@@ -148,6 +148,10 @@ const RESOLV: &str = "resolv.conf";
 /// on NixOS it is a chain of symlinks and the mount lands at the end of it
 /// (`sys::link_target`).
 const ETC_RESOLV: &str = "/etc/resolv.conf";
+/// The zone's own copy of the NSS configuration, and what it is bound over
+/// (a symlink chain on NixOS, like resolv.conf).
+const NSSWITCH: &str = "nsswitch.conf";
+const ETC_NSSWITCH: &str = "/etc/nsswitch.conf";
 /// Directories holding a unix socket through which a daemon in the HOST's
 /// network answers name lookups. Every one of them is covered by a tmpfs inside
 /// the zone — see `hide_host_resolvers`, where the reason is written down.
@@ -1572,6 +1576,8 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // hostname. The policy "an unknown program gets no network" is only true
     // once these are gone.
     hide_host_resolvers(zone)?;
+    // The same hole closed as a class rather than by a list of sockets.
+    own_nsswitch(zone);
 
     let Some(ZoneLinks {
         backend,
@@ -1993,6 +1999,72 @@ fn hide_host_resolvers(zone: &Zone) -> Result<(), String> {
         }
     );
     Ok(())
+}
+
+/// Bind the zone's own `nsswitch.conf`: the host's, with `hosts:` reduced to
+/// `files dns`.
+///
+/// Hiding the resolver sockets (`hide_host_resolvers`) is a LIST — nscd,
+/// systemd-resolved, avahi — and a list goes stale with the next NSS module
+/// that talks to a daemon of the host's (`mymachines` asks machined over the
+/// system bus, a future one asks something else). With `hosts: files dns` in
+/// the zone no module but the plain resolver is ever loaded for a name, and the
+/// plain resolver reads the zone's resolv.conf, i.e. goes into the tunnel.
+/// Every other database (`passwd`, `group`, …) stays as the host has it: user
+/// lookups are not a network channel. (`docs/LEAK-MODEL.md` §3)
+///
+/// Not fatal, and deliberately so, like the nftables echelon: the sockets are
+/// already hidden, so a failure here costs the class-wide insurance, not the
+/// zone's hermeticity — and it has to be impossible to miss in the journal.
+fn own_nsswitch(zone: &Zone) {
+    let target = sys::link_target(Path::new(ETC_NSSWITCH));
+    let Ok(host) = fs::read_to_string(&target) else {
+        // No nsswitch.conf at all: glibc's built-in default has no daemon
+        // module for hosts, and there is nothing to bind over.
+        return;
+    };
+    let path = zone.path(NSSWITCH);
+    let result = fs::write(&path, zone_nsswitch(&host))
+        .map_err(|e| format!("cannot write {NSSWITCH}: {e}"))
+        .and_then(|()| {
+            sys::mount(path.as_os_str(), &target, "", libc::MS_BIND, "")
+                .map_err(|e| format!("cannot bind it over {}: {e}", target.display()))
+        });
+    match result {
+        Ok(()) => println!("zone {}: hosts in nsswitch.conf is files dns", zone.name()),
+        Err(e) => eprintln!(
+            "zone {}: the zone's own nsswitch.conf is OFF ({e}) — the host's resolver sockets \
+             are hidden, but a new NSS module talking to a host daemon would not be",
+            zone.name()
+        ),
+    }
+}
+
+/// The host's `nsswitch.conf` with every `hosts:` line replaced by
+/// `hosts: files dns` (and one added when there was none). Comments and every
+/// other database are kept as they are.
+pub fn zone_nsswitch(host: &str) -> String {
+    let mut out = String::new();
+    let mut replaced = false;
+    for line in host.lines() {
+        let is_hosts = line
+            .trim_start()
+            .strip_prefix("hosts")
+            .is_some_and(|rest| rest.trim_start().starts_with(':'));
+        if is_hosts {
+            if !replaced {
+                out.push_str("hosts: files dns\n");
+                replaced = true;
+            }
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !replaced {
+        out.push_str("hosts: files dns\n");
+    }
+    out
 }
 
 /// Cover the first of `dirs` that exists with an empty tmpfs, and say which.
@@ -2515,6 +2587,33 @@ mod tests {
         // It does not: no default at all. There is nothing else in this
         // namespace for the family to leak through, so no sysctl is needed.
         assert_eq!(v6_plan(true, false), V6Plan::CloseDefault);
+    }
+
+    #[test]
+    fn the_zone_resolves_hosts_with_files_and_dns_only() {
+        let nixos = "\
+passwd:    files systemd
+group:     files [success=merge] systemd
+# a comment about hosts: mdns
+hosts:     mymachines resolve [!UNAVAIL=return] files myhostname dns
+networks:  files
+";
+        let zone = zone_nsswitch(nixos);
+        assert!(zone.contains("\nhosts: files dns\n"), "{zone}");
+        assert!(!zone.contains("resolve"), "{zone}");
+        assert!(!zone.contains("mymachines"), "{zone}");
+        // Everything else stays, the comment included.
+        assert!(zone.starts_with("passwd:    files systemd\n"), "{zone}");
+        assert!(zone.contains("# a comment about hosts: mdns\n"), "{zone}");
+        assert!(zone.contains("networks:  files\n"), "{zone}");
+        // No hosts line: one is added. Two: one remains.
+        assert!(zone_nsswitch("passwd: files\n").ends_with("hosts: files dns\n"));
+        assert_eq!(
+            zone_nsswitch("hosts: mdns dns\nhosts: resolve\n"),
+            "hosts: files dns\n"
+        );
+        // "hostsfoo:" is not a hosts line.
+        assert!(zone_nsswitch("hostsfoo: x\n").contains("hostsfoo: x\n"));
     }
 
     #[test]

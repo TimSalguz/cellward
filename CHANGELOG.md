@@ -21,6 +21,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   written invariant "foreign files there are never rewritten"
   (`docs/LAUNCHERS.md` §3.2, the owner's decision of 2026-09-17).
 
+### Security (a zone's own nsswitch.conf)
+- A zone binds its own `/etc/nsswitch.conf`, the host's with `hosts:` reduced
+  to `files dns`. Hiding the host's resolver sockets was a list (nscd,
+  systemd-resolved, avahi) that the next NSS module talking to a host daemon
+  would not be on — `mymachines` already asks machined over the system bus.
+  Now no module but the plain resolver is loaded for a name inside a zone, and
+  it reads the zone's resolv.conf. Other databases stay as the host has them. A
+  failure is a loud warning, like the nftables echelon: the sockets are still
+  hidden. Checked in the smoke and VM tests.
+
 ### Added (containers as identities: network binding, Nix options, JSON state)
 - **A container can be bound to one network**: `vpn-zone container set
   <container> network <network|ask>`. `vpn-zone run` then refuses a bound

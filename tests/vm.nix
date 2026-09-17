@@ -327,6 +327,12 @@ let
           out = in_zone(zpid, "sh -c 'ip -6 route show default 2>/dev/null || true'")
           assert out.strip() == "" or out.strip().startswith("unreachable"), out
 
+      with subtest("the zone's own nsswitch.conf: hosts is files dns, the host's is untouched"):
+          out = in_zone(zpid, "grep '^hosts:' /etc/nsswitch.conf")
+          assert out.strip() == "hosts: files dns", out
+          out = machine.succeed("grep '^hosts:' /etc/nsswitch.conf")
+          assert "resolve" in out, f"the zone changed the host's nsswitch.conf: {out}"
+
       with subtest("zone DNS defaults to 1.1.1.1 (config has no DNS=)"):
           out = in_zone(zpid, "cat /etc/resolv.conf")
           assert "nameserver 1.1.1.1" in out, out
