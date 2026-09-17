@@ -724,6 +724,7 @@ fn what_nix_declares_is_shown_as_such_and_not_changed_here() {
         "{json}"
     );
     assert!(json.contains("\"id\":\"firefox\""), "{json}");
+    assert!(json.contains("\"uplink_owner\":"), "{json}");
     assert!(
         json.contains("\"autostart_unassigned\":{\"value\":\"offline\",\"source\":\"default\"}"),
         "{json}"
