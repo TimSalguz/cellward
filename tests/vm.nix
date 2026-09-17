@@ -523,12 +523,17 @@ let
           out = alice(f"cat {APPS}/userapp-vmforeign.desktop")
           assert "X-VPNZone=adopted" in out, out
           assert "vpn-zone-pick --id userapp-vmforeign --" in out, out
-          # home-manager's entries stay symlinks into the store.
-          alice(f"test -L {APPS}/vpn-zone-add.desktop")
           alice("vpn-zone mode off")
           alice(f"cmp {APPS}/userapp-vmforeign.desktop /tmp/vmforeign.orig")
           alice("vpn-zone mode picker")
           alice(f"rm -f {APPS}/userapp-vmforeign.desktop")
+          # A symlink is somebody's managed entry (home-manager's xdg.dataFile,
+          # a dotfile manager): left as it is, never written through.
+          alice(f"cp /tmp/vmforeign.orig /tmp/vmlink.desktop && ln -s /tmp/vmlink.desktop {APPS}/userapp-vmlink.desktop")
+          alice("vpn-zone sync")
+          alice(f"test -L {APPS}/userapp-vmlink.desktop")
+          alice("cmp /tmp/vmlink.desktop /tmp/vmforeign.orig")
+          alice(f"rm -f {APPS}/userapp-vmlink.desktop")
 
       # --- Declared in Nix (docs/CONTAINERS.md §8) ---------------------------
       DECLCA = "${declaredCa}"
