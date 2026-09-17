@@ -583,6 +583,13 @@ in
       description = "Записи ~/.config/autostart (обычные файлы; symlink не трогаются): offline — перехватывать на месте, программа при входе стартует без диалога туда, что для неё выбрано (закрепление, назначенный контейнер и его сеть), а невыбранное — offline и в своём доме, с уведомлением (по умолчанию); as-is — не трогать и вернуть перехваченные. /etc/xdg/autostart не трогается никогда. null — не задавать из Nix. См. docs/CONTAINERS.ru.md §5.";
     };
 
+    zoneX11 = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "games" ];
+      description = "Зоны (по имени), программы которых получают свой X-сервер (xwayland-satellite) — для X11-only программ вроде Steam без контейнеров. X-сервер хоста из зон недоступен всегда. Сами зоны в Nix не описываются: здесь только имена.";
+    };
+
     pathShims.enable = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -644,6 +651,9 @@ in
     })
     (lib.mkIf (cfg.launcher.mode != null) {
       "vpn-zones/declared/mode".text = cfg.launcher.mode;
+    })
+    (lib.mkIf (cfg.zoneX11 != [ ]) {
+      "vpn-zones/declared/zone-x11".text = lib.concatStringsSep "\n" cfg.zoneX11 + "\n";
     })
     (lib.mkIf cfg.pathShims.enable {
       "vpn-zones/declared/path-shims".text = "on";

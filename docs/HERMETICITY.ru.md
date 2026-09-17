@@ -105,7 +105,8 @@ English: [HERMETICITY.md](HERMETICITY.md) · Связанные документ
 - **А — X11: вариант А — сделано.** В зонах закрыт по умолчанию: tmpfs поверх
   `/tmp/.X11-unix` в mount namespace зоны и никакого `DISPLAY` в запуске.
   Контейнер с разрешением `x11` получает свой `xwayland-satellite`. Дыры
-  `x11 = "host"` нет.
+  `x11 = "host"` нет. То же на зону, для зон без контейнеров:
+  `vpn-zone x11 <зона> on` или `zoneX11 = [ "<зона>" ]`.
 - **B — системная шина: B2, суженный — сделано.** `xdg-dbus-proxy` на зону; `UPower`
   разрешён; `login1` — только `Inhibit` и чтение свойств, без списка сессий и
   управления питанием; `NetworkManager`, `hostname1`, `resolve1`, `machined`,

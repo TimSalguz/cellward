@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (X11 per zone)
+- `vpn-zone x11 <zone> on|off` and `programs.vpn-zones.zoneX11 = [ names ]`:
+  every program launched into such a zone gets an X server of its own
+  (`x11-run`), without any container — Steam in a zone for someone who runs
+  zones only. The host's X server stays out of reach. `status --json`
+  networks carry `x11` as `{value, source}` (`null` for `direct` and
+  `offline`'s built-in entry; additive).
+
 ### Security (X11 closed in zones)
 - A zone hides `/tmp/.X11-unix` behind a tmpfs of its own, and a launch into a
   zone carries no `DISPLAY` or `XAUTHORITY`: the host's X server — every

@@ -222,6 +222,7 @@ vpn-zone profile create|list|rm <имя>
 vpn-zone sandbox create|list|rm <имя>
 vpn-zone perms list|reset <программа|--all>    # выданные доступы к файлам
 vpn-zone lock|unlock <зона>                    # запретить выход в другие сети
+vpn-zone x11 <зона> on|off                     # свой X-сервер программам зоны
 vpn-zone default-profile ask|main|own|<имя>
 vpn-zone mode picker|per-zone|both|off         # как ведут себя ярлыки (per-zone, both — устарели)
 ```

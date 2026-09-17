@@ -22,6 +22,28 @@ use std::time::Duration;
 
 use crate::profile::EXIT_NOT_STARTED;
 
+/// The marker of a zone whose programs get an X server of their own, in the
+/// zone's directory.
+pub const ZONE_FLAG: &str = "x11";
+/// The zones declared to have one, one name per line, below the config dir.
+pub const DECLARED_ZONES: &str = "declared/zone-x11";
+
+/// Where the per-zone setting comes from, if the zone has one:
+/// `(on, source)`. Declared in Nix wins over the local marker.
+pub fn zone_setting(state: &Path, config: &Path, zone: &str) -> (bool, crate::container::Source) {
+    use crate::container::Source;
+    if let Ok(text) = std::fs::read_to_string(config.join(DECLARED_ZONES)) {
+        if text.lines().map(str::trim).any(|l| l == zone) {
+            return (true, Source::Nix);
+        }
+    }
+    if state.join(zone).join(ZONE_FLAG).exists() {
+        (true, Source::Local)
+    } else {
+        (false, Source::Default)
+    }
+}
+
 /// Where X servers put their sockets.
 pub const X11_DIR: &str = "/tmp/.X11-unix";
 /// The displays a satellite may take: `:100`…`:499`, like the sandbox's.

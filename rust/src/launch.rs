@@ -514,9 +514,12 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             Some(container.profile.to_string_lossy().into_owned()).filter(|p| !p.is_empty())
         }
     };
+    // Or the zone itself has x11: for someone who runs zones without
+    // containers, Steam in a zone must open all the same.
     let container_x11 = x11_selector
         .and_then(|selector| crate::container::load(tools, &selector))
-        .is_some_and(|c| c.x11.value);
+        .is_some_and(|c| c.x11.value)
+        || (zone != DIRECT && crate::x11::zone_setting(&tools.state, &tools.config, &zone_name).0);
     if container_x11 && zone != DIRECT && selection.sandbox == Sandbox::None && !cmd.is_empty() {
         let mut wrapped: Vec<OsString> = vec![
             tools.core.clone().into(),

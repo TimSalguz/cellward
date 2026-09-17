@@ -231,6 +231,7 @@ vpn-zone profile create|list|rm <name>
 vpn-zone sandbox create|list|rm <name>
 vpn-zone perms list|reset <app|--all>          # granted file accesses
 vpn-zone lock|unlock <zone>                    # forbid leaving for other networks
+vpn-zone x11 <zone> on|off                     # an X server of their own for the zone's programs
 vpn-zone default-profile ask|main|own|<name>
 vpn-zone mode picker|per-zone|both|off         # how launcher entries behave (per-zone, both: deprecated)
 ```

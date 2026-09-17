@@ -1166,6 +1166,29 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
 
     let out = home.run(&["container", "set", "work", "x11", "maybe"]);
     assert_eq!(out.status.code(), Some(1));
+
+    // Or the zone itself, without any container.
+    let out = home.run_with(&["run", "nl", "--", "steam"], &dry);
+    assert!(!stdout(&out).contains("x11-run"), "{}", stdout(&out));
+    let out = home.run(&["x11", "nl", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = home.run_with(&["run", "nl", "--", "steam"], &dry);
+    assert!(
+        stdout(&out).contains("x11-run --xwayland"),
+        "{}",
+        stdout(&out)
+    );
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"x11\":{\"value\":true,\"source\":\"local\"}}"),
+        "{json}"
+    );
+    // Declared in Nix: switched off there, not here.
+    fs::create_dir_all(home.root.join("config/declared")).unwrap();
+    fs::write(home.root.join("config/declared/zone-x11"), "nl\n").unwrap();
+    let out = home.run(&["x11", "nl", "off"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("в Nix"), "{}", stderr(&out));
 }
 
 #[test]
