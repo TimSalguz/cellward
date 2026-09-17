@@ -92,6 +92,15 @@ pub fn defaults(tools: &Tools) -> String {
     )
 }
 
+/// The host interface a `host-interface` zone goes out through.
+fn host_interface(dir: &std::path::Path) -> Option<String> {
+    let raw = fs::read(dir.join("config.conf")).ok()?;
+    let ini = WgConfig::parse(&strip_cr(&raw)).ok()?;
+    crate::hostif::HostIfConfig::from_ini(&ini)
+        .ok()
+        .map(|h| h.interface)
+}
+
 /// The kind of a zone directory, or `None` when it is not a zone.
 fn zone_kind(dir: &std::path::Path) -> Option<&'static str> {
     if dir.join("offline").exists() {
@@ -112,7 +121,7 @@ pub fn networks(tools: &Tools) -> String {
     let mut items = vec![
         "{\"name\":\"direct\",\"kind\":\"direct\",\"source\":\"default\",\"up\":true,\
          \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null}"
+             \"tx_bytes\":null,\"interface\":null}"
             .to_owned(),
     ];
     let mut offline_listed = false;
@@ -151,13 +160,20 @@ pub fn networks(tools: &Tools) -> String {
             ),
             None => "\"handshake_age_s\":null,\"rx_bytes\":null,\"tx_bytes\":null".to_owned(),
         };
+        // Named for the one kind that has one: "через enp4s0 — без шифрования"
+        // has to be sayable without reading the config.
+        let interface = if kind == "host-interface" {
+            host_interface(&dir).map_or("null".to_owned(), |i| string(&i))
+        } else {
+            "null".to_owned()
+        };
         let source = if kind == "offline" {
             "default"
         } else {
             "local"
         };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters}}}",
+            "{{\"name\":{},\"kind\":\"{kind}\",\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface}}}",
             string(&name),
             dir.join(NO_ESCAPE).exists()
         ));
@@ -166,7 +182,7 @@ pub fn networks(tools: &Tools) -> String {
         items.push(
             "{\"name\":\"offline\",\"kind\":\"offline\",\"source\":\"default\",\"up\":false,\
              \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null}"
+             \"tx_bytes\":null,\"interface\":null}"
                 .to_owned(),
         );
     }

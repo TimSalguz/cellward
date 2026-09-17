@@ -486,8 +486,14 @@ programs.vpn-zones = {
     "user_entries": { "value": "take-over", "source": "default" }
   },
   "networks": [
-    { "name": "nl", "kind": "amneziawg", "source": "local",
-      "up": true, "locked": false, "handshake_age_s": 42 }
+    { "name": "nl", "kind": "wireguard", "source": "local",
+      "up": true, "locked": false, "tunnel_alive": true,
+      "handshake_age_s": 42, "rx_bytes": 1048576, "tx_bytes": 524288,
+      "interface": null },
+    { "name": "lan", "kind": "host-interface", "source": "local",
+      "up": false, "locked": false, "tunnel_alive": null,
+      "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,
+      "interface": "enp4s0" }
   ],
   "containers": [
     { "name": "work", "selector": "sb:work",
@@ -510,6 +516,19 @@ programs.vpn-zones = {
 
 JSON пишется руками, как руками читается манифест (без `serde`); каждый ключ
 версии 1 закреплён тестом.
+
+**Ключи для сопоставления — часть контракта версии 1:**
+
+- контейнер определяется **`selector`**, а не `name`: у слоя над домом и у
+  своего дома может быть одно имя (`work` и `sb:work` — два разных контейнера).
+  Любая ссылка на контейнер в документе — `apps[].container.value` — это
+  селектор, и сопоставляется он с `containers[].selector`;
+- сеть — по `name`; `networks[].kind` — одно из `direct`, `offline`,
+  `wireguard`, `openconnect`, `host-interface`, а `interface` — интерфейс хоста
+  для `host-interface` и `null` для всех остальных; сеть `host-interface`
+  этим проектом НЕ шифруется;
+- программа — по ключу ярлыка (`apps[].id`, `containers[].apps[].value`), это
+  ключ без потерь из `docs/LAUNCHERS.ru.md` §3.4.
 
 ## 10. Куда теперь может уйти пакет или DNS-запрос мимо туннеля?
 

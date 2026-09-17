@@ -493,8 +493,14 @@ and `vpn-zone container show <name> --json` print subsets of the same schema.
     "user_entries": { "value": "take-over", "source": "default" }
   },
   "networks": [
-    { "name": "nl", "kind": "amneziawg", "source": "local",
-      "up": true, "locked": false, "handshake_age_s": 42 }
+    { "name": "nl", "kind": "wireguard", "source": "local",
+      "up": true, "locked": false, "tunnel_alive": true,
+      "handshake_age_s": 42, "rx_bytes": 1048576, "tx_bytes": 524288,
+      "interface": null },
+    { "name": "lan", "kind": "host-interface", "source": "local",
+      "up": false, "locked": false, "tunnel_alive": null,
+      "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,
+      "interface": "enp4s0" }
   ],
   "containers": [
     { "name": "work", "selector": "sb:work",
@@ -517,6 +523,20 @@ and `vpn-zone container show <name> --json` print subsets of the same schema.
 
 Written by hand like the manifest is read by hand (no `serde`); a test pins
 every key of version 1.
+
+**Keys to join on — part of the version 1 contract:**
+
+- a container is identified by its **`selector`**, never by `name`: a layer
+  over the home and a home of its own may share a name (`work` and `sb:work`
+  are two containers). Every reference to a container elsewhere in the
+  document — `apps[].container.value` — is a selector, and
+  `containers[].selector` is what it matches;
+- a network by `name`; `networks[].kind` is one of `direct`, `offline`,
+  `wireguard`, `openconnect`, `host-interface`, and `interface` is the host's
+  interface for `host-interface` and `null` for every other kind — a
+  `host-interface` network is NOT encrypted by this project;
+- a program by its launcher key (`apps[].id`, `containers[].apps[].value`),
+  the lossless key of `docs/LAUNCHERS.md` §3.4.
 
 ## 10. Where can a packet or a DNS query go around the tunnel now?
 

@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (JSON)
+- `status --json` networks carry `interface`: the host interface of a
+  `host-interface` network, `null` for every other kind (additive, schema
+  version 1). `docs/CONTAINERS.md` §9 now states the keys to join on:
+  containers by `selector`, networks by `name`, programs by launcher key.
+
 ### Added (PATH shims, opt-in)
 - `programs.vpn-zones.pathShims.enable` (off by default): for every program
   assigned to a container, `sync` writes `~/.local/share/vpn-zones/bin/<program>`,

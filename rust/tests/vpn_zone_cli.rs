@@ -1044,6 +1044,12 @@ fn a_host_interface_zone_is_added_and_reported_as_such() {
         json.contains("{\"name\":\"lan\",\"kind\":\"host-interface\""),
         "{json}"
     );
+    assert!(json.contains("\"interface\":\"vpnztest0\"}"), "{json}");
+    assert!(
+        json.contains("\"name\":\"direct\",\"kind\":\"direct\"")
+            && json.contains("\"interface\":null"),
+        "{json}"
+    );
 
     for bad in [
         "[HostInterface]\nInterface = lo\n",
