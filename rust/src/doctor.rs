@@ -394,7 +394,13 @@ pub fn probe(uid: u32) -> Vec<Check> {
             checks.push(system_bus_check(&mountinfo, reachable(&path), what));
             continue;
         }
-        if id == "session-bus" && mounted_at(&mountinfo, &path.to_string_lossy()) {
+        // A bus bound into a zone is the filtered one only when what is bound
+        // is the zone's proxy: an ordinary zone's sealed runtime binds the
+        // host's own bus back, and that is as open as ever.
+        if id == "session-bus"
+            && mount_root_at(&mountinfo, &path.to_string_lossy())
+                .is_some_and(|root| root.ends_with("/session-bus"))
+        {
             checks.push(Check::new(
                 "session-bus",
                 Level::Ok,
@@ -412,7 +418,66 @@ pub fn probe(uid: u32) -> Vec<Check> {
         }
         checks.push(open_channel_check(id, what, reachable(&path)));
     }
+    let (raw, ipc) = compositor_entries(Path::new(&format!("/run/user/{uid}")));
+    checks.push(listed_channel_check(
+        "wayland-raw",
+        &raw,
+        "сокет композитора без ограничений: захват экрана, буфер обмена, \
+         виртуальная клавиатура — команда в терминал хоста (§13)",
+    ));
+    checks.push(listed_channel_check(
+        "compositor-ipc",
+        &ipc,
+        "IPC композитора: запуск процесса на хосте (`niri msg action spawn`) (§13)",
+    ));
     checks
+}
+
+/// The compositor's own sockets and its IPC in a runtime directory, as
+/// `(raw, ipc)` names.
+pub fn compositor_entries(runtime: &Path) -> (Vec<String>, Vec<String>) {
+    let mut raw = Vec::new();
+    let mut ipc = Vec::new();
+    for entry in fs::read_dir(runtime).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".lock") || !crate::zone::compositor_private(&name) {
+            continue;
+        }
+        if name.starts_with("wayland-") {
+            raw.push(name);
+        } else {
+            ipc.push(name);
+        }
+    }
+    raw.sort();
+    ipc.sort();
+    (raw, ipc)
+}
+
+/// A channel found by name: `warn` naming what is there, `ok` when nothing is.
+pub fn listed_channel_check(id: &str, found: &[String], what: &str) -> Check {
+    if found.is_empty() {
+        Check::new(id, Level::Ok, "не виден")
+    } else {
+        Check::new(
+            id,
+            Level::Warn,
+            format!("открыт ({}) — {what}", found.join(", ")),
+        )
+    }
+}
+
+/// The root (field 4 of `mountinfo`) of the last mount at `point`: what of its
+/// filesystem is bound there.
+pub fn mount_root_at<'a>(mountinfo: &'a str, point: &str) -> Option<&'a str> {
+    mountinfo
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let root = fields.nth(3)?;
+            (fields.next()? == point).then_some(root)
+        })
+        .next_back()
 }
 
 /// The system bus in a zone: filtered (the zone's proxy bound over the socket)
@@ -869,6 +934,25 @@ mod tests {
         );
         assert_eq!(open_channel_check("x11", "X", true).level, Level::Warn);
         assert_eq!(open_channel_check("x11", "X", false).level, Level::Ok);
+        assert_eq!(
+            listed_channel_check("wayland-raw", &[], "w").level,
+            Level::Ok
+        );
+        let found = ["wayland-1".to_owned()];
+        let check = listed_channel_check("wayland-raw", &found, "w");
+        assert_eq!(check.level, Level::Warn);
+        assert!(check.detail.contains("wayland-1"), "{}", check.detail);
+        let info = "30 29 0:40 /bus /run/user/1000/bus rw - tmpfs tmpfs rw\n\
+                    31 29 8:2 /u/.local/state/vpn-zones/nl/session-bus /run/user/1000/bus rw - ext4 /dev/x rw\n";
+        assert_eq!(
+            mount_root_at(info, "/run/user/1000/bus"),
+            Some("/u/.local/state/vpn-zones/nl/session-bus")
+        );
+        assert_eq!(
+            mount_root_at(info.lines().next().unwrap(), "/run/user/1000/bus"),
+            Some("/bus")
+        );
+        assert_eq!(mount_root_at(info, "/run/user/1000/pulse"), None);
         assert_eq!(
             nameservers("# c\nnameserver 10.0.0.1\nnameserver  ::1\nsearch x\n"),
             ["10.0.0.1", "::1"]

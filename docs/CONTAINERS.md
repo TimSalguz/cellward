@@ -213,6 +213,7 @@ end of the term (RFC 3339, `null` without one).
 ### 3.6 Per-launch runtime (the order is the specification)
 
 ```
+vpn-zone-core wl-sandbox <program> --zone <zone> --     on the host: the restricted Wayland socket (LEAK-MODEL §13)
 [nsenter -U -n -m -t <zone>]  or  [unshare -U --map-current-user --keep-caps]   (unconfined)
   └─ unshare --mount --propagation private           when anything is mounted
       └─ vpn-zone-core profile-run --cwd <dir> …     (done)
@@ -222,7 +223,7 @@ end of the term (RFC 3339, `null` without one).
            3. trust layer: bundle binds, NSS databases (CERTIFICATES.md)
            4. chdir <dir> → $HOME → /                (done)
            5. drop ambient capabilities
-           6. exec: wl-sandbox → fs-sandbox (bwrap) → program
+           6. exec: fs-sandbox (bwrap) → program
 ```
 
 Every mount happens in the launch's own mount namespace, never in the zone's:

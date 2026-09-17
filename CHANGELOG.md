@@ -5,6 +5,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Security (compositor sockets, LEAK-MODEL §13)
+- No zone gets the compositor's own `wayland-*` socket or the IPC of niri,
+  sway, Hyprland or i3 any more — through them a program in a zone could have
+  the compositor spawn a process on the host, or type into a host terminal
+  with a virtual keyboard. Every zone's runtime directory is a tmpfs with
+  entries bound back: a hermetic zone keeps pipewire, pulse and doc; an
+  ordinary zone everything else, the session bus and `systemd --user`
+  included. Entries the host creates later (a restarted pipewire or dbus) are
+  bound in by a watcher; refused names stay refused.
+- `wl-sandbox` wraps the whole launch and runs on the host; the restricted
+  socket lives in `$XDG_RUNTIME_DIR/vpn-zones/wayland/<zone>/` and
+  `WAYLAND_DISPLAY` points there. `fs-sandbox` now gets that socket instead of
+  the compositor's own one.
+- `vpn-zone doctor`: `wayland-raw` and `compositor-ipc` checks; `session-bus`
+  is reported filtered only when the bound bus is the zone's proxy.
+
+### Changed (compositor restriction in zones)
+- In a zone the Wayland restriction always applies: the built-in allowlist,
+  `~/.config/vpn-zones/wayland-allow` and `vpn-zone wayland-sandbox off` apply
+  to `unconfined` launches only. A screenshot tool or a clipboard manager that
+  needs the full protocols has to run unconfined. With a compositor without
+  `wp_security_context_v1` a program in a zone gets no Wayland at all.
+- `NIRI_SOCKET`, `SWAYSOCK`, `I3SOCK`, `HYPRLAND_INSTANCE_SIGNATURE` are
+  dropped from launches into a zone. `wl-sandbox` takes `--zone <zone>`.
+
 ### Changed (kill exit codes)
 - `vpn-zone kill` exit codes are a contract now: 0 cut off, 1 programs killed
   but the zone not down, 2 the zone is not up, 3 refused (nothing touched).

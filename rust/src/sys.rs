@@ -78,6 +78,103 @@ pub fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
+/// An inotify watch on one directory for what appears in it.
+pub struct Inotify {
+    fd: OwnedFd,
+    dir: PathBuf,
+}
+
+impl Inotify {
+    /// Watch `dir` for entries created or moved into it.
+    pub fn watch(dir: &Path) -> io::Result<Self> {
+        // SAFETY: inotify_init1 takes flags and returns a new descriptor or -1.
+        let raw = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the descriptor was just returned to us and nothing else owns it.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let path = cstring(dir.as_os_str().as_bytes())?;
+        // SAFETY: a valid inotify descriptor and a NUL-terminated path.
+        let wd = unsafe {
+            libc::inotify_add_watch(
+                std::os::fd::AsRawFd::as_raw_fd(&fd),
+                path.as_ptr(),
+                libc::IN_CREATE | libc::IN_MOVED_TO,
+            )
+        };
+        if wd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            fd,
+            dir: dir.to_path_buf(),
+        })
+    }
+
+    /// Block until something appears; the names that did. When the queue
+    /// overflowed, every name in the directory — the caller cannot know what
+    /// it missed. `Err` when the watch is gone for good.
+    pub fn names(&self) -> io::Result<Vec<String>> {
+        let mut buf = vec![0u8; 16 * 1024];
+        // SAFETY: a valid descriptor and a buffer of the length passed.
+        let n = unsafe {
+            libc::read(
+                std::os::fd::AsRawFd::as_raw_fd(&self.fd),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        if n < 0 {
+            let e = io::Error::last_os_error();
+            return if e.kind() == io::ErrorKind::Interrupted {
+                Ok(Vec::new())
+            } else {
+                Err(e)
+            };
+        }
+        let (names, overflow) = parse_inotify(&buf[..n as usize]);
+        if overflow {
+            return Ok(std::fs::read_dir(&self.dir)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default());
+        }
+        Ok(names)
+    }
+}
+
+/// The names in a buffer of `struct inotify_event`s, and whether the queue
+/// overflowed.
+pub fn parse_inotify(mut buf: &[u8]) -> (Vec<String>, bool) {
+    const HEADER: usize = 16;
+    let mut names = Vec::new();
+    let mut overflow = false;
+    while buf.len() >= HEADER {
+        let field =
+            |at: usize| u32::from_ne_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]);
+        let mask = field(4);
+        let len = field(12) as usize;
+        if buf.len() < HEADER + len {
+            break;
+        }
+        if mask & libc::IN_Q_OVERFLOW != 0 {
+            overflow = true;
+        }
+        let name = &buf[HEADER..HEADER + len];
+        let name = &name[..name.iter().position(|b| *b == 0).unwrap_or(name.len())];
+        if !name.is_empty() {
+            names.push(String::from_utf8_lossy(name).into_owned());
+        }
+        buf = &buf[HEADER + len..];
+    }
+    (names, overflow)
+}
+
 fn cstring(bytes: &[u8]) -> io::Result<CString> {
     CString::new(bytes)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument contains a NUL byte"))
@@ -244,5 +341,29 @@ mod link_target_tests {
             root.join("run/stub.conf")
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod inotify_tests {
+    use super::*;
+
+    #[test]
+    fn inotify_events_are_read_past_their_padding() {
+        let mut buf = Vec::new();
+        for (mask, name) in [(libc::IN_CREATE, "pipewire-0"), (libc::IN_Q_OVERFLOW, "")] {
+            let mut padded = name.as_bytes().to_vec();
+            if !padded.is_empty() {
+                padded.resize(16, 0);
+            }
+            buf.extend_from_slice(&1i32.to_ne_bytes());
+            buf.extend_from_slice(&mask.to_ne_bytes());
+            buf.extend_from_slice(&0u32.to_ne_bytes());
+            buf.extend_from_slice(&(padded.len() as u32).to_ne_bytes());
+            buf.extend_from_slice(&padded);
+        }
+        let (names, overflow) = parse_inotify(&buf);
+        assert_eq!(names, ["pipewire-0"]);
+        assert!(overflow);
     }
 }

@@ -198,6 +198,9 @@ let
           # For the real-tunnel part: TCP client inside the zone, DNS client,
           # and the leak capture on the uplink interface.
           pkgs.socat
+          # A real compositor for the restricted-Wayland check, headless.
+          pkgs.sway
+          pkgs.wayland-utils
           pkgs.dnsutils
           pkgs.tcpdump
           # The host's own resolver for the DNS leak test — the one whose
@@ -1034,10 +1037,11 @@ let
           alice("vpn-zone down vmawg")
 
       # --- The compositor's IPC and its raw socket (docs/LEAK-MODEL.md §13) --
-      # No real compositor here: two host listeners where niri keeps its IPC
-      # socket and a raw Wayland socket. What reaches them from a zone could
-      # reach the real ones — `niri msg action spawn` runs a process on the host.
-      with subtest("compositor IPC: reachable from an ordinary zone (an open channel, LEAK-MODEL §13)"):
+      # Fake listeners first, where niri keeps its IPC socket and a compositor
+      # its own socket: neither may be reachable from ANY zone, created before
+      # the zone or after it. A socket the zone does keep — pipewire's — is
+      # recreated on the host and must come back into the zone by itself.
+      with subtest("compositor IPC and raw socket: out of reach of an ordinary zone"):
           alice(
               "systemd-run --user --unit=fakeniri socat "
               "UNIX-LISTEN:/run/user/1000/niri.wayland-9.4242.sock,fork "
@@ -1051,16 +1055,81 @@ let
           machine.wait_until_succeeds("test -S /run/user/1000/wayland-9")
           machine.succeed(
               "printf '%s\\n' 'echo \"NIRI=$NIRI_SOCKET\"' "
-              "'echo spawn-from-zone | socat - UNIX-CONNECT:\"$NIRI_SOCKET\"' "
+              "'echo spawn-from-zone | socat - UNIX-CONNECT:/run/user/1000/niri.wayland-9.4242.sock || echo NIRI-REFUSED' "
+              "'echo raw-from-zone | socat - UNIX-CONNECT:/run/user/1000/wayland-9 || echo RAW-REFUSED' "
               "> /tmp/niri-probe.sh && chmod 755 /tmp/niri-probe.sh"
           )
           out = alice(
               "NIRI_SOCKET=/run/user/1000/niri.wayland-9.4242.sock "
               "vpn-zone run vmsmoke -- sh /tmp/niri-probe.sh"
           )
-          assert "NIRI=/run/user/1000/niri.wayland-9.4242.sock" in out, out
-          machine.wait_until_succeeds("grep -q spawn-from-zone /tmp/niri-got", timeout=15)
+          assert "NIRI=/run" not in out, out
+          assert "NIRI-REFUSED" in out and "RAW-REFUSED" in out, out
+          machine.sleep(2)
+          machine.fail("grep -q spawn-from-zone /tmp/niri-got")
+          machine.fail("grep -q raw-from-zone /tmp/wayland-got")
+          zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
+          # The ordinary zone keeps its bus and systemd --user (LEAK-MODEL §1).
+          in_zone(zp, "test -S /run/user/1000/bus")
+          in_zone(zp, "test -S /run/user/1000/systemd/private")
+          # Created after the zone: a compositor socket stays out, a kept
+          # socket comes in — and comes in again when it is recreated.
+          alice(
+              "systemd-run --user --unit=latewayland socat "
+              "UNIX-LISTEN:/run/user/1000/wayland-8,fork OPEN:/dev/null"
+          )
+          alice(
+              "systemd-run --user --unit=fakepipewire socat "
+              "UNIX-LISTEN:/run/user/1000/pipewire-0,fork SYSTEM:'echo pipewire-one'"
+          )
+          machine.wait_until_succeeds("test -S /run/user/1000/pipewire-0")
+          in_zone(zp, "sh -c 'for i in $(seq 50); do socat -T2 - UNIX-CONNECT:/run/user/1000/pipewire-0 </dev/null | grep -q pipewire-one && exit 0; sleep 0.2; done; exit 1'")
+          alice("systemctl --user stop fakepipewire.service")
+          machine.succeed("rm -f /run/user/1000/pipewire-0")
+          alice(
+              "systemd-run --user --unit=fakepipewire2 socat "
+              "UNIX-LISTEN:/run/user/1000/pipewire-0,fork SYSTEM:'echo pipewire-two'"
+          )
+          in_zone(zp, "sh -c 'for i in $(seq 50); do socat -T2 - UNIX-CONNECT:/run/user/1000/pipewire-0 </dev/null | grep -q pipewire-two && exit 0; sleep 0.2; done; exit 1'")
+          in_zone(zp, "test ! -e /run/user/1000/wayland-8")
+          in_zone(zp, "test ! -e /run/user/1000/wayland-9")
+          in_zone(zp, "test ! -e /run/user/1000/niri.wayland-9.4242.sock")
+          out = alice("vpn-zone doctor vmsmoke --json")
+          assert '{"id":"wayland-raw","level":"ok"' in out, out
+          assert '{"id":"compositor-ipc","level":"ok"' in out, out
+          assert '{"id":"session-bus","level":"warn"' in out, out
           alice("vpn-zone down vmsmoke")
+
+      # A real compositor, headless: sway speaks wp_security_context_v1 and
+      # hides its privileged protocols from a restricted client. A program in a
+      # zone gets Wayland — through the socket wl-sandbox made on the host — and
+      # neither screencopy nor a virtual keyboard; sway's IPC does not answer it.
+      with subtest("headless sway: a zone program gets restricted Wayland and no IPC"):
+          alice(
+              "systemd-run --user --unit=vmsway "
+              "--setenv=WLR_BACKENDS=headless --setenv=WLR_LIBINPUT_NO_DEVICES=1 "
+              "--setenv=WLR_RENDERER=pixman --setenv=WLR_HEADLESS_OUTPUTS=1 "
+              "sway -c /dev/null"
+          )
+          machine.wait_until_succeeds("ls /run/user/1000/sway-ipc.*.sock", timeout=60)
+          display = machine.succeed(
+              "ls /run/user/1000 | grep -E '^wayland-[0-9]+$' | grep -v '^wayland-[89]$' | head -1"
+          ).strip()
+          assert display, "sway made no socket"
+          swaysock = machine.succeed("ls /run/user/1000/sway-ipc.*.sock | head -1").strip()
+          host = alice(f"WAYLAND_DISPLAY={display} wayland-info")
+          assert "zwlr_screencopy_manager_v1" in host, host
+          alice(f"SWAYSOCK={swaysock} swaymsg -t get_version")
+          zone = alice(
+              f"WAYLAND_DISPLAY={display} SWAYSOCK={swaysock} "
+              "vpn-zone run vmsmoke -- sh -c 'wayland-info; echo SWAY; swaymsg -t get_version || echo SWAY-REFUSED'"
+          )
+          assert "wl_compositor" in zone, zone
+          assert "zwlr_screencopy_manager_v1" not in zone, zone
+          assert "zwp_virtual_keyboard_manager_v1" not in zone, zone
+          assert "SWAY-REFUSED" in zone, zone
+          alice("vpn-zone down vmsmoke")
+          alice("systemctl --user stop vmsway.service")
 
       # --- A hermetic zone (docs/HERMETICITY.md §7 C, the prototype) --------
       # The evil host: from inside, systemd --user is gone and its D-Bus name
@@ -1077,11 +1146,9 @@ let
           alice("systemctl --user is-active vpn-zone-broker.service")
           alice("vpn-zone up vmherm")
           hp = machine.succeed(f"cat {STATE}/vmherm/zone.pid").strip()
-          # The compositor's IPC socket stays outside (a regression guard); the
-          # raw Wayland socket comes back in (LEAK-MODEL §13, known open —
-          # flip this assert when it is closed).
+          # Neither the compositor's IPC nor its own socket (LEAK-MODEL §13).
           in_zone(hp, "test ! -e /run/user/1000/niri.wayland-9.4242.sock")
-          in_zone(hp, "test -S /run/user/1000/wayland-9")
+          in_zone(hp, "test ! -e /run/user/1000/wayland-9")
           units = "call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager ListUnits"
           names = "call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ListNames"
           alice(f"busctl --user --timeout=5 {units} > /dev/null")
