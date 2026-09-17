@@ -437,7 +437,7 @@ let
 
       with subtest("trust: the host and the container next door do not"):
           machine.fail(f"su -l alice -c 'openssl verify {CA}/srv.pem'")
-          machine.fail(f"su -l alice -c 'trust list --filter=ca-anchors | grep -q \"vpn-zones vm CA\"'")
+          machine.fail("su -l alice -c 'trust list --filter=ca-anchors | grep -q \"vpn-zones vm CA\"'")
           machine.fail(
               "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
               f"vpn-zone run direct --profile vmnoca -- openssl verify {CA}/srv.pem'"
