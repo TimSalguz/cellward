@@ -606,7 +606,7 @@ fn zone_hermetic(tools: &Tools, args: &[OsString]) -> u8 {
     }
     let name = name.to_string_lossy();
     let marker = dir.join(crate::zone::HERMETIC);
-    let up = zone_pid(&tools.state, name.as_ref()).is_some();
+    let up = zone_pid(&tools.state, OsStr::new(&*name)).is_some();
     let restart = if up {
         format!(" — подействует после перезапуска зоны: vpn-zone down {name} && vpn-zone up {name}")
     } else {
