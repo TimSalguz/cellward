@@ -24,7 +24,16 @@
 //! wrong, so every such path prints a warning to stderr first — that is what
 //! [`run_plain`] is, the shared "it did not work out" exit of this module.
 //!
-//! Usage: `vpn-zone-core wl-sandbox <app-id> -- <command> [args…]`.
+//! Usage: `vpn-zone-core wl-sandbox <app-id> [--zone <zone>] -- <command> [args…]`.
+//!
+//! **Where it runs.** On the host, before the launch enters its zone
+//! (`docs/LEAK-MODEL.md` §13): a zone does not have the compositor's own
+//! socket at all — that one hands out the screen, the clipboard and a virtual
+//! keyboard — so the restricted socket has to be made outside and handed in.
+//! It is created in `$XDG_RUNTIME_DIR/vpn-zones/wayland/<zone>/`, the one
+//! directory of this kind the zone's holder binds into that zone (and only
+//! into that one: a program of another zone cannot replace the socket), and
+//! `WAYLAND_DISPLAY` becomes that path relative to the runtime directory.
 //!
 //! This was a C program (`module/wl-sandbox.c`) until it moved here; there is
 //! no C in this project any more. Two things changed with the move:
@@ -63,6 +72,12 @@ use crate::sys;
 /// not the program.
 const SANDBOX_ENGINE: &str = "vpn-zone";
 
+/// Below the runtime directory: one directory per zone for the restricted
+/// sockets of its launches.
+pub const SOCKET_DIR: &str = "vpn-zones/wayland";
+/// The directory for launches that enter no zone.
+pub const NO_ZONE: &str = "unconfined";
+
 /// What `wl-sandbox` was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -71,6 +86,8 @@ pub struct Args {
     /// `[A-Za-z0-9_.-]` — a space used to split the argument in two and the
     /// wrong program was started (`docs/GOTCHAS.md` §7).
     pub app_id: String,
+    /// The zone the launch goes into, which names the socket's directory.
+    pub zone: String,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
 }
@@ -88,6 +105,9 @@ pub enum ArgError {
     /// separator-less call shape, which would otherwise start the wrong
     /// program.
     TooManyArguments,
+    /// `--zone` without a name, or with one that is not a single path
+    /// component.
+    BadZone,
 }
 
 impl fmt::Display for ArgError {
@@ -97,6 +117,7 @@ impl fmt::Display for ArgError {
             Self::MissingAppId => write!(f, "need a non-empty <app-id>"),
             Self::EmptyCommand => write!(f, "nothing to run after `--`"),
             Self::TooManyArguments => write!(f, "only <app-id> may precede `--`"),
+            Self::BadZone => write!(f, "--zone needs a zone name"),
         }
     }
 }
@@ -104,7 +125,7 @@ impl fmt::Display for ArgError {
 impl std::error::Error for ArgError {}
 
 impl Args {
-    /// Parse `<app-id> -- cmd...`.
+    /// Parse `<app-id> [--zone <zone>] -- cmd...`.
     ///
     /// The command keeps its `OsString`s: an argument can be a file name handed
     /// over by the launcher through a `%U` field code, and those are bytes, not
@@ -116,10 +137,23 @@ impl Args {
             .iter()
             .position(|a| a == "--")
             .ok_or(ArgError::NoSeparator)?;
-        let positional = &argv[..split];
         let cmd = argv[split + 1..].to_vec();
         if cmd.is_empty() {
             return Err(ArgError::EmptyCommand);
+        }
+        let mut positional = Vec::new();
+        let mut zone = NO_ZONE.to_owned();
+        let mut words = argv[..split].iter();
+        while let Some(word) = words.next() {
+            if word == "--zone" {
+                let name = words.next().ok_or(ArgError::BadZone)?.to_string_lossy();
+                if !valid_zone_dir(&name) {
+                    return Err(ArgError::BadZone);
+                }
+                zone = name.into_owned();
+            } else {
+                positional.push(word);
+            }
         }
         if positional.len() > 1 {
             return Err(ArgError::TooManyArguments);
@@ -130,9 +164,15 @@ impl Args {
         }
         Ok(Self {
             app_id: app_id.to_string_lossy().into_owned(),
+            zone,
             cmd,
         })
     }
+}
+
+/// A zone name that can be a directory: one component, nothing to climb with.
+pub fn valid_zone_dir(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\0'])
 }
 
 /// Name of the socket this run registers with the compositor.
@@ -140,6 +180,13 @@ impl Args {
 /// Unique by pid: two runs of the same program must not fight over one path.
 pub fn socket_name(pid: u32) -> String {
     format!("wl-sandbox-{pid}")
+}
+
+/// The socket's path relative to the runtime directory — what
+/// `WAYLAND_DISPLAY` is set to (libwayland joins a relative one onto
+/// `XDG_RUNTIME_DIR`, slashes included).
+pub fn socket_display(zone: &str, pid: u32) -> String {
+    format!("{SOCKET_DIR}/{zone}/{}", socket_name(pid))
 }
 
 /// Run without restrictions — the shared path for everything that did not work
@@ -226,9 +273,23 @@ pub fn run(args: Args) -> u8 {
     };
 
     // A socket of this program's own, named by pid so that two runs of one
-    // program do not fight over a single path.
-    let sock_name = socket_name(std::process::id());
+    // program do not fight over a single path, in the directory of its zone.
+    let sock_name = socket_display(&args.zone, std::process::id());
     let sock_path = PathBuf::from(runtime_dir).join(&sock_name);
+    if let Some(dir) = sock_path.parent() {
+        use std::os::unix::fs::DirBuilderExt;
+        if let Err(e) = fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+        {
+            eprintln!(
+                "wl-sandbox: cannot create {} ({e}) — running unrestricted",
+                dir.display()
+            );
+            return run_plain(&args.cmd);
+        }
+    }
     // A leftover from an earlier run that happened to have this pid would make
     // bind(2) fail with EADDRINUSE.
     let _ = fs::remove_file(&sock_path);
@@ -404,5 +465,27 @@ mod tests {
     fn socket_names_are_unique_per_pid() {
         assert_eq!(socket_name(1234), "wl-sandbox-1234");
         assert_ne!(socket_name(1234), socket_name(1235));
+        assert_eq!(
+            socket_display("nl", 1234),
+            "vpn-zones/wayland/nl/wl-sandbox-1234"
+        );
+    }
+
+    #[test]
+    fn the_zone_names_the_directory_and_nothing_else() {
+        let a = Args::parse(&argv(&["firefox", "--zone", "nl", "--", "firefox"])).unwrap();
+        assert_eq!((a.app_id.as_str(), a.zone.as_str()), ("firefox", "nl"));
+        let a = Args::parse(&argv(&["--zone", "nl", "firefox", "--", "firefox"])).unwrap();
+        assert_eq!(a.app_id, "firefox");
+        let a = Args::parse(&argv(&["firefox", "--", "firefox"])).unwrap();
+        assert_eq!(a.zone, NO_ZONE);
+        for bad in [
+            &["firefox", "--zone", "--", "x"][..],
+            &["firefox", "--zone", "../x", "--", "x"],
+            &["firefox", "--zone", "..", "--", "x"],
+            &["firefox", "--zone", "", "--", "x"],
+        ] {
+            assert_eq!(Args::parse(&argv(bad)), Err(ArgError::BadZone), "{bad:?}");
+        }
     }
 }

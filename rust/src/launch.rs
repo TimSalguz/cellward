@@ -59,6 +59,16 @@ pub const ENV_APPID: &str = "VPN_ZONE_APPID";
 /// Print the resulting command and start nothing.
 pub const ENV_DRYRUN: &str = "VPN_ZONE_DRYRUN";
 
+/// Environment variables that name a compositor's IPC socket — a way to have
+/// the compositor spawn a process on the host. Dropped from launches into a
+/// zone, where the sockets are not either (`docs/LEAK-MODEL.md` §13).
+pub const COMPOSITOR_IPC_VARS: [&str; 4] = [
+    "NIRI_SOCKET",
+    "SWAYSOCK",
+    "I3SOCK",
+    "HYPRLAND_INSTANCE_SIGNATURE",
+];
+
 /// Marker file of a locked ("no escape") zone.
 pub const NO_ESCAPE: &str = "no-escape";
 
@@ -578,16 +588,33 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         cmd = wrapped;
     }
 
-    if wayland_sandbox_wanted(tools, &appbin) {
-        let mut wrapped: Vec<OsString> = vec![
-            tools.core.clone().into(),
-            "wl-sandbox".into(),
-            appbin.clone(),
-            "--".into(),
-        ];
-        wrapped.extend(cmd);
-        cmd = wrapped;
-    }
+    // --- THE COMPOSITOR (docs/LEAK-MODEL.md §13) ---
+    // Around everything, on the host: a zone has no compositor socket of its
+    // own to make the restricted one from, and a sandbox would otherwise be
+    // handed the unrestricted one. Into a zone always — the allowlist and
+    // `wayland-sandbox off` are for unconfined launches only, where the
+    // compositor's own socket is there anyway.
+    let compositor_wrap: Option<Vec<OsString>> =
+        (zone != UNCONFINED || wayland_sandbox_wanted(tools, &appbin)).then(|| {
+            let app = if appbin.is_empty() {
+                OsString::from("shell")
+            } else {
+                appbin.clone()
+            };
+            let dir = if zone == UNCONFINED {
+                crate::wl_sandbox::NO_ZONE.to_owned()
+            } else {
+                zone_name.clone()
+            };
+            vec![
+                tools.core.clone().into(),
+                "wl-sandbox".into(),
+                app,
+                "--zone".into(),
+                dir.into(),
+                "--".into(),
+            ]
+        });
 
     if selection.sandbox != Sandbox::None {
         // The permissions belong to the launcher's id when there is one: the
@@ -742,8 +769,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     };
 
     if dryrun {
-        let shown: Vec<String> = cmd
+        let shown: Vec<String> = compositor_wrap
             .iter()
+            .flatten()
+            .chain(cmd.iter())
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         let profile = if container.profile.is_empty() {
@@ -823,6 +852,11 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     if network != Network::Unconfined {
         std::env::remove_var("DISPLAY");
         std::env::remove_var("XAUTHORITY");
+        // The compositors' IPC is not in a zone (LEAK-MODEL §13); its names
+        // are not either.
+        for var in COMPOSITOR_IPC_VARS {
+            std::env::remove_var(var);
+        }
     }
 
     // The caller's working directory, which `nsenter` would otherwise lose. A
@@ -864,6 +898,13 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         eprintln!("нечего запускать");
         return 1;
     }
+    let exec = match compositor_wrap {
+        Some(mut wrapped) => {
+            wrapped.extend(exec);
+            wrapped
+        }
+        None => exec,
+    };
 
     let e = exec_command(&exec);
     eprintln!("не удалось запустить {}: {e}", exec[0].to_string_lossy());

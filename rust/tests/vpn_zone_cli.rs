@@ -317,14 +317,46 @@ fn a_launch_is_wrapped_in_the_compositor_restriction_by_default() {
     let out = home.run_with(&["run", "nl", "--", "firefox"], &[("VPN_ZONE_DRYRUN", "1")]);
     assert!(out.status.success(), "{}", stderr(&out));
     let line = stdout(&out);
-    assert!(line.contains("wl-sandbox firefox --"), "{line}");
-    assert!(line.starts_with("зона nl, профиль основной:"), "{line}");
+    // Outermost, on the host, and named by the zone whose directory the
+    // restricted socket goes into (LEAK-MODEL §13).
+    assert!(
+        line.starts_with("зона nl, профиль основной: /nonexistent/vpn-zone-core wl-sandbox firefox --zone nl -- firefox"),
+        "{line}"
+    );
 
-    // Turned off by the setting the CLI itself writes.
+    // Turned off by the setting the CLI itself writes — for unconfined
+    // launches only: a zone has no unrestricted socket to hand out.
     let out = home.run(&["wayland-sandbox", "off"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let out = home.run_with(&["run", "nl", "--", "firefox"], &[("VPN_ZONE_DRYRUN", "1")]);
-    assert_eq!(stdout(&out).trim(), "зона nl, профиль основной: firefox");
+    assert!(
+        stdout(&out).contains("wl-sandbox firefox --zone nl --"),
+        "{}",
+        stdout(&out)
+    );
+    let out = home.run_with(
+        &["run", "unconfined", "--", "firefox"],
+        &[("VPN_ZONE_DRYRUN", "1")],
+    );
+    assert_eq!(
+        stdout(&out).trim(),
+        "зона unconfined, профиль основной: firefox"
+    );
+    // The allowlist likewise: obs is let through unconfined only.
+    fs::create_dir_all(home.root.join("config")).unwrap();
+    let out = home.run(&["wayland-sandbox", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = home.run_with(&["run", "nl", "--", "obs"], &[("VPN_ZONE_DRYRUN", "1")]);
+    assert!(
+        stdout(&out).contains("wl-sandbox obs --zone nl --"),
+        "{}",
+        stdout(&out)
+    );
+    let out = home.run_with(
+        &["run", "unconfined", "--", "obs"],
+        &[("VPN_ZONE_DRYRUN", "1")],
+    );
+    assert!(!stdout(&out).contains("wl-sandbox"), "{}", stdout(&out));
 }
 
 #[test]
@@ -346,7 +378,10 @@ fn an_unconfined_launch_starts_no_zone_and_loses_nothing_on_the_way() {
         line.starts_with("зона unconfined, профиль основной:"),
         "{line}"
     );
-    assert!(line.contains("wl-sandbox firefox --"), "{line}");
+    assert!(
+        line.contains("wl-sandbox firefox --zone unconfined --"),
+        "{line}"
+    );
 
     // The old name is the same network.
     fs::create_dir_all(home.root.join("profiles/work")).unwrap();

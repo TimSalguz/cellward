@@ -209,14 +209,53 @@ const HOSTIF_GATEWAY4: &str = "10.255.255.254";
 
 /// The zone's filtered session bus, in its state directory.
 const SESSION_BUS_PROXY: &str = "session-bus";
-/// Where the host's runtime directory is held for a moment while the zone's
-/// own is built over it.
+/// Where the host's runtime directory is held for the zone's lifetime, to bind
+/// entries from — below a tmpfs only the zone's root may enter, because the
+/// hold has everything, the compositor's own socket included.
 const HOST_RUNTIME: &str = ".host-runtime";
-/// What of the runtime directory a hermetic zone keeps: the compositor, the
-/// sound servers and the document portal's files. Not `bus` (the filtered one
-/// is bound instead), not `systemd/` (the manager's private socket — a process
-/// outside the zone), not `gnupg/`, `ssh-agent`, `keyring/`, `at-spi/`.
-const RUNTIME_KEPT: [&str; 4] = ["wayland-", "pipewire-0", "pulse", "doc"];
+/// The hold's subdirectory the host's runtime directory is bound at.
+const HOST_RUNTIME_HELD: &str = "r";
+/// What of the runtime directory a hermetic zone keeps: the sound servers and
+/// the document portal's files. Not `bus` (the filtered one is bound instead),
+/// not `systemd/` (the manager's private socket — a process outside the zone),
+/// not `gnupg/`, `ssh-agent`, `keyring/`, `at-spi/` — and not the compositor's
+/// socket, which no zone gets (`compositor_private`).
+const RUNTIME_KEPT: [&str; 3] = ["pipewire-0", "pulse", "doc"];
+/// Ours, below the runtime directory: the broker's socket and the restricted
+/// Wayland sockets. Never bound whole — one zone must not reach another zone's
+/// sockets —, only the broker and the zone's own Wayland directory.
+const OURS: &str = "vpn-zones";
+
+/// Entries of the runtime directory NO zone gets, hermetic or not, created
+/// before the zone or after it (`docs/LEAK-MODEL.md` §13):
+///
+/// * the compositor's own sockets, `wayland-*`: the screen, the clipboard, a
+///   virtual keyboard and pointer — a command typed into a terminal of the
+///   host. A zone's programs get a restricted socket made by `wl-sandbox`
+///   outside the zone, in `vpn-zones/wayland/<zone>/`;
+/// * compositors' IPC, which spawn processes on the host: niri's
+///   `niri.<display>.<pid>.sock`, sway's `sway-ipc.*`, Hyprland's `hypr/`, i3's
+///   `i3/`.
+pub fn compositor_private(name: &str) -> bool {
+    name.starts_with("wayland-")
+        || (name.starts_with("niri.") && name.ends_with(".sock"))
+        || name.starts_with("sway-ipc.")
+        || name == "hypr"
+        || name == "i3"
+}
+
+/// Is this entry of the host's runtime directory bound into a zone?
+///
+/// A hermetic zone keeps what [`RUNTIME_KEPT`] names and nothing else. An
+/// ordinary zone keeps everything — its session bus and `systemd --user` are
+/// open by design (`docs/LEAK-MODEL.md` §1) — except [`compositor_private`].
+/// [`OURS`] is bound piece by piece, never as it is.
+pub fn runtime_entry_kept(name: &str, hermetic: bool) -> bool {
+    if compositor_private(name) || name == OURS {
+        return false;
+    }
+    !hermetic || RUNTIME_KEPT.contains(&name)
+}
 
 /// What a program in a hermetic zone may ask of the session bus: the portals,
 /// notifications, tray icons, media players, input methods, the screensaver
@@ -1674,35 +1713,105 @@ fn host_runtime_dir(zone: &Zone) -> PathBuf {
     PathBuf::from(format!("/run/user/{uid}"))
 }
 
-/// A hermetic zone's runtime directory (`docs/HERMETICITY.md` §2): a tmpfs of
-/// its own over the user's, with only [`RUNTIME_KEPT`] bound back, the
-/// filtered session bus as `bus`, and the broker's socket. `systemd/private`
-/// and the host's `bus` are gone — the two ways to start a process outside
-/// the zone. Fatal when it cannot be done: a zone marked hermetic that is not
-/// is the one outcome worse than an ordinary zone.
+/// Bind `from` over a placeholder at `to`, replacing whatever was bound there:
+/// a socket the host recreated is a new inode, and the old bind leads nowhere.
+fn bind_entry(from: &Path, to: &Path) -> Result<(), String> {
+    let target = std::ffi::CString::new(to.as_os_str().as_bytes())
+        .map_err(|_| format!("a NUL in {}", to.display()))?;
+    // SAFETY: a NUL-terminated path; MNT_DETACH takes no pointers. Until
+    // nothing is bound there any more.
+    while unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) } == 0 {}
+    let is_dir = fs::metadata(from)
+        .map_err(|e| format!("{}: {e}", from.display()))?
+        .is_dir();
+    match fs::symlink_metadata(to) {
+        Ok(meta) if meta.is_dir() != is_dir => {
+            if meta.is_dir() {
+                let _ = fs::remove_dir(to);
+            } else {
+                let _ = fs::remove_file(to);
+            }
+        }
+        _ => {}
+    }
+    if is_dir {
+        fs::create_dir_all(to)
+    } else {
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(to)
+            .map(|_| ())
+    }
+    .map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+    sys::mount(from.as_os_str(), to, "", libc::MS_BIND | libc::MS_REC, "")
+        .map_err(|e| format!("cannot bind {}: {e}", from.display()))
+}
+
+/// The zone's runtime directory (`docs/HERMETICITY.md` §2,
+/// `docs/LEAK-MODEL.md` §13), for EVERY zone: a tmpfs of its own over the
+/// user's, with the entries [`runtime_entry_kept`] allows bound back, the
+/// broker's socket, the zone's own directory of restricted Wayland sockets
+/// and — in a hermetic zone — the filtered session bus as `bus`.
+///
+/// Built from a hold of the host's directory that stays for the zone's
+/// lifetime, below a tmpfs of mode 0700 owned by the zone's root: programs run
+/// as the user and never get there. A watcher binds what the host creates
+/// later — pipewire or dbus restarted, gpg-agent started — so a zone does not
+/// lose its sound or its bus to a restart; what [`runtime_entry_kept`] refuses
+/// is refused then too. Fatal when the directory cannot be closed at all: a
+/// zone that hands out the compositor's socket is worse than no zone.
 fn seal_runtime(zone: &Zone) -> Result<(), String> {
-    if !zone.hermetic {
+    let runtime = host_runtime_dir(zone);
+    if fs::symlink_metadata(&runtime).is_err() {
         return Ok(());
     }
-    let runtime = host_runtime_dir(zone);
     let (uid, gid) = {
         use std::os::unix::fs::MetadataExt;
         let meta = fs::metadata(&zone.dir)
             .map_err(|e| format!("cannot read the zone's directory: {e}"))?;
         (meta.uid(), meta.gid())
     };
-    let host = zone.path(HOST_RUNTIME);
-    fs::create_dir_all(&host).map_err(|e| format!("cannot create {}: {e}", host.display()))?;
-    // The host's directory kept reachable for a moment, to bind from after the
-    // tmpfs covers the original.
+    let hold = zone.path(HOST_RUNTIME);
+    fs::create_dir_all(&hold).map_err(|e| format!("cannot create {}: {e}", hold.display()))?;
+    sys::mount(OsStr::new("tmpfs"), &hold, "tmpfs", 0, "mode=0700,size=64k")
+        .map_err(|e| format!("cannot close {}: {e}", hold.display()))?;
+    let held = hold.join(HOST_RUNTIME_HELD);
+    fs::create_dir_all(&held).map_err(|e| format!("cannot create {}: {e}", held.display()))?;
     sys::mount(
         runtime.as_os_str(),
-        &host,
+        &held,
         "",
         libc::MS_BIND | libc::MS_REC,
         "",
     )
     .map_err(|e| format!("cannot hold {}: {e}", runtime.display()))?;
+
+    // Our directories on the host, owned by the user: the zone's Wayland
+    // directory has to exist before it can be bound, and wl-sandbox (the
+    // user, on the host) creates its sockets in it.
+    let wayland_host = held.join(crate::wl_sandbox::SOCKET_DIR).join(&*zone.name());
+    fs::create_dir_all(&wayland_host)
+        .map_err(|e| format!("cannot create {}: {e}", wayland_host.display()))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut dir = wayland_host.clone();
+        while dir != held {
+            let _ = std::os::unix::fs::chown(&dir, Some(uid), Some(gid));
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+
+    // The watch first, the listing second: nothing created in between is lost.
+    let watch = crate::sys::Inotify::watch(&held).ok();
+
     sys::mount(
         OsStr::new("tmpfs"),
         &runtime,
@@ -1712,63 +1821,69 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
     )
     .map_err(|e| format!("cannot close {}: {e}", runtime.display()))?;
 
-    let bind_back = |from: &Path, to: &Path| -> Result<(), String> {
-        let is_dir = fs::metadata(from).is_ok_and(|m| m.is_dir());
-        if is_dir {
-            fs::create_dir_all(to)
-        } else {
-            if let Some(parent) = to.parent() {
-                fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-            }
-            File::create(to).map(|_| ())
-        }
-        .map_err(|e| format!("cannot create {}: {e}", to.display()))?;
-        sys::mount(from.as_os_str(), to, "", libc::MS_BIND | libc::MS_REC, "")
-            .map_err(|e| format!("cannot bind {}: {e}", from.display()))
-    };
     let mut kept = Vec::new();
-    for entry in fs::read_dir(&host).into_iter().flatten().flatten() {
+    for entry in fs::read_dir(&held).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let wanted = RUNTIME_KEPT.iter().any(|k| {
-            if k.ends_with('-') {
-                name.starts_with(k) && !name.ends_with(".lock")
-            } else {
-                name == *k
+        if runtime_entry_kept(&name, zone.hermetic) {
+            match bind_entry(&entry.path(), &runtime.join(&name)) {
+                Ok(()) => kept.push(name),
+                // Skipped is hidden: what could not be bound is simply not there.
+                Err(e) => eprintln!("zone {}: {e} — not in the zone", zone.name()),
             }
-        });
-        if wanted {
-            bind_back(&entry.path(), &runtime.join(&name))?;
-            kept.push(name);
         }
     }
-    let session = zone.path(SESSION_BUS_PROXY);
-    if fs::symlink_metadata(&session).is_ok() {
-        bind_back(&session, &runtime.join("bus"))?;
-        kept.push("bus (filtered)".to_owned());
-    }
-    let broker = host.join(crate::broker::SOCKET);
+    let wayland_zone = runtime
+        .join(crate::wl_sandbox::SOCKET_DIR)
+        .join(&*zone.name());
+    bind_entry(&wayland_host, &wayland_zone)?;
+    kept.push(format!("{}/{}", crate::wl_sandbox::SOCKET_DIR, zone.name()));
+    let broker = held.join(crate::broker::SOCKET);
     if fs::symlink_metadata(&broker).is_ok() {
-        bind_back(&broker, &runtime.join(crate::broker::SOCKET))?;
+        bind_entry(&broker, &runtime.join(crate::broker::SOCKET))?;
         kept.push("broker".to_owned());
     }
-    // The host's directory is not to stay reachable through the zone's own
-    // state directory, which programs in the zone can see.
-    let target = std::ffi::CString::new(host.as_os_str().as_bytes())
-        .map_err(|_| "a NUL in the zone's path".to_owned())?;
-    // SAFETY: a NUL-terminated path; MNT_DETACH takes no pointers.
-    if unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) } != 0 {
-        return Err(format!(
-            "cannot release {}: {} — the host's runtime directory would stay reachable",
-            host.display(),
-            io::Error::last_os_error()
-        ));
+    if zone.hermetic {
+        let session = zone.path(SESSION_BUS_PROXY);
+        if fs::symlink_metadata(&session).is_ok() {
+            bind_entry(&session, &runtime.join("bus"))?;
+            kept.push("bus (filtered)".to_owned());
+        }
     }
-    let _ = fs::remove_dir(&host);
     println!(
-        "zone {}: hermetic runtime ({})",
+        "zone {}: {} runtime ({})",
         zone.name(),
+        if zone.hermetic { "hermetic" } else { "sealed" },
         kept.join(", ")
     );
+
+    match watch {
+        Some(watch) => {
+            let hermetic = zone.hermetic;
+            let name = zone.name().into_owned();
+            thread::spawn(move || loop {
+                let names = match watch.names() {
+                    Ok(names) => names,
+                    Err(e) => {
+                        eprintln!("zone {name}: the runtime watch ended ({e})");
+                        return;
+                    }
+                };
+                for entry in names {
+                    if !runtime_entry_kept(&entry, hermetic) {
+                        continue;
+                    }
+                    if let Err(e) = bind_entry(&held.join(&entry), &runtime.join(&entry)) {
+                        eprintln!("zone {name}: {e} — not in the zone");
+                    }
+                }
+            });
+        }
+        None => eprintln!(
+            "zone {}: no watch on {} — what the host creates later stays outside the zone",
+            zone.name(),
+            runtime.display()
+        ),
+    }
     Ok(())
 }
 
@@ -2147,7 +2262,8 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // resolve1 is on the system bus too, and NetworkManager tells a program
     // which networks the machine is really on.
     seal_system_bus(zone)?;
-    // A hermetic zone: no systemd --user, no whole session bus, the broker.
+    // Every zone: no compositor socket and no compositor IPC; a hermetic one
+    // also no systemd --user and no whole session bus, and the broker.
     seal_runtime(zone)?;
     // One X server shows every client everything: the host's is out of reach,
     // and so are the X servers of other zones — /tmp is shared, this tmpfs
@@ -3093,6 +3209,41 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_zone_gets_the_compositor_or_its_ipc() {
+        for name in [
+            "wayland-1",
+            "wayland-1.lock",
+            "niri.wayland-1.1798.sock",
+            "sway-ipc.1000.4242.sock",
+            "hypr",
+            "i3",
+            "vpn-zones",
+        ] {
+            assert!(!runtime_entry_kept(name, false), "{name}");
+            assert!(!runtime_entry_kept(name, true), "{name}");
+        }
+        // An ordinary zone keeps the rest, the bus and systemd --user included;
+        // a hermetic one only the sound servers and the document portal.
+        for name in [
+            "bus",
+            "systemd",
+            "gnupg",
+            "pipewire-0",
+            "noctalia-wayland-1.sock",
+        ] {
+            assert!(runtime_entry_kept(name, false), "{name}");
+        }
+        for name in ["pipewire-0", "pulse", "doc"] {
+            assert!(runtime_entry_kept(name, true), "{name}");
+        }
+        for name in ["bus", "systemd", "gnupg", "niri"] {
+            assert!(!runtime_entry_kept(name, true), "{name}");
+        }
+        // A name that only looks like niri's is not hidden by accident.
+        assert!(runtime_entry_kept("niri-config.kdl", false));
+    }
 
     fn argv(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
