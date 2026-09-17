@@ -225,12 +225,16 @@ const RUNTIME_KEPT: [&str; 4] = ["wayland-", "pipewire-0", "pulse", "doc"];
 /// inhibitor (the owner's decision C4). Not `org.freedesktop.systemd1` —
 /// starting a process outside the zone —, not the Secret Service, not other
 /// programs' interfaces.
-pub const SESSION_BUS_RULES: [&str; 11] = [
+///
+/// Wildcards only as a `.*` suffix: xdg-dbus-proxy refuses anything else as
+/// "not a valid dbus name" and does not start at all — `StatusNotifierItem-*`
+/// did exactly that. A tray item registers under its unique name without
+/// owning a well-known one.
+pub const SESSION_BUS_RULES: [&str; 10] = [
     "--filter",
     "--talk=org.freedesktop.portal.*",
     "--talk=org.freedesktop.Notifications",
     "--talk=org.kde.StatusNotifierWatcher",
-    "--own=org.kde.StatusNotifierItem-*",
     "--own=org.mpris.MediaPlayer2.*",
     "--talk=org.freedesktop.IBus",
     "--talk=org.freedesktop.portal.IBus",
@@ -3102,6 +3106,31 @@ mod tests {
         assert_eq!(parsed.tools.nft, PathBuf::from("/n/nft"));
         assert_eq!(parsed.tools.openconnect, PathBuf::from("/n/openconnect"));
         assert_eq!(parsed.tools.dbus_proxy, PathBuf::from("/n/xdg-dbus-proxy"));
+    }
+
+    #[test]
+    fn bus_rules_use_only_wildcards_the_proxy_accepts() {
+        for rule in SYSTEM_BUS_RULES
+            .iter()
+            .chain(SESSION_BUS_RULES.iter())
+            .skip(1)
+        {
+            let name = rule
+                .split_once('=')
+                .map(|(_, rest)| rest.split('=').next().unwrap_or(rest))
+                .unwrap_or("");
+            let bare = name.strip_suffix(".*").unwrap_or(name);
+            assert!(!bare.contains('*'), "{rule}");
+            assert!(
+                bare.split('.').count() >= 2
+                    && bare
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-'),
+                "{rule}"
+            );
+        }
+        assert!(!SESSION_BUS_RULES.iter().any(|r| r.contains("systemd1")));
+        assert!(!SESSION_BUS_RULES.iter().any(|r| r.contains("secrets")));
     }
 
     #[test]
