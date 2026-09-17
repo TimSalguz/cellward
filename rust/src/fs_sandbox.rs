@@ -521,17 +521,18 @@ pub fn bwrap_args(layout: &Layout, cmd: &[OsString]) -> Vec<OsString> {
                 a.push(layout.home.as_os_str().to_owned());
             }
         }
-        // Plain `--bind`, not `--bind-try`, exactly as the shell had it: a
-        // permission granted for a directory that does not exist is a bwrap
-        // failure rather than a silently ignored tick. Worth knowing, since
-        // ~/Pictures is not guaranteed to exist.
+        // `--bind-try`: a permission granted for a directory that does not
+        // exist (~/Pictures is not guaranteed to) used to be a bwrap failure,
+        // i.e. a program that did not start at all over a tick that grants
+        // nothing. `run` says which one is missing; nothing is created in the
+        // real home on the program's behalf.
         for (allowed, name) in [
             (layout.perms.downloads, "Downloads"),
             (layout.perms.documents, "Documents"),
             (layout.perms.pictures, "Pictures"),
         ] {
             if allowed {
-                bind_same(&mut a, "--bind", &layout.home.join(name));
+                bind_same(&mut a, "--bind-try", &layout.home.join(name));
             }
         }
         // Granted directories, after the home is gone and for the same reason
@@ -944,6 +945,19 @@ pub fn run(args: Args) -> u8 {
         }
     }
     let perms = Perms::parse(&fs::read_to_string(&perm_file).unwrap_or_default());
+    if !perms.home {
+        for (allowed, name) in [
+            (perms.downloads, "Downloads"),
+            (perms.documents, "Documents"),
+            (perms.pictures, "Pictures"),
+        ] {
+            if allowed && !home.join(name).is_dir() {
+                eprintln!(
+                    "fs-sandbox: доступ к ~/{name} выдан, но такого каталога нет — программа его не увидит"
+                );
+            }
+        }
+    }
 
     // --- SCRATCH: /.flatpak-info AND THE BUS SOCKET ---
     let dir = match scratch_dir() {
@@ -1556,13 +1570,13 @@ mod tests {
                 // covered up and the permission would silently do nothing.
                 "--tmpfs",
                 "/home/u",
-                "--bind",
+                "--bind-try",
                 "/home/u/Downloads",
                 "/home/u/Downloads",
-                "--bind",
+                "--bind-try",
                 "/home/u/Documents",
                 "/home/u/Documents",
-                "--bind",
+                "--bind-try",
                 "/home/u/Pictures",
                 "/home/u/Pictures",
             ]

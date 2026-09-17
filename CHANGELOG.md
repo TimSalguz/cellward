@@ -5,6 +5,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed (a granted directory that does not exist)
+- A sandbox granted `~/Downloads`, `~/Documents` or `~/Pictures` that does not
+  exist no longer fails to start: the directory is bound with `--bind-try`, and
+  the launch says which one is missing. Nothing is created in the real home.
+
 ### Added (networks through an interface of the host)
 - A zone whose config has a `[HostInterface]` section (`Interface =`, optional
   literal `DNS =`) goes out through that interface of the host and nothing
