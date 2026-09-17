@@ -537,6 +537,35 @@ env -u WAYLAND_DISPLAY -u DISPLAY "$FSCORE" fs-sandbox \
 [ ! -e "$WORK/kdialog-was-called" ] || fail "kdialog вызвался при готовом файле доступов"
 echo "ok: без шины запуск живёт, код выхода 42 донесён"
 
+# Свой machine-id (docs/LEAK-MODEL.md §10): /etc/machine-id хоста — один
+# идентификатор на все зоны и песочницы машины. У именованной песочницы свой и
+# постоянный, у одноразовой — новый на каждый запуск.
+step "Песочница ФС: machine-id свой — постоянный у именованной, новый у одноразовой"
+if [ -f /etc/machine-id ] && [ ! -L /etc/machine-id ]; then
+  host_id=$(cat /etc/machine-id)
+  sb_id() {
+    env -u WAYLAND_DISPLAY -u DISPLAY "$FSCORE" fs-sandbox \
+      --bwrap "$FSBWRAP" --dbus-proxy "$FSPROXY" \
+      --kdialog "$WORK/fake-kdialog" --xwayland /nonexistent/xwayland-satellite \
+      "$@" "$FSAPP" -- "$FSSH" -c 'read -r id < /etc/machine-id; echo "ID=$id"' \
+      | sed -n 's/^ID=//p'
+  }
+  named1=$(sb_id --name smokeid)
+  named2=$(sb_id --name smokeid)
+  temp1=$(sb_id)
+  temp2=$(sb_id)
+  echo "хост=$host_id именованная=$named1/$named2 одноразовая=$temp1/$temp2"
+  [ ${#named1} -eq 32 ] || fail "у именованной песочницы нет своего machine-id"
+  [ "$named1" != "$host_id" ] || fail "именованная песочница видит machine-id хоста"
+  [ "$named1" = "$named2" ] || fail "machine-id именованной песочницы не постоянный"
+  [ "$temp1" != "$host_id" ] && [ "$temp1" != "$temp2" ] \
+    || fail "одноразовая песочница не получает новый machine-id"
+  rm -rf "$HOME/.local/state/vpn-sandboxes/smokeid"
+  echo "ok: machine-id свой"
+else
+  echo "skip: у раннера нет обычного /etc/machine-id"
+fi
+
 # Выданные каталоги (docs/CONTAINERS.md §3.5): своему дому песочницы можно
 # выдать каталог настоящего дома — префикс Wine, библиотеку Steam. Нельзя —
 # состояние vpn-zones (там ключи зон), в том числе через symlink: bwrap идёт

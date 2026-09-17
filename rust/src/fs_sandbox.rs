@@ -110,6 +110,45 @@ const SANDBOX_SUBDIR: &str = ".local/state/vpn-sandboxes";
 /// The one file passed in from `~/.config`, read-only.
 const MIMEAPPS: &str = ".config/mimeapps.list";
 
+/// The file every program asks for the identity of the machine.
+const MACHINE_ID: &str = "/etc/machine-id";
+
+/// A new machine-id: 32 lower-case hex digits from the kernel's random pool,
+/// and a newline, the format systemd writes.
+pub fn new_machine_id() -> io::Result<String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    let mut text: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    text.push('\n');
+    Ok(text)
+}
+
+/// The machine-id this sandbox shows: its own, kept in a named sandbox's
+/// directory so that a program registered once stays registered, and a fresh
+/// one for a throwaway sandbox, whose home is thrown away too. `None` when the
+/// host has no plain `/etc/machine-id` to cover (a symlink would lead bwrap
+/// outside the sandbox's tree).
+fn sandbox_machine_id(sandbox_dir: Option<&Path>, scratch: &Path) -> Option<PathBuf> {
+    if !fs::symlink_metadata(MACHINE_ID).is_ok_and(|m| m.file_type().is_file()) {
+        return None;
+    }
+    let path = match sandbox_dir {
+        Some(dir) => dir.join("machine-id"),
+        None => scratch.join("machine-id"),
+    };
+    let valid = fs::read_to_string(&path)
+        .is_ok_and(|t| t.trim().len() == 32 && t.trim().bytes().all(|b| b.is_ascii_hexdigit()));
+    if !valid {
+        let written = new_machine_id().and_then(|id| fs::write(&path, id));
+        if let Err(e) = written {
+            eprintln!("fs-sandbox: no machine-id of its own ({e}) — the host's stays visible");
+            return None;
+        }
+    }
+    Some(path)
+}
+
 /// The descriptor number bwrap reads the compiled filter from.
 ///
 /// `bwrap --seccomp` takes a NUMBER, never a path, so the program has to be on
@@ -434,6 +473,8 @@ pub struct Layout {
     pub granted: Vec<(PathBuf, PathBuf)>,
     /// `~/.config/mimeapps.list`, when it exists.
     pub mimeapps: Option<PathBuf>,
+    /// The sandbox's own `/etc/machine-id`, bound over the host's.
+    pub machine_id: Option<PathBuf>,
     /// The file `/etc/resolv.conf` really is, when that is outside `/etc`.
     /// `None` when `/etc` already contains it, or when there is nothing there
     /// to bind — inside a zone whose resolver directory has just been hidden,
@@ -487,6 +528,12 @@ pub fn bwrap_args(layout: &Layout, cmd: &[OsString]) -> Vec<OsString> {
     bind_same(&mut a, "--ro-bind-try", Path::new("/run/opengl-driver"));
     bind_same(&mut a, "--ro-bind-try", Path::new("/run/opengl-driver-32"));
     bind_same(&mut a, "--ro-bind", Path::new("/etc"));
+    // Right after /etc, which it covers one file of: the host's machine-id is
+    // one identifier for every zone and every sandbox of the machine, and two
+    // identities that are never supposed to meet share it. (LEAK-MODEL §10)
+    if let Some(id) = &layout.machine_id {
+        bind(&mut a, "--ro-bind", id, Path::new(MACHINE_ID));
+    }
     bind_same(&mut a, "--ro-bind-try", Path::new("/sys"));
     // The FILE behind /etc/resolv.conf, and never the directory it lives in:
     // /run is not passed in, so without this names do not resolve inside — and
@@ -1059,6 +1106,10 @@ pub fn run(args: Args) -> u8 {
         home: home.clone(),
         runtime: runtime.clone(),
         perms,
+        machine_id: sandbox_machine_id(
+            sandbox_home.as_deref().and_then(Path::parent),
+            &cleanup.dir,
+        ),
         sandbox_home,
         granted,
         mimeapps: home.join(MIMEAPPS).is_file().then(|| home.join(MIMEAPPS)),
@@ -1410,6 +1461,7 @@ mod tests {
             perms: Perms::default(),
             sandbox_home: None,
             granted: Vec::new(),
+            machine_id: None,
             mimeapps: None,
             resolv: Some(PathBuf::from("/run/systemd/resolve/stub-resolv.conf")),
             dev_nodes: Vec::new(),
@@ -1581,6 +1633,25 @@ mod tests {
                 "/home/u/Pictures",
             ]
         );
+    }
+
+    #[test]
+    fn the_sandbox_shows_a_machine_id_of_its_own_right_after_etc() {
+        let mut l = layout();
+        l.machine_id = Some(PathBuf::from("/s/dev/machine-id"));
+        let got = strs(&bwrap_args(&l, &argv(&["prog"])));
+        let etc = got.iter().position(|a| a == "/etc").unwrap();
+        assert_eq!(
+            &got[etc + 1..etc + 4],
+            ["--ro-bind", "/s/dev/machine-id", "/etc/machine-id"]
+        );
+        let id = new_machine_id().unwrap();
+        assert_eq!(id.len(), 33, "{id:?}");
+        assert!(id
+            .trim()
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert_ne!(new_machine_id().unwrap(), id);
     }
 
     #[test]

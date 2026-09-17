@@ -5,6 +5,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed (a machine-id of the sandbox's own)
+- A sandbox no longer shows the host's `/etc/machine-id`, one identifier shared
+  by every zone and sandbox of the machine: a named sandbox gets one of its own,
+  kept in its directory, and a throwaway sandbox a new one at every launch.
+  **Behaviour change:** programs that register a device by machine-id (some
+  launchers and sync clients) see a new device once per named sandbox.
+
 ### Added (containers in the GUI)
 - A «Контейнеры VPN-зон» launcher entry (`vpn-zone-gui containers`): pick a
   container, then change its network, merge it into another container of the
