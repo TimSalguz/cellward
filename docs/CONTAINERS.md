@@ -195,6 +195,21 @@ at its own path, read-write. Rules:
 - only for a home of its own: a layer over the home already sees the whole
   real home.
 
+**Grants with a term — implemented.** `grant … --for 30m|2h|7d` (up to 366
+days; the GUI offers an hour, a day, a week) writes
+`until=<unix seconds> <path>` into the sandbox's `paths` — a line an older
+version reads as a relative path and refuses. A grant whose term is over is
+absent from every launch from that second on, whether or not anything has
+cleaned it up. For the programs already running a transient user timer runs
+`vpn-zone container expire` at the end of the term, and `revoke` does the same
+at once: the bind is detached (`umount2(MNT_DETACH)`) in every mount namespace
+of the sandbox's running programs, entered with `setns` as the owner of their
+user namespaces. A detach cannot take away what is already open — a file
+descriptor, a working directory inside; `vpn-zone kill` is the hard end. Every
+grant, revoke and expiry is in the journal (`grant`, `revoke`,
+`grant-expired`), and `permissions.paths[].expires` in `status --json` is the
+end of the term (RFC 3339, `null` without one).
+
 ### 3.6 Per-launch runtime (the order is the specification)
 
 ```

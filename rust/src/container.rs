@@ -35,8 +35,32 @@ pub const FILE: &str = "container.conf";
 pub const DECLARED: &str = "declared/containers";
 /// The prefix of a named sandbox's selector.
 pub const SANDBOX_PREFIX: &str = "sb:";
-/// The directories granted to a private home, one per line.
+/// The directories granted to a private home, one per line: the path, or
+/// `until=<unix seconds> <path>` for a grant with a term.
 pub const PATHS_FILE: &str = "paths";
+/// The prefix of a grant with a term. A granted path is absolute or `~/…`,
+/// so it can never start like this — and a version that does not know the
+/// prefix reads the line as a relative path, which fs-sandbox refuses.
+pub const UNTIL_PREFIX: &str = "until=";
+
+/// Now, in seconds since the epoch.
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// One line of a paths file: the path as written, and the end of its term.
+/// A term that does not parse ended long ago: `Some(0)`.
+pub fn grant_line(line: &str) -> (&str, Option<u64>) {
+    match line.strip_prefix(UNTIL_PREFIX) {
+        Some(rest) => match rest.split_once(' ') {
+            Some((until, path)) => (path.trim(), Some(until.parse().unwrap_or(0))),
+            None => ("", Some(0)),
+        },
+        None => (line, None),
+    }
+}
 
 /// Where a value comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,8 +162,11 @@ pub struct Container {
     /// (one `<sha256>.pem` each, checked for CA:TRUE at build time), read-only.
     pub declared_trust: Vec<PathBuf>,
     /// Directories of the real home granted to a private home
-    /// (`docs/CONTAINERS.md` §3.5): declared ones first.
+    /// (`docs/CONTAINERS.md` §3.5): declared ones first. Only grants in force:
+    /// one whose term is over is not here at all.
     pub paths: Vec<Sourced<PathBuf>>,
+    /// The end of the term of those `paths` that have one, in unix seconds.
+    pub expires: Vec<(PathBuf, u64)>,
     /// An X server of its own in a zone (`docs/HERMETICITY.md` §7, A): the
     /// host's is never reachable from a zone.
     pub x11: Sourced<bool>,
@@ -291,10 +318,20 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
             });
         }
     }
+    let mut expires = Vec::new();
     if let Ok(text) = fs::read_to_string(dir.join(PATHS_FILE)) {
+        let now = now();
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            let value = expand_home(&tools.home, line);
+            let (path, until) = grant_line(line);
+            // Over is over, whether or not anything has cleaned it up yet.
+            if until.is_some_and(|u| u <= now) || path.is_empty() {
+                continue;
+            }
+            let value = expand_home(&tools.home, path);
             if !paths.iter().any(|p| p.value == value) {
+                if let Some(until) = until {
+                    expires.push((value.clone(), until));
+                }
                 paths.push(Sourced {
                     value,
                     source: Source::Local,
@@ -333,6 +370,7 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
         apps,
         declared_trust,
         paths,
+        expires,
         x11,
         dir,
     })
@@ -477,7 +515,14 @@ pub fn forbidden_path(home: &Path, path: &Path) -> Option<String> {
 }
 
 /// Grant a directory to a private home, or take the grant back.
-pub fn set_path(tools: &Tools, selector: &str, path: &str, grant: bool) -> Result<PathBuf, String> {
+/// Grant (`until`: the end of its term, if it has one) or revoke a directory.
+pub fn set_path(
+    tools: &Tools,
+    selector: &str,
+    path: &str,
+    grant: bool,
+    until: Option<u64>,
+) -> Result<PathBuf, String> {
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
     if container.home != Home::Private {
         return Err(format!(
@@ -519,15 +564,23 @@ pub fn set_path(tools: &Tools, selector: &str, path: &str, grant: bool) -> Resul
         return Err(format!("{} выдан в Nix — забирается там", value.display()));
     }
     let file = container.dir.join(PATHS_FILE);
+    let now = now();
     let mut lines: Vec<String> = fs::read_to_string(&file)
         .unwrap_or_default()
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty() && expand_home(&tools.home, l) != value)
+        .filter(|l| {
+            let (p, u) = grant_line(l);
+            !p.is_empty() && u.is_none_or(|u| u > now) && expand_home(&tools.home, p) != value
+        })
         .map(str::to_owned)
         .collect();
     if grant {
-        lines.push(value.to_string_lossy().into_owned());
+        let path = value.to_string_lossy();
+        lines.push(match until {
+            Some(until) => format!("{UNTIL_PREFIX}{until} {path}"),
+            None => path.into_owned(),
+        });
     }
     fs::create_dir_all(&container.dir)
         .and_then(|()| {
@@ -538,6 +591,43 @@ pub fn set_path(tools: &Tools, selector: &str, path: &str, grant: bool) -> Resul
         })
         .map_err(|e| format!("не записать {}: {e}", file.display()))?;
     Ok(value)
+}
+
+/// Take every grant whose term is over out of the paths files of the named
+/// sandboxes. Returns what was taken: `(selector, path)`.
+pub fn expire_grants(tools: &Tools) -> Vec<(String, PathBuf)> {
+    let now = now();
+    let mut taken = Vec::new();
+    let Ok(entries) = fs::read_dir(&tools.sandboxes) else {
+        return taken;
+    };
+    for entry in entries.flatten() {
+        let file = entry.path().join(PATHS_FILE);
+        let Ok(text) = fs::read_to_string(&file) else {
+            continue;
+        };
+        let selector = selector_of(Home::Private, &entry.file_name().to_string_lossy());
+        let mut kept = Vec::new();
+        let mut changed = false;
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let (path, until) = grant_line(line);
+            if until.is_some_and(|u| u <= now) || path.is_empty() {
+                changed = true;
+                if !path.is_empty() {
+                    taken.push((selector.clone(), expand_home(&tools.home, path)));
+                }
+            } else {
+                kept.push(line.to_owned());
+            }
+        }
+        if changed {
+            let text = kept.join("\n") + if kept.is_empty() { "" } else { "\n" };
+            if let Err(e) = fs::write(&file, text) {
+                eprintln!("не записать {}: {e}", file.display());
+            }
+        }
+    }
+    taken
 }
 
 /// What a merge did.
@@ -971,6 +1061,7 @@ mod tests {
             apps: Vec::new(),
             declared_trust: Vec::new(),
             paths: Vec::new(),
+            expires: Vec::new(),
             x11: Sourced {
                 value: false,
                 source: Source::Default,

@@ -847,7 +847,7 @@ fn a_private_home_is_granted_directories_but_never_the_state() {
     let json = stdout(&home.run(&["container", "show", "sb:dev", "--json"]));
     assert!(
         json.contains(&format!(
-            "\"paths\":[{{\"value\":\"{r}/.wine\",\"source\":\"local\"}}]"
+            "\"paths\":[{{\"value\":\"{r}/.wine\",\"source\":\"local\",\"expires\":null}}]"
         )),
         "{json}"
     );
@@ -893,6 +893,55 @@ fn a_private_home_is_granted_directories_but_never_the_state() {
     assert!(out.status.success(), "{}", stderr(&out));
     let json = stdout(&home.run(&["container", "show", "sb:dev", "--json"]));
     assert!(json.contains("\"paths\":[]"), "{json}");
+
+    // With a term: written next to the path, shown, and on the record.
+    let out = home.run(&["container", "grant", "sb:dev", "~/.wine", "--for", "2h"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains(" до 20"), "{}", stdout(&out));
+    let line = fs::read_to_string(home.root.join("sandboxes/dev/paths")).unwrap();
+    assert!(
+        line.starts_with("until=") && line.trim_end().ends_with(&format!(" {r}/.wine")),
+        "{line}"
+    );
+    let json = stdout(&home.run(&["container", "show", "sb:dev", "--json"]));
+    assert!(
+        json.contains("\"source\":\"local\",\"expires\":\"20"),
+        "{json}"
+    );
+    for bad in [&["--for", "2w"][..], &["--for"][..], &["--later", "2h"][..]] {
+        let mut argv = vec!["container", "grant", "sb:dev", "~/.wine"];
+        argv.extend(bad);
+        assert_eq!(home.run(&argv).status.code(), Some(1), "{bad:?}");
+    }
+    // A term that is over is not granted to anything, before any cleanup.
+    fs::write(
+        home.root.join("sandboxes/dev/paths"),
+        format!("until=1 {r}/.wine\n{r}/games\n"),
+    )
+    .unwrap();
+    let json = stdout(&home.run(&["container", "show", "sb:dev", "--json"]));
+    assert!(!json.contains(".wine"), "{json}");
+    let out = home.run_with(
+        &["run", "nl", "--sandbox", "dev", "--", "wine"],
+        &[("VPN_ZONE_DRYRUN", "1"), ("VPN_ZONE_APPID", "wine")],
+    );
+    assert!(!stdout(&out).contains(".wine"), "{}", stdout(&out));
+    // `expire` takes it out of the file and says so.
+    let out = home.run(&["container", "expire"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("истёк"), "{}", stdout(&out));
+    assert_eq!(
+        fs::read_to_string(home.root.join("sandboxes/dev/paths")).unwrap(),
+        format!("{r}/games\n")
+    );
+    let journal = stdout(&home.run(&["journal", "--json"]));
+    for event in [
+        "\"event\":\"grant\"",
+        "\"event\":\"revoke\"",
+        "\"event\":\"grant-expired\"",
+    ] {
+        assert!(journal.contains(event), "{event}: {journal}");
+    }
 }
 
 #[test]

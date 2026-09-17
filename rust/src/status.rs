@@ -298,10 +298,24 @@ pub fn container(tools: &Tools, c: &Container) -> String {
             .filter(|(on, _)| *on)
             .map(|(_, name)| string(name))
             .collect();
+            // `expires`: the end of a grant's term, `null` for a grant without one.
             let paths = array(
                 c.paths
                     .iter()
-                    .map(|p| sourced_str(&p.value.to_string_lossy(), p.source))
+                    .map(|p| {
+                        let expires = c
+                            .expires
+                            .iter()
+                            .find(|(path, _)| *path == p.value)
+                            .map_or("null".to_owned(), |(_, until)| {
+                                string(&crate::journal::utc(*until))
+                            });
+                        format!(
+                            "{{\"value\":{},\"source\":{},\"expires\":{expires}}}",
+                            string(&p.value.to_string_lossy()),
+                            string(p.source.as_str())
+                        )
+                    })
                     .collect(),
             );
             format!(

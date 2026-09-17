@@ -10,6 +10,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   but the zone not down, 2 the zone is not up, 3 refused (nothing touched).
   "Not up" and "refused" were both 1.
 
+### Added (grants with a term)
+- `vpn-zone container grant sb:<name> <dir> --for 30m|2h|7d` and a term
+  choice in the GUI. A grant past its term is absent from every launch; for
+  programs already running a user timer runs `vpn-zone container expire`,
+  which detaches the directory in their mount namespaces. `revoke` now does
+  that at once too, instead of "from the next launch".
+- Journal events `grant`, `revoke`, `grant-expired`; `status --json` and
+  `container show --json`: `permissions.paths[]` gains `expires` (additive).
+
 ### Added (cut a zone off)
 - `vpn-zone kill <zone>` and the «Оборвать VPN-зону» launcher entry
   (`vpn-zone-gui kill`): every program in the zone's network namespace is

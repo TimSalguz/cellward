@@ -550,12 +550,29 @@ echo "подтверди флагом --yes" >&2; exit 1"#,
 fn a_home_of_its_own_is_granted_a_directory_from_the_chooser() {
     let home = Home::new("containers-grant");
     fs::create_dir_all(home.path("sandboxes/dev/home")).unwrap();
-    home.answers(&["sb:dev", "grant", "/mnt/games"]);
+    home.answers(&["sb:dev", "grant", "/mnt/games", "always"]);
     let out = home.run(&["containers"], &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         home.ran(),
         vec![vec!["container", "grant", "sb:dev", "/mnt/games"]]
+    );
+    // With a term.
+    let home = Home::new("containers-grant-term");
+    fs::create_dir_all(home.path("sandboxes/dev/home")).unwrap();
+    home.answers(&["sb:dev", "grant", "/mnt/games", "1d"]);
+    let out = home.run(&["containers"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        home.ran(),
+        vec![vec![
+            "container",
+            "grant",
+            "sb:dev",
+            "/mnt/games",
+            "--for",
+            "1d"
+        ]]
     );
     // A layer over the home is offered no grant at all.
     let home = Home::new("containers-grant-overlay");

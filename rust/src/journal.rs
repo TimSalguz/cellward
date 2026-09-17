@@ -16,7 +16,10 @@
 //! * `launch-unconfined` — `app`, `container`, `program`, `pid`;
 //! * `broker` — `origin`, `target`, `app`, `decision` (`started`, `refused`),
 //!   `why` when refused;
-//! * `kill` — `zone`, `killed` (how many), `programs`, `down` (`yes`, `no`).
+//! * `kill` — `zone`, `killed` (how many), `programs`, `down` (`yes`, `no`);
+//! * `grant` — `container`, `path`, `until` (empty for no term);
+//! * `revoke`, `grant-expired` — `container`, `path`, `detached` (mount
+//!   namespaces of running programs it was taken out of), `failed`.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -200,6 +203,30 @@ fn human(fields: &[(String, String)]) -> String {
                 get("app")
             )
         }
+        "grant" => format!(
+            "выдан каталог {} контейнеру {}{}",
+            get("path"),
+            get("container"),
+            match get("until") {
+                "" => String::new(),
+                until => format!(" до {}", until.replace('T', " ").replace('Z', " UTC")),
+            }
+        ),
+        event @ ("revoke" | "grant-expired") => format!(
+            "{} {} у {}: отмонтирован у запущенных программ — {}{}",
+            if event == "revoke" {
+                "забран каталог"
+            } else {
+                "истёк срок каталога"
+            },
+            get("path"),
+            get("container"),
+            get("detached"),
+            match get("failed") {
+                "" => String::new(),
+                f => format!(", не удалось: {f}"),
+            }
+        ),
         "kill" => format!(
             "зона «{}» оборвана: убито {}{}{}",
             get("zone"),

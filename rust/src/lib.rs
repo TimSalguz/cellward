@@ -74,6 +74,7 @@ pub mod desktop;
 pub mod dialog;
 pub mod doctor;
 pub mod fs_sandbox;
+pub mod grants;
 pub mod gui;
 pub mod hermetic;
 pub mod hostif;
