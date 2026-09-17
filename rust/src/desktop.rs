@@ -388,6 +388,29 @@ fn is_hidden_user_entry(file_name: &str, entry: Option<&Group>) -> bool {
         && entry.get("Exec").is_some_and(|e| !e.is_empty())
 }
 
+/// The memory key of a launcher id: [`sanitize`] when that lost nothing,
+/// otherwise with the first eight hex digits of an FNV-1a hash of the id
+/// appended (`docs/LAUNCHERS.md` §3.4, L8).
+///
+/// `sanitize` alone maps every character it does not keep to `_`, so two ids
+/// of the same length that differ only there — `Игра` and `Мама`, `a b` and
+/// `a_b` — got ONE key: one pin, one container, one network for two programs,
+/// and the second went where the first was sent without a word. Idempotent:
+/// a key is all kept characters, so it maps to itself — the picker gets the key
+/// on its command line and derives it again.
+pub fn stable_key(raw: &str) -> String {
+    let kept = sanitize(raw);
+    if kept == raw {
+        return kept;
+    }
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in raw.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    format!("{kept}-{hash:08x}")
+}
+
 /// A key without spaces or quotes, so that `Exec` parses for anybody.
 pub fn sanitize(s: &str) -> String {
     s.chars()
@@ -531,7 +554,7 @@ pub fn render_autostart(groups: &[Group], picker: &str, app_key: &str) -> String
             let inner = unwrap_picker_exec(exec).map_or(exec, |(_, inner)| inner);
             out.push(format!(
                 "Exec={picker} {AUTOSTART_FLAG} --id {} -- {inner}",
-                sanitize(app_key)
+                stable_key(app_key)
             ));
         }
         out.push("DBusActivatable=false".to_string());
@@ -550,7 +573,7 @@ pub fn render_autostart(groups: &[Group], picker: &str, app_key: &str) -> String
 pub fn render_dbus_shadow(name: &str, picker: &str, app_key: &str, exec: &str) -> String {
     format!(
         "{DBUS_MARK}\n[D-BUS Service]\nName={name}\nExec={picker} --id {} -- {exec}\n",
-        sanitize(app_key)
+        stable_key(app_key)
     )
 }
 
@@ -658,7 +681,7 @@ fn render_intercepted(groups: &[Group], picker: &str, app_key: &str, marker: &st
             // ordinary argument.
             out.push(format!(
                 "Exec={picker} --id {} -- {exec}",
-                sanitize(app_key)
+                stable_key(app_key)
             ));
         }
         // Without this the launcher activates the program over D-Bus, around
@@ -762,7 +785,7 @@ pub fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
 fn write_label(state_dir: &Path, key: &str, label: &str) {
     let dir = state_dir.join(".labels");
     if fs::create_dir_all(&dir).is_ok() {
-        let _ = fs::write(dir.join(sanitize(key)), label);
+        let _ = fs::write(dir.join(stable_key(key)), label);
     }
 }
 
@@ -1061,10 +1084,10 @@ pub fn cleanup(out_dir: &Path, wanted: &BTreeSet<String>, adopted_dir: &Path) ->
 /// name.
 fn autostart_key(name: &str, exec: &str, apps: &[App]) -> String {
     if let Some((Some(id), _)) = unwrap_picker_exec(exec) {
-        return sanitize(&id);
+        return stable_key(&id);
     }
     if let Some(app) = apps.iter().find(|a| a.name == name && !a.hidden) {
-        return app.key().to_owned();
+        return stable_key(app.key());
     }
     let inner = unwrap_picker_exec(exec).map_or(exec, |(_, inner)| inner);
     if let Some(program) = exec_program(inner) {
@@ -1082,10 +1105,101 @@ fn autostart_key(name: &str, exec: &str, apps: &[App]) -> String {
             .find(|a| a.key() == program)
             .or_else(|| apps.iter().find(same))
         {
-            return app.key().to_owned();
+            return stable_key(app.key());
         }
     }
-    sanitize(name.strip_suffix(".desktop").unwrap_or(name))
+    stable_key(name.strip_suffix(".desktop").unwrap_or(name))
+}
+
+/// The picker's memory directories below the state directory, by key.
+const MEMORY_DIRS: [&str; 5] = [
+    ".pinned",
+    ".pinnedprofile",
+    ".last",
+    ".lastprofile",
+    ".labels",
+];
+
+/// Move what was remembered under the old, lossy keys to the stable ones
+/// ([`stable_key`]), once, under the sync lock.
+///
+/// For every old key: if some entry still owns it losslessly (its id needed no
+/// replacement), it stays that entry's and nothing moves. If exactly one entry
+/// maps to it, its pins, last choices, label, file permissions and own sandbox
+/// (`app-<key>`, and the selectors naming it) move to the new key — only where
+/// the new key has nothing yet. If several entries shared it, nobody can tell
+/// whose memory it was: it is dropped, and those programs are asked again —
+/// the closed choice. Returns what it did, for the log.
+fn migrate_keys(state_dir: &Path, home: &Path, apps: &[App]) -> Vec<String> {
+    let mut by_old: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for app in apps {
+        by_old
+            .entry(sanitize(app.key()))
+            .or_default()
+            .insert(stable_key(app.key()));
+    }
+    let move_absent = |from: &Path, to: &Path| -> bool {
+        occupied(from) && !occupied(to) && fs::rename(from, to).is_ok()
+    };
+    let sandboxes = home.join(".local/state/vpn-sandboxes");
+    let perms = home.join(".config/vpn-zones/fs-perms");
+    let mut log = Vec::new();
+    for (old, news) in by_old {
+        if news.contains(&old) {
+            continue;
+        }
+        let memory = MEMORY_DIRS
+            .iter()
+            .any(|d| occupied(&state_dir.join(d).join(&old)));
+        if news.len() > 1 {
+            // A shared own sandbox is data and stays where it is; only the
+            // choices go.
+            if !memory {
+                continue;
+            }
+            for dir in MEMORY_DIRS {
+                let _ = fs::remove_file(state_dir.join(dir).join(&old));
+            }
+            log.push(format!(
+                "key {old} was shared by {}: its memory is dropped, they will be asked again",
+                news.iter().cloned().collect::<Vec<_>>().join(", ")
+            ));
+            continue;
+        }
+        let remembered = memory
+            || occupied(&perms.join(&old))
+            || occupied(&sandboxes.join(format!("app-{old}")));
+        let Some(new) = news.into_iter().next().filter(|_| remembered) else {
+            continue;
+        };
+        for dir in MEMORY_DIRS {
+            move_absent(
+                &state_dir.join(dir).join(&old),
+                &state_dir.join(dir).join(&new),
+            );
+        }
+        move_absent(&perms.join(&old), &perms.join(&new));
+        if move_absent(
+            &sandboxes.join(format!("app-{old}")),
+            &sandboxes.join(format!("app-{new}")),
+        ) {
+            // A pinned or last-chosen own sandbox names the directory.
+            let (from, to) = (format!("sb:app-{old}"), format!("sb:app-{new}"));
+            for dir in [".pinnedprofile", ".lastprofile"] {
+                for file in fs::read_dir(state_dir.join(dir))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    if fs::read_to_string(file.path()).is_ok_and(|v| v.trim() == from) {
+                        let _ = fs::write(file.path(), &to);
+                    }
+                }
+            }
+        }
+        log.push(format!("key {old} → {new}"));
+    }
+    log
 }
 
 /// Take over the user's XDG autostart entries in place, or give them back.
@@ -1380,6 +1494,9 @@ fn sync_from(
     } else {
         collect_apps(dirs, &out_dir, &adopted_dir)
     };
+    for line in migrate_keys(state_dir, home, &apps) {
+        println!("{line}");
+    }
 
     let mut wanted: BTreeSet<String> = BTreeSet::new();
     let mut written = 0u32;
@@ -1706,7 +1823,12 @@ Name=not carried over
     fn the_picker_id_is_sanitised_not_quoted() {
         let g = parse_desktop("[Desktop Entry]\nType=Application\nExec=AyuGram\n");
         let out = render_picker(&g, "pick", "com.ayugram.desktop with space");
-        assert!(out.contains("Exec=pick --id com.ayugram.desktop_with_space -- AyuGram"));
+        let key = stable_key("com.ayugram.desktop with space");
+        assert!(key.starts_with("com.ayugram.desktop_with_space-"), "{key}");
+        assert!(
+            out.contains(&format!("Exec=pick --id {key} -- AyuGram")),
+            "{out}"
+        );
         assert_eq!(sanitize("Zen Browser"), "Zen_Browser");
         assert_eq!(sanitize("Огненный"), "________");
         assert_eq!(sanitize("a-b_c.d"), "a-b_c.d");
@@ -2603,5 +2725,76 @@ Name=not carried over
         assert!(d
             .read("chrome-abcdef-Default.desktop")
             .contains("--id chrome-abcdef-Default --"));
+    }
+
+    // --- Lossless keys (L8) --------------------------------------------------
+
+    #[test]
+    fn keys_that_lost_something_carry_a_hash_and_keys_are_fixed_points() {
+        assert_eq!(stable_key("firefox"), "firefox");
+        assert_eq!(stable_key("org.kde.dolphin"), "org.kde.dolphin");
+        let a = stable_key("Игра");
+        let b = stable_key("Мама");
+        assert!(a.starts_with("____-"), "{a}");
+        assert_ne!(a, b);
+        assert_ne!(stable_key("a b"), stable_key("a_b"));
+        assert_eq!(stable_key("a_b"), "a_b");
+        for raw in ["Игра", "a b", "Zen Browser", "x"] {
+            let key = stable_key(raw);
+            assert_eq!(stable_key(&key), key, "{raw}");
+        }
+        // Stable across versions: the hash is part of the state format.
+        assert_eq!(stable_key("Zen Browser"), "Zen_Browser-a5ffb3fa");
+    }
+
+    #[test]
+    fn memory_moves_to_the_new_key_or_is_dropped_when_it_was_shared() {
+        let d = Desk::new("migrate");
+        let entry = |name: &str| {
+            fs::write(
+                d.system.join(format!("{name}.desktop")),
+                format!(
+                    "[Desktop Entry]\nType=Application\nName={name}\nExec=x-{}\n",
+                    name.len()
+                ),
+            )
+            .unwrap()
+        };
+        entry("Zen Browser");
+        entry("Игра");
+        entry("Мама");
+        let mem = |dir: &str, key: &str, value: &str| {
+            fs::create_dir_all(d.state.join(dir)).unwrap();
+            fs::write(d.state.join(dir).join(key), value).unwrap();
+        };
+        // The one entry behind `Zen_Browser`: everything moves.
+        mem(".pinned", "Zen_Browser", "nl");
+        mem(".pinnedprofile", "Zen_Browser", "sb:app-Zen_Browser");
+        let sandboxes = d.home.join(".local/state/vpn-sandboxes");
+        fs::create_dir_all(sandboxes.join("app-Zen_Browser/home")).unwrap();
+        // Two entries behind `____`: nobody knows whose it was.
+        mem(".pinned", "____", "direct");
+
+        d.sync();
+        let zen = stable_key("Zen Browser");
+        assert_eq!(
+            fs::read_to_string(d.state.join(".pinned").join(&zen)).unwrap(),
+            "nl"
+        );
+        assert!(!d.state.join(".pinned/Zen_Browser").exists());
+        assert!(sandboxes.join(format!("app-{zen}/home")).is_dir());
+        assert_eq!(
+            fs::read_to_string(d.state.join(".pinnedprofile").join(&zen)).unwrap(),
+            format!("sb:app-{zen}")
+        );
+        assert!(
+            !d.state.join(".pinned/____").exists(),
+            "shared memory is dropped"
+        );
+        assert!(!d.state.join(".pinned").join(stable_key("Игра")).exists());
+        // The entries carry the new keys.
+        assert!(d
+            .read("Zen Browser.desktop")
+            .contains(&format!("--id {zen} --")));
     }
 }

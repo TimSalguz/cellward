@@ -252,7 +252,8 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
     if let Some(conf) = &declared {
         for app in values(conf, "app") {
             apps.push(Sourced {
-                value: app.to_owned(),
+                // The key the picker remembers it under (`stable_key`).
+                value: crate::desktop::stable_key(app),
                 source: Source::Nix,
             });
         }

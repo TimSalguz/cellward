@@ -62,7 +62,7 @@ launcher → vpn-zone-pick --id K -- cmd
 | L5 | child entries (`Exec=steam steam://rungameid/…`) treated as programs | per-zone mode: games × zones clones (about a hundred on a real desktop), each promising a network choice the client ignores (§10) | **done** |
 | L6 | **`NoDisplay=true` entries are never intercepted** | URL and file handlers are exactly the entries hidden from menus (`x-scheme-handler/…`, "open with" helpers): a link opened through one starts the program uncontained, around the picker. Ten such scheme handlers in the system directories of a real desktop | **done**: intercepted under the id of the visible entry of the same program; helpers without one are left alone |
 | L7 | **foreign entries in `~/.local/share/applications` are never intercepted** | Steam games, browser web apps, Wine, anything created through the DynamicLauncher portal — and the `userapp-*` entries programs write when they make themselves the default handler. On a real desktop `mimeapps.list` sends `http`, `https` and `tg` to such entries: **every link opened from any host program starts the browser (or the messenger) uncontained, in the direct network**, although the same program's system entry is intercepted | **done**: taken over in place with the original kept (§3.2); the most consequential item of this table |
-| L8 | the id is sanitised lossily (`[A-Za-z0-9._-]`, the rest → `_`) | two non-ASCII entry names of equal length collide (`Игра.desktop`, `Мода.desktop` → `____`): shared pins, labels, registry and sandbox home — one program starts in the other's network or container | proposal: append a short hash when sanitising lost characters; migrate old keys once |
+| L8 | the id is sanitised lossily (`[A-Za-z0-9._-]`, the rest → `_`) | two non-ASCII entry names of equal length collide (`Игра.desktop`, `Мода.desktop` → `____`): shared pins, labels, registry and sandbox home — one program starts in the other's network or container | **fixed**: a short hash is appended when sanitising lost characters; old keys are migrated once (§3.4) |
 | L9 | per-zone clones carry no launcher id | sandbox permissions and registry keyed by the binary, different from picker mode (the "two permission sets for Discord" trap, §6); `Desktop Action`s are dropped | moot if clones are deprecated (§4) |
 | L10 | D-Bus activation goes around the shadow | `DBusActivatable=false` only helps launchers that honour it; the app's session service file still activates it (`gapplication launch`, GNOME "open with") | **fixed**: shadow session services ([CONTAINERS.md](CONTAINERS.md) §5.3) |
 | L11 | autostart is not intercepted | programs in `~/.config/autostart` or `/etc/xdg/autostart` start uncontained at login | **fixed** for `~/.config/autostart` ([CONTAINERS.md](CONTAINERS.md) §5.2); `/etc/xdg/autostart` is the desktop's own and stays |
@@ -136,14 +136,23 @@ of its program is a system helper (an OAuth callback, a settings URL handler)
 and is left alone — intercepting it would put a network dialog in the middle
 of a login. `Hidden=true` stays excluded (it means "deleted").
 
-### 3.4 Lossy ids (L8)
+### 3.4 Lossy ids (L8) — implemented
 
 `key = sanitize(name)` when nothing was lost, otherwise `sanitize(name) + "-" +
-first 8 hex digits of a hash of the name`. On the first launch under the new
-key the picker moves `.pinned`, `.pinnedprofile`, `.last`, `.lastprofile` and
-`.labels` from the old key if exactly one entry maps to it; with a collision it
-drops the ambiguous memory and asks again. Sandbox homes `app-<old key>` are
-renamed the same way.
+the first 8 hex digits of the FNV-1a hash of the name` (`stable_key`). A key is
+a fixed point of the function, so the picker, which receives the key on its
+command line, derives the same key again. The hash is part of the state format
+and must never change.
+
+The move happens once, in `sync`, under its lock, before any entry is written
+with the new key: for every old key that no entry owns losslessly, if exactly
+one entry maps to it, `.pinned`, `.pinnedprofile`, `.last`, `.lastprofile`,
+`.labels`, the file permissions and the own sandbox `app-<key>` (with the
+selectors naming it) move to the new key — never over something already there.
+If several entries shared it, nobody can tell whose memory it was: the choices
+are dropped and asked again; a shared sandbox home is data and stays. Keys
+declared in Nix (`containers.<name>.apps`) and given to `vpn-zone container
+assign` and `vpn-zone launch` go through the same function.
 
 ## 4. What becomes of launcher entries
 

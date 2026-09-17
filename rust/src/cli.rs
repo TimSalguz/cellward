@@ -1466,7 +1466,7 @@ fn launch_entry(tools: &Tools, args: &[OsString]) -> u8 {
     let mut argv: Vec<OsString> = vec![
         tools.picker.clone().into(),
         "--id".into(),
-        crate::desktop::sanitize(&id).into(),
+        crate::desktop::stable_key(&id).into(),
     ];
     if let Some(name) = entry.get("Name").filter(|n| !n.is_empty()) {
         argv.push("--label".into());
@@ -1580,7 +1580,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                 }
             }
             let dir = tools.state.join(".pinnedprofile");
-            let path = dir.join(crate::desktop::sanitize(app));
+            let path = dir.join(crate::desktop::stable_key(app));
             if let Err(e) = fs::create_dir_all(&dir).and_then(|()| fs::write(&path, selector)) {
                 eprintln!("не записать {}: {e}", path.display());
                 return 1;
@@ -1597,7 +1597,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                 tools
                     .state
                     .join(".pinnedprofile")
-                    .join(crate::desktop::sanitize(app)),
+                    .join(crate::desktop::stable_key(app)),
             );
             match crate::container::declared_owner(tools, app) {
                 Some(owner) => println!(

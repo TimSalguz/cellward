@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed (lossless launcher keys, with migration)
+- **The memory key of a launcher entry no longer loses characters.** Two
+  entries whose names differed only in characters outside `[A-Za-z0-9._-]`
+  (`Игра` and `Мама`, `a b` and `a_b`) shared one key — one network pin, one
+  container, one sandbox home — and the second program silently went where the
+  first had been sent. Such a key now carries the FNV-1a hash of the name
+  (`Zen_Browser-a5ffb3fa`); plain ASCII ids do not change. **State migration:**
+  the first `sync` moves pins, last choices, labels, file permissions and the
+  own sandbox of a key that belonged to one entry to its new key; memory of a
+  key that several entries shared is dropped, and those programs ask again.
+  Declared `containers.<name>.apps`, `container assign` and `launch` use the
+  same keys (`docs/LAUNCHERS.md` §3.4).
+
 ### Changed (web apps are children of their browser)
 - An entry that opens a web app of a Chromium-family browser (`--app-id=`,
   `--app=`) is launched under the id of that browser's entry, like a Steam game

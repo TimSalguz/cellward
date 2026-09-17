@@ -826,7 +826,7 @@ pub fn main() -> ExitCode {
     let _ = fs::create_dir_all(&tools.config);
 
     let key = match &args.id {
-        Some(id) => sanitize(&id.to_string_lossy()),
+        Some(id) => crate::desktop::stable_key(&id.to_string_lossy()),
         None => sanitize(&fallback_key(&args.cmd).to_string_lossy()),
     };
 
