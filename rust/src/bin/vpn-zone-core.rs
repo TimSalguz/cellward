@@ -53,7 +53,9 @@ Usage:
         Run the command on a Wayland socket of its own, registered with the
         compositor as a sandbox (wp_security_context_v1): no screen capture,
         no background clipboard reads, no input emulation, no list of other
-        windows. Without the protocol — an older compositor, an X11 session —
+        windows. The socket goes into $XDG_RUNTIME_DIR/vpn-zones/wayland/<zone>/
+        (--zone <zone> after <app-id>; unconfined without it), the directory a
+        zone gets bound in. Without the protocol — an older compositor, an X11 session —
         the command is run as it is, with a warning on stderr.
 
   vpn-zone-core fs-sandbox [--bwrap P] [--dbus-proxy P] [--kdialog P]

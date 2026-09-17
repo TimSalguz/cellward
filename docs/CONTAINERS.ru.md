@@ -206,6 +206,7 @@ namespace. Отмонтирование не отнимает уже откры�
 ### 3.6 Устройство одного запуска (порядок — это и есть спецификация)
 
 ```
+vpn-zone-core wl-sandbox <программа> --zone <зона> --   на хосте: ограниченный сокет Wayland (LEAK-MODEL §13)
 [nsenter -U -n -m -t <зона>]  или  [unshare -U --map-current-user --keep-caps]   (unconfined)
   └─ unshare --mount --propagation private           когда что-то монтируется
       └─ vpn-zone-core profile-run --cwd <каталог> …   (сделано)
@@ -215,7 +216,7 @@ namespace. Отмонтирование не отнимает уже откры�
            3. доверие: бинды бандла, базы NSS (CERTIFICATES.ru.md)
            4. chdir <каталог> → $HOME → /          (сделано)
            5. сброс ambient capabilities
-           6. exec: wl-sandbox → fs-sandbox (bwrap) → программа
+           6. exec: fs-sandbox (bwrap) → программа
 ```
 
 Всё монтируется в собственном mount namespace запуска, никогда — в namespace
