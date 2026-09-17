@@ -222,6 +222,7 @@ vpn-zone up <zone> / down <zone>
 vpn-zone check <zone>                          # is the tunnel alive
 vpn-zone doctor [<zone>] [--json]              # what is really closed, checked inside the zone
 vpn-zone journal [--json] [<N>]                # unconfined launches and the broker's decisions
+vpn-zone kill <zone>                           # cut a zone off now: its programs killed, the zone down
 vpn-zone watch [--json]                        # are the tunnels alive (a timer runs it and notifies)
 vpn-zone status --bar                          # one JSON line for waybar and similar bars
 vpn-zone launch <id> [-- args]                 # a launcher entry through the picker (key bindings)

@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (cut a zone off)
+- `vpn-zone kill <zone>` and the «Оборвать VPN-зону» launcher entry
+  (`vpn-zone-gui kill`): every program in the zone's network namespace is
+  frozen, the zone goes down, the frozen programs are killed — for a
+  remote-access session that has to end now. The zone's own processes are
+  left to `systemctl stop`; signals go through pidfds; a "zone" whose
+  namespace is the host's is refused. Recorded in the journal as `kill`.
+
 ### Added (unconfined in sight)
 - A journal of what was let out of containment: every launch into
   `unconfined` (`launch-unconfined`: app, container, program, pid) and every

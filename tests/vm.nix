@@ -487,6 +487,29 @@ let
           assert status == "active", f"run did not leave the unit running: {status}"
           alice("vpn-zone down vmsmoke")
 
+      # `down` takes the network away; `kill` also takes away the programs,
+      # which live in cgroups of their own. The host's are not touched.
+      with subtest("vpn-zone kill: the zone's programs die, the zone is down, the host's live"):
+          alice("systemd-run --user --unit=vmremote vpn-zone run vmsmoke -- sleep 4242")
+          alice("systemd-run --user --unit=vmhostsleep sleep 4343")
+          # The program itself, not the launch still waiting for the zone:
+          # only the exec'd sleep has exactly this command line.
+          machine.wait_until_succeeds("pgrep -f '^(/[^ ]*/)?sleep 424[2]$'", timeout=60)
+          machine.wait_until_succeeds("pgrep -f 'sleep 434[3]'", timeout=30)
+          out = alice("vpn-zone kill vmsmoke")
+          assert "оборвана" in out, out
+          machine.wait_until_fails("pgrep -f 'sleep 424[2]'", timeout=15)
+          machine.succeed("pgrep -f 'sleep 434[3]'")
+          status = alice(
+              "systemctl --user is-active vpn-zone@vmsmoke.service || true"
+          ).strip()
+          assert status != "active", f"the zone is still up: {status}"
+          out = alice("vpn-zone journal --json")
+          assert '"event":"kill","zone":"vmsmoke"' in out and '"down":"yes"' in out, out
+          assert re.search(r'"killed":"[1-9]', out), out
+          alice("systemctl --user stop vmhostsleep.service")
+          alice("systemctl --user reset-failed vmremote.service || true")
+
       # The picker branch the smoke test explicitly cannot cover: offline
       # starts vpn-zone@offline through `systemctl --user`. No graphics in the
       # VM either, so the picker must take what would have been highlighted —

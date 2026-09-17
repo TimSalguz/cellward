@@ -97,6 +97,7 @@ const VERBS: &[&str] = &[
     "doctor",
     "watch",
     "journal",
+    "kill",
     "lock",
     "unlock",
     "profile",
@@ -107,6 +108,7 @@ const VERBS: &[&str] = &[
 
 /// Verbs whose first argument is a zone name.
 const ZONE_VERBS: &[&str] = &[
+    "kill",
     "hermetic",
     "x11",
     "up",
