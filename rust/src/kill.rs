@@ -33,6 +33,17 @@ use std::path::{Path, PathBuf};
 use crate::cli::zone_pid;
 use crate::tools::Tools;
 
+/// Exit codes, a contract for the tools that put a button on this:
+/// 0 — cut off: programs killed, zone down;
+pub const EXIT_CUT: u8 = 0;
+/// 1 — programs killed, but the zone could not be taken down;
+pub const EXIT_NOT_DOWN: u8 = 1;
+/// 2 — the zone is not up: nothing of it has a network any more;
+pub const EXIT_NOT_UP: u8 = 2;
+/// 3 — refused: not a zone of its own (`unconfined`, the host's namespace), a
+/// namespace that cannot be read, a bad command line. Nothing was touched.
+pub const EXIT_REFUSED: u8 = 3;
+
 /// How many freezing passes before giving up on a zone that forks faster than
 /// it is frozen.
 const PASSES: usize = 20;
@@ -145,7 +156,7 @@ fn freeze(netns: &Path, unit: Option<&str>, spare: &[i32]) -> (Vec<Target>, Opti
 pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     let Some(name) = args.first().filter(|n| !n.is_empty()) else {
         eprintln!("vpn-zone kill <зона>");
-        return 1;
+        return EXIT_REFUSED;
     };
     let text = name.to_string_lossy();
     if crate::launch::is_unconfined_name(&text) {
@@ -153,21 +164,21 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
             "у {} нет зоны: это сеть хоста, обрывать нечего — программы там обычные процессы хоста",
             crate::launch::UNCONFINED
         );
-        return 1;
+        return EXIT_REFUSED;
     }
     let Some(zone) = zone_pid(&tools.state, name) else {
         eprintln!("зона {text} не поднята: сети у её программ уже нет");
-        return 1;
+        return EXIT_NOT_UP;
     };
     let Ok(netns) = fs::read_link(format!("/proc/{zone}/ns/net")) else {
         eprintln!("не прочитать сетевой namespace зоны {text}");
-        return 1;
+        return EXIT_REFUSED;
     };
     // A zone whose namespace is the host's is no zone, and "every process in
     // it" would be every process of the session.
     if fs::read_link("/proc/self/ns/net").ok().as_deref() == Some(netns.as_path()) {
         eprintln!("у зоны {text} сеть хоста, а не своя — обрывать отказываюсь");
-        return 1;
+        return EXIT_REFUSED;
     }
     let unit = fs::read_to_string(format!("/proc/{zone}/cgroup"))
         .ok()
@@ -222,7 +233,11 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
             names.join(", ")
         );
     }
-    u8::from(stopped != 0)
+    if stopped == 0 {
+        EXIT_CUT
+    } else {
+        EXIT_NOT_DOWN
+    }
 }
 
 #[cfg(test)]

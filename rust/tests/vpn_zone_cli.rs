@@ -690,20 +690,22 @@ fn a_container_bound_to_a_network_runs_there_only() {
 #[test]
 fn kill_refuses_what_is_not_a_zone_of_its_own() {
     let home = Home::new("kill");
+    // The exit codes are a contract: 2 not up, 3 refused.
     for name in ["unconfined", "direct"] {
         let out = home.run(&["kill", name]);
-        assert_eq!(out.status.code(), Some(1), "{name}");
+        assert_eq!(out.status.code(), Some(3), "{name}");
         assert!(stderr(&out).contains("сеть хоста"), "{}", stderr(&out));
     }
+    assert_eq!(home.run(&["kill"]).status.code(), Some(3));
     let out = home.run(&["kill", "nl"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("не поднята"), "{}", stderr(&out));
     // A zone whose pid is a process of the host's network: "everything in its
     // namespace" would be the whole session. Refused before anything is
     // touched — this very test process is in that namespace.
     home.zone_is_up("nl");
     let out = home.run(&["kill", "nl"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     assert!(stderr(&out).contains("отказываюсь"), "{}", stderr(&out));
     assert!(!home.state().join(".journal").exists());
 }
