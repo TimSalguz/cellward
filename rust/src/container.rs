@@ -130,6 +130,9 @@ pub struct Container {
     pub home: Home,
     pub network: Sourced<Network>,
     pub apps: Vec<Sourced<String>>,
+    /// Directories of trusted certificates declared in Nix: built by the module
+    /// (one `<sha256>.pem` each, checked for CA:TRUE at build time), read-only.
+    pub declared_trust: Vec<PathBuf>,
     /// The container's own directory. May not exist yet for a container that
     /// is only declared.
     pub dir: PathBuf,
@@ -263,11 +266,17 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
         }
     }
 
+    let declared_trust = declared
+        .as_ref()
+        .map(|conf| values(conf, "trust").map(PathBuf::from).collect())
+        .unwrap_or_default();
+
     Some(Container {
         name: name.to_owned(),
         home,
         network,
         apps,
+        declared_trust,
         dir,
     })
 }
@@ -311,6 +320,16 @@ pub fn load_all(tools: &Tools) -> Vec<Container> {
     selectors.sort();
     selectors.dedup();
     selectors.iter().filter_map(|s| load(tools, s)).collect()
+}
+
+/// The container a program is assigned to in Nix, if any.
+pub fn declared_owner(tools: &Tools, app: &str) -> Option<String> {
+    load_all(tools).into_iter().find_map(|c| {
+        c.apps
+            .iter()
+            .any(|a| a.value == app && a.source == Source::Nix)
+            .then(|| c.selector())
+    })
 }
 
 /// Bind a container to a network (or unbind it with `ask`), locally.
@@ -477,6 +496,7 @@ mod tests {
                 source,
             },
             apps: Vec::new(),
+            declared_trust: Vec::new(),
             dir: PathBuf::from("/s/work"),
         }
     }

@@ -369,11 +369,14 @@ CONTAINERS §12: сеть контейнера меняется явно и мо
       контейнера и в прямой сети. Изменение инварианта — отдельным коммитом
 - [ ] id ярлыка без потерь: не-ASCII имена одинаковой длины сливаются в один
       ключ (LAUNCHERS L8)
-- [ ] этап 1: сущность «контейнер» с меняемой сетью (I1, I2), свой дом по
-      умолчанию, выдача путей и подсказки (Wine, Steam), объединение
-      контейнеров, пикер «сначала контейнер», `vpn-zone container …`,
-      `vpn-zone status --json` (`schema_version`, источник каждого значения),
-      опции home-manager-модуля (для nix_cm), миграция в `network = ask`
+- [x] этап 1а: привязка контейнера к сети (I1, I2 в `run` и пикере),
+      `vpn-zone container list|show|set|assign|unassign`, `vpn-zone status
+      --json` (`schema_version`, источник каждого значения)
+- [x] этап 1б: опции home-manager-модуля (`defaults`, `launcher.mode`,
+      `compositorRestriction`, `containers.<имя>.{home, network, apps,
+      trust}`) → `~/.config/vpn-zones/declared/`; Nix сильнее локального
+- [ ] этап 1в: свой дом по умолчанию (`own`), выдача путей и подсказки (Wine,
+      Steam), объединение контейнеров, пикер «сначала контейнер» со сменой сети
 - [x] этап 2: доверенные сертификаты по контейнерам (CERTIFICATES) —
       `vpn-zone trust`, бандл, окружение, базы NSS; смоук и VM-тест
 - [ ] хвосты этапа 2: диалог GUI с подтверждением, опция `trust.certificates`

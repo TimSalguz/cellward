@@ -435,8 +435,8 @@ every key of version 1.
 | phase | content | proof |
 |---|---|---|
 | 0 | **done**: `direct` keeps its layers, working directory, conflict by id and binary, hidden handlers, Steam children | smoke; unit and scenario tests |
-| 1 | container entity with changeable network (I1, I2), `own` by default, path grants and hints, merge, container-first picker, `vpn-zone container …`, `status --json`, module options, migration; clones deprecated | CLI/picker scenario tests; VM: a container refuses a second network while running; JSON schema test |
-| 2 | trust layer ([CERTIFICATES.md](CERTIFICATES.md)) — **in progress** | VM and smoke: synthetic CA trusted in one container only |
+| 1 | **done**: network binding with I1/I2 in `run` and the picker, `vpn-zone container list/show/set/assign/unassign`, `status --json` (`schema_version`, sources), home-manager options with `declared/`, clones deprecated. **Left**: `own` by default, path grants and hints, merge, container-first picker | CLI/picker scenario tests; VM: a declared container with its declared CA, refused elsewhere, reported as Nix |
+| 2 | trust layer ([CERTIFICATES.md](CERTIFICATES.md)) — **done** (GUI dialog left) | VM and smoke: synthetic CA trusted in one container only |
 | 3 | `vpn-zone launch`, D-Bus and autostart shadows, user-dir take-over, web apps as children, host-interface networks, PATH shims | VM: activation via `gdbus call` lands in the container; autostart of an unassigned program is offline |
 | 4 | runtime hermeticity, broker, X11 closure, extra routes | VM "evil host": a `systemd --user` counting `StartTransientUnit`, a portal logging callers, an HTTP beacon |
 

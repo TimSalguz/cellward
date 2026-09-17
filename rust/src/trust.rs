@@ -292,6 +292,9 @@ pub struct Layer<'a> {
     /// Directories proven to be the container's own. An NSS database outside
     /// all of them is never written.
     pub private: &'a [PathBuf],
+    /// Certificate directories declared in Nix, in the same `<sha256>.pem`
+    /// shape; read-only, built by the module.
+    pub extra: &'a [PathBuf],
 }
 
 /// Lay the layer down. `Ok` carries the warnings to print; `Err` means the
@@ -299,7 +302,12 @@ pub struct Layer<'a> {
 pub fn apply(layer: &Layer<'_>) -> Result<Vec<String>, String> {
     let mut warnings = Vec::new();
     let mut certs: Vec<(String, Vec<u8>)> = Vec::new();
-    for cert in stored(layer.dir) {
+    let dirs = std::iter::once(layer.dir).chain(layer.extra.iter().map(PathBuf::as_path));
+    for cert in dirs.flat_map(stored) {
+        // The same certificate declared and added by hand is one certificate.
+        if certs.iter().any(|(fp, _)| *fp == cert.sha256) {
+            continue;
+        }
         let pem = fs::read(&cert.path).map_err(|e| {
             format!(
                 "cannot read the trusted certificate {}: {e}",
@@ -448,6 +456,7 @@ pub fn sync_home(certutil: &Path, dir: &Path, home: &Path) -> Vec<String> {
         certutil,
         home,
         private: &private,
+        extra: &[],
     };
     sync_nss(&layer, &certs, &mut warnings);
     warnings
@@ -650,6 +659,7 @@ X509v3 Basic Constraints: critical
             certutil: Path::new("/nonexistent/certutil"),
             home: &home,
             private: &[tmp.0.join("somewhere-else")],
+            extra: &[],
         };
         let certs = vec![(FP.to_owned(), b"PEM".to_vec())];
         let mut warnings = Vec::new();

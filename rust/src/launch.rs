@@ -718,7 +718,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     } else {
         cmd
     };
-    let (trust, nss_home) = trust_of(tools, &selection);
+    let (trust, nss_home, trust_extra) = trust_of(tools, &selection);
     let exec = entry_argv(
         &Entry {
             nsenter: &tools.nsenter,
@@ -732,6 +732,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             cwd: &cwd,
             trust: trust.as_deref(),
             nss_home: nss_home.as_deref(),
+            trust_extra: &trust_extra,
             certutil: &tools.certutil,
         },
         cmd,
@@ -779,6 +780,8 @@ pub struct Entry<'a> {
     /// The home the program will see when that is not `$HOME`: a named
     /// sandbox's, on disk. Only meaningful together with `trust`.
     pub nss_home: Option<&'a Path>,
+    /// Directories of certificates declared in Nix, besides `trust`.
+    pub trust_extra: &'a [PathBuf],
     pub certutil: &'a Path,
 }
 
@@ -868,6 +871,10 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
                 exec.push("--nss-home".into());
                 exec.push(home.into());
             }
+            for extra in entry.trust_extra {
+                exec.push("--trust-extra".into());
+                exec.push(extra.into());
+            }
         }
         exec.push(entry.dir.into());
         exec.push(entry.zone.into());
@@ -910,7 +917,8 @@ fn refuse(tools: &Tools, why: &str) {
     }
 }
 
-/// The trusted certificates of a launch, and the home they belong to.
+/// The trusted certificates of a launch: the container's own directory, the
+/// directories declared in Nix, and the home they belong to.
 ///
 /// They follow the home the program SEES (`docs/CERTIFICATES.md` §3.1): a
 /// named sandbox's (its home on disk is where its NSS databases are), otherwise
@@ -918,22 +926,32 @@ fn refuse(tools: &Tools, why: &str) {
 /// with, and the main profile is the host's — neither ever gets a layer. The
 /// layer is switched on by the directory existing, even empty: an emptied one
 /// still takes stale entries out of the container's NSS databases.
-fn trust_of(tools: &Tools, selection: &Selection) -> (Option<PathBuf>, Option<PathBuf>) {
-    match &selection.sandbox {
-        Sandbox::Named(name) => {
-            let dir = tools.sandboxes.join(name);
-            let trust = dir.join(crate::trust::DIR);
-            (trust.is_dir().then_some(trust), Some(dir.join("home")))
+fn trust_of(
+    tools: &Tools,
+    selection: &Selection,
+) -> (Option<PathBuf>, Option<PathBuf>, Vec<PathBuf>) {
+    let (selector, nss_home) = match (&selection.sandbox, &selection.container) {
+        (Sandbox::Named(name), _) => (
+            format!("sb:{}", name.to_string_lossy()),
+            Some(tools.sandboxes.join(name).join("home")),
+        ),
+        (Sandbox::Throwaway, _) => return (None, None, Vec::new()),
+        (Sandbox::None, Container::Named(name)) => (name.to_string_lossy().into_owned(), None),
+        (Sandbox::None, _) => return (None, None, Vec::new()),
+    };
+    let Some(container) = crate::container::load(tools, &selector) else {
+        return (None, None, Vec::new());
+    };
+    let dir = container.trust_dir();
+    if !container.declared_trust.is_empty() {
+        // Declared certificates still need the container's own directory: the
+        // bundle is written to a tmpfs laid over it.
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("не создать {}: {e}", dir.display());
         }
-        Sandbox::Throwaway => (None, None),
-        Sandbox::None => match &selection.container {
-            Container::Named(name) => {
-                let trust = tools.profiles.join(name).join(crate::trust::DIR);
-                (trust.is_dir().then_some(trust), None)
-            }
-            _ => (None, None),
-        },
     }
+    let active = dir.is_dir();
+    (active.then_some(dir), nss_home, container.declared_trust)
 }
 
 /// A locked zone: run the command here, without the network the caller asked
@@ -1064,7 +1082,7 @@ fn mkdtemp(template: &str) -> std::io::Result<PathBuf> {
 /// Should this program be put on a restricted Wayland socket? Reads the two
 /// files the answer depends on and asks [`restrict_compositor`].
 fn wayland_sandbox_wanted(tools: &Tools, appbin: &OsStr) -> bool {
-    let mode = cli::read_setting(&tools.config.join("wayland-sandbox"));
+    let mode = cli::setting(tools, "wayland-sandbox").map(|(value, _)| value);
     let allowlist = std::fs::read_to_string(tools.config.join("wayland-allow")).ok();
     restrict_compositor(mode.as_deref(), appbin, allowlist.as_deref())
 }
@@ -1427,6 +1445,7 @@ mod tests {
             cwd: Path::new("/home/u/src"),
             trust: None,
             nss_home: None,
+            trust_extra: &[],
             certutil: Path::new("/t/certutil"),
         }
     }

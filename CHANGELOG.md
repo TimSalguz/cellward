@@ -5,6 +5,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (containers as identities: network binding, Nix options, JSON state)
+- **A container can be bound to one network**: `vpn-zone container set
+  <container> network <network|ask>`. `vpn-zone run` then refuses a bound
+  container in any other network (and names the way out), and refuses ANY
+  container — bound or not — in a second network while its programs run in a
+  first: one identity, one network at a time (`docs/CONTAINERS.md` I1, I2).
+  The picker takes a bound container's network as the answer, above a network
+  pin. **Behaviour change:** starting a program of a data container in network
+  B while another program of the same container runs in A is now refused;
+  before, only the same program warned.
+- `vpn-zone container list|show|set|assign|unassign`: containers with their
+  network, programs and trusted certificates, and where each value comes from.
+- `vpn-zone status --json`: the whole state for configuration tools —
+  `schema_version` and `{value, source: nix|local|default}` for every
+  settable value, plus runtime facts (networks up and alive, running
+  programs). `container list|show --json` print parts of it.
+- **home-manager options** — `programs.vpn-zones.defaults.{network,container}`,
+  `launcher.mode`, `compositorRestriction.enable` and
+  `containers.<name>.{home, network, apps, trust.{certificates,
+  acknowledgeRisk}}`. The module writes `~/.config/vpn-zones/declared/`; the
+  runtime reads it first, and the CLI and the GUI refuse to change a value
+  declared there instead of writing a file that would change nothing.
+  Declared certificates are checked at BUILD time (exactly one certificate per
+  file, `CA:TRUE`); assertions catch a certificate without `acknowledgeRisk`, a
+  program assigned to two containers and an unusable container name. The
+  activation creates the directories of declared containers.
+
 ### Added (extra root certificates per container)
 - `vpn-zone trust add|list|rm|reset`: a root certificate — a national CA, a
   corporate inspection root, a test CA — trusted by the programs of ONE data

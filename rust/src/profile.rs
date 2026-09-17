@@ -99,6 +99,9 @@ pub struct Args {
     pub nss_home: Option<PathBuf>,
     /// `--certutil PATH`, from the manifest.
     pub certutil: Option<PathBuf>,
+    /// `--trust-extra DIR`, repeated: certificate directories declared in Nix,
+    /// besides the container's own.
+    pub trust_extra: Vec<PathBuf>,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
 }
@@ -148,7 +151,15 @@ impl Args {
             .ok_or(ArgError::NoSeparator)?;
         let mut positional = &argv[..split];
         let (mut cwd, mut trust, mut nss_home, mut certutil) = (None, None, None, None);
+        let mut trust_extra = Vec::new();
         while let Some(flag) = positional.first() {
+            if flag == "--trust-extra" {
+                if let Some(dir) = positional.get(1).filter(|v| !v.is_empty()) {
+                    trust_extra.push(PathBuf::from(dir));
+                }
+                positional = positional.get(2..).unwrap_or(&[]);
+                continue;
+            }
             let slot = match flag.as_bytes() {
                 b"--cwd" => &mut cwd,
                 b"--trust" => &mut trust,
@@ -180,6 +191,7 @@ impl Args {
             trust,
             nss_home,
             certutil,
+            trust_extra,
             cmd,
         })
     }
@@ -456,6 +468,7 @@ pub fn run(args: Args) -> u8 {
             certutil: &certutil,
             home: &home,
             private: &private,
+            extra: &args.trust_extra,
         };
         match crate::trust::apply(&layer) {
             Ok(warnings) => {
@@ -677,6 +690,25 @@ mod tests {
         // None of them by default.
         let a = Args::parse(&argv(&["/p", "nl", "--", "x"])).unwrap();
         assert_eq!((a.trust, a.nss_home, a.certutil), (None, None, None));
+        // Declared directories repeat.
+        let a = Args::parse(&argv(&[
+            "--trust-extra",
+            "/nix/store/a",
+            "--trust",
+            "/t",
+            "--trust-extra",
+            "/nix/store/b",
+            "/p",
+            "nl",
+            "--",
+            "x",
+        ]))
+        .unwrap();
+        assert_eq!(
+            a.trust_extra,
+            [PathBuf::from("/nix/store/a"), PathBuf::from("/nix/store/b")]
+        );
+        assert_eq!(a.profile_dir, PathBuf::from("/p"));
     }
 
     #[test]

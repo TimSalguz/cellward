@@ -764,7 +764,14 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
         return 1;
     }
 
-    let mode = match fs::read_to_string(home.join(".config/vpn-zones/mode")) {
+    // The mode declared in Nix, when there is one, wins over the local file.
+    let declared_mode = home.join(".config/vpn-zones/declared/mode");
+    let mode_file = if declared_mode.exists() {
+        declared_mode
+    } else {
+        home.join(".config/vpn-zones/mode")
+    };
+    let mode = match fs::read_to_string(mode_file) {
         Ok(text) => Mode::parse(&text),
         Err(_) => Mode::Picker,
     };

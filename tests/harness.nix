@@ -78,6 +78,49 @@ let
   # обёртка ниже тянет за собой и ip, и pasta, и awg/wg.
   # Тип юнит-опций home-manager коэрсит значение в список (повторяемые ключи
   # ini) — нормализуем обратно в строку.
+  # A synthetic CA made at build time — for the declared trust option only; no
+  # certificate or key is kept in git.
+  testCa = pkgs.runCommand "vpn-zones-test-ca" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+    mkdir -p "$out"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=vpn-zones harness CA" \
+      -addext "basicConstraints=critical,CA:TRUE" -keyout "$out/ca.key" -out "$out/ca.pem" 2>/dev/null
+  '';
+
+  # The same module with every declarative option set: the eval job
+  # instantiates it, so an option that stops evaluating (or an assertion that
+  # fires on a valid configuration) is red in CI and not on somebody's switch.
+  hmDeclared = import "${homeManagerSrc}/modules" {
+    inherit pkgs;
+    configuration =
+      { ... }:
+      {
+        imports = [ ../module ];
+        programs.vpn-zones = {
+          enable = true;
+          defaults = {
+            network = "offline";
+            container = "own";
+          };
+          launcher.mode = "picker";
+          compositorRestriction.enable = true;
+          containers.work = {
+            home = "overlay";
+            network = "direct";
+            apps = [ "firefox" ];
+            trust = {
+              certificates = [ "${testCa}/ca.pem" ];
+              acknowledgeRisk = true;
+            };
+          };
+          containers.dev.apps = [ "org.telegram.desktop" ];
+        };
+        home = {
+          inherit username homeDirectory;
+          stateVersion = "26.05";
+        };
+      };
+  };
+
   rawExecStart = hm.config.systemd.user.services."vpn-zone@".Service.ExecStart;
   zoneHolderExecLine = if lib.isList rawExecStart then lib.head rawExecStart else rawExecStart;
 in
@@ -85,6 +128,9 @@ in
   # Полная активация home-manager: инстанцируется в CI как «модуль хотя бы
   # целиком вычисляется». Собирать её не обязательно.
   inherit (hm) activationPackage;
+
+  # Every declarative option set (docs/CONTAINERS.md §8).
+  declaredActivation = hmDeclared.activationPackage;
 
   # Каждый скрипт — отдельным атрибутом: nix-build tests/harness.nix -A scripts.<имя>
   scripts = lib.genAttrs scriptNames scriptByName // {

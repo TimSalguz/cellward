@@ -423,13 +423,193 @@ let
   guiExec =
     verb:
     "${pkgs.coreutils}/bin/env VPN_ZONE_TOOLS=${vpn-zone-tools} ${vpn-zone-rust}/bin/vpn-zone-gui ${verb}";
+
+  # --- ЧАСТЬ 5: ДЕКЛАРАТИВНАЯ СТОРОНА (docs/CONTAINERS.ru.md §8) ---
+  # Опции ниже — единственный интерфейс для конфигураторов (nix_cm и подобных):
+  # они ставят опции, а модуль пишет файлы в ~/.config/vpn-zones/declared/.
+  # Рантайм читает их первыми (Nix сильнее локального) и отказывается менять из
+  # CLI/GUI то, что задано здесь, — вместо того чтобы молча не сработать.
+  # Машиночитаемый ответ, откуда какое значение, — `vpn-zone status --json`.
+  cfg = config.programs.vpn-zones;
+
+  # Имя контейнера попадает в путь, в имя файла и в имя деривации.
+  validName = name: builtins.match "[A-Za-z0-9_][A-Za-z0-9_.-]*" name != null;
+
+  # Доверенные корневые сертификаты контейнера (docs/CERTIFICATES.ru.md),
+  # приведённые к виду, который читает рантайм: `<sha256>.pem` на сертификат.
+  # Проверки — ПРИ СБОРКЕ, а не при запуске: файл с несколькими сертификатами
+  # (бандл протащил бы все свои корни) и сертификат не УЦ (лист корнем быть не
+  # может) ломают сборку конфигурации, а не молча доезжают до контейнера.
+  trustDir =
+    name: certs:
+    pkgs.runCommand "vpn-zones-trust-${name}" { nativeBuildInputs = [ pkgs.openssl ]; } (
+      ''
+        mkdir -p "$out"
+      ''
+      + lib.concatMapStrings (cert: ''
+        n=$(grep -c 'BEGIN CERTIFICATE' ${cert} || true)
+        if [ "$n" -gt 1 ]; then
+          echo "${cert}: сертификатов в файле: $n — по одному на файл" >&2
+          exit 1
+        fi
+        if [ "$n" = 1 ]; then form=PEM; else form=DER; fi
+        if ! openssl x509 -inform "$form" -in ${cert} -noout -ext basicConstraints | grep -q 'CA:TRUE'; then
+          echo "${cert}: не сертификат удостоверяющего центра (нет basicConstraints CA:TRUE)" >&2
+          exit 1
+        fi
+        fp=$(openssl x509 -inform "$form" -in ${cert} -noout -fingerprint -sha256 | cut -d= -f2 | tr -d : | tr 'A-F' 'a-f')
+        openssl x509 -inform "$form" -in ${cert} -outform PEM > "$out/$fp.pem"
+      '') certs
+    );
+
+  renderContainer =
+    name: c:
+    lib.concatStringsSep "\n" (
+      [ "# Объявлено в Nix: programs.vpn-zones.containers.${name}. Меняется там, не здесь." ]
+      ++ lib.optional (c.network != null) "network = ${c.network}"
+      ++ map (app: "app = ${app}") c.apps
+      ++ lib.optional (c.trust.certificates != [ ]) "trust = ${trustDir name c.trust.certificates}"
+    )
+    + "\n";
+
+  allApps = lib.concatMap (c: c.apps) (lib.attrValues cfg.containers);
+  duplicateApps = lib.filter (app: lib.count (x: x == app) allApps > 1) (lib.unique allApps);
+
+  containerModule = {
+    options = {
+      home = lib.mkOption {
+        type = lib.types.enum [
+          "private"
+          "overlay"
+        ];
+        default = "private";
+        description = "Дом контейнера: private — свой пустой дом (песочница), overlay — слой над XDG-каталогами настоящего дома.";
+      };
+      network = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "offline";
+        description = "Сеть контейнера: имя зоны, direct или offline. Запуск в другой сети — отказ. null — сеть не задана в Nix и меняется локально (`vpn-zone container set`).";
+      };
+      apps = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "firefox" ];
+        description = "Программы (id ярлыков, имя .desktop без расширения), которые запускаются в этом контейнере без вопроса.";
+      };
+      trust = {
+        certificates = lib.mkOption {
+          type = lib.types.listOf lib.types.path;
+          default = [ ];
+          description = "Дополнительные корневые сертификаты (PEM или DER, по одному в файле), которым доверяют ТОЛЬКО программы этого контейнера. Владелец ключа такого сертификата читает и подменяет их TLS-трафик. См. docs/CERTIFICATES.ru.md.";
+        };
+        acknowledgeRisk = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = "Обязательное подтверждение для непустого certificates: программы контейнера будут доверять этим корням.";
+        };
+      };
+    };
+  };
 in
 {
   options.programs.vpn-zones = {
     enable = lib.mkEnableOption "сетевые зоны с VPN, контейнеры данных и песочницы для запуска программ";
+
+    defaults = {
+      network = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "offline";
+        description = "Сеть, которую пикер предлагает незнакомой программе: offline, direct или имя зоны. null — не задавать из Nix (`vpn-zone default`).";
+      };
+      container = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "own";
+        description = "Контейнер для запусков по умолчанию: ask, main, own (свой дом у каждой программы) или имя контейнера. null — не задавать из Nix.";
+      };
+    };
+
+    launcher.mode = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "picker"
+          "per-zone"
+          "both"
+          "off"
+        ]
+      );
+      default = null;
+      description = "Как генерируются ярлыки (per-zone и both устарели). null — не задавать из Nix.";
+    };
+
+    compositorRestriction.enable = lib.mkOption {
+      type = lib.types.nullOr lib.types.bool;
+      default = null;
+      description = "Отбирать ли у программ захват экрана, фоновый буфер обмена и эмуляцию ввода. null — не задавать из Nix (по умолчанию включено).";
+    };
+
+    containers = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.submodule containerModule);
+      default = { };
+      description = "Контейнеры: дом, сеть, программы, доверенные сертификаты (docs/CONTAINERS.ru.md). Состояние с источником каждого значения — `vpn-zone status --json`.";
+    };
   };
 
   config = lib.mkIf config.programs.vpn-zones.enable {
+  assertions =
+    lib.mapAttrsToList (name: _: {
+      assertion = validName name;
+      message = "programs.vpn-zones.containers.${name}: имя контейнера — латиница, цифры, _ . - и не с точки или дефиса";
+    }) cfg.containers
+    ++ lib.mapAttrsToList (name: c: {
+      assertion = c.trust.certificates == [ ] || c.trust.acknowledgeRisk;
+      message = "programs.vpn-zones.containers.${name}.trust: дополнительный корневой сертификат позволяет его владельцу читать TLS-трафик программ контейнера — подтверди это: trust.acknowledgeRisk = true";
+    }) cfg.containers
+    ++ [
+      {
+        assertion = duplicateApps == [ ];
+        message = "programs.vpn-zones.containers: программы назначены нескольким контейнерам сразу: ${lib.concatStringsSep ", " duplicateApps}";
+      }
+    ];
+
+  xdg.configFile = lib.mkMerge [
+    (lib.mkIf (cfg.defaults.network != null) {
+      "vpn-zones/declared/default".text = cfg.defaults.network;
+    })
+    (lib.mkIf (cfg.defaults.container != null) {
+      "vpn-zones/declared/default-profile".text = cfg.defaults.container;
+    })
+    (lib.mkIf (cfg.launcher.mode != null) {
+      "vpn-zones/declared/mode".text = cfg.launcher.mode;
+    })
+    (lib.mkIf (cfg.compositorRestriction.enable != null) {
+      "vpn-zones/declared/wayland-sandbox".text = if cfg.compositorRestriction.enable then "on" else "off";
+    })
+    (lib.mapAttrs' (
+      name: c: lib.nameValuePair "vpn-zones/declared/containers/${c.home}-${name}.conf" { text = renderContainer name c; }
+    ) cfg.containers)
+  ];
+
+  # Каталоги объявленных контейнеров: без них запуск в оверлее отказался бы
+  # («профиля нет — создай»), а слой доверия искал бы, куда положить бандл.
+  home.activation.vpnZoneContainers = lib.hm.dag.entryAfter [ "writeBoundary" ] (
+    lib.concatStrings (
+      lib.mapAttrsToList (
+        name: c:
+        if c.home == "overlay" then
+          ''
+            $DRY_RUN_CMD mkdir -p ${lib.escapeShellArg "${profilesDir}/${name}"}
+          ''
+        else
+          ''
+            $DRY_RUN_CMD mkdir -p ${lib.escapeShellArg "${config.home.homeDirectory}/.local/state/vpn-sandboxes/${name}/home"}
+          ''
+      ) cfg.containers
+    )
+  );
+
   home.packages = [
     vpn-zone
     vpn-zone-sync

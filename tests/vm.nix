@@ -48,6 +48,20 @@ let
     overlays = [ ];
   };
 
+  # A CA and a server certificate made at build time, for the container that is
+  # DECLARED to trust it (docs/CONTAINERS.md §8). Synthetic, and in the store of
+  # this test only.
+  declaredCa = pkgs.runCommand "vpn-zones-vm-declared-ca" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+    mkdir -p "$out" && cd "$out"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=vpn-zones declared CA" \
+      -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+      -keyout ca.key -out ca.pem 2>/dev/null
+    openssl req -newkey rsa:2048 -nodes -subj "/CN=declared.internal" -keyout srv.key -out srv.csr 2>/dev/null
+    printf 'subjectAltName=DNS:declared.internal\n' > ext
+    openssl x509 -req -in srv.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 3650 \
+      -extfile ext -out srv.pem 2>/dev/null
+  '';
+
   test = pkgs.testers.runNixOSTest {
     name = "vpn-zones-vm";
 
@@ -92,6 +106,18 @@ let
         home-manager.users.alice = {
           imports = [ ../module ];
           programs.vpn-zones.enable = true;
+          # A container declared in Nix: bound to direct, trusting a CA made
+          # at build time. What the module writes, the runtime obeys and the
+          # CLI refuses to change is asserted below.
+          programs.vpn-zones.containers.vmdecl = {
+            home = "overlay";
+            network = "direct";
+            apps = [ "vmdeclapp" ];
+            trust = {
+              certificates = [ "${declaredCa}/ca.pem" ];
+              acknowledgeRisk = true;
+            };
+          };
           home.stateVersion = "26.05";
         };
 
@@ -479,6 +505,28 @@ let
           out = in_container("vmca", "direct", "sh -c 'certutil -L -d sql:$HOME/.pki/nssdb || true'")
           assert "vpn-zones " not in out, f"the reset left the CA in the NSS database:\n{out}"
           alice("vpn-zone down vmsmoke")
+
+      # --- Declared in Nix (docs/CONTAINERS.md §8) ---------------------------
+      DECLCA = "${declaredCa}"
+
+      with subtest("declared: status --json names Nix as the source, and the CLI leaves it alone"):
+          out = alice("vpn-zone status --json")
+          assert out.startswith('{"schema_version":1,'), out
+          assert '"selector":"vmdecl"' in out, out
+          assert '"network":{"value":"direct","source":"nix"}' in out, out
+          assert '"container":{"value":"vmdecl","source":"nix"}' in out, out
+          assert '"source":"nix"}]' in out or '"source":"nix"}' in out, out
+          alice("sh -c '! vpn-zone container set vmdecl network offline'")
+          alice("test -d /home/alice/.local/state/vpn-profiles/vmdecl")
+
+      with subtest("declared: the container runs in its network only, trusting its declared CA"):
+          in_container("vmdecl", "direct", f"openssl verify {DECLCA}/srv.pem")
+          machine.fail(
+              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
+              "vpn-zone run offline --profile vmdecl -- true'"
+          )
+          machine.fail(f"su -l alice -c 'openssl verify {DECLCA}/srv.pem'")
+          alice("vpn-zone down offline || true")
 
       # --- The real tunnel: an actual WireGuard peer on the second VM -------
       # Everything above used an unreachable endpoint and checked mechanics;

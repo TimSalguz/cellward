@@ -67,8 +67,8 @@ fn sourced_str(value: &str, source: Source) -> String {
 
 /// A one-line setting file of `~/.config/vpn-zones`, or its default.
 fn setting(tools: &Tools, name: &str, default: &str) -> (String, Source) {
-    match read_setting(&tools.config.join(name)) {
-        Some(value) if !value.is_empty() => (value, Source::Local),
+    match crate::cli::setting(tools, name) {
+        Some((value, source)) if !value.is_empty() => (value, source),
         _ => (default.to_owned(), Source::Default),
     }
 }
@@ -179,19 +179,28 @@ fn running(tools: &Tools, c: &Container) -> String {
 
 /// One trusted certificate, with what openssl can tell about it.
 fn trust(tools: &Tools, c: &Container) -> String {
+    let declared = c
+        .declared_trust
+        .iter()
+        .flat_map(|dir| crate::trust::stored(dir.as_path()))
+        .map(|cert| (cert, Source::Nix));
+    let local = crate::trust::stored(&c.trust_dir())
+        .into_iter()
+        .map(|cert| (cert, Source::Local));
     array(
-        crate::trust::stored(&c.trust_dir())
-            .iter()
-            .map(|cert| {
+        declared
+            .chain(local)
+            .map(|(cert, source)| {
                 let info = crate::cli::certificate_info(tools, &cert.path, "PEM").ok();
                 let field = |f: fn(&crate::trust::CertInfo) -> &str| {
                     info.as_ref().map_or("null".to_owned(), |i| string(f(i)))
                 };
                 format!(
-                    "{{\"sha256\":{},\"subject\":{},\"not_after\":{},\"source\":\"local\"}}",
+                    "{{\"sha256\":{},\"subject\":{},\"not_after\":{},\"source\":{}}}",
                     string(&cert.sha256),
                     field(|i| i.subject.as_str()),
-                    field(|i| i.not_after.as_str())
+                    field(|i| i.not_after.as_str()),
+                    string(source.as_str())
                 )
             })
             .collect(),

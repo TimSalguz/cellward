@@ -907,6 +907,11 @@ fn read_memory(tools: &Tools, key: &str) -> Memory {
 
     let profile_pin_path = state.join(".pinnedprofile").join(key);
     let mut pinned_profile = read_setting(&profile_pin_path).unwrap_or_default();
+    // An assignment declared in Nix outranks the picker's own pin: it is the
+    // configuration, the pin only a memory. (`docs/CONTAINERS.md` §4)
+    if let Some(declared) = crate::container::declared_owner(tools, key) {
+        pinned_profile = declared;
+    }
     if !profile_pin_is_valid(&pinned_profile, |name| tools.profiles.join(name).is_dir()) {
         let _ = fs::remove_file(&profile_pin_path);
         pinned_profile.clear();
@@ -918,10 +923,10 @@ fn read_memory(tools: &Tools, key: &str) -> Memory {
         pinned_profile,
         last: read_setting(&state.join(".last").join(key)).unwrap_or_default(),
         last_profile: read_setting(&state.join(".lastprofile").join(key)).unwrap_or_default(),
-        fallback: read_setting(&tools.config.join("default"))
-            .unwrap_or_else(|| "offline".to_owned()),
-        default_profile: read_setting(&tools.config.join("default-profile"))
-            .unwrap_or_else(|| "ask".to_owned()),
+        fallback: crate::cli::setting(tools, "default")
+            .map_or_else(|| "offline".to_owned(), |(value, _)| value),
+        default_profile: crate::cli::setting(tools, "default-profile")
+            .map_or_else(|| "ask".to_owned(), |(value, _)| value),
         ask: std::env::var_os(ENV_ASK).is_some_and(|v| !v.is_empty()),
         bound: String::new(),
     };

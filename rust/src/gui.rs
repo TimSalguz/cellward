@@ -517,7 +517,7 @@ fn profile_rm(tools: &Tools) -> u8 {
 fn settings(tools: &Tools) -> u8 {
     let _ = fs::create_dir_all(&tools.config);
     let setting = |name: &str, fallback: &str| {
-        read_setting(&tools.config.join(name)).unwrap_or_else(|| fallback.to_owned())
+        crate::cli::setting(tools, name).map_or_else(|| fallback.to_owned(), |(value, _)| value)
     };
     let current_net = setting("default", "offline");
     let current_profile = setting("default-profile", "ask");

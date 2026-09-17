@@ -194,9 +194,31 @@ pub fn read_setting(path: &Path) -> Option<String> {
     Some(text)
 }
 
+/// Where the home-manager module puts what is declared in Nix, below the
+/// config directory: one file per setting, and `containers/`.
+pub const DECLARED_DIR: &str = "declared";
+
+/// A setting of `~/.config/vpn-zones` and where it comes from: the value
+/// declared in Nix wins over the local one. `None` when neither is set.
+pub fn setting(tools: &Tools, name: &str) -> Option<(String, crate::container::Source)> {
+    if let Some(value) = read_setting(&tools.config.join(DECLARED_DIR).join(name)) {
+        return Some((value, crate::container::Source::Nix));
+    }
+    read_setting(&tools.config.join(name)).map(|value| (value, crate::container::Source::Local))
+}
+
 /// Write a setting file with no trailing newline (`printf '%s'`), creating
 /// `~/.config/vpn-zones` on the way.
+///
+/// A setting declared in Nix is refused rather than written: the local file
+/// would change nothing (the declared one wins) and the command would look
+/// like it worked.
 fn write_setting(tools: &Tools, name: &str, value: &OsStr) -> Result<(), String> {
+    if tools.config.join(DECLARED_DIR).join(name).exists() {
+        return Err(format!(
+            "«{name}» задано в Nix (programs.vpn-zones) и меняется там"
+        ));
+    }
     fs::create_dir_all(&tools.config).map_err(|e| format!("{}: {e}", tools.config.display()))?;
     let path = tools.config.join(name);
     fs::write(&path, value.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))
@@ -1480,7 +1502,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                 eprintln!("контейнера {selector} нет");
                 return 1;
             }
-            if let Some(owner) = declared_owner(tools, app) {
+            if let Some(owner) = crate::container::declared_owner(tools, app) {
                 if &owner != selector {
                     eprintln!("программа {app} назначена контейнеру {owner} в Nix — меняется там");
                     return 1;
@@ -1506,7 +1528,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                     .join(".pinnedprofile")
                     .join(crate::desktop::sanitize(app)),
             );
-            match declared_owner(tools, app) {
+            match crate::container::declared_owner(tools, app) {
                 Some(owner) => println!(
                     "локальное назначение {app} снято, но в Nix программа назначена контейнеру {owner}"
                 ),
@@ -1524,16 +1546,6 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
 /// Is there a network by this name: `direct`, `offline`, or a zone?
 fn network_exists(tools: &Tools, name: &str) -> bool {
     matches!(name, "direct" | "offline") || tools.state.join(name).join("config.conf").is_file()
-}
-
-/// The container a program is assigned to in Nix, if any.
-fn declared_owner(tools: &Tools, app: &str) -> Option<String> {
-    crate::container::load_all(tools).into_iter().find_map(|c| {
-        c.apps
-            .iter()
-            .any(|a| a.value == app && a.source == crate::container::Source::Nix)
-            .then(|| c.selector())
-    })
 }
 
 fn source_word(source: crate::container::Source) -> &'static str {
