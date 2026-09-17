@@ -1640,7 +1640,11 @@ mod tests {
         let mut l = layout();
         l.machine_id = Some(PathBuf::from("/s/dev/machine-id"));
         let got = strs(&bwrap_args(&l, &argv(&["prog"])));
-        let etc = got.iter().position(|a| a == "/etc").unwrap();
+        let etc = got
+            .windows(3)
+            .position(|w| w == ["--ro-bind", "/etc", "/etc"])
+            .unwrap()
+            + 2;
         assert_eq!(
             &got[etc + 1..etc + 4],
             ["--ro-bind", "/s/dev/machine-id", "/etc/machine-id"]
