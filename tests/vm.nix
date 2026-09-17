@@ -370,6 +370,15 @@ let
           out = in_zone(upid, "ip -4 route show default")
           assert out.strip(), "no default route in uplink-ns — pasta gave no way out"
 
+      # pasta's defaults mirror every TCP/UDP port bound on the host's loopback
+      # onto the uplink's loopback (-T/-U auto), and the uplink's filter
+      # accepts lo. The host's dnsmasq listens on 127.0.0.1:5353: with the
+      # defaults it would answer from inside the uplink within a second.
+      with subtest("uplink: pasta mirrors none of the host's loopback ports"):
+          machine.succeed("ss -tln | grep -q '127.0.0.1:5353'")
+          machine.sleep(3)
+          in_zone(upid, "sh -c '! timeout 3 socat -u OPEN:/dev/null TCP:127.0.0.1:5353'")
+
       with subtest("second echelon, uplink: only tunnel transport may leave"):
           rules = in_zone_root(upid, "nft list ruleset")
           for pat in [
