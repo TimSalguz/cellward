@@ -582,6 +582,16 @@ impl Ids {
     }
 }
 
+/// The host ids every zone's way out runs under: the zone's uid 0 and gid 0,
+/// i.e. the start of the user's subordinate ranges. pasta and the OpenConnect
+/// client are started by the holder as uid 0 inside the zone's user namespace,
+/// so every socket a zone's traffic leaves the host by is owned by these —
+/// which a host firewall can match (`meta skuid`) without knowing anything
+/// about user units.
+pub fn uplink_owner() -> Option<(u64, u64)> {
+    Ids::current().ok().map(|ids| (ids.subuid, ids.subgid))
+}
+
 fn user_name(uid: libc::uid_t) -> Option<String> {
     // SAFETY: getpwuid returns a pointer into a static buffer, read here before
     // anything else can call into the passwd machinery again.

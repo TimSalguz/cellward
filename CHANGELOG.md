@@ -5,6 +5,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (egress marker)
+- `status --json` carries `uplink_owner`: the host uid and gid every zone's way
+  out runs under (the zone's uid 0, the start of the user's subordinate
+  ranges), for a host egress policy matching `meta skuid` (additive).
+
 ### Added (hermetic zones — prototype, off by default)
 - `vpn-zone hermetic <zone> on|off` (takes effect at the zone's next start):
   the zone's runtime directory is a tmpfs of its own with only the Wayland,

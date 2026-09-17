@@ -425,8 +425,13 @@ pub fn bar(tools: &Tools) -> String {
 
 /// The whole document of `vpn-zone status --json`.
 pub fn document(tools: &Tools) -> String {
+    // The host ids of the zones' sockets on the host, for a host egress policy
+    // (`meta skuid`/`meta skgid`); `null` without subordinate ranges.
+    let uplink_owner = crate::zone::uplink_owner().map_or("null".to_owned(), |(uid, gid)| {
+        format!("{{\"uid\":{uid},\"gid\":{gid}}}")
+    });
     format!(
-        "{{\"schema_version\":{SCHEMA_VERSION},\"defaults\":{},\"networks\":{},\"containers\":{},\"apps\":{}}}",
+        "{{\"schema_version\":{SCHEMA_VERSION},\"defaults\":{},\"networks\":{},\"containers\":{},\"apps\":{},\"uplink_owner\":{uplink_owner}}}",
         defaults(tools),
         networks(tools),
         containers(tools),

@@ -539,6 +539,14 @@ every key of version 1.
 - a program by its launcher key (`apps[].id`, `containers[].apps[].value`),
   the lossless key of `docs/LAUNCHERS.md` §3.4.
 
+**`uplink_owner`** (`{uid, gid}` or `null`) is for a host egress policy: every
+socket a zone's traffic leaves the host by — pasta's, the OpenConnect
+client's — belongs to the zone's uid 0, the start of the user's subordinate
+ranges, so `meta skuid <uid>` in the host's nftables lets the zones out and
+nothing else of the user. Stable as long as `/etc/subuid` is; note that a
+rootless container tool mapping its own uid 1 onto the same subordinate uid
+would match too.
+
 ## 10. Where can a packet or a DNS query go around the tunnel now?
 
 - **Changeable networks (I1, I2).** A change is explicit and shown; a
