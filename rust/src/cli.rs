@@ -413,9 +413,31 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             }
         }
+    } else if crate::hostif::is_host_interface(&ini) {
+        match crate::hostif::HostIfConfig::from_ini(&ini) {
+            Ok(host) => {
+                // Only a warning: a VPN the system brings up later, a modem
+                // plugged in tomorrow. The zone itself refuses to come up
+                // without it.
+                if !Path::new("/sys/class/net").join(&host.interface).exists() {
+                    eprintln!(
+                        "интерфейса {} сейчас нет: зона не поднимется, пока он не появится",
+                        host.interface
+                    );
+                }
+                println!(
+                    "зона пойдёт наружу через интерфейс хоста {} — сама она трафик не шифрует",
+                    host.interface
+                );
+            }
+            Err(e) => {
+                eprintln!("{}: {e}", conf.display());
+                return 1;
+            }
+        }
     } else if ini.interface().is_none() {
         eprintln!(
-            "{} не похож на конфиг WireGuard/AmneziaWG или OpenConnect",
+            "{} не похож на конфиг WireGuard/AmneziaWG, OpenConnect или [HostInterface]",
             conf.display()
         );
         return 1;

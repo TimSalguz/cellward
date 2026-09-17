@@ -192,6 +192,24 @@ anything else through (`docs/LEAK-MODEL.md`):
   `--allow-insecure-crypto`, `--script`, `--csd-wrapper` or
   `--external-browser`.
 
+### A network through an interface of the host
+
+A zone whose config has a `[HostInterface]` section has no tunnel of its own:
+its programs go out through one interface of the host — a second uplink, a
+modem, a VPN the system itself brought up — and through nothing else.
+
+```ini
+[HostInterface]
+Interface = enp4s0
+DNS = 192.168.1.1
+```
+
+Every socket is bound to that interface, so when it goes down the zone is
+offline, not rerouted; a missing interface is a zone that refuses to come up.
+Such a zone does **not** encrypt anything: `status --json` calls it
+`host-interface`. The zone's side of it is `10.255.255.253/30`, whatever the
+host's addresses are.
+
 Then just launch programs from the launcher. The same from the terminal:
 
 ```sh

@@ -124,7 +124,7 @@ container = {
 | zone: WireGuard/AmneziaWG | kernel tunnel created in the uplink, moved into the app namespace (done) | no |
 | zone: OpenConnect | client in the uplink, its tun moved into the app namespace (done) | no |
 | zone: another client (sing-box, OpenVPN, a GUI client) | same shape, M4 | no |
-| through a host interface | uplink with pasta bound to that interface (`--outbound-if4/-if6`): a second uplink, a modem, a VPN the system brought up | no |
+| through a host interface | **done**: no uplink — pasta attached to the app namespace itself, its interface named `awg0`, every socket bound to that host interface (`--outbound-if4/-if6`), no port forwarding; `[HostInterface]` config | no |
 | `direct` | the host's network, no namespace (done) | no |
 | `offline` | loopback only (done) | no |
 | a host interface **itself** inside the container | moving a real link into another network namespace needs `CAP_NET_ADMIN` in the host's namespace | **yes**: a small system helper (NixOS module option), never the default |
@@ -523,10 +523,13 @@ every key of version 1.
 - **Changeable networks (I1, I2).** A change is explicit and shown; a
   container never runs in two networks at once. The identity channel of
   [LEAK-MODEL](LEAK-MODEL.md) §4 is narrowed to a deliberate act.
-- **Networks through a host interface.** The uplink is bound to one interface;
-  the app namespace is the same two-link namespace as for a tunnel, so nothing
-  inside can pick another way out. What this network does not do is encrypt:
-  it is named as such everywhere it is shown.
+- **Networks through a host interface** (done). pasta in the app namespace
+  binds every socket to one interface of the host; the app namespace is the
+  same two-link namespace (`lo` and `awg0`) as for a tunnel, with the same
+  filter, so nothing inside can pick another way out, and an interface that
+  goes down means no network rather than another route. pasta forwards no
+  ports. What this network does not do is encrypt: it is named as such
+  everywhere it is shown (`host-interface`).
 - **Extra routes.** Each is a hole by definition — explicit, per prefix, off by
   default, listed in every view and in `doctor`.
 - **`direct` containers** (done). No network namespace — the host's network and
@@ -558,7 +561,7 @@ every key of version 1.
 | 0 | **done**: `direct` keeps its layers, working directory, conflict by id and binary, hidden handlers, Steam children | smoke; unit and scenario tests |
 | 1 | **done**: network binding with I1/I2 in `run` and the picker, `vpn-zone container list/show/set/assign/unassign`, `status --json` (`schema_version`, sources), home-manager options with `declared/`, clones deprecated, path grants (`container grant/revoke`, `permissions.paths`), merge (`container merge`). **Left**: `own` by default, hints (Wine prefix, Steam), container-first picker, GUI entries | CLI/picker scenario tests; VM: a declared container with its declared CA, refused elsewhere, reported as Nix |
 | 2 | trust layer ([CERTIFICATES.md](CERTIFICATES.md)) — **done** (GUI dialog left) | VM and smoke: synthetic CA trusted in one container only |
-| 3 | **done**: user-dir take-over, autostart take-over (§5.2). `vpn-zone launch` (§5.1), D-Bus shadows (§5.3). **Left**: web apps as children, host-interface networks, PATH shims | VM: activation via `gdbus call` lands in the container; autostart of an unassigned program is offline |
+| 3 | **done**: user-dir take-over, autostart take-over (§5.2). `vpn-zone launch` (§5.1), D-Bus shadows (§5.3). web apps as children, host-interface networks (§3.3). **Left**: PATH shims | VM: activation via `gdbus call` lands in the container; autostart of an unassigned program is offline |
 | 4 | runtime hermeticity, broker, X11 closure, extra routes | VM "evil host": a `systemd --user` counting `StartTransientUnit`, a portal logging callers, an HTTP beacon |
 
 ## 12. The owner's decisions (2026-09-17)

@@ -98,10 +98,14 @@ fn zone_kind(dir: &std::path::Path) -> Option<&'static str> {
         return Some("offline");
     }
     let raw = fs::read(dir.join("config.conf")).ok()?;
-    let is_oc = WgConfig::parse(&strip_cr(&raw))
-        .map(|ini| crate::openconnect::is_openconnect(&ini))
-        .unwrap_or(false);
-    Some(if is_oc { "openconnect" } else { "wireguard" })
+    let ini = WgConfig::parse(&strip_cr(&raw)).ok();
+    Some(match ini {
+        Some(ini) if crate::openconnect::is_openconnect(&ini) => "openconnect",
+        // Not encrypted by the zone: a configuration tool has to be able to
+        // say so without reading the file.
+        Some(ini) if crate::hostif::is_host_interface(&ini) => "host-interface",
+        _ => "wireguard",
+    })
 }
 
 pub fn networks(tools: &Tools) -> String {

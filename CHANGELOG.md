@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (networks through an interface of the host)
+- A zone whose config has a `[HostInterface]` section (`Interface =`, optional
+  literal `DNS =`) goes out through that interface of the host and nothing
+  else: no uplink, pasta attached to the app namespace with every socket bound
+  to the interface (`--outbound-if4/-if6`), its interface named `awg0` so the
+  zone's filter, `doctor` and `check` apply unchanged, no port forwarding, an
+  address of its own (`10.255.255.253/30`). A missing interface is a zone that
+  refuses to come up. Not encrypted by the zone: `status --json` reports the
+  kind `host-interface` (the owner's decision of 2026-09-17).
+
 ### Security (pasta's port forwarding shut)
 - The uplink's pasta is started with `-t none -u none -T none -U none
   --no-map-gw`. Its defaults bound every port of the uplink — the tunnel's own

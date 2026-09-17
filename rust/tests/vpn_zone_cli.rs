@@ -1026,6 +1026,42 @@ fn doctor_reports_as_json_and_fails_on_what_it_cannot_prove() {
 }
 
 #[test]
+fn a_host_interface_zone_is_added_and_reported_as_such() {
+    let home = Home::new("hostif");
+    let conf = home.root.join("lan.conf");
+    fs::write(
+        &conf,
+        "[HostInterface]\nInterface = vpnztest0\nDNS = 192.0.2.53\n",
+    )
+    .unwrap();
+    let out = home.run(&["add", "lan", conf.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("не шифрует"), "{}", stdout(&out));
+    // The interface is not there right now: said, not refused.
+    assert!(stderr(&out).contains("сейчас нет"), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("{\"name\":\"lan\",\"kind\":\"host-interface\""),
+        "{json}"
+    );
+
+    for bad in [
+        "[HostInterface]\nInterface = lo\n",
+        "[HostInterface]\nDNS = 192.0.2.53\n",
+        "[HostInterface]\nInterface = eth0\nDNS = resolver.example\n",
+    ] {
+        fs::write(&conf, bad).unwrap();
+        let out = home.run(&["add", "bad", conf.to_str().unwrap()]);
+        assert_eq!(out.status.code(), Some(1), "{bad}");
+        assert!(
+            stderr(&out).contains("[HostInterface]"),
+            "{bad}: {}",
+            stderr(&out)
+        );
+    }
+}
+
+#[test]
 fn the_registry_keeps_its_three_field_shape() {
     let home = Home::new("registry");
     home.zone_is_up("nl");

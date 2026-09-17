@@ -239,6 +239,8 @@ let
           51820
           51821
         ];
+        # The responder a host-interface zone talks to directly, on eth1.
+        networking.firewall.allowedTCPPorts = [ 8090 ];
         # Services listen on the tunnel address only; the firewall must not
         # get in their way there.
         networking.firewall.trustedInterfaces = [
@@ -923,6 +925,54 @@ let
                   f"packets escaped the obfuscated tunnel:\n{escaped}"
               )
           alice("vpn-zone down vmawg")
+
+      # --- A network through an interface of the host (CONTAINERS §3.3) -----
+      # No tunnel: pasta attached to the app namespace and bound to one host
+      # interface. The server must see the machine's own eth1 address, and a
+      # zone bound to eth0 must not reach the server at all — the binding, not
+      # the host's routing table, decides where packets go.
+      with subtest("host-interface zone: out through eth1 only"):
+          server.succeed(
+              "systemd-run --unit=hello-lan socat "
+              f"TCP-LISTEN:8090,bind={server_ip},fork,reuseaddr "
+              "'SYSTEM:echo peer=$SOCAT_PEERADDR'"
+          )
+          alice("printf '[HostInterface]\\nInterface = eth1\\n' > /tmp/vmlan.conf")
+          alice("vpn-zone add vmlan /tmp/vmlan.conf")
+          alice("vpn-zone up vmlan")
+          lpid = machine.succeed(f"cat {STATE}/vmlan/zone.pid").strip()
+          links = in_zone(lpid, "ip -o link show")
+          assert len(links.strip().splitlines()) == 2 and ": awg0" in links, links
+          out = in_zone(lpid, "ip -4 route show default")
+          assert "dev awg0" in out, out
+          out = in_zone(lpid, f"socat -T10 - TCP:{server_ip}:8090")
+          assert "peer=192.168.1.1" in out, f"server saw someone else: {out}"
+          # The app namespace's filter holds here too.
+          rules = in_zone_root(lpid, "nft list ruleset")
+          assert 'oifname "awg0" accept' in rules and "policy drop" in rules, rules
+          machine.wait_until_succeeds(
+              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; vpn-zone check vmlan'",
+              timeout=30,
+          )
+          out = alice("vpn-zone doctor vmlan --json")
+          assert '"worst":"fail"' not in out, out
+          alice("vpn-zone down vmlan")
+
+      with subtest("host-interface zone bound to eth0 cannot reach eth1's network"):
+          alice("printf '[HostInterface]\\nInterface = eth0\\n' > /tmp/vmwan.conf")
+          alice("vpn-zone add vmwan /tmp/vmwan.conf")
+          alice("vpn-zone up vmwan")
+          wpid = machine.succeed(f"cat {STATE}/vmwan/zone.pid").strip()
+          in_zone(wpid, f"sh -c '! timeout 10 socat -T5 - TCP:{server_ip}:8090'")
+          alice("vpn-zone down vmwan")
+
+      with subtest("host-interface zone: a missing interface refuses to come up"):
+          alice("printf '[HostInterface]\\nInterface = nosuchif0\\n' > /tmp/vmnone.conf")
+          alice("vpn-zone add vmnone /tmp/vmnone.conf")
+          machine.fail(
+              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; vpn-zone up vmnone'"
+          )
+          machine.fail(f"test -f {STATE}/vmnone/ready")
     '';
   };
 in

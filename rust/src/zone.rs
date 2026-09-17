@@ -124,6 +124,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::config::{Endpoint, EndpointHost, Family, WgConfig};
+use crate::hostif::{self, HostIfConfig};
 use crate::openconnect::{self, OcConfig};
 use crate::profile::{exit_code_of, home_dir};
 use crate::sys;
@@ -189,6 +190,17 @@ const TUN_IFACE: &str = "awg0";
 const PASTA_IFACE: &str = "hostif";
 /// wg-quick's default, used when the config carries no `MTU`.
 const DEFAULT_MTU: u32 = 1420;
+/// The IPv4 address and gateway a host-interface zone gets on its side of
+/// pasta. Its own, not a copy of the host interface's: pasta takes those from
+/// the interface's DEFAULT route, and the interfaces such a zone is for — a
+/// LAN next to the uplink, a system VPN routed from a table of its own — often
+/// have none, and pasta then refuses IPv4 altogether. pasta translates sockets,
+/// not addresses: what the other end sees is the host interface's address
+/// either way. A /30 at the far end of 10/8, so that it collides with a
+/// network somebody wants to reach as rarely as a private range can.
+const HOSTIF_GUEST4: &str = "10.255.255.253/30";
+const HOSTIF_GATEWAY4: &str = "10.255.255.254";
+
 /// pasta's doors that nothing here uses, shut. Its defaults open four:
 ///
 /// * `-t auto`, `-u auto` — every port bound in the uplink is bound on the
@@ -244,6 +256,9 @@ const TOOL_WG: u8 = b'w';
 /// app namespace and the facts about it are in the plan file the client's
 /// script wrote. (`crate::openconnect`)
 const TOOL_OC: u8 = b'o';
+/// pasta attached to the app namespace itself, going out through an interface
+/// of the host (`crate::hostif`).
+const TOOL_HOSTIF: u8 = b'h';
 
 /// How long the uplink waits for the OpenConnect client to authenticate and
 /// hand the tunnel over: two minutes in 0.1 s steps. Long, and deliberately so
@@ -821,6 +836,9 @@ pub enum Backend {
     /// interface and its own `--script` hands it down; the TLS session stays
     /// with the process, which never leaves the uplink.
     Oc(Box<OcZone>),
+    /// No tunnel and no uplink: pasta attaches to the app namespace and binds
+    /// everything it sends to one interface of the host.
+    HostIf(HostIfConfig),
 }
 
 /// An OpenConnect zone, ready to be started.
@@ -851,6 +869,8 @@ impl Backend {
                 addr: oc.addr,
                 port: None,
             }],
+            // No uplink exists to be filtered.
+            Self::HostIf(_) => Vec::new(),
         }
     }
 }
@@ -931,7 +951,46 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
 
     let mut uplink_pid = 0;
     let mut pasta: Option<Child> = None;
-    if let Some(backend) = cfg.as_ref() {
+    if let Some(Backend::HostIf(host)) = cfg.as_ref() {
+        // No uplink: nobody is on the other end of its pipe.
+        drop(uplink_up_r);
+        drop(uplink_up_w);
+        if let Err(e) = wait_for_app_namespace(zone_up_r) {
+            kill_and_reap(zone_pid);
+            return Err(e);
+        }
+        let netns = format!("/proc/{zone_pid}/ns/net");
+        match Command::new(&zone.tools.pasta)
+            .arg("--netns")
+            .arg(&netns)
+            .args(["--config-net", "-q", "-I", TUN_IFACE, "-f"])
+            .args(["-a", HOSTIF_GUEST4, "-g", HOSTIF_GATEWAY4])
+            .arg("--outbound-if4")
+            .arg(&host.interface)
+            .arg("--outbound-if6")
+            .arg(&host.interface)
+            .args(PASTA_CLOSED)
+            .spawn()
+        {
+            Ok(child) => {
+                PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
+                pasta = Some(child);
+                if let Err(e) = tell_the_zone(moved_w, TOOL_HOSTIF) {
+                    eprintln!("zone {}: {e}", zone.name());
+                }
+            }
+            Err(e) => {
+                // The zone gets EOF instead of the byte and refuses to come up:
+                // a host-interface zone without pasta has no way out at all,
+                // and saying "up" would be a lie.
+                drop(moved_w);
+                eprintln!(
+                    "zone {}: cannot start pasta ({e}) — the zone has no way out",
+                    zone.name()
+                );
+            }
+        }
+    } else if let Some(backend) = cfg.as_ref() {
         // SAFETY: as above.
         let pid = unsafe { libc::fork() };
         if pid < 0 {
@@ -1046,6 +1105,25 @@ fn prepare(zone: &Zone) -> Result<Backend, String> {
     let mut cfg = WgConfig::parse(&raw).map_err(|e| format!("{CONFIG}: {e}"))?;
     if openconnect::is_openconnect(&cfg) {
         return prepare_openconnect(zone, &cfg);
+    }
+    if hostif::is_host_interface(&cfg) {
+        let host = HostIfConfig::from_ini(&cfg).map_err(|e| format!("{CONFIG}: {e}"))?;
+        // Here, in the host's network: an interface that is not there is a
+        // zone that cannot go anywhere, and that is said now rather than
+        // after a namespace that pretends to be up.
+        if !Path::new("/sys/class/net").join(&host.interface).exists() {
+            return Err(format!(
+                "the host has no interface {} — a host-interface zone goes out through it or \
+                 nowhere",
+                host.interface
+            ));
+        }
+        println!(
+            "zone {}: out through the host's interface {} (not encrypted by this zone)",
+            zone.name(),
+            host.interface
+        );
+        return Ok(Backend::HostIf(host));
     }
     if !cfg.dropped_empty.is_empty() {
         // Recent Amnezia writes junk-packet parameters and fills only some of
@@ -1318,6 +1396,8 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
             tell_the_zone(moved_w, TOOL_OC)?;
             Ok(Some(client))
         }
+        // `supervise` never starts an uplink for these.
+        Backend::HostIf(_) => Err("a host-interface zone has no uplink".to_string()),
     }
 }
 
@@ -1329,6 +1409,30 @@ fn wait_for_app_namespace(zone_up_r: OwnedFd) -> Result<(), String> {
         return Err("the app namespace never came up".to_string());
     }
     Ok(())
+}
+
+/// Wait for pasta to create and configure its interface in this namespace: the
+/// link up and a default route through it. pasta does this over netlink from
+/// outside, so the only way to know it is done is to look.
+fn wait_for_pasta_link(zone: &Zone) -> Result<(), String> {
+    for _ in 0..WAIT_STEPS {
+        let route =
+            tool_output(&zone.tools.ip, &["-4", "route", "show", "default"]).unwrap_or_default();
+        let route6 =
+            tool_output(&zone.tools.ip, &["-6", "route", "show", "default"]).unwrap_or_default();
+        let through = |text: &str| {
+            text.lines()
+                .map(parse_default_route)
+                .any(|r| r.dev.as_deref() == Some(TUN_IFACE))
+        };
+        if through(&route) || through(&route6) {
+            return Ok(());
+        }
+        thread::sleep(WAIT_STEP);
+    }
+    Err(format!(
+        "pasta did not bring up {TUN_IFACE} with a default route — is the host's interface up?"
+    ))
 }
 
 /// Hand the app namespace the one byte that says which backend built the
@@ -1684,6 +1788,14 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
             let dns: Vec<String> = plan.dns.iter().map(ToString::to_string).collect();
             (dns, plan.search.clone(), Mirror::Oc)
         }
+        TOOL_HOSTIF => {
+            let Backend::HostIf(host) = backend else {
+                return Err("pasta was attached to a zone that is not a host-interface one".into());
+            };
+            wait_for_pasta_link(zone)?;
+            let dns: Vec<String> = host.dns.iter().map(ToString::to_string).collect();
+            (dns, None, Mirror::HostIf(host.interface.clone()))
+        }
         _ => return Err("the uplink could not build the tunnel".to_string()),
     };
 
@@ -1755,6 +1867,12 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
                     zone.name()
                 );
             }
+        }
+        Mirror::HostIf(interface) => {
+            println!(
+                "zone {}: going out through the host's interface {interface}",
+                zone.name()
+            );
         }
         Mirror::Oc => {
             // The same question, already answered: an OpenConnect zone only
@@ -1897,6 +2015,9 @@ enum Mirror {
     /// being there and up, and the client — which the uplink is waiting on —
     /// still running.
     Oc,
+    /// The same question for pasta's interface, which goes out through the
+    /// named interface of the host.
+    HostIf(String),
 }
 
 /// Mirror the tunnel's state into the zone's `status` file.
@@ -1920,6 +2041,11 @@ fn start_status_mirror(zone: &Zone, mirror: Mirror) {
                 &tool_output(&ip, &["-o", "link", "show", TUN_IFACE]).unwrap_or_default(),
                 &tool_output(&ip, &["-br", "-4", "addr", "show", TUN_IFACE]).unwrap_or_default(),
             )),
+            Mirror::HostIf(interface) => Some(link_mirror(
+                &format!("host interface {interface}"),
+                &tool_output(&ip, &["-o", "link", "show", TUN_IFACE]).unwrap_or_default(),
+                &tool_output(&ip, &["-br", "-4", "addr", "show", TUN_IFACE]).unwrap_or_default(),
+            )),
         };
         if let Some(text) = text {
             if fs::write(&tmp, text).is_ok() {
@@ -1939,6 +2065,12 @@ fn start_status_mirror(zone: &Zone, mirror: Mirror) {
 /// which for this backend really is the whole question, because the client
 /// dying takes the interface and then the zone with it.
 pub fn oc_mirror(link: &str, addr: &str) -> String {
+    link_mirror("openconnect", link, addr)
+}
+
+/// [`oc_mirror`] for any backend whose liveness is its interface being there
+/// and up.
+pub fn link_mirror(backend: &str, link: &str, addr: &str) -> String {
     // The flags, and only the flags. `ip -o link show` prints them between
     // angle brackets — `<POINTOPOINT,NOARP,UP,LOWER_UP>` — and a substring
     // search for "UP" would find LOWER_UP, NO-CARRIER and half the operstates
@@ -1947,7 +2079,7 @@ pub fn oc_mirror(link: &str, addr: &str) -> String {
         .split_once('<')
         .and_then(|(_, rest)| rest.split_once('>'))
         .is_some_and(|(flags, _)| flags.split(',').any(|flag| flag == "UP"));
-    let mut text = format!("interface: {TUN_IFACE}\n  backend: openconnect\n");
+    let mut text = format!("interface: {TUN_IFACE}\n  backend: {backend}\n");
     if link.trim().is_empty() {
         text.push_str("  disconnected: the tunnel interface is gone\n");
         return text;
