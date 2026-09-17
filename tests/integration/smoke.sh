@@ -411,15 +411,16 @@ cwdout=$(cd "$HOME/.config" && "$VPN_ZONE" run smoke --profile "$TEST_PROFILE" -
   || fail "рабочий каталог контейнера — не слой, а каталог под ним (chdir до монтирования): «$cwdout»"
 echo "ok: каталог сохранён, и это каталог внутри слоя"
 
-# --- 6а. Тот же контейнер в «прямом интернете» -------------------------------
+# --- 6а. Тот же контейнер без ограничений зоны (unconfined, прежде direct) ----
 # Раньше пикер при выборе direct просто становился командой, и выбранный
-# контейнер молча терялся: программа писала в настоящий дом. Теперь direct идёт
+# контейнер молча терялся: программа писала в настоящий дом. Теперь unconfined идёт
 # через `vpn-zone run`, а user namespace, которого у зоны тут не занять, делает
 # `unshare --map-current-user --keep-caps` (rust/src/launch.rs, entry_argv).
 # Проверяется ровно то, что должно быть: запись ушла в слой, netns — хостовый
-# (direct — это сеть хоста), userns — свой.
-step "vpn-zone run direct --profile $TEST_PROFILE — контейнер без зоны"
-"$VPN_ZONE" run direct --profile "$TEST_PROFILE" -- \
+# (unconfined — это сеть хоста; второй запуск — по прежнему имени direct),
+# userns — свой.
+step "vpn-zone run unconfined --profile $TEST_PROFILE — контейнер без зоны"
+"$VPN_ZONE" run unconfined --profile "$TEST_PROFILE" -- \
   sh -c 'echo marker > "$HOME/.config/vpn-smoke-direct-marker"'
 DIRECT_UPPER="$PROFILES/$TEST_PROFILE/.config/upper/vpn-smoke-direct-marker"
 [ -f "$DIRECT_UPPER" ] || fail "маркера нет в верхнем слое ($DIRECT_UPPER) — контейнер в direct не наложился"
@@ -629,6 +630,8 @@ sed "s|\"runner\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"runner\": \"$VPN_ZONE\"|"
   "$PICK_TOOLS" > "$WORK/pick-tools.json"
 grep -q "\"runner\": \"$VPN_ZONE\"" "$WORK/pick-tools.json" || fail "не подменился runner в манифесте пикера"
 mkdir -p "$STATE/.last"
+# `direct` — прежнее имя unconfined: память, записанная до переименования,
+# обязана читаться как новое имя (и в реестр пишется уже оно).
 printf '%s' direct > "$STATE/.last/$PICKKEY"
 pickout=$(env -u WAYLAND_DISPLAY -u DISPLAY -u VPN_ZONE_ASK -u VPN_ZONE_PROFILE \
   -u VPN_ZONE_CURRENT -u VPN_ZONE_DELEGATED VPN_ZONE_TOOLS="$WORK/pick-tools.json" \
@@ -645,9 +648,9 @@ grep -q 'спросить негде' "$WORK/pick.err" \
   || fail "пикер не записал метку в $STATE/.labels/$PICKKEY"
 # И запуск в direct теперь виден реестру: без записи предупреждение «уже
 # запущена в другой сети» не знало о программах в прямом интернете.
-grep -q '^[0-9]* direct ' "$STATE/.running/__main__/$PICKKEY" 2>/dev/null \
-  || fail "запуск в direct не записан в реестр: $(cat "$STATE/.running/__main__/$PICKKEY" 2>&1)"
-echo "ok: без графики выбран direct, команда запущена через run, метка и реестр записаны"
+grep -q '^[0-9]* unconfined ' "$STATE/.running/__main__/$PICKKEY" 2>/dev/null \
+  || fail "запуск в unconfined не записан в реестр: $(cat "$STATE/.running/__main__/$PICKKEY" 2>&1)"
+echo "ok: без графики выбран unconfined (из памяти с прежним именем direct), команда запущена через run, метка и реестр записаны"
 
 # --- 6г. Доверенный сертификат — только в своём контейнере -----------------
 # docs/CERTIFICATES.ru.md. Всё на УЦ, сгенерированном здесь же: ничего

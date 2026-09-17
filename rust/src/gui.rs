@@ -158,7 +158,7 @@ fn row(tag: &str, text: impl Into<String>) -> (String, String) {
 
 /// The zones a dialog may act on: a directory with a config in it.
 ///
-/// "Прямой интернет" and "Без сети" are deliberately absent — the first is the
+/// `unconfined` and "Без сети" are deliberately absent — the first is the
 /// absence of a zone, the second an empty namespace recreated by the next
 /// launch that asks for it. There is nothing to delete there, and an entry for
 /// them would only confuse. (`docs/GOTCHAS.md` §2)
@@ -166,7 +166,11 @@ fn zones(state: &Path) -> Vec<PathBuf> {
     visible_entries(state)
         .into_iter()
         .filter(|dir| dir.join("config.conf").is_file())
-        .filter(|dir| dir.file_name().is_some_and(|n| n != "offline"))
+        .filter(|dir| {
+            dir.file_name().is_some_and(|n| {
+                n != "offline" && !crate::launch::is_unconfined_name(&n.to_string_lossy())
+            })
+        })
         .collect()
 }
 
@@ -583,7 +587,10 @@ fn containers(tools: &Tools) -> u8 {
         "network" => {
             let mut nets = vec![
                 row("ask", "Спрашивать при запуске (не привязывать)"),
-                row("direct", "Прямой интернет (без VPN)"),
+                row(
+                    crate::picker::UNCONFINED_ROW.0,
+                    crate::picker::UNCONFINED_ROW.1,
+                ),
                 row("offline", "Без сети"),
             ];
             for zone in zones(&tools.state) {
@@ -719,7 +726,7 @@ fn settings(tools: &Tools) -> u8 {
     let setting = |name: &str, fallback: &str| {
         crate::cli::setting(tools, name).map_or_else(|| fallback.to_owned(), |(value, _)| value)
     };
-    let current_net = setting("default", "offline");
+    let current_net = crate::launch::network_name(&setting("default", "offline")).to_owned();
     let current_profile = setting("default-profile", "ask");
     let current_mode = setting("mode", "picker");
     let current_wayland = setting("wayland-sandbox", "on");
@@ -752,7 +759,10 @@ fn settings(tools: &Tools) -> u8 {
                     "offline",
                     "Без сети (безопасный выбор для незнакомой программы)",
                 ),
-                row("direct", "Прямой интернет"),
+                row(
+                    crate::picker::UNCONFINED_ROW.0,
+                    crate::picker::UNCONFINED_ROW.1,
+                ),
             ];
             for dir in zones(&tools.state) {
                 let name = name_of(&dir);

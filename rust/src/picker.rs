@@ -492,13 +492,16 @@ pub fn autostart_plan(
 
 /// Is this network pin still worth honouring?
 ///
-/// `direct` and `offline` are built-in choices rather than zones, so they are
-/// always valid; anything else has to still have a config. A dead pin is
+/// `unconfined` (and its old name `direct`) and `offline` are built-in choices
+/// rather than zones, so they are always valid; anything else has to still
+/// have a config. A dead pin is
 /// removed rather than ignored, or the program would stay bound to a network
 /// that does not exist and fail silently on every launch.
 /// (`docs/GOTCHAS.md` §11)
 pub fn pin_is_valid(pinned: &str, zone_exists: impl Fn(&str) -> bool) -> bool {
-    matches!(pinned, "" | "direct" | "offline") || zone_exists(pinned)
+    matches!(pinned, "" | "offline")
+        || crate::launch::is_unconfined_name(pinned)
+        || zone_exists(pinned)
 }
 
 /// Is this container pin still worth honouring?
@@ -522,6 +525,13 @@ pub fn profile_pin_is_valid(pinned: &str, profile_exists: impl Fn(&str) -> bool)
 /// text shown next to it.
 pub type Row = (String, String);
 
+/// The unconfined choice, said the way it is: nothing of a zone stands
+/// between the program and the host.
+pub const UNCONFINED_ROW: (&str, &str) = (
+    crate::launch::UNCONFINED,
+    "Без ограничений — сеть хоста, без VPN и без изоляции зоны",
+);
+
 fn row(tag: &str, text: impl Into<String>) -> Row {
     (tag.to_owned(), text.into())
 }
@@ -534,7 +544,7 @@ fn row(tag: &str, text: impl Into<String>) -> Row {
 /// — see [`container_label`].
 pub fn net_menu(zones: &[MenuZone], pinned: &str, current_container: &str) -> Vec<Row> {
     let mut nets = vec![
-        row("direct", "Прямой интернет (без VPN)"),
+        row(UNCONFINED_ROW.0, UNCONFINED_ROW.1),
         row("offline", "Без сети"),
     ];
     for zone in zones {
@@ -1087,7 +1097,8 @@ fn autostart(tools: &Tools, key: &str, label: &str, memory: &Memory, cmd: &[OsSt
 fn read_memory(tools: &Tools, key: &str) -> Memory {
     let state = &tools.state;
     let pinned_path = state.join(".pinned").join(key);
-    let mut pinned = read_setting(&pinned_path).unwrap_or_default();
+    let mut pinned =
+        crate::launch::network_name(&read_setting(&pinned_path).unwrap_or_default()).to_owned();
     if !pin_is_valid(&pinned, |zone| {
         state.join(zone).join("config.conf").is_file()
     }) {
@@ -1111,10 +1122,15 @@ fn read_memory(tools: &Tools, key: &str) -> Memory {
         running: running_record(state, key),
         pinned,
         pinned_profile,
-        last: read_setting(&state.join(".last").join(key)).unwrap_or_default(),
+        last: crate::launch::network_name(
+            &read_setting(&state.join(".last").join(key)).unwrap_or_default(),
+        )
+        .to_owned(),
         last_profile: read_setting(&state.join(".lastprofile").join(key)).unwrap_or_default(),
-        fallback: crate::cli::setting(tools, "default")
-            .map_or_else(|| "offline".to_owned(), |(value, _)| value),
+        fallback: crate::cli::setting(tools, "default").map_or_else(
+            || "offline".to_owned(),
+            |(value, _)| crate::launch::network_name(&value).to_owned(),
+        ),
         default_profile: crate::cli::setting(tools, "default-profile")
             .map_or_else(|| "ask".to_owned(), |(value, _)| value),
         ask: std::env::var_os(ENV_ASK).is_some_and(|v| !v.is_empty()),
@@ -1161,6 +1177,10 @@ fn zone_names(state: &Path) -> Vec<String> {
         .filter(|dir| dir.join("config.conf").is_file())
         .filter_map(|dir| dir.file_name().map(|n| n.to_string_lossy().into_owned()))
         .filter(|name| name != "offline")
+        // A zone left with a name that now means the host's network is not
+        // offered: choosing it would launch unconfined. (`vpn-zone doctor`
+        // names it.)
+        .filter(|name| !crate::launch::is_unconfined_name(name))
         .collect()
 }
 
@@ -1502,16 +1522,17 @@ fn launch(
     // sandbox permissions are keyed by. (`docs/GOTCHAS.md` §6, §7)
     std::env::set_var(launch::ENV_APPID, key);
 
-    // "direct" is NOT special here any more, and must not become special again.
+    // "unconfined" (once "direct") is NOT special here any more, and must not
+    // become special again.
     // The picker used to become the command itself for it, and everything
     // `vpn-zone run` adds on the way was lost without a word: the container or
     // sandbox that had just been chosen (or pinned, or set as the default), the
     // compositor restriction and the registry record. "🔒 Своя песочница" with
     // "Прямой интернет" started the program with the whole home in reach, and
     // from inside a LOCKED zone the systemd-run it used went straight past the
-    // lock. `vpn-zone run direct` does all of it — delegation out of a zone
+    // lock. `vpn-zone run unconfined` does all of it — delegation out of a zone
     // (§13) and the lock included. (`docs/GOTCHAS.md` §10)
-    let zone = match zone_choice {
+    let zone = match crate::launch::network_name(zone_choice) {
         "offline" => {
             // A zone with no network is created on demand — there is nothing to
             // keep in a config, it is an empty namespace. (`docs/GOTCHAS.md` §2)
@@ -1591,7 +1612,7 @@ mod tests {
             // What a dialog would preselect is not a consent to go online.
             last: "nl".into(),
             last_profile: "work".into(),
-            fallback: "direct".into(),
+            fallback: "unconfined".into(),
             default_profile: "ask".into(),
             ..Memory::default()
         };
@@ -1838,11 +1859,11 @@ mod tests {
                 default: "offline".to_owned()
             }
         );
-        m.fallback = "direct".to_owned();
+        m.fallback = "unconfined".to_owned();
         assert_eq!(
             net_step(&m),
             NetStep::Ask {
-                default: "direct".to_owned()
+                default: "unconfined".to_owned()
             }
         );
         m.last = "nl".to_owned();
@@ -2031,6 +2052,7 @@ mod tests {
     fn a_pin_is_dropped_only_when_what_it_names_is_gone() {
         assert!(pin_is_valid("", nothing));
         // Built-in choices are not zones and are always valid.
+        assert!(pin_is_valid("unconfined", nothing));
         assert!(pin_is_valid("direct", nothing));
         assert!(pin_is_valid("offline", nothing));
         assert!(pin_is_valid("nl", |z| z == "nl"));
@@ -2060,11 +2082,11 @@ mod tests {
         assert_eq!(
             tags(&menu),
             [
-                "direct",
+                "unconfined",
                 "offline",
                 "de",
                 "nl",
-                "pin:direct",
+                "pin:unconfined",
                 "pin:offline",
                 "pin:de",
                 "pin:nl",

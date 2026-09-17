@@ -538,22 +538,30 @@ fn without_a_graphical_session_the_remembered_choice_is_taken_and_said_out_loud(
 }
 
 #[test]
-fn the_direct_choice_goes_through_run_like_any_other_network() {
-    // "Прямой интернет" used to be the picker becoming the command itself —
+fn the_unconfined_choice_goes_through_run_like_any_other_network() {
+    // "Прямой интернет" (now "Без ограничений") used to be the picker becoming
+    // the command itself —
     // and everything `vpn-zone run` adds on the way (the container, the
     // compositor restriction, the registry record) was lost without a word.
-    let home = Home::new("direct");
-    home.answers(&["direct"]);
+    let home = Home::new("unconfined");
+    home.answers(&["unconfined"]);
     let out = home.run(
         &["--id", "hello", "--", "/bin/sh", "-c", "echo ЗАПУЩЕНО"],
         &[],
     );
     assert!(out.status.success(), "{}", stderr(&out));
+    let menu = &home.asked()[0];
+    assert!(
+        menu.iter()
+            .any(|a| a == "Без ограничений — сеть хоста, без VPN и без изоляции зоны"),
+        "{menu:?}"
+    );
+    assert!(!menu.iter().any(|a| a == "direct"), "{menu:?}");
     assert_eq!(
         home.launched(),
         vec![vec![
             "run",
-            "direct",
+            "unconfined",
             "--",
             "/bin/sh",
             "-c",
@@ -564,19 +572,19 @@ fn the_direct_choice_goes_through_run_like_any_other_network() {
 }
 
 #[test]
-fn a_container_chosen_for_direct_is_not_dropped() {
+fn a_container_chosen_for_unconfined_is_not_dropped() {
     // The loss of isolation this used to be: a sandbox set as the default (or
     // pinned) plus "Прямой интернет" started the program with the whole home.
-    let home = Home::new("direct-sandbox");
+    let home = Home::new("unconfined-sandbox");
     home.write("config/default-profile", "own");
-    home.answers(&["direct"]);
+    home.answers(&["unconfined"]);
     let out = home.run(&pick("firefox"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         home.launched()[0],
         [
             "run",
-            "direct",
+            "unconfined",
             "--sandbox",
             "app-firefox",
             "--",
@@ -585,7 +593,8 @@ fn a_container_chosen_for_direct_is_not_dropped() {
         ]
     );
 
-    let home = Home::new("direct-profile");
+    // A pin written before the rename says `direct`: the same network.
+    let home = Home::new("unconfined-profile");
     home.profile("work");
     home.write("state/.pinned/firefox", "direct");
     home.write("state/.pinnedprofile/firefox", "work");
@@ -597,7 +606,15 @@ fn a_container_chosen_for_direct_is_not_dropped() {
     );
     assert_eq!(
         home.launched()[0],
-        ["run", "direct", "--profile", "work", "--", "firefox", "%u"]
+        [
+            "run",
+            "unconfined",
+            "--profile",
+            "work",
+            "--",
+            "firefox",
+            "%u"
+        ]
     );
 }
 
@@ -859,6 +876,6 @@ fn an_assigned_autostart_starts_where_it_was_put_and_says_nothing() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         home.launched()[0],
-        ["run", "direct", "--profile", "work", "--", "telegram"]
+        ["run", "unconfined", "--profile", "work", "--", "telegram"]
     );
 }

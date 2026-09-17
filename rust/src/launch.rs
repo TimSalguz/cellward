@@ -62,9 +62,32 @@ pub const ENV_DRYRUN: &str = "VPN_ZONE_DRYRUN";
 /// Marker file of a locked ("no escape") zone.
 pub const NO_ESCAPE: &str = "no-escape";
 
-/// The built-in "network" that is the host's own: no zone, no tunnel. Not a
-/// directory in the state dir and never one — `vpn-zone add` refuses the name.
-pub const DIRECT: &str = "direct";
+/// The built-in "network" that is the host's own: no zone, no tunnel, and none
+/// of a zone's containment — the host's resolver, its session bus, its
+/// `systemd --user`, its X server. Named for exactly that, so that it is never
+/// taken for a harmless default. Not a directory in the state dir and never
+/// one: `vpn-zone add` refuses the name, and a launch refuses it while a zone
+/// of that name survives from before the name was taken.
+pub const UNCONFINED: &str = "unconfined";
+/// Its name until 2026-09. Accepted wherever a network name comes in — the
+/// command line, pins, settings, containers, Nix, the registry — and never
+/// written again.
+pub const UNCONFINED_ALIAS: &str = "direct";
+
+/// A network name as the rest of the code knows it: the old name of
+/// [`UNCONFINED`] becomes the new one, everything else stays.
+pub fn network_name(name: &str) -> &str {
+    if name == UNCONFINED_ALIAS {
+        UNCONFINED
+    } else {
+        name
+    }
+}
+
+/// Names a zone directory cannot be entered by: they mean [`UNCONFINED`].
+pub fn is_unconfined_name(name: &str) -> bool {
+    matches!(name, UNCONFINED | UNCONFINED_ALIAS)
+}
 /// The other built-in choice: a zone with loopback only, created on demand.
 pub const OFFLINE: &str = "offline";
 
@@ -196,8 +219,12 @@ impl Selection {
         let zone = rest
             .next()
             .filter(|z| !z.is_empty())
-            .ok_or(ArgError::MissingZone)?
-            .clone();
+            .ok_or(ArgError::MissingZone)?;
+        let zone = if zone == UNCONFINED_ALIAS {
+            OsString::from(UNCONFINED)
+        } else {
+            zone.clone()
+        };
         let mut rest: Vec<OsString> = rest.cloned().collect();
 
         let container = match rest.first().map(OsString::as_os_str) {
@@ -463,6 +490,23 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     let zone = selection.zone.clone();
     let zone_name = zone.to_string_lossy().into_owned();
 
+    // A zone that was called `unconfined` before the name meant the host's
+    // network: a launch "into" it would now leave its VPN behind without a
+    // word. Refused until the zone is renamed.
+    if zone == UNCONFINED && tools.state.join(UNCONFINED).is_dir() {
+        refuse(
+            tools,
+            &format!(
+                "«{UNCONFINED}» теперь значит «без ограничений» (сеть хоста, без VPN и изоляции зоны), \
+                 а у тебя есть зона с таким именем — запуск остановлен, чтобы не уйти мимо её VPN. \
+                 Переименуй зону: vpn-zone down {UNCONFINED}, переименуй каталог \
+                 {} и снова vpn-zone up",
+                tools.state.join(UNCONFINED).display()
+            ),
+        );
+        return 1;
+    }
+
     // --- 1a. ONE IDENTITY, ONE NETWORK ---
     // Before anything is created: a container bound to a network runs in that
     // network only, and a container never runs in two networks at once
@@ -519,8 +563,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     let container_x11 = x11_selector
         .and_then(|selector| crate::container::load(tools, &selector))
         .is_some_and(|c| c.x11.value)
-        || (zone != DIRECT && crate::x11::zone_setting(&tools.state, &tools.config, &zone_name).0);
-    if container_x11 && zone != DIRECT && selection.sandbox == Sandbox::None && !cmd.is_empty() {
+        || (zone != UNCONFINED
+            && crate::x11::zone_setting(&tools.state, &tools.config, &zone_name).0);
+    if container_x11 && zone != UNCONFINED && selection.sandbox == Sandbox::None && !cmd.is_empty()
+    {
         let mut wrapped: Vec<OsString> = vec![
             tools.core.clone().into(),
             "x11-run".into(),
@@ -674,9 +720,9 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     }
 
     // --- 5. THE ZONE ITSELF ---
-    let network = if zone == DIRECT {
+    let network = if zone == UNCONFINED {
         // Nothing to start and nothing to enter: the host's own network.
-        Network::Direct
+        Network::Unconfined
     } else {
         let mut pid = zone_pid(&tools.state, &zone);
         if pid.is_none() {
@@ -738,20 +784,20 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // The mark descendants are recognised by: a program started in a zone that
     // tries to open something else has that launch delegated outwards (step 1).
     //
-    // A `direct` launch is marked only when it ends up in a namespace of its
+    // An unconfined launch is marked only when it ends up in a namespace of its
     // own — a container's user namespace or a sandbox. From there `nsenter`
     // into a zone fails exactly as it does from inside a zone, so the
-    // descendants have to delegate too. A plain `direct` launch is an ordinary
+    // descendants have to delegate too. A plain unconfined launch is an ordinary
     // host process and must stay unmarked, or everything it starts would take
     // a detour through systemd for nothing.
     let namespaced = !container.dir.as_os_str().is_empty() || selection.sandbox != Sandbox::None;
-    if network != Network::Direct || namespaced {
+    if network != Network::Unconfined || namespaced {
         std::env::set_var(ENV_CURRENT, &zone);
     }
     // No host X server in a zone, and no name of one either: toolkits that see
     // DISPLAY try X first and fail instead of using Wayland. A container with
     // the permission gets its own display from x11-run.
-    if network != Network::Direct {
+    if network != Network::Unconfined {
         std::env::remove_var("DISPLAY");
         std::env::remove_var("XAUTHORITY");
     }
@@ -762,7 +808,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| tools.home.clone());
     // No command at all is a shell inside the zone — what `nsenter` used to
     // start by itself, before `profile-run` stood between it and the program.
-    let cmd = if cmd.is_empty() && network != Network::Direct {
+    let cmd = if cmd.is_empty() && network != Network::Unconfined {
         vec![std::env::var_os("SHELL")
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| OsString::from("/bin/sh"))]
@@ -808,7 +854,7 @@ pub enum Network {
     /// targets.
     Zone(i32),
     /// The host's own network: there is no namespace to enter.
-    Direct,
+    Unconfined,
 }
 
 /// Everything the last command line of a launch depends on.
@@ -894,7 +940,7 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
                 ]);
             }
         }
-        Network::Direct if container => {
+        Network::Unconfined if container => {
             exec.push(entry.unshare.into());
             exec.extend([
                 "--user".into(),
@@ -906,7 +952,7 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
                 "--".into(),
             ]);
         }
-        Network::Direct => {}
+        Network::Unconfined => {}
     }
     if entered {
         exec.push(entry.core.into());
@@ -1217,6 +1263,16 @@ mod tests {
     }
 
     #[test]
+    fn the_old_name_of_unconfined_is_read_as_it() {
+        let s = Selection::parse(&argv(&["direct", "--", "firefox"])).unwrap();
+        assert_eq!(s.zone, os(UNCONFINED));
+        assert_eq!(network_name("direct"), "unconfined");
+        assert_eq!(network_name("nl"), "nl");
+        assert!(is_unconfined_name("direct") && is_unconfined_name("unconfined"));
+        assert!(!is_unconfined_name("offline"));
+    }
+
+    #[test]
     fn the_separator_is_optional_and_only_the_first_one_counts() {
         assert_eq!(
             Selection::parse(&argv(&["nl", "firefox"])).unwrap().cmd,
@@ -1497,7 +1553,7 @@ mod tests {
             core: Path::new("/t/core"),
             zone: OsStr::new(match network {
                 Network::Zone(_) => "nl",
-                Network::Direct => DIRECT,
+                Network::Unconfined => UNCONFINED,
             }),
             network,
             dir,
@@ -1557,7 +1613,7 @@ mod tests {
         );
 
         // In direct the same takes a user namespace of its own.
-        let mut e = entry(Network::Direct, Path::new(""), false);
+        let mut e = entry(Network::Unconfined, Path::new(""), false);
         e.trust = Some(Path::new("/p/work/trust"));
         let line = entry_argv(&e, argv(&["firefox"]));
         assert_eq!(line[0], os("/t/unshare"));
@@ -1648,10 +1704,17 @@ mod tests {
         // the working directory survives an exec by itself.
         let cmd = argv(&["/t/core", "wl-sandbox", "firefox", "--", "firefox"]);
         assert_eq!(
-            entry_argv(&entry(Network::Direct, Path::new(""), false), cmd.clone()),
+            entry_argv(
+                &entry(Network::Unconfined, Path::new(""), false),
+                cmd.clone()
+            ),
             cmd
         );
-        assert!(entry_argv(&entry(Network::Direct, Path::new(""), false), Vec::new()).is_empty());
+        assert!(entry_argv(
+            &entry(Network::Unconfined, Path::new(""), false),
+            Vec::new()
+        )
+        .is_empty());
     }
 
     #[test]
@@ -1659,7 +1722,7 @@ mod tests {
         // The container must not be dropped just because there is no zone to
         // borrow a user namespace from — that was a silent loss of isolation.
         let line = entry_argv(
-            &entry(Network::Direct, Path::new("/tmp/vpn-profile-x"), true),
+            &entry(Network::Unconfined, Path::new("/tmp/vpn-profile-x"), true),
             argv(&["firefox"]),
         );
         assert_eq!(
@@ -1678,14 +1741,17 @@ mod tests {
                 "--cwd",
                 "/home/u/src",
                 "/tmp/vpn-profile-x",
-                "direct",
+                "unconfined",
                 "1",
                 "/r/.running/work",
                 "--",
                 "firefox"
             ])
         );
-        assert!(!line.contains(&os("--net")), "direct is the host's network");
+        assert!(
+            !line.contains(&os("--net")),
+            "unconfined is the host's network"
+        );
         assert!(!line.contains(&os("/t/nsenter")));
     }
 }

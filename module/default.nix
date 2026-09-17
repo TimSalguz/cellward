@@ -48,7 +48,7 @@
 #
 # Незнакомая программа по умолчанию предлагает вариант «Без сети» — это и есть
 # политика «интернет не выдаётся, пока его явно не дали». Поменять:
-# `vpn-zone default direct`. Кому больше нравится прежний вид — «Firefox (nl)»
+# `vpn-zone default unconfined`. Кому больше нравится прежний вид — «Firefox (nl)»
 # отдельным ярлыком на каждую зону — включается `vpn-zone mode per-zone`
 # (или both, чтобы работало и то, и другое).
 #
@@ -492,7 +492,7 @@ let
         type = lib.types.nullOr lib.types.str;
         default = null;
         example = "offline";
-        description = "Сеть контейнера: имя зоны, direct или offline. Запуск в другой сети — отказ. null — сеть не задана в Nix и меняется локально (`vpn-zone container set`).";
+        description = "Сеть контейнера: имя зоны, unconfined (без ограничений: сеть хоста, без VPN и без изоляции зоны; прежнее имя direct тоже принимается) или offline. Запуск в другой сети — отказ. null — сеть не задана в Nix и меняется локально (`vpn-zone container set`).";
       };
       apps = lib.mkOption {
         type = lib.types.listOf lib.types.str;
@@ -538,7 +538,7 @@ in
         type = lib.types.nullOr lib.types.str;
         default = null;
         example = "offline";
-        description = "Сеть, которую пикер предлагает незнакомой программе: offline, direct или имя зоны. null — не задавать из Nix (`vpn-zone default`).";
+        description = "Сеть, которую пикер предлагает незнакомой программе: offline, unconfined (без ограничений: сеть хоста, без VPN и без изоляции зоны; прежнее имя direct тоже принимается) или имя зоны. null — не задавать из Nix (`vpn-zone default`).";
       };
       container = lib.mkOption {
         type = lib.types.nullOr lib.types.str;

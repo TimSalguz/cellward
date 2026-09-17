@@ -10,7 +10,7 @@ English: [CONTAINERS.md](CONTAINERS.md) · Связанные документы
 ## 1. Коротко
 
 Сегодня запуск — это три независимых выбора на каждый клик: сеть (зона,
-direct, offline), контейнер данных (основной, профиль-оверлей, одноразовый) и
+unconfined, offline), контейнер данных (основной, профиль-оверлей, одноразовый) и
 песочница файловой системы (нет, своя, именованная, разовая). Дизайн сводит
 три оси в одну сущность — **контейнер**:
 
@@ -45,7 +45,7 @@ direct, offline), контейнер данных (основной, профи�
 | понятие | где живёт | что изолирует |
 |---|---|---|
 | зона | `~/.local/state/vpn-zones/<зона>/` + `vpn-zone@<зона>` | сеть (в app-ns только `lo` и туннель); WireGuard, AmneziaWG или OpenConnect |
-| `direct` | нигде | ничего (сеть хоста) |
+| `unconfined` | нигде | ничего (сеть хоста) |
 | `offline` | зона с маркером, создаётся по требованию | всё сетевое, включая резолверы хоста |
 | контейнер-оверлей («профиль») | `~/.local/state/vpn-profiles/<имя>/` | XDG-каталоги (`.config`, `.local/share`, `.cache`, `.mozilla`, `.pki`) |
 | одноразовый контейнер | `/tmp/vpn-profile-*` | то же, стирается за последним жильцом |
@@ -105,7 +105,7 @@ direct, offline), контейнер данных (основной, профи�
 - **I4. Все слои на любой дороге.** Сеть, дом, разрешения, доверие и
   ограничение композитора накладывает один путь кода (`vpn-zone run` →
   `entry_argv` → `profile-run`) для любого вида сети (сделано для зон,
-  `direct` и `offline`).
+  `unconfined` и `offline`).
 - **I5. Незнакомое — без сети.** Программа без назначения стартует без сети,
   пока её не дали ([GOTCHAS](GOTCHAS.md) §2), в своём доме
   (`defaults.container = own`).
@@ -121,7 +121,7 @@ direct, offline), контейнер данных (основной, профи�
 | зона: OpenConnect | клиент в аплинке, его tun переезжает в app-ns (сделано) | нет |
 | зона: другой клиент (sing-box, OpenVPN, GUI-клиент) | та же схема, M4 | нет |
 | через интерфейс хоста | **сделано**: без аплинка — pasta прямо в namespace приложений, её интерфейс называется `awg0`, каждый сокет привязан к этому интерфейсу хоста (`--outbound-if4/-if6`), проброса портов нет; конфиг `[HostInterface]` — второй аплинк, модем, VPN, поднятый системой | нет |
-| `direct` | сеть хоста, без namespace (сделано) | нет |
+| `unconfined` | сеть хоста, без namespace (сделано) | нет |
 | `offline` | только loopback (сделано) | нет |
 | **сам** интерфейс хоста внутри контейнера | перенос настоящего линка в чужой netns требует `CAP_NET_ADMIN` в namespace хоста | **да**: маленький системный помощник (опция NixOS-модуля), никогда не по умолчанию |
 
@@ -192,7 +192,7 @@ direct, offline), контейнер данных (основной, профи�
 ### 3.6 Устройство одного запуска (порядок — это и есть спецификация)
 
 ```
-[nsenter -U -n -m -t <зона>]  или  [unshare -U --map-current-user --keep-caps]   (direct)
+[nsenter -U -n -m -t <зона>]  или  [unshare -U --map-current-user --keep-caps]   (unconfined)
   └─ unshare --mount --propagation private           когда что-то монтируется
       └─ vpn-zone-core profile-run --cwd <каталог> …   (сделано)
            1. дом: слоты оверлея или бинды для разрешения.paths
@@ -420,7 +420,7 @@ programs.vpn-zones = {
 
   launcher.mode = "picker";              # picker | per-zone (устарел) | both (устарел) | off
   defaults = {
-    network = "offline";                 # offline | direct | <сеть>
+    network = "offline";                 # offline | unconfined | <сеть>
     container = "own";                   # own | ask | main | <контейнер>
   };
   compositorRestriction.enable = true;
@@ -432,7 +432,7 @@ programs.vpn-zones = {
 
   containers.work = {
     home = "private";                    # private | overlay
-    network = "nl";                      # <зона> | <сеть> | direct | offline | "ask"
+    network = "nl";                      # <зона> | <сеть> | unconfined | offline | "ask"
     routes = [ ];                        # например [ "192.168.1.0/24" ] — явные дыры
     apps = [ "firefox" "org.telegram.desktop" ];
     permissions = {
@@ -487,11 +487,15 @@ programs.vpn-zones = {
     "hermetic": { "value": false, "source": "default" }
   },
   "networks": [
-    { "name": "nl", "kind": "wireguard", "source": "local",
+    { "name": "unconfined", "kind": "unconfined", "aliases": ["direct"],
+      "source": "default", "up": true, "locked": false, "tunnel_alive": null,
+      "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,
+      "interface": null },
+    { "name": "nl", "kind": "wireguard", "aliases": [], "source": "local",
       "up": true, "locked": false, "tunnel_alive": true,
       "handshake_age_s": 42, "rx_bytes": 1048576, "tx_bytes": 524288,
       "interface": null },
-    { "name": "lan", "kind": "host-interface", "source": "local",
+    { "name": "lan", "kind": "host-interface", "aliases": [], "source": "local",
       "up": false, "locked": false, "tunnel_alive": null,
       "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,
       "interface": "enp4s0" }
@@ -525,10 +529,16 @@ JSON пишется руками, как руками читается мани�
   своего дома может быть одно имя (`work` и `sb:work` — два разных контейнера).
   Любая ссылка на контейнер в документе — `apps[].container.value` — это
   селектор, и сопоставляется он с `containers[].selector`;
-- сеть — по `name`; `networks[].kind` — одно из `direct`, `offline`,
+- сеть — по `name`; `networks[].kind` — одно из `unconfined`, `offline`,
   `wireguard`, `openconnect`, `host-interface`, а `interface` — интерфейс хоста
   для `host-interface` и `null` для всех остальных; сеть `host-interface`
   этим проектом НЕ шифруется;
+- `networks[].aliases` — другие имена, по которым сеть читается. Такое одно:
+  `direct` у `unconfined`, её имя до 2026-09. Оно принимается в CLI, в Nix
+  (`defaults.network`, `containers.<n>.network`), в закреплениях и настройках,
+  записанных до переименования, и нигде в документе не встречается как
+  значение — все `network.value` и `apps[].network.value` говорят
+  `unconfined`;
 - программа — по ключу ярлыка (`apps[].id`, `containers[].apps[].value`), это
   ключ без потерь из `docs/LAUNCHERS.ru.md` §3.4.
 
@@ -553,7 +563,7 @@ OpenConnect, — принадлежит uid 0 зоны, началу подчи�
   и называется везде, где показана (`host-interface`).
 - **Дополнительные маршруты.** Каждый — дыра по определению: явная, по
   префиксу, выключена по умолчанию, видна в любом отображении и в `doctor`.
-- **Контейнеры в `direct`** (сделано). Сетевого namespace нет — сеть и резолверы
+- **Контейнеры в `unconfined`** (сделано). Сетевого namespace нет — сеть и резолверы
   хоста, и так и названо. User namespace прав над netns хоста не даёт.
 - **Mount namespace запуска, выдача путей.** Сеть не меняется. Выданный
   каталог — канал данных между контейнером и всем, что видит тот же каталог:

@@ -235,10 +235,11 @@ fn add_refuses_a_bad_name_and_a_file_that_is_not_a_config() {
     );
     assert!(!home.state().join("nl").exists(), "зона создана из мусора");
 
-    // The two built-in choices of the picker are not names a zone can take: a
-    // zone called "direct" would be shadowed by the host's network in every
-    // launch, and "offline" is the directory the picker creates by itself.
-    for reserved in ["direct", "offline"] {
+    // The built-in choices of the picker are not names a zone can take: a
+    // zone called "unconfined" (or "direct", its old name) would be shadowed
+    // by the host's network in every launch, and "offline" is the directory
+    // the picker creates by itself.
+    for reserved in ["unconfined", "direct", "offline"] {
         let out = home.run(&["add", reserved, conf.to_str().unwrap()]);
         assert_eq!(out.status.code(), Some(1), "{reserved}");
         assert!(stderr(&out).contains("встроенный"), "{}", stderr(&out));
@@ -327,13 +328,13 @@ fn a_launch_is_wrapped_in_the_compositor_restriction_by_default() {
 }
 
 #[test]
-fn a_direct_launch_starts_no_zone_and_loses_nothing_on_the_way() {
-    // "direct" is the host's network: nothing to start and nothing to enter.
+fn an_unconfined_launch_starts_no_zone_and_loses_nothing_on_the_way() {
+    // "unconfined" is the host's network: nothing to start and nothing to enter.
     // But the compositor restriction and the container still apply — the
     // picker used to become the command itself and dropped both.
-    let home = Home::new("direct");
+    let home = Home::new("unconfined");
     let out = home.run_with(
-        &["run", "direct", "--", "firefox"],
+        &["run", "unconfined", "--", "firefox"],
         &[("VPN_ZONE_DRYRUN", "1")],
     );
     assert!(out.status.success(), "{}", stderr(&out));
@@ -341,9 +342,13 @@ fn a_direct_launch_starts_no_zone_and_loses_nothing_on_the_way() {
     // waited ten seconds for a zone that does not exist.
     assert!(!stderr(&out).contains("systemctl"), "{}", stderr(&out));
     let line = stdout(&out);
-    assert!(line.starts_with("зона direct, профиль основной:"), "{line}");
+    assert!(
+        line.starts_with("зона unconfined, профиль основной:"),
+        "{line}"
+    );
     assert!(line.contains("wl-sandbox firefox --"), "{line}");
 
+    // The old name is the same network.
     fs::create_dir_all(home.root.join("profiles/work")).unwrap();
     let out = home.run_with(
         &["run", "direct", "--profile", "work", "--", "firefox"],
@@ -351,10 +356,28 @@ fn a_direct_launch_starts_no_zone_and_loses_nothing_on_the_way() {
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
-        stdout(&out).starts_with("зона direct, профиль work:"),
+        stdout(&out).starts_with("зона unconfined, профиль work:"),
         "{}",
         stdout(&out)
     );
+}
+
+#[test]
+fn a_zone_left_with_the_name_unconfined_is_refused_not_left_behind() {
+    // Before the name was taken it could be a VPN zone: a launch "into" it now
+    // would be the host's network, its tunnel silently skipped.
+    let home = Home::new("unconfined-zone");
+    home.zone_is_up("unconfined");
+    fs::write(home.state().join("unconfined/config.conf"), "[Interface]\n").unwrap();
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+    for name in ["unconfined", "direct"] {
+        let out = home.run_with(&["run", name, "--", "firefox"], &dry);
+        assert_eq!(out.status.code(), Some(1), "{name}");
+        assert!(stderr(&out).contains("Переименуй"), "{}", stderr(&out));
+        assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+    }
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert_eq!(json.matches("\"name\":\"unconfined\"").count(), 1, "{json}");
 }
 
 #[test]
@@ -647,7 +670,7 @@ fn a_container_bound_to_a_network_runs_there_only() {
         stderr(&out)
     );
     assert!(
-        stderr(&out).contains("vpn-zone container set work network direct"),
+        stderr(&out).contains("vpn-zone container set work network unconfined"),
         "{}",
         stderr(&out)
     );
@@ -734,7 +757,7 @@ fn what_nix_declares_is_shown_as_such_and_not_changed_here() {
         "{json}"
     );
     assert!(
-        json.contains("\"name\":\"direct\",\"kind\":\"direct\""),
+        json.contains("\"name\":\"unconfined\",\"kind\":\"unconfined\",\"aliases\":[\"direct\"]"),
         "{json}"
     );
     // A local assignment of another program is local.
@@ -1050,7 +1073,7 @@ fn a_host_interface_zone_is_added_and_reported_as_such() {
         "{json}"
     );
     assert!(
-        json.contains("\"name\":\"direct\",\"kind\":\"direct\"")
+        json.contains("\"name\":\"unconfined\",\"kind\":\"unconfined\"")
             && json.contains("\"interface\":null"),
         "{json}"
     );
