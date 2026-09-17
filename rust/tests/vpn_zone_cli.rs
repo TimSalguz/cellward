@@ -458,6 +458,62 @@ fn containers_and_sandboxes_are_created_listed_and_removed() {
 }
 
 #[test]
+fn two_entries_for_one_binary_see_each_other() {
+    // A Steam game's shortcut (id PEAK) and Steam itself, firefox and its
+    // private-window entry: different ids, one single-instance binary. The
+    // second launch hands its work to the process that is already up, in ITS
+    // network — and the warning used to stay silent.
+    let home = Home::new("by-binary");
+    home.zone_is_up("nl");
+    let index = home.state().join(".running/__main__/.by-binary");
+    fs::create_dir_all(&index).unwrap();
+    fs::write(index.join("steam"), format!("{} de \n", std::process::id())).unwrap();
+
+    let out = home.run_with(
+        &["run", "nl", "--", "steam", "steam://rungameid/1"],
+        &[("VPN_ZONE_DRYRUN", "1"), ("VPN_ZONE_APPID", "PEAK")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    // Without a graphical session the warning goes to stderr — and for a link
+    // it says what really happens to a link.
+    let err = stderr(&out);
+    assert!(err.contains("уже запущена в сети «de»"), "{err}");
+    assert!(err.contains("ссылку ты открываешь в «nl»"), "{err}");
+
+    // A plain launch of another id of the same binary gets the ordinary text.
+    fs::write(
+        index.join("firefox"),
+        format!("{} de \n", std::process::id()),
+    )
+    .unwrap();
+    let out = home.run_with(
+        &["run", "nl", "--", "firefox", "--private-window"],
+        &[
+            ("VPN_ZONE_DRYRUN", "1"),
+            ("VPN_ZONE_APPID", "firefox-private"),
+        ],
+    );
+    let err = stderr(&out);
+    assert!(err.contains("уже запущена в сети «de»"), "{err}");
+    assert!(err.contains("окно ОТКРОЕТСЯ"), "{err}");
+
+    // The same binary in the SAME network is no conflict at all.
+    fs::write(
+        index.join("firefox"),
+        format!("{} nl \n", std::process::id()),
+    )
+    .unwrap();
+    let out = home.run_with(
+        &["run", "nl", "--", "firefox"],
+        &[
+            ("VPN_ZONE_DRYRUN", "1"),
+            ("VPN_ZONE_APPID", "firefox-private"),
+        ],
+    );
+    assert!(!stderr(&out).contains("уже запущена"), "{}", stderr(&out));
+}
+
+#[test]
 fn the_registry_keeps_its_three_field_shape() {
     let home = Home::new("registry");
     home.zone_is_up("nl");

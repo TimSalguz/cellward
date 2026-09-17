@@ -46,6 +46,17 @@ use std::path::{Path, PathBuf};
 /// so does everything here.
 pub const LOCK: &str = ".lock";
 
+/// A subdirectory of every container's registry directory: the same records,
+/// filed under the program's BINARY name rather than the launcher's id.
+///
+/// Answers one question only — "is this binary already running in another
+/// network?" — because two launcher entries for one single-instance program
+/// (a Steam game and Steam, firefox and its private-window entry) have
+/// different ids and used to be invisible to each other. A dot-directory on
+/// purpose: every walk of the registry skips dot-names, so none of the four
+/// readers mistakes it for a program. `vpn-zone gc` sweeps it too.
+pub const BY_BINARY: &str = ".by-binary";
+
 /// The container key of "no container at all". A real profile name can never
 /// collide with it: `profile create` refuses `/`, spaces and a leading dot or
 /// dash, and nobody would name a container `__main__` by accident.
@@ -238,7 +249,7 @@ where
         let Ok(_guard) = lock(&dir) else {
             continue;
         };
-        for file in files(&dir) {
+        for file in files(&dir).into_iter().chain(files(&dir.join(BY_BINARY))) {
             let Ok(text) = fs::read_to_string(&file) else {
                 continue;
             };
@@ -472,6 +483,26 @@ mod tests {
         assert!(running.join(".hidden/x").exists());
         // Nothing left to do the second time round.
         assert_eq!(sweep_dead(&running, &alive(&[2])), 0);
+    }
+
+    #[test]
+    fn the_binary_index_is_swept_and_never_read_as_a_program() {
+        let dir = Dir::new("by-binary");
+        let running = dir.0.join("running");
+        let main = running.join("__main__");
+        fs::create_dir_all(main.join(BY_BINARY)).unwrap();
+        fs::write(main.join("PEAK"), "1 nl\n").unwrap();
+        fs::write(main.join(BY_BINARY).join("steam"), "1 nl\n").unwrap();
+        fs::write(main.join(BY_BINARY).join("firefox"), "2 de\n").unwrap();
+
+        // Not a program of the container: the walks skip the dot-directory.
+        assert_eq!(files(&main), vec![main.join("PEAK")]);
+        assert_eq!(live_zone(&main, &alive(&[1, 2])).as_deref(), Some("nl"));
+
+        // gc takes the dead records from the index as well.
+        assert_eq!(sweep_dead(&running, &alive(&[1])), 1);
+        assert!(main.join(BY_BINARY).join("steam").exists());
+        assert!(!main.join(BY_BINARY).join("firefox").exists());
     }
 
     #[test]

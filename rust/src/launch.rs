@@ -112,6 +112,13 @@ pub const WAYLAND_ALLOWED: [&str; 27] = [
 /// reads under time pressure.
 const CONFLICT_MESSAGE: &str = "«{app}» уже запущена в сети «{busy}», а ты открываешь её в «{zone}».\n\nОсторожно: у программ с одним процессом на профиль (браузеры, Telegram, Discord) окно ОТКРОЕТСЯ и будет выглядеть обычно — но нарисует его старый процесс, и трафик в нём пойдёт через «{busy}», а не через «{zone}». Со стороны неотличимо, поэтому и предупреждаем.\n\nЕсли у программы каждое окно своё (терминалы, редакторы), всё в порядке — отметь «не спрашивать снова».";
 
+/// The same warning when what is being handed over is a LINK (`steam://…`,
+/// `tg://…`, `https://…`). A single-instance program hands it to the process
+/// that is already up, so the link — or the game a Steam shortcut starts — is
+/// opened in THAT process's network; "the window will open" is the wrong
+/// picture for it. (`docs/GOTCHAS.md` §5)
+const CONFLICT_URL_MESSAGE: &str = "«{app}» уже запущена в сети «{busy}», а ссылку ты открываешь в «{zone}».\n\nОсторожно: ссылку, скорее всего, примет уже запущенный процесс — и откроет её в сети «{busy}», а не «{zone}». Так ведут себя браузеры, мессенджеры и Steam: игра с ярлыка запускается в сети клиента. Со стороны неотличимо, поэтому и предупреждаем.\n\nЕсли программа на каждую ссылку запускает свой процесс, всё в порядке — отметь «не спрашивать снова».";
+
 /// What the user asked for, before anything was created or checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
@@ -311,6 +318,17 @@ pub fn app_word(cmd: &[OsString]) -> Option<&OsStr> {
         return Some(basename(word));
     }
     None
+}
+
+/// Does this command hand a LINK to its program (`steam://rungameid/…`,
+/// `tg://resolve?…`, `https://…`)?
+///
+/// Only the warning text depends on it, so a rough test is the right one: any
+/// argument with `://` in it that is not the program itself.
+pub fn hands_over_a_link(cmd: &[OsString]) -> bool {
+    cmd.iter()
+        .skip(1)
+        .any(|arg| arg.as_bytes().windows(3).any(|w| w == b"://"))
 }
 
 /// `[A-Za-z_]*=*` as a shell glob: a name-looking word with an equals sign
@@ -526,13 +544,32 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     });
     let regdir = tools.state.join(".running").join(container.key.as_os_str());
     let reg = regdir.join(&appname);
+    // The same program under its BINARY name as well. The key above is the
+    // launcher's id when there is one, and two ids for one single-instance
+    // binary did not see each other: a Steam game's shortcut and Steam itself,
+    // firefox and a firefox private-window entry, two Telegram variants. The
+    // second launch handed its work to the process already up — in ITS network
+    // — and the warning stayed silent. The binary index answers only "is it
+    // running elsewhere"; which network a click on a running program goes to is
+    // still decided by the id, because a multi-window program (a terminal) must
+    // not be dragged into another's network by name. (`docs/GOTCHAS.md` §5)
+    let binary = sanitize_app_id(app_word(&selection.cmd).unwrap_or(OsStr::new("")));
+    let binreg = (!binary.is_empty() && binary != appname)
+        .then(|| regdir.join(registry::BY_BINARY).join(&binary));
     let dryrun = env_nonempty(ENV_DRYRUN).is_some();
 
     let busy = match registry::lock(&regdir) {
-        Ok(_guard) => registry::rewrite_live(&reg, &zone_name, proc_is_alive).unwrap_or_else(|e| {
-            eprintln!("реестр запусков {}: {e}", reg.display());
-            None
-        }),
+        Ok(_guard) => {
+            let live = |file: &Path| {
+                registry::rewrite_live(file, &zone_name, proc_is_alive).unwrap_or_else(|e| {
+                    eprintln!("реестр запусков {}: {e}", file.display());
+                    None
+                })
+            };
+            let by_id = live(reg.as_path());
+            let by_binary = binreg.as_deref().and_then(live);
+            by_id.or(by_binary)
+        }
         Err(e) => {
             eprintln!("реестр запусков {}: {e}", regdir.display());
             None
@@ -547,7 +584,12 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         let shown = label
             .clone()
             .unwrap_or_else(|| appname.to_string_lossy().into_owned());
-        let message = CONFLICT_MESSAGE
+        let template = if hands_over_a_link(&selection.cmd) {
+            CONFLICT_URL_MESSAGE
+        } else {
+            CONFLICT_MESSAGE
+        };
+        let message = template
             .replace("{app}", &shown)
             .replace("{busy}", &busy)
             .replace("{zone}", &zone_name);
@@ -625,13 +667,15 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     };
     match registry::lock(&regdir) {
         Ok(_guard) => {
-            if let Err(e) = registry::append(
-                &reg,
-                std::process::id() as i32,
-                &zone_name,
-                &selector.to_string_lossy(),
-            ) {
-                eprintln!("реестр запусков {}: {e}", reg.display());
+            for file in std::iter::once(&reg).chain(binreg.as_ref()) {
+                if let Err(e) = registry::append(
+                    file,
+                    std::process::id() as i32,
+                    &zone_name,
+                    &selector.to_string_lossy(),
+                ) {
+                    eprintln!("реестр запусков {}: {e}", file.display());
+                }
             }
         }
         Err(e) => eprintln!("реестр запусков {}: {e}", regdir.display()),
@@ -1253,6 +1297,19 @@ mod tests {
             );
         }
         assert!(!WAYLAND_ALLOWED.contains(&"firefox"));
+    }
+
+    #[test]
+    fn a_link_is_told_apart_from_a_file_argument() {
+        assert!(hands_over_a_link(&argv(&["steam", "steam://rungameid/1"])));
+        assert!(hands_over_a_link(&argv(&[
+            "firefox",
+            "https://example.org"
+        ])));
+        assert!(!hands_over_a_link(&argv(&["firefox", "/home/u/page.html"])));
+        assert!(!hands_over_a_link(&argv(&["firefox"])));
+        // The program word itself does not count.
+        assert!(!hands_over_a_link(&argv(&["x://odd"])));
     }
 
     fn entry<'a>(network: Network, dir: &'a Path, ephemeral: bool) -> Entry<'a> {

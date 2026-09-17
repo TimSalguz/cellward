@@ -39,6 +39,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `$HOME` and `/` when that directory does not exist in the zone's mount tree.
   `profile-run` accepts the new optional leading `--cwd`; older command lines
   parse as before.
+- **Two launcher entries for one single-instance binary did not see each
+  other** in the "already running in another network" check: a Steam game's
+  shortcut and Steam, firefox and its private-window entry, two Telegram
+  variants. The registry key is the launcher id, so the second launch handed
+  its work to the process already up — in that process's network — without a
+  word. Every record is now also filed under the binary name
+  (`.running/<container>/.by-binary/<binary>`, swept by `gc`), and the warning
+  checks both. Routing a click on a running program still goes by the id only.
+  When what is handed over is a link (`steam://…`, `https://…`) the warning
+  says so, instead of promising that "the window will open".
 
 ### Fixed (DNS leak: the host's resolvers were reachable from inside a zone)
 - **Every name looked up inside a zone could be resolved by the HOST's
