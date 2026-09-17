@@ -532,13 +532,26 @@ fn row(tag: &str, text: impl Into<String>) -> Row {
 /// One dialog rather than two steps, because pinning is worth exactly one
 /// click. `current_container` is the label of the container that WOULD be used
 /// — see [`container_label`].
-pub fn net_menu(zones: &[String], pinned: &str, current_container: &str) -> Vec<Row> {
+pub fn net_menu(zones: &[MenuZone], pinned: &str, current_container: &str) -> Vec<Row> {
     let mut nets = vec![
         row("direct", "Прямой интернет (без VPN)"),
         row("offline", "Без сети"),
     ];
     for zone in zones {
-        nets.push(row(zone, format!("VPN: {zone}")));
+        let name = &zone.name;
+        // A network through an interface of the host is not a VPN, and the
+        // menu must not call it one: nothing about it is encrypted.
+        let mut text = if zone.host_interface {
+            format!("Через интерфейс: {name} (без шифрования)")
+        } else {
+            format!("VPN: {name}")
+        };
+        // What `vpn-zone watch` last concluded: choosing a network whose
+        // tunnel does not answer should not be a surprise.
+        if zone.dead {
+            text.push_str(" — туннель не отвечает");
+        }
+        nets.push(row(name, text));
     }
 
     let mut menu = nets.clone();
@@ -556,6 +569,40 @@ pub fn net_menu(zones: &[String], pinned: &str, current_container: &str) -> Vec<
         ));
     }
     menu
+}
+
+/// A zone as the network menu shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MenuZone {
+    pub name: String,
+    /// `[HostInterface]`: no tunnel, no encryption.
+    pub host_interface: bool,
+    /// `vpn-zone watch` found the tunnel dead at its last look.
+    pub dead: bool,
+}
+
+/// The zones of the state directory with what the menu says about them.
+fn menu_zones(state: &Path) -> Vec<MenuZone> {
+    zone_names(state)
+        .into_iter()
+        .map(|name| {
+            let dir = state.join(&name);
+            let host_interface = fs::read(dir.join("config.conf"))
+                .ok()
+                .and_then(|raw| crate::config::WgConfig::parse(&crate::cli::strip_cr(&raw)).ok())
+                .is_some_and(|ini| crate::hostif::is_host_interface(&ini));
+            let dead = crate::cli::zone_pid(state, name.as_ref()).is_some()
+                && fs::read_to_string(state.join(crate::watch::WATCH_DIR).join(&name))
+                    .ok()
+                    .and_then(|t| crate::watch::parse_memory(&t))
+                    .is_some_and(|(_, v)| v == crate::watch::Verdict::Dead);
+            MenuZone {
+                name,
+                host_interface,
+                dead,
+            }
+        })
+        .collect()
 }
 
 /// How the container that is in force right now is described in that entry.
@@ -880,7 +927,7 @@ pub fn main() -> ExitCode {
                 &memory.pinned_profile
             };
             let menu = net_menu(
-                &zone_names(&tools.state),
+                &menu_zones(&tools.state),
                 &memory.pinned,
                 &container_label(current),
             );
@@ -2005,7 +2052,11 @@ mod tests {
 
     #[test]
     fn the_network_menu_offers_every_choice_twice_once_as_a_pin() {
-        let menu = net_menu(&["de".to_owned(), "nl".to_owned()], "", "основной");
+        let zone = |name: &str| MenuZone {
+            name: name.to_owned(),
+            ..MenuZone::default()
+        };
+        let menu = net_menu(&[zone("de"), zone("nl")], "", "основной");
         assert_eq!(
             tags(&menu),
             [
@@ -2032,6 +2083,28 @@ mod tests {
             text_of(&menu, "unpin"),
             "↺ Спрашивать сеть снова (закреплено: nl)"
         );
+        // A host interface is not called a VPN, and a dead tunnel says so.
+        let menu = net_menu(
+            &[
+                MenuZone {
+                    name: "lan".to_owned(),
+                    host_interface: true,
+                    dead: false,
+                },
+                MenuZone {
+                    name: "nl".to_owned(),
+                    host_interface: false,
+                    dead: true,
+                },
+            ],
+            "",
+            "основной",
+        );
+        assert_eq!(
+            text_of(&menu, "lan"),
+            "Через интерфейс: lan (без шифрования)"
+        );
+        assert_eq!(text_of(&menu, "nl"), "VPN: nl — туннель не отвечает");
     }
 
     #[test]

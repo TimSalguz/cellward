@@ -15,6 +15,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   mirror's `connected`/`disconnected`.
 - `status --json` networks carry `handshake_age_s`, `rx_bytes` and `tx_bytes`
   (additive, schema version 1).
+- The picker's network menu says "— туннель не отвечает" next to a zone the
+  watcher found dead, and names a host-interface network "Через интерфейс: …
+  (без шифрования)" instead of calling it a VPN.
 
 ### Fixed (a granted directory that does not exist)
 - A sandbox granted `~/Downloads`, `~/Documents` or `~/Pictures` that does not
