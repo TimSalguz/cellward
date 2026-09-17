@@ -477,7 +477,7 @@ pub fn mount_root_at<'a>(mountinfo: &'a str, point: &str) -> Option<&'a str> {
             let root = fields.nth(3)?;
             (fields.next()? == point).then_some(root)
         })
-        .last()
+        .next_back()
 }
 
 /// The system bus in a zone: filtered (the zone's proxy bound over the socket)
