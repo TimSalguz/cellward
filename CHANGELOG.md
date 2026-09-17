@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (doctor)
+- `vpn-zone doctor [<zone>…] [--json]`: system readiness (user namespaces,
+  `newuidmap`, subordinate ids, `/dev/net/tun`, the tools of the manifest), the
+  context it runs in (a zone, a sandbox), and a probe run INSIDE every zone that
+  is up — only `lo` and `awg0`, default routes into the tunnel only, `hosts:
+  files dns`, no host resolver socket in reach — plus the tunnel's liveness.
+  The channels `docs/LEAK-MODEL.md` lists as open (session bus, `systemd
+  --user`, system bus, X11) are reported as warnings every time. Exit code 1
+  when a promised property does not hold; `--json` carries `schema_version`
+  and a level per check.
+
 ### Changed (D-Bus activation goes through the picker)
 - A `DBusActivatable=true` program intercepted by the picker now also gets a
   shadow session service in `~/.local/share/dbus-1/services/` with the same bus

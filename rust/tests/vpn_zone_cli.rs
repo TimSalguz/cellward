@@ -988,6 +988,44 @@ fn launch_starts_an_entry_by_id_through_the_picker() {
 }
 
 #[test]
+fn doctor_reports_as_json_and_fails_on_what_it_cannot_prove() {
+    // Every tool in this manifest is missing, and the zone "nl" is up but
+    // cannot be entered: both are failures, never silence.
+    let home = Home::new("doctor");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    fs::create_dir_all(home.state().join("de")).unwrap();
+    fs::write(home.state().join("de/config.conf"), crlf_config()).unwrap();
+    let out = home.run(&["doctor", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let json = stdout(&out);
+    assert!(
+        json.starts_with("{\"schema_version\":1,\"worst\":\"fail\","),
+        "{json}"
+    );
+    assert!(
+        json.contains("{\"id\":\"tool-nsenter\",\"level\":\"fail\""),
+        "{json}"
+    );
+    // A zone that is down is skipped, not failed.
+    assert!(
+        json.contains(
+            "{\"name\":\"de\",\"up\":false,\"checks\":[{\"id\":\"up\",\"level\":\"skip\""
+        ),
+        "{json}"
+    );
+    assert!(json.contains("\"name\":\"nl\",\"up\":true"), "{json}");
+    assert!(
+        json.contains("{\"id\":\"probe\",\"level\":\"fail\""),
+        "{json}"
+    );
+
+    let out = home.run(&["doctor", "nope"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stdout(&out).contains("такой зоны нет"), "{}", stdout(&out));
+}
+
+#[test]
 fn the_registry_keeps_its_three_field_shape() {
     let home = Home::new("registry");
     home.zone_is_up("nl");

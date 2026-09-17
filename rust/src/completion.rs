@@ -92,6 +92,7 @@ const VERBS: &[&str] = &[
     "reset-profile",
     "wayland-sandbox",
     "check",
+    "doctor",
     "lock",
     "unlock",
     "profile",
@@ -162,6 +163,10 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             }
             v if ZONE_VERBS.contains(&v) && pos == 2 => owned(&mut out, &snap.zones),
             "add" if pos == 3 => return vec![FILES.to_string()],
+            "doctor" => {
+                owned(&mut out, &snap.zones);
+                strs(&mut out, &["--json"]);
+            }
             "isolate" if pos == 2 => strs(&mut out, &["overlay", "off"]),
             "mode" if pos == 2 => strs(&mut out, &["picker", "per-zone", "both", "off"]),
             "wayland-sandbox" if pos == 2 => strs(&mut out, &["on", "off"]),
@@ -367,6 +372,10 @@ mod tests {
             ["firefox", "--all"]
         );
         assert_eq!(complete(&["vpn-zone", "default", "o"], 3), ["offline"]);
+        assert_eq!(
+            complete(&["vpn-zone", "doctor", "nl", ""], 4),
+            ["nl", "ru", "--json"]
+        );
         assert_eq!(
             complete(&["vpn-zone", "launch", "org"], 3),
             ["org.telegram.desktop"]

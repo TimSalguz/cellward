@@ -71,6 +71,7 @@ pub mod config;
 pub mod container;
 pub mod desktop;
 pub mod dialog;
+pub mod doctor;
 pub mod fs_sandbox;
 pub mod gui;
 pub mod launch;

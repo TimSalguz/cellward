@@ -129,6 +129,8 @@ fn main() -> ExitCode {
                 ExitCode::from(EXIT_USAGE)
             }
         },
+        // The inside half of `vpn-zone doctor`, run in a zone's namespaces.
+        Some("doctor-probe") => ExitCode::from(vpn_zone::doctor::probe_main(&args[1..])),
         Some("wl-sandbox") => match wl_sandbox::Args::parse(&args[1..]) {
             Ok(parsed) => ExitCode::from(wl_sandbox::run(parsed)),
             Err(e) => {

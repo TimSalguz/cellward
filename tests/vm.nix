@@ -445,6 +445,30 @@ let
           in_zone(opid, "sh -c '! getent ahostsv4 leaktest.internal'")
           alice("vpn-zone down offline")
 
+      # `vpn-zone doctor` (ROADMAP M5): the probe runs INSIDE the zone and must
+      # find nothing wrong there — and, run in the host's own namespaces, it
+      # must find exactly what a zone hides: a second way out, the resolver's
+      # socket, the host's nsswitch.conf. A probe that passes the host would
+      # prove nothing about the zone.
+      with subtest("doctor: a zone passes, the host's own namespace does not"):
+          alice("vpn-zone up vmsmoke")
+          out = alice("vpn-zone doctor vmsmoke --json")
+          assert out.startswith('{"schema_version":1,'), out
+          assert '"worst":"fail"' not in out, out
+          for must in ["links", "route4", "route6", "nsswitch", "resolvers"]:
+              assert f'{{"id":"{must}","level":"ok"' in out, (must, out)
+          # Known open channels are named, not hidden.
+          assert '{"id":"session-bus","level":"warn"' in out, out
+          tools = alice(
+              "grep -m1 -o '/nix/store/[^ \"]*-vpn-zone-tools.json' "
+              "$(readlink -f $(command -v vpn-zone))"
+          ).strip()
+          core = machine.succeed(f"grep -o '\"core\": *\"[^\"]*\"' {tools}").strip().split('"')[3]
+          host = alice(f"{core} doctor-probe 1000")
+          for leak in ["links", "resolvers", "nsswitch"]:
+              assert f"{leak}\tfail\t" in host, (leak, host)
+          alice("vpn-zone down vmsmoke")
+
       # --- Per-container trust (docs/CERTIFICATES.md) ------------------------
       # A CA generated here and nowhere else. On NixOS every bundle path is a
       # symlink chain into ONE store file, and the layer binds over that file

@@ -190,6 +190,8 @@ openconnect --non-inter vpn.example.com   # напечатает «--servercert 
 vpn-zone list                                  # зоны и их состояние
 vpn-zone up <зона> / down <зона>
 vpn-zone check <зона>                          # жив ли туннель
+vpn-zone doctor [<зона>] [--json]              # что на деле закрыто — проверка изнутри зоны
+vpn-zone launch <id> [-- арг.]                 # ярлык через пикер (для биндов)
 vpn-zone run <зона> -- firefox                 # запустить в зоне
 vpn-zone run <зона> --profile work -- firefox  # + контейнер данных
 vpn-zone run <зона> --sandbox work -- firefox  # + именованная песочница
