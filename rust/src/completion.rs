@@ -166,9 +166,17 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                     ),
                 }
             }
+            "hermetic" if pos == 2 => {
+                owned(&mut out, &snap.zones);
+                strs(&mut out, &["--default"]);
+            }
             v if ZONE_VERBS.contains(&v) && pos == 2 => owned(&mut out, &snap.zones),
             "add" if pos == 3 => return vec![FILES.to_string()],
-            "x11" | "hermetic" if pos == 3 => strs(&mut out, &["on", "off"]),
+            "x11" if pos == 3 => strs(&mut out, &["on", "off"]),
+            "hermetic" if pos == 3 => match word(2) {
+                "--default" => strs(&mut out, &["on", "off"]),
+                _ => strs(&mut out, &["on", "off", "default"]),
+            },
             "doctor" => {
                 owned(&mut out, &snap.zones);
                 strs(&mut out, &["--json"]);
@@ -367,6 +375,14 @@ mod tests {
         assert_eq!(
             complete(&["vpn-zone", "container", "set", "work", "x11", ""], 6),
             ["on", "off"]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "hermetic", "--default", ""], 4),
+            ["on", "off"]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "hermetic", "nl", "d"], 4),
+            ["default"]
         );
         assert_eq!(
             complete(&["vpn-zone", "container", "grant", ""], 4),

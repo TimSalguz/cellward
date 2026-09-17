@@ -119,7 +119,18 @@ becomes a default, with the table above as the list of what the owner accepts.
   Then:
   1. `hermetic` becomes the default; switching it off is explicit and per
      zone (a zone whose programs legitimately drive `systemd --user`, such as
-     one running agents that start VM checks with `systemd-run --user`);
+     one running agents that start VM checks with `systemd-run --user`).
+     **The switches are implemented, the default is not flipped yet:**
+     `hermetic.default` and `hermetic.exceptions` in the module,
+     `vpn-zone hermetic --default on|off` and
+     `vpn-zone hermetic <zone> on|off|default` locally. What wins: a zone in
+     `hermetic.exceptions` (the opposite of `hermetic.default`, which the
+     module requires with it), then the zone's own setting, then
+     `hermetic.default`, then the local default, then off. Only `off` opens
+     anything: the prototype's empty marker, an unreadable one and any other
+     content mean on. The holder decides once, when the zone comes up;
+     `status --json` shows `defaults.hermetic` and `networks[].hermetic`, each
+     with its source;
   2. bus permissions come from the program's Flathub manifest
      (`finish-args`: `--talk-name`, `--own-name`, `--system-talk-name`) when
      it has one, so that the filter does not break known programs;

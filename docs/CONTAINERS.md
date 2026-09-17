@@ -490,7 +490,8 @@ and `vpn-zone container show <name> --json` print subsets of the same schema.
     "launcher_mode": { "value": "picker", "source": "default" },
     "compositor_restriction": { "value": true, "source": "default" },
     "autostart_unassigned": { "value": "offline", "source": "default" },
-    "user_entries": { "value": "take-over", "source": "default" }
+    "user_entries": { "value": "take-over", "source": "default" },
+    "hermetic": { "value": false, "source": "default" }
   },
   "networks": [
     { "name": "nl", "kind": "wireguard", "source": "local",

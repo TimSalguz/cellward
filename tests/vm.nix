@@ -121,6 +121,13 @@ let
         home-manager.users.alice = {
           imports = [ ../module ];
           programs.vpn-zones.enable = true;
+          # Hermeticity declared the way an owner switches it on for one zone:
+          # the default spelled out (off, as it is anyway) and the zone as the
+          # exception. The holder has to find this in ~/.config on its own.
+          programs.vpn-zones.hermetic = {
+            default = false;
+            exceptions = [ "vmherm" ];
+          };
           # A container declared in Nix: bound to direct, trusting a CA made
           # at build time. What the module writes, the runtime obeys and the
           # CLI refuses to change is asserted below.
@@ -1009,7 +1016,11 @@ let
       # into another network with nobody to ask.
       with subtest("hermetic zone: no systemd --user, a filtered bus, the broker as the door"):
           alice("vpn-zone add vmherm /tmp/vmsmoke.conf")
-          alice("vpn-zone hermetic vmherm on")
+          out = json.loads(alice("vpn-zone status --json"))
+          herm = next(n for n in out["networks"] if n["name"] == "vmherm")["hermetic"]
+          assert herm == {"value": True, "source": "nix"}, herm
+          assert out["defaults"]["hermetic"] == {"value": False, "source": "nix"}, out["defaults"]
+          alice("sh -c '! vpn-zone hermetic vmherm off'")
           alice("systemctl --user is-active vpn-zone-broker.service")
           alice("vpn-zone up vmherm")
           hp = machine.succeed(f"cat {STATE}/vmherm/zone.pid").strip()
