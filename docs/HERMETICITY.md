@@ -31,7 +31,9 @@ In the zone's mount namespace (once, at zone start, so that every program in
 the zone gets it — not per launch):
 
 1. **tmpfs over `/run/user/<uid>`**, with bound back: the Wayland socket (the
-   restricted one of `wl-sandbox` stays per launch), PipeWire, PulseAudio,
+   restricted one of `wl-sandbox` stays per launch — and the host's socket bound
+   back is NOT restricted, an open channel: `docs/LEAK-MODEL.md` §13; the
+   compositor's IPC socket, `$NIRI_SOCKET`, is not bound back), PipeWire, PulseAudio,
    and two sockets of ours: a **filtered session bus** (`xdg-dbus-proxy`) and
    the **broker**. `systemd/private` is not bound back.
 2. **tmpfs over `/tmp/.X11-unix`** and `DISPLAY` unset in the launch

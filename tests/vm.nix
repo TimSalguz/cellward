@@ -1033,6 +1033,35 @@ let
               )
           alice("vpn-zone down vmawg")
 
+      # --- The compositor's IPC and its raw socket (docs/LEAK-MODEL.md §13) --
+      # No real compositor here: two host listeners where niri keeps its IPC
+      # socket and a raw Wayland socket. What reaches them from a zone could
+      # reach the real ones — `niri msg action spawn` runs a process on the host.
+      with subtest("compositor IPC: reachable from an ordinary zone (an open channel, LEAK-MODEL §13)"):
+          alice(
+              "systemd-run --user --unit=fakeniri socat "
+              "UNIX-LISTEN:/run/user/1000/niri.wayland-9.4242.sock,fork "
+              "OPEN:/tmp/niri-got,creat,append"
+          )
+          alice(
+              "systemd-run --user --unit=fakewayland socat "
+              "UNIX-LISTEN:/run/user/1000/wayland-9,fork OPEN:/tmp/wayland-got,creat,append"
+          )
+          machine.wait_until_succeeds("test -S /run/user/1000/niri.wayland-9.4242.sock")
+          machine.wait_until_succeeds("test -S /run/user/1000/wayland-9")
+          machine.succeed(
+              "printf '%s\\n' 'echo \"NIRI=$NIRI_SOCKET\"' "
+              "'echo spawn-from-zone | socat - UNIX-CONNECT:\"$NIRI_SOCKET\"' "
+              "> /tmp/niri-probe.sh && chmod 755 /tmp/niri-probe.sh"
+          )
+          out = alice(
+              "NIRI_SOCKET=/run/user/1000/niri.wayland-9.4242.sock "
+              "vpn-zone run vmsmoke -- sh /tmp/niri-probe.sh"
+          )
+          assert "NIRI=/run/user/1000/niri.wayland-9.4242.sock" in out, out
+          machine.wait_until_succeeds("grep -q spawn-from-zone /tmp/niri-got", timeout=15)
+          alice("vpn-zone down vmsmoke")
+
       # --- A hermetic zone (docs/HERMETICITY.md §7 C, the prototype) --------
       # The evil host: from inside, systemd --user is gone and its D-Bus name
       # refused, while the filtered bus still answers — so the refusal is the
@@ -1048,6 +1077,11 @@ let
           alice("systemctl --user is-active vpn-zone-broker.service")
           alice("vpn-zone up vmherm")
           hp = machine.succeed(f"cat {STATE}/vmherm/zone.pid").strip()
+          # The compositor's IPC socket stays outside (a regression guard); the
+          # raw Wayland socket comes back in (LEAK-MODEL §13, known open —
+          # flip this assert when it is closed).
+          in_zone(hp, "test ! -e /run/user/1000/niri.wayland-9.4242.sock")
+          in_zone(hp, "test -S /run/user/1000/wayland-9")
           units = "call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager ListUnits"
           names = "call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ListNames"
           alice(f"busctl --user --timeout=5 {units} > /dev/null")
