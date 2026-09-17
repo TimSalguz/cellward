@@ -348,6 +348,54 @@ pub fn apps(tools: &Tools) -> String {
     )
 }
 
+/// `vpn-zone status --bar`: one JSON line in the shape status bars take
+/// (`text`, `tooltip`, `class`, as waybar's `return-type: json` reads it).
+///
+/// The text names the zones that are up, a dead tunnel marked; the class is
+/// the worst of them — `dead` when a tunnel `vpn-zone watch` found dead, `up`
+/// when zones are up and none is, `none` when no zone is up. Nothing here reads
+/// the network itself: the watcher's memory and the status mirrors only, so a
+/// bar polling every second costs nothing.
+pub fn bar(tools: &Tools) -> String {
+    let mut up = Vec::new();
+    let mut dead = false;
+    for dir in visible_entries(&tools.state) {
+        let Some(name) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        if zone_kind(&dir).is_none() || zone_pid(&tools.state, name.as_ref()).is_none() {
+            continue;
+        }
+        let verdict = fs::read_to_string(tools.state.join(crate::watch::WATCH_DIR).join(&name))
+            .ok()
+            .and_then(|t| crate::watch::parse_memory(&t))
+            .map(|(_, v)| v);
+        let is_dead = verdict == Some(crate::watch::Verdict::Dead);
+        dead |= is_dead;
+        up.push(if is_dead { format!("{name} ✗") } else { name });
+    }
+    let class = if dead {
+        "dead"
+    } else if up.is_empty() {
+        "none"
+    } else {
+        "up"
+    };
+    let tooltip = if up.is_empty() {
+        "VPN-зоны: ни одна не поднята".to_owned()
+    } else if dead {
+        "VPN-зоны: туннель не отвечает (✗)".to_owned()
+    } else {
+        "VPN-зоны: поднятые зоны".to_owned()
+    };
+    format!(
+        "{{\"text\":{},\"tooltip\":{},\"class\":{}}}",
+        string(&up.join(" ")),
+        string(&tooltip),
+        string(class)
+    )
+}
+
 /// The whole document of `vpn-zone status --json`.
 pub fn document(tools: &Tools) -> String {
     format!(

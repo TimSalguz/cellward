@@ -210,6 +210,7 @@ vpn-zone up <зона> / down <зона>
 vpn-zone check <зона>                          # жив ли туннель
 vpn-zone doctor [<зона>] [--json]              # что на деле закрыто — проверка изнутри зоны
 vpn-zone watch [--json]                        # живы ли туннели (зовёт таймер, уведомляет)
+vpn-zone status --bar                          # строка JSON для waybar и подобных баров
 vpn-zone launch <id> [-- арг.]                 # ярлык через пикер (для биндов)
 vpn-zone run <зона> -- firefox                 # запустить в зоне
 vpn-zone run <зона> --profile work -- firefox  # + контейнер данных

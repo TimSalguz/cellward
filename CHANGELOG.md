@@ -15,6 +15,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   mirror's `connected`/`disconnected`.
 - `status --json` networks carry `handshake_age_s`, `rx_bytes` and `tx_bytes`
   (additive, schema version 1).
+- `vpn-zone status --bar`: one JSON line for a status bar (waybar's
+  `return-type: json`): the zones that are up, a dead tunnel marked, and a
+  class of `none`, `up` or `dead`. Reads only the mirrors and the watcher's
+  memory, so a bar can poll it often.
 - The picker's network menu says "— туннель не отвечает" next to a zone the
   watcher found dead, and names a host-interface network "Через интерфейс: …
   (без шифрования)" instead of calling it a VPN.

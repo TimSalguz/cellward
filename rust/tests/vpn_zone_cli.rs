@@ -1103,6 +1103,13 @@ fn watch_announces_a_dead_tunnel_once_and_its_recovery() {
     assert!(out.contains("\"verdict\":\"alive\""), "{out}");
     assert!(out.contains("\"notified\":true"), "{out}");
 
+    // The status bar line marks nothing dead now.
+    let bar = stdout(&home.run(&["status", "--bar"]));
+    assert_eq!(
+        bar.trim(),
+        "{\"text\":\"nl\",\"tooltip\":\"VPN-зоны: поднятые зоны\",\"class\":\"up\"}"
+    );
+
     // status --json carries the counters too.
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
