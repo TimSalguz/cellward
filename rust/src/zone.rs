@@ -976,6 +976,12 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
                 "-g",
                 HOSTIF_GATEWAY4,
             ])
+            // The template interface too, explicitly: older pasta takes it
+            // from the host's default route rather than from --outbound-if*,
+            // and refuses the whole thing ("External interface not usable")
+            // when that route is not on the interface asked for.
+            .arg("-i")
+            .arg(&host.interface)
             .arg("--outbound-if4")
             .arg(&host.interface)
             .arg("--outbound-if6")
