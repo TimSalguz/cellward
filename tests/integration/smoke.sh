@@ -643,7 +643,7 @@ for _ in $(seq 50); do
   sleep 0.1
 done
 [ "$(cat "$LIVEHOME/home/live-status" 2>/dev/null)" = GONE ] \
-  || fail "после истечения срока запущенная программа всё ещё видит каталог"
+  || fail "после истечения срока запущенная программа всё ещё видит каталог; где смонтирован: $(grep -l smoke-live /proc/[0-9]*/mountinfo 2>/dev/null | while read -r f; do echo "$f: $(grep smoke-live "$f")"; done)"
 [ -e "$LIVE/probe" ] || fail "отмонтирование задело сам каталог на хосте"
 [ ! -s "$LIVEHOME/paths" ] || fail "истёкшая выдача осталась в файле: $(cat "$LIVEHOME/paths")"
 "$VPN_ZONE" journal --json | grep -q '"event":"grant-expired","container":"sb:smokelive".*"detached":"1"' \

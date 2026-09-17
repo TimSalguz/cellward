@@ -185,10 +185,13 @@ fn detach_in(pid: i32, dest: &Path) -> Result<(), String> {
             if libc::setns(mnt.as_raw_fd(), libc::CLONE_NEWNS) != 0 {
                 libc::_exit(3);
             }
-            if libc::umount2(target.as_ptr(), libc::MNT_DETACH) != 0 {
-                libc::_exit(4);
+            // Until nothing is mounted there any more: a bind can sit on top
+            // of another bind of the same directory.
+            let mut detached = 0;
+            while detached < 16 && libc::umount2(target.as_ptr(), libc::MNT_DETACH) == 0 {
+                detached += 1;
             }
-            libc::_exit(0)
+            libc::_exit(if detached > 0 { 0 } else { 4 })
         },
         child => {
             let mut status = 0;
