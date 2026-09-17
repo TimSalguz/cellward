@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (unconfined in sight)
+- A journal of what was let out of containment: every launch into
+  `unconfined` (`launch-unconfined`: app, container, program, pid) and every
+  decision of the broker (`broker`: origin zone, target, app, started or
+  refused and why). JSON lines in `~/.local/state/vpn-zones/.journal` (0600,
+  rotated at 1 MiB into `.journal.1`); `vpn-zone journal [--json] [<N>]`
+  reads it (`{"schema_version": 1, "events": [...]}`).
+- `status --bar`: programs running unconfined right now are marked in the text
+  (`⚠N`) and named in the tooltip; the object gains `"unconfined": N`
+  (additive; `class` is unchanged).
+
 ### Changed (breaking, with the old name kept)
 - The built-in network `direct` is now `unconfined`: the name says that nothing
   of a zone is around the program — no VPN, the host's resolver, session bus,

@@ -160,10 +160,28 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                             &selection.cmd,
                         ),
                     };
-                    match allowed {
+                    let answer = match &allowed {
                         Ok(()) => start(tools, &app_id, &argv),
                         Err(why) => format!("refused: {why}"),
+                    };
+                    // Every crossing the broker decides, either way, on the
+                    // record: which zone asked, for what, and what came of it.
+                    let why = answer.strip_prefix("refused: ").unwrap_or("");
+                    let decision = if answer == "ok" { "started" } else { "refused" };
+                    if let Err(e) = crate::journal::append(
+                        &tools.state,
+                        "broker",
+                        &[
+                            ("origin", origin.as_deref().unwrap_or("")),
+                            ("target", target.as_str()),
+                            ("app", &*app_id.to_string_lossy()),
+                            ("decision", decision),
+                            ("why", why),
+                        ],
+                    ) {
+                        eprintln!("broker: journal: {e}");
                     }
+                    answer
                 }
             }
         }

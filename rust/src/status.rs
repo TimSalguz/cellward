@@ -420,19 +420,63 @@ pub fn bar(tools: &Tools) -> String {
     } else {
         "up"
     };
-    let tooltip = if up.is_empty() {
+    let mut tooltip = if up.is_empty() {
         "VPN-зоны: ни одна не поднята".to_owned()
     } else if dead {
         "VPN-зоны: туннель не отвечает (✗)".to_owned()
     } else {
         "VPN-зоны: поднятые зоны".to_owned()
     };
+    // What runs with nothing of a zone around it is to be seen, not looked
+    // for: a mark in the text and the programs in the tooltip.
+    let unconfined = unconfined_launches(&tools.state);
+    let mut text = up.join(" ");
+    if !unconfined.is_empty() {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(&format!("⚠{}", unconfined.len()));
+        tooltip.push_str(&format!(
+            "\nБез ограничений (⚠) сейчас: {}",
+            unconfined.join(", ")
+        ));
+    }
     format!(
-        "{{\"text\":{},\"tooltip\":{},\"class\":{}}}",
-        string(&up.join(" ")),
+        "{{\"text\":{},\"tooltip\":{},\"class\":{},\"unconfined\":{}}}",
+        string(&text),
         string(&tooltip),
-        string(class)
+        string(class),
+        unconfined.len()
     )
+}
+
+/// The programs running in `unconfined` right now, by the registry: one name
+/// per live pid (a launch is recorded under its id and its binary both).
+pub fn unconfined_launches(state: &std::path::Path) -> Vec<String> {
+    let mut seen = std::collections::BTreeMap::new();
+    for dir in crate::registry::dirs(&state.join(".running")) {
+        for file in visible_entries(&dir) {
+            if !file.is_file() {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&file) else {
+                continue;
+            };
+            let name = file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            for record in text.lines().filter_map(crate::registry::parse_record) {
+                if record.zone == crate::launch::UNCONFINED
+                    && crate::profile::proc_is_alive(record.pid)
+                {
+                    seen.entry(record.pid).or_insert_with(|| name.clone());
+                }
+            }
+        }
+    }
+    seen.into_values().collect()
 }
 
 /// The whole document of `vpn-zone status --json`.

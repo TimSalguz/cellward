@@ -1037,6 +1037,10 @@ let
           in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm vpn-zone run direct -- touch /tmp/brokered-escape'")
           machine.sleep(3)
           machine.fail("test -e /tmp/brokered-escape")
+          # Both decisions are on the record, the escape under the new name.
+          out = alice("vpn-zone journal --json")
+          assert '"event":"broker","origin":"vmherm","target":"vmherm"' in out, out
+          assert '"target":"unconfined","app":"","decision":"refused"' in out, out
           out = alice("vpn-zone doctor vmherm --json")
           assert '{"id":"session-bus","level":"ok"' in out, out
           alice("vpn-zone down vmherm")
