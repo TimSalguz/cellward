@@ -250,6 +250,8 @@ let
       };
 
     testScript = ''
+      import json
+      import re
       import shlex
 
       STATE = "/home/alice/.local/state/vpn-zones"
@@ -797,6 +799,20 @@ let
               "journalctl -u leakwatch | grep -q 'listening on eth1'"
           )
 
+      # The marker a host egress policy lets the zones out by
+      # (docs/CONTAINERS.md §9, `uplink_owner`): counted from here on, every
+      # packet of the tunnel must leave from a socket of the zone's uid 0.
+      with subtest("egress marker: status --json names the owner of the zone's sockets"):
+          owner = json.loads(alice("vpn-zone status --json"))["uplink_owner"]
+          assert owner and owner["uid"] != 1000, f"no usable uplink_owner: {owner}"
+          machine.succeed(
+              "nft add table inet vzowner && "
+              "nft add chain inet vzowner out '{ type filter hook output priority 0; }' && "
+              f"nft add rule inet vzowner out ip daddr {server_ip} udp dport 51820 "
+              f"meta skuid {owner['uid']} meta skgid {owner['gid']} counter && "
+              f"nft add rule inet vzowner out ip daddr {server_ip} udp dport 51820 counter"
+          )
+
       rzpid = machine.succeed(f"cat {STATE}/vmreal/zone.pid").strip()
 
       # The holder's ordinary branch, which nothing else covers: with the
@@ -859,6 +875,13 @@ let
               escaped = machine.succeed("tcpdump -nr /tmp/leak.pcap 2>/dev/null")
               raise AssertionError(f"packets escaped the tunnel:\n{escaped}")
           alice("vpn-zone down vmreal")
+
+      with subtest("egress marker: every tunnel packet left from the zone's uid"):
+          out = machine.succeed("nft list chain inet vzowner out")
+          counts = re.findall(r"counter packets (\d+)", out)
+          assert len(counts) == 2 and int(counts[1]) > 0, out
+          assert counts[0] == counts[1], f"tunnel packets from another owner:\n{out}"
+          machine.succeed("nft delete table inet vzowner")
 
       # --- The obfuscated tunnel: AmneziaWG as a real user runs it ----------
       # Everything so far was wire-compatible with plain WireGuard. This zone
