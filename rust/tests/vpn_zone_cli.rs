@@ -232,6 +232,19 @@ fn add_refuses_a_bad_name_and_a_file_that_is_not_a_config() {
         stderr(&out)
     );
     assert!(!home.state().join("nl").exists(), "зона создана из мусора");
+
+    // The two built-in choices of the picker are not names a zone can take: a
+    // zone called "direct" would be shadowed by the host's network in every
+    // launch, and "offline" is the directory the picker creates by itself.
+    for reserved in ["direct", "offline"] {
+        let out = home.run(&["add", reserved, conf.to_str().unwrap()]);
+        assert_eq!(out.status.code(), Some(1), "{reserved}");
+        assert!(stderr(&out).contains("встроенный"), "{}", stderr(&out));
+        assert!(
+            !home.state().join(reserved).join("config.conf").exists(),
+            "{reserved}"
+        );
+    }
 }
 
 #[test]
@@ -309,6 +322,37 @@ fn a_launch_is_wrapped_in_the_compositor_restriction_by_default() {
     assert!(out.status.success(), "{}", stderr(&out));
     let out = home.run_with(&["run", "nl", "--", "firefox"], &[("VPN_ZONE_DRYRUN", "1")]);
     assert_eq!(stdout(&out).trim(), "зона nl, профиль основной: firefox");
+}
+
+#[test]
+fn a_direct_launch_starts_no_zone_and_loses_nothing_on_the_way() {
+    // "direct" is the host's network: nothing to start and nothing to enter.
+    // But the compositor restriction and the container still apply — the
+    // picker used to become the command itself and dropped both.
+    let home = Home::new("direct");
+    let out = home.run_with(
+        &["run", "direct", "--", "firefox"],
+        &[("VPN_ZONE_DRYRUN", "1")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    // A zone start would have named the manifest's systemctl in a message and
+    // waited ten seconds for a zone that does not exist.
+    assert!(!stderr(&out).contains("systemctl"), "{}", stderr(&out));
+    let line = stdout(&out);
+    assert!(line.starts_with("зона direct, профиль основной:"), "{line}");
+    assert!(line.contains("wl-sandbox firefox --"), "{line}");
+
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+    let out = home.run_with(
+        &["run", "direct", "--profile", "work", "--", "firefox"],
+        &[("VPN_ZONE_DRYRUN", "1")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).starts_with("зона direct, профиль work:"),
+        "{}",
+        stdout(&out)
+    );
 }
 
 #[test]

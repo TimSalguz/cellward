@@ -45,6 +45,8 @@ PROFILES="$HOME/.local/state/vpn-profiles"
 TEST_ZONES=(smoke smoke-crlf offsmoke)
 TEST_PROFILE=smoketest-prof
 MARKER="$HOME/.config/vpn-smoke-marker"
+# То же для контейнера в «прямом интернете» — без зоны, в своём userns.
+DIRECT_MARKER="$HOME/.config/vpn-smoke-direct-marker"
 # Песочница файловой системы: свой app-id (набор доступов запоминается по нему)
 # и маркер в настоящем доме, которого изнутри песочницы видно быть не должно.
 FSAPP=smoke-fsapp
@@ -80,10 +82,10 @@ cleanup() {
   # ~/.config появляется только при провале теста (слой не наложился), но
   # убрать его всё равно надо — чужого файла с таким именем не бывает.
   rm -rf "${PROFILES:?}/$TEST_PROFILE" "${STATE:?}/.running/$TEST_PROFILE"
-  rm -f "$MARKER" "$FSPERMS" "$FSMARKER"
+  rm -f "$MARKER" "$DIRECT_MARKER" "$FSPERMS" "$FSMARKER"
   # Память пикера по синтетическому ключу — свои файлы, чужих здесь не бывает.
   rm -f "${STATE:?}/.last/$PICKKEY" "${STATE:?}/.lastprofile/$PICKKEY" \
-        "${STATE:?}/.labels/$PICKKEY"
+        "${STATE:?}/.labels/$PICKKEY" "${STATE:?}/.running/__main__/$PICKKEY"
   if [ "$rc" -ne 0 ]; then
     for z in smoke offsmoke; do
       if [ -s "$WORK/holder-$z.log" ]; then
@@ -137,9 +139,9 @@ for z in "${TEST_ZONES[@]}"; do
   rm -rf "${STATE:?}/$z"
 done
 rm -rf "${PROFILES:?}/$TEST_PROFILE" "${STATE:?}/.running/$TEST_PROFILE"
-rm -f "$MARKER" "$FSPERMS" "$FSMARKER"
+rm -f "$MARKER" "$DIRECT_MARKER" "$FSPERMS" "$FSMARKER"
 rm -f "${STATE:?}/.last/$PICKKEY" "${STATE:?}/.lastprofile/$PICKKEY" \
-      "${STATE:?}/.labels/$PICKKEY"
+      "${STATE:?}/.labels/$PICKKEY" "${STATE:?}/.running/__main__/$PICKKEY"
 
 # --- 2. Синтетический конфиг -------------------------------------------------
 step "Генерирую синтетический конфиг WireGuard (без DNS=, без обфускации)"
@@ -362,6 +364,28 @@ UPPER="$PROFILES/$TEST_PROFILE/.config/upper/vpn-smoke-marker"
 [ ! -e "$MARKER" ] || fail "маркер попал в настоящий ~/.config — слой профиля не изолировал запись"
 echo "ok: запись ушла в слой профиля, настоящий ~/.config не тронут"
 
+# --- 6а. Тот же контейнер в «прямом интернете» -------------------------------
+# Раньше пикер при выборе direct просто становился командой, и выбранный
+# контейнер молча терялся: программа писала в настоящий дом. Теперь direct идёт
+# через `vpn-zone run`, а user namespace, которого у зоны тут не занять, делает
+# `unshare --map-current-user --keep-caps` (rust/src/launch.rs, entry_argv).
+# Проверяется ровно то, что должно быть: запись ушла в слой, netns — хостовый
+# (direct — это сеть хоста), userns — свой.
+step "vpn-zone run direct --profile $TEST_PROFILE — контейнер без зоны"
+"$VPN_ZONE" run direct --profile "$TEST_PROFILE" -- \
+  sh -c 'echo marker > "$HOME/.config/vpn-smoke-direct-marker"'
+DIRECT_UPPER="$PROFILES/$TEST_PROFILE/.config/upper/vpn-smoke-direct-marker"
+[ -f "$DIRECT_UPPER" ] || fail "маркера нет в верхнем слое ($DIRECT_UPPER) — контейнер в direct не наложился"
+[ ! -e "$DIRECT_MARKER" ] || fail "маркер попал в настоящий ~/.config — в direct контейнер потерян"
+nsout=$("$VPN_ZONE" run direct --profile "$TEST_PROFILE" -- \
+  sh -c 'readlink /proc/self/ns/net; readlink /proc/self/ns/user')
+echo "$nsout"
+[ "$(echo "$nsout" | sed -n 1p)" = "$(readlink /proc/self/ns/net)" ] \
+  || fail "direct-запуск оказался не в сети хоста: $nsout"
+[ "$(echo "$nsout" | sed -n 2p)" != "$(readlink /proc/self/ns/user)" ] \
+  || fail "у контейнера в direct нет своего user namespace: $nsout"
+echo "ok: слой наложился, сеть хоста, свой userns"
+
 step "vpn-zone profile rm $TEST_PROFILE"
 # При провале — владельцы и права всего дерева: без этого EACCES нечитаем.
 "$VPN_ZONE" profile rm "$TEST_PROFILE" || {
@@ -475,30 +499,47 @@ echo "ok: без шины запуск живёт, код выхода 42 дон
 #
 # ПОЧЕМУ ИМЕННО direct, А НЕ offline. Ветка offline поднимает зону через
 # `systemctl --user`, которого на раннере нет вовсе (сессионного systemd в
-# контейнере CI не бывает) — тест падал бы не по делу. При выборе direct пикер
-# НИЧЕГО не поднимает и не зовёт `vpn-zone run`: он становится самой командой
-# (exec), потому что «прямой интернет» — это отсутствие зоны. Ассерт получается
-# точный и ни от чего не зависящий.
+# контейнере CI не бывает) — тест падал бы не по делу. direct ничего не
+# поднимает: пикер становится `vpn-zone run direct`, а тот — самой командой
+# (обёрнутой в wl-sandbox, который без композитора запускает её как есть).
+#
+# ПОЧЕМУ СВОЙ МАНИФЕСТ. В Exec и в манифесте пикер зовёт `vpn-zone` по пути в
+# ПРОФИЛЕ (docs/GOTCHAS.md §10), а профиля home-manager на раннере нет. Поэтому
+# пикер запускается бинарём крейта напрямую, с копией манифеста, где `runner` —
+# собранная обёртка vpn-zone. Остальные пути — те самые, что поедут
+# пользователю. Раньше это было не нужно: для direct пикер `vpn-zone run` не
+# звал вовсе — и именно поэтому терял выбранный контейнер.
 #
 # Выбор задаётся файлом памяти .last у синтетического ключа, а не командой
 # `vpn-zone default`: смоук гоняют и на рабочей машине, а `default` — настоящая
 # настройка пользователя, её трогать нельзя. Файл памяти на своём ключе — нет.
-step "Пикер без графики: берёт прошлый выбор и исполняет команду сама"
+step "Пикер без графики: берёт прошлый выбор и запускает через vpn-zone run"
+PICK_BIN=$(grep -m1 -o '/nix/store/[^ "]*/bin/vpn-zone-pick' "$VPN_ZONE_PICK")
+PICK_TOOLS=$(grep -m1 -o '/nix/store/[^ "]*-vpn-zone-tools.json' "$VPN_ZONE_PICK")
+[ -x "$PICK_BIN" ] && [ -f "$PICK_TOOLS" ] || fail "в обёртке vpn-zone-pick нет бинаря или манифеста"
+sed "s|\"runner\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"runner\": \"$VPN_ZONE\"|" \
+  "$PICK_TOOLS" > "$WORK/pick-tools.json"
+grep -q "\"runner\": \"$VPN_ZONE\"" "$WORK/pick-tools.json" || fail "не подменился runner в манифесте пикера"
 mkdir -p "$STATE/.last"
 printf '%s' direct > "$STATE/.last/$PICKKEY"
 pickout=$(env -u WAYLAND_DISPLAY -u DISPLAY -u VPN_ZONE_ASK -u VPN_ZONE_PROFILE \
-  -u VPN_ZONE_CURRENT "$VPN_ZONE_PICK" --label "Смоук-программа" --id "$PICKKEY" \
+  -u VPN_ZONE_CURRENT -u VPN_ZONE_DELEGATED VPN_ZONE_TOOLS="$WORK/pick-tools.json" \
+  "$PICK_BIN" --label "Смоук-программа" --id "$PICKKEY" \
   -- sh -c 'echo ПИКЕР-ЗАПУСТИЛ' 2>"$WORK/pick.err") \
   || fail "пикер без графики завершился с ошибкой (см. $WORK/pick.err)"
 echo "${pickout:-<пусто>}"
-[ "$pickout" = "ПИКЕР-ЗАПУСТИЛ" ] || fail "пикер не исполнил команду: $pickout"
+[ "$pickout" = "ПИКЕР-ЗАПУСТИЛ" ] || fail "пикер не запустил команду: $pickout"
 grep -q 'спросить негде' "$WORK/pick.err" \
   || fail "пикер не сказал, что спрашивать негде: $(cat "$WORK/pick.err")"
 # Метку он обязан записать: из неё берутся имена программ в диалогах и в
 # списке сброса закреплений (там иначе виден ключ ярлыка).
 [ "$(cat "$STATE/.labels/$PICKKEY" 2>/dev/null)" = "Смоук-программа" ] \
   || fail "пикер не записал метку в $STATE/.labels/$PICKKEY"
-echo "ok: без графики выбран direct, команда исполнена, метка записана"
+# И запуск в direct теперь виден реестру: без записи предупреждение «уже
+# запущена в другой сети» не знало о программах в прямом интернете.
+grep -q '^[0-9]* direct ' "$STATE/.running/__main__/$PICKKEY" 2>/dev/null \
+  || fail "запуск в direct не записан в реестр: $(cat "$STATE/.running/__main__/$PICKKEY" 2>&1)"
+echo "ok: без графики выбран direct, команда запущена через run, метка и реестр записаны"
 
 # --- 7. Offline-зона ---------------------------------------------------------
 step "Создаю offline-зону offsmoke (как это делает пикер: mkdir + touch offline)"

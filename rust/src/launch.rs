@@ -24,6 +24,15 @@
 //!  6. the zone is started if it was down, we write ourselves into the registry
 //!     and `execvp` into `nsenter`.
 //!
+//! **`direct` takes the same road**, minus the zone. It used to be a special
+//! case of the picker, which simply became the command — and with that the
+//! container or sandbox the user had chosen, the compositor restriction and the
+//! registry record were all dropped without a word: "🔒 Своя песочница" plus
+//! "Прямой интернет" started the program with the whole `$HOME` in reach.
+//! Now only the NAMESPACE step differs: there is no zone to enter, so a
+//! container gets a user+mount namespace of its own from `unshare` (see
+//! [`entry_argv`]) and everything else is exactly what a zone launch gets.
+//!
 //! **The last step must be an `exec`.** The pid does not change, so the registry
 //! record written just before it stays true for as long as the program runs —
 //! the picker, the conflict warning and the throwaway-container cleanup all read
@@ -52,6 +61,12 @@ pub const ENV_DRYRUN: &str = "VPN_ZONE_DRYRUN";
 
 /// Marker file of a locked ("no escape") zone.
 pub const NO_ESCAPE: &str = "no-escape";
+
+/// The built-in "network" that is the host's own: no zone, no tunnel. Not a
+/// directory in the state dir and never one — `vpn-zone add` refuses the name.
+pub const DIRECT: &str = "direct";
+/// The other built-in choice: a zone with loopback only, created on demand.
+pub const OFFLINE: &str = "offline";
 
 /// Programs that keep the full set of compositor protocols.
 ///
@@ -412,6 +427,13 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             };
         }
     }
+    // The guard has done its job for THIS launch and must not travel into the
+    // program. It used to: a browser opened from a messenger inside a zone
+    // carried `VPN_ZONE_DELEGATED=1` for the rest of its life, so a link
+    // clicked in THAT browser skipped the delegation above and died in
+    // `nsenter` with "reassociate to namespaces failed" — the very failure the
+    // delegation exists to avoid.
+    std::env::remove_var(ENV_DELEGATED);
 
     let selection = match Selection::parse(argv) {
         Ok(selection) => selection,
@@ -556,19 +578,25 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     }
 
     // --- 5. THE ZONE ITSELF ---
-    let mut pid = zone_pid(&tools.state, &zone);
-    if pid.is_none() {
-        // The shortcut may well have been clicked while the zone was down.
-        // Starting it is the expected behaviour, not an error — and a failure
-        // here is deliberately ignored, because the check below says the same
-        // thing in words a user can act on.
-        let _ = cli::systemctl(tools, "start", &zone);
-        cli::wait_ready(&tools.state, &zone);
-        pid = zone_pid(&tools.state, &zone);
-    }
-    let Some(pid) = pid else {
-        eprintln!("зона {zone_name} не поднимается");
-        return 1;
+    let network = if zone == DIRECT {
+        // Nothing to start and nothing to enter: the host's own network.
+        Network::Direct
+    } else {
+        let mut pid = zone_pid(&tools.state, &zone);
+        if pid.is_none() {
+            // The shortcut may well have been clicked while the zone was down.
+            // Starting it is the expected behaviour, not an error — and a
+            // failure here is deliberately ignored, because the check below
+            // says the same thing in words a user can act on.
+            let _ = cli::systemctl(tools, "start", &zone);
+            cli::wait_ready(&tools.state, &zone);
+            pid = zone_pid(&tools.state, &zone);
+        }
+        let Some(pid) = pid else {
+            eprintln!("зона {zone_name} не поднимается");
+            return 1;
+        };
+        Network::Zone(pid)
     };
 
     if dryrun {
@@ -611,40 +639,137 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
 
     // The mark descendants are recognised by: a program started in a zone that
     // tries to open something else has that launch delegated outwards (step 1).
-    std::env::set_var(ENV_CURRENT, &zone);
-
-    let mut exec: Vec<OsString> = vec![tools.nsenter.clone().into()];
-    exec.push("--preserve-credentials".into());
-    if !container.dir.as_os_str().is_empty() {
-        // Without --keep-caps CapEff is zeroed on entering the zone's user
-        // namespace and there is nothing left to mount the layer with.
-        // (`docs/GOTCHAS.md` §1)
-        exec.push("--keep-caps".into());
+    //
+    // A `direct` launch is marked only when it ends up in a namespace of its
+    // own — a container's user namespace or a sandbox. From there `nsenter`
+    // into a zone fails exactly as it does from inside a zone, so the
+    // descendants have to delegate too. A plain `direct` launch is an ordinary
+    // host process and must stay unmarked, or everything it starts would take
+    // a detour through systemd for nothing.
+    let namespaced = !container.dir.as_os_str().is_empty() || selection.sandbox != Sandbox::None;
+    if network != Network::Direct || namespaced {
+        std::env::set_var(ENV_CURRENT, &zone);
     }
-    exec.extend(["-U".into(), "-n".into(), "-m".into(), "-t".into()]);
-    exec.push(pid.to_string().into());
-    exec.push("--".into());
-    if !container.dir.as_os_str().is_empty() {
-        exec.push(tools.unshare.clone().into());
-        exec.extend([
-            "--mount".into(),
-            "--propagation".into(),
-            "private".into(),
-            "--".into(),
-        ]);
-        exec.push(tools.core.clone().into());
+
+    let exec = entry_argv(
+        &Entry {
+            nsenter: &tools.nsenter,
+            unshare: &tools.unshare,
+            core: &tools.core,
+            zone: &zone,
+            network,
+            dir: &container.dir,
+            ephemeral: container.ephemeral,
+            regdir: &regdir,
+        },
+        cmd,
+    );
+    // Only `direct` with no container can get here with nothing at all: into a
+    // zone an empty command is `nsenter`'s own shell, which is a perfectly good
+    // thing to want, but the host has no such fallback.
+    if exec.is_empty() {
+        eprintln!("нечего запускать");
+        return 1;
+    }
+
+    let e = exec_command(&exec);
+    eprintln!("не удалось запустить {}: {e}", exec[0].to_string_lossy());
+    EXIT_NOT_STARTED
+}
+
+/// Where a launch runs, as far as its command line is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Network {
+    /// A zone that is up; the pid of its APP namespace, the one `nsenter`
+    /// targets.
+    Zone(i32),
+    /// The host's own network: there is no namespace to enter.
+    Direct,
+}
+
+/// Everything the last command line of a launch depends on.
+#[derive(Debug, Clone, Copy)]
+pub struct Entry<'a> {
+    pub nsenter: &'a Path,
+    pub unshare: &'a Path,
+    pub core: &'a Path,
+    pub zone: &'a OsStr,
+    pub network: Network,
+    /// The container's layer directory; empty for the main profile.
+    pub dir: &'a Path,
+    pub ephemeral: bool,
+    pub regdir: &'a Path,
+}
+
+/// The command line `run` finally `exec`s: the namespaces, the container, then
+/// the (already wrapped) command.
+///
+/// A pure function, because every word of it was paid for:
+///
+/// * **into a zone**: `nsenter --preserve-credentials -U -n -m -t <pid>`, and
+///   with a container also `--keep-caps` — without it CapEff is zeroed on
+///   entering the zone's user namespace and there is nothing left to mount the
+///   layer with (`docs/GOTCHAS.md` §1). The container then gets a private mount
+///   namespace of its own (`unshare --mount`), so its layers are seen by this
+///   launch only and not by the whole zone;
+/// * **`direct` with a container**: there is no zone to borrow a user namespace
+///   from, so `unshare` makes one — `--map-current-user` maps the user onto
+///   itself (the program keeps its uid and sees `$HOME` as usual) and
+///   `--keep-caps` carries the capabilities of that namespace across the exec,
+///   for the same reason as above: `profile-run` needs CAP_SYS_ADMIN over the
+///   new mount namespace to stack the layers, and drops it before the program
+///   starts. No network namespace is created: `direct` IS the host's network;
+/// * **`direct` without a container**: nothing at all. The program is a host
+///   process like any other, and the command is exec'd as it is (still wrapped
+///   in `wl-sandbox`/`fs-sandbox`, which are part of `cmd`).
+pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
+    let container = !entry.dir.as_os_str().is_empty();
+    let mut exec: Vec<OsString> = Vec::new();
+    match entry.network {
+        Network::Zone(pid) => {
+            exec.push(entry.nsenter.into());
+            exec.push("--preserve-credentials".into());
+            if container {
+                exec.push("--keep-caps".into());
+            }
+            exec.extend(["-U".into(), "-n".into(), "-m".into(), "-t".into()]);
+            exec.push(pid.to_string().into());
+            exec.push("--".into());
+            if container {
+                exec.push(entry.unshare.into());
+                exec.extend([
+                    "--mount".into(),
+                    "--propagation".into(),
+                    "private".into(),
+                    "--".into(),
+                ]);
+            }
+        }
+        Network::Direct if container => {
+            exec.push(entry.unshare.into());
+            exec.extend([
+                "--user".into(),
+                "--map-current-user".into(),
+                "--keep-caps".into(),
+                "--mount".into(),
+                "--propagation".into(),
+                "private".into(),
+                "--".into(),
+            ]);
+        }
+        Network::Direct => {}
+    }
+    if container {
+        exec.push(entry.core.into());
         exec.push("profile-run".into());
-        exec.push(container.dir.clone().into());
-        exec.push(zone.clone());
-        exec.push(if container.ephemeral { "1" } else { "0" }.into());
-        exec.push(regdir.into());
+        exec.push(entry.dir.into());
+        exec.push(entry.zone.into());
+        exec.push(if entry.ephemeral { "1" } else { "0" }.into());
+        exec.push(entry.regdir.into());
         exec.push("--".into());
     }
     exec.extend(cmd);
-
-    let e = exec_command(&exec);
-    eprintln!("не удалось запустить {}: {e}", tools.nsenter.display());
-    EXIT_NOT_STARTED
+    exec
 }
 
 /// A locked zone: run the command here, without the network the caller asked
@@ -1107,5 +1232,124 @@ mod tests {
             );
         }
         assert!(!WAYLAND_ALLOWED.contains(&"firefox"));
+    }
+
+    fn entry<'a>(network: Network, dir: &'a Path, ephemeral: bool) -> Entry<'a> {
+        Entry {
+            nsenter: Path::new("/t/nsenter"),
+            unshare: Path::new("/t/unshare"),
+            core: Path::new("/t/core"),
+            zone: OsStr::new(match network {
+                Network::Zone(_) => "nl",
+                Network::Direct => DIRECT,
+            }),
+            network,
+            dir,
+            ephemeral,
+            regdir: Path::new("/r/.running/work"),
+        }
+    }
+
+    #[test]
+    fn into_a_zone_without_a_container_is_one_nsenter() {
+        let line = entry_argv(
+            &entry(Network::Zone(42), Path::new(""), false),
+            argv(&["firefox", "%u"]),
+        );
+        assert_eq!(
+            line,
+            argv(&[
+                "/t/nsenter",
+                "--preserve-credentials",
+                "-U",
+                "-n",
+                "-m",
+                "-t",
+                "42",
+                "--",
+                "firefox",
+                "%u"
+            ])
+        );
+    }
+
+    #[test]
+    fn into_a_zone_with_a_container_keeps_the_caps_and_takes_a_mount_namespace() {
+        let line = entry_argv(
+            &entry(Network::Zone(42), Path::new("/p/work"), false),
+            argv(&["firefox"]),
+        );
+        assert_eq!(
+            line,
+            argv(&[
+                "/t/nsenter",
+                "--preserve-credentials",
+                "--keep-caps",
+                "-U",
+                "-n",
+                "-m",
+                "-t",
+                "42",
+                "--",
+                "/t/unshare",
+                "--mount",
+                "--propagation",
+                "private",
+                "--",
+                "/t/core",
+                "profile-run",
+                "/p/work",
+                "nl",
+                "0",
+                "/r/.running/work",
+                "--",
+                "firefox"
+            ])
+        );
+    }
+
+    #[test]
+    fn direct_without_a_container_is_the_command_itself() {
+        // Still whatever wrappers `run` put in front of it — they are part of
+        // the command by then — but no namespace of any kind.
+        let cmd = argv(&["/t/core", "wl-sandbox", "firefox", "--", "firefox"]);
+        assert_eq!(
+            entry_argv(&entry(Network::Direct, Path::new(""), false), cmd.clone()),
+            cmd
+        );
+        assert!(entry_argv(&entry(Network::Direct, Path::new(""), false), Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn direct_with_a_container_makes_its_own_user_namespace_and_no_network_one() {
+        // The container must not be dropped just because there is no zone to
+        // borrow a user namespace from — that was a silent loss of isolation.
+        let line = entry_argv(
+            &entry(Network::Direct, Path::new("/tmp/vpn-profile-x"), true),
+            argv(&["firefox"]),
+        );
+        assert_eq!(
+            line,
+            argv(&[
+                "/t/unshare",
+                "--user",
+                "--map-current-user",
+                "--keep-caps",
+                "--mount",
+                "--propagation",
+                "private",
+                "--",
+                "/t/core",
+                "profile-run",
+                "/tmp/vpn-profile-x",
+                "direct",
+                "1",
+                "/r/.running/work",
+                "--",
+                "firefox"
+            ])
+        );
+        assert!(!line.contains(&os("--net")), "direct is the host's network");
+        assert!(!line.contains(&os("/t/nsenter")));
     }
 }

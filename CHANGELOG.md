@@ -5,6 +5,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed (`direct` dropped the container, the sandbox and the compositor restriction)
+- **Choosing "Прямой интернет" in the picker silently threw away every layer
+  but the network.** The picker became the command itself for `direct`, so
+  what `vpn-zone run` adds on the way never happened: the container or
+  filesystem sandbox that had just been chosen, pinned or set as the default
+  (`default-profile own` included) was not applied — the program got the whole
+  `$HOME` — the Wayland restriction was not applied although it is on by
+  default, and no record reached the launch registry, so "already running in
+  another network" never knew about programs in the direct network. From
+  inside a LOCKED zone the picker's own `systemd-run` also went straight past
+  the lock. `direct` now goes through `vpn-zone run direct` like every other
+  network; only the namespace step differs. A container there gets a user and
+  mount namespace of its own from `unshare --map-current-user --keep-caps
+  --mount` (no network namespace — direct is the host's network), so a data
+  container works with `direct` for the first time instead of being ignored.
+  Covered by unit tests of the new `entry_argv`, the picker scenarios and a
+  smoke step that checks the layer, the host netns and the private userns.
+- A program opened through delegation (a link clicked in a zone) carried
+  `VPN_ZONE_DELEGATED=1` for the rest of its life, so the NEXT link clicked in
+  it skipped the delegation and died in `nsenter` with "reassociate to
+  namespaces failed". The guard is now removed from the environment once it has
+  been checked.
+- `vpn-zone add` refuses the names `direct` and `offline`: they are the
+  picker's built-in choices, and a zone called `direct` could never be entered.
+
 ### Fixed (DNS leak: the host's resolvers were reachable from inside a zone)
 - **Every name looked up inside a zone could be resolved by the HOST's
   systemd-resolved, around the tunnel.** nss-resolve talks varlink over

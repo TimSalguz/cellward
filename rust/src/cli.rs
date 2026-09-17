@@ -336,6 +336,17 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
         eprintln!("имя только из букв, цифр, - и _");
         return 1;
     }
+    // The picker's built-in choices, not zones: a zone called "direct" would
+    // never be entered (`vpn-zone run direct` is the host's network), and
+    // "offline" is the directory the picker creates by itself for the empty
+    // zone. (`docs/GOTCHAS.md` §2)
+    if name == launch::DIRECT || name == launch::OFFLINE {
+        eprintln!(
+            "«{}» — встроенный вариант пикера, так зону назвать нельзя",
+            name.to_string_lossy()
+        );
+        return 1;
+    }
     let conf = Path::new(conf);
     if !conf.is_file() {
         eprintln!("нет файла {}", conf.display());

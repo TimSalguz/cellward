@@ -1283,29 +1283,16 @@ fn launch(
     // sandbox permissions are keyed by. (`docs/GOTCHAS.md` §6, §7)
     std::env::set_var(launch::ENV_APPID, key);
 
+    // "direct" is NOT special here any more, and must not become special again.
+    // The picker used to become the command itself for it, and everything
+    // `vpn-zone run` adds on the way was lost without a word: the container or
+    // sandbox that had just been chosen (or pinned, or set as the default), the
+    // compositor restriction and the registry record. "🔒 Своя песочница" with
+    // "Прямой интернет" started the program with the whole home in reach, and
+    // from inside a LOCKED zone the systemd-run it used went straight past the
+    // lock. `vpn-zone run direct` does all of it — delegation out of a zone
+    // (§13) and the lock included. (`docs/GOTCHAS.md` §10)
     let zone = match zone_choice {
-        "direct" => {
-            // From inside a zone "direct" would not be direct at all: the
-            // process would inherit its network. Ask systemd to start it
-            // outside, the way `vpn-zone run` delegates. (`docs/GOTCHAS.md` §13)
-            let argv: Vec<OsString> =
-                if std::env::var_os(launch::ENV_CURRENT).is_some_and(|v| !v.is_empty()) {
-                    let mut argv: Vec<OsString> = vec![tools.systemd_run.clone().into()];
-                    argv.extend([
-                        "--user".into(),
-                        "--quiet".into(),
-                        "--collect".into(),
-                        "--".into(),
-                    ]);
-                    argv.extend(cmd.iter().cloned());
-                    argv
-                } else {
-                    cmd.to_vec()
-                };
-            let e = exec_command(&argv);
-            eprintln!("не удалось запустить {}: {e}", argv[0].to_string_lossy());
-            return ExitCode::from(EXIT_NOT_STARTED);
-        }
         "offline" => {
             // A zone with no network is created on demand — there is nothing to
             // keep in a config, it is an empty namespace. (`docs/GOTCHAS.md` §2)

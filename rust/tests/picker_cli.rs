@@ -2,8 +2,8 @@
 //!
 //! The picker is a machine with three inputs — the memory on disk, the answer
 //! to a dialog and the environment — and exactly two outcomes: it becomes
-//! `vpn-zone run` (or the program itself), or it exits without starting
-//! anything. That invariant is what these tests assert, scenario by scenario:
+//! `vpn-zone run` (for `direct` too — it never becomes the program itself), or
+//! it exits without starting anything. That invariant is what these tests assert, scenario by scenario:
 //! **every one of them ends either in a recorded exec or in an explicit
 //! cancel**, and never in silence.
 //!
@@ -536,9 +536,10 @@ fn without_a_graphical_session_the_remembered_choice_is_taken_and_said_out_loud(
 }
 
 #[test]
-fn the_direct_choice_becomes_the_program_itself() {
-    // "Прямой интернет" is the absence of a zone: there is no `vpn-zone run` in
-    // this path at all, the picker simply becomes the command.
+fn the_direct_choice_goes_through_run_like_any_other_network() {
+    // "Прямой интернет" used to be the picker becoming the command itself —
+    // and everything `vpn-zone run` adds on the way (the container, the
+    // compositor restriction, the registry record) was lost without a word.
     let home = Home::new("direct");
     home.answers(&["direct"]);
     let out = home.run(
@@ -546,8 +547,56 @@ fn the_direct_choice_becomes_the_program_itself() {
         &[],
     );
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stdout(&out).trim(), "ЗАПУЩЕНО");
-    assert!(home.launched().is_empty(), "vpn-zone run тут ни при чём");
+    assert_eq!(
+        home.launched(),
+        vec![vec![
+            "run",
+            "direct",
+            "--",
+            "/bin/sh",
+            "-c",
+            "echo ЗАПУЩЕНО"
+        ]]
+    );
+    assert!(stdout(&out).trim().is_empty(), "пикер сам стал командой");
+}
+
+#[test]
+fn a_container_chosen_for_direct_is_not_dropped() {
+    // The loss of isolation this used to be: a sandbox set as the default (or
+    // pinned) plus "Прямой интернет" started the program with the whole home.
+    let home = Home::new("direct-sandbox");
+    home.write("config/default-profile", "own");
+    home.answers(&["direct"]);
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        home.launched()[0],
+        [
+            "run",
+            "direct",
+            "--sandbox",
+            "app-firefox",
+            "--",
+            "firefox",
+            "%u"
+        ]
+    );
+
+    let home = Home::new("direct-profile");
+    home.profile("work");
+    home.write("state/.pinned/firefox", "direct");
+    home.write("state/.pinnedprofile/firefox", "work");
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        home.asked().is_empty(),
+        "всё закреплено — спрашивать нечего"
+    );
+    assert_eq!(
+        home.launched()[0],
+        ["run", "direct", "--profile", "work", "--", "firefox", "%u"]
+    );
 }
 
 #[test]
