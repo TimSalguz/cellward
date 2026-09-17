@@ -137,8 +137,8 @@ never possible: two ways out is a leak waiting for a routing mistake.
 
 ### 3.4 Merging two containers
 
-`vpn-zone container merge <from> <into> [--yes]` — **implemented** (the GUI
-entry is left): for programs that turned out to belong together (a browser and
+`vpn-zone container merge <from> <into> [--yes]` and the «Контейнеры VPN-зон»
+entry (`vpn-zone-gui containers`) — **implemented**: for programs that turned out to belong together (a browser and
 a password manager).
 
 - only containers of one kind merge: two layers over the home (their overlay

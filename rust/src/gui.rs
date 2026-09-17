@@ -46,6 +46,7 @@ vpn-zone-gui — графические ярлыки vpn-zones (kdialog над v
   vpn-zone-gui profile-rm   удалить контейнер (или все)
   vpn-zone-gui settings     сеть/контейнер по умолчанию, ярлыки, замки
   vpn-zone-gui forget       забыть закреплённые сети программ
+  vpn-zone-gui containers   сеть контейнера, объединение, выданные каталоги
 
 Эти же действия есть в CLI: vpn-zone add|rm|profile|default|mode|forget.
 Пути инструментов приходят манифестом VPN_ZONE_TOOLS, как и у vpn-zone.
@@ -76,6 +77,7 @@ pub fn main() -> ExitCode {
         b"profile-rm" => profile_rm(&tools),
         b"settings" => settings(&tools),
         b"forget" => forget(&tools),
+        b"containers" => containers(&tools),
         _ => {
             eprintln!("неизвестная команда: {}", verb.to_string_lossy());
             print!("{USAGE}");
@@ -504,6 +506,204 @@ fn profile_rm(tools: &Tools) -> u8 {
                 format!("Не удалось удалить профиль «{choice}»").as_str(),
             ],
         );
+    }
+    0
+}
+
+// --- CONTAINERS --------------------------------------------------------------
+
+/// `vpn-zone-gui containers`: what `vpn-zone container` does, for someone who
+/// does not live in a terminal — change a container's network, merge two, grant
+/// a home of its own a directory or take it back (`docs/CONTAINERS.md` §3.4,
+/// §3.5). Every change goes through the CLI, which refuses what is declared in
+/// Nix and says why; the dialog shows that text.
+fn containers(tools: &Tools) -> u8 {
+    use crate::container::{Home, Network};
+    let all = crate::container::load_all(tools);
+    if all.is_empty() {
+        dialog::message(
+            &tools.kdialog,
+            [
+                "--msgbox",
+                "Контейнеров нет.\n\nСоздать: «Создать контейнер» в меню или «➕ Новый профиль…» при запуске программы.",
+            ],
+        );
+        return 0;
+    }
+    let describe = |c: &crate::container::Container| {
+        let home = match c.home {
+            Home::Overlay => "слой над домом",
+            Home::Private => "свой дом",
+        };
+        let network = match &c.network.value {
+            Network::Ask => "спрашивать".to_owned(),
+            Network::Named(name) => name.clone(),
+        };
+        format!("{} — {home}, сеть: {network}", c.selector())
+    };
+    let rows: Vec<(String, String)> = all
+        .iter()
+        .map(|c| row(&c.selector(), describe(c)))
+        .collect();
+    let Some(selector) = menu(tools, "Контейнеры", "Какой контейнер?", &rows)
+    else {
+        return 0;
+    };
+    let Some(container) = all.iter().find(|c| c.selector() == selector) else {
+        return 0;
+    };
+
+    let mut actions = vec![
+        row("network", "⇄ Сменить сеть…"),
+        row("merge", "⊕ Объединить с другим контейнером…"),
+    ];
+    if container.home == Home::Private {
+        actions.push(row("grant", "📁 Выдать каталог…"));
+        if !container.paths.is_empty() {
+            actions.push(row("revoke", "✕ Забрать выданный каталог…"));
+        }
+    }
+    let Some(action) = menu(
+        tools,
+        &format!("Контейнер «{selector}»"),
+        &describe(container),
+        &actions,
+    ) else {
+        return 0;
+    };
+    let done = |ok: bool, text: String, title: &str| {
+        if ok {
+            dialog::notify(&tools.notify_send, None, "6000", title, &text);
+        } else {
+            dialog::message(&tools.kdialog, ["--error", text.as_str()]);
+        }
+    };
+
+    match action.as_str() {
+        "network" => {
+            let mut nets = vec![
+                row("ask", "Спрашивать при запуске (не привязывать)"),
+                row("direct", "Прямой интернет (без VPN)"),
+                row("offline", "Без сети"),
+            ];
+            for zone in zones(&tools.state) {
+                let name = name_of(&zone);
+                nets.push(row(&name, format!("VPN: {name}")));
+            }
+            let Some(network) = menu(
+                tools,
+                &format!("Сеть контейнера «{selector}»"),
+                "Программы контейнера будут запускаться только в ней",
+                &nets,
+            ) else {
+                return 0;
+            };
+            let (ok, text) = cli(tools, &["container", "set", &selector, "network", &network]);
+            done(ok, text, "Сеть контейнера изменена");
+        }
+        "merge" => {
+            let targets: Vec<(String, String)> = all
+                .iter()
+                .filter(|c| c.home == container.home && c.selector() != selector)
+                .map(|c| row(&c.selector(), describe(c)))
+                .collect();
+            if targets.is_empty() {
+                dialog::message(
+                    &tools.kdialog,
+                    [
+                        "--msgbox",
+                        "Объединять не с чем: другого контейнера того же вида нет.",
+                    ],
+                );
+                return 0;
+            }
+            let Some(into) = menu(
+                tools,
+                &format!("Объединить «{selector}» с…"),
+                "В какой контейнер перенести данные и программы?",
+                &targets,
+            ) else {
+                return 0;
+            };
+            let warn = format!(
+                "Перенести «{selector}» в «{into}»?\n\nСовпавшие файлы останутся у «{into}», версии из «{selector}» лягут рядом, в .merged-from-{}. Программы «{selector}» перейдут в «{into}». Сам «{selector}» останется — удалишь, когда проверишь.",
+                selector.trim_start_matches(crate::container::SANDBOX_PREFIX)
+            );
+            if !dialog::confirm(
+                &tools.kdialog,
+                [
+                    "--title",
+                    "Объединить?",
+                    "--warningcontinuecancel",
+                    warn.as_str(),
+                ],
+            ) {
+                return 0;
+            }
+            let (mut ok, mut text) = cli(tools, &["container", "merge", &selector, &into]);
+            // New root certificates need a word of their own: they let
+            // somebody read the TLS traffic of every program of the target.
+            if !ok && text.contains("--yes") {
+                let question = format!(
+                    "{text}\n\n⚠ Программы «{into}» начнут доверять этим корневым сертификатам: их владелец сможет читать их TLS-трафик. Принять?"
+                );
+                if !dialog::confirm(
+                    &tools.kdialog,
+                    [
+                        "--title",
+                        "Чужие сертификаты",
+                        "--warningcontinuecancel",
+                        question.as_str(),
+                    ],
+                ) {
+                    return 0;
+                }
+                (ok, text) = cli(tools, &["container", "merge", &selector, &into, "--yes"]);
+            }
+            if ok {
+                dialog::message(&tools.kdialog, ["--msgbox", text.as_str()]);
+            } else {
+                dialog::message(&tools.kdialog, ["--error", text.as_str()]);
+            }
+        }
+        "grant" => {
+            let Some(dir) = dialog::ask(
+                &tools.kdialog,
+                [
+                    OsString::from("--title"),
+                    OsString::from(format!("Какой каталог выдать «{selector}»?")),
+                    OsString::from("--getexistingdirectory"),
+                    tools.home.clone().into_os_string(),
+                ],
+            )
+            .map(|d| d.trim().to_owned())
+            .filter(|d| !d.is_empty()) else {
+                return 0;
+            };
+            let (ok, text) = cli(tools, &["container", "grant", &selector, &dir]);
+            done(ok, text, "Каталог выдан");
+        }
+        "revoke" => {
+            let rows: Vec<(String, String)> = container
+                .paths
+                .iter()
+                .map(|p| {
+                    let path = p.value.to_string_lossy().into_owned();
+                    row(&path, path.clone())
+                })
+                .collect();
+            let Some(path) = menu(
+                tools,
+                &format!("Забрать у «{selector}»"),
+                "Какой каталог больше не выдавать?",
+                &rows,
+            ) else {
+                return 0;
+            };
+            let (ok, text) = cli(tools, &["container", "revoke", &selector, &path]);
+            done(ok, text, "Каталог больше не выдан");
+        }
+        _ => {}
     }
     0
 }

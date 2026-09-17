@@ -830,6 +830,16 @@ in
     categories = [ "Network" ];
   };
 
+  xdg.desktopEntries."vpn-zone-containers" = {
+    name = "Контейнеры VPN-зон";
+    comment = "Сеть контейнера, объединение двух контейнеров, выданные каталоги";
+    exec = guiExec "containers";
+    icon = "folder-network";
+    terminal = false;
+    type = "Application";
+    categories = [ "Network" ];
+  };
+
   xdg.desktopEntries."vpn-zone-forget" = {
     name = "Сбросить сети программ";
     comment = "Забыть, в какой сети запускать программу — у одной или у всех сразу";

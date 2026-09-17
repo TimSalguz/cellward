@@ -487,3 +487,81 @@ fn a_cancelled_file_dialog_creates_nothing() {
     assert!(home.ran().is_empty());
     assert_eq!(home.asked().len(), 1);
 }
+
+#[test]
+fn a_container_is_bound_to_a_network_from_the_menu() {
+    let home = Home::new("containers-net");
+    home.zone("nl");
+    fs::create_dir_all(home.path("profiles/work")).unwrap();
+    home.answers(&["work", "network", "nl"]);
+    let out = home.run(&["containers"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        home.ran(),
+        vec![vec!["container", "set", "work", "network", "nl"]]
+    );
+    assert!(said(&home.notified()[0], "Сеть контейнера изменена"));
+}
+
+#[test]
+fn a_merge_asks_again_before_it_accepts_foreign_certificates() {
+    let home = Home::new("containers-merge");
+    fs::create_dir_all(home.path("profiles/old")).unwrap();
+    fs::create_dir_all(home.path("profiles/work")).unwrap();
+    // The CLI refuses without --yes, the way the real one does when the
+    // source trusts a root the target does not.
+    home.script(
+        "vpn-zone",
+        r#"{ printf '%s\n' "$@"; echo '--END--'; } >> "$RUNNER_LOG"
+case "$*" in
+  *--yes*) echo "old объединён в work"; exit 0 ;;
+  *) echo "у old есть корневые сертификаты — подтверди флагом --yes" >&2; exit 1 ;;
+esac"#,
+    );
+    home.answers(&["old", "merge", "work", "EMPTY", "EMPTY"]);
+    let out = home.run(&["containers"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        home.ran(),
+        vec![
+            vec!["container", "merge", "old", "work"],
+            vec!["container", "merge", "old", "work", "--yes"],
+        ]
+    );
+    let asked = home.asked();
+    assert!(said(asked.last().unwrap(), "объединён"), "{asked:?}");
+
+    // Declining the certificates stops there.
+    let home = Home::new("containers-merge-no");
+    fs::create_dir_all(home.path("profiles/old")).unwrap();
+    fs::create_dir_all(home.path("profiles/work")).unwrap();
+    home.script(
+        "vpn-zone",
+        r#"{ printf '%s\n' "$@"; echo '--END--'; } >> "$RUNNER_LOG"
+echo "подтверди флагом --yes" >&2; exit 1"#,
+    );
+    home.answers(&["old", "merge", "work", "EMPTY", "CANCEL"]);
+    let out = home.run(&["containers"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(home.ran().len(), 1);
+}
+
+#[test]
+fn a_home_of_its_own_is_granted_a_directory_from_the_chooser() {
+    let home = Home::new("containers-grant");
+    fs::create_dir_all(home.path("sandboxes/dev/home")).unwrap();
+    home.answers(&["sb:dev", "grant", "/mnt/games"]);
+    let out = home.run(&["containers"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        home.ran(),
+        vec![vec!["container", "grant", "sb:dev", "/mnt/games"]]
+    );
+    // A layer over the home is offered no grant at all.
+    let home = Home::new("containers-grant-overlay");
+    fs::create_dir_all(home.path("profiles/work")).unwrap();
+    home.answers(&["work", "CANCEL"]);
+    let _ = home.run(&["containers"], &[]);
+    let asked = home.asked();
+    assert!(!said(&asked[1], "Выдать каталог"), "{asked:?}");
+}

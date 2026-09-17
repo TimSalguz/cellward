@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (containers in the GUI)
+- A «Контейнеры VPN-зон» launcher entry (`vpn-zone-gui containers`): pick a
+  container, then change its network, merge it into another container of the
+  same kind (asking again before foreign root certificates are accepted), or
+  grant a home of its own a directory from a chooser and take one back. Every
+  change goes through `vpn-zone container`, whose refusals are shown as they
+  are.
+
 ### Added (tunnel watch)
 - `vpn-zone watch [--json]`, run every minute by a user timer
   (`programs.vpn-zones.tunnelWatch.enable`, on by default): a tunnel that sends
