@@ -330,26 +330,34 @@ let
           zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
           busctl = "busctl --system --timeout=5"
           inz = f"nsenter --preserve-credentials -U -n -m -t {zp} --"
-          alice(
-              f"sh -c '! {inz} {busctl} get-property org.freedesktop.hostname1 "
-              "/org/freedesktop/hostname1 org.freedesktop.hostname1 Hostname'"
-          )
-          alice(
-              f"sh -c '! {inz} {busctl} call org.freedesktop.login1 /org/freedesktop/login1 "
-              "org.freedesktop.login1.Manager ListSessions'"
-          )
-          alice(
-              f"{inz} {busctl} get-property org.freedesktop.login1 /org/freedesktop/login1 "
-              "org.freedesktop.login1.Manager IdleHint"
-          )
-          alice(
-              f"{inz} {busctl} call org.freedesktop.login1 /org/freedesktop/login1 "
-              "org.freedesktop.login1.Manager Inhibit ssss sleep vmtest vmtest delay"
-          )
-          alice(
-              f"{busctl} get-property org.freedesktop.hostname1 /org/freedesktop/hostname1 "
-              "org.freedesktop.hostname1 Hostname"
-          )
+
+          def bus(cmd, zone=True):
+              """(exit status, stdout+stderr) of a busctl call as alice."""
+              prefix = f"{inz} " if zone else ""
+              return machine.execute(
+                  "su -l alice -c "
+                  + shlex.quote(
+                      f"export XDG_RUNTIME_DIR=/run/user/1000; {prefix}{busctl} {cmd} 2>&1"
+                  )
+              )
+
+          hostname = "get-property org.freedesktop.hostname1 /org/freedesktop/hostname1 org.freedesktop.hostname1 Hostname"
+          sessions = "call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager ListSessions"
+          idle = "get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager IdleHint"
+          inhibit = "call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager Inhibit ssss sleep vmtest vmtest delay"
+          # The host first: every call works there, so a refusal in the zone
+          # is the filter and not the test.
+          for call in [hostname, sessions, idle, inhibit]:
+              code, out = bus(call, zone=False)
+              assert code == 0, f"on the host: {call}: {out}"
+          code, out = bus(hostname)
+          assert code != 0, f"hostname1 answered in the zone: {out}"
+          code, out = bus(sessions)
+          assert code != 0, f"ListSessions answered in the zone: {out}"
+          code, out = bus(idle)
+          assert code == 0, f"reading login1 refused in the zone: {out}"
+          code, out = bus(inhibit)
+          assert code == 0, f"Inhibit refused in the zone: {out}"
 
       with subtest("tab completion offers the zone where a zone is expected"):
           out = alice("vpn-zone _complete -- vpn-zone up \"\" 3")
