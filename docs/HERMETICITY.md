@@ -108,7 +108,7 @@ becomes a default, with the table above as the list of what the owner accepts.
   `/tmp/.X11-unix` in the zone's mount namespace and no `DISPLAY` in a launch.
   A container with the `x11` permission gets its own `xwayland-satellite`.
   There is no `x11 = "host"` hole.
-- **B — the system bus: B2, narrowed.** `xdg-dbus-proxy` per zone; `UPower`
+- **B — the system bus: B2, narrowed — implemented.** `xdg-dbus-proxy` per zone; `UPower`
   allowed; `login1` only `Inhibit` and reading properties — no session list,
   no power management; `NetworkManager`, `hostname1`, `resolve1`, `machined`,
   `timedate1` denied.

@@ -725,7 +725,7 @@ in
       ExecStart =
         "${vpn-zone-rust}/bin/vpn-zone-core zone-holder"
         + " --ip ${iproute} --awg ${awg} --wg ${wg} --pasta ${pasta} --nft ${nft}"
-        + " --openconnect ${openconnect} %i";
+        + " --openconnect ${openconnect} --dbus-proxy ${pkgs.xdg-dbus-proxy}/bin/xdg-dbus-proxy %i";
       Restart = "no";
       # KillMode=control-group по умолчанию: гасим зону — гаснет и pasta, и всё,
       # что в зоне работало, теряет сеть. Это и есть kill switch.

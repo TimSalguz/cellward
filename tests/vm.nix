@@ -322,6 +322,35 @@ let
           alice("systemctl --user is-active vpn-zone@vmsmoke.service")
           machine.succeed(f"test -f {STATE}/vmsmoke/ready")
 
+      # The system bus (docs/HERMETICITY.md §7, B2): filtered by a proxy in
+      # every zone. hostname1 and the session list are refused, reading
+      # login1's properties and inhibiting sleep are not — and the host keeps
+      # its whole bus.
+      with subtest("system bus in a zone: hostname1 and ListSessions refused, Inhibit allowed"):
+          zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
+          busctl = "busctl --system --timeout=5"
+          inz = f"nsenter --preserve-credentials -U -n -m -t {zp} --"
+          alice(
+              f"sh -c '! {inz} {busctl} get-property org.freedesktop.hostname1 "
+              "/org/freedesktop/hostname1 org.freedesktop.hostname1 Hostname'"
+          )
+          alice(
+              f"sh -c '! {inz} {busctl} call org.freedesktop.login1 /org/freedesktop/login1 "
+              "org.freedesktop.login1.Manager ListSessions'"
+          )
+          alice(
+              f"{inz} {busctl} get-property org.freedesktop.login1 /org/freedesktop/login1 "
+              "org.freedesktop.login1.Manager IdleHint"
+          )
+          alice(
+              f"{inz} {busctl} call org.freedesktop.login1 /org/freedesktop/login1 "
+              "org.freedesktop.login1.Manager Inhibit ssss sleep vmtest vmtest delay"
+          )
+          alice(
+              f"{busctl} get-property org.freedesktop.hostname1 /org/freedesktop/hostname1 "
+              "org.freedesktop.hostname1 Hostname"
+          )
+
       with subtest("tab completion offers the zone where a zone is expected"):
           out = alice("vpn-zone _complete -- vpn-zone up \"\" 3")
           assert "vmsmoke" in out.split(), out

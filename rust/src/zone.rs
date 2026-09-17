@@ -205,6 +205,29 @@ const HOSTIF_GUEST4: &str = "10.255.255.253";
 const HOSTIF_PREFIX4: &str = "30";
 const HOSTIF_GATEWAY4: &str = "10.255.255.254";
 
+/// The host's system bus.
+const SYSTEM_BUS: &str = "/run/dbus/system_bus_socket";
+/// The zone's filtered system bus, in its state directory.
+const SYSTEM_BUS_PROXY: &str = "system-bus";
+
+/// What a program in a zone may ask of the system bus (the owner's decision
+/// B2, `docs/HERMETICITY.md` §7). Everything else — NetworkManager (the
+/// machine's real interfaces, SSIDs and addresses), hostname1, resolve1 (a
+/// resolver in the host's network), machined, timedate1 — is filtered out:
+/// de-anonymisation without a single packet.
+///
+/// * UPower whole: battery state, read by players and browsers;
+/// * login1 only to inhibit sleep and to read properties — not the list of
+///   sessions, not power management.
+pub const SYSTEM_BUS_RULES: [&str; 6] = [
+    "--filter",
+    "--talk=org.freedesktop.UPower",
+    "--call=org.freedesktop.login1=org.freedesktop.login1.Manager.Inhibit@/org/freedesktop/login1",
+    "--call=org.freedesktop.login1=org.freedesktop.DBus.Properties.Get@/org/freedesktop/login1",
+    "--call=org.freedesktop.login1=org.freedesktop.DBus.Properties.GetAll@/org/freedesktop/login1",
+    "--call=org.freedesktop.login1=org.freedesktop.DBus.Introspectable.Introspect@/org/freedesktop/login1",
+];
+
 /// pasta's doors that nothing here uses, shut. Its defaults open four:
 ///
 /// * `-t auto`, `-u auto` — every port bound in the uplink is bound on the
@@ -286,6 +309,8 @@ pub struct Tools {
     /// The userspace client of an `[OpenConnect]` zone. Only such a zone runs
     /// it; a WireGuard one never looks at this path.
     pub openconnect: PathBuf,
+    /// The filter in front of the system bus (`docs/HERMETICITY.md` §7, B2).
+    pub dbus_proxy: PathBuf,
 }
 
 impl Default for Tools {
@@ -299,6 +324,7 @@ impl Default for Tools {
             pasta: PathBuf::from("pasta"),
             nft: PathBuf::from("nft"),
             openconnect: PathBuf::from("openconnect"),
+            dbus_proxy: PathBuf::from("xdg-dbus-proxy"),
         }
     }
 }
@@ -365,6 +391,7 @@ impl Args {
                 "--pasta" => &mut tools.pasta,
                 "--nft" => &mut tools.nft,
                 "--openconnect" => &mut tools.openconnect,
+                "--dbus-proxy" => &mut tools.dbus_proxy,
                 _ => return Err(ArgError::UnknownFlag(flag)),
             };
             let value = rest
@@ -604,6 +631,7 @@ static USERNS_CHILD: AtomicI32 = AtomicI32::new(0);
 static ZONE_CHILD: AtomicI32 = AtomicI32::new(0);
 static UPLINK_CHILD: AtomicI32 = AtomicI32::new(0);
 static PASTA_CHILD: AtomicI32 = AtomicI32::new(0);
+static PROXY_CHILD: AtomicI32 = AtomicI32::new(0);
 /// Did the shutdown start with a TERM/INT of our own?
 static ASKED_TO_STOP: AtomicBool = AtomicBool::new(false);
 
@@ -618,7 +646,7 @@ extern "C" fn forward_signal(sig: libc::c_int) {
 
 extern "C" fn stop_zone(_sig: libc::c_int) {
     ASKED_TO_STOP.store(true, Ordering::SeqCst);
-    for slot in [&PASTA_CHILD, &UPLINK_CHILD, &ZONE_CHILD] {
+    for slot in [&PASTA_CHILD, &UPLINK_CHILD, &ZONE_CHILD, &PROXY_CHILD] {
         let pid = slot.load(Ordering::SeqCst);
         if pid > 0 {
             // SAFETY: as above.
@@ -915,6 +943,11 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
         Some(prepare(zone)?)
     };
 
+    // The filtered system bus, before the zone exists: its namespace binds the
+    // socket in as one of its first steps.
+    let proxy = start_system_bus_proxy(zone);
+    let proxy_pid = proxy.as_ref().map_or(0, |c| c.id() as i32);
+
     let (uplink_up_r, uplink_up_w) =
         sys::pipe().map_err(|e| format!("cannot create a pipe: {e}"))?;
     let (zone_up_r, zone_up_w) = sys::pipe().map_err(|e| format!("cannot create a pipe: {e}"))?;
@@ -1096,7 +1129,21 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
     // left to serve. pasta counts too — a zone whose way out is gone is a zone
     // that only pretends to work.
     let pasta_pid = pasta.as_ref().map_or(0, |c| c.id() as i32);
-    let (dead, code) = wait_any();
+    let (dead, code) = loop {
+        let (dead, code) = wait_any();
+        // The proxy dying is no reason to take the zone down: the bind to its
+        // socket stays, and connecting to a dead socket is refused — the
+        // system bus is simply gone for the zone, which is closed, not open.
+        if dead == proxy_pid && dead > 0 && !ASKED_TO_STOP.load(Ordering::SeqCst) {
+            eprintln!(
+                "zone {}: the system bus proxy died — the zone has no system bus now",
+                zone.name()
+            );
+            PROXY_CHILD.store(0, Ordering::SeqCst);
+            continue;
+        }
+        break (dead, code);
+    };
     if !ASKED_TO_STOP.load(Ordering::SeqCst) {
         let what = if dead == zone_pid {
             "the zone"
@@ -1113,7 +1160,12 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
     // Nothing may outlive the zone: a stray pasta would keep an interface on a
     // dead namespace and `vpn-zone gc` would have to clean up after us, and a
     // surviving uplink would keep a namespace nobody can reach any more.
-    for pid in [pasta_pid, uplink_pid, zone_pid] {
+    for pid in [
+        pasta_pid,
+        uplink_pid,
+        zone_pid,
+        PROXY_CHILD.load(Ordering::SeqCst),
+    ] {
         if pid != dead {
             kill_and_reap(pid);
         }
@@ -1434,6 +1486,94 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
     }
 }
 
+/// Start `xdg-dbus-proxy` in front of the host's system bus, listening in the
+/// zone's directory, and wait for its socket. `None` when the host has no
+/// system bus, the proxy cannot start, or its socket never appears — the zone
+/// then closes the system bus altogether ([`seal_system_bus`]).
+fn start_system_bus_proxy(zone: &Zone) -> Option<Child> {
+    if fs::symlink_metadata(SYSTEM_BUS).is_err() {
+        return None;
+    }
+    let socket = zone.path(SYSTEM_BUS_PROXY);
+    let _ = fs::remove_file(&socket);
+    let mut child = match Command::new(&zone.tools.dbus_proxy)
+        .arg(format!("unix:path={SYSTEM_BUS}"))
+        .arg(&socket)
+        .args(SYSTEM_BUS_RULES)
+        .stdout(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!(
+                "zone {}: cannot start {} ({e}) — the zone gets no system bus",
+                zone.name(),
+                zone.tools.dbus_proxy.display()
+            );
+            return None;
+        }
+    };
+    PROXY_CHILD.store(child.id() as i32, Ordering::SeqCst);
+    for _ in 0..WAIT_STEPS {
+        if fs::symlink_metadata(&socket).is_ok() {
+            return Some(child);
+        }
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        thread::sleep(WAIT_STEP);
+    }
+    eprintln!(
+        "zone {}: the system bus proxy did not come up — the zone gets no system bus",
+        zone.name()
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+    PROXY_CHILD.store(0, Ordering::SeqCst);
+    None
+}
+
+/// In the zone's mount namespace: the proxy's socket over the host's system
+/// bus, or — no proxy — nothing at all over `/run/dbus`. Never the host's bus
+/// as it is. Fatal when neither can be done: a zone that promises a filtered
+/// system bus and hands out the whole one is worse than no zone.
+fn seal_system_bus(zone: &Zone) -> Result<(), String> {
+    if fs::symlink_metadata(SYSTEM_BUS).is_err() {
+        return Ok(());
+    }
+    let proxy = zone.path(SYSTEM_BUS_PROXY);
+    if fs::symlink_metadata(&proxy).is_ok()
+        && sys::mount(
+            proxy.as_os_str(),
+            Path::new(SYSTEM_BUS),
+            "",
+            libc::MS_BIND,
+            "",
+        )
+        .is_ok()
+    {
+        println!(
+            "zone {}: system bus filtered (UPower, login1 inhibit/read)",
+            zone.name()
+        );
+        return Ok(());
+    }
+    let dir = Path::new(SYSTEM_BUS)
+        .parent()
+        .unwrap_or(Path::new("/run/dbus"));
+    sys::mount(OsStr::new("tmpfs"), dir, "tmpfs", 0, "mode=0755,size=64k").map_err(|e| {
+        format!(
+            "cannot close the system bus at {}: {e} — the zone would see all of it",
+            dir.display()
+        )
+    })?;
+    eprintln!(
+        "zone {}: no system bus proxy — the system bus is closed in the zone",
+        zone.name()
+    );
+    Ok(())
+}
+
 /// Wait for the app namespace to say it exists.
 fn wait_for_app_namespace(zone_up_r: OwnedFd) -> Result<(), String> {
     let mut zone_up = File::from(zone_up_r);
@@ -1740,6 +1880,9 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     hide_host_resolvers(zone)?;
     // The same hole closed as a class rather than by a list of sockets.
     own_nsswitch(zone);
+    // resolve1 is on the system bus too, and NetworkManager tells a program
+    // which networks the machine is really on.
+    seal_system_bus(zone)?;
 
     let Some(ZoneLinks {
         backend,
@@ -2699,6 +2842,8 @@ mod tests {
             "/n/nft",
             "--openconnect",
             "/n/openconnect",
+            "--dbus-proxy",
+            "/n/xdg-dbus-proxy",
             "nl",
         ]))
         .unwrap();
@@ -2709,6 +2854,40 @@ mod tests {
         assert_eq!(parsed.tools.pasta, PathBuf::from("/n/pasta"));
         assert_eq!(parsed.tools.nft, PathBuf::from("/n/nft"));
         assert_eq!(parsed.tools.openconnect, PathBuf::from("/n/openconnect"));
+        assert_eq!(parsed.tools.dbus_proxy, PathBuf::from("/n/xdg-dbus-proxy"));
+    }
+
+    #[test]
+    fn the_system_bus_filter_names_what_is_allowed_and_nothing_else() {
+        assert_eq!(SYSTEM_BUS_RULES[0], "--filter");
+        let talks: Vec<&str> = SYSTEM_BUS_RULES
+            .iter()
+            .filter(|r| r.starts_with("--talk=") || r.starts_with("--own="))
+            .copied()
+            .collect();
+        assert_eq!(talks, ["--talk=org.freedesktop.UPower"]);
+        // login1: calls only, and only these.
+        for rule in SYSTEM_BUS_RULES.iter().filter(|r| r.contains("login1")) {
+            assert!(rule.starts_with("--call=org.freedesktop.login1="), "{rule}");
+            assert!(
+                rule.contains("Manager.Inhibit@")
+                    || rule.contains("DBus.Properties.Get")
+                    || rule.contains("Introspectable.Introspect@"),
+                "{rule}"
+            );
+        }
+        for denied in [
+            "NetworkManager",
+            "hostname1",
+            "resolve1",
+            "machine1",
+            "timedate1",
+        ] {
+            assert!(
+                !SYSTEM_BUS_RULES.iter().any(|r| r.contains(denied)),
+                "{denied}"
+            );
+        }
     }
 
     #[test]

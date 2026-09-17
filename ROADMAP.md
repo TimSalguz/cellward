@@ -185,9 +185,11 @@ Flathub), а единственный сегодняшний диалог — в
       LAN недоступна вовсе)
 - [ ] DNS: опционально DoT/DoH через локальный резолвер зоны (безопасный дефолт
       при пустом `DNS=` уже есть)
-- [ ] решено владельцем (2026-09-17, `docs/HERMETICITY.md` §7): системная шина
-      зоны — через `xdg-dbus-proxy` (UPower; login1 только Inhibit и чтение;
-      NM/hostname1/resolve1/machined/timedate1 закрыты); X11 в зонах закрыт,
+- [x] системная шина зоны — через `xdg-dbus-proxy` (UPower; login1 только
+      Inhibit и чтение; NM/hostname1/resolve1/machined/timedate1 закрыты); без
+      прокси `/run/dbus` в зоне закрыт целиком. VM: hostname1 и ListSessions —
+      отказ, Inhibit — да
+- [ ] решено владельцем (2026-09-17, `docs/HERMETICITY.md` §7): X11 в зонах закрыт,
       контейнер с `x11` получает свой xwayland-satellite; сессионная шина и
       брокер — прототип за флагом `hermetic`, затем умолчание с явным
       выключением на зону, разрешения из finish-args Flathub, свой ключ Secret

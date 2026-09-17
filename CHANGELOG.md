@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Security (the system bus in zones is filtered)
+- Every zone gets its own `xdg-dbus-proxy` in front of the system bus, bound
+  over `/run/dbus/system_bus_socket` in the zone's mount namespace: UPower
+  whole, login1 only `Inhibit` and reading properties; NetworkManager,
+  hostname1, resolve1, machined and timedate1 are filtered out (the owner's
+  decision B2). A zone whose proxy cannot start has no system bus at all
+  (tmpfs over `/run/dbus`); a proxy that dies leaves the zone without one.
+  `zone-holder` takes `--dbus-proxy`. `doctor` reports the system bus as
+  filtered or closed. **Behaviour change:** NetworkManager applets and
+  anything asking hostname1 inside a zone stop getting answers.
+
 ### Added (JSON)
 - `status --json` networks carry `interface`: the host interface of a
   `host-interface` network, `null` for every other kind (additive, schema

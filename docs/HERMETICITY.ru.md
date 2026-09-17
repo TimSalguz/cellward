@@ -106,7 +106,7 @@ English: [HERMETICITY.md](HERMETICITY.md) · Связанные документ
   `/tmp/.X11-unix` в mount namespace зоны и никакого `DISPLAY` в запуске.
   Контейнер с разрешением `x11` получает свой `xwayland-satellite`. Дыры
   `x11 = "host"` нет.
-- **B — системная шина: B2, суженный.** `xdg-dbus-proxy` на зону; `UPower`
+- **B — системная шина: B2, суженный — сделано.** `xdg-dbus-proxy` на зону; `UPower`
   разрешён; `login1` — только `Inhibit` и чтение свойств, без списка сессий и
   управления питанием; `NetworkManager`, `hostname1`, `resolve1`, `machined`,
   `timedate1` запрещены.

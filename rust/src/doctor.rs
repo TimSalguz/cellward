@@ -388,10 +388,37 @@ pub fn probe(uid: u32) -> Vec<Check> {
         .filter(|p| fs::symlink_metadata(p).is_ok())
         .collect();
     checks.push(resolver_sockets_check(&present));
+    let mountinfo = read("/proc/self/mountinfo").unwrap_or_default();
     for (id, path, what) in open_channels(uid) {
+        if id == "system-bus" {
+            checks.push(system_bus_check(&mountinfo, reachable(&path), what));
+            continue;
+        }
         checks.push(open_channel_check(id, what, reachable(&path)));
     }
     checks
+}
+
+/// The system bus in a zone: filtered (the zone's proxy bound over the socket)
+/// or closed (a tmpfs over `/run/dbus`) is what the zone promises; the host's
+/// bus as it is, a warning.
+pub fn system_bus_check(mountinfo: &str, reachable: bool, what: &str) -> Check {
+    let mounted_at = |point: &str| {
+        mountinfo
+            .lines()
+            .any(|line| line.split_whitespace().nth(4) == Some(point))
+    };
+    if mounted_at("/run/dbus/system_bus_socket") {
+        Check::new(
+            "system-bus",
+            Level::Ok,
+            "фильтруется: UPower, login1 только Inhibit и чтение",
+        )
+    } else if mounted_at("/run/dbus") || !reachable {
+        Check::new("system-bus", Level::Ok, "закрыта")
+    } else {
+        Check::new("system-bus", Level::Warn, format!("открыта — {what}"))
+    }
 }
 
 /// `vpn-zone-core doctor-probe <uid>`.
@@ -814,6 +841,15 @@ mod tests {
             ["10.0.0.1", "::1"]
         );
         assert_eq!(resolv_check(Some("search x\n")).level, Level::Warn);
+    }
+
+    #[test]
+    fn the_system_bus_is_ok_when_filtered_or_closed() {
+        let bound = "36 25 0:5 /x /run/dbus/system_bus_socket rw - tmpfs x rw\n";
+        let closed = "36 25 0:5 / /run/dbus rw - tmpfs tmpfs rw\n";
+        assert_eq!(system_bus_check(bound, true, "w").level, Level::Ok);
+        assert_eq!(system_bus_check(closed, false, "w").level, Level::Ok);
+        assert_eq!(system_bus_check("", true, "w").level, Level::Warn);
     }
 
     #[test]
