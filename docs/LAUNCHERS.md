@@ -61,7 +61,7 @@ launcher → vpn-zone-pick --id K -- cmd
 | L4 | `VPN_ZONE_DELEGATED` stayed in the program's environment | the second link clicked in a program opened by delegation died in `nsenter` | **done** |
 | L5 | child entries (`Exec=steam steam://rungameid/…`) treated as programs | per-zone mode: games × zones clones (about a hundred on a real desktop), each promising a network choice the client ignores (§10) | **done** |
 | L6 | **`NoDisplay=true` entries are never intercepted** | URL and file handlers are exactly the entries hidden from menus (`x-scheme-handler/…`, "open with" helpers): a link opened through one starts the program uncontained, around the picker. Ten such scheme handlers in the system directories of a real desktop | **done**: intercepted under the id of the visible entry of the same program; helpers without one are left alone |
-| L7 | **foreign entries in `~/.local/share/applications` are never intercepted** | Steam games, browser web apps, Wine, anything created through the DynamicLauncher portal — and the `userapp-*` entries programs write when they make themselves the default handler. On a real desktop `mimeapps.list` sends `http`, `https` and `tg` to such entries: **every link opened from any host program starts the browser (or the messenger) uncontained, in the direct network**, although the same program's system entry is intercepted | decided: take-over in place (§3.2); the most consequential item of this table |
+| L7 | **foreign entries in `~/.local/share/applications` are never intercepted** | Steam games, browser web apps, Wine, anything created through the DynamicLauncher portal — and the `userapp-*` entries programs write when they make themselves the default handler. On a real desktop `mimeapps.list` sends `http`, `https` and `tg` to such entries: **every link opened from any host program starts the browser (or the messenger) uncontained, in the direct network**, although the same program's system entry is intercepted | **done**: taken over in place with the original kept (§3.2); the most consequential item of this table |
 | L8 | the id is sanitised lossily (`[A-Za-z0-9._-]`, the rest → `_`) | two non-ASCII entry names of equal length collide (`Игра.desktop`, `Мода.desktop` → `____`): shared pins, labels, registry and sandbox home — one program starts in the other's network or container | proposal: append a short hash when sanitising lost characters; migrate old keys once |
 | L9 | per-zone clones carry no launcher id | sandbox permissions and registry keyed by the binary, different from picker mode (the "two permission sets for Discord" trap, §6); `Desktop Action`s are dropped | moot if clones are deprecated (§4) |
 | L10 | D-Bus activation goes around the shadow | `DBusActivatable=false` only helps launchers that honour it; the app's session service file still activates it (`gapplication launch`, GNOME "open with") | phase 3 ([CONTAINERS.md](CONTAINERS.md) §5) |
@@ -122,9 +122,10 @@ themselves the default handler.
 | Wine (`wine-extension-*`, `wine-protocol-*`, per-program entries) | `winemenubuilder`, on every prefix update | its own id; the prefix path from `WINEPREFIX=` in `Exec` is offered as a path grant | a private home without the prefix cannot start the program at all — hence the grant; many small entries per prefix |
 | hand-written entries of the user | the user | as any entry | the user's own file changes; the original is kept and `leave` restores it |
 
-The take-over is a **change of a written invariant**: it lands in a commit of
-its own with this reasoning, behind `interception.userEntries` (default
-`take-over` once the VM test on a desktop like the owner's passes).
+The take-over is a **change of a written invariant** and landed in a commit of
+its own with this reasoning. **Done**: default `take-over`, switched off with
+`interception.userEntries = "leave"` (or a `user-entries` file saying `leave`),
+covered by unit tests and a VM subtest.
 
 ### 3.3 `NoDisplay` handlers (L6)
 

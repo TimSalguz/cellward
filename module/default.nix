@@ -544,6 +544,17 @@ in
       description = "Как генерируются ярлыки (per-zone и both устарели). null — не задавать из Nix.";
     };
 
+    interception.userEntries = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "take-over"
+          "leave"
+        ]
+      );
+      default = null;
+      description = "Чужие записи в ~/.local/share/applications (игры Steam, userapp-* программ, ставших обработчиками по умолчанию, веб-приложения, Wine): take-over — перехватывать на месте, сохраняя оригинал (по умолчанию), leave — не трогать. null — не задавать из Nix. См. docs/LAUNCHERS.ru.md §3.2.";
+    };
+
     compositorRestriction.enable = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
@@ -583,6 +594,9 @@ in
     })
     (lib.mkIf (cfg.launcher.mode != null) {
       "vpn-zones/declared/mode".text = cfg.launcher.mode;
+    })
+    (lib.mkIf (cfg.interception.userEntries != null) {
+      "vpn-zones/declared/user-entries".text = cfg.interception.userEntries;
     })
     (lib.mkIf (cfg.compositorRestriction.enable != null) {
       "vpn-zones/declared/wayland-sandbox".text = if cfg.compositorRestriction.enable then "on" else "off";

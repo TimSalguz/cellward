@@ -506,6 +506,30 @@ let
           assert "vpn-zones " not in out, f"the reset left the CA in the NSS database:\n{out}"
           alice("vpn-zone down vmsmoke")
 
+      # --- Entries in the user's own directory (docs/LAUNCHERS.md §3.2) -----
+      # The directory XDG gives the highest precedence, where programs write the
+      # entries mimeapps.list sends links to. Taken over in place, never a
+      # symlink (home-manager's own entries are right there), and given back
+      # byte for byte.
+      APPS = "/home/alice/.local/share/applications"
+
+      with subtest("user entries: a foreign one is taken over, a symlink is not, and both come back"):
+          alice(
+              "printf '[Desktop Entry]\\nType=Application\\nName=VM foreign\\n"
+              f"NoDisplay=true\\nExec=/bin/sh -c true %%u\\n' > {APPS}/userapp-vmforeign.desktop"
+          )
+          alice(f"cp {APPS}/userapp-vmforeign.desktop /tmp/vmforeign.orig")
+          alice("vpn-zone sync")
+          out = alice(f"cat {APPS}/userapp-vmforeign.desktop")
+          assert "X-VPNZone=adopted" in out, out
+          assert "vpn-zone-pick --id userapp-vmforeign --" in out, out
+          # home-manager's entries stay symlinks into the store.
+          alice(f"test -L {APPS}/vpn-zone-add.desktop")
+          alice("vpn-zone mode off")
+          alice(f"cmp {APPS}/userapp-vmforeign.desktop /tmp/vmforeign.orig")
+          alice("vpn-zone mode picker")
+          alice(f"rm -f {APPS}/userapp-vmforeign.desktop")
+
       # --- Declared in Nix (docs/CONTAINERS.md §8) ---------------------------
       DECLCA = "${declaredCa}"
 

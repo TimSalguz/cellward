@@ -5,6 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed (invariant: foreign entries in the user's applications directory)
+- **Entries programs write into `~/.local/share/applications` are now taken
+  over in place** — Steam games, browser web apps, Wine entries and, above
+  all, the `userapp-*` entries a browser or a messenger writes when it makes
+  itself the default handler. `mimeapps.list` sends links to exactly those
+  files, so until now every link opened from a host program started the
+  browser uncontained, in the direct network, although the browser's own
+  system entry was intercepted. The original bytes are kept in
+  `~/.local/state/vpn-zones/.adopted/` before anything is written, the entry is
+  rewritten like a picker shadow (`X-VPNZone=adopted`), a program that rewrites
+  its entry has it taken over again, and `vpn-zone mode off` or
+  `interception.userEntries = "leave"` gives every original back byte for
+  byte. Symlinks (home-manager, Nix) are never touched. This changes the
+  written invariant "foreign files there are never rewritten"
+  (`docs/LAUNCHERS.md` §3.2, the owner's decision of 2026-09-17).
+
 ### Added (containers as identities: network binding, Nix options, JSON state)
 - **A container can be bound to one network**: `vpn-zone container set
   <container> network <network|ask>`. `vpn-zone run` then refuses a bound

@@ -35,6 +35,11 @@ use std::path::{Path, PathBuf};
 /// Prefix of every file this module writes itself, and of the module's own
 /// menu entries. Files starting with it are never taken as input.
 pub const PREFIX: &str = "vpn-zone-";
+/// Where the original bytes of taken-over entries are kept, below the state
+/// directory: one file per entry, under the entry's own name.
+pub const ADOPTED_DIR: &str = ".adopted";
+/// The marker value of an entry taken over in place: `X-VPNZone=adopted`.
+const ADOPTED: &str = "adopted";
 /// The marker that says "this file is ours". Present in the file we write and
 /// checked before overwriting or deleting anything.
 pub const MARK: &str = "X-VPNZone";
@@ -349,6 +354,26 @@ pub fn claimed_schemes(entry: &Group) -> Vec<String> {
         .collect()
 }
 
+/// A hidden application entry of the user's own directory, with or without a
+/// `MimeType`: not deleted (`Hidden`), not ours, with a command.
+fn is_hidden_user_entry(file_name: &str, entry: Option<&Group>) -> bool {
+    let Some(entry) = entry else {
+        return false;
+    };
+    let flag = |key: &str| {
+        entry
+            .get(key)
+            .unwrap_or("false")
+            .eq_ignore_ascii_case("true")
+    };
+    !file_name.starts_with(PREFIX)
+        && !entry.has(MARK)
+        && entry.get("Type").unwrap_or("Application") == "Application"
+        && flag("NoDisplay")
+        && !flag("Hidden")
+        && entry.get("Exec").is_some_and(|e| !e.is_empty())
+}
+
 /// A key without spaces or quotes, so that `Exec` parses for anybody.
 pub fn sanitize(s: &str) -> String {
     s.chars()
@@ -454,6 +479,17 @@ pub fn render_clone(entry: &Group, zone: &str, runner: &str) -> String {
 /// is taken by the picker from the label file written next to it.
 /// (`docs/GOTCHAS.md` §10)
 pub fn render_picker(groups: &[Group], picker: &str, app_key: &str) -> String {
+    render_intercepted(groups, picker, app_key, "picker")
+}
+
+/// The same entry, taken over in place in the user's own directory: only the
+/// marker differs, and it is what tells [`cleanup`] to RESTORE the original
+/// rather than delete the file. (`docs/LAUNCHERS.md` §3.2)
+pub fn render_adopted(groups: &[Group], picker: &str, app_key: &str) -> String {
+    render_intercepted(groups, picker, app_key, ADOPTED)
+}
+
+fn render_intercepted(groups: &[Group], picker: &str, app_key: &str, marker: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     for group in groups {
         if group.name != "Desktop Entry" && !group.name.starts_with("Desktop Action ") {
@@ -479,7 +515,7 @@ pub fn render_picker(groups: &[Group], picker: &str, app_key: &str) -> String {
         // `Exec` — and the whole interception would be pointless.
         out.push("DBusActivatable=false".to_string());
         if group.name == "Desktop Entry" {
-            out.push(format!("{MARK}=picker"));
+            out.push(format!("{MARK}={marker}"));
         }
         out.push(String::new());
     }
@@ -498,6 +534,20 @@ pub fn ours(path: &Path) -> bool {
         Ok(bytes) => String::from_utf8_lossy(&bytes).contains(&format!("{MARK}=")),
         Err(_) => false,
     }
+}
+
+/// Is this an entry taken over in place — ours, with the `adopted` marker?
+pub fn adopted(path: &Path) -> bool {
+    ours(path)
+        && fs::read(path)
+            .is_ok_and(|b| String::from_utf8_lossy(&b).contains(&format!("{MARK}={ADOPTED}")))
+}
+
+/// A regular file, not a symlink: the only kind of foreign entry that may ever
+/// be taken over. home-manager's and Nix's entries are symlinks into the store
+/// and stay untouched whatever happens.
+fn regular_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
 }
 
 /// Is there anything at this path at all — INCLUDING a broken symlink?
@@ -584,6 +634,17 @@ struct App {
     hidden: bool,
 }
 
+/// Whether foreign entries in the user's directory are taken over: the
+/// declared setting, then the local one, `take-over` by default
+/// (`docs/LAUNCHERS.md` §3.2, the owner's decision of 2026-09-17).
+fn takes_over_user_entries(home: &Path) -> bool {
+    let config = home.join(".config/vpn-zones");
+    let value = fs::read_to_string(config.join("declared/user-entries"))
+        .or_else(|_| fs::read_to_string(config.join("user-entries")))
+        .unwrap_or_default();
+    value.trim() != "leave"
+}
+
 impl App {
     /// The memory key of the entry: its file name without the extension.
     fn key(&self) -> &str {
@@ -658,7 +719,7 @@ fn parents(apps: &[App]) -> BTreeMap<String, String> {
     out
 }
 
-fn collect_apps(dirs: &[PathBuf], out_dir: &Path) -> Vec<App> {
+fn collect_apps(dirs: &[PathBuf], out_dir: &Path, adopted_dir: &Path) -> Vec<App> {
     let resolved = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let out_resolved = resolved(out_dir);
 
@@ -681,7 +742,20 @@ fn collect_apps(dirs: &[PathBuf], out_dir: &Path) -> Vec<App> {
             if seen.contains(&name) {
                 continue;
             }
-            let groups = parse_desktop_file(&dir.join(&name));
+            let path = dir.join(&name);
+            // An entry taken over in place is read from the original it
+            // replaced, not from what we wrote: the original is the program's
+            // entry, ours is only its interception.
+            let source = if own_dir && adopted(&path) {
+                let backup = adopted_dir.join(&name);
+                if !backup.is_file() {
+                    continue;
+                }
+                backup
+            } else {
+                path
+            };
+            let groups = parse_desktop_file(&source);
             if groups.is_empty() {
                 continue;
             }
@@ -689,6 +763,12 @@ fn collect_apps(dirs: &[PathBuf], out_dir: &Path) -> Vec<App> {
             let hidden = if is_candidate(&name, entry) {
                 false
             } else if is_hidden_handler(&name, entry) {
+                true
+            } else if own_dir && is_hidden_user_entry(&name, entry) {
+                // In the user's own directory a hidden entry needs no MimeType
+                // to matter: `mimeapps.list` names these files directly — the
+                // `userapp-*` entries programs write when they make themselves
+                // the default handler are exactly this.
                 true
             } else {
                 continue;
@@ -728,7 +808,11 @@ fn zone_names(state_dir: &Path) -> Vec<String> {
 /// Remove our own files that are not wanted any more: the mode changed, a zone
 /// was deleted, a program disappeared. Foreign files are left alone —
 /// [`ours`] checks both the marker and that it is not a symlink.
-pub fn cleanup(out_dir: &Path, wanted: &BTreeSet<String>) -> u32 {
+///
+/// An entry taken over in place is never deleted: it was the user's (or a
+/// program's) file. Its original bytes are written back and the backup goes;
+/// without a backup the file is left as it is.
+pub fn cleanup(out_dir: &Path, wanted: &BTreeSet<String>, adopted_dir: &Path) -> u32 {
     let Ok(entries) = fs::read_dir(out_dir) else {
         return 0;
     };
@@ -744,6 +828,16 @@ pub fn cleanup(out_dir: &Path, wanted: &BTreeSet<String>) -> u32 {
             continue;
         }
         let path = entry.path();
+        if adopted(&path) {
+            let backup = adopted_dir.join(&name);
+            if let Ok(original) = fs::read(&backup) {
+                if fs::write(&path, original).is_ok() {
+                    let _ = fs::remove_file(&backup);
+                    removed += 1;
+                }
+            }
+            continue;
+        }
         if ours(&path) && fs::remove_file(&path).is_ok() {
             removed += 1;
         }
@@ -776,10 +870,12 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
         Err(_) => Mode::Picker,
     };
     let zones = zone_names(state_dir);
+    let adopted_dir = state_dir.join(ADOPTED_DIR);
+    let take_over = takes_over_user_entries(home);
     let apps = if mode == Mode::Off {
         Vec::new()
     } else {
-        collect_apps(dirs, &out_dir)
+        collect_apps(dirs, &out_dir, &adopted_dir)
     };
 
     let mut wanted: BTreeSet<String> = BTreeSet::new();
@@ -792,8 +888,10 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
         };
         let parent = parents.get(&app.name);
         // A hidden handler with no visible entry of its program is a system
-        // helper, not a program somebody launches: left alone entirely.
-        if app.hidden && parent.is_none() {
+        // helper, not a program somebody launches: left alone entirely. The
+        // user's own directory holds no system helpers — what is there, the
+        // user or a program they installed put there.
+        if app.hidden && parent.is_none() && !app.own_dir {
             continue;
         }
 
@@ -818,9 +916,48 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
             }
         }
 
+        // A foreign entry of the user's own directory: taken over IN PLACE,
+        // with its original bytes kept aside (`docs/LAUNCHERS.md` §3.2). There
+        // is no directory with a higher precedence to shadow it from, and these
+        // are the entries `mimeapps.list` sends links to — a browser or a
+        // messenger made the default handler writes one. A symlink is never
+        // touched (home-manager, Nix); a regular file that is not ours yet is
+        // either new, or ours rewritten by its program — either way its current
+        // bytes are the original now.
+        if mode.intercepts() && app.own_dir && take_over {
+            let target = out_dir.join(&app.name);
+            if regular_file(&target) {
+                let mut kept = true;
+                if !ours(&target) {
+                    kept = fs::create_dir_all(&adopted_dir).is_ok()
+                        && fs::read(&target)
+                            .and_then(|bytes| fs::write(adopted_dir.join(&app.name), bytes))
+                            .is_ok();
+                }
+                // No backup, no take-over: a file we could not restore is not
+                // ours to rewrite.
+                if kept {
+                    wanted.insert(app.name.clone());
+                    let app_key = match parent {
+                        Some(parent) => parent.as_str(),
+                        None => {
+                            write_label(
+                                state_dir,
+                                app.key(),
+                                entry.get("Name").unwrap_or(app.key()),
+                            );
+                            app.key()
+                        }
+                    };
+                    written +=
+                        write_if_changed(&target, &render_adopted(&app.groups, picker, app_key));
+                }
+            }
+        }
+
         // Clones are for programs: not for a game of Steam's, and not for a
         // handler nobody sees in a menu.
-        if mode.clones() && parent.is_none() {
+        if mode.clones() && parent.is_none() && !app.hidden {
             for zone in &zones {
                 let name = format!("{PREFIX}{zone}-{}", app.name);
                 let target = out_dir.join(&name);
@@ -833,7 +970,7 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
         }
     }
 
-    let removed = cleanup(&out_dir, &wanted);
+    let removed = cleanup(&out_dir, &wanted, &adopted_dir);
     if let Some(note) = mode.deprecation() {
         eprintln!("{note}");
     }
@@ -1120,7 +1257,7 @@ Name=not carried over
             .into_iter()
             .map(String::from)
             .collect();
-        assert_eq!(cleanup(&tmp.path, &wanted), 1);
+        assert_eq!(cleanup(&tmp.path, &wanted, &tmp.join("adopted")), 1);
 
         assert!(!stale.exists(), "our stale clone must go");
         assert!(kept.exists());
@@ -1315,10 +1452,12 @@ Name=not carried over
             "Steam"
         );
         assert!(!state.join(".labels/PEAK").exists());
-        // No clones for either game, and the foreign user entry is untouched.
+        // No clones for either game. The one the client wrote into the user
+        // directory is taken over in place, under the client's id too.
         assert!(!apps.join("vpn-zone-nl-PEAK.desktop").exists());
         assert!(!apps.join("vpn-zone-nl-Some Game.desktop").exists());
-        assert!(!read("Some Game.desktop").contains("X-VPNZone"));
+        assert!(read("Some Game.desktop").contains("X-VPNZone=adopted"));
+        assert!(read("Some Game.desktop").contains("--id steam -- steam steam://rungameid/2"));
         // The client itself is a program: intercepted and cloned as before.
         assert!(read("steam.desktop").contains("--id steam -- steam %U"));
         assert!(apps.join("vpn-zone-nl-steam.desktop").exists());
@@ -1339,6 +1478,157 @@ Name=not carried over
         // An ordinary entry with a URL of an unclaimed scheme is its own program.
         assert!(read("site.desktop").contains("--id site --"));
         assert!(apps.join("vpn-zone-nl-site.desktop").exists());
+    }
+
+    /// A home, a state dir and a system dir for a full sync pass.
+    struct Desk {
+        _tmp: TempDir,
+        home: PathBuf,
+        state: PathBuf,
+        apps: PathBuf,
+        system: PathBuf,
+    }
+
+    impl Desk {
+        fn new(tag: &str) -> Self {
+            let tmp = TempDir::new(tag);
+            let home = tmp.join("home");
+            let state = tmp.join("state");
+            let apps = home.join(".local/share/applications");
+            let system = tmp.join("system/applications");
+            fs::create_dir_all(&apps).unwrap();
+            fs::create_dir_all(&system).unwrap();
+            fs::create_dir_all(&state).unwrap();
+            Self {
+                _tmp: tmp,
+                home,
+                state,
+                apps,
+                system,
+            }
+        }
+
+        fn sync(&self) {
+            let dirs = vec![self.apps.clone(), self.system.clone()];
+            assert_eq!(
+                sync_from(&self.state, &self.home, "/bin/vpn-zone", "/bin/pick", &dirs),
+                0
+            );
+        }
+
+        fn setting(&self, name: &str, value: &str) {
+            let dir = self.home.join(".config/vpn-zones");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(name), value).unwrap();
+        }
+
+        fn read(&self, name: &str) -> String {
+            fs::read_to_string(self.apps.join(name)).unwrap_or_default()
+        }
+    }
+
+    #[test]
+    fn a_foreign_user_entry_is_taken_over_in_place_and_given_back() {
+        let d = Desk::new("adopt");
+        let original = "[Desktop Entry]\nType=Application\nName=Handler\nExec=myapp --open %u\nMimeType=x-scheme-handler/my;\n";
+        fs::write(d.apps.join("userapp-My.desktop"), original).unwrap();
+        d.sync();
+        let taken = d.read("userapp-My.desktop");
+        assert!(taken.contains("X-VPNZone=adopted"), "{taken}");
+        assert!(
+            taken.contains("Exec=/bin/pick --id userapp-My -- myapp --open %u"),
+            "{taken}"
+        );
+        assert!(taken.contains("MimeType=x-scheme-handler/my;"), "{taken}");
+        assert_eq!(
+            fs::read_to_string(d.state.join(ADOPTED_DIR).join("userapp-My.desktop")).unwrap(),
+            original
+        );
+        // Idempotent: the second pass reads the original from the backup and
+        // writes nothing.
+        d.sync();
+        assert_eq!(d.read("userapp-My.desktop"), taken);
+
+        // The program writes its entry again: the new bytes are the original
+        // now, and the entry is taken over again.
+        let rewritten = original.replace("--open", "--open-new");
+        fs::write(d.apps.join("userapp-My.desktop"), &rewritten).unwrap();
+        d.sync();
+        assert!(d
+            .read("userapp-My.desktop")
+            .contains("-- myapp --open-new %u"));
+        assert_eq!(
+            fs::read_to_string(d.state.join(ADOPTED_DIR).join("userapp-My.desktop")).unwrap(),
+            rewritten
+        );
+
+        // "leave" gives it back byte for byte, and the backup goes.
+        d.setting("user-entries", "leave");
+        d.sync();
+        assert_eq!(d.read("userapp-My.desktop"), rewritten);
+        assert!(!d
+            .state
+            .join(ADOPTED_DIR)
+            .join("userapp-My.desktop")
+            .exists());
+    }
+
+    #[test]
+    fn mode_off_gives_every_taken_over_entry_back() {
+        let d = Desk::new("adopt-off");
+        let original = "[Desktop Entry]\nType=Application\nName=X\nExec=x\n";
+        fs::write(d.apps.join("x.desktop"), original).unwrap();
+        d.sync();
+        assert!(d.read("x.desktop").contains("X-VPNZone=adopted"));
+        d.setting("mode", "off");
+        d.sync();
+        assert_eq!(d.read("x.desktop"), original);
+    }
+
+    #[test]
+    fn a_symlinked_user_entry_is_never_taken_over() {
+        // home-manager and Nix put their entries there as symlinks.
+        let d = Desk::new("adopt-symlink");
+        let target = d.system.join("../hm-entry.desktop");
+        fs::write(
+            &target,
+            "[Desktop Entry]\nType=Application\nName=H\nExec=h\n",
+        )
+        .unwrap();
+        symlink(&target, d.apps.join("hm.desktop")).unwrap();
+        d.sync();
+        assert!(fs::symlink_metadata(d.apps.join("hm.desktop"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!d.state.join(ADOPTED_DIR).join("hm.desktop").exists());
+    }
+
+    #[test]
+    fn a_hidden_default_handler_goes_under_its_program() {
+        // What a browser made the default writes: hidden, no MimeType, named
+        // by mimeapps.list directly.
+        let d = Desk::new("adopt-userapp");
+        fs::write(
+            d.system.join("zen.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Zen\nExec=zen --name zen %U\n",
+        )
+        .unwrap();
+        fs::write(
+            d.apps.join("userapp-Zen-ABC.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Zen\nNoDisplay=true\nExec=/etc/profiles/per-user/u/bin/zen %u\n",
+        )
+        .unwrap();
+        d.setting("mode", "both");
+        d.sync();
+        let taken = d.read("userapp-Zen-ABC.desktop");
+        assert!(
+            taken.contains("--id zen -- /etc/profiles/per-user/u/bin/zen %u"),
+            "{taken}"
+        );
+        assert!(taken.contains("NoDisplay=true"), "{taken}");
+        // A hidden entry gets no clones.
+        assert!(!d.apps.join("vpn-zone-nl-userapp-Zen-ABC.desktop").exists());
     }
 
     #[test]
