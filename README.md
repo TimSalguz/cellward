@@ -217,6 +217,7 @@ vpn-zone list                                  # zones and their state
 vpn-zone up <zone> / down <zone>
 vpn-zone check <zone>                          # is the tunnel alive
 vpn-zone doctor [<zone>] [--json]              # what is really closed, checked inside the zone
+vpn-zone watch [--json]                        # are the tunnels alive (a timer runs it and notifies)
 vpn-zone launch <id> [-- args]                 # a launcher entry through the picker (key bindings)
 vpn-zone run <zone> -- firefox                 # run in a zone
 vpn-zone run <zone> --profile work -- firefox  # + data container

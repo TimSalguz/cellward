@@ -284,6 +284,7 @@ let
           alice("command -v vpn-zone")
           alice("systemctl --user cat vpn-zone@.service > /dev/null")
           alice("systemctl --user cat vpn-zone-desktop-sync.timer > /dev/null")
+          alice("systemctl --user cat vpn-zone-watch.timer > /dev/null")
           machine.succeed(
               "test -f /etc/profiles/per-user/alice"
               "/share/zsh/site-functions/_vpn-zone"

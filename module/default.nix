@@ -577,6 +577,12 @@ in
       description = "Записи ~/.config/autostart (обычные файлы; symlink не трогаются): offline — перехватывать на месте, программа при входе стартует без диалога туда, что для неё выбрано (закрепление, назначенный контейнер и его сеть), а невыбранное — offline и в своём доме, с уведомлением (по умолчанию); as-is — не трогать и вернуть перехваченные. /etc/xdg/autostart не трогается никогда. null — не задавать из Nix. См. docs/CONTAINERS.ru.md §5.";
     };
 
+    tunnelWatch.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Раз в минуту проверять, живы ли туннели поднятых зон (`vpn-zone watch`), и присылать уведомление, когда туннель перестал отвечать и когда снова заработал.";
+    };
+
     compositorRestriction.enable = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
@@ -725,6 +731,27 @@ in
       Type = "oneshot";
       ExecStart = "${vpn-zone-sync}/bin/vpn-zone-sync";
     };
+  };
+
+  # Живость туннелей: зона с мёртвым туннелем не течёт, но и человеку об этом
+  # никто не говорит — браузер просто крутится. Раз в минуту смотрим счётчики
+  # и уведомляем при смерти и при возвращении (rust/src/watch.rs).
+  systemd.user.services.vpn-zone-watch = lib.mkIf cfg.tunnelWatch.enable {
+    Unit.Description = "Проверка живости туннелей VPN-зон";
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${vpn-zone}/bin/vpn-zone watch";
+    };
+  };
+
+  systemd.user.timers.vpn-zone-watch = lib.mkIf cfg.tunnelWatch.enable {
+    Unit.Description = "Ежеминутная проверка живости туннелей VPN-зон";
+    Timer = {
+      OnStartupSec = "1m";
+      OnUnitActiveSec = "1m";
+      AccuracySec = "10s";
+    };
+    Install.WantedBy = [ "timers.target" ];
   };
 
   systemd.user.timers.vpn-zone-desktop-sync = {

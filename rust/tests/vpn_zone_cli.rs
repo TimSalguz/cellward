@@ -1062,6 +1062,56 @@ fn a_host_interface_zone_is_added_and_reported_as_such() {
 }
 
 #[test]
+fn watch_announces_a_dead_tunnel_once_and_its_recovery() {
+    let home = Home::new("watch");
+    home.zone_is_up("nl");
+    let zone = home.state().join("nl");
+    fs::write(zone.join("config.conf"), crlf_config()).unwrap();
+    let mirror = |rx: &str, tx: &str| {
+        fs::write(
+            zone.join("status"),
+            format!(
+                "interface: awg0\n\npeer: x\n  latest handshake: 10 minutes, 2 seconds ago\n  \
+                 transfer: {rx} received, {tx} sent\n"
+            ),
+        )
+        .unwrap()
+    };
+    let look = || {
+        let out = home.run(&["watch", "--json"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        stdout(&out)
+    };
+    mirror("1.00 KiB", "1.00 KiB");
+    let out = look();
+    assert!(out.starts_with("{\"schema_version\":1,"), "{out}");
+    assert!(out.contains("\"verdict\":\"unknown\""), "{out}");
+    assert!(out.contains("\"handshake_age_s\":602"), "{out}");
+    // Sending into silence: suspect at the first look, dead at the second.
+    mirror("1.00 KiB", "2.00 KiB");
+    assert!(look().contains("\"verdict\":\"suspect\",\"handshake_age_s\":602,\"rx_bytes\":1024,\"tx_bytes\":2048,\"notified\":false"));
+    mirror("1.00 KiB", "3.00 KiB");
+    let out = look();
+    assert!(out.contains("\"verdict\":\"dead\""), "{out}");
+    assert!(out.contains("\"notified\":true"), "{out}");
+    // Still dead: not announced again.
+    mirror("1.00 KiB", "4.00 KiB");
+    assert!(look().contains("\"notified\":false"));
+    // Answers again: alive, and that is announced.
+    mirror("5.00 KiB", "5.00 KiB");
+    let out = look();
+    assert!(out.contains("\"verdict\":\"alive\""), "{out}");
+    assert!(out.contains("\"notified\":true"), "{out}");
+
+    // status --json carries the counters too.
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"handshake_age_s\":602,\"rx_bytes\":5120,\"tx_bytes\":5120"),
+        "{json}"
+    );
+}
+
+#[test]
 fn the_registry_keeps_its_three_field_shape() {
     let home = Home::new("registry");
     home.zone_is_up("nl");

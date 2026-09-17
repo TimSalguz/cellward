@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (tunnel watch)
+- `vpn-zone watch [--json]`, run every minute by a user timer
+  (`programs.vpn-zones.tunnelWatch.enable`, on by default): a tunnel that sends
+  into silence — the transmitted counter grows, the received one does not, and
+  the last handshake is older than 180 s or never happened — is dead after two
+  looks in a row, and a notification says so once; another one says when it
+  answers again. OpenConnect and host-interface zones are judged by their
+  mirror's `connected`/`disconnected`.
+- `status --json` networks carry `handshake_age_s`, `rx_bytes` and `tx_bytes`
+  (additive, schema version 1).
+
 ### Fixed (a granted directory that does not exist)
 - A sandbox granted `~/Downloads`, `~/Documents` or `~/Pictures` that does not
   exist no longer fails to start: the directory is bound with `--bind-try`, and

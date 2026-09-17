@@ -93,6 +93,7 @@ const VERBS: &[&str] = &[
     "wayland-sandbox",
     "check",
     "doctor",
+    "watch",
     "lock",
     "unlock",
     "profile",

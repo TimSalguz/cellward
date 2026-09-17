@@ -111,7 +111,8 @@ fn zone_kind(dir: &std::path::Path) -> Option<&'static str> {
 pub fn networks(tools: &Tools) -> String {
     let mut items = vec![
         "{\"name\":\"direct\",\"kind\":\"direct\",\"source\":\"default\",\"up\":true,\
-         \"locked\":false,\"tunnel_alive\":null}"
+         \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
+             \"tx_bytes\":null}"
             .to_owned(),
     ];
     let mut offline_listed = false;
@@ -129,13 +130,26 @@ pub fn networks(tools: &Tools) -> String {
             .into_owned();
         offline_listed |= name == "offline";
         let up = zone_pid(&tools.state, dir.file_name().unwrap_or_default()).is_some();
-        let alive = if up && kind != "offline" {
-            match fs::read_to_string(dir.join("status")) {
-                Ok(mirror) => liveness_line(&mirror).is_some().to_string(),
-                Err(_) => "null".to_owned(),
-            }
+        let mirror = if up && kind != "offline" {
+            fs::read_to_string(dir.join("status")).ok()
         } else {
-            "null".to_owned()
+            None
+        };
+        let alive = mirror.as_deref().map_or("null".to_owned(), |m| {
+            liveness_line(m).is_some().to_string()
+        });
+        // Counters for status bars, from the same mirror; `null` when there is
+        // nothing to read (down, offline, or a zone from an older version).
+        let reading = mirror.as_deref().map(crate::watch::parse_mirror);
+        let counters = match &reading {
+            Some(r) => format!(
+                "\"handshake_age_s\":{},\"rx_bytes\":{},\"tx_bytes\":{}",
+                r.handshake_age_s
+                    .map_or("null".to_owned(), |a| a.to_string()),
+                r.rx_bytes,
+                r.tx_bytes
+            ),
+            None => "\"handshake_age_s\":null,\"rx_bytes\":null,\"tx_bytes\":null".to_owned(),
         };
         let source = if kind == "offline" {
             "default"
@@ -143,7 +157,7 @@ pub fn networks(tools: &Tools) -> String {
             "local"
         };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive}}}",
+            "{{\"name\":{},\"kind\":\"{kind}\",\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters}}}",
             string(&name),
             dir.join(NO_ESCAPE).exists()
         ));
@@ -151,7 +165,8 @@ pub fn networks(tools: &Tools) -> String {
     if !offline_listed {
         items.push(
             "{\"name\":\"offline\",\"kind\":\"offline\",\"source\":\"default\",\"up\":false,\
-             \"locked\":false,\"tunnel_alive\":null}"
+             \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
+             \"tx_bytes\":null}"
                 .to_owned(),
         );
     }
