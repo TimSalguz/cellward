@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Security (pasta's port forwarding shut)
+- The uplink's pasta is started with `-t none -u none -T none -U none
+  --no-map-gw`. Its defaults bound every port of the uplink — the tunnel's own
+  UDP socket — on every address of the host and forwarded it in, offered every
+  port of the host's loopback on the uplink's loopback (which the uplink's
+  filter accepts), and mapped the gateway address to the host's loopback. The
+  tunnel's own flows need none of it.
+
 ### Changed (lossless launcher keys, with migration)
 - **The memory key of a launcher entry no longer loses characters.** Two
   entries whose names differed only in characters outside `[A-Za-z0-9._-]`

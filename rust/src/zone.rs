@@ -189,6 +189,30 @@ const TUN_IFACE: &str = "awg0";
 const PASTA_IFACE: &str = "hostif";
 /// wg-quick's default, used when the config carries no `MTU`.
 const DEFAULT_MTU: u32 = 1420;
+/// pasta's doors that nothing here uses, shut. Its defaults open four:
+///
+/// * `-t auto`, `-u auto` — every port bound in the uplink is bound on the
+///   HOST as well and forwarded in: the tunnel's own UDP socket got a port on
+///   every address of the machine, reachable from the LAN;
+/// * `-T auto`, `-U auto` — every port bound on the host's loopback is offered
+///   on the uplink's loopback, and the uplink's filter accepts `lo`: the
+///   OpenConnect client running there could talk to any local service of the
+///   host;
+/// * the gateway address maps to the host's loopback (`--no-map-gw` shuts it).
+///
+/// The tunnel needs none of them: its packets are flows it starts itself, and
+/// pasta tracks those without any forwarding. (`docs/GOTCHAS.md` §2)
+const PASTA_CLOSED: [&str; 9] = [
+    "-t",
+    "none",
+    "-u",
+    "none",
+    "-T",
+    "none",
+    "-U",
+    "none",
+    "--no-map-gw",
+];
 /// Resolvers for a config without `DNS=`: public ones, reached through the
 /// tunnel. (`docs/GOTCHAS.md` §3)
 const DEFAULT_RESOLVERS: [&str; 2] = ["1.1.1.1", "9.9.9.9"];
@@ -955,6 +979,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
             .arg("--netns")
             .arg(&netns)
             .args(["--config-net", "-q", "-I", PASTA_IFACE, "-f"])
+            .args(PASTA_CLOSED)
             .spawn()
         {
             Ok(child) => {
