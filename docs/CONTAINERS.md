@@ -254,7 +254,7 @@ boundary is the container → outside direction (§6).
 | child entries (`steam steam://rungameid/…`) | **done**: no clones, launched under the client's id | web apps of a browser (`--app-id=`) join them | 0/3 |
 | entries programs write into the user directory (Steam games, `userapp-*`, web apps, Wine) | not intercepted: foreign files are never rewritten | **done**: taken over in place with a backup and re-taken when rewritten ([LAUNCHERS.md](LAUNCHERS.md) §3.2); the invariant changed in a commit of its own | 3 |
 | `xdg-open`, `gio open`, `kde-open`, "open with" | resolve to a `.desktop` → the shadow entry | unchanged | — |
-| D-Bus activation (`gapplication launch`, `DBusActivatable=true`) | the service file activates around the shadow | shadow session service files in `$XDG_DATA_HOME/dbus-1/services/<id>.service` for intercepted ids only; never for portal or system names | 3 |
+| D-Bus activation (`gapplication launch`, `DBusActivatable=true`) | the service file activates around the shadow | **done** (§5.3): shadow session service files in `$XDG_DATA_HOME/dbus-1/services/<id>.service` for intercepted ids only; never for portal or system names | 3 |
 | XDG autostart | runs uncontained | **done** (§5.2): assigned programs start in their container; **unassigned ones start offline, in a home of their own, without a dialog, and a notification says so** | 3 |
 | compositor key bindings | only if the binding calls `vpn-zone-pick` | **done** (§5.1): `vpn-zone launch <launcher-id>` reads the entry's `Exec` and goes through the picker | 3 |
 | shell | uncontained | opt-in PATH shims for assigned programs; never a boundary | 3 |
@@ -324,6 +324,35 @@ is `vpn-zone-pick --autostart --id <key> -- <original command>`.
   unwrapped, not wrapped twice.
 - The path unit watches `~/.config/autostart`: a program that switches its
   autostart on is taken over at once, long before the next login.
+
+### 5.3 D-Bus activation
+
+A `DBusActivatable=true` program is started by the session bus whenever its
+name is called — `gapplication launch`, a notification's action, a file
+manager's "open with", another program — and the bus reads the program's
+**service file**, not its launcher entry. `DBusActivatable=false` in our entries
+only helps launchers that honour it. So `sync` writes, for every entry it
+intercepts (a picker shadow or a take-over) that is `DBusActivatable=true`, a
+shadow service with the same bus name in `~/.local/share/dbus-1/services/`:
+
+```ini
+# X-VPNZone=dbus
+[D-BUS Service]
+Name=org.example.Notes
+Exec=<picker> --id org.example.Notes -- <the original service Exec>
+```
+
+- the session bus reads the user's directory first and ignores a later file
+  for the same name; `SystemdService=` of the original is dropped, or the bus
+  would start that unit instead of `Exec`;
+- only names of intercepted entries, and only well-formed bus names: nothing is
+  written for a portal, a system component or any name without a launcher
+  entry. A service file of the user's own with that name is never overwritten;
+  ours are removed when the entry stops being intercepted (`mode off`);
+- dbus-broker does not watch its service directories: when a shadow changed,
+  `sync` asks for `systemctl --user --no-block reload dbus.service`;
+- a program already running owns its name, and the bus hands calls to it —
+  in the network it was started in, like a click on a running program.
 
 ## 6. The outward boundary (phase 4)
 
@@ -511,6 +540,8 @@ every key of version 1.
   nor the host's X11 or resolver becomes reachable through a grant.
 - **`vpn-zone launch`, shims, autostart, D-Bus shadows, taken-over entries.**
   They only start the picker or `vpn-zone run`; no new socket, no new route.
+  D-Bus shadows (done) close a path: activating a program by its bus name
+  started it in the host's network, uncontained.
   Autostart (done) closes a path: a program that switched its own autostart on
   used to start at login in the host's network, uncontained; now it starts
   where it was put, or offline.
@@ -527,7 +558,7 @@ every key of version 1.
 | 0 | **done**: `direct` keeps its layers, working directory, conflict by id and binary, hidden handlers, Steam children | smoke; unit and scenario tests |
 | 1 | **done**: network binding with I1/I2 in `run` and the picker, `vpn-zone container list/show/set/assign/unassign`, `status --json` (`schema_version`, sources), home-manager options with `declared/`, clones deprecated, path grants (`container grant/revoke`, `permissions.paths`), merge (`container merge`). **Left**: `own` by default, hints (Wine prefix, Steam), container-first picker, GUI entries | CLI/picker scenario tests; VM: a declared container with its declared CA, refused elsewhere, reported as Nix |
 | 2 | trust layer ([CERTIFICATES.md](CERTIFICATES.md)) — **done** (GUI dialog left) | VM and smoke: synthetic CA trusted in one container only |
-| 3 | **done**: user-dir take-over, autostart take-over (§5.2). **Left**: `vpn-zone launch`, D-Bus shadows, web apps as children, host-interface networks, PATH shims | VM: activation via `gdbus call` lands in the container; autostart of an unassigned program is offline |
+| 3 | **done**: user-dir take-over, autostart take-over (§5.2). `vpn-zone launch` (§5.1), D-Bus shadows (§5.3). **Left**: web apps as children, host-interface networks, PATH shims | VM: activation via `gdbus call` lands in the container; autostart of an unassigned program is offline |
 | 4 | runtime hermeticity, broker, X11 closure, extra routes | VM "evil host": a `systemd --user` counting `StartTransientUnit`, a portal logging callers, an HTTP beacon |
 
 ## 12. The owner's decisions (2026-09-17)

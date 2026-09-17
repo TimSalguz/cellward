@@ -45,7 +45,7 @@ Usage:
         is run as a child and the container is removed after the last program
         living in it is gone.
 
-  vpn-zone-core sync <state_dir> <home> <runner> <picker>
+  vpn-zone-core sync <state_dir> <home> <runner> <picker> [<systemctl>]
         Regenerate the .desktop entries for the zones. <runner> and <picker>
         are the paths that end up in the generated Exec lines.
 
@@ -155,8 +155,12 @@ fn main() -> ExitCode {
         },
         Some("sync") => {
             let rest = &args[1..];
-            if rest.len() != 4 {
-                eprintln!("vpn-zone-core sync: need <state_dir> <home> <runner> <picker>");
+            // The fifth, `systemctl`, reloads the session bus when a shadow
+            // D-Bus service changed; a wrapper that predates it passes four.
+            if !matches!(rest.len(), 4 | 5) {
+                eprintln!(
+                    "vpn-zone-core sync: need <state_dir> <home> <runner> <picker> [<systemctl>]"
+                );
                 eprint!("{USAGE}");
                 return ExitCode::from(EXIT_USAGE);
             }
@@ -165,6 +169,7 @@ fn main() -> ExitCode {
                 Path::new(&rest[1]),
                 &rest[2].to_string_lossy(),
                 &rest[3].to_string_lossy(),
+                rest.get(4).map(Path::new),
             ))
         }
         Some(other) => {

@@ -402,7 +402,8 @@ let
     exec ${vpn-zone-rust}/bin/vpn-zone-core sync \
       "${stateDir}" "${config.home.homeDirectory}" \
       "${config.home.profileDirectory}/bin/vpn-zone" \
-      "${config.home.profileDirectory}/bin/vpn-zone-pick"
+      "${config.home.profileDirectory}/bin/vpn-zone-pick" \
+      "${pkgs.systemd}/bin/systemctl"
   '';
 
   # --- ЧАСТЬ 4б: ГРАФИЧЕСКИЕ ЯРЛЫКИ ---

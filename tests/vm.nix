@@ -62,6 +62,21 @@ let
       -extfile ext -out srv.pem 2>/dev/null
   '';
 
+  # A D-Bus-activatable program (docs/CONTAINERS.md §5.3): a launcher entry
+  # with DBusActivatable=true and the session service file that starts it.
+  # Started, it records the network it sees and exits — it never takes its
+  # name, so the activation itself times out, which is fine.
+  vmActivatableRun = pkgs.writeShellScript "vm-activatable" ''
+    ${pkgs.iproute2}/bin/ip -o link show > /tmp/vmactivated
+  '';
+  vmActivatable = pkgs.runCommand "vpn-zones-vm-activatable" { } ''
+    mkdir -p "$out/share/applications" "$out/share/dbus-1/services"
+    printf '[Desktop Entry]\nType=Application\nName=VM activatable\nExec=%s\nDBusActivatable=true\n' \
+      ${vmActivatableRun} > "$out/share/applications/org.vpnzones.VmActivatable.desktop"
+    printf '[D-BUS Service]\nName=org.vpnzones.VmActivatable\nExec=%s\n' \
+      ${vmActivatableRun} > "$out/share/dbus-1/services/org.vpnzones.VmActivatable.service"
+  '';
+
   test = pkgs.testers.runNixOSTest {
     name = "vpn-zones-vm";
 
@@ -187,7 +202,9 @@ let
           pkgs.openssl
           pkgs.nss.tools
           pkgs.p11-kit
+          vmActivatable
         ];
+        environment.pathsToLink = [ "/share/dbus-1" ];
 
         virtualisation.cores = 4;
         virtualisation.memorySize = 2048;
@@ -547,6 +564,36 @@ let
       # and the picker it goes through never asks. A program nobody chose
       # anything for starts offline, in a home of its own, without a file
       # access dialog — the owner's decision of 2026-09-17.
+      # D-Bus activation (docs/CONTAINERS.md §5.3): the bus starts a
+      # DBusActivatable program from its SERVICE file, around the launcher
+      # entry. A shadow service in the user's directory wins over the system
+      # one and goes through the picker — here pinned offline, so the program
+      # must see loopback only. Without the shadow (or without the bus
+      # reloading it) the system service would run it in the host's network,
+      # and the link list below would say so.
+      with subtest("D-Bus activation: the shadow service starts the program through the picker"):
+          APP = "org.vpnzones.VmActivatable"
+          alice(f"mkdir -p {STATE}/.pinned {STATE}/.pinnedprofile")
+          alice(f"printf offline > {STATE}/.pinned/{APP}")
+          alice(f"printf __main__ > {STATE}/.pinnedprofile/{APP}")
+          machine.succeed("rm -f /tmp/vmactivated")
+          alice("vpn-zone sync")
+          out = alice(f"cat /home/alice/.local/share/dbus-1/services/{APP}.service")
+          assert f"vpn-zone-pick --id {APP} --" in out, out
+          alice("systemctl --user reload dbus.service")
+          alice(
+              f"${pkgs.glib.bin}/bin/gdbus call --session --timeout 5 --dest {APP} "
+              f"--object-path /org/vpnzones/VmActivatable --method org.freedesktop.DBus.Peer.Ping || true"
+          )
+          machine.wait_until_succeeds("test -s /tmp/vmactivated", timeout=60)
+          out = machine.succeed("cat /tmp/vmactivated")
+          lines = [l for l in out.strip().splitlines() if ": " in l]
+          assert len(lines) == 1 and ": lo:" in lines[0], f"activation ran outside the zone: {out}"
+          alice("vpn-zone mode off")
+          alice(f"test ! -e /home/alice/.local/share/dbus-1/services/{APP}.service")
+          alice("vpn-zone mode picker")
+          alice("vpn-zone down offline || true")
+
       AUTOSTART = "/home/alice/.config/autostart"
       with subtest("autostart: taken over, and an unassigned program starts offline in its own home"):
           alice(

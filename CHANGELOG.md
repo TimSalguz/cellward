@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed (D-Bus activation goes through the picker)
+- A `DBusActivatable=true` program intercepted by the picker now also gets a
+  shadow session service in `~/.local/share/dbus-1/services/` with the same bus
+  name, starting it through the picker: activation by name (`gapplication
+  launch`, notification actions, "open with", other programs) started it in the
+  host's network, uncontained. Only intercepted entries with well-formed names;
+  a user's own service file is never overwritten; `mode off` removes ours.
+  `vpn-zone-core sync` takes an optional fifth argument, `systemctl`, to reload
+  the session bus when a shadow changed (`docs/CONTAINERS.md` §5.3).
+
 ### Added (launch by id)
 - `vpn-zone launch <id> [-- <arguments>]`: a launcher entry started through the
   picker by its id, the way a click starts it — for compositor key bindings

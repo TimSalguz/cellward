@@ -44,6 +44,12 @@ pub const SYNC_LOCK_DIR: &str = ".sync";
 /// Apart from [`ADOPTED_DIR`]: an autostart entry and a launcher entry often
 /// share a file name (`org.telegram.desktop.desktop`) and differ in content.
 pub const AUTOSTART_ADOPTED_DIR: &str = ".adopted-autostart";
+/// Where shadow D-Bus service files go, below the home: the session bus reads
+/// this directory before the system ones (`docs/CONTAINERS.md` §5.3).
+pub const DBUS_SERVICES: &str = ".local/share/dbus-1/services";
+/// The marker of our service files. A comment: a key the bus does not know
+/// might make it reject the file.
+const DBUS_MARK: &str = "# X-VPNZone=dbus";
 /// The picker's flag for a launch from XDG autostart: no dialog, ever.
 pub const AUTOSTART_FLAG: &str = "--autostart";
 /// The marker value of an entry taken over in place: `X-VPNZone=adopted`.
@@ -533,6 +539,81 @@ pub fn render_autostart(groups: &[Group], picker: &str, app_key: &str) -> String
         out.push(String::new());
     }
     out.join("\n")
+}
+
+/// A shadow D-Bus service file: the same bus name, started through the picker.
+///
+/// A `DBusActivatable=true` program is started by the session bus whenever
+/// somebody calls its name — `gapplication launch`, a notification's action,
+/// another program — and the bus reads the service file, not the launcher
+/// entry. Without a shadow the interception covered clicks only.
+pub fn render_dbus_shadow(name: &str, picker: &str, app_key: &str, exec: &str) -> String {
+    format!(
+        "{DBUS_MARK}\n[D-BUS Service]\nName={name}\nExec={picker} --id {} -- {exec}\n",
+        sanitize(app_key)
+    )
+}
+
+/// The `Exec` of the service file that activates `name`, from the data
+/// directories next to the launcher directories `sync` reads — never from our
+/// own service directory.
+fn dbus_service_exec(dirs: &[PathBuf], home: &Path, name: &str) -> Option<String> {
+    let resolved = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let own = resolved(&home.join(DBUS_SERVICES));
+    for dir in dirs {
+        let Some(data) = dir.parent() else {
+            continue;
+        };
+        let services = data.join("dbus-1/services");
+        if resolved(&services) == own {
+            continue;
+        }
+        let groups = parse_desktop_file(&services.join(format!("{name}.service")));
+        let Some(group) = groups.iter().find(|g| g.name == "D-BUS Service") else {
+            continue;
+        };
+        if group.get("Name") != Some(name) {
+            continue;
+        }
+        if let Some(exec) = group.get("Exec").filter(|e| !e.is_empty()) {
+            return Some(exec.to_owned());
+        }
+    }
+    None
+}
+
+/// A well-formed D-Bus name a launcher entry may be activated under: the
+/// specification requires `DBusActivatable` entries to be named by it.
+fn is_bus_name(name: &str) -> bool {
+    name.contains('.')
+        && !name.starts_with('.')
+        && !name.ends_with('.')
+        && name
+            .split('.')
+            .all(|part| !part.is_empty() && !part.starts_with(|c: char| c.is_ascii_digit()))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+/// Remove our service files that are not wanted any more. Returns how many.
+fn cleanup_dbus(dir: &Path, wanted: &BTreeSet<String>) -> u32 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(String::from) else {
+            continue;
+        };
+        if !name.ends_with(".service") || wanted.contains(&name) {
+            continue;
+        }
+        if ours(&entry.path()) && fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// `vpn-zone-pick [--autostart] --id <key> -- <command>` → the key and the
@@ -1205,16 +1286,42 @@ pub fn expand_exec(entry: &Group, file: &Path, args: &[OsString]) -> (Vec<OsStri
 }
 
 /// The whole pass. Returns the process exit code.
-pub fn sync(state_dir: &Path, home: &Path, runner: &str, picker: &str) -> u8 {
-    sync_from(state_dir, home, runner, picker, &source_dirs(home))
+pub fn sync(
+    state_dir: &Path,
+    home: &Path,
+    runner: &str,
+    picker: &str,
+    systemctl: Option<&Path>,
+) -> u8 {
+    let (code, dbus_changed) = sync_from(state_dir, home, runner, picker, &source_dirs(home));
+    // dbus-broker does not watch its service directories: a shadow nobody
+    // told it about would not exist for it until the next login. dbus-daemon
+    // does watch, and a reload costs it nothing. No-block: this pass may be
+    // running inside a unit itself.
+    if dbus_changed {
+        if let Some(systemctl) = systemctl {
+            let _ = std::process::Command::new(systemctl)
+                .args(["--user", "--no-block", "reload", "dbus.service"])
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+    code
 }
 
-/// [`sync`] over an explicit list of source directories.
-fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[PathBuf]) -> u8 {
+/// [`sync`] over an explicit list of source directories. Returns the exit code
+/// and whether a D-Bus service file changed.
+fn sync_from(
+    state_dir: &Path,
+    home: &Path,
+    runner: &str,
+    picker: &str,
+    dirs: &[PathBuf],
+) -> (u8, bool) {
     let out_dir = home.join(".local/share/applications");
     if let Err(e) = fs::create_dir_all(&out_dir) {
         eprintln!("cannot create {}: {e}", out_dir.display());
-        return 1;
+        return (1, false);
     }
 
     // One pass at a time, and the mode read under the lock: the path unit
@@ -1254,6 +1361,31 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
     let mut wanted: BTreeSet<String> = BTreeSet::new();
     let mut written = 0u32;
     let parents = parents(&apps);
+    let dbus_dir = home.join(DBUS_SERVICES);
+    let mut dbus_wanted: BTreeSet<String> = BTreeSet::new();
+    let mut dbus_written = 0u32;
+    // The shadow service of an intercepted, D-Bus-activatable entry.
+    let mut shadow_dbus = |app: &App, entry: &Group, app_key: &str| {
+        let name = app.key();
+        if entry.get("DBusActivatable") != Some("true") || !is_bus_name(name) {
+            return;
+        }
+        let Some(exec) = dbus_service_exec(dirs, home, name) else {
+            return;
+        };
+        let file = format!("{name}.service");
+        let target = dbus_dir.join(&file);
+        // A service file of the user's own is theirs, as an entry would be.
+        if occupied(&target) && !ours(&target) {
+            return;
+        }
+        if fs::create_dir_all(&dbus_dir).is_err() {
+            return;
+        }
+        dbus_wanted.insert(file);
+        dbus_written +=
+            write_if_changed(&target, &render_dbus_shadow(name, picker, app_key, &exec));
+    };
 
     for app in &apps {
         let Some(entry) = desktop_entry(&app.groups) else {
@@ -1286,6 +1418,7 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
                     }
                 };
                 written += write_if_changed(&target, &render_picker(&app.groups, picker, app_key));
+                shadow_dbus(app, entry, app_key);
             }
         }
 
@@ -1326,6 +1459,7 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
                     };
                     written +=
                         write_if_changed(&target, &render_adopted(&app.groups, picker, app_key));
+                    shadow_dbus(app, entry, app_key);
                 }
             }
         }
@@ -1346,6 +1480,7 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
     }
 
     let removed = cleanup(&out_dir, &wanted, &adopted_dir);
+    let dbus_removed = cleanup_dbus(&dbus_dir, &dbus_wanted);
     let (autostart_written, autostart_given_back) = sync_autostart(
         &home.join(".config/autostart"),
         &state_dir.join(AUTOSTART_ADOPTED_DIR),
@@ -1364,11 +1499,13 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
     };
     println!(
         "mode {}: {} entries ({written} updated, {removed} removed); autostart: \
-         {autostart_written} updated, {autostart_given_back} given back; zones: {zone_list}",
+         {autostart_written} updated, {autostart_given_back} given back; D-Bus services: {} \
+         ({dbus_written} updated, {dbus_removed} removed); zones: {zone_list}",
         mode.as_str(),
-        wanted.len()
+        wanted.len(),
+        dbus_wanted.len()
     );
-    0
+    (0, dbus_written + dbus_removed > 0)
 }
 
 #[cfg(test)]
@@ -1843,7 +1980,7 @@ Name=not carried over
 
         let dirs = vec![apps.clone(), system.clone()];
         assert_eq!(
-            sync_from(&state, &home, "/bin/vpn-zone", "/bin/vpn-zone-pick", &dirs),
+            sync_from(&state, &home, "/bin/vpn-zone", "/bin/vpn-zone-pick", &dirs).0,
             0
         );
         let read = |name: &str| fs::read_to_string(apps.join(name)).unwrap_or_default();
@@ -1914,7 +2051,7 @@ Name=not carried over
         fn sync(&self) {
             let dirs = vec![self.apps.clone(), self.system.clone()];
             assert_eq!(
-                sync_from(&self.state, &self.home, "/bin/vpn-zone", "/bin/pick", &dirs),
+                sync_from(&self.state, &self.home, "/bin/vpn-zone", "/bin/pick", &dirs).0,
                 0
             );
         }
@@ -2057,7 +2194,7 @@ Name=not carried over
         // tests share one process, and rewriting the environment under the
         // other threads is not worth a fixture.
         let dirs = vec![apps.clone(), system.clone()];
-        let run = || sync_from(&state, &home, "/bin/vpn-zone", "/bin/vpn-zone-pick", &dirs);
+        let run = || sync_from(&state, &home, "/bin/vpn-zone", "/bin/vpn-zone-pick", &dirs).0;
         assert_eq!(run(), 0);
 
         let written = fs::read_to_string(apps.join("firefox.desktop")).unwrap();
@@ -2315,5 +2452,76 @@ Name=not carried over
         );
 
         assert!(find_entry(&dirs, &d.home, &d.state, "nope").is_none());
+    }
+
+    // --- D-Bus activation ----------------------------------------------------
+
+    #[test]
+    fn a_dbus_activatable_entry_gets_a_shadow_service_and_loses_it() {
+        let d = Desk::new("dbus");
+        fs::write(
+            d.system.join("org.example.Notes.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Notes\nExec=notes %U\nDBusActivatable=true\n",
+        )
+        .unwrap();
+        // Not activatable: no shadow, even with a service file next to it.
+        fs::write(
+            d.system.join("org.example.Plain.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Plain\nExec=plain\n",
+        )
+        .unwrap();
+        let services = d.system.parent().unwrap().join("dbus-1/services");
+        fs::create_dir_all(&services).unwrap();
+        fs::write(
+            services.join("org.example.Notes.service"),
+            "[D-BUS Service]\nName=org.example.Notes\nExec=/store/notes --gapplication-service\nSystemdService=app-notes.service\n",
+        )
+        .unwrap();
+        fs::write(
+            services.join("org.example.Plain.service"),
+            "[D-BUS Service]\nName=org.example.Plain\nExec=/store/plain\n",
+        )
+        .unwrap();
+        let dirs = vec![d.apps.clone(), d.system.clone()];
+        let (_, changed) = sync_from(&d.state, &d.home, "/bin/vpn-zone", "/bin/pick", &dirs);
+        assert!(changed);
+        let shadow = d.home.join(DBUS_SERVICES).join("org.example.Notes.service");
+        let text = fs::read_to_string(&shadow).unwrap();
+        assert_eq!(
+            text,
+            "# X-VPNZone=dbus\n[D-BUS Service]\nName=org.example.Notes\n\
+             Exec=/bin/pick --id org.example.Notes -- /store/notes --gapplication-service\n"
+        );
+        assert!(!d
+            .home
+            .join(DBUS_SERVICES)
+            .join("org.example.Plain.service")
+            .exists());
+
+        // Nothing changed: the bus is not reloaded for nothing.
+        let (_, changed) = sync_from(&d.state, &d.home, "/bin/vpn-zone", "/bin/pick", &dirs);
+        assert!(!changed);
+
+        // A service file of the user's own is never overwritten or removed.
+        let mine = d.home.join(DBUS_SERVICES).join("org.example.Mine.service");
+        fs::write(&mine, "[D-BUS Service]\nName=org.example.Mine\nExec=mine\n").unwrap();
+
+        // Mode off: our shadow goes, theirs stays.
+        d.setting("mode", "off");
+        let (_, changed) = sync_from(&d.state, &d.home, "/bin/vpn-zone", "/bin/pick", &dirs);
+        assert!(changed);
+        assert!(!shadow.exists());
+        assert!(mine.exists());
+    }
+
+    #[test]
+    fn only_well_formed_bus_names_are_shadowed() {
+        assert!(is_bus_name("org.example.Notes"));
+        assert!(is_bus_name("org.gnome.Nautilus"));
+        for bad in [
+            "firefox", ".org.x", "org.x.", "org..x", "org.1x", "org.x/y", "org.x y",
+        ] {
+            assert!(!is_bus_name(bad), "{bad}");
+        }
     }
 }

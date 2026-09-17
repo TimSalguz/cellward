@@ -1931,6 +1931,7 @@ fn sync_argv(tools: &Tools) -> Vec<OsString> {
         tools.home.clone().into(),
         tools.runner.clone().into(),
         tools.picker.clone().into(),
+        tools.systemctl.clone().into(),
     ]
 }
 
