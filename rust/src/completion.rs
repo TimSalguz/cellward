@@ -166,10 +166,8 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                     ),
                 }
             }
-            "hermetic" if pos == 2 => {
-                owned(&mut out, &snap.zones);
-                strs(&mut out, &["--default"]);
-            }
+            // The flag only for a dash: an empty word is a zone's place.
+            "hermetic" if pos == 2 && prefix.starts_with('-') => strs(&mut out, &["--default"]),
             v if ZONE_VERBS.contains(&v) && pos == 2 => owned(&mut out, &snap.zones),
             "add" if pos == 3 => return vec![FILES.to_string()],
             "x11" if pos == 3 => strs(&mut out, &["on", "off"]),
@@ -376,6 +374,7 @@ mod tests {
             complete(&["vpn-zone", "container", "set", "work", "x11", ""], 6),
             ["on", "off"]
         );
+        assert_eq!(complete(&["vpn-zone", "hermetic", "-"], 3), ["--default"]);
         assert_eq!(
             complete(&["vpn-zone", "hermetic", "--default", ""], 4),
             ["on", "off"]
