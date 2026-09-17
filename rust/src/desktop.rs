@@ -833,6 +833,17 @@ impl App {
     }
 }
 
+/// Does this `Exec` open a web app of a Chromium-family browser
+/// (`--app-id=<id>` for an installed one, `--app=<url>` for a site as a
+/// window)? Such an entry is the browser: the running browser process takes
+/// the request and opens the window in ITS network and profile, whatever a
+/// pin of the web app's own said. (`docs/CONTAINERS.md` §5)
+pub fn is_web_app_exec(exec: &str) -> bool {
+    exec_words(exec)
+        .iter()
+        .any(|w| w.starts_with("--app-id=") || w.starts_with("--app="))
+}
+
 /// Whose id an entry is launched under, when it is not its own.
 ///
 /// Two kinds of entries are not programs of their own and must not get a
@@ -846,7 +857,9 @@ impl App {
 ///   promised a choice nobody could honour, and the conflict check did not see
 ///   the game and the client as one program. (`docs/GOTCHAS.md` §10)
 /// * a **hidden handler** of a program that has a visible entry — see
-///   [`is_hidden_handler`].
+///   [`is_hidden_handler`];
+/// * a **web app** of a browser that has a visible entry — see
+///   [`is_web_app_exec`].
 ///
 /// With several visible entries for one program the one whose key IS the
 /// program's name wins, then the first by name — stable across passes.
@@ -857,8 +870,15 @@ fn parents(apps: &[App]) -> BTreeMap<String, String> {
             .and_then(|e| e.get("Exec"))
             .and_then(exec_program)
     };
+    let web_app = |app: &App| {
+        desktop_entry(&app.groups)
+            .and_then(|e| e.get("Exec"))
+            .is_some_and(is_web_app_exec)
+    };
     let mut by_program: BTreeMap<String, &App> = BTreeMap::new();
-    for app in visible() {
+    // A web app is never the entry of its browser, even when it is the only
+    // entry of that program the scan has seen so far.
+    for app in visible().filter(|a| !web_app(a)) {
         let Some(program) = program_of(app) else {
             continue;
         };
@@ -879,8 +899,11 @@ fn parents(apps: &[App]) -> BTreeMap<String, String> {
         let Some(program) = entry.get("Exec").and_then(exec_program) else {
             continue;
         };
-        let parent = if app.hidden {
-            by_program.get(&program).map(|p| p.key().to_owned())
+        let parent = if app.hidden || web_app(app) {
+            by_program
+                .get(&program)
+                .filter(|p| p.name != app.name)
+                .map(|p| p.key().to_owned())
         } else {
             let schemes = exec_url_schemes(entry.get("Exec").unwrap_or(""));
             visible()
@@ -2523,5 +2546,62 @@ Name=not carried over
         ] {
             assert!(!is_bus_name(bad), "{bad}");
         }
+    }
+
+    // --- Web apps ------------------------------------------------------------
+
+    #[test]
+    fn a_web_app_is_launched_as_its_browser() {
+        let d = Desk::new("webapp");
+        fs::write(
+            d.system.join("chromium-browser.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Chromium\nExec=chromium %U\n",
+        )
+        .unwrap();
+        // What Chromium writes into the user directory when a site is
+        // installed as an app — and a plain site shortcut.
+        fs::write(
+            d.apps.join("chrome-abcdef-Default.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Mail\n\
+             Exec=/nix/store/x-chromium/bin/chromium --profile-directory=Default --app-id=abcdef\n",
+        )
+        .unwrap();
+        fs::write(
+            d.system.join("site-window.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Site\nExec=chromium --app=https://example.org\n",
+        )
+        .unwrap();
+        d.sync();
+        let web = d.read("chrome-abcdef-Default.desktop");
+        assert!(web.contains("X-VPNZone=adopted"), "{web}");
+        assert!(
+            web.contains("--id chromium-browser -- /nix/store/x-chromium/bin/chromium"),
+            "{web}"
+        );
+        assert!(d
+            .read("site-window.desktop")
+            .contains("--id chromium-browser -- chromium --app="));
+        // The browser keeps its label; the web apps get none of their own.
+        assert!(!d.state.join(".labels/chrome-abcdef-Default").exists());
+        assert!(!d.state.join(".labels/site-window").exists());
+
+        assert!(is_web_app_exec(
+            "brave --profile-directory=Default --app-id=x"
+        ));
+        assert!(!is_web_app_exec("firefox --new-window https://example.org"));
+    }
+
+    #[test]
+    fn a_web_app_without_its_browser_entry_is_its_own_program() {
+        let d = Desk::new("webapp-alone");
+        fs::write(
+            d.apps.join("chrome-abcdef-Default.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Mail\nExec=chromium --app-id=abcdef\n",
+        )
+        .unwrap();
+        d.sync();
+        assert!(d
+            .read("chrome-abcdef-Default.desktop")
+            .contains("--id chrome-abcdef-Default --"));
     }
 }

@@ -251,7 +251,7 @@ boundary is the container → outside direction (§6).
 |---|---|---|---|
 | launcher entry (menus, fuzzel/rofi, KRunner, noctalia) | picker shadow entry in `~/.local/share/applications` | unchanged; container-first picker | 1 |
 | hidden handlers (`NoDisplay=true` + `MimeType`) | **done**: intercepted under the id of the visible entry of the same program | — | 0 |
-| child entries (`steam steam://rungameid/…`) | **done**: no clones, launched under the client's id | web apps of a browser (`--app-id=`) join them | 0/3 |
+| child entries (`steam steam://rungameid/…`) | **done**: no clones, launched under the client's id | **done**: web apps of a browser (`--app-id=`, `--app=`) join them | 0/3 |
 | entries programs write into the user directory (Steam games, `userapp-*`, web apps, Wine) | not intercepted: foreign files are never rewritten | **done**: taken over in place with a backup and re-taken when rewritten ([LAUNCHERS.md](LAUNCHERS.md) §3.2); the invariant changed in a commit of its own | 3 |
 | `xdg-open`, `gio open`, `kde-open`, "open with" | resolve to a `.desktop` → the shadow entry | unchanged | — |
 | D-Bus activation (`gapplication launch`, `DBusActivatable=true`) | the service file activates around the shadow | **done** (§5.3): shadow session service files in `$XDG_DATA_HOME/dbus-1/services/<id>.service` for intercepted ids only; never for portal or system names | 3 |

@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed (web apps are children of their browser)
+- An entry that opens a web app of a Chromium-family browser (`--app-id=`,
+  `--app=`) is launched under the id of that browser's entry, like a Steam game
+  under Steam's: the running browser opens the window in its own network and
+  profile, so a pin of the web app's own promised a choice nobody could honour.
+  No clones and no label of its own; without a browser entry it stays a
+  program of its own.
+
 ### Added (doctor)
 - `vpn-zone doctor [<zone>…] [--json]`: system readiness (user namespaces,
   `newuidmap`, subordinate ids, `/dev/net/tun`, the tools of the manifest), the
