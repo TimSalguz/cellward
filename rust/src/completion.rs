@@ -226,6 +226,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             "container" if pos == 4 && matches!(word(2), "grant" | "revoke") => {
                 return vec![FILES.to_string()]
             }
+            "container" if pos == 5 && word(2) == "grant" => strs(&mut out, &["--for"]),
             "container" if matches!(pos, 3 | 4) && word(2) == "merge" => {
                 owned(&mut out, &snap.profiles);
                 out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));

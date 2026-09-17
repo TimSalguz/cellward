@@ -606,6 +606,53 @@ grep -q 'smoke-sneaky is not granted' "$WORK/grant.err" || fail "symlink в со
 rm -rf "$GRANTED" "$HOME/smoke-sneaky" "$KEYDIR/.smoke-grant-marker" "$HOME/.local/state/vpn-sandboxes/smokegrant"
 echo "ok: выданный каталог работает, ключи зон не выдаются ни прямо, ни по ссылке"
 
+# Срок выдачи (rust/src/grants.rs): у программы, которая УЖЕ работает, каталог
+# обязан исчезнуть по истечении срока, а не при следующем запуске. Запись в
+# реестре делается руками: песочница здесь запускается напрямую, мимо
+# `vpn-zone run`, который пишет её сам.
+step "Песочница ФС: истёкший срок забирает каталог и у запущенной программы"
+LIVE="$HOME/smoke-live"
+LIVEHOME="$HOME/.local/state/vpn-sandboxes/smokelive"
+rm -rf "$LIVE" "$LIVEHOME"
+mkdir -p "$LIVE" && : > "$LIVE/probe"
+# Store-путь: /tmp внутри песочницы свой, ссылка из $WORK туда не ведёт.
+LIVESLEEP=$(readlink -f "$FSCOREUTILS/sleep")
+env -u WAYLAND_DISPLAY -u DISPLAY "$FSCORE" fs-sandbox \
+  --bwrap "$FSBWRAP" --dbus-proxy "$FSPROXY" \
+  --kdialog "$WORK/fake-kdialog" --xwayland /nonexistent/xwayland-satellite \
+  --name smokelive --bind-path "$LIVE" \
+  "$FSAPP" -- "$FSSH" -c '
+    while :; do
+      if [ -e "$HOME/smoke-live/probe" ]; then echo SEEN; else echo GONE; fi > "$HOME/live-status"
+      "$1" 0.1
+    done
+  ' sh "$LIVESLEEP" 2>"$WORK/live.err" &
+LIVEPID=$!
+for _ in $(seq 50); do
+  [ "$(cat "$LIVEHOME/home/live-status" 2>/dev/null)" = SEEN ] && break
+  sleep 0.1
+done
+[ "$(cat "$LIVEHOME/home/live-status" 2>/dev/null)" = SEEN ] \
+  || fail "запущенная песочница не видит выданный каталог: $(cat "$WORK/live.err")"
+mkdir -p "$STATE/.running/__main__"
+printf '%s unconfined sb:smokelive\n' "$LIVEPID" > "$STATE/.running/__main__/smoke-live"
+printf 'until=1 %s\n' "$LIVE" > "$LIVEHOME/paths"
+"$VPN_ZONE" container expire || fail "expire не отмонтировал каталог у запущенной программы"
+for _ in $(seq 50); do
+  [ "$(cat "$LIVEHOME/home/live-status" 2>/dev/null)" = GONE ] && break
+  sleep 0.1
+done
+[ "$(cat "$LIVEHOME/home/live-status" 2>/dev/null)" = GONE ] \
+  || fail "после истечения срока запущенная программа всё ещё видит каталог"
+[ -e "$LIVE/probe" ] || fail "отмонтирование задело сам каталог на хосте"
+[ ! -s "$LIVEHOME/paths" ] || fail "истёкшая выдача осталась в файле: $(cat "$LIVEHOME/paths")"
+"$VPN_ZONE" journal --json | grep -q '"event":"grant-expired","container":"sb:smokelive".*"detached":"1"' \
+  || fail "истечение не записано в журнал: $("$VPN_ZONE" journal --json)"
+kill "$LIVEPID" 2>/dev/null || true
+wait "$LIVEPID" 2>/dev/null || true
+rm -rf "$LIVE" "$LIVEHOME" "$STATE/.running/__main__/smoke-live"
+echo "ok: срок истёк — каталог отмонтирован у работающей программы, файл и журнал это знают"
+
 # --- 6в. Пикер сети без графики ----------------------------------------------
 # Пикер интерактивен, и проверять здесь можно ровно одно: ветку «спросить
 # негде». Она не косметическая — это недавний фикс: без графики kdialog падает

@@ -753,7 +753,25 @@ fn containers(tools: &Tools) -> u8 {
             .filter(|d| !d.is_empty()) else {
                 return 0;
             };
-            let (ok, text) = cli(tools, &["container", "grant", &selector, &dir]);
+            let terms = [
+                row("always", "Бессрочно"),
+                row("1h", "На час"),
+                row("1d", "На сутки"),
+                row("7d", "На неделю"),
+            ];
+            let Some(term) = menu(
+                tools,
+                &format!("Надолго ли выдать {dir}?"),
+                "По истечении срока каталог отмонтируется и у уже запущенных программ.",
+                &terms,
+            ) else {
+                return 0;
+            };
+            let mut args = vec!["container", "grant", selector.as_str(), dir.as_str()];
+            if term != "always" {
+                args.extend(["--for", term.as_str()]);
+            }
+            let (ok, text) = cli(tools, &args);
             done(ok, text, "Каталог выдан");
         }
         "revoke" => {
