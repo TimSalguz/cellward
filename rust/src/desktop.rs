@@ -27,7 +27,8 @@
 //! and escaping, and taking it apart line by line means one day producing an
 //! entry with a mangled `Exec`. (`docs/GOTCHAS.md` §10)
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -222,6 +223,115 @@ pub fn is_candidate(file_name: &str, entry: Option<&Group>) -> bool {
         }
     }
     entry.get("Exec").is_some_and(|e| !e.is_empty())
+}
+
+/// A hidden handler: an application entry kept out of menus (`NoDisplay=true`)
+/// that exists to open files or links (`MimeType` is set).
+///
+/// These are exactly the entries links and "open with" go through —
+/// `okularApplication_pdf`, `codium-url-handler`, `imv-dir` — and they used to
+/// be skipped as non-candidates, so a PDF or a link opened through one started
+/// the program around the picker, without its container and in the host's
+/// network. They are intercepted now, but only under the id of a VISIBLE entry
+/// of the same program (see [`sync`]): a hidden system helper with no program
+/// of its own in the menu (an OAuth callback, a settings URL handler) is left
+/// alone rather than turned into a network dialog. `Hidden=true` means
+/// "deleted" and is never a handler. (`docs/LAUNCHERS.md` L6)
+pub fn is_hidden_handler(file_name: &str, entry: Option<&Group>) -> bool {
+    if file_name.starts_with(PREFIX) {
+        return false;
+    }
+    let Some(entry) = entry else {
+        return false;
+    };
+    let flag = |key: &str| {
+        entry
+            .get(key)
+            .unwrap_or("false")
+            .eq_ignore_ascii_case("true")
+    };
+    !entry.has(MARK)
+        && entry.get("Type").unwrap_or("Application") == "Application"
+        && flag("NoDisplay")
+        && !flag("Hidden")
+        && entry.get("Exec").is_some_and(|e| !e.is_empty())
+        && entry.get("MimeType").is_some_and(|m| !m.trim().is_empty())
+}
+
+/// The words of an `Exec` line, the way the desktop entry specification quotes
+/// them: whitespace separates, double quotes group, a backslash inside quotes
+/// escapes the next character.
+///
+/// Used only to recognise WHICH PROGRAM an entry starts and what it hands over
+/// — never to build a command line: `Exec` is always passed on verbatim.
+pub fn exec_words(exec: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut quoted = false;
+    let mut chars = exec.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                in_word = true;
+            }
+            '\\' if quoted => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            c if c.is_whitespace() && !quoted => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            c => {
+                current.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(current);
+    }
+    words
+}
+
+/// The program an `Exec` line starts: wrappers and assignments skipped, by the
+/// same rule `vpn-zone run` names the program with.
+pub fn exec_program(exec: &str) -> Option<String> {
+    let words: Vec<OsString> = exec_words(exec).into_iter().map(OsString::from).collect();
+    crate::launch::app_word(&words).map(|w| w.to_string_lossy().into_owned())
+}
+
+/// The URL schemes an `Exec` line hands to its program: `steam` for
+/// `steam steam://rungameid/1`. Field codes are not URLs.
+pub fn exec_url_schemes(exec: &str) -> Vec<String> {
+    exec_words(exec)
+        .iter()
+        .skip(1)
+        .filter_map(|word| {
+            let (scheme, _) = word.split_once("://")?;
+            let mut chars = scheme.chars();
+            let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+                && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'));
+            valid.then(|| scheme.to_ascii_lowercase())
+        })
+        .collect()
+}
+
+/// The URL schemes an entry claims: `x-scheme-handler/<scheme>` in `MimeType`.
+pub fn claimed_schemes(entry: &Group) -> Vec<String> {
+    entry
+        .get("MimeType")
+        .unwrap_or("")
+        .split(';')
+        .filter_map(|mime| mime.trim().strip_prefix("x-scheme-handler/"))
+        .filter(|scheme| !scheme.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 /// A key without spaces or quotes, so that `Exec` parses for anybody.
@@ -455,6 +565,82 @@ struct App {
     /// Found in our own output directory. Such files are never intercepted:
     /// they are either ours or the user's.
     own_dir: bool,
+    /// A [`is_hidden_handler`] entry rather than a visible one.
+    hidden: bool,
+}
+
+impl App {
+    /// The memory key of the entry: its file name without the extension.
+    fn key(&self) -> &str {
+        self.name.strip_suffix(".desktop").unwrap_or(&self.name)
+    }
+}
+
+/// Whose id an entry is launched under, when it is not its own.
+///
+/// Two kinds of entries are not programs of their own and must not get a
+/// memory, a registry key and — in per-zone mode — a row of clones:
+///
+/// * a **child**: its command hands a URL to a program that another visible
+///   entry starts and whose scheme that entry claims — `Exec=steam
+///   steam://rungameid/<id>` next to `steam.desktop` with
+///   `x-scheme-handler/steam`. The running client decides where the game runs;
+///   the game is its child and has its network. A clone per game per zone
+///   promised a choice nobody could honour, and the conflict check did not see
+///   the game and the client as one program. (`docs/GOTCHAS.md` §10)
+/// * a **hidden handler** of a program that has a visible entry — see
+///   [`is_hidden_handler`].
+///
+/// With several visible entries for one program the one whose key IS the
+/// program's name wins, then the first by name — stable across passes.
+fn parents(apps: &[App]) -> BTreeMap<String, String> {
+    let visible = || apps.iter().filter(|a| !a.hidden);
+    let program_of = |app: &App| {
+        desktop_entry(&app.groups)
+            .and_then(|e| e.get("Exec"))
+            .and_then(exec_program)
+    };
+    let mut by_program: BTreeMap<String, &App> = BTreeMap::new();
+    for app in visible() {
+        let Some(program) = program_of(app) else {
+            continue;
+        };
+        let better = match by_program.get(&program) {
+            None => true,
+            Some(current) => current.key() != program && app.key() == program,
+        };
+        if better {
+            by_program.insert(program, app);
+        }
+    }
+
+    let mut out = BTreeMap::new();
+    for app in apps {
+        let Some(entry) = desktop_entry(&app.groups) else {
+            continue;
+        };
+        let Some(program) = entry.get("Exec").and_then(exec_program) else {
+            continue;
+        };
+        let parent = if app.hidden {
+            by_program.get(&program).map(|p| p.key().to_owned())
+        } else {
+            let schemes = exec_url_schemes(entry.get("Exec").unwrap_or(""));
+            visible()
+                .filter(|p| p.name != app.name)
+                .filter(|p| program_of(p).as_deref() == Some(program.as_str()))
+                .find(|p| {
+                    desktop_entry(&p.groups)
+                        .map(claimed_schemes)
+                        .is_some_and(|claimed| schemes.iter().any(|s| claimed.contains(s)))
+                })
+                .map(|p| p.key().to_owned())
+        };
+        if let Some(parent) = parent {
+            out.insert(app.name.clone(), parent);
+        }
+    }
+    out
 }
 
 fn collect_apps(dirs: &[PathBuf], out_dir: &Path) -> Vec<App> {
@@ -481,14 +667,23 @@ fn collect_apps(dirs: &[PathBuf], out_dir: &Path) -> Vec<App> {
                 continue;
             }
             let groups = parse_desktop_file(&dir.join(&name));
-            if groups.is_empty() || !is_candidate(&name, desktop_entry(&groups)) {
+            if groups.is_empty() {
                 continue;
             }
+            let entry = desktop_entry(&groups);
+            let hidden = if is_candidate(&name, entry) {
+                false
+            } else if is_hidden_handler(&name, entry) {
+                true
+            } else {
+                continue;
+            };
             seen.insert(name.clone());
             apps.push(App {
                 name,
                 groups,
                 own_dir,
+                hidden,
             });
         }
     }
@@ -567,11 +762,18 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
 
     let mut wanted: BTreeSet<String> = BTreeSet::new();
     let mut written = 0u32;
+    let parents = parents(&apps);
 
     for app in &apps {
         let Some(entry) = desktop_entry(&app.groups) else {
             continue;
         };
+        let parent = parents.get(&app.name);
+        // A hidden handler with no visible entry of its program is a system
+        // helper, not a program somebody launches: left alone entirely.
+        if app.hidden && parent.is_none() {
+            continue;
+        }
 
         // The picker intercepts an entry under its own name, so only entries
         // that came from the system directories may be touched. Files already
@@ -581,13 +783,22 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
             let target = out_dir.join(&app.name);
             if !occupied(&target) || ours(&target) {
                 wanted.insert(app.name.clone());
-                let app_key = app.name.strip_suffix(".desktop").unwrap_or(&app.name);
-                write_label(state_dir, app_key, entry.get("Name").unwrap_or(app_key));
+                // A child or a hidden handler is launched under its parent's
+                // id and leaves the parent's label alone.
+                let app_key = match parent {
+                    Some(parent) => parent.as_str(),
+                    None => {
+                        write_label(state_dir, app.key(), entry.get("Name").unwrap_or(app.key()));
+                        app.key()
+                    }
+                };
                 written += write_if_changed(&target, &render_picker(&app.groups, picker, app_key));
             }
         }
 
-        if mode.clones() {
+        // Clones are for programs: not for a game of Steam's, and not for a
+        // handler nobody sees in a menu.
+        if mode.clones() && parent.is_none() {
             for zone in &zones {
                 let name = format!("{PREFIX}{zone}-{}", app.name);
                 let target = out_dir.join(&name);
@@ -910,6 +1121,194 @@ Name=not carried over
         assert!(Mode::Picker.intercepts() && !Mode::Picker.clones());
         assert!(!Mode::PerZone.intercepts() && Mode::PerZone.clones());
         assert!(!Mode::Off.intercepts() && !Mode::Off.clones());
+    }
+
+    #[test]
+    fn exec_lines_are_split_the_way_the_specification_quotes_them() {
+        assert_eq!(
+            exec_words(r#"env "WINEPREFIX=/home/u/My Games" wine start %u"#),
+            ["env", "WINEPREFIX=/home/u/My Games", "wine", "start", "%u"]
+        );
+        assert_eq!(exec_words(r#""/opt/a b/app" --x"#), ["/opt/a b/app", "--x"]);
+        assert_eq!(
+            exec_words(r#"sh -c "echo \"hi\"""#),
+            ["sh", "-c", "echo \"hi\""]
+        );
+        assert_eq!(
+            exec_words("  steam   steam://rungameid/1 "),
+            ["steam", "steam://rungameid/1"]
+        );
+        assert_eq!(exec_words(r#"app """#), ["app", ""]);
+        assert!(exec_words("").is_empty());
+    }
+
+    #[test]
+    fn the_program_of_an_entry_is_named_past_its_wrappers() {
+        assert_eq!(
+            exec_program("steam steam://rungameid/1").as_deref(),
+            Some("steam")
+        );
+        assert_eq!(
+            exec_program(r#"env "WINEPREFIX=/w" /nix/store/x/bin/wine start %u"#).as_deref(),
+            Some("wine")
+        );
+        assert_eq!(
+            exec_program("/usr/bin/okular %U").as_deref(),
+            Some("okular")
+        );
+        assert_eq!(exec_program(""), None);
+    }
+
+    #[test]
+    fn urls_handed_over_and_schemes_claimed_are_read_apart() {
+        assert_eq!(exec_url_schemes("steam steam://rungameid/1"), ["steam"]);
+        assert_eq!(exec_url_schemes("app HTTPS://x %U"), ["https"]);
+        // The program word is not an argument, field codes are not URLs, and
+        // something that only looks like a scheme is not one.
+        assert!(exec_url_schemes("x://odd %U").is_empty());
+        assert!(exec_url_schemes("app 1abc://x --flag=a://b").is_empty());
+
+        let g = parse_desktop(
+            "[Desktop Entry]\nMimeType=text/html;x-scheme-handler/Steam;x-scheme-handler/steamlink;\n",
+        );
+        assert_eq!(
+            claimed_schemes(desktop_entry(&g).unwrap()),
+            ["steam", "steamlink"]
+        );
+    }
+
+    #[test]
+    fn a_hidden_handler_is_a_hidden_application_that_opens_something() {
+        let entry = |body: &str| parse_desktop(&format!("[Desktop Entry]\n{body}\n"));
+        let yes = entry("NoDisplay=true\nExec=okular %U\nMimeType=application/pdf;");
+        assert!(is_hidden_handler(
+            "okularApplication_pdf.desktop",
+            desktop_entry(&yes)
+        ));
+        assert!(!is_candidate(
+            "okularApplication_pdf.desktop",
+            desktop_entry(&yes)
+        ));
+        for no in [
+            // Visible: an ordinary candidate, not a hidden handler.
+            "Exec=okular %U\nMimeType=application/pdf;",
+            // Hidden but opens nothing.
+            "NoDisplay=true\nExec=helper",
+            "NoDisplay=true\nExec=helper\nMimeType=",
+            // Deleted.
+            "NoDisplay=true\nHidden=true\nExec=x\nMimeType=a/b;",
+            // Ours.
+            "NoDisplay=true\nExec=x\nMimeType=a/b;\nX-VPNZone=picker",
+            "Type=Link\nNoDisplay=true\nExec=x\nMimeType=a/b;",
+        ] {
+            let g = entry(no);
+            assert!(!is_hidden_handler("x.desktop", desktop_entry(&g)), "{no}");
+        }
+        assert!(!is_hidden_handler(
+            "vpn-zone-x.desktop",
+            desktop_entry(&yes)
+        ));
+    }
+
+    #[test]
+    fn children_and_hidden_handlers_go_under_the_program_they_belong_to() {
+        let tmp = TempDir::new("parents");
+        let home = tmp.join("home");
+        let state = tmp.join("state");
+        let apps = home.join(".local/share/applications");
+        let system = tmp.join("system/applications");
+        fs::create_dir_all(&apps).unwrap();
+        fs::create_dir_all(&system).unwrap();
+        fs::create_dir_all(state.join("nl")).unwrap();
+        fs::write(state.join("nl/config.conf"), "[Interface]\n").unwrap();
+        fs::create_dir_all(home.join(".config/vpn-zones")).unwrap();
+        fs::write(home.join(".config/vpn-zones/mode"), "both").unwrap();
+
+        let write = |dir: &Path, name: &str, body: &str| {
+            fs::write(
+                dir.join(name),
+                format!("[Desktop Entry]\nType=Application\n{body}\n"),
+            )
+            .unwrap()
+        };
+        write(
+            &system,
+            "steam.desktop",
+            "Name=Steam\nExec=steam %U\nMimeType=x-scheme-handler/steam;",
+        );
+        // A game in the system directory (interceptable) and one written by
+        // the client into the user directory (foreign: never rewritten).
+        write(
+            &system,
+            "PEAK.desktop",
+            "Name=PEAK\nExec=steam steam://rungameid/1",
+        );
+        write(
+            &apps,
+            "Some Game.desktop",
+            "Name=Some Game\nExec=steam steam://rungameid/2",
+        );
+        write(
+            &system,
+            "org.kde.okular.desktop",
+            "Name=Okular\nExec=okular %U\nMimeType=application/pdf;",
+        );
+        write(
+            &system,
+            "okularApplication_pdf.desktop",
+            "Name=Okular PDF\nNoDisplay=true\nExec=okular %U\nMimeType=application/pdf;",
+        );
+        // A hidden helper with no program of its own in the menu.
+        write(
+            &system,
+            "oauth-helper.desktop",
+            "Name=OAuth\nNoDisplay=true\nExec=goa-oauth2-handler %u\nMimeType=x-scheme-handler/goa;",
+        );
+        // A link that is NOT a child: nobody claims the scheme.
+        write(
+            &system,
+            "site.desktop",
+            "Name=Site\nExec=firefox https://example.org",
+        );
+
+        let dirs = vec![apps.clone(), system.clone()];
+        assert_eq!(
+            sync_from(&state, &home, "/bin/vpn-zone", "/bin/vpn-zone-pick", &dirs),
+            0
+        );
+        let read = |name: &str| fs::read_to_string(apps.join(name)).unwrap_or_default();
+
+        // The child is launched as Steam, and the client keeps its own label.
+        assert!(read("PEAK.desktop").contains("--id steam -- steam steam://rungameid/1"));
+        assert_eq!(
+            fs::read_to_string(state.join(".labels/steam")).unwrap(),
+            "Steam"
+        );
+        assert!(!state.join(".labels/PEAK").exists());
+        // No clones for either game, and the foreign user entry is untouched.
+        assert!(!apps.join("vpn-zone-nl-PEAK.desktop").exists());
+        assert!(!apps.join("vpn-zone-nl-Some Game.desktop").exists());
+        assert!(!read("Some Game.desktop").contains("X-VPNZone"));
+        // The client itself is a program: intercepted and cloned as before.
+        assert!(read("steam.desktop").contains("--id steam -- steam %U"));
+        assert!(apps.join("vpn-zone-nl-steam.desktop").exists());
+
+        // The hidden handler goes under Okular's id and stays hidden.
+        let pdf = read("okularApplication_pdf.desktop");
+        assert!(pdf.contains("--id org.kde.okular -- okular %U"), "{pdf}");
+        assert!(pdf.contains("NoDisplay=true"), "{pdf}");
+        assert!(pdf.contains("MimeType=application/pdf;"), "{pdf}");
+        assert!(!apps
+            .join("vpn-zone-nl-okularApplication_pdf.desktop")
+            .exists());
+
+        // A helper with no program behind it is left alone entirely.
+        assert!(!apps.join("oauth-helper.desktop").exists());
+        assert!(!apps.join("vpn-zone-nl-oauth-helper.desktop").exists());
+
+        // An ordinary entry with a URL of an unclaimed scheme is its own program.
+        assert!(read("site.desktop").contains("--id site --"));
+        assert!(apps.join("vpn-zone-nl-site.desktop").exists());
     }
 
     #[test]

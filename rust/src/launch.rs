@@ -782,7 +782,7 @@ pub struct Entry<'a> {
 /// has to come after the mounts, and even without one a directory that does
 /// not exist in the zone's mount tree would make `nsenter` refuse to start the
 /// program at all. `profile-run` makes the chdir after mounting and falls back
-/// to `$HOME` and `/`. (`docs/GOTCHAS.md` §10a)
+/// to `$HOME` and `/`. (`docs/GOTCHAS.md` §1)
 pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
     let container = !entry.dir.as_os_str().is_empty();
     let mut exec: Vec<OsString> = Vec::new();

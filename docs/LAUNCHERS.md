@@ -2,7 +2,7 @@
 
 Russian: [LAUNCHERS.ru.md](LAUNCHERS.ru.md) · Related:
 [CONTAINERS.md](CONTAINERS.md) · Specification of past traps:
-[GOTCHAS.md](GOTCHAS.md) §10, §10a, §11, §13
+[GOTCHAS.md](GOTCHAS.md) §1, §5, §10, §11, §13
 
 **Status (2026-09-17):** §2 is a review of today's code; the fixes marked
 *done* are on the branch `fix/launch-path` (CI green), everything else is a
@@ -57,11 +57,11 @@ launcher → vpn-zone-pick --id K -- cmd
 | # | problem | effect | status |
 |---|---|---|---|
 | L1 | **"direct" skipped `vpn-zone run`**: the picker became the command | the chosen/pinned/default container or sandbox was dropped (whole `$HOME`), no Wayland restriction, no registry record, a locked zone's lock bypassed | **done** |
-| L2 | `nsenter` does `chdir("/")` | a terminal started into a zone opens in `/` (§10a) | **done** |
-| L3 | conflict key = launcher id **or** binary | two entries for one single-instance binary (Steam game and Steam, firefox and firefox-private) did not warn; link hand-over had the wrong text (§10a) | **done** |
+| L2 | `nsenter` does `chdir("/")` | a terminal started into a zone opens in `/` (§1) | **done** |
+| L3 | conflict key = launcher id **or** binary | two entries for one single-instance binary (Steam game and Steam, firefox and firefox-private) did not warn; link hand-over had the wrong text (§5) | **done** |
 | L4 | `VPN_ZONE_DELEGATED` stayed in the program's environment | the second link clicked in a program opened by delegation died in `nsenter` | **done** |
-| L5 | child entries (`Exec=steam steam://rungameid/…`) treated as programs | per-zone mode: games × zones clones (about a hundred on a real desktop), each promising a network choice the client ignores (§10a) | next branch |
-| L6 | **`NoDisplay=true` entries are never intercepted** | URL and file handlers are exactly the entries hidden from menus (`x-scheme-handler/…`, "open with" helpers): a link opened through one starts the program uncontained, around the picker. Ten such scheme handlers in the system directories of a real desktop | next branch: intercept `NoDisplay` entries that carry `MimeType` (keeping `NoDisplay`) |
+| L5 | child entries (`Exec=steam steam://rungameid/…`) treated as programs | per-zone mode: games × zones clones (about a hundred on a real desktop), each promising a network choice the client ignores (§10) | **done** |
+| L6 | **`NoDisplay=true` entries are never intercepted** | URL and file handlers are exactly the entries hidden from menus (`x-scheme-handler/…`, "open with" helpers): a link opened through one starts the program uncontained, around the picker. Ten such scheme handlers in the system directories of a real desktop | **done**: intercepted under the id of the visible entry of the same program; helpers without one are left alone |
 | L7 | **foreign entries in `~/.local/share/applications` are never intercepted** | Steam games, browser web apps, Wine, anything created through the DynamicLauncher portal — and the `userapp-*` entries programs write when they make themselves the default handler. On a real desktop `mimeapps.list` sends `http`, `https` and `tg` to such entries: **every link opened from any host program starts the browser (or the messenger) uncontained, in the direct network**, although the same program's system entry is intercepted | owner's decision (§3.2); the most consequential item of this table |
 | L8 | the id is sanitised lossily (`[A-Za-z0-9._-]`, the rest → `_`) | two non-ASCII entry names of equal length collide (`Игра.desktop`, `Мода.desktop` → `____`): shared pins, labels, registry and sandbox home — one program starts in the other's network or container | proposal: append a short hash when sanitising lost characters; migrate old keys once |
 | L9 | per-zone clones carry no launcher id | sandbox permissions and registry keyed by the binary, different from picker mode (the "two permission sets for Discord" trap, §6); `Desktop Action`s are dropped | moot if clones are deprecated (§4) |
@@ -114,9 +114,12 @@ until the owner decides).
 
 ### 3.3 `NoDisplay` handlers (L6)
 
-In picker mode, intercept `NoDisplay=true` entries that declare a `MimeType`,
-and keep `NoDisplay=true` in the shadow. `Hidden=true` stays excluded (it means
-"deleted"). No clones for them in per-zone mode.
+Done. In picker mode, `NoDisplay=true` entries that declare a `MimeType` are
+intercepted under the id of the visible entry of the same program and keep
+`NoDisplay=true` in the shadow; no clones. A hidden entry with no visible entry
+of its program is a system helper (an OAuth callback, a settings URL handler)
+and is left alone — intercepting it would put a network dialog in the middle
+of a login. `Hidden=true` stays excluded (it means "deleted").
 
 ### 3.4 Lossy ids (L8)
 

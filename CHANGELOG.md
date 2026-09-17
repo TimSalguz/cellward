@@ -19,6 +19,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - `docs/LEAK-MODEL.md`: launches around the picker and trusted roots as
   channels, with the invariants the implementation must hold.
 
+### Fixed (launches around the picker through hidden handlers; Steam games)
+- **Links and files opened through a hidden handler started the program
+  around the picker.** Entries with `NoDisplay=true` were skipped as a whole,
+  and those are exactly the ones URL and file associations go through
+  (`okularApplication_pdf`, `codium-url-handler`, …): the program started
+  without its container, in the host's network. Such entries are now
+  intercepted — kept hidden, never cloned — under the id of the visible entry
+  of the same program. A hidden system helper with no program of its own in
+  the menu is left alone.
+- **Steam game entries are no longer treated as programs.** An entry whose
+  command hands a URL to a program that another visible entry starts and
+  claims the scheme of (`Exec=steam steam://rungameid/…` next to
+  `steam.desktop`) is a child: no per-zone clones (the menu no longer grows as
+  games × zones), and in picker mode it launches under the client's id, so the
+  click is routed by the running client and the conflict check sees one
+  program. Stale clones of such entries are swept by the next sync.
+
 ### Fixed (`direct` dropped the container, the sandbox and the compositor restriction)
 - **Choosing "Прямой интернет" in the picker silently threw away every layer
   but the network.** The picker became the command itself for `direct`, so

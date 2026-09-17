@@ -80,7 +80,7 @@ pub struct Args {
     /// cannot do it for a container: the overlay is mounted over `$HOME` HERE,
     /// after `nsenter`, and a chdir made before that would pin the program to
     /// the directory UNDER the layer. So the chdir is made here, after the
-    /// mounts. (`docs/GOTCHAS.md` §10a)
+    /// mounts. (`docs/GOTCHAS.md` §1)
     pub cwd: Option<PathBuf>,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,

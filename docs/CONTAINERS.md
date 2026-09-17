@@ -185,7 +185,7 @@ scheme some other entry claims as `x-scheme-handler/<scheme>`, and both entries
 start the same program. A child is never cloned per zone and, in picker mode,
 uses the parent's launcher id: the running client decides where the game runs,
 and the game is its child — its network is the client's ([GOTCHAS](GOTCHAS.md)
-§10a). "A network per game" is impossible while the client owns the launch;
+§10). "A network per game" is impossible while the client owns the launch;
 the honest UI is "Steam's container".
 
 ### 5.2 The launch command for bindings
