@@ -826,6 +826,139 @@ struct App {
     hidden: bool,
 }
 
+/// Where the PATH shims go, below the home (`docs/CONTAINERS.md` §5).
+pub const SHIM_DIR: &str = ".local/share/vpn-zones/bin";
+/// The marker line of a shim.
+const SHIM_MARK: &str = "# X-VPNZone=shim";
+
+/// Whether PATH shims are wanted: the declared setting, then the local one,
+/// off by default — a shim changes what a word typed in a terminal does, and
+/// that is the person's call.
+fn wants_shims(home: &Path) -> bool {
+    let config = home.join(".config/vpn-zones");
+    fs::read_to_string(config.join("declared/path-shims"))
+        .or_else(|_| fs::read_to_string(config.join("path-shims")))
+        .is_ok_and(|v| v.trim() == "on")
+}
+
+/// A shim: the program typed in a terminal goes through the picker like a
+/// click on its entry. `real` is the program as found outside the shim
+/// directory, so a shim never calls itself.
+pub fn render_shim(picker: &str, key: &str, real: &Path) -> String {
+    format!(
+        "#!/bin/sh\n{SHIM_MARK}\n# Written by vpn-zone sync; `pathShims.enable = false` removes it.\n\
+         exec {picker} --id {} -- {} \"$@\"\n",
+        stable_key(key),
+        shell_quote(&real.to_string_lossy())
+    )
+}
+
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// The first `name` on the search path that is not in the shim directory and
+/// not a shim.
+pub fn real_program(name: &str, search: &[PathBuf], shim_dir: &Path) -> Option<PathBuf> {
+    let resolved = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let shims = resolved(shim_dir);
+    search
+        .iter()
+        .filter(|dir| resolved(dir) != shims)
+        .map(|dir| dir.join(name))
+        .find(|path| {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                && !fs::read(path).is_ok_and(|b| String::from_utf8_lossy(&b).contains(SHIM_MARK))
+        })
+}
+
+/// Write a shim for every program assigned to a container, remove the ones
+/// no longer wanted. Returns (written, removed).
+///
+/// Only assigned programs: a shim for a program nobody chose anything for
+/// would put a dialog in front of every use in a terminal. The shim name is the
+/// program's name from its entry's `Exec`; the first entry wins a name.
+fn sync_shims(
+    home: &Path,
+    state_dir: &Path,
+    picker: &str,
+    apps: &[App],
+    parents: &BTreeMap<String, String>,
+    search: Option<&[PathBuf]>,
+) -> (u32, u32) {
+    let dir = home.join(SHIM_DIR);
+    let mut wanted: BTreeSet<String> = BTreeSet::new();
+    let mut written = 0;
+    if let Some(search) = search {
+        let declared = home.join(".config/vpn-zones/declared/containers");
+        let declared_apps: BTreeSet<String> = fs::read_dir(&declared)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|f| fs::read_to_string(f.path()).ok())
+            .flat_map(|text| {
+                text.lines()
+                    .filter_map(|l| l.split_once('='))
+                    .filter(|(k, _)| k.trim() == "app")
+                    .map(|(_, v)| stable_key(v.trim()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for app in apps
+            .iter()
+            .filter(|a| !a.hidden && !parents.contains_key(&a.name))
+        {
+            let key = stable_key(app.key());
+            let assigned = state_dir.join(".pinnedprofile").join(&key).is_file()
+                || declared_apps.contains(&key);
+            if !assigned {
+                continue;
+            }
+            let Some(program) = desktop_entry(&app.groups)
+                .and_then(|e| e.get("Exec"))
+                .and_then(exec_program)
+            else {
+                continue;
+            };
+            if program.contains('/') || program.starts_with("vpn-zone") || wanted.contains(&program)
+            {
+                continue;
+            }
+            let Some(real) = real_program(&program, search, &dir) else {
+                continue;
+            };
+            if fs::create_dir_all(&dir).is_err() {
+                break;
+            }
+            let target = dir.join(&program);
+            // Somebody else's file of that name is left alone.
+            if occupied(&target)
+                && !fs::read(&target).is_ok_and(|b| String::from_utf8_lossy(&b).contains(SHIM_MARK))
+            {
+                continue;
+            }
+            written += write_if_changed(&target, &render_shim(picker, &key, &real));
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o755));
+            wanted.insert(program);
+        }
+    }
+    let mut removed = 0;
+    for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if wanted.contains(&name) || name.starts_with('.') {
+            continue;
+        }
+        let ours =
+            fs::read(entry.path()).is_ok_and(|b| String::from_utf8_lossy(&b).contains(SHIM_MARK));
+        if ours && fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    (written, removed)
+}
+
 /// Whether XDG autostart entries of the user are taken over: the declared
 /// setting (`autostart.unassigned`), then the local one, `offline` by default
 /// (the owner's decision of 2026-09-17). `as-is` leaves them, and gives back
@@ -1621,6 +1754,26 @@ fn sync_from(
 
     let removed = cleanup(&out_dir, &wanted, &adopted_dir);
     let dbus_removed = cleanup_dbus(&dbus_dir, &dbus_wanted);
+    // Where a shim looks for the real program: the search path of this pass,
+    // and the profiles, which a unit's PATH may not have.
+    let shim_search: Option<Vec<PathBuf>> = (mode.intercepts() && wants_shims(home)).then(|| {
+        let mut search: Vec<PathBuf> = std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect())
+            .unwrap_or_default();
+        let user = std::env::var("USER").unwrap_or_default();
+        search.push(PathBuf::from(format!("/etc/profiles/per-user/{user}/bin")));
+        search.push(home.join(".nix-profile/bin"));
+        search.push(PathBuf::from("/run/current-system/sw/bin"));
+        search
+    });
+    let (shims_written, shims_removed) = sync_shims(
+        home,
+        state_dir,
+        picker,
+        &apps,
+        &parents,
+        shim_search.as_deref(),
+    );
     let (autostart_written, autostart_given_back) = sync_autostart(
         &home.join(".config/autostart"),
         &state_dir.join(AUTOSTART_ADOPTED_DIR),
@@ -1640,7 +1793,8 @@ fn sync_from(
     println!(
         "mode {}: {} entries ({written} updated, {removed} removed); autostart: \
          {autostart_written} updated, {autostart_given_back} given back; D-Bus services: {} \
-         ({dbus_written} updated, {dbus_removed} removed); zones: {zone_list}",
+         ({dbus_written} updated, {dbus_removed} removed); shims: {shims_written} updated, \
+         {shims_removed} removed; zones: {zone_list}",
         mode.as_str(),
         wanted.len(),
         dbus_wanted.len()
@@ -2796,5 +2950,85 @@ Name=not carried over
         assert!(d
             .read("Zen Browser.desktop")
             .contains(&format!("--id {zen} --")));
+    }
+
+    // --- PATH shims ----------------------------------------------------------
+
+    #[test]
+    fn an_assigned_program_gets_a_shim_that_never_calls_itself() {
+        let d = Desk::new("shims");
+        let bin = d.home.join("realbin");
+        fs::create_dir_all(&bin).unwrap();
+        let real = bin.join("tgapp");
+        fs::write(&real, "#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            d.system.join("org.example.Tg.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Tg\nExec=tgapp -- %u\n",
+        )
+        .unwrap();
+        fs::write(
+            d.system.join("other.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Other\nExec=tgapp --other\n",
+        )
+        .unwrap();
+        fs::create_dir_all(d.state.join(".pinnedprofile")).unwrap();
+        fs::write(d.state.join(".pinnedprofile/org.example.Tg"), "work").unwrap();
+
+        let shims = d.home.join(SHIM_DIR);
+        let search = vec![shims.clone(), bin.clone()];
+        assert_eq!(real_program("tgapp", &search, &shims), Some(real.clone()));
+
+        // Off by default: nothing written.
+        d.sync();
+        assert!(!shims.join("tgapp").exists());
+
+        d.setting("path-shims", "on");
+        let apps = collect_apps(
+            &[d.apps.clone(), d.system.clone()],
+            &d.apps,
+            &d.state.join(ADOPTED_DIR),
+        );
+        let parents = parents(&apps);
+        let search = vec![shims.clone(), bin.clone()];
+        let (written, _) = sync_shims(
+            &d.home,
+            &d.state,
+            "/bin/pick",
+            &apps,
+            &parents,
+            Some(&search),
+        );
+        assert_eq!(written, 1);
+        let text = fs::read_to_string(shims.join("tgapp")).unwrap();
+        assert!(
+            text.contains(&format!(
+                "exec /bin/pick --id org.example.Tg -- '{}' \"$@\"",
+                real.display()
+            )),
+            "{text}"
+        );
+        // The shim itself is never taken for the real program.
+        let search = vec![shims.clone()];
+        assert_eq!(
+            real_program("tgapp", &search, &d.home.join("elsewhere")),
+            None
+        );
+
+        // Unassigned: the shim goes.
+        fs::remove_file(d.state.join(".pinnedprofile/org.example.Tg")).unwrap();
+        let search = vec![shims.clone(), bin.clone()];
+        let (_, removed) = sync_shims(
+            &d.home,
+            &d.state,
+            "/bin/pick",
+            &apps,
+            &parents,
+            Some(&search),
+        );
+        assert_eq!(removed, 1);
+        assert!(!shims.join("tgapp").exists());
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
     }
 }

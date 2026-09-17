@@ -257,7 +257,7 @@ boundary is the container → outside direction (§6).
 | D-Bus activation (`gapplication launch`, `DBusActivatable=true`) | the service file activates around the shadow | **done** (§5.3): shadow session service files in `$XDG_DATA_HOME/dbus-1/services/<id>.service` for intercepted ids only; never for portal or system names | 3 |
 | XDG autostart | runs uncontained | **done** (§5.2): assigned programs start in their container; **unassigned ones start offline, in a home of their own, without a dialog, and a notification says so** | 3 |
 | compositor key bindings | only if the binding calls `vpn-zone-pick` | **done** (§5.1): `vpn-zone launch <launcher-id>` reads the entry's `Exec` and goes through the picker | 3 |
-| shell | uncontained | opt-in PATH shims for assigned programs; never a boundary | 3 |
+| shell | uncontained | **done**: opt-in PATH shims for assigned programs (`pathShims.enable`); never a boundary | 3 |
 | portal `OpenURI` from a host program | portal → handler entry → shadow → picker | unchanged | — |
 | portal `OpenURI` from a container | the origin is lost | broker (§6.2) | 4 |
 | a link opened from inside a zone | delegated through `systemd --user` | the same door, guarded: broker | 4 |

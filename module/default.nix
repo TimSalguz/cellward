@@ -577,6 +577,12 @@ in
       description = "Записи ~/.config/autostart (обычные файлы; symlink не трогаются): offline — перехватывать на месте, программа при входе стартует без диалога туда, что для неё выбрано (закрепление, назначенный контейнер и его сеть), а невыбранное — offline и в своём доме, с уведомлением (по умолчанию); as-is — не трогать и вернуть перехваченные. /etc/xdg/autostart не трогается никогда. null — не задавать из Nix. См. docs/CONTAINERS.ru.md §5.";
     };
 
+    pathShims.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "PATH-шимы: программа, назначенная контейнеру, набранная в терминале, идёт через пикер, как щелчок по ярлыку. Каталог ~/.local/share/vpn-zones/bin добавляется в PATH сессии. Удобство, а не граница: процесс хоста всегда может запустить store-путь напрямую.";
+    };
+
     tunnelWatch.enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -632,6 +638,9 @@ in
     })
     (lib.mkIf (cfg.launcher.mode != null) {
       "vpn-zones/declared/mode".text = cfg.launcher.mode;
+    })
+    (lib.mkIf cfg.pathShims.enable {
+      "vpn-zones/declared/path-shims".text = "on";
     })
     (lib.mkIf (cfg.autostart.unassigned != null) {
       "vpn-zones/declared/autostart".text = cfg.autostart.unassigned;
@@ -736,6 +745,10 @@ in
   # Живость туннелей: зона с мёртвым туннелем не течёт, но и человеку об этом
   # никто не говорит — браузер просто крутится. Раз в минуту смотрим счётчики
   # и уведомляем при смерти и при возвращении (rust/src/watch.rs).
+  home.sessionPath = lib.mkIf cfg.pathShims.enable [
+    "${config.home.homeDirectory}/.local/share/vpn-zones/bin"
+  ];
+
   systemd.user.services.vpn-zone-watch = lib.mkIf cfg.tunnelWatch.enable {
     Unit.Description = "Проверка живости туннелей VPN-зон";
     Service = {

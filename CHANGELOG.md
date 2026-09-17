@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (PATH shims, opt-in)
+- `programs.vpn-zones.pathShims.enable` (off by default): for every program
+  assigned to a container, `sync` writes `~/.local/share/vpn-zones/bin/<program>`,
+  which goes through the picker like a click on the entry, and the directory is
+  put on the session's PATH. The shim calls the real program found outside its
+  own directory, never itself; a file of that name that is not a shim is left
+  alone. A convenience, not a boundary.
+
 ### Changed (a machine-id of the sandbox's own)
 - A sandbox no longer shows the host's `/etc/machine-id`, one identifier shared
   by every zone and sandbox of the machine: a named sandbox gets one of its own,

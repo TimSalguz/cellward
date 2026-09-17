@@ -103,6 +103,7 @@ let
           };
           launcher.mode = "picker";
           autostart.unassigned = "offline";
+          pathShims.enable = true;
           compositorRestriction.enable = true;
           containers.work = {
             home = "overlay";
