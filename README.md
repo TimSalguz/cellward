@@ -232,6 +232,8 @@ vpn-zone sandbox create|list|rm <name>
 vpn-zone perms list|reset <app|--all>          # granted file accesses
 vpn-zone lock|unlock <zone>                    # forbid leaving for other networks
 vpn-zone x11 <zone> on|off                     # an X server of their own for the zone's programs
+vpn-zone hermetic <zone> on|off|default        # no systemd --user, a filtered session bus, the broker
+vpn-zone hermetic --default on|off             # for zones without a setting of their own (off)
 vpn-zone default-profile ask|main|own|<name>
 vpn-zone mode picker|per-zone|both|off         # how launcher entries behave (per-zone, both: deprecated)
 ```

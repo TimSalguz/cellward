@@ -80,15 +80,17 @@ pub fn defaults(tools: &Tools) -> String {
     let (wayland, wayland_source) = setting(tools, "wayland-sandbox", "on");
     let (autostart, autostart_source) = setting(tools, "autostart", "offline");
     let (user_entries, user_entries_source) = setting(tools, "user-entries", "take-over");
+    let (hermetic, hermetic_source) = crate::hermetic::default_setting(&tools.config);
     format!(
         "{{\"network\":{},\"container\":{},\"launcher_mode\":{},\"compositor_restriction\":{},\
-         \"autostart_unassigned\":{},\"user_entries\":{}}}",
+         \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{}}}",
         sourced_str(&network, network_source),
         sourced_str(&container, container_source),
         sourced_str(&mode, mode_source),
         sourced((wayland == "on").to_string(), wayland_source),
         sourced_str(&autostart, autostart_source),
-        sourced_str(&user_entries, user_entries_source)
+        sourced_str(&user_entries, user_entries_source),
+        sourced(hermetic.to_string(), hermetic_source)
     )
 }
 
@@ -171,10 +173,9 @@ pub fn networks(tools: &Tools) -> String {
             let (on, source) = crate::x11::zone_setting(&tools.state, &tools.config, &name);
             sourced(on.to_string(), source)
         };
-        let hermetic = if dir.join(crate::zone::HERMETIC).exists() {
-            sourced("true".to_owned(), Source::Local)
-        } else {
-            sourced("false".to_owned(), Source::Default)
+        let hermetic = {
+            let (on, source) = crate::hermetic::zone_setting(&dir, &tools.config, &name);
+            sourced(on.to_string(), source)
         };
         let source = if kind == "offline" {
             "default"

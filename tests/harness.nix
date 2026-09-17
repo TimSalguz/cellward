@@ -104,6 +104,10 @@ let
           launcher.mode = "picker";
           autostart.unassigned = "offline";
           pathShims.enable = true;
+          hermetic = {
+            default = true;
+            exceptions = [ "agents" ];
+          };
           compositorRestriction.enable = true;
           containers.work = {
             home = "overlay";

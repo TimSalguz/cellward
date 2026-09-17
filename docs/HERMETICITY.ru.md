@@ -116,7 +116,17 @@ English: [HERMETICITY.md](HERMETICITY.md) · Связанные документ
   (`vpn-zone hermetic <зона> on`); дальнейшее — ещё нет. Потом:
   1. `hermetic` включён по умолчанию; выключение — явное и на одну зону
      (зона, программы которой законно управляют `systemd --user`, например
-     агенты, запускающие VM-проверки через `systemd-run --user`);
+     агенты, запускающие VM-проверки через `systemd-run --user`).
+     **Переключатели сделаны, умолчание пока не перевёрнуто:**
+     `hermetic.default` и `hermetic.exceptions` в модуле,
+     `vpn-zone hermetic --default on|off` и
+     `vpn-zone hermetic <зона> on|off|default` локально. Что важнее: зона из
+     `hermetic.exceptions` (обратное `hermetic.default`, который модуль требует
+     вместе с ними), затем своя настройка зоны, затем `hermetic.default`, затем
+     локальное умолчание, затем выкл. Открывает только `off`: пустой маркер
+     прототипа, нечитаемый и с любым другим содержимым значат вкл. Держатель
+     решает один раз, при подъёме зоны; `status --json` показывает
+     `defaults.hermetic` и `networks[].hermetic`, у каждого — источник;
   2. разрешения шины — из манифеста программы на Flathub (`finish-args`:
      `--talk-name`, `--own-name`, `--system-talk-name`), когда он есть, чтобы
      фильтр не ломал известные программы; `permissions.dbus` — для остальных;

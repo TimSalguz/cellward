@@ -1198,6 +1198,50 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     );
     let out = home.run(&["hermetic", "nl", "off"]);
     assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"hermetic\":{\"value\":false,\"source\":\"local\"}}"),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"hermetic\":{\"value\":false,\"source\":\"default\"}}"),
+        "{json}"
+    );
+    // A local default, and a zone that follows it again.
+    let out = home.run(&["hermetic", "--default", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = home.run(&["hermetic", "nl", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"user_entries\":{\"value\":\"take-over\",\"source\":\"default\"},\"hermetic\":{\"value\":true,\"source\":\"local\"}}"),
+        "{json}"
+    );
+    // Declared in Nix: the default refuses the CLI, and an exception inverts it.
+    fs::create_dir_all(home.root.join("config/declared")).unwrap();
+    fs::write(home.root.join("config/declared/hermetic-default"), "on").unwrap();
+    fs::write(
+        home.root.join("config/declared/hermetic-exceptions"),
+        "nl\n",
+    )
+    .unwrap();
+    let out = home.run(&["hermetic", "--default", "off"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("в Nix"), "{}", stderr(&out));
+    let out = home.run(&["hermetic", "nl", "on"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("hermetic.exceptions"),
+        "{}",
+        stderr(&out)
+    );
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"hermetic\":{\"value\":false,\"source\":\"nix\"}}"),
+        "{json}"
+    );
+    fs::remove_file(home.root.join("config/declared/hermetic-default")).unwrap();
+    fs::remove_file(home.root.join("config/declared/hermetic-exceptions")).unwrap();
     // Declared in Nix: switched off there, not here.
     fs::create_dir_all(home.root.join("config/declared")).unwrap();
     fs::write(home.root.join("config/declared/zone-x11"), "nl\n").unwrap();

@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (hermetic switches)
+- `programs.vpn-zones.hermetic.default` and `hermetic.exceptions` (zones set
+  opposite to the default; the default is required with them), and locally
+  `vpn-zone hermetic --default on|off` and
+  `vpn-zone hermetic <zone> on|off|default`. The default is still off.
+- `status --json`: `defaults.hermetic` (additive); `networks[].hermetic` now
+  names `nix` when the value comes from the module.
+
+### Changed
+- `vpn-zone hermetic <zone> off` writes `off` into the zone's marker instead of
+  removing it, so that it holds against a default that is on; `default`
+  removes it. A marker left by the prototype (empty) still means on.
+
 ### Added (egress marker)
 - `status --json` carries `uplink_owner`: the host uid and gid every zone's way
   out runs under (the zone's uid 0, the start of the user's subordinate

@@ -131,6 +131,8 @@ use crate::sys;
 
 /// Where the zones live, below `$HOME`. The bash CLI computes the same path.
 const STATE_SUBDIR: &str = ".local/state/vpn-zones";
+/// Where the settings are, below `$HOME` — the same as the CLI's `config`.
+const CONFIG_SUBDIR: &str = ".config/vpn-zones";
 
 /// Files of one zone. This set is a contract: `vpn-zone` (bash), the desktop
 /// picker and the smoke test all read them by these names.
@@ -205,10 +207,6 @@ const HOSTIF_GUEST4: &str = "10.255.255.253";
 const HOSTIF_PREFIX4: &str = "30";
 const HOSTIF_GATEWAY4: &str = "10.255.255.254";
 
-/// The marker of a hermetic zone, in its directory (`docs/HERMETICITY.md` §7,
-/// C): the runtime directory closed, the session bus filtered, the broker as
-/// the one way out. A prototype, off unless set.
-pub const HERMETIC: &str = "hermetic";
 /// The zone's filtered session bus, in its state directory.
 const SESSION_BUS_PROXY: &str = "session-bus";
 /// Where the host's runtime directory is held for a moment while the zone's
@@ -450,6 +448,11 @@ struct Zone {
     name: OsString,
     dir: PathBuf,
     tools: Tools,
+    /// Hermetic (`docs/HERMETICITY.md` §7 C): the runtime directory closed,
+    /// the session bus filtered, the broker as the one way out. Decided once,
+    /// when the zone comes up, so the bus proxy and the sealed runtime
+    /// directory cannot disagree about it.
+    hermetic: bool,
 }
 
 impl Zone {
@@ -516,10 +519,17 @@ pub fn run(args: Args) -> u8 {
         eprintln!("zone-holder: no $HOME and no passwd entry — cannot find the zone directory");
         return 1;
     };
+    let dir = home.join(STATE_SUBDIR).join(&args.name);
+    let (hermetic, _) = crate::hermetic::zone_setting(
+        &dir,
+        &home.join(CONFIG_SUBDIR),
+        &args.name.to_string_lossy(),
+    );
     let zone = Zone {
-        dir: home.join(STATE_SUBDIR).join(&args.name),
+        dir,
         name: args.name,
         tools: args.tools,
+        hermetic,
     };
 
     // A directory is a zone if it has a config or the offline marker; anything
@@ -1003,7 +1013,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
     let proxy = start_system_bus_proxy(zone);
     let proxy_pid = proxy.as_ref().map_or(0, |c| c.id() as i32);
     // A hermetic zone's session bus the same way.
-    let session_proxy = if zone.path(HERMETIC).exists() {
+    let session_proxy = if zone.hermetic {
         start_proxy(
             zone,
             &format!("unix:path={}", host_runtime_dir(zone).join("bus").display()),
@@ -1671,7 +1681,7 @@ fn host_runtime_dir(zone: &Zone) -> PathBuf {
 /// the zone. Fatal when it cannot be done: a zone marked hermetic that is not
 /// is the one outcome worse than an ordinary zone.
 fn seal_runtime(zone: &Zone) -> Result<(), String> {
-    if !zone.path(HERMETIC).exists() {
+    if !zone.hermetic {
         return Ok(());
     }
     let runtime = host_runtime_dir(zone);

@@ -590,6 +590,19 @@ in
       description = "Зоны (по имени), программы которых получают свой X-сервер (xwayland-satellite) — для X11-only программ вроде Steam без контейнеров. X-сервер хоста из зон недоступен всегда. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
+    hermetic.default = lib.mkOption {
+      type = lib.types.nullOr lib.types.bool;
+      default = null;
+      description = "Герметичны ли зоны без своей настройки: без systemd --user, сессионная шина через фильтр (xdg-dbus-proxy), запуск в других сетях — только через брокер с вопросом человеку. null — не задавать из Nix (тогда действует vpn-zone hermetic --default, иначе выкл.). Своя настройка зоны (vpn-zone hermetic <зона> on|off) важнее умолчания. См. docs/HERMETICITY.ru.md §7.";
+    };
+
+    hermetic.exceptions = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "agents" ];
+      description = "Зоны (по имени), для которых действует обратное hermetic.default: при default = true — зоны без герметичности (например, зона, чьи программы законно зовут systemd-run --user), при false — герметичные. Важнее своей настройки зоны. Требует заданного hermetic.default. Сами зоны в Nix не описываются: здесь только имена.";
+    };
+
     pathShims.enable = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -637,6 +650,14 @@ in
     }) cfg.containers
     ++ [
       {
+        assertion = cfg.hermetic.exceptions == [ ] || cfg.hermetic.default != null;
+        message = "programs.vpn-zones.hermetic.exceptions: исключения — это зоны с обратным умолчанию значением, поэтому нужно явное hermetic.default (true или false)";
+      }
+      {
+        assertion = lib.all (z: z != "" && !(lib.hasInfix "\n" z)) cfg.hermetic.exceptions;
+        message = "programs.vpn-zones.hermetic.exceptions: имя зоны — непустое и без переводов строки";
+      }
+      {
         assertion = duplicateApps == [ ];
         message = "programs.vpn-zones.containers: программы назначены нескольким контейнерам сразу: ${lib.concatStringsSep ", " duplicateApps}";
       }
@@ -654,6 +675,13 @@ in
     })
     (lib.mkIf (cfg.zoneX11 != [ ]) {
       "vpn-zones/declared/zone-x11".text = lib.concatStringsSep "\n" cfg.zoneX11 + "\n";
+    })
+    (lib.mkIf (cfg.hermetic.default != null) {
+      "vpn-zones/declared/hermetic-default".text = if cfg.hermetic.default then "on" else "off";
+    })
+    (lib.mkIf (cfg.hermetic.exceptions != [ ]) {
+      "vpn-zones/declared/hermetic-exceptions".text =
+        lib.concatStringsSep "\n" cfg.hermetic.exceptions + "\n";
     })
     (lib.mkIf cfg.pathShims.enable {
       "vpn-zones/declared/path-shims".text = "on";
