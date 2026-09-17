@@ -326,30 +326,39 @@ let
       # every zone. hostname1 and the session list are refused, reading
       # login1's properties and inhibiting sleep are not — and the host keeps
       # its whole bus.
-      with subtest("system bus in a zone: hostname1 and ListSessions refused, Inhibit allowed"):
+      with subtest("system bus in a zone: hostname1 and ListSessions refused, login1 readable"):
           zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
           busctl = "busctl --system --timeout=5"
           inz = f"nsenter --preserve-credentials -U -n -m -t {zp} --"
-          alice(
-              f"sh -c '! {inz} {busctl} get-property org.freedesktop.hostname1 "
-              "/org/freedesktop/hostname1 org.freedesktop.hostname1 Hostname'"
-          )
-          alice(
-              f"sh -c '! {inz} {busctl} call org.freedesktop.login1 /org/freedesktop/login1 "
-              "org.freedesktop.login1.Manager ListSessions'"
-          )
-          alice(
-              f"{inz} {busctl} get-property org.freedesktop.login1 /org/freedesktop/login1 "
-              "org.freedesktop.login1.Manager IdleHint"
-          )
-          alice(
-              f"{inz} {busctl} call org.freedesktop.login1 /org/freedesktop/login1 "
-              "org.freedesktop.login1.Manager Inhibit ssss sleep vmtest vmtest delay"
-          )
-          alice(
-              f"{busctl} get-property org.freedesktop.hostname1 /org/freedesktop/hostname1 "
-              "org.freedesktop.hostname1 Hostname"
-          )
+
+          def bus(cmd, zone=True):
+              """(exit status, stdout+stderr) of a busctl call as alice."""
+              prefix = f"{inz} " if zone else ""
+              return machine.execute(
+                  "su -l alice -c "
+                  + shlex.quote(
+                      f"export XDG_RUNTIME_DIR=/run/user/1000; {prefix}{busctl} {cmd} 2>&1"
+                  )
+              )
+
+          hostname = "get-property org.freedesktop.hostname1 /org/freedesktop/hostname1 org.freedesktop.hostname1 Hostname"
+          sessions = "call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager ListSessions"
+          idle = "get-property org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager IdleHint"
+          # The host first: every call works there, so a refusal in the zone
+          # is the filter and not the test.
+          # (Inhibit is allowed too, but polkit refuses it to a user without an
+          # active session even on the host, so it cannot be shown here.)
+          for call in [hostname, sessions, idle]:
+              code, out = bus(call, zone=False)
+              assert code == 0, f"on the host: {call}: {out}"
+          code, out = bus(hostname)
+          assert code != 0, f"hostname1 answered in the zone: {out}"
+          code, out = bus(sessions)
+          assert code != 0, f"ListSessions answered in the zone: {out}"
+          # Reading is allowed — which also proves the proxy is up and the
+          # refusals above are the filter, not a dead bus.
+          code, out = bus(idle)
+          assert code == 0, f"reading login1 refused in the zone: {out}"
 
       # X11 (docs/HERMETICITY.md §7, A): a socket in the host's /tmp/.X11-unix
       # is out of sight in a zone, and a launch into a zone carries no DISPLAY.

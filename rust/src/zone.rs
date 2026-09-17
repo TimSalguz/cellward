@@ -1496,11 +1496,33 @@ fn start_system_bus_proxy(zone: &Zone) -> Option<Child> {
     }
     let socket = zone.path(SYSTEM_BUS_PROXY);
     let _ = fs::remove_file(&socket);
+    // As the user, not as the holder: uid 0 in here is a subordinate uid on the
+    // host, and the system bus would see a stranger connect — while a program
+    // in the zone, which runs as the user, presents the user's uid. Through a
+    // proxy of the wrong uid every call fails, the allowed ones included. The
+    // zone's directory belongs to the user, and its owner is the uid mapped
+    // onto itself.
+    let (uid, gid) = match fs::metadata(&zone.dir) {
+        Ok(meta) => {
+            use std::os::unix::fs::MetadataExt;
+            (meta.uid(), meta.gid())
+        }
+        Err(e) => {
+            eprintln!(
+                "zone {}: cannot read {} ({e}) — no system bus proxy",
+                zone.name(),
+                zone.dir.display()
+            );
+            return None;
+        }
+    };
     let mut child = match Command::new(&zone.tools.dbus_proxy)
         .arg(format!("unix:path={SYSTEM_BUS}"))
         .arg(&socket)
         .args(SYSTEM_BUS_RULES)
         .stdout(Stdio::null())
+        .uid(uid)
+        .gid(gid)
         .spawn()
     {
         Ok(child) => child,
