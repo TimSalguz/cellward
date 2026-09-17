@@ -463,6 +463,16 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     let zone = selection.zone.clone();
     let zone_name = zone.to_string_lossy().into_owned();
 
+    // --- 1a. ONE IDENTITY, ONE NETWORK ---
+    // Before anything is created: a container bound to a network runs in that
+    // network only, and a container never runs in two networks at once
+    // (`docs/CONTAINERS.md` I1, I2). The picker does not offer anything else;
+    // this is where a command line, a stale shortcut or a script is stopped.
+    if let Some(why) = identity_refusal(tools, &selection, &zone_name) {
+        refuse(tools, &why);
+        return 1;
+    }
+
     // --- 2. THE CONTAINER ---
     let Some(container) = resolve_container(tools, &selection.container) else {
         return 1;
@@ -867,6 +877,37 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
     }
     exec.extend(cmd);
     exec
+}
+
+/// Why this launch may not use its container in `zone`, if it may not.
+fn identity_refusal(tools: &Tools, selection: &Selection, zone: &str) -> Option<String> {
+    let profile = match &selection.container {
+        Container::Named(name) => Some(name.to_string_lossy().into_owned()),
+        _ => None,
+    };
+    let sandbox = match &selection.sandbox {
+        Sandbox::Named(name) => Some(name.to_string_lossy().into_owned()),
+        _ => None,
+    };
+    let selector = crate::container::selector_of_launch(profile.as_deref(), sandbox.as_deref())?;
+    let container = crate::container::load(tools, &selector)?;
+    let running = crate::container::running_network(tools, &container);
+    crate::container::refusal(&container, zone, running.as_deref())
+}
+
+/// Say no, where the person can see it: a dialog when there is a graphical
+/// session (a launcher entry's stderr is read by nobody), and stderr always.
+fn refuse(tools: &Tools, why: &str) {
+    eprintln!("{why}");
+    if has_display() {
+        let _ = Command::new(&tools.kdialog)
+            .arg("--title")
+            .arg("Запуск остановлен")
+            .arg("--sorry")
+            .arg(why)
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 /// The trusted certificates of a launch, and the home they belong to.

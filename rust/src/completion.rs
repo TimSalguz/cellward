@@ -91,6 +91,7 @@ const VERBS: &[&str] = &[
     "unlock",
     "profile",
     "trust",
+    "container",
     "help",
 ];
 
@@ -186,6 +187,22 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
             }
             "trust" if pos == 4 && word(2) == "add" => return vec![FILES.to_string()],
+            "container" if pos == 2 => {
+                strs(&mut out, &["list", "show", "set", "assign", "unassign"])
+            }
+            "container" if pos == 3 && matches!(word(2), "show" | "set") => {
+                owned(&mut out, &snap.profiles);
+                out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
+            }
+            "container" if pos == 4 && word(2) == "set" => strs(&mut out, &["network"]),
+            "container" if pos == 5 && word(2) == "set" => {
+                strs(&mut out, &["ask", "direct", "offline"]);
+                owned(&mut out, &snap.zones);
+            }
+            "container" if pos == 4 && word(2) == "assign" => {
+                owned(&mut out, &snap.profiles);
+                out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
+            }
             "profile" if pos == 2 => strs(&mut out, &["create", "list", "rm"]),
             "profile" if pos == 3 && word(2) == "rm" => owned(&mut out, &snap.profiles),
             _ => {}
@@ -300,6 +317,17 @@ mod tests {
         assert_eq!(
             complete(&["vpn-zone", "trust", "add", "work", ""], 5),
             [FILES]
+        );
+        assert_eq!(
+            complete(
+                &["vpn-zone", "container", "set", "sb:dev", "network", "o"],
+                6
+            ),
+            ["offline"]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "container", "assign", "firefox", ""], 5),
+            ["work", "sb:dev"]
         );
         assert_eq!(
             complete(&["vpn-zone", "forget", ""], 3),

@@ -214,6 +214,50 @@ where
     None
 }
 
+/// Where does anything launched with this selector run? The zone of the first
+/// live record, in any program's file of one registry directory, whose third
+/// field is `selector`.
+///
+/// A named sandbox has no data container of its own, so its launches are filed
+/// under `__main__` together with everything else, and only the selector tells
+/// them apart. (`docs/CONTAINERS.md` I2)
+pub fn live_zone_of_selector<F>(dir: &Path, selector: &str, is_alive: &F) -> Option<String>
+where
+    F: Fn(i32) -> bool,
+{
+    files(dir).iter().find_map(|file| {
+        fs::read_to_string(file)
+            .ok()?
+            .lines()
+            .filter_map(parse_record)
+            .find(|r| r.selector == selector && !r.zone.is_empty() && is_alive(r.pid))
+            .map(|r| r.zone)
+    })
+}
+
+/// Every live record of one registry directory, with the program each belongs
+/// to (the file name). What `vpn-zone status --json` lists as "running".
+pub fn live_records<F>(dir: &Path, is_alive: &F) -> Vec<(String, Record)>
+where
+    F: Fn(i32) -> bool,
+{
+    let mut out = Vec::new();
+    for file in files(dir) {
+        let Some(app) = file.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let Ok(text) = fs::read_to_string(&file) else {
+            continue;
+        };
+        for record in text.lines().filter_map(parse_record) {
+            if is_alive(record.pid) {
+                out.push((app.clone(), record));
+            }
+        }
+    }
+    out
+}
+
 /// Is anything at all still running in this container?
 ///
 /// Unlike [`live_zone`] this does not care which zone the record names: `gc`
@@ -461,6 +505,25 @@ mod tests {
         assert_eq!(live_zone(&dir.0, &alive(&[])), None);
         assert!(!any_live(&dir.0, &alive(&[])));
         assert!(any_live(&dir.0, &alive(&[2])));
+    }
+
+    #[test]
+    fn a_sandbox_is_found_by_its_selector_among_everything_else() {
+        let dir = Dir::new("selector");
+        dir.file("firefox", "1 nl sb:work\n2 de \n");
+        dir.file("telegram", "3 fr sb:other\n");
+        assert_eq!(
+            live_zone_of_selector(&dir.0, "sb:work", &alive(&[1, 2, 3])).as_deref(),
+            Some("nl")
+        );
+        assert_eq!(
+            live_zone_of_selector(&dir.0, "sb:work", &alive(&[2, 3])),
+            None
+        );
+        assert_eq!(
+            live_zone_of_selector(&dir.0, "sb:other", &alive(&[3])).as_deref(),
+            Some("fr")
+        );
     }
 
     #[test]

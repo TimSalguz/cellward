@@ -614,6 +614,135 @@ fn trusted_certificates_are_listed_and_removed_by_fingerprint() {
 }
 
 #[test]
+fn a_container_bound_to_a_network_runs_there_only() {
+    // docs/CONTAINERS.md I1: one identity, one network at a time, and a change
+    // of network is an action of its own — never a side effect of a launch.
+    let home = Home::new("bound");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+
+    let out = home.run(&["container", "set", "work", "network", "nope"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("сети nope нет"), "{}", stderr(&out));
+
+    let out = home.run(&["container", "set", "work", "network", "nl"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["container", "show", "work", "--json"]));
+    assert!(json.starts_with("{\"schema_version\":1,"), "{json}");
+    assert!(
+        json.contains("\"network\":{\"value\":\"nl\",\"source\":\"local\"}"),
+        "{json}"
+    );
+
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+    let out = home.run_with(
+        &["run", "direct", "--profile", "work", "--", "firefox"],
+        &dry,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("работает в сети «nl»"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("vpn-zone container set work network direct"),
+        "{}",
+        stderr(&out)
+    );
+    let out = home.run_with(&["run", "nl", "--profile", "work", "--", "firefox"], &dry);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // Unbinding brings the per-launch question back.
+    let out = home.run(&["container", "set", "work", "network", "ask"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = home.run_with(
+        &["run", "direct", "--profile", "work", "--", "firefox"],
+        &dry,
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn a_container_is_never_in_two_networks_at_once() {
+    // docs/CONTAINERS.md I2: even an unbound container, while its programs run.
+    let home = Home::new("two-networks");
+    home.zone_is_up("nl");
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+    let reg = home.state().join(".running/work/firefox");
+    fs::create_dir_all(reg.parent().unwrap()).unwrap();
+    fs::write(&reg, format!("{} nl work\n", std::process::id())).unwrap();
+
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+    let out = home.run_with(&["run", "direct", "--profile", "work", "--", "tg"], &dry);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("двух сетях"), "{}", stderr(&out));
+    let out = home.run_with(&["run", "nl", "--profile", "work", "--", "tg"], &dry);
+    assert!(out.status.success(), "{}", stderr(&out));
+    // And the binding cannot be moved under running programs either.
+    let out = home.run(&["container", "set", "work", "network", "direct"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("сейчас работают в сети nl"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn what_nix_declares_is_shown_as_such_and_not_changed_here() {
+    let home = Home::new("declared");
+    let declared = home.root.join("config/declared/containers");
+    fs::create_dir_all(&declared).unwrap();
+    fs::write(
+        declared.join("private-dev.conf"),
+        "network = offline\napp = firefox\n",
+    )
+    .unwrap();
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+
+    let out = home.run(&["container", "set", "sb:dev", "network", "direct"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("задана в Nix"), "{}", stderr(&out));
+    let out = home.run(&["container", "assign", "firefox", "work"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("в Nix"), "{}", stderr(&out));
+
+    let out = home.run(&["status", "--json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&out);
+    assert!(json.starts_with("{\"schema_version\":1,"), "{json}");
+    assert!(json.contains("\"selector\":\"sb:dev\""), "{json}");
+    assert!(
+        json.contains("\"network\":{\"value\":\"offline\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    // Declared and not yet on disk: the home itself comes from Nix.
+    assert!(
+        json.contains("\"home\":{\"value\":\"private\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    assert!(json.contains("\"id\":\"firefox\""), "{json}");
+    assert!(
+        json.contains("\"container\":{\"value\":\"sb:dev\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"name\":\"direct\",\"kind\":\"direct\""),
+        "{json}"
+    );
+    // A local assignment of another program is local.
+    let out = home.run(&["container", "assign", "tg", "work"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"container\":{\"value\":\"work\",\"source\":\"local\"}"),
+        "{json}"
+    );
+}
+
+#[test]
 fn the_registry_keeps_its_three_field_shape() {
     let home = Home::new("registry");
     home.zone_is_up("nl");

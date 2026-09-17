@@ -28,6 +28,9 @@
 //!   mapping, the net+mount namespace, pasta, the tunnel, DNS and the state
 //!   mirror. This is what `vpn-zone@<name>.service` starts
 //!   (`docs/GOTCHAS.md` §1–§4);
+//! * [`container`] — containers as identities: the network a data container or
+//!   a named sandbox is bound to, the programs assigned to it, and where each
+//!   of those settings comes from (`docs/CONTAINERS.md`);
 //! * [`config`] — WireGuard/AmneziaWG config parsing, the behaviour of the
 //!   `sed`/`grep` pipeline the zones used to run, written down as code and
 //!   tests (`docs/GOTCHAS.md` §4);
@@ -49,6 +52,8 @@
 //!   (`wp_security_context_v1`, `docs/GOTCHAS.md` §7);
 //! * [`trust`] — extra root certificates trusted by one container only: the
 //!   bundle bind, the environment and the NSS databases (`docs/CERTIFICATES.md`);
+//! * [`status`] — the machine-readable state (`vpn-zone status --json`), with
+//!   the origin of every settable value;
 //! * [`sys`] — the handful of syscalls more than one of them needs.
 //!
 //! `profile` and `desktop` were Python scripts in `module/`, `wl_sandbox` was a
@@ -63,6 +68,7 @@
 pub mod cli;
 pub mod completion;
 pub mod config;
+pub mod container;
 pub mod desktop;
 pub mod dialog;
 pub mod fs_sandbox;
@@ -73,6 +79,7 @@ pub mod picker;
 pub mod profile;
 pub mod registry;
 pub mod seccomp;
+pub mod status;
 pub mod sys;
 pub mod tools;
 pub mod trust;

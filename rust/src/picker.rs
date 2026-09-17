@@ -223,6 +223,9 @@ pub struct Memory {
     pub default_profile: String,
     /// `VPN_ZONE_ASK` is set.
     pub ask: bool,
+    /// The network the container this launch would use is bound to, empty
+    /// when it is not bound (`ask`) or there is no container at all.
+    pub bound: String,
 }
 
 /// What the first (network) question resolves to.
@@ -250,6 +253,17 @@ pub fn net_step(memory: &Memory) -> NetStep {
             return NetStep::Running {
                 zone: running.zone.clone(),
                 selector: running.selector.clone(),
+            };
+        }
+        // A container bound to a network answers the network question itself,
+        // and more firmly than a network pin: the network is part of the
+        // container's identity, and asking would only offer the way to break
+        // it (`docs/CONTAINERS.md` I1). The container itself is the one the pin
+        // or the default chose, so there is nothing left to ask.
+        if !memory.bound.is_empty() {
+            return NetStep::Pinned {
+                zone: memory.bound.clone(),
+                ask_container: false,
             };
         }
         if !memory.pinned.is_empty() {
@@ -898,7 +912,7 @@ fn read_memory(tools: &Tools, key: &str) -> Memory {
         pinned_profile.clear();
     }
 
-    Memory {
+    let mut memory = Memory {
         running: running_record(state, key),
         pinned,
         pinned_profile,
@@ -909,7 +923,17 @@ fn read_memory(tools: &Tools, key: &str) -> Memory {
         default_profile: read_setting(&tools.config.join("default-profile"))
             .unwrap_or_else(|| "ask".to_owned()),
         ask: std::env::var_os(ENV_ASK).is_some_and(|v| !v.is_empty()),
+        bound: String::new(),
+    };
+    // The container this launch would use without a dialog, and its network.
+    let profiles = tools.profiles.clone();
+    let would_use = container_without_dialog(&memory, key, |n| profiles.join(n).is_dir(), None);
+    if let Some(container) = crate::container::load(tools, &would_use.selector()) {
+        if let crate::container::Network::Named(network) = container.network.value {
+            memory.bound = network;
+        }
     }
+    memory
 }
 
 /// Where is this program running right now? The first live record found, over
@@ -1457,6 +1481,31 @@ mod tests {
                 default: "offline".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn a_container_bound_to_a_network_answers_the_network_question() {
+        let mut m = memory();
+        m.bound = "nl".to_owned();
+        // Stronger than a network pin: the network is the container's.
+        m.pinned = "de".to_owned();
+        assert_eq!(
+            net_step(&m),
+            NetStep::Pinned {
+                zone: "nl".to_owned(),
+                ask_container: false
+            }
+        );
+        // A running instance still wins: its window is raised where it is.
+        m.running = Some(Running {
+            zone: "nl".to_owned(),
+            selector: "work".to_owned(),
+        });
+        assert!(matches!(net_step(&m), NetStep::Running { .. }));
+        // And VPN_ZONE_ASK still opens the dialog.
+        m.running = None;
+        m.ask = true;
+        assert!(matches!(net_step(&m), NetStep::Ask { .. }));
     }
 
     #[test]

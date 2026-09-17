@@ -656,6 +656,25 @@ fn a_pin_that_names_a_zone_that_is_gone_is_dropped_rather_than_obeyed() {
 }
 
 #[test]
+fn a_container_bound_to_a_network_starts_there_without_a_question() {
+    let home = Home::new("bound");
+    home.zone("nl");
+    home.zone("de");
+    home.profile("work");
+    home.write("profiles/work/container.conf", "network = nl\n");
+    home.write("state/.pinnedprofile/firefox", "work");
+    // A stale network pin elsewhere loses: the network is the container's.
+    home.write("state/.pinned/firefox", "de");
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.asked().is_empty(), "{:?}", home.asked());
+    assert_eq!(
+        home.launched()[0],
+        ["run", "nl", "--profile", "work", "--", "firefox", "%u"]
+    );
+}
+
+#[test]
 fn the_old_shortcut_format_still_launches() {
     // Shortcuts and the picker are not updated atomically: during one rebuild
     // the new picker was handed shortcuts of the old shape and AyuGram stopped
