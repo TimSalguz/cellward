@@ -5,6 +5,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed (kill exit codes)
+- `vpn-zone kill` exit codes are a contract now: 0 cut off, 1 programs killed
+  but the zone not down, 2 the zone is not up, 3 refused (nothing touched).
+  "Not up" and "refused" were both 1.
+
 ### Added (cut a zone off)
 - `vpn-zone kill <zone>` and the «Оборвать VPN-зону» launcher entry
   (`vpn-zone-gui kill`): every program in the zone's network namespace is
