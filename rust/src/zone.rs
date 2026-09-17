@@ -3113,7 +3113,7 @@ mod tests {
         for rule in SYSTEM_BUS_RULES
             .iter()
             .chain(SESSION_BUS_RULES.iter())
-            .skip(1)
+            .filter(|r| r.contains('='))
         {
             let name = rule
                 .split_once('=')
