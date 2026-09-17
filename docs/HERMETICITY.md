@@ -4,10 +4,9 @@
 [LEAK-MODEL.md](LEAK-MODEL.md) ("open channels"), [CONTAINERS.md](CONTAINERS.md)
 §6, ROADMAP M3 (hermeticity, broker, X11).
 
-**Status: design, nothing implemented.** Three decisions of the owner are
-needed before a line of it lands: A (X11), B (system bus), C (session bus and
-broker). `vpn-zone doctor` already reports every channel below as `warn` on
-every run.
+**Status: decided (the owner, 2026-09-17), implementation in progress** — see
+§7 for the decisions. `vpn-zone doctor` reports every channel below as `warn`
+until it is closed.
 
 ## 1. What is open today
 
@@ -102,3 +101,30 @@ becomes a default, with the table above as the list of what the owner accepts.
   changes nothing: socket paths are well known). Only the mount closes.
 - None of it is a network change: no packet goes anywhere new; what changes is
   which host services a zone program can ask to act for it.
+
+## 7. Decisions (the owner, 2026-09-17)
+
+- **A — X11: option А.** Closed in zones by default: tmpfs over
+  `/tmp/.X11-unix` in the zone's mount namespace and no `DISPLAY` in a launch.
+  A container with the `x11` permission gets its own `xwayland-satellite`.
+  There is no `x11 = "host"` hole.
+- **B — the system bus: B2, narrowed.** `xdg-dbus-proxy` per zone; `UPower`
+  allowed; `login1` only `Inhibit` and reading properties — no session list,
+  no power management; `NetworkManager`, `hostname1`, `resolve1`, `machined`,
+  `timedate1` denied.
+- **C — the session bus and the broker.** The prototype first, behind a
+  per-zone flag `hermetic`, proven by an evil host in the VM. Then:
+  1. `hermetic` becomes the default; switching it off is explicit and per
+     zone (a zone whose programs legitimately drive `systemd --user`, such as
+     one running agents that start VM checks with `systemd-run --user`);
+  2. bus permissions come from the program's Flathub manifest
+     (`finish-args`: `--talk-name`, `--own-name`, `--system-talk-name`) when
+     it has one, so that the filter does not break known programs;
+     `permissions.dbus` is for the rest;
+  3. the Secret Service the way Flatpak's Secret portal does it: a key of the
+     container's own, never the host's whole keyring;
+  4. MPRIS and input methods (IBus, fcitx) allowed by default; dconf writes
+     and KDE global shortcuts by a per-container permission.
+- `own` for everything (decision №2 of CONTAINERS §12) is a sandbox, i.e.
+  Flatpak-like isolation without `hermetic`; the flag closes the rest: overlay
+  containers, the main profile, launches without a sandbox.
