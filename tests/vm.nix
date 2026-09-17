@@ -543,6 +543,40 @@ let
           alice("cmp /tmp/vmlink.desktop /tmp/vmforeign.orig")
           alice(f"rm -f {APPS}/userapp-vmlink.desktop")
 
+      # XDG autostart (docs/CONTAINERS.md §5): taken over like a user entry,
+      # and the picker it goes through never asks. A program nobody chose
+      # anything for starts offline, in a home of its own, without a file
+      # access dialog — the owner's decision of 2026-09-17.
+      AUTOSTART = "/home/alice/.config/autostart"
+      with subtest("autostart: taken over, and an unassigned program starts offline in its own home"):
+          alice(
+              "printf '[Desktop Entry]\\nType=Application\\nName=VM auto\\n"
+              "Exec=vmauto-program --flag\\n' > /tmp/vmauto.orig"
+          )
+          alice(f"mkdir -p {AUTOSTART} && cp /tmp/vmauto.orig {AUTOSTART}/vmauto.desktop")
+          alice("vpn-zone sync")
+          out = alice(f"cat {AUTOSTART}/vmauto.desktop")
+          assert "vpn-zone-pick --autostart --id vmauto -- vmauto-program --flag" in out, out
+          assert "X-VPNZone=adopted" in out, out
+          alice("vpn-zone mode off")
+          alice(f"cmp {AUTOSTART}/vmauto.desktop /tmp/vmauto.orig")
+          alice("vpn-zone mode picker")
+          alice(f"rm -f {AUTOSTART}/vmauto.desktop")
+
+          # What the rewritten entry runs, as the session would run it.
+          out = alice(
+              "env -u WAYLAND_DISPLAY -u DISPLAY "
+              "vpn-zone-pick --autostart --id vmauto -- ${pkgs.iproute2}/bin/ip -o link show"
+          )
+          lines = [l for l in out.strip().splitlines() if ": " in l]
+          assert len(lines) == 1 and ": lo:" in lines[0], f"autostart not offline: {out}"
+          alice("test -f /home/alice/.local/state/vpn-sandboxes/app-vmauto/perms")
+          alice("test ! -s /home/alice/.local/state/vpn-sandboxes/app-vmauto/perms")
+          alice("test -d /home/alice/.local/state/vpn-sandboxes/app-vmauto/home")
+          # Nothing remembered: autostart is not a choice.
+          alice(f"test ! -e {STATE}/.pinned/vmauto && test ! -e {STATE}/.last/vmauto")
+          alice("vpn-zone down offline || true")
+
       # --- Declared in Nix (docs/CONTAINERS.md §8) ---------------------------
       DECLCA = "${declaredCa}"
 

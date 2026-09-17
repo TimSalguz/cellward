@@ -40,6 +40,12 @@ pub const PREFIX: &str = "vpn-zone-";
 pub const ADOPTED_DIR: &str = ".adopted";
 /// Where the lock of the whole sync pass lives, below the state directory.
 pub const SYNC_LOCK_DIR: &str = ".sync";
+/// Backups of the autostart entries taken over, below the state directory.
+/// Apart from [`ADOPTED_DIR`]: an autostart entry and a launcher entry often
+/// share a file name (`org.telegram.desktop.desktop`) and differ in content.
+pub const AUTOSTART_ADOPTED_DIR: &str = ".adopted-autostart";
+/// The picker's flag for a launch from XDG autostart: no dialog, ever.
+pub const AUTOSTART_FLAG: &str = "--autostart";
 /// The marker value of an entry taken over in place: `X-VPNZone=adopted`.
 const ADOPTED: &str = "adopted";
 /// The marker that says "this file is ours". Present in the file we write and
@@ -491,6 +497,67 @@ pub fn render_adopted(groups: &[Group], picker: &str, app_key: &str) -> String {
     render_intercepted(groups, picker, app_key, ADOPTED)
 }
 
+/// An XDG autostart entry, taken over in place (`docs/CONTAINERS.md` §5): the
+/// picker is started with [`AUTOSTART_FLAG`], so that a program nobody chose a
+/// network for starts offline at login instead of asking a person who is not
+/// looking yet — or starting uncontained, as it did.
+///
+/// Two differences from a launcher entry. `TryExec` is kept: it is how an
+/// autostart entry of an uninstalled program stays silent, and without it the
+/// picker would be started at every login for nothing. And a copy of one of
+/// our own picker entries (desktop settings "add to autostart" copy the entry
+/// the menu shows, which is ours) is unwrapped first — wrapped twice, the
+/// inner picker would ask at login after all.
+pub fn render_autostart(groups: &[Group], picker: &str, app_key: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for group in groups {
+        if group.name != "Desktop Entry" {
+            continue;
+        }
+        out.push(format!("[{}]", group.name));
+        for (key, value) in group.entries() {
+            if matches!(key, "Exec" | "DBusActivatable") || key == MARK {
+                continue;
+            }
+            out.push(format!("{key}={value}"));
+        }
+        if let Some(exec) = group.get("Exec").filter(|e| !e.is_empty()) {
+            let inner = unwrap_picker_exec(exec).map_or(exec, |(_, inner)| inner);
+            out.push(format!(
+                "Exec={picker} {AUTOSTART_FLAG} --id {} -- {inner}",
+                sanitize(app_key)
+            ));
+        }
+        out.push("DBusActivatable=false".to_string());
+        out.push(format!("{MARK}={ADOPTED}"));
+        out.push(String::new());
+    }
+    out.join("\n")
+}
+
+/// `vpn-zone-pick [--autostart] --id <key> -- <command>` → the key and the
+/// command, for an `Exec` line one of our entries wrote. Anything else: `None`.
+///
+/// By the program's file name, not its path: a copy made months ago names a
+/// store path of an older generation.
+pub fn unwrap_picker_exec(exec: &str) -> Option<(Option<String>, &str)> {
+    let (head, inner) = exec.split_once(" -- ")?;
+    let mut words = head.split_whitespace();
+    let program = words.next()?;
+    if program.rsplit('/').next() != Some("vpn-zone-pick") {
+        return None;
+    }
+    let mut id = None;
+    while let Some(word) = words.next() {
+        match word {
+            "--id" => id = words.next().map(str::to_owned),
+            AUTOSTART_FLAG => {}
+            _ => return None,
+        }
+    }
+    Some((id, inner))
+}
+
 fn render_intercepted(groups: &[Group], picker: &str, app_key: &str, marker: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     for group in groups {
@@ -653,6 +720,18 @@ struct App {
     own_dir: bool,
     /// A [`is_hidden_handler`] entry rather than a visible one.
     hidden: bool,
+}
+
+/// Whether XDG autostart entries of the user are taken over: the declared
+/// setting (`autostart.unassigned`), then the local one, `offline` by default
+/// (the owner's decision of 2026-09-17). `as-is` leaves them, and gives back
+/// the ones taken over.
+fn takes_over_autostart(home: &Path) -> bool {
+    let config = home.join(".config/vpn-zones");
+    let value = fs::read_to_string(config.join("declared/autostart"))
+        .or_else(|_| fs::read_to_string(config.join("autostart")))
+        .unwrap_or_default();
+    value.trim() != "as-is"
 }
 
 /// Whether foreign entries in the user's directory are taken over: the
@@ -866,6 +945,159 @@ pub fn cleanup(out_dir: &Path, wanted: &BTreeSet<String>, adopted_dir: &Path) ->
     removed
 }
 
+/// The key an autostart entry is launched under — the one its program's pins
+/// and container assignment are kept under.
+///
+/// Autostart files are named by whoever wrote them, and often not like the
+/// launcher entry (`telegramdesktop.desktop` next to
+/// `org.telegram.desktop.desktop`): a key taken from the file name alone would
+/// miss the pins and start a pinned program offline. So, in order: the id of a
+/// copied picker entry; a launcher entry of the same file name; a launcher
+/// entry of the same program (the one named like the program first); the file
+/// name.
+fn autostart_key(name: &str, exec: &str, apps: &[App]) -> String {
+    if let Some((Some(id), _)) = unwrap_picker_exec(exec) {
+        return sanitize(&id);
+    }
+    if let Some(app) = apps.iter().find(|a| a.name == name && !a.hidden) {
+        return app.key().to_owned();
+    }
+    let inner = unwrap_picker_exec(exec).map_or(exec, |(_, inner)| inner);
+    if let Some(program) = exec_program(inner) {
+        let same = |a: &&App| {
+            !a.hidden
+                && desktop_entry(&a.groups)
+                    .and_then(|e| e.get("Exec"))
+                    .and_then(exec_program)
+                    .as_deref()
+                    == Some(program.as_str())
+        };
+        if let Some(app) = apps
+            .iter()
+            .filter(same)
+            .find(|a| a.key() == program)
+            .or_else(|| apps.iter().find(same))
+        {
+            return app.key().to_owned();
+        }
+    }
+    sanitize(name.strip_suffix(".desktop").unwrap_or(name))
+}
+
+/// Take over the user's XDG autostart entries in place, or give them back.
+///
+/// The same rules as for the user's launcher entries (`docs/LAUNCHERS.md`
+/// §3.2): a symlink is never touched (home-manager's `xdg.autostart`); the
+/// original bytes are kept aside BEFORE anything is written, and no backup
+/// means no take-over; a program that rewrites its entry has its new bytes
+/// taken as the original. Beyond them:
+///
+/// * an entry that starts nothing (`Hidden=true`, disabled, no `Exec`) is left
+///   alone, and given back if it was taken;
+/// * a per-zone clone copied here (its marker names a zone) is an explicit
+///   choice of a network and stays as it is; a copied picker entry is taken
+///   over like a foreign one;
+/// * a backup whose entry is gone is dropped: the program switched its own
+///   autostart off.
+///
+/// `/etc/xdg/autostart` is not touched at all: it is the desktop's own
+/// components, and an entry of the user's own directory with the same name
+/// would override — disable — them.
+///
+/// Returns (written, given back).
+fn sync_autostart(
+    dir: &Path,
+    backups: &Path,
+    state_dir: &Path,
+    picker: &str,
+    take: bool,
+    apps: &[App],
+) -> (u32, u32) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .filter(|n| n.ends_with(".desktop") && !n.starts_with('.'))
+        .collect();
+    names.sort();
+
+    let (mut written, mut given_back) = (0, 0);
+    let give_back = |path: &Path, name: &str| -> u32 {
+        let backup = backups.join(name);
+        match fs::read(&backup) {
+            Ok(original) if write_atomically(path, &original).is_ok() => {
+                let _ = fs::remove_file(&backup);
+                1
+            }
+            _ => 0,
+        }
+    };
+    for name in &names {
+        let path = dir.join(name);
+        if !regular_file(&path) {
+            continue;
+        }
+        let taken = adopted(&path);
+        if !take {
+            if taken {
+                given_back += give_back(&path, name);
+            }
+            continue;
+        }
+        let original = if taken {
+            fs::read(backups.join(name))
+        } else {
+            fs::read(&path)
+        };
+        let Ok(original) = original else {
+            continue;
+        };
+        let groups = parse_desktop(&String::from_utf8_lossy(&original));
+        let Some(entry) = desktop_entry(&groups) else {
+            continue;
+        };
+        let exec = entry.get("Exec").unwrap_or("");
+        let starts_nothing = exec.is_empty()
+            || entry.get("Hidden") == Some("true")
+            || entry.get("X-GNOME-Autostart-enabled") == Some("false");
+        if starts_nothing {
+            if taken {
+                given_back += give_back(&path, name);
+            }
+            continue;
+        }
+        // Somebody's copy of one of our entries: a picker entry is unwrapped
+        // and taken over below; a clone names its network already.
+        if !taken && entry.get(MARK).is_some_and(|m| m != "picker") {
+            continue;
+        }
+        if !taken {
+            let kept = fs::create_dir_all(backups).is_ok()
+                && write_atomically(&backups.join(name), &original).is_ok();
+            if !kept {
+                continue;
+            }
+        }
+        let key = autostart_key(name, exec, apps);
+        if !state_dir.join(".labels").join(&key).exists() {
+            write_label(state_dir, &key, entry.get("Name").unwrap_or(&key));
+        }
+        written += write_if_changed(&path, &render_autostart(&groups, picker, &key));
+    }
+
+    // Backups of entries that are gone.
+    if let Ok(entries) = fs::read_dir(backups) {
+        for backup in entries.flatten() {
+            if !occupied(&dir.join(backup.file_name())) {
+                let _ = fs::remove_file(backup.path());
+            }
+        }
+    }
+    (written, given_back)
+}
+
 /// The whole pass. Returns the process exit code.
 pub fn sync(state_dir: &Path, home: &Path, runner: &str, picker: &str) -> u8 {
     sync_from(state_dir, home, runner, picker, &source_dirs(home))
@@ -1008,6 +1240,14 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
     }
 
     let removed = cleanup(&out_dir, &wanted, &adopted_dir);
+    let (autostart_written, autostart_given_back) = sync_autostart(
+        &home.join(".config/autostart"),
+        &state_dir.join(AUTOSTART_ADOPTED_DIR),
+        state_dir,
+        picker,
+        mode.intercepts() && takes_over_autostart(home),
+        &apps,
+    );
     if let Some(note) = mode.deprecation() {
         eprintln!("{note}");
     }
@@ -1017,7 +1257,8 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
         zones.join(", ")
     };
     println!(
-        "mode {}: {} entries ({written} updated, {removed} removed); zones: {zone_list}",
+        "mode {}: {} entries ({written} updated, {removed} removed); autostart: \
+         {autostart_written} updated, {autostart_given_back} given back; zones: {zone_list}",
         mode.as_str(),
         wanted.len()
     );
@@ -1730,5 +1971,177 @@ Name=not carried over
             fs::read_to_string(apps.join("firefox.desktop")).unwrap(),
             written
         );
+    }
+
+    // --- AUTOSTART ---------------------------------------------------------
+
+    impl Desk {
+        fn autostart(&self, name: &str, text: &str) -> PathBuf {
+            let dir = self.home.join(".config/autostart");
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(name);
+            fs::write(&path, text).unwrap();
+            path
+        }
+    }
+
+    #[test]
+    fn an_autostart_entry_goes_through_the_picker_and_comes_back() {
+        let d = Desk::new("autostart");
+        // The launcher entry and the autostart entry are named differently, as
+        // Telegram names them: the autostart one must still get the pins of
+        // the program.
+        fs::write(
+            d.system.join("org.telegram.desktop.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Telegram\nExec=telegram-desktop -- %u\n",
+        )
+        .unwrap();
+        let original = "[Desktop Entry]\nType=Application\nName=Telegram\n\
+                        TryExec=/nix/store/x-telegram/bin/telegram-desktop\n\
+                        Exec=/nix/store/x-telegram/bin/telegram-desktop -workdir /tmp/t -autostart\n\
+                        X-GNOME-Autostart-enabled=true\n";
+        let path = d.autostart("telegramdesktop.desktop", original);
+        d.sync();
+        let taken = fs::read_to_string(&path).unwrap();
+        assert!(
+            taken.contains(
+                "Exec=/bin/pick --autostart --id org.telegram.desktop -- \
+                 /nix/store/x-telegram/bin/telegram-desktop -workdir /tmp/t -autostart"
+            ),
+            "{taken}"
+        );
+        assert!(taken.contains("TryExec=/nix/store/x-telegram"), "{taken}");
+        assert!(taken.contains("X-VPNZone=adopted"), "{taken}");
+        assert!(taken.contains("DBusActivatable=false"), "{taken}");
+        assert_eq!(
+            fs::read_to_string(
+                d.state
+                    .join(AUTOSTART_ADOPTED_DIR)
+                    .join("telegramdesktop.desktop")
+            )
+            .unwrap(),
+            original
+        );
+
+        // Idempotent, and a rewrite by the program is taken over again.
+        d.sync();
+        assert_eq!(fs::read_to_string(&path).unwrap(), taken);
+        let rewritten = original.replace("-autostart", "-startintray");
+        fs::write(&path, &rewritten).unwrap();
+        d.sync();
+        assert!(fs::read_to_string(&path).unwrap().contains("-startintray"));
+        assert_eq!(
+            fs::read_to_string(
+                d.state
+                    .join(AUTOSTART_ADOPTED_DIR)
+                    .join("telegramdesktop.desktop")
+            )
+            .unwrap(),
+            rewritten
+        );
+
+        // `as-is` gives it back byte for byte, and so does `mode off`.
+        d.setting("autostart", "as-is");
+        d.sync();
+        assert_eq!(fs::read_to_string(&path).unwrap(), rewritten);
+        assert!(!d
+            .state
+            .join(AUTOSTART_ADOPTED_DIR)
+            .join("telegramdesktop.desktop")
+            .exists());
+        d.setting("autostart", "offline");
+        d.sync();
+        assert!(fs::read_to_string(&path).unwrap().contains("--autostart"));
+        d.setting("mode", "off");
+        d.sync();
+        assert_eq!(fs::read_to_string(&path).unwrap(), rewritten);
+    }
+
+    #[test]
+    fn autostart_leaves_what_starts_nothing_symlinks_and_clones() {
+        let d = Desk::new("autostart-leave");
+        let hidden = "[Desktop Entry]\nType=Application\nName=Off\nExec=off\nHidden=true\n";
+        let disabled =
+            "[Desktop Entry]\nType=Application\nName=Off2\nExec=off2\nX-GNOME-Autostart-enabled=false\n";
+        let clone = "[Desktop Entry]\nType=Application\nName=In nl\nExec=/bin/vpn-zone run nl -- x\nX-VPNZone=nl\n";
+        let hidden_path = d.autostart("off.desktop", hidden);
+        let disabled_path = d.autostart("off2.desktop", disabled);
+        let clone_path = d.autostart("vpn-zone-nl-x.desktop", clone);
+        let target = d.home.join("hm-target.desktop");
+        fs::write(
+            &target,
+            "[Desktop Entry]\nType=Application\nName=HM\nExec=hm\n",
+        )
+        .unwrap();
+        let link = d.home.join(".config/autostart/hm.desktop");
+        symlink(&target, &link).unwrap();
+        d.sync();
+        assert_eq!(fs::read_to_string(&hidden_path).unwrap(), hidden);
+        assert_eq!(fs::read_to_string(&disabled_path).unwrap(), disabled);
+        assert_eq!(fs::read_to_string(&clone_path).unwrap(), clone);
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!fs::read_to_string(&target).unwrap().contains("X-VPNZone"));
+    }
+
+    #[test]
+    fn a_copied_picker_entry_is_unwrapped_not_wrapped_twice() {
+        let d = Desk::new("autostart-copy");
+        // "Add to autostart" in desktop settings copies the menu entry — ours.
+        let copy = "[Desktop Entry]\nType=Application\nName=Firefox\n\
+                    Exec=/old/generation/bin/vpn-zone-pick --id firefox -- firefox %u\n\
+                    DBusActivatable=false\nX-VPNZone=picker\n";
+        let path = d.autostart("firefox.desktop", copy);
+        d.sync();
+        let taken = fs::read_to_string(&path).unwrap();
+        assert!(
+            taken.contains("Exec=/bin/pick --autostart --id firefox -- firefox %u"),
+            "{taken}"
+        );
+        assert_eq!(taken.matches("vpn-zone-pick").count(), 0, "{taken}");
+        assert_eq!(taken.matches("X-VPNZone=").count(), 1, "{taken}");
+        // Given back as the copy it was.
+        d.setting("autostart", "as-is");
+        d.sync();
+        assert_eq!(fs::read_to_string(&path).unwrap(), copy);
+    }
+
+    #[test]
+    fn a_backup_goes_when_the_program_switches_its_autostart_off() {
+        let d = Desk::new("autostart-gone");
+        let path = d.autostart(
+            "x.desktop",
+            "[Desktop Entry]\nType=Application\nName=X\nExec=x\n",
+        );
+        d.sync();
+        assert!(d
+            .state
+            .join(AUTOSTART_ADOPTED_DIR)
+            .join("x.desktop")
+            .exists());
+        fs::remove_file(&path).unwrap();
+        d.sync();
+        assert!(!d
+            .state
+            .join(AUTOSTART_ADOPTED_DIR)
+            .join("x.desktop")
+            .exists());
+    }
+
+    #[test]
+    fn picker_exec_lines_are_recognised_by_the_program_name() {
+        assert_eq!(
+            unwrap_picker_exec("/a/b/vpn-zone-pick --id tg -- telegram %u"),
+            Some((Some("tg".to_owned()), "telegram %u"))
+        );
+        assert_eq!(
+            unwrap_picker_exec("vpn-zone-pick --autostart --id tg -- telegram"),
+            Some((Some("tg".to_owned()), "telegram"))
+        );
+        assert_eq!(unwrap_picker_exec("telegram -- x"), None);
+        assert_eq!(unwrap_picker_exec("/bin/vpn-zone run nl -- x"), None);
+        assert_eq!(unwrap_picker_exec("vpn-zone-pick --weird -- x"), None);
     }
 }

@@ -104,6 +104,9 @@ pub struct Args {
     /// "env". (`docs/GOTCHAS.md` §10)
     pub id: Option<OsString>,
     pub label: Option<OsString>,
+    /// `--autostart`: started by XDG autostart at login, where nobody is
+    /// looking at a dialog yet. Never asks (`docs/CONTAINERS.md` §5).
+    pub autostart: bool,
     pub cmd: Vec<OsString>,
 }
 
@@ -123,6 +126,7 @@ impl Args {
         }
 
         let mut id = None;
+        let mut autostart = false;
         let mut at = 0;
         while at < rest.len() {
             match rest[at].as_bytes() {
@@ -133,6 +137,10 @@ impl Args {
                 b"--label" => {
                     label = rest.get(at + 1).cloned();
                     at += 2;
+                }
+                b"--autostart" => {
+                    autostart = true;
+                    at += 1;
                 }
                 b"--" => {
                     at += 1;
@@ -145,6 +153,7 @@ impl Args {
         Self {
             id: id.filter(|v| !v.is_empty()),
             label: label.filter(|v| !v.is_empty()),
+            autostart,
             cmd: rest.get(at..).unwrap_or(&[]).to_vec(),
         }
     }
@@ -407,6 +416,78 @@ pub fn container_without_dialog(
         }
     }
     container
+}
+
+/// Where a program started by XDG autostart goes, and what had to be guessed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutostartPlan {
+    pub zone: String,
+    pub container: Container,
+    /// No network was chosen for the program: it starts in `offline`.
+    pub network_guessed: bool,
+    /// No container was chosen and the default is `ask`: it starts in a home
+    /// of its own.
+    pub container_guessed: bool,
+}
+
+/// The decision for an autostart launch — never a dialog.
+///
+/// At login nobody is looking yet: a dialog would wait on a screen that is
+/// still being drawn, or be answered by a stray click, and the program used to
+/// start uncontained in the host's network. The owner's decision
+/// (2026-09-17): what was chosen for the program is honoured, and what was not
+/// chosen is the closed variant.
+///
+/// * running already — where it runs, like a click would;
+/// * the container: the pinned or assigned one; otherwise the global default
+///   when it is an answer (`main`, `own`, an existing container); otherwise —
+///   `ask` — a home of its own;
+/// * the network: the one that container is bound to; otherwise the pin;
+///   otherwise `offline`. Not the last choice and not the global default: those
+///   are what a dialog preselects, not a consent to go online unasked.
+///
+/// `bound_of` is the network a container is bound to, if any.
+pub fn autostart_plan(
+    memory: &Memory,
+    key: &str,
+    exists: impl Fn(&str) -> bool,
+    bound_of: impl Fn(&Container) -> Option<String>,
+) -> AutostartPlan {
+    if let Some(running) = &memory.running {
+        return AutostartPlan {
+            zone: running.zone.clone(),
+            container: Container::from_selector(&running.selector),
+            network_guessed: false,
+            container_guessed: false,
+        };
+    }
+    let (container, container_guessed) = if !memory.pinned_profile.is_empty() {
+        (Container::from_selector(&memory.pinned_profile), false)
+    } else {
+        match memory.default_profile.as_str() {
+            "main" => (Container::default(), false),
+            "own" => (Container::own_sandbox(key), false),
+            name if name != "ask" && exists(name) => (
+                Container {
+                    profile: name.to_owned(),
+                    ..Container::default()
+                },
+                false,
+            ),
+            _ => (Container::own_sandbox(key), true),
+        }
+    };
+    let (zone, network_guessed) = match bound_of(&container) {
+        Some(network) => (network, false),
+        None if !memory.pinned.is_empty() => (memory.pinned.clone(), false),
+        None => ("offline".to_owned(), true),
+    };
+    AutostartPlan {
+        zone,
+        container,
+        network_guessed,
+        container_guessed,
+    }
 }
 
 /// Is this network pin still worth honouring?
@@ -769,6 +850,9 @@ pub fn main() -> ExitCode {
     std::env::remove_var(ENV_PROFILE);
 
     let memory = read_memory(&tools, &key);
+    if args.autostart {
+        return autostart(&tools, &key, &label, &memory, &args.cmd);
+    }
     let mut asksolo = false;
     let zone_choice: String;
 
@@ -891,6 +975,65 @@ pub fn main() -> ExitCode {
     };
 
     launch(&tools, &key, &zone_choice, &container, &args.cmd)
+}
+
+/// A launch from XDG autostart: [`autostart_plan`], a notification for what
+/// was guessed, and the launch itself.
+fn autostart(tools: &Tools, key: &str, label: &str, memory: &Memory, cmd: &[OsString]) -> ExitCode {
+    let profiles = tools.profiles.clone();
+    let plan = autostart_plan(
+        memory,
+        key,
+        |name| profiles.join(name).is_dir(),
+        |container| {
+            crate::container::load(tools, &container.selector()).and_then(|c| {
+                match c.network.value {
+                    crate::container::Network::Named(network) => Some(network),
+                    crate::container::Network::Ask => None,
+                }
+            })
+        },
+    );
+    let mut lines = Vec::new();
+    if plan.network_guessed {
+        lines.push(
+            "сеть для неё не выбрана — запущена без сети. Чтобы выбрать: закрой программу, \
+             запусти из меню и закрепи сеть"
+                .to_owned(),
+        );
+    }
+    if plan.container_guessed {
+        lines.push(format!(
+            "контейнер не выбран — запущена в своём доме ({}). Назначить: vpn-zone container \
+             assign {key} <контейнер>",
+            container_label(&plan.container.selector())
+        ));
+    }
+    // A home of its own that has never been started asks for file access in
+    // a dialog — the one thing an autostart must not do. It gets the closed
+    // answer instead, the one given when there is no screen to ask on.
+    if !plan.container.sandbox.is_empty() {
+        let dir = tools.sandboxes.join(&plan.container.sandbox);
+        let perms = dir.join("perms");
+        if !perms.exists()
+            && fs::create_dir_all(&dir)
+                .and_then(|()| fs::write(&perms, crate::fs_sandbox::Perms::default().render()))
+                .is_ok()
+        {
+            lines.push("доступа к файлам хоста у неё нет".to_owned());
+        }
+    }
+    if !lines.is_empty() {
+        eprintln!("vpn-zone-pick: автозапуск «{label}»: {}", lines.join("; "));
+        dialog::notify(
+            &tools.notify_send,
+            None,
+            "15000",
+            &format!("Автозапуск: «{label}»"),
+            &lines.join("\n"),
+        );
+    }
+    launch(tools, key, &plan.zone, &plan.container, cmd)
 }
 
 /// Read the three levels of memory, dropping the pins that have gone stale.
@@ -1370,6 +1513,100 @@ mod tests {
     }
 
     // --- ARGUMENTS -----------------------------------------------------------
+
+    #[test]
+    fn the_autostart_flag_is_taken_before_the_command() {
+        let a = Args::parse(&argv(&[
+            "--autostart",
+            "--id",
+            "tg",
+            "--",
+            "telegram",
+            "-autostart",
+        ]));
+        assert!(a.autostart);
+        assert_eq!(a.id.as_deref(), Some(OsStr::new("tg")));
+        assert_eq!(a.cmd, argv(&["telegram", "-autostart"]));
+        // After `--` it belongs to the program.
+        let a = Args::parse(&argv(&["--id", "x", "--", "x", "--autostart"]));
+        assert!(!a.autostart);
+    }
+
+    // --- AUTOSTART -----------------------------------------------------------
+
+    fn unbound(_: &Container) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn an_unassigned_program_starts_offline_in_a_home_of_its_own() {
+        let memory = Memory {
+            // What a dialog would preselect is not a consent to go online.
+            last: "nl".into(),
+            last_profile: "work".into(),
+            fallback: "direct".into(),
+            default_profile: "ask".into(),
+            ..Memory::default()
+        };
+        let plan = autostart_plan(&memory, "tg", anything, unbound);
+        assert_eq!(plan.zone, "offline");
+        assert_eq!(plan.container.selector(), "sb:app-tg");
+        assert!(plan.network_guessed && plan.container_guessed);
+    }
+
+    #[test]
+    fn what_was_chosen_for_a_program_is_honoured_at_login() {
+        let memory = Memory {
+            pinned: "nl".into(),
+            pinned_profile: "work".into(),
+            default_profile: "ask".into(),
+            ..Memory::default()
+        };
+        let plan = autostart_plan(&memory, "tg", anything, unbound);
+        assert_eq!(
+            (plan.zone.as_str(), plan.container.selector()),
+            ("nl", "work".to_owned())
+        );
+        assert!(!plan.network_guessed && !plan.container_guessed);
+
+        // A bound container's network beats the pin, as in a click.
+        let bound = |c: &Container| (c.selector() == "work").then(|| "de".to_owned());
+        assert_eq!(autostart_plan(&memory, "tg", anything, bound).zone, "de");
+
+        // The global container default is an answer, `ask` is not.
+        for (default, selector) in [("main", ""), ("own", "sb:app-tg"), ("work", "work")] {
+            let memory = Memory {
+                default_profile: default.into(),
+                ..Memory::default()
+            };
+            let plan = autostart_plan(&memory, "tg", anything, unbound);
+            assert_eq!(plan.container.selector(), selector, "{default}");
+            assert!(!plan.container_guessed, "{default}");
+            assert!(plan.network_guessed, "{default}");
+        }
+        // A default naming a container that is gone is no answer either.
+        let memory = Memory {
+            default_profile: "gone".into(),
+            ..Memory::default()
+        };
+        let plan = autostart_plan(&memory, "tg", nothing, unbound);
+        assert_eq!(plan.container.selector(), "sb:app-tg");
+        assert!(plan.container_guessed);
+
+        // Running already: where it runs.
+        let memory = Memory {
+            running: Some(Running {
+                zone: "nl".into(),
+                selector: "sb:x".into(),
+            }),
+            ..Memory::default()
+        };
+        let plan = autostart_plan(&memory, "tg", anything, unbound);
+        assert_eq!(
+            (plan.zone.as_str(), plan.container.selector()),
+            ("nl", "sb:x".to_owned())
+        );
+    }
 
     #[test]
     fn the_shortcut_form_is_id_then_command() {

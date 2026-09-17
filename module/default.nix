@@ -565,6 +565,17 @@ in
       description = "Чужие записи в ~/.local/share/applications (игры Steam, userapp-* программ, ставших обработчиками по умолчанию, веб-приложения, Wine): take-over — перехватывать на месте, сохраняя оригинал (по умолчанию), leave — не трогать. null — не задавать из Nix. См. docs/LAUNCHERS.ru.md §3.2.";
     };
 
+    autostart.unassigned = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "offline"
+          "as-is"
+        ]
+      );
+      default = null;
+      description = "Записи ~/.config/autostart (обычные файлы; symlink не трогаются): offline — перехватывать на месте, программа при входе стартует без диалога туда, что для неё выбрано (закрепление, назначенный контейнер и его сеть), а невыбранное — offline и в своём доме, с уведомлением (по умолчанию); as-is — не трогать и вернуть перехваченные. /etc/xdg/autostart не трогается никогда. null — не задавать из Nix. См. docs/CONTAINERS.ru.md §5.";
+    };
+
     compositorRestriction.enable = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
@@ -614,6 +625,9 @@ in
     })
     (lib.mkIf (cfg.launcher.mode != null) {
       "vpn-zones/declared/mode".text = cfg.launcher.mode;
+    })
+    (lib.mkIf (cfg.autostart.unassigned != null) {
+      "vpn-zones/declared/autostart".text = cfg.autostart.unassigned;
     })
     (lib.mkIf (cfg.interception.userEntries != null) {
       "vpn-zones/declared/user-entries".text = cfg.interception.userEntries;
@@ -735,6 +749,9 @@ in
     Path = {
       PathChanged = [
         "${config.home.homeDirectory}/.local/share/applications"
+        # Программа, включившая свой автозапуск, перехватывается сразу, а не
+        # через полчаса — до следующего входа в сессию успевает наверняка.
+        "${config.home.homeDirectory}/.config/autostart"
         "/etc/profiles/per-user/${config.home.username}/share/applications"
         "/run/current-system/sw/share/applications"
       ];

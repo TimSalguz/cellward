@@ -788,3 +788,77 @@ fn every_shape_of_memory_ends_in_a_launch_or_in_a_cancel() {
         );
     }
 }
+
+#[test]
+fn an_unassigned_autostart_starts_offline_in_its_own_home_without_a_dialog() {
+    // docs/CONTAINERS.md §5.2: at login nobody is looking at a dialog.
+    let home = Home::new("autostart-unassigned");
+    home.zone("nl");
+    // What a dialog would preselect is not a consent to go online unasked.
+    home.write("state/.last/tg", "nl");
+    home.write("config/default", "direct");
+    home.script("notify-send", r#"printf '%s\n' "$@" >> "$NOTIFY_LOG""#);
+    let log = home.path("notify.log");
+    let out = home.run(
+        &["--autostart", "--id", "tg", "--", "telegram", "-autostart"],
+        &[("NOTIFY_LOG", log.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.asked().is_empty(), "{:?}", home.asked());
+    assert_eq!(
+        home.launched()[0],
+        [
+            "run",
+            "offline",
+            "--sandbox",
+            "app-tg",
+            "--",
+            "telegram",
+            "-autostart"
+        ]
+    );
+    // The file access dialog of a new home is answered in advance: nothing.
+    assert_eq!(home.read("sandboxes/app-tg/perms").as_deref(), Some(""));
+    // Nothing is remembered.
+    assert_eq!(home.read("state/.last/tg").as_deref(), Some("nl"));
+    assert_eq!(home.read("state/.lastprofile/tg"), None);
+    assert_eq!(home.read("state/.pinned/tg"), None);
+    let notified = home.read("notify.log").unwrap_or_default();
+    assert!(notified.contains("Автозапуск"), "{notified}");
+    assert!(notified.contains("без сети"), "{notified}");
+}
+
+#[test]
+fn an_assigned_autostart_starts_where_it_was_put_and_says_nothing() {
+    let home = Home::new("autostart-assigned");
+    home.zone("nl");
+    home.profile("work");
+    home.write("state/.pinned/tg", "nl");
+    home.write("state/.pinnedprofile/tg", "work");
+    home.script("notify-send", r#"printf '%s\n' "$@" >> "$NOTIFY_LOG""#);
+    let log = home.path("notify.log");
+    let out = home.run(
+        &["--autostart", "--id", "tg", "--", "telegram"],
+        &[("NOTIFY_LOG", log.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.asked().is_empty(), "{:?}", home.asked());
+    assert_eq!(
+        home.launched()[0],
+        ["run", "nl", "--profile", "work", "--", "telegram"]
+    );
+    assert_eq!(home.read("notify.log"), None);
+
+    // A container bound to a network takes it along, over the pin.
+    home.write("profiles/work/container.conf", "network = direct\n");
+    let _ = fs::remove_file(home.path("runner.log"));
+    let out = home.run(
+        &["--autostart", "--id", "tg", "--", "telegram"],
+        &[("NOTIFY_LOG", log.to_str().unwrap())],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        home.launched()[0],
+        ["run", "direct", "--profile", "work", "--", "telegram"]
+    );
+}

@@ -65,7 +65,7 @@ launcher → vpn-zone-pick --id K -- cmd
 | L8 | the id is sanitised lossily (`[A-Za-z0-9._-]`, the rest → `_`) | two non-ASCII entry names of equal length collide (`Игра.desktop`, `Мода.desktop` → `____`): shared pins, labels, registry and sandbox home — one program starts in the other's network or container | proposal: append a short hash when sanitising lost characters; migrate old keys once |
 | L9 | per-zone clones carry no launcher id | sandbox permissions and registry keyed by the binary, different from picker mode (the "two permission sets for Discord" trap, §6); `Desktop Action`s are dropped | moot if clones are deprecated (§4) |
 | L10 | D-Bus activation goes around the shadow | `DBusActivatable=false` only helps launchers that honour it; the app's session service file still activates it (`gapplication launch`, GNOME "open with") | phase 3 ([CONTAINERS.md](CONTAINERS.md) §5) |
-| L11 | autostart is not intercepted | programs in `~/.config/autostart` or `/etc/xdg/autostart` start uncontained at login | phase 3 |
+| L11 | autostart is not intercepted | programs in `~/.config/autostart` or `/etc/xdg/autostart` start uncontained at login | **fixed** for `~/.config/autostart` ([CONTAINERS.md](CONTAINERS.md) §5.2); `/etc/xdg/autostart` is the desktop's own and stays |
 | L12 | the label comes from the untranslated `Name` | dialogs say "Firefox" where the menu says the localised name | M6 |
 
 The path unit also misses `$XDG_DATA_DIRS` directories (Flatpak exports):

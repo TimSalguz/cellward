@@ -102,6 +102,7 @@ let
             container = "own";
           };
           launcher.mode = "picker";
+          autostart.unassigned = "offline";
           compositorRestriction.enable = true;
           containers.work = {
             home = "overlay";

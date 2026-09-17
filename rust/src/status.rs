@@ -78,12 +78,17 @@ pub fn defaults(tools: &Tools) -> String {
     let (container, container_source) = setting(tools, "default-profile", "ask");
     let (mode, mode_source) = setting(tools, "mode", "picker");
     let (wayland, wayland_source) = setting(tools, "wayland-sandbox", "on");
+    let (autostart, autostart_source) = setting(tools, "autostart", "offline");
+    let (user_entries, user_entries_source) = setting(tools, "user-entries", "take-over");
     format!(
-        "{{\"network\":{},\"container\":{},\"launcher_mode\":{},\"compositor_restriction\":{}}}",
+        "{{\"network\":{},\"container\":{},\"launcher_mode\":{},\"compositor_restriction\":{},\
+         \"autostart_unassigned\":{},\"user_entries\":{}}}",
         sourced_str(&network, network_source),
         sourced_str(&container, container_source),
         sourced_str(&mode, mode_source),
-        sourced((wayland == "on").to_string(), wayland_source)
+        sourced((wayland == "on").to_string(), wayland_source),
+        sourced_str(&autostart, autostart_source),
+        sourced_str(&user_entries, user_entries_source)
     )
 }
 

@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed (XDG autostart goes through the picker)
+- **The user's `~/.config/autostart` entries are taken over in place**, like
+  the user's launcher entries: a program that switched its own autostart on
+  started at login in the host's network, uncontained. Now it starts where it
+  was put — its pinned or assigned container, that container's network or its
+  network pin — and what nobody chose is the closed variant: `offline`, a home
+  of its own, no dialog of any kind, and a notification saying so. The last
+  choice and the global network default are not used unasked. Originals are
+  kept in `~/.local/state/vpn-zones/.adopted-autostart/`; `vpn-zone mode off`
+  or the new option `programs.vpn-zones.autostart.unassigned = "as-is"` (local
+  file `~/.config/vpn-zones/autostart`) gives them back byte for byte.
+  Symlinks, disabled entries and `/etc/xdg/autostart` are not touched
+  (`docs/CONTAINERS.md` §5.2, the owner's decision of 2026-09-17).
+
 ### Added (path grants and merging containers)
 - `vpn-zone container grant|revoke sb:<sandbox> <dir>` and
   `programs.vpn-zones.containers.<name>.permissions.paths`: a directory of the

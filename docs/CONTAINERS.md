@@ -252,10 +252,10 @@ boundary is the container → outside direction (§6).
 | launcher entry (menus, fuzzel/rofi, KRunner, noctalia) | picker shadow entry in `~/.local/share/applications` | unchanged; container-first picker | 1 |
 | hidden handlers (`NoDisplay=true` + `MimeType`) | **done**: intercepted under the id of the visible entry of the same program | — | 0 |
 | child entries (`steam steam://rungameid/…`) | **done**: no clones, launched under the client's id | web apps of a browser (`--app-id=`) join them | 0/3 |
-| entries programs write into the user directory (Steam games, `userapp-*`, web apps, Wine) | not intercepted: foreign files are never rewritten | taken over in place with a backup and re-taken when rewritten ([LAUNCHERS.md](LAUNCHERS.md) §3.2); the invariant changes in a commit of its own | 3 |
+| entries programs write into the user directory (Steam games, `userapp-*`, web apps, Wine) | not intercepted: foreign files are never rewritten | **done**: taken over in place with a backup and re-taken when rewritten ([LAUNCHERS.md](LAUNCHERS.md) §3.2); the invariant changed in a commit of its own | 3 |
 | `xdg-open`, `gio open`, `kde-open`, "open with" | resolve to a `.desktop` → the shadow entry | unchanged | — |
 | D-Bus activation (`gapplication launch`, `DBusActivatable=true`) | the service file activates around the shadow | shadow session service files in `$XDG_DATA_HOME/dbus-1/services/<id>.service` for intercepted ids only; never for portal or system names | 3 |
-| XDG autostart | runs uncontained | assigned programs start in their container; **unassigned ones start offline, in a home of their own, without a dialog, and a notification says so** | 3 |
+| XDG autostart | runs uncontained | **done** (§5.2): assigned programs start in their container; **unassigned ones start offline, in a home of their own, without a dialog, and a notification says so** | 3 |
 | compositor key bindings | only if the binding calls `vpn-zone-pick` | `vpn-zone launch <launcher-id>` reads the entry's `Exec`; a module option exposes the command line | 3 |
 | shell | uncontained | opt-in PATH shims for assigned programs; never a boundary | 3 |
 | portal `OpenURI` from a host program | portal → handler entry → shadow → picker | unchanged | — |
@@ -274,6 +274,39 @@ the extra arguments), and becomes the picker for it:
 ```kdl
 Mod+B { spawn "vpn-zone" "launch" "firefox"; }
 ```
+
+### 5.2 Autostart
+
+The user's `~/.config/autostart/*.desktop` are taken over in place by the same
+pass and under the same rules as the user's launcher entries (regular files
+only, original bytes kept in `~/.local/state/vpn-zones/.adopted-autostart/`
+first, re-taken when the program rewrites its entry, given back by
+`autostart.unassigned = "as-is"` or `vpn-zone mode off`). The rewritten `Exec`
+is `vpn-zone-pick --autostart --id <key> -- <original command>`.
+
+- **The key** is the one the program's pins live under, not the file name:
+  autostart files are named by whoever wrote them (`telegramdesktop.desktop`
+  next to `org.telegram.desktop.desktop`). A copied picker entry gives its
+  `--id`; otherwise a launcher entry of the same file name; otherwise one of
+  the same program; otherwise the file name.
+- **The picker never asks** with `--autostart`. Running already — where it
+  runs. The container: the pinned or assigned one, else the global default when
+  it is an answer (`main`, `own`, an existing container), else a home of its
+  own. The network: the one that container is bound to, else the pin, else
+  `offline`. The last choice and the global network default are NOT used: they
+  are what a dialog preselects, not a consent to go online unasked. Nothing is
+  remembered. What was guessed is said in a notification.
+- **No file access dialog either**: a home of its own that has never been
+  started gets an empty permission file — the answer given when there is no
+  screen to ask on.
+- **Left alone**: symlinks (home-manager's `xdg.autostart`); entries that start
+  nothing (`Hidden=true`, `X-GNOME-Autostart-enabled=false`, no `Exec`); a
+  copied per-zone clone (it names its network); `/etc/xdg/autostart` entirely —
+  the desktop's own components, and an entry of the same name in the user's
+  directory would override, i.e. disable, them. A copied picker entry is
+  unwrapped, not wrapped twice.
+- The path unit watches `~/.config/autostart`: a program that switches its
+  autostart on is taken over at once, long before the next login.
 
 ## 6. The outward boundary (phase 4)
 
@@ -409,7 +442,9 @@ and `vpn-zone container show <name> --json` print subsets of the same schema.
     "network":   { "value": "offline", "source": "default" },
     "container": { "value": "own",     "source": "nix" },
     "launcher_mode": { "value": "picker", "source": "default" },
-    "compositor_restriction": { "value": true, "source": "default" }
+    "compositor_restriction": { "value": true, "source": "default" },
+    "autostart_unassigned": { "value": "offline", "source": "default" },
+    "user_entries": { "value": "take-over", "source": "default" }
   },
   "networks": [
     { "name": "nl", "kind": "amneziawg", "source": "local",
@@ -459,6 +494,9 @@ every key of version 1.
   nor the host's X11 or resolver becomes reachable through a grant.
 - **`vpn-zone launch`, shims, autostart, D-Bus shadows, taken-over entries.**
   They only start the picker or `vpn-zone run`; no new socket, no new route.
+  Autostart (done) closes a path: a program that switched its own autostart on
+  used to start at login in the host's network, uncontained; now it starts
+  where it was put, or offline.
 - **Broker.** A guarded door replacing the unguarded `systemd --user` path.
 - **JSON output.** Names zones and containers to processes of the user; inside
   a private home the state directory is not visible at all.
@@ -472,7 +510,7 @@ every key of version 1.
 | 0 | **done**: `direct` keeps its layers, working directory, conflict by id and binary, hidden handlers, Steam children | smoke; unit and scenario tests |
 | 1 | **done**: network binding with I1/I2 in `run` and the picker, `vpn-zone container list/show/set/assign/unassign`, `status --json` (`schema_version`, sources), home-manager options with `declared/`, clones deprecated, path grants (`container grant/revoke`, `permissions.paths`), merge (`container merge`). **Left**: `own` by default, hints (Wine prefix, Steam), container-first picker, GUI entries | CLI/picker scenario tests; VM: a declared container with its declared CA, refused elsewhere, reported as Nix |
 | 2 | trust layer ([CERTIFICATES.md](CERTIFICATES.md)) — **done** (GUI dialog left) | VM and smoke: synthetic CA trusted in one container only |
-| 3 | `vpn-zone launch`, D-Bus and autostart shadows, user-dir take-over, web apps as children, host-interface networks, PATH shims | VM: activation via `gdbus call` lands in the container; autostart of an unassigned program is offline |
+| 3 | **done**: user-dir take-over, autostart take-over (§5.2). **Left**: `vpn-zone launch`, D-Bus shadows, web apps as children, host-interface networks, PATH shims | VM: activation via `gdbus call` lands in the container; autostart of an unassigned program is offline |
 | 4 | runtime hermeticity, broker, X11 closure, extra routes | VM "evil host": a `systemd --user` counting `StartTransientUnit`, a portal logging callers, an HTTP beacon |
 
 ## 12. The owner's decisions (2026-09-17)
