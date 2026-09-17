@@ -354,6 +354,17 @@ if in_uplink "$IP" -o link show awg0 >/dev/null 2>&1; then
   fail "awg0 остался в uplink-ns — переезд интерфейса не состоялся"
 fi
 
+step "Внутри зоны: свой nsswitch.conf — hosts: files dns"
+# Резолверы хоста прятать списком сокетов мало: следующий NSS-модуль, говорящий
+# с демоном хоста, в список не попадёт. У зоны свой nsswitch.conf, где для имён
+# нет ничего, кроме files и dns (docs/LEAK-MODEL.md §3).
+nss_hosts=$("$NSENTER" --preserve-credentials -U -n -m -t "$ZPID" -- sh -c "grep '^hosts:' /etc/nsswitch.conf")
+echo "$nss_hosts"
+[ "$nss_hosts" = "hosts: files dns" ] || fail "в зоне hosts в nsswitch.conf не files dns: $nss_hosts"
+host_hosts=$(grep '^hosts:' /etc/nsswitch.conf || true)
+echo "хост: ${host_hosts:-<нет строки>}"
+echo "ok"
+
 step "Внутри аплинка: второй эшелон — наружу только транспорт туннеля"
 # Аплинк заперт до одного адреса и одного порта: даже скомпрометированный
 # процесс здесь не отправит ничего, кроме пакетов туннеля. DNS и ICMP тут не
