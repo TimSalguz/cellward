@@ -5,6 +5,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (extra root certificates per container)
+- `vpn-zone trust add|list|rm|reset`: a root certificate — a national CA, a
+  corporate inspection root, a test CA — trusted by the programs of ONE data
+  container or named sandbox, and by nothing else: not the host, not the
+  container next door (`docs/CERTIFICATES.md`). `add` takes exactly one
+  certificate with `basicConstraints CA:TRUE`, shows subject, issuer, validity
+  and fingerprint with a loud warning and asks for the container's name.
+- At launch `profile-run` binds the host's bundle plus the container's roots
+  over the file every bundle path resolves to (on NixOS one store file, which
+  NSS also reads through p11-kit), points `SSL_CERT_FILE` and its relatives at
+  the SYSTEM path so a leaked variable is harmless, and installs the roots into
+  the container's own NSS databases with `certutil` — never into one it cannot
+  prove to be the container's. A bundle that cannot be laid down stops the
+  launch. The manifest gains `openssl` and `certutil`.
+- Covered by the smoke test (Ubuntu layout) and the VM test (NixOS store
+  layout, p11-kit, and an environment pushed into the user manager).
+
+### Fixed
+- `vpn-zone run <zone>` with no command started nothing after the working
+  directory fix put `profile-run` between `nsenter` and the program; it starts
+  a shell again.
+
 ### Deprecated
 - **Per-zone launcher clones** (`vpn-zone mode per-zone` and `both`). A clone
   is "this program, in that network" on every click — exactly how one identity

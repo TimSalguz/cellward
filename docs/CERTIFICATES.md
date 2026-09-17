@@ -3,9 +3,12 @@
 Russian: [CERTIFICATES.ru.md](CERTIFICATES.ru.md) · Builds on
 [CONTAINERS.md](CONTAINERS.md) · Threat model: [LEAK-MODEL.md](LEAK-MODEL.md)
 
-**Status: proposal (2026-09-17).** Not implemented. The facts in §2 were
-checked on current nixpkgs binaries on 2026-09-17; the items marked *verify*
-are the first thing the VM prototype has to confirm.
+**Status (2026-09-17): implemented for data containers and named sandboxes** —
+the CLI (`vpn-zone trust`), the bundle, the environment and the NSS databases,
+with the tests of §6 in the smoke and VM tests. Not yet: the GUI dialog, the
+declarative option (with the container entity of CONTAINERS phase 1), Java.
+The facts in §2 were checked on current nixpkgs binaries; the items marked
+*verify* are still open.
 
 ## 1. Goal and threat
 
@@ -118,8 +121,9 @@ launch's mount namespace before the program starts, from `nss.tools` in the
 manifest.
 
 - **A database is written only when it is provably the container's.** Before
-  writing, `profile-run` reads `/proc/self/mountinfo` and checks that the path
-  is on the overlay it has just mounted, or on the private home bind. Anything
+  writing, `profile-run` checks that the path lies under an overlay slot it has
+  just stacked itself (the list `mount_profile` returns — what was really
+  mounted, not what was hoped for), or under the home of a named sandbox. Anything
   else — a profile directory the overlay does not cover (`~/.zen` is not one
   of the XDG slots) — is skipped with a loud warning naming the program and
   suggesting a private home. This is the check that stands between a
@@ -129,7 +133,7 @@ manifest.
   `certutil -d sql:$HOME/.pki/nssdb` inside the container would create the
   database **in the real home**, and the host's Chromium would trust the
   certificate from then on. Containers with trust therefore create the missing
-  lower directories (empty, mode 0700) before stacking, and the mountinfo check
+  lower directories (empty, mode 0700) before stacking, and the check above
   catches whatever is still missed.
 - Idempotent: a stamp file in the database directory records the fingerprints
   installed; equal stamp → no `certutil` at all.
@@ -203,7 +207,8 @@ non-empty `certificates` without `acknowledgeRisk`.
 
 - **Host.** The host's bundle is never modified; binds live in the launch's
   mount namespace; environment variables name only the system path (§3.3);
-  NSS databases are written only after the mountinfo check (§3.4).
+  NSS databases are written only under what this launch proved to be the
+  container's own (§3.4).
 - **Another container in the same zone.** Every container launch has its own
   mount namespace; nothing is mounted in the zone's.
 - **The same program outside the container.** A delegated or brokered launch
