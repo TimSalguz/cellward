@@ -95,6 +95,21 @@ impl Mode {
         }
     }
 
+    /// What to say about a mode that is on its way out, if anything.
+    ///
+    /// Per-zone clones are deprecated (`docs/LAUNCHERS.md` §4): their purpose
+    /// is "this program, in that network" on every click, which is exactly how
+    /// one identity ends up in two networks, and they grow as programs × zones.
+    /// Nothing is removed yet; the notice says why and what replaces them.
+    pub fn deprecation(self) -> Option<&'static str> {
+        self.clones().then_some(
+            "режим ярлыков per-zone/both устарел и будет убран: ярлык на каждую зону — это выбор \
+             сети на каждый клик, так одна программа оказывается в двух сетях. Замена — один \
+             ярлык с пикером (vpn-zone mode picker), а позже ярлыки контейнеров \
+             (docs/LAUNCHERS.ru.md §4)",
+        )
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Picker => "picker",
@@ -812,6 +827,9 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
     }
 
     let removed = cleanup(&out_dir, &wanted);
+    if let Some(note) = mode.deprecation() {
+        eprintln!("{note}");
+    }
     let zone_list = if zones.is_empty() {
         "none".to_string()
     } else {
@@ -1121,6 +1139,11 @@ Name=not carried over
         assert!(Mode::Picker.intercepts() && !Mode::Picker.clones());
         assert!(!Mode::PerZone.intercepts() && Mode::PerZone.clones());
         assert!(!Mode::Off.intercepts() && !Mode::Off.clones());
+        // The modes that make clones say they are deprecated; the others do not.
+        assert!(Mode::PerZone.deprecation().is_some());
+        assert!(Mode::Both.deprecation().is_some());
+        assert!(Mode::Picker.deprecation().is_none());
+        assert!(Mode::Off.deprecation().is_none());
     }
 
     #[test]

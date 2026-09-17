@@ -5,6 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Deprecated
+- **Per-zone launcher clones** (`vpn-zone mode per-zone` and `both`). A clone
+  is "this program, in that network" on every click — exactly how one identity
+  ends up in two networks — and clones grow as programs × zones. `vpn-zone
+  mode`, `vpn-zone sync` in those modes and the GUI settings now say so;
+  nothing is removed yet. The replacement is the single intercepted entry and,
+  later, per-container entries (`docs/LAUNCHERS.md` §4).
+
+### Changed (design)
+- `docs/CONTAINERS.md` and `docs/LAUNCHERS.md` carry the owner's decisions of
+  2026-09-17: a container's network changes explicitly and can be a host
+  interface as well as a zone, every program gets a home of its own with a way
+  to merge two containers, entries in the user's applications directory are
+  taken over in place, unassigned autostart starts offline with a
+  notification, and the JSON state carries `schema_version` and the origin of
+  every value.
+
 ### Added (design proposals, not implemented)
 - `docs/CONTAINERS.md` (+ `.ru.md`): "everything in containers by default" —
   a container as one identity with exactly one network, interception of

@@ -4,9 +4,8 @@ Russian: [CONTAINERS.ru.md](CONTAINERS.ru.md) · Related: [LAUNCHERS.md](LAUNCHE
 (launcher entries), [CERTIFICATES.md](CERTIFICATES.md) (per-container trust),
 [LEAK-MODEL.md](LEAK-MODEL.md), [GOTCHAS.md](GOTCHAS.md)
 
-**Status: proposal (2026-09-17).** Nothing described here as "new" exists yet
-unless it is marked as done. The owner decides the open questions at the end
-before any of it is implemented.
+**Status: design accepted with the owner's decisions of 2026-09-17 (§12).**
+Nothing described here as "new" exists yet unless it is marked as done.
 
 ## 1. Summary
 
@@ -16,32 +15,38 @@ and a filesystem sandbox (none, per-app, named, throwaway). This design turns
 the three into one thing, a **container**:
 
 > A container is a named identity: a home, a set of permissions, a set of
-> trusted certificates **and exactly one network**. A program instance runs in
-> exactly one container. Programs are assigned to containers, not to networks.
+> trusted certificates **and one network at a time**. A program instance runs
+> in exactly one container. Programs are assigned to containers; networks are
+> assigned to containers, and both assignments can be changed at any time —
+> explicitly, never as a side effect of a click.
 
 Consequences, in order of importance:
 
-1. **Identity cannot be split across networks** ([LEAK-MODEL](LEAK-MODEL.md)
-   "Open channels" §4). A container bound to zone `nl` never runs in `direct`:
-   the picker does not offer it and `vpn-zone run` refuses it.
+1. **An identity changes networks only when a person says so**
+   ([LEAK-MODEL](LEAK-MODEL.md) "Open channels" §4). The per-click network
+   question is what used to take one browser profile into two networks without
+   anybody noticing; a network change is now an action of its own, shown as
+   such.
 2. **No layer is silently dropped.** Every launch takes the same road, whether
-   the network is a zone, `direct` or `offline`. The `direct` bug fixed on
+   the network is a zone, `direct` or `offline`. The `direct` bug fixed in
    `fix/launch-path` (the picker dropped the container, the sandbox and the
    compositor restriction) is the class of bug this removes by construction.
-3. **Launches from outside the launcher end up in the right container**: D-Bus
-   activation, autostart, compositor key bindings, links from other programs
-   (§5).
-4. **Per-zone launcher clones become unnecessary**; the per-container view
-   replaces them ([LAUNCHERS.md](LAUNCHERS.md) §4). Nothing is deleted before
-   the owner agrees.
-5. **Everything is declarative** through module options, with a
-   machine-readable state output for nix_cm (§8, §9).
+3. **Every program gets a home of its own by default**, and two containers can
+   be merged into one (§3.4).
+4. **Launches from outside the launcher end up in the right container**: D-Bus
+   activation, autostart, compositor key bindings, links from other programs,
+   entries programs write into the user directory (§5).
+5. **Per-zone launcher clones are deprecated**; the per-container view replaces
+   them ([LAUNCHERS.md](LAUNCHERS.md) §4).
+6. **Everything is declarative** through home-manager module options, with a
+   machine-readable state output that says where every value comes from (§8,
+   §9).
 
 ## 2. What exists today
 
 | concept | where it lives | what it isolates |
 |---|---|---|
-| zone | `~/.local/state/vpn-zones/<zone>/` + `vpn-zone@<zone>` | network (app-ns: `lo` + tunnel only) |
+| zone | `~/.local/state/vpn-zones/<zone>/` + `vpn-zone@<zone>` | network (app-ns: `lo` + tunnel only); WireGuard, AmneziaWG or OpenConnect |
 | `direct` | nothing | nothing (host network) |
 | `offline` | a zone with a marker, created on demand | everything network, incl. host resolvers |
 | overlay container ("profile") | `~/.local/state/vpn-profiles/<name>/` | XDG dirs (`.config`, `.local/share`, `.cache`, `.mozilla`, `.pki`) |
@@ -62,59 +67,116 @@ which is exactly what lets one program's identity travel between networks.
 ```
 container = {
   name        unique; the selector is what the registry already uses
-  home        overlay | private | throwaway-overlay | throwaway-private
-  network     <zone> | direct | offline | ask
-  permissions filesystem {downloads, documents, pictures, home}, x11,
-              compositor {restricted | full}, (later) bus names, devices
+  home        private | overlay | throwaway-private | throwaway-overlay
+  network     one network (§3.3), or ask
+  routes      extra named routes beside the network (LAN, …) — off by default
+  permissions filesystem {downloads, documents, pictures, home, paths[]},
+              x11, compositor {restricted | full}, (later) bus names, devices
   trust       extra CA certificates (CERTIFICATES.md)
   apps        programs assigned here (launcher ids)
-  source      declared (Nix, read-only) | local (CLI/GUI)
+  source      nix (read-only) | local (CLI/GUI)
 }
 ```
 
-- **`home`** maps one-to-one onto what exists: `overlay` is today's profile,
-  `private` is today's named sandbox (and the per-app `app-<key>` one),
-  the throwaway kinds are today's `--tmp-profile` and `--fs-sandbox`. Data
+- **`home`** maps one-to-one onto what exists: `private` is today's named
+  sandbox (and the per-app `app-<key>` one), `overlay` is today's profile, the
+  throwaway kinds are today's `--fs-sandbox` and `--tmp-profile`. Data
   directories stay where they are; they are part of the contract
   ([GOTCHAS](GOTCHAS.md) §5).
-- **`network = ask`** is the compatibility value: the network question is asked
-  on every launch, exactly as now. Every container that exists today migrates
-  to `ask`. A container created by the new GUI binds its network at creation.
+- **`permissions.paths`** grants a private home individual directories of the
+  real one, bound at the same path: `~/.wine` for a Wine program, the Steam
+  library for Steam. Without it the default "a home of its own" breaks exactly
+  the programs that live off data in the shared home (§3.5).
+- **`network = ask`** is the compatibility value: the network question is
+  asked on every launch, exactly as now. Existing containers migrate to it.
 - **The main home is not a container.** "No container" stays available (host
-  tools, terminals that run `sudo`), is shown as such, and cannot hold trust or
-  a binding.
+  tools, terminals that run `sudo`), is shown as such, and cannot hold trust.
 
 ### 3.2 Invariants
 
-- **I1. One network per container.** A container with a bound network is
-  launched into that network only. `vpn-zone run <other> --profile <c>` is a
-  refusal with the way out named ("контейнер `c` привязан к сети `nl`;
-  перепривязать: `vpn-zone container set c network <сеть>`"), never a silent
-  launch.
-- **I2. One container per program instance.** Already true by construction
-  (the registry records the selector); the conflict check also looks at the
-  binary (done on `fix/launch-path`).
-- **I3. Every layer on every road.** Network, home, permissions, trust and the
+- **I1. One network at a time; a change is explicit.** A container is launched
+  into its current network only. Changing it is an action of its own —
+  «Сменить сеть контейнера…» in the picker and the GUI, `vpn-zone container
+  set <c> network <net>` on the command line, the option in Nix — and never a
+  side effect of choosing where to run a program. `vpn-zone run <other>
+  --profile <c>` is a refusal naming the way out, not a silent launch.
+- **I2. Running programs keep their network.** A process cannot be moved into
+  another network (§7). While programs of a container run in network A, the
+  container is not started in B; the network change offers to close and
+  restart them instead.
+- **I3. One container per program instance.** The registry records the
+  selector; the conflict check also looks at the binary (done).
+- **I4. Every layer on every road.** Network, home, permissions, trust and the
   compositor restriction are applied by one code path (`vpn-zone run` →
-  `entry_argv` → `profile-run`), for zones, `direct` and `offline` alike.
-- **I4. Unknown means offline.** A program with no assignment still gets the
-  "no network until given" default ([GOTCHAS](GOTCHAS.md) §2); with
-  `defaults.container = own` it also gets its own private home.
-- **I5. Fail closed.** A container bound to a zone that no longer exists does
-  not start in another network; a trust layer that cannot be applied stops the
-  launch ([CERTIFICATES.md](CERTIFICATES.md) §4).
+  `entry_argv` → `profile-run`), for every kind of network (done for zones,
+  `direct` and `offline`).
+- **I5. Unknown means offline.** A program with no assignment starts with no
+  network until one is given ([GOTCHAS](GOTCHAS.md) §2), in a home of its own
+  (`defaults.container = own`).
+- **I6. Fail closed.** A container whose network no longer exists does not
+  start somewhere else; a trust layer that cannot be applied stops the launch
+  ([CERTIFICATES.md](CERTIFICATES.md) §4).
 
-### 3.3 Per-launch runtime (the order is the specification)
+### 3.3 What a network can be
+
+| kind | how | root |
+|---|---|---|
+| zone: WireGuard/AmneziaWG | kernel tunnel created in the uplink, moved into the app namespace (done) | no |
+| zone: OpenConnect | client in the uplink, its tun moved into the app namespace (done) | no |
+| zone: another client (sing-box, OpenVPN, a GUI client) | same shape, M4 | no |
+| through a host interface | uplink with pasta bound to that interface (`--outbound-if4/-if6`): a second uplink, a modem, a VPN the system brought up | no |
+| `direct` | the host's network, no namespace (done) | no |
+| `offline` | loopback only (done) | no |
+| a host interface **itself** inside the container | moving a real link into another network namespace needs `CAP_NET_ADMIN` in the host's namespace | **yes**: a small system helper (NixOS module option), never the default |
+
+**Extra routes** (`routes`) sit beside the one network — the typical one is the
+LAN next to a tunnel. Each is a named, explicit exception: a rule in the
+uplink plus a route in the app namespace for exactly that prefix, off by
+default and shown in every view of the container. A second default route is
+never possible: two ways out is a leak waiting for a routing mistake.
+
+### 3.4 Merging two containers
+
+`vpn-zone container merge <from> <into>` (and a GUI entry): for programs that
+turned out to belong together (a browser and a password manager).
+
+- the programs of `<from>` are assigned to `<into>`;
+- the home of `<from>` is copied into `<into>` **only where `<into>` has no
+  such path**; conflicting paths go to `<into>`'s
+  `.merged-from-<from>/` directory and are listed — merging two browser
+  profiles is not something a tool can decide;
+- the network stays `<into>`'s; trust certificates are united (the ⚠ dialog of
+  [CERTIFICATES.md](CERTIFICATES.md) is shown for every certificate that is new
+  to `<into>`); permissions of `<from>` that `<into>` lacks are asked for, not
+  copied;
+- `<from>` is kept, emptied of programs, until it is deleted by hand;
+- refused while programs of either container are running (I2).
+
+### 3.5 Homes of their own, and what they cost
+
+`own` as the default means an unassigned program starts in an empty private
+home. Programs that expect their data in the shared home do not find it:
+
+| program | what it needs | how it gets it |
+|---|---|---|
+| Wine programs | the prefix (`~/.wine`, or the `WINEPREFIX` their entry sets) | the prefix is read from the entry's `Exec` and offered as `permissions.paths` on the first launch |
+| Steam | `~/.local/share/Steam`, `~/.steam` | a known-program hint: offered on the first launch |
+| programs a person already set up in the shared home | their config | the first-launch dialog offers "a home of its own", "a layer over your home" (overlay) and "no container" |
+
+The hints are a list in the crate, each entry naming the program and the
+paths; nothing is granted without the person's answer.
+
+### 3.6 Per-launch runtime (the order is the specification)
 
 ```
 [nsenter -U -n -m -t <zone>]  or  [unshare -U --map-current-user --keep-caps]   (direct)
-  └─ unshare --mount --propagation private           always, when anything is mounted
-      └─ vpn-zone-core profile-run --cwd <dir> …
-           1. home layer: overlay slots (missing lower dirs created empty, 0700)
+  └─ unshare --mount --propagation private           when anything is mounted
+      └─ vpn-zone-core profile-run --cwd <dir> …     (done)
+           1. home layer: overlay slots, or binds for permissions.paths
            2. runtime hermeticity (§6, phase 4): tmpfs over /run/user/<uid>,
               sockets back by name; tmpfs over /tmp/.X11-unix
            3. trust layer: bundle binds, NSS databases (CERTIFICATES.md)
-           4. chdir <dir> → $HOME → /            (done: fix/launch-path)
+           4. chdir <dir> → $HOME → /                (done)
            5. drop ambient capabilities
            6. exec: wl-sandbox → fs-sandbox (bwrap) → program
 ```
@@ -129,71 +191,56 @@ Resolution order for a launch of program `P`:
 
 1. a running instance of `P` (by launcher id): the same container — clicking a
    running program means "raise the window" ([GOTCHAS](GOTCHAS.md) §11);
-2. a **declared** assignment (`programs.vpn-zones.apps.P.container`);
-3. a **local** pin (`.pinnedprofile`, and `.pinned` for `ask` containers);
-4. the question.
+2. an assignment from Nix (`programs.vpn-zones.containers.<c>.apps`);
+3. a local assignment (made in the picker);
+4. `defaults.container`: `own` — a new private container named after the
+   program, network `offline`, and one question: which network to give it
+   (the same menu as today, remembered as the container's network).
 
-The question becomes container-first. A sketch of the menu (texts are
-illustrative, the final ones go through i18n):
+The picker shows the container and its network, and never asks for a network
+of an assigned program:
 
 ```
-Where should «Firefox» run?
-  🔒 work — VPN nl · own home
-  📁 personal — direct · layer over your home
-  ⚠ gov — VPN ru · own home · EXTRA ROOT CERTIFICATE
-  ── one-off ──
-  Offline, throwaway sandbox
-  VPN nl, throwaway sandbox
-  No container · direct            (shown last, plain)
-  ── ──
-  ➕ New container…                 (name, home kind, network — bound)
-  Always: …                         (pins the program to the chosen container)
+«Firefox» — container firefox · VPN nl · own home
+  ▶ Start
+  ⇄ Change the container's network…     (I1: explicit; running programs restart)
+  ⧉ Another container…                  (lists containers with their networks)
+  ⊕ Merge with another container…
+  One-off: throwaway container, offline
 ```
 
-The existing network-first dialog stays available for `ask` containers and for
-"no container", so nothing a user relies on today disappears.
+For `ask` containers and for "no container" the network-first dialog of today
+stays, so nothing a user relies on disappears.
 
 ## 5. Launches outside the launcher
 
 Interception is **default routing, not a security boundary**. A process on the
 host can always `exec` a store path directly; the host user is trusted. The
-boundary is the container → outside direction (§6). The table lists every way
-a program gets started and what routes it.
+boundary is the container → outside direction (§6).
 
-| path | today | proposal | phase |
+| path | today | design | phase |
 |---|---|---|---|
-| launcher entry (menus, fuzzel/rofi, KRunner, noctalia) | picker shadow entry in `~/.local/share/applications` | unchanged; container-first question | 1 |
-| entries the user dir already holds (Steam games, `userapp-*` of messengers, web apps, Wine) | **not intercepted**: foreign files are never rewritten | owner's decision, see [LAUNCHERS.md](LAUNCHERS.md) §3.2 | 3 |
-| child entries (`steam steam://rungameid/…`) | cloned per zone as separate programs | routed to the parent's container | 1 |
+| launcher entry (menus, fuzzel/rofi, KRunner, noctalia) | picker shadow entry in `~/.local/share/applications` | unchanged; container-first picker | 1 |
+| hidden handlers (`NoDisplay=true` + `MimeType`) | **done**: intercepted under the id of the visible entry of the same program | — | 0 |
+| child entries (`steam steam://rungameid/…`) | **done**: no clones, launched under the client's id | web apps of a browser (`--app-id=`) join them | 0/3 |
+| entries programs write into the user directory (Steam games, `userapp-*`, web apps, Wine) | not intercepted: foreign files are never rewritten | taken over in place with a backup and re-taken when rewritten ([LAUNCHERS.md](LAUNCHERS.md) §3.2); the invariant changes in a commit of its own | 3 |
 | `xdg-open`, `gio open`, `kde-open`, "open with" | resolve to a `.desktop` → the shadow entry | unchanged | — |
-| D-Bus activation (`DBusActivatable=true`, `gapplication launch`) | `DBusActivatable=false` in the shadow; the service file still activates around it | shadow session service files in `$XDG_DATA_HOME/dbus-1/services/<id>.service` for intercepted ids only; never for portal or system names | 3 |
-| XDG autostart (`~/.config/autostart`, systemd-xdg-autostart-generator) | runs uncontained | shadow entries in `~/.config/autostart` for **assigned** programs only; no dialogs at login; unassigned ones listed by `doctor` | 3 |
-| compositor key bindings (niri `spawn`, KWin shortcuts) | only if the binding itself calls `vpn-zone-pick` | `vpn-zone launch <launcher-id> [args]` reads the entry's own `Exec` (no command duplicated in the compositor config); a module option exposes the command line | 3 |
-| shell | uncontained | opt-in PATH shims for assigned programs (`~/.local/share/vpn-zones/shims`), with a recursion guard; never a boundary | 3 |
-| portal `OpenURI`/`OpenFile` from a host program | the portal launches the handler's entry → shadow → picker | unchanged | — |
-| portal `OpenURI` from a container | same, but the origin is lost: a link from a zone may open in a direct browser | broker (§6.2) | 4 |
-| a link or program opened from inside a zone (`vpn-zone run` in a zone) | delegated through `systemd --user` (`launch.rs` step 1) | the same door, but guarded: broker (§6.2) | 4 |
-| `systemd-run --user`, `systemctl --user` from inside a zone | reachable: a process can start anything outside | runtime hermeticity (§6.1) | 4 |
-| `flatpak run`, `flatpak-spawn --host` | flatpak's own sandbox; `--host` escapes over the session bus | private containers already filter the bus; overlay containers get it with §6.1 | 4 |
+| D-Bus activation (`gapplication launch`, `DBusActivatable=true`) | the service file activates around the shadow | shadow session service files in `$XDG_DATA_HOME/dbus-1/services/<id>.service` for intercepted ids only; never for portal or system names | 3 |
+| XDG autostart | runs uncontained | assigned programs start in their container; **unassigned ones start offline, in a home of their own, without a dialog, and a notification says so** | 3 |
+| compositor key bindings | only if the binding calls `vpn-zone-pick` | `vpn-zone launch <launcher-id>` reads the entry's `Exec`; a module option exposes the command line | 3 |
+| shell | uncontained | opt-in PATH shims for assigned programs; never a boundary | 3 |
+| portal `OpenURI` from a host program | portal → handler entry → shadow → picker | unchanged | — |
+| portal `OpenURI` from a container | the origin is lost | broker (§6.2) | 4 |
+| a link opened from inside a zone | delegated through `systemd --user` | the same door, guarded: broker | 4 |
+| `systemd-run --user`, `systemctl --user` from inside a zone | reachable | runtime hermeticity (§6.1) | 4 |
+| `flatpak-spawn --host` | escapes over the session bus | filtered for private homes today; overlays with §6.1 | 4 |
 | programs started by other host programs | uncontained | out of scope (host is trusted); `doctor` names it | — |
 
-### 5.1 Child entries
-
-An entry is a **child** when its command hands a URL to another program:
-`Exec=steam steam://rungameid/<id>`. Detection: an argument is a URL whose
-scheme some other entry claims as `x-scheme-handler/<scheme>`, and both entries
-start the same program. A child is never cloned per zone and, in picker mode,
-uses the parent's launcher id: the running client decides where the game runs,
-and the game is its child — its network is the client's ([GOTCHAS](GOTCHAS.md)
-§10). "A network per game" is impossible while the client owns the launch;
-the honest UI is "Steam's container".
-
-### 5.2 The launch command for bindings
+### 5.1 The launch command for bindings
 
 `vpn-zone launch <launcher-id> [-- extra args]` finds the entry by id in the
 same source directories `sync` reads, takes its `Exec` (field codes filled from
-the extra arguments), and becomes the picker for it. A compositor binding then
-names the program once:
+the extra arguments), and becomes the picker for it:
 
 ```kdl
 Mod+B { spawn "vpn-zone" "launch" "firefox"; }
@@ -201,93 +248,95 @@ Mod+B { spawn "vpn-zone" "launch" "firefox"; }
 
 ## 6. The outward boundary (phase 4)
 
-These are M3 items; containers make them per-container defaults instead of
-global switches.
+These are M3 items; containers make them per-container defaults.
 
 ### 6.1 Runtime hermeticity
 
 In the launch's mount namespace: tmpfs over `/run/user/<uid>` with only the
 Wayland socket (already restricted), PipeWire, PulseAudio and the broker socket
 bound back; tmpfs over `/tmp/.X11-unix` plus `unset DISPLAY`
-([LEAK-MODEL](LEAK-MODEL.md) §7); optionally tmpfs over `/run/dbus`. Private
-containers already have all of it through bwrap. Overlay containers get it as
-the default once the broker exists — before that it would break opening links,
-which is exactly what the delegation path serves today.
+([LEAK-MODEL](LEAK-MODEL.md) §7), with a container-own `xwayland-satellite` for
+programs granted `x11`; optionally tmpfs over `/run/dbus`. Private homes
+already get all of it through bwrap; overlay containers get it once the broker
+exists.
 
 ### 6.2 Broker
 
 One socket per container, bound into its runtime directory. One verb: "open
-this" (a URI, a file handed over by fd, or a launcher id). On the host side the
-broker knows the origin container, so the decision is:
+this" (a URI, a file handed over by fd, or a launcher id). The host side knows
+the origin container:
 
-- target program assigned to the **same** container → start it there, no
-  dialog;
+- target assigned to the **same** container → start it there, no dialog;
 - a locked container → only the same container;
-- otherwise → the picker, with the origin in the question ("a link from `work`
-  (VPN nl)").
+- otherwise → the picker, with the origin in the question.
 
-Inside the container, three entry points reach it:
-
-1. `xdg-open` and `$BROWSER` resolve to the broker client (a bind over the
-   store path of `xdg-open` in the launch's mount namespace);
-2. the delegation in `launch.rs` step 1 goes to the broker instead of
-   `systemd-run`;
-3. portals: private containers stop getting `OpenURI`/`OpenFile` through the
-   bus proxy (`--call` rules per portal interface instead of the blanket
-   `--talk=org.freedesktop.portal.*`). GTK, Qt and Firefox under
-   `/.flatpak-info` call the portal and do not fall back to `xdg-open`, so a
-   portal-compatible front for `OpenURI` is needed before this switch.
-   **Open research item**, prototype in the VM before any promise.
+Entry points inside the container: `xdg-open`/`$BROWSER` resolve to the broker
+client; the delegation in `launch.rs` step 1 goes to the broker; portals stop
+getting `OpenURI`/`OpenFile` through the bus proxy (`--call` rules per portal
+interface). GTK, Qt and Firefox under `/.flatpak-info` call the portal and do
+not fall back to `xdg-open`, so a portal-compatible front for `OpenURI` is
+needed first. **Open research item**, VM prototype before any promise.
 
 ## 7. Limits without root
-
-What cannot be done as an unprivileged user, and why. Each item is a
-constraint on this design, not a to-do.
 
 - **No global interception of `exec`.** fanotify permission events, LSM and
   eBPF hooks need `CAP_SYS_ADMIN`/`CAP_BPF` in the initial user namespace.
   seccomp user notification would need `NO_NEW_PRIVS` on the whole session,
   which breaks every setuid helper (`sudo`, and `newuidmap`, which zones depend
   on), and still does not reach the children of `systemd --user`.
-- **No per-process network policy on the host.** cgroup BPF and `net_cls` need
-  root. A network is only ever a namespace.
-- **A running process cannot be moved** into another network or container.
-  `setns` acts on the caller; a program started outside stays outside until it
-  is restarted.
-- **Host files cannot change, only views of them.** Every change of `/etc`
-  (bundles, `nsswitch.conf`, browser policies) is a bind or tmpfs in our own
-  mount namespace, and a mount point has to exist already: nothing can be
-  created inside root-owned directories.
+- **No per-process network policy on the host.** cgroup BPF and `net_cls`
+  need root. A network is only ever a namespace.
+- **A running process cannot be moved** into another network or container;
+  `setns` acts on the caller (I2).
+- **A host interface cannot be moved into a container** without
+  `CAP_NET_ADMIN` in the host's network namespace (§3.3). Traffic *through* it
+  is possible rootless; the interface *itself* inside needs a system helper.
+- **Host files cannot change, only views of them**, and a mount point has to
+  exist already: nothing can be created inside root-owned directories.
 - **The host session bus cannot be filtered for host programs**, only for
   containers, through a proxy.
 - **Kernel modules** (`amneziawg`, `nf_tables`) cannot be loaded from a user
   namespace, and `/etc/subuid` needs the administrator once.
-- **Programs with compiled-in trust or their own runtime** (Flatpak runtimes,
-  Steam's pressure-vessel, AppImages, `webpki-roots`) cannot be given a trust
-  layer from outside ([CERTIFICATES.md](CERTIFICATES.md) §2).
+- **Programs with compiled-in trust or their own runtime** (Flatpak, Steam's
+  pressure-vessel, AppImages, `webpki-roots`) cannot be given a trust layer
+  from outside ([CERTIFICATES.md](CERTIFICATES.md) §2).
+- **Entries in the user's own applications directory** can only be taken over
+  by rewriting them, and a program that rewrites its entry wins for the moment
+  until it is taken over again ([LAUNCHERS.md](LAUNCHERS.md) §3.2).
 
-## 8. Declarative configuration (module options)
+## 8. Declarative configuration (home-manager module options)
 
-For nix_cm, whose rule is "program settings only through module options":
-options in, JSON out (§9), no parsing of our files on its side.
+The options belong to the **home-manager** module (`homeModules.default`) and
+are set in the home configuration of the user they apply to; the NixOS module
+has none of them. Declared values are written into
+`~/.config/vpn-zones/declared/` of that user (read-only store links) and take
+precedence over local state; the CLI and the GUI show them as "set in Nix" and
+refuse to change them.
 
 ```nix
 programs.vpn-zones = {
   enable = true;
 
-  launcher.mode = "picker";              # picker | per-zone | both | off
+  launcher.mode = "picker";              # picker | per-zone (deprecated) | both (deprecated) | off
   defaults = {
-    network = "offline";                 # offline | direct | <zone>
-    container = "ask";                   # ask | main | own | <container>
+    network = "offline";                 # offline | direct | <network>
+    container = "own";                   # own | ask | main | <container>
   };
   compositorRestriction.enable = true;
 
+  networks.lan-uplink = {                # zones are local (keys); this is the rootless kind
+    kind = "host-interface";
+    interface = "enp4s0";
+  };
+
   containers.work = {
-    home = "private";                    # overlay | private
-    network = "nl";                      # <zone> | direct | offline | "ask"
+    home = "private";                    # private | overlay
+    network = "nl";                      # <zone> | <network> | direct | offline | "ask"
+    routes = [ ];                        # e.g. [ "192.168.1.0/24" ] — explicit holes
     apps = [ "firefox" "org.telegram.desktop" ];
     permissions = {
       filesystem = [ "downloads" ];      # downloads | documents | pictures | home
+      paths = [ ];                       # e.g. [ "~/.wine" ]
       x11 = false;
     };
     trust = {                            # CERTIFICATES.md
@@ -296,113 +345,113 @@ programs.vpn-zones = {
     };
   };
 
+  autostart.unassigned = "offline";      # offline (no dialog, notification) | as-is
   interception = {
-    dbusActivation = false;              # phase 3
-    autostart = false;                   # phase 3
-    userEntries = "leave";               # leave | take-over — LAUNCHERS.md §3.2
+    dbusActivation = true;
+    userEntries = "take-over";           # take-over | leave — LAUNCHERS.md §3.2
   };
 };
 ```
 
-- Declared values are written by home-manager into
-  `~/.config/vpn-zones/declared/` (read-only store links) and **take
-  precedence** over local state. The CLI and the GUI show them as "set in
-  Nix" and refuse to change them instead of failing on a read-only file.
 - Zones themselves are not declared: a zone config is a private key and must
-  never enter the Nix store. A declared container naming a zone that does not
-  exist is a launch-time refusal (I5), not an evaluation error.
-- Assertions at evaluation time: `trust.certificates != []` requires
-  `acknowledgeRisk`; one program in two containers' `apps` is an error;
-  `permissions.filesystem` on an `overlay` home is a warning (it does not
-  apply).
+  never enter the Nix store. A declared container naming a network that does
+  not exist is a launch-time refusal (I6), not an evaluation error.
+- Assertions: `trust.certificates != []` requires `acknowledgeRisk`; one
+  program in two containers' `apps` is an error; `permissions.filesystem` or
+  `paths` on an `overlay` home is a warning (they do not apply).
 
 ## 9. Machine-readable state
 
 `vpn-zone status --json` prints everything; `vpn-zone container list --json`
 and `vpn-zone container show <name> --json` print subsets of the same schema.
-Additive changes only within a `version`.
+
+- **`schema_version`** is in every document. Within a version changes are
+  additive only; removing a field or changing its meaning is a new version and
+  a CHANGELOG entry.
+- **Every settable value carries its origin**: `{"value": …, "source": "nix" |
+  "local" | "default"}`. Runtime facts (`running`, `up`, `handshake_age_s`) are
+  plain values.
 
 ```json
 {
-  "version": 1,
-  "defaults": { "network": "offline", "container": "ask",
-                "launcher_mode": "picker", "compositor_restriction": true },
-  "zones": [
-    { "name": "nl", "backend": "amneziawg", "up": true, "locked": false,
-      "handshake_age_s": 42 }
+  "schema_version": 1,
+  "defaults": {
+    "network":   { "value": "offline", "source": "default" },
+    "container": { "value": "own",     "source": "nix" },
+    "launcher_mode": { "value": "picker", "source": "default" },
+    "compositor_restriction": { "value": true, "source": "default" }
+  },
+  "networks": [
+    { "name": "nl", "kind": "amneziawg", "source": "local",
+      "up": true, "locked": false, "handshake_age_s": 42 }
   ],
   "containers": [
-    { "name": "work", "selector": "sb:work", "home": "private",
-      "source": "declared", "network": "nl",
-      "apps": ["firefox"],
-      "permissions": { "filesystem": ["downloads"], "x11": false,
-                       "compositor": "restricted" },
-      "trust": { "extra": [ { "sha256": "…", "subject": "CN=…",
-                              "not_after": "2030-01-01T00:00:00Z",
-                              "source": "declared" } ] },
-      "running": [ { "app": "firefox", "pid": 1234, "zone": "nl" } ] }
-  ],
-  "apps": [
-    { "id": "firefox", "label": "Firefox", "container": "sb:work",
-      "source": "declared" }
+    { "name": "work", "selector": "sb:work",
+      "home":    { "value": "private", "source": "nix" },
+      "network": { "value": "nl",      "source": "local" },
+      "routes":  { "value": [],        "source": "default" },
+      "apps":    [ { "value": "firefox", "source": "nix" } ],
+      "permissions": {
+        "filesystem": { "value": ["downloads"], "source": "nix" },
+        "paths":      { "value": [],            "source": "default" },
+        "x11":        { "value": false,         "source": "default" },
+        "compositor": { "value": "restricted",  "source": "default" }
+      },
+      "trust": [ { "sha256": "…", "subject": "CN=…",
+                   "not_after": "2030-01-01T00:00:00Z", "source": "nix" } ],
+      "running": [ { "app": "firefox", "pid": 1234, "network": "nl" } ] }
   ]
 }
 ```
 
-The JSON is written by hand like the manifest parser is read by hand (no
-`serde`): the schema is ours and flat enough. Its only consumer-visible
-contract is this document; a test pins every key.
+Written by hand like the manifest is read by hand (no `serde`); a test pins
+every key of version 1.
 
 ## 10. Where can a packet or a DNS query go around the tunnel now?
 
-Asked for every piece, as the project rules require.
-
-- **Container binding (I1).** Removes a path rather than adding one: an
-  identity can no longer be taken into another network by a click.
-- **`direct` containers** (done). No network namespace by definition — the
-  program uses the host's network and the host's resolvers, and says so in
-  the name. The user namespace is new; it grants no capability over the host
-  netns.
-- **Per-launch mount namespace.** No network change; mounts are private to the
-  launch.
-- **`vpn-zone launch`, PATH shims, autostart and D-Bus shadows.** They only
-  start the picker or `vpn-zone run`; no new socket, no new route.
-- **Broker.** A new unix socket inside the container — a door with a guard:
-  one verb, and a human decides anything that crosses containers. It replaces
-  the unguarded `systemd --user` path, which is strictly wider.
-- **JSON output.** Names zones and containers to any process of the user.
-  Inside a private container the state directory is not visible at all;
-  inside an overlay container the whole home is readable already
-  ([LEAK-MODEL](LEAK-MODEL.md) §9) — nothing new is disclosed.
-- **Trust layer.** Not a network path, but a MITM channel; its own analysis is
+- **Changeable networks (I1, I2).** A change is explicit and shown; a
+  container never runs in two networks at once. The identity channel of
+  [LEAK-MODEL](LEAK-MODEL.md) §4 is narrowed to a deliberate act.
+- **Networks through a host interface.** The uplink is bound to one interface;
+  the app namespace is the same two-link namespace as for a tunnel, so nothing
+  inside can pick another way out. What this network does not do is encrypt:
+  it is named as such everywhere it is shown.
+- **Extra routes.** Each is a hole by definition — explicit, per prefix, off by
+  default, listed in every view and in `doctor`.
+- **`direct` containers** (done). No network namespace — the host's network and
+  resolvers, and the name says so. The user namespace grants nothing over the
+  host's netns.
+- **Per-launch mount namespace, path grants.** No network change.
+- **`vpn-zone launch`, shims, autostart, D-Bus shadows, taken-over entries.**
+  They only start the picker or `vpn-zone run`; no new socket, no new route.
+- **Broker.** A guarded door replacing the unguarded `systemd --user` path.
+- **JSON output.** Names zones and containers to processes of the user; inside
+  a private home the state directory is not visible at all.
+- **Trust layer.** A MITM channel with its own analysis:
   [CERTIFICATES.md](CERTIFICATES.md) §5.
 
 ## 11. Phases and tests
 
-Every phase ends with a VM test that is red before and green after
-([LEAK-MODEL](LEAK-MODEL.md): "a channel is closed when a test opens it").
-
 | phase | content | proof |
 |---|---|---|
-| 0 | launch-path fixes: `direct` keeps its layers, working directory, conflict by id and binary (**done**, `fix/launch-path`); child entries | smoke: layer + host netns + own userns in `direct`; `pwd` and a file only in the upper layer |
-| 1 | container entity, network binding (I1), container-first picker, `vpn-zone container …`, `status --json`, module options, migration to `network = ask` | CLI/picker scenario tests; VM: a bound container refuses another network; JSON schema test |
-| 2 | trust layer ([CERTIFICATES.md](CERTIFICATES.md)) | VM: synthetic CA trusted in container A only |
-| 3 | `vpn-zone launch`, D-Bus and autostart shadows, child entries in picker mode, user-dir entries (per owner's decision), PATH shims | VM: activation via `gdbus call`/`gapplication launch` lands in the container |
-| 4 | runtime hermeticity, broker, X11 closure | VM "evil host": a `systemd --user` that counts `StartTransientUnit`, a portal that logs callers, an HTTP beacon |
+| 0 | **done**: `direct` keeps its layers, working directory, conflict by id and binary, hidden handlers, Steam children | smoke; unit and scenario tests |
+| 1 | container entity with changeable network (I1, I2), `own` by default, path grants and hints, merge, container-first picker, `vpn-zone container …`, `status --json`, module options, migration; clones deprecated | CLI/picker scenario tests; VM: a container refuses a second network while running; JSON schema test |
+| 2 | trust layer ([CERTIFICATES.md](CERTIFICATES.md)) — **in progress** | VM and smoke: synthetic CA trusted in one container only |
+| 3 | `vpn-zone launch`, D-Bus and autostart shadows, user-dir take-over, web apps as children, host-interface networks, PATH shims | VM: activation via `gdbus call` lands in the container; autostart of an unassigned program is offline |
+| 4 | runtime hermeticity, broker, X11 closure, extra routes | VM "evil host": a `systemd --user` counting `StartTransientUnit`, a portal logging callers, an HTTP beacon |
 
-## 12. Open questions for the owner
+## 12. The owner's decisions (2026-09-17)
 
-1. Bind the network into containers (I1) — and migrate existing containers to
-   `ask` (compatible) or ask the user once per container?
-2. `defaults.container`: keep `ask`, or make `own` (every new program gets its
-   own private home) the default for new installs?
-3. Foreign entries in `~/.local/share/applications` (Steam games, `userapp-*`,
-   web apps, Wine): leave them uncontained, or take them over in place with a
-   backup ([LAUNCHERS.md](LAUNCHERS.md) §3.2)? This changes a written invariant
-   ("foreign files are never rewritten").
-4. Autostart of an unassigned program: start as is (today), start offline
-   without a dialog, or not start and notify?
-5. Per-zone clones: deprecate now and remove after the container view lands
-   ([LAUNCHERS.md](LAUNCHERS.md) §4)?
-6. The unmerged `feat/openconnect-backend`: merge first, or rebase it after
-   this work?
+1. **Networks and containers change independently**, and a container's network
+   can be any interface, not only the zones of this project → I1/I2 (explicit
+   change, no two networks at once), §3.3 (host interfaces rootless through
+   pasta; an interface itself only with a system helper), extra routes as
+   explicit holes.
+2. **A home of its own for every program, with merging** →
+   `defaults.container = own`, §3.4, §3.5.
+3. **Everything in containers, including entries in the user directory** →
+   take-over in place with a backup ([LAUNCHERS.md](LAUNCHERS.md) §3.2, with the
+   cost and risk per kind of entry); the invariant changes in its own commit.
+4. **Unassigned autostart: offline, no dialog, a notification** → §5.
+5. **Per-zone clones deprecated now** → [LAUNCHERS.md](LAUNCHERS.md) §4.
+6. **`feat/openconnect-backend` merged first** → done.
