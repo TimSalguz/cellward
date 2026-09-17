@@ -29,6 +29,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   been checked.
 - `vpn-zone add` refuses the names `direct` and `offline`: they are the
   picker's built-in choices, and a zone called `direct` could never be entered.
+- **A program started into a zone opened in `/` instead of where it was
+  started from** — a terminal showed `/` in its prompt. `nsenter` does
+  `chdir("/")` when it joins a mount namespace. Every launch that enters a
+  namespace now ends in `vpn-zone-core profile-run --cwd <dir>` (with an empty
+  layer directory for the main profile), which changes into the caller's
+  directory AFTER stacking the container's layers — `nsenter --wd` would have
+  pinned the program to the directory under the overlay — and falls back to
+  `$HOME` and `/` when that directory does not exist in the zone's mount tree.
+  `profile-run` accepts the new optional leading `--cwd`; older command lines
+  parse as before.
 
 ### Fixed (DNS leak: the host's resolvers were reachable from inside a zone)
 - **Every name looked up inside a zone could be resolved by the HOST's

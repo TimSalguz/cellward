@@ -72,6 +72,16 @@ pub struct Args {
     /// Directory of the launch registry for this container, or empty. Used
     /// only to answer "is anybody else still in here?".
     pub regdir: PathBuf,
+    /// `--cwd`: the directory the program is to start in — the caller's.
+    ///
+    /// Needed because `nsenter`, joining another mount namespace, does
+    /// `chdir("/")`: the old working directory belongs to the old namespace. A
+    /// terminal started into a zone opened in `/` (measured). `nsenter --wd`
+    /// cannot do it for a container: the overlay is mounted over `$HOME` HERE,
+    /// after `nsenter`, and a chdir made before that would pin the program to
+    /// the directory UNDER the layer. So the chdir is made here, after the
+    /// mounts. (`docs/GOTCHAS.md` §10a)
+    pub cwd: Option<PathBuf>,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
 }
@@ -102,7 +112,10 @@ impl fmt::Display for ArgError {
 impl std::error::Error for ArgError {}
 
 impl Args {
-    /// Parse `<profiledir> <zone> <ephemeral 0|1> <regdir> -- cmd...`.
+    /// Parse `[--cwd DIR] <profiledir> <zone> <ephemeral 0|1> <regdir> -- cmd...`.
+    ///
+    /// `--cwd` is optional and may only come first, so that every older
+    /// command line still parses the way it did.
     ///
     /// `OsString` and not `String` all the way through: an argument can be a
     /// file name handed over by the launcher through a `%U` field code, and
@@ -114,7 +127,15 @@ impl Args {
             .iter()
             .position(|a| a == "--")
             .ok_or(ArgError::NoSeparator)?;
-        let positional = &argv[..split];
+        let mut positional = &argv[..split];
+        let mut cwd = None;
+        if positional.first().is_some_and(|a| a == "--cwd") {
+            cwd = positional
+                .get(1)
+                .filter(|dir| !dir.is_empty())
+                .map(PathBuf::from);
+            positional = positional.get(2..).unwrap_or(&[]);
+        }
         let cmd = argv[split + 1..].to_vec();
         if cmd.is_empty() {
             return Err(ArgError::EmptyCommand);
@@ -129,6 +150,7 @@ impl Args {
             // safe way round: a typo must not delete somebody's data.
             ephemeral: positional.get(2).is_some_and(|e| e == "1"),
             regdir: PathBuf::from(positional.get(3).cloned().unwrap_or_default()),
+            cwd,
             cmd,
         })
     }
@@ -203,6 +225,42 @@ fn mount_profile(profile_dir: &Path) {
         // using the paths it always used.
         if let Err(e) = mount_overlay(&lower, &upper, &work, &lower) {
             eprintln!("profile: overlay on {}: {e}", lower.display());
+        }
+    }
+}
+
+/// Where to try to start the program, in order: the caller's directory, the
+/// home directory, and `/`, which always exists.
+///
+/// A fallback and not a failure, because the caller's directory may well not
+/// exist in here: the zone's mount tree is a private copy taken when the zone
+/// came up, and a drive mounted since (or a directory removed since) is simply
+/// not there. A program that does not start because of where it was started
+/// FROM would be a worse bug than the one this fixes.
+pub fn start_dirs(cwd: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = [cwd, home]
+        .into_iter()
+        .flatten()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .collect();
+    dirs.push(PathBuf::from("/"));
+    dirs
+}
+
+/// `chdir` into the first of [`start_dirs`] that works.
+fn enter_start_dir(cwd: Option<&Path>) {
+    let home = home_dir();
+    for dir in start_dirs(cwd, home.as_deref()) {
+        if std::env::set_current_dir(&dir).is_ok() {
+            if cwd.is_some_and(|wanted| wanted != dir) {
+                eprintln!(
+                    "profile: {} is not reachable here — starting in {}",
+                    cwd.unwrap_or(Path::new("")).display(),
+                    dir.display()
+                );
+            }
+            return;
         }
     }
 }
@@ -325,6 +383,11 @@ fn lossy(name: &OsStr) -> std::borrow::Cow<'_, str> {
 pub fn run(args: Args) -> u8 {
     if !args.profile_dir.as_os_str().is_empty() {
         mount_profile(&args.profile_dir);
+    }
+    // After the mounts and never before them: a directory entered earlier
+    // would be the one UNDER the overlay.
+    if args.cwd.is_some() {
+        enter_start_dir(args.cwd.as_deref());
     }
 
     // Nothing below this line needs privileges.
@@ -462,6 +525,57 @@ mod tests {
         let a = Args::parse(&argv(&["/tmp/p", "nl", "--", "x"])).unwrap();
         assert!(!a.ephemeral);
         assert_eq!(a.regdir, PathBuf::from(""));
+    }
+
+    #[test]
+    fn the_working_directory_comes_first_and_is_optional() {
+        let a = Args::parse(&argv(&[
+            "--cwd",
+            "/home/u/src",
+            "/state/prof",
+            "nl",
+            "0",
+            "/r",
+            "--",
+            "x",
+        ]))
+        .unwrap();
+        assert_eq!(a.cwd, Some(PathBuf::from("/home/u/src")));
+        assert_eq!(a.profile_dir, PathBuf::from("/state/prof"));
+        assert_eq!(a.zone, OsString::from("nl"));
+        assert_eq!(a.regdir, PathBuf::from("/r"));
+        assert_eq!(a.cmd, argv(&["x"]));
+        // The main profile after it: an empty directory argument is still one.
+        let a = Args::parse(&argv(&["--cwd", "/w", "", "nl", "0", "", "--", "x"])).unwrap();
+        assert!(a.profile_dir.as_os_str().is_empty());
+        assert_eq!(a.zone, OsString::from("nl"));
+        // Older command lines have none.
+        assert_eq!(
+            Args::parse(&argv(&["/p", "nl", "--", "x"])).unwrap().cwd,
+            None
+        );
+        // An empty value is no value.
+        let a = Args::parse(&argv(&["--cwd", "", "/p", "nl", "--", "x"])).unwrap();
+        assert_eq!(a.cwd, None);
+        assert_eq!(a.profile_dir, PathBuf::from("/p"));
+    }
+
+    #[test]
+    fn the_start_directory_falls_back_to_home_and_then_to_the_root() {
+        assert_eq!(
+            start_dirs(Some(Path::new("/w")), Some(Path::new("/home/u"))),
+            [
+                PathBuf::from("/w"),
+                PathBuf::from("/home/u"),
+                PathBuf::from("/")
+            ]
+        );
+        assert_eq!(
+            start_dirs(None, Some(Path::new("/home/u"))),
+            [PathBuf::from("/home/u"), PathBuf::from("/")]
+        );
+        assert_eq!(start_dirs(None, None), [PathBuf::from("/")]);
+        assert_eq!(start_dirs(Some(Path::new("")), None), [PathBuf::from("/")]);
     }
 
     #[test]

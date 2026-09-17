@@ -24,11 +24,12 @@ Usage:
         kill switch. This is the ExecStart of vpn-zone@<name>.service; the tool
         paths are substituted by Nix and default to a PATH lookup.
 
-  vpn-zone-core profile-run <profiledir> <zone> <ephemeral 0|1> <regdir> -- cmd...
-        Stack the container's overlay layers over the XDG directories, drop the
-        ambient capabilities and run the command. Called from `vpn-zone run`,
-        already inside the zone's namespaces. An empty <profiledir> means the
-        main profile: no layers are stacked. With <ephemeral> = 1 the command
+  vpn-zone-core profile-run [--cwd DIR] <profiledir> <zone> <ephemeral 0|1> <regdir> -- cmd...
+        Stack the container's overlay layers over the XDG directories, change
+        into DIR (falling back to $HOME and /), drop the ambient capabilities
+        and run the command. Called from `vpn-zone run`, already inside the
+        zone's namespaces. An empty <profiledir> means the main profile: no
+        layers are stacked. With <ephemeral> = 1 the command
         is run as a child and the container is removed after the last program
         living in it is gone.
 

@@ -651,6 +651,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         std::env::set_var(ENV_CURRENT, &zone);
     }
 
+    // The caller's working directory, which `nsenter` would otherwise lose. A
+    // directory that has been removed under us is no reason not to start:
+    // `profile-run` falls back to `$HOME` anyway.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| tools.home.clone());
     let exec = entry_argv(
         &Entry {
             nsenter: &tools.nsenter,
@@ -661,6 +665,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             dir: &container.dir,
             ephemeral: container.ephemeral,
             regdir: &regdir,
+            cwd: &cwd,
         },
         cmd,
     );
@@ -699,6 +704,8 @@ pub struct Entry<'a> {
     pub dir: &'a Path,
     pub ephemeral: bool,
     pub regdir: &'a Path,
+    /// The directory the program is to start in: the caller's.
+    pub cwd: &'a Path,
 }
 
 /// The command line `run` finally `exec`s: the namespaces, the container, then
@@ -722,9 +729,21 @@ pub struct Entry<'a> {
 /// * **`direct` without a container**: nothing at all. The program is a host
 ///   process like any other, and the command is exec'd as it is (still wrapped
 ///   in `wl-sandbox`/`fs-sandbox`, which are part of `cmd`).
+///
+/// **Everything that enters a namespace ends in `profile-run --cwd`**, the
+/// main profile included (with an empty layer directory, which stacks
+/// nothing). `nsenter` does `chdir("/")` when it joins a mount namespace — a
+/// terminal started into a zone opened in `/` — and `--wd` is no cure: with a
+/// container the overlay is mounted over `$HOME` after `nsenter`, so the chdir
+/// has to come after the mounts, and even without one a directory that does
+/// not exist in the zone's mount tree would make `nsenter` refuse to start the
+/// program at all. `profile-run` makes the chdir after mounting and falls back
+/// to `$HOME` and `/`. (`docs/GOTCHAS.md` §10a)
 pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
     let container = !entry.dir.as_os_str().is_empty();
     let mut exec: Vec<OsString> = Vec::new();
+    // Does the program end up in a mount namespace other than ours?
+    let entered = container || matches!(entry.network, Network::Zone(_));
     match entry.network {
         Network::Zone(pid) => {
             exec.push(entry.nsenter.into());
@@ -759,9 +778,11 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
         }
         Network::Direct => {}
     }
-    if container {
+    if entered {
         exec.push(entry.core.into());
         exec.push("profile-run".into());
+        exec.push("--cwd".into());
+        exec.push(entry.cwd.into());
         exec.push(entry.dir.into());
         exec.push(entry.zone.into());
         exec.push(if entry.ephemeral { "1" } else { "0" }.into());
@@ -1247,11 +1268,14 @@ mod tests {
             dir,
             ephemeral,
             regdir: Path::new("/r/.running/work"),
+            cwd: Path::new("/home/u/src"),
         }
     }
 
     #[test]
-    fn into_a_zone_without_a_container_is_one_nsenter() {
+    fn into_a_zone_without_a_container_still_restores_the_working_directory() {
+        // No layer to stack, but `nsenter` has left us in `/`: `profile-run`
+        // with an empty directory stacks nothing and makes the chdir.
         let line = entry_argv(
             &entry(Network::Zone(42), Path::new(""), false),
             argv(&["firefox", "%u"]),
@@ -1267,10 +1291,22 @@ mod tests {
                 "-t",
                 "42",
                 "--",
+                "/t/core",
+                "profile-run",
+                "--cwd",
+                "/home/u/src",
+                "",
+                "nl",
+                "0",
+                "/r/.running/work",
+                "--",
                 "firefox",
                 "%u"
             ])
         );
+        // Not `nsenter --wd`: that chdir would come before the overlay, and a
+        // directory missing from the zone's mount tree would stop the launch.
+        assert!(!line.iter().any(|a| a.to_string_lossy().starts_with("--wd")));
     }
 
     #[test]
@@ -1298,6 +1334,8 @@ mod tests {
                 "--",
                 "/t/core",
                 "profile-run",
+                "--cwd",
+                "/home/u/src",
                 "/p/work",
                 "nl",
                 "0",
@@ -1311,7 +1349,8 @@ mod tests {
     #[test]
     fn direct_without_a_container_is_the_command_itself() {
         // Still whatever wrappers `run` put in front of it — they are part of
-        // the command by then — but no namespace of any kind.
+        // the command by then — but no namespace of any kind, and no chdir:
+        // the working directory survives an exec by itself.
         let cmd = argv(&["/t/core", "wl-sandbox", "firefox", "--", "firefox"]);
         assert_eq!(
             entry_argv(&entry(Network::Direct, Path::new(""), false), cmd.clone()),
@@ -1341,6 +1380,8 @@ mod tests {
                 "--",
                 "/t/core",
                 "profile-run",
+                "--cwd",
+                "/home/u/src",
                 "/tmp/vpn-profile-x",
                 "direct",
                 "1",
