@@ -571,7 +571,7 @@ pub fn set_path(
         .map(str::trim)
         .filter(|l| {
             let (p, u) = grant_line(l);
-            !p.is_empty() && !u.is_some_and(|u| u <= now) && expand_home(&tools.home, p) != value
+            !p.is_empty() && u.is_none_or(|u| u > now) && expand_home(&tools.home, p) != value
         })
         .map(str::to_owned)
         .collect();

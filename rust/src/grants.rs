@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::fs::{self, File};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -145,13 +145,33 @@ fn sandbox_processes(tools: &Tools, selector: &str) -> BTreeSet<i32> {
     seen
 }
 
+/// `NS_GET_USERNS` from `<linux/nsfs.h>`: the user namespace that owns a
+/// namespace, as a new descriptor.
+const NS_GET_USERNS: u64 = 0xb701;
+
 /// Detach `dest` inside the mount namespace of `pid`, from a forked child that
-/// enters the process's user and mount namespaces.
+/// enters the user namespace OWNING that mount namespace, then the mount
+/// namespace itself.
+///
+/// The owner, not the process's own user namespace: bwrap sets its mounts up
+/// in a first user namespace and then moves the program into a second one,
+/// nested, to map the sandbox's uid. Capabilities in the nested one say
+/// nothing about the mounts, and `setns` into the mount namespace is refused.
 fn detach_in(pid: i32, dest: &Path) -> Result<(), String> {
-    let user = File::open(format!("/proc/{pid}/ns/user")).map_err(|e| e.to_string())?;
     let mnt = File::open(format!("/proc/{pid}/ns/mnt")).map_err(|e| e.to_string())?;
+    // SAFETY: an ioctl on a namespace descriptor we own; it returns a new
+    // descriptor or -1.
+    let owner_fd = unsafe { libc::ioctl(mnt.as_raw_fd(), NS_GET_USERNS as _) };
+    if owner_fd < 0 {
+        return Err(format!(
+            "не узнать владельца mount namespace: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: the descriptor was just returned to us and is owned by nobody else.
+    let owner = unsafe { File::from_raw_fd(owner_fd) };
     let same_user = fs::read_link("/proc/self/ns/user").ok()
-        == fs::read_link(format!("/proc/{pid}/ns/user")).ok();
+        == fs::read_link(format!("/proc/self/fd/{owner_fd}")).ok();
     let target = CString::new(dest.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
     // SAFETY: fork in a process that is single-threaded here; the child only
     // makes async-signal-safe system calls on descriptors and a C string that
@@ -159,7 +179,7 @@ fn detach_in(pid: i32, dest: &Path) -> Result<(), String> {
     match unsafe { libc::fork() } {
         -1 => Err(std::io::Error::last_os_error().to_string()),
         0 => unsafe {
-            if !same_user && libc::setns(user.as_raw_fd(), libc::CLONE_NEWUSER) != 0 {
+            if !same_user && libc::setns(owner.as_raw_fd(), libc::CLONE_NEWUSER) != 0 {
                 libc::_exit(2);
             }
             if libc::setns(mnt.as_raw_fd(), libc::CLONE_NEWNS) != 0 {
@@ -176,7 +196,7 @@ fn detach_in(pid: i32, dest: &Path) -> Result<(), String> {
             unsafe { libc::waitpid(child, &mut status, 0) };
             match libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status)) {
                 Some(0) => Ok(()),
-                Some(2) => Err("не войти в user namespace программы".to_owned()),
+                Some(2) => Err("не войти в user namespace-владелец".to_owned()),
                 Some(3) => Err("не войти в mount namespace программы".to_owned()),
                 Some(4) => Err("отмонтировать не вышло".to_owned()),
                 _ => Err("помощник завершился аварийно".to_owned()),
