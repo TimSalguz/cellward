@@ -15,7 +15,8 @@
 //! Events:
 //! * `launch-unconfined` — `app`, `container`, `program`, `pid`;
 //! * `broker` — `origin`, `target`, `app`, `decision` (`started`, `refused`),
-//!   `why` when refused.
+//!   `why` when refused;
+//! * `kill` — `zone`, `killed` (how many), `programs`, `down` (`yes`, `no`).
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -199,6 +200,20 @@ fn human(fields: &[(String, String)]) -> String {
                 get("app")
             )
         }
+        "kill" => format!(
+            "зона «{}» оборвана: убито {}{}{}",
+            get("zone"),
+            get("killed"),
+            match get("programs") {
+                "" => String::new(),
+                p => format!(" — {p}"),
+            },
+            if get("down") == "yes" {
+                ""
+            } else {
+                ", опустить не удалось"
+            }
+        ),
         other => {
             let rest: Vec<String> = fields
                 .iter()

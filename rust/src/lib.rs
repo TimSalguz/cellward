@@ -78,6 +78,7 @@ pub mod gui;
 pub mod hermetic;
 pub mod hostif;
 pub mod journal;
+pub mod kill;
 pub mod launch;
 pub mod openconnect;
 pub mod picker;

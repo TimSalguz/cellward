@@ -47,8 +47,9 @@ vpn-zone-gui — графические ярлыки vpn-zones (kdialog над v
   vpn-zone-gui settings     сеть/контейнер по умолчанию, ярлыки, замки
   vpn-zone-gui forget       забыть закреплённые сети программ
   vpn-zone-gui containers   сеть контейнера, объединение, выданные каталоги
+  vpn-zone-gui kill         оборвать зону: убить её программы и опустить
 
-Эти же действия есть в CLI: vpn-zone add|rm|profile|default|mode|forget.
+Эти же действия есть в CLI: vpn-zone add|rm|profile|default|mode|forget|kill.
 Пути инструментов приходят манифестом VPN_ZONE_TOOLS, как и у vpn-zone.
 ";
 
@@ -78,6 +79,7 @@ pub fn main() -> ExitCode {
         b"settings" => settings(&tools),
         b"forget" => forget(&tools),
         b"containers" => containers(&tools),
+        b"kill" => kill(&tools),
         _ => {
             eprintln!("неизвестная команда: {}", verb.to_string_lossy());
             print!("{USAGE}");
@@ -370,6 +372,70 @@ fn remove(tools: &Tools) -> u8 {
             [
                 "--error",
                 format!("Не удалось удалить зону «{zone}»:\\n{out}").as_str(),
+            ],
+        );
+    }
+    0
+}
+
+// --- CUT A ZONE OFF ----------------------------------------------------------
+
+/// `vpn-zone kill` behind a button: the zones that are up, one question, and
+/// what was killed in the notification.
+fn kill(tools: &Tools) -> u8 {
+    let rows: Vec<(String, String)> = zones(&tools.state)
+        .into_iter()
+        .chain(std::iter::once(tools.state.join(crate::launch::OFFLINE)))
+        .filter(|dir| zone_is_up(dir))
+        .map(|dir| {
+            let name = name_of(&dir);
+            row(&name, name.clone())
+        })
+        .collect();
+    if rows.is_empty() {
+        dialog::message(
+            &tools.kdialog,
+            ["--msgbox", "Ни одна зона не поднята — обрывать нечего."],
+        );
+        return 0;
+    }
+    let Some(zone) = menu(
+        tools,
+        "Оборвать зону",
+        "Все программы зоны будут убиты сразу, без сохранения, и зона опущена. Какую?",
+        &rows,
+    ) else {
+        return 0;
+    };
+    let question = format!(
+        "Оборвать зону «{zone}»?\\n\\nВсе её программы (удалённый доступ, браузеры, всё, что в ней запущено) будут заморожены и убиты, несохранённое пропадёт."
+    );
+    if !dialog::confirm(
+        &tools.kdialog,
+        [
+            "--title",
+            "Оборвать зону",
+            "--warningcontinuecancel",
+            question.as_str(),
+        ],
+    ) {
+        return 0;
+    }
+    let (ok, out) = cli(tools, &["kill", &zone]);
+    if ok {
+        dialog::notify(
+            &tools.notify_send,
+            None,
+            "8000",
+            &format!("Зона «{zone}» оборвана"),
+            &out,
+        );
+    } else {
+        dialog::message(
+            &tools.kdialog,
+            [
+                "--error",
+                format!("Зону «{zone}» оборвать не удалось:\\n{out}").as_str(),
             ],
         );
     }

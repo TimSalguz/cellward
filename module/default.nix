@@ -879,6 +879,16 @@ in
     categories = [ "Network" ];
   };
 
+  xdg.desktopEntries."vpn-zone-kill" = {
+    name = "Оборвать VPN-зону";
+    comment = "Сразу убить все программы зоны и опустить её — например, прекратить удалённый доступ";
+    exec = guiExec "kill";
+    icon = "process-stop";
+    terminal = false;
+    type = "Application";
+    categories = [ "Network" ];
+  };
+
   xdg.desktopEntries."vpn-zone-settings" = {
     name = "Настройки VPN-зон";
     comment = "Сеть и контейнер по умолчанию, поведение ярлыков, замки зон";
