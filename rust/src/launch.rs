@@ -780,6 +780,29 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
         Err(e) => eprintln!("реестр запусков {}: {e}", regdir.display()),
     }
+    // Nothing of a zone around this one: on the record, with who and what.
+    if network == Network::Unconfined {
+        let program = selection
+            .cmd
+            .first()
+            .map(|c| c.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Err(e) = crate::journal::append(
+            &tools.state,
+            "launch-unconfined",
+            &[
+                ("app", &*appname.to_string_lossy()),
+                ("container", &*selector.to_string_lossy()),
+                ("program", program.as_str()),
+                ("pid", std::process::id().to_string().as_str()),
+            ],
+        ) {
+            eprintln!(
+                "журнал {}: {e}",
+                tools.state.join(crate::journal::FILE).display()
+            );
+        }
+    }
 
     // The mark descendants are recognised by: a program started in a zone that
     // tries to open something else has that launch delegated outwards (step 1).

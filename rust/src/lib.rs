@@ -77,6 +77,7 @@ pub mod fs_sandbox;
 pub mod gui;
 pub mod hermetic;
 pub mod hostif;
+pub mod journal;
 pub mod launch;
 pub mod openconnect;
 pub mod picker;

@@ -433,6 +433,13 @@ echo "$nsout"
 [ "$(echo "$nsout" | sed -n 2p)" != "$(readlink /proc/self/ns/user)" ] \
   || fail "у контейнера в direct нет своего user namespace: $nsout"
 echo "ok: слой наложился, сеть хоста, свой userns"
+# Запуск без ограничений обязан остаться в журнале — кто, что и когда.
+grep -q "\"event\":\"launch-unconfined\".*\"container\":\"$TEST_PROFILE\"" "$STATE/.journal" 2>/dev/null \
+  || fail "запуск без ограничений не записан в журнал: $(tail -3 "$STATE/.journal" 2>&1)"
+[ "$(stat -c %a "$STATE/.journal")" = 600 ] || fail "журнал читаем не только пользователем: $(stat -c %a "$STATE/.journal")"
+"$VPN_ZONE" journal | grep -q "без ограничений: .*контейнер $TEST_PROFILE" \
+  || fail "vpn-zone journal не показывает запуск: $("$VPN_ZONE" journal 2>&1 | tail -3)"
+echo "ok: запуск без ограничений в журнале (0600), vpn-zone journal его показывает"
 
 step "vpn-zone profile rm $TEST_PROFILE"
 # При провале — владельцы и права всего дерева: без этого EACCES нечитаем.

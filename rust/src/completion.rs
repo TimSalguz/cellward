@@ -96,6 +96,7 @@ const VERBS: &[&str] = &[
     "x11",
     "doctor",
     "watch",
+    "journal",
     "lock",
     "unlock",
     "profile",

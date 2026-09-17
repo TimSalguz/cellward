@@ -688,6 +688,41 @@ fn a_container_bound_to_a_network_runs_there_only() {
 }
 
 #[test]
+fn the_journal_reads_for_a_person_and_for_a_program() {
+    let home = Home::new("journal");
+    let out = home.run(&["journal"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("журнал пуст"), "{}", stdout(&out));
+    fs::create_dir_all(home.state()).unwrap();
+    fs::write(
+        home.state().join(".journal"),
+        "{\"time\":\"2026-09-17T13:05:09Z\",\"event\":\"launch-unconfined\",\"app\":\"firefox\",\"container\":\"sb:web\",\"program\":\"firefox\",\"pid\":\"42\"}\n\
+         {\"time\":\"2026-09-17T13:06:00Z\",\"event\":\"broker\",\"origin\":\"nl\",\"target\":\"unconfined\",\"app\":\"tg\",\"decision\":\"refused\",\"why\":\"человек отказал\"}\n\
+         {\"time\":\"cut sho\n",
+    )
+    .unwrap();
+    let out = stdout(&home.run(&["journal"]));
+    assert!(
+        out.contains(
+            "2026-09-17 13:05:09 UTC  без ограничений: firefox (firefox, контейнер sb:web), pid 42"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("брокер: из зоны «nl» в «unconfined» — tg — отказано: человек отказал"),
+        "{out}"
+    );
+    assert!(out.contains("(повреждённая строка)"), "{out}");
+    let out = stdout(&home.run(&["journal", "--json", "2"]));
+    assert!(
+        out.starts_with("{\"schema_version\":1,\"events\":[{\"time\":\"2026-09-17T13:06:00Z\",\"event\":\"broker\""),
+        "{out}"
+    );
+    assert!(out.trim_end().ends_with("}]}"), "{out}");
+    assert_eq!(home.run(&["journal", "0"]).status.code(), Some(1));
+}
+
+#[test]
 fn a_container_is_never_in_two_networks_at_once() {
     // docs/CONTAINERS.md I2: even an unbound container, while its programs run.
     let home = Home::new("two-networks");
@@ -1140,8 +1175,26 @@ fn watch_announces_a_dead_tunnel_once_and_its_recovery() {
     let bar = stdout(&home.run(&["status", "--bar"]));
     assert_eq!(
         bar.trim(),
-        "{\"text\":\"nl\",\"tooltip\":\"VPN-зоны: поднятые зоны\",\"class\":\"up\"}"
+        "{\"text\":\"nl\",\"tooltip\":\"VPN-зоны: поднятые зоны\",\"class\":\"up\",\"unconfined\":0}"
     );
+
+    // A program running unconfined is marked, dead records are not.
+    let reg = home.state().join(".running/__main__/firefox");
+    fs::create_dir_all(reg.parent().unwrap()).unwrap();
+    fs::write(
+        &reg,
+        format!(
+            "{} direct __main__\n999999999 unconfined __main__\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
+    let bar = stdout(&home.run(&["status", "--bar"]));
+    assert_eq!(
+        bar.trim(),
+        "{\"text\":\"nl ⚠1\",\"tooltip\":\"VPN-зоны: поднятые зоны\\nБез ограничений (⚠) сейчас: firefox\",\"class\":\"up\",\"unconfined\":1}"
+    );
+    fs::remove_file(&reg).unwrap();
 
     // status --json carries the counters too.
     let json = stdout(&home.run(&["status", "--json"]));
