@@ -198,7 +198,11 @@ const DEFAULT_MTU: u32 = 1420;
 /// not addresses: what the other end sees is the host interface's address
 /// either way. A /30 at the far end of 10/8, so that it collides with a
 /// network somebody wants to reach as rarely as a private range can.
-const HOSTIF_GUEST4: &str = "10.255.255.253/30";
+///
+/// The prefix goes separately (`-n`): older pasta refuses `ADDR/PREFIX` in
+/// `-a` ("Invalid address").
+const HOSTIF_GUEST4: &str = "10.255.255.253";
+const HOSTIF_PREFIX4: &str = "30";
 const HOSTIF_GATEWAY4: &str = "10.255.255.254";
 
 /// pasta's doors that nothing here uses, shut. Its defaults open four:
@@ -964,7 +968,14 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
             .arg("--netns")
             .arg(&netns)
             .args(["--config-net", "-q", "-I", TUN_IFACE, "-f"])
-            .args(["-a", HOSTIF_GUEST4, "-g", HOSTIF_GATEWAY4])
+            .args([
+                "-a",
+                HOSTIF_GUEST4,
+                "-n",
+                HOSTIF_PREFIX4,
+                "-g",
+                HOSTIF_GATEWAY4,
+            ])
             .arg("--outbound-if4")
             .arg(&host.interface)
             .arg("--outbound-if6")
