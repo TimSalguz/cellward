@@ -463,6 +463,10 @@ fn two_entries_for_one_binary_see_each_other() {
     // private-window entry: different ids, one single-instance binary. The
     // second launch hands its work to the process that is already up, in ITS
     // network — and the warning used to stay silent.
+    //
+    // Not a dry run: a dry run says nothing about conflicts on purpose. The
+    // launch goes all the way to exec'ing the manifest's nsenter, which does
+    // not exist — so it fails AFTER the warning, which is what is looked at.
     let home = Home::new("by-binary");
     home.zone_is_up("nl");
     let index = home.state().join(".running/__main__/.by-binary");
@@ -471,9 +475,8 @@ fn two_entries_for_one_binary_see_each_other() {
 
     let out = home.run_with(
         &["run", "nl", "--", "steam", "steam://rungameid/1"],
-        &[("VPN_ZONE_DRYRUN", "1"), ("VPN_ZONE_APPID", "PEAK")],
+        &[("VPN_ZONE_APPID", "PEAK")],
     );
-    assert!(out.status.success(), "{}", stderr(&out));
     // Without a graphical session the warning goes to stderr — and for a link
     // it says what really happens to a link.
     let err = stderr(&out);
@@ -488,10 +491,7 @@ fn two_entries_for_one_binary_see_each_other() {
     .unwrap();
     let out = home.run_with(
         &["run", "nl", "--", "firefox", "--private-window"],
-        &[
-            ("VPN_ZONE_DRYRUN", "1"),
-            ("VPN_ZONE_APPID", "firefox-private"),
-        ],
+        &[("VPN_ZONE_APPID", "firefox-private")],
     );
     let err = stderr(&out);
     assert!(err.contains("уже запущена в сети «de»"), "{err}");
@@ -505,12 +505,14 @@ fn two_entries_for_one_binary_see_each_other() {
     .unwrap();
     let out = home.run_with(
         &["run", "nl", "--", "firefox"],
-        &[
-            ("VPN_ZONE_DRYRUN", "1"),
-            ("VPN_ZONE_APPID", "firefox-private"),
-        ],
+        &[("VPN_ZONE_APPID", "firefox-private")],
     );
     assert!(!stderr(&out).contains("уже запущена"), "{}", stderr(&out));
+    // …and the launch was filed under both keys on the way.
+    let by_id = fs::read_to_string(home.state().join(".running/__main__/firefox-private")).unwrap();
+    assert!(by_id.contains(" nl "), "{by_id}");
+    let by_binary = fs::read_to_string(index.join("firefox")).unwrap();
+    assert_eq!(by_binary.lines().count(), 2, "{by_binary}");
 }
 
 #[test]
