@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (design proposals, not implemented)
+- `docs/CONTAINERS.md` (+ `.ru.md`): "everything in containers by default" —
+  a container as one identity with exactly one network, interception of
+  launches outside the launcher, the limits of what is possible without root,
+  module options and a `--json` state schema for configuration tools.
+- `docs/LAUNCHERS.md` (+ `.ru.md`): how launcher entries are generated and
+  launched, the problems found (including handlers hidden with `NoDisplay` and
+  foreign entries in the user directory that bypass the picker), and a
+  proposal for retiring per-zone clones.
+- `docs/CERTIFICATES.md` (+ `.ru.md`): extra root certificates trusted by the
+  chosen containers only — never by the host or another container.
+- `docs/LEAK-MODEL.md`: launches around the picker and trusted roots as
+  channels, with the invariants the implementation must hold.
+
 ### Fixed (`direct` dropped the container, the sandbox and the compositor restriction)
 - **Choosing "Прямой интернет" in the picker silently threw away every layer
   but the network.** The picker became the command itself for `direct`, so

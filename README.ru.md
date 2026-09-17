@@ -1,6 +1,8 @@
 # vpn-zones
 
 Read in English: [README.md](README.md) · План развития: [ROADMAP.md](ROADMAP.md)
+· Дизайн (предложения): [всё в контейнерах](docs/CONTAINERS.ru.md),
+[ярлыки](docs/LAUNCHERS.ru.md), [сертификаты по контейнерам](docs/CERTIFICATES.ru.md)
 
 Запуск программ с выбором сети, контейнера данных и песочницы — прямо из ярлыка
 приложения. Всё работает из-под пользователя: root не нужен ни для создания

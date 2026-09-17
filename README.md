@@ -1,6 +1,8 @@
 # vpn-zones
 
 Читать по-русски: [README.ru.md](README.ru.md) · Development plan: [ROADMAP.md](ROADMAP.md)
+· Design proposals: [containers by default](docs/CONTAINERS.md),
+[launcher entries](docs/LAUNCHERS.md), [per-container certificates](docs/CERTIFICATES.md)
 
 Launch programs with a choice of network, data container and sandbox — straight
 from the app's launcher entry. Everything runs as your user: root is not needed
