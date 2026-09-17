@@ -918,6 +918,76 @@ fn a_merge_keeps_what_the_target_has_and_moves_the_programs() {
 }
 
 #[test]
+fn launch_starts_an_entry_by_id_through_the_picker() {
+    // docs/CONTAINERS.md §5.1: a key binding gets what a click gets.
+    let home = Home::new("launch");
+    let apps = home.root.join(".local/share/applications");
+    fs::create_dir_all(&apps).unwrap();
+    fs::write(
+        apps.join("vpnztest-fox.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Test Fox\nExec=fox --new-window %U\n",
+    )
+    .unwrap();
+    let r = home.root.display().to_string();
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+
+    let out = home.run_with(&["launch", "vpnztest-fox", "--", "https://a", "b c"], &dry);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out).trim_end(),
+        format!(
+            "{r}/bin/vpn-zone-pick --id vpnztest-fox --label Test Fox -- fox --new-window https://a b c"
+        )
+    );
+
+    // Taken over in place: the original from the backup, never our rewrite.
+    fs::write(
+        apps.join("vpnztest-fox.desktop"),
+        "[Desktop Entry]\nName=Test Fox\nExec=/x/vpn-zone-pick --id vpnztest-fox -- fox\nX-VPNZone=adopted\n",
+    )
+    .unwrap();
+    let backups = home.state().join(".adopted");
+    fs::create_dir_all(&backups).unwrap();
+    fs::write(
+        backups.join("vpnztest-fox.desktop"),
+        "[Desktop Entry]\nName=Test Fox\nExec=fox --from-backup\n",
+    )
+    .unwrap();
+    let out = home.run_with(&["launch", "vpnztest-fox"], &dry);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).ends_with("-- fox --from-backup\n"),
+        "{}",
+        stdout(&out)
+    );
+
+    // Arguments an entry does not take are not passed.
+    let out = home.run_with(&["launch", "vpnztest-fox", "--", "x"], &dry);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("не принимает аргументов"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stdout(&out).ends_with("-- fox --from-backup\n"),
+        "{}",
+        stdout(&out)
+    );
+
+    for (args, message) in [
+        (&["launch", "vpnztest-nope"][..], "нет ни в одном"),
+        (&["launch", "vpn-zone-add"][..], "служебный"),
+        (&["launch", "vpnztest-fox", "x"][..], "после --"),
+        (&["launch"][..], "нужен id"),
+    ] {
+        let out = home.run_with(args, &dry);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(stderr(&out).contains(message), "{args:?}: {}", stderr(&out));
+    }
+}
+
+#[test]
 fn the_registry_keeps_its_three_field_shape() {
     let home = Home::new("registry");
     home.zone_is_up("nl");

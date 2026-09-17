@@ -1098,6 +1098,112 @@ fn sync_autostart(
     (written, given_back)
 }
 
+/// The entry a launcher id names, as its program wrote it: `(file, groups)`.
+///
+/// Searched in the directories `sync` reads, in their order. In the user's own
+/// directory an entry taken over in place is read from its backup, and one of
+/// our picker entries is skipped — the original it shadows is further down the
+/// list. (`docs/CONTAINERS.md` §5.1)
+pub fn find_entry(
+    dirs: &[PathBuf],
+    home: &Path,
+    state_dir: &Path,
+    id: &str,
+) -> Option<(PathBuf, Vec<Group>)> {
+    let name = format!("{id}.desktop");
+    let own = home.join(".local/share/applications");
+    let resolved = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    for dir in dirs {
+        let path = dir.join(&name);
+        if !path.is_file() {
+            continue;
+        }
+        let source = if resolved(dir) == resolved(&own) && adopted(&path) {
+            state_dir.join(ADOPTED_DIR).join(&name)
+        } else if ours(&path) {
+            continue;
+        } else {
+            path
+        };
+        let groups = parse_desktop_file(&source);
+        if desktop_entry(&groups).is_some() {
+            return Some((source, groups));
+        }
+    }
+    None
+}
+
+/// An entry's `Exec` as a command, its field codes filled from `args` the way a
+/// launcher fills them (the desktop entry specification, "The Exec key").
+///
+/// `%u`/`%f` take the first argument, `%U`/`%F` all of them, `%i` becomes
+/// `--icon <Icon>`, `%c` the name, `%k` the entry's file, `%%` a percent sign;
+/// the deprecated codes vanish. Arguments with no field code to take them are
+/// not appended: the program did not say it accepts any. Returns the words and
+/// whether the arguments were used.
+pub fn expand_exec(entry: &Group, file: &Path, args: &[OsString]) -> (Vec<OsString>, bool) {
+    let exec = entry.get("Exec").unwrap_or("");
+    let mut out: Vec<OsString> = Vec::new();
+    let mut used = false;
+    for word in exec_words(exec) {
+        match word.as_str() {
+            "%U" | "%F" => {
+                out.extend(args.iter().cloned());
+                used = true;
+                continue;
+            }
+            "%u" | "%f" => {
+                out.extend(args.first().cloned());
+                used = true;
+                continue;
+            }
+            "%i" => {
+                if let Some(icon) = entry.get("Icon").filter(|i| !i.is_empty()) {
+                    out.push("--icon".into());
+                    out.push(icon.into());
+                }
+                continue;
+            }
+            _ => {}
+        }
+        // A code inside a word (`--url=%u`): filled in place, lossy for a
+        // file name that is not UTF-8 — the same as every launcher does it.
+        let mut filled = String::new();
+        let mut coded = false;
+        let mut chars = word.chars();
+        while let Some(c) = chars.next() {
+            if c != '%' {
+                filled.push(c);
+                continue;
+            }
+            coded = true;
+            match chars.next() {
+                Some('%') => filled.push('%'),
+                Some('u' | 'f' | 'U' | 'F') => {
+                    if let Some(first) = args.first() {
+                        filled.push_str(&first.to_string_lossy());
+                    }
+                    used = true;
+                }
+                Some('c') => filled.push_str(entry.get("Name").unwrap_or("")),
+                Some('k') => filled.push_str(&file.to_string_lossy()),
+                Some(code) if FIELD_CODES.contains(code) => {}
+                Some(other) => {
+                    filled.push('%');
+                    filled.push(other);
+                }
+                None => filled.push('%'),
+            }
+        }
+        // A word that was nothing but a code with nothing to fill it with is
+        // gone, not an empty argument.
+        if !(coded && filled.is_empty()) {
+            out.push(filled.into());
+        }
+    }
+    (out, used)
+}
+
 /// The whole pass. Returns the process exit code.
 pub fn sync(state_dir: &Path, home: &Path, runner: &str, picker: &str) -> u8 {
     sync_from(state_dir, home, runner, picker, &source_dirs(home))
@@ -2143,5 +2249,71 @@ Name=not carried over
         assert_eq!(unwrap_picker_exec("telegram -- x"), None);
         assert_eq!(unwrap_picker_exec("/bin/vpn-zone run nl -- x"), None);
         assert_eq!(unwrap_picker_exec("vpn-zone-pick --weird -- x"), None);
+    }
+
+    // --- vpn-zone launch -----------------------------------------------------
+
+    #[test]
+    fn field_codes_are_filled_like_a_launcher_fills_them() {
+        let groups = parse_desktop(
+            "[Desktop Entry]\nName=Fox\nIcon=fox\nExec=fox --name \"Fox Box\" %i --url=%u %U %% %d\n",
+        );
+        let entry = desktop_entry(&groups).unwrap();
+        let args: Vec<OsString> = vec!["https://a".into(), "https://b".into()];
+        let (words, used) = expand_exec(entry, Path::new("/x/fox.desktop"), &args);
+        assert!(used);
+        assert_eq!(
+            words,
+            [
+                "fox",
+                "--name",
+                "Fox Box",
+                "--icon",
+                "fox",
+                "--url=https://a",
+                "https://a",
+                "https://b",
+                "%",
+            ]
+            .map(OsString::from)
+        );
+        let (words, used) = expand_exec(entry, Path::new("/x/fox.desktop"), &[]);
+        assert!(used);
+        assert_eq!(
+            words,
+            ["fox", "--name", "Fox Box", "--icon", "fox", "--url=", "%"].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn a_launch_finds_the_original_not_our_shadow() {
+        let d = Desk::new("find");
+        fs::write(
+            d.system.join("fox.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Fox\nExec=fox %u\n",
+        )
+        .unwrap();
+        d.sync();
+        assert!(d.read("fox.desktop").contains("X-VPNZone=picker"));
+        let dirs = vec![d.apps.clone(), d.system.clone()];
+        let (file, groups) = find_entry(&dirs, &d.home, &d.state, "fox").unwrap();
+        assert_eq!(file, d.system.join("fox.desktop"));
+        assert_eq!(desktop_entry(&groups).unwrap().get("Exec"), Some("fox %u"));
+
+        // Taken over in place: read from the backup.
+        fs::write(
+            d.apps.join("userapp-Fox.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Fox link\nNoDisplay=true\nExec=fox --open %u\n",
+        )
+        .unwrap();
+        d.sync();
+        let (file, groups) = find_entry(&dirs, &d.home, &d.state, "userapp-Fox").unwrap();
+        assert_eq!(file, d.state.join(ADOPTED_DIR).join("userapp-Fox.desktop"));
+        assert_eq!(
+            desktop_entry(&groups).unwrap().get("Exec"),
+            Some("fox --open %u")
+        );
+
+        assert!(find_entry(&dirs, &d.home, &d.state, "nope").is_none());
     }
 }

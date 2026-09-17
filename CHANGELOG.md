@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (launch by id)
+- `vpn-zone launch <id> [-- <arguments>]`: a launcher entry started through the
+  picker by its id, the way a click starts it — for compositor key bindings
+  (`spawn "vpn-zone" "launch" "firefox"`) and scripts. The program's own entry
+  is used (a taken-over one from its backup, our picker entries skipped), field
+  codes are filled like a launcher fills them, `VPN_ZONE_DRYRUN=1` prints the
+  command, and the shells complete the ids (`docs/CONTAINERS.md` §5.1).
+
 ### Changed (XDG autostart goes through the picker)
 - **The user's `~/.config/autostart` entries are taken over in place**, like
   the user's launcher entries: a program that switched its own autostart on

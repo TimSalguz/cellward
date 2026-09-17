@@ -256,7 +256,7 @@ boundary is the container → outside direction (§6).
 | `xdg-open`, `gio open`, `kde-open`, "open with" | resolve to a `.desktop` → the shadow entry | unchanged | — |
 | D-Bus activation (`gapplication launch`, `DBusActivatable=true`) | the service file activates around the shadow | shadow session service files in `$XDG_DATA_HOME/dbus-1/services/<id>.service` for intercepted ids only; never for portal or system names | 3 |
 | XDG autostart | runs uncontained | **done** (§5.2): assigned programs start in their container; **unassigned ones start offline, in a home of their own, without a dialog, and a notification says so** | 3 |
-| compositor key bindings | only if the binding calls `vpn-zone-pick` | `vpn-zone launch <launcher-id>` reads the entry's `Exec`; a module option exposes the command line | 3 |
+| compositor key bindings | only if the binding calls `vpn-zone-pick` | **done** (§5.1): `vpn-zone launch <launcher-id>` reads the entry's `Exec` and goes through the picker | 3 |
 | shell | uncontained | opt-in PATH shims for assigned programs; never a boundary | 3 |
 | portal `OpenURI` from a host program | portal → handler entry → shadow → picker | unchanged | — |
 | portal `OpenURI` from a container | the origin is lost | broker (§6.2) | 4 |
@@ -267,13 +267,30 @@ boundary is the container → outside direction (§6).
 
 ### 5.1 The launch command for bindings
 
-`vpn-zone launch <launcher-id> [-- extra args]` finds the entry by id in the
-same source directories `sync` reads, takes its `Exec` (field codes filled from
-the extra arguments), and becomes the picker for it:
+`vpn-zone launch <launcher-id> [-- extra args]` — **implemented** — finds the
+entry by id in the same source directories `sync` reads, takes its `Exec`
+(field codes filled from the extra arguments), and becomes the picker for it:
 
 ```kdl
 Mod+B { spawn "vpn-zone" "launch" "firefox"; }
 ```
+
+- the entry is the program's own: an entry taken over in place is read from
+  its backup, and one of our picker entries is skipped for the original it
+  shadows further down the list — so a binding never wraps the picker in the
+  picker;
+- field codes are filled the way a launcher fills them: `%u`/`%f` the first
+  argument, `%U`/`%F` all, `%i` → `--icon <Icon>`, `%c` the name, `%k` the
+  entry file, `%%` a percent sign, deprecated codes dropped. Arguments an entry
+  has no code for are not passed, and it says so;
+- our own `vpn-zone-*` entries are refused: they start the GUI, not a program;
+- `VPN_ZONE_DRYRUN=1` prints the picker command instead of starting it, for
+  checking a binding;
+- the shells complete the ids the picker knows (`.labels`).
+
+A binding that calls the program directly still starts it uncontained: the
+compositor is a host program, and the host is trusted (§5). What changes is
+that the contained way is one word longer, not a script.
 
 ### 5.2 Autostart
 

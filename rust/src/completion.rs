@@ -35,6 +35,9 @@ pub struct Snapshot {
     pub perm_keys: Vec<String>,
     /// Programs pinned to a network (`.pinned/*`) — what `forget` takes.
     pub pinned: Vec<String>,
+    /// Launcher ids the picker knows by name (`.labels/*`) — what `launch`
+    /// takes.
+    pub apps: Vec<String>,
 }
 
 impl Snapshot {
@@ -60,6 +63,7 @@ impl Snapshot {
             sandboxes: Self::names(&tools.sandboxes),
             perm_keys: Self::names(&tools.config.join("fs-perms")),
             pinned: Self::names(&tools.state.join(".pinned")),
+            apps: Self::names(&tools.state.join(".labels")),
         }
     }
 }
@@ -73,6 +77,7 @@ const VERBS: &[&str] = &[
     "list",
     "status",
     "run",
+    "launch",
     "rm",
     "sync",
     "mode",
@@ -187,6 +192,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
             }
             "trust" if pos == 4 && word(2) == "add" => return vec![FILES.to_string()],
+            "launch" if pos == 2 => owned(&mut out, &snap.apps),
             "container" if pos == 2 => strs(
                 &mut out,
                 &[
@@ -264,6 +270,7 @@ mod tests {
             sandboxes: vec!["dev".into()],
             perm_keys: vec!["telegram".into()],
             pinned: vec!["firefox".into()],
+            apps: vec!["firefox".into(), "org.telegram.desktop".into()],
         }
     }
 
@@ -360,6 +367,10 @@ mod tests {
             ["firefox", "--all"]
         );
         assert_eq!(complete(&["vpn-zone", "default", "o"], 3), ["offline"]);
+        assert_eq!(
+            complete(&["vpn-zone", "launch", "org"], 3),
+            ["org.telegram.desktop"]
+        );
         assert_eq!(complete(&["vpn-zone", "add", "name", ""], 4), [FILES]);
     }
 
