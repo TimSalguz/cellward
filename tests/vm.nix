@@ -959,8 +959,15 @@ let
           assert '"worst":"fail"' not in out, out
           alice("vpn-zone down vmlan")
 
-      with subtest("host-interface zone bound to eth0 cannot reach eth1's network"):
-          alice("printf '[HostInterface]\\nInterface = eth0\\n' > /tmp/vmwan.conf")
+      # A dummy interface with an address and no way to the server: bound to
+      # it, the zone must not reach the server even though the host itself
+      # routes there through eth1.
+      with subtest("host-interface zone bound to another interface cannot reach eth1's network"):
+          machine.succeed(
+              "ip link add vmdummy type dummy && ip addr add 10.77.0.1/24 dev vmdummy "
+              "&& ip link set vmdummy up"
+          )
+          alice("printf '[HostInterface]\\nInterface = vmdummy\\n' > /tmp/vmwan.conf")
           alice("vpn-zone add vmwan /tmp/vmwan.conf")
           alice("vpn-zone up vmwan")
           wpid = machine.succeed(f"cat {STATE}/vmwan/zone.pid").strip()
