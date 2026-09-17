@@ -964,6 +964,23 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
             return Err(e);
         }
         let netns = format!("/proc/{zone_pid}/ns/net");
+        // IPv6 bound to the interface, or no IPv6 in the zone at all: never
+        // IPv6 left free to go out wherever the host routes it.
+        let v6_usable = hostif::ipv6_usable(
+            &host.interface,
+            &fs::read_to_string("/proc/net/if_inet6").unwrap_or_default(),
+            &fs::read_to_string("/proc/net/ipv6_route").unwrap_or_default(),
+        );
+        let v6_args: Vec<&str> = if v6_usable {
+            vec!["--outbound-if6", host.interface.as_str()]
+        } else {
+            println!(
+                "zone {}: {} has no usable IPv6 — the zone gets none",
+                zone.name(),
+                host.interface
+            );
+            vec!["-4"]
+        };
         match Command::new(&zone.tools.pasta)
             .arg("--netns")
             .arg(&netns)
@@ -984,8 +1001,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
             .arg(&host.interface)
             .arg("--outbound-if4")
             .arg(&host.interface)
-            .arg("--outbound-if6")
-            .arg(&host.interface)
+            .args(&v6_args)
             .args(PASTA_CLOSED)
             .spawn()
         {
