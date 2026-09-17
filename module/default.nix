@@ -471,6 +471,7 @@ let
       ++ map (app: "app = ${app}") c.apps
       ++ lib.optional (c.trust.certificates != [ ]) "trust = ${trustDir name c.trust.certificates}"
       ++ map (path: "path = ${path}") c.permissions.paths
+      ++ lib.optional c.permissions.x11 "x11 = true"
     )
     + "\n";
 
@@ -498,6 +499,11 @@ let
         default = [ ];
         example = [ "firefox" ];
         description = "Программы (id ярлыков, имя .desktop без расширения), которые запускаются в этом контейнере без вопроса.";
+      };
+      permissions.x11 = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Свой X-сервер (xwayland-satellite) для программ контейнера в зонах. X-сервер хоста из зон недоступен всегда: он показывает каждому клиенту окна, ввод и буфер обмена всех остальных. См. docs/HERMETICITY.ru.md §7.";
       };
       permissions.paths = lib.mkOption {
         type = lib.types.listOf lib.types.str;

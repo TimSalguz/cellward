@@ -501,6 +501,34 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     );
     let mut cmd = selection.cmd.clone();
 
+    // --- X11 (docs/HERMETICITY.md §7, A) ---
+    // The host's X server is out of reach in a zone. A container with the x11
+    // permission gets a satellite of its own, started INSIDE wl-sandbox (the
+    // wrapping below goes around this one), so it speaks to the compositor
+    // through the restricted socket like the program does. A sandbox starts
+    // its own satellite and is told about the permission instead.
+    let x11_selector = match &selection.sandbox {
+        Sandbox::Named(name) => Some(format!("sb:{}", name.to_string_lossy())),
+        Sandbox::Throwaway => None,
+        Sandbox::None => {
+            Some(container.profile.to_string_lossy().into_owned()).filter(|p| !p.is_empty())
+        }
+    };
+    let container_x11 = x11_selector
+        .and_then(|selector| crate::container::load(tools, &selector))
+        .is_some_and(|c| c.x11.value);
+    if container_x11 && zone != DIRECT && selection.sandbox == Sandbox::None && !cmd.is_empty() {
+        let mut wrapped: Vec<OsString> = vec![
+            tools.core.clone().into(),
+            "x11-run".into(),
+            "--xwayland".into(),
+            tools.xwayland.clone().into(),
+            "--".into(),
+        ];
+        wrapped.extend(cmd);
+        cmd = wrapped;
+    }
+
     if wayland_sandbox_wanted(tools, &appbin) {
         let mut wrapped: Vec<OsString> = vec![
             tools.core.clone().into(),
@@ -547,6 +575,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         if let Some(label) = &label {
             wrapped.push("--label".into());
             wrapped.push(label.clone().into());
+        }
+        if container_x11 {
+            wrapped.push("--x11".into());
+            wrapped.push("on".into());
         }
         wrapped.push("--".into());
         wrapped.extend(cmd);
@@ -712,6 +744,13 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     let namespaced = !container.dir.as_os_str().is_empty() || selection.sandbox != Sandbox::None;
     if network != Network::Direct || namespaced {
         std::env::set_var(ENV_CURRENT, &zone);
+    }
+    // No host X server in a zone, and no name of one either: toolkits that see
+    // DISPLAY try X first and fail instead of using Wayland. A container with
+    // the permission gets its own display from x11-run.
+    if network != Network::Direct {
+        std::env::remove_var("DISPLAY");
+        std::env::remove_var("XAUTHORITY");
     }
 
     // The caller's working directory, which `nsenter` would otherwise lose. A

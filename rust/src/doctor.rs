@@ -394,6 +394,14 @@ pub fn probe(uid: u32) -> Vec<Check> {
             checks.push(system_bus_check(&mountinfo, reachable(&path), what));
             continue;
         }
+        if id == "x11" && mounted_at(&mountinfo, crate::x11::X11_DIR) {
+            checks.push(Check::new(
+                "x11",
+                Level::Ok,
+                "X-сервер хоста скрыт; видны только свои X-серверы контейнеров",
+            ));
+            continue;
+        }
         checks.push(open_channel_check(id, what, reachable(&path)));
     }
     checks
@@ -402,12 +410,15 @@ pub fn probe(uid: u32) -> Vec<Check> {
 /// The system bus in a zone: filtered (the zone's proxy bound over the socket)
 /// or closed (a tmpfs over `/run/dbus`) is what the zone promises; the host's
 /// bus as it is, a warning.
+/// Is something mounted at this point, per `/proc/self/mountinfo`?
+pub fn mounted_at(mountinfo: &str, point: &str) -> bool {
+    mountinfo
+        .lines()
+        .any(|line| line.split_whitespace().nth(4) == Some(point))
+}
+
 pub fn system_bus_check(mountinfo: &str, reachable: bool, what: &str) -> Check {
-    let mounted_at = |point: &str| {
-        mountinfo
-            .lines()
-            .any(|line| line.split_whitespace().nth(4) == Some(point))
-    };
+    let mounted_at = |point: &str| mounted_at(mountinfo, point);
     if mounted_at("/run/dbus/system_bus_socket") {
         Check::new(
             "system-bus",

@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Security (X11 closed in zones)
+- A zone hides `/tmp/.X11-unix` behind a tmpfs of its own, and a launch into a
+  zone carries no `DISPLAY` or `XAUTHORITY`: the host's X server — every
+  client of which sees the windows, the keyboard and the clipboard of all the
+  others — and the X servers of other zones are out of reach (the owner's
+  decision A). A container with `x11` — `vpn-zone container set <c> x11 on` or
+  `programs.vpn-zones.containers.<name>.permissions.x11` — gets an
+  `xwayland-satellite` of its own in zones (`vpn-zone-core x11-run`, started
+  inside `wl-sandbox` and taken down with the program); a sandbox is told the
+  same and starts its own. `container show --json` carries `x11` as
+  `{value, source}` (additive). **Behaviour change:** X11-only programs in a
+  zone (Steam, some Electron builds) need a container with `x11`.
+
 ### Security (the system bus in zones is filtered)
 - Every zone gets its own `xdg-dbus-proxy` in front of the system bus, bound
   over `/run/dbus/system_bus_socket` in the zone's mount namespace: UPower

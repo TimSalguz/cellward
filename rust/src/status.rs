@@ -300,14 +300,16 @@ pub fn container(tools: &Tools, c: &Container) -> String {
     };
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
-         \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{}}}",
+         \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{},\
+         \"x11\":{}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),
         sourced_str(c.network.value.as_str(), c.network.source),
         sourced_str(compositor, wayland_source),
         trust(tools, c),
-        running(tools, c)
+        running(tools, c),
+        sourced(c.x11.value.to_string(), c.x11.source)
     )
 }
 

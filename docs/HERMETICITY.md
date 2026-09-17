@@ -104,7 +104,7 @@ becomes a default, with the table above as the list of what the owner accepts.
 
 ## 7. Decisions (the owner, 2026-09-17)
 
-- **A — X11: option А.** Closed in zones by default: tmpfs over
+- **A — X11: option А — implemented.** Closed in zones by default: tmpfs over
   `/tmp/.X11-unix` in the zone's mount namespace and no `DISPLAY` in a launch.
   A container with the `x11` permission gets its own `xwayland-satellite`.
   There is no `x11 = "host"` hole.

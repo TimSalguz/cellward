@@ -139,6 +139,9 @@ pub struct Container {
     /// Directories of the real home granted to a private home
     /// (`docs/CONTAINERS.md` §3.5): declared ones first.
     pub paths: Vec<Sourced<PathBuf>>,
+    /// An X server of its own in a zone (`docs/HERMETICITY.md` §7, A): the
+    /// host's is never reachable from a zone.
+    pub x11: Sourced<bool>,
     /// The container's own directory. May not exist yet for a container that
     /// is only declared.
     pub dir: PathBuf,
@@ -299,6 +302,29 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
         }
     }
 
+    let flag = |conf: &[(String, String)]| {
+        values(conf, "x11")
+            .last()
+            .map(|v| matches!(v, "true" | "on" | "yes"))
+    };
+    let x11 = declared
+        .as_deref()
+        .and_then(flag)
+        .map(|value| Sourced {
+            value,
+            source: Source::Nix,
+        })
+        .or_else(|| {
+            flag(&local).map(|value| Sourced {
+                value,
+                source: Source::Local,
+            })
+        })
+        .unwrap_or(Sourced {
+            value: false,
+            source: Source::Default,
+        });
+
     Some(Container {
         name: name.to_owned(),
         home,
@@ -306,6 +332,7 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
         apps,
         declared_trust,
         paths,
+        x11,
         dir,
     })
 }
@@ -788,6 +815,34 @@ pub fn set_network(tools: &Tools, selector: &str, network: &Network) -> Result<(
     fs::write(&path, text).map_err(|e| format!("не записать {}: {e}", path.display()))
 }
 
+/// Give a container an X server of its own in zones, or take it away, locally.
+pub fn set_x11(tools: &Tools, selector: &str, on: bool) -> Result<(), String> {
+    let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    if container.x11.source == Source::Nix {
+        return Err(format!(
+            "x11 контейнера {selector} задан в Nix — меняется там"
+        ));
+    }
+    fs::create_dir_all(&container.dir)
+        .map_err(|e| format!("не создать {}: {e}", container.dir.display()))?;
+    let path = container.dir.join(FILE);
+    let mut conf: Vec<(String, String)> = fs::read_to_string(&path)
+        .map(|t| parse_conf(&t))
+        .unwrap_or_default();
+    conf.retain(|(k, _)| k != "x11");
+    if on {
+        conf.push(("x11".to_owned(), "true".to_owned()));
+    }
+    let mut text = String::from(
+        "# Локальные настройки контейнера vpn-zones (docs/CONTAINERS.md).\n\
+         # Пишет `vpn-zone container`; значения из Nix лежат в ~/.config/vpn-zones/declared.\n",
+    );
+    for (k, v) in &conf {
+        text.push_str(&format!("{k} = {v}\n"));
+    }
+    fs::write(&path, text).map_err(|e| format!("не записать {}: {e}", path.display()))
+}
+
 /// The network the container's programs run in right now, if any: the first
 /// live registry record of any of its programs.
 ///
@@ -911,6 +966,10 @@ mod tests {
             apps: Vec::new(),
             declared_trust: Vec::new(),
             paths: Vec::new(),
+            x11: Sourced {
+                value: false,
+                source: Source::Default,
+            },
             dir: PathBuf::from("/s/work"),
         }
     }

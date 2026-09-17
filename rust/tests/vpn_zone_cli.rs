@@ -1125,6 +1125,50 @@ fn watch_announces_a_dead_tunnel_once_and_its_recovery() {
 }
 
 #[test]
+fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
+    // docs/HERMETICITY.md §7, A.
+    let home = Home::new("x11");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+    fs::create_dir_all(home.root.join("sandboxes/dev/home")).unwrap();
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+
+    let out = home.run_with(&["run", "nl", "--profile", "work", "--", "steam"], &dry);
+    assert!(!stdout(&out).contains("x11-run"), "{}", stdout(&out));
+
+    let out = home.run(&["container", "set", "work", "x11", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["container", "show", "work", "--json"]));
+    assert!(
+        json.contains("\"x11\":{\"value\":true,\"source\":\"local\"}"),
+        "{json}"
+    );
+
+    let out = home.run_with(&["run", "nl", "--profile", "work", "--", "steam"], &dry);
+    assert!(
+        stdout(&out).contains("x11-run --xwayland /nonexistent/xwayland-satellite -- steam"),
+        "{}",
+        stdout(&out)
+    );
+    // `direct` is the host's own session: nothing to add.
+    let out = home.run_with(&["run", "direct", "--profile", "work", "--", "steam"], &dry);
+    assert!(!stdout(&out).contains("x11-run"), "{}", stdout(&out));
+
+    // A sandbox is told, and starts its own satellite.
+    let out = home.run(&["container", "set", "sb:dev", "x11", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = home.run_with(
+        &["run", "nl", "--sandbox", "dev", "--", "steam"],
+        &[("VPN_ZONE_DRYRUN", "1"), ("VPN_ZONE_APPID", "steam")],
+    );
+    assert!(stdout(&out).contains("--x11 on --"), "{}", stdout(&out));
+
+    let out = home.run(&["container", "set", "work", "x11", "maybe"]);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
 fn the_registry_keeps_its_three_field_shape() {
     let home = Home::new("registry");
     home.zone_is_up("nl");

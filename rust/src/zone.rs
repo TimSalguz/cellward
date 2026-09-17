@@ -1574,6 +1574,31 @@ fn seal_system_bus(zone: &Zone) -> Result<(), String> {
     Ok(())
 }
 
+/// A tmpfs over `/tmp/.X11-unix` in the zone's mount namespace
+/// (`docs/HERMETICITY.md` §7, A). Created first when the host has none, so
+/// that an X server started in the zone never puts its socket into the shared
+/// `/tmp`, where every other zone could connect to it. Fatal when it cannot be
+/// done: the promise is that no zone program reaches a foreign X server.
+fn hide_x11(zone: &Zone) -> Result<(), String> {
+    let dir = Path::new(crate::x11::X11_DIR);
+    if !dir.is_dir() {
+        fs::create_dir_all(dir)
+            .and_then(|()| {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o1777))
+            })
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    sys::mount(OsStr::new("tmpfs"), dir, "tmpfs", 0, "mode=1777,size=64k").map_err(|e| {
+        format!(
+            "cannot hide {}: {e} — programs in the zone would reach the host's X server",
+            dir.display()
+        )
+    })?;
+    println!("zone {}: host X11 hidden", zone.name());
+    Ok(())
+}
+
 /// Wait for the app namespace to say it exists.
 fn wait_for_app_namespace(zone_up_r: OwnedFd) -> Result<(), String> {
     let mut zone_up = File::from(zone_up_r);
@@ -1883,6 +1908,11 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // resolve1 is on the system bus too, and NetworkManager tells a program
     // which networks the machine is really on.
     seal_system_bus(zone)?;
+    // One X server shows every client everything: the host's is out of reach,
+    // and so are the X servers of other zones — /tmp is shared, this tmpfs
+    // is not. A container with the x11 permission runs its own satellite, and
+    // its socket lands in here.
+    hide_x11(zone)?;
 
     let Some(ZoneLinks {
         backend,

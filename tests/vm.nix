@@ -351,6 +351,20 @@ let
               "org.freedesktop.hostname1 Hostname"
           )
 
+      # X11 (docs/HERMETICITY.md §7, A): a socket in the host's /tmp/.X11-unix
+      # is out of sight in a zone, and a launch into a zone carries no DISPLAY.
+      with subtest("x11 in a zone: the host's socket is hidden and DISPLAY is gone"):
+          machine.succeed(
+              "mkdir -p /tmp/.X11-unix && systemd-run --unit=fakex "
+              "socat UNIX-LISTEN:/tmp/.X11-unix/X77,fork /dev/null"
+          )
+          machine.wait_until_succeeds("test -S /tmp/.X11-unix/X77")
+          zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
+          in_zone(zp, "test ! -e /tmp/.X11-unix/X77")
+          out = alice("DISPLAY=:77 vpn-zone run vmsmoke -- sh -c 'echo D=$DISPLAY.'")
+          assert "D=." in out, f"DISPLAY reached the zone: {out}"
+          machine.succeed("systemctl stop fakex")
+
       with subtest("tab completion offers the zone where a zone is expected"):
           out = alice("vpn-zone _complete -- vpn-zone up \"\" 3")
           assert "vmsmoke" in out.split(), out

@@ -189,8 +189,9 @@ Flathub), а единственный сегодняшний диалог — в
       Inhibit и чтение; NM/hostname1/resolve1/machined/timedate1 закрыты); без
       прокси `/run/dbus` в зоне закрыт целиком. VM: hostname1 и ListSessions —
       отказ, Inhibit — да
-- [ ] решено владельцем (2026-09-17, `docs/HERMETICITY.md` §7): X11 в зонах закрыт,
-      контейнер с `x11` получает свой xwayland-satellite; сессионная шина и
+- [x] X11 в зонах закрыт (tmpfs поверх `/tmp/.X11-unix`, без `DISPLAY`);
+      контейнер с `x11` получает свой xwayland-satellite (`x11-run`)
+- [ ] решено владельцем (2026-09-17, `docs/HERMETICITY.md` §7): сессионная шина и
       брокер — прототип за флагом `hermetic`, затем умолчание с явным
       выключением на зону, разрешения из finish-args Flathub, свой ключ Secret
 - [ ] последний открытый путь к резолверу хоста: `org.freedesktop.resolve1` по

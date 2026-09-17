@@ -220,7 +220,10 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 owned(&mut out, &snap.profiles);
                 out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
             }
-            "container" if pos == 4 && word(2) == "set" => strs(&mut out, &["network"]),
+            "container" if pos == 4 && word(2) == "set" => strs(&mut out, &["network", "x11"]),
+            "container" if pos == 5 && word(2) == "set" && word(4) == "x11" => {
+                strs(&mut out, &["on", "off"])
+            }
             "container" if pos == 5 && word(2) == "set" => {
                 strs(&mut out, &["ask", "direct", "offline"]);
                 owned(&mut out, &snap.zones);
@@ -355,6 +358,10 @@ mod tests {
         assert_eq!(
             complete(&["vpn-zone", "container", "assign", "firefox", ""], 5),
             ["work", "sb:dev"]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "container", "set", "work", "x11", ""], 6),
+            ["on", "off"]
         );
         assert_eq!(
             complete(&["vpn-zone", "container", "grant", ""], 4),

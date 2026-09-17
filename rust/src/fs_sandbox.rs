@@ -233,6 +233,9 @@ pub struct Args {
     /// named sandbox (`docs/CONTAINERS.md` §3.5) — a Wine prefix, a Steam
     /// library. Checked again here against the state of this project.
     pub bind_paths: Vec<PathBuf>,
+    /// `--x11 on`: the container's own `x11` permission (`vpn-zone container
+    /// set … x11 on`, or Nix), on top of whatever the dialog answered.
+    pub x11: bool,
     pub tools: Tools,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
@@ -296,6 +299,7 @@ impl Args {
         let mut sandbox: Option<String> = None;
         let mut label: Option<String> = None;
         let mut bind_paths: Vec<PathBuf> = Vec::new();
+        let mut x11 = false;
         let mut app_id: Option<OsString> = None;
         let mut rest = argv[..split].iter();
         while let Some(arg) = rest.next() {
@@ -331,6 +335,7 @@ impl Args {
                         bind_paths.push(PathBuf::from(value));
                     }
                 }
+                "--x11" => x11 = value == "on",
                 _ => return Err(ArgError::UnknownFlag(flag)),
             }
         }
@@ -346,6 +351,7 @@ impl Args {
             sandbox,
             label,
             bind_paths,
+            x11,
             tools,
             cmd,
         })
@@ -991,7 +997,8 @@ pub fn run(args: Args) -> u8 {
             );
         }
     }
-    let perms = Perms::parse(&fs::read_to_string(&perm_file).unwrap_or_default());
+    let mut perms = Perms::parse(&fs::read_to_string(&perm_file).unwrap_or_default());
+    perms.x11 |= args.x11;
     if !perms.home {
         for (allowed, name) in [
             (perms.downloads, "Downloads"),
@@ -1633,6 +1640,14 @@ mod tests {
                 "/home/u/Pictures",
             ]
         );
+    }
+
+    #[test]
+    fn the_container_x11_permission_reaches_the_sandbox() {
+        let a = Args::parse(&argv(&["app", "--x11", "on", "--", "prog"])).unwrap();
+        assert!(a.x11);
+        let a = Args::parse(&argv(&["app", "--x11", "off", "--", "prog"])).unwrap();
+        assert!(!a.x11);
     }
 
     #[test]

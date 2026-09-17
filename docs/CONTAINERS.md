@@ -516,7 +516,8 @@ and `vpn-zone container show <name> --json` print subsets of the same schema.
       },
       "trust": [ { "sha256": "…", "subject": "CN=…",
                    "not_after": "2030-01-01T00:00:00Z", "source": "nix" } ],
-      "running": [ { "app": "firefox", "pid": 1234, "network": "nl" } ] }
+      "running": [ { "app": "firefox", "pid": 1234, "network": "nl" } ],
+      "x11": { "value": false, "source": "default" } }
   ]
 }
 ```

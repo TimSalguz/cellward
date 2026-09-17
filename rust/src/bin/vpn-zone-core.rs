@@ -130,6 +130,15 @@ fn main() -> ExitCode {
             }
         },
         // The inside half of `vpn-zone doctor`, run in a zone's namespaces.
+        // A launch's own X server in a zone (docs/HERMETICITY.md §7, A).
+        Some("x11-run") => match vpn_zone::x11::Args::parse(&args[1..]) {
+            Ok(parsed) => ExitCode::from(vpn_zone::x11::run(parsed)),
+            Err(e) => {
+                eprintln!("vpn-zone-core x11-run: {e}");
+                eprint!("{USAGE}");
+                ExitCode::from(EXIT_USAGE)
+            }
+        },
         Some("doctor-probe") => ExitCode::from(vpn_zone::doctor::probe_main(&args[1..])),
         Some("wl-sandbox") => match wl_sandbox::Args::parse(&args[1..]) {
             Ok(parsed) => ExitCode::from(wl_sandbox::run(parsed)),
