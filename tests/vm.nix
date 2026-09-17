@@ -520,11 +520,13 @@ let
       APPS = "/home/alice/.local/share/applications"
 
       with subtest("user entries: a foreign one is taken over, a symlink is not, and both come back"):
+          # The original is written outside first: the path unit takes the
+          # entry over the moment it lands in the directory.
           alice(
               "printf '[Desktop Entry]\\nType=Application\\nName=VM foreign\\n"
-              f"NoDisplay=true\\nExec=/bin/sh -c true %%u\\n' > {APPS}/userapp-vmforeign.desktop"
+              "NoDisplay=true\\nExec=/bin/sh -c true %%u\\n' > /tmp/vmforeign.orig"
           )
-          alice(f"cp {APPS}/userapp-vmforeign.desktop /tmp/vmforeign.orig")
+          alice(f"cp /tmp/vmforeign.orig {APPS}/userapp-vmforeign.desktop")
           alice("vpn-zone sync")
           out = alice(f"cat {APPS}/userapp-vmforeign.desktop")
           assert "X-VPNZone=adopted" in out, out

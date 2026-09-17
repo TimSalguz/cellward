@@ -20,6 +20,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   byte. Symlinks (home-manager, Nix) are never touched. This changes the
   written invariant "foreign files there are never rewritten"
   (`docs/LAUNCHERS.md` §3.2, the owner's decision of 2026-09-17).
+- Desktop sync passes run one at a time (a lock in the state directory) and
+  write entries, backups and restored originals through a rename: the path
+  unit starts a pass on the very write of another pass, and a pass that read a
+  half-written entry kept the fragment as the original.
 
 ### Security (a zone's own nsswitch.conf)
 - A zone binds its own `/etc/nsswitch.conf`, the host's with `hosts:` reduced

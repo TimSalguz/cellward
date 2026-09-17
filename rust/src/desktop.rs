@@ -38,6 +38,8 @@ pub const PREFIX: &str = "vpn-zone-";
 /// Where the original bytes of taken-over entries are kept, below the state
 /// directory: one file per entry, under the entry's own name.
 pub const ADOPTED_DIR: &str = ".adopted";
+/// Where the lock of the whole sync pass lives, below the state directory.
+pub const SYNC_LOCK_DIR: &str = ".sync";
 /// The marker value of an entry taken over in place: `X-VPNZone=adopted`.
 const ADOPTED: &str = "adopted";
 /// The marker that says "this file is ours". Present in the file we write and
@@ -573,7 +575,7 @@ pub fn write_if_changed(target: &Path, content: &str) -> u32 {
     if fs::read(target).is_ok_and(|existing| existing == content.as_bytes()) {
         return 0;
     }
-    match fs::write(target, content) {
+    match write_atomically(target, content.as_bytes()) {
         Ok(()) => 1,
         Err(e) => {
             eprintln!(
@@ -586,6 +588,25 @@ pub fn write_if_changed(target: &Path, content: &str) -> u32 {
             0
         }
     }
+}
+
+/// Write through a temporary in the same directory and rename it over the
+/// target, so that nobody ever reads half a file.
+///
+/// Not a nicety for the entries taken over in place: a pass that read one of
+/// them half-written would see a foreign file without the marker and keep THAT
+/// as the original, over the real backup — and `mode off` would then "restore"
+/// a fragment. Two passes do run at once: the path unit reacts to the very
+/// write a manual `vpn-zone sync` makes. The temporary does not end in
+/// `.desktop`, so no pass ever collects it.
+pub fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = target.with_file_name(format!(".{name}.vpn-zone-tmp"));
+    fs::write(&tmp, bytes)
+        .and_then(|()| fs::rename(&tmp, target))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })
 }
 
 /// The human-readable name next to the key: dialogs and reset lists show
@@ -831,7 +852,7 @@ pub fn cleanup(out_dir: &Path, wanted: &BTreeSet<String>, adopted_dir: &Path) ->
         if adopted(&path) {
             let backup = adopted_dir.join(&name);
             if let Ok(original) = fs::read(&backup) {
-                if fs::write(&path, original).is_ok() {
+                if write_atomically(&path, &original).is_ok() {
                     let _ = fs::remove_file(&backup);
                     removed += 1;
                 }
@@ -857,6 +878,20 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
         eprintln!("cannot create {}: {e}", out_dir.display());
         return 1;
     }
+
+    // One pass at a time, and the mode read under the lock: the path unit
+    // starts a pass for every write into the applications directory, the
+    // manual `vpn-zone sync` and `mode` start theirs, and two passes
+    // interleaved can each take the other's rewrite for an original, or
+    // rewrite an entry the other has just given back. Without the lock only
+    // this pass's own atomicity is left, which is not enough for that.
+    let _lock = match crate::registry::lock(&state_dir.join(SYNC_LOCK_DIR)) {
+        Ok(lock) => Some(lock),
+        Err(e) => {
+            eprintln!("sync lock unavailable ({e}): running unlocked");
+            None
+        }
+    };
 
     // The mode declared in Nix, when there is one, wins over the local file.
     let declared_mode = home.join(".config/vpn-zones/declared/mode");
@@ -931,7 +966,9 @@ fn sync_from(state_dir: &Path, home: &Path, runner: &str, picker: &str, dirs: &[
                 if !ours(&target) {
                     kept = fs::create_dir_all(&adopted_dir).is_ok()
                         && fs::read(&target)
-                            .and_then(|bytes| fs::write(adopted_dir.join(&app.name), bytes))
+                            .and_then(|bytes| {
+                                write_atomically(&adopted_dir.join(&app.name), &bytes)
+                            })
                             .is_ok();
                 }
                 // No backup, no take-over: a file we could not restore is not
@@ -1220,6 +1257,25 @@ Name=not carried over
         // and writing to it would write into somebody else's target.
         assert!(occupied(&broken));
         assert!(!occupied(&tmp.join("absent.desktop")));
+    }
+
+    #[test]
+    fn an_atomic_write_leaves_no_temporary_behind() {
+        let tmp = TempDir::new("atomic");
+        let target = tmp.join("userapp-x.desktop");
+        fs::write(&target, "old\n").unwrap();
+        write_atomically(&target, b"new\n").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+        let names: Vec<String> = fs::read_dir(&tmp.path)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["userapp-x.desktop"]);
+        // A failed write removes its temporary and leaves the target alone.
+        let missing = tmp.join("no-such-dir").join("y.desktop");
+        assert!(write_atomically(&missing, b"x").is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
     }
 
     #[test]
