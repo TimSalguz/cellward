@@ -13,7 +13,9 @@
 //!    new — a fork between two passes is frozen by the next one;
 //! 2. the zone goes down (`systemctl --user stop`), taking the tunnel, the
 //!    uplink and pasta with it;
-//! 3. the frozen processes are killed (`SIGKILL`).
+//! 3. the frozen processes are killed (`SIGKILL`), and so is anything that
+//!    entered the namespace while the zone was going down — a launch that
+//!    was already on its way in.
 //!
 //! Frozen first, so that nothing gets to act on the teardown it sees. The
 //! zone's own processes — the holder, pasta, the proxies, the app namespace's
@@ -181,8 +183,15 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
         eprintln!("{why}");
     }
     let stopped = crate::cli::systemctl(tools, "stop", name);
+    // The namespace outlives the zone while anything is in it: one more
+    // round for whoever got in between the passes and the stop.
+    let (late, _) = freeze(&netns, unit.as_deref(), &spare);
     let killed: Vec<&Target> = frozen
         .iter()
+        .chain(
+            late.iter()
+                .filter(|l| !frozen.iter().any(|f| f.pid == l.pid)),
+        )
         .filter(|t| pidfd_signal(&t.fd, libc::SIGKILL))
         .collect();
     let names: Vec<String> = killed

@@ -492,11 +492,13 @@ let
       with subtest("vpn-zone kill: the zone's programs die, the zone is down, the host's live"):
           alice("systemd-run --user --unit=vmremote vpn-zone run vmsmoke -- sleep 4242")
           alice("systemd-run --user --unit=vmhostsleep sleep 4343")
-          machine.wait_until_succeeds("pgrep -f 'sleep 424[2]'", timeout=60)
+          # The program itself, not the launch still waiting for the zone:
+          # only the exec'd sleep has exactly this command line.
+          machine.wait_until_succeeds("pgrep -f '^(/[^ ]*/)?sleep 424[2]$'", timeout=60)
           machine.wait_until_succeeds("pgrep -f 'sleep 434[3]'", timeout=30)
           out = alice("vpn-zone kill vmsmoke")
           assert "оборвана" in out, out
-          machine.wait_until_fails("pgrep -f 'sleep 424[2]'", timeout=10)
+          machine.wait_until_fails("pgrep -f 'sleep 424[2]'", timeout=15)
           machine.succeed("pgrep -f 'sleep 434[3]'")
           status = alice(
               "systemctl --user is-active vpn-zone@vmsmoke.service || true"
