@@ -66,7 +66,7 @@ pub const MAIN: &str = "__main__";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
     pub pid: i32,
-    /// Zone the program was started into. `direct` and `offline` are zones here
+    /// Zone the program was started into. `unconfined` and `offline` are zones here
     /// like any other.
     pub zone: String,
     /// What was chosen: `sb:<name>`, `__fs__`, a container name, or empty.
@@ -87,7 +87,8 @@ pub struct Record {
 pub fn parse_record(line: &str) -> Option<Record> {
     let mut fields = line.split_whitespace();
     let pid: i32 = fields.next()?.parse().ok()?;
-    let zone = fields.next().unwrap_or_default().to_owned();
+    // Records written before the rename say `direct`.
+    let zone = crate::launch::network_name(fields.next().unwrap_or_default()).to_owned();
     let selector = fields.collect::<Vec<_>>().join(" ");
     Some(Record {
         pid,

@@ -237,10 +237,10 @@ fn removing_a_zone_asks_twice_and_then_calls_the_cli() {
     let asked = home.asked();
     assert_eq!(asked.len(), 2, "{asked:?}");
     assert!(said(&asked[0], "Какую зону удалить?"));
-    // Both zones are offered, and nothing else: `direct` and `offline` are not
+    // Both zones are offered, and nothing else: `unconfined` and `offline` are not
     // zones and there is nothing to delete about them.
     assert!(asked[0].contains(&"nl".to_owned()) && asked[0].contains(&"de".to_owned()));
-    assert!(!said(&asked[0], "direct"));
+    assert!(!said(&asked[0], "unconfined"));
     // The second step warns about the private key that goes with the config.
     assert!(said(&asked[1], "приватный ключ"), "{:?}", asked[1]);
     assert_eq!(home.ran(), vec![vec!["rm".to_owned(), "nl".to_owned()]]);
@@ -357,7 +357,7 @@ fn the_settings_show_the_current_values_and_write_through_the_cli() {
     let asked = home.asked();
     // The first menu is the one that makes the settings discoverable at all.
     assert!(
-        said(&asked[0], "Сеть по умолчанию — сейчас: direct"),
+        said(&asked[0], "Сеть по умолчанию — сейчас: unconfined"),
         "{:?}",
         asked[0]
     );

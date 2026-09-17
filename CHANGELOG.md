@@ -5,6 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed (breaking, with the old name kept)
+- The built-in network `direct` is now `unconfined`: the name says that nothing
+  of a zone is around the program — no VPN, the host's resolver, session bus,
+  `systemd --user` and X server. `direct` stays an alias everywhere a network
+  name is read — `vpn-zone run`, `vpn-zone default`, `container set … network`,
+  `defaults.network` and `containers.<n>.network` in Nix, pins, `.last`,
+  settings and registry records written before — and is never written again.
+  The picker and the GUI call it «Без ограничений — сеть хоста, без VPN и без
+  изоляции зоны».
+- `status --json` (schema_version 1): the built-in entry of `networks[]` is
+  `{"name": "unconfined", "kind": "unconfined", "aliases": ["direct"], …}`,
+  every entry has `aliases` (additive), and `defaults.network.value`,
+  `containers[].network.value`, `apps[].network.value` and the live launches'
+  `network` say `unconfined` where they said `direct`. A consumer matching
+  `direct` must accept `unconfined` (or read `aliases`).
+- Migration: a zone the user had named `unconfined` is no longer entered — a
+  launch into it is refused instead of silently using the host's network, the
+  picker does not offer it and `vpn-zone doctor` fails on it. Rename its
+  directory in `~/.local/state/vpn-zones/`. `vpn-zone add` refuses the name.
+
 ### Added (hermetic switches)
 - `programs.vpn-zones.hermetic.default` and `hermetic.exceptions` (zones set
   opposite to the default; the default is required with them), and locally

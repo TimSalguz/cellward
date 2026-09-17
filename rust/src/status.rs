@@ -75,6 +75,7 @@ fn setting(tools: &Tools, name: &str, default: &str) -> (String, Source) {
 
 pub fn defaults(tools: &Tools) -> String {
     let (network, network_source) = setting(tools, "default", "offline");
+    let network = crate::launch::network_name(&network).to_owned();
     let (container, container_source) = setting(tools, "default-profile", "ask");
     let (mode, mode_source) = setting(tools, "mode", "picker");
     let (wayland, wayland_source) = setting(tools, "wayland-sandbox", "on");
@@ -121,7 +122,9 @@ fn zone_kind(dir: &std::path::Path) -> Option<&'static str> {
 
 pub fn networks(tools: &Tools) -> String {
     let mut items = vec![
-        "{\"name\":\"direct\",\"kind\":\"direct\",\"source\":\"default\",\"up\":true,\
+        // `aliases`: the names it is also read by — `direct`, its name until
+        // 2026-09, may still be in a configuration or in Nix.
+        "{\"name\":\"unconfined\",\"kind\":\"unconfined\",\"aliases\":[\"direct\"],\"source\":\"default\",\"up\":true,\
          \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
              \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null}"
             .to_owned(),
@@ -139,6 +142,12 @@ pub fn networks(tools: &Tools) -> String {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
+        // A zone left with a name that now means the host's network: it would
+        // be a second `unconfined` here, and a launch refuses it anyway.
+        // (`vpn-zone doctor` names it.)
+        if crate::launch::is_unconfined_name(&name) {
+            continue;
+        }
         offline_listed |= name == "offline";
         let up = zone_pid(&tools.state, dir.file_name().unwrap_or_default()).is_some();
         let mirror = if up && kind != "offline" {
@@ -183,14 +192,14 @@ pub fn networks(tools: &Tools) -> String {
             "local"
         };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic}}}",
+            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic}}}",
             string(&name),
             dir.join(NO_ESCAPE).exists()
         ));
     }
     if !offline_listed {
         items.push(
-            "{\"name\":\"offline\",\"kind\":\"offline\",\"source\":\"default\",\"up\":false,\
+            "{\"name\":\"offline\",\"kind\":\"offline\",\"aliases\":[],\"source\":\"default\",\"up\":false,\
              \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
              \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null}"
                 .to_owned(),
@@ -364,7 +373,9 @@ pub fn apps(tools: &Tools) -> String {
                 });
                 let assigned = assigned.unwrap_or_else(|| sourced("null".to_owned(), Source::Default));
                 let network = match read_setting(&tools.state.join(".pinned").join(id)) {
-                    Some(net) if !net.is_empty() => sourced_str(&net, Source::Local),
+                    Some(net) if !net.is_empty() => {
+                        sourced_str(crate::launch::network_name(&net), Source::Local)
+                    }
                     _ => sourced("null".to_owned(), Source::Default),
                 };
                 format!(

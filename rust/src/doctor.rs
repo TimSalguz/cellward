@@ -603,6 +603,20 @@ pub fn system_checks(tools: &Tools, uid: u32) -> Vec<Check> {
             None => Check::new(id, Level::Fail, format!("{file} не читается")),
         });
     }
+    // A zone that kept the name `unconfined` from before it meant the host's
+    // network: no longer offered, and refused when named.
+    if tools.state.join(crate::launch::UNCONFINED).is_dir() {
+        checks.push(Check::new(
+            "zone-name-unconfined",
+            Level::Fail,
+            format!(
+                "есть зона с именем «{}» — теперь это имя сети хоста без ограничений; \
+                 запуск в неё отказывается, переименуй её каталог в {}",
+                crate::launch::UNCONFINED,
+                tools.state.display()
+            ),
+        ));
+    }
     checks.push(if Path::new("/dev/net/tun").exists() {
         Check::new("tun", Level::Ok, "/dev/net/tun есть")
     } else {

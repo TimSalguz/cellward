@@ -183,7 +183,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             "mode" if pos == 2 => strs(&mut out, &["picker", "per-zone", "both", "off"]),
             "wayland-sandbox" if pos == 2 => strs(&mut out, &["on", "off"]),
             "default" if pos == 2 => {
-                strs(&mut out, &["offline", "direct"]);
+                strs(&mut out, &["offline", "unconfined"]);
                 owned(&mut out, &snap.zones);
             }
             "default-profile" if pos == 2 => {
@@ -236,7 +236,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 strs(&mut out, &["on", "off"])
             }
             "container" if pos == 5 && word(2) == "set" => {
-                strs(&mut out, &["ask", "direct", "offline"]);
+                strs(&mut out, &["ask", "unconfined", "offline"]);
                 owned(&mut out, &snap.zones);
             }
             "container" if pos == 4 && word(2) == "assign" => {

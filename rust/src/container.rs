@@ -90,7 +90,8 @@ pub enum Network {
     /// Not bound: the network is asked on every launch, as before containers
     /// had one. What every existing container starts as.
     Ask,
-    /// A network by name: a zone, `direct` or `offline`.
+    /// A network by name: a zone, `unconfined` or `offline` (`direct`, the old
+    /// name of `unconfined`, is read as it).
     Named(String),
 }
 
@@ -106,7 +107,7 @@ impl Network {
         Some(if text == "ask" {
             Self::Ask
         } else {
-            Self::Named(text.to_owned())
+            Self::Named(crate::launch::network_name(text).to_owned())
         })
     }
 
@@ -937,7 +938,11 @@ mod tests {
         }
         assert!(Network::Ask.accepts("anything"));
         assert!(Network::Named("nl".into()).accepts("nl"));
-        assert!(!Network::Named("nl".into()).accepts("direct"));
+        assert!(!Network::Named("nl".into()).accepts("unconfined"));
+        assert_eq!(
+            Network::parse("direct"),
+            Some(Network::Named("unconfined".into()))
+        );
     }
 
     #[test]
@@ -978,15 +983,18 @@ mod tests {
     fn a_bound_container_runs_in_its_network_only() {
         let c = container(Network::Named("nl".into()), Source::Local);
         assert_eq!(refusal(&c, "nl", None), None);
-        let why = refusal(&c, "direct", None).unwrap();
-        assert!(why.contains("«nl»") && why.contains("«direct»"), "{why}");
+        let why = refusal(&c, "unconfined", None).unwrap();
         assert!(
-            why.contains("vpn-zone container set sb:work network direct"),
+            why.contains("«nl»") && why.contains("«unconfined»"),
+            "{why}"
+        );
+        assert!(
+            why.contains("vpn-zone container set sb:work network unconfined"),
             "{why}"
         );
         // Declared in Nix: the way out is the module, not the CLI.
         let c = container(Network::Named("nl".into()), Source::Nix);
-        assert!(refusal(&c, "direct", None)
+        assert!(refusal(&c, "unconfined", None)
             .unwrap()
             .contains("задана в Nix"));
     }

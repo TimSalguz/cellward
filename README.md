@@ -24,8 +24,11 @@ inside, `pasta` from passt facing outward. Two kinds of tunnel are supported —
 kernel WireGuard/AmneziaWG, and OpenConnect (Cisco AnyConnect and ocserv, and
 through `Protocol =` also GlobalProtect, Pulse, F5, Fortinet and Array). There
 can be any number of zones, each with its own config. There are built-in
-"direct internet" and "no network" options — the latter means the literal
-absence of a route, not a firewall rule.
+`unconfined` and `offline` options. `unconfined` (called `direct` until
+2026-09; the old name still works) is the host's own network with nothing of a
+zone around the program: no VPN, the host's resolver, session bus and
+`systemd --user`. `offline` means the literal absence of a route, not a
+firewall rule.
 
 **Data.** Five modes:
 

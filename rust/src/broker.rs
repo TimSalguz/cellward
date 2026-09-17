@@ -15,7 +15,7 @@
 //! * a launch into the very zone that asks: started, no dialog — the program
 //!   is in that zone already;
 //! * a locked zone asking for another network: refused;
-//! * anything else — another zone, `direct`: a person is asked, with the
+//! * anything else — another zone, `unconfined`: a person is asked, with the
 //!   asking zone and the command in the question; with nobody to ask (no
 //!   graphical session), refused.
 //!
@@ -180,8 +180,8 @@ fn ask(tools: &Tools, origin: &str, target: &str, cmd: &[OsString]) -> Result<()
         .iter()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    let network = if target == crate::launch::DIRECT {
-        "прямом интернете (без VPN)".to_owned()
+    let network = if target == crate::launch::UNCONFINED {
+        "без ограничений (сеть хоста, без VPN и без изоляции зоны)".to_owned()
     } else {
         format!("сети «{target}»")
     };
@@ -300,12 +300,12 @@ mod tests {
     fn only_the_same_zone_starts_without_a_person() {
         assert_eq!(decide(Some("nl"), false, "nl"), Decision::Start);
         assert_eq!(decide(Some("nl"), false, "de"), Decision::Ask);
-        assert_eq!(decide(Some("nl"), false, "direct"), Decision::Ask);
+        assert_eq!(decide(Some("nl"), false, "unconfined"), Decision::Ask);
         assert!(matches!(
-            decide(Some("nl"), true, "direct"),
+            decide(Some("nl"), true, "unconfined"),
             Decision::Refuse(_)
         ));
         assert_eq!(decide(Some("nl"), true, "nl"), Decision::Start);
-        assert_eq!(decide(None, false, "direct"), Decision::Start);
+        assert_eq!(decide(None, false, "unconfined"), Decision::Start);
     }
 }

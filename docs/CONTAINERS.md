@@ -10,7 +10,7 @@ Nothing described here as "new" exists yet unless it is marked as done.
 ## 1. Summary
 
 Today a launch is three independent choices made on every click: a network
-(zone, direct, offline), a data container (main, overlay profile, throwaway)
+(zone, unconfined, offline), a data container (main, overlay profile, throwaway)
 and a filesystem sandbox (none, per-app, named, throwaway). This design turns
 the three into one thing, a **container**:
 
@@ -47,7 +47,7 @@ Consequences, in order of importance:
 | concept | where it lives | what it isolates |
 |---|---|---|
 | zone | `~/.local/state/vpn-zones/<zone>/` + `vpn-zone@<zone>` | network (app-ns: `lo` + tunnel only); WireGuard, AmneziaWG or OpenConnect |
-| `direct` | nothing | nothing (host network) |
+| `unconfined` | nothing | nothing (host network) |
 | `offline` | a zone with a marker, created on demand | everything network, incl. host resolvers |
 | overlay container ("profile") | `~/.local/state/vpn-profiles/<name>/` | XDG dirs (`.config`, `.local/share`, `.cache`, `.mozilla`, `.pki`) |
 | throwaway container | `/tmp/vpn-profile-*` | same, erased after the last tenant |
@@ -109,7 +109,7 @@ container = {
 - **I4. Every layer on every road.** Network, home, permissions, trust and the
   compositor restriction are applied by one code path (`vpn-zone run` →
   `entry_argv` → `profile-run`), for every kind of network (done for zones,
-  `direct` and `offline`).
+  `unconfined` and `offline`).
 - **I5. Unknown means offline.** A program with no assignment starts with no
   network until one is given ([GOTCHAS](GOTCHAS.md) §2), in a home of its own
   (`defaults.container = own`).
@@ -125,7 +125,7 @@ container = {
 | zone: OpenConnect | client in the uplink, its tun moved into the app namespace (done) | no |
 | zone: another client (sing-box, OpenVPN, a GUI client) | same shape, M4 | no |
 | through a host interface | **done**: no uplink — pasta attached to the app namespace itself, its interface named `awg0`, every socket bound to that host interface (`--outbound-if4/-if6`), no port forwarding; `[HostInterface]` config | no |
-| `direct` | the host's network, no namespace (done) | no |
+| `unconfined` | the host's network, no namespace (done) | no |
 | `offline` | loopback only (done) | no |
 | a host interface **itself** inside the container | moving a real link into another network namespace needs `CAP_NET_ADMIN` in the host's namespace | **yes**: a small system helper (NixOS module option), never the default |
 
@@ -198,7 +198,7 @@ at its own path, read-write. Rules:
 ### 3.6 Per-launch runtime (the order is the specification)
 
 ```
-[nsenter -U -n -m -t <zone>]  or  [unshare -U --map-current-user --keep-caps]   (direct)
+[nsenter -U -n -m -t <zone>]  or  [unshare -U --map-current-user --keep-caps]   (unconfined)
   └─ unshare --mount --propagation private           when anything is mounted
       └─ vpn-zone-core profile-run --cwd <dir> …     (done)
            1. home layer: overlay slots, or binds for permissions.paths
@@ -427,7 +427,7 @@ programs.vpn-zones = {
 
   launcher.mode = "picker";              # picker | per-zone (deprecated) | both (deprecated) | off
   defaults = {
-    network = "offline";                 # offline | direct | <network>
+    network = "offline";                 # offline | unconfined | <network>
     container = "own";                   # own | ask | main | <container>
   };
   compositorRestriction.enable = true;
@@ -439,7 +439,7 @@ programs.vpn-zones = {
 
   containers.work = {
     home = "private";                    # private | overlay
-    network = "nl";                      # <zone> | <network> | direct | offline | "ask"
+    network = "nl";                      # <zone> | <network> | unconfined | offline | "ask"
     routes = [ ];                        # e.g. [ "192.168.1.0/24" ] — explicit holes
     apps = [ "firefox" "org.telegram.desktop" ];
     permissions = {
@@ -494,11 +494,15 @@ and `vpn-zone container show <name> --json` print subsets of the same schema.
     "hermetic": { "value": false, "source": "default" }
   },
   "networks": [
-    { "name": "nl", "kind": "wireguard", "source": "local",
+    { "name": "unconfined", "kind": "unconfined", "aliases": ["direct"],
+      "source": "default", "up": true, "locked": false, "tunnel_alive": null,
+      "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,
+      "interface": null },
+    { "name": "nl", "kind": "wireguard", "aliases": [], "source": "local",
       "up": true, "locked": false, "tunnel_alive": true,
       "handshake_age_s": 42, "rx_bytes": 1048576, "tx_bytes": 524288,
       "interface": null },
-    { "name": "lan", "kind": "host-interface", "source": "local",
+    { "name": "lan", "kind": "host-interface", "aliases": [], "source": "local",
       "up": false, "locked": false, "tunnel_alive": null,
       "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,
       "interface": "enp4s0" }
@@ -533,10 +537,16 @@ every key of version 1.
   are two containers). Every reference to a container elsewhere in the
   document — `apps[].container.value` — is a selector, and
   `containers[].selector` is what it matches;
-- a network by `name`; `networks[].kind` is one of `direct`, `offline`,
+- a network by `name`; `networks[].kind` is one of `unconfined`, `offline`,
   `wireguard`, `openconnect`, `host-interface`, and `interface` is the host's
   interface for `host-interface` and `null` for every other kind — a
   `host-interface` network is NOT encrypted by this project;
+- `networks[].aliases` are the other names a network is read by. The only one
+  is `direct` on `unconfined`, its name until 2026-09: it is accepted in the
+  CLI, in Nix (`defaults.network`, `containers.<n>.network`), in pins and in
+  settings written before the rename, and never appears as a value anywhere
+  in the document — every `network.value` and `apps[].network.value` says
+  `unconfined`;
 - a program by its launcher key (`apps[].id`, `containers[].apps[].value`),
   the lossless key of `docs/LAUNCHERS.md` §3.4.
 
@@ -562,7 +572,7 @@ would match too.
   everywhere it is shown (`host-interface`).
 - **Extra routes.** Each is a hole by definition — explicit, per prefix, off by
   default, listed in every view and in `doctor`.
-- **`direct` containers** (done). No network namespace — the host's network and
+- **`unconfined` containers** (done). No network namespace — the host's network and
   resolvers, and the name says so. The user namespace grants nothing over the
   host's netns.
 - **Per-launch mount namespace, path grants.** No network change. A granted

@@ -728,7 +728,8 @@ let
           out = alice("vpn-zone status --json")
           assert out.startswith('{"schema_version":1,'), out
           assert '"selector":"vmdecl"' in out, out
-          assert '"network":{"value":"direct","source":"nix"}' in out, out
+          # Declared as `direct`, the old name: read as the new one.
+          assert '"network":{"value":"unconfined","source":"nix"}' in out, out
           assert '"container":{"value":"vmdecl","source":"nix"}' in out, out
           assert '"source":"nix"}]' in out or '"source":"nix"}' in out, out
           alice("sh -c '! vpn-zone container set vmdecl network offline'")
