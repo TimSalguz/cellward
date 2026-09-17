@@ -469,6 +469,7 @@ let
       ++ lib.optional (c.network != null) "network = ${c.network}"
       ++ map (app: "app = ${app}") c.apps
       ++ lib.optional (c.trust.certificates != [ ]) "trust = ${trustDir name c.trust.certificates}"
+      ++ map (path: "path = ${path}") c.permissions.paths
     )
     + "\n";
 
@@ -496,6 +497,15 @@ let
         default = [ ];
         example = [ "firefox" ];
         description = "Программы (id ярлыков, имя .desktop без расширения), которые запускаются в этом контейнере без вопроса.";
+      };
+      permissions.paths = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [
+          "~/.wine"
+          "/mnt/games/SteamLibrary"
+        ];
+        description = "Только для home = \"private\": каталоги настоящего дома (~/…) или дисков (/mnt, /media, /run/media, /srv), которые программы контейнера видят и меняют. Состояние vpn-zones, весь дом и остальные места (/run, /tmp, /etc…) не выдаются — это стены песочницы; такой путь пропускается при запуске с предупреждением. То, что программы положат сюда, видно вне контейнера.";
       };
       trust = {
         certificates = lib.mkOption {
@@ -577,6 +587,16 @@ in
     ++ lib.mapAttrsToList (name: c: {
       assertion = c.trust.certificates == [ ] || c.trust.acknowledgeRisk;
       message = "programs.vpn-zones.containers.${name}.trust: дополнительный корневой сертификат позволяет его владельцу читать TLS-трафик программ контейнера — подтверди это: trust.acknowledgeRisk = true";
+    }) cfg.containers
+    ++ lib.mapAttrsToList (name: c: {
+      assertion = c.permissions.paths == [ ] || c.home == "private";
+      message = "programs.vpn-zones.containers.${name}.permissions.paths: каталоги выдаются только своему дому (home = \"private\") — слою над домом и так виден весь настоящий дом";
+    }) cfg.containers
+    ++ lib.mapAttrsToList (name: c: {
+      assertion = lib.all (
+        v: !(lib.hasInfix "\n" v) && (lib.hasPrefix "/" v || lib.hasPrefix "~/" v)
+      ) c.permissions.paths && lib.all (v: !(lib.hasInfix "\n" v)) c.apps;
+      message = "programs.vpn-zones.containers.${name}: каталог в permissions.paths — абсолютный путь или ~/…, без переводов строки (и id программ тоже без них)";
     }) cfg.containers
     ++ [
       {

@@ -239,8 +239,14 @@ pub fn container(tools: &Tools, c: &Container) -> String {
             .filter(|(on, _)| *on)
             .map(|(_, name)| string(name))
             .collect();
+            let paths = array(
+                c.paths
+                    .iter()
+                    .map(|p| sourced_str(&p.value.to_string_lossy(), p.source))
+                    .collect(),
+            );
             format!(
-                "{{\"filesystem\":{},\"x11\":{}}}",
+                "{{\"filesystem\":{},\"x11\":{},\"paths\":{paths}}}",
                 sourced(array(filesystem), source),
                 sourced(perms.x11.to_string(), source)
             )

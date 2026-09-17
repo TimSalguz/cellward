@@ -537,6 +537,38 @@ env -u WAYLAND_DISPLAY -u DISPLAY "$FSCORE" fs-sandbox \
 [ ! -e "$WORK/kdialog-was-called" ] || fail "kdialog вызвался при готовом файле доступов"
 echo "ok: без шины запуск живёт, код выхода 42 донесён"
 
+# Выданные каталоги (docs/CONTAINERS.md §3.5): своему дому песочницы можно
+# выдать каталог настоящего дома — префикс Wine, библиотеку Steam. Нельзя —
+# состояние vpn-zones (там ключи зон), в том числе через symlink: bwrap идёт
+# по ссылкам, поэтому путь проверяется и как написан, и как разрешён.
+step "Песочница ФС: выданный каталог виден и пишется, состояние vpn-zones — нет, и через symlink тоже"
+GRANTED="$HOME/smoke-granted"
+KEYDIR="$HOME/.local/state/vpn-zones"
+mkdir -p "$KEYDIR"
+: > "$KEYDIR/.smoke-grant-marker"
+rm -rf "$GRANTED" "$HOME/smoke-sneaky"
+ln -s "$KEYDIR" "$HOME/smoke-sneaky"
+fsout=$(env -u WAYLAND_DISPLAY -u DISPLAY "$FSCORE" fs-sandbox \
+  --bwrap "$FSBWRAP" --dbus-proxy "$FSPROXY" \
+  --kdialog "$WORK/fake-kdialog" --xwayland /nonexistent/xwayland-satellite \
+  --name smokegrant \
+  --bind-path "$GRANTED" --bind-path "$KEYDIR" --bind-path "$HOME/smoke-sneaky" \
+  "$FSAPP" -- "$FSSH" -c '
+    echo from-inside > "$HOME/smoke-granted/written" && echo WRITE-OK
+    [ -e "$HOME/.local/state/vpn-zones/.smoke-grant-marker" ] && echo LEAK-STATE
+    [ -e "$HOME/smoke-sneaky/.smoke-grant-marker" ] && echo LEAK-SYMLINK
+    exit 0
+  ' 2>"$WORK/grant.err") || fail "песочница с выданным каталогом не запустилась: $(cat "$WORK/grant.err")"
+echo "${fsout:-<пусто>}"
+echo "$fsout" | grep -q '^WRITE-OK$' || fail "в выданный каталог не пишется изнутри"
+[ "$(cat "$GRANTED/written" 2>/dev/null)" = from-inside ] || fail "записанное внутри не видно снаружи"
+if echo "$fsout" | grep -q '^LEAK-'; then
+  fail "состояние vpn-zones выдано песочнице: $fsout"
+fi
+grep -q 'smoke-sneaky is not granted' "$WORK/grant.err" || fail "symlink в состояние не был отвергнут: $(cat "$WORK/grant.err")"
+rm -rf "$GRANTED" "$HOME/smoke-sneaky" "$KEYDIR/.smoke-grant-marker" "$HOME/.local/state/vpn-sandboxes/smokegrant"
+echo "ok: выданный каталог работает, ключи зон не выдаются ни прямо, ни по ссылке"
+
 # --- 6в. Пикер сети без графики ----------------------------------------------
 # Пикер интерактивен, и проверять здесь можно ровно одно: ветку «спросить
 # негде». Она не косметическая — это недавний фикс: без графики kdialog падает

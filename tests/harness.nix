@@ -112,7 +112,13 @@ let
               acknowledgeRisk = true;
             };
           };
-          containers.dev.apps = [ "org.telegram.desktop" ];
+          containers.dev = {
+            apps = [ "org.telegram.desktop" ];
+            permissions.paths = [
+              "~/.wine"
+              "/mnt/games"
+            ];
+          };
         };
         home = {
           inherit username homeDirectory;

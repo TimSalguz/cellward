@@ -5,6 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (path grants and merging containers)
+- `vpn-zone container grant|revoke sb:<sandbox> <dir>` and
+  `programs.vpn-zones.containers.<name>.permissions.paths`: a directory of the
+  real home or of a data disk (`/mnt`, `/media`, `/run/media`, `/srv`) seen
+  read-write by the programs of a home of their own — a Wine prefix, a Steam
+  library. An allow-list: sockets (`/run`, `/tmp`), `/etc`, the home itself and
+  the state of vpn-zones (zone keys) are never granted, checked as written and
+  as resolved, in the CLI and again by `fs-sandbox` at every launch.
+  `container show --json` lists them under `permissions.paths` (additive,
+  schema version 1).
+- `vpn-zone container merge <from> <into> [--yes]`: containers of one kind are
+  merged — what `<into>` has is kept, conflicting versions from `<from>` go to a
+  fresh `.merged-from-<from>/`, programs are reassigned, certificates new to
+  `<into>` need `--yes`, permissions are not copied, `<from>` is kept. Refused
+  while either runs and for containers declared in Nix.
+
 ### Changed (invariant: foreign entries in the user's applications directory)
 - **Entries programs write into `~/.local/share/applications` are now taken
   over in place** — Steam games, browser web apps, Wine entries and, above

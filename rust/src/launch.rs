@@ -534,6 +534,15 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         if let Sandbox::Named(name) = &selection.sandbox {
             wrapped.push("--name".into());
             wrapped.push(name.clone());
+            // Directories of the real home granted to this sandbox
+            // (`docs/CONTAINERS.md` §3.5); fs-sandbox checks them once more.
+            let selector = format!("sb:{}", name.to_string_lossy());
+            if let Some(container) = crate::container::load(tools, &selector) {
+                for path in container.paths {
+                    wrapped.push("--bind-path".into());
+                    wrapped.push(path.value.into());
+                }
+            }
         }
         if let Some(label) = &label {
             wrapped.push("--label".into());

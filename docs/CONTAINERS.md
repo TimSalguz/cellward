@@ -137,20 +137,29 @@ never possible: two ways out is a leak waiting for a routing mistake.
 
 ### 3.4 Merging two containers
 
-`vpn-zone container merge <from> <into>` (and a GUI entry): for programs that
-turned out to belong together (a browser and a password manager).
+`vpn-zone container merge <from> <into> [--yes]` — **implemented** (the GUI
+entry is left): for programs that turned out to belong together (a browser and
+a password manager).
 
-- the programs of `<from>` are assigned to `<into>`;
+- only containers of one kind merge: two layers over the home (their overlay
+  slots, `<slot>/upper`, are merged slot by slot) or two homes of their own;
+- the programs of `<from>` are assigned to `<into>` (`.pinnedprofile`, and
+  `.lastprofile` so the picker does not offer the emptied container first);
 - the home of `<from>` is copied into `<into>` **only where `<into>` has no
-  such path**; conflicting paths go to `<into>`'s
-  `.merged-from-<from>/` directory and are listed — merging two browser
-  profiles is not something a tool can decide;
-- the network stays `<into>`'s; trust certificates are united (the ⚠ dialog of
-  [CERTIFICATES.md](CERTIFICATES.md) is shown for every certificate that is new
-  to `<into>`); permissions of `<from>` that `<into>` lacks are asked for, not
-  copied;
+  such path**; conflicting paths go to a fresh `.merged-from-<from>[-N]/`
+  directory of `<into>` and are listed — merging two browser profiles is not
+  something a tool can decide. Nothing is followed: symlinks are copied as
+  symlinks, a symlink in `<into>` is a taken name, and the conflicts directory
+  is never one that already exists (a program of `<into>` could have planted a
+  link to `~/.ssh` under that name, and the merge runs outside the sandbox).
+  Sockets, pipes and overlay whiteouts are skipped and counted;
+- the network stays `<into>`'s; trust certificates are united, and one that is
+  new to `<into>` needs `--yes` — the merge is refused without it, and prints
+  the ⚠ warning of [CERTIFICATES.md](CERTIFICATES.md) with it; permissions and
+  path grants of `<from>` are not copied: `<into>` keeps its own;
 - `<from>` is kept, emptied of programs, until it is deleted by hand;
-- refused while programs of either container are running (I2).
+- refused while programs of either container are running (I2), and for a
+  container declared in Nix (the module would restore it).
 
 ### 3.5 Homes of their own, and what they cost
 
@@ -165,6 +174,26 @@ home. Programs that expect their data in the shared home do not find it:
 
 The hints are a list in the crate, each entry naming the program and the
 paths; nothing is granted without the person's answer.
+
+**Path grants — implemented** (the hints and the first-launch offer are left):
+`vpn-zone container grant|revoke sb:<name> <dir>` and
+`containers.<name>.permissions.paths` in Nix. The program sees the directory
+at its own path, read-write. Rules:
+
+- an **allow-list**, not a list of dangers: below the home, or below `/mnt`,
+  `/media`, `/run/media`, `/srv`. Everywhere else are the walls of the
+  sandbox — `/run/user` holds the D-Bus socket the proxy filters and the
+  compositor's, `/tmp` the X11 sockets, `/etc` the resolver the zone replaces —
+  and a list of those would be one socket short sooner or later;
+- never the home itself or anything above it (that is the `home` permission,
+  asked for in words), never the state of this project or anything containing
+  it: `~/.local/state/vpn-zones` holds every zone's private key;
+- checked as written **and as resolved**, when granted and again by
+  `fs-sandbox` at every launch: bwrap follows symlinks, so `~/games` pointing
+  into the state is refused, and the resolved directory is what gets bound. A
+  refused path is skipped with a warning; the launch goes on without it;
+- only for a home of its own: a layer over the home already sees the whole
+  real home.
 
 ### 3.6 Per-launch runtime (the order is the specification)
 
@@ -357,8 +386,9 @@ programs.vpn-zones = {
   never enter the Nix store. A declared container naming a network that does
   not exist is a launch-time refusal (I6), not an evaluation error.
 - Assertions: `trust.certificates != []` requires `acknowledgeRisk`; one
-  program in two containers' `apps` is an error; `permissions.filesystem` or
-  `paths` on an `overlay` home is a warning (they do not apply).
+  program in two containers' `apps` is an error; `permissions.paths` on an
+  `overlay` home is an error (it does not apply), and so is a path that is
+  neither absolute nor `~/…`.
 
 ## 9. Machine-readable state
 
@@ -393,7 +423,7 @@ and `vpn-zone container show <name> --json` print subsets of the same schema.
       "apps":    [ { "value": "firefox", "source": "nix" } ],
       "permissions": {
         "filesystem": { "value": ["downloads"], "source": "nix" },
-        "paths":      { "value": [],            "source": "default" },
+        "paths":      [ { "value": "/home/u/.wine", "source": "nix" } ],
         "x11":        { "value": false,         "source": "default" },
         "compositor": { "value": "restricted",  "source": "default" }
       },
@@ -421,7 +451,12 @@ every key of version 1.
 - **`direct` containers** (done). No network namespace — the host's network and
   resolvers, and the name says so. The user namespace grants nothing over the
   host's netns.
-- **Per-launch mount namespace, path grants.** No network change.
+- **Per-launch mount namespace, path grants.** No network change. A granted
+  directory is a data channel between the container and everything that sees
+  the same directory — deliberate, listed in `container show` and the JSON.
+  The allow-list keeps it from being a channel to a host service: no socket
+  directory (`/run`, `/tmp`) can be granted, so neither the unfiltered D-Bus
+  nor the host's X11 or resolver becomes reachable through a grant.
 - **`vpn-zone launch`, shims, autostart, D-Bus shadows, taken-over entries.**
   They only start the picker or `vpn-zone run`; no new socket, no new route.
 - **Broker.** A guarded door replacing the unguarded `systemd --user` path.
@@ -435,7 +470,7 @@ every key of version 1.
 | phase | content | proof |
 |---|---|---|
 | 0 | **done**: `direct` keeps its layers, working directory, conflict by id and binary, hidden handlers, Steam children | smoke; unit and scenario tests |
-| 1 | **done**: network binding with I1/I2 in `run` and the picker, `vpn-zone container list/show/set/assign/unassign`, `status --json` (`schema_version`, sources), home-manager options with `declared/`, clones deprecated. **Left**: `own` by default, path grants and hints, merge, container-first picker | CLI/picker scenario tests; VM: a declared container with its declared CA, refused elsewhere, reported as Nix |
+| 1 | **done**: network binding with I1/I2 in `run` and the picker, `vpn-zone container list/show/set/assign/unassign`, `status --json` (`schema_version`, sources), home-manager options with `declared/`, clones deprecated, path grants (`container grant/revoke`, `permissions.paths`), merge (`container merge`). **Left**: `own` by default, hints (Wine prefix, Steam), container-first picker, GUI entries | CLI/picker scenario tests; VM: a declared container with its declared CA, refused elsewhere, reported as Nix |
 | 2 | trust layer ([CERTIFICATES.md](CERTIFICATES.md)) — **done** (GUI dialog left) | VM and smoke: synthetic CA trusted in one container only |
 | 3 | `vpn-zone launch`, D-Bus and autostart shadows, user-dir take-over, web apps as children, host-interface networks, PATH shims | VM: activation via `gdbus call` lands in the container; autostart of an unassigned program is offline |
 | 4 | runtime hermeticity, broker, X11 closure, extra routes | VM "evil host": a `systemd --user` counting `StartTransientUnit`, a portal logging callers, an HTTP beacon |

@@ -190,6 +190,10 @@ pub struct Args {
     /// question, and a dialog titled with a raw id is how the answers get
     /// swapped.
     pub label: Option<String>,
+    /// `--bind-path P`, repeated: directories of the real home granted to a
+    /// named sandbox (`docs/CONTAINERS.md` §3.5) — a Wine prefix, a Steam
+    /// library. Checked again here against the state of this project.
+    pub bind_paths: Vec<PathBuf>,
     pub tools: Tools,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
@@ -252,6 +256,7 @@ impl Args {
         let mut tools = Tools::default();
         let mut sandbox: Option<String> = None;
         let mut label: Option<String> = None;
+        let mut bind_paths: Vec<PathBuf> = Vec::new();
         let mut app_id: Option<OsString> = None;
         let mut rest = argv[..split].iter();
         while let Some(arg) = rest.next() {
@@ -282,6 +287,11 @@ impl Args {
                 "--label" => {
                     label = Some(value.to_string_lossy().into_owned()).filter(|l| !l.is_empty())
                 }
+                "--bind-path" => {
+                    if !value.is_empty() {
+                        bind_paths.push(PathBuf::from(value));
+                    }
+                }
                 _ => return Err(ArgError::UnknownFlag(flag)),
             }
         }
@@ -296,6 +306,7 @@ impl Args {
             app_id: app_id.to_string_lossy().into_owned(),
             sandbox,
             label,
+            bind_paths,
             tools,
             cmd,
         })
@@ -418,6 +429,9 @@ pub struct Layout {
     pub perms: Perms,
     /// The persistent home of a named sandbox, bound over `$HOME`.
     pub sandbox_home: Option<PathBuf>,
+    /// Directories granted to this sandbox, bound after the home is replaced:
+    /// `(the directory it really is, the path the program asked for)`.
+    pub granted: Vec<(PathBuf, PathBuf)>,
     /// `~/.config/mimeapps.list`, when it exists.
     pub mimeapps: Option<PathBuf>,
     /// The file `/etc/resolv.conf` really is, when that is outside `/etc`.
@@ -519,6 +533,11 @@ pub fn bwrap_args(layout: &Layout, cmd: &[OsString]) -> Vec<OsString> {
             if allowed {
                 bind_same(&mut a, "--bind", &layout.home.join(name));
             }
+        }
+        // Granted directories, after the home is gone and for the same reason
+        // as the three above: bound earlier, the tmpfs would cover them.
+        for (real, path) in &layout.granted {
+            bind(&mut a, "--bind", real, path);
         }
     }
 
@@ -995,12 +1014,39 @@ pub fn run(args: Args) -> u8 {
         }
     }
 
+    // Granted directories: checked as written AND as resolved — `~/games` may
+    // be a symlink into the state of this project, where the zone keys live,
+    // and bwrap follows symlinks — and only then created when missing, so that
+    // bwrap has something to bind. The resolved directory is what gets bound.
+    let real_home = fs::canonicalize(&home).unwrap_or_else(|_| home.clone());
+    let mut granted = Vec::new();
+    for path in &args.bind_paths {
+        let checked = match crate::container::forbidden_path(&home, path) {
+            Some(why) => Err(why),
+            None => crate::container::resolved(path)
+                .ok_or_else(|| "the path does not resolve".to_owned())
+                .and_then(
+                    |real| match crate::container::forbidden_path(&real_home, &real) {
+                        Some(why) => Err(format!("{} → {}: {why}", path.display(), real.display())),
+                        None => fs::create_dir_all(&real)
+                            .map(|()| real)
+                            .map_err(|e| e.to_string()),
+                    },
+                ),
+        };
+        match checked {
+            Ok(real) => granted.push((real, crate::container::lexical(path))),
+            Err(why) => eprintln!("fs-sandbox: {} is not granted: {why}", path.display()),
+        }
+    }
+
     let layout = Layout {
         app_id: args.app_id.clone(),
         home: home.clone(),
         runtime: runtime.clone(),
         perms,
         sandbox_home,
+        granted,
         mimeapps: home.join(MIMEAPPS).is_file().then(|| home.join(MIMEAPPS)),
         resolv: resolv_file(),
         dev_nodes: dev_nodes(Path::new("/dev")),
@@ -1349,6 +1395,7 @@ mod tests {
             runtime: PathBuf::from("/run/user/1000"),
             perms: Perms::default(),
             sandbox_home: None,
+            granted: Vec::new(),
             mimeapps: None,
             resolv: Some(PathBuf::from("/run/systemd/resolve/stub-resolv.conf")),
             dev_nodes: Vec::new(),

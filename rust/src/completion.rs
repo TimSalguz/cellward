@@ -187,8 +187,22 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
             }
             "trust" if pos == 4 && word(2) == "add" => return vec![FILES.to_string()],
-            "container" if pos == 2 => {
-                strs(&mut out, &["list", "show", "set", "assign", "unassign"])
+            "container" if pos == 2 => strs(
+                &mut out,
+                &[
+                    "list", "show", "set", "assign", "unassign", "grant", "revoke", "merge",
+                ],
+            ),
+            // Only a home of its own is granted directories.
+            "container" if pos == 3 && matches!(word(2), "grant" | "revoke") => {
+                out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
+            }
+            "container" if pos == 4 && matches!(word(2), "grant" | "revoke") => {
+                return vec![FILES.to_string()]
+            }
+            "container" if matches!(pos, 3 | 4) && word(2) == "merge" => {
+                owned(&mut out, &snap.profiles);
+                out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
             }
             "container" if pos == 3 && matches!(word(2), "show" | "set") => {
                 owned(&mut out, &snap.profiles);
@@ -327,6 +341,18 @@ mod tests {
         );
         assert_eq!(
             complete(&["vpn-zone", "container", "assign", "firefox", ""], 5),
+            ["work", "sb:dev"]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "container", "grant", ""], 4),
+            ["sb:dev"]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "container", "grant", "sb:dev", ""], 5),
+            [FILES]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "container", "merge", "work", ""], 5),
             ["work", "sb:dev"]
         );
         assert_eq!(

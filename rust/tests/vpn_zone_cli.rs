@@ -743,6 +743,177 @@ fn what_nix_declares_is_shown_as_such_and_not_changed_here() {
 }
 
 #[test]
+fn a_private_home_is_granted_directories_but_never_the_state() {
+    // docs/CONTAINERS.md §3.5: a Wine prefix or a Steam library, not the keys.
+    let home = Home::new("grant");
+    home.zone_is_up("nl");
+    fs::create_dir_all(home.root.join("sandboxes/dev/home")).unwrap();
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+    let r = home.root.display().to_string();
+
+    let out = home.run(&["container", "grant", "sb:dev", "~/.wine"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("увидят программы вне контейнера"),
+        "{}",
+        stdout(&out)
+    );
+    let json = stdout(&home.run(&["container", "show", "sb:dev", "--json"]));
+    assert!(
+        json.contains(&format!(
+            "\"paths\":[{{\"value\":\"{r}/.wine\",\"source\":\"local\"}}]"
+        )),
+        "{json}"
+    );
+
+    for refused in [
+        "~/.local/state/vpn-zones",
+        "~/.local/state/vpn-zones/nl",
+        "~/state/nl",
+        "~/sandboxes/dev/home",
+        "~/.local/state",
+        "~",
+        "~/.wine/../.config/vpn-zones",
+        "/run/user/1000",
+        "/tmp/.X11-unix",
+        "/etc",
+        "relative/path",
+    ] {
+        let out = home.run(&["container", "grant", "sb:dev", refused]);
+        assert_eq!(out.status.code(), Some(1), "{refused}: {}", stdout(&out));
+        assert!(
+            stderr(&out).contains("выдать нельзя"),
+            "{refused}: {}",
+            stderr(&out)
+        );
+    }
+    // A layer over the home sees the whole real home already.
+    let out = home.run(&["container", "grant", "work", "~/.wine"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("слой над домом"), "{}", stderr(&out));
+
+    // The launch hands the grant to fs-sandbox, which checks it once more.
+    let out = home.run_with(
+        &["run", "nl", "--sandbox", "dev", "--", "wine"],
+        &[("VPN_ZONE_DRYRUN", "1"), ("VPN_ZONE_APPID", "wine")],
+    );
+    assert!(
+        stdout(&out).contains(&format!("--name dev --bind-path {r}/.wine --")),
+        "{}",
+        stdout(&out)
+    );
+
+    let out = home.run(&["container", "revoke", "sb:dev", "~/.wine"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["container", "show", "sb:dev", "--json"]));
+    assert!(json.contains("\"paths\":[]"), "{json}");
+}
+
+#[test]
+fn a_merge_keeps_what_the_target_has_and_moves_the_programs() {
+    // docs/CONTAINERS.md §3.4.
+    let home = Home::new("merge");
+    let old = home.root.join("profiles/old");
+    let work = home.root.join("profiles/work");
+    fs::create_dir_all(old.join("config/upper/app")).unwrap();
+    fs::create_dir_all(work.join("config/upper")).unwrap();
+    fs::write(old.join("config/upper/app/settings"), "old").unwrap();
+    fs::write(old.join("config/upper/shared"), "old").unwrap();
+    fs::write(work.join("config/upper/shared"), "work").unwrap();
+    // A slot only the source has is created in the target.
+    fs::create_dir_all(old.join("local-share/upper")).unwrap();
+    fs::write(old.join("local-share/upper/history"), "old").unwrap();
+    // A name a program of the target planted: never written through.
+    std::os::unix::fs::symlink(
+        "/nonexistent-elsewhere",
+        work.join("config/upper/.merged-from-old"),
+    )
+    .unwrap();
+    let pins = home.state().join(".pinnedprofile");
+    fs::create_dir_all(&pins).unwrap();
+    fs::write(pins.join("firefox"), "old").unwrap();
+    fs::write(pins.join("tg"), "sb:other").unwrap();
+    let sha = "a".repeat(64);
+    fs::create_dir_all(old.join("trust")).unwrap();
+    fs::write(
+        old.join("trust").join(format!("{sha}.pem")),
+        "-----BEGIN CERTIFICATE-----\n",
+    )
+    .unwrap();
+    fs::create_dir_all(home.root.join("sandboxes/dev/home")).unwrap();
+
+    let out = home.run(&["container", "merge", "old", "sb:dev"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("разные виды дома"),
+        "{}",
+        stderr(&out)
+    );
+
+    // A certificate the target does not trust yet needs a word of consent.
+    let out = home.run(&["container", "merge", "old", "work"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("--yes"), "{}", stderr(&out));
+    assert!(
+        !work.join("config/upper/app").exists(),
+        "refused means untouched"
+    );
+
+    // Not while programs of either run.
+    let reg = home.state().join(".running/work/firefox");
+    fs::create_dir_all(reg.parent().unwrap()).unwrap();
+    fs::write(&reg, format!("{} direct work\n", std::process::id())).unwrap();
+    let out = home.run(&["container", "merge", "old", "work", "--yes"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("работают"), "{}", stderr(&out));
+    fs::remove_file(&reg).unwrap();
+
+    let out = home.run(&["container", "merge", "old", "work", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("теперь доверяет"), "{}", stderr(&out));
+    assert_eq!(
+        fs::read_to_string(work.join("config/upper/app/settings")).unwrap(),
+        "old"
+    );
+    assert_eq!(
+        fs::read_to_string(work.join("config/upper/shared")).unwrap(),
+        "work"
+    );
+    assert_eq!(
+        fs::read_to_string(work.join("config/upper/.merged-from-old-2/shared")).unwrap(),
+        "old"
+    );
+    assert!(
+        fs::symlink_metadata(work.join("config/upper/.merged-from-old"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(work.join("local-share/upper/history")).unwrap(),
+        "old"
+    );
+    assert!(work.join("trust").join(format!("{sha}.pem")).is_file());
+    assert_eq!(fs::read_to_string(pins.join("firefox")).unwrap(), "work");
+    assert_eq!(fs::read_to_string(pins.join("tg")).unwrap(), "sb:other");
+    // The source stays until it is removed by hand.
+    assert!(old.join("config/upper/app/settings").is_file());
+    assert!(
+        stdout(&out).contains("vpn-zone profile rm old"),
+        "{}",
+        stdout(&out)
+    );
+
+    // What Nix declares is merged in the configuration.
+    let declared = home.root.join("config/declared/containers");
+    fs::create_dir_all(&declared).unwrap();
+    fs::write(declared.join("overlay-work.conf"), "network = direct\n").unwrap();
+    let out = home.run(&["container", "merge", "old", "work", "--yes"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("объявлен в Nix"), "{}", stderr(&out));
+}
+
+#[test]
 fn the_registry_keeps_its_three_field_shape() {
     let home = Home::new("registry");
     home.zone_is_up("nl");
