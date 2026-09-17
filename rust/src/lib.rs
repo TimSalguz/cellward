@@ -47,6 +47,8 @@
 //!   (`docs/GOTCHAS.md` §10);
 //! * [`wl_sandbox`] — the restricted Wayland socket a program is put on
 //!   (`wp_security_context_v1`, `docs/GOTCHAS.md` §7);
+//! * [`trust`] — extra root certificates trusted by one container only: the
+//!   bundle bind, the environment and the NSS databases (`docs/CERTIFICATES.md`);
 //! * [`sys`] — the handful of syscalls more than one of them needs.
 //!
 //! `profile` and `desktop` were Python scripts in `module/`, `wl_sandbox` was a
@@ -73,5 +75,6 @@ pub mod registry;
 pub mod seccomp;
 pub mod sys;
 pub mod tools;
+pub mod trust;
 pub mod wl_sandbox;
 pub mod zone;

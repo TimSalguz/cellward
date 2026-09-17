@@ -90,6 +90,7 @@ const VERBS: &[&str] = &[
     "lock",
     "unlock",
     "profile",
+    "trust",
     "help",
 ];
 
@@ -177,6 +178,14 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             }
             "sandbox" if pos == 2 => strs(&mut out, &["create", "list", "rm"]),
             "sandbox" if pos == 3 && word(2) == "rm" => owned(&mut out, &snap.sandboxes),
+            "trust" if pos == 2 => strs(&mut out, &["add", "list", "rm", "reset"]),
+            // A certificate belongs to a data container or to a named sandbox,
+            // which is spelled `sb:<name>`.
+            "trust" if pos == 3 => {
+                owned(&mut out, &snap.profiles);
+                out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
+            }
+            "trust" if pos == 4 && word(2) == "add" => return vec![FILES.to_string()],
             "profile" if pos == 2 => strs(&mut out, &["create", "list", "rm"]),
             "profile" if pos == 3 && word(2) == "rm" => owned(&mut out, &snap.profiles),
             _ => {}
@@ -283,6 +292,15 @@ mod tests {
         );
         assert_eq!(complete(&["vpn-zone", "sandbox", "rm", ""], 4), ["dev"]);
         assert_eq!(complete(&["vpn-zone", "profile", "rm", ""], 4), ["work"]);
+        assert_eq!(complete(&["vpn-zone", "trust", "r"], 3), ["rm", "reset"]);
+        assert_eq!(
+            complete(&["vpn-zone", "trust", "add", ""], 4),
+            ["work", "sb:dev"]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "trust", "add", "work", ""], 5),
+            [FILES]
+        );
         assert_eq!(
             complete(&["vpn-zone", "forget", ""], 3),
             ["firefox", "--all"]

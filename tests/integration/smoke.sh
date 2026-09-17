@@ -44,6 +44,9 @@ STATE="$HOME/.local/state/vpn-zones"
 PROFILES="$HOME/.local/state/vpn-profiles"
 TEST_ZONES=(smoke smoke-crlf offsmoke ocsmoke)
 TEST_PROFILE=smoketest-prof
+# Доверенный сертификат: контейнер, который ему доверяет, и соседний, который нет.
+CA_PROFILE=smoketest-ca
+NOCA_PROFILE=smoketest-noca
 MARKER="$HOME/.config/vpn-smoke-marker"
 # То же для контейнера в «прямом интернете» — без зоны, в своём userns.
 DIRECT_MARKER="$HOME/.config/vpn-smoke-direct-marker"
@@ -94,6 +97,8 @@ cleanup() {
   # ~/.config появляется только при провале теста (слой не наложился), но
   # убрать его всё равно надо — чужого файла с таким именем не бывает.
   rm -rf "${PROFILES:?}/$TEST_PROFILE" "${STATE:?}/.running/$TEST_PROFILE"
+  rm -rf "${PROFILES:?}/$CA_PROFILE" "${STATE:?}/.running/$CA_PROFILE" \
+         "${PROFILES:?}/$NOCA_PROFILE" "${STATE:?}/.running/$NOCA_PROFILE"
   rm -f "$MARKER" "$DIRECT_MARKER" "$FSPERMS" "$FSMARKER"
   # Память пикера по синтетическому ключу — свои файлы, чужих здесь не бывает.
   rm -f "${STATE:?}/.last/$PICKKEY" "${STATE:?}/.lastprofile/$PICKKEY" \
@@ -155,6 +160,8 @@ for z in "${TEST_ZONES[@]}"; do
   rm -rf "${STATE:?}/$z"
 done
 rm -rf "${PROFILES:?}/$TEST_PROFILE" "${STATE:?}/.running/$TEST_PROFILE"
+rm -rf "${PROFILES:?}/$CA_PROFILE" "${STATE:?}/.running/$CA_PROFILE" \
+       "${PROFILES:?}/$NOCA_PROFILE" "${STATE:?}/.running/$NOCA_PROFILE"
 rm -f "$MARKER" "$DIRECT_MARKER" "$FSPERMS" "$FSMARKER"
 rm -f "${STATE:?}/.last/$PICKKEY" "${STATE:?}/.lastprofile/$PICKKEY" \
       "${STATE:?}/.labels/$PICKKEY" "${STATE:?}/.running/__main__/$PICKKEY"
@@ -569,6 +576,96 @@ grep -q 'спросить негде' "$WORK/pick.err" \
 grep -q '^[0-9]* direct ' "$STATE/.running/__main__/$PICKKEY" 2>/dev/null \
   || fail "запуск в direct не записан в реестр: $(cat "$STATE/.running/__main__/$PICKKEY" 2>&1)"
 echo "ok: без графики выбран direct, команда запущена через run, метка и реестр записаны"
+
+# --- 6г. Доверенный сертификат — только в своём контейнере -----------------
+# docs/CERTIFICATES.ru.md. Всё на УЦ, сгенерированном здесь же: ничего
+# настоящего. Три стороны одного свойства: контейнер с сертификатом ему
+# доверяет, соседний — нет, хост — нет. Проверяется по двум путям сразу:
+# системному бандлу по его обычному пути (-CAfile, бинд в mount namespace
+# запуска) и хранилищу по умолчанию (переменные окружения указывают на тот же
+# системный путь). Плюс база NSS: сертификат обязан лечь в слой контейнера, а
+# не в настоящий ~/.pki — ловушка из docs/CERTIFICATES.ru.md §3.4.
+step "Доверенный сертификат: генерирую УЦ и серверный сертификат на лету"
+OPENSSL=$(tool openssl)
+CERTUTIL=$(tool certutil)
+[ -x "$OPENSSL" ] && [ -x "$CERTUTIL" ] || fail "в манифесте нет openssl или certutil"
+CADIR="$WORK/ca"
+mkdir -p "$CADIR"
+"$OPENSSL" req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=vpn-zones smoke CA" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -keyout "$CADIR/ca.key" -out "$CADIR/ca.pem" 2>/dev/null || fail "не сгенерировался УЦ"
+"$OPENSSL" req -newkey rsa:2048 -nodes -subj "/CN=tls.internal" \
+  -keyout "$CADIR/srv.key" -out "$CADIR/srv.csr" 2>/dev/null || fail "не сгенерировался запрос"
+printf 'subjectAltName=DNS:tls.internal\nbasicConstraints=CA:FALSE\n' > "$CADIR/ext"
+"$OPENSSL" x509 -req -in "$CADIR/srv.csr" -CA "$CADIR/ca.pem" -CAkey "$CADIR/ca.key" \
+  -CAcreateserial -days 2 -extfile "$CADIR/ext" -out "$CADIR/srv.pem" 2>/dev/null \
+  || fail "не подписался серверный сертификат"
+BUNDLE=/etc/ssl/certs/ca-certificates.crt
+[ -f "$BUNDLE" ] || fail "на раннере нет $BUNDLE"
+echo "ok: $CADIR"
+
+step "Доверенный сертификат: добавляю в $CA_PROFILE; лист как корень не принимается"
+"$VPN_ZONE" profile create "$CA_PROFILE" >/dev/null
+"$VPN_ZONE" profile create "$NOCA_PROFILE" >/dev/null
+"$VPN_ZONE" trust add "$CA_PROFILE" "$CADIR/ca.pem" --yes || fail "trust add не принял УЦ"
+ls "$PROFILES/$CA_PROFILE/trust/"*.pem >/dev/null 2>&1 || fail "сертификат не сохранился в контейнере"
+if "$VPN_ZONE" trust add "$CA_PROFILE" "$CADIR/srv.pem" --yes 2>/dev/null; then
+  fail "серверный (не УЦ) сертификат принят как корень доверия"
+fi
+echo "ok"
+
+verify_in() { # <профиль> <сеть> [-CAfile …]
+  local prof=$1 net=$2
+  shift 2
+  "$VPN_ZONE" run "$net" --profile "$prof" -- "$OPENSSL" verify "$@" "$CADIR/srv.pem"
+}
+
+step "Доверенный сертификат: контейнер доверяет — в direct и в зоне"
+verify_in "$CA_PROFILE" direct -CAfile "$BUNDLE" || fail "контейнер не доверяет своему УЦ (системный бандл)"
+verify_in "$CA_PROFILE" direct || fail "контейнер не доверяет своему УЦ (хранилище по умолчанию)"
+verify_in "$CA_PROFILE" smoke -CAfile "$BUNDLE" || fail "контейнер в зоне не доверяет своему УЦ"
+# shellcheck disable=SC2016  # переменные раскрывает шелл ВНУТРИ контейнера
+envout=$("$VPN_ZONE" run direct --profile "$CA_PROFILE" -- sh -c 'echo "$SSL_CERT_FILE|$NIX_SSL_CERT_FILE"')
+[ "$envout" = "$BUNDLE|$BUNDLE" ] || fail "переменные указывают не на системный путь: $envout"
+echo "ok: доверяет, переменные — системный путь"
+
+step "Доверенный сертификат: соседний контейнер и хост — не доверяют"
+if verify_in "$NOCA_PROFILE" direct -CAfile "$BUNDLE" 2>/dev/null; then
+  fail "соседний контейнер доверяет чужому УЦ"
+fi
+if verify_in "$NOCA_PROFILE" smoke -CAfile "$BUNDLE" 2>/dev/null; then
+  fail "соседний контейнер в той же зоне доверяет чужому УЦ"
+fi
+if "$OPENSSL" verify -CAfile "$BUNDLE" "$CADIR/srv.pem" 2>/dev/null; then
+  fail "хост доверяет УЦ контейнера"
+fi
+if grep -q "vpn-zones smoke CA" "$BUNDLE"; then
+  fail "УЦ контейнера оказался в бандле хоста"
+fi
+echo "ok"
+
+step "Доверенный сертификат: база NSS — в слое контейнера, не в настоящем доме"
+"$VPN_ZONE" run direct --profile "$CA_PROFILE" -- "$CERTUTIL" -L -d "sql:$HOME/.pki/nssdb" \
+  > "$WORK/nss-in.txt" 2>&1 || fail "certutil внутри контейнера: $(cat "$WORK/nss-in.txt")"
+grep -q "vpn-zones " "$WORK/nss-in.txt" || fail "в базе NSS контейнера сертификата нет: $(cat "$WORK/nss-in.txt")"
+[ -f "$PROFILES/$CA_PROFILE/.pki/upper/nssdb/cert9.db" ] || fail "база NSS не легла в верхний слой контейнера"
+if [ -f "$HOME/.pki/nssdb/cert9.db" ] && "$CERTUTIL" -L -d "sql:$HOME/.pki/nssdb" 2>/dev/null | grep -q "vpn-zones "; then
+  fail "сертификат попал в настоящую базу NSS хоста"
+fi
+echo "ok"
+
+step "Доверенный сертификат: сброс — контейнер больше не доверяет, база NSS вычищена"
+"$VPN_ZONE" trust reset "$CA_PROFILE" || fail "trust reset"
+if verify_in "$CA_PROFILE" direct -CAfile "$BUNDLE" 2>/dev/null; then
+  fail "после сброса контейнер всё ещё доверяет УЦ"
+fi
+"$VPN_ZONE" run direct --profile "$CA_PROFILE" -- "$CERTUTIL" -L -d "sql:$HOME/.pki/nssdb" > "$WORK/nss-after.txt" 2>&1 || true
+if grep -q "vpn-zones " "$WORK/nss-after.txt"; then
+  fail "после сброса сертификат остался в базе NSS контейнера"
+fi
+"$VPN_ZONE" profile rm "$CA_PROFILE" >/dev/null
+"$VPN_ZONE" profile rm "$NOCA_PROFILE" >/dev/null
+echo "ok"
 
 # --- 7. Offline-зона ---------------------------------------------------------
 step "Создаю offline-зону offsmoke (как это делает пикер: mkdir + touch offline)"

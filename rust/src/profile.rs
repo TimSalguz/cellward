@@ -32,6 +32,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 /// The XDG directories that make up a "profile".
@@ -40,6 +41,13 @@ use std::path::{Path, PathBuf};
 /// separates profiles, it is not a sandbox — that is what
 /// [`crate::fs_sandbox`] is for. (`docs/GOTCHAS.md` §5)
 pub const SUBDIRS: [&str; 5] = [".config", ".local/share", ".cache", ".mozilla", ".pki"];
+
+/// The slots a container with trusted certificates must have stacked even when
+/// the host has no such directory: they hold the NSS databases. An overlay slot
+/// is only stacked where the lower directory exists, and without one `certutil`
+/// would write `~/.pki/nssdb` into the REAL home — the host's Chromium would
+/// trust the certificate from then on. (`docs/CERTIFICATES.md` §3.4)
+const TRUST_SLOTS: [&str; 2] = [".pki", ".mozilla"];
 
 /// `PR_CAP_AMBIENT` / `PR_CAP_AMBIENT_CLEAR_ALL` from `linux/prctl.h`.
 ///
@@ -82,6 +90,15 @@ pub struct Args {
     /// the directory UNDER the layer. So the chdir is made here, after the
     /// mounts. (`docs/GOTCHAS.md` §1)
     pub cwd: Option<PathBuf>,
+    /// `--trust DIR`: the container's directory of trusted certificates. Its
+    /// presence lays the trust layer down (`crate::trust`).
+    pub trust: Option<PathBuf>,
+    /// `--nss-home DIR`: the home the program will SEE when that is not
+    /// `$HOME` — a named sandbox's home as it lies on disk. Its NSS databases
+    /// are the container's by construction.
+    pub nss_home: Option<PathBuf>,
+    /// `--certutil PATH`, from the manifest.
+    pub certutil: Option<PathBuf>,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
 }
@@ -112,10 +129,12 @@ impl fmt::Display for ArgError {
 impl std::error::Error for ArgError {}
 
 impl Args {
-    /// Parse `[--cwd DIR] <profiledir> <zone> <ephemeral 0|1> <regdir> -- cmd...`.
+    /// Parse `[--cwd DIR] [--trust DIR] [--nss-home DIR] [--certutil PATH]
+    /// <profiledir> <zone> <ephemeral 0|1> <regdir> -- cmd...`.
     ///
-    /// `--cwd` is optional and may only come first, so that every older
-    /// command line still parses the way it did.
+    /// The flags are optional, in any order, and only before the positionals,
+    /// so that every older command line still parses the way it did. An empty
+    /// value is no value.
     ///
     /// `OsString` and not `String` all the way through: an argument can be a
     /// file name handed over by the launcher through a `%U` field code, and
@@ -128,11 +147,18 @@ impl Args {
             .position(|a| a == "--")
             .ok_or(ArgError::NoSeparator)?;
         let mut positional = &argv[..split];
-        let mut cwd = None;
-        if positional.first().is_some_and(|a| a == "--cwd") {
-            cwd = positional
+        let (mut cwd, mut trust, mut nss_home, mut certutil) = (None, None, None, None);
+        while let Some(flag) = positional.first() {
+            let slot = match flag.as_bytes() {
+                b"--cwd" => &mut cwd,
+                b"--trust" => &mut trust,
+                b"--nss-home" => &mut nss_home,
+                b"--certutil" => &mut certutil,
+                _ => break,
+            };
+            *slot = positional
                 .get(1)
-                .filter(|dir| !dir.is_empty())
+                .filter(|value| !value.is_empty())
                 .map(PathBuf::from);
             positional = positional.get(2..).unwrap_or(&[]);
         }
@@ -151,6 +177,9 @@ impl Args {
             ephemeral: positional.get(2).is_some_and(|e| e == "1"),
             regdir: PathBuf::from(positional.get(3).cloned().unwrap_or_default()),
             cwd,
+            trust,
+            nss_home,
+            certutil,
             cmd,
         })
     }
@@ -199,20 +228,34 @@ fn mount_overlay(lower: &Path, upper: &Path, work: &Path, target: &Path) -> io::
     crate::sys::mount(OsStr::new("overlay"), target, "overlay", 0, &opts)
 }
 
-/// Stack the profile over every XDG directory that exists.
+/// Stack the profile over every XDG directory that exists, and over the ones
+/// in `ensure` whether they existed or not (created empty, 0700, first).
+/// Returns the directories a layer was really stacked over.
 ///
 /// A single failing layer is a warning, never fatal: losing `.pki` must not
 /// stop the browser from starting, and the ones that did mount still separate
-/// the data they cover.
-fn mount_profile(profile_dir: &Path) {
+/// the data they cover. What depends on a layer being there — the trust layer
+/// writing NSS databases — asks the returned list, not this function's hopes.
+fn mount_profile(profile_dir: &Path, ensure: &[&str]) -> Vec<PathBuf> {
+    let mut mounted = Vec::new();
     let Some(home) = home_dir() else {
         eprintln!("profile: no $HOME — running without the container layer");
-        return;
+        return mounted;
     };
     for sub in SUBDIRS {
         let lower = home.join(sub);
         if !lower.is_dir() {
-            continue;
+            if !ensure.contains(&sub) {
+                continue;
+            }
+            if let Err(e) = fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&lower)
+            {
+                eprintln!("profile: cannot create {}: {e}", lower.display());
+                continue;
+            }
         }
         let slot = profile_dir.join(slot_name(sub));
         let upper = slot.join("upper");
@@ -223,10 +266,12 @@ fn mount_profile(profile_dir: &Path) {
         }
         // The mount target is the lower directory itself: the program keeps
         // using the paths it always used.
-        if let Err(e) = mount_overlay(&lower, &upper, &work, &lower) {
-            eprintln!("profile: overlay on {}: {e}", lower.display());
+        match mount_overlay(&lower, &upper, &work, &lower) {
+            Ok(()) => mounted.push(lower),
+            Err(e) => eprintln!("profile: overlay on {}: {e}", lower.display()),
         }
     }
+    mounted
 }
 
 /// Where to try to start the program, in order: the caller's directory, the
@@ -381,8 +426,52 @@ fn lossy(name: &OsStr) -> std::borrow::Cow<'_, str> {
 /// Returns only when the program could not be started or when this was a
 /// throwaway container (which has to be outlived and cleaned up).
 pub fn run(args: Args) -> u8 {
-    if !args.profile_dir.as_os_str().is_empty() {
-        mount_profile(&args.profile_dir);
+    let ensure: &[&str] = if args.trust.is_some() {
+        &TRUST_SLOTS
+    } else {
+        &[]
+    };
+    let mounted = if args.profile_dir.as_os_str().is_empty() {
+        Vec::new()
+    } else {
+        mount_profile(&args.profile_dir, ensure)
+    };
+
+    // The trust layer: after the home layer (its NSS databases live there) and
+    // before anything that starts the program. (`docs/CERTIFICATES.md`)
+    if let Some(dir) = &args.trust {
+        let home = args.nss_home.clone().or_else(home_dir).unwrap_or_default();
+        // What is provably the container's own: a named sandbox's home, or the
+        // overlay slots this launch has just stacked. Nothing else.
+        let private = match &args.nss_home {
+            Some(sandbox_home) => vec![sandbox_home.clone()],
+            None => mounted,
+        };
+        let certutil = args
+            .certutil
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("certutil"));
+        let layer = crate::trust::Layer {
+            dir,
+            certutil: &certutil,
+            home: &home,
+            private: &private,
+        };
+        match crate::trust::apply(&layer) {
+            Ok(warnings) => {
+                for warning in warnings {
+                    eprintln!("trust: {warning}");
+                }
+            }
+            Err(e) => {
+                // Fail closed: a program the user expects to trust the
+                // container's roots and that silently does not is a broken
+                // launch, and "run without the layer" must not be a path
+                // anyone takes by accident.
+                eprintln!("trust: {e} — the program is not started");
+                return EXIT_NOT_STARTED;
+            }
+        }
     }
     // After the mounts and never before them: a directory entered earlier
     // would be the one UNDER the overlay.
@@ -558,6 +647,36 @@ mod tests {
         let a = Args::parse(&argv(&["--cwd", "", "/p", "nl", "--", "x"])).unwrap();
         assert_eq!(a.cwd, None);
         assert_eq!(a.profile_dir, PathBuf::from("/p"));
+    }
+
+    #[test]
+    fn the_trust_flags_come_before_the_positionals_in_any_order() {
+        let a = Args::parse(&argv(&[
+            "--trust",
+            "/s/sb/work/trust",
+            "--cwd",
+            "/w",
+            "--certutil",
+            "/store/certutil",
+            "--nss-home",
+            "/s/sb/work/home",
+            "",
+            "nl",
+            "0",
+            "",
+            "--",
+            "x",
+        ]))
+        .unwrap();
+        assert_eq!(a.trust, Some(PathBuf::from("/s/sb/work/trust")));
+        assert_eq!(a.nss_home, Some(PathBuf::from("/s/sb/work/home")));
+        assert_eq!(a.certutil, Some(PathBuf::from("/store/certutil")));
+        assert_eq!(a.cwd, Some(PathBuf::from("/w")));
+        assert!(a.profile_dir.as_os_str().is_empty());
+        assert_eq!(a.zone, OsString::from("nl"));
+        // None of them by default.
+        let a = Args::parse(&argv(&["/p", "nl", "--", "x"])).unwrap();
+        assert_eq!((a.trust, a.nss_home, a.certutil), (None, None, None));
     }
 
     #[test]

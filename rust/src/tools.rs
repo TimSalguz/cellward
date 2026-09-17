@@ -87,11 +87,17 @@ pub struct Tools {
     pub bwrap: PathBuf,
     pub dbus_proxy: PathBuf,
     pub xwayland: PathBuf,
+    /// `openssl`: reads and normalises a certificate for `vpn-zone trust add`
+    /// (fingerprint, subject, `basicConstraints`) — no X.509 code in the crate.
+    pub openssl: PathBuf,
+    /// `certutil` from NSS: installs a container's certificates into its NSS
+    /// databases. The CLI passes it on to `profile-run`.
+    pub certutil: PathBuf,
 }
 
 /// The keys of the manifest, in the order they are reported. Kept next to the
 /// struct so that `module/default.nix` and this file can be diffed by eye.
-const KEYS: [&str; 18] = [
+const KEYS: [&str; 20] = [
     "home",
     "state",
     "profiles",
@@ -110,6 +116,8 @@ const KEYS: [&str; 18] = [
     "bwrap",
     "dbus-proxy",
     "xwayland",
+    "openssl",
+    "certutil",
 ];
 
 /// Why the manifest could not be used. Every variant names the file: when this
@@ -196,6 +204,8 @@ impl Tools {
             bwrap: take("bwrap")?,
             dbus_proxy: take("dbus-proxy")?,
             xwayland: take("xwayland")?,
+            openssl: take("openssl")?,
+            certutil: take("certutil")?,
         })
     }
 

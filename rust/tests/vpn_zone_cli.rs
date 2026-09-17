@@ -61,6 +61,8 @@ impl Home {
             ("bwrap", "/nonexistent/bwrap".to_owned()),
             ("dbus-proxy", "/nonexistent/xdg-dbus-proxy".to_owned()),
             ("xwayland", "/nonexistent/xwayland-satellite".to_owned()),
+            ("openssl", "/nonexistent/openssl".to_owned()),
+            ("certutil", "/nonexistent/certutil".to_owned()),
             ("notify-send", "/nonexistent/notify-send".to_owned()),
         ] {
             json.push_str(&format!("  \"{key}\": \"{value}\",\n"));
@@ -513,6 +515,102 @@ fn two_entries_for_one_binary_see_each_other() {
     assert!(by_id.contains(" nl "), "{by_id}");
     let by_binary = fs::read_to_string(index.join("firefox")).unwrap();
     assert_eq!(by_binary.lines().count(), 2, "{by_binary}");
+}
+
+#[test]
+fn a_trusted_certificate_needs_a_real_container_and_one_certificate() {
+    let home = Home::new("trust-add");
+    let pem = home.root.join("ca.pem");
+    let one = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+    fs::write(&pem, one).unwrap();
+
+    let out = home.run(&["trust", "add", "nope", pem.to_str().unwrap(), "--yes"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("контейнера nope нет"),
+        "{}",
+        stderr(&out)
+    );
+
+    // The main profile is the host's: a certificate there would be the host's.
+    let out = home.run(&["trust", "add", "__main__", pem.to_str().unwrap(), "--yes"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("не контейнер"), "{}", stderr(&out));
+
+    let out = home.run(&["trust", "add", "sb:nope", pem.to_str().unwrap(), "--yes"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("песочницы nope нет"),
+        "{}",
+        stderr(&out)
+    );
+
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+    // A bundle is refused before anything is run.
+    let bundle = home.root.join("bundle.pem");
+    fs::write(&bundle, format!("{one}{one}")).unwrap();
+    let out = home.run(&["trust", "add", "work", bundle.to_str().unwrap(), "--yes"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("добавляй по одному"),
+        "{}",
+        stderr(&out)
+    );
+
+    // One certificate reaches openssl — here the manifest's, which is not there.
+    let out = home.run(&["trust", "add", "work", pem.to_str().unwrap(), "--yes"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("/nonexistent/openssl"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!home.root.join("profiles/work/trust").exists());
+}
+
+#[test]
+fn trusted_certificates_are_listed_and_removed_by_fingerprint() {
+    let home = Home::new("trust-list");
+    let out = home.run(&["trust", "list"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("нет ни у одного"), "{}", stdout(&out));
+
+    let trust = home.root.join("profiles/work/trust");
+    fs::create_dir_all(&trust).unwrap();
+    let a = format!("0f1e{}", "a".repeat(60));
+    let b = format!("0f1f{}", "b".repeat(60));
+    fs::write(trust.join(format!("{a}.pem")), "x").unwrap();
+    fs::write(trust.join(format!("{b}.pem")), "x").unwrap();
+
+    // openssl is not there, and the certificates are listed all the same: by
+    // their fingerprints. Hiding one would hide that it is trusted.
+    let out = home.run(&["trust", "list", "--json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&out);
+    assert!(json.starts_with("{\"schema_version\":1,"), "{json}");
+    assert!(json.contains(&format!("\"sha256\":\"{a}\"")), "{json}");
+    assert!(json.contains("\"container\":\"work\""), "{json}");
+
+    let out = home.run(&["trust", "rm", "work", "0f1"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("подходит к 2"), "{}", stderr(&out));
+
+    let out = home.run(&["trust", "rm", "work", "0F1E"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!trust.join(format!("{a}.pem")).exists());
+    assert!(trust.join(format!("{b}.pem")).exists());
+    // A data container's NSS databases are cleaned from inside the next launch,
+    // which the (still existing) trust directory switches on.
+    assert!(
+        stdout(&out).contains("при следующем запуске"),
+        "{}",
+        stdout(&out)
+    );
+
+    let out = home.run(&["trust", "reset", "work"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(trust.is_dir());
+    assert!(fs::read_dir(&trust).unwrap().next().is_none());
 }
 
 #[test]

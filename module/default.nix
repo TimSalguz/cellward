@@ -280,6 +280,11 @@ let
       bwrap = "${pkgs.bubblewrap}/bin/bwrap";
       dbus-proxy = "${pkgs.xdg-dbus-proxy}/bin/xdg-dbus-proxy";
       xwayland = "${pkgs.xwayland-satellite}/bin/xwayland-satellite";
+      # Доверенные сертификаты контейнеров (docs/CERTIFICATES.ru.md): openssl
+      # разбирает сертификат при `vpn-zone trust add`, certutil ставит его в
+      # базы NSS контейнера из `profile-run`.
+      openssl = "${pkgs.openssl}/bin/openssl";
+      certutil = "${pkgs.nss.tools}/bin/certutil";
       # awg/wg/pasta/nft/openconnect здесь намеренно НЕТ: их зовёт только
       # держатель зоны, и получает он их флагами ExecStart своего юнита.
       # Дублировать пути в двух местах — значит однажды поменять их в одном.

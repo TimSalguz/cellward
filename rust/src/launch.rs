@@ -699,6 +699,16 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // directory that has been removed under us is no reason not to start:
     // `profile-run` falls back to `$HOME` anyway.
     let cwd = std::env::current_dir().unwrap_or_else(|_| tools.home.clone());
+    // No command at all is a shell inside the zone — what `nsenter` used to
+    // start by itself, before `profile-run` stood between it and the program.
+    let cmd = if cmd.is_empty() && network != Network::Direct {
+        vec![std::env::var_os("SHELL")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| OsString::from("/bin/sh"))]
+    } else {
+        cmd
+    };
+    let (trust, nss_home) = trust_of(tools, &selection);
     let exec = entry_argv(
         &Entry {
             nsenter: &tools.nsenter,
@@ -710,6 +720,9 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             ephemeral: container.ephemeral,
             regdir: &regdir,
             cwd: &cwd,
+            trust: trust.as_deref(),
+            nss_home: nss_home.as_deref(),
+            certutil: &tools.certutil,
         },
         cmd,
     );
@@ -750,6 +763,13 @@ pub struct Entry<'a> {
     pub regdir: &'a Path,
     /// The directory the program is to start in: the caller's.
     pub cwd: &'a Path,
+    /// The container's directory of trusted certificates, when it has one
+    /// (`docs/CERTIFICATES.md`). Like a layer, it needs a mount namespace.
+    pub trust: Option<&'a Path>,
+    /// The home the program will see when that is not `$HOME`: a named
+    /// sandbox's, on disk. Only meaningful together with `trust`.
+    pub nss_home: Option<&'a Path>,
+    pub certutil: &'a Path,
 }
 
 /// The command line `run` finally `exec`s: the namespaces, the container, then
@@ -784,7 +804,9 @@ pub struct Entry<'a> {
 /// program at all. `profile-run` makes the chdir after mounting and falls back
 /// to `$HOME` and `/`. (`docs/GOTCHAS.md` §1)
 pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
-    let container = !entry.dir.as_os_str().is_empty();
+    // Something has to be mounted for this launch: a container's layer, or
+    // the trust layer's bundle.
+    let container = !entry.dir.as_os_str().is_empty() || entry.trust.is_some();
     let mut exec: Vec<OsString> = Vec::new();
     // Does the program end up in a mount namespace other than ours?
     let entered = container || matches!(entry.network, Network::Zone(_));
@@ -827,6 +849,16 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
         exec.push("profile-run".into());
         exec.push("--cwd".into());
         exec.push(entry.cwd.into());
+        if let Some(trust) = entry.trust {
+            exec.push("--trust".into());
+            exec.push(trust.into());
+            exec.push("--certutil".into());
+            exec.push(entry.certutil.into());
+            if let Some(home) = entry.nss_home {
+                exec.push("--nss-home".into());
+                exec.push(home.into());
+            }
+        }
         exec.push(entry.dir.into());
         exec.push(entry.zone.into());
         exec.push(if entry.ephemeral { "1" } else { "0" }.into());
@@ -835,6 +867,32 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
     }
     exec.extend(cmd);
     exec
+}
+
+/// The trusted certificates of a launch, and the home they belong to.
+///
+/// They follow the home the program SEES (`docs/CERTIFICATES.md` §3.1): a
+/// named sandbox's (its home on disk is where its NSS databases are), otherwise
+/// the data container's. A throwaway sandbox has no identity to trust anything
+/// with, and the main profile is the host's — neither ever gets a layer. The
+/// layer is switched on by the directory existing, even empty: an emptied one
+/// still takes stale entries out of the container's NSS databases.
+fn trust_of(tools: &Tools, selection: &Selection) -> (Option<PathBuf>, Option<PathBuf>) {
+    match &selection.sandbox {
+        Sandbox::Named(name) => {
+            let dir = tools.sandboxes.join(name);
+            let trust = dir.join(crate::trust::DIR);
+            (trust.is_dir().then_some(trust), Some(dir.join("home")))
+        }
+        Sandbox::Throwaway => (None, None),
+        Sandbox::None => match &selection.container {
+            Container::Named(name) => {
+                let trust = tools.profiles.join(name).join(crate::trust::DIR);
+                (trust.is_dir().then_some(trust), None)
+            }
+            _ => (None, None),
+        },
+    }
 }
 
 /// A locked zone: run the command here, without the network the caller asked
@@ -1326,7 +1384,66 @@ mod tests {
             ephemeral,
             regdir: Path::new("/r/.running/work"),
             cwd: Path::new("/home/u/src"),
+            trust: None,
+            nss_home: None,
+            certutil: Path::new("/t/certutil"),
         }
+    }
+
+    #[test]
+    fn trust_alone_is_enough_to_take_a_mount_namespace() {
+        // A named sandbox has no overlay directory, but its certificates still
+        // need a bundle bound in a namespace of this launch's own — never in
+        // the zone's, where the container next door would see it.
+        let mut e = entry(Network::Zone(42), Path::new(""), false);
+        e.trust = Some(Path::new("/s/sb/work/trust"));
+        e.nss_home = Some(Path::new("/s/sb/work/home"));
+        let line = entry_argv(&e, argv(&["firefox"]));
+        assert_eq!(
+            line,
+            argv(&[
+                "/t/nsenter",
+                "--preserve-credentials",
+                "--keep-caps",
+                "-U",
+                "-n",
+                "-m",
+                "-t",
+                "42",
+                "--",
+                "/t/unshare",
+                "--mount",
+                "--propagation",
+                "private",
+                "--",
+                "/t/core",
+                "profile-run",
+                "--cwd",
+                "/home/u/src",
+                "--trust",
+                "/s/sb/work/trust",
+                "--certutil",
+                "/t/certutil",
+                "--nss-home",
+                "/s/sb/work/home",
+                "",
+                "nl",
+                "0",
+                "/r/.running/work",
+                "--",
+                "firefox"
+            ])
+        );
+
+        // In direct the same takes a user namespace of its own.
+        let mut e = entry(Network::Direct, Path::new(""), false);
+        e.trust = Some(Path::new("/p/work/trust"));
+        let line = entry_argv(&e, argv(&["firefox"]));
+        assert_eq!(line[0], os("/t/unshare"));
+        assert!(line.contains(&os("--map-current-user")));
+        assert!(line.contains(&os("--trust")));
+        // The home is $HOME there: no --nss-home without one.
+        assert!(!line.contains(&os("--nss-home")));
     }
 
     #[test]

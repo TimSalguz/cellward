@@ -44,7 +44,7 @@ pub const EXIT_TOOLS: u8 = 2;
 const READY_TRIES: u32 = 100;
 const READY_STEP: Duration = Duration::from_millis(100);
 
-const USAGE: &str = "vpn-zone — сетевые зоны с VPN, без root\n\n  vpn-zone add <имя> <файл.conf>   создать зону из конфига AmneziaWG/WireGuard\n                                   или OpenConnect (секция [OpenConnect])\n  vpn-zone up <имя>                поднять\n  vpn-zone down <имя>              опустить\n  vpn-zone list                    список зон и их состояние\n  vpn-zone status <имя>            подробности (адрес, handshake)\n  vpn-zone run <имя> -- <кмд>      запустить программу внутри зоны\n  vpn-zone rm <имя>                удалить зону вместе с ярлыками\n  vpn-zone sync                    пересобрать .desktop-ярлыки\n  vpn-zone mode <режим>            как ярлыки работают:\n                                     picker   — один ярлык, спрашивает сеть\n                                                при запуске (по умолчанию)\n                                     per-zone — отдельный ярлык на каждую зону\n                                                (устарел, будет убран)\n                                     both     — и то, и другое (устарел)\n                                     off      — не трогать ярлыки вовсе\n  vpn-zone default <вариант>       что предлагать в пикере для незнакомой\n                                   программы: offline (по умолчанию), direct\n                                   или имя зоны\n  vpn-zone gc                      убрать зависшие держатели зон, осиротевшую\n                                   обвязку и мёртвые записи\n  vpn-zone perms list|reset <прог.|--all>\n                                   какие доступы к файлам выданы программам\n                                   в песочнице; reset — спросить заново\n  vpn-zone sandbox create|list|rm <имя>\n                                   именованные песочницы: свой дом, общий для\n                                   всех программ, запущенных в этой песочнице\n  vpn-zone run <имя> --sandbox <п> -- <кмд>\n                                   запустить в именованной песочнице\n  vpn-zone run <имя> --fs-sandbox -- <кмд>\n                                   запустить в песочнице файловой системы:\n                                   вместо $HOME — пустой каталог, наружу\n                                   видно только разрешённое, остальное — через\n                                   диалог выбора файла (порталы)\n  vpn-zone run <имя> --tmp-profile -- <кмд>\n                                   запустить в одноразовом контейнере: слой\n                                   создаётся в /tmp и стирается по выходе\n  vpn-zone default-profile <v>     контейнер по умолчанию для всех запусков:\n                                   ask (спрашивать), main (основной),\n                                   own (своя песочница у каждой программы)\n                                   или имя контейнера\n  vpn-zone pins                    какие программы закреплены за сетями\n  vpn-zone forget <прог.|--all>    снять закрепление (снова будет спрашивать)\n  vpn-zone isolate <overlay|off>   свой слой профиля у зоны (overlay — по\n                                   умолчанию). Без него браузер откроет окно\n                                   в уже запущенном процессе, мимо VPN\n  vpn-zone reset-profile <имя>     очистить слой профиля зоны\n  vpn-zone wayland-sandbox on|off  отбирать ли у программ захват экрана,\n                                   чтение буфера в фоне и эмуляцию ввода\n                                   (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-allow)\n  vpn-zone check <имя>             прошло ли рукопожатие (жив ли конфиг)\n  vpn-zone lock|unlock <имя>       запретить/разрешить программам этой зоны\n                                   запускать что-либо в ДРУГИХ сетях\n                                   (по умолчанию разрешено)\n";
+const USAGE: &str = "vpn-zone — сетевые зоны с VPN, без root\n\n  vpn-zone add <имя> <файл.conf>   создать зону из конфига AmneziaWG/WireGuard\n                                   или OpenConnect (секция [OpenConnect])\n  vpn-zone up <имя>                поднять\n  vpn-zone down <имя>              опустить\n  vpn-zone list                    список зон и их состояние\n  vpn-zone status <имя>            подробности (адрес, handshake)\n  vpn-zone run <имя> -- <кмд>      запустить программу внутри зоны\n  vpn-zone rm <имя>                удалить зону вместе с ярлыками\n  vpn-zone sync                    пересобрать .desktop-ярлыки\n  vpn-zone mode <режим>            как ярлыки работают:\n                                     picker   — один ярлык, спрашивает сеть\n                                                при запуске (по умолчанию)\n                                     per-zone — отдельный ярлык на каждую зону\n                                                (устарел, будет убран)\n                                     both     — и то, и другое (устарел)\n                                     off      — не трогать ярлыки вовсе\n  vpn-zone default <вариант>       что предлагать в пикере для незнакомой\n                                   программы: offline (по умолчанию), direct\n                                   или имя зоны\n  vpn-zone gc                      убрать зависшие держатели зон, осиротевшую\n                                   обвязку и мёртвые записи\n  vpn-zone perms list|reset <прог.|--all>\n                                   какие доступы к файлам выданы программам\n                                   в песочнице; reset — спросить заново\n  vpn-zone sandbox create|list|rm <имя>\n                                   именованные песочницы: свой дом, общий для\n                                   всех программ, запущенных в этой песочнице\n  vpn-zone run <имя> --sandbox <п> -- <кмд>\n                                   запустить в именованной песочнице\n  vpn-zone run <имя> --fs-sandbox -- <кмд>\n                                   запустить в песочнице файловой системы:\n                                   вместо $HOME — пустой каталог, наружу\n                                   видно только разрешённое, остальное — через\n                                   диалог выбора файла (порталы)\n  vpn-zone run <имя> --tmp-profile -- <кмд>\n                                   запустить в одноразовом контейнере: слой\n                                   создаётся в /tmp и стирается по выходе\n  vpn-zone default-profile <v>     контейнер по умолчанию для всех запусков:\n                                   ask (спрашивать), main (основной),\n                                   own (своя песочница у каждой программы)\n                                   или имя контейнера\n  vpn-zone pins                    какие программы закреплены за сетями\n  vpn-zone forget <прог.|--all>    снять закрепление (снова будет спрашивать)\n  vpn-zone isolate <overlay|off>   свой слой профиля у зоны (overlay — по\n                                   умолчанию). Без него браузер откроет окно\n                                   в уже запущенном процессе, мимо VPN\n  vpn-zone reset-profile <имя>     очистить слой профиля зоны\n  vpn-zone wayland-sandbox on|off  отбирать ли у программ захват экрана,\n                                   чтение буфера в фоне и эмуляцию ввода\n                                   (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-allow)\n  vpn-zone check <имя>             прошло ли рукопожатие (жив ли конфиг)\n  vpn-zone lock|unlock <имя>       запретить/разрешить программам этой зоны\n                                   запускать что-либо в ДРУГИХ сетях\n                                   (по умолчанию разрешено)\n  vpn-zone trust add <контейнер> <сертификат> [--yes]\n                                   дополнительный корневой сертификат ТОЛЬКО\n                                   для программ этого контейнера (профиль или\n                                   sb:<песочница>): хост и другие контейнеры\n                                   ему не доверяют. Его владелец сможет читать\n                                   TLS-трафик программ контейнера\n  vpn-zone trust list [<контейнер>] [--json]\n  vpn-zone trust rm <контейнер> <начало sha256>\n  vpn-zone trust reset <контейнер> убрать все дополнительные сертификаты\n";
 
 /// Entry point of the `vpn-zone` binary.
 pub fn main() -> ExitCode {
@@ -90,6 +90,7 @@ pub fn main() -> ExitCode {
         b"run" => launch::run(&tools, rest),
         b"gc" => gc(&tools),
         b"perms" => perms(&tools, rest),
+        b"trust" => trust(&tools, rest),
         b"sandbox" => sandbox(&tools, rest),
         b"profile" => profile(&tools, rest),
         b"wayland-sandbox" => wayland_sandbox(&tools, rest),
@@ -995,6 +996,418 @@ fn profile(tools: &Tools, args: &[OsString]) -> u8 {
     }
 }
 
+// --- TRUSTED CERTIFICATES ----------------------------------------------------
+
+/// `vpn-zone trust …`: extra root certificates of ONE container
+/// (`docs/CERTIFICATES.md`). The layer itself is laid down at launch time by
+/// `profile-run` (`crate::trust`); this is the storage and the loud part.
+fn trust(tools: &Tools, args: &[OsString]) -> u8 {
+    let sub = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| OsString::from("list"));
+    let rest: &[OsString] = args.get(1..).unwrap_or(&[]);
+    match sub.as_bytes() {
+        b"add" => trust_add(tools, rest),
+        b"list" => trust_list(tools, rest),
+        b"rm" => trust_remove(tools, rest, false),
+        b"reset" => trust_remove(tools, rest, true),
+        _ => {
+            eprintln!("vpn-zone trust add|list|rm|reset <контейнер> …");
+            1
+        }
+    }
+}
+
+/// A container a certificate can belong to.
+struct TrustTarget {
+    /// As the user named it: a profile name, or `sb:<sandbox>`.
+    shown: String,
+    /// The container's own directory; the certificates live in `trust/` there.
+    dir: PathBuf,
+    /// A named sandbox's home on disk: its NSS databases can be brought in line
+    /// right away, from here. `None` for a data container, whose databases sit
+    /// under an overlay and are only touched from inside a launch.
+    home: Option<PathBuf>,
+}
+
+impl TrustTarget {
+    fn trust_dir(&self) -> PathBuf {
+        self.dir.join(crate::trust::DIR)
+    }
+}
+
+/// `sb:<name>` is a named sandbox, anything else a data container. The main
+/// profile is neither: its NSS databases are the host's, and a certificate
+/// there would be the host's too.
+fn trust_target(tools: &Tools, name: &OsStr) -> Result<TrustTarget, String> {
+    let text = name.to_string_lossy().into_owned();
+    if let Some(sandbox) = text.strip_prefix("sb:") {
+        if !safe_name(OsStr::new(sandbox)) {
+            return Err(format!("нет такой песочницы: {text}"));
+        }
+        let dir = tools.sandboxes.join(sandbox);
+        if !dir.is_dir() {
+            return Err(format!(
+                "песочницы {sandbox} нет — создай: vpn-zone sandbox create {sandbox}"
+            ));
+        }
+        return Ok(TrustTarget {
+            home: Some(dir.join("home")),
+            shown: text,
+            dir,
+        });
+    }
+    if !safe_name(name) || text == registry::MAIN {
+        return Err(format!(
+            "«{text}» — не контейнер: основной профиль общий с хостом, и сертификат в нём был бы сертификатом хоста"
+        ));
+    }
+    let dir = tools.profiles.join(name);
+    if !dir.is_dir() {
+        return Err(format!(
+            "контейнера {text} нет — создай: vpn-zone profile create {text}"
+        ));
+    }
+    Ok(TrustTarget {
+        shown: text,
+        dir,
+        home: None,
+    })
+}
+
+/// `openssl x509 … -noout -fingerprint -sha256 -subject -issuer -enddate -ext
+/// basicConstraints` on a certificate file.
+fn certificate_info(
+    tools: &Tools,
+    file: &Path,
+    inform: &str,
+) -> Result<crate::trust::CertInfo, String> {
+    let out = Command::new(&tools.openssl)
+        .args(["x509", "-inform", inform, "-in"])
+        .arg(file)
+        .args([
+            "-noout",
+            "-fingerprint",
+            "-sha256",
+            "-subject",
+            "-issuer",
+            "-enddate",
+            "-ext",
+            "basicConstraints",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("не запустить {}: {e}", tools.openssl.display()))?;
+    if !out.status.success() {
+        return Err(format!(
+            "{} не похож на сертификат X.509: {}",
+            file.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    crate::trust::parse_x509_text(&String::from_utf8_lossy(&out.stdout))
+        .ok_or_else(|| format!("openssl не назвал отпечаток {}", file.display()))
+}
+
+fn trust_add(tools: &Tools, args: &[OsString]) -> u8 {
+    let Some(container) = required(args, 0, "нужен контейнер: имя профиля или sb:<песочница>")
+    else {
+        return 1;
+    };
+    let Some(file) = required(args, 1, "нужен файл сертификата (PEM или DER)")
+    else {
+        return 1;
+    };
+    let yes = args.iter().skip(2).any(|a| a == "--yes");
+    let target = match trust_target(tools, container) {
+        Ok(target) => target,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let file = Path::new(file);
+    let raw = match fs::read(file) {
+        Ok(raw) => raw,
+        Err(e) => {
+            eprintln!("не читается {}: {e}", file.display());
+            return 1;
+        }
+    };
+    // One certificate per file, checked before anything is run: a bundle added
+    // "as a certificate" would smuggle in every root inside it.
+    let pems = crate::trust::count_pem_certs(&raw);
+    if pems > 1 {
+        eprintln!(
+            "в {} сертификатов: {pems} — добавляй по одному, иначе в контейнер уехал бы каждый корень из этого файла",
+            file.display()
+        );
+        return 1;
+    }
+    let inform = if pems == 1 { "PEM" } else { "DER" };
+    let info = match certificate_info(tools, file, inform) {
+        Ok(info) => info,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    if !info.is_ca {
+        eprintln!(
+            "{} — не сертификат удостоверяющего центра (нет basicConstraints CA:TRUE): корнем доверия он быть не может",
+            file.display()
+        );
+        return 1;
+    }
+    let pem = match Command::new(&tools.openssl)
+        .args(["x509", "-inform", inform, "-in"])
+        .arg(file)
+        .args(["-outform", "PEM"])
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(out) if out.status.success() && crate::trust::count_pem_certs(&out.stdout) == 1 => {
+            out.stdout
+        }
+        Ok(out) => {
+            eprintln!(
+                "openssl не перевёл {} в PEM: {}",
+                file.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            return 1;
+        }
+        Err(e) => {
+            eprintln!("не запустить {}: {e}", tools.openssl.display());
+            return 1;
+        }
+    };
+
+    println!("Сертификат:    {}", info.subject);
+    println!("Издатель:      {}", info.issuer);
+    println!("Действует до:  {}", info.not_after);
+    println!("SHA-256:       {}", info.sha256);
+    println!();
+    println!(
+        "ВНИМАНИЕ. Любой, у кого есть закрытый ключ этого сертификата, сможет читать и подменять \
+         зашифрованный трафик программ контейнера «{}»: пароли, переписку, банковские сессии. На \
+         хост и в другие контейнеры сертификат не попадёт.",
+        target.shown
+    );
+    if !yes {
+        // SAFETY: isatty(3) takes no pointers.
+        if unsafe { libc::isatty(0) } != 1 {
+            eprintln!("нужно подтверждение: запусти в терминале или добавь --yes");
+            return 1;
+        }
+        print!("Чтобы добавить, введи имя контейнера ({}): ", target.shown);
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_err() || answer.trim() != target.shown {
+            println!("не подтверждено — ничего не добавлено");
+            return 1;
+        }
+    }
+
+    let dir = target.trust_dir();
+    let path = dir.join(format!("{}.pem", info.sha256));
+    if let Err(e) = fs::create_dir_all(&dir).and_then(|()| fs::write(&path, &pem)) {
+        eprintln!("не записать {}: {e}", path.display());
+        return 1;
+    }
+    println!(
+        "сертификат {} добавлен в контейнер {}: программы, запущенные в нём с этой минуты, ему \
+         доверяют; уже запущенные — нет",
+        &info.sha256[..16],
+        target.shown
+    );
+    0
+}
+
+/// JSON string literal: the few escapes a subject line can need.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn trust_list(tools: &Tools, args: &[OsString]) -> u8 {
+    let json = args.iter().any(|a| a == "--json");
+    let named: Vec<&OsString> = args.iter().filter(|a| *a != "--json").collect();
+    let targets: Vec<TrustTarget> = match named.first() {
+        Some(name) => match trust_target(tools, name) {
+            Ok(target) => vec![target],
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        },
+        None => {
+            let profiles = visible_entries(&tools.profiles).into_iter().map(|dir| {
+                let name = dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                TrustTarget {
+                    shown: name,
+                    dir,
+                    home: None,
+                }
+            });
+            let sandboxes = visible_entries(&tools.sandboxes).into_iter().map(|dir| {
+                let name = dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                TrustTarget {
+                    shown: format!("sb:{name}"),
+                    home: Some(dir.join("home")),
+                    dir,
+                }
+            });
+            profiles
+                .chain(sandboxes)
+                .filter(|t| t.trust_dir().is_dir())
+                .collect()
+        }
+    };
+
+    let mut rows: Vec<(String, crate::trust::CertInfo)> = Vec::new();
+    for target in &targets {
+        for cert in crate::trust::stored(&target.trust_dir()) {
+            // A certificate openssl cannot read any more is still listed, by its
+            // fingerprint: hiding it would hide that it is trusted.
+            let info =
+                certificate_info(tools, &cert.path, "PEM").unwrap_or(crate::trust::CertInfo {
+                    sha256: cert.sha256.clone(),
+                    ..crate::trust::CertInfo::default()
+                });
+            rows.push((target.shown.clone(), info));
+        }
+    }
+
+    if json {
+        let items: Vec<String> = rows
+            .iter()
+            .map(|(container, info)| {
+                format!(
+                    "{{\"container\":{},\"sha256\":{},\"subject\":{},\"issuer\":{},\"not_after\":{},\"source\":\"local\"}}",
+                    json_str(container),
+                    json_str(&info.sha256),
+                    json_str(&info.subject),
+                    json_str(&info.issuer),
+                    json_str(&info.not_after)
+                )
+            })
+            .collect();
+        println!("{{\"schema_version\":1,\"trust\":[{}]}}", items.join(","));
+        return 0;
+    }
+    if rows.is_empty() {
+        println!("дополнительных корневых сертификатов нет ни у одного контейнера");
+        return 0;
+    }
+    for (container, info) in rows {
+        let subject = if info.subject.is_empty() {
+            "(не читается)".to_owned()
+        } else {
+            info.subject
+        };
+        println!(
+            "{container}: {} — {subject}, до {}",
+            &info.sha256[..16],
+            info.not_after
+        );
+    }
+    0
+}
+
+/// `rm <container> <prefix>` and `reset <container>`.
+fn trust_remove(tools: &Tools, args: &[OsString], all: bool) -> u8 {
+    let Some(container) = required(args, 0, "нужен контейнер: имя профиля или sb:<песочница>")
+    else {
+        return 1;
+    };
+    let target = match trust_target(tools, container) {
+        Ok(target) => target,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let stored = crate::trust::stored(&target.trust_dir());
+    let doomed: Vec<&crate::trust::Stored> = if all {
+        stored.iter().collect()
+    } else {
+        let Some(prefix) = required(
+            args,
+            1,
+            "нужно начало отпечатка SHA-256 (vpn-zone trust list)",
+        ) else {
+            return 1;
+        };
+        let prefix = prefix.to_string_lossy().to_ascii_lowercase();
+        let matching: Vec<&crate::trust::Stored> = stored
+            .iter()
+            .filter(|c| c.sha256.starts_with(&prefix))
+            .collect();
+        match matching.len() {
+            0 => {
+                eprintln!("у контейнера {} нет сертификата {prefix}…", target.shown);
+                return 1;
+            }
+            1 => matching,
+            n => {
+                eprintln!("«{prefix}» подходит к {n} сертификатам — укажи больше символов");
+                return 1;
+            }
+        }
+    };
+    for cert in &doomed {
+        if let Err(e) = fs::remove_file(&cert.path) {
+            eprintln!("не удалить {}: {e}", cert.path.display());
+            return 1;
+        }
+    }
+    // A named sandbox's databases are its own directory on disk: bring them in
+    // line now. A data container's sit under its overlay, and the next launch
+    // does it from inside — the (possibly empty) trust directory is what makes
+    // that launch lay the layer down.
+    match &target.home {
+        Some(home) => {
+            for warning in crate::trust::sync_home(&tools.certutil, &target.trust_dir(), home) {
+                eprintln!("{warning}");
+            }
+            println!(
+                "у контейнера {} убрано сертификатов: {}",
+                target.shown,
+                doomed.len()
+            );
+        }
+        None => println!(
+            "у контейнера {} убрано сертификатов: {} — из его баз NSS они уйдут при следующем запуске программы в нём",
+            target.shown,
+            doomed.len()
+        ),
+    }
+    0
+}
+
 // --- SETTINGS ----------------------------------------------------------------
 
 fn wayland_sandbox(tools: &Tools, args: &[OsString]) -> u8 {
@@ -1326,6 +1739,7 @@ peer: p
             "wayland-sandbox",
             "check",
             "lock",
+            "trust",
         ] {
             assert!(
                 USAGE.contains(&format!("vpn-zone {verb}")),

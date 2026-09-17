@@ -141,6 +141,8 @@ exit "$code""#,
             ("bwrap", "/nonexistent/bwrap".to_owned()),
             ("dbus-proxy", "/nonexistent/xdg-dbus-proxy".to_owned()),
             ("xwayland", "/nonexistent/xwayland-satellite".to_owned()),
+            ("openssl", "/nonexistent/openssl".to_owned()),
+            ("certutil", "/nonexistent/certutil".to_owned()),
         ] {
             json.push_str(&format!("  \"{key}\": \"{value}\",\n"));
         }

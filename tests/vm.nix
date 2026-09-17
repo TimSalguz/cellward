@@ -155,6 +155,12 @@ let
           # The host's own resolver for the DNS leak test — the one whose
           # answer must never appear inside a zone.
           pkgs.dnsmasq
+          # Per-container trust (docs/CERTIFICATES.md): a CA made on the fly,
+          # `certutil` to look into NSS databases, and p11-kit's `trust` to see
+          # the anchors the way NSS sees them on NixOS.
+          pkgs.openssl
+          pkgs.nss.tools
+          pkgs.p11-kit
         ];
 
         virtualisation.cores = 4;
@@ -389,6 +395,90 @@ let
           in_zone(opid, "test ! -e /run/systemd/resolve/io.systemd.Resolve")
           in_zone(opid, "sh -c '! getent ahostsv4 leaktest.internal'")
           alice("vpn-zone down offline")
+
+      # --- Per-container trust (docs/CERTIFICATES.md) ------------------------
+      # A CA generated here and nowhere else. On NixOS every bundle path is a
+      # symlink chain into ONE store file, and the layer binds over that file
+      # in the launch's own mount namespace — this is the one place that
+      # layout is exercised (the CI smoke runs on Ubuntu, a plain file).
+      CA = "/tmp/vmca"
+
+      def in_container(profile, net, cmd):
+          return alice(f"vpn-zone run {net} --profile {profile} -- {cmd}")
+
+      with subtest("trust: a CA and a server certificate made on the fly"):
+          alice(
+              f"mkdir -p {CA} && cd {CA} && "
+              "openssl req -x509 -newkey rsa:2048 -nodes -days 2 "
+              "-subj '/CN=vpn-zones vm CA' "
+              "-addext 'basicConstraints=critical,CA:TRUE' "
+              "-addext 'keyUsage=critical,keyCertSign,cRLSign' "
+              "-keyout ca.key -out ca.pem 2>/dev/null && "
+              "openssl req -newkey rsa:2048 -nodes -subj '/CN=tls.internal' "
+              "-keyout srv.key -out srv.csr 2>/dev/null && "
+              "printf 'subjectAltName=DNS:tls.internal\\n' > ext && "
+              "openssl x509 -req -in srv.csr -CA ca.pem -CAkey ca.key "
+              "-CAcreateserial -days 2 -extfile ext -out srv.pem 2>/dev/null"
+          )
+          alice("vpn-zone profile create vmca && vpn-zone profile create vmnoca")
+          alice(f"vpn-zone trust add vmca {CA}/ca.pem --yes")
+
+      with subtest("trust: the container trusts it, through the store-file bind and p11-kit"):
+          in_container("vmca", "direct", f"openssl verify {CA}/srv.pem")
+          in_container("vmca", "direct", f"openssl verify -CAfile /etc/ssl/certs/ca-certificates.crt {CA}/srv.pem")
+          # p11-kit is what NSS reads on NixOS (libnssckbi.so is p11-kit-trust).
+          out = in_container("vmca", "direct", "trust list --filter=ca-anchors")
+          assert "vpn-zones vm CA" in out, f"p11-kit does not see the container's CA:\n{out}"
+          out = in_container("vmca", "direct", "sh -c 'certutil -L -d sql:$HOME/.pki/nssdb'")
+          assert "vpn-zones " in out, f"the container's NSS database lacks the CA:\n{out}"
+          # Through a zone too: the layer lives in the launch's namespace, not
+          # the zone's.
+          in_container("vmca", "vmsmoke", f"openssl verify {CA}/srv.pem")
+
+      with subtest("trust: the host and the container next door do not"):
+          machine.fail(f"su -l alice -c 'openssl verify {CA}/srv.pem'")
+          machine.fail(f"su -l alice -c 'trust list --filter=ca-anchors | grep -q \"vpn-zones vm CA\"'")
+          machine.fail(
+              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
+              f"vpn-zone run direct --profile vmnoca -- openssl verify {CA}/srv.pem'"
+          )
+          machine.fail(
+              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
+              f"vpn-zone run vmsmoke --profile vmnoca -- openssl verify {CA}/srv.pem'"
+          )
+          machine.fail("grep -q 'vpn-zones vm CA' /etc/ssl/certs/ca-certificates.crt")
+          machine.fail(
+              "test -f /home/alice/.pki/nssdb/cert9.db && "
+              "su -l alice -c 'certutil -L -d sql:/home/alice/.pki/nssdb' | grep -q 'vpn-zones '"
+          )
+
+      # The decision that makes environment leaks harmless: inside the
+      # container the variables name the SYSTEM path. A program that pushes
+      # them into the user manager changes nothing for anybody else — proven
+      # with the push actually having happened.
+      with subtest("trust: a leaked environment gives the host nothing"):
+          in_container(
+              "vmca",
+              "direct",
+              "systemctl --user import-environment SSL_CERT_FILE NIX_SSL_CERT_FILE",
+          )
+          out = alice("systemctl --user show-environment")
+          assert "NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" in out, out
+          machine.fail(
+              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
+              f"systemd-run --user --wait --pipe --quiet openssl verify {CA}/srv.pem'"
+          )
+          alice("systemctl --user unset-environment SSL_CERT_FILE NIX_SSL_CERT_FILE")
+
+      with subtest("trust: after a reset the container does not trust it either"):
+          alice("vpn-zone trust reset vmca")
+          machine.fail(
+              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
+              f"vpn-zone run direct --profile vmca -- openssl verify {CA}/srv.pem'"
+          )
+          out = in_container("vmca", "direct", "sh -c 'certutil -L -d sql:$HOME/.pki/nssdb || true'")
+          assert "vpn-zones " not in out, f"the reset left the CA in the NSS database:\n{out}"
+          alice("vpn-zone down vmsmoke")
 
       # --- The real tunnel: an actual WireGuard peer on the second VM -------
       # Everything above used an unreachable endpoint and checked mechanics;
