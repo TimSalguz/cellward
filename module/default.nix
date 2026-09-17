@@ -765,6 +765,18 @@ in
     "${config.home.homeDirectory}/.local/share/vpn-zones/bin"
   ];
 
+  # Брокер: единственная дверь наружу из герметичной зоны (rust/src/broker.rs).
+  # Кто просит — узнаёт по сетевому namespace процесса, запуск в ту же зону —
+  # без вопроса, в другую сеть — только после подтверждения человеком.
+  systemd.user.services.vpn-zone-broker = {
+    Unit.Description = "Брокер запусков из герметичных VPN-зон";
+    Service = {
+      ExecStart = "${vpn-zone}/bin/vpn-zone _broker";
+      Restart = "on-failure";
+    };
+    Install.WantedBy = [ "default.target" ];
+  };
+
   systemd.user.services.vpn-zone-watch = lib.mkIf cfg.tunnelWatch.enable {
     Unit.Description = "Проверка живости туннелей VPN-зон";
     Service = {

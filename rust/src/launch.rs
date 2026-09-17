@@ -1034,6 +1034,16 @@ fn delegate(tools: &Tools, argv: &[OsString]) -> u8 {
     // permissions and a separate registry entry, and the same program stopped
     // being recognised as itself.
     let appid = env_nonempty(ENV_APPID).unwrap_or_default();
+
+    // A hermetic zone has no systemd --user to reach, and the broker instead:
+    // the door with a guard (`crate::broker`). Checked by the manager's socket
+    // being gone rather than by a variable a program could set.
+    let runtime = crate::broker::runtime_dir();
+    if !runtime.join("systemd/private").exists() {
+        if let Some(code) = crate::broker::request(appid.as_bytes(), argv) {
+            return code;
+        }
+    }
     let mut setenv = OsString::from("--setenv=VPN_ZONE_APPID=");
     setenv.push(&appid);
 

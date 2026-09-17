@@ -394,6 +394,14 @@ pub fn probe(uid: u32) -> Vec<Check> {
             checks.push(system_bus_check(&mountinfo, reachable(&path), what));
             continue;
         }
+        if id == "session-bus" && mounted_at(&mountinfo, &path.to_string_lossy()) {
+            checks.push(Check::new(
+                "session-bus",
+                Level::Ok,
+                "фильтруется (герметичная зона): порталы, уведомления, трей, MPRIS, методы ввода",
+            ));
+            continue;
+        }
         if id == "x11" && mounted_at(&mountinfo, crate::x11::X11_DIR) {
             checks.push(Check::new(
                 "x11",

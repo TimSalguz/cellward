@@ -92,6 +92,7 @@ const VERBS: &[&str] = &[
     "reset-profile",
     "wayland-sandbox",
     "check",
+    "hermetic",
     "x11",
     "doctor",
     "watch",
@@ -105,6 +106,7 @@ const VERBS: &[&str] = &[
 
 /// Verbs whose first argument is a zone name.
 const ZONE_VERBS: &[&str] = &[
+    "hermetic",
     "x11",
     "up",
     "down",
@@ -166,7 +168,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             }
             v if ZONE_VERBS.contains(&v) && pos == 2 => owned(&mut out, &snap.zones),
             "add" if pos == 3 => return vec![FILES.to_string()],
-            "x11" if pos == 3 => strs(&mut out, &["on", "off"]),
+            "x11" | "hermetic" if pos == 3 => strs(&mut out, &["on", "off"]),
             "doctor" => {
                 owned(&mut out, &snap.zones);
                 strs(&mut out, &["--json"]);

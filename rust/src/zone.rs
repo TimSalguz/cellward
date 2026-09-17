@@ -205,6 +205,40 @@ const HOSTIF_GUEST4: &str = "10.255.255.253";
 const HOSTIF_PREFIX4: &str = "30";
 const HOSTIF_GATEWAY4: &str = "10.255.255.254";
 
+/// The marker of a hermetic zone, in its directory (`docs/HERMETICITY.md` §7,
+/// C): the runtime directory closed, the session bus filtered, the broker as
+/// the one way out. A prototype, off unless set.
+pub const HERMETIC: &str = "hermetic";
+/// The zone's filtered session bus, in its state directory.
+const SESSION_BUS_PROXY: &str = "session-bus";
+/// Where the host's runtime directory is held for a moment while the zone's
+/// own is built over it.
+const HOST_RUNTIME: &str = ".host-runtime";
+/// What of the runtime directory a hermetic zone keeps: the compositor, the
+/// sound servers and the document portal's files. Not `bus` (the filtered one
+/// is bound instead), not `systemd/` (the manager's private socket — a process
+/// outside the zone), not `gnupg/`, `ssh-agent`, `keyring/`, `at-spi/`.
+const RUNTIME_KEPT: [&str; 4] = ["wayland-", "pipewire-0", "pulse", "doc"];
+
+/// What a program in a hermetic zone may ask of the session bus: the portals,
+/// notifications, tray icons, media players, input methods, the screensaver
+/// inhibitor (the owner's decision C4). Not `org.freedesktop.systemd1` —
+/// starting a process outside the zone —, not the Secret Service, not other
+/// programs' interfaces.
+pub const SESSION_BUS_RULES: [&str; 11] = [
+    "--filter",
+    "--talk=org.freedesktop.portal.*",
+    "--talk=org.freedesktop.Notifications",
+    "--talk=org.kde.StatusNotifierWatcher",
+    "--own=org.kde.StatusNotifierItem-*",
+    "--own=org.mpris.MediaPlayer2.*",
+    "--talk=org.freedesktop.IBus",
+    "--talk=org.freedesktop.portal.IBus",
+    "--talk=org.fcitx.Fcitx5",
+    "--talk=org.freedesktop.portal.Fcitx",
+    "--talk=org.freedesktop.ScreenSaver",
+];
+
 /// The host's system bus.
 const SYSTEM_BUS: &str = "/run/dbus/system_bus_socket";
 /// The zone's filtered system bus, in its state directory.
@@ -632,6 +666,7 @@ static ZONE_CHILD: AtomicI32 = AtomicI32::new(0);
 static UPLINK_CHILD: AtomicI32 = AtomicI32::new(0);
 static PASTA_CHILD: AtomicI32 = AtomicI32::new(0);
 static PROXY_CHILD: AtomicI32 = AtomicI32::new(0);
+static SESSION_PROXY_CHILD: AtomicI32 = AtomicI32::new(0);
 /// Did the shutdown start with a TERM/INT of our own?
 static ASKED_TO_STOP: AtomicBool = AtomicBool::new(false);
 
@@ -646,7 +681,13 @@ extern "C" fn forward_signal(sig: libc::c_int) {
 
 extern "C" fn stop_zone(_sig: libc::c_int) {
     ASKED_TO_STOP.store(true, Ordering::SeqCst);
-    for slot in [&PASTA_CHILD, &UPLINK_CHILD, &ZONE_CHILD, &PROXY_CHILD] {
+    for slot in [
+        &PASTA_CHILD,
+        &UPLINK_CHILD,
+        &ZONE_CHILD,
+        &PROXY_CHILD,
+        &SESSION_PROXY_CHILD,
+    ] {
         let pid = slot.load(Ordering::SeqCst);
         if pid > 0 {
             // SAFETY: as above.
@@ -947,6 +988,20 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
     // socket in as one of its first steps.
     let proxy = start_system_bus_proxy(zone);
     let proxy_pid = proxy.as_ref().map_or(0, |c| c.id() as i32);
+    // A hermetic zone's session bus the same way.
+    let session_proxy = if zone.path(HERMETIC).exists() {
+        start_proxy(
+            zone,
+            &format!("unix:path={}", host_runtime_dir(zone).join("bus").display()),
+            SESSION_BUS_PROXY,
+            &SESSION_BUS_RULES,
+            "session bus",
+        )
+    } else {
+        None
+    };
+    let session_proxy_pid = session_proxy.as_ref().map_or(0, |c| c.id() as i32);
+    SESSION_PROXY_CHILD.store(session_proxy_pid, Ordering::SeqCst);
 
     let (uplink_up_r, uplink_up_w) =
         sys::pipe().map_err(|e| format!("cannot create a pipe: {e}"))?;
@@ -1142,6 +1197,14 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
             PROXY_CHILD.store(0, Ordering::SeqCst);
             continue;
         }
+        if dead == session_proxy_pid && dead > 0 && !ASKED_TO_STOP.load(Ordering::SeqCst) {
+            eprintln!(
+                "zone {}: the session bus proxy died — the zone has no session bus now",
+                zone.name()
+            );
+            SESSION_PROXY_CHILD.store(0, Ordering::SeqCst);
+            continue;
+        }
         break (dead, code);
     };
     if !ASKED_TO_STOP.load(Ordering::SeqCst) {
@@ -1165,6 +1228,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
         uplink_pid,
         zone_pid,
         PROXY_CHILD.load(Ordering::SeqCst),
+        SESSION_PROXY_CHILD.load(Ordering::SeqCst),
     ] {
         if pid != dead {
             kill_and_reap(pid);
@@ -1494,14 +1558,37 @@ fn start_system_bus_proxy(zone: &Zone) -> Option<Child> {
     if fs::symlink_metadata(SYSTEM_BUS).is_err() {
         return None;
     }
-    let socket = zone.path(SYSTEM_BUS_PROXY);
+    let child = start_proxy(
+        zone,
+        &format!("unix:path={SYSTEM_BUS}"),
+        SYSTEM_BUS_PROXY,
+        &SYSTEM_BUS_RULES,
+        "system bus",
+    );
+    PROXY_CHILD.store(
+        child.as_ref().map_or(0, |c| c.id() as i32),
+        Ordering::SeqCst,
+    );
+    child
+}
+
+/// Start `xdg-dbus-proxy` for `address`, listening at `socket_name` in the
+/// zone's directory, and wait for its socket.
+fn start_proxy(
+    zone: &Zone,
+    address: &str,
+    socket_name: &str,
+    rules: &[&str],
+    what: &str,
+) -> Option<Child> {
+    let socket = zone.path(socket_name);
     let _ = fs::remove_file(&socket);
     // As the user, not as the holder: uid 0 in here is a subordinate uid on the
-    // host, and the system bus would see a stranger connect — while a program
-    // in the zone, which runs as the user, presents the user's uid. Through a
-    // proxy of the wrong uid every call fails, the allowed ones included. The
-    // zone's directory belongs to the user, and its owner is the uid mapped
-    // onto itself.
+    // host, and the bus would see a stranger connect — while a program in the
+    // zone, which runs as the user, presents the user's uid. Through a proxy of
+    // the wrong uid every call fails, the allowed ones included. The zone's
+    // directory belongs to the user, and its owner is the uid mapped onto
+    // itself.
     let (uid, gid) = match fs::metadata(&zone.dir) {
         Ok(meta) => {
             use std::os::unix::fs::MetadataExt;
@@ -1509,7 +1596,7 @@ fn start_system_bus_proxy(zone: &Zone) -> Option<Child> {
         }
         Err(e) => {
             eprintln!(
-                "zone {}: cannot read {} ({e}) — no system bus proxy",
+                "zone {}: cannot read {} ({e}) — no {what} proxy",
                 zone.name(),
                 zone.dir.display()
             );
@@ -1517,9 +1604,9 @@ fn start_system_bus_proxy(zone: &Zone) -> Option<Child> {
         }
     };
     let mut child = match Command::new(&zone.tools.dbus_proxy)
-        .arg(format!("unix:path={SYSTEM_BUS}"))
+        .arg(address)
         .arg(&socket)
-        .args(SYSTEM_BUS_RULES)
+        .args(rules)
         .stdout(Stdio::null())
         .uid(uid)
         .gid(gid)
@@ -1528,14 +1615,13 @@ fn start_system_bus_proxy(zone: &Zone) -> Option<Child> {
         Ok(child) => child,
         Err(e) => {
             eprintln!(
-                "zone {}: cannot start {} ({e}) — the zone gets no system bus",
+                "zone {}: cannot start {} ({e}) — the zone gets no {what}",
                 zone.name(),
                 zone.tools.dbus_proxy.display()
             );
             return None;
         }
     };
-    PROXY_CHILD.store(child.id() as i32, Ordering::SeqCst);
     for _ in 0..WAIT_STEPS {
         if fs::symlink_metadata(&socket).is_ok() {
             return Some(child);
@@ -1546,13 +1632,120 @@ fn start_system_bus_proxy(zone: &Zone) -> Option<Child> {
         thread::sleep(WAIT_STEP);
     }
     eprintln!(
-        "zone {}: the system bus proxy did not come up — the zone gets no system bus",
+        "zone {}: the {what} proxy did not come up — the zone gets no {what}",
         zone.name()
     );
     let _ = child.kill();
     let _ = child.wait();
-    PROXY_CHILD.store(0, Ordering::SeqCst);
     None
+}
+
+/// The host's runtime directory of the zone's user.
+fn host_runtime_dir(zone: &Zone) -> PathBuf {
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    use std::os::unix::fs::MetadataExt;
+    let uid = fs::metadata(&zone.dir).map_or(0, |m| m.uid());
+    PathBuf::from(format!("/run/user/{uid}"))
+}
+
+/// A hermetic zone's runtime directory (`docs/HERMETICITY.md` §2): a tmpfs of
+/// its own over the user's, with only [`RUNTIME_KEPT`] bound back, the
+/// filtered session bus as `bus`, and the broker's socket. `systemd/private`
+/// and the host's `bus` are gone — the two ways to start a process outside
+/// the zone. Fatal when it cannot be done: a zone marked hermetic that is not
+/// is the one outcome worse than an ordinary zone.
+fn seal_runtime(zone: &Zone) -> Result<(), String> {
+    if !zone.path(HERMETIC).exists() {
+        return Ok(());
+    }
+    let runtime = host_runtime_dir(zone);
+    let (uid, gid) = {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(&zone.dir)
+            .map_err(|e| format!("cannot read the zone's directory: {e}"))?;
+        (meta.uid(), meta.gid())
+    };
+    let host = zone.path(HOST_RUNTIME);
+    fs::create_dir_all(&host).map_err(|e| format!("cannot create {}: {e}", host.display()))?;
+    // The host's directory kept reachable for a moment, to bind from after the
+    // tmpfs covers the original.
+    sys::mount(
+        runtime.as_os_str(),
+        &host,
+        "",
+        libc::MS_BIND | libc::MS_REC,
+        "",
+    )
+    .map_err(|e| format!("cannot hold {}: {e}", runtime.display()))?;
+    sys::mount(
+        OsStr::new("tmpfs"),
+        &runtime,
+        "tmpfs",
+        0,
+        &format!("mode=0700,uid={uid},gid={gid},size=16m"),
+    )
+    .map_err(|e| format!("cannot close {}: {e}", runtime.display()))?;
+
+    let bind_back = |from: &Path, to: &Path| -> Result<(), String> {
+        let is_dir = fs::metadata(from).is_ok_and(|m| m.is_dir());
+        if is_dir {
+            fs::create_dir_all(to)
+        } else {
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+            }
+            File::create(to).map(|_| ())
+        }
+        .map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+        sys::mount(from.as_os_str(), to, "", libc::MS_BIND | libc::MS_REC, "")
+            .map_err(|e| format!("cannot bind {}: {e}", from.display()))
+    };
+    let mut kept = Vec::new();
+    for entry in fs::read_dir(&host).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let wanted = RUNTIME_KEPT.iter().any(|k| {
+            if k.ends_with('-') {
+                name.starts_with(k) && !name.ends_with(".lock")
+            } else {
+                name == *k
+            }
+        });
+        if wanted {
+            bind_back(&entry.path(), &runtime.join(&name))?;
+            kept.push(name);
+        }
+    }
+    let session = zone.path(SESSION_BUS_PROXY);
+    if fs::symlink_metadata(&session).is_ok() {
+        bind_back(&session, &runtime.join("bus"))?;
+        kept.push("bus (filtered)".to_owned());
+    }
+    let broker = host.join(crate::broker::SOCKET);
+    if fs::symlink_metadata(&broker).is_ok() {
+        bind_back(&broker, &runtime.join(crate::broker::SOCKET))?;
+        kept.push("broker".to_owned());
+    }
+    // The host's directory is not to stay reachable through the zone's own
+    // state directory, which programs in the zone can see.
+    let target = std::ffi::CString::new(host.as_os_str().as_bytes())
+        .map_err(|_| "a NUL in the zone's path".to_owned())?;
+    // SAFETY: a NUL-terminated path; MNT_DETACH takes no pointers.
+    if unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) } != 0 {
+        return Err(format!(
+            "cannot release {}: {} — the host's runtime directory would stay reachable",
+            host.display(),
+            io::Error::last_os_error()
+        ));
+    }
+    let _ = fs::remove_dir(&host);
+    println!(
+        "zone {}: hermetic runtime ({})",
+        zone.name(),
+        kept.join(", ")
+    );
+    Ok(())
 }
 
 /// In the zone's mount namespace: the proxy's socket over the host's system
@@ -1930,6 +2123,8 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // resolve1 is on the system bus too, and NetworkManager tells a program
     // which networks the machine is really on.
     seal_system_bus(zone)?;
+    // A hermetic zone: no systemd --user, no whole session bus, the broker.
+    seal_runtime(zone)?;
     // One X server shows every client everything: the host's is out of reach,
     // and so are the X servers of other zones — /tmp is shared, this tmpfs
     // is not. A container with the x11 permission runs its own satellite, and

@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (hermetic zones — prototype, off by default)
+- `vpn-zone hermetic <zone> on|off` (takes effect at the zone's next start):
+  the zone's runtime directory is a tmpfs of its own with only the Wayland,
+  PipeWire and PulseAudio sockets and the document portal bound back; the
+  session bus is a filter (portals, notifications, tray, MPRIS, IBus/fcitx,
+  the screensaver inhibitor — not `systemd1`, not the Secret Service);
+  `systemd --user` is out of reach. A launch out of such a zone goes through
+  the broker (`vpn-zone-broker` user service): into the same zone at once,
+  into another network only after a person says yes, never from a locked
+  zone. `status --json` networks carry `hermetic` as `{value, source}`;
+  `doctor` reports the session bus as filtered. The owner's decision C, as the
+  prototype that is proven before it becomes the default.
+
 ### Added (X11 per zone)
 - `vpn-zone x11 <zone> on|off` and `programs.vpn-zones.zoneX11 = [ names ]`:
   every program launched into such a zone gets an X server of its own

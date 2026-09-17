@@ -121,7 +121,7 @@ pub fn networks(tools: &Tools) -> String {
     let mut items = vec![
         "{\"name\":\"direct\",\"kind\":\"direct\",\"source\":\"default\",\"up\":true,\
          \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null,\"interface\":null,\"x11\":null}"
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null}"
             .to_owned(),
     ];
     let mut offline_listed = false;
@@ -171,13 +171,18 @@ pub fn networks(tools: &Tools) -> String {
             let (on, source) = crate::x11::zone_setting(&tools.state, &tools.config, &name);
             sourced(on.to_string(), source)
         };
+        let hermetic = if dir.join(crate::zone::HERMETIC).exists() {
+            sourced("true".to_owned(), Source::Local)
+        } else {
+            sourced("false".to_owned(), Source::Default)
+        };
         let source = if kind == "offline" {
             "default"
         } else {
             "local"
         };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11}}}",
+            "{{\"name\":{},\"kind\":\"{kind}\",\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic}}}",
             string(&name),
             dir.join(NO_ESCAPE).exists()
         ));
@@ -186,7 +191,7 @@ pub fn networks(tools: &Tools) -> String {
         items.push(
             "{\"name\":\"offline\",\"kind\":\"offline\",\"source\":\"default\",\"up\":false,\
              \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null,\"interface\":null,\"x11\":null}"
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null}"
                 .to_owned(),
         );
     }

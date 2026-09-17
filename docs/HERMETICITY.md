@@ -114,7 +114,9 @@ becomes a default, with the table above as the list of what the owner accepts.
   no power management; `NetworkManager`, `hostname1`, `resolve1`, `machined`,
   `timedate1` denied.
 - **C — the session bus and the broker.** The prototype first, behind a
-  per-zone flag `hermetic`, proven by an evil host in the VM. Then:
+  per-zone flag `hermetic`, proven by an evil host in the VM — **the prototype
+  is implemented** (`vpn-zone hermetic <zone> on`); what follows is not yet.
+  Then:
   1. `hermetic` becomes the default; switching it off is explicit and per
      zone (a zone whose programs legitimately drive `systemd --user`, such as
      one running agents that start VM checks with `systemd-run --user`);

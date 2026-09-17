@@ -979,6 +979,33 @@ let
               )
           alice("vpn-zone down vmawg")
 
+      # --- A hermetic zone (docs/HERMETICITY.md §7 C, the prototype) --------
+      # The evil host: from inside, systemd --user is gone and its D-Bus name
+      # refused, while the filtered bus still answers — so the refusal is the
+      # filter. The broker starts a launch into the same zone and refuses one
+      # into another network with nobody to ask.
+      with subtest("hermetic zone: no systemd --user, a filtered bus, the broker as the door"):
+          alice("vpn-zone add vmherm /tmp/vmsmoke.conf")
+          alice("vpn-zone hermetic vmherm on")
+          alice("systemctl --user is-active vpn-zone-broker.service")
+          alice("vpn-zone up vmherm")
+          hp = machine.succeed(f"cat {STATE}/vmherm/zone.pid").strip()
+          units = "call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager ListUnits"
+          names = "call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ListNames"
+          alice(f"busctl --user --timeout=5 {units} > /dev/null")
+          in_zone(hp, "test ! -e /run/user/1000/systemd/private")
+          in_zone(hp, f"sh -c '! busctl --user --timeout=5 {units}'")
+          in_zone(hp, "sh -c '! systemctl --user is-system-running'")
+          in_zone(hp, f"busctl --user --timeout=5 {names}")
+          in_zone(hp, "env VPN_ZONE_CURRENT=vmherm vpn-zone run vmherm -- touch /tmp/brokered-same")
+          machine.wait_until_succeeds("test -e /tmp/brokered-same", timeout=30)
+          in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm vpn-zone run direct -- touch /tmp/brokered-escape'")
+          machine.sleep(3)
+          machine.fail("test -e /tmp/brokered-escape")
+          out = alice("vpn-zone doctor vmherm --json")
+          assert '{"id":"session-bus","level":"ok"' in out, out
+          alice("vpn-zone down vmherm")
+
       # --- A network through an interface of the host (CONTAINERS §3.3) -----
       # No tunnel: pasta attached to the app namespace and bound to one host
       # interface. The server must see the machine's own eth1 address, and a
