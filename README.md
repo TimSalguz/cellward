@@ -164,6 +164,55 @@ its copy of the config, but never a file outside the zone's directory. Unlike a
 WireGuard private key, which lives inside the config and goes with the zone,
 this one is yours to keep or remove.
 
+#### Why the format is ours and not the native one
+
+`openconnect` does have a native way to write settings down — two, in fact.
+Neither works as "a config you can accept from someone":
+
+- **`--config=FILE`** is not a description of a VPN but **a command line folded
+  into a file**: "long-format options as would be accepted on the command line,
+  but without the two leading dashes". Anything may go in it, including
+  `--script`, `--csd-wrapper`, `--external-browser` and `--no-system-trust`. To
+  accept such a file is to accept an arbitrary command to run and an arbitrary
+  trust decision along with it;
+- **`--xmlconfig=FILE`** is the AnyConnect XML profile the gateway itself hands
+  out. It describes a list of gateways and a client policy, holds no
+  credentials, and is not a zone: it supplements the settings rather than being
+  them.
+
+So the `[OpenConnect]` section is **a subset of the native options**, chosen so
+that the file cannot be turned into an executable one. `Args` takes an allowlist
+of fifteen flags, and each one must be a single `--flag=value` chunk: allow a
+flag and its value to be written separately and `Args = --useragent --script`
+would smuggle the forbidden one in as its neighbour's value. Trust is decided
+in exactly one way — `ServerCert`.
+
+#### The password: why a file, and why not for long
+
+`PasswordFile` exists for one reason: a zone is started by a systemd unit with
+no terminal, so the client runs with `--non-inter` and there is nobody to ask.
+The file must be `0600` and yours, which is checked both on `add` and on every
+start, and its contents are read once in the uplink right before they go to the
+client **on stdin**: `--passwd` is not an option, because `/proc/<pid>/cmdline`
+is world readable.
+
+The right home for a corporate password, though, is neither a file nor a secret
+encrypted to the machine's key. A sops-style secret is decrypted by the machine
+**itself, without a human, on every boot**: that is exactly right for a service
+password and exactly wrong for a person's, which is usually also the domain and
+mail password — so a stolen disk becomes a stolen account with no second factor
+behind it. And where there is 2FA or a one-time code there is nothing to store
+at all: the code lives half a minute.
+
+Hence the decision (ROADMAP M4): store nothing by default and ask at start —
+**in a window of ours, not a terminal** — keeping everything except the password
+and the one-time code; "remember the password" means the session keyring, which
+your login opens, not the machine's boot. Showing a terminal running
+`openconnect`, which asks for all of this anyway, would be the easiest thing of
+all — but then the zone is brought up by a person rather than by our code, and
+both the certificate pin and the allowlist are bypassed: the two things the
+format exists for.
+
 `ServerCert` is what a corporate CA the system does not know needs; a gateway
 with a publicly trusted certificate needs none. `openconnect` itself also
 accepts a `sha1:` pin; a zone config does not, because a pin IS the whole trust
