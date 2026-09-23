@@ -273,9 +273,15 @@ ARCHITECTURE §2, «страховка»: a user's program that runs outside eve
 the network, however it was started.
 
 - **One table, one unit.** `inet vpnzones_egress`, an `output` chain at priority −160 (after
-  conntrack, before a DPI bypass's mangle), loaded by `vpn-zones-egress.service` with
-  `vpn-zone-core egress apply` in one transaction (`destroy table` + the new one). Rolling
-  back a generation removes it with everything else.
+  conntrack, before a DPI bypass's mangle). Rolling back a generation removes it with
+  everything else.
+- **Our binary cannot open the host.** The restriction is printed when the system is built
+  (`vpn-zone-core egress print`, the same function as everything else) and loaded by `nft`
+  alone from that file, in one transaction (`destroy table` + the new one). Only then does our
+  binary ADD the allowances that need the running system — the uplinks of user zones, the
+  named users and groups — with `egress allow`, and that step may fail (`-` in the unit): the
+  host is then more closed than meant, user zones lose their way out as with a dropped
+  tunnel, and it is never open. The VM test loads the file alone and checks exactly that.
 - **By the socket's owner, not by cgroup.** Out: root and system users (uid < 1000),
   systemd's dynamic users (61184–65519), the first uid and gid of every `/etc/subuid` and
   `/etc/subgid` range (the uplinks of user zones: pasta runs as uid 0 of the zone's user
@@ -318,7 +324,7 @@ way around it that does not need the broken part:
 | The graphical session, the GPU driver | The TTY console (§7a): the kernel's console, no graphics |
 | This package in a new generation | The console falls through to the ordinary shell; the previous generation in the boot menu |
 | The VPN, or the amneziawg module for a new kernel | The in-tree `wireguard` for configs without obfuscation; the plain zone, which needs no module |
-| The egress policy keeps the host offline, our binary broken | The emergency key deletes the table with `nft` alone; `vpnzones.egress=off` on the kernel command line (`e` in the boot menu) keeps the policy from loading, with no binary of ours involved |
+| The egress policy keeps the host offline, our binary broken | The emergency key deletes the table with `nft` alone and puts it back from the built file with `nft` alone; `vpnzones.egress=off` on the kernel command line (`e` in the boot menu) keeps the policy from loading, with no binary of ours involved. Our binary crashing never OPENS the host: it only adds allowances to a restriction `nft` loads by itself |
 | Nix, the daemon | Not used at run time by zones, the console or the policy |
 | The store itself | The previous generation; nix_cm's rescue copy runs without `/nix/store` |
 

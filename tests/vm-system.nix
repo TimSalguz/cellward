@@ -380,6 +380,23 @@ let
           machine.wait_until_succeeds("nft list table inet vpnzones_egress", timeout=30)
           machine.fail(direct("alice"))
 
+      with subtest("our binary failing leaves the host more closed, never open"):
+          # The allowances are ours and are there: the uplinks of user zones.
+          machine.succeed("nft list set inet vpnzones_egress users | grep -q 100000")
+          rules = machine.succeed(
+              "systemctl show -p ExecStart vpn-zones-egress "
+              "| grep -o '/nix/store/[^ ;]*-vpn-zones-egress.nft' | head -1"
+          ).strip()
+          assert rules, "the policy is not loaded from a built file"
+          # As if vpn-zone-core had crashed: the restriction alone, loaded by nft.
+          machine.succeed("systemctl stop vpn-zones-egress")
+          machine.succeed(f"nft -f {rules}")
+          machine.fail(direct("alice"))
+          out = machine.succeed("nft list set inet vpnzones_egress users")
+          assert "100000" not in out, out
+          machine.succeed("systemctl start vpn-zones-egress")
+          machine.succeed("nft list set inet vpnzones_egress users | grep -q 100000")
+
       with subtest("the emergency key opens the host and closes it again"):
           # alice is in wheel: polkit lets her turn the key without a password.
           machine.succeed(as_user("alice", "systemctl start vpn-zones-egress-open"))
