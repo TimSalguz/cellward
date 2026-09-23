@@ -71,6 +71,22 @@ where
         .is_ok_and(|s| s.success())
 }
 
+/// A three-way question (`--yesnocancel` with its own labels): `Some(0)` yes,
+/// `Some(1)` no, `Some(2)` cancel; `None` when kdialog could not be started or
+/// was killed — which the caller reads as the safe answer.
+pub fn choose3<I, S>(kdialog: &Path, args: I) -> Option<i32>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Command::new(kdialog)
+        .args(args)
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .and_then(|s| s.code())
+}
+
 /// A dialog with nothing to answer: `--msgbox`, `--error`. Failures are ignored
 /// — the shell wrote `|| true` after every one of them, because a missing
 /// dialog must not turn a message into a failed command.

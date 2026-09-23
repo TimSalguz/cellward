@@ -190,7 +190,71 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
     let _ = stream.write_all(format!("{answer}\n").as_bytes());
 }
 
+/// What "always" is remembered in: one `origin\ttarget\tprogram` per line,
+/// below the config directory.
+pub const ALWAYS: &str = "broker-always";
+
+/// The program a launch runs, as the host resolves it: the first word of the
+/// command, looked up in `PATH` if it is a bare name, its directory's links
+/// followed and its own name kept — `touch` and `cat` are links to one
+/// coreutils binary, and "always" for one must not be "always" for all.
+pub fn program_of(cmd: &[OsString]) -> Option<PathBuf> {
+    let first = Path::new(cmd.first()?);
+    let path = if first.components().count() > 1 {
+        first.to_path_buf()
+    } else {
+        std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|dir| dir.join(first))
+            .find(|p| p.is_file())?
+    };
+    let dir = std::fs::canonicalize(path.parent()?).ok()?;
+    Some(dir.join(path.file_name()?))
+}
+
+/// Whether "always" may be offered for this program: only for one in the
+/// store — the name and the file it finally is — where nothing in a zone can
+/// write. A program named by a path the user, or a program in a zone with the
+/// home in reach, could replace (`~/.local/bin/…`) would make "always" a
+/// standing door for whatever is put there next.
+pub fn may_remember(program: &Path) -> bool {
+    program.starts_with("/nix/store/")
+        && std::fs::canonicalize(program).is_ok_and(|real| real.starts_with("/nix/store/"))
+}
+
+/// The line "always" writes, and looks for.
+pub fn always_line(origin: &str, target: &str, program: &Path) -> String {
+    format!("{origin}\t{target}\t{}", program.display())
+}
+
+fn remembered(tools: &Tools, line: &str) -> bool {
+    std::fs::read_to_string(tools.config.join(ALWAYS))
+        .is_ok_and(|text| text.lines().any(|l| l == line))
+}
+
+fn remember(tools: &Tools, line: &str) {
+    let path = tools.config.join(ALWAYS);
+    let _ = std::fs::create_dir_all(&tools.config);
+    let appended = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| writeln!(f, "{line}"));
+    if let Err(e) = appended {
+        eprintln!("broker: cannot remember in {}: {e}", path.display());
+    }
+}
+
 fn ask(tools: &Tools, origin: &str, target: &str, cmd: &[OsString]) -> Result<(), String> {
+    // Asked before, and "always" said: the same zone, the same network, the
+    // very same program from the store.
+    let program = program_of(cmd).filter(|p| may_remember(p));
+    let line = program.as_ref().map(|p| always_line(origin, target, p));
+    if line.as_ref().is_some_and(|l| remembered(tools, l)) {
+        return Ok(());
+    }
     if !crate::launch::has_display() {
         return Err("спросить некого (нет графической сессии)".to_owned());
     }
@@ -207,18 +271,43 @@ fn ask(tools: &Tools, origin: &str, target: &str, cmd: &[OsString]) -> Result<()
         "Программа из зоны «{origin}» просит запустить в {network}:\n\n{}\n\nРазрешить?",
         shown.join(" ")
     );
-    if crate::dialog::confirm(
+    // "Always" only where it can be kept safely (`may_remember`).
+    let Some(line) = line else {
+        return if crate::dialog::confirm(
+            &tools.kdialog,
+            [
+                "--title",
+                "Запуск из зоны",
+                "--warningcontinuecancel",
+                question.as_str(),
+            ],
+        ) {
+            Ok(())
+        } else {
+            Err("человек отказал".to_owned())
+        };
+    };
+    match crate::dialog::choose3(
         &tools.kdialog,
         [
             "--title",
             "Запуск из зоны",
-            "--warningcontinuecancel",
+            "--yes-label",
+            "Разрешить",
+            "--no-label",
+            "Всегда",
+            "--cancel-label",
+            "Отказать",
+            "--warningyesnocancel",
             question.as_str(),
         ],
     ) {
-        Ok(())
-    } else {
-        Err("человек отказал".to_owned())
+        Some(0) => Ok(()),
+        Some(1) => {
+            remember(tools, &line);
+            Ok(())
+        }
+        _ => Err("человек отказал".to_owned()),
     }
 }
 
@@ -298,6 +387,46 @@ pub fn request(app_id: &[u8], argv: &[OsString]) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn always_is_kept_for_programs_of_the_store_only() {
+        // A program of the store: `sh`, as the test's own PATH has it.
+        let sh = program_of(&["sh".into()]).unwrap();
+        assert!(
+            sh.starts_with("/nix/store/") && sh.ends_with("sh"),
+            "{}",
+            sh.display()
+        );
+        assert!(may_remember(&sh));
+        assert!(!may_remember(Path::new(
+            "/nix/store/does-not-exist/bin/zen"
+        )));
+        assert!(!may_remember(Path::new("/home/u/.local/bin/zen")));
+        assert!(!may_remember(Path::new("/tmp/zen")));
+        assert_eq!(
+            always_line("nl", "unconfined", Path::new("/nix/store/abc-zen/bin/zen")),
+            "nl\tunconfined\t/nix/store/abc-zen/bin/zen"
+        );
+        // The program as the host resolves it: the directory's links followed,
+        // the name kept.
+        let dir = std::env::temp_dir().join(format!("vpn-zone-broker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real");
+        std::fs::write(&real, "").unwrap();
+        let link = dir.join("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(
+            program_of(&[link.clone().into_os_string()]),
+            Some(std::fs::canonicalize(&dir).unwrap().join("link"))
+        );
+        // …and a file outside the store is never "always".
+        assert!(!may_remember(
+            &program_of(&[real.clone().into_os_string()]).unwrap()
+        ));
+        assert_eq!(program_of(&[]), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_request_survives_the_socket() {

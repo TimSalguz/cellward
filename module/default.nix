@@ -563,7 +563,7 @@ in
     hermetic.default = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
-      description = "Герметичны ли зоны без своей настройки: без systemd --user, сессионная шина через фильтр (xdg-dbus-proxy), запуск в других сетях — только через брокер с вопросом человеку. null — не задавать из Nix (тогда действует vpn-zone hermetic --default, иначе выкл.). Своя настройка зоны (vpn-zone hermetic <зона> on|off) важнее умолчания. См. docs/HERMETICITY.ru.md §7.";
+      description = "Герметичны ли зоны без своей настройки: без systemd --user, сессионная шина через фильтр (xdg-dbus-proxy), запуск в других сетях — только через брокер с вопросом человеку. null — не задавать из Nix (тогда действует vpn-zone hermetic --default, иначе вкл.: с 2026-09 зоны герметичны по умолчанию; прежнее поведение — hermetic.default = false или исключения). Своя настройка зоны (vpn-zone hermetic <зона> on|off) важнее умолчания. См. docs/HERMETICITY.ru.md §7.";
     };
 
     hermetic.exceptions = lib.mkOption {

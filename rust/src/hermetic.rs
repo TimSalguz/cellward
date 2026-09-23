@@ -9,7 +9,11 @@
 //! 2. the zone's own marker (`vpn-zone hermetic <zone> on|off`);
 //! 3. `hermetic.default` (Nix);
 //! 4. the local default (`vpn-zone hermetic --default on|off`);
-//! 5. off.
+//! 5. on — since 2026-09 (off before). A zone in the ordinary mode lets its
+//!    programs have the host's session do things for them, `systemd-run
+//!    --user` first of all: a process started outside the zone, around its
+//!    tunnel. The kernel keeps the zone's own processes in; only hermeticity
+//!    keeps them from asking a helper outside (docs/LEAK-MODEL.md §1, §14).
 //!
 //! Only `off` switches anything off. An empty marker is what the prototype
 //! wrote for "on", and a file that says something else, or that is there but
@@ -45,7 +49,7 @@ pub fn default_setting(config: &Path) -> (bool, Source) {
     if let Some(on) = default_file(&config.join(DEFAULT_SETTING)) {
         return (on, Source::Local);
     }
-    (false, Source::Default)
+    (true, Source::Default)
 }
 
 /// Whether Nix names this zone an exception.
@@ -108,11 +112,14 @@ mod tests {
     }
 
     #[test]
-    fn nothing_set_is_off_by_default() {
+    fn nothing_set_is_on_by_default() {
         let d = Dirs::new("none");
-        assert_eq!(d.setting(), (false, Source::Default));
+        assert_eq!(d.setting(), (true, Source::Default));
         d.write("config/hermetic-default", "");
-        assert_eq!(d.setting(), (false, Source::Default));
+        assert_eq!(d.setting(), (true, Source::Default));
+        // The way back is explicit.
+        d.write("config/hermetic-default", "off");
+        assert_eq!(d.setting(), (false, Source::Local));
     }
 
     #[test]

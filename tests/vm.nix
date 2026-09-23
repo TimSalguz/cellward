@@ -1167,6 +1167,21 @@ let
           in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm vpn-zone run direct -- touch /tmp/brokered-escape'")
           machine.sleep(3)
           machine.fail("test -e /tmp/brokered-escape")
+          # "Always" said before for this very program of the store (the
+          # broker-always file is what the dialog's third button writes): the
+          # launch in another network goes on without a question — there is
+          # nobody to ask here, so a question would have been a refusal.
+          touch = machine.succeed("readlink -f /run/current-system/sw/bin").strip() + "/touch"
+          alice(
+              "mkdir -p ~/.config/vpn-zones && "
+              f"printf 'vmherm\tunconfined\t%s\n' {touch} >> ~/.config/vpn-zones/broker-always"
+          )
+          in_zone(hp, f"env VPN_ZONE_CURRENT=vmherm vpn-zone run direct -- {touch} /tmp/brokered-always")
+          machine.wait_until_succeeds("test -e /tmp/brokered-always", timeout=30)
+          # Only that program: another one is asked about — and refused.
+          in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm vpn-zone run direct -- mkdir /tmp/brokered-other'")
+          machine.sleep(3)
+          machine.fail("test -e /tmp/brokered-other")
           # Both decisions are on the record, the escape under the new name.
           out = alice("vpn-zone journal --json")
           assert '"event":"broker","origin":"vmherm","target":"vmherm"' in out, out
