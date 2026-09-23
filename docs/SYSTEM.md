@@ -4,7 +4,8 @@ Related: [ARCHITECTURE.md](ARCHITECTURE.md) §3, [LEAK-MODEL.md](LEAK-MODEL.md)
 
 **Status, 2026-09-23.** Stages 1–3 (system zones, services and NixOS containers in them) are
 in `main`, with `tests/vm-system.nix` green locally and in CI. Stage 4 (a user's console
-program in a system zone, §7) is on the branch `feat/system-run`.
+program in a system zone, §7) is in `main` too; stage 5 (the host egress policy, §9) is on
+the branch `feat/host-egress`, green in the same VM test.
 
 ## 1. What it is
 
@@ -186,7 +187,47 @@ offer a system zone as a network for a program container, which can't use it.
 `readable: false` means the reader isn't in the group `vpn-zones`: the run directory is
 closed to them, so `up`, `tunnel_alive` and the counters are `null`.
 
-## 9. Leak channels of the system tier
+## 9. The host without a network of its own (stage 5)
+
+`services.vpn-zones.system.egress = { enable = true; mode = "audit" | "enforce"; }` —
+ARCHITECTURE §2, «страховка»: a user's program that runs outside every zone does not reach
+the network, however it was started.
+
+- **One table, one unit.** `inet vpnzones_egress`, an `output` chain at priority −160 (after
+  conntrack, before a DPI bypass's mangle), loaded by `vpn-zones-egress.service` with
+  `vpn-zone-core egress apply` in one transaction (`destroy table` + the new one). Rolling
+  back a generation removes it with everything else.
+- **By the socket's owner, not by cgroup.** Out: root and system users (uid < 1000),
+  systemd's dynamic users (61184–65519), the first uid and gid of every `/etc/subuid` and
+  `/etc/subgid` range (the uplinks of user zones: pasta runs as uid 0 of the zone's user
+  namespace), `allowUsers`, `allowGroups` (`nixbld` by default), established and related
+  traffic, loopback, the kernel's neighbour discovery and IGMP. A system zone's tunnel is
+  let out by its mark: its UDP socket is the kernel's own, has no file and so no owner, and
+  the holder writes `FwMark = 0x767a` into what `setconf` gets (`system::TUNNEL_MARK`,
+  replacing any the config had) — found by the VM test, where the first handshake was
+  refused. Everything in a zone never passes this hook. Anybody else: a rate-limited
+  `vpn-zones-egress: … UID=<uid>` line in the kernel log, and in `enforce` `reject with
+  icmpx admin-prohibited` — the program fails at once instead of hanging.
+  Cgroup sets (`NFTSet=`) were the other design: systemd fills them when a unit starts, and
+  every flushing firewall reload empties them — a policy that silently stops recognising
+  what it allows.
+- **`audit` first.** The same rules, logged and let through: a machine is watched before it
+  is locked.
+- **A firewall that flushes.** With `networking.nftables.flushRuleset` the NixOS firewall
+  deletes every table on start and reload; the policy's unit is then `PartOf` it and
+  reloads with it (`ReloadPropagatedFrom`). Without flushing it is left alone.
+- **The emergency key.** `vpn-zones-egress-open.service` keeps the table and lifts the
+  restriction for `emergency.minutes` (15), then puts it back — also when stopped earlier.
+  `emergency.group` (`wheel`) may start and stop it without a password — through polkit,
+  which the module therefore turns on (NixOS has it off by default; the VM test found the
+  key refused without it). The TTY console of ARCHITECTURE §4 turns it with one key.
+- **What it does not close.** Names: a blocked program still resolves them through the
+  host's nscd or resolved, which are the system's and go out — the connection is refused,
+  the question already left. Moving the host's own resolver into a system zone is the
+  answer, and a later step. And root: root can unload anything; the policy is about
+  programs of users.
+
+## 10. Leak channels of the system tier
 
 1. **Routes around the tunnel** — none: `lo` and `awg0` only; the second echelon is loaded
    into the namespace before the tunnel arrives.
@@ -206,9 +247,9 @@ closed to them, so `up`, `tunnel_alive` and the counters are `null`.
    host's network.
 8. **The host side has no second echelon** — a system zone's uplink is the host's network
    itself, and a ruleset there would be the host's firewall. Filtering the host's egress is
-   stage 5, the backstop.
+   stage 5 (§9); a zone's tunnel passes it by its mark.
 
-## 10. Tests
+## 11. Tests
 
 - **Rust** (`system.rs`, `status.rs`): the name check; the paths; the argument parser;
   refusing OpenConnect, host-interface and configs without `[Interface]`; the declared list
@@ -232,4 +273,10 @@ closed to them, so `up`, `tunnel_alive` and the counters are `null`.
   7. `vpn-zone-sys` as a listed user: the tunnel's network and names, the user's uid,
      `NoNewPrivs: 1` and no capabilities, `lo` and `awg0` only, `ip link add` refused, the
      zone's nsswitch, the command's exit code, a pty with a terminal, the launch in the
-     journal; a user of another zone and a user outside the group are refused.
+     journal; a user of another zone and a user outside the group are refused;
+  8. the egress policy, enforced from boot under a firewall that flushes every table: root
+     and a `DynamicUser` service reach the LAN, a user outside the zones is refused at once
+     and named in the kernel log, the same user through her zone is not; `systemctl reload`
+     and `restart nftables` leave the policy in place; the emergency key opens and closes
+     the host for a member of `wheel` and is refused to anybody else. Everything before
+     step 8 runs under the enforced policy too.

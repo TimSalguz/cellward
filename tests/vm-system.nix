@@ -47,10 +47,28 @@ let
           };
           services.probe.zone = "sz";
           containers.box.zone = "sz";
+          # The host without a network for a user's program outside the
+          # zones. Enforced from boot: nothing above runs as a user outside a
+          # zone, so everything above has to keep working under it.
+          egress = {
+            enable = true;
+            mode = "enforce";
+          };
+        };
+
+        # The hard case for the policy's table: a firewall that flushes the
+        # whole ruleset on every start and reload.
+        networking.nftables = {
+          enable = true;
+          flushRuleset = true;
         };
 
         users.users = {
-          alice.isNormalUser = true;
+          alice = {
+            isNormalUser = true;
+            # For the emergency key: `wheel` may start and stop it.
+            extraGroups = [ "wheel" ];
+          };
           bob.isNormalUser = true;
           carol.isNormalUser = true;
         };
@@ -311,6 +329,51 @@ let
           machine.succeed("systemctl stop leakwatch")
           out = machine.succeed("tcpdump -n -r /tmp/leak.pcap 2>/dev/null | wc -l").strip()
           assert out == "0", machine.succeed("tcpdump -n -r /tmp/leak.pcap")
+
+      # After the leak watch on purpose: from here on root talks to the
+      # server's LAN address directly, which is allowed and would be "a leak"
+      # to that capture.
+      def direct(user):
+          return as_user(user, f"timeout 10 socat -T5 - TCP:{server_ip}:8090")
+
+      with subtest("the host has no network for a user's program outside the zones"):
+          machine.succeed(
+              "nft list table inet vpnzones_egress | grep -q 'reject with icmpx admin-prohibited'"
+          )
+          out = machine.succeed(f"socat -T10 - TCP:{server_ip}:8090")
+          assert "peer=" in out, f"root lost the network: {out}"
+          machine.fail(direct("alice"))
+          machine.wait_until_succeeds(
+              "journalctl -k | grep -q 'vpn-zones-egress: .*UID=1000'", timeout=30
+          )
+          # Through her zone: as before.
+          out = machine.succeed(as_user("alice", "vpn-zone-sys sz -- socat -T10 - TCP:10.99.0.1:8080"))
+          assert "peer=10.99.0.2" in out, out
+          # A service with a dynamic user is the system's and goes out.
+          out = machine.succeed(
+              "systemd-run --wait --pipe -p DynamicUser=yes "
+              f"$(command -v socat) -T10 - TCP:{server_ip}:8090"
+          )
+          assert "peer=" in out, out
+
+      with subtest("a firewall that flushes everything does not take the policy with it"):
+          machine.succeed("systemctl reload nftables")
+          machine.wait_until_succeeds("nft list table inet vpnzones_egress", timeout=30)
+          machine.fail(direct("alice"))
+          machine.succeed("systemctl restart nftables")
+          machine.wait_until_succeeds("nft list table inet vpnzones_egress", timeout=30)
+          machine.fail(direct("alice"))
+
+      with subtest("the emergency key opens the host and closes it again"):
+          # alice is in wheel: polkit lets her turn the key without a password.
+          machine.succeed(as_user("alice", "systemctl start vpn-zones-egress-open"))
+          out = machine.succeed(as_user("alice", f"socat -T10 - TCP:{server_ip}:8090"))
+          assert "peer=" in out, out
+          machine.succeed(as_user("alice", "systemctl stop vpn-zones-egress-open"))
+          machine.fail(direct("alice"))
+          # carol is not: no key for her.
+          machine.fail(as_user("carol", "systemctl start vpn-zones-egress-open"))
+          machine.fail(direct("carol"))
 
       with subtest("the tunnel stops: lo alone, the consumers keep running and reach nothing"):
           machine.succeed("systemctl stop vpn-zone-system-sz")
