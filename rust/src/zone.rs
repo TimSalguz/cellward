@@ -163,7 +163,7 @@ const ETC_NSSWITCH: &str = "/etc/nsswitch.conf";
 /// `/run` on any modern system, so hiding either name hides the one directory
 /// and there is nothing left to do in that group. The groups themselves are
 /// independent and each is hidden on its own.
-const RESOLVER_DIRS: [&[&str]; 3] = [
+pub(crate) const RESOLVER_DIRS: [&[&str]; 3] = [
     // nscd, or the nsncd NixOS runs in its place.
     &["/run/nscd", "/var/run/nscd"],
     // systemd-resolved: `io.systemd.Resolve`, the varlink socket nss-resolve
@@ -2788,7 +2788,7 @@ pub fn zone_nsswitch(host: &str) -> String {
 }
 
 /// Cover the first of `dirs` that exists with an empty tmpfs, and say which.
-fn hide_first<'a>(dirs: &[&'a str]) -> Result<Option<&'a str>, String> {
+pub(crate) fn hide_first<'a>(dirs: &[&'a str]) -> Result<Option<&'a str>, String> {
     for &dir in dirs {
         let path = Path::new(dir);
         if !path.is_dir() {

@@ -115,6 +115,15 @@ pub fn resolv_path(name: &str) -> PathBuf {
         .join("resolv.conf")
 }
 
+/// `/etc/netns/vz-<name>/nsswitch.conf`: the host's, with `hosts: files dns`
+/// (`zone::zone_nsswitch`) — the class-wide insurance a user zone has too: no
+/// NSS module but the plain resolver is ever asked for a name.
+pub fn nsswitch_path(name: &str) -> PathBuf {
+    Path::new("/etc/netns")
+        .join(netns(name))
+        .join("nsswitch.conf")
+}
+
 pub fn run_dir(name: &str) -> PathBuf {
     Path::new(RUN_DIR).join(name)
 }
@@ -341,6 +350,12 @@ fn ns_up(args: &Args) -> Result<(), String> {
         }
         fs::write(&resolv, "").map_err(|e| format!("cannot create {}: {e}", resolv.display()))?;
     }
+    // Written every time: the host's nsswitch.conf changes with the system.
+    if let Ok(host) = fs::read_to_string(crate::sys::link_target(Path::new("/etc/nsswitch.conf"))) {
+        let path = nsswitch_path(name);
+        fs::write(&path, zone::zone_nsswitch(&host))
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
     println!("system zone {name}: namespace {ns} is ready");
     Ok(())
 }
@@ -356,6 +371,7 @@ fn ns_down(args: &Args) {
     }
     let resolv = resolv_path(name);
     let _ = fs::remove_file(&resolv);
+    let _ = fs::remove_file(nsswitch_path(name));
     if let Some(dir) = resolv.parent() {
         let _ = fs::remove_dir(dir);
     }
@@ -748,6 +764,10 @@ mod tests {
             PathBuf::from("/etc/netns/vz-nl/resolv.conf")
         );
         assert_eq!(run_dir("nl"), PathBuf::from("/run/vpn-zones/system/nl"));
+        assert_eq!(
+            nsswitch_path("nl"),
+            PathBuf::from("/etc/netns/vz-nl/nsswitch.conf")
+        );
         assert_eq!(
             in_zone_args("vz-nl", &["link", "set", "lo", "up"]),
             vec!["-n", "vz-nl", "link", "set", "lo", "up"]

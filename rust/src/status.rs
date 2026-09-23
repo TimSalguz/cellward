@@ -208,7 +208,7 @@ pub fn networks(tools: &Tools) -> String {
     array(items)
 }
 
-/// One system zone (`docs/SYSTEM.md` §7): the same counters as a network,
+/// One system zone (`docs/SYSTEM.md` §8): the same counters as a network,
 /// `null` where the reader may not look — the run directory is the group
 /// `vpn-zones`'s.
 pub fn system_network(name: &str, state: &crate::system::RunState) -> String {

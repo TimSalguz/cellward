@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::ExitCode;
 
-use vpn_zone::{desktop, fs_sandbox, openconnect, profile, system, wl_sandbox, zone};
+use vpn_zone::{desktop, fs_sandbox, openconnect, profile, sysrun, system, wl_sandbox, zone};
 
 const USAGE: &str = "\
 vpn-zone-core — helper commands of vpn-zones
@@ -38,6 +38,15 @@ Usage:
         ExecStop lines of vpn-zone-system-ns-<name> and vpn-zone-system-<name>.
         The config is /var/lib/vpn-zones/system/<name>/config.conf unless
         --config names another file.
+
+  vpn-zone-core system-run <zone> [--] <command> [args…]
+        A console program in a system zone, as the calling user (docs/SYSTEM.md
+        §7); what `vpn-zone-sys` runs. The program gets the zone's network and
+        resolvers and no way to change them; its exit code is this command's.
+
+  vpn-zone-core system-run-service
+        The other end of `system-run`, as root: one connection on descriptor 0
+        (vpn-zone-sysrun@.service, Accept=yes). Not meant to be run by hand.
 
   vpn-zone-core oc-script
         The vpnc-script of an [OpenConnect] zone, and nothing else's: this is
@@ -132,6 +141,8 @@ fn main() -> ExitCode {
                 ExitCode::from(EXIT_USAGE)
             }
         },
+        Some("system-run") => ExitCode::from(sysrun::client(&args[1..])),
+        Some("system-run-service") => ExitCode::from(sysrun::broker()),
         Some("oc-script") => {
             let env = openconnect::environment();
             match openconnect::Args::from_env(&args[1..], &env) {
