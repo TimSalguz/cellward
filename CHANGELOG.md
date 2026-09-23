@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (system tier)
+- Plain system zones: `services.vpn-zones.system.zones.<name>.kind = "plain"` —
+  a namespace of its own that goes out through the host's network by pasta
+  (as the system user `vpn-zones-plain`), not encrypted, with the host's
+  loopback and port forwarding shut. The way a program goes out directly once
+  the host egress policy is enforced, and the TTY console's fallback when the
+  VPN cannot come up. `system_networks[].kind` is `plain` for them.
+
 ### Added (system tier, ROADMAP M10 stage 5)
 - The host without a network of its own: `services.vpn-zones.system.egress`
   (`audit` by default, `enforce`). An nftables table of its own lets out root,

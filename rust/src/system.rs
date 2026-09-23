@@ -43,6 +43,7 @@ use std::os::linux::net::SocketAddrExt;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -236,6 +237,8 @@ pub struct Tools {
     pub awg: PathBuf,
     pub wg: PathBuf,
     pub nft: PathBuf,
+    /// The way out of a plain zone.
+    pub pasta: PathBuf,
 }
 
 impl Default for Tools {
@@ -246,6 +249,7 @@ impl Default for Tools {
             awg: PathBuf::from("awg"),
             wg: PathBuf::from("wg"),
             nft: PathBuf::from("nft"),
+            pasta: PathBuf::from("pasta"),
         }
     }
 }
@@ -283,10 +287,14 @@ pub struct Args {
     /// The config, when it is not `STATE_DIR/<name>/config.conf` — a secret
     /// decrypted at boot, typically.
     pub config: Option<PathBuf>,
+    /// A plain zone (§1a of `docs/SYSTEM.md`): no tunnel, out through the
+    /// host's network by pasta, which runs as this system user.
+    pub plain: Option<String>,
 }
 
 impl Args {
-    /// Parse `<verb> [--ip P] [--awg P] [--wg P] [--nft P] [--config P] <name>`.
+    /// Parse `<verb> [--ip P] [--awg P] [--wg P] [--nft P] [--pasta P]
+    /// [--config P] [--plain USER] <name>`.
     pub fn parse(argv: &[OsString]) -> Result<Self, String> {
         let mut rest = argv.iter();
         let word = rest
@@ -298,6 +306,7 @@ impl Args {
 
         let mut tools = Tools::default();
         let mut config = None;
+        let mut plain = None;
         let mut name: Option<String> = None;
         while let Some(arg) = rest.next() {
             let arg = arg.to_str().ok_or("the arguments have to be UTF-8")?;
@@ -311,7 +320,9 @@ impl Args {
                     "awg" => tools.awg = value,
                     "wg" => tools.wg = value,
                     "nft" => tools.nft = value,
+                    "pasta" => tools.pasta = value,
                     "config" => config = Some(value),
+                    "plain" => plain = Some(value.to_string_lossy().into_owned()),
                     _ => return Err(format!("unknown flag: --{flag}")),
                 }
                 continue;
@@ -328,6 +339,7 @@ impl Args {
             name,
             tools,
             config,
+            plain,
         })
     }
 }
@@ -416,6 +428,9 @@ fn ns_down(args: &Args) {
 // --- THE TUNNEL --------------------------------------------------------------
 
 fn up(args: &Args) -> Result<(), String> {
+    if let Some(runas) = &args.plain {
+        return up_plain(args, runas);
+    }
     let (tools, name) = (&args.tools, args.name.as_str());
     let ns = netns(name);
 
@@ -493,6 +508,189 @@ fn up(args: &Args) -> Result<(), String> {
     println!("system zone {name} is up in {}", netns_path(name).display());
     notify_ready();
     mirror(tools, name, &wgtool, &run)
+}
+
+/// A plain zone: pasta attached to the zone's namespace, as a system user of
+/// its own. No tunnel and no encryption — the zone's own namespace, its own
+/// resolvers and nothing of the host's: pasta's port forwarding and its
+/// mapping of the gateway to the host's loopback are shut (`PASTA_CLOSED`), as
+/// in every zone. What it is for: a network for the TTY console when the VPN
+/// cannot come up, and for programs that have to go out directly once the
+/// host has no network of its own (§9).
+fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
+    let (tools, name) = (&args.tools, args.name.as_str());
+    if !netns_path(name).exists() {
+        return Err(format!(
+            "{} is missing — vpn-zone-system-ns-{name} has to run first",
+            netns_path(name).display()
+        ));
+    }
+    let run = run_dir(name);
+    fs::create_dir_all(&run).map_err(|e| format!("cannot create {}: {e}", run.display()))?;
+    let _ = fs::remove_file(run.join(READY));
+    let _ = fs::remove_file(run.join(STATUS));
+    let _ = ip_in(tools, name, &["link", "del", TUN], true);
+
+    // As a system user, not as root and not as pasta's default `nobody`: the
+    // host's egress policy lets system users out, and knows this one by name.
+    let (uid, gid) = user_ids(runas).ok_or_else(|| format!("there is no user {runas}"))?;
+    let mut pasta = Command::new(&tools.pasta);
+    pasta
+        .arg("--netns")
+        .arg(netns_path(name))
+        .args(["--config-net", "-q", "-I", TUN, "-f"])
+        .args(zone::PASTA_CLOSED);
+    // SAFETY: between fork and exec the closure only makes syscalls.
+    unsafe {
+        pasta.pre_exec(move || become_with_ns_caps(uid, gid));
+    }
+    let mut pasta = pasta
+        .spawn()
+        .map_err(|e| format!("cannot start {}: {e}", tools.pasta.display()))?;
+    let link = || {
+        let args = in_zone_args(&netns(name), &["-o", "link", "show", TUN]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        zone::tool_output(&tools.ip, &args).unwrap_or_default()
+    };
+    let mut there = false;
+    for _ in 0..50 {
+        if !link().trim().is_empty() {
+            there = true;
+            break;
+        }
+        if let Ok(Some(status)) = pasta.try_wait() {
+            return Err(format!("pasta exited ({status}) — the zone has no way out"));
+        }
+        thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if !there {
+        let _ = pasta.kill();
+        let _ = pasta.wait();
+        return Err("pasta gave the zone no interface".to_owned());
+    }
+    let (text, _) = zone::resolv_conf(&[]);
+    write_resolv_text(name, &text, true)?;
+    write_group_readable(&run.join(READY), b"")
+        .map_err(|e| format!("cannot write {READY}: {e}"))?;
+    println!(
+        "system zone {name} is up in {}: plain, out through the host's network (not encrypted \
+         by this zone)",
+        netns_path(name).display()
+    );
+    notify_ready();
+
+    let status = run.join(STATUS);
+    let tmp = run.join(STATUS_TMP);
+    loop {
+        if let Ok(Some(exit)) = pasta.try_wait() {
+            return Err(format!("pasta exited ({exit}) — the zone has no way out"));
+        }
+        let addr = {
+            let args = in_zone_args(&netns(name), &["-br", "-4", "addr", "show", TUN]);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            zone::tool_output(&tools.ip, &args).unwrap_or_default()
+        };
+        let text = zone::link_mirror("plain", &link(), &addr);
+        if write_group_readable(&tmp, text.as_bytes()).is_ok() {
+            let _ = fs::rename(&tmp, &status);
+        }
+        thread::sleep(zone::STATUS_PERIOD);
+    }
+}
+
+fn user_ids(name: &str) -> Option<(u32, u32)> {
+    let name = std::ffi::CString::new(name).ok()?;
+    // SAFETY: getpwnam returns a pointer into a static buffer, read at once.
+    unsafe {
+        let pw = libc::getpwnam(name.as_ptr());
+        if pw.is_null() {
+            None
+        } else {
+            Some(((*pw).pw_uid, (*pw).pw_gid))
+        }
+    }
+}
+
+/// In pasta's child, before exec: become `uid`/`gid` and keep exactly
+/// CAP_SYS_ADMIN and CAP_NET_ADMIN, as ambient capabilities — what pasta needs
+/// to enter a namespace the host's user namespace owns and configure its
+/// interface there. `--runas` cannot do it: pasta changes its uid first, which
+/// clears every capability, and then fails to enter the namespace ("Couldn't
+/// switch to pasta namespaces", found by the VM test). Started as a non-root
+/// user, pasta keeps its uid and these two.
+fn become_with_ns_caps(uid: u32, gid: u32) -> io::Result<()> {
+    const CAP_NET_ADMIN: u32 = 12;
+    const CAP_SYS_ADMIN: u32 = 21;
+    /// `_LINUX_CAPABILITY_VERSION_3`: two 32-bit words per set.
+    const VERSION_3: u32 = 0x2008_0522;
+    #[repr(C)]
+    struct Header {
+        version: u32,
+        pid: libc::c_int,
+    }
+    #[repr(C)]
+    struct Data {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+    let check = |rc: libc::c_int| {
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    };
+    let bits = (1u32 << CAP_NET_ADMIN) | (1u32 << CAP_SYS_ADMIN);
+    let mut header = Header {
+        version: VERSION_3,
+        pid: 0,
+    };
+    let data = [
+        Data {
+            effective: bits,
+            permitted: bits,
+            inheritable: bits,
+        },
+        Data {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
+    ];
+    // SAFETY: plain syscalls with constants, ids and the two structs above.
+    unsafe {
+        // Keep the permitted set across the change of uid…
+        check(libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0))?;
+        check(libc::setgroups(0, std::ptr::null()))?;
+        check(libc::setresgid(gid, gid, gid))?;
+        check(libc::setresuid(uid, uid, uid))?;
+        // …then narrow it to the two, and make them survive exec.
+        if libc::syscall(libc::SYS_capset, &mut header as *mut Header, data.as_ptr()) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        for cap in [CAP_NET_ADMIN, CAP_SYS_ADMIN] {
+            check(libc::prctl(
+                libc::PR_CAP_AMBIENT,
+                libc::PR_CAP_AMBIENT_RAISE,
+                libc::c_ulong::from(cap),
+                0,
+                0,
+            ))?;
+        }
+    }
+    Ok(())
+}
+
+/// What the module says a declared zone is: `plain`, or a tunnel.
+pub fn declared_kind(name: &str) -> &'static str {
+    let kind = fs::read_to_string(Path::new(crate::sysrun::ZONES_DIR).join(name).join("kind"))
+        .unwrap_or_default();
+    if kind.trim() == "plain" {
+        "plain"
+    } else {
+        "wireguard"
+    }
 }
 
 fn down(args: &Args) {
@@ -613,6 +811,10 @@ fn configure(
 /// tunnel.
 fn write_resolv(name: &str, cfg: &WgConfig) -> Result<(), String> {
     let (text, defaulted) = zone::resolv_conf(&cfg.dns());
+    write_resolv_text(name, &text, defaulted)
+}
+
+fn write_resolv_text(name: &str, text: &str, defaulted: bool) -> Result<(), String> {
     if defaulted {
         println!("system zone {name}: no DNS= in the config — public resolvers through the tunnel");
     }
@@ -828,6 +1030,18 @@ mod tests {
         assert_eq!(args.tools.awg, PathBuf::from("/x/awg"));
         assert_eq!(args.tools.wg, PathBuf::from("wg"));
         assert_eq!(args.config, Some(PathBuf::from("/run/secrets/nl")));
+        assert_eq!(args.plain, None);
+        let plain = Args::parse(&os(&[
+            "up",
+            "--pasta",
+            "/x/pasta",
+            "--plain",
+            "vpn-zones-plain",
+            "pl",
+        ]))
+        .unwrap();
+        assert_eq!(plain.plain.as_deref(), Some("vpn-zones-plain"));
+        assert_eq!(plain.tools.pasta, PathBuf::from("/x/pasta"));
 
         assert_eq!(Args::parse(&os(&["ns-up", "nl"])).unwrap().verb, Verb::NsUp);
         assert_eq!(
@@ -841,7 +1055,7 @@ mod tests {
         assert!(Args::parse(&os(&["up"])).is_err());
         assert!(Args::parse(&os(&["up", "nl", "de"])).is_err());
         assert!(Args::parse(&os(&["up", "--ip"])).is_err());
-        assert!(Args::parse(&os(&["up", "--pasta", "/x", "nl"])).is_err());
+        assert!(Args::parse(&os(&["up", "--openconnect", "/x", "nl"])).is_err());
         assert!(Args::parse(&os(&["up", "Bad_Name"])).is_err());
     }
 

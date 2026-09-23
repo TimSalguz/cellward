@@ -20,6 +20,26 @@ What joins it: system services (`NetworkNamespacePath=`) and NixOS containers
 Stages 1–3 carry WireGuard/AmneziaWG zones only. OpenConnect and host-interface configs are
 refused with a message; they need the uplink to be a namespace of its own and come later.
 
+### 1a. Plain zones
+
+`zones.<name>.kind = "plain"`: the same namespace, no tunnel. pasta attaches to it and
+carries its connections out through the host's own network — not encrypted by the zone, but
+still a namespace of its own: `lo` and pasta's interface (named `awg0`, so the second echelon
+applies unchanged), its own resolv.conf (the public resolvers, as for a config without
+`DNS =`), and nothing of the host's — pasta's port forwarding in both directions and its
+mapping of the gateway to the host's loopback are shut (`PASTA_CLOSED`, the same as user
+zones). pasta runs as the system user `vpn-zones-plain`, not as root and not as its default
+`nobody`: the host's egress policy (§9) lets system users out and knows this one by name. It
+keeps exactly two capabilities, CAP_SYS_ADMIN and CAP_NET_ADMIN, as ambient ones set by the
+holder before exec — what it needs to enter a namespace the host's user namespace owns and
+configure its interface. Not `--runas`: pasta changes its uid first, which clears every
+capability, and then cannot enter the namespace (the VM test's "Couldn't switch to pasta
+namespaces").
+
+What it is for: the TTY console's second step when the VPN cannot come up (ARCHITECTURE §4),
+and the way a program goes out directly once the host has no network of its own —
+`vpn-zone-sys <plain zone> -- <command>`.
+
 ## 2. Names and files
 
 - Zone name: `[a-z0-9][a-z0-9-]{0,11}`, not `unconfined`, `direct` or `offline`. Twelve,
@@ -274,9 +294,13 @@ the network, however it was started.
      `NoNewPrivs: 1` and no capabilities, `lo` and `awg0` only, `ip link add` refused, the
      zone's nsswitch, the command's exit code, a pty with a terminal, the launch in the
      journal; a user of another zone and a user outside the group are refused;
-  8. the egress policy, enforced from boot under a firewall that flushes every table: root
+  8. a plain zone: `lo` and `awg0`, pasta as `vpn-zones-plain`, the server sees the machine,
+     the host's loopback unreachable by the gateway and by `127.0.0.1`, the public resolvers,
+     `connected: yes` in the status, and alice out through it while the policy refuses her
+     directly; stopping it leaves `lo` alone;
+  9. the egress policy, enforced from boot under a firewall that flushes every table: root
      and a `DynamicUser` service reach the LAN, a user outside the zones is refused at once
      and named in the kernel log, the same user through her zone is not; `systemctl reload`
      and `restart nftables` leave the policy in place; the emergency key opens and closes
      the host for a member of `wheel` and is refused to anybody else. Everything before
-     step 8 runs under the enforced policy too.
+     step 9 runs under the enforced policy too.

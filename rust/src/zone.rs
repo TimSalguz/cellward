@@ -316,7 +316,7 @@ pub const SYSTEM_BUS_RULES: [&str; 6] = [
 ///
 /// The tunnel needs none of them: its packets are flows it starts itself, and
 /// pasta tracks those without any forwarding. (`docs/GOTCHAS.md` §2)
-const PASTA_CLOSED: [&str; 9] = [
+pub(crate) const PASTA_CLOSED: [&str; 9] = [
     "-t",
     "none",
     "-u",

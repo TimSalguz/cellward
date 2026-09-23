@@ -39,6 +39,14 @@ let
             autoStart = false;
             users = [ "alice" ];
           };
+          # A plain zone: no tunnel, out through the host's network by pasta —
+          # the TTY console's second step, and how a program goes out directly
+          # once the host has no network of its own.
+          zones.pl = {
+            kind = "plain";
+            autoStart = false;
+            users = [ "alice" ];
+          };
           # Only here to put bob into the group vpn-zones without letting him
           # into sz: the per-zone check has to refuse him on its own.
           zones.other = {
@@ -374,6 +382,46 @@ let
           # carol is not: no key for her.
           machine.fail(as_user("carol", "systemctl start vpn-zones-egress-open"))
           machine.fail(direct("carol"))
+
+      with subtest("a plain zone: its own namespace, out through the host, nothing of the host's"):
+          machine.succeed("systemctl start vpn-zone-system-pl")
+          out = machine.succeed("ip -n vz-pl -o link show")
+          assert len(links(out)) == 2 and ": awg0" in out, out
+          machine.succeed("pgrep -u vpn-zones-plain -x pasta || pgrep -u vpn-zones-plain -f pasta")
+          # Out through the host's network: the server sees the machine itself.
+          out = machine.succeed(f"ip netns exec vz-pl socat -T10 - TCP:{server_ip}:8090")
+          assert "peer=" in out and "peer=10.99." not in out, out
+          # The host's loopback is not the zone's, and the gateway does not
+          # lead there either.
+          machine.succeed(
+              "systemd-run --unit=hostlocal socat TCP-LISTEN:7777,bind=127.0.0.1,fork,reuseaddr "
+              "'SYSTEM:echo local'"
+          )
+          # Compared, not piped into `grep -q`: the driver runs under pipefail,
+          # and socat killed by SIGPIPE would fail the pipeline forever.
+          machine.wait_until_succeeds(
+              'test "$(socat -T2 - TCP:127.0.0.1:7777 </dev/null)" = local', timeout=30
+          )
+          gw = machine.succeed(
+              "ip -n vz-pl -4 route show default | grep -o 'via [0-9.]*' | cut -d' ' -f2"
+          ).strip()
+          assert gw, "the plain zone has no default route"
+          machine.succeed(f"ip netns exec vz-pl sh -c '! timeout 5 socat -T3 - TCP:{gw}:7777'")
+          machine.succeed("ip netns exec vz-pl sh -c '! timeout 5 socat -T3 - TCP:127.0.0.1:7777'")
+          out = machine.succeed("cat /etc/netns/vz-pl/resolv.conf")
+          assert "nameserver 1.1.1.1" in out, out
+          machine.wait_until_succeeds(
+              "grep -q 'connected: yes' /run/vpn-zones/system/pl/status", timeout=30
+          )
+          # Under the enforced policy, this is how alice goes out directly.
+          machine.fail(direct("alice"))
+          out = machine.succeed(
+              as_user("alice", f"vpn-zone-sys pl -- socat -T10 - TCP:{server_ip}:8090")
+          )
+          assert "peer=" in out and "peer=10.99." not in out, out
+          machine.succeed("systemctl stop vpn-zone-system-pl")
+          out = machine.succeed("ip -n vz-pl -o link show")
+          assert len(links(out)) == 1, f"pasta's interface outlived the zone: {out}"
 
       with subtest("the tunnel stops: lo alone, the consumers keep running and reach nothing"):
           machine.succeed("systemctl stop vpn-zone-system-sz")
