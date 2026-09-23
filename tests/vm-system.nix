@@ -79,8 +79,10 @@ let
           pkgs.tcpdump
         ];
 
+        # Sized to run next to other VMs on a 16 GiB desktop: the zone, a
+        # service and one small container fit in 1.5 GiB.
         virtualisation.cores = 2;
-        virtualisation.memorySize = 2048;
+        virtualisation.memorySize = 1536;
       };
 
     nodes.server =
@@ -95,6 +97,8 @@ let
         networking.firewall.allowedUDPPorts = [ 51820 ];
         networking.firewall.allowedTCPPorts = [ 8090 ];
         networking.firewall.trustedInterfaces = [ "wg0" ];
+        # WireGuard, socat and dnsmasq only.
+        virtualisation.memorySize = 768;
       };
 
     testScript = ''
