@@ -747,11 +747,18 @@ in
             StandardInput = "socket";
             StandardOutput = "journal";
             StandardError = "journal";
-            # «Добавить зону» и «поднять зону» — systemctl от root.
-            Environment = "VPN_ZONE_SYSTEMCTL=${config.systemd.package}/bin/systemctl";
+            Environment = [
+              # «Добавить зону» и «поднять зону» — systemctl от root.
+              "VPN_ZONE_SYSTEMCTL=${config.systemd.package}/bin/systemctl"
+              # Выход пользовательской зоны через системную (SYSTEM.md §7b):
+              # pasta в сети системной зоны, от имени пользователя.
+              "VPN_ZONE_PASTA=${pkgs.passt}/bin/pasta"
+            ];
             # Войти в пространство и смонтировать своё (SYS_ADMIN), стать
-            # пользователем (SETUID, SETGID), погасить его программу, когда
-            # клиент ушёл (KILL). Больше ничего.
+            # пользователем (SETUID, SETGID), погасить его программу или pasta,
+            # когда клиент ушёл (KILL). Больше ничего: пространства
+            # пользовательской зоны приходят дескрипторами, /proc чужих
+            # процессов (SYS_PTRACE) не нужен.
             CapabilityBoundingSet = [
               "CAP_SYS_ADMIN"
               "CAP_SETUID"

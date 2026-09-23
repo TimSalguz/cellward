@@ -167,6 +167,12 @@ pub fn refusal(cfg: &WgConfig) -> Option<&'static str> {
              WireGuard/AmneziaWG only for now",
         );
     }
+    if crate::sysuplink::is_system_zone(cfg) {
+        return Some(
+            "a [SystemZone] config is a user zone's way out through a system zone, not a \
+             system zone",
+        );
+    }
     if cfg.interface().is_none() {
         return Some("no [Interface] section — this is not a WireGuard/AmneziaWG config");
     }

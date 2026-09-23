@@ -104,6 +104,15 @@ fn host_interface(dir: &std::path::Path) -> Option<String> {
         .map(|h| h.interface)
 }
 
+/// The system zone a `system-zone` zone goes out through (`docs/SYSTEM.md` §7b).
+fn system_zone_of(dir: &std::path::Path) -> Option<String> {
+    let raw = fs::read(dir.join("config.conf")).ok()?;
+    let ini = WgConfig::parse(&strip_cr(&raw)).ok()?;
+    crate::sysuplink::SysUplinkConfig::from_ini(&ini)
+        .ok()
+        .map(|s| s.zone)
+}
+
 /// The kind of a zone directory, or `None` when it is not a zone.
 fn zone_kind(dir: &std::path::Path) -> Option<&'static str> {
     if dir.join("offline").exists() {
@@ -116,6 +125,8 @@ fn zone_kind(dir: &std::path::Path) -> Option<&'static str> {
         // Not encrypted by the zone: a configuration tool has to be able to
         // say so without reading the file.
         Some(ini) if crate::hostif::is_host_interface(&ini) => "host-interface",
+        // No tunnel of its own: the named system zone's.
+        Some(ini) if crate::sysuplink::is_system_zone(&ini) => "system-zone",
         _ => "wireguard",
     })
 }
@@ -126,7 +137,7 @@ pub fn networks(tools: &Tools) -> String {
         // 2026-09, may still be in a configuration or in Nix.
         "{\"name\":\"unconfined\",\"kind\":\"unconfined\",\"aliases\":[\"direct\"],\"source\":\"default\",\"up\":true,\
          \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null}"
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"system_zone\":null}"
             .to_owned(),
     ];
     let mut offline_listed = false;
@@ -178,6 +189,11 @@ pub fn networks(tools: &Tools) -> String {
         } else {
             "null".to_owned()
         };
+        let system_zone = if kind == "system-zone" {
+            system_zone_of(&dir).map_or("null".to_owned(), |z| string(&z))
+        } else {
+            "null".to_owned()
+        };
         let x11 = {
             let (on, source) = crate::x11::zone_setting(&tools.state, &tools.config, &name);
             sourced(on.to_string(), source)
@@ -192,7 +208,7 @@ pub fn networks(tools: &Tools) -> String {
             "local"
         };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic}}}",
+            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"system_zone\":{system_zone}}}",
             string(&name),
             dir.join(NO_ESCAPE).exists()
         ));
@@ -201,7 +217,7 @@ pub fn networks(tools: &Tools) -> String {
         items.push(
             "{\"name\":\"offline\",\"kind\":\"offline\",\"aliases\":[],\"source\":\"default\",\"up\":false,\
              \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null}"
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"system_zone\":null}"
                 .to_owned(),
         );
     }

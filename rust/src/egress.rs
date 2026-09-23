@@ -426,7 +426,7 @@ fn policy_of(args: &Args) -> Policy {
     }
 }
 
-fn user_id(name: &str) -> Option<u32> {
+pub(crate) fn user_id(name: &str) -> Option<u32> {
     let name = CString::new(name).ok()?;
     // SAFETY: getpwnam returns a pointer into a static buffer, read at once.
     unsafe {

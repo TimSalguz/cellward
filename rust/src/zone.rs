@@ -111,7 +111,7 @@
 use std::borrow::Cow;
 use std::ffi::{CStr, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
@@ -128,6 +128,7 @@ use crate::hostif::{self, HostIfConfig};
 use crate::openconnect::{self, OcConfig};
 use crate::profile::{exit_code_of, home_dir};
 use crate::sys;
+use crate::sysuplink::{self, SysUplinkConfig};
 
 /// Where the zones live, below `$HOME`. The bash CLI computes the same path.
 const STATE_SUBDIR: &str = ".local/state/vpn-zones";
@@ -203,9 +204,9 @@ pub(crate) const DEFAULT_MTU: u32 = 1420;
 ///
 /// The prefix goes separately (`-n`): older pasta refuses `ADDR/PREFIX` in
 /// `-a` ("Invalid address").
-const HOSTIF_GUEST4: &str = "10.255.255.253";
-const HOSTIF_PREFIX4: &str = "30";
-const HOSTIF_GATEWAY4: &str = "10.255.255.254";
+pub(crate) const HOSTIF_GUEST4: &str = "10.255.255.253";
+pub(crate) const HOSTIF_PREFIX4: &str = "30";
+pub(crate) const HOSTIF_GATEWAY4: &str = "10.255.255.254";
 
 /// The zone's filtered session bus, in its state directory.
 const SESSION_BUS_PROXY: &str = "session-bus";
@@ -361,6 +362,12 @@ const TOOL_OC: u8 = b'o';
 /// pasta attached to the app namespace itself, going out through an interface
 /// of the host (`crate::hostif`).
 const TOOL_HOSTIF: u8 = b'h';
+/// pasta, started by the system-zone service in a system zone's network, has
+/// attached to the app namespace (`docs/SYSTEM.md` §7b).
+const TOOL_SYSZONE: u8 = b's';
+/// The system zone's resolvers, as the service said them, one per line: what
+/// the app namespace's resolv.conf is written from.
+const SYS_RESOLVERS: &str = "system-resolvers";
 
 /// How long the uplink waits for the OpenConnect client to authenticate and
 /// hand the tunnel over: two minutes in 0.1 s steps. Long, and deliberately so
@@ -975,6 +982,10 @@ pub enum Backend {
     /// No tunnel and no uplink: pasta attaches to the app namespace and binds
     /// everything it sends to one interface of the host.
     HostIf(HostIfConfig),
+    /// No tunnel of its own and no uplink: pasta, started by the system-zone
+    /// service in a SYSTEM zone's network, attaches to the app namespace —
+    /// the system zone's tunnel is this zone's way out (docs/SYSTEM.md §7b).
+    SysZone(SysUplinkConfig),
 }
 
 /// An OpenConnect zone, ready to be started.
@@ -1006,7 +1017,7 @@ impl Backend {
                 port: None,
             }],
             // No uplink exists to be filtered.
-            Self::HostIf(_) => Vec::new(),
+            Self::HostIf(_) | Self::SysZone(_) => Vec::new(),
         }
     }
 }
@@ -1174,6 +1185,40 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
                 );
             }
         }
+    } else if let Some(Backend::SysZone(sys)) = cfg.as_ref() {
+        // No uplink here either: the system-zone service starts pasta in the
+        // system zone's network and attaches it to the app namespace. What we
+        // run is the watcher that holds that way out; it stands where pasta
+        // stands for the other kinds — its end is the zone's end, and
+        // stopping it lets go of the way out.
+        drop(uplink_up_r);
+        drop(uplink_up_w);
+        if let Err(e) = wait_for_app_namespace(zone_up_r) {
+            kill_and_reap(zone_pid);
+            return Err(e);
+        }
+        match start_system_uplink(&sys.zone, zone_pid) {
+            Ok((child, resolvers)) => {
+                PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
+                pasta = Some(child);
+                let told = fs::write(zone.path(SYS_RESOLVERS), resolvers.join("\n"))
+                    .map_err(|e| format!("cannot write {SYS_RESOLVERS}: {e}"))
+                    .and_then(|()| tell_the_zone(moved_w, TOOL_SYSZONE));
+                if let Err(e) = told {
+                    eprintln!("zone {}: {e}", zone.name());
+                }
+            }
+            Err(e) => {
+                // EOF instead of the byte: the zone refuses to come up rather
+                // than say "up" with no way out.
+                drop(moved_w);
+                eprintln!(
+                    "zone {}: no way out through the system zone {} — {e}",
+                    zone.name(),
+                    sys.zone
+                );
+            }
+        }
     } else if let Some(backend) = cfg.as_ref() {
         // SAFETY: as above.
         let pid = unsafe { libc::fork() };
@@ -1336,6 +1381,15 @@ fn prepare(zone: &Zone) -> Result<Backend, String> {
             host.interface
         );
         return Ok(Backend::HostIf(host));
+    }
+    if sysuplink::is_system_zone(&cfg) {
+        let sys = SysUplinkConfig::from_ini(&cfg).map_err(|e| format!("{CONFIG}: {e}"))?;
+        println!(
+            "zone {}: out through the tunnel of the system zone {}",
+            zone.name(),
+            sys.zone
+        );
+        return Ok(Backend::SysZone(sys));
     }
     if !cfg.dropped_empty.is_empty() {
         // Recent Amnezia writes junk-packet parameters and fills only some of
@@ -1610,6 +1664,9 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
         }
         // `supervise` never starts an uplink for these.
         Backend::HostIf(_) => Err("a host-interface zone has no uplink".to_string()),
+        Backend::SysZone(_) => {
+            Err("a zone through a system zone has no uplink of its own".to_string())
+        }
     }
 }
 
@@ -1987,6 +2044,38 @@ fn wait_for_pasta_link(zone: &Zone) -> Result<(), String> {
     ))
 }
 
+/// Ask the system-zone service for the way out through `system`
+/// (docs/SYSTEM.md §7b). The asking is done by our own binary, `system-uplink`,
+/// which then holds the connection for as long as it runs: its first line
+/// says whether the way out is there, and with it the system zone's resolvers.
+fn start_system_uplink(system: &str, zone_pid: i32) -> Result<(Child, Vec<String>), String> {
+    let mut child = Command::new("/proc/self/exe")
+        .arg("system-uplink")
+        .arg(system)
+        .arg(zone_pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot start the watcher: {e}"))?;
+    let mut line = String::new();
+    if let Some(out) = child.stdout.take() {
+        let _ = BufReader::new(out).read_line(&mut line);
+    }
+    let line = line.trim_end();
+    if let Some(resolvers) = line.strip_prefix("OK") {
+        return Ok((
+            child,
+            resolvers.split_whitespace().map(str::to_owned).collect(),
+        ));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(line
+        .strip_prefix("ERR ")
+        .unwrap_or("the watcher said nothing")
+        .to_owned())
+}
+
 /// Hand the app namespace the one byte that says which backend built the
 /// tunnel it is now looking at.
 fn tell_the_zone(moved_w: OwnedFd, tool: u8) -> Result<(), String> {
@@ -2359,6 +2448,24 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
             let dns: Vec<String> = host.dns.iter().map(ToString::to_string).collect();
             (dns, None, Mirror::HostIf(host.interface.clone()))
         }
+        TOOL_SYSZONE => {
+            let Backend::SysZone(sys) = backend else {
+                return Err(
+                    "pasta was attached to a zone that is not one through a system \
+                            zone"
+                        .into(),
+                );
+            };
+            wait_for_pasta_link(zone)?;
+            // Addresses only: they go into resolv.conf as they are.
+            let dns: Vec<String> = fs::read_to_string(zone.path(SYS_RESOLVERS))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.trim().parse::<IpAddr>().ok())
+                .map(|ip| ip.to_string())
+                .collect();
+            (dns, None, Mirror::SysZone(sys.zone.clone()))
+        }
         _ => return Err("the uplink could not build the tunnel".to_string()),
     };
 
@@ -2434,6 +2541,12 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         Mirror::HostIf(interface) => {
             println!(
                 "zone {}: going out through the host's interface {interface}",
+                zone.name()
+            );
+        }
+        Mirror::SysZone(system) => {
+            println!(
+                "zone {}: going out through the tunnel of the system zone {system}",
                 zone.name()
             );
         }
@@ -2581,6 +2694,11 @@ enum Mirror {
     /// The same question for pasta's interface, which goes out through the
     /// named interface of the host.
     HostIf(String),
+    /// pasta's interface for the link, and the named system zone's own mirror
+    /// for the tunnel behind it — `wg show` output, read by the group
+    /// vpn-zones, so `vpn-zone check` answers from the handshake as for any
+    /// WireGuard zone.
+    SysZone(String),
 }
 
 /// Mirror the tunnel's state into the zone's `status` file.
@@ -2609,6 +2727,29 @@ fn start_status_mirror(zone: &Zone, mirror: Mirror) {
                 &tool_output(&ip, &["-o", "link", "show", TUN_IFACE]).unwrap_or_default(),
                 &tool_output(&ip, &["-br", "-4", "addr", "show", TUN_IFACE]).unwrap_or_default(),
             )),
+            Mirror::SysZone(system) => {
+                let own = link_mirror(
+                    &format!("system zone {system}"),
+                    &tool_output(&ip, &["-o", "link", "show", TUN_IFACE]).unwrap_or_default(),
+                    &tool_output(&ip, &["-br", "-4", "addr", "show", TUN_IFACE])
+                        .unwrap_or_default(),
+                );
+                // Our link up: the rest is the tunnel's, and the tunnel is
+                // the system zone's. Our link down: that says it all.
+                let tunnel = own
+                    .contains("connected: yes")
+                    .then(|| {
+                        fs::read_to_string(
+                            Path::new(crate::system::RUN_DIR)
+                                .join(system)
+                                .join("status"),
+                        )
+                        .ok()
+                    })
+                    .flatten()
+                    .filter(|t| !t.trim().is_empty());
+                Some(tunnel.unwrap_or(own))
+            }
         };
         if let Some(text) = text {
             if fs::write(&tmp, text).is_ok() {

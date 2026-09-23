@@ -60,6 +60,12 @@ Usage:
         table and lifts the restriction — the emergency key; `apply` puts it
         back.
 
+  vpn-zone-core system-uplink <system zone> <pid>
+        A user zone's way out through a system zone (docs/SYSTEM.md §7b),
+        asked for the namespaces of <pid> — what the zone's holder runs. Prints
+        `OK <resolvers>` or `ERR <why>`, then holds the way out until pasta
+        ends or this is stopped. Not meant to be run by hand.
+
   vpn-zone-core dns-forward [--resolv FILE] [--upstream ADDR[:PORT]]…
         The host's names through a zone (docs/SYSTEM.md §9c): forward DNS
         queries on the sockets systemd passes (vpn-zones-dns.socket, in the
@@ -184,6 +190,7 @@ fn main() -> ExitCode {
         Some("console") => ExitCode::from(console::run(&args[1..])),
         Some("system-run") => ExitCode::from(sysrun::client(&args[1..])),
         Some("system-run-service") => ExitCode::from(sysrun::broker()),
+        Some("system-uplink") => ExitCode::from(sysrun::uplink_main(&args[1..])),
         Some("oc-script") => {
             let env = openconnect::environment();
             match openconnect::Args::from_env(&args[1..], &env) {

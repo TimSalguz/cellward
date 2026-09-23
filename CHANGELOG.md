@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- A user zone through a system zone (`docs/SYSTEM.md` §7b): `[SystemZone]
+  Name = <zone>`, or `vpn-zone add <zone> --system <system zone>`. No tunnel
+  of its own: the system-zone service starts pasta in the system zone's
+  network, as the user, attached to the user zone — one VPN, one tunnel, for
+  services and programs, graphical ones included, with everything a user
+  zone has. `vpn-zone add` with a config whose key is a system zone's makes
+  such a zone by itself instead of a second tunnel. `status --json`: kind
+  `system-zone` and a new key `system_zone` on every network; the picker
+  names the system zone. `tests/vm-bridge.nix`.
+
 ### Security
 - `host.dns` with NetworkManager and resolved: NetworkManager's
   `systemd-resolved` key (true by default) still sent every connection's
