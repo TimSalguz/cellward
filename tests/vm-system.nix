@@ -55,6 +55,12 @@ let
           };
           services.probe.zone = "sz";
           containers.box.zone = "sz";
+          # The TTY console: log in on tty1 and there is a network.
+          console = {
+            enable = true;
+            zone = "sz";
+            fallback = "pl";
+          };
           # The host without a network for a user's program outside the
           # zones. Enforced from boot: nothing above runs as a user outside a
           # zone, so everything above has to keep working under it.
@@ -76,6 +82,8 @@ let
             isNormalUser = true;
             # For the emergency key: `wheel` may start and stop it.
             extraGroups = [ "wheel" ];
+            # For logging in on tty1.
+            initialPassword = "alice-console";
           };
           bob.isNormalUser = true;
           carol.isNormalUser = true;
@@ -455,6 +463,58 @@ let
           machine.wait_until_succeeds("nixos-container run box -- true", timeout=120)
           out = in_box("socat -T10 - TCP:10.99.0.1:8080")
           assert "peer=10.99.0.2" in out, out
+      # The console's text on the virtual terminal is read through /dev/vcs,
+      # where Cyrillic does not survive: the checks look at the ASCII in it.
+      def tty_run(cmd):
+          machine.send_chars(cmd + "\n")
+
+      with subtest("the TTY console: log in, and there is a network already"):
+          machine.wait_until_tty_matches("1", "login: ")
+          machine.send_chars("alice\n")
+          machine.wait_until_tty_matches("1", "Password: ")
+          machine.send_chars("alice-console\n")
+          machine.wait_until_tty_matches("1", "tunnel alive")
+          machine.wait_until_tty_matches("1", r"\[Enter\].*zone sz")
+          machine.send_chars("\n")
+          # A login shell in the zone: the console did not come up again in it.
+          machine.wait_until_succeeds("pgrep -u alice -f 'system-run sz'", timeout=30)
+          tty_run("socat -T10 - TCP:10.99.0.1:8080 > /tmp/console-zone 2>&1; echo $VPN_ZONE_CURRENT >> /tmp/console-zone")
+          machine.wait_until_succeeds("grep -q sys:sz /tmp/console-zone", timeout=30)
+          out = machine.succeed("cat /tmp/console-zone")
+          assert "peer=10.99.0.2" in out, out
+          tty_run("exit")
+          # Back in the menu once the zone's shell is gone.
+          machine.wait_until_fails("pgrep -u alice -f 'system-run sz'", timeout=30)
+          # The plain console: the host, which has no network for alice.
+          machine.send_chars("q")
+          tty_run(f"socat -T5 - TCP:{server_ip}:8090 > /tmp/console-host 2>&1; echo host-exit=$? >> /tmp/console-host")
+          machine.wait_until_succeeds("grep -q host-exit= /tmp/console-host", timeout=30)
+          out = machine.succeed("cat /tmp/console-host")
+          assert "peer=" not in out and "host-exit=0" not in out, out
+          tty_run("exit")
+
+      with subtest("the TTY console: no tunnel, and the plain zone is one key away"):
+          # The VPN server stops answering; the zone comes up again without a
+          # handshake.
+          server.succeed("ip link set wg0 down")
+          machine.succeed("systemctl restart vpn-zone-system-sz")
+          machine.wait_until_tty_matches("1", "login: ")
+          machine.send_chars("alice\n")
+          machine.wait_until_tty_matches("1", "Password: ")
+          machine.send_chars("alice-console\n")
+          machine.wait_until_tty_matches("1", "no tunnel", timeout=60)
+          machine.wait_until_tty_matches("1", r"\[p\].*zone pl")
+          machine.send_chars("p")
+          machine.wait_until_succeeds("pgrep -u alice -f 'system-run pl'", timeout=60)
+          tty_run(f"socat -T10 - TCP:{server_ip}:8090 > /tmp/console-plain 2>&1; echo $VPN_ZONE_CURRENT >> /tmp/console-plain")
+          machine.wait_until_succeeds("grep -q sys:pl /tmp/console-plain", timeout=30)
+          out = machine.succeed("cat /tmp/console-plain")
+          assert "peer=" in out and "peer=10.99." not in out, out
+          tty_run("exit")
+          machine.wait_until_fails("pgrep -u alice -f 'system-run pl'", timeout=30)
+          machine.send_chars("q")
+          tty_run("exit")
+          server.succeed("ip link set wg0 up")
     '';
   };
 in

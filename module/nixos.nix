@@ -197,6 +197,45 @@ in
       '';
     };
 
+    console = {
+      enable = lib.mkEnableOption ''
+        the TTY console (docs/SYSTEM.md §7a): logging in on a text console
+        lands in a small menu with a network already — a terminal in `zone`
+        with one key, the plain `fallback` zone when the VPN does not come up,
+        the admin tool, the emergency key, the plain console. For the users of
+        `zone`; everybody else gets the ordinary login'';
+      zone = lib.mkOption {
+        type = lib.types.str;
+        example = "nl";
+        description = "The system zone the console's terminal runs in. Its `users` get the console.";
+      };
+      fallback = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "direct";
+        description = "A plain zone offered when `zone` has no live tunnel.";
+      };
+      admin = lib.mkOption {
+        type = lib.types.nullOr (
+          lib.types.submodule {
+            options = {
+              command = lib.mkOption {
+                type = lib.types.str;
+                description = "Run on the host, as the user.";
+              };
+              label = lib.mkOption {
+                type = lib.types.str;
+                description = "What the menu calls it.";
+              };
+            };
+          }
+        );
+        default = null;
+        example = lib.literalExpression ''{ command = "nix_cm --tui"; label = "Настройки и откат"; }'';
+        description = "An admin tool behind the `n` key.";
+      };
+    };
+
     egress = {
       enable = lib.mkEnableOption ''
         the host egress policy (docs/SYSTEM.md §9): a user's program outside
@@ -470,6 +509,70 @@ in
             exec ${core} system-run "$@"
           '')
         ];
+      })
+
+      # --- ПУЛЬТ TTY (docs/SYSTEM.md §7a) ---
+      # Вход на текстовой консоли: сразу меню с сетью. Решает, показываться ли,
+      # сама программа (только VT, только вне зоны, только пользователям зоны),
+      # а при любой ошибке уступает обычной оболочке — запереть снаружи пульт
+      # не может.
+      (lib.mkIf cfg.console.enable {
+        assertions = [
+          {
+            assertion = cfg.zones ? ${cfg.console.zone} && cfg.zones.${cfg.console.zone}.users != [ ];
+            message = "services.vpn-zones.system.console.zone = \"${cfg.console.zone}\" has to be a declared zone with users.";
+          }
+          {
+            assertion =
+              cfg.console.fallback == null
+              || (cfg.zones ? ${cfg.console.fallback} && cfg.zones.${cfg.console.fallback}.kind == "plain");
+            message = "services.vpn-zones.system.console.fallback has to be a declared plain zone.";
+          }
+        ];
+        environment.etc."vpn-zones/console".text =
+          "zone=${cfg.console.zone}\n"
+          + lib.optionalString (cfg.console.fallback != null) "fallback=${cfg.console.fallback}\n"
+          + lib.optionalString (cfg.console.admin != null) (
+            "admin=${cfg.console.admin.command}\nadmin-label=${cfg.console.admin.label}\n"
+          );
+        environment.systemPackages = [
+          (pkgs.writeShellScriptBin "vpn-zone-console" ''
+            exec ${core} console "$@"
+          '')
+        ];
+        # Один раз на вход (оболочка в зоне — тоже оболочка входа) и только в
+        # интерактивной: display manager запускает сеанс через `bash -l -c …`,
+        # часто прямо на VT, и встать перед композитором пульт не должен.
+        environment.loginShellInit = ''
+          case $- in
+            *i*)
+              if [ -z "''${VPN_ZONE_CONSOLE-}" ]; then
+                export VPN_ZONE_CONSOLE=1
+                ${core} console --login
+              fi
+              ;;
+          esac
+        '';
+      })
+
+      # Пользователи зоны могут её поднять — пульт делает это сам, без root.
+      (lib.mkIf (runUsers != [ ]) {
+        security.polkit.enable = true;
+        security.polkit.extraConfig = lib.concatStrings (
+          lib.mapAttrsToList (
+            name: z:
+            lib.optionalString (z.users != [ ]) ''
+              polkit.addRule(function(action, subject) {
+                if (action.id == "org.freedesktop.systemd1.manage-units" &&
+                    action.lookup("unit") == "${holderUnit name}.service" &&
+                    action.lookup("verb") == "start" &&
+                    ${builtins.toJSON z.users}.indexOf(subject.user) >= 0) {
+                  return polkit.Result.YES;
+                }
+              });
+            ''
+          ) cfg.zones
+        );
       })
 
       # --- ХОСТ БЕЗ СЕТИ (этап 5, docs/SYSTEM.md §9) ---

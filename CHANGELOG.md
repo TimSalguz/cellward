@@ -6,6 +6,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added (system tier)
+- The TTY console: `services.vpn-zones.system.console`. Logging in on a text
+  console lands in a small menu with a network already — a terminal in the
+  console's system zone with one key, the plain fallback zone when the VPN
+  does not come up, an admin tool, the emergency key, the plain console. Shown
+  in interactive login shells on a virtual terminal only, for the zone's users;
+  every failure ends in the ordinary shell. The zones' users may start their
+  zones (polkit). `rust/src/console.rs`, `docs/SYSTEM.md` §7a.
+
+### Added (system tier)
 - Plain system zones: `services.vpn-zones.system.zones.<name>.kind = "plain"` —
   a namespace of its own that goes out through the host's network by pasta
   (as the system user `vpn-zones-plain`), not encrypted, with the host's

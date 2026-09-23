@@ -58,6 +58,8 @@
 //!   held by systemd from boot, for services and NixOS containers —
 //!   `vpn-zone-core system-zone`, one of the two parts of the crate that run
 //!   as root;
+//! * [`console`] — the TTY console: log in on a text console and there is a
+//!   network, through a system zone, with one key for everything else;
 //! * [`egress`] — the host without a network of its own (M10 stage 5): an
 //!   nftables policy that lets a user's program out only through a zone;
 //! * [`sysrun`] — the other: `vpn-zone-sys`, a user's console program in a
@@ -78,6 +80,7 @@ pub mod broker;
 pub mod cli;
 pub mod completion;
 pub mod config;
+pub mod console;
 pub mod container;
 pub mod desktop;
 pub mod dialog;

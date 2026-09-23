@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use vpn_zone::{
-    desktop, egress, fs_sandbox, openconnect, profile, sysrun, system, wl_sandbox, zone,
+    console, desktop, egress, fs_sandbox, openconnect, profile, sysrun, system, wl_sandbox, zone,
 };
 
 const USAGE: &str = "\
@@ -58,6 +58,13 @@ Usage:
         /etc/subgid) and the named users and groups go out. `open` keeps the
         table and lifts the restriction — the emergency key; `apply` puts it
         back.
+
+  vpn-zone-core console [--login]
+        The TTY console (docs/SYSTEM.md §7a): the network of the console's
+        system zone, a terminal in it with one key, the plain zone when the
+        VPN does not come up, the admin tool, the emergency key, the plain
+        console. With --login (what the login shell runs) it shows up only on
+        a virtual terminal, outside any zone, for a user of the zone.
 
   vpn-zone-core oc-script
         The vpnc-script of an [OpenConnect] zone, and nothing else's: this is
@@ -159,6 +166,7 @@ fn main() -> ExitCode {
                 ExitCode::from(EXIT_USAGE)
             }
         },
+        Some("console") => ExitCode::from(console::run(&args[1..])),
         Some("system-run") => ExitCode::from(sysrun::client(&args[1..])),
         Some("system-run-service") => ExitCode::from(sysrun::broker()),
         Some("oc-script") => {

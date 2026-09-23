@@ -190,6 +190,40 @@ A system zone's namespace belongs to the host's user namespace; entering it take
 - The request is one datagram: `VZS1\0`, zone, mode, cwd, argc, argv…, envc, env…, each
   NUL-ended, at most 64 KiB; the answer is `EXIT <code>` or `ERR <why>`.
 
+## 7a. The TTY console
+
+`services.vpn-zones.system.console = { enable = true; zone = "nl"; fallback = "direct"; }` —
+ARCHITECTURE §4: fell into a text console, logged in, and there is a network already, with
+nothing to type and nothing to know.
+
+```
+  vpn-zones — консоль · alice
+    сеть: nl — туннель жив (tunnel alive)
+    [Enter] терминал с интернетом (zone nl)
+    [n]     Настройки и откат                ← console.admin, if set
+    [p]     напрямую, без VPN (zone direct)  ← only when nl has no live tunnel
+    [k]     аварийный ключ …                 ← the egress policy's key (§9)
+    [q]     обычная консоль, без сети
+```
+
+- **When it shows up.** The login shell runs `vpn-zone-core console --login` once per login
+  (`environment.loginShellInit`), in interactive shells only — a display manager starts a
+  session with `bash -l -c …`, often on a VT, and the console must not stand in front of the
+  compositor. The program then decides: a virtual terminal (`/dev/ttyN`, not a pty, not a
+  serial line), outside any zone, a user of the console's zone. Anybody else gets the
+  ordinary login.
+- **The network.** A zone that is down is started — the zone's users may start its holder
+  (a polkit rule the module writes per zone) — and a tunnel is waited for up to 15 s. Alive
+  means a handshake within WireGuard's session limit, or for a plain zone its interface up.
+- **The keys.** Enter: a login shell in the zone through `vpn-zone-sys`, and back to the menu
+  when it ends; `p`: the same in the plain `fallback` zone, offered when the zone has no live
+  tunnel; `n`: the admin tool on the host; `k`: the emergency key; `q`: the ordinary shell of
+  the host. The shell runs as a process of its own, not inside the console: the client's
+  relay would leave a thread blocked on the terminal that would take the next key meant for
+  the menu.
+- **It never locks anybody out.** Every failure ends in the host's ordinary shell, which under
+  the egress policy has no network but has everything to repair with — and the key.
+
 ## 8. State for tools
 
 `vpn-zone status --json` gets a top-level `system_networks` array — additive, schema 1. A
@@ -304,3 +338,7 @@ the network, however it was started.
      and `restart nftables` leave the policy in place; the emergency key opens and closes
      the host for a member of `wheel` and is refused to anybody else. Everything before
      step 9 runs under the enforced policy too.
+  10. the TTY console: alice logs in on tty1, the menu says the tunnel is alive, Enter gives
+     a shell in `sz` that reaches the tunnel, `q` a host shell that does not reach the LAN;
+     with the server's WireGuard down and the zone restarted, the menu says there is no
+     tunnel and `p` gives a shell in the plain zone that reaches the LAN;
