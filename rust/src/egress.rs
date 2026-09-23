@@ -262,7 +262,7 @@ fn user_id(name: &str) -> Option<u32> {
     }
 }
 
-fn group_id(name: &str) -> Option<u32> {
+pub(crate) fn group_id(name: &str) -> Option<u32> {
     let name = CString::new(name).ok()?;
     // SAFETY: getgrnam returns a pointer into a static buffer, read at once.
     unsafe {

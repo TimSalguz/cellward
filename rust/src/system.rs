@@ -428,7 +428,16 @@ fn ns_down(args: &Args) {
 // --- THE TUNNEL --------------------------------------------------------------
 
 fn up(args: &Args) -> Result<(), String> {
-    if let Some(runas) = &args.plain {
+    // The flags win (running a verb by hand); the unit passes none, and the
+    // zone's own settings say what it is.
+    let found = settings(&args.name);
+    let plain = args.plain.clone().or_else(|| {
+        found
+            .as_ref()
+            .filter(|s| s.plain)
+            .map(|_| PLAIN_USER.to_owned())
+    });
+    if let Some(runas) = &plain {
         return up_plain(args, runas);
     }
     let (tools, name) = (&args.tools, args.name.as_str());
@@ -437,7 +446,8 @@ fn up(args: &Args) -> Result<(), String> {
     let config = args
         .config
         .clone()
-        .unwrap_or_else(|| Path::new(STATE_DIR).join(name).join(CONFIG));
+        .or_else(|| found.map(|s| s.config))
+        .unwrap_or_else(|| local_dir(name).join(CONFIG));
     let raw = fs::read(&config).map_err(|e| format!("cannot read {}: {e}", config.display()))?;
     let mut cfg = WgConfig::parse(&raw).map_err(|e| format!("{}: {e}", config.display()))?;
     if let Some(why) = refusal(&cfg) {
@@ -475,7 +485,7 @@ fn up(args: &Args) -> Result<(), String> {
         ));
     }
     let run = run_dir(name);
-    fs::create_dir_all(&run).map_err(|e| format!("cannot create {}: {e}", run.display()))?;
+    make_run_dir(&run)?;
     let _ = fs::remove_file(run.join(READY));
     let _ = fs::remove_file(run.join(STATUS));
     // 0600, root: it carries the private key.
@@ -526,7 +536,7 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
         ));
     }
     let run = run_dir(name);
-    fs::create_dir_all(&run).map_err(|e| format!("cannot create {}: {e}", run.display()))?;
+    make_run_dir(&run)?;
     let _ = fs::remove_file(run.join(READY));
     let _ = fs::remove_file(run.join(STATUS));
     let _ = ip_in(tools, name, &["link", "del", TUN], true);
@@ -682,11 +692,100 @@ fn become_with_ns_caps(uid: u32, gid: u32) -> io::Result<()> {
     Ok(())
 }
 
-/// What the module says a declared zone is: `plain`, or a tunnel.
+/// The zone's run directory, `2750 root:vpn-zones`: the group reads the
+/// status, new files inherit the group. Made here and not only by tmpfiles,
+/// because a zone added on the spot has no tmpfiles line.
+fn make_run_dir(run: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(run).map_err(|e| format!("cannot create {}: {e}", run.display()))?;
+    if let Some(gid) = crate::egress::group_id("vpn-zones") {
+        let path = std::ffi::CString::new(run.as_os_str().as_encoded_bytes())
+            .map_err(|_| "a NUL in the run directory's path".to_owned())?;
+        // SAFETY: a valid path; uid 0 and the group's gid.
+        unsafe { libc::chown(path.as_ptr(), 0, gid) };
+    }
+    fs::set_permissions(run, fs::Permissions::from_mode(0o2750))
+        .map_err(|e| format!("cannot set the mode of {}: {e}", run.display()))
+}
+
+/// The system user pasta of plain zones runs as; the module creates it.
+pub const PLAIN_USER: &str = "vpn-zones-plain";
+
+/// A system zone's settings. Two sources, as with user zones: declared in Nix
+/// (`/etc/vpn-zones/system-zones.d/<name>/`, written by the module) and made
+/// on the spot (`/var/lib/vpn-zones/system/<name>/`, written by the
+/// system-zone service when a user adds a VPN). Nix is stronger: a declared
+/// zone takes nothing from the local directory but its config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    pub declared: bool,
+    pub plain: bool,
+    /// Where the tunnel's config is; unused by a plain zone.
+    pub config: PathBuf,
+    pub users: Vec<String>,
+    pub system_bus: bool,
+}
+
+pub fn declared_dir(name: &str) -> PathBuf {
+    Path::new(crate::sysrun::ZONES_DIR).join(name)
+}
+
+pub fn local_dir(name: &str) -> PathBuf {
+    Path::new(STATE_DIR).join(name)
+}
+
+fn read_trimmed(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+}
+
+/// The settings of a zone, or `None` when there is no such zone.
+pub fn settings(name: &str) -> Option<Settings> {
+    check_name(name).ok()?;
+    let local = local_dir(name);
+    let declared = declared().iter().any(|z| z == name);
+    let dir = if declared {
+        declared_dir(name)
+    } else if local.join("kind").exists() {
+        local.clone()
+    } else {
+        return None;
+    };
+    let config = read_trimmed(&dir.join("config"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| local.join(CONFIG));
+    Some(Settings {
+        declared,
+        plain: read_trimmed(&dir.join("kind")).as_deref() == Some("plain"),
+        config,
+        users: fs::read_to_string(dir.join("users"))
+            .map(|t| crate::sysrun::parse_users(&t))
+            .unwrap_or_default(),
+        system_bus: dir.join("system-bus").exists(),
+    })
+}
+
+/// Every system zone: the declared ones and the ones made on the spot.
+pub fn all_zones() -> Vec<String> {
+    let mut zones = declared();
+    if let Ok(entries) = fs::read_dir(STATE_DIR) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if check_name(&name).is_ok() && entry.path().join("kind").exists() {
+                zones.push(name);
+            }
+        }
+    }
+    zones.sort();
+    zones.dedup();
+    zones
+}
+
+/// What a zone is, in `status --json`'s words.
 pub fn declared_kind(name: &str) -> &'static str {
-    let kind = fs::read_to_string(Path::new(crate::sysrun::ZONES_DIR).join(name).join("kind"))
-        .unwrap_or_default();
-    if kind.trim() == "plain" {
+    if settings(name).is_some_and(|s| s.plain) {
         "plain"
     } else {
         "wireguard"

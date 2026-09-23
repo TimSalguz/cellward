@@ -45,8 +45,10 @@ let
     "--pasta ${pkgs.passt}/bin/pasta"
   ];
 
-  nsUnit = zone: "vpn-zone-system-ns-${zone}";
-  holderUnit = zone: "vpn-zone-system-${zone}";
+  # Шаблоны: зона — экземпляр, так что зону можно добавить и без пересборки
+  # (vpn-zone-sys --add), а объявленные отличаются только настройками в /etc.
+  nsUnit = zone: "vpn-zone-system-ns@${zone}";
+  holderUnit = zone: "vpn-zone-system@${zone}";
   netnsPath = zone: "/run/netns/vz-${zone}";
   resolvPath = zone: "/etc/netns/vz-${zone}/resolv.conf";
 
@@ -147,12 +149,13 @@ let
 
   # Кто вообще ходит через посредника: у сокета группа vpn-zones, а список
   # по зонам посредник проверяет сам.
-  runUsers = lib.unique (lib.concatMap (z: z.users) (lib.attrValues cfg.zones));
+  runUsers = lib.unique (
+    cfg.users ++ lib.concatMap (z: z.users) (lib.attrValues cfg.zones)
+  );
 
   # pasta одной или нескольких простых зон: системный пользователь, а не root и
   # не nobody — политика хоста пропускает системных, и этого знает по имени.
   plainUser = "vpn-zones-plain";
-  anyPlain = lib.any (z: z.kind == "plain") (lib.attrValues cfg.zones);
 
   containerOpts = {
     options.zone = lib.mkOption {
@@ -164,6 +167,17 @@ in
 {
   options.services.vpn-zones.system = {
     enable = lib.mkEnableOption "system zones of vpn-zones: network namespaces with a tunnel as their only way out, held from boot, for services and NixOS containers";
+
+    users = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "alice" ];
+      description = ''
+        Users who may add system zones on the spot (`vpn-zone-sys --add`) and
+        see their state; a zone's own `users` may use it. Everybody listed here
+        or in any zone's `users` is in the group `vpn-zones`.
+      '';
+    };
 
     zones = lib.mkOption {
       type = lib.types.attrsOf (lib.types.submodule zoneOpts);
@@ -349,12 +363,13 @@ in
           );
 
         users.groups.vpn-zones.members = runUsers;
-        users.users.${plainUser} = lib.mkIf anyPlain {
+        # Всегда: простую зону можно добавить и на ходу.
+        users.users.${plainUser} = {
           isSystemUser = true;
           group = plainUser;
           description = "vpn-zones pasta of plain system zones";
         };
-        users.groups.${plainUser} = lib.mkIf anyPlain { };
+        users.groups.${plainUser} = { };
 
         # Список для `vpn-zone status --json` (system_networks), и по зоне —
         # кто может запускать в ней программы (посредник, rust/src/sysrun.rs).
@@ -375,7 +390,10 @@ in
         ) (lib.filterAttrs (_: z: z.systemBus) cfg.zones)
         // lib.mapAttrs' (
           name: z: lib.nameValuePair "vpn-zones/system-zones.d/${name}/kind" { text = z.kind + "\n"; }
-        ) cfg.zones;
+        ) cfg.zones
+        // lib.mapAttrs' (
+          name: z: lib.nameValuePair "vpn-zones/system-zones.d/${name}/config" { text = z.configFile + "\n"; }
+        ) (lib.filterAttrs (_: z: z.configFile != null) cfg.zones);
 
         boot.extraModulePackages = lib.mkIf cfg.amneziawg [ config.boot.kernelPackages.amneziawg ];
         boot.kernelModules = lib.mkIf cfg.amneziawg [ "amneziawg" ];
@@ -386,55 +404,52 @@ in
           "d /run/vpn-zones 0755 root root -"
           "d /run/vpn-zones/system 0755 root root -"
           "d /var/lib/vpn-zones 0755 root root -"
-          "d /var/lib/vpn-zones/system 0700 root root -"
+          # 0755: имена и виды зон видны их пользователям; сами конфиги —
+          # 0600 root.
+          "d /var/lib/vpn-zones/system 0755 root root -"
         ]
         ++ lib.concatLists (
           lib.mapAttrsToList (name: _: [
             "d /run/vpn-zones/system/${name} 2750 root vpn-zones -"
-            "d /var/lib/vpn-zones/system/${name} 0700 root root -"
+            "d /var/lib/vpn-zones/system/${name} 0755 root root -"
           ]) cfg.zones
         );
 
-        systemd.services = lib.mkMerge (
-          lib.mapAttrsToList (name: z: {
-            ${nsUnit name} = {
-              description = "vpn-zones: network namespace of the system zone ${name}";
-              wantedBy = lib.mkIf z.autoStart [ "multi-user.target" ];
-              restartIfChanged = false;
-              serviceConfig = {
-                Type = "oneshot";
-                RemainAfterExit = true;
-                ExecStart = "${core} system-zone ns-up ${tools} ${name}";
-                ExecStop = "${core} system-zone ns-down ${tools} ${name}";
-              };
-            };
-            ${holderUnit name} = {
-              description = "vpn-zones: the ${if z.kind == "plain" then "way out" else "tunnel"} of the system zone ${name}";
-              bindsTo = [ "${nsUnit name}.service" ];
-              after = [
-                "${nsUnit name}.service"
-                "network-online.target"
-              ];
-              wants = [ "network-online.target" ];
-              wantedBy = lib.mkIf z.autoStart [ "multi-user.target" ];
-              serviceConfig = {
-                # READY=1 — после настройки туннеля и resolv.conf зоны: всё,
-                # что идёт следом, стартует уже с сетью, а не с одним lo.
-                Type = "notify";
-                ExecStart =
-                  "${core} system-zone up ${tools}"
-                  + lib.optionalString (z.configFile != null) " --config ${lib.escapeShellArg z.configFile}"
-                  + lib.optionalString (z.kind == "plain") " --plain ${plainUser}"
-                  + " ${name}";
-                # После любой остановки, и после неудачного старта тоже:
-                # туннель удалён, в зоне остаётся один lo.
-                ExecStopPost = "${core} system-zone down ${tools} ${name}";
-                # При загрузке endpoint может ещё не разрешаться.
-                Restart = "on-failure";
-                RestartSec = "10s";
-              };
-            };
-          }) cfg.zones
+        # Держатель сам читает настройки зоны: объявленной — из /etc, добавленной
+        # на ходу — из /var/lib/vpn-zones/system/<имя>/. Юниту нужно одно имя.
+        systemd.services."vpn-zone-system-ns@" = {
+          description = "vpn-zones: network namespace of the system zone %i";
+          restartIfChanged = false;
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            ExecStart = "${core} system-zone ns-up ${tools} %i";
+            ExecStop = "${core} system-zone ns-down ${tools} %i";
+          };
+        };
+        systemd.services."vpn-zone-system@" = {
+          description = "vpn-zones: the way out of the system zone %i";
+          bindsTo = [ "vpn-zone-system-ns@%i.service" ];
+          after = [
+            "vpn-zone-system-ns@%i.service"
+            "network-online.target"
+          ];
+          wants = [ "network-online.target" ];
+          serviceConfig = {
+            # READY=1 — после настройки туннеля и resolv.conf зоны: всё,
+            # что идёт следом, стартует уже с сетью, а не с одним lo.
+            Type = "notify";
+            ExecStart = "${core} system-zone up ${tools} %i";
+            # После любой остановки, и после неудачного старта тоже:
+            # туннель удалён, в зоне остаётся один lo.
+            ExecStopPost = "${core} system-zone down ${tools} %i";
+            # При загрузке endpoint может ещё не разрешаться.
+            Restart = "on-failure";
+            RestartSec = "10s";
+          };
+        };
+        systemd.targets.multi-user.wants = map (name: "${holderUnit name}.service") (
+          lib.attrNames (lib.filterAttrs (_: z: z.autoStart) cfg.zones)
         );
       }
 
@@ -474,7 +489,7 @@ in
       # Войти в пространство зоны без root нельзя, поэтому входит посредник:
       # по юниту на каждый запуск (Accept=yes), кто спрашивает — от ядра,
       # команда — уже от имени пользователя и с NO_NEW_PRIVS.
-      (lib.mkIf (runUsers != [ ]) {
+      {
         systemd.sockets.vpn-zone-sysrun = {
           description = "vpn-zones: programs of users in system zones";
           wantedBy = [ "sockets.target" ];
@@ -493,6 +508,8 @@ in
             StandardInput = "socket";
             StandardOutput = "journal";
             StandardError = "journal";
+            # «Добавить зону» и «поднять зону» — systemctl от root.
+            Environment = "VPN_ZONE_SYSTEMCTL=${config.systemd.package}/bin/systemctl";
             # Войти в пространство и смонтировать своё (SYS_ADMIN), стать
             # пользователем (SETUID, SETGID), погасить его программу, когда
             # клиент ушёл (KILL). Больше ничего.
@@ -509,7 +526,7 @@ in
             exec ${core} system-run "$@"
           '')
         ];
-      })
+      }
 
       # --- ПУЛЬТ TTY (docs/SYSTEM.md §7a) ---
       # Вход на текстовой консоли: сразу меню с сетью. Решает, показываться ли,
@@ -555,26 +572,6 @@ in
         '';
       })
 
-      # Пользователи зоны могут её поднять — пульт делает это сам, без root.
-      (lib.mkIf (runUsers != [ ]) {
-        security.polkit.enable = true;
-        security.polkit.extraConfig = lib.concatStrings (
-          lib.mapAttrsToList (
-            name: z:
-            lib.optionalString (z.users != [ ]) ''
-              polkit.addRule(function(action, subject) {
-                if (action.id == "org.freedesktop.systemd1.manage-units" &&
-                    action.lookup("unit") == "${holderUnit name}.service" &&
-                    action.lookup("verb") == "start" &&
-                    ${builtins.toJSON z.users}.indexOf(subject.user) >= 0) {
-                  return polkit.Result.YES;
-                }
-              });
-            ''
-          ) cfg.zones
-        );
-      })
-
       # --- ХОСТ БЕЗ СЕТИ (этап 5, docs/SYSTEM.md §9) ---
       # Своя таблица nftables и свой юнит: откат поколения снимает политику
       # вместе со всем остальным. Признак — владелец сокета, а не cgroup:
@@ -596,6 +593,9 @@ in
         {
           systemd.services.vpn-zones-egress = {
             description = "vpn-zones: the host egress policy (${e.mode})";
+            # Путь спасения без единого нашего бинарника: `vpnzones.egress=off`
+            # в строке ядра (в меню загрузки — `e`) — и политика не поднимается.
+            unitConfig.ConditionKernelCommandLine = "!vpnzones.egress=off";
             wantedBy = [ "multi-user.target" ];
             before = [ "network-pre.target" ];
             wants = [ "network-pre.target" ];
@@ -619,7 +619,9 @@ in
             description = "vpn-zones: the host egress policy lifted for ${toString e.emergency.minutes} minutes";
             serviceConfig = {
               Type = "simple";
-              ExecStartPre = "${core} egress open --nft ${nft}";
+              # Сам nft, без vpn-zone-core: ключ должен повернуться и тогда,
+              # когда сломано всё наше.
+              ExecStartPre = "${nft} destroy table inet vpnzones_egress";
               ExecStart = "${pkgs.coreutils}/bin/sleep ${toString (e.emergency.minutes * 60)}";
               ExecStopPost = apply;
             };

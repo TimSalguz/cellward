@@ -6,6 +6,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added (system tier)
+- One VPN, added once: `vpn-zone-sys --add <zone> <config.conf>` (or
+  `--plain`) makes a system zone on the spot — no rebuild, no root for the
+  user — and the same private key again answers which zone it already is
+  instead of a second tunnel. `vpn-zone-sys --up <zone>`.
+  `services.vpn-zones.system.users`: who may add zones.
+- Rescue paths: the emergency key deletes the policy's table with `nft` alone;
+  `vpnzones.egress=off` on the kernel command line keeps the policy from
+  loading. `docs/SYSTEM.md` §9a.
+
+### Changed
+- System zones are instances of templates: `vpn-zone-system-ns@<zone>` and
+  `vpn-zone-system@<zone>`; the holder reads a zone's settings itself.
+- The TTY console brings a zone up through the system-zone service, not polkit.
+
+### Added (system tier)
 - The TTY console: `services.vpn-zones.system.console`. Logging in on a text
   console lands in a small menu with a network already — a terminal in the
   console's system zone with one key, the plain fallback zone when the VPN

@@ -170,16 +170,17 @@ fn menu(config: &Config, user: &str) {
     let zone = config.zone.as_str();
     let mut started = false;
     loop {
-        // A zone that is down is started — the zone's users may, by polkit —
-        // and waited for, once per console; a tunnel that was already up but
-        // has not shaken hands is waited for too.
+        // A zone that is down is started — through the system-zone service,
+        // which lets the zone's users — and waited for, once per console; a
+        // tunnel that was already up but has not shaken hands is waited for
+        // too.
         let mut net = net_of(&system::run_state(zone));
         if net == Net::Down && !started {
             started = true;
             println!("Поднимаю зону {zone}…");
-            let _ = Command::new("systemctl")
-                .args(["start", &format!("vpn-zone-system-{zone}.service")])
-                .status();
+            if let Err(e) = crate::sysrun::request_up(zone) {
+                println!("{e}");
+            }
             net = net_of(&system::run_state(zone));
         }
         if net == Net::Waiting {
@@ -230,9 +231,9 @@ fn menu(config: &Config, user: &str) {
             }
             b'p' | b'P' => {
                 if let Some(plain) = fallback {
-                    let _ = Command::new("systemctl")
-                        .args(["start", &format!("vpn-zone-system-{plain}.service")])
-                        .status();
+                    if let Err(e) = crate::sysrun::request_up(plain) {
+                        println!("{e}");
+                    }
                     shell_in(plain);
                 }
             }
