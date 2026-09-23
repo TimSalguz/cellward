@@ -282,9 +282,14 @@ system zone they may not use is a refusal, never a second tunnel behind its back
   stopping leaves the system zone with lo and the user zone with nothing (the VM test checks
   both the tunnel's address and the host's own). pasta's sockets are in the system zone's
   namespace, so the host's egress policy never sees them — and does not have to.
-- **Not yet.** IPv6 through such a zone (pasta is started with `-4`), and taking a system
-  zone's namespace being recreated into account: pasta stays in the old one, which has no
-  tunnel, until the user zone is restarted — closed, not open.
+- **The system zone made anew** — its namespace unit restarted, vpn-zones off and on — would
+  leave pasta in the old namespace, which has no tunnel. The service keeps the zone's two
+  descriptors for as long as the connection lasts and looks every second: the system zone's
+  namespace gone or another one, pasta is killed; a namespace there again with its way out
+  up (`ready`), pasta is started in it. In between the user zone has no way out at all —
+  closed, never open — and it comes back without a restart.
+- **Not yet.** IPv6 through such a zone: pasta is started with `-4`, so the zone has no IPv6
+  route and its programs fall back to IPv4 at once.
 
 ## 7a. The TTY console
 
@@ -621,8 +626,10 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
   only; the tunnel's resolver; the machine's own LAN address unreachable; pasta in the system
   zone's namespace as alice, none as root; `vpn-zone check` from the system zone's
   handshake; `vpn-zone add` with the system zone's key makes a zone through it; the tunnel
-  stopped, nothing reachable, started again, reachable; the zone down, nothing of alice's
-  left in the system zone.
+  stopped, nothing reachable, started again, reachable; the system zone's namespace made
+  anew (told by a sysctl marker) and the user zone reaching the tunnel again with one pasta
+  of alice's in the new namespace; vpn-zones off, nothing reachable, on, reachable; the zone
+  down, nothing of alice's left in the system zone.
 - **VM `tests/vm-host.nix`:** the strict policy. `server` has a LAN address and one outside
   every private range (198.51.100.1) that stands for the internet, with a TCP responder, an
   HTTP file and an NTP server (chrony) there; `machine` runs `strict` with a plain zone `pl`

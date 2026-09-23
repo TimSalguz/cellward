@@ -1131,7 +1131,9 @@ fn serve_uplink(
     .collect();
 
     let mut pasta = spawn_uplink_pasta(&sysnet, &userns, &netns, pid, &user)?;
-    drop((sysnet, userns, netns));
+    // The namespace pasta was started in: the one to follow if it changes.
+    let mut serving = file_ns_id(&sysnet);
+    drop(sysnet);
     thread::sleep(UPLINK_SETTLE);
     if let Ok(Some(status)) = pasta.try_wait() {
         return Err(format!("pasta could not attach ({status})"));
@@ -1142,18 +1144,60 @@ fn serve_uplink(
     );
     send_on(sock, &answer_done(&Done::Ok(resolvers.join(" "))));
 
-    // Until one of the two ends: pasta, or the zone letting go.
+    // Until the zone lets go. The zone's namespaces stay open here (`userns`,
+    // `netns`), so pasta can be started again without asking the zone: the
+    // system zone's namespace made anew — its unit restarted, vpn-zones off
+    // and on — leaves pasta in the old one, which has no tunnel. Between the
+    // old pasta going and the new one coming the zone has no way out at all:
+    // closed, never open.
+    let mut pasta = Some(pasta);
     loop {
-        if let Ok(Some(status)) = pasta.try_wait() {
-            eprintln!(
-                "sysrun: the way out of {}'s zone through {zone} ended ({status})",
-                user.name
-            );
-            let code = status
-                .code()
-                .and_then(|c| u8::try_from(c).ok())
-                .unwrap_or(1);
-            return Ok(answer_exit(code.max(1)));
+        let now = File::open(system::netns_path(zone))
+            .ok()
+            .and_then(|f| file_ns_id(&f).map(|id| (f, id)));
+        match (pasta.as_mut(), now) {
+            // Serving the zone's current namespace: pasta ending here is the
+            // end of the way out, as for any zone.
+            (Some(child), Some((_, id))) if Some(id) == serving => {
+                if let Ok(Some(status)) = child.try_wait() {
+                    eprintln!(
+                        "sysrun: the way out of {}'s zone through {zone} ended ({status})",
+                        user.name
+                    );
+                    let code = status
+                        .code()
+                        .and_then(|c| u8::try_from(c).ok())
+                        .unwrap_or(1);
+                    return Ok(answer_exit(code.max(1)));
+                }
+            }
+            // The system zone's namespace is gone or another one: pasta is
+            // left in a dead end.
+            (Some(child), _) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                pasta = None;
+                serving = None;
+                println!(
+                    "sysrun: the system zone {zone} was made anew — {}'s zone waits for it",
+                    user.name
+                );
+            }
+            // A namespace again, and its way out up: follow it.
+            (None, Some((file, id))) if system::is_ready(zone) => {
+                match spawn_uplink_pasta(&file, &userns, &netns, pid, &user) {
+                    Ok(child) => {
+                        pasta = Some(child);
+                        serving = Some(id);
+                        println!(
+                            "sysrun: {}'s zone goes out through the system zone {zone} again",
+                            user.name
+                        );
+                    }
+                    Err(e) => eprintln!("sysrun: {e} — trying again"),
+                }
+            }
+            (None, _) => {}
         }
         let mut pfd = libc::pollfd {
             fd: sock,
@@ -1162,11 +1206,20 @@ fn serve_uplink(
         };
         // SAFETY: one valid pollfd.
         if unsafe { libc::poll(&mut pfd, 1, 1000) } > 0 && pfd.revents != 0 {
-            let _ = pasta.kill();
-            let _ = pasta.wait();
+            if let Some(mut child) = pasta.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
             return Ok(answer_exit(0));
         }
     }
+}
+
+/// [`ns_id`] of an opened namespace file.
+fn file_ns_id(file: &File) -> Option<(u64, u64)> {
+    // SAFETY: fstat fills the struct it is given.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    (unsafe { libc::fstat(file.as_raw_fd(), &mut st) } == 0).then_some((st.st_dev, st.st_ino))
 }
 
 fn systemctl(args: &[&str]) -> Result<(), String> {
