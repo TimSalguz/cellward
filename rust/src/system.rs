@@ -141,6 +141,12 @@ pub fn nsswitch_path(name: &str) -> PathBuf {
         .join("nsswitch.conf")
 }
 
+/// Whether the zone's way out is up: its holder writes `ready` once the tunnel
+/// (or a plain zone's pasta) is there, and removes it when it goes.
+pub fn is_ready(name: &str) -> bool {
+    run_dir(name).join(READY).exists()
+}
+
 pub fn run_dir(name: &str) -> PathBuf {
     Path::new(RUN_DIR).join(name)
 }

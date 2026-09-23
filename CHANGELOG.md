@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed (system tier)
+- A user zone through a system zone follows the system zone being made anew
+  (its namespace unit restarted, vpn-zones off and on): the service starts
+  its pasta in the new namespace once the way out there is up, with no
+  restart of the user zone; in between the zone has no way out at all.
+
 ### Added
 - A user zone through a system zone (`docs/SYSTEM.md` §7b): `[SystemZone]
   Name = <zone>`, or `vpn-zone add <zone> --system <system zone>`. No tunnel

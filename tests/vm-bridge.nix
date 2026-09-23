@@ -122,6 +122,14 @@ let
               "for p in $(ip netns pids vz-sz); do ps -o user=,comm= -p $p; done; true"
           )
 
+      # pasta processes of `owner` in sz's namespace. `ps` names pasta by the
+      # binary: pasta is passt, `passt.avx2` here.
+      def pastas(owner):
+          return [
+              l for l in in_sz().splitlines()
+              if l.split()[:1] == [owner] and l.split()[-1].startswith("pas")
+          ]
+
       start_all()
       machine.wait_for_unit("multi-user.target")
       server.wait_for_unit("multi-user.target")
@@ -192,12 +200,6 @@ let
           # Not the host: the only way out is sz's tunnel.
           machine.fail(alice(f"vpn-zone run mz -- timeout 5 socat -T3 - TCP:{machine_ip}:8092"))
           # pasta runs in the system zone's namespace, as alice — not as root.
-          # (`ps` names it by the binary: pasta is passt, `passt.avx2` here.)
-          def pastas(owner):
-              return [
-                  l for l in out.splitlines()
-                  if l.split()[:1] == [owner] and l.split()[-1].startswith("pas")
-              ]
           out = in_sz()
           assert pastas("alice") and not pastas("root"), out
           # Its liveness is the system zone's handshake.
@@ -222,6 +224,35 @@ let
               alice("vpn-zone run mz -- socat -T5 - TCP:10.99.0.1:8080 | grep peer=10.99.0.2"),
               timeout=60,
           )
+
+      # Inode numbers of namespaces are reused, so the new namespace is told
+      # by a per-namespace sysctl, as in tests/vm-system.nix.
+      with subtest("the system zone made anew: the user zone follows, without a restart"):
+          machine.succeed("ip netns exec vz-sz sysctl -qw net.ipv4.ip_default_ttl=63")
+          machine.succeed("systemctl restart vpn-zone-system-ns@sz")
+          machine.succeed("systemctl start vpn-zone-system@sz")
+          out = machine.succeed("ip netns exec vz-sz cat /proc/sys/net/ipv4/ip_default_ttl").strip()
+          assert out == "64", f"the namespace was not recreated: ttl {out}"
+          machine.wait_until_succeeds(
+              alice("vpn-zone run mz -- socat -T5 - TCP:10.99.0.1:8080 | grep peer=10.99.0.2"),
+              timeout=60,
+          )
+          # One pasta of alice's, in the new namespace; the old one is gone.
+          out = in_sz()
+          assert len(pastas("alice")) == 1, out
+
+      with subtest("vpn-zones off and on again: the user zone waits, then goes on"):
+          machine.succeed("systemctl start vpn-zones-off.service")
+          machine.fail(alice("vpn-zone run mz -- timeout 5 socat -T3 - TCP:10.99.0.1:8080"))
+          machine.fail(alice(f"vpn-zone run mz -- timeout 5 socat -T3 - TCP:{machine_ip}:8092"))
+          machine.succeed("systemctl start vpn-zones-on.service")
+          machine.succeed("systemctl start vpn-zone-system@sz")
+          machine.wait_until_succeeds(
+              alice("vpn-zone run mz -- socat -T5 - TCP:10.99.0.1:8080 | grep peer=10.99.0.2"),
+              timeout=60,
+          )
+
+      with subtest("down: nothing of alice's left in the system zone"):
           machine.succeed(alice("vpn-zone down mz"))
           machine.wait_until_succeeds(
               "test -z \"$(for p in $(ip netns pids vz-sz); do ps -o user= -p $p; done | grep alice)\"",
