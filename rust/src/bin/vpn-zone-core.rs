@@ -12,7 +12,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use vpn_zone::{
-    console, desktop, egress, fs_sandbox, openconnect, profile, sysrun, system, wl_sandbox, zone,
+    console, desktop, dnsfwd, egress, fs_sandbox, openconnect, profile, sysrun, system, wl_sandbox,
+    zone,
 };
 
 const USAGE: &str = "\
@@ -58,6 +59,13 @@ Usage:
         /etc/subgid) and the named users and groups go out. `open` keeps the
         table and lifts the restriction — the emergency key; `apply` puts it
         back.
+
+  vpn-zone-core dns-forward [--resolv FILE] [--upstream ADDR[:PORT]]…
+        The host's names through a zone (docs/SYSTEM.md §9c): forward DNS
+        queries on the sockets systemd passes (vpn-zones-dns.socket, in the
+        host's network) to the resolvers of --resolv (read again per query)
+        or --upstream, asking from this process's own network — the zone's.
+        Nothing is parsed but the ID. Not meant to be run by hand.
 
   vpn-zone-core console [--login]
         The TTY console (docs/SYSTEM.md §7a): the network of the console's
@@ -163,6 +171,13 @@ fn main() -> ExitCode {
             Ok(parsed) => ExitCode::from(egress::run(&parsed)),
             Err(e) => {
                 eprintln!("vpn-zone-core egress: {e}");
+                ExitCode::from(EXIT_USAGE)
+            }
+        },
+        Some("dns-forward") => match dnsfwd::Args::parse(&args[1..]) {
+            Ok(parsed) => ExitCode::from(dnsfwd::run(parsed)),
+            Err(e) => {
+                eprintln!("vpn-zone-core dns-forward: {e}");
                 ExitCode::from(EXIT_USAGE)
             }
         },

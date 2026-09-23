@@ -324,8 +324,7 @@ the network, however it was started.
   key refused without it). The TTY console of ARCHITECTURE §4 turns it with one key.
 - **What it does not close.** Names: a blocked program still resolves them through the
   host's nscd or resolved, which are the system's and go out — the connection is refused,
-  the question already left. Moving the host's own resolver into a system zone is the
-  answer, and a later step. And root: root can unload anything; the policy is about
+  the question already left. `host.dns` (§9c) sends those questions through a zone. And root: root can unload anything; the policy is about
   programs that do not know, not about root. `strict` (§9b) takes the host's own services
   off the network as well.
 
@@ -418,8 +417,8 @@ services.vpn-zones.system = {
 - **NetworkManager.** Its connectivity check is root's and goes to the internet; refused, it
   would tell every program that asks that there is only limited connectivity, while the
   zones have the internet. Under `strict` the module turns the check off (`mkDefault`).
-- **Left on the host**, and refused once strict: a DNS resolver pointed past the LAN (a
-  zone's endpoint name is resolved by the host — use a resolver on the LAN or an address),
+- **Left on the host**, and refused once strict: a DNS resolver pointed past the LAN, unless
+  `host.dns` (§9c) takes it through a zone (a zone's endpoint name is resolved by the host),
   `nixos-upgrade` (its evaluation fetches as root: attach it with `services.<unit>` and
   `systemBus = true`), anything else of the system that phones out. The kernel log names
   each of them (`vpn-zones-egress: … UID=`), and `audit` shows them before `strict` refuses.
@@ -428,6 +427,45 @@ services.vpn-zones.system = {
   on and `host.time` unset it is a warning (the clock drifts, the machine still works); both
   say the line to add.
 - **The switch** (§9a) returns the host's services to the host's network with the rest.
+
+## 9c. The host's names through a zone
+
+`services.vpn-zones.system.host.dns = "<zone>"`: every name the host itself asks — resolved,
+nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
+
+- **Why not resolved in the zone.** A namespace has no way into another, and that is the
+  point of a zone. resolved moved into one would listen on 127.0.0.53 in the zone, out of
+  the host's reach; the links NetworkManager tells it about would be the host's, which it
+  would not see. What can be in two namespaces at once is a process.
+- **The forwarder.** `vpn-zones-dns.socket` — UDP and TCP on 127.0.0.60:53, opened by systemd
+  in the host's network — hands its sockets to `vpn-zones-dns.service`, which the generator
+  (§5) attaches to the zone. The queries arrive from the host, and every socket the service
+  makes to ask them further is made in the zone (`vpn-zone-core dns-forward`,
+  `rust/src/dnsfwd.rs`). It parses nothing but the ID, gives each query a socket of its own
+  connected to the resolver (a fresh port from the kernel, nothing accepted from elsewhere),
+  and asks the zone's resolv.conf — bound over `/etc/resolv.conf`, read again per query
+  because the zone rewrites it in place when its tunnel comes up. A zone that is not up
+  answers nothing: the query is dropped, never sent elsewhere. `DynamicUser`, no
+  capabilities, `ProtectSystem=strict`.
+- **The host's resolver points there and nowhere else.** With resolved: `DNS=127.0.0.60`,
+  `FallbackDNS=` empty, `Domains=~.` — forced (`mkForce`), because a merged list would send
+  part of the questions around the zone. Without it: `networking.nameservers`. The
+  resolvers DHCP hands out are ignored — NetworkManager's `dns = "none"`, dhcpcd's `nohook
+  resolv.conf` — or the router would be asked directly. Local names the router knows
+  (`printer.lan`) are then answered only if the zone's resolvers know them: a plain zone
+  whose `dns` is the router does.
+- **Whose resolvers.** The zone's: the config's `DNS =`, the public ones for a plain zone,
+  or `zones.<z>.dns` — its own list, instead of either (addresses only, checked when the
+  system is built and again when the zone comes up; a line that is not an address would be
+  an option in resolv.conf).
+- **A VPN zone for the host's names** needs its endpoint as an address: the holder resolves
+  an endpoint name through the host, which would ask through the zone that is not up yet.
+  The module warns; a plain zone for `host.dns` has no such loop.
+- **Off.** Without the attaching drop-in the unit's own `ExecStart` runs:
+  `--upstream` the zone's `dns` (or the public resolvers) from the host's network. Names
+  keep working with vpn-zones off; the resolver settings stay as they are.
+- **A program outside the zones** still gets its names — through the zone now, not the
+  host's network — and under `enforce`/`strict` still no connection.
 
 ## 10. Leak channels of the system tier
 
@@ -513,4 +551,10 @@ services.vpn-zones.system = {
      break it by dropping a job — on a new configuration this is where it shows); a reboot
      brings the policy, the zone and both services in it back by themselves;
   7. off survives a reboot: no table, no zone, timesyncd and the daemon on the host's
-     network, root out; on after it puts everything back.
+     network, root out; on after it puts everything back;
+  8. the host's names (§9c): `server` answers the same names differently from its
+     "internet" resolver and from its LAN one (the "router"); the host — through nscd and
+     resolved, and directly at 127.0.0.60 over UDP and TCP — gets the "internet" answer, the
+     forwarder runs in `pl`'s namespace, `resolvectl dns` shows the forwarder alone; off, and
+     after a reboot off, names still resolve with the forwarder on the host's network; on,
+     it is back in the zone.

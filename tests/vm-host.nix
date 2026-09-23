@@ -36,10 +36,13 @@ let
           zones.pl = {
             kind = "plain";
             users = [ "alice" ];
+            # The "internet" resolver: public resolvers are out of reach here.
+            dns = [ "198.51.100.1" ];
           };
           host = {
             nix = "pl";
             time = "pl";
+            dns = "pl";
           };
           egress = {
             enable = true;
@@ -48,6 +51,10 @@ let
         };
 
         users.users.alice.isNormalUser = true;
+
+        # The host's resolver, which host.dns points at the zone: resolved in
+        # front and nscd, as NixOS runs them.
+        services.resolved.enable = true;
 
         # The way to the "internet", there from boot as on a real machine:
         # what starts early has to cope with the zone's way out coming later,
@@ -71,6 +78,7 @@ let
         environment.systemPackages = [
           pkgs.socat
           pkgs.nftables
+          pkgs.dnsutils
         ];
 
         virtualisation.cores = 2;
@@ -83,12 +91,17 @@ let
         environment.systemPackages = [
           pkgs.socat
           pkgs.python3
+          pkgs.dnsmasq
         ];
         networking.firewall.allowedTCPPorts = [
           8090
           8091
+          53
         ];
-        networking.firewall.allowedUDPPorts = [ 123 ];
+        networking.firewall.allowedUDPPorts = [
+          123
+          53
+        ];
         networking.interfaces.eth1.ipv4.addresses = [
           {
             address = "198.51.100.1";
@@ -109,6 +122,7 @@ let
 
     testScript = ''
       import shlex
+      import time
 
       def as_user(user, cmd):
           return f"su -l {user} -c {shlex.quote(cmd)}"
@@ -120,6 +134,14 @@ let
 
       def zone_netns():
           return "net:[" + machine.succeed("stat -L -c %i /run/netns/vz-pl").strip() + "]"
+
+      # Every check asks a name of its own: resolved and nscd cache answers.
+      def host_resolves(name):
+          machine.wait_until_succeeds(
+              f"getent ahostsv4 {name} | grep -q 10.77.0.1", timeout=60
+          )
+          out = machine.succeed(f"getent ahostsv4 {name}")
+          assert "10.66." not in out, out
 
       # A new configuration's first boot is where the order of early units
       # shows: systemd breaks a cycle by dropping a job and says so, once.
@@ -140,6 +162,8 @@ let
           assert netns_of("systemd-timesyncd") == zone_netns(), netns_of("systemd-timesyncd")
           machine.succeed(as_user("alice", "nix-store -q --hash /run/current-system"))
           assert netns_of("nix-daemon") == zone_netns(), netns_of("nix-daemon")
+          host_resolves("boot" + str(time.time_ns()) + ".internal")
+          assert netns_of("vpn-zones-dns") == zone_netns(), netns_of("vpn-zones-dns")
           # Started before the zone's way out, and synced once it came up:
           # the way out restarts it.
           machine.wait_until_succeeds(
@@ -166,6 +190,18 @@ let
               "--bind 198.51.100.1 --directory /srv"
           )
           server.wait_for_open_port(8091, "198.51.100.1")
+          # Two resolvers that answer the same names differently: the
+          # "internet" one, which the zone asks, and the "router" on the LAN,
+          # which the host must not.
+          server.succeed(
+              "systemd-run --unit=dns-internet dnsmasq -k --port=53 --bind-interfaces "
+              "--listen-address=198.51.100.1 --no-resolv --address=/internal/10.77.0.1"
+          )
+          server.succeed(
+              f"systemd-run --unit=dns-router dnsmasq -k --port=53 --bind-interfaces "
+              f"--listen-address={server_ip} --no-resolv --address=/internal/10.66.0.1"
+          )
+          server.wait_for_open_port(53, "198.51.100.1")
           server.wait_for_unit("chronyd.service")
 
       with subtest("the first boot: the early units in order, no cycle"):
@@ -217,10 +253,29 @@ let
               timeout=60,
           )
 
+      with subtest("the host's names through its zone"):
+          machine.succeed("grep -q 'nameserver 198.51.100.1' /etc/netns/vz-pl/resolv.conf")
+          host_resolves("leaktest.internal")
+          assert netns_of("vpn-zones-dns") == zone_netns(), netns_of("vpn-zones-dns")
+          out = machine.succeed("dig +short @127.0.0.60 udp.internal").strip()
+          assert out == "10.77.0.1", out
+          out = machine.succeed("dig +tcp +short @127.0.0.60 tcp.internal").strip()
+          assert out == "10.77.0.1", out
+          # resolved asks the forwarder and nothing else.
+          out = machine.succeed("resolvectl dns")
+          assert "127.0.0.60" in out and server_ip not in out, out
+          # A user outside the zones still gets an answer — through the zone,
+          # not the host's network — and still no connection.
+          machine.succeed(as_user("alice", "getent ahostsv4 user.internal"))
+
       with subtest("off: the host's own services back on the host's network"):
           host_ns = machine.succeed("readlink /proc/1/ns/net").strip()
           machine.succeed("systemctl start vpn-zones-off.service")
           assert netns_of("systemd-timesyncd") == host_ns
+          # Off: the forwarder asks the zone's resolvers from the host's
+          # network — names still work with vpn-zones off.
+          host_resolves("off.internal")
+          assert netns_of("vpn-zones-dns") == host_ns
           machine.succeed("systemctl start vpn-zones-on.service")
           machine.wait_for_unit("vpn-zone-system@pl.service")
           assert netns_of("systemd-timesyncd") == zone_netns()
@@ -249,6 +304,8 @@ let
           assert netns_of("nix-daemon") == host_ns
           out = machine.succeed("socat -T10 - TCP:198.51.100.1:8090")
           assert "peer=" in out, out
+          host_resolves("offboot.internal")
+          assert netns_of("vpn-zones-dns") == host_ns
           machine.succeed("systemctl start vpn-zones-on.service")
           host_services_in_zone()
           machine.fail("timeout 10 socat -T5 - TCP:198.51.100.1:8090")

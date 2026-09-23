@@ -84,6 +84,7 @@ pub mod console;
 pub mod container;
 pub mod desktop;
 pub mod dialog;
+pub mod dnsfwd;
 pub mod doctor;
 pub mod egress;
 pub mod fs_sandbox;
