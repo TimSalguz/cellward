@@ -42,6 +42,7 @@ let
     "--awg ${pkgs.amneziawg-tools}/bin/awg"
     "--wg ${pkgs.wireguard-tools}/bin/wg"
     "--nft ${pkgs.nftables}/bin/nft"
+    "--pasta ${pkgs.passt}/bin/pasta"
   ];
 
   nsUnit = zone: "vpn-zone-system-ns-${zone}";
@@ -71,6 +72,21 @@ let
 
   zoneOpts = {
     options = {
+      kind = lib.mkOption {
+        type = lib.types.enum [
+          "tunnel"
+          "plain"
+        ];
+        default = "tunnel";
+        description = ''
+          `tunnel`: WireGuard/AmneziaWG, the config from `configFile` or the
+          state directory. `plain`: no tunnel — out through the host's own
+          network by pasta, not encrypted by the zone, but a namespace of its
+          own with its own resolvers and nothing of the host's. For the TTY
+          console when the VPN cannot come up, and for programs that have to
+          go out directly once the host has no network of its own (`egress`).
+        '';
+      };
       configFile = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -132,6 +148,11 @@ let
   # Кто вообще ходит через посредника: у сокета группа vpn-zones, а список
   # по зонам посредник проверяет сам.
   runUsers = lib.unique (lib.concatMap (z: z.users) (lib.attrValues cfg.zones));
+
+  # pasta одной или нескольких простых зон: системный пользователь, а не root и
+  # не nobody — политика хоста пропускает системных, и этого знает по имени.
+  plainUser = "vpn-zones-plain";
+  anyPlain = lib.any (z: z.kind == "plain") (lib.attrValues cfg.zones);
 
   containerOpts = {
     options.zone = lib.mkOption {
@@ -238,6 +259,10 @@ in
             assertion = validName name;
             message = "services.vpn-zones.system.zones.${name}: a system zone is named by 1 to 12 of a-z, 0-9 and '-', not starting with '-', and not unconfined, direct or offline.";
           }) cfg.zones
+          ++ lib.mapAttrsToList (name: z: {
+            assertion = z.kind != "plain" || z.configFile == null;
+            message = "services.vpn-zones.system.zones.${name}: a plain zone has no tunnel, so no configFile.";
+          }) cfg.zones
           ++ lib.mapAttrsToList (unit: s: {
             assertion = cfg.zones ? ${s.zone};
             message = "services.vpn-zones.system.services.${unit}.zone = \"${s.zone}\": there is no such zone in services.vpn-zones.system.zones.";
@@ -285,6 +310,12 @@ in
           );
 
         users.groups.vpn-zones.members = runUsers;
+        users.users.${plainUser} = lib.mkIf anyPlain {
+          isSystemUser = true;
+          group = plainUser;
+          description = "vpn-zones pasta of plain system zones";
+        };
+        users.groups.${plainUser} = lib.mkIf anyPlain { };
 
         # Список для `vpn-zone status --json` (system_networks), и по зоне —
         # кто может запускать в ней программы (посредник, rust/src/sysrun.rs).
@@ -302,7 +333,10 @@ in
         // lib.mapAttrs' (
           name: _:
           lib.nameValuePair "vpn-zones/system-zones.d/${name}/system-bus" { text = "yes\n"; }
-        ) (lib.filterAttrs (_: z: z.systemBus) cfg.zones);
+        ) (lib.filterAttrs (_: z: z.systemBus) cfg.zones)
+        // lib.mapAttrs' (
+          name: z: lib.nameValuePair "vpn-zones/system-zones.d/${name}/kind" { text = z.kind + "\n"; }
+        ) cfg.zones;
 
         boot.extraModulePackages = lib.mkIf cfg.amneziawg [ config.boot.kernelPackages.amneziawg ];
         boot.kernelModules = lib.mkIf cfg.amneziawg [ "amneziawg" ];
@@ -336,7 +370,7 @@ in
               };
             };
             ${holderUnit name} = {
-              description = "vpn-zones: the tunnel of the system zone ${name}";
+              description = "vpn-zones: the ${if z.kind == "plain" then "way out" else "tunnel"} of the system zone ${name}";
               bindsTo = [ "${nsUnit name}.service" ];
               after = [
                 "${nsUnit name}.service"
@@ -351,6 +385,7 @@ in
                 ExecStart =
                   "${core} system-zone up ${tools}"
                   + lib.optionalString (z.configFile != null) " --config ${lib.escapeShellArg z.configFile}"
+                  + lib.optionalString (z.kind == "plain") " --plain ${plainUser}"
                   + " ${name}";
                 # После любой остановки, и после неудачного старта тоже:
                 # туннель удалён, в зоне остаётся один lo.
