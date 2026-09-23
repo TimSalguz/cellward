@@ -580,12 +580,27 @@ in
         let
           e = cfg.egress;
           nft = "${pkgs.nftables}/bin/nft";
-          apply = lib.concatStringsSep " " (
-            [ "${core} egress apply --nft ${nft}" ]
-            ++ lib.optional (e.mode == "enforce") "--enforce"
-            ++ map (u: "--user ${lib.escapeShellArg u}") e.allowUsers
-            ++ map (g: "--group ${lib.escapeShellArg g}") e.allowGroups
+          # Запрет — из файла, собранного вместе с системой, и грузит его сам
+          # nft. Наша программа только ДОПИСЫВАЕТ разрешения (выходы
+          # пользовательских зон, названных людей): упадёт она — хост станет
+          # закрытее, а не открытым. `nixbld` известен при сборке — он в файле.
+          nixbldInFile = builtins.elem "nixbld" e.allowGroups;
+          rules = pkgs.runCommand "vpn-zones-egress.nft" { } (
+            "${core} egress print"
+            + lib.optionalString (e.mode == "enforce") " --enforce"
+            + lib.optionalString nixbldInFile " --gid ${toString config.ids.gids.nixbld}"
+            + " > $out"
           );
+          allow = lib.concatStringsSep " " (
+            [ "${core} egress allow --nft ${nft}" ]
+            ++ map (u: "--user ${lib.escapeShellArg u}") e.allowUsers
+            ++ map (g: "--group ${lib.escapeShellArg g}") (lib.remove "nixbld" e.allowGroups)
+          );
+          # «-»: разрешения не добавились — политика стоит строже, а не падает.
+          apply = [
+            "${nft} -f ${rules}"
+            "-${allow}"
+          ];
           # Фаервол NixOS, стирающий ВСЕ таблицы при перезагрузке, стёр бы и
           # нашу — тогда политика перечитывается вслед за ним.
           flushes = config.networking.nftables.enable && config.networking.nftables.flushRuleset;
@@ -608,7 +623,7 @@ in
               RemainAfterExit = true;
               ExecStart = apply;
               ExecReload = apply;
-              ExecStop = "${core} egress remove --nft ${nft}";
+              ExecStop = "${nft} destroy table inet vpnzones_egress";
             };
           };
 

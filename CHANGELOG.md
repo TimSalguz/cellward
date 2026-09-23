@@ -5,6 +5,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Security
+- The host egress policy fails closed when this project's binary fails: its
+  restriction is printed when the system is built and loaded by `nft` alone;
+  `vpn-zone-core egress allow` only adds allowances afterwards, and its failure
+  leaves the host more closed, never open. The emergency key closes the host
+  again from the same file. New verbs `egress print` and `egress allow`.
+
 ### Added (system tier)
 - One VPN, added once: `vpn-zone-sys --add <zone> <config.conf>` (or
   `--plain`) makes a system zone on the spot — no rebuild, no root for the

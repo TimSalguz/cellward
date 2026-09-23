@@ -28,6 +28,13 @@
 //!
 //! `audit` is the default: the same rules, logged and let through, so that a
 //! machine can be watched before it is locked.
+//!
+//! **Our binary cannot open the host.** The restriction is printed once, when
+//! the system is built (`print`), and loaded by `nft` from that file; this
+//! binary only ADDS allowances to it afterwards (`allow`). If it crashes, the
+//! allowances are missing and the host is more closed than meant — user zones
+//! lose their way out, as with a dropped tunnel — never open. The emergency key
+//! closes the host again from the same file.
 
 use std::ffi::{CString, OsString};
 use std::fs;
@@ -110,6 +117,25 @@ pub fn ruleset(policy: &Policy) -> String {
     out
 }
 
+/// Allowances added to a loaded policy: the elements of its two sets. Empty
+/// when there is nothing to add. What this cannot do is lift the restriction —
+/// the policy's own rules come from a file `nft` loads by itself, so our
+/// binary failing leaves the host MORE closed, never open.
+pub fn allow_text(uids: &[u32], gids: &[u32]) -> String {
+    let mut out = String::new();
+    for (set, ids) in [("users", uids), ("groups", gids)] {
+        if ids.is_empty() {
+            continue;
+        }
+        let list: Vec<String> = ids.iter().map(u32::to_string).collect();
+        out.push_str(&format!(
+            "add element inet {TABLE} {set} {{ {} }}\n",
+            list.join(", ")
+        ));
+    }
+    out
+}
+
 /// The first uid of every range in `/etc/subuid` (or gid in `/etc/subgid`):
 /// the owners of user zones' uplinks.
 pub fn subid_starts(text: &str) -> Vec<u32> {
@@ -135,11 +161,19 @@ pub struct Args {
     pub enforce: bool,
     pub users: Vec<String>,
     pub groups: Vec<String>,
+    /// Groups by number, for `print`: known when the system is built.
+    pub gids: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
-    /// Load the policy (again).
+    /// Print the restriction, with only the ids given as flags — what the
+    /// module loads with `nft` alone, from a file built with the system.
+    Print,
+    /// Add the allowances that need the running system — the uplinks of
+    /// user zones, named users and groups — to a loaded policy.
+    Allow,
+    /// Load the policy (again), restriction and allowances at once: by hand.
     Apply,
     /// Keep the table, lift the restriction: the emergency key.
     Open,
@@ -154,8 +188,10 @@ impl Args {
         let verb = match rest.next().and_then(|v| v.to_str()) {
             Some("apply") => Verb::Apply,
             Some("open") => Verb::Open,
+            Some("print") => Verb::Print,
+            Some("allow") => Verb::Allow,
             Some("remove") => Verb::Remove,
-            _ => return Err("need a verb: apply, open or remove".to_owned()),
+            _ => return Err("need a verb: print, allow, apply, open or remove".to_owned()),
         };
         let mut args = Self {
             verb,
@@ -163,6 +199,7 @@ impl Args {
             enforce: false,
             users: Vec::new(),
             groups: Vec::new(),
+            gids: Vec::new(),
         };
         while let Some(arg) = rest.next() {
             let arg = arg.to_str().ok_or("the arguments have to be UTF-8")?;
@@ -179,6 +216,11 @@ impl Args {
                 "--nft" => args.nft = PathBuf::from(value),
                 "--user" => args.users.push(value),
                 "--group" => args.groups.push(value),
+                "--gid" => args.gids.push(
+                    value
+                        .parse()
+                        .map_err(|_| format!("--gid {value}: not a number"))?,
+                ),
                 _ => return Err(format!("unknown flag: {arg}")),
             }
         }
@@ -188,16 +230,40 @@ impl Args {
 
 /// Run one verb. Returns the exit code for the process.
 pub fn run(args: &Args) -> u8 {
+    if args.verb == Verb::Print {
+        print!(
+            "{}",
+            ruleset(&Policy {
+                enforce: args.enforce,
+                open: false,
+                uids: Vec::new(),
+                gids: args.gids.clone(),
+            })
+        );
+        return 0;
+    }
     let text = match args.verb {
         Verb::Remove => format!("destroy table inet {TABLE}\n"),
-        Verb::Apply | Verb::Open => ruleset(&policy_of(args)),
+        Verb::Allow => {
+            let policy = policy_of(args);
+            allow_text(&policy.uids, &policy.gids)
+        }
+        Verb::Apply | Verb::Open | Verb::Print => ruleset(&policy_of(args)),
     };
+    if text.is_empty() {
+        println!("host egress policy: nothing to allow besides root and system users");
+        return 0;
+    }
     match feed(&args.nft, &text) {
         Ok(()) => {
             println!(
                 "{}",
                 match (args.verb, args.enforce) {
                     (Verb::Remove, _) => "host egress policy removed".to_owned(),
+                    (Verb::Allow, _) => "host egress policy: user zones' uplinks and the \
+                                         named owners allowed"
+                        .to_owned(),
+                    (Verb::Print, _) => String::new(),
                     (Verb::Open, _) => "host egress policy OPEN: programs of users outside \
                                         zones reach the network until it is applied again"
                         .to_owned(),
@@ -354,6 +420,18 @@ mod tests {
     }
 
     #[test]
+    fn allowances_only_add_elements() {
+        assert_eq!(
+            allow_text(&[100_000, 1000], &[30_000]),
+            "add element inet vpnzones_egress users { 100000, 1000 }\n\
+             add element inet vpnzones_egress groups { 30000 }\n"
+        );
+        assert_eq!(allow_text(&[], &[]), "");
+        assert!(!allow_text(&[1], &[2]).contains("delete"));
+        assert!(!allow_text(&[1], &[2]).contains("destroy"));
+    }
+
+    #[test]
     fn subordinate_ranges_give_their_first_ids() {
         assert_eq!(
             subid_starts(
@@ -384,6 +462,10 @@ mod tests {
         assert_eq!(args.groups, ["nixbld"]);
         assert_eq!(Args::parse(&os(&["open"])).unwrap().verb, Verb::Open);
         assert_eq!(Args::parse(&os(&["remove"])).unwrap().verb, Verb::Remove);
+        let print = Args::parse(&os(&["print", "--enforce", "--gid", "30000"])).unwrap();
+        assert_eq!((print.verb, print.gids), (Verb::Print, vec![30_000]));
+        assert!(Args::parse(&os(&["print", "--gid", "x"])).is_err());
+        assert_eq!(Args::parse(&os(&["allow"])).unwrap().verb, Verb::Allow);
         assert!(Args::parse(&os(&[])).is_err());
         assert!(Args::parse(&os(&["apply", "--user"])).is_err());
         assert!(Args::parse(&os(&["apply", "--other", "x"])).is_err());
