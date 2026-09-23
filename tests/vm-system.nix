@@ -224,7 +224,7 @@ let
           )
 
       with subtest("the namespace comes up alone: lo, the ruleset, an empty resolv.conf"):
-          machine.succeed("systemctl start vpn-zone-system-ns-sz")
+          machine.succeed("systemctl start vpn-zone-system-ns@sz")
           out = machine.succeed("ip -n vz-sz -o link show")
           assert len(links(out)) == 1 and ": lo" in out, out
           rules = machine.succeed("ip netns exec vz-sz nft list ruleset")
@@ -241,7 +241,7 @@ let
               "chmod 600 /var/lib/vpn-zones/system/sz/config.conf"
           )
           # Type=notify: `start` returns once the zone is up.
-          machine.succeed("systemctl start vpn-zone-system-sz")
+          machine.succeed("systemctl start vpn-zone-system@sz")
           machine.succeed("test -f /run/vpn-zones/system/sz/ready")
 
       with subtest("inside: exactly lo and awg0, nothing left in the host's namespace"):
@@ -392,7 +392,7 @@ let
           machine.fail(direct("carol"))
 
       with subtest("a plain zone: its own namespace, out through the host, nothing of the host's"):
-          machine.succeed("systemctl start vpn-zone-system-pl")
+          machine.succeed("systemctl start vpn-zone-system@pl")
           out = machine.succeed("ip -n vz-pl -o link show")
           assert len(links(out)) == 2 and ": awg0" in out, out
           machine.succeed("pgrep -u vpn-zones-plain -x pasta || pgrep -u vpn-zones-plain -f pasta")
@@ -427,19 +427,55 @@ let
               as_user("alice", f"vpn-zone-sys pl -- socat -T10 - TCP:{server_ip}:8090")
           )
           assert "peer=" in out and "peer=10.99." not in out, out
-          machine.succeed("systemctl stop vpn-zone-system-pl")
+          machine.succeed("systemctl stop vpn-zone-system@pl")
           out = machine.succeed("ip -n vz-pl -o link show")
           assert len(links(out)) == 1, f"pasta's interface outlived the zone: {out}"
 
+      with subtest("a VPN added once, on the spot: a system zone for everything, no second tunnel"):
+          # A second device on the server, for alice's own VPN.
+          k2 = machine.succeed("wg genkey").strip()
+          p2 = machine.succeed(f"printf %s '{k2}' | wg pubkey").strip()
+          server.succeed(f"wg set wg0 peer '{p2}' allowed-ips 10.99.0.3/32")
+          machine.succeed(
+              f"printf '[Interface]\\nPrivateKey = {k2}\\nAddress = 10.99.0.3/32\\n"
+              f"DNS = 10.99.0.1\\n\\n[Peer]\\nPublicKey = {spub}\\n"
+              f"AllowedIPs = 0.0.0.0/0\\nEndpoint = {server_ip}:51820\\n' > /tmp/nl2.conf && "
+              "chown alice /tmp/nl2.conf && chmod 600 /tmp/nl2.conf"
+          )
+          out = machine.succeed(as_user("alice", "vpn-zone-sys --add nl2 /tmp/nl2.conf"))
+          assert "nl2" in out, out
+          machine.succeed("test \"$(stat -c %a /var/lib/vpn-zones/system/nl2/config.conf)\" = 600")
+          out = machine.succeed(as_user("alice", "vpn-zone-sys nl2 -- socat -T10 - TCP:10.99.0.1:8080"))
+          assert "peer=10.99.0.3" in out, out
+          # The same config again — sz's own: not a second tunnel, but which zone it is.
+          machine.succeed(
+              "cp /var/lib/vpn-zones/system/sz/config.conf /tmp/sz-copy.conf && "
+              "chown alice /tmp/sz-copy.conf"
+          )
+          out = machine.succeed(as_user("alice", "vpn-zone-sys --add nl3 /tmp/sz-copy.conf"))
+          assert "sz" in out, out
+          machine.fail("test -e /var/lib/vpn-zones/system/nl3")
+          machine.fail("ip netns list | grep -q vz-nl3")
+          # Somebody else's zone: neither used nor replaced.
+          out = machine.fail(as_user("bob", "vpn-zone-sys nl2 -- true") + " 2>&1")
+          assert "may not" in out, out
+          out = machine.fail(as_user("bob", "vpn-zone-sys --add nl2 /dev/null") + " 2>&1")
+          assert "not bob's" in out, out
+          # A plain zone added on the spot.
+          machine.succeed(as_user("alice", "vpn-zone-sys --add pl2 --plain"))
+          out = machine.succeed(as_user("alice", f"vpn-zone-sys pl2 -- socat -T10 - TCP:{server_ip}:8090"))
+          assert "peer=" in out and "peer=10.99." not in out, out
+          machine.succeed("systemctl stop vpn-zone-system@pl2 vpn-zone-system@nl2")
+
       with subtest("the tunnel stops: lo alone, the consumers keep running and reach nothing"):
-          machine.succeed("systemctl stop vpn-zone-system-sz")
+          machine.succeed("systemctl stop vpn-zone-system@sz")
           out = machine.succeed("ip -n vz-sz -o link show")
           assert len(links(out)) == 1, out
           machine.succeed("systemctl is-active probe")
           machine.succeed("systemctl is-active container@box")
           in_probe("sh -c '! timeout 5 socat -T3 - TCP:10.99.0.1:8080'")
           machine.fail("nixos-container run box -- timeout 5 socat -T3 - TCP:10.99.0.1:8080")
-          machine.succeed("systemctl start vpn-zone-system-sz")
+          machine.succeed("systemctl start vpn-zone-system@sz")
           out = in_probe("socat -T10 - TCP:10.99.0.1:8080")
           assert "peer=10.99.0.2" in out, out
 
@@ -450,8 +486,8 @@ let
       with subtest("the namespace restarts: its consumers restart into the new one"):
           machine.succeed("ip netns exec vz-sz sysctl -qw net.ipv4.ip_default_ttl=63")
           assert in_probe("cat /proc/sys/net/ipv4/ip_default_ttl").strip() == "63"
-          machine.succeed("systemctl restart vpn-zone-system-ns-sz")
-          machine.succeed("systemctl start vpn-zone-system-sz probe container@box")
+          machine.succeed("systemctl restart vpn-zone-system-ns@sz")
+          machine.succeed("systemctl start vpn-zone-system@sz probe container@box")
           out = machine.succeed("ip netns exec vz-sz cat /proc/sys/net/ipv4/ip_default_ttl").strip()
           assert out == "64", f"the namespace was not recreated: ttl {out}"
           assert in_probe("cat /proc/sys/net/ipv4/ip_default_ttl").strip() == "64"
@@ -497,7 +533,7 @@ let
           # The VPN server stops answering; the zone comes up again without a
           # handshake.
           server.succeed("ip link set wg0 down")
-          machine.succeed("systemctl restart vpn-zone-system-sz")
+          machine.succeed("systemctl restart vpn-zone-system@sz")
           machine.wait_until_tty_matches("1", "login: ")
           machine.send_chars("alice\n")
           machine.wait_until_tty_matches("1", "Password: ")

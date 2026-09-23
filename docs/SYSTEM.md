@@ -64,19 +64,44 @@ and the way a program goes out directly once the host has no network of its own 
 Members of the group `vpn-zones` can read the status; that is what makes
 `vpn-zone status --json` report a system zone's tunnel without root.
 
+## 2a. One VPN, added once
+
+`vpn-zone-sys --add <name> <config.conf>` (or `--plain`): the config goes to the
+system-zone service (§7) over its socket, as one datagram; root checks it — a parseable
+WireGuard/AmneziaWG config, a free name or a zone of the asking user's — writes
+`/var/lib/vpn-zones/system/<name>/config.conf` (0600), `kind` and `users` (the one who added
+it), and starts the zone. No rebuild, no root for the user, nothing in the repository.
+
+**One config is one tunnel.** The same private key in two tunnels makes the server see two
+devices with one key, and they knock each other off. So before writing anything root compares
+the key with every system zone's: a match answers `SAME <zone>` — "this VPN already is zone
+X, run your programs in it" — and nothing is created. Everything that should use that VPN —
+services, NixOS containers, the TTY console, a user's programs — goes into that one zone, at
+the same time, through one tunnel.
+
+`vpn-zone-sys --up <name>` starts a zone for one of its users; the TTY console uses it.
+
 ## 3. Units
 
-- `vpn-zone-system-ns-<name>.service` — `vpn-zone-core system-zone ns-up <name>`:
+- `vpn-zone-system-ns@<name>.service` — `vpn-zone-core system-zone ns-up <name>`:
   the namespace, `lo` up, the app ruleset (second echelon) loaded before anything else, an
   empty resolv.conf. `Type=oneshot`, `RemainAfterExit`, **`restartIfChanged = false`**: the
   namespace must survive switches, because every consumer bound to it would otherwise be cut
   off or restarted by every update of this package. `ExecStop` = `ns-down`.
-- `vpn-zone-system-<name>.service` — `vpn-zone-core system-zone up <name>`, the holder.
+- `vpn-zone-system@<name>.service` — `vpn-zone-core system-zone up <name>`, the holder.
   `Type=notify`, `BindsTo=` and `After=` the namespace unit, `After=network-online.target`.
   Sets the zone up (§4), says `READY=1` — so whatever is ordered after it starts with the
   tunnel and the zone's resolv.conf in place — then mirrors the status until stopped. `ExecStopPost` = `down`: the tunnel
   interface is deleted, the namespace stays with `lo` alone. `Restart=on-failure` after
   10 s: at boot the endpoint may not resolve yet.
+
+Both are **templates**, and a zone is an instance: a zone can be added on the spot
+(`vpn-zone-sys --add`, §2a) with no rebuild, and a declared one differs only by its settings.
+The holder reads those itself — `kind`, `config`, `users`, `system-bus` — from
+`/etc/vpn-zones/system-zones.d/<name>/` for a declared zone (written by the module) and from
+`/var/lib/vpn-zones/system/<name>/` for one added on the spot. Nix is stronger, as with user
+zones: a declared zone takes nothing from the local directory but its `config.conf`. Declared
+zones with `autoStart` are wanted by `multi-user.target`.
 
 Consumers bind to the **namespace** unit and only order after the holder: a tunnel going
 down leaves them running with no way out (fail-closed, and downloads resume later); the
@@ -270,8 +295,10 @@ the network, however it was started.
 - **A firewall that flushes.** With `networking.nftables.flushRuleset` the NixOS firewall
   deletes every table on start and reload; the policy's unit is then `PartOf` it and
   reloads with it (`ReloadPropagatedFrom`). Without flushing it is left alone.
-- **The emergency key.** `vpn-zones-egress-open.service` keeps the table and lifts the
-  restriction for `emergency.minutes` (15), then puts it back — also when stopped earlier.
+- **The emergency key.** `vpn-zones-egress-open.service` deletes the table with `nft` itself
+  — no binary of this project involved, so it works when ours is broken — for
+  `emergency.minutes` (15), then puts the policy back — also when stopped earlier. And
+  `vpnzones.egress=off` on the kernel command line keeps the policy from loading at all.
   `emergency.group` (`wheel`) may start and stop it without a password — through polkit,
   which the module therefore turns on (NixOS has it off by default; the VM test found the
   key refused without it). The TTY console of ARCHITECTURE §4 turns it with one key.
@@ -280,6 +307,25 @@ the network, however it was started.
   the question already left. Moving the host's own resolver into a system zone is the
   answer, and a later step. And root: root can unload anything; the policy is about
   programs of users.
+
+## 9a. Rescue paths
+
+The system tier is what gives a broken machine its network, so each way it can break has a
+way around it that does not need the broken part:
+
+| Broken | What is left |
+|---|---|
+| The graphical session, the GPU driver | The TTY console (§7a): the kernel's console, no graphics |
+| This package in a new generation | The console falls through to the ordinary shell; the previous generation in the boot menu |
+| The VPN, or the amneziawg module for a new kernel | The in-tree `wireguard` for configs without obfuscation; the plain zone, which needs no module |
+| The egress policy keeps the host offline, our binary broken | The emergency key deletes the table with `nft` alone; `vpnzones.egress=off` on the kernel command line (`e` in the boot menu) keeps the policy from loading, with no binary of ours involved |
+| Nix, the daemon | Not used at run time by zones, the console or the policy |
+| The store itself | The previous generation; nix_cm's rescue copy runs without `/nix/store` |
+
+A statically linked set of tools (`ip`, `awg`, `nft`, pasta) was weighed and left out: on
+NixOS every package carries its own closure, "the linking broke" happens only with a
+corrupted store, which breaks everything at once and is what the previous generation is for;
+the static set would cost long local builds for next to nothing.
 
 ## 10. Leak channels of the system tier
 

@@ -51,6 +51,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -215,11 +216,100 @@ pub fn parse_answer(bytes: &[u8]) -> Result<u8, String> {
     }
 }
 
-/// Who may run programs in a zone: the module's list.
+/// Adding a zone: `VZA1\0`, the zone, `tunnel` or `plain`, a NUL, then the
+/// config's bytes (none for a plain zone).
+const ADD_MAGIC: &[u8] = b"VZA1\0";
+/// Bringing a zone up: `VZU1\0`, the zone, a NUL.
+const UP_MAGIC: &[u8] = b"VZU1\0";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddRequest {
+    pub zone: String,
+    pub plain: bool,
+    pub config: Vec<u8>,
+}
+
+impl AddRequest {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = ADD_MAGIC.to_vec();
+        out.extend_from_slice(self.zone.as_bytes());
+        out.push(0);
+        out.extend_from_slice(if self.plain { b"plain" } else { b"tunnel" });
+        out.push(0);
+        out.extend_from_slice(&self.config);
+        out
+    }
+
+    pub fn decode(body: &[u8]) -> Result<Self, String> {
+        let mut parts = body.splitn(3, |&b| b == 0);
+        let zone = std::str::from_utf8(parts.next().unwrap_or_default())
+            .map_err(|_| "the zone's name is not UTF-8")?
+            .to_owned();
+        let plain = match parts.next() {
+            Some(b"plain") => true,
+            Some(b"tunnel") => false,
+            _ => return Err("unknown kind of zone".to_owned()),
+        };
+        let config = parts.next().ok_or("the request is cut short")?.to_vec();
+        check_name(&zone)?;
+        Ok(Self {
+            zone,
+            plain,
+            config,
+        })
+    }
+}
+
+pub fn encode_up(zone: &str) -> Vec<u8> {
+    let mut out = UP_MAGIC.to_vec();
+    out.extend_from_slice(zone.as_bytes());
+    out.push(0);
+    out
+}
+
+pub fn decode_up(body: &[u8]) -> Result<String, String> {
+    let zone = body.strip_suffix(&[0]).ok_or("the request is cut short")?;
+    let zone = std::str::from_utf8(zone)
+        .map_err(|_| "the zone's name is not UTF-8")?
+        .to_owned();
+    check_name(&zone)?;
+    Ok(zone)
+}
+
+/// What adding or bringing up a zone came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Done {
+    /// Done, in words.
+    Ok(String),
+    /// This VPN is already that zone: one config, one tunnel — use it.
+    Same(String),
+}
+
+pub fn answer_done(done: &Done) -> Vec<u8> {
+    match done {
+        Done::Ok(what) => format!("OK {what}").into_bytes(),
+        Done::Same(zone) => format!("SAME {zone}").into_bytes(),
+    }
+}
+
+pub fn parse_done(bytes: &[u8]) -> Result<Done, String> {
+    let text = String::from_utf8_lossy(bytes);
+    if let Some(what) = text.strip_prefix("OK ") {
+        return Ok(Done::Ok(what.to_owned()));
+    }
+    if let Some(zone) = text.strip_prefix("SAME ") {
+        return Ok(Done::Same(zone.trim().to_owned()));
+    }
+    match text.strip_prefix("ERR ") {
+        Some(why) => Err(why.to_owned()),
+        None => Err(format!("a strange answer: {text}")),
+    }
+}
+
+/// Who may run programs in a zone: the module's list for a declared zone, the
+/// one who added it for a zone made on the spot.
 pub fn allowed_users(zone: &str) -> Vec<String> {
-    fs::read_to_string(Path::new(ZONES_DIR).join(zone).join("users"))
-        .map(|text| parse_users(&text))
-        .unwrap_or_default()
+    system::settings(zone).map(|s| s.users).unwrap_or_default()
 }
 
 pub fn parse_users(text: &str) -> Vec<String> {
@@ -239,7 +329,7 @@ pub fn parse_users(text: &str) -> Vec<String> {
 
 /// Does the zone leave the host's system bus reachable?
 fn system_bus_allowed(zone: &str) -> bool {
-    Path::new(ZONES_DIR).join(zone).join("system-bus").exists()
+    system::settings(zone).is_some_and(|s| s.system_bus)
 }
 
 /// The user the command runs as.
@@ -315,10 +405,18 @@ pub fn parse_client_args(args: &[OsString]) -> Result<(String, Vec<OsString>), S
 
 // --- THE CLIENT --------------------------------------------------------------
 
-const USAGE: &str = "usage: vpn-zone-sys <zone> [--] <command> [args…]";
+const USAGE: &str = "usage: vpn-zone-sys <zone> [--] <command> [args…]
+       vpn-zone-sys --add <zone> <config.conf | ->
+       vpn-zone-sys --add <zone> --plain
+       vpn-zone-sys --up <zone>";
 
 /// The client. Returns the command's exit code.
 pub fn client(args: &[OsString]) -> u8 {
+    match args.first().and_then(|a| a.to_str()) {
+        Some("--add") => return manage(add_request(&args[1..])),
+        Some("--up") => return manage(up_request(&args[1..])),
+        _ => {}
+    }
     let (zone, cmd) = match parse_client_args(args) {
         Ok(parsed) => parsed,
         Err(e) => {
@@ -333,6 +431,106 @@ pub fn client(args: &[OsString]) -> u8 {
             1
         }
     }
+}
+
+/// `--add <zone> <file | - | --plain>`.
+fn add_request(args: &[OsString]) -> Result<Vec<u8>, String> {
+    let zone = args
+        .first()
+        .and_then(|a| a.to_str())
+        .ok_or("need a zone")?
+        .to_owned();
+    check_name(&zone)?;
+    let source = args.get(1).ok_or("need a config file, `-` or --plain")?;
+    if args.len() > 2 {
+        return Err("too many arguments".to_owned());
+    }
+    let (plain, config) = if source == "--plain" {
+        (true, Vec::new())
+    } else if source == "-" {
+        let mut bytes = Vec::new();
+        io::stdin()
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("cannot read the config: {e}"))?;
+        (false, bytes)
+    } else {
+        let bytes = fs::read(source)
+            .map_err(|e| format!("cannot read {}: {e}", source.to_string_lossy()))?;
+        (false, bytes)
+    };
+    let request = AddRequest {
+        zone,
+        plain,
+        config,
+    }
+    .encode();
+    if request.len() > MAX_REQUEST {
+        return Err("the config is too large".to_owned());
+    }
+    Ok(request)
+}
+
+fn up_request(args: &[OsString]) -> Result<Vec<u8>, String> {
+    match args {
+        [zone] => {
+            let zone = zone.to_str().ok_or("the zone's name is not UTF-8")?;
+            check_name(zone)?;
+            Ok(encode_up(zone))
+        }
+        _ => Err("need exactly one zone".to_owned()),
+    }
+}
+
+/// Send an add or up request and say what came of it.
+fn manage(request: Result<Vec<u8>, String>) -> u8 {
+    let request = match request {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("vpn-zone-sys: {e}\n{USAGE}");
+            return 2;
+        }
+    };
+    match exchange(&request) {
+        Ok(Done::Ok(what)) => {
+            println!("{what}");
+            0
+        }
+        Ok(Done::Same(zone)) => {
+            println!(
+                "Этот VPN уже есть: системная зона {zone}. Второе подключение не нужно — \
+                 программы запускаются в ней: vpn-zone-sys {zone} -- <команда>"
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("vpn-zone-sys: {e}");
+            1
+        }
+    }
+}
+
+/// Bring a system zone up through the service, as its user: what the TTY
+/// console does when the zone is down.
+pub fn request_up(zone: &str) -> Result<Done, String> {
+    exchange(&encode_up(zone))
+}
+
+fn exchange(request: &[u8]) -> Result<Done, String> {
+    let sock = connect(SOCKET).map_err(|e| {
+        format!(
+            "cannot reach {SOCKET}: {e} — is the system tier on, and are you in the group \
+             vpn-zones?"
+        )
+    })?;
+    send_with_fds(sock.as_raw_fd(), request, &[])
+        .map_err(|e| format!("cannot send the request: {e}"))?;
+    let mut buf = [0u8; 4096];
+    // SAFETY: a valid descriptor and a buffer of the length given.
+    let n = unsafe { libc::recv(sock.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+    if n <= 0 {
+        return Err("the system-zone service went away without an answer".to_owned());
+    }
+    parse_done(&buf[..n.unsigned_abs()])
 }
 
 fn run_client(zone: &str, argv: Vec<OsString>) -> Result<u8, String> {
@@ -527,8 +725,8 @@ fn openpty() -> io::Result<(OwnedFd, OwnedFd)> {
 /// The service: one connection on descriptor 0 (`Accept=yes`), one launch.
 pub fn broker() -> u8 {
     let sock: RawFd = 0;
-    let answer = match serve(sock) {
-        Ok(code) => answer_exit(code),
+    let answer = match serve_any(sock) {
+        Ok(answer) => answer,
         Err(e) => {
             eprintln!("sysrun: refused: {e}");
             answer_refusal(&e)
@@ -558,14 +756,130 @@ struct Launch {
     system_bus: bool,
 }
 
-fn serve(sock: RawFd) -> Result<u8, String> {
+/// Who asks, from the kernel; then what they ask for.
+fn serve_any(sock: RawFd) -> Result<Vec<u8>, String> {
     let uid = peer_uid(sock)?;
     let (data, fds) =
         recv_with_fds(sock, MAX_REQUEST, 3).map_err(|e| format!("cannot read the request: {e}"))?;
-    let request = Request::decode(&data)?;
+    if let Some(body) = data.strip_prefix(ADD_MAGIC) {
+        return serve_add(uid, &AddRequest::decode(body)?).map(|d| answer_done(&d));
+    }
+    if let Some(body) = data.strip_prefix(UP_MAGIC) {
+        return serve_up(uid, &decode_up(body)?).map(|d| answer_done(&d));
+    }
+    serve(sock, uid, &data, fds).map(answer_exit)
+}
+
+fn systemctl(args: &[&str]) -> Result<(), String> {
+    let tool = std::env::var_os("VPN_ZONE_SYSTEMCTL").unwrap_or_else(|| "systemctl".into());
+    let status = Command::new(&tool)
+        .args(args)
+        .status()
+        .map_err(|e| format!("cannot run systemctl: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("systemctl {} failed ({status})", args.join(" ")))
+    }
+}
+
+fn private_key(cfg: &crate::config::WgConfig) -> Option<String> {
+    cfg.interface()?.get("PrivateKey").map(str::to_owned)
+}
+
+/// Add a VPN as a system zone — or say which zone it already is. One config
+/// is one tunnel: the same private key in two tunnels makes the server see
+/// two devices with one key, and they knock each other off.
+fn serve_add(uid: u32, request: &AddRequest) -> Result<Done, String> {
+    let zone = request.zone.as_str();
+    if uid == 0 {
+        return Err("root adds a zone by declaring it".to_owned());
+    }
+    let user = user_of(uid)?;
+    let existing = system::settings(zone);
+    if let Some(s) = &existing {
+        if !s.users.contains(&user.name) {
+            return Err(format!(
+                "the system zone {zone} exists and is not {}'s",
+                user.name
+            ));
+        }
+        if s.declared && s.plain != request.plain {
+            return Err(format!(
+                "{zone} is declared in Nix as {}",
+                if s.plain { "plain" } else { "a tunnel" }
+            ));
+        }
+        if s.declared && !s.plain && s.config != system::local_dir(zone).join("config.conf") {
+            return Err(format!(
+                "the config of {zone} comes from Nix ({})",
+                s.config.display()
+            ));
+        }
+    }
+    if !request.plain {
+        let cfg = crate::config::WgConfig::parse(&request.config)
+            .map_err(|e| format!("the config: {e}"))?;
+        if let Some(why) = system::refusal(&cfg) {
+            return Err(why.to_owned());
+        }
+        let key = private_key(&cfg).ok_or("the config has no PrivateKey")?;
+        for other in system::all_zones() {
+            let Some(s) = system::settings(&other).filter(|s| !s.plain && other != zone) else {
+                continue;
+            };
+            let held = fs::read(&s.config)
+                .ok()
+                .and_then(|raw| crate::config::WgConfig::parse(&raw).ok())
+                .and_then(|o| private_key(&o));
+            if held.as_deref() == Some(key.as_str()) {
+                if s.users.contains(&user.name) {
+                    return Ok(Done::Same(other));
+                }
+                return Err(format!(
+                    "this VPN is already the system zone {other}, which is not {}'s",
+                    user.name
+                ));
+            }
+        }
+    }
+
+    let local = system::local_dir(zone);
+    fs::create_dir_all(&local).map_err(|e| format!("cannot create {}: {e}", local.display()))?;
+    if !request.plain {
+        crate::zone::write_private(&local.join("config.conf"), &request.config)
+            .map_err(|e| format!("cannot write the config: {e}"))?;
+    }
+    if !existing.as_ref().is_some_and(|s| s.declared) {
+        let kind = if request.plain { "plain\n" } else { "tunnel\n" };
+        fs::write(local.join("kind"), kind).map_err(|e| format!("cannot write: {e}"))?;
+        fs::write(local.join("users"), format!("{}\n", user.name))
+            .map_err(|e| format!("cannot write: {e}"))?;
+    }
+    println!("sysrun: {} added the system zone {zone}", user.name);
+    systemctl(&["restart", &format!("vpn-zone-system@{zone}.service")])
+        .map_err(|e| format!("{zone} is added, but did not come up: {e}"))?;
+    Ok(Done::Ok(format!("зона {zone} добавлена и поднята")))
+}
+
+/// Bring a zone up for one of its users.
+fn serve_up(uid: u32, zone: &str) -> Result<Done, String> {
+    let settings =
+        system::settings(zone).ok_or_else(|| format!("there is no system zone {zone}"))?;
+    let user = user_of(uid)?;
+    if uid != 0 && !settings.users.contains(&user.name) {
+        return Err(format!("{} may not use the system zone {zone}", user.name));
+    }
+    systemctl(&["start", &format!("vpn-zone-system@{zone}.service")])
+        .map_err(|e| format!("{zone} did not come up: {e}"))?;
+    Ok(Done::Ok(format!("зона {zone} поднята")))
+}
+
+fn serve(sock: RawFd, uid: u32, data: &[u8], fds: Vec<OwnedFd>) -> Result<u8, String> {
+    let request = Request::decode(data)?;
     let zone = request.zone.clone();
     check_name(&zone)?;
-    if !system::declared().contains(&zone) {
+    if system::settings(&zone).is_none() {
         return Err(format!("there is no system zone {zone}"));
     }
     if uid == 0 {
@@ -1131,6 +1445,48 @@ mod tests {
 
         let without_runtime = child_env(&os(&["XDG_RUNTIME_DIR=/x"]), &user, "nl", None);
         assert!(without_runtime.iter().all(|(k, _)| k != "XDG_RUNTIME_DIR"));
+    }
+
+    #[test]
+    fn adding_a_zone_survives_the_wire() {
+        let add = AddRequest {
+            zone: "nl".to_owned(),
+            plain: false,
+            config: b"[Interface]\nPrivateKey = x\n".to_vec(),
+        };
+        let bytes = add.encode();
+        assert_eq!(
+            AddRequest::decode(bytes.strip_prefix(ADD_MAGIC).unwrap()),
+            Ok(add)
+        );
+        let plain = AddRequest {
+            zone: "direct2".to_owned(),
+            plain: true,
+            config: Vec::new(),
+        };
+        assert_eq!(
+            AddRequest::decode(plain.encode().strip_prefix(ADD_MAGIC).unwrap()),
+            Ok(plain)
+        );
+        assert!(AddRequest::decode(b"Bad_Zone\0tunnel\0").is_err());
+        assert!(AddRequest::decode(b"nl\0vpn\0").is_err());
+        assert!(AddRequest::decode(b"nl\0tunnel").is_err());
+
+        assert_eq!(
+            decode_up(encode_up("nl").strip_prefix(UP_MAGIC).unwrap()),
+            Ok("nl".to_owned())
+        );
+        assert!(decode_up(b"nl").is_err());
+
+        assert_eq!(
+            parse_done(&answer_done(&Done::Same("nl".to_owned()))),
+            Ok(Done::Same("nl".to_owned()))
+        );
+        assert_eq!(
+            parse_done(&answer_done(&Done::Ok("зона nl поднята".to_owned()))),
+            Ok(Done::Ok("зона nl поднята".to_owned()))
+        );
+        assert_eq!(parse_done(&answer_refusal("no")), Err("no".to_owned()));
     }
 
     #[test]
