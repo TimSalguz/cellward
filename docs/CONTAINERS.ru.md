@@ -545,9 +545,12 @@ JSON пишется руками, как руками читается мани�
   Любая ссылка на контейнер в документе — `apps[].container.value` — это
   селектор, и сопоставляется он с `containers[].selector`;
 - сеть — по `name`; `networks[].kind` — одно из `unconfined`, `offline`,
-  `wireguard`, `openconnect`, `host-interface`, а `interface` — интерфейс хоста
-  для `host-interface` и `null` для всех остальных; сеть `host-interface`
-  этим проектом НЕ шифруется;
+  `wireguard`, `openconnect`, `host-interface`, `system-zone`, а `interface` —
+  интерфейс хоста для `host-interface` и `null` для всех остальных; сеть
+  `host-interface` этим проектом НЕ шифруется; `system_zone` — системная зона,
+  через туннель которой выходит сеть `system-zone` (`docs/SYSTEM.md` §7b), и
+  `null` для всех остальных (добавлен в 2026-09 как дополнительный ключ: для
+  читателей, пропускающих незнакомые ключи, версия 1 не меняется);
 - `networks[].aliases` — другие имена, по которым сеть читается. Такое одно:
   `direct` у `unconfined`, её имя до 2026-09. Оно принимается в CLI, в Nix
   (`defaults.network`, `containers.<n>.network`), в закреплениях и настройках,

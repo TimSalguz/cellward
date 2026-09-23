@@ -554,9 +554,12 @@ every key of version 1.
   document — `apps[].container.value` — is a selector, and
   `containers[].selector` is what it matches;
 - a network by `name`; `networks[].kind` is one of `unconfined`, `offline`,
-  `wireguard`, `openconnect`, `host-interface`, and `interface` is the host's
-  interface for `host-interface` and `null` for every other kind — a
-  `host-interface` network is NOT encrypted by this project;
+  `wireguard`, `openconnect`, `host-interface`, `system-zone`, and `interface`
+  is the host's interface for `host-interface` and `null` for every other kind
+  — a `host-interface` network is NOT encrypted by this project; `system_zone`
+  is the system zone whose tunnel a `system-zone` network goes out by
+  (`docs/SYSTEM.md` §7b) and `null` for every other kind (added 2026-09, an
+  additional key: version 1 is unchanged for readers that ignore unknown keys);
 - `networks[].aliases` are the other names a network is read by. The only one
   is `direct` on `unconfined`, its name until 2026-09: it is accepted in the
   CLI, in Nix (`defaults.network`, `containers.<n>.network`), in pins and in

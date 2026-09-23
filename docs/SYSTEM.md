@@ -196,9 +196,9 @@ with their zones.
 ## 7. A user's program in a system zone (stage 4)
 
 `vpn-zone-sys <zone> [--] <command>`, for the users listed in
-`services.vpn-zones.system.zones.<zone>.users`. Console programs only for now (the use the
-TTY console of ARCHITECTURE §4 needs); graphical ones need the session sealing user zones
-have.
+`services.vpn-zones.system.zones.<zone>.users`. Console programs (the use the TTY console of
+ARCHITECTURE §4 needs); graphical ones go through a user zone over the system zone (§7b),
+which has the session sealing user zones have.
 
 A system zone's namespace belongs to the host's user namespace; entering it takes
 `CAP_SYS_ADMIN` there, which no program of a user has. So a small service does the entering
@@ -227,6 +227,64 @@ A system zone's namespace belongs to the host's user namespace; entering it take
   2 are passed. The client gone, the command gets SIGHUP and SIGTERM.
 - The request is one datagram: `VZS1\0`, zone, mode, cwd, argc, argv…, envc, env…, each
   NUL-ended, at most 64 KiB; the answer is `EXIT <code>` or `ERR <why>`.
+
+## 7b. A user zone through a system zone
+
+One VPN, one tunnel — for the host's services and for the user's programs, graphical ones
+included. A system zone holds the tunnel; a **user zone** (the rootless tier, with everything
+it has: the sealed runtime directory, the compositor restriction, the picker, containers,
+hermeticity) takes its way out from it instead of dialling the VPN a second time. The same
+key in two tunnels makes the server see two devices with one key, and they knock each other
+off.
+
+```ini
+[SystemZone]
+Name = nl
+```
+
+`vpn-zone add <zone> --system nl` writes that, and `vpn-zone add <zone> <file.conf>` writes it
+by itself when the file's key is already a system zone's the user may use (`VZK1`, below); a
+system zone they may not use is a refusal, never a second tunnel behind its back.
+
+- **The shape.** The user zone is a user namespace with its app namespace in it, like any
+  other, but with no tunnel and no uplink of its own. Its way out is pasta, as for a
+  host-interface zone — only this pasta is started by the system-zone service **in the
+  system zone's network namespace**, as the user, and attached to the app namespace, where
+  it names its interface `awg0`. A packet from the user zone reaches pasta, pasta sends it
+  on from the system zone, and the system zone has lo and its tunnel and nothing else.
+- **Asking** (`VZP1`). The zone's holder runs `vpn-zone-core system-uplink <zone> <pid>`, a
+  watcher that opens the app namespace's user and network namespaces (`/proc/<pid>/ns/*`,
+  its own zone's) and sends them as descriptors. The service knows the asker from the
+  kernel: the zone asks from inside its own user namespace as its uid 0, which on the host
+  is the first uid of the user's `/etc/subuid` range — the owner the egress policy knows
+  zones' ways out by. It checks that the user may use the system zone, that the user
+  namespace is owned by the user (`NS_GET_OWNER_UID`) and that the network namespace belongs
+  to that user namespace (`NS_GET_USERNS`) — the host's and the system zones' belong to the
+  host's, owned by root, so neither can be passed off as a zone —, brings the system zone
+  up, and starts pasta: `setns` into the system zone's network while root, then no groups,
+  the user's uid and gid, `NO_NEW_PRIVS`, and the two descriptors at fixed numbers for
+  `--userns`/`--netns`. The checks and the attaching use the same descriptors: a pid could
+  be reused in between, a descriptor cannot. The service reads no `/proc` of another user's
+  processes and needs no `CAP_SYS_PTRACE`.
+- **Its life is the connection.** The watcher holds the connection for as long as it runs;
+  the holder watches the watcher the way it watches pasta for the other kinds. The zone
+  going down stops the watcher, the connection closes, the service kills pasta. pasta
+  ending is said on the connection (`EXIT`), the watcher ends, and the zone goes down with
+  it.
+- **Names.** The service answers with the system zone's resolvers; the app namespace's
+  resolv.conf is written from them — the tunnel's, reached through the tunnel.
+- **Liveness.** pasta's interface up is the link; the tunnel behind it is the system zone's,
+  whose holder mirrors `wg show` for the group `vpn-zones`: the user zone's status is that
+  file, so `vpn-zone check` and the picker read a handshake as for any WireGuard zone.
+- **Where a packet can go.** From the app namespace only to pasta (`awg0` is its only
+  interface besides lo, and its filter allows nothing else). From pasta only where the
+  system zone routes — its tunnel; the system zone's filter drops anything else. The tunnel
+  stopping leaves the system zone with lo and the user zone with nothing (the VM test checks
+  both the tunnel's address and the host's own). pasta's sockets are in the system zone's
+  namespace, so the host's egress policy never sees them — and does not have to.
+- **Not yet.** IPv6 through such a zone (pasta is started with `-4`), and taking a system
+  zone's namespace being recreated into account: pasta stays in the old one, which has no
+  tunnel, until the user zone is restarted — closed, not open.
 
 ## 7a. The TTY console
 
@@ -556,6 +614,15 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
      the LAN directly; `vpn-zone-sys` answers that vpn-zones are off; a `daemon-reload` does
      not attach the service again; `vpn-zones-on` is refused to a user outside `wheel`, and
      for alice brings the policy, `sz` and the service in its namespace back;
+- **VM `tests/vm-bridge.nix`:** a user zone through a system zone (§7b), both tiers on one
+  machine (the NixOS module and alice's home-manager module), the egress policy enforced:
+  `vpn-zone add --system` writes a config with no key; the zone's program reaches the
+  tunnel's service and the server sees the system zone's tunnel address; `lo` and `awg0`
+  only; the tunnel's resolver; the machine's own LAN address unreachable; pasta in the system
+  zone's namespace as alice, none as root; `vpn-zone check` from the system zone's
+  handshake; `vpn-zone add` with the system zone's key makes a zone through it; the tunnel
+  stopped, nothing reachable, started again, reachable; the zone down, nothing of alice's
+  left in the system zone.
 - **VM `tests/vm-host.nix`:** the strict policy. `server` has a LAN address and one outside
   every private range (198.51.100.1) that stands for the internet, with a TCP responder, an
   HTTP file and an NTP server (chrony) there; `machine` runs `strict` with a plain zone `pl`

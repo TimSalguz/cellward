@@ -194,6 +194,28 @@ jobs:
       - name: Прогнать VM-тест
         run: env -u XDG_RUNTIME_DIR ./vm-host-driver/bin/nixos-test-driver
 
+  # VM-тест зоны через системную (tests/vm-bridge.nix): оба уровня на одной
+  # машине, пользовательская зона выходит через туннель системной — один VPN,
+  # одно подключение.
+  vm-bridge:
+    name: vm-bridge (NixOS test, user zone through a system zone)
+    runs-on: ubuntu-24.04
+    needs: eval
+    steps:
+      - uses: actions/checkout@v4
+      - name: Включить KVM для раннера
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -c /dev/kvm
+      - uses: cachix/install-nix-action@v31
+      - name: Собрать драйвер VM-теста
+        run: nix-build tests/vm-bridge.nix -A driver -o vm-bridge-driver
+      - name: Прогнать VM-тест
+        run: env -u XDG_RUNTIME_DIR ./vm-bridge-driver/bin/nixos-test-driver
+
   # Смоук: поднять настоящую зону в непривилегированном userns и проверить её
   # изнутри. Требует fallback на ядерный wireguard (amneziawg-модуля на
   # раннере нет) — см. tests/integration/smoke.sh.

@@ -553,6 +553,8 @@ pub fn net_menu(zones: &[MenuZone], pinned: &str, current_container: &str) -> Ve
         // menu must not call it one: nothing about it is encrypted.
         let mut text = if zone.host_interface {
             format!("Через интерфейс: {name} (без шифрования)")
+        } else if let Some(system) = &zone.system_zone {
+            format!("VPN: {name} (через системную зону {system})")
         } else {
             format!("VPN: {name}")
         };
@@ -587,6 +589,8 @@ pub struct MenuZone {
     pub name: String,
     /// `[HostInterface]`: no tunnel, no encryption.
     pub host_interface: bool,
+    /// `[SystemZone]`: the tunnel is this system zone's (`docs/SYSTEM.md` §7b).
+    pub system_zone: Option<String>,
     /// `vpn-zone watch` found the tunnel dead at its last look.
     pub dead: bool,
 }
@@ -597,10 +601,14 @@ fn menu_zones(state: &Path) -> Vec<MenuZone> {
         .into_iter()
         .map(|name| {
             let dir = state.join(&name);
-            let host_interface = fs::read(dir.join("config.conf"))
+            let ini = fs::read(dir.join("config.conf"))
                 .ok()
-                .and_then(|raw| crate::config::WgConfig::parse(&crate::cli::strip_cr(&raw)).ok())
-                .is_some_and(|ini| crate::hostif::is_host_interface(&ini));
+                .and_then(|raw| crate::config::WgConfig::parse(&crate::cli::strip_cr(&raw)).ok());
+            let host_interface = ini.as_ref().is_some_and(crate::hostif::is_host_interface);
+            let system_zone = ini
+                .as_ref()
+                .and_then(|ini| crate::sysuplink::SysUplinkConfig::from_ini(ini).ok())
+                .map(|s| s.zone);
             let dead = crate::cli::zone_pid(state, name.as_ref()).is_some()
                 && fs::read_to_string(state.join(crate::watch::WATCH_DIR).join(&name))
                     .ok()
@@ -609,6 +617,7 @@ fn menu_zones(state: &Path) -> Vec<MenuZone> {
             MenuZone {
                 name,
                 host_interface,
+                system_zone,
                 dead,
             }
         })
@@ -2112,11 +2121,18 @@ mod tests {
                     name: "lan".to_owned(),
                     host_interface: true,
                     dead: false,
+                    ..MenuZone::default()
                 },
                 MenuZone {
                     name: "nl".to_owned(),
                     host_interface: false,
                     dead: true,
+                    ..MenuZone::default()
+                },
+                MenuZone {
+                    name: "mz".to_owned(),
+                    system_zone: Some("sz".to_owned()),
+                    ..MenuZone::default()
                 },
             ],
             "",
@@ -2127,6 +2143,8 @@ mod tests {
             "Через интерфейс: lan (без шифрования)"
         );
         assert_eq!(text_of(&menu, "nl"), "VPN: nl — туннель не отвечает");
+        // A zone through a system zone is a VPN, and says whose tunnel it is.
+        assert_eq!(text_of(&menu, "mz"), "VPN: mz (через системную зону sz)");
     }
 
     #[test]

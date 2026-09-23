@@ -40,10 +40,12 @@
 //! its own `vpn-zone-sysrun@…` instance — listed by `systemctl`, stopped with
 //! it, and nothing it leaves behind outlives it.
 //!
-//! **Console programs only, for now.** The session's sockets — its bus, the
-//! compositor, pipewire — are hidden: a program that could ask the host's
-//! session to open a link would have a way out around the zone. Graphical
-//! programs need the sealing user zones do (LEAK-MODEL §13) and come later.
+//! **Console programs here.** The session's sockets — its bus, the compositor,
+//! pipewire — are hidden: a program that could ask the host's session to open a
+//! link would have a way out around the zone. Graphical programs get the
+//! system zone's network another way: a user zone through it (`VZP1` below,
+//! `docs/SYSTEM.md` §7b), where the sealing user zones do (LEAK-MODEL §13) is
+//! already there — this service only starts that zone's pasta.
 
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{self, File};
@@ -772,7 +774,399 @@ fn serve_any(sock: RawFd) -> Result<Vec<u8>, String> {
     if let Some(body) = data.strip_prefix(UP_MAGIC) {
         return serve_up(uid, &decode_up(body)?).map(|d| answer_done(&d));
     }
+    if let Some(body) = data.strip_prefix(UPLINK_MAGIC) {
+        let (zone, pid) = decode_uplink(body)?;
+        return serve_uplink(sock, uid, &zone, pid, fds);
+    }
+    if let Some(body) = data.strip_prefix(KEY_MAGIC) {
+        let key = std::str::from_utf8(body).map_err(|_| "the key is not UTF-8")?;
+        return serve_key(uid, key.trim()).map(|d| answer_done(&d));
+    }
     serve(sock, uid, &data, fds).map(answer_exit)
+}
+
+// --- A USER ZONE'S WAY OUT THROUGH A SYSTEM ZONE (docs/SYSTEM.md §7b) ---
+//
+// The user zone's own process asks, with its user and network namespaces as
+// descriptors; the service starts pasta in the SYSTEM zone's network, as the
+// user, attached to those namespaces. The connection is the uplink's life:
+// the zone letting go of it takes pasta down, and pasta ending is said on it.
+
+/// `VZP1\0`, the system zone, a NUL, the pid of the zone's app namespace, a
+/// NUL; two descriptors: that process's user and network namespaces. Answered
+/// `OK <resolvers>` once pasta runs, and `EXIT <code>` when it has ended.
+const UPLINK_MAGIC: &[u8] = b"VZP1\0";
+/// `VZK1\0` and a private key: which system zone holds it.
+const KEY_MAGIC: &[u8] = b"VZK1\0";
+/// How the module names pasta for the service.
+pub const ENV_PASTA: &str = "VPN_ZONE_PASTA";
+/// ioctl_ns(2): `_IO(0xb7, 0x1)` and `_IO(0xb7, 0x4)`.
+const NS_GET_USERNS: libc::c_ulong = 0xb701;
+const NS_GET_OWNER_UID: libc::c_ulong = 0xb704;
+/// pasta failing at once — no such namespace, no way in — is said as a
+/// refusal rather than as an uplink that ends a moment later.
+const UPLINK_SETTLE: Duration = Duration::from_millis(300);
+
+pub fn encode_uplink(zone: &str, pid: i32) -> Vec<u8> {
+    let mut out = UPLINK_MAGIC.to_vec();
+    out.extend_from_slice(zone.as_bytes());
+    out.push(0);
+    out.extend_from_slice(pid.to_string().as_bytes());
+    out.push(0);
+    out
+}
+
+pub fn decode_uplink(body: &[u8]) -> Result<(String, i32), String> {
+    let mut parts = body.split(|&b| b == 0);
+    let zone = std::str::from_utf8(parts.next().unwrap_or_default())
+        .map_err(|_| "the zone's name is not UTF-8")?
+        .to_owned();
+    check_name(&zone)?;
+    let pid = parts
+        .next()
+        .and_then(|p| std::str::from_utf8(p).ok())
+        .and_then(|p| p.parse::<i32>().ok())
+        .filter(|&p| p > 1)
+        .ok_or("a bad pid in the request")?;
+    Ok((zone, pid))
+}
+
+pub fn encode_key(key: &str) -> Vec<u8> {
+    let mut out = KEY_MAGIC.to_vec();
+    out.extend_from_slice(key.as_bytes());
+    out
+}
+
+/// Which system zone this private key already is, if any — asked by
+/// `vpn-zone add` before it makes a second tunnel on the same key.
+pub fn request_key_owner(key: &str) -> Result<Option<String>, String> {
+    match exchange(&encode_key(key))? {
+        Done::Same(zone) => Ok(Some(zone)),
+        Done::Ok(_) => Ok(None),
+    }
+}
+
+/// Ask for a user zone's way out through `zone`, for the namespaces of the
+/// process `pid` (the zone's app namespace). Returns the connection — keep it
+/// open for as long as the zone wants its way out, and read the end from it
+/// with [`wait_uplink`] — and the system zone's resolvers.
+pub fn request_uplink(zone: &str, pid: i32) -> Result<(OwnedFd, Vec<String>), String> {
+    let userns = File::open(format!("/proc/{pid}/ns/user"))
+        .map_err(|e| format!("cannot open the zone's user namespace: {e}"))?;
+    let netns = File::open(format!("/proc/{pid}/ns/net"))
+        .map_err(|e| format!("cannot open the zone's network namespace: {e}"))?;
+    let sock = connect(SOCKET).map_err(|e| {
+        format!(
+            "cannot reach {SOCKET}: {e} — is the system tier on, and are you in the group \
+             vpn-zones?"
+        )
+    })?;
+    send_with_fds(
+        sock.as_raw_fd(),
+        &encode_uplink(zone, pid),
+        &[userns.as_raw_fd(), netns.as_raw_fd()],
+    )
+    .map_err(|e| format!("cannot send the request: {e}"))?;
+    let mut buf = [0u8; 4096];
+    // SAFETY: a valid descriptor and a buffer of the length given.
+    let n = unsafe { libc::recv(sock.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+    if n <= 0 {
+        return Err("the system-zone service went away without an answer".to_owned());
+    }
+    match parse_done(&buf[..n.unsigned_abs()])? {
+        Done::Ok(resolvers) => Ok((
+            sock,
+            resolvers.split_whitespace().map(str::to_owned).collect(),
+        )),
+        Done::Same(_) => Err("a strange answer to an uplink".to_owned()),
+    }
+}
+
+/// `vpn-zone-core system-uplink <system zone> <pid>`: what a user zone's holder
+/// runs as its way out through a system zone. Says `OK <resolvers>` or
+/// `ERR <why>` on its first line, then holds the uplink and exits with its
+/// end — the holder watches it the way it watches pasta, and stopping it lets
+/// go of the uplink.
+pub fn uplink_main(args: &[OsString]) -> u8 {
+    let (Some(zone), Some(pid)) = (
+        args.first().and_then(|a| a.to_str()),
+        args.get(1)
+            .and_then(|a| a.to_str())
+            .and_then(|p| p.parse::<i32>().ok()),
+    ) else {
+        eprintln!("usage: vpn-zone-core system-uplink <system zone> <pid>");
+        return 2;
+    };
+    let mut out = io::stdout();
+    match request_uplink(zone, pid) {
+        Ok((sock, resolvers)) => {
+            let _ = writeln!(out, "OK {}", resolvers.join(" "));
+            let _ = out.flush();
+            wait_uplink(&sock)
+        }
+        Err(e) => {
+            let _ = writeln!(out, "ERR {e}");
+            let _ = out.flush();
+            1
+        }
+    }
+}
+
+/// Block until the uplink ends: pasta's exit code, or 1 when the service is
+/// gone without saying.
+pub fn wait_uplink(sock: &OwnedFd) -> u8 {
+    let mut buf = [0u8; 256];
+    // SAFETY: a valid descriptor and a buffer of the length given.
+    let n = unsafe { libc::recv(sock.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+    if n <= 0 {
+        return 1;
+    }
+    parse_answer(&buf[..n.unsigned_abs()]).unwrap_or(1)
+}
+
+/// Who asks for an uplink: the user themself, or their zone — which asks from
+/// inside its own user namespace as that namespace's uid 0, i.e. on the host
+/// the first uid of the user's `/etc/subuid` range (`zone::uplink_owner`, the
+/// owner the egress policy knows zones' ways out by).
+fn acting_user(uid: u32) -> Result<User, String> {
+    if let Ok(user) = user_of(uid) {
+        return Ok(user);
+    }
+    let text = fs::read_to_string("/etc/subuid").unwrap_or_default();
+    for line in text.lines() {
+        let mut fields = line.trim().split(':');
+        let (Some(who), Some(start)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if start.parse::<u32>().ok() != Some(uid) {
+            continue;
+        }
+        let owner = who
+            .parse::<u32>()
+            .ok()
+            .or_else(|| crate::egress::user_id(who))
+            .ok_or_else(|| format!("the owner of the range at {uid} has no account"))?;
+        return user_of(owner);
+    }
+    Err(format!(
+        "uid {uid} has no account and starts no subordinate range"
+    ))
+}
+
+fn ns_ioctl(fd: RawFd, request: libc::c_ulong, arg: *mut libc::c_void) -> libc::c_int {
+    // SAFETY: the requests used here take either nothing or a pointer to a
+    // uid_t the caller owns.
+    unsafe { libc::ioctl(fd, request as _, arg) }
+}
+
+/// The uid owning a user namespace.
+fn ns_owner_uid(userns: &OwnedFd) -> Result<u32, String> {
+    let mut uid: libc::uid_t = 0;
+    if ns_ioctl(userns.as_raw_fd(), NS_GET_OWNER_UID, (&raw mut uid).cast()) != 0 {
+        return Err(format!(
+            "not a user namespace: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(uid)
+}
+
+/// Whether two descriptors are the same namespace.
+fn same_ns(a: &OwnedFd, b: &OwnedFd) -> bool {
+    matches!((ns_id(a), ns_id(b)), (Some(x), Some(y)) if x == y)
+}
+
+fn send_on(sock: RawFd, answer: &[u8]) {
+    // SAFETY: a valid descriptor and a buffer of the length given.
+    unsafe {
+        libc::send(
+            sock,
+            answer.as_ptr().cast(),
+            answer.len(),
+            libc::MSG_NOSIGNAL,
+        )
+    };
+}
+
+/// `(st_dev, st_ino)` of a descriptor: a namespace's identity.
+fn ns_id(fd: &OwnedFd) -> Option<(u64, u64)> {
+    // SAFETY: fstat fills the struct it is given.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    (unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } == 0).then_some((st.st_dev, st.st_ino))
+}
+
+/// pasta in the system zone's network, as the user, attached to the zone's
+/// namespaces by `/proc/<pid>/ns/*`.
+///
+/// Paths, not the descriptors the zone sent: pasta closes every descriptor it
+/// inherits before it does anything (found by the VM test). The descriptors
+/// are what was checked; so the child, once it is the user — who may open a
+/// process of their own zone's, as its owner, where root without
+/// `CAP_SYS_PTRACE` may not —, checks that the paths lead to the very same
+/// namespaces before pasta starts. And pasta, running as the user, could
+/// enter nothing but the user's own namespaces in any case.
+fn spawn_uplink_pasta(
+    sysnet: &File,
+    userns: &OwnedFd,
+    netns: &OwnedFd,
+    pid: i32,
+    user: &User,
+) -> Result<std::process::Child, String> {
+    use std::os::unix::process::CommandExt;
+    let sysnet_fd = sysnet.as_raw_fd();
+    let want = [
+        ns_id(userns).ok_or("cannot stat the zone's user namespace")?,
+        ns_id(netns).ok_or("cannot stat the zone's network namespace")?,
+    ];
+    let user_path = format!("/proc/{pid}/ns/user");
+    let net_path = format!("/proc/{pid}/ns/net");
+    let paths = [
+        CString::new(user_path.clone()).map_err(|_| "a bad path")?,
+        CString::new(net_path.clone()).map_err(|_| "a bad path")?,
+    ];
+    let (uid, gid) = (user.uid, user.gid);
+    let pasta = std::env::var_os(ENV_PASTA).unwrap_or_else(|| "pasta".into());
+    let mut cmd = Command::new(pasta);
+    cmd.arg("--userns")
+        .arg(&user_path)
+        .arg("--netns")
+        .arg(&net_path)
+        .args(["--config-net", "-q", "-I", zone::TUN_IFACE, "-f", "-4"])
+        // pasta would watch the namespace's /proc directory to quit with it,
+        // and that directory is the zone's uid 0's, not the user's: EACCES.
+        // Its life is this service's to end anyway, on the zone letting go.
+        .arg("--no-netns-quit")
+        .args([
+            "-a",
+            zone::HOSTIF_GUEST4,
+            "-n",
+            zone::HOSTIF_PREFIX4,
+            "-g",
+            zone::HOSTIF_GATEWAY4,
+        ])
+        .args(zone::PASTA_CLOSED)
+        .stdin(std::process::Stdio::null());
+    // SAFETY: only async-signal-safe syscalls between fork and exec.
+    unsafe {
+        cmd.pre_exec(move || {
+            // Into the system zone's network while still root…
+            if libc::setns(sysnet_fd, libc::CLONE_NEWNET) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // …then the user and nothing more: no group of root's, and no way
+            // back up — pasta's own sockets are made here, in the system zone.
+            if libc::setgroups(0, std::ptr::null()) != 0
+                || libc::setresgid(gid, gid, gid) != 0
+                || libc::setresuid(uid, uid, uid) != 0
+                || libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // As the user now: the paths are the namespaces that were checked.
+            for (path, (dev, ino)) in paths.iter().zip(want) {
+                let mut st: libc::stat = std::mem::zeroed();
+                if libc::stat(path.as_ptr(), &mut st) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if st.st_dev != dev || st.st_ino != ino {
+                    return Err(io::Error::from_raw_os_error(libc::ESTALE));
+                }
+            }
+            Ok(())
+        });
+    }
+    cmd.spawn().map_err(|e| format!("cannot start pasta: {e}"))
+}
+
+/// A user zone's way out through the system zone `zone` (§7b).
+fn serve_uplink(
+    sock: RawFd,
+    uid: u32,
+    zone: &str,
+    pid: i32,
+    mut fds: Vec<OwnedFd>,
+) -> Result<Vec<u8>, String> {
+    let user = acting_user(uid)?;
+    if user.uid == 0 {
+        return Err("root's services go into a system zone directly".to_owned());
+    }
+    if !allowed_users(zone).contains(&user.name) {
+        return Err(format!("{} may not use the system zone {zone}", user.name));
+    }
+    if fds.len() != 2 {
+        return Err("an uplink comes with the zone's two namespaces".to_owned());
+    }
+    let netns = fds.pop().expect("two");
+    let userns = fds.pop().expect("two");
+    // The zone's namespaces are the user's own: the network one belongs to
+    // the user namespace, and that one to the user. The host's network and a
+    // system zone's belong to the host's user namespace, owned by root, so
+    // neither can be passed off as a zone.
+    if ns_owner_uid(&userns)? != user.uid {
+        return Err(format!("that namespace is not {}'s", user.name));
+    }
+    let owning = ns_ioctl(netns.as_raw_fd(), NS_GET_USERNS, std::ptr::null_mut());
+    if owning < 0 {
+        return Err(format!(
+            "not a network namespace: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: NS_GET_USERNS returned a new descriptor that is ours.
+    let owning = unsafe { OwnedFd::from_raw_fd(owning) };
+    if !same_ns(&owning, &userns) {
+        return Err("the network namespace is not the zone's".to_owned());
+    }
+    drop(owning);
+
+    systemctl(&["start", &format!("vpn-zone-system@{zone}.service")])
+        .map_err(|e| format!("{zone} did not come up: {e}"))?;
+    let sysnet = File::open(system::netns_path(zone))
+        .map_err(|e| format!("cannot open the zone's namespace: {e}"))?;
+    let resolvers: Vec<String> = crate::dnsfwd::nameservers(
+        &fs::read_to_string(system::resolv_path(zone)).unwrap_or_default(),
+    )
+    .iter()
+    .map(|a| a.ip().to_string())
+    .collect();
+
+    let mut pasta = spawn_uplink_pasta(&sysnet, &userns, &netns, pid, &user)?;
+    drop((sysnet, userns, netns));
+    thread::sleep(UPLINK_SETTLE);
+    if let Ok(Some(status)) = pasta.try_wait() {
+        return Err(format!("pasta could not attach ({status})"));
+    }
+    println!(
+        "sysrun: a zone of {} goes out through the system zone {zone}",
+        user.name
+    );
+    send_on(sock, &answer_done(&Done::Ok(resolvers.join(" "))));
+
+    // Until one of the two ends: pasta, or the zone letting go.
+    loop {
+        if let Ok(Some(status)) = pasta.try_wait() {
+            eprintln!(
+                "sysrun: the way out of {}'s zone through {zone} ended ({status})",
+                user.name
+            );
+            let code = status
+                .code()
+                .and_then(|c| u8::try_from(c).ok())
+                .unwrap_or(1);
+            return Ok(answer_exit(code.max(1)));
+        }
+        let mut pfd = libc::pollfd {
+            fd: sock,
+            events: libc::POLLIN | libc::POLLRDHUP,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        if unsafe { libc::poll(&mut pfd, 1, 1000) } > 0 && pfd.revents != 0 {
+            let _ = pasta.kill();
+            let _ = pasta.wait();
+            return Ok(answer_exit(0));
+        }
+    }
 }
 
 fn systemctl(args: &[&str]) -> Result<(), String> {
@@ -790,6 +1184,35 @@ fn systemctl(args: &[&str]) -> Result<(), String> {
 
 fn private_key(cfg: &crate::config::WgConfig) -> Option<String> {
     cfg.interface()?.get("PrivateKey").map(str::to_owned)
+}
+
+/// The system zone whose config holds this private key, and its users — other
+/// than `except`, the zone being (re)added.
+fn key_owner(key: &str, except: Option<&str>) -> Option<(String, Vec<String>)> {
+    system::all_zones().into_iter().find_map(|other| {
+        let s = system::settings(&other).filter(|s| !s.plain && Some(other.as_str()) != except)?;
+        let held = fs::read(&s.config)
+            .ok()
+            .and_then(|raw| crate::config::WgConfig::parse(&raw).ok())
+            .and_then(|o| private_key(&o))?;
+        (held == key).then_some((other, s.users))
+    })
+}
+
+/// Which system zone a VPN already is, for `vpn-zone add`: a user zone on the
+/// same key would be a second tunnel, and two tunnels on one key knock each
+/// other off. `SAME <zone>` for a zone the asker may use — the user zone then
+/// goes out through it (§7b) —, a refusal for one they may not.
+fn serve_key(uid: u32, key: &str) -> Result<Done, String> {
+    let user = user_of(uid)?;
+    match key_owner(key, None) {
+        Some((zone, users)) if users.contains(&user.name) => Ok(Done::Same(zone)),
+        Some((zone, _)) => Err(format!(
+            "this VPN is already the system zone {zone}, which is not {}'s",
+            user.name
+        )),
+        None => Ok(Done::Ok(String::new())),
+    }
 }
 
 /// Add a VPN as a system zone — or say which zone it already is. One config
@@ -829,23 +1252,14 @@ fn serve_add(uid: u32, request: &AddRequest) -> Result<Done, String> {
             return Err(why.to_owned());
         }
         let key = private_key(&cfg).ok_or("the config has no PrivateKey")?;
-        for other in system::all_zones() {
-            let Some(s) = system::settings(&other).filter(|s| !s.plain && other != zone) else {
-                continue;
-            };
-            let held = fs::read(&s.config)
-                .ok()
-                .and_then(|raw| crate::config::WgConfig::parse(&raw).ok())
-                .and_then(|o| private_key(&o));
-            if held.as_deref() == Some(key.as_str()) {
-                if s.users.contains(&user.name) {
-                    return Ok(Done::Same(other));
-                }
-                return Err(format!(
-                    "this VPN is already the system zone {other}, which is not {}'s",
-                    user.name
-                ));
+        if let Some((other, users)) = key_owner(&key, Some(zone)) {
+            if users.contains(&user.name) {
+                return Ok(Done::Same(other));
             }
+            return Err(format!(
+                "this VPN is already the system zone {other}, which is not {}'s",
+                user.name
+            ));
         }
     }
 
@@ -1173,6 +1587,11 @@ fn groups_of(name: &CString, gid: u32) -> Result<Vec<u32>, String> {
 
 /// Who is on the other end, by the kernel's word.
 fn peer_uid(sock: RawFd) -> Result<u32, String> {
+    peer_cred(sock).map(|(uid, _)| uid)
+}
+
+/// The asker's uid and pid, from the kernel.
+fn peer_cred(sock: RawFd) -> Result<(u32, i32), String> {
     let mut cred = libc::ucred {
         pid: 0,
         uid: 0,
@@ -1192,7 +1611,7 @@ fn peer_uid(sock: RawFd) -> Result<u32, String> {
     if rc != 0 || cred.pid <= 0 {
         return Err("cannot tell who is asking".to_owned());
     }
-    Ok(cred.uid)
+    Ok((cred.uid, cred.pid))
 }
 
 fn connect(path: &str) -> io::Result<OwnedFd> {
