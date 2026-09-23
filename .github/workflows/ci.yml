@@ -161,20 +161,16 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           test -c /dev/kvm
-      # Стор машины в этом тесте — образ диска (9p не умеет idmap, а контейнеру
-      # с privateUsers = "pick" он нужен), и драйвер собирает этот образ на
-      # раннере прямо перед запуском. На голом ubuntu-раннере под него не
-      # хватило места («erofs: No space left on device») — убираем то, что
-      # тесту не нужно, около 20 ГБ.
-      - name: Освободить место на раннере
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
       - uses: cachix/install-nix-action@v31
       - name: Собрать драйвер VM-теста
         run: nix-build tests/vm-system.nix -A driver -o vm-system-driver
+      # Стор машины в этом тесте — образ диска (9p не умеет idmap, а контейнеру
+      # с privateUsers = "pick" он нужен), и драйвер собирает образ в своём
+      # временном каталоге. Этот каталог он берёт из XDG_RUNTIME_DIR раньше,
+      # чем из TMPDIR, а на раннере это маленький tmpfs /run/user/<uid> —
+      # «erofs: No space left on device». Без переменной — /tmp на диске.
       - name: Прогнать VM-тест
-        run: ./vm-system-driver/bin/nixos-test-driver
+        run: env -u XDG_RUNTIME_DIR ./vm-system-driver/bin/nixos-test-driver
 
   # Смоук: поднять настоящую зону в непривилегированном userns и проверить её
   # изнутри. Требует fallback на ядерный wireguard (amneziawg-модуля на
