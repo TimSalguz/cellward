@@ -208,6 +208,48 @@ pub fn networks(tools: &Tools) -> String {
     array(items)
 }
 
+/// One system zone (`docs/SYSTEM.md` §7): the same counters as a network,
+/// `null` where the reader may not look — the run directory is the group
+/// `vpn-zones`'s.
+pub fn system_network(name: &str, state: &crate::system::RunState) -> String {
+    use crate::system::RunState;
+    let (readable, up, mirror) = match state {
+        RunState::Closed => (false, "null", None),
+        RunState::Down => (true, "false", None),
+        RunState::Up(mirror) => (true, "true", mirror.as_deref()),
+    };
+    let alive = mirror.map_or("null".to_owned(), |m| {
+        liveness_line(m).is_some().to_string()
+    });
+    let counters = match mirror.map(crate::watch::parse_mirror) {
+        Some(r) => format!(
+            "\"handshake_age_s\":{},\"rx_bytes\":{},\"tx_bytes\":{}",
+            r.handshake_age_s
+                .map_or("null".to_owned(), |a| a.to_string()),
+            r.rx_bytes,
+            r.tx_bytes
+        ),
+        None => "\"handshake_age_s\":null,\"rx_bytes\":null,\"tx_bytes\":null".to_owned(),
+    };
+    format!(
+        "{{\"name\":{},\"netns\":{},\"kind\":\"wireguard\",\"source\":\"nix\",\"up\":{up},\"tunnel_alive\":{alive},{counters},\"readable\":{readable}}}",
+        string(name),
+        string(&crate::system::netns_path(name).to_string_lossy())
+    )
+}
+
+/// The declared system zones — a separate array and not entries of
+/// `networks`: a tool that did not know the difference would offer a system
+/// zone to a program container, which cannot use one.
+pub fn system_networks() -> String {
+    array(
+        crate::system::declared()
+            .iter()
+            .map(|name| system_network(name, &crate::system::run_state(name)))
+            .collect(),
+    )
+}
+
 /// The live launches of a container: `{app, pid, network}`.
 fn running(tools: &Tools, c: &Container) -> String {
     let base = tools.state.join(".running");
@@ -501,11 +543,12 @@ pub fn document(tools: &Tools) -> String {
         format!("{{\"uid\":{uid},\"gid\":{gid}}}")
     });
     format!(
-        "{{\"schema_version\":{SCHEMA_VERSION},\"defaults\":{},\"networks\":{},\"containers\":{},\"apps\":{},\"uplink_owner\":{uplink_owner}}}",
+        "{{\"schema_version\":{SCHEMA_VERSION},\"defaults\":{},\"networks\":{},\"containers\":{},\"apps\":{},\"system_networks\":{},\"uplink_owner\":{uplink_owner}}}",
         defaults(tools),
         networks(tools),
         containers(tools),
-        apps(tools)
+        apps(tools),
+        system_networks()
     )
 }
 
@@ -534,5 +577,42 @@ mod tests {
         );
         assert_eq!(array(vec![]), "[]");
         assert_eq!(array(vec!["1".into(), "2".into()]), "[1,2]");
+    }
+
+    #[test]
+    fn a_system_zone_says_only_what_its_reader_may_know() {
+        use crate::system::RunState;
+
+        let closed = system_network("nl", &RunState::Closed);
+        for part in [
+            "\"name\":\"nl\"",
+            "\"netns\":\"/run/netns/vz-nl\"",
+            "\"source\":\"nix\"",
+            "\"up\":null",
+            "\"tunnel_alive\":null",
+            "\"rx_bytes\":null",
+            "\"readable\":false",
+        ] {
+            assert!(closed.contains(part), "{part} in {closed}");
+        }
+
+        let down = system_network("nl", &RunState::Down);
+        assert!(down.contains("\"up\":false"), "{down}");
+        assert!(down.contains("\"readable\":true"), "{down}");
+        assert!(down.contains("\"tunnel_alive\":null"), "{down}");
+
+        let mirror = "interface: awg0\n\npeer: abc=\n  endpoint: 192.0.2.1:51820\n  \
+                      latest handshake: 12 seconds ago\n  \
+                      transfer: 1.00 KiB received, 2.00 KiB sent\n";
+        let up = system_network("nl", &RunState::Up(Some(mirror.to_owned())));
+        assert!(up.contains("\"up\":true"), "{up}");
+        assert!(up.contains("\"tunnel_alive\":true"), "{up}");
+        assert!(up.contains("\"handshake_age_s\":12"), "{up}");
+        assert!(up.contains("\"rx_bytes\":1024"), "{up}");
+
+        // Up, before the holder has written its first mirror.
+        let early = system_network("nl", &RunState::Up(None));
+        assert!(early.contains("\"up\":true"), "{early}");
+        assert!(early.contains("\"tunnel_alive\":null"), "{early}");
     }
 }

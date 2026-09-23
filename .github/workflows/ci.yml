@@ -145,6 +145,28 @@ jobs:
       - name: Прогнать VM-тест
         run: ./vm-driver/bin/nixos-test-driver
 
+  # VM-тест системного уровня (tests/vm-system.nix, ROADMAP M10): зона, которую
+  # держит systemd, служба и NixOS-контейнер в ней; DNS хоста (resolved + nscd)
+  # отвечает иначе, чем DNS туннеля, и tcpdump на eth1 обязан остаться пустым.
+  vm-system:
+    name: vm-system (NixOS test, system zones)
+    runs-on: ubuntu-24.04
+    needs: eval
+    steps:
+      - uses: actions/checkout@v4
+      - name: Включить KVM для раннера
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -c /dev/kvm
+      - uses: cachix/install-nix-action@v31
+      - name: Собрать драйвер VM-теста
+        run: nix-build tests/vm-system.nix -A driver -o vm-system-driver
+      - name: Прогнать VM-тест
+        run: ./vm-system-driver/bin/nixos-test-driver
+
   # Смоук: поднять настоящую зону в непривилегированном userns и проверить её
   # изнутри. Требует fallback на ядерный wireguard (amneziawg-модуля на
   # раннере нет) — см. tests/integration/smoke.sh.

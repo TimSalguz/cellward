@@ -145,40 +145,10 @@ let
   # (шесть ярлыков одной подкомандой каждый). ДВА ПЕРВЫХ ИМЕНЕМ СТАЛКИВАЮТСЯ с
   # обёртками из home.packages, поэтому крейт целиком туда не кладётся — в
   # профиль уходит symlink-набор vpn-zone-helpers (см. часть 3).
-  vpn-zone-rust = pkgs.rustPlatform.buildRustPackage {
-    pname = "vpn-zone-rust";
-    version = "0.1.0";
-    # Крейт — сосед модуля в репозитории, а не его часть: ../rust от
-    # module/default.nix. В store кладём только исходники: попади туда ещё и
-    # target/ (появляется, стоит один раз запустить cargo руками), каждая
-    # пересборка тащила бы в store гигабайты и меняла хеш деривации.
-    src = lib.fileset.toSource {
-      root = ../rust;
-      fileset = lib.fileset.unions [
-        ../rust/Cargo.toml
-        ../rust/Cargo.lock
-        ../rust/src
-        ../rust/tests
-      ];
-    };
-    cargoLock.lockFile = ../rust/Cargo.lock;
-    # libseccomp-sys линкуется с системной libseccomp, а её версию ищет
-    # pkg-config (build.rs крейта libseccomp).
-    #
-    # А вот libwayland здесь НЕТ, и это осознанный выбор: у wayland-backend
-    # фича client_system по умолчанию выключена, то есть wayland-client говорит
-    # по проводному протоколу сам, на Rust. Ни линковки, ни dlopen — значит
-    # нечему разъехаться с версией композитора и нечего добавлять в buildInputs.
-    # Включит кто-нибудь client_system в rust/Cargo.toml — сюда придётся
-    # дописать pkgs.wayland.
-    nativeBuildInputs = [ pkgs.pkg-config ];
-    buildInputs = [ pkgs.libseccomp ];
-    # Тесты гоняет CI (job rust). Здесь они выключены сознательно: selftest
-    # грузит seccomp-фильтр в собственный процесс, а что разрешает песочница
-    # сборки nix — зависит от демона; ломать этим пересборку системы нельзя.
-    doCheck = false;
-    meta.mainProgram = "vpn-zone-seccomp";
-  };
+  # Сама деривация — в ../package.nix: её же собирает NixOS-модуль системного
+  # уровня (module/nixos.nix, M10), и два одинаковых текста однажды разошлись
+  # бы. Исходники и флаги прежние, поэтому и store-путь прежний.
+  vpn-zone-rust = pkgs.callPackage ../package.nix { };
 
   # --- ЧАСТЬ 0б: ПЕСОЧНИЦА ФАЙЛОВОЙ СИСТЕМЫ — В RUST ---
   # Здесь был writeShellScriptBin vpn-fs-sandbox на две сотни строк. Он целиком

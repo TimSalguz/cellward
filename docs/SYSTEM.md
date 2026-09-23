@@ -52,8 +52,9 @@ Members of the group `vpn-zones` can read the status; that is what makes
   namespace must survive switches, because every consumer bound to it would otherwise be cut
   off or restarted by every update of this package. `ExecStop` = `ns-down`.
 - `vpn-zone-system-<name>.service` — `vpn-zone-core system-zone up <name>`, the holder.
-  `BindsTo=` and `After=` the namespace unit, `After=network-online.target`. Sets the zone
-  up (§4), then mirrors the status until stopped. `ExecStopPost` = `down`: the tunnel
+  `Type=notify`, `BindsTo=` and `After=` the namespace unit, `After=network-online.target`.
+  Sets the zone up (§4), says `READY=1` — so whatever is ordered after it starts with the
+  tunnel and the zone's resolv.conf in place — then mirrors the status until stopped. `ExecStopPost` = `down`: the tunnel
   interface is deleted, the namespace stays with `lo` alone. `Restart=on-failure` after
   10 s: at boot the endpoint may not resolve yet.
 
@@ -79,8 +80,8 @@ good.
    an unreachable default (`v6_plan`, shared with user zones).
 8. resolv.conf from `DNS =` (or the public resolvers through the tunnel, as a user zone
    does), written in place.
-9. `ready`; after 4 s the handshake is looked at and said in the journal; the status mirror
-   runs until the unit stops.
+9. `ready` and `READY=1` to systemd; after 4 s the handshake is looked at and said in the
+   journal; the status mirror runs until the unit stops.
 
 ## 5. Services in a system zone (stage 2)
 
@@ -161,9 +162,11 @@ closed to them, so `up`, `tunnel_alive` and the counters are `null`.
 
 ## 9. Tests
 
-- **Rust:** the name check; the argument parser; the plan of `up` as data (which commands,
-  in which order, for v4, v4+v6, obfuscated and plain configs); refusing OpenConnect and
-  host-interface; the `system_networks` document with and without read access.
+- **Rust** (`system.rs`, `status.rs`): the name check; the paths; the argument parser;
+  refusing OpenConnect, host-interface and configs without `[Interface]`; the declared list
+  trusting no name; the `system_networks` entry for a closed, a down and an up zone. The
+  command sequence of `up` itself is covered by the VM test only — it is `ip` calls, and a
+  fake `ip` would test the fake.
 - **VM `tests/vm-system.nix`:** `machine` with the NixOS module and a zone `sz` whose config
   is written at run time; `server` a WireGuard peer with HTTP and DNS on its tunnel address;
   `machine` also serves HTTP on its LAN address, which must never be reached from the zone:
