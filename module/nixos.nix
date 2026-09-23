@@ -68,6 +68,9 @@ let
   # привязывает службы — всё в сети хоста, до следующего vpn-zones-on, в том
   # числе после перезагрузки.
   offFlag = "/var/lib/vpn-zones/off";
+  # Куда хост спрашивает имена при host.dns: не 127.0.0.53/54 (resolved).
+  hostDnsAddress = "127.0.0.60";
+  hostDnsListen = "${hostDnsAddress}:53";
   systemctl = "${config.systemd.package}/bin/systemctl";
 
   # Дополнение к юниту службы, которое кладёт генератор (см. «Службы в зоне»).
@@ -93,6 +96,7 @@ let
       + lib.optionalString (!s.systemBus) ''
         InaccessiblePaths=-/run/dbus/system_bus_socket
       ''
+      + (s.extra or "")
     );
 
   # Службы в зонах: названные человеком и службы самого хоста (host.*).
@@ -105,6 +109,20 @@ let
         # Не ждать выхода зоны: пространство уже есть, сеть в нём появится
         # вместе с туннелем, а локальная сборка VPN не ждёт никогда.
         afterHolder = false;
+      };
+    }
+    // lib.optionalAttrs (cfg.host.dns != null) {
+      # В зоне — спрашивать резолверы зоны (её resolv.conf привязан поверх
+      # /etc/resolv.conf выше); без привязки (выключено) остаётся ExecStart
+      # юнита — адреса напрямую из сети хоста.
+      vpn-zones-dns = {
+        zone = cfg.host.dns;
+        systemBus = false;
+        afterHolder = false;
+        extra = ''
+          ExecStart=
+          ExecStart=${core} dns-forward --resolv /etc/resolv.conf
+        '';
       };
     }
     // lib.optionalAttrs (cfg.host.time != null) {
@@ -169,6 +187,16 @@ let
           path on purpose: a path would be copied into the world-readable Nix
           store together with the private key. Point it at a decrypted secret
           and list the holder in that secret's `restartUnits`.
+        '';
+      };
+      dns = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "192.168.1.1" ];
+        description = ''
+          The zone's own resolvers, asked through its way out: instead of the
+          config's `DNS =`, or for a plain zone instead of the public ones
+          (1.1.1.1, 9.9.9.9) — the router, say. Addresses only.
         '';
       };
       autoStart = lib.mkOption {
@@ -417,6 +445,23 @@ in
           is enough), so local builds never wait for a VPN.
         '';
       };
+      dns = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "direct0";
+        description = ''
+          The system zone the host's own names are asked through
+          (docs/SYSTEM.md §9c). A forwarder listens on 127.0.0.60:53 in the
+          host's network and asks the zone's resolvers from the zone's; the
+          host's resolver — resolved, or /etc/resolv.conf without it — is
+          pointed there and nowhere else: its DNS, FallbackDNS and Domains are
+          replaced, NetworkManager's and dhcpcd's resolvers are ignored. A
+          plain zone is "directly"; a VPN zone must then have its endpoint as
+          an address, since its name would be asked through the zone itself.
+          Off (`vpn-zones-off`), the forwarder asks the zone's `dns`, or the
+          public resolvers, from the host's network.
+        '';
+      };
       time = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -474,7 +519,19 @@ in
               {
                 nix = "nix-daemon";
                 time = "systemd-timesyncd";
+                dns = "vpn-zones-dns";
               }
+          )
+          ++ lib.concatLists (
+            lib.mapAttrsToList (
+              name: z:
+              map (a: {
+                # Строже, чем проверит программа (она пропустит только адрес):
+                # опечатка должна остановить сборку, а не молча выпасть.
+                assertion = builtins.match "[0-9a-fA-F.:]+" a != null;
+                message = "services.vpn-zones.system.zones.${name}.dns: \"${a}\" is not an address.";
+              }) z.dns
+            ) cfg.zones
           )
           ++ [
             {
@@ -553,6 +610,12 @@ in
         // lib.mapAttrs' (
           name: z: lib.nameValuePair "vpn-zones/system-zones.d/${name}/kind" { text = z.kind + "\n"; }
         ) cfg.zones
+        // lib.mapAttrs' (
+          name: z:
+          lib.nameValuePair "vpn-zones/system-zones.d/${name}/dns" {
+            text = lib.concatMapStrings (a: a + "\n") z.dns;
+          }
+        ) (lib.filterAttrs (_: z: z.dns != [ ]) cfg.zones)
         // lib.mapAttrs' (
           name: z: lib.nameValuePair "vpn-zones/system-zones.d/${name}/config" { text = z.configFile + "\n"; }
         ) (lib.filterAttrs (_: z: z.configFile != null) cfg.zones);
@@ -703,6 +766,64 @@ in
           '')
         ];
       }
+
+      # --- ИМЕНА ХОСТА ЧЕРЕЗ ЗОНУ (docs/SYSTEM.md §9c) ---
+      # Сокеты открывает systemd в сети хоста, служба живёт в сети зоны:
+      # вопрос приходит с хоста, дальше его задают уже из зоны.
+      (lib.mkIf (cfg.host.dns != null) (
+        let
+          zone = cfg.zones.${cfg.host.dns} or { dns = [ ]; };
+          # Без привязки (vpn-zones выключены) — эти адреса, из сети хоста.
+          offUpstreams = if zone.dns != [ ] then zone.dns else [ "1.1.1.1" "9.9.9.9" ];
+        in
+        {
+          systemd.sockets.vpn-zones-dns = {
+            description = "vpn-zones: the host's DNS, asked through the zone ${cfg.host.dns}";
+            wantedBy = [ "sockets.target" ];
+            listenDatagrams = [ hostDnsListen ];
+            listenStreams = [ hostDnsListen ];
+          };
+          systemd.services.vpn-zones-dns = {
+            description = "vpn-zones: the host's DNS through a zone";
+            serviceConfig = {
+              ExecStart = "${core} dns-forward" + lib.concatMapStrings (a: " --upstream ${a}") offUpstreams;
+              DynamicUser = true;
+              NoNewPrivileges = true;
+              CapabilityBoundingSet = "";
+              ProtectSystem = "strict";
+              ProtectHome = true;
+              PrivateTmp = true;
+              PrivateDevices = true;
+              RestrictAddressFamilies = [
+                "AF_INET"
+                "AF_INET6"
+                "AF_UNIX"
+              ];
+              SystemCallArchitectures = "native";
+              MemoryDenyWriteExecute = true;
+            };
+          };
+
+          # Резолвер хоста — только сюда. DNS/FallbackDNS/Domains заменяются
+          # целиком (mkForce): слитый список отправил бы часть вопросов мимо
+          # зоны. NM и dhcpcd не сообщают резолверы DHCP ни resolved, ни
+          # resolv.conf — иначе вопросы пошли бы роутеру напрямую.
+          services.resolved.settings.Resolve = lib.mkIf config.services.resolved.enable {
+            DNS = lib.mkForce [ hostDnsAddress ];
+            FallbackDNS = lib.mkForce [ ];
+            Domains = lib.mkForce [ "~." ];
+          };
+          networking.nameservers = lib.mkIf (!config.services.resolved.enable) (
+            lib.mkForce [ hostDnsAddress ]
+          );
+          networking.networkmanager.dns = lib.mkIf config.networking.networkmanager.enable (
+            lib.mkForce "none"
+          );
+          networking.dhcpcd.extraConfig = "nohook resolv.conf";
+
+          warnings = lib.optional ((cfg.zones.${cfg.host.dns}.kind or "plain") != "plain") "services.vpn-zones.system.host.dns = \"${cfg.host.dns}\" is a VPN zone: the host's names go through it, and so would the name of its own endpoint — give the endpoint as an address, or the zone never comes up.";
+        }
+      ))
 
       # --- ВЫКЛЮЧАТЕЛЬ (docs/SYSTEM.md §9a) ---
       # vpn-zones целиком выключаются и включаются без пересборки и без

@@ -441,6 +441,7 @@ fn up(args: &Args) -> Result<(), String> {
     // The flags win (running a verb by hand); the unit passes none, and the
     // zone's own settings say what it is.
     let found = settings(&args.name);
+    let own_dns = found.as_ref().map(|s| s.dns.clone()).unwrap_or_default();
     let plain = args.plain.clone().or_else(|| {
         found
             .as_ref()
@@ -521,7 +522,12 @@ fn up(args: &Args) -> Result<(), String> {
         let _ = ip_in(tools, name, &["link", "del", TUN], true);
         return Err(e);
     }
-    write_resolv(name, &cfg)?;
+    if own_dns.is_empty() {
+        write_resolv(name, &cfg)?;
+    } else {
+        println!("system zone {name}: its own resolvers, not the config's DNS=");
+        write_resolv_text(name, &zone::resolv_conf(&own_dns).0, false)?;
+    }
 
     write_group_readable(&run.join(READY), b"")
         .map_err(|e| format!("cannot write {READY}: {e}"))?;
@@ -588,8 +594,9 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
         let _ = pasta.wait();
         return Err("pasta gave the zone no interface".to_owned());
     }
-    let (text, _) = zone::resolv_conf(&[]);
-    write_resolv_text(name, &text, true)?;
+    let own_dns = settings(name).map(|s| s.dns).unwrap_or_default();
+    let (text, defaulted) = zone::resolv_conf(&own_dns);
+    write_resolv_text(name, &text, defaulted)?;
     write_group_readable(&run.join(READY), b"")
         .map_err(|e| format!("cannot write {READY}: {e}"))?;
     println!(
@@ -734,6 +741,9 @@ pub struct Settings {
     pub config: PathBuf,
     pub users: Vec<String>,
     pub system_bus: bool,
+    /// The zone's own resolvers, instead of the config's `DNS =` (or, for a
+    /// plain zone, the public ones): `zones.<name>.dns` in the module.
+    pub dns: Vec<String>,
 }
 
 pub fn declared_dir(name: &str) -> PathBuf {
@@ -774,7 +784,20 @@ pub fn settings(name: &str) -> Option<Settings> {
             .map(|t| crate::sysrun::parse_users(&t))
             .unwrap_or_default(),
         system_bus: dir.join("system-bus").exists(),
+        dns: fs::read_to_string(dir.join("dns"))
+            .map(|t| parse_dns(&t))
+            .unwrap_or_default(),
     })
+}
+
+/// The addresses of a zone's `dns` file, one per line. Anything that is not
+/// an address is left out: the lines end up in a resolv.conf, and a line of
+/// its own there would be an option, not a resolver.
+pub fn parse_dns(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|l| l.trim().parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string())
+        .collect()
 }
 
 /// Every system zone: the declared ones and the ones made on the spot.
@@ -1077,6 +1100,17 @@ mod tests {
 
     fn os(words: &[&str]) -> Vec<OsString> {
         words.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn a_zones_own_resolvers_are_addresses_only() {
+        assert_eq!(
+            parse_dns(
+                "192.168.1.1\n  2606:4700::1111 \n\noptions ndots:9\nnameserver 1.1.1.1\nx\n"
+            ),
+            ["192.168.1.1", "2606:4700::1111"]
+        );
+        assert!(parse_dns("").is_empty());
     }
 
     #[test]

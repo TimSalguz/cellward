@@ -6,6 +6,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added (system tier)
+- The host's names through a zone: `host.dns = "<zone>"`. A forwarder
+  (`vpn-zone-core dns-forward`) gets UDP and TCP sockets on 127.0.0.60:53
+  from systemd in the host's network and asks from the zone's; resolved (or
+  /etc/resolv.conf) points there alone, DHCP's resolvers are ignored. Off, it
+  asks the same addresses from the host. `zones.<z>.dns`: a zone's own
+  resolvers. `docs/SYSTEM.md` §9c.
+
+### Added (system tier)
 - `egress.mode = "strict"`: the host itself loses the internet too — root
   and the system's users keep the local network (`egress.localNetworks`,
   checked when the system is built) and DHCP. `host.nix` and `host.time` put
