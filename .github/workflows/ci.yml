@@ -216,6 +216,27 @@ jobs:
       - name: Прогнать VM-тест
         run: env -u XDG_RUNTIME_DIR ./vm-bridge-driver/bin/nixos-test-driver
 
+  # VM-тест выхода через заданный интерфейс (tests/vm-uplink.nix): две сети,
+  # зона через eth2, зона через «не тот» интерфейс остаётся закрытой.
+  vm-uplink:
+    name: vm-uplink (NixOS test, a zone through one interface)
+    runs-on: ubuntu-24.04
+    needs: eval
+    steps:
+      - uses: actions/checkout@v4
+      - name: Включить KVM для раннера
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -c /dev/kvm
+      - uses: cachix/install-nix-action@v31
+      - name: Собрать драйвер VM-теста
+        run: nix-build tests/vm-uplink.nix -A driver -o vm-uplink-driver
+      - name: Прогнать VM-тест
+        run: env -u XDG_RUNTIME_DIR ./vm-uplink-driver/bin/nixos-test-driver
+
   # Смоук: поднять настоящую зону в непривилегированном userns и проверить её
   # изнутри. Требует fallback на ядерный wireguard (amneziawg-модуля на
   # раннере нет) — см. tests/integration/smoke.sh.

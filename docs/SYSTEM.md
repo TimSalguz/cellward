@@ -128,6 +128,35 @@ good.
 9. `ready` and `READY=1` to systemd; after 4 s the handshake is looked at and said in the
    journal; the status mirror runs until the unit stops.
 
+## 4a. Through one interface of the host
+
+`services.vpn-zones.system.zones.<zone>.uplink = "enp4s0";` — two providers, a modem next to
+the wired network: each zone goes out by the interface it is given, and by nothing else.
+
+- **A tunnel zone gets an uplink of its own.** Without `uplink` the host's namespace is the
+  uplink: the tunnel is created there and its encrypted socket leaves by the host's routes.
+  With it, `vzu-<zone>` is made first, with pasta in front of it — as the plain zones'
+  user with the two namespace capabilities, like a plain zone's pasta — bound to the
+  interface (`--outbound-if4/-if6`, i.e. `SO_BINDTODEVICE`), with addresses of its own (a
+  second interface often has no default route; the sockets are bound to it anyway). The
+  tunnel is born in `vzu-<zone>`, so its socket stays there, behind pasta, and moves on into
+  the zone as `awg0` as before. This is a user zone's shape, held by root.
+- **The uplink's filter** is a user zone's: the tunnel's packets to the endpoints, and
+  nothing else (`zone::uplink_ruleset`). The endpoints are resolved in the host's network
+  first, as always.
+- **Out by it or not at all.** The interface down, gone, or without a route to the endpoint:
+  no handshake, the zone has lo and a silent `awg0` — never another route (the VM test gives
+  a zone the wrong interface on purpose and checks the server never hears from it). pasta
+  dying fails the unit, which is started again (`Restart=on-failure`); the unit stopping
+  takes pasta and `vzu-<zone>` away, and with them the tunnel's socket.
+- **A plain zone** with `uplink` has its own pasta bound to the interface in the same way.
+- **IPv6** by the interface when it has a global address and a default route through it
+  (`hostif::ipv6_usable`), otherwise none (`-4`), exactly as for a host-interface user zone.
+- **The egress policy** sees pasta's sockets, owned by `vpn-zones-plain`: let out in
+  `enforce` (a system user) and in `strict` (named in the allowances). The tunnel's mark
+  (§9) plays no part here.
+- `status --json` says it: `system_networks[].uplink`, the interface or `null`.
+
 ## 5. Services in a system zone (stage 2)
 
 `services.vpn-zones.system.services.<unit> = "<zone>";` attaches the unit to the zone. The
@@ -630,6 +659,13 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
   anew (told by a sysctl marker) and the user zone reaching the tunnel again with one pasta
   of alice's in the new namespace; vpn-zones off, nothing reachable, on, reachable; the zone
   down, nothing of alice's left in the system zone.
+- **VM `tests/vm-uplink.nix`:** zones through one interface (§4a), two networks under the
+  strict policy: a tunnel zone through eth2 whose server sees it come from the machine's
+  second address, `lo` and `awg0` in it, its uplink's pasta run by `vpn-zones-plain` and the
+  uplink letting nothing out but the tunnel; a tunnel zone through eth1 with its endpoint on
+  the second network: closed, no handshake ever, not rerouted; a plain zone through eth2
+  reaching the second network and not the first; the uplink namespace and its pasta gone
+  with the zone and back with it.
 - **VM `tests/vm-host.nix`:** the strict policy. `server` has a LAN address and one outside
   every private range (198.51.100.1) that stands for the internet, with a TCP responder, an
   HTTP file and an NTP server (chrony) there; `machine` runs `strict` with a plain zone `pl`

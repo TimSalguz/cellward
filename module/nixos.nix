@@ -189,6 +189,20 @@ let
           and list the holder in that secret's `restartUnits`.
         '';
       };
+      uplink = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "enp4s0";
+        description = ''
+          The one interface of the host the zone goes out through — for two
+          providers, say (docs/SYSTEM.md §4a). A tunnel zone then gets an
+          uplink namespace of its own, `vzu-<name>`, behind pasta bound to the
+          interface, and its tunnel is born there; a plain zone's pasta is
+          bound to it. Out by that interface or not at all: down or gone, the
+          zone has no way out, never another route. `null`: wherever the
+          host routes.
+        '';
+      };
       dns = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [ ];
@@ -533,6 +547,12 @@ in
               }) z.dns
             ) cfg.zones
           )
+          ++ lib.mapAttrsToList (name: z: {
+            # Как проверит программа (`hostif::valid_interface_name`): имя
+            # интерфейса Linux, 1–15 байт, без `/`, `:` и пробелов.
+            assertion = z.uplink == null || builtins.match "[^/: \t\n]{1,15}" z.uplink != null;
+            message = "services.vpn-zones.system.zones.${name}.uplink: \"${toString z.uplink}\" is not an interface name.";
+          }) cfg.zones
           ++ [
             {
               assertion = cfg.host.time == null || config.services.timesyncd.enable;
@@ -610,6 +630,9 @@ in
         // lib.mapAttrs' (
           name: z: lib.nameValuePair "vpn-zones/system-zones.d/${name}/kind" { text = z.kind + "\n"; }
         ) cfg.zones
+        // lib.mapAttrs' (
+          name: z: lib.nameValuePair "vpn-zones/system-zones.d/${name}/uplink" { text = z.uplink + "\n"; }
+        ) (lib.filterAttrs (_: z: z.uplink != null) cfg.zones)
         // lib.mapAttrs' (
           name: z:
           lib.nameValuePair "vpn-zones/system-zones.d/${name}/dns" {
