@@ -144,7 +144,7 @@ gatekeeper's exceptions are **packages in the store, not names**: anybody can pu
 | System zones | done (M10, stage 1) |
 | Services and NixOS containers in system zones | done (M10, stages 2–3) |
 | Broker: a user's program in a system zone | console programs done (`vpn-zone-sys`), graphical ones M10 stage 4 |
-| The host without a network by default | M10, stage 5 (today only a journal in the config tool) |
+| The host without a network by default | done (M10 stage 5: `egress`, `audit` first); the host's resolver next |
 | A terminal in a container, the shell hook | M10, stage 6 |
 | The gatekeeper for launches from scripts (fanotify) | M10, stage 7, after measurements |
 | Camera and microphone asked at run time | M8, tail |

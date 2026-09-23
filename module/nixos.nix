@@ -176,6 +176,49 @@ in
       '';
     };
 
+    egress = {
+      enable = lib.mkEnableOption ''
+        the host egress policy (docs/SYSTEM.md §9): a user's program outside
+        every zone does not reach the network. Root, system users, the uplinks
+        of user zones, system zones and everything inside a zone are not
+        affected'';
+      mode = lib.mkOption {
+        type = lib.types.enum [
+          "audit"
+          "enforce"
+        ];
+        default = "audit";
+        description = ''
+          `audit` logs what would be refused and lets it through — watch the
+          kernel log for `vpn-zones-egress:` before switching; `enforce`
+          refuses it.
+        '';
+      };
+      allowUsers = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "alice" ];
+        description = "Users whose own programs still go out directly — for moving over one person at a time.";
+      };
+      allowGroups = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "nixbld" ];
+        description = "Groups whose programs go out directly. `nixbld`: builds that fetch.";
+      };
+      emergency = {
+        minutes = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 15;
+          description = "How long `vpn-zones-egress-open.service` lifts the policy before it puts it back.";
+        };
+        group = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = "wheel";
+          description = "Members may start and stop `vpn-zones-egress-open.service` without a password; this turns polkit on. `null`: root only.";
+        };
+      };
+    };
+
     amneziawg = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -393,6 +436,74 @@ in
           '')
         ];
       })
+
+      # --- ХОСТ БЕЗ СЕТИ (этап 5, docs/SYSTEM.md §9) ---
+      # Своя таблица nftables и свой юнит: откат поколения снимает политику
+      # вместе со всем остальным. Признак — владелец сокета, а не cgroup:
+      # наборы cgroup пустеют при каждой перезагрузке фаервола.
+      (lib.mkIf cfg.egress.enable (
+        let
+          e = cfg.egress;
+          nft = "${pkgs.nftables}/bin/nft";
+          apply = lib.concatStringsSep " " (
+            [ "${core} egress apply --nft ${nft}" ]
+            ++ lib.optional (e.mode == "enforce") "--enforce"
+            ++ map (u: "--user ${lib.escapeShellArg u}") e.allowUsers
+            ++ map (g: "--group ${lib.escapeShellArg g}") e.allowGroups
+          );
+          # Фаервол NixOS, стирающий ВСЕ таблицы при перезагрузке, стёр бы и
+          # нашу — тогда политика перечитывается вслед за ним.
+          flushes = config.networking.nftables.enable && config.networking.nftables.flushRuleset;
+        in
+        {
+          systemd.services.vpn-zones-egress = {
+            description = "vpn-zones: the host egress policy (${e.mode})";
+            wantedBy = [ "multi-user.target" ];
+            before = [ "network-pre.target" ];
+            wants = [ "network-pre.target" ];
+            after = [ "nftables.service" ];
+            partOf = lib.optional flushes "nftables.service";
+            unitConfig.ReloadPropagatedFrom = lib.optional flushes "nftables.service";
+            reloadIfChanged = true;
+            serviceConfig = {
+              Type = "oneshot";
+              RemainAfterExit = true;
+              ExecStart = apply;
+              ExecReload = apply;
+              ExecStop = "${core} egress remove --nft ${nft}";
+            };
+          };
+
+          # Аварийный ключ: таблица остаётся, ограничение снимается на
+          # e.emergency.minutes и возвращается само — и по истечении, и при
+          # остановке юнита.
+          systemd.services.vpn-zones-egress-open = {
+            description = "vpn-zones: the host egress policy lifted for ${toString e.emergency.minutes} minutes";
+            serviceConfig = {
+              Type = "simple";
+              ExecStartPre = "${core} egress open --nft ${nft}";
+              ExecStart = "${pkgs.coreutils}/bin/sleep ${toString (e.emergency.minutes * 60)}";
+              ExecStopPost = apply;
+            };
+          };
+
+          # Без polkit правило ниже никого не пустит, а в NixOS он выключен по
+          # умолчанию. Явный `security.polkit.enable = false` здесь даст
+          # конфликт определений — это и есть выбор: ключ группе или без polkit
+          # (emergency.group = null, ключ только у root).
+          security.polkit.enable = lib.mkIf (e.emergency.group != null) true;
+          security.polkit.extraConfig = lib.mkIf (e.emergency.group != null) ''
+            polkit.addRule(function(action, subject) {
+              if (action.id == "org.freedesktop.systemd1.manage-units" &&
+                  action.lookup("unit") == "vpn-zones-egress-open.service" &&
+                  (action.lookup("verb") == "start" || action.lookup("verb") == "stop") &&
+                  subject.isInGroup("${e.emergency.group}")) {
+                return polkit.Result.YES;
+              }
+            });
+          '';
+        }
+      ))
 
       # --- NIXOS-КОНТЕЙНЕРЫ В ЗОНЕ (этап 3) ---
       {

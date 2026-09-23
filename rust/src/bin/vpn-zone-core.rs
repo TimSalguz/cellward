@@ -11,7 +11,9 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::ExitCode;
 
-use vpn_zone::{desktop, fs_sandbox, openconnect, profile, sysrun, system, wl_sandbox, zone};
+use vpn_zone::{
+    desktop, egress, fs_sandbox, openconnect, profile, sysrun, system, wl_sandbox, zone,
+};
 
 const USAGE: &str = "\
 vpn-zone-core — helper commands of vpn-zones
@@ -47,6 +49,15 @@ Usage:
   vpn-zone-core system-run-service
         The other end of `system-run`, as root: one connection on descriptor 0
         (vpn-zone-sysrun@.service, Accept=yes). Not meant to be run by hand.
+
+  vpn-zone-core egress <apply|open|remove> [--nft P] [--enforce]
+                       [--user NAME]… [--group NAME]…
+        The host egress policy (docs/SYSTEM.md §9), as root: programs of users
+        outside every zone are logged, and with --enforce refused; root, system
+        users, the uplinks of user zones (the first ids of /etc/subuid and
+        /etc/subgid) and the named users and groups go out. `open` keeps the
+        table and lifts the restriction — the emergency key; `apply` puts it
+        back.
 
   vpn-zone-core oc-script
         The vpnc-script of an [OpenConnect] zone, and nothing else's: this is
@@ -138,6 +149,13 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("vpn-zone-core system-zone: {e}");
                 eprint!("{USAGE}");
+                ExitCode::from(EXIT_USAGE)
+            }
+        },
+        Some("egress") => match egress::Args::parse(&args[1..]) {
+            Ok(parsed) => ExitCode::from(egress::run(&parsed)),
+            Err(e) => {
+                eprintln!("vpn-zone-core egress: {e}");
                 ExitCode::from(EXIT_USAGE)
             }
         },

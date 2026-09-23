@@ -58,6 +58,8 @@
 //!   held by systemd from boot, for services and NixOS containers —
 //!   `vpn-zone-core system-zone`, one of the two parts of the crate that run
 //!   as root;
+//! * [`egress`] — the host without a network of its own (M10 stage 5): an
+//!   nftables policy that lets a user's program out only through a zone;
 //! * [`sysrun`] — the other: `vpn-zone-sys`, a user's console program in a
 //!   system zone, entered by a per-launch service and run as the user
 //!   (M10 stage 4);
@@ -80,6 +82,7 @@ pub mod container;
 pub mod desktop;
 pub mod dialog;
 pub mod doctor;
+pub mod egress;
 pub mod fs_sandbox;
 pub mod grants;
 pub mod gui;

@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (system tier, ROADMAP M10 stage 5)
+- The host without a network of its own: `services.vpn-zones.system.egress`
+  (`audit` by default, `enforce`). An nftables table of its own lets out root,
+  system and dynamic users, the uplinks of user zones (the first ids of
+  `/etc/subuid`/`/etc/subgid`), system zones' tunnels (by a mark: their kernel
+  socket has no owner) and the named users and groups; a user's program
+  outside every zone is logged as `vpn-zones-egress: … UID=`, and refused under
+  `enforce`. Survives a firewall that flushes every table. An emergency key,
+  `vpn-zones-egress-open.service`, lifts it for 15 minutes; `wheel` may turn it
+  (polkit, which the module turns on). `rust/src/egress.rs`, `docs/SYSTEM.md` §9.
+
+### Changed
+- A system zone's tunnel marks its encrypted packets with `FwMark = 0x767a`,
+  replacing any `FwMark` of the config.
+
 ### Added (system tier, ROADMAP M10 stage 4)
 - `vpn-zone-sys <zone> [--] <command>`: a user's console program in a system
   zone, for the users in `services.vpn-zones.system.zones.<zone>.users`. A

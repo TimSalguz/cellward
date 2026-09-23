@@ -65,6 +65,12 @@ pub const NETNS_PREFIX: &str = "vz-";
 /// interface is born in the host's namespace under that very name.
 pub const NAME_MAX: usize = 12;
 
+/// The mark a system zone's tunnel puts on its encrypted packets. Its UDP
+/// socket is the kernel's own — no file, so no owner for the host egress
+/// policy to recognise (`crate::egress`) — and the mark is what lets it out.
+/// 0x767a is "vz"; a DPI bypass's marks sit in the high bits.
+pub const TUNNEL_MARK: u32 = 0x767a;
+
 /// Names that already mean a built-in network.
 const RESERVED: [&str; 3] = ["unconfined", "direct", "offline"];
 const CONFIG: &str = "config.conf";
@@ -154,6 +160,35 @@ pub fn refusal(cfg: &WgConfig) -> Option<&'static str> {
         return Some("no [Interface] section — this is not a WireGuard/AmneziaWG config");
     }
     None
+}
+
+/// The text `setconf` gets, with the tunnel's mark as the interface's
+/// `FwMark` — replacing any the config had: in a system zone the socket lives
+/// in the host's namespace, and the host's policy has to know it.
+pub fn with_tunnel_mark(setconf: &str) -> String {
+    let mut out = String::new();
+    let mut in_interface = false;
+    for line in setconf.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_interface = trimmed.eq_ignore_ascii_case("[interface]");
+            out.push_str(line);
+            out.push('\n');
+            if in_interface {
+                out.push_str(&format!("FwMark = {TUNNEL_MARK:#x}\n"));
+            }
+            continue;
+        }
+        let is_mark = trimmed
+            .split_once('=')
+            .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("fwmark"));
+        if in_interface && is_mark {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// The declared zones: the module's list, with anything that isn't a valid
@@ -430,7 +465,7 @@ fn up(args: &Args) -> Result<(), String> {
     let _ = fs::remove_file(run.join(STATUS));
     // 0600, root: it carries the private key.
     let setconf = run.join(SETCONF);
-    zone::write_private(&setconf, cfg.to_setconf().as_bytes())
+    zone::write_private(&setconf, with_tunnel_mark(&cfg.to_setconf()).as_bytes())
         .map_err(|e| format!("cannot write {}: {e}", setconf.display()))?;
 
     // Leftovers of a run that died halfway: an interface still in the host's
@@ -826,6 +861,20 @@ mod tests {
 
         let nothing = WgConfig::parse_str("[Peer]\nPublicKey = y\n").unwrap();
         assert!(refusal(&nothing).is_some());
+    }
+
+    #[test]
+    fn the_tunnel_carries_the_mark_the_host_lets_out() {
+        let text = "[Interface]\nPrivateKey = x\nFwMark = 0x1\nJc = 4\n[Peer]\nPublicKey = y\n\
+                    FwMark = 7\n";
+        let marked = with_tunnel_mark(text);
+        assert_eq!(
+            marked,
+            "[Interface]\nFwMark = 0x767a\nPrivateKey = x\nJc = 4\n[Peer]\nPublicKey = y\n\
+             FwMark = 7\n"
+        );
+        // A config without one gets it all the same.
+        assert!(with_tunnel_mark("[Interface]\nPrivateKey = x\n").contains("FwMark = 0x767a"));
     }
 
     #[test]
