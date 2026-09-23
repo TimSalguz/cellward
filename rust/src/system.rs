@@ -33,8 +33,14 @@
 //! anything is configured, the amneziawg/wireguard choice, the IPv6 plan, the
 //! resolv.conf text and the second-echelon ruleset.
 //!
-//! **What is not here yet.** OpenConnect and host-interface configs: they need
-//! an uplink namespace of their own and are refused for now.
+//! **Through one interface of the host** (`zones.<name>.uplink`, §4a): then the
+//! host's namespace is NOT the uplink. A namespace of the zone's own,
+//! `vzu-<name>`, is — with pasta in front of it bound to that interface, as a
+//! user zone's uplink is — and the tunnel is born there, so its encrypted
+//! socket lives behind pasta and leaves by the one interface or not at all.
+//!
+//! **What is not here yet.** OpenConnect and host-interface configs: they are
+//! refused for now.
 
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -92,6 +98,18 @@ const STATUS_TMP: &str = "status.tmp";
 /// The tunnel's name inside the zone — the one user zones use, so the app
 /// ruleset applies unchanged.
 const TUN: &str = zone::TUN_IFACE;
+/// pasta's interface in a zone's own uplink.
+const UPLINK_IFACE: &str = "uplink0";
+/// A namespace behind pasta bound to one interface: addresses of its own, as a
+/// host-interface user zone gets (`zone::HOSTIF_*`).
+const HOSTIF_ADDRESSES: [&str; 6] = [
+    "-a",
+    zone::HOSTIF_GUEST4,
+    "-n",
+    zone::HOSTIF_PREFIX4,
+    "-g",
+    zone::HOSTIF_GATEWAY4,
+];
 
 /// Is this a name a system zone may have?
 pub fn check_name(name: &str) -> Result<(), String> {
@@ -117,6 +135,11 @@ pub fn check_name(name: &str) -> Result<(), String> {
 /// `vz-<name>`: the namespace, and the interface's name until it is inside.
 pub fn netns(name: &str) -> String {
     format!("{NETNS_PREFIX}{name}")
+}
+
+/// `vzu-<name>`: a zone's own uplink, when it goes out through one interface.
+pub fn uplink_netns(name: &str) -> String {
+    format!("vzu-{name}")
 }
 
 /// `/run/netns/vz-<name>`: what services and containers are given.
@@ -454,6 +477,7 @@ fn up(args: &Args) -> Result<(), String> {
     // zone's own settings say what it is.
     let found = settings(&args.name);
     let own_dns = found.as_ref().map(|s| s.dns.clone()).unwrap_or_default();
+    let uplink = found.as_ref().and_then(|s| s.uplink.clone());
     let plain = args.plain.clone().or_else(|| {
         found
             .as_ref()
@@ -521,13 +545,28 @@ fn up(args: &Args) -> Result<(), String> {
     let _ = ip_quiet(tools, &["link", "del", ns.as_str()]);
     let _ = ip_in(tools, name, &["link", "del", TUN], true);
 
-    // --- THE TUNNEL IS BORN IN THE HOST'S NAMESPACE ---
+    // --- THE UPLINK: THE HOST'S NAMESPACE, OR ONE BEHIND ONE INTERFACE ---
+    let mut uplink_pasta = None;
+    let born_in = match &uplink {
+        Some(interface) => {
+            uplink_pasta = Some(start_uplink(tools, name, interface, &cfg)?);
+            Some(uplink_netns(name))
+        }
+        None => None,
+    };
+
+    // --- THE TUNNEL IS BORN IN THE UPLINK ---
     // Its UDP socket stays in the namespace it was created in, wherever the
-    // interface goes: the encrypted packets leave by the host's routes, and the
-    // zone never sees the endpoint at all.
-    let wgtool = create_tunnel(tools, ns.as_str(), &cfg)?;
-    if let Err(e) = move_in(tools, name, ns.as_str()) {
-        let _ = ip_quiet(tools, &["link", "del", ns.as_str()]);
+    // interface goes: the encrypted packets leave by the uplink's routes, and
+    // the zone never sees the endpoint at all.
+    let wgtool = create_tunnel(tools, born_in.as_deref(), ns.as_str(), &cfg)?;
+    if let Err(e) = move_in(tools, name, born_in.as_deref(), ns.as_str()) {
+        let _ = ip_ns(
+            tools,
+            born_in.as_deref(),
+            &["link", "del", ns.as_str()],
+            true,
+        );
         return Err(e);
     }
     if let Err(e) = configure(tools, name, &cfg, &wgtool, &setconf) {
@@ -543,9 +582,103 @@ fn up(args: &Args) -> Result<(), String> {
 
     write_group_readable(&run.join(READY), b"")
         .map_err(|e| format!("cannot write {READY}: {e}"))?;
-    println!("system zone {name} is up in {}", netns_path(name).display());
+    match &uplink {
+        Some(interface) => println!(
+            "system zone {name} is up in {}, out through {interface} only",
+            netns_path(name).display()
+        ),
+        None => println!("system zone {name} is up in {}", netns_path(name).display()),
+    }
     notify_ready();
-    mirror(tools, name, &wgtool, &run)
+    mirror(tools, name, &wgtool, &run, uplink_pasta)
+}
+
+/// A zone's own uplink, `vzu-<name>`, behind pasta bound to `interface`: what
+/// a user zone's uplink is, held by root. pasta runs as the plain zones' user
+/// with the two namespace capabilities, and binds every socket it opens on the
+/// host to the interface (`--outbound-if4/-if6`, `SO_BINDTODEVICE`) — the
+/// tunnel's packets leave by it or not at all, never by another route. The
+/// uplink's filter lets out the tunnel's packets to the endpoints and nothing
+/// else, as a user zone's does.
+fn start_uplink(
+    tools: &Tools,
+    name: &str,
+    interface: &str,
+    cfg: &WgConfig,
+) -> Result<std::process::Child, String> {
+    if !Path::new("/sys/class/net").join(interface).exists() {
+        return Err(format!(
+            "the host has no interface {interface} — the zone goes out through it or not at all"
+        ));
+    }
+    let uns = uplink_netns(name);
+    let _ = ip_quiet(tools, &["netns", "del", uns.as_str()]);
+    ip(tools, &["netns", "add", uns.as_str()])?;
+    ip_ns(tools, Some(&uns), &["link", "set", "lo", "up"], false)?;
+    if let Err(e) = feed_ruleset_ns(
+        tools,
+        &uns,
+        &zone::uplink_ruleset(&zone::endpoint_sockets(cfg)),
+    ) {
+        eprintln!(
+            "system zone {name}: the uplink's nftables second echelon is OFF ({e}) — pasta's \
+             binding to {interface} still holds"
+        );
+    }
+    let v6 = crate::hostif::ipv6_usable(
+        interface,
+        &fs::read_to_string("/proc/net/if_inet6").unwrap_or_default(),
+        &fs::read_to_string("/proc/net/ipv6_route").unwrap_or_default(),
+    );
+    let (uid, gid) =
+        user_ids(PLAIN_USER).ok_or_else(|| format!("there is no user {PLAIN_USER}"))?;
+    let mut pasta = Command::new(&tools.pasta);
+    pasta
+        .arg("--netns")
+        .arg(Path::new("/run/netns").join(&uns))
+        .args(["--config-net", "-q", "-I", UPLINK_IFACE, "-f"])
+        // Addresses of its own, as a host-interface zone has: the interface
+        // need not have a default route of its own (a second one often has
+        // none), and its sockets are bound to it anyway.
+        .args(HOSTIF_ADDRESSES)
+        .arg("-i")
+        .arg(interface)
+        .arg("--outbound-if4")
+        .arg(interface);
+    if v6 {
+        pasta.arg("--outbound-if6").arg(interface);
+    } else {
+        pasta.arg("-4");
+    }
+    pasta.args(zone::PASTA_CLOSED);
+    // SAFETY: between fork and exec the closure only makes syscalls.
+    unsafe {
+        pasta.pre_exec(move || become_with_ns_caps(uid, gid));
+    }
+    let mut child = pasta
+        .spawn()
+        .map_err(|e| format!("cannot start {}: {e}", tools.pasta.display()))?;
+    // Up once pasta has put its interface there with a default route.
+    for _ in 0..50 {
+        let routes =
+            zone::tool_output(&tools.ip, &["-n", uns.as_str(), "route", "show", "default"])
+                .unwrap_or_default();
+        if routes.contains(&format!("dev {UPLINK_IFACE}")) {
+            println!("system zone {name}: the uplink goes out through {interface} only");
+            return Ok(child);
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!(
+                "pasta exited ({status}) — the uplink through {interface} did not come up"
+            ));
+        }
+        thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(format!(
+        "pasta gave the uplink no route through {interface} — is it up, with a route?"
+    ))
 }
 
 /// A plain zone: pasta attached to the zone's namespace, as a system user of
@@ -576,8 +709,35 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
     pasta
         .arg("--netns")
         .arg(netns_path(name))
-        .args(["--config-net", "-q", "-I", TUN, "-f"])
-        .args(zone::PASTA_CLOSED);
+        .args(["--config-net", "-q", "-I", TUN, "-f"]);
+    // Through one interface of the host (`zones.<name>.uplink`): every socket
+    // pasta opens is bound to it — out by it or not at all.
+    if let Some(interface) = settings(name).and_then(|s| s.uplink) {
+        if !Path::new("/sys/class/net").join(&interface).exists() {
+            return Err(format!(
+                "the host has no interface {interface} — the zone goes out through it or not at \
+                 all"
+            ));
+        }
+        let v6 = crate::hostif::ipv6_usable(
+            &interface,
+            &fs::read_to_string("/proc/net/if_inet6").unwrap_or_default(),
+            &fs::read_to_string("/proc/net/ipv6_route").unwrap_or_default(),
+        );
+        pasta
+            .args(HOSTIF_ADDRESSES)
+            .arg("-i")
+            .arg(&interface)
+            .arg("--outbound-if4")
+            .arg(&interface);
+        if v6 {
+            pasta.arg("--outbound-if6").arg(&interface);
+        } else {
+            pasta.arg("-4");
+        }
+        println!("system zone {name}: out through {interface} only");
+    }
+    pasta.args(zone::PASTA_CLOSED);
     // SAFETY: between fork and exec the closure only makes syscalls.
     unsafe {
         pasta.pre_exec(move || become_with_ns_caps(uid, gid));
@@ -765,6 +925,9 @@ pub struct Settings {
     /// The zone's own resolvers, instead of the config's `DNS =` (or, for a
     /// plain zone, the public ones): `zones.<name>.dns` in the module.
     pub dns: Vec<String>,
+    /// The one interface of the host the zone goes out through
+    /// (`zones.<name>.uplink`); `None`: wherever the host routes.
+    pub uplink: Option<String>,
 }
 
 pub fn declared_dir(name: &str) -> PathBuf {
@@ -808,6 +971,8 @@ pub fn settings(name: &str) -> Option<Settings> {
         dns: fs::read_to_string(dir.join("dns"))
             .map(|t| parse_dns(&t))
             .unwrap_or_default(),
+        uplink: read_trimmed(&dir.join("uplink"))
+            .filter(|i| crate::hostif::valid_interface_name(i)),
     })
 }
 
@@ -856,6 +1021,9 @@ fn down(args: &Args) {
     }
     // A run that died between `link add` and the move leaves it here.
     let _ = ip_quiet(tools, &["link", "del", ns.as_str()]);
+    // The zone's own uplink, if it had one: pasta is gone with the unit, and
+    // the tunnel's socket with the namespace — fail-closed, as in a user zone.
+    let _ = ip_quiet(tools, &["netns", "del", uplink_netns(name).as_str()]);
     let _ = fs::remove_file(run.join(STATUS));
     let _ = fs::remove_file(run.join(SETCONF));
     println!("system zone {name}: the tunnel is gone, the namespace keeps lo alone");
@@ -864,8 +1032,20 @@ fn down(args: &Args) {
 /// The amneziawg module when there is one, the in-tree wireguard for a config
 /// without obfuscation — the choice a user zone makes. Returns the tool that
 /// speaks to what was built.
-fn create_tunnel(tools: &Tools, link: &str, cfg: &WgConfig) -> Result<PathBuf, String> {
-    if ip_quiet(tools, &["link", "add", link, "type", "amneziawg"]).is_ok() {
+fn create_tunnel(
+    tools: &Tools,
+    uplink: Option<&str>,
+    link: &str,
+    cfg: &WgConfig,
+) -> Result<PathBuf, String> {
+    if ip_ns(
+        tools,
+        uplink,
+        &["link", "add", link, "type", "amneziawg"],
+        true,
+    )
+    .is_ok()
+    {
         return Ok(tools.awg.clone());
     }
     if cfg.is_obfuscated() {
@@ -875,15 +1055,20 @@ fn create_tunnel(tools: &Tools, link: &str, cfg: &WgConfig) -> Result<PathBuf, S
                 .to_owned(),
         );
     }
-    ip(tools, &["link", "add", link, "type", "wireguard"])?;
+    ip_ns(
+        tools,
+        uplink,
+        &["link", "add", link, "type", "wireguard"],
+        false,
+    )?;
     println!("no amneziawg module — using the in-tree wireguard");
     Ok(tools.wg.clone())
 }
 
-/// Into the zone, where it becomes `awg0`. The namespace and the interface
-/// share the name `vz-<name>`, which is why `link` is both.
-fn move_in(tools: &Tools, name: &str, link: &str) -> Result<(), String> {
-    ip(tools, &["link", "set", link, "netns", link])?;
+/// From the uplink into the zone, where it becomes `awg0`. The namespace and
+/// the interface share the name `vz-<name>`, which is why `link` is both.
+fn move_in(tools: &Tools, name: &str, uplink: Option<&str>, link: &str) -> Result<(), String> {
+    ip_ns(tools, uplink, &["link", "set", link, "netns", link], false)?;
     ip_in(tools, name, &["link", "set", link, "name", TUN], false)
 }
 
@@ -1017,7 +1202,13 @@ fn write_resolv_text(name: &str, text: &str, defaulted: bool) -> Result<(), Stri
 /// Say the first handshake in the journal, then mirror `show` into the run
 /// directory until the unit is stopped. `show` needs netlink privileges in the
 /// zone; the group `vpn-zones` reads the file instead.
-fn mirror(tools: &Tools, name: &str, wgtool: &Path, run: &Path) -> Result<(), String> {
+fn mirror(
+    tools: &Tools,
+    name: &str,
+    wgtool: &Path,
+    run: &Path,
+    mut uplink_pasta: Option<std::process::Child>,
+) -> Result<(), String> {
     thread::sleep(zone::HANDSHAKE_AFTER);
     let handshakes = show(tools, name, wgtool, &["latest-handshakes"]).unwrap_or_default();
     if zone::handshake_seen(&handshakes) {
@@ -1031,6 +1222,13 @@ fn mirror(tools: &Tools, name: &str, wgtool: &Path, run: &Path) -> Result<(), St
     let status = run.join(STATUS);
     let tmp = run.join(STATUS_TMP);
     loop {
+        // The zone's own uplink gone is the tunnel's transport gone: the unit
+        // fails and is started again, rather than a zone that pretends.
+        if let Some(Ok(Some(exit))) = uplink_pasta.as_mut().map(std::process::Child::try_wait) {
+            return Err(format!(
+                "the uplink's pasta exited ({exit}) — the tunnel has no way out"
+            ));
+        }
         if let Ok(text) = show(tools, name, wgtool, &[]) {
             if write_group_readable(&tmp, text.as_bytes()).is_ok() {
                 let _ = fs::rename(&tmp, &status);
@@ -1078,9 +1276,19 @@ fn ip_quiet(tools: &Tools, args: &[&str]) -> Result<(), String> {
 
 /// `ip -n vz-<name> …`.
 fn ip_in(tools: &Tools, name: &str, args: &[&str], quiet: bool) -> Result<(), String> {
-    let all = in_zone_args(&netns(name), args);
-    let all: Vec<&str> = all.iter().map(String::as_str).collect();
-    zone::run_tool(&tools.ip, &all, quiet)
+    ip_ns(tools, Some(&netns(name)), args, quiet)
+}
+
+/// `ip -n <ns> …`, or `ip …` in the host's namespace.
+fn ip_ns(tools: &Tools, ns: Option<&str>, args: &[&str], quiet: bool) -> Result<(), String> {
+    match ns {
+        Some(ns) => {
+            let all = in_zone_args(ns, args);
+            let all: Vec<&str> = all.iter().map(String::as_str).collect();
+            zone::run_tool(&tools.ip, &all, quiet)
+        }
+        None => zone::run_tool(&tools.ip, args, quiet),
+    }
 }
 
 /// `ip netns exec vz-<name> <tool>`: for the tools that only speak to the
@@ -1107,7 +1315,14 @@ fn show(tools: &Tools, name: &str, wgtool: &Path, extra: &[&str]) -> Result<Stri
 
 /// `nft -f -` inside the zone, the ruleset on stdin (see `zone::feed_nft`).
 fn feed_ruleset(tools: &Tools, name: &str, ruleset: &str) -> Result<(), String> {
-    let mut child = exec_in(tools, name, &tools.nft)
+    feed_ruleset_ns(tools, &netns(name), ruleset)
+}
+
+/// The same inside any namespace of ours.
+fn feed_ruleset_ns(tools: &Tools, ns: &str, ruleset: &str) -> Result<(), String> {
+    let mut child = Command::new(&tools.ip);
+    child.arg("netns").arg("exec").arg(ns).arg(&tools.nft);
+    let mut child = child
         .args(["-f", "-"])
         .stdin(Stdio::piped())
         .spawn()

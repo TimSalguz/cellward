@@ -232,6 +232,7 @@ pub fn system_network(
     kind: &str,
     source: &str,
     state: &crate::system::RunState,
+    uplink: Option<&str>,
 ) -> String {
     use crate::system::RunState;
     let (readable, up, mirror) = match state {
@@ -253,11 +254,12 @@ pub fn system_network(
         None => "\"handshake_age_s\":null,\"rx_bytes\":null,\"tx_bytes\":null".to_owned(),
     };
     format!(
-        "{{\"name\":{},\"netns\":{},\"kind\":{},\"source\":{},\"up\":{up},\"tunnel_alive\":{alive},{counters},\"readable\":{readable}}}",
+        "{{\"name\":{},\"netns\":{},\"kind\":{},\"source\":{},\"up\":{up},\"tunnel_alive\":{alive},{counters},\"readable\":{readable},\"uplink\":{}}}",
         string(name),
         string(&crate::system::netns_path(name).to_string_lossy()),
         string(kind),
-        string(source)
+        string(source),
+        uplink.map_or("null".to_owned(), string)
     )
 }
 
@@ -269,12 +271,14 @@ pub fn system_networks() -> String {
         crate::system::all_zones()
             .iter()
             .map(|name| {
-                let declared = crate::system::settings(name).is_some_and(|s| s.declared);
+                let settings = crate::system::settings(name);
+                let declared = settings.as_ref().is_some_and(|s| s.declared);
                 system_network(
                     name,
                     crate::system::declared_kind(name),
                     if declared { "nix" } else { "local" },
                     &crate::system::run_state(name),
+                    settings.as_ref().and_then(|s| s.uplink.as_deref()),
                 )
             })
             .collect(),
@@ -614,7 +618,7 @@ mod tests {
     fn a_system_zone_says_only_what_its_reader_may_know() {
         use crate::system::RunState;
 
-        let closed = system_network("nl", "wireguard", "nix", &RunState::Closed);
+        let closed = system_network("nl", "wireguard", "nix", &RunState::Closed, None);
         for part in [
             "\"name\":\"nl\"",
             "\"netns\":\"/run/netns/vz-nl\"",
@@ -627,7 +631,7 @@ mod tests {
             assert!(closed.contains(part), "{part} in {closed}");
         }
 
-        let down = system_network("nl", "wireguard", "nix", &RunState::Down);
+        let down = system_network("nl", "wireguard", "nix", &RunState::Down, None);
         assert!(down.contains("\"up\":false"), "{down}");
         assert!(down.contains("\"readable\":true"), "{down}");
         assert!(down.contains("\"tunnel_alive\":null"), "{down}");
@@ -640,8 +644,10 @@ mod tests {
             "wireguard",
             "nix",
             &RunState::Up(Some(mirror.to_owned())),
+            None,
         );
         assert!(up.contains("\"up\":true"), "{up}");
+        assert!(up.contains("\"uplink\":null"), "{up}");
         assert!(up.contains("\"tunnel_alive\":true"), "{up}");
         assert!(up.contains("\"handshake_age_s\":12"), "{up}");
         assert!(up.contains("\"rx_bytes\":1024"), "{up}");
@@ -653,13 +659,15 @@ mod tests {
             &RunState::Up(Some(
                 "interface: awg0\n  backend: plain\n  connected: yes\n".to_owned(),
             )),
+            Some("enp4s0"),
         );
         assert!(plain.contains("\"kind\":\"plain\""), "{plain}");
+        assert!(plain.contains("\"uplink\":\"enp4s0\""), "{plain}");
         assert!(plain.contains("\"source\":\"local\""), "{plain}");
         assert!(plain.contains("\"tunnel_alive\":true"), "{plain}");
 
         // Up, before the holder has written its first mirror.
-        let early = system_network("nl", "wireguard", "nix", &RunState::Up(None));
+        let early = system_network("nl", "wireguard", "nix", &RunState::Up(None), None);
         assert!(early.contains("\"up\":true"), "{early}");
         assert!(early.contains("\"tunnel_alive\":null"), "{early}");
     }

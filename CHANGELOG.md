@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (system tier)
+- A system zone through one interface of the host:
+  `zones.<zone>.uplink = "<interface>"`. A tunnel zone gets an uplink
+  namespace of its own, `vzu-<zone>`, behind pasta bound to the interface,
+  and its tunnel is born there; a plain zone's pasta is bound to it. Out by
+  that interface or not at all. `system_networks[].uplink` in
+  `status --json`. `docs/SYSTEM.md` §4a, `tests/vm-uplink.nix`.
+
+### Fixed
+- `tests/vm-bridge.nix` listed the system zone's processes with `ps` per pid
+  under errexit, and one ending in between failed the test (red once on
+  main).
+
 ### Changed (system tier)
 - A user zone through a system zone follows the system zone being made anew
   (its namespace unit restarted, vpn-zones off and on): the service starts

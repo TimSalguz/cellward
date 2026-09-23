@@ -116,10 +116,12 @@ let
       def links(out):
           return [l for l in out.strip().splitlines() if l.strip()]
 
-      # Every process in sz's namespace, with its owner: `ip netns pids`.
+      # Every process in sz's namespace, with its owner: `ip netns pids`. One
+      # may end between the listing and `ps` — which then fails, and the
+      # driver runs under errexit (red once in CI).
       def in_sz():
           return machine.succeed(
-              "for p in $(ip netns pids vz-sz); do ps -o user=,comm= -p $p; done; true"
+              "for p in $(ip netns pids vz-sz); do ps -o user=,comm= -p $p || true; done"
           )
 
       # pasta processes of `owner` in sz's namespace. `ps` names pasta by the
@@ -255,7 +257,7 @@ let
       with subtest("down: nothing of alice's left in the system zone"):
           machine.succeed(alice("vpn-zone down mz"))
           machine.wait_until_succeeds(
-              "test -z \"$(for p in $(ip netns pids vz-sz); do ps -o user= -p $p; done | grep alice)\"",
+              "test -z \"$(for p in $(ip netns pids vz-sz); do ps -o user= -p $p || true; done | grep alice)\"",
               timeout=30,
           )
     '';
