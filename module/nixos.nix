@@ -77,7 +77,7 @@ let
       ''
         [Unit]
         BindsTo=${nsUnit s.zone}.service
-        After=${nsUnit s.zone}.service ${holderUnit s.zone}.service
+        After=${nsUnit s.zone}.service${lib.optionalString (s.afterHolder or true) " ${holderUnit s.zone}.service"}
         Wants=${holderUnit s.zone}.service
 
         [Service]
@@ -94,6 +94,44 @@ let
         InaccessiblePaths=-/run/dbus/system_bus_socket
       ''
     );
+
+  # Службы в зонах: названные человеком и службы самого хоста (host.*).
+  attachedServices =
+    cfg.services
+    // lib.optionalAttrs (cfg.host.nix != null) {
+      nix-daemon = {
+        zone = cfg.host.nix;
+        systemBus = false;
+        # Не ждать выхода зоны: пространство уже есть, сеть в нём появится
+        # вместе с туннелем, а локальная сборка VPN не ждёт никогда.
+        afterHolder = false;
+      };
+    }
+    // lib.optionalAttrs (cfg.host.time != null) {
+      # Шина — да: timesyncd без неё не запускается (держит имя
+      # org.freedesktop.timesync1), а имена он спрашивает через NSS зоны.
+      systemd-timesyncd = {
+        zone = cfg.host.time;
+        systemBus = true;
+        # timesyncd — из ранней загрузки (Before=sysinit.target), а выход
+        # зоны ждёт сеть: порядок «после выхода» дал бы цикл.
+        afterHolder = false;
+        # Сам он не переспросит: о сети судит по состоянию сети хоста, и
+        # после неудачных первых попыток (в зоне ещё один lo) ждёт события,
+        # которого может не быть (CI: ни одной попытки за 2 минуты). Выход
+        # зоны, поднявшись, перезапускает его.
+        restartWhenUp = true;
+      };
+    };
+
+  # Выход зоны, поднявшись, перезапускает службу (restartWhenUp): для тех,
+  # кто стартует раньше выхода и сам сеть не переспрашивает.
+  restartWhenUpDropIn =
+    unit:
+    pkgs.writeText "vpn-zones-restart-when-up-${unit}.conf" ''
+      [Service]
+      ExecStartPost=-${systemctl} --no-block try-restart ${unit}.service
+    '';
 
   consumerDeps = zone: {
     bindsTo = [ "${nsUnit zone}.service" ];
@@ -303,12 +341,36 @@ in
         type = lib.types.enum [
           "audit"
           "enforce"
+          "strict"
         ];
         default = "audit";
         description = ''
           `audit` logs what would be refused and lets it through — watch the
           kernel log for `vpn-zones-egress:` before switching; `enforce`
-          refuses it.
+          refuses it; `strict` refuses it and keeps root and the system's
+          users to `localNetworks` and DHCP as well: what of the system has to
+          reach further goes through a zone (`host.nix`, `host.time`,
+          `services.<unit>`).
+        '';
+      };
+      localNetworks = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [
+          "10.0.0.0/8"
+          "172.16.0.0/12"
+          "192.168.0.0/16"
+          "169.254.0.0/16"
+          "224.0.0.0/4"
+          "255.255.255.255/32"
+          "fe80::/10"
+          "fc00::/7"
+          "ff00::/8"
+        ];
+        description = ''
+          What `strict` leaves to root and the system's users: the router, the
+          printer, the resolver on the local network. Private, link-local and
+          multicast ranges by default; a local network on public addresses has
+          to be added here.
         '';
       };
       allowUsers = lib.mkOption {
@@ -319,8 +381,13 @@ in
       };
       allowGroups = lib.mkOption {
         type = lib.types.listOf lib.types.str;
-        default = [ "nixbld" ];
-        description = "Groups whose programs go out directly. `nixbld`: builds that fetch.";
+        default = lib.optional (cfg.egress.mode != "strict") "nixbld";
+        defaultText = lib.literalExpression ''lib.optional (mode != "strict") "nixbld"'';
+        description = ''
+          Groups whose programs go out directly. `nixbld`: builds that fetch —
+          not under `strict`, where the Nix daemon downloads through `host.nix`
+          and its builds with it.
+        '';
       };
       emergency = {
         minutes = lib.mkOption {
@@ -333,6 +400,32 @@ in
           default = "wheel";
           description = "Members may start and stop `vpn-zones-egress-open.service` without a password; this turns polkit on. `null`: root only.";
         };
+      };
+    };
+
+    host = {
+      nix = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "direct0";
+        description = ''
+          The system zone the Nix daemon downloads through: substitutes and the
+          builds that fetch run in the daemon's network. A plain zone is
+          "directly"; a VPN zone takes the downloads through the tunnel. `null`:
+          the host's own network, which `egress.mode = "strict"` closes to it.
+          The daemon starts without its zone's tunnel too (the zone's namespace
+          is enough), so local builds never wait for a VPN.
+        '';
+      };
+      time = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "direct0";
+        description = ''
+          The system zone systemd-timesyncd sets the clock through. A plain
+          zone is "directly"; a VPN zone hides who asks for the time. `null`:
+          the host's own network, which `egress.mode = "strict"` closes to it.
+        '';
       };
     };
 
@@ -363,6 +456,32 @@ in
             assertion = cfg.zones ? ${s.zone};
             message = "services.vpn-zones.system.services.${unit}.zone = \"${s.zone}\": there is no such zone in services.vpn-zones.system.zones.";
           }) cfg.services
+          ++ lib.concatLists (
+            lib.mapAttrsToList
+              (
+                what: unit:
+                lib.optionals (cfg.host.${what} != null) [
+                  {
+                    assertion = cfg.zones ? ${cfg.host.${what}};
+                    message = "services.vpn-zones.system.host.${what} = \"${cfg.host.${what}}\": there is no such zone in services.vpn-zones.system.zones.";
+                  }
+                  {
+                    assertion = !(cfg.services ? ${unit});
+                    message = "services.vpn-zones.system.host.${what} and services.vpn-zones.system.services.${unit} both put ${unit} into a zone: one of them.";
+                  }
+                ]
+              )
+              {
+                nix = "nix-daemon";
+                time = "systemd-timesyncd";
+              }
+          )
+          ++ [
+            {
+              assertion = cfg.host.time == null || config.services.timesyncd.enable;
+              message = "services.vpn-zones.system.host.time is for systemd-timesyncd, which is off here; another time daemon goes into a zone with services.vpn-zones.system.services.<unit>.";
+            }
+          ]
           ++ lib.concatLists (
             lib.mapAttrsToList (
               c: a:
@@ -463,6 +582,18 @@ in
         systemd.services."vpn-zone-system-ns@" = {
           description = "vpn-zones: network namespace of the system zone %i";
           restartIfChanged = false;
+          # Раннее: пространство нужно и службам ранней загрузки (timesyncd —
+          # до sysinit.target). Ему хватает /run, /etc и стора — сети не надо;
+          # но `ip netns` держит пространства в /var/run/netns, а ссылку
+          # /var/run → /run делает tmpfiles (VM-тест: «mkdir /var/run/netns
+          # failed»). Оба — тоже до sysinit.target, цикла нет.
+          unitConfig.DefaultDependencies = false;
+          after = [
+            "local-fs.target"
+            "systemd-tmpfiles-setup.service"
+          ];
+          before = [ "shutdown.target" ];
+          conflicts = [ "shutdown.target" ];
           # vpn-zones-off и `vpnzones=off` в строке ядра: зоны не поднимаются.
           unitConfig.ConditionPathExists = "!${offFlag}";
           unitConfig.ConditionKernelCommandLine = "!vpnzones=off";
@@ -507,7 +638,7 @@ in
       # (vpn-zones-off) возвращает службы в сеть хоста без пересборки: без
       # метки дополнений нет. Генератор — несколько строк sh с абсолютными
       # путями, без нашей программы: он должен работать, когда наше сломано.
-      (lib.mkIf (cfg.services != { }) {
+      (lib.mkIf (attachedServices != { }) {
         systemd.generators.vpn-zones = pkgs.writeShellScript "vpn-zones-generator" (
           ''
             [ -e ${offFlag} ] && exit 0
@@ -515,10 +646,17 @@ in
             case " $cmdline " in *" vpnzones=off "*) exit 0 ;; esac
           ''
           + lib.concatStrings (
-            lib.mapAttrsToList (unit: s: ''
-              ${pkgs.coreutils}/bin/mkdir -p "$1/${unit}.service.d"
-              ${pkgs.coreutils}/bin/ln -sf ${attachDropIn unit s} "$1/${unit}.service.d/50-vpn-zones.conf"
-            '') cfg.services
+            lib.mapAttrsToList (
+              unit: s:
+              ''
+                ${pkgs.coreutils}/bin/mkdir -p "$1/${unit}.service.d"
+                ${pkgs.coreutils}/bin/ln -sf ${attachDropIn unit s} "$1/${unit}.service.d/50-vpn-zones.conf"
+              ''
+              + lib.optionalString (s.restartWhenUp or false) ''
+                ${pkgs.coreutils}/bin/mkdir -p "$1/${holderUnit s.zone}.service.d"
+                ${pkgs.coreutils}/bin/ln -sf ${restartWhenUpDropIn unit} "$1/${holderUnit s.zone}.service.d/50-vpn-zones-restart-${unit}.conf"
+              ''
+            ) attachedServices
           )
         );
       })
@@ -572,7 +710,7 @@ in
       # переживает перезагрузку.
       (
         let
-          attached = map (u: "${u}.service") (lib.attrNames cfg.services);
+          attached = map (u: "${u}.service") (lib.attrNames attachedServices);
           autoStarted = map (n: "${holderUnit n}.service") (
             lib.attrNames (lib.filterAttrs (_: z: z.autoStart) cfg.zones)
           );
@@ -588,7 +726,7 @@ in
             active=
             for pair in ${
               lib.escapeShellArgs (
-                lib.mapAttrsToList (u: s: "${u}.service:${holderUnit s.zone}.service") cfg.services
+                lib.mapAttrsToList (u: s: "${u}.service:${holderUnit s.zone}.service") attachedServices
               )
             }; do
               u=''${pair%%:*}
@@ -715,14 +853,23 @@ in
           # пользовательских зон, названных людей): упадёт она — хост станет
           # закрытее, а не открытым. `nixbld` известен при сборке — он в файле.
           nixbldInFile = builtins.elem "nixbld" e.allowGroups;
+          strict = e.mode == "strict";
+          # Префиксы проверяет сама программа при сборке: кривой не соберётся,
+          # а не оставит хост без политики при загрузке.
           rules = pkgs.runCommand "vpn-zones-egress.nft" { } (
             "${core} egress print"
             + lib.optionalString (e.mode == "enforce") " --enforce"
+            + lib.optionalString strict (
+              " --strict" + lib.concatMapStrings (p: " --local ${lib.escapeShellArg p}") e.localNetworks
+            )
             + lib.optionalString nixbldInFile " --gid ${toString config.ids.gids.nixbld}"
             + " > $out"
           );
           allow = lib.concatStringsSep " " (
             [ "${core} egress allow --nft ${nft}" ]
+            # strict: системные пользователи больше не выходят все подряд, а
+            # pasta простых зон — это выход «напрямую» для всего в них.
+            ++ lib.optional strict "--user ${plainUser}"
             ++ map (u: "--user ${lib.escapeShellArg u}") e.allowUsers
             ++ map (g: "--group ${lib.escapeShellArg g}") (lib.remove "nixbld" e.allowGroups)
           );
@@ -736,6 +883,26 @@ in
           flushes = config.networking.nftables.enable && config.networking.nftables.flushRuleset;
         in
         {
+          # Без сети у демона система не соберёт следующую версию себя —
+          # такую конфигурацию не собрать вовсе, а не предупредить о ней.
+          assertions = [
+            {
+              assertion = !strict || cfg.host.nix != null;
+              message = "services.vpn-zones.system.egress.mode = \"strict\" closes the network to the Nix daemon: substitutes and the builds that fetch would fail, and the next rebuild with them. Put it into a zone: services.vpn-zones.system.host.nix = \"<zone>\" (a plain zone is directly).";
+            }
+          ];
+          warnings =
+            lib.optional (
+              strict && cfg.host.time == null && config.services.timesyncd.enable
+            ) "services.vpn-zones.system.egress.mode = \"strict\" closes the network to systemd-timesyncd: the clock will drift. Put it into a zone: services.vpn-zones.system.host.time = \"<zone>\" (a plain zone is directly).";
+
+          # Проверка связности NetworkManager (root, в интернет) под strict
+          # не пройдёт, и NM сообщит «ограниченное подключение» всем, кто
+          # его спрашивает, хотя в зонах сеть есть. Выключенная — не мешает.
+          networking.networkmanager.settings.connectivity.enabled = lib.mkIf (
+            strict && config.networking.networkmanager.enable
+          ) (lib.mkDefault false);
+
           systemd.services.vpn-zones-egress = {
             description = "vpn-zones: the host egress policy (${e.mode})";
             # Путь спасения без единого нашего бинарника: `vpnzones.egress=off`

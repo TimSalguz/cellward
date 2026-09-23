@@ -6,6 +6,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added (system tier)
+- `egress.mode = "strict"`: the host itself loses the internet too — root
+  and the system's users keep the local network (`egress.localNetworks`,
+  checked when the system is built) and DHCP. `host.nix` and `host.time` put
+  the Nix daemon and systemd-timesyncd into a zone (a plain one is
+  "directly", a VPN one hides them); the daemon does not wait for the tunnel.
+  NetworkManager's connectivity check is turned off under `strict`; `nixbld`
+  is no longer allowed by default there. Build warnings name what `strict`
+  would cut off. `docs/SYSTEM.md` §9b, `tests/vm-host.nix`.
+
+### Changed
+- The namespace unit of a system zone (`vpn-zone-system-ns@`) has no default
+  dependencies (after the local file systems and tmpfiles only), so early-boot services can be
+  attached to a zone.
+
+### Added (system tier)
 - The off switch: `vpn-zones-off` turns vpn-zones off entirely with no
   rebuild and no network — the policy's table goes, attached services restart
   on the host's network, zones stop, and a flag in `/var/lib/vpn-zones` keeps

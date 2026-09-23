@@ -282,7 +282,7 @@ closed to them, so `up`, `tunnel_alive` and the counters are `null`.
 
 ## 9. The host without a network of its own (stage 5)
 
-`services.vpn-zones.system.egress = { enable = true; mode = "audit" | "enforce"; }` —
+`services.vpn-zones.system.egress = { enable = true; mode = "audit" | "enforce" | "strict"; }` —
 ARCHITECTURE §2, «страховка»: a user's program that runs outside every zone does not reach
 the network, however it was started.
 
@@ -326,7 +326,8 @@ the network, however it was started.
   host's nscd or resolved, which are the system's and go out — the connection is refused,
   the question already left. Moving the host's own resolver into a system zone is the
   answer, and a later step. And root: root can unload anything; the policy is about
-  programs of users.
+  programs that do not know, not about root. `strict` (§9b) takes the host's own services
+  off the network as well.
 
 ## 9a. Rescue paths
 
@@ -366,6 +367,67 @@ A statically linked set of tools (`ip`, `awg`, `nft`, pasta) was weighed and lef
 NixOS every package carries its own closure, "the linking broke" happens only with a
 corrupted store, which breaks everything at once and is what the previous generation is for;
 the static set would cost long local builds for next to nothing.
+
+## 9b. `strict`: the host itself, too
+
+`mode = "strict"` is `enforce` and one more restriction: root and the system's users —
+uid < 1000 and systemd's dynamic range — keep the local network only. Whatever of the
+system has to reach further goes through a zone, like everything else, and chooses which:
+
+```nix
+services.vpn-zones.system = {
+  zones.direct0.kind = "plain";   # "directly": the host's network, through pasta
+  host.nix = "direct0";           # or a VPN zone: downloads through the tunnel
+  host.time = "direct0";          # or a VPN zone: nobody sees who asks for the time
+  egress = { enable = true; mode = "strict"; };
+};
+```
+
+- **What "local" is.** `egress.localNetworks`: the private, link-local and multicast ranges
+  of both families by default — the router, a printer, a resolver on the LAN, mDNS. They
+  are in the file built with the system, as two interval sets; each prefix is checked by
+  our binary at build time (a prefix `nft` refused at boot would leave the host with no
+  policy at all) and its host bits cleared. A LAN on public addresses has to be added.
+  DHCP is let out by port (68→67, 546→547): a renewal goes to the server's own address,
+  which need not be a private one.
+- **The ways out that stay.** A system zone's tunnel (its mark), the uplinks of user zones
+  (subuid), the pasta of plain zones — its owner, `vpn-zones-plain`, is a system user and
+  is now named in the allowances (`egress allow --user vpn-zones-plain`; if that step fails,
+  plain zones are closed, not the host open) — and `allowUsers`/`allowGroups`. `nixbld` is
+  no longer in `allowGroups` by default: builds download in the daemon's network, which is
+  `host.nix`'s zone.
+- **`host.nix`.** The Nix daemon is attached to the zone like any service (§5): substitutes
+  and the builds that fetch run in the daemon's network namespace. It is not ordered after
+  the zone's way out, only after its namespace — the daemon starts at once, local builds
+  never wait for a VPN, and the network appears in its namespace when the tunnel does.
+  Whoever may use the daemon may make it download; it downloads through this zone. Root's
+  own `nix` without the daemon (a local store) is the host's and refused — which is what
+  the VM test checks it against.
+- **`host.time`.** systemd-timesyncd, attached the same way, with the system bus (it does
+  not start without it; it asks for names through the zone's NSS). It belongs to early
+  boot (`Before=sysinit.target`), so the namespace unit has no default dependencies — only
+  after the local file systems and `systemd-tmpfiles-setup.service`, which makes the
+  `/var/run → /run` link `ip netns` keeps namespaces under (the VM test found the zone
+  failing without it): ordered after anything later, timesyncd would close a cycle.
+  So it starts before the zone has a way out, and it does not come back by itself: it
+  judges the network by the host's, and after its first attempts fail it waits for an
+  event that may never come (in CI it never tried again within two minutes). The zone's
+  way out, once up, restarts it — `ExecStartPost=-systemctl --no-block try-restart`, a
+  drop-in on `vpn-zone-system@<zone>` written by the same generator, so the switch takes
+  it away with the rest.
+- **NetworkManager.** Its connectivity check is root's and goes to the internet; refused, it
+  would tell every program that asks that there is only limited connectivity, while the
+  zones have the internet. Under `strict` the module turns the check off (`mkDefault`).
+- **Left on the host**, and refused once strict: a DNS resolver pointed past the LAN (a
+  zone's endpoint name is resolved by the host — use a resolver on the LAN or an address),
+  `nixos-upgrade` (its evaluation fetches as root: attach it with `services.<unit>` and
+  `systemBus = true`), anything else of the system that phones out. The kernel log names
+  each of them (`vpn-zones-egress: … UID=`), and `audit` shows them before `strict` refuses.
+- **Refused at build time.** `strict` with `host.nix` unset does not build: the daemon
+  could not download, and neither could the next rebuild that would fix it. With timesyncd
+  on and `host.time` unset it is a warning (the clock drifts, the machine still works); both
+  say the line to add.
+- **The switch** (§9a) returns the host's services to the host's network with the rest.
 
 ## 10. Leak channels of the system tier
 
@@ -433,3 +495,22 @@ the static set would cost long local builds for next to nothing.
      the LAN directly; `vpn-zone-sys` answers that vpn-zones are off; a `daemon-reload` does
      not attach the service again; `vpn-zones-on` is refused to a user outside `wheel`, and
      for alice brings the policy, `sz` and the service in its namespace back;
+- **VM `tests/vm-host.nix`:** the strict policy. `server` has a LAN address and one outside
+  every private range (198.51.100.1) that stands for the internet, with a TCP responder, an
+  HTTP file and an NTP server (chrony) there; `machine` runs `strict` with a plain zone `pl`
+  and `host.nix = host.time = "pl"`:
+  1. the loaded table has no blanket allowance for system users; root reaches the LAN and is
+     refused beyond it, named in the kernel log; a user outside the zones reaches neither;
+  2. through `vpn-zone-sys pl` the user reaches the internet address;
+  3. the Nix daemon runs in `pl`'s namespace, and a user's build downloads a file from the
+     internet address through it; root's own `nix-prefetch-url` (a local store) is refused;
+  4. timesyncd runs in `pl`'s namespace and contacts the NTP server — after every boot,
+     although it starts before the zone's way out (the routes are the machine's own, from
+     boot, as on real hardware);
+  5. `vpn-zones-off` puts timesyncd back into the host's namespace, `vpn-zones-on` into the
+     zone, and root is refused again;
+  6. no ordering cycle in the journal of the first boot or of any later one (systemd would
+     break it by dropping a job — on a new configuration this is where it shows); a reboot
+     brings the policy, the zone and both services in it back by themselves;
+  7. off survives a reboot: no table, no zone, timesyncd and the daemon on the host's
+     network, root out; on after it puts everything back.

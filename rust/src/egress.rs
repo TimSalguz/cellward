@@ -29,6 +29,16 @@
 //! `audit` is the default: the same rules, logged and let through, so that a
 //! machine can be watched before it is locked.
 //!
+//! **`strict`: the host itself, too.** Root and the system's users keep only
+//! the local network (`--local`: private, link-local and multicast ranges by
+//! default) and DHCP. What of the system has to reach further goes through a
+//! zone like everything else — the Nix daemon and the clock through a plain
+//! zone ("directly") or a VPN one, attached by the module; a plain zone's
+//! pasta is let out by its owner (`--user vpn-zones-plain`). What is left on
+//! the host and wants the internet is refused and logged, root included.
+//! Against a program that does not know, not against root: root can load a
+//! ruleset of its own.
+//!
 //! **Our binary cannot open the host.** The restriction is printed once, when
 //! the system is built (`print`), and loaded by `nft` from that file; this
 //! binary only ADDS allowances to it afterwards (`allow`). If it crashes, the
@@ -54,6 +64,10 @@ const DYNAMIC_UIDS: (u32, u32) = (61_184, 65_519);
 pub struct Policy {
     /// Refuse, or only log.
     pub enforce: bool,
+    /// Root and the system's users too: the local network only.
+    pub strict: bool,
+    /// The local network, for `strict`: prefixes, checked (`parse_prefix`).
+    pub local: Vec<String>,
     /// The emergency key: the table stays, the restriction does not.
     pub open: bool,
     /// Owners let out besides root and system users.
@@ -75,6 +89,26 @@ pub fn ruleset(policy: &Policy) -> String {
     };
     set(&mut out, "users", "uid", &policy.uids);
     set(&mut out, "groups", "gid", &policy.gids);
+    if policy.strict {
+        for (name, kind, v6) in [
+            ("local4", "ipv4_addr", false),
+            ("local6", "ipv6_addr", true),
+        ] {
+            let list: Vec<&str> = policy
+                .local
+                .iter()
+                .filter(|p| p.contains(':') == v6)
+                .map(String::as_str)
+                .collect();
+            out.push_str(&format!(
+                "\tset {name} {{\n\t\ttype {kind}\n\t\tflags interval\n\t\tauto-merge\n"
+            ));
+            if !list.is_empty() {
+                out.push_str(&format!("\t\telements = {{ {} }}\n", list.join(", ")));
+            }
+            out.push_str("\t}\n");
+        }
+    }
     out.push_str("\tchain output {\n");
     // After conntrack (-200), before mangle (-150): a DPI bypass steering
     // packets there sees only what was let through here.
@@ -86,11 +120,35 @@ pub fn ruleset(policy: &Policy) -> String {
         out.push_str("\t}\n}\n");
         return out;
     }
+    let system_owners = [
+        "meta skuid < 1000".to_owned(),
+        format!("meta skuid {}-{}", DYNAMIC_UIDS.0, DYNAMIC_UIDS.1),
+    ];
+    let system_rules: Vec<String> = if policy.strict {
+        // DHCP by port: a renewal goes to the server's own address, which
+        // need not be a private one.
+        let mut rules = vec![
+            "udp sport 68 udp dport 67 accept".to_owned(),
+            "udp sport 546 udp dport 547 accept".to_owned(),
+        ];
+        for owner in &system_owners {
+            rules.push(format!("{owner} ip daddr @local4 accept"));
+            rules.push(format!("{owner} ip6 daddr @local6 accept"));
+        }
+        rules
+    } else {
+        system_owners
+            .iter()
+            .map(|o| format!("{o} accept"))
+            .collect()
+    };
     for rule in [
         "ct state established,related accept".to_owned(),
         "oifname \"lo\" accept".to_owned(),
-        "meta skuid < 1000 accept".to_owned(),
-        format!("meta skuid {}-{} accept", DYNAMIC_UIDS.0, DYNAMIC_UIDS.1),
+    ]
+    .into_iter()
+    .chain(system_rules)
+    .chain([
         "meta skuid @users accept".to_owned(),
         "meta skgid @groups accept".to_owned(),
         // A system zone's tunnel: the kernel's own UDP socket has no owner,
@@ -103,12 +161,12 @@ pub fn ruleset(policy: &Policy) -> String {
             .to_owned(),
         "ip protocol igmp accept".to_owned(),
         format!("limit rate 10/second burst 20 packets log prefix \"{LOG_PREFIX}\" flags skuid"),
-    ] {
+    ]) {
         out.push_str("\t\t");
         out.push_str(&rule);
         out.push('\n');
     }
-    if policy.enforce {
+    if policy.enforce || policy.strict {
         // Refused at once rather than dropped: a program fails in a moment
         // instead of hanging until its own timeout.
         out.push_str("\t\treject with icmpx admin-prohibited\n");
@@ -153,12 +211,49 @@ pub fn subid_starts(text: &str) -> Vec<u32> {
     out
 }
 
+/// A prefix of the local network as nft takes it — `10.0.0.0/8`, `fe80::/10`,
+/// or a single address. Checked here, when the system is built: a ruleset
+/// `nft` refuses at boot would leave the host with no policy at all.
+pub fn parse_prefix(text: &str) -> Result<String, String> {
+    let (addr, len) = match text.split_once('/') {
+        Some((a, l)) => (a, Some(l)),
+        None => (text, None),
+    };
+    let addr: std::net::IpAddr = addr
+        .parse()
+        .map_err(|_| format!("{text}: not an address or a prefix"))?;
+    let max = if addr.is_ipv4() { 32 } else { 128 };
+    let len = match len {
+        None => max,
+        Some(l) => l
+            .parse::<u8>()
+            .ok()
+            .filter(|l| *l <= max)
+            .ok_or_else(|| format!("{text}: the prefix length is 0 to {max}"))?,
+    };
+    // The host bits cleared: `10.1.2.3/8` is `10.0.0.0/8`, which nft takes
+    // as it is.
+    let addr = match addr {
+        std::net::IpAddr::V4(a) => {
+            let mask = u32::MAX.checked_shl(32 - u32::from(len)).unwrap_or(0);
+            std::net::IpAddr::V4((u32::from(a) & mask).into())
+        }
+        std::net::IpAddr::V6(a) => {
+            let mask = u128::MAX.checked_shl(128 - u32::from(len)).unwrap_or(0);
+            std::net::IpAddr::V6((u128::from(a) & mask).into())
+        }
+    };
+    Ok(format!("{addr}/{len}"))
+}
+
 /// What `vpn-zone-core egress` was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub verb: Verb,
     pub nft: PathBuf,
     pub enforce: bool,
+    pub strict: bool,
+    pub local: Vec<String>,
     pub users: Vec<String>,
     pub groups: Vec<String>,
     /// Groups by number, for `print`: known when the system is built.
@@ -182,7 +277,8 @@ pub enum Verb {
 }
 
 impl Args {
-    /// `<apply|open|remove> [--nft P] [--enforce] [--user NAME]… [--group NAME]…`
+    /// `<verb> [--nft P] [--enforce|--strict] [--local PREFIX]… [--user NAME]…
+    /// [--group NAME]… [--gid N]…`
     pub fn parse(argv: &[OsString]) -> Result<Self, String> {
         let mut rest = argv.iter();
         let verb = match rest.next().and_then(|v| v.to_str()) {
@@ -197,6 +293,8 @@ impl Args {
             verb,
             nft: PathBuf::from("nft"),
             enforce: false,
+            strict: false,
+            local: Vec::new(),
             users: Vec::new(),
             groups: Vec::new(),
             gids: Vec::new(),
@@ -205,6 +303,10 @@ impl Args {
             let arg = arg.to_str().ok_or("the arguments have to be UTF-8")?;
             if arg == "--enforce" {
                 args.enforce = true;
+                continue;
+            }
+            if arg == "--strict" {
+                args.strict = true;
                 continue;
             }
             let value = rest
@@ -216,6 +318,7 @@ impl Args {
                 "--nft" => args.nft = PathBuf::from(value),
                 "--user" => args.users.push(value),
                 "--group" => args.groups.push(value),
+                "--local" => args.local.push(parse_prefix(&value)?),
                 "--gid" => args.gids.push(
                     value
                         .parse()
@@ -235,6 +338,8 @@ pub fn run(args: &Args) -> u8 {
             "{}",
             ruleset(&Policy {
                 enforce: args.enforce,
+                strict: args.strict,
+                local: args.local.clone(),
                 open: false,
                 uids: Vec::new(),
                 gids: args.gids.clone(),
@@ -258,7 +363,7 @@ pub fn run(args: &Args) -> u8 {
         Ok(()) => {
             println!(
                 "{}",
-                match (args.verb, args.enforce) {
+                match (args.verb, args.enforce || args.strict) {
                     (Verb::Remove, _) => "host egress policy removed".to_owned(),
                     (Verb::Allow, _) => "host egress policy: user zones' uplinks and the \
                                          named owners allowed"
@@ -267,6 +372,10 @@ pub fn run(args: &Args) -> u8 {
                     (Verb::Open, _) => "host egress policy OPEN: programs of users outside \
                                         zones reach the network until it is applied again"
                         .to_owned(),
+                    (Verb::Apply, true) if args.strict => {
+                        "host egress policy strict: the host keeps its local network only"
+                            .to_owned()
+                    }
                     (Verb::Apply, true) => "host egress policy enforced".to_owned(),
                     (Verb::Apply, false) =>
                         "host egress policy auditing (logs, lets through)".to_owned(),
@@ -309,6 +418,8 @@ fn policy_of(args: &Args) -> Policy {
     gids.dedup();
     Policy {
         enforce: args.enforce,
+        strict: args.strict,
+        local: args.local.clone(),
         open: args.verb == Verb::Open,
         uids,
         gids,
@@ -403,6 +514,66 @@ mod tests {
         assert!(text[reject..].lines().skip(1).all(|l| l.trim() == "}"));
         // Empty sets are declared without elements.
         assert!(!text.contains("elements = {  }"));
+    }
+
+    #[test]
+    fn strict_keeps_the_host_to_its_local_network() {
+        let text = ruleset(&Policy {
+            strict: true,
+            local: vec![
+                "10.0.0.0/8".into(),
+                "fe80::/10".into(),
+                "192.168.0.0/16".into(),
+            ],
+            ..Policy::default()
+        });
+        // Root and system users: no blanket allowance any more.
+        assert!(!text.contains("meta skuid < 1000 accept"), "{text}");
+        assert!(!text.contains("meta skuid 61184-65519 accept"), "{text}");
+        assert!(text.contains("meta skuid < 1000 ip daddr @local4 accept"));
+        assert!(text.contains("meta skuid < 1000 ip6 daddr @local6 accept"));
+        assert!(text.contains("meta skuid 61184-65519 ip daddr @local4 accept"));
+        assert!(text.contains("elements = { 10.0.0.0/8, 192.168.0.0/16 }"));
+        assert!(text.contains("elements = { fe80::/10 }"));
+        assert!(text.contains("flags interval"));
+        assert!(text.contains("udp sport 68 udp dport 67 accept"));
+        // The ways out that are not the host's own stay as they are.
+        assert!(text.contains("meta mark 0x767a accept"));
+        assert!(text.contains("meta skuid @users accept"));
+        // Strict refuses, whatever `enforce` says.
+        assert!(text.contains("reject with icmpx admin-prohibited"));
+        // No local sets outside strict.
+        let enforce = ruleset(&Policy {
+            enforce: true,
+            local: vec!["10.0.0.0/8".into()],
+            ..Policy::default()
+        });
+        assert!(!enforce.contains("local4"), "{enforce}");
+    }
+
+    #[test]
+    fn local_prefixes_are_checked_when_built() {
+        assert_eq!(parse_prefix("10.0.0.0/8").unwrap(), "10.0.0.0/8");
+        assert_eq!(parse_prefix("192.168.1.1").unwrap(), "192.168.1.1/32");
+        assert_eq!(parse_prefix("fe80::/10").unwrap(), "fe80::/10");
+        assert_eq!(parse_prefix("ff02::1:2").unwrap(), "ff02::1:2/128");
+        assert_eq!(parse_prefix("10.1.2.3/8").unwrap(), "10.0.0.0/8");
+        assert_eq!(parse_prefix("0.0.0.0/0").unwrap(), "0.0.0.0/0");
+        assert_eq!(parse_prefix("fe80::1/10").unwrap(), "fe80::/10");
+        for bad in [
+            "10.0.0.0/33",
+            "fe80::/129",
+            "10.0.0/8",
+            "x",
+            "10.0.0.0/",
+            "10.0.0.0/8; flush ruleset",
+        ] {
+            assert!(parse_prefix(bad).is_err(), "{bad}");
+        }
+        let args = Args::parse(&os(&["print", "--strict", "--local", "10.0.0.0/8"])).unwrap();
+        assert!(args.strict);
+        assert_eq!(args.local, ["10.0.0.0/8"]);
+        assert!(Args::parse(&os(&["print", "--local", "nope"])).is_err());
     }
 
     #[test]
