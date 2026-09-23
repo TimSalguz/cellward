@@ -105,8 +105,14 @@ The unit is still the person's; only its network changes.
 `services.vpn-zones.system.containers.<container> = "<zone>";` sets on
 `containers.<container>`:
 
-- `networkNamespace = "/run/netns/vz-<zone>"` (exclusive with `privateNetwork` and
-  `interfaces` — the nixpkgs module asserts it);
+- the network: **not** `containers.<container>.networkNamespace`. nspawn joins a network
+  namespace from inside the container's new user namespace, and the zone's belongs to the
+  host's — `Failed to join network namespace: Operation not permitted` under
+  `privateUsers = "pick"` (found by `tests/vm-system.nix`). Instead systemd enters the zone
+  before nspawn runs — `NetworkNamespacePath=/run/netns/vz-<zone>` on `container@<container>`
+  — and nspawn, given no network flags, shares the network it was started in. An assertion
+  keeps `privateNetwork`, `networkNamespace`, `interfaces`, `macvlans` and `extraVeths`
+  unset;
 - `privateUsers = mkDefault "pick"`: the container's root has no capability in the user
   namespace that owns the zone's network namespace (the host's), so it can't add a route or
   an interface. An assertion refuses `"no"` and `"identity"` for a container in a zone, and
@@ -121,8 +127,8 @@ The unit is still the person's; only its network changes.
     any user there can ask the daemon for a fixed-output derivation — a download from any
     URL, made by the host in the host's network. This is a channel of every NixOS container,
     not only ours;
-- `systemd.services."container@<container>"`: `bindsTo`/`after` the namespace unit,
-  `wants`/`after` the holder.
+- `systemd.services."container@<container>"`: `NetworkNamespacePath`, `bindsTo`/`after`
+  the namespace unit, `wants`/`after` the holder.
 
 ## 7. State for tools
 

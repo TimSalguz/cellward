@@ -202,6 +202,17 @@ in
                   assertion = !ct.enableTun && !(builtins.elem "CAP_NET_ADMIN" ct.additionalCapabilities);
                   message = "containers.${c} runs in the system zone ${a.zone}: no enableTun and no CAP_NET_ADMIN — a network of its own is exactly what the zone takes away.";
                 }
+                {
+                  # Сеть контейнера — сеть зоны, в которой запущен nspawn:
+                  # любой из этих флагов дал бы ему другую.
+                  assertion =
+                    !ct.privateNetwork
+                    && ct.networkNamespace == null
+                    && ct.interfaces == [ ]
+                    && ct.macvlans == [ ]
+                    && ct.extraVeths == { };
+                  message = "containers.${c} runs in the system zone ${a.zone}: its network is the zone's, so privateNetwork, networkNamespace, interfaces, macvlans and extraVeths have to stay unset.";
+                }
               ]
             ) cfg.containers
           );
@@ -299,8 +310,16 @@ in
 
       # --- NIXOS-КОНТЕЙНЕРЫ В ЗОНЕ (этап 3) ---
       {
+        # Сеть — НЕ через containers.<c>.networkNamespace: nspawn входит в
+        # чужое сетевое пространство уже из нового user namespace контейнера,
+        # а пространство зоны принадлежит user namespace хоста — «Failed to
+        # join network namespace: Operation not permitted» при
+        # privateUsers = "pick" (проверено в tests/vm-system.nix). Поэтому в
+        # зону входит сам systemd, до запуска nspawn (NetworkNamespacePath у
+        # container@<c> ниже), а nspawn без сетевых флагов делит сеть, в
+        # которой запущен, — сеть зоны. Свой user namespace контейнер получает
+        # как обычно, и прав над сетью зоны у его root нет.
         containers = lib.mapAttrs (_c: a: {
-          networkNamespace = netnsPath a.zone;
           privateUsers = lib.mkDefault "pick";
           extraFlags = [
             # Стартовый скрипт nixpkgs копирует resolv.conf хоста в корень
@@ -317,7 +336,13 @@ in
         }) cfg.containers;
 
         systemd.services = lib.mapAttrs' (
-          c: a: lib.nameValuePair "container@${c}" (consumerDeps a.zone)
+          c: a:
+          lib.nameValuePair "container@${c}" (
+            consumerDeps a.zone
+            // {
+              serviceConfig.NetworkNamespacePath = netnsPath a.zone;
+            }
+          )
         ) cfg.containers;
       }
     ]

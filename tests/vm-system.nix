@@ -79,6 +79,17 @@ let
           pkgs.tcpdump
         ];
 
+        # The store from a disk image, not the host's over 9p: with
+        # `privateUsers = "pick"` nixpkgs binds /nix/store into the container
+        # with `idmap`, and 9p has no idmapped mounts ("Failed to clone
+        # /nix/store: Invalid argument"). A real machine's ext4 or btrfs has.
+        virtualisation.useNixStoreImage = true;
+        # That image is read-only, so register-nix-paths can't fill the Nix
+        # database at boot and /nix/var/nix/db is never made — and nixpkgs
+        # binds it into every container. Empty is enough: the container only
+        # reads it, and nothing here asks Nix anything.
+        systemd.tmpfiles.rules = [ "d /nix/var/nix/db 0755 root root -" ];
+
         # Sized to run next to other VMs on a 16 GiB desktop: the zone, a
         # service and one small container fit in 1.5 GiB.
         virtualisation.cores = 2;
@@ -256,15 +267,26 @@ let
           out = in_probe("socat -T10 - TCP:10.99.0.1:8080")
           assert "peer=10.99.0.2" in out, out
 
+      # Inode numbers of namespaces are reused as soon as one is freed, so
+      # "a different inode" proves nothing. A per-namespace sysctl marks the
+      # old one instead: the new namespace has the default, and so must the
+      # namespace the service ends up in.
       with subtest("the namespace restarts: its consumers restart into the new one"):
-          before = netns_inode()
+          machine.succeed("ip netns exec vz-sz sysctl -qw net.ipv4.ip_default_ttl=63")
+          assert in_probe("cat /proc/sys/net/ipv4/ip_default_ttl").strip() == "63"
           machine.succeed("systemctl restart vpn-zone-system-ns-sz")
           machine.succeed("systemctl start vpn-zone-system-sz probe container@box")
-          after = netns_inode()
-          assert before != after, f"the namespace was not recreated: {before}"
+          out = machine.succeed("ip netns exec vz-sz cat /proc/sys/net/ipv4/ip_default_ttl").strip()
+          assert out == "64", f"the namespace was not recreated: ttl {out}"
+          assert in_probe("cat /proc/sys/net/ipv4/ip_default_ttl").strip() == "64"
           pid = machine.succeed("systemctl show -p MainPID --value probe").strip()
           ns = machine.succeed(f"readlink /proc/{pid}/ns/net").strip()
-          assert ns == f"net:[{after}]", f"probe is in {ns}, the zone is {after}"
+          assert ns == f"net:[{netns_inode()}]", f"probe is in {ns}"
+          out = in_probe("socat -T10 - TCP:10.99.0.1:8080")
+          assert "peer=10.99.0.2" in out, out
+          machine.wait_until_succeeds("nixos-container run box -- true", timeout=120)
+          out = in_box("socat -T10 - TCP:10.99.0.1:8080")
+          assert "peer=10.99.0.2" in out, out
     '';
   };
 in
