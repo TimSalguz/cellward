@@ -5,6 +5,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed (behaviour — read before updating)
+- **Zones are hermetic by default** (`docs/HERMETICITY.md` §7 C): with no
+  setting of its own a zone has no `systemd --user`, its session bus goes
+  through the filter, and a launch in another network goes through the
+  broker, which asks. The ordinary mode let any program in a zone have the
+  host's session start a process outside it, around its tunnel; the kernel
+  never let the zone's own processes out, but a helper outside did.
+  The way back is explicit: `programs.vpn-zones.hermetic.default = false`,
+  a zone in `hermetic.exceptions`, `vpn-zone hermetic --default off` or
+  `vpn-zone hermetic <zone> off`. What a hermetic zone does not have yet:
+  bus permissions from Flathub manifests and a Secret Service of its own —
+  programs that keep their login in the keyring (Electron ones among them)
+  do not reach it; give such a zone an exception until then.
+
+### Fixed
+- The broker is socket-activated (`vpn-zone-broker.socket`), and every zone
+  wants its socket. It used to be a service wanted by `default.target`: when
+  home-manager put its unit in place after the user manager had reached that
+  target (a switch, or a first boot), it was not started until the next login
+  — and a hermetic zone's one door out was missing (red in CI).
+
+### Added
+- The broker's question has a third answer, **always**: remembered as zone →
+  network → program (`~/.config/vpn-zones/broker-always`), offered only for a
+  program of the store — what a zone cannot replace. `docs/HERMETICITY.md`
+  §3.
+
 ### Security (a review of the system tier, 2026-09-23)
 - A program in any user zone, hermetic ones included, reached the system
   tier's service socket (`/run/vpn-zones/sysrun.sock`): it could add a plain

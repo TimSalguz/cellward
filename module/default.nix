@@ -563,7 +563,7 @@ in
     hermetic.default = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
-      description = "Герметичны ли зоны без своей настройки: без systemd --user, сессионная шина через фильтр (xdg-dbus-proxy), запуск в других сетях — только через брокер с вопросом человеку. null — не задавать из Nix (тогда действует vpn-zone hermetic --default, иначе выкл.). Своя настройка зоны (vpn-zone hermetic <зона> on|off) важнее умолчания. См. docs/HERMETICITY.ru.md §7.";
+      description = "Герметичны ли зоны без своей настройки: без systemd --user, сессионная шина через фильтр (xdg-dbus-proxy), запуск в других сетях — только через брокер с вопросом человеку. null — не задавать из Nix (тогда действует vpn-zone hermetic --default, иначе вкл.: с 2026-09 зоны герметичны по умолчанию; прежнее поведение — hermetic.default = false или исключения). Своя настройка зоны (vpn-zone hermetic <зона> on|off) важнее умолчания. См. docs/HERMETICITY.ru.md §7.";
     };
 
     hermetic.exceptions = lib.mkOption {
@@ -718,7 +718,13 @@ in
   systemd.user.services."vpn-zone@" = {
     Unit = {
       Description = "VPN-зона %i (сетевое пространство с туннелем)";
-      After = [ "network-online.target" ];
+      # Сокет брокера — до зоны: держатель переносит его в зону, если он
+      # есть к её подъёму (zone.rs, seal_runtime).
+      Wants = [ "vpn-zone-broker.socket" ];
+      After = [
+        "network-online.target"
+        "vpn-zone-broker.socket"
+      ];
     };
     Service = {
       Type = "simple";
@@ -766,13 +772,30 @@ in
   # Брокер: единственная дверь наружу из герметичной зоны (rust/src/broker.rs).
   # Кто просит — узнаёт по сетевому namespace процесса, запуск в ту же зону —
   # без вопроса, в другую сеть — только после подтверждения человеком.
+  # Брокер активируется сокетом: сокет есть с момента, как его захотел
+  # менеджер пользователя или любая зона (vpn-zone@ его требует), даже если
+  # home-manager положил юниты уже после того, как менеджер прошёл
+  # default.target (так было в CI: служба просто не запустилась). Зоны теперь
+  # герметичны по умолчанию, и брокер — их единственная дверь наружу.
+  systemd.user.sockets.vpn-zone-broker = {
+    Unit.Description = "Сокет брокера запусков из герметичных VPN-зон";
+    Socket = {
+      ListenStream = "%t/vpn-zones/broker";
+      SocketMode = "0600";
+      DirectoryMode = "0700";
+    };
+    Install.WantedBy = [ "sockets.target" ];
+  };
   systemd.user.services.vpn-zone-broker = {
-    Unit.Description = "Брокер запусков из герметичных VPN-зон";
+    Unit = {
+      Description = "Брокер запусков из герметичных VPN-зон";
+      Requires = [ "vpn-zone-broker.socket" ];
+      After = [ "vpn-zone-broker.socket" ];
+    };
     Service = {
       ExecStart = "${vpn-zone}/bin/vpn-zone _broker";
       Restart = "on-failure";
     };
-    Install.WantedBy = [ "default.target" ];
   };
 
   systemd.user.services.vpn-zone-watch = lib.mkIf cfg.tunnelWatch.enable {

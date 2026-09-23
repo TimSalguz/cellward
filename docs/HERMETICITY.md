@@ -69,6 +69,16 @@ knows which zone asked, and answers:
 - the zone is locked → only the same container;
 - otherwise → the picker, with "asked by zone X" in the question.
 
+**"Always" (2026-09).** The question has three answers: allow, *always*, refuse. "Always"
+is remembered as zone → network → program in `~/.config/vpn-zones/broker-always`, one
+`origin<TAB>target<TAB>program` per line, and the next such launch goes on without a
+question. The program is the command's first word as the host resolves it — its directory's
+links followed, its own name kept, since `touch` and `cat` are links to one coreutils — and
+"always" is offered only when that path and the file it finally is are both in the store,
+where nothing in a zone can write: a program in `~/.local/bin` could be replaced by a
+program in the zone and would make "always" a standing door. The name a launch gives itself
+(the app-id) is not trusted — the program that asks sends it.
+
 Inside the zone `xdg-open`/`$BROWSER` resolve to the broker client, and the
 portal's `OpenURI`/`OpenFile` are filtered out of the bus proxy (`--call`
 rules) so that GTK/Qt fall back to `xdg-open`. Firefox and GTK under
@@ -123,13 +133,13 @@ becomes a default, with the table above as the list of what the owner accepts.
   1. `hermetic` becomes the default; switching it off is explicit and per
      zone (a zone whose programs legitimately drive `systemd --user`, such as
      one running agents that start VM checks with `systemd-run --user`).
-     **The switches are implemented, the default is not flipped yet:**
+     **Implemented, and the default flipped (2026-09):**
      `hermetic.default` and `hermetic.exceptions` in the module,
      `vpn-zone hermetic --default on|off` and
      `vpn-zone hermetic <zone> on|off|default` locally. What wins: a zone in
      `hermetic.exceptions` (the opposite of `hermetic.default`, which the
      module requires with it), then the zone's own setting, then
-     `hermetic.default`, then the local default, then off. Only `off` opens
+     `hermetic.default`, then the local default, then on. Only `off` opens
      anything: the prototype's empty marker, an unreadable one and any other
      content mean on. The holder decides once, when the zone comes up;
      `status --json` shows `defaults.hermetic` and `networks[].hermetic`, each

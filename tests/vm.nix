@@ -1143,14 +1143,10 @@ let
           assert herm == {"value": True, "source": "nix"}, herm
           assert out["defaults"]["hermetic"] == {"value": False, "source": "nix"}, out["defaults"]
           alice("sh -c '! vpn-zone hermetic vmherm off'")
-          # The broker is a user service started with the session: wait for it
-          # rather than race it (red once on main, 2026-09-23).
-          machine.wait_until_succeeds(
-              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
-              "systemctl --user is-active vpn-zone-broker.service'",
-              timeout=60,
-          )
+          # The broker is socket-activated, and every zone wants its socket:
+          # no race with the session (red on main and in CI before).
           alice("vpn-zone up vmherm")
+          alice("systemctl --user is-active vpn-zone-broker.socket")
           hp = machine.succeed(f"cat {STATE}/vmherm/zone.pid").strip()
           # Neither the compositor's IPC nor its own socket (LEAK-MODEL §13).
           in_zone(hp, "test ! -e /run/user/1000/niri.wayland-9.4242.sock")
@@ -1167,6 +1163,21 @@ let
           in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm vpn-zone run direct -- touch /tmp/brokered-escape'")
           machine.sleep(3)
           machine.fail("test -e /tmp/brokered-escape")
+          # "Always" said before for this very program of the store (the
+          # broker-always file is what the dialog's third button writes): the
+          # launch in another network goes on without a question — there is
+          # nobody to ask here, so a question would have been a refusal.
+          touch = machine.succeed("readlink -f /run/current-system/sw/bin").strip() + "/touch"
+          alice(
+              "mkdir -p ~/.config/vpn-zones && "
+              f"printf 'vmherm\tunconfined\t%s\n' {touch} >> ~/.config/vpn-zones/broker-always"
+          )
+          in_zone(hp, f"env VPN_ZONE_CURRENT=vmherm vpn-zone run direct -- {touch} /tmp/brokered-always")
+          machine.wait_until_succeeds("test -e /tmp/brokered-always", timeout=30)
+          # Only that program: another one is asked about — and refused.
+          in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm vpn-zone run direct -- mkdir /tmp/brokered-other'")
+          machine.sleep(3)
+          machine.fail("test -e /tmp/brokered-other")
           # Both decisions are on the record, the escape under the new name.
           out = alice("vpn-zone journal --json")
           assert '"event":"broker","origin":"vmherm","target":"vmherm"' in out, out

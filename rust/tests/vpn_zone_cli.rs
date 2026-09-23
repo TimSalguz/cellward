@@ -1387,7 +1387,7 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
         "{json}"
     );
     assert!(
-        json.contains("\"hermetic\":{\"value\":false,\"source\":\"default\"}}"),
+        json.contains("\"hermetic\":{\"value\":true,\"source\":\"default\"}}"),
         "{json}"
     );
     // A local default, and a zone that follows it again.
