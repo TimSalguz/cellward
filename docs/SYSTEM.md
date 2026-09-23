@@ -409,7 +409,12 @@ services.vpn-zones.system = {
   after the local file systems and `systemd-tmpfiles-setup.service`, which makes the
   `/var/run → /run` link `ip netns` keeps namespaces under (the VM test found the zone
   failing without it): ordered after anything later, timesyncd would close a cycle.
-  It retries its servers by itself (`ConnectionRetrySec`).
+  So it starts before the zone has a way out, and it does not come back by itself: it
+  judges the network by the host's, and after its first attempts fail it waits for an
+  event that may never come (in CI it never tried again within two minutes). The zone's
+  way out, once up, restarts it — `ExecStartPost=-systemctl --no-block try-restart`, a
+  drop-in on `vpn-zone-system@<zone>` written by the same generator, so the switch takes
+  it away with the rest.
 - **NetworkManager.** Its connectivity check is root's and goes to the internet; refused, it
   would tell every program that asks that there is only limited connectivity, while the
   zones have the internet. Under `strict` the module turns the check off (`mkDefault`).
@@ -499,7 +504,9 @@ services.vpn-zones.system = {
   2. through `vpn-zone-sys pl` the user reaches the internet address;
   3. the Nix daemon runs in `pl`'s namespace, and a user's build downloads a file from the
      internet address through it; root's own `nix-prefetch-url` (a local store) is refused;
-  4. timesyncd runs in `pl`'s namespace and contacts the NTP server;
+  4. timesyncd runs in `pl`'s namespace and contacts the NTP server — after every boot,
+     although it starts before the zone's way out (the routes are the machine's own, from
+     boot, as on real hardware);
   5. `vpn-zones-off` puts timesyncd back into the host's namespace, `vpn-zones-on` into the
      zone, and root is refused again;
   6. no ordering cycle in the journal of the first boot or of any later one (systemd would

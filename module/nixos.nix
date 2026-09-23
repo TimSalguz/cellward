@@ -114,11 +114,24 @@ let
         zone = cfg.host.time;
         systemBus = true;
         # timesyncd — из ранней загрузки (Before=sysinit.target), а выход
-        # зоны ждёт сеть: порядок «после выхода» дал бы цикл. Часы
-        # переспрашивают сервер сами (ConnectionRetrySec).
+        # зоны ждёт сеть: порядок «после выхода» дал бы цикл.
         afterHolder = false;
+        # Сам он не переспросит: о сети судит по состоянию сети хоста, и
+        # после неудачных первых попыток (в зоне ещё один lo) ждёт события,
+        # которого может не быть (CI: ни одной попытки за 2 минуты). Выход
+        # зоны, поднявшись, перезапускает его.
+        restartWhenUp = true;
       };
     };
+
+  # Выход зоны, поднявшись, перезапускает службу (restartWhenUp): для тех,
+  # кто стартует раньше выхода и сам сеть не переспрашивает.
+  restartWhenUpDropIn =
+    unit:
+    pkgs.writeText "vpn-zones-restart-when-up-${unit}.conf" ''
+      [Service]
+      ExecStartPost=-${systemctl} --no-block try-restart ${unit}.service
+    '';
 
   consumerDeps = zone: {
     bindsTo = [ "${nsUnit zone}.service" ];
@@ -633,10 +646,17 @@ in
             case " $cmdline " in *" vpnzones=off "*) exit 0 ;; esac
           ''
           + lib.concatStrings (
-            lib.mapAttrsToList (unit: s: ''
-              ${pkgs.coreutils}/bin/mkdir -p "$1/${unit}.service.d"
-              ${pkgs.coreutils}/bin/ln -sf ${attachDropIn unit s} "$1/${unit}.service.d/50-vpn-zones.conf"
-            '') attachedServices
+            lib.mapAttrsToList (
+              unit: s:
+              ''
+                ${pkgs.coreutils}/bin/mkdir -p "$1/${unit}.service.d"
+                ${pkgs.coreutils}/bin/ln -sf ${attachDropIn unit s} "$1/${unit}.service.d/50-vpn-zones.conf"
+              ''
+              + lib.optionalString (s.restartWhenUp or false) ''
+                ${pkgs.coreutils}/bin/mkdir -p "$1/${holderUnit s.zone}.service.d"
+                ${pkgs.coreutils}/bin/ln -sf ${restartWhenUpDropIn unit} "$1/${holderUnit s.zone}.service.d/50-vpn-zones-restart-${unit}.conf"
+              ''
+            ) attachedServices
           )
         );
       })

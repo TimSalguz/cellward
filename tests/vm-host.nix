@@ -49,6 +49,16 @@ let
 
         users.users.alice.isNormalUser = true;
 
+        # The way to the "internet", there from boot as on a real machine:
+        # what starts early has to cope with the zone's way out coming later,
+        # not with a route the test adds afterwards.
+        networking.interfaces.eth1.ipv4.routes = [
+          {
+            address = "198.51.100.0";
+            prefixLength = 24;
+          }
+        ];
+
         # The clock from the "internet" address, and nothing else to ask.
         services.timesyncd = {
           enable = lib.mkForce true;
@@ -79,6 +89,12 @@ let
           8091
         ];
         networking.firewall.allowedUDPPorts = [ 123 ];
+        networking.interfaces.eth1.ipv4.addresses = [
+          {
+            address = "198.51.100.1";
+            prefixLength = 24;
+          }
+        ];
         # An NTP server with no time source of its own: its clock is the
         # reference.
         services.chrony = {
@@ -116,8 +132,6 @@ let
           machine.shutdown()
           machine.start()
           machine.wait_for_unit("multi-user.target")
-          # The test's route to the "internet" does not survive a reboot.
-          machine.succeed("ip route add 198.51.100.0/24 dev eth1")
           no_ordering_cycles()
 
       def host_services_in_zone():
@@ -126,6 +140,12 @@ let
           assert netns_of("systemd-timesyncd") == zone_netns(), netns_of("systemd-timesyncd")
           machine.succeed(as_user("alice", "nix-store -q --hash /run/current-system"))
           assert netns_of("nix-daemon") == zone_netns(), netns_of("nix-daemon")
+          # Started before the zone's way out, and synced once it came up:
+          # the way out restarts it.
+          machine.wait_until_succeeds(
+              "journalctl -b -u systemd-timesyncd | grep -q 'Contacted time server 198.51.100.1'",
+              timeout=60,
+          )
 
       start_all()
       server.wait_for_unit("multi-user.target")
@@ -133,10 +153,9 @@ let
 
       with subtest("server: a LAN address, and one that stands for the internet"):
           server_ip = server.succeed(
-              "ip -4 -o addr show eth1 | head -1 | tr -s ' ' | cut -d' ' -f4 | cut -d/ -f1"
+              "ip -4 -o addr show eth1 | grep -v 198.51.100 | head -1 | tr -s ' ' | cut -d' ' -f4 | cut -d/ -f1"
           ).strip()
-          server.succeed("ip addr add 198.51.100.1/24 dev eth1")
-          machine.succeed("ip route add 198.51.100.0/24 dev eth1")
+          machine.succeed("ip route show 198.51.100.0/24 | grep -q eth1")
           server.succeed(
               "systemd-run --unit=echo socat TCP-LISTEN:8090,fork,reuseaddr "
               "'SYSTEM:echo peer=$SOCAT_PEERADDR'"
@@ -194,8 +213,8 @@ let
           machine.wait_for_unit("systemd-timesyncd.service")
           assert netns_of("systemd-timesyncd") == zone_netns(), netns_of("systemd-timesyncd")
           machine.wait_until_succeeds(
-              "journalctl -u systemd-timesyncd | grep -q 'Contacted time server 198.51.100.1'",
-              timeout=120,
+              "journalctl -b -u systemd-timesyncd | grep -q 'Contacted time server 198.51.100.1'",
+              timeout=60,
           )
 
       with subtest("off: the host's own services back on the host's network"):
