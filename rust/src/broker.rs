@@ -336,8 +336,25 @@ fn start(tools: &Tools, app_id: &OsString, argv: &[OsString]) -> String {
     }
 }
 
-/// `vpn-zone _broker`: listen and answer, forever.
+/// `vpn-zone _broker`: listen and answer, forever. Normally the socket is
+/// systemd's (`vpn-zone-broker.socket`) and handed over at fd 3 — it exists
+/// from the moment the user manager or a zone wants it, whether or not this
+/// has been started (red in CI: the service, wanted by `default.target`, was
+/// never started when home-manager put its unit in place after the manager
+/// had reached that target). Run by hand, it listens by itself.
 pub fn serve(tools: &Tools) -> u8 {
+    let passed = crate::dnsfwd::listen_fds(
+        &std::env::var("LISTEN_PID").unwrap_or_default(),
+        &std::env::var("LISTEN_FDS").unwrap_or_default(),
+        std::process::id(),
+    );
+    if passed >= 1 {
+        use std::os::fd::FromRawFd;
+        // SAFETY: systemd passed this descriptor to us to own.
+        let listener = unsafe { UnixListener::from_raw_fd(3) };
+        eprintln!("broker: listening on the socket systemd passed");
+        return accept_forever(tools, &listener);
+    }
     let socket = runtime_dir().join(SOCKET);
     if let Some(dir) = socket.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
@@ -354,9 +371,13 @@ pub fn serve(tools: &Tools) -> u8 {
         }
     };
     eprintln!("broker: listening on {}", socket.display());
+    accept_forever(tools, &listener)
+}
+
+fn accept_forever(tools: &Tools, listener: &UnixListener) -> u8 {
     for stream in listener.incoming().flatten() {
         let tools = tools.clone();
-        std::thread::spawn(move || handle(&tools, stream));
+        let _ = std::thread::Builder::new().spawn(move || handle(&tools, stream));
     }
     0
 }

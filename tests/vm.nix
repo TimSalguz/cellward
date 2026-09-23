@@ -1143,14 +1143,10 @@ let
           assert herm == {"value": True, "source": "nix"}, herm
           assert out["defaults"]["hermetic"] == {"value": False, "source": "nix"}, out["defaults"]
           alice("sh -c '! vpn-zone hermetic vmherm off'")
-          # The broker is a user service started with the session: wait for it
-          # rather than race it (red once on main, 2026-09-23).
-          machine.wait_until_succeeds(
-              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
-              "systemctl --user is-active vpn-zone-broker.service'",
-              timeout=60,
-          )
+          # The broker is socket-activated, and every zone wants its socket:
+          # no race with the session (red on main and in CI before).
           alice("vpn-zone up vmherm")
+          alice("systemctl --user is-active vpn-zone-broker.socket")
           hp = machine.succeed(f"cat {STATE}/vmherm/zone.pid").strip()
           # Neither the compositor's IPC nor its own socket (LEAK-MODEL §13).
           in_zone(hp, "test ! -e /run/user/1000/niri.wayland-9.4242.sock")

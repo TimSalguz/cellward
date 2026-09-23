@@ -19,6 +19,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   programs that keep their login in the keyring (Electron ones among them)
   do not reach it; give such a zone an exception until then.
 
+### Fixed
+- The broker is socket-activated (`vpn-zone-broker.socket`), and every zone
+  wants its socket. It used to be a service wanted by `default.target`: when
+  home-manager put its unit in place after the user manager had reached that
+  target (a switch, or a first boot), it was not started until the next login
+  — and a hermetic zone's one door out was missing (red in CI).
+
 ### Added
 - The broker's question has a third answer, **always**: remembered as zone →
   network → program (`~/.config/vpn-zones/broker-always`), offered only for a
