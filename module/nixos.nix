@@ -63,6 +63,38 @@ let
       "offline"
     ]);
 
+  # Метка «vpn-zones выключены»: её ставит vpn-zones-off, снимает vpn-zones-on.
+  # Пока она есть, не поднимаются ни зоны, ни политика хоста, а генератор не
+  # привязывает службы — всё в сети хоста, до следующего vpn-zones-on, в том
+  # числе после перезагрузки.
+  offFlag = "/var/lib/vpn-zones/off";
+  systemctl = "${config.systemd.package}/bin/systemctl";
+
+  # Дополнение к юниту службы, которое кладёт генератор (см. «Службы в зоне»).
+  attachDropIn =
+    unit: s:
+    pkgs.writeText "vpn-zones-attach-${unit}.conf" (
+      ''
+        [Unit]
+        BindsTo=${nsUnit s.zone}.service
+        After=${nsUnit s.zone}.service ${holderUnit s.zone}.service
+        Wants=${holderUnit s.zone}.service
+
+        [Service]
+        NetworkNamespacePath=${netnsPath s.zone}
+        # Без «-»: нет файла — служба не стартует, а не резолвит через хост.
+        BindReadOnlyPaths=${resolvPath s.zone}:/etc/resolv.conf
+        # hosts: files dns — ни один модуль NSS, кроме обычного резолвера.
+        BindReadOnlyPaths=/etc/netns/vz-${s.zone}/nsswitch.conf:/etc/nsswitch.conf
+        # unix-сокеты проходят сквозь сетевые пространства: nscd, resolved и
+        # avahi ответили бы из сети хоста, мимо туннеля.
+        InaccessiblePaths=-/run/nscd -/run/systemd/resolve/io.systemd.Resolve -/run/avahi-daemon
+      ''
+      + lib.optionalString (!s.systemBus) ''
+        InaccessiblePaths=-/run/dbus/system_bus_socket
+      ''
+    );
+
   consumerDeps = zone: {
     bindsTo = [ "${nsUnit zone}.service" ];
     after = [
@@ -167,6 +199,17 @@ in
 {
   options.services.vpn-zones.system = {
     enable = lib.mkEnableOption "system zones of vpn-zones: network namespaces with a tunnel as their only way out, held from boot, for services and NixOS containers";
+
+    switchGroup = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = "wheel";
+      description = ''
+        Members may run `vpn-zones-off` and `vpn-zones-on` without a password:
+        vpn-zones off entirely — zones, the egress policy, services back on the
+        host's network — with no rebuild and no network, until turned on again.
+        This turns polkit on. `null`: root only.
+      '';
+    };
 
     users = lib.mkOption {
       type = lib.types.listOf lib.types.str;
@@ -420,6 +463,9 @@ in
         systemd.services."vpn-zone-system-ns@" = {
           description = "vpn-zones: network namespace of the system zone %i";
           restartIfChanged = false;
+          # vpn-zones-off и `vpnzones=off` в строке ядра: зоны не поднимаются.
+          unitConfig.ConditionPathExists = "!${offFlag}";
+          unitConfig.ConditionKernelCommandLine = "!vpnzones=off";
           serviceConfig = {
             Type = "oneshot";
             RemainAfterExit = true;
@@ -429,6 +475,8 @@ in
         };
         systemd.services."vpn-zone-system@" = {
           description = "vpn-zones: the way out of the system zone %i";
+          unitConfig.ConditionPathExists = "!${offFlag}";
+          unitConfig.ConditionKernelCommandLine = "!vpnzones=off";
           bindsTo = [ "vpn-zone-system-ns@%i.service" ];
           after = [
             "vpn-zone-system-ns@%i.service"
@@ -454,36 +502,26 @@ in
       }
 
       # --- СЛУЖБЫ В ЗОНЕ (этап 2) ---
-      {
-        systemd.services = lib.mapAttrs (
-          _unit: s:
-          consumerDeps s.zone
-          // {
-            serviceConfig = {
-              NetworkNamespacePath = netnsPath s.zone;
-              # Без «-»: нет файла — служба не стартует, а не резолвит через хост.
-              BindReadOnlyPaths = [
-                "${resolvPath s.zone}:/etc/resolv.conf"
-                # hosts: files dns — ни один модуль NSS, кроме обычного
-                # резолвера, имя не получит (страховка на весь класс, как у
-                # пользовательских зон).
-                "/etc/netns/vz-${s.zone}/nsswitch.conf:/etc/nsswitch.conf"
-              ];
-              # Оба — unix-сокеты, а они сквозь сетевые namespace проходят:
-              # glibc спрашивает nscd первым, nss-resolve ходит к resolved по
-              # varlink, и любой из них ответил бы из сети хоста. «-» — потому
-              # что на хосте может не быть ни того, ни другого.
-              InaccessiblePaths = [
-                "-/run/nscd"
-                "-/run/systemd/resolve/io.systemd.Resolve"
-                # nss-mdns: имя на .local ушло бы в локальную сеть хоста.
-                "-/run/avahi-daemon"
-              ]
-              ++ lib.optional (!s.systemBus) "-/run/dbus/system_bus_socket";
-            };
-          }
-        ) cfg.services;
-      }
+      # Привязка — не опциями юнита, а дополнением в /run, которое кладёт
+      # генератор systemd при каждой загрузке и daemon-reload. Так выключатель
+      # (vpn-zones-off) возвращает службы в сеть хоста без пересборки: без
+      # метки дополнений нет. Генератор — несколько строк sh с абсолютными
+      # путями, без нашей программы: он должен работать, когда наше сломано.
+      (lib.mkIf (cfg.services != { }) {
+        systemd.generators.vpn-zones = pkgs.writeShellScript "vpn-zones-generator" (
+          ''
+            [ -e ${offFlag} ] && exit 0
+            read -r cmdline < /proc/cmdline
+            case " $cmdline " in *" vpnzones=off "*) exit 0 ;; esac
+          ''
+          + lib.concatStrings (
+            lib.mapAttrsToList (unit: s: ''
+              ${pkgs.coreutils}/bin/mkdir -p "$1/${unit}.service.d"
+              ${pkgs.coreutils}/bin/ln -sf ${attachDropIn unit s} "$1/${unit}.service.d/50-vpn-zones.conf"
+            '') cfg.services
+          )
+        );
+      })
 
       # --- ПРОГРАММЫ ПОЛЬЗОВАТЕЛЕЙ В ЗОНЕ (этап 4, docs/SYSTEM.md §7) ---
       # Войти в пространство зоны без root нельзя, поэтому входит посредник:
@@ -527,6 +565,98 @@ in
           '')
         ];
       }
+
+      # --- ВЫКЛЮЧАТЕЛЬ (docs/SYSTEM.md §9a) ---
+      # vpn-zones целиком выключаются и включаются без пересборки и без
+      # интернета — и без нашей программы: systemd, nft и coreutils. Метка
+      # переживает перезагрузку.
+      (
+        let
+          attached = map (u: "${u}.service") (lib.attrNames cfg.services);
+          autoStarted = map (n: "${holderUnit n}.service") (
+            lib.attrNames (lib.filterAttrs (_: z: z.autoStart) cfg.zones)
+          );
+          nft = "${pkgs.nftables}/bin/nft";
+          # Выключение: дополнений уже нет, службы встают в сети хоста.
+          detach = lib.optional (attached != [ ]) "-${systemctl} try-restart ${lib.concatStringsSep " " attached}";
+          # Включение — наоборот, и порядок здесь важен. Служба с `BindsTo`
+          # на неподнятую зону будет остановлена systemd сразу при
+          # daemon-reload и сама не вернётся; а `try-restart` зону не
+          # поднимет — он не тянет зависимостей. Поэтому: запомнить, какие
+          # службы работают, поднять их зоны, перечитать юниты, перезапустить.
+          reattach = pkgs.writeShellScript "vpn-zones-reattach" ''
+            active=
+            for pair in ${
+              lib.escapeShellArgs (
+                lib.mapAttrsToList (u: s: "${u}.service:${holderUnit s.zone}.service") cfg.services
+              )
+            }; do
+              u=''${pair%%:*}
+              if ${systemctl} -q is-active "$u"; then
+                active="$active $u"
+                ${systemctl} start "''${pair#*:}" || true
+              fi
+            done
+            ${systemctl} daemon-reload
+            for u in $active; do
+              ${systemctl} restart "$u" || true
+            done
+          '';
+        in
+        {
+          systemd.services.vpn-zones-off = {
+            description = "vpn-zones: off — everything back on the host's network until vpn-zones-on";
+            serviceConfig = {
+              Type = "oneshot";
+              ExecStart = [
+                "${pkgs.coreutils}/bin/touch ${offFlag}"
+                "-${nft} destroy table inet vpnzones_egress"
+                # Генератор видит метку и больше не привязывает службы…
+                "${systemctl} daemon-reload"
+              ]
+              # …и они встают заново уже в сети хоста;
+              ++ detach
+              ++ [
+                # зоны — последними: привязанные к ним службы уже отвязаны.
+                "-${systemctl} stop vpn-zones-egress.service"
+                "-${systemctl} stop vpn-zone-system@*.service vpn-zone-system-ns@*.service"
+              ];
+            };
+          };
+          systemd.services.vpn-zones-on = {
+            description = "vpn-zones: on again";
+            serviceConfig = {
+              Type = "oneshot";
+              ExecStart = [
+                "${pkgs.coreutils}/bin/rm -f ${offFlag}"
+                # Политика — первой: хост закрывается как можно раньше.
+                "-${systemctl} start vpn-zones-egress.service"
+              ]
+              ++ lib.optional (autoStarted != [ ]) "-${systemctl} start ${lib.concatStringsSep " " autoStarted}"
+              ++ [ "${reattach}" ];
+            };
+          };
+          environment.systemPackages = [
+            (pkgs.writeShellScriptBin "vpn-zones-off" ''
+              exec ${systemctl} start vpn-zones-off.service
+            '')
+            (pkgs.writeShellScriptBin "vpn-zones-on" ''
+              exec ${systemctl} start vpn-zones-on.service
+            '')
+          ];
+          security.polkit.enable = lib.mkIf (cfg.switchGroup != null) true;
+          security.polkit.extraConfig = lib.mkIf (cfg.switchGroup != null) ''
+            polkit.addRule(function(action, subject) {
+              if (action.id == "org.freedesktop.systemd1.manage-units" &&
+                  ["vpn-zones-off.service", "vpn-zones-on.service"].indexOf(action.lookup("unit")) >= 0 &&
+                  action.lookup("verb") == "start" &&
+                  subject.isInGroup("${cfg.switchGroup}")) {
+                return polkit.Result.YES;
+              }
+            });
+          '';
+        }
+      )
 
       # --- ПУЛЬТ TTY (docs/SYSTEM.md §7a) ---
       # Вход на текстовой консоли: сразу меню с сетью. Решает, показываться ли,
@@ -610,7 +740,11 @@ in
             description = "vpn-zones: the host egress policy (${e.mode})";
             # Путь спасения без единого нашего бинарника: `vpnzones.egress=off`
             # в строке ядра (в меню загрузки — `e`) — и политика не поднимается.
-            unitConfig.ConditionKernelCommandLine = "!vpnzones.egress=off";
+            unitConfig.ConditionKernelCommandLine = [
+              "!vpnzones.egress=off"
+              "!vpnzones=off"
+            ];
+            unitConfig.ConditionPathExists = "!${offFlag}";
             wantedBy = [ "multi-user.target" ];
             before = [ "network-pre.target" ];
             wants = [ "network-pre.target" ];

@@ -130,7 +130,12 @@ good.
 
 ## 5. Services in a system zone (stage 2)
 
-`services.vpn-zones.system.services.<unit> = "<zone>";` sets on `systemd.services.<unit>`:
+`services.vpn-zones.system.services.<unit> = "<zone>";` attaches the unit to the zone. The
+unit's own definition is left alone: a systemd generator (`vpn-zones-generator`, a few lines
+of shell with absolute store paths, none of our binaries) links a drop-in
+`<unit>.service.d/50-vpn-zones.conf` into `/run` at boot and at every `daemon-reload`. The
+switch (§9a) sets a flag, reloads, and the drop-ins are not there: the unit is back on the
+host's network with no rebuild. The drop-in sets:
 
 - `NetworkNamespacePath=/run/netns/vz-<zone>`;
 - `BindReadOnlyPaths=/etc/netns/vz-<zone>/resolv.conf:/etc/resolv.conf` — without the `-`:
@@ -149,6 +154,14 @@ good.
 - `bindsTo`/`after` the namespace unit, `wants`/`after` the holder.
 
 The unit is still the person's; only its network changes.
+
+The generator runs before local file systems are mounted. With `/var` on a file system of
+its own it cannot see the switch's flag at boot and attaches the units anyway; the zones
+themselves check the flag once `/var` is there and stay down, so the attached units stay
+down with them (`BindsTo` a unit skipped by its condition) — closed, never leaking — until
+`systemctl daemon-reload` runs the generator again. NixOS containers stay attached statically
+(`container@<c>` has its network set by its own module) and under the switch stay stopped
+with their zones.
 
 ## 6. NixOS containers in a system zone (stage 3)
 
@@ -228,6 +241,7 @@ nothing to type and nothing to know.
     [n]     Настройки и откат                ← console.admin, if set
     [p]     напрямую, без VPN (zone direct)  ← only when nl has no live tunnel
     [k]     аварийный ключ …                 ← the egress policy's key (§9)
+    [x]     выключить vpn-zones целиком …    ← the off switch (§9a)
     [q]     обычная консоль, без сети
 ```
 
@@ -237,13 +251,13 @@ nothing to type and nothing to know.
   compositor. The program then decides: a virtual terminal (`/dev/ttyN`, not a pty, not a
   serial line), outside any zone, a user of the console's zone. Anybody else gets the
   ordinary login.
-- **The network.** A zone that is down is started — the zone's users may start its holder
-  (a polkit rule the module writes per zone) — and a tunnel is waited for up to 15 s. Alive
+- **The network.** A zone that is down is started — through the helper (§7), which starts
+  it for the zone's users — and a tunnel is waited for up to 15 s. Alive
   means a handshake within WireGuard's session limit, or for a plain zone its interface up.
 - **The keys.** Enter: a login shell in the zone through `vpn-zone-sys`, and back to the menu
   when it ends; `p`: the same in the plain `fallback` zone, offered when the zone has no live
-  tunnel; `n`: the admin tool on the host; `k`: the emergency key; `q`: the ordinary shell of
-  the host. The shell runs as a process of its own, not inside the console: the client's
+  tunnel; `n`: the admin tool on the host; `k`: the emergency key; `x`: the off switch;
+  `q`: the ordinary shell of the host. With vpn-zones off the console does not show itself. The shell runs as a process of its own, not inside the console: the client's
   relay would leave a thread blocked on the terminal that would take the next key meant for
   the menu.
 - **It never locks anybody out.** Every failure ends in the host's ordinary shell, which under
@@ -325,8 +339,28 @@ way around it that does not need the broken part:
 | This package in a new generation | The console falls through to the ordinary shell; the previous generation in the boot menu |
 | The VPN, or the amneziawg module for a new kernel | The in-tree `wireguard` for configs without obfuscation; the plain zone, which needs no module |
 | The egress policy keeps the host offline, our binary broken | The emergency key deletes the table with `nft` alone and puts it back from the built file with `nft` alone; `vpnzones.egress=off` on the kernel command line (`e` in the boot menu) keeps the policy from loading, with no binary of ours involved. Our binary crashing never OPENS the host: it only adds allowances to a restriction `nft` loads by itself |
+| vpn-zones as a whole, with no network to rebuild without them | `vpn-zones-off` (below) |
 | Nix, the daemon | Not used at run time by zones, the console or the policy |
 | The store itself | The previous generation; nix_cm's rescue copy runs without `/nix/store` |
+
+**Off entirely, with no rebuild.** Taking vpn-zones out of the configuration needs a rebuild,
+and a rebuild may need the network vpn-zones is keeping from the host. `vpn-zones-off` turns
+it all off in place instead: it sets `/var/lib/vpn-zones/off`, deletes the egress table,
+reloads systemd (the generator no longer attaches services), restarts the attached services
+on the host's network, and stops the zones. Every zone unit and the policy have
+`ConditionPathExists=!/var/lib/vpn-zones/off`, so nothing comes up again, reboots included;
+the console does not show itself, and the helper (§7) answers "vpn-zones are off".
+`vpn-zones-on` removes the flag, starts the policy and the `autoStart` zones, brings up the
+zones of the attached services that are running, reloads systemd and restarts those services
+into their zones. The order matters: after the reload a service is bound to its zone, and
+systemd stops a service bound to a zone that is not up; `try-restart` would not bring the
+zone up either, it pulls in no dependencies. Both are oneshot units run by systemd with
+coreutils, `nft` and `systemctl` — none of our binaries; the commands are wrappers around
+`systemctl start`, and polkit lets `services.vpn-zones.system.switchGroup` (`wheel` by
+default, `null` for root only) start exactly these two units without a password. The console
+has it as `[x]`. On the kernel command line, `vpnzones=off` does the same for one boot
+without touching the flag. The user tier has its own switch, `vpn-zone mode off`; user zones
+do not depend on the system tier and keep working.
 
 A statically linked set of tools (`ip`, `awg`, `nft`, pasta) was weighed and left out: on
 NixOS every package carries its own closure, "the linking broke" happens only with a
@@ -394,3 +428,8 @@ the static set would cost long local builds for next to nothing.
      a shell in `sz` that reaches the tunnel, `q` a host shell that does not reach the LAN;
      with the server's WireGuard down and the zone restarted, the menu says there is no
      tunnel and `p` gives a shell in the plain zone that reaches the LAN;
+  11. the off switch, by a member of `wheel`: the flag is set, the policy's table is gone,
+     `sz` is down, the attached service runs again in the host's namespace and alice reaches
+     the LAN directly; `vpn-zone-sys` answers that vpn-zones are off; a `daemon-reload` does
+     not attach the service again; `vpn-zones-on` is refused to a user outside `wheel`, and
+     for alice brings the policy, `sz` and the service in its namespace back;

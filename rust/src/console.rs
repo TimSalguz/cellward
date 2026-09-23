@@ -116,7 +116,7 @@ pub fn net_of(state: &RunState) -> Net {
 /// leave the login going.
 pub fn run(args: &[OsString]) -> u8 {
     let login = args.iter().any(|a| a == "--login");
-    if login && !should_show() {
+    if login && (!should_show() || crate::system::is_off()) {
         return 0;
     }
     let Some(config) = fs::read_to_string(CONFIG)
@@ -214,6 +214,7 @@ fn menu(config: &Config, user: &str) {
             println!("    [p]     напрямую, без VPN (zone {plain})");
         }
         println!("    [k]     аварийный ключ: сеть на хосте на время (emergency key)");
+        println!("    [x]     выключить vpn-zones целиком — сеть хоста, пока не включишь (vpn-zones off)");
         println!("    [q]     обычная консоль, без сети (plain console)");
         print!("  > ");
         let _ = io::stdout().flush();
@@ -250,6 +251,20 @@ fn menu(config: &Config, user: &str) {
                         "Ключ не повернулся — нужна группа ключа или root. (key refused)"
                     }
                 );
+            }
+            b'x' | b'X' => {
+                let ok = Command::new("systemctl")
+                    .args(["start", "vpn-zones-off.service"])
+                    .status()
+                    .is_ok_and(|s| s.success());
+                if ok {
+                    println!(
+                        "vpn-zones выключены: у хоста своя сеть. Включить обратно — vpn-zones-on. \
+                         (vpn-zones off)"
+                    );
+                    return;
+                }
+                println!("Не выключилось — нужна группа выключателя или root. (refused)");
             }
             b'q' | b'Q' | 0x1b | 0x04 => return,
             _ => {}
