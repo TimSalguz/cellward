@@ -5,6 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Security (a review of the system tier, 2026-09-23)
+- A program in any user zone, hermetic ones included, reached the system
+  tier's service socket (`/run/vpn-zones/sysrun.sock`): it could add a plain
+  zone and run itself there, or attach a system zone's way out to namespaces
+  of its own — out around its zone's tunnel. `/run/vpn-zones` is now hidden in
+  every user zone; a way out through a system zone is taken from a zone's
+  uid 0 only; adding zones is for `services.vpn-zones.system.users` only
+  (as documented), and a zone the host's own services go through never has
+  its config replaced by a request. `docs/LEAK-MODEL.md` §14.
+- A user zone through a system zone could reach services listening in the
+  system zone: its pasta now runs with the group `vpn-zones-bridge`, whose
+  packets to the system zone's own addresses are refused.
+- The system-zone service: 16 connections per user, 5 s to send a request;
+  the follow loop re-checks the user and the zone's kind before re-attaching;
+  namespaces are checked for their kind (`NS_GET_NSTYPE`).
+- `strict`: DHCP ports are let out for the system's users only.
+- The egress table is replaced with `add` + `delete table` instead of
+  `destroy` (nft 1.0.8 / Linux 6.3 only): a policy that did not load left the
+  host open.
+- `host.dns`: resolved's LLMNR and mDNS off by default; the DNS forwarder has
+  an overall deadline per query and per TCP connection and does not panic
+  when no thread can be had. Remaining channels are listed in
+  `docs/SYSTEM.md` §9, §9c.
+
 ### Added (system tier)
 - A system zone through one interface of the host:
   `zones.<zone>.uplink = "<interface>"`. A tunnel zone gets an uplink

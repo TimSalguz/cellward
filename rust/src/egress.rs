@@ -78,7 +78,11 @@ pub struct Policy {
 /// The ruleset, as `nft -f` takes it: the old table destroyed and the new one
 /// made in one transaction, so there is no moment without either.
 pub fn ruleset(policy: &Policy) -> String {
-    let mut out = format!("destroy table inet {TABLE}\ntable inet {TABLE} {{\n");
+    // `add` then `delete`: the table gone whether it was there or not, in any
+    // nft and kernel — `destroy` needs nft 1.0.8 and Linux 6.3, and a file
+    // that does not load leaves the host with no policy at all (review).
+    let mut out =
+        format!("add table inet {TABLE}\ndelete table inet {TABLE}\ntable inet {TABLE} {{\n");
     let set = |out: &mut String, name: &str, kind: &str, ids: &[u32]| {
         out.push_str(&format!("\tset {name} {{\n\t\ttype {kind}\n"));
         if !ids.is_empty() {
@@ -128,8 +132,10 @@ pub fn ruleset(policy: &Policy) -> String {
         // DHCP by port: a renewal goes to the server's own address, which
         // need not be a private one.
         let mut rules = vec![
-            "udp sport 68 udp dport 67 accept".to_owned(),
-            "udp sport 546 udp dport 547 accept".to_owned(),
+            // The DHCP clients are the system's: a service able to bind
+            // port 68 would otherwise have a way to anywhere (review).
+            "meta skuid < 1000 udp sport 68 udp dport 67 accept".to_owned(),
+            "meta skuid < 1000 udp sport 546 udp dport 547 accept".to_owned(),
         ];
         for owner in &system_owners {
             rules.push(format!("{owner} ip daddr @local4 accept"));
@@ -348,7 +354,7 @@ pub fn run(args: &Args) -> u8 {
         return 0;
     }
     let text = match args.verb {
-        Verb::Remove => format!("destroy table inet {TABLE}\n"),
+        Verb::Remove => format!("add table inet {TABLE}\ndelete table inet {TABLE}\n"),
         Verb::Allow => {
             let policy = policy_of(args);
             allow_text(&policy.uids, &policy.gids)
@@ -490,7 +496,10 @@ mod tests {
             gids: vec![30_000],
             ..Policy::default()
         });
-        assert!(text.starts_with("destroy table inet vpnzones_egress\n"));
+        assert!(
+            text.starts_with("add table inet vpnzones_egress\ndelete table inet vpnzones_egress\n")
+        );
+        assert!(!text.contains("destroy"), "{text}");
         assert!(text.contains("priority -160; policy accept;"));
         assert!(text.contains("elements = { 100000 }"));
         assert!(text.contains("elements = { 30000 }"));
@@ -536,7 +545,7 @@ mod tests {
         assert!(text.contains("elements = { 10.0.0.0/8, 192.168.0.0/16 }"));
         assert!(text.contains("elements = { fe80::/10 }"));
         assert!(text.contains("flags interval"));
-        assert!(text.contains("udp sport 68 udp dport 67 accept"));
+        assert!(text.contains("meta skuid < 1000 udp sport 68 udp dport 67 accept"));
         // The ways out that are not the host's own stay as they are.
         assert!(text.contains("meta mark 0x767a accept"));
         assert!(text.contains("meta skuid @users accept"));

@@ -113,7 +113,7 @@ use std::ffi::{CStr, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, ToSocketAddrs};
-use std::os::fd::OwnedFd;
+use std::os::fd::{IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
@@ -365,6 +365,9 @@ const TOOL_HOSTIF: u8 = b'h';
 /// pasta, started by the system-zone service in a system zone's network, has
 /// attached to the app namespace (`docs/SYSTEM.md` §7b).
 const TOOL_SYSZONE: u8 = b's';
+/// The system tier's run directory: its root service's socket and the system
+/// zones' state. Hidden in every zone (`hide_system_tier`).
+const SYSTEM_TIER_DIR: &str = "/run/vpn-zones";
 /// The system zone's resolvers, as the service said them, one per line: what
 /// the app namespace's resolv.conf is written from.
 const SYS_RESOLVERS: &str = "system-resolvers";
@@ -2010,6 +2013,29 @@ fn hide_x11(zone: &Zone) -> Result<(), String> {
     Ok(())
 }
 
+/// `/run/vpn-zones` out of reach, for every zone: the system tier's root
+/// service listens there, and every request it takes — a zone added, a
+/// program run in a system zone, a user zone's way out — is a way out of this
+/// zone that the kernel would not stop, because the helper acts outside it
+/// (`docs/LEAK-MODEL.md` §13, found by review). The zone's users are in the
+/// group that may reach it; the zone must not be. Fatal when it cannot be
+/// hidden: a zone with a door out is worse than no zone. A host without the
+/// system tier has no such directory, and nothing to hide.
+fn hide_system_tier(zone: &Zone) -> Result<(), String> {
+    let dir = Path::new(SYSTEM_TIER_DIR);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    sys::mount(OsStr::new("tmpfs"), dir, "tmpfs", 0, "mode=0755,size=16k").map_err(|e| {
+        format!(
+            "cannot hide {}: {e} — programs in the zone would reach the system tier's service",
+            dir.display()
+        )
+    })?;
+    println!("zone {}: the system tier's service hidden", zone.name());
+    Ok(())
+}
+
 /// Wait for the app namespace to say it exists.
 fn wait_for_app_namespace(zone_up_r: OwnedFd) -> Result<(), String> {
     let mut zone_up = File::from(zone_up_r);
@@ -2359,6 +2385,19 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // is not. A container with the x11 permission runs its own satellite, and
     // its socket lands in here.
     hide_x11(zone)?;
+    // The system tier's directory, with its root service's socket: a helper
+    // outside that acts for whoever asks. A zone through a system zone keeps
+    // that zone's status, through a descriptor opened before it goes.
+    // Kept open for good: this process holds the zone until it dies.
+    let system_status: Option<RawFd> = match links.as_ref().map(|l| l.backend) {
+        Some(Backend::SysZone(sys)) => {
+            File::open(Path::new(crate::system::RUN_DIR).join(&sys.zone))
+                .ok()
+                .map(IntoRawFd::into_raw_fd)
+        }
+        _ => None,
+    };
+    hide_system_tier(zone)?;
 
     let Some(ZoneLinks {
         backend,
@@ -2464,7 +2503,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
                 .filter_map(|l| l.trim().parse::<IpAddr>().ok())
                 .map(|ip| ip.to_string())
                 .collect();
-            (dns, None, Mirror::SysZone(sys.zone.clone()))
+            (dns, None, Mirror::SysZone(sys.zone.clone(), system_status))
         }
         _ => return Err("the uplink could not build the tunnel".to_string()),
     };
@@ -2544,7 +2583,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
                 zone.name()
             );
         }
-        Mirror::SysZone(system) => {
+        Mirror::SysZone(system, _) => {
             println!(
                 "zone {}: going out through the tunnel of the system zone {system}",
                 zone.name()
@@ -2697,8 +2736,9 @@ enum Mirror {
     /// pasta's interface for the link, and the named system zone's own mirror
     /// for the tunnel behind it — `wg show` output, read by the group
     /// vpn-zones, so `vpn-zone check` answers from the handshake as for any
-    /// WireGuard zone.
-    SysZone(String),
+    /// WireGuard zone. Read through a descriptor of its run directory opened
+    /// before `/run/vpn-zones` was hidden here (`hide_system_tier`).
+    SysZone(String, Option<RawFd>),
 }
 
 /// Mirror the tunnel's state into the zone's `status` file.
@@ -2727,7 +2767,7 @@ fn start_status_mirror(zone: &Zone, mirror: Mirror) {
                 &tool_output(&ip, &["-o", "link", "show", TUN_IFACE]).unwrap_or_default(),
                 &tool_output(&ip, &["-br", "-4", "addr", "show", TUN_IFACE]).unwrap_or_default(),
             )),
-            Mirror::SysZone(system) => {
+            Mirror::SysZone(system, dir) => {
                 let own = link_mirror(
                     &format!("system zone {system}"),
                     &tool_output(&ip, &["-o", "link", "show", TUN_IFACE]).unwrap_or_default(),
@@ -2738,14 +2778,7 @@ fn start_status_mirror(zone: &Zone, mirror: Mirror) {
                 // the system zone's. Our link down: that says it all.
                 let tunnel = own
                     .contains("connected: yes")
-                    .then(|| {
-                        fs::read_to_string(
-                            Path::new(crate::system::RUN_DIR)
-                                .join(system)
-                                .join("status"),
-                        )
-                        .ok()
-                    })
+                    .then(|| fs::read_to_string(format!("/proc/self/fd/{}/status", (*dir)?)).ok())
                     .flatten()
                     .filter(|t| !t.trim().is_empty());
                 Some(tunnel.unwrap_or(own))
@@ -3064,10 +3097,16 @@ const NDP_RULE: &str =
 /// ever recreated; `oifname` compares the name every time, so the ruleset can go
 /// in before the tunnel does and keeps meaning what it says afterwards.
 pub fn app_ruleset() -> String {
-    output_table(&[
-        "oifname \"lo\" accept".to_string(),
-        format!("oifname \"{TUN_IFACE}\" accept"),
-    ])
+    app_ruleset_with(&[])
+}
+
+/// [`app_ruleset`] with rules of the caller's first — a system zone's refusal
+/// of what its user zones' pasta sends to its own addresses.
+pub fn app_ruleset_with(first: &[String]) -> String {
+    let mut rules = first.to_vec();
+    rules.push("oifname \"lo\" accept".to_string());
+    rules.push(format!("oifname \"{TUN_IFACE}\" accept"));
+    output_table(&rules)
 }
 
 /// The uplink's ruleset: the tunnel's own packets to the endpoint, and nothing
