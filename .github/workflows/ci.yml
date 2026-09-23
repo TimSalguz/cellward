@@ -161,6 +161,15 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           test -c /dev/kvm
+      # Стор машины в этом тесте — образ диска (9p не умеет idmap, а контейнеру
+      # с privateUsers = "pick" он нужен), и драйвер собирает этот образ на
+      # раннере прямо перед запуском. На голом ubuntu-раннере под него не
+      # хватило места («erofs: No space left on device») — убираем то, что
+      # тесту не нужно, около 20 ГБ.
+      - name: Освободить место на раннере
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: cachix/install-nix-action@v31
       - name: Собрать драйвер VM-теста
         run: nix-build tests/vm-system.nix -A driver -o vm-system-driver
