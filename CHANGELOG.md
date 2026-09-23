@@ -5,6 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (system tier)
+- The off switch: `vpn-zones-off` turns vpn-zones off entirely with no
+  rebuild and no network — the policy's table goes, attached services restart
+  on the host's network, zones stop, and a flag in `/var/lib/vpn-zones` keeps
+  it so across reboots; `vpn-zones-on` turns it back. Plain systemd units, no
+  binary of ours; `services.vpn-zones.system.switchGroup` (`wheel`) may use
+  them without a password; `[x]` in the TTY console; `vpnzones=off` on the
+  kernel command line for one boot. `docs/SYSTEM.md` §9a.
+
+### Changed
+- Services are attached to system zones by a systemd generator (a drop-in in
+  `/run`), not in their unit definitions, so the switch can detach them.
+
+### Fixed
+- The user-tier VM test waits for the broker instead of racing it.
+
 ### Security
 - The host egress policy fails closed when this project's binary fails: its
   restriction is printed when the system is built and loaded by `nft` alone;

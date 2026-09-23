@@ -761,6 +761,11 @@ fn serve_any(sock: RawFd) -> Result<Vec<u8>, String> {
     let uid = peer_uid(sock)?;
     let (data, fds) =
         recv_with_fds(sock, MAX_REQUEST, 3).map_err(|e| format!("cannot read the request: {e}"))?;
+    if system::is_off() {
+        // The zones are down and stay down (their units check the same
+        // flag): say so, rather than "the zone did not come up".
+        return Err("vpn-zones are off; `vpn-zones-on` turns them on".to_owned());
+    }
     if let Some(body) = data.strip_prefix(ADD_MAGIC) {
         return serve_add(uid, &AddRequest::decode(body)?).map(|d| answer_done(&d));
     }

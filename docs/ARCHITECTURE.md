@@ -104,6 +104,8 @@ else.** That is intended:
   (the systemd user manager starts for a TTY login too, so user zones work there), or a
   system zone through the broker;
 - an emergency key: "open the host for 15 minutes", a unit that reverts on its own;
+- an off switch: `vpn-zones-off` turns everything off in place — no rebuild, which could
+  need the very network the policy keeps away — until `vpn-zones-on`;
 - it can't become a trap: the policy is a unit, and booting an older generation from the
   boot menu removes it with everything else.
 

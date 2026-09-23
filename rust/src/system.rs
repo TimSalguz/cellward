@@ -72,6 +72,16 @@ pub const NAME_MAX: usize = 12;
 /// 0x767a is "vz"; a DPI bypass's marks sit in the high bits.
 pub const TUNNEL_MARK: u32 = 0x767a;
 
+/// Set by `vpn-zones-off`, removed by `vpn-zones-on`: vpn-zones are off, the
+/// host has its own network, and no zone comes up — the module's units check
+/// the same path.
+pub const OFF_FLAG: &str = "/var/lib/vpn-zones/off";
+
+/// Whether vpn-zones are off (`vpn-zones-off`).
+pub fn is_off() -> bool {
+    Path::new(OFF_FLAG).exists()
+}
+
 /// Names that already mean a built-in network.
 const RESERVED: [&str; 3] = ["unconfined", "direct", "offline"];
 const CONFIG: &str = "config.conf";

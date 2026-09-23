@@ -568,6 +568,39 @@ let
           machine.send_chars("q")
           tty_run("exit")
           server.succeed("ip link set wg0 up")
+
+      with subtest("vpn-zones off without a rebuild, and on again"):
+          # Services are attached by the generator, in /run — not in their units.
+          machine.succeed("systemctl cat probe | grep -q NetworkNamespacePath")
+          host_ns = machine.succeed("readlink /proc/1/ns/net").strip()
+          # alice is in wheel: the switch needs no password.
+          machine.succeed(as_user("alice", "vpn-zones-off"))
+          machine.succeed("test -e /var/lib/vpn-zones/off")
+          machine.fail("nft list table inet vpnzones_egress")
+          machine.fail("systemctl is-active vpn-zone-system@sz")
+          machine.succeed("systemctl is-active probe")
+          pid = machine.succeed("systemctl show -p MainPID --value probe").strip()
+          ns = machine.succeed(f"readlink /proc/{pid}/ns/net").strip()
+          assert ns == host_ns, f"probe stayed in {ns}"
+          out = machine.succeed(as_user("alice", f"socat -T10 - TCP:{server_ip}:8090"))
+          assert "peer=" in out, out
+          # Zones do not come up behind the switch's back.
+          out = machine.fail(as_user("alice", "vpn-zone-sys sz -- true") + " 2>&1")
+          assert "vpn-zones are off" in out, out
+          machine.fail("systemctl is-active vpn-zone-system@sz")
+          # Off survives a reload, which is what a reboot does to generators.
+          machine.succeed("systemctl daemon-reload")
+          machine.fail("systemctl cat probe | grep -q NetworkNamespacePath")
+          # carol is not in wheel.
+          machine.fail(as_user("carol", "vpn-zones-on"))
+          machine.succeed(as_user("alice", "vpn-zones-on"))
+          machine.fail("test -e /var/lib/vpn-zones/off")
+          machine.succeed("nft list table inet vpnzones_egress")
+          machine.wait_until_succeeds("systemctl is-active vpn-zone-system@sz", timeout=60)
+          pid = machine.succeed("systemctl show -p MainPID --value probe").strip()
+          ns = machine.succeed(f"readlink /proc/{pid}/ns/net").strip()
+          assert ns == f"net:[{netns_inode()}]", f"probe is not back in its zone: {ns}"
+          machine.fail(direct("alice"))
     '';
   };
 in
