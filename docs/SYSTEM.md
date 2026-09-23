@@ -2,10 +2,9 @@
 
 Related: [ARCHITECTURE.md](ARCHITECTURE.md) §3, [LEAK-MODEL.md](LEAK-MODEL.md)
 
-**Status: design of stages 1–3, 2026-09-23.** Stage 1 (system zones), stage 2 (services in
-them) and stage 3 (NixOS containers in them) are written on the branch `feat/system-zones`
-and have **not been built or run yet**: no `cargo`, no VM test. Everything below that names a
-file or a function describes that branch.
+**Status, 2026-09-23.** Stages 1–3 (system zones, services and NixOS containers in them) are
+in `main`, with `tests/vm-system.nix` green locally and in CI. Stage 4 (a user's console
+program in a system zone, §7) is on the branch `feat/system-run`.
 
 ## 1. What it is
 
@@ -96,6 +95,11 @@ good.
   because a host may run neither;
 - with `systemBus = false` (the default): `InaccessiblePaths=-/run/dbus/system_bus_socket` —
   resolved's `org.freedesktop.resolve1` answers name lookups over the system bus too;
+- `BindReadOnlyPaths=/etc/netns/vz-<zone>/nsswitch.conf:/etc/nsswitch.conf` — the host's
+  file with `hosts: files dns`, written by `ns-up`: no NSS module but the plain resolver is
+  ever asked for a name, which is the insurance a user zone has too (`zone_nsswitch`);
+- `InaccessiblePaths=-/run/avahi-daemon` as well: nss-mdns would put a `.local` name onto the
+  host's LAN;
 - `bindsTo`/`after` the namespace unit, `wants`/`after` the holder.
 
 The unit is still the person's; only its network changes.
@@ -130,7 +134,42 @@ The unit is still the person's; only its network changes.
 - `systemd.services."container@<container>"`: `NetworkNamespacePath`, `bindsTo`/`after`
   the namespace unit, `wants`/`after` the holder.
 
-## 7. State for tools
+## 7. A user's program in a system zone (stage 4)
+
+`vpn-zone-sys <zone> [--] <command>`, for the users listed in
+`services.vpn-zones.system.zones.<zone>.users`. Console programs only for now (the use the
+TTY console of ARCHITECTURE §4 needs); graphical ones need the session sealing user zones
+have.
+
+A system zone's namespace belongs to the host's user namespace; entering it takes
+`CAP_SYS_ADMIN` there, which no program of a user has. So a small service does the entering
+(`rust/src/sysrun.rs`):
+
+- **The socket** `/run/vpn-zones/sysrun.sock`, `SOCK_SEQPACKET`, `0660 root:vpn-zones`,
+  `Accept=yes`: **one unit per launch** (`vpn-zone-sysrun@…`), so every launch is visible in
+  `systemctl`, stops with its unit, and nothing it leaves behind outlives it. The group gets
+  the zones' users (`users.groups.vpn-zones.members`); the per-zone list is checked by the
+  service itself.
+- **Who asks** comes from the kernel (`SO_PEERCRED`), never from the request. Root is
+  refused (it has `ip netns exec`, and root in the zone's namespace could route around the
+  tunnel).
+- **What root does:** enters the zone's network namespace, makes a mount namespace of its
+  own — the host's resolvers hidden (the same list as a user zone: nscd, resolved, avahi),
+  the zone's resolv.conf and nsswitch.conf bound in, the system bus hidden unless
+  `systemBus`, an empty `/run/user/<uid>` over the session's sockets — then drops to the
+  user's groups, gid and uid and sets `NO_NEW_PRIVS`: `sudo` inside would be root in the
+  zone's namespace.
+- **What root does not do:** interpret the request. The command, its directory and its
+  environment are applied after the privileges are gone, as the user; the zone's name is
+  checked like any zone name before it becomes a path.
+- **The terminal** is the client's: it makes a pty, sends only the slave, and relays. The
+  command gets the slave as its controlling terminal, so Ctrl-C, job control and the window
+  size work without a signal passing through root. Without a terminal, the client's 0, 1 and
+  2 are passed. The client gone, the command gets SIGHUP and SIGTERM.
+- The request is one datagram: `VZS1\0`, zone, mode, cwd, argc, argv…, envc, env…, each
+  NUL-ended, at most 64 KiB; the answer is `EXIT <code>` or `ERR <why>`.
+
+## 8. State for tools
 
 `vpn-zone status --json` gets a top-level `system_networks` array — additive, schema 1. A
 separate array and not entries in `networks`: a tool that doesn't know the difference would
@@ -147,7 +186,7 @@ offer a system zone as a network for a program container, which can't use it.
 `readable: false` means the reader isn't in the group `vpn-zones`: the run directory is
 closed to them, so `up`, `tunnel_alive` and the counters are `null`.
 
-## 8. Leak channels of the system tier
+## 9. Leak channels of the system tier
 
 1. **Routes around the tunnel** — none: `lo` and `awg0` only; the second echelon is loaded
    into the namespace before the tunnel arrives.
@@ -162,11 +201,14 @@ closed to them, so `up`, `tunnel_alive` and the counters are `null`.
 5. **One zone is one network** — everything in a zone shares its `lo` and abstract unix
    sockets. Separation means separate zones.
 6. **The endpoint** — resolved in the host's network, as for user zones (LEAK-MODEL §5).
-7. **The host side has no second echelon** — a system zone's uplink is the host's network
+7. **A user's program** (§7) gets the same hiding as a service plus the session's sockets:
+   the bus and the compositor are how a program asks the host to open something, in the
+   host's network.
+8. **The host side has no second echelon** — a system zone's uplink is the host's network
    itself, and a ruleset there would be the host's firewall. Filtering the host's egress is
    stage 5, the backstop.
 
-## 9. Tests
+## 10. Tests
 
 - **Rust** (`system.rs`, `status.rs`): the name check; the paths; the argument parser;
   refusing OpenConnect, host-interface and configs without `[Interface]`; the declared list
@@ -186,4 +228,8 @@ closed to them, so `up`, `tunnel_alive` and the counters are `null`.
   5. stopping the holder: `ip -n vz-sz -o link` is `lo` alone, the service and the container
      keep running and reach nothing; starting it: the HTTP answers again;
   6. restarting the namespace unit restarts the service and the container, and they are in
-     the new namespace.
+     the new namespace (checked by a per-namespace sysctl: inode numbers are reused);
+  7. `vpn-zone-sys` as a listed user: the tunnel's network and names, the user's uid,
+     `NoNewPrivs: 1` and no capabilities, `lo` and `awg0` only, `ip link add` refused, the
+     zone's nsswitch, the command's exit code, a pty with a terminal, the launch in the
+     journal; a user of another zone and a user outside the group are refused.

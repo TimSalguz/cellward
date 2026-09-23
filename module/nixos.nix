@@ -88,6 +88,26 @@ let
         default = true;
         description = "Bring the zone up at boot. Otherwise it comes up when something bound to it starts, or with `systemctl start vpn-zone-system-<name>`.";
       };
+      users = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "alice" ];
+        description = ''
+          Users who may run console programs in this zone with
+          `vpn-zone-sys <name> -- <command>`. The program runs as the user,
+          with the zone's network and resolvers, without the session's sockets
+          and with no way to gain privileges. Empty: nobody.
+        '';
+      };
+      systemBus = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Leave the host's system bus reachable to programs run with
+          `vpn-zone-sys`. Off by default for the same reason as for services:
+          systemd-resolved answers name lookups over it, around the tunnel.
+        '';
+      };
     };
   };
 
@@ -108,6 +128,10 @@ let
       };
     };
   };
+
+  # Кто вообще ходит через посредника: у сокета группа vpn-zones, а список
+  # по зонам посредник проверяет сам.
+  runUsers = lib.unique (lib.concatMap (z: z.users) (lib.attrValues cfg.zones));
 
   containerOpts = {
     options.zone = lib.mkOption {
@@ -217,12 +241,25 @@ in
             ) cfg.containers
           );
 
-        users.groups.vpn-zones = { };
+        users.groups.vpn-zones.members = runUsers;
 
-        # Список для `vpn-zone status --json` (system_networks).
-        environment.etc."vpn-zones/system-zones".text = lib.concatMapStrings (name: name + "\n") (
-          lib.attrNames cfg.zones
-        );
+        # Список для `vpn-zone status --json` (system_networks), и по зоне —
+        # кто может запускать в ней программы (посредник, rust/src/sysrun.rs).
+        environment.etc = {
+          "vpn-zones/system-zones".text = lib.concatMapStrings (name: name + "\n") (
+            lib.attrNames cfg.zones
+          );
+        }
+        // lib.mapAttrs' (
+          name: z:
+          lib.nameValuePair "vpn-zones/system-zones.d/${name}/users" {
+            text = lib.concatMapStrings (u: u + "\n") z.users;
+          }
+        ) cfg.zones
+        // lib.mapAttrs' (
+          name: _:
+          lib.nameValuePair "vpn-zones/system-zones.d/${name}/system-bus" { text = "yes\n"; }
+        ) (lib.filterAttrs (_: z: z.systemBus) cfg.zones);
 
         boot.extraModulePackages = lib.mkIf cfg.amneziawg [ config.boot.kernelPackages.amneziawg ];
         boot.kernelModules = lib.mkIf cfg.amneziawg [ "amneziawg" ];
@@ -293,7 +330,13 @@ in
             serviceConfig = {
               NetworkNamespacePath = netnsPath s.zone;
               # Без «-»: нет файла — служба не стартует, а не резолвит через хост.
-              BindReadOnlyPaths = [ "${resolvPath s.zone}:/etc/resolv.conf" ];
+              BindReadOnlyPaths = [
+                "${resolvPath s.zone}:/etc/resolv.conf"
+                # hosts: files dns — ни один модуль NSS, кроме обычного
+                # резолвера, имя не получит (страховка на весь класс, как у
+                # пользовательских зон).
+                "/etc/netns/vz-${s.zone}/nsswitch.conf:/etc/nsswitch.conf"
+              ];
               # Оба — unix-сокеты, а они сквозь сетевые namespace проходят:
               # glibc спрашивает nscd первым, nss-resolve ходит к resolved по
               # varlink, и любой из них ответил бы из сети хоста. «-» — потому
@@ -301,12 +344,55 @@ in
               InaccessiblePaths = [
                 "-/run/nscd"
                 "-/run/systemd/resolve/io.systemd.Resolve"
+                # nss-mdns: имя на .local ушло бы в локальную сеть хоста.
+                "-/run/avahi-daemon"
               ]
               ++ lib.optional (!s.systemBus) "-/run/dbus/system_bus_socket";
             };
           }
         ) cfg.services;
       }
+
+      # --- ПРОГРАММЫ ПОЛЬЗОВАТЕЛЕЙ В ЗОНЕ (этап 4, docs/SYSTEM.md §7) ---
+      # Войти в пространство зоны без root нельзя, поэтому входит посредник:
+      # по юниту на каждый запуск (Accept=yes), кто спрашивает — от ядра,
+      # команда — уже от имени пользователя и с NO_NEW_PRIVS.
+      (lib.mkIf (runUsers != [ ]) {
+        systemd.sockets.vpn-zone-sysrun = {
+          description = "vpn-zones: programs of users in system zones";
+          wantedBy = [ "sockets.target" ];
+          socketConfig = {
+            ListenSequentialPacket = "/run/vpn-zones/sysrun.sock";
+            SocketMode = "0660";
+            SocketGroup = "vpn-zones";
+            Accept = true;
+            MaxConnections = 64;
+          };
+        };
+        systemd.services."vpn-zone-sysrun@" = {
+          description = "vpn-zones: a program in a system zone";
+          serviceConfig = {
+            ExecStart = "${core} system-run-service";
+            StandardInput = "socket";
+            StandardOutput = "journal";
+            StandardError = "journal";
+            # Войти в пространство и смонтировать своё (SYS_ADMIN), стать
+            # пользователем (SETUID, SETGID), погасить его программу, когда
+            # клиент ушёл (KILL). Больше ничего.
+            CapabilityBoundingSet = [
+              "CAP_SYS_ADMIN"
+              "CAP_SETUID"
+              "CAP_SETGID"
+              "CAP_KILL"
+            ];
+          };
+        };
+        environment.systemPackages = [
+          (pkgs.writeShellScriptBin "vpn-zone-sys" ''
+            exec ${core} system-run "$@"
+          '')
+        ];
+      })
 
       # --- NIXOS-КОНТЕЙНЕРЫ В ЗОНЕ (этап 3) ---
       {

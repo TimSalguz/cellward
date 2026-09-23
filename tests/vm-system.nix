@@ -34,10 +34,25 @@ let
 
         services.vpn-zones.system = {
           enable = true;
-          # Not at boot: the config only exists once the test has written it.
-          zones.sz.autoStart = false;
+          zones.sz = {
+            # Not at boot: the config only exists once the test has written it.
+            autoStart = false;
+            users = [ "alice" ];
+          };
+          # Only here to put bob into the group vpn-zones without letting him
+          # into sz: the per-zone check has to refuse him on its own.
+          zones.other = {
+            autoStart = false;
+            users = [ "bob" ];
+          };
           services.probe.zone = "sz";
           containers.box.zone = "sz";
+        };
+
+        users.users = {
+          alice.isNormalUser = true;
+          bob.isNormalUser = true;
+          carol.isNormalUser = true;
         };
 
         # A service to look at the zone from: it only has to stay alive.
@@ -113,6 +128,11 @@ let
       };
 
     testScript = ''
+      import shlex
+
+      def as_user(user, cmd):
+          return f"su -l {user} -c {shlex.quote(cmd)}"
+
       def links(out):
           return [l for l in out.strip().splitlines() if l.strip()]
 
@@ -234,6 +254,9 @@ let
               "sh -c '! socat -u OPEN:/dev/null "
               "UNIX-CONNECT:/run/systemd/resolve/io.systemd.Resolve'"
           )
+          # The class-wide insurance: no NSS module but the plain resolver.
+          out = in_probe("grep ^hosts: /etc/nsswitch.conf").strip()
+          assert out == "hosts: files dns", out
 
       with subtest("a NixOS container in the zone: the same network, no way to change it"):
           machine.succeed("systemctl start container@box")
@@ -249,6 +272,40 @@ let
           machine.fail("nixos-container run box -- ip route add 10.1.0.0/16 dev awg0")
           # The host's Nix daemon is out of reach.
           machine.fail("nixos-container run box -- test -S /nix/var/nix/daemon-socket/socket")
+
+      with subtest("a user's program in the zone: as the user, without privileges"):
+          out = machine.succeed(as_user("alice", "vpn-zone-sys sz -- socat -T10 - TCP:10.99.0.1:8080"))
+          assert "peer=10.99.0.2" in out, out
+          out = machine.succeed(as_user("alice", "vpn-zone-sys sz -- getent ahostsv4 leaktest.internal"))
+          assert "10.99.0.9" in out and "10.66.66.66" not in out, out
+          out = machine.succeed(as_user("alice", "vpn-zone-sys sz -- id -un")).strip()
+          assert out == "alice", out
+          out = machine.succeed(
+              as_user("alice", "vpn-zone-sys sz -- grep -E '^(NoNewPrivs|CapEff)' /proc/self/status")
+          )
+          assert "NoNewPrivs:\t1" in out and "CapEff:\t0000000000000000" in out, out
+          out = machine.succeed(as_user("alice", "vpn-zone-sys sz -- ip -o link show"))
+          assert len(links(out)) == 2 and ": awg0" in out, out
+          machine.fail(as_user("alice", "vpn-zone-sys sz -- ip link add vzx type dummy"))
+          out = machine.succeed(as_user("alice", "vpn-zone-sys sz -- grep ^hosts: /etc/nsswitch.conf"))
+          assert out.strip() == "hosts: files dns", out
+          # The exit code is the command's. (`execute`, not a shell's `$?`: the
+          # driver runs commands under errexit.)
+          status, _ = machine.execute(as_user("alice", "vpn-zone-sys sz -- sh -c 'exit 7'"))
+          assert status == 7, f"exit code {status}, not 7"
+          # With a terminal: the command gets a pty of its own as its terminal.
+          out = machine.succeed(
+              as_user("alice", "script -qec 'vpn-zone-sys sz -- tty' /dev/null")
+          )
+          assert "/dev/pts/" in out, out
+          # Every launch is a unit of its own, and the journal names who ran what.
+          machine.succeed("journalctl -u 'vpn-zone-sysrun@*' | grep -q 'alice runs socat'")
+
+      with subtest("the zone's list of users is the only way in"):
+          out = machine.fail(as_user("bob", "vpn-zone-sys sz -- true") + " 2>&1")
+          assert "may not run programs in the system zone sz" in out, out
+          out = machine.fail(as_user("carol", "vpn-zone-sys sz -- true") + " 2>&1")
+          assert "cannot reach" in out, out
 
       with subtest("nothing but the tunnel's UDP left eth1 towards the server"):
           machine.succeed("systemctl stop leakwatch")

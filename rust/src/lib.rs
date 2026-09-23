@@ -56,7 +56,11 @@
 //!   the origin of every settable value;
 //! * [`system`] — system zones (ROADMAP M10, `docs/SYSTEM.md`): the same zone
 //!   held by systemd from boot, for services and NixOS containers —
-//!   `vpn-zone-core system-zone`, the one part of the crate that runs as root;
+//!   `vpn-zone-core system-zone`, one of the two parts of the crate that run
+//!   as root;
+//! * [`sysrun`] — the other: `vpn-zone-sys`, a user's console program in a
+//!   system zone, entered by a per-launch service and run as the user
+//!   (M10 stage 4);
 //! * [`sys`] — the handful of syscalls more than one of them needs.
 //!
 //! `profile` and `desktop` were Python scripts in `module/`, `wl_sandbox` was a
@@ -91,6 +95,7 @@ pub mod registry;
 pub mod seccomp;
 pub mod status;
 pub mod sys;
+pub mod sysrun;
 pub mod system;
 pub mod tools;
 pub mod trust;

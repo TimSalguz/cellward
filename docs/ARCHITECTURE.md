@@ -141,9 +141,9 @@ gatekeeper's exceptions are **packages in the store, not names**: anybody can pu
 | User zones, gateway topology, second echelon, hermeticity | done |
 | Program containers, launch interception, per-container trust | done, M8 tails |
 | Machine-readable state and declarative options | done (`status --json`, home-manager) |
-| System zones | **M10, stage 1** |
-| Services and NixOS containers in system zones | **M10, stages 2–3** |
-| Broker: a user's program in a system zone | M10, stage 4 |
+| System zones | done (M10, stage 1) |
+| Services and NixOS containers in system zones | done (M10, stages 2–3) |
+| Broker: a user's program in a system zone | console programs done (`vpn-zone-sys`), graphical ones M10 stage 4 |
 | The host without a network by default | M10, stage 5 (today only a journal in the config tool) |
 | A terminal in a container, the shell hook | M10, stage 6 |
 | The gatekeeper for launches from scripts (fanotify) | M10, stage 7, after measurements |

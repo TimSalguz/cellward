@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (system tier, ROADMAP M10 stage 4)
+- `vpn-zone-sys <zone> [--] <command>`: a user's console program in a system
+  zone, for the users in `services.vpn-zones.system.zones.<zone>.users`. A
+  socket-activated service (`vpn-zone-sysrun@`, one unit per launch) learns who
+  asks from the kernel, enters the zone, hides the host's resolvers, the system
+  bus and the session's sockets, drops to the user with `NO_NEW_PRIVS` and runs
+  the command; the pty is the client's own. `rust/src/sysrun.rs`,
+  `docs/SYSTEM.md` §7.
+
+### Security (system tier)
+- Services in a system zone get the zone's `nsswitch.conf` (`hosts: files dns`,
+  written by `ns-up`) and no `/run/avahi-daemon`, as user zones have had: a
+  `.local` name went to the host's LAN through nss-mdns.
+
 ### Added (system tier, ROADMAP M10 — not built or run yet)
 - `nixosModules.default` (`module/nixos.nix`): system zones held by systemd
   from boot — `services.vpn-zones.system.zones.<name>` — and services and NixOS
