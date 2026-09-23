@@ -595,8 +595,9 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
         return Err("pasta gave the zone no interface".to_owned());
     }
     let own_dns = settings(name).map(|s| s.dns).unwrap_or_default();
-    let (text, defaulted) = zone::resolv_conf(&own_dns);
-    write_resolv_text(name, &text, defaulted)?;
+    let (mut resolvers, whose) = plain_resolvers(&own_dns);
+    println!("system zone {name}: resolvers {whose}");
+    write_resolv_text(name, &resolvers, false)?;
     write_group_readable(&run.join(READY), b"")
         .map_err(|e| format!("cannot write {READY}: {e}"))?;
     println!(
@@ -611,6 +612,14 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
     loop {
         if let Ok(Some(exit)) = pasta.try_wait() {
             return Err(format!("pasta exited ({exit}) — the zone has no way out"));
+        }
+        // The router's resolvers change with the network (another Wi-Fi):
+        // the zone follows, in place (`write_resolv_text`).
+        let (now, whose) = plain_resolvers(&own_dns);
+        if now != resolvers {
+            println!("system zone {name}: resolvers now {whose}");
+            write_resolv_text(name, &now, false)?;
+            resolvers = now;
         }
         let addr = {
             let args = in_zone_args(&netns(name), &["-br", "-4", "addr", "show", TUN]);
@@ -937,6 +946,31 @@ fn configure(
         }
     }
     Ok(())
+}
+
+/// A plain zone's resolv.conf, and whose resolvers they are: its own
+/// (`zones.<z>.dns`), else the router's as the host knows them — the zone is
+/// "directly", and directly the router is who answers names — else the public
+/// ones.
+fn plain_resolvers(own: &[String]) -> (String, &'static str) {
+    if !own.is_empty() {
+        return (zone::resolv_conf(own).0, "of its own (zones.<name>.dns)");
+    }
+    let router: Vec<String> = crate::dnsfwd::router_resolvers()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    if router.is_empty() {
+        (
+            zone::resolv_conf(&[]).0,
+            "public: the host knows no router's",
+        )
+    } else {
+        (
+            zone::resolv_conf(&router).0,
+            "the router's, as the host has them",
+        )
+    }
 }
 
 /// The zone's resolv.conf, from `DNS =` or the public resolvers through the

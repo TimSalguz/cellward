@@ -7,7 +7,10 @@
 #     range (198.51.100.1, TEST-NET-2) that stands for the internet: a TCP
 #     responder on both, an HTTP file and an NTP server on the second;
 #   - `machine`, with the NixOS module, `egress.mode = "strict"`, a plain zone
-#     `pl`, and `host.nix` and `host.time` in it.
+#     `pl`, and `host.nix`, `host.time` and `host.dns` in it;
+#   - `nmhost`, a desktop's network: NetworkManager takes its address and its
+#     resolver from the "router"'s DHCP, and `host.dns` is a plain zone that
+#     has to ask the router — with nothing of it reaching resolved.
 #
 # Run:
 #   nix-build tests/vm-host.nix -A driver && ./result/bin/nixos-test-driver
@@ -85,8 +88,38 @@ let
         virtualisation.memorySize = 1024;
       };
 
+    nodes.nmhost =
+      { lib, pkgs, ... }:
+      {
+        imports = [ ../module/nixos.nix ];
+        services.vpn-zones.system = {
+          enable = true;
+          zones.direct0.kind = "plain";
+          host.dns = "direct0";
+        };
+        services.resolved.enable = true;
+        networking.networkmanager = {
+          enable = true;
+          # QEMU's own user network: not the LAN under test.
+          unmanaged = [ "eth0" ];
+        };
+        # The address comes from DHCP, as on a desktop, not from the test: none
+        # of the test's addresses (an IPv6 one too — with any address on it
+        # NetworkManager takes eth1 as configured by somebody else and never
+        # asks DHCP).
+        networking.interfaces = lib.mkForce { };
+        networking.useDHCP = false;
+        environment.systemPackages = [ pkgs.dnsutils ];
+        virtualisation.memorySize = 768;
+      };
+
     nodes.server =
-      { pkgs, ... }:
+      {
+        config,
+        lib,
+        pkgs,
+        ...
+      }:
       {
         environment.systemPackages = [
           pkgs.socat
@@ -101,7 +134,28 @@ let
         networking.firewall.allowedUDPPorts = [
           123
           53
+          67
         ];
+        # The router: a resolver on the LAN address that answers the test's
+        # names its own way, and DHCP that names it as the resolver — what
+        # NetworkManager on `nmhost` learns. Up from boot: NetworkManager asks
+        # for its lease while booting.
+        systemd.services.router = {
+          wantedBy = [ "multi-user.target" ];
+          after = [ "network-online.target" ];
+          wants = [ "network-online.target" ];
+          serviceConfig.RuntimeDirectory = "router";
+          serviceConfig.ExecStart = lib.concatStringsSep " " [
+            "${pkgs.dnsmasq}/bin/dnsmasq -k --port=53 --bind-interfaces"
+            "--dhcp-leasefile=/run/router/leases"
+            "--listen-address=${config.networking.primaryIPAddress}"
+            "--no-resolv --address=/internal/10.66.0.1"
+            "--dhcp-range=192.168.1.100,192.168.1.150,1h"
+            "--dhcp-option=6,${config.networking.primaryIPAddress}"
+            # No default route: nmhost needs the LAN only.
+            "--dhcp-option=3"
+          ];
+        };
         networking.interfaces.eth1.ipv4.addresses = [
           {
             address = "198.51.100.1";
@@ -146,9 +200,10 @@ let
       # A new configuration's first boot is where the order of early units
       # shows: systemd breaks a cycle by dropping a job and says so, once.
       # `grep -c` reads everything: no SIGPIPE for pipefail to see.
-      def no_ordering_cycles():
-          out = machine.succeed("journalctl -b | grep -c 'ordering cycle' || true").strip()
-          assert out == "0", machine.succeed("journalctl -b | grep -B2 -A5 'ordering cycle'")
+      def no_ordering_cycles(m=None):
+          m = m or machine
+          out = m.succeed("journalctl -b | grep -c 'ordering cycle' || true").strip()
+          assert out == "0", m.succeed("journalctl -b | grep -B2 -A5 'ordering cycle'")
 
       def reboot():
           machine.shutdown()
@@ -197,12 +252,28 @@ let
               "systemd-run --unit=dns-internet dnsmasq -k --port=53 --bind-interfaces "
               "--listen-address=198.51.100.1 --no-resolv --address=/internal/10.77.0.1"
           )
-          server.succeed(
-              f"systemd-run --unit=dns-router dnsmasq -k --port=53 --bind-interfaces "
-              f"--listen-address={server_ip} --no-resolv --address=/internal/10.66.0.1"
-          )
+          server.wait_for_unit("router.service")
           server.wait_for_open_port(53, "198.51.100.1")
           server.wait_for_unit("chronyd.service")
+
+      with subtest("NetworkManager: the router's resolvers reach the plain zone, not resolved"):
+          nmhost.wait_for_unit("NetworkManager.service")
+          no_ordering_cycles(nmhost)
+          # NetworkManager's own copy: the router, from DHCP.
+          nmhost.wait_until_succeeds(
+              f"grep -q 'nameserver {server_ip}' /run/NetworkManager/resolv.conf", timeout=120
+          )
+          # …and nothing of it in resolved: the forwarder alone.
+          out = nmhost.succeed("resolvectl dns")
+          assert "127.0.0.60" in out and server_ip not in out, out
+          assert all(l.rstrip().endswith(":") for l in out.splitlines() if l.startswith("Link")), out
+          # The plain zone is "directly", and directly the router answers.
+          nmhost.wait_until_succeeds(
+              f"grep -q 'nameserver {server_ip}' /etc/netns/vz-direct0/resolv.conf", timeout=30
+          )
+          nmhost.wait_until_succeeds("getent ahostsv4 nm.internal | grep -q 10.66.0.1", timeout=60)
+          out = nmhost.succeed("dig +short @127.0.0.60 nmdig.internal").strip()
+          assert out == "10.66.0.1", out
 
       with subtest("the first boot: the early units in order, no cycle"):
           no_ordering_cycles()
@@ -261,9 +332,11 @@ let
           assert out == "10.77.0.1", out
           out = machine.succeed("dig +tcp +short @127.0.0.60 tcp.internal").strip()
           assert out == "10.77.0.1", out
-          # resolved asks the forwarder and nothing else.
+          # resolved asks the forwarder and nothing else: no link has a
+          # resolver of its own (dhcpcd's DHCP on eth0 would give one).
           out = machine.succeed("resolvectl dns")
           assert "127.0.0.60" in out and server_ip not in out, out
+          assert all(l.rstrip().endswith(":") for l in out.splitlines() if l.startswith("Link")), out
           # A user outside the zones still gets an answer — through the zone,
           # not the host's network — and still no connection.
           machine.succeed(as_user("alice", "getent ahostsv4 user.internal"))
