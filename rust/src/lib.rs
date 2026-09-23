@@ -54,6 +54,9 @@
 //!   bundle bind, the environment and the NSS databases (`docs/CERTIFICATES.md`);
 //! * [`status`] — the machine-readable state (`vpn-zone status --json`), with
 //!   the origin of every settable value;
+//! * [`system`] — system zones (ROADMAP M10, `docs/SYSTEM.md`): the same zone
+//!   held by systemd from boot, for services and NixOS containers —
+//!   `vpn-zone-core system-zone`, the one part of the crate that runs as root;
 //! * [`sys`] — the handful of syscalls more than one of them needs.
 //!
 //! `profile` and `desktop` were Python scripts in `module/`, `wl_sandbox` was a
@@ -88,6 +91,7 @@ pub mod registry;
 pub mod seccomp;
 pub mod status;
 pub mod sys;
+pub mod system;
 pub mod tools;
 pub mod trust;
 pub mod watch;

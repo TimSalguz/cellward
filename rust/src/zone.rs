@@ -184,14 +184,14 @@ const STRIPPED: &str = ".stripped.conf";
 /// backend that brought its own name would have its packets dropped by the
 /// second echelon. One name for every kind of zone is the invariant, and the
 /// name is historical rather than descriptive.
-const TUN_IFACE: &str = "awg0";
+pub(crate) const TUN_IFACE: &str = "awg0";
 /// Name of pasta's interface inside the uplink namespace. Given explicitly
 /// because pasta otherwise copies the name of the host's outbound interface —
 /// and if the host is itself under a VPN and that interface is called `awg0`,
 /// the name would collide with the zone's own tunnel. (`docs/GOTCHAS.md` §2)
 const PASTA_IFACE: &str = "hostif";
 /// wg-quick's default, used when the config carries no `MTU`.
-const DEFAULT_MTU: u32 = 1420;
+pub(crate) const DEFAULT_MTU: u32 = 1420;
 /// The IPv4 address and gateway a host-interface zone gets on its side of
 /// pasta. Its own, not a copy of the host interface's: pasta takes those from
 /// the interface's DEFAULT route, and the interfaces such a zone is for — a
@@ -341,9 +341,9 @@ const WAIT_STEP: Duration = Duration::from_millis(100);
 /// How often the tunnel state is mirrored into the `status` file. Five seconds
 /// is the compromise the bash version settled on: the handshake shows up almost
 /// at once and the load is nil.
-const STATUS_PERIOD: Duration = Duration::from_secs(5);
+pub(crate) const STATUS_PERIOD: Duration = Duration::from_secs(5);
 /// When to report the first handshake to the journal.
-const HANDSHAKE_AFTER: Duration = Duration::from_secs(4);
+pub(crate) const HANDSHAKE_AFTER: Duration = Duration::from_secs(4);
 
 /// Handshake bytes between the holder and its user-namespace child.
 const SYNC_OK: u8 = b'1';
@@ -3055,7 +3055,7 @@ pub fn endpoint_host_kind(endpoint: &Endpoint) -> EndpointHostKind {
 /// v4 first and v6 only if there is no v4 — the order `getent ahostsv4` then
 /// `ahostsv6` gave. This has to happen before either namespace exists, while
 /// the resolver is still the host's.
-fn resolve_endpoint(endpoint: &Endpoint) -> Option<IpAddr> {
+pub(crate) fn resolve_endpoint(endpoint: &Endpoint) -> Option<IpAddr> {
     match endpoint_host_kind(endpoint) {
         EndpointHostKind::Literal(addr) => Some(addr),
         EndpointHostKind::Name(name) => {
@@ -3093,7 +3093,7 @@ pub fn handshake_seen(text: &str) -> bool {
 
 // --- SMALL PLUMBING ----------------------------------------------------------
 
-fn run_tool(tool: &Path, args: &[&str], quiet: bool) -> Result<(), String> {
+pub(crate) fn run_tool(tool: &Path, args: &[&str], quiet: bool) -> Result<(), String> {
     let status = Command::new(tool)
         .args(args)
         .stderr(if quiet {
@@ -3113,7 +3113,7 @@ fn run_tool(tool: &Path, args: &[&str], quiet: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn tool_output(tool: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn tool_output(tool: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new(tool)
         .args(args)
         .stderr(Stdio::null())
@@ -3196,7 +3196,7 @@ fn touch(path: &Path) -> io::Result<()> {
 /// Replaced and not truncated: the mode is only applied when the file is
 /// created, and a leftover from an older version would keep its old, wider
 /// permissions while holding the private key.
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let _ = fs::remove_file(path);
     let mut file = OpenOptions::new()
         .write(true)

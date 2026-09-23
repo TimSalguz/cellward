@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::ExitCode;
 
-use vpn_zone::{desktop, fs_sandbox, openconnect, profile, wl_sandbox, zone};
+use vpn_zone::{desktop, fs_sandbox, openconnect, profile, system, wl_sandbox, zone};
 
 const USAGE: &str = "\
 vpn-zone-core — helper commands of vpn-zones
@@ -26,6 +26,18 @@ Usage:
         paths are substituted by Nix and default to a PATH lookup. The zone is
         a WireGuard/AmneziaWG one or an OpenConnect one, depending on whether
         its config has an [OpenConnect] section.
+
+  vpn-zone-core system-zone <ns-up|ns-down|up|down> [--ip P] [--awg P] [--wg P]
+                            [--nft P] [--config P] <name>
+        A system zone (docs/SYSTEM.md), as root: ns-up makes the namespace
+        /run/netns/vz-<name> with lo and the second echelon in it; up creates
+        the tunnel in the host's namespace, moves it in as awg0, configures it,
+        writes the zone's resolv.conf and then mirrors its state into
+        /run/vpn-zones/system/<name>/ until killed; down deletes the tunnel and
+        leaves lo alone; ns-down removes the namespace. The ExecStart and
+        ExecStop lines of vpn-zone-system-ns-<name> and vpn-zone-system-<name>.
+        The config is /var/lib/vpn-zones/system/<name>/config.conf unless
+        --config names another file.
 
   vpn-zone-core oc-script
         The vpnc-script of an [OpenConnect] zone, and nothing else's: this is
@@ -108,6 +120,14 @@ fn main() -> ExitCode {
             Ok(parsed) => ExitCode::from(zone::run(parsed)),
             Err(e) => {
                 eprintln!("vpn-zone-core zone-holder: {e}");
+                eprint!("{USAGE}");
+                ExitCode::from(EXIT_USAGE)
+            }
+        },
+        Some("system-zone") => match system::Args::parse(&args[1..]) {
+            Ok(parsed) => ExitCode::from(system::run(&parsed)),
+            Err(e) => {
+                eprintln!("vpn-zone-core system-zone: {e}");
                 eprint!("{USAGE}");
                 ExitCode::from(EXIT_USAGE)
             }

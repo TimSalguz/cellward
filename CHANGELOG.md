@@ -5,6 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added (system tier, ROADMAP M10 — not built or run yet)
+- `nixosModules.default` (`module/nixos.nix`): system zones held by systemd
+  from boot — `services.vpn-zones.system.zones.<name>` — and services and NixOS
+  containers attached to them (`…system.services.<unit>.zone`,
+  `…system.containers.<name>.zone`). Optional; without it everything stays
+  rootless. Design: `docs/SYSTEM.md`; the target picture:
+  `docs/ARCHITECTURE.md`.
+- `vpn-zone-core system-zone ns-up|ns-down|up|down <name>` (`rust/src/system.rs`):
+  the namespace `/run/netns/vz-<name>` with `lo` and the second echelon; the
+  tunnel created in the host's namespace and moved in as `awg0`; the zone's
+  resolv.conf written in place; `READY=1` to systemd; the status mirror in
+  `/run/vpn-zones/system/<name>/` for the group `vpn-zones`.
+- `vpn-zone status --json`: a top-level `system_networks` array (additive,
+  schema 1).
+- A service in a system zone gets `/run/nscd`, resolved's varlink socket and by
+  default the system bus hidden; a NixOS container gets its own user namespace
+  and no access to the host's Nix daemon socket, which nixpkgs binds into every
+  container and through which the host downloads whatever it is asked to.
+- `tests/vm-system.nix` and a `vm-system` CI job.
+
+### Changed
+- The crate's derivation moved to `package.nix`, shared by both modules. Same
+  text, same store path.
+
 ### Security (compositor sockets, LEAK-MODEL §13)
 - No zone gets the compositor's own `wayland-*` socket or the IPC of niri,
   sway, Hyprland or i3 any more — through them a program in a zone could have
