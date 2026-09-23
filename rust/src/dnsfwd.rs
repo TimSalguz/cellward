@@ -20,10 +20,11 @@
 //! **Where it asks.** `--resolv FILE`: the `nameserver` lines of the zone's
 //! resolv.conf, bound over `/etc/resolv.conf` by the attaching drop-in and
 //! read again for every query — the zone rewrites it in place when its tunnel
-//! comes up. `--upstream ADDR[:PORT]`: fixed addresses, what the unit has
-//! when vpn-zones are off. No resolver: the query is dropped, and the asker
-//! times out — a zone that is not up answers nothing rather than something
-//! from elsewhere.
+//! comes up. `--upstream ADDR[:PORT]`: fixed addresses. `--host-resolvers`:
+//! the router's, as the host learnt them (`router_resolvers`), and
+//! `--fallback` only when there is none — what the unit has when vpn-zones
+//! are off. No resolver: the query is dropped, and the asker times out — a
+//! zone that is not up answers nothing rather than something from elsewhere.
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -53,15 +54,22 @@ const MAX_MESSAGE: usize = 65_535;
 pub struct Args {
     pub resolv: Option<PathBuf>,
     pub upstreams: Vec<SocketAddr>,
+    pub host_resolvers: bool,
+    pub fallback: Vec<SocketAddr>,
 }
 
 impl Args {
-    /// `[--resolv FILE] [--upstream ADDR[:PORT]]…`
+    /// `[--resolv FILE] [--upstream ADDR[:PORT]]… [--host-resolvers]
+    /// [--fallback ADDR[:PORT]]…`
     pub fn parse(argv: &[std::ffi::OsString]) -> Result<Self, String> {
         let mut args = Self::default();
         let mut rest = argv.iter();
         while let Some(flag) = rest.next() {
             let flag = flag.to_str().ok_or("the arguments have to be UTF-8")?;
+            if flag == "--host-resolvers" {
+                args.host_resolvers = true;
+                continue;
+            }
             let value = rest
                 .next()
                 .and_then(|v| v.to_str())
@@ -72,11 +80,15 @@ impl Args {
                     parse_upstream(value)
                         .ok_or_else(|| format!("--upstream {value}: not an address"))?,
                 ),
+                "--fallback" => args.fallback.push(
+                    parse_upstream(value)
+                        .ok_or_else(|| format!("--fallback {value}: not an address"))?,
+                ),
                 _ => return Err(format!("unknown flag: {flag}")),
             }
         }
-        if args.resolv.is_none() && args.upstreams.is_empty() {
-            return Err("need --resolv or --upstream".to_owned());
+        if args.resolv.is_none() && args.upstreams.is_empty() && !args.host_resolvers {
+            return Err("need --resolv, --upstream or --host-resolvers".to_owned());
         }
         Ok(args)
     }
@@ -86,6 +98,16 @@ impl Args {
         let mut out = self.upstreams.clone();
         if let Some(path) = &self.resolv {
             out.extend(nameservers(&fs::read_to_string(path).unwrap_or_default()));
+        }
+        if self.host_resolvers {
+            out.extend(
+                router_resolvers()
+                    .into_iter()
+                    .map(|ip| SocketAddr::new(ip, 53)),
+            );
+        }
+        if out.is_empty() {
+            out.clone_from(&self.fallback);
         }
         out
     }
@@ -112,6 +134,42 @@ pub fn nameservers(text: &str) -> Vec<SocketAddr> {
         })
         .map(|ip| SocketAddr::new(ip, 53))
         .collect()
+}
+
+/// Where the host keeps the resolvers it was given (by DHCP, by a
+/// connection's settings) — the router's, usually — in the order they are
+/// believed: NetworkManager's own copy (written whatever it does with
+/// /etc/resolv.conf), resolved's list of upstreams, /etc/resolv.conf.
+pub const ROUTER_SOURCES: [&str; 3] = [
+    "/run/NetworkManager/resolv.conf",
+    "/run/systemd/resolve/resolv.conf",
+    "/etc/resolv.conf",
+];
+
+/// The resolvers of the first source that names any: a loopback address is
+/// the host's own resolver (a stub, or our forwarder), not the router's, and
+/// is left out, and so is a scoped link-local one.
+pub fn router_resolvers_in(texts: &[String]) -> Vec<IpAddr> {
+    for text in texts {
+        let found: Vec<IpAddr> = nameservers(text)
+            .into_iter()
+            .map(|a| a.ip())
+            .filter(|ip| !ip.is_loopback())
+            .collect();
+        if !found.is_empty() {
+            return found;
+        }
+    }
+    Vec::new()
+}
+
+/// The router's resolvers, as this host knows them now (`ROUTER_SOURCES`).
+pub fn router_resolvers() -> Vec<IpAddr> {
+    let texts: Vec<String> = ROUTER_SOURCES
+        .iter()
+        .map(|p| fs::read_to_string(p).unwrap_or_default())
+        .collect();
+    router_resolvers_in(&texts)
 }
 
 /// Whether an answer is to this query: the same ID, and at least a header.
@@ -342,6 +400,48 @@ mod tests {
             ]
         );
         assert!(nameservers("").is_empty());
+    }
+
+    #[test]
+    fn the_routers_resolvers_come_from_the_first_source_that_has_any() {
+        let t = |s: &str| s.to_owned();
+        // NetworkManager's copy first.
+        assert_eq!(
+            router_resolvers_in(&[t("nameserver 192.168.1.1\n"), t("nameserver 10.0.0.1\n")]),
+            ["192.168.1.1".parse::<IpAddr>().unwrap()]
+        );
+        // A stub or our forwarder is the host's own, not the router's.
+        assert_eq!(
+            router_resolvers_in(&[
+                t(""),
+                t("nameserver 127.0.0.60\n"),
+                t("nameserver 127.0.0.53\nnameserver ::1\nnameserver 192.168.0.1\n"),
+            ]),
+            ["192.168.0.1".parse::<IpAddr>().unwrap()]
+        );
+        assert!(router_resolvers_in(&[t("nameserver 127.0.0.53\n"), t("")]).is_empty());
+        assert!(router_resolvers_in(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_fallback_is_only_for_when_there_is_nothing_else() {
+        let args = Args::parse(&os(&["--upstream", "10.0.0.1", "--fallback", "1.1.1.1"])).unwrap();
+        assert_eq!(
+            args.resolvers(),
+            ["10.0.0.1:53".parse::<SocketAddr>().unwrap()]
+        );
+        let args =
+            Args::parse(&os(&["--resolv", "/nonexistent", "--fallback", "1.1.1.1"])).unwrap();
+        assert_eq!(
+            args.resolvers(),
+            ["1.1.1.1:53".parse::<SocketAddr>().unwrap()]
+        );
+        assert!(
+            Args::parse(&os(&["--host-resolvers"]))
+                .unwrap()
+                .host_resolvers
+        );
+        assert!(Args::parse(&os(&["--fallback", "1.1.1.1"])).is_err());
     }
 
     #[test]

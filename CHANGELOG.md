@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Security
+- `host.dns` with NetworkManager and resolved: NetworkManager's
+  `systemd-resolved` key (true by default) still sent every connection's
+  resolvers to resolved under `dns = "none"`, so part of the host's names
+  could go to the router around the zone. Now `dns = "default"`,
+  `rc-manager = "unmanaged"`, `systemd-resolved = false`; with networkd, a
+  network that would hand resolved its resolvers does not build. dhcpcd's
+  `nohook resolv.conf` landed inside an `interface` block and held for one
+  interface only: the hook is now skipped from `/etc/dhcpcd.enter-hook`. A
+  NetworkManager host in `tests/vm-host.nix` checks it, and no link of any
+  test host may have a resolver of its own.
+
+### Changed (system tier)
+- A plain zone's resolvers are the router's, as the host knows them
+  (NetworkManager's copy, resolved's upstreams, /etc/resolv.conf), followed
+  as the network changes; the public ones only when the host knows none.
+  The host's DNS forwarder does the same when vpn-zones are off.
+
 ### Added (system tier)
 - The host's names through a zone: `host.dns = "<zone>"`. A forwarder
   (`vpn-zone-core dns-forward`) gets UDP and TCP sockets on 127.0.0.60:53

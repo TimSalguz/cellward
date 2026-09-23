@@ -772,9 +772,32 @@ in
       # вопрос приходит с хоста, дальше его задают уже из зоны.
       (lib.mkIf (cfg.host.dns != null) (
         let
-          zone = cfg.zones.${cfg.host.dns} or { dns = [ ]; };
-          # Без привязки (vpn-zones выключены) — эти адреса, из сети хоста.
-          offUpstreams = if zone.dns != [ ] then zone.dns else [ "1.1.1.1" "9.9.9.9" ];
+          zone =
+            cfg.zones.${cfg.host.dns} or {
+              kind = "plain";
+              dns = [ ];
+            };
+          # Без привязки (vpn-zones выключены) хост как обычный: резолверы
+          # роутера, какие он знает; нет их — свои простой зоны, иначе
+          # публичные. Свои резолверы VPN-зоны из сети хоста недостижимы.
+          offFallback =
+            if zone.kind == "plain" && zone.dns != [ ] then
+              zone.dns
+            else
+              [
+                "1.1.1.1"
+                "9.9.9.9"
+              ];
+          networkdLeaks = lib.filterAttrs (
+            _: n:
+            let
+              off = v: v == false || v == "no" || v == "false";
+            in
+            (n.networkConfig.DNS or [ ]) != [ ]
+            || !(off (n.dhcpV4Config.UseDNS or true))
+            || !(off (n.dhcpV6Config.UseDNS or true))
+            || !(off (n.ipv6AcceptRAConfig.UseDNS or true))
+          ) config.systemd.network.networks;
         in
         {
           systemd.sockets.vpn-zones-dns = {
@@ -786,7 +809,9 @@ in
           systemd.services.vpn-zones-dns = {
             description = "vpn-zones: the host's DNS through a zone";
             serviceConfig = {
-              ExecStart = "${core} dns-forward" + lib.concatMapStrings (a: " --upstream ${a}") offUpstreams;
+              ExecStart =
+                "${core} dns-forward --host-resolvers"
+                + lib.concatMapStrings (a: " --fallback ${a}") offFallback;
               DynamicUser = true;
               NoNewPrivileges = true;
               CapabilityBoundingSet = "";
@@ -806,8 +831,8 @@ in
 
           # Резолвер хоста — только сюда. DNS/FallbackDNS/Domains заменяются
           # целиком (mkForce): слитый список отправил бы часть вопросов мимо
-          # зоны. NM и dhcpcd не сообщают резолверы DHCP ни resolved, ни
-          # resolv.conf — иначе вопросы пошли бы роутеру напрямую.
+          # зоны. Резолверы DHCP не доходят ни до resolved, ни до resolv.conf —
+          # иначе вопросы пошли бы роутеру напрямую.
           services.resolved.settings.Resolve = lib.mkIf config.services.resolved.enable {
             DNS = lib.mkForce [ hostDnsAddress ];
             FallbackDNS = lib.mkForce [ ];
@@ -816,11 +841,37 @@ in
           networking.nameservers = lib.mkIf (!config.services.resolved.enable) (
             lib.mkForce [ hostDnsAddress ]
           );
+          # NM: не `dns = "none"` — ключ `systemd-resolved` (по умолчанию true)
+          # и тогда отправляет resolved DNS каждого соединения. Так: свою копию
+          # (/run/NetworkManager/resolv.conf — резолверы роутера для простых
+          # зон и для выключенного состояния) пишет, остального не трогает.
           networking.networkmanager.dns = lib.mkIf config.networking.networkmanager.enable (
-            lib.mkForce "none"
+            lib.mkForce "default"
           );
-          networking.dhcpcd.extraConfig = "nohook resolv.conf";
+          networking.networkmanager.settings.main = lib.mkIf config.networking.networkmanager.enable {
+            rc-manager = lib.mkForce "unmanaged";
+            systemd-resolved = lib.mkForce false;
+          };
+          # dhcpcd: не `nohook resolv.conf` в extraConfig — nixpkgs ставит его
+          # после блоков `interface ethX` (статический IPv6), а блок в
+          # dhcpcd.conf тянется до конца файла: хук пропускался бы на одном
+          # интерфейсе (VM-тест: eth0 отдал resolved 10.0.2.3). enter-hook
+          # выполняется в той же оболочке перед хуками, на каждом интерфейсе,
+          # а список пропусков читается заново перед каждым хуком.
+          environment.etc."dhcpcd.enter-hook".text = ''
+            # vpn-zones host.dns: the resolvers DHCP hands out never reach the
+            # host's resolver — its names go through the zone.
+            skip_hooks="$skip_hooks resolv.conf"
+          '';
 
+          # networkd отдаёт resolved резолверы каждого .network сам, и общего
+          # «не брать» в networkd.conf нет — только в каждой сети.
+          assertions = [
+            {
+              assertion = !(config.systemd.network.enable && config.services.resolved.enable) || networkdLeaks == { };
+              message = "services.vpn-zones.system.host.dns: systemd-networkd would hand resolved the resolvers of ${lib.concatStringsSep ", " (lib.attrNames networkdLeaks)}, and the host's names would go to them around the zone. For each: dhcpV4Config.UseDNS = false; dhcpV6Config.UseDNS = false; ipv6AcceptRAConfig.UseDNS = false; and no networkConfig.DNS.";
+            }
+          ];
           warnings = lib.optional ((cfg.zones.${cfg.host.dns}.kind or "plain") != "plain") "services.vpn-zones.system.host.dns = \"${cfg.host.dns}\" is a VPN zone: the host's names go through it, and so would the name of its own endpoint — give the endpoint as an address, or the zone never comes up.";
         }
       ))

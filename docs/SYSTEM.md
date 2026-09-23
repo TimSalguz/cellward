@@ -449,21 +449,43 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
   capabilities, `ProtectSystem=strict`.
 - **The host's resolver points there and nowhere else.** With resolved: `DNS=127.0.0.60`,
   `FallbackDNS=` empty, `Domains=~.` — forced (`mkForce`), because a merged list would send
-  part of the questions around the zone. Without it: `networking.nameservers`. The
-  resolvers DHCP hands out are ignored — NetworkManager's `dns = "none"`, dhcpcd's `nohook
-  resolv.conf` — or the router would be asked directly. Local names the router knows
-  (`printer.lan`) are then answered only if the zone's resolvers know them: a plain zone
-  whose `dns` is the router does.
-- **Whose resolvers.** The zone's: the config's `DNS =`, the public ones for a plain zone,
-  or `zones.<z>.dns` — its own list, instead of either (addresses only, checked when the
-  system is built and again when the zone comes up; a line that is not an address would be
-  an option in resolv.conf).
+  part of the questions around the zone. Without it: `networking.nameservers`. What DHCP
+  hands out never reaches the resolver, or the router would be asked directly:
+  - NetworkManager: `dns = "default"`, `rc-manager = "unmanaged"`, `systemd-resolved =
+    false`. Not `dns = "none"`: its `systemd-resolved` key (true by default) sends every
+    connection's resolvers to resolved whatever `dns` says — found in the manual after this
+    section first shipped with `none`, and checked by a NetworkManager host in the VM test.
+    It still writes its own copy, `/run/NetworkManager/resolv.conf`: the router's resolvers,
+    read by plain zones and by the forwarder when off;
+  - dhcpcd: its `resolv.conf` hook skipped from `/etc/dhcpcd.enter-hook`, which it runs
+    before its hooks on every interface. Not `nohook resolv.conf` in `extraConfig`:
+    nixpkgs puts that after the `interface ethX` blocks it writes for static IPv6, and a
+    block in dhcpcd.conf runs to the end of the file — the VM test found eth0 still handing
+    resolved QEMU's resolver;
+  - systemd-networkd hands resolved each `.network`'s resolvers itself, and networkd.conf
+    has no global "don't": with resolved, every network has to say `UseDNS = false` (DHCPv4,
+    DHCPv6, router advertisements) and have no `DNS=`, or the system does not build — the
+    message names the networks, NixOS's generated `99-*-dhcp` ones included.
+- **Whose resolvers** (the owner's rule): a VPN zone's are its config's `DNS =`, or the
+  public ones when the VPN names none; a plain zone — "directly" — has the router's, as the
+  host knows them (`dnsfwd::ROUTER_SOURCES`: NetworkManager's copy, resolved's upstreams,
+  /etc/resolv.conf; loopback addresses are the host's own stub and are skipped), or the
+  public ones when the host knows none, and follows them every five seconds (another Wi-Fi,
+  another router). `zones.<z>.dns` overrides either: addresses only, checked when the system
+  is built and again when the zone comes up (a line that is not an address would be an
+  option in resolv.conf).
+- **Local names** (`printer.lan`, the router's own names) are answered when the zone's
+  resolvers know them: a plain zone's are the router, so they are; a VPN zone's are not.
+  Sending chosen local domains to the router from a VPN zone is optional and not built yet
+  (ROADMAP).
 - **A VPN zone for the host's names** needs its endpoint as an address: the holder resolves
   an endpoint name through the host, which would ask through the zone that is not up yet.
   The module warns; a plain zone for `host.dns` has no such loop.
-- **Off.** Without the attaching drop-in the unit's own `ExecStart` runs:
-  `--upstream` the zone's `dns` (or the public resolvers) from the host's network. Names
-  keep working with vpn-zones off; the resolver settings stay as they are.
+- **Off.** Without the attaching drop-in the unit's own `ExecStart` runs, from the host's
+  network: the router's resolvers as the host knows them (`--host-resolvers`), else a plain
+  zone's own `dns`, else the public ones (`--fallback`). A VPN zone's own resolvers are not
+  used: they are inside its tunnel. Names keep working with vpn-zones off; the resolver
+  settings stay as they are.
 - **A program outside the zones** still gets its names — through the zone now, not the
   host's network — and under `enforce`/`strict` still no connection.
 
@@ -515,7 +537,8 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
      zone's nsswitch, the command's exit code, a pty with a terminal, the launch in the
      journal; a user of another zone and a user outside the group are refused;
   8. a plain zone: `lo` and `awg0`, pasta as `vpn-zones-plain`, the server sees the machine,
-     the host's loopback unreachable by the gateway and by `127.0.0.1`, the public resolvers,
+     the host's loopback unreachable by the gateway and by `127.0.0.1`, the resolvers the
+     host knows (QEMU's, from resolved) and no loopback among them,
      `connected: yes` in the status, and alice out through it while the policy refuses her
      directly; stopping it leaves `lo` alone;
   9. the egress policy, enforced from boot under a firewall that flushes every table: root
@@ -553,8 +576,13 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
   7. off survives a reboot: no table, no zone, timesyncd and the daemon on the host's
      network, root out; on after it puts everything back;
   8. the host's names (§9c): `server` answers the same names differently from its
-     "internet" resolver and from its LAN one (the "router"); the host — through nscd and
+     "internet" resolver and from its LAN one (the "router", which also hands out addresses
+     and itself as the resolver by DHCP); the host — through nscd and
      resolved, and directly at 127.0.0.60 over UDP and TCP — gets the "internet" answer, the
      forwarder runs in `pl`'s namespace, `resolvectl dns` shows the forwarder alone; off, and
      after a reboot off, names still resolve with the forwarder on the host's network; on,
-     it is back in the zone.
+     it is back in the zone;
+  9. `nmhost`: NetworkManager takes its address and resolver from the router's DHCP;
+     `/run/NetworkManager/resolv.conf` names the router, `resolvectl dns` names the forwarder
+     alone, the plain zone `direct0` (no `dns` of its own) asks the router, and the host's
+     names get the router's answer through it.

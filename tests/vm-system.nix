@@ -433,8 +433,14 @@ let
           assert gw, "the plain zone has no default route"
           machine.succeed(f"ip netns exec vz-pl sh -c '! timeout 5 socat -T3 - TCP:{gw}:7777'")
           machine.succeed("ip netns exec vz-pl sh -c '! timeout 5 socat -T3 - TCP:127.0.0.1:7777'")
+          # "Directly" asks the router's resolvers, as the host knows them —
+          # here QEMU's, which resolved has for eth0 — and never the host's
+          # own stub on loopback.
           out = machine.succeed("cat /etc/netns/vz-pl/resolv.conf")
-          assert "nameserver 1.1.1.1" in out, out
+          zone_ns = [l.split()[1] for l in out.splitlines() if l.startswith("nameserver ")]
+          host_ns = machine.succeed("cat /run/systemd/resolve/resolv.conf")
+          assert zone_ns and not any(n.startswith("127.") for n in zone_ns), out
+          assert all(f"nameserver {n}" in host_ns for n in zone_ns), f"{out} vs {host_ns}"
           machine.wait_until_succeeds(
               "grep -q 'connected: yes' /run/vpn-zones/system/pl/status", timeout=30
           )
