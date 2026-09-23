@@ -207,6 +207,42 @@ let
           # Its liveness is the system zone's handshake.
           machine.wait_until_succeeds(alice("vpn-zone check mz"), timeout=60)
 
+      with subtest("from inside a user zone, no door to the system tier (review)"):
+          # The service's socket is hidden in every user zone: a program in
+          # one could otherwise have added a zone, or run itself in one, and
+          # gone out around its own tunnel.
+          machine.succeed(alice("vpn-zone run mz -- test ! -e /run/vpn-zones/sysrun.sock"))
+          machine.fail(alice("vpn-zone run mz -- vpn-zone-sys sz -- true"))
+          # A way out through a system zone is asked for by a zone, not by a
+          # program of the user's, even outside every zone.
+          core = machine.succeed(
+              "grep -o '/nix/store/[^ ]*/bin/vpn-zone-core' "
+              "$(readlink -f $(command -v vpn-zone-sys)) | head -1"
+          ).strip()
+          out = machine.fail(alice(f"{core} system-uplink sz $$") + " 2>&1")
+          assert "asked for by a zone" in out, out
+          # Through the system zone, not into it: a service listening in sz
+          # answers sz itself and not the user zone.
+          machine.succeed(
+              "systemd-run --unit=insz -p NetworkNamespacePath=/run/netns/vz-sz "
+              "socat TCP-LISTEN:8093,fork,reuseaddr 'SYSTEM:echo inside'"
+          )
+          # stdin closed: with the driver's left open, socat waits on it and a
+          # refusal check could pass on a connection that in fact succeeded.
+          machine.wait_until_succeeds(
+              "ip netns exec vz-sz socat -T5 - TCP:10.99.0.2:8093 </dev/null | grep inside",
+              timeout=30,
+          )
+          out = machine.succeed(
+              alice(
+                  "vpn-zone run mz -- sh -c "
+                  "'timeout -s KILL 5 socat -T3 - TCP:10.99.0.2:8093 </dev/null; true'"
+              )
+          )
+          assert "inside" not in out, out
+          out = machine.succeed(alice("vpn-zone run mz -- socat -T10 - TCP:10.99.0.1:8080"))
+          assert "peer=10.99.0.2" in out, out
+
       with subtest("the system zone's key in a user zone: through the system zone, not twice"):
           machine.succeed(
               "install -o alice -m 600 /var/lib/vpn-zones/system/sz/config.conf /home/alice/sz.conf"

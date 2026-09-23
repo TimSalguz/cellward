@@ -34,6 +34,9 @@ let
 
         services.vpn-zones.system = {
           enable = true;
+          # Who may add zones on the spot: alice, and nobody else — bob is in
+          # the group through `other` and may not.
+          users = [ "alice" ];
           zones.sz = {
             # Not at boot: the config only exists once the test has written it.
             autoStart = false;
@@ -483,7 +486,13 @@ let
           out = machine.fail(as_user("bob", "vpn-zone-sys nl2 -- true") + " 2>&1")
           assert "may not" in out, out
           out = machine.fail(as_user("bob", "vpn-zone-sys --add nl2 /dev/null") + " 2>&1")
-          assert "not bob's" in out, out
+          assert "may not add system zones" in out, out
+          # alice may add zones, but not take one declared for somebody else…
+          out = machine.fail(as_user("alice", "vpn-zone-sys --add other /tmp/nl2.conf") + " 2>&1")
+          assert "not alice's" in out, out
+          # …nor replace the tunnel of one the host's own services go through.
+          out = machine.fail(as_user("alice", "vpn-zone-sys --add sz /tmp/nl2.conf") + " 2>&1")
+          assert "carries the host's own services" in out, out
           # A plain zone added on the spot.
           machine.succeed(as_user("alice", "vpn-zone-sys --add pl2 --plain"))
           out = machine.succeed(as_user("alice", f"vpn-zone-sys pl2 -- socat -T10 - TCP:{server_ip}:8090"))

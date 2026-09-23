@@ -81,6 +81,15 @@ the same time, through one tunnel.
 
 `vpn-zone-sys --up <name>` starts a zone for one of its users; the TTY console uses it.
 
+**Who may add** (review): `services.vpn-zones.system.users` (the module writes them to
+`/etc/vpn-zones/system-adders`), and nobody else — a zone's own `users` may use it, not add
+zones. A declared zone that the host's own services go through (`host.*`, `services`,
+`containers` — marked `carries`) never has its config replaced by a request: whoever sets its
+tunnel answers for the host's names, clock and services. The socket takes at most 16
+connections per user (`MaxConnectionsPerSource`) and a request within 5 s
+(`SO_RCVTIMEO`), so nobody holds the service from the others — the TTY console's rescue
+path among them.
+
 ## 3. Units
 
 - `vpn-zone-system-ns@<name>.service` — `vpn-zone-core system-zone ns-up <name>`:
@@ -291,10 +300,21 @@ system zone they may not use is a refusal, never a second tunnel behind its back
   to that user namespace (`NS_GET_USERNS`) — the host's and the system zones' belong to the
   host's, owned by root, so neither can be passed off as a zone —, brings the system zone
   up, and starts pasta: `setns` into the system zone's network while root, then no groups,
-  the user's uid and gid, `NO_NEW_PRIVS`, and the two descriptors at fixed numbers for
-  `--userns`/`--netns`. The checks and the attaching use the same descriptors: a pid could
-  be reused in between, a descriptor cannot. The service reads no `/proc` of another user's
-  processes and needs no `CAP_SYS_PTRACE`.
+  the user's uid, the group `vpn-zones-bridge`, `NO_NEW_PRIVS`. pasta closes every
+  descriptor it inherits, so it is given `/proc/<pid>/ns/*` paths, and the child — already
+  the user, who may open a process of their own zone's as its owner — checks that the paths
+  are the namespaces that were checked (`st_dev`/`st_ino`); a pid reused in the moment
+  after could only attach pasta, running as the user, to another namespace of the same
+  user's. Each descriptor is checked for its kind first (`NS_GET_NSTYPE`). The service
+  reads no `/proc` of another user's processes and needs no `CAP_SYS_PTRACE`.
+- **Only a zone asks** (review): VZP1 from an account's own uid is refused — the zone's
+  uid 0 (the subuid start) is what a zone asks as, and no program of the user's becomes
+  it. `/run/vpn-zones` is hidden in every user zone (LEAK-MODEL §14), so its programs do
+  not reach the service at all.
+- **Through, not into.** pasta's group `vpn-zones-bridge`: the system zone's ruleset
+  refuses that group's packets to the system zone's own addresses (`meta skgid … fib daddr
+  type local reject`), so a service listening in the system zone is not the user zone's
+  to reach.
 - **Its life is the connection.** The watcher holds the connection for as long as it runs;
   the holder watches the watcher the way it watches pasta for the other kinds. The zone
   going down stops the watcher, the connection closes, the service kills pasta. pasta
@@ -416,9 +436,22 @@ the network, however it was started.
   key refused without it). The TTY console of ARCHITECTURE §4 turns it with one key.
 - **What it does not close.** Names: a blocked program still resolves them through the
   host's nscd or resolved, which are the system's and go out — the connection is refused,
-  the question already left. `host.dns` (§9c) sends those questions through a zone. And root: root can unload anything; the policy is about
-  programs that do not know, not about root. `strict` (§9b) takes the host's own services
-  off the network as well.
+  the question already left. `host.dns` (§9c) sends those questions through a zone. And
+  root: root can unload anything; the policy is about programs that do not know, not about
+  root. `strict` (§9b) takes the host's own services off the network as well.
+- **Known gaps** (review, not closed yet):
+  - *Every first subuid and subgid is let out*, not only zones' uplinks: whatever runs as
+    the user's first subordinate id in the host's network goes out — the root of a rootless
+    container started with the host's network (`distrobox`/`toolbox`, `--network host`), or
+    a namespace the user maps on purpose with `newuidmap`. Narrowing it needs the zones'
+    pasta under an owner no container uses (ROADMAP).
+  - *Established flows stay.* `ct state established,related accept` comes first: a
+    connection opened while vpn-zones were off, during the emergency key's window or
+    before the policy loaded keeps flowing afterwards, and so does the reply side of a
+    connection someone opened to a user's listener.
+- **Loaded on any nft and kernel.** The table is replaced with `add table` + `delete
+  table` in the same transaction as the new one — not `destroy`, which needs nft 1.0.8 and
+  Linux 6.3; a file that did not load would leave the host with no policy at all.
 
 ## 9a. Rescue paths
 
@@ -479,8 +512,9 @@ services.vpn-zones.system = {
   are in the file built with the system, as two interval sets; each prefix is checked by
   our binary at build time (a prefix `nft` refused at boot would leave the host with no
   policy at all) and its host bits cleared. A LAN on public addresses has to be added.
-  DHCP is let out by port (68→67, 546→547): a renewal goes to the server's own address,
-  which need not be a private one.
+  DHCP is let out by port (68→67, 546→547) for the system's users only: a renewal goes to
+  the server's own address, which need not be a private one, and a service that can bind
+  port 68 is not thereby let out to anywhere (review).
 - **The ways out that stay.** A system zone's tunnel (its mark), the uplinks of user zones
   (subuid), the pasta of plain zones — its owner, `vpn-zones-plain`, is a system user and
   is now named in the allowances (`egress allow --user vpn-zones-plain`; if that step fails,
@@ -566,6 +600,19 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
   another router). `zones.<z>.dns` overrides either: addresses only, checked when the system
   is built and again when the zone comes up (a line that is not an address would be an
   option in resolv.conf).
+- **What the host's resolver itself does in the host's network.** resolved's LLMNR and
+  mDNS are multicast to the local network, around the zone: `host.dns` turns them off
+  (`mkDefault`, for whoever wants `.local` on purpose). Tools that hand resolved per-link
+  resolvers over D-Bus as root — iwd with its own network configuration, wg-quick,
+  openvpn and strongswan scripts, tailscale — are not stopped by this module, and their
+  routing domains are a closer match than the global `~.`: those names go to their
+  servers. A `resolved.conf.d` drop-in or `extraConfig` with `DNS=` is added to the forced
+  list, not replaced by it; without resolved, another `resolvconf -a` source lands in
+  `/etc/resolv.conf` after 127.0.0.60 and glibc falls back to it on a timeout.
+- **The forwarder under load** (review): a UDP query waits at most 2 s per resolver in all
+  (stray answers do not restart the wait), a TCP client's connection lives at most 30 s,
+  128 queries per protocol are in flight at once, and no thread to be had drops the query
+  rather than the listener. Any local user can still keep those 128 busy.
 - **Local names** (`printer.lan`, the router's own names) are answered when the zone's
   resolvers know them: a plain zone's are the router, so they are; a VPN zone's are not.
   Sending chosen local domains to the router from a VPN zone is optional and not built yet

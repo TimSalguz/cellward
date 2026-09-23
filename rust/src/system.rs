@@ -66,6 +66,8 @@ pub const RUN_DIR: &str = "/run/vpn-zones/system";
 /// The declared zones, one name per line, written by the NixOS module. What
 /// `vpn-zone status --json` lists.
 pub const DECLARED: &str = "/etc/vpn-zones/system-zones";
+/// `services.vpn-zones.system.users`, one per line: who may add zones.
+pub const ADDERS: &str = "/etc/vpn-zones/system-adders";
 /// Namespaces are `vz-<name>`: apart from anybody else's `ip netns add`.
 pub const NETNS_PREFIX: &str = "vz-";
 /// `vz-` + 12 = 15, the longest interface name the kernel takes — and the
@@ -425,7 +427,13 @@ fn ns_up(args: &Args) -> Result<(), String> {
     // The second echelon, before there is anything to filter — as in a user
     // zone, and never fatal for the same reason: it insures the topology, the
     // topology does not lean on it.
-    if let Err(e) = feed_ruleset(tools, name, &zone::app_ruleset()) {
+    // User zones go out THROUGH this zone, not into it: their pasta runs with
+    // a group of its own, whose packets to this namespace's own addresses —
+    // a service listening here, the tunnel's address — are refused.
+    let first: Vec<String> = crate::egress::group_id(crate::sysrun::BRIDGE_GROUP)
+        .map(|gid| vec![format!("meta skgid {gid} fib daddr type local reject")])
+        .unwrap_or_default();
+    if let Err(e) = feed_ruleset(tools, name, &zone::app_ruleset_with(&first)) {
         eprintln!(
             "system zone {name}: nftables second echelon is OFF ({e}) — the zone is still \
              hermetic by construction, but nothing insures it against a mistake"
@@ -928,6 +936,9 @@ pub struct Settings {
     /// The one interface of the host the zone goes out through
     /// (`zones.<name>.uplink`); `None`: wherever the host routes.
     pub uplink: Option<String>,
+    /// The host's own services go through it (`host.*`, `services`,
+    /// `containers` in the module): its config is not replaced by a request.
+    pub carries: bool,
 }
 
 pub fn declared_dir(name: &str) -> PathBuf {
@@ -973,7 +984,16 @@ pub fn settings(name: &str) -> Option<Settings> {
             .unwrap_or_default(),
         uplink: read_trimmed(&dir.join("uplink"))
             .filter(|i| crate::hostif::valid_interface_name(i)),
+        carries: declared && dir.join("carries").exists(),
     })
+}
+
+/// Who may add system zones on the spot: `services.vpn-zones.system.users`,
+/// written by the module. No file, nobody.
+pub fn adders() -> Vec<String> {
+    fs::read_to_string(ADDERS)
+        .map(|t| crate::sysrun::parse_users(&t))
+        .unwrap_or_default()
 }
 
 /// The addresses of a zone's `dns` file, one per line. Anything that is not

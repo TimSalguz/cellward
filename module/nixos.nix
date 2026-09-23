@@ -609,6 +609,9 @@ in
           description = "vpn-zones pasta of plain system zones";
         };
         users.groups.${plainUser} = { };
+        # pasta пользовательских зон через системную: своя группа, чтобы
+        # системная зона отказала её пакетам к своим же адресам (ревью).
+        users.groups.vpn-zones-bridge = { };
 
         # Список для `vpn-zone status --json` (system_networks), и по зоне —
         # кто может запускать в ней программы (посредник, rust/src/sysrun.rs).
@@ -616,7 +619,21 @@ in
           "vpn-zones/system-zones".text = lib.concatMapStrings (name: name + "\n") (
             lib.attrNames cfg.zones
           );
+          # Кто может добавлять зоны на ходу: `users`, и никто больше — у
+          # пользователей зоны только право ею пользоваться (ревью).
+          "vpn-zones/system-adders".text = lib.concatMapStrings (u: u + "\n") cfg.users;
         }
+        # Зоны, через которые идут службы самого хоста: их конфиг запросом не
+        # заменить — кто задаёт туннель, тот отвечает за имена, часы и службы
+        # хоста (ревью).
+        // lib.listToAttrs (
+          map (z: lib.nameValuePair "vpn-zones/system-zones.d/${z}/carries" { text = "yes\n"; }) (
+            lib.unique (
+              lib.mapAttrsToList (_: s: s.zone) attachedServices
+              ++ lib.mapAttrsToList (_: a: a.zone) cfg.containers
+            )
+          )
+        )
         // lib.mapAttrs' (
           name: z:
           lib.nameValuePair "vpn-zones/system-zones.d/${name}/users" {
@@ -761,6 +778,10 @@ in
             SocketGroup = "vpn-zones";
             Accept = true;
             MaxConnections = 64;
+            # Для AF_UNIX systemd считает источником uid собеседника: один
+            # пользователь не займёт все 64 и не закроет посредника остальным
+            # (ревью: 64 молчащих соединения — и пульт TTY без сети).
+            MaxConnectionsPerSource = 16;
           };
         };
         systemd.services."vpn-zone-sysrun@" = {
@@ -867,6 +888,11 @@ in
             DNS = lib.mkForce [ hostDnsAddress ];
             FallbackDNS = lib.mkForce [ ];
             Domains = lib.mkForce [ "~." ];
+            # LLMNR и mDNS resolved спрашивает сам, многоадресно, в сети
+            # хоста: односложные имена ушли бы в локальную сеть мимо зоны
+            # (ревью). mkDefault — mDNS на `.local` кому-то нужен сознательно.
+            LLMNR = lib.mkDefault "false";
+            MulticastDNS = lib.mkDefault "false";
           };
           networking.nameservers = lib.mkIf (!config.services.resolved.enable) (
             lib.mkForce [ hostDnsAddress ]
@@ -950,7 +976,7 @@ in
               Type = "oneshot";
               ExecStart = [
                 "${pkgs.coreutils}/bin/touch ${offFlag}"
-                "-${nft} destroy table inet vpnzones_egress"
+                "-${nft} delete table inet vpnzones_egress"
                 # Генератор видит метку и больше не привязывает службы…
                 "${systemctl} daemon-reload"
               ]
@@ -1126,7 +1152,8 @@ in
               RemainAfterExit = true;
               ExecStart = apply;
               ExecReload = apply;
-              ExecStop = "${nft} destroy table inet vpnzones_egress";
+              # `delete`, не `destroy`: тот требует nft 1.0.8 и ядра 6.3.
+              ExecStop = "-${nft} delete table inet vpnzones_egress";
             };
           };
 
@@ -1139,7 +1166,7 @@ in
               Type = "simple";
               # Сам nft, без vpn-zone-core: ключ должен повернуться и тогда,
               # когда сломано всё наше.
-              ExecStartPre = "${nft} destroy table inet vpnzones_egress";
+              ExecStartPre = "-${nft} delete table inet vpnzones_egress";
               ExecStart = "${pkgs.coreutils}/bin/sleep ${toString (e.emergency.minutes * 60)}";
               ExecStopPost = apply;
             };

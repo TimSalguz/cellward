@@ -43,6 +43,9 @@ const UDP_WAIT: Duration = Duration::from_secs(2);
 /// A TCP client or resolver that says nothing for this long is dropped.
 const TCP_IDLE: Duration = Duration::from_secs(10);
 const TCP_CONNECT: Duration = Duration::from_secs(3);
+/// The whole life of a client's TCP connection: one trickling a byte at a
+/// time would otherwise hold its slot for ever (review).
+const TCP_LIFE: Duration = Duration::from_secs(30);
 /// Queries in flight at once, per protocol: beyond it new ones are dropped
 /// rather than threads made without end.
 const MAX_IN_FLIGHT: usize = 128;
@@ -196,8 +199,17 @@ pub fn forward_udp(query: &[u8], resolvers: &[SocketAddr]) -> Option<Vec<u8>> {
             continue;
         }
         // A stray datagram with another ID is not an answer; keep waiting
-        // for this resolver until its time is up.
-        while let Ok(n) = sock.recv(&mut buf) {
+        // for this resolver until ITS time is up — the time, not each wait:
+        // a stream of wrong answers must not hold the query (review).
+        let deadline = std::time::Instant::now() + UDP_WAIT;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() || sock.set_read_timeout(Some(left)).is_err() {
+                break;
+            }
+            let Ok(n) = sock.recv(&mut buf) else {
+                break;
+            };
             if answers(query, &buf[..n]) {
                 return Some(buf[..n].to_vec());
             }
@@ -276,7 +288,8 @@ fn serve_udp(listener: UdpSocket, args: Arc<Args>) {
         };
         let query = buf[..n].to_vec();
         let (listener, args) = (Arc::clone(&listener), Arc::clone(&args));
-        thread::spawn(move || {
+        // No thread to be had: the query is dropped, the listener lives on.
+        let _ = thread::Builder::new().spawn(move || {
             let _slot = slot;
             if let Some(reply) = forward_udp(&query, &args.resolvers()) {
                 let _ = listener.send_to(&reply, client);
@@ -288,7 +301,11 @@ fn serve_udp(listener: UdpSocket, args: Arc<Args>) {
 fn serve_tcp_client(mut client: TcpStream, args: &Args) {
     let _ = client.set_read_timeout(Some(TCP_IDLE));
     let _ = client.set_write_timeout(Some(TCP_IDLE));
-    while let Ok(query) = read_message(&mut client) {
+    let born = std::time::Instant::now();
+    while born.elapsed() < TCP_LIFE {
+        let Ok(query) = read_message(&mut client) else {
+            return;
+        };
         let Some(reply) = forward_tcp(&query, &args.resolvers()) else {
             return;
         };
@@ -308,7 +325,7 @@ fn serve_tcp(listener: TcpListener, args: Arc<Args>) {
             continue;
         };
         let args = Arc::clone(&args);
-        thread::spawn(move || {
+        let _ = thread::Builder::new().spawn(move || {
             let _slot = slot;
             serve_tcp_client(client, &args);
         });
