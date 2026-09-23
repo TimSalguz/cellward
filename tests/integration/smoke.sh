@@ -616,7 +616,12 @@ LIVEHOME="$HOME/.local/state/vpn-sandboxes/smokelive"
 rm -rf "$LIVE" "$LIVEHOME"
 mkdir -p "$LIVE" && : > "$LIVE/probe"
 # Store-путь: /tmp внутри песочницы свой, ссылка из $WORK туда не ведёт.
-LIVESLEEP=$(readlink -f "$FSCOREUTILS/sleep")
+# Раскрывается только КАТАЛОГ, имя остаётся sleep: coreutils в nixpkgs —
+# один бинарь на все команды, и `readlink -f …/sleep` давал …/coreutils, а
+# `coreutils 0.1` сразу падал. Цикл внутри тогда крутился без паузы,
+# переписывая файл статуса, и проверки ниже проходили или нет — смотря
+# когда им удавалось его прочитать.
+LIVESLEEP="$(readlink -f "$FSCOREUTILS")/sleep"
 env -u WAYLAND_DISPLAY -u DISPLAY "$FSCORE" fs-sandbox \
   --bwrap "$FSBWRAP" --dbus-proxy "$FSPROXY" \
   --kdialog "$WORK/fake-kdialog" --xwayland /nonexistent/xwayland-satellite \
