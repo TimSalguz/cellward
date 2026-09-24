@@ -264,15 +264,20 @@ pub fn runtime_entry_kept(name: &str, hermetic: bool) -> bool {
 /// starting a process outside the zone —, not the Secret Service, not other
 /// programs' interfaces.
 ///
-/// Wildcards only as a `.*` suffix: xdg-dbus-proxy refuses anything else as
-/// "not a valid dbus name" and does not start at all — `StatusNotifierItem-*`
-/// did exactly that. A tray item registers under its unique name without
-/// owning a well-known one.
-pub const SESSION_BUS_RULES: [&str; 10] = [
+/// Wildcards: a `.*` suffix as in xdg-dbus-proxy itself, and `-*` for OWN
+/// only — our patch of it (`module/patches/xdg-dbus-proxy-own-prefix.patch`),
+/// without which the stock proxy refuses the rule and does not start at all.
+/// Tray icons need it: Electron and Qt register theirs as
+/// `org.kde.StatusNotifierItem-<pid>-<n>` and show nothing if they may not own
+/// that name (owner, 2026-09-24: no tray icon from Claude Desktop in a hermetic
+/// zone). `--own=org.kde.*` would do it too — and let the program take
+/// `org.kde.kwalletd6` and collect other programs' passwords.
+pub const SESSION_BUS_RULES: [&str; 11] = [
     "--filter",
     "--talk=org.freedesktop.portal.*",
     "--talk=org.freedesktop.Notifications",
     "--talk=org.kde.StatusNotifierWatcher",
+    TRAY_ITEM_NAMES,
     "--own=org.mpris.MediaPlayer2.*",
     "--talk=org.freedesktop.IBus",
     "--talk=org.freedesktop.portal.IBus",
@@ -280,6 +285,9 @@ pub const SESSION_BUS_RULES: [&str; 10] = [
     "--talk=org.freedesktop.portal.Fcitx",
     "--talk=org.freedesktop.ScreenSaver",
 ];
+
+/// Tray icons' names, owned and nothing more (see [`SESSION_BUS_RULES`]).
+pub const TRAY_ITEM_NAMES: &str = "--own=org.kde.StatusNotifierItem-*";
 
 /// The host's system bus.
 const SYSTEM_BUS: &str = "/run/dbus/system_bus_socket";
@@ -3470,7 +3478,14 @@ mod tests {
                 .split_once('=')
                 .map(|(_, rest)| rest.split('=').next().unwrap_or(rest))
                 .unwrap_or("");
-            let bare = name.strip_suffix(".*").unwrap_or(name);
+            // `-*` only on OWN, and only with our patched proxy.
+            let bare = match name.strip_suffix("-*") {
+                Some(b) => {
+                    assert!(rule.starts_with("--own="), "{rule}");
+                    b
+                }
+                None => name.strip_suffix(".*").unwrap_or(name),
+            };
             assert!(!bare.contains('*'), "{rule}");
             assert!(
                 bare.split('.').count() >= 2
@@ -3482,6 +3497,9 @@ mod tests {
         }
         assert!(!SESSION_BUS_RULES.iter().any(|r| r.contains("systemd1")));
         assert!(!SESSION_BUS_RULES.iter().any(|r| r.contains("secrets")));
+        // Owning a whole org.kde.* would own KWallet's name as well.
+        assert!(!SESSION_BUS_RULES.contains(&"--own=org.kde.*"));
+        assert!(SESSION_BUS_RULES.contains(&TRAY_ITEM_NAMES));
     }
 
     #[test]

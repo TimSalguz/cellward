@@ -52,6 +52,7 @@ by what those programs use the bus for:
 |---|---|
 | Secret Service / KWallet / GNOME Keyring | browsers fall back to an unencrypted password store or ask for a password; mail and chat clients lose saved logins |
 | MPRIS (`org.mpris.MediaPlayer2.*` needs `--own`) | media keys and the shell's player widget do not see players in the zone |
+| tray icons of Electron and Qt (they own `org.kde.StatusNotifierItem-<pid>-<n>` first) | no icon, and a program that closes to the tray cannot be brought back from it — allowed since 2026-09-24 by `--own=org.kde.StatusNotifierItem-*`, a rule of our patched proxy that owns and nothing more |
 | IBus / fcitx5 input methods | typing in a second layout through an input method stops working in zone programs |
 | KDE global shortcuts (`org.kde.kglobalaccel`) | shortcuts registered by zone programs do nothing |
 | dconf / GSettings writes (`ca.desrt.dconf`) | GTK programs cannot save settings (they fall back to memory) |

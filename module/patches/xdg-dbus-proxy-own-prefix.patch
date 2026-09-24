@@ -1,0 +1,123 @@
+diff -ruN a b
+--- a/dbus-proxy.c
++++ b/dbus-proxy.c
+@@ -273,6 +273,23 @@
+           else if (arg[2] == 'o')
+             policy = FLATPAK_POLICY_OWN;
+ 
++          /* vpn-zones: `--own=NAME-*` — own names NAME-<suffix> and nothing else. */
++          if (policy == FLATPAK_POLICY_OWN && g_str_has_suffix (name, "-*"))
++            {
++              name[strlen (name) - 2] = 0;
++              if (name[0] == ':' || !g_dbus_is_name (name))
++                {
++                  g_printerr ("'%s' is not a valid dbus name\n", name);
++                  return FALSE;
++                }
++              {
++                g_autofree char *prefix = g_strconcat (name, "-", NULL);
++                flatpak_proxy_add_own_prefix (proxy, prefix);
++              }
++              *args_i += 1;
++              continue;
++            }
++
+           if (g_str_has_suffix (name, ".*"))
+             {
+               name[strlen (name) - 2] = 0;
+diff --color -ruN '--color=never' a/flatpak-proxy.c b/flatpak-proxy.c
+--- a/flatpak-proxy.c
++++ b/flatpak-proxy.c
+@@ -344,6 +344,10 @@
+   gboolean       sloppy_names;
+ 
+   GHashTable    *filters;
++  /* vpn-zones: `--own=NAME-*` — prefixes the client may OWN (RequestName,
++   * ReleaseName, ListQueuedOwners) and nothing more: no SEE or TALK on other
++   * names with the prefix. For StatusNotifierItem-<pid>-<n> tray names. */
++  GPtrArray     *own_prefixes;
+ };
+ 
+ typedef struct
+@@ -683,6 +687,43 @@
+ }
+ 
+ void
++flatpak_proxy_add_own_prefix (FlatpakProxy *proxy,
++                              const char   *prefix)
++{
++  g_ptr_array_add (proxy->own_prefixes, g_strdup (prefix));
++}
++
++/* The name is PREFIX followed by at least one of [A-Za-z0-9_-] and nothing
++ * else: no dot, so no namespace below it. */
++static gboolean
++own_prefix_matches (FlatpakProxy *proxy, const char *name)
++{
++  guint i;
++
++  for (i = 0; i < proxy->own_prefixes->len; i++)
++    {
++      const char *prefix = g_ptr_array_index (proxy->own_prefixes, i);
++      const char *rest;
++
++      if (!g_str_has_prefix (name, prefix))
++        continue;
++
++      rest = name + strlen (prefix);
++      if (*rest == 0)
++        continue;
++
++      for (; *rest != 0; rest++)
++        if (!g_ascii_isalnum (*rest) && *rest != '_' && *rest != '-')
++          break;
++
++      if (*rest == 0)
++        return TRUE;
++    }
++
++  return FALSE;
++}
++
++void
+ flatpak_proxy_add_call_rule (FlatpakProxy *proxy,
+                              const char   *name,
+                              gboolean      name_is_subtree,
+@@ -715,6 +756,7 @@
+   g_assert (proxy->clients == NULL);
+ 
+   g_hash_table_destroy (proxy->filters);
++  g_ptr_array_unref (proxy->own_prefixes);
+ 
+   g_free (proxy->socket_path);
+   g_free (proxy->dbus_address);
+@@ -2182,6 +2224,9 @@
+       if (name_policy >= required_policy)
+         return TRUE;
+ 
++      if (required_policy == FLATPAK_POLICY_OWN && own_prefix_matches (client->proxy, name))
++        return TRUE;
++
+       if (client->proxy->log_messages)
+         g_print ("Filtering message due to arg0 %s, policy: %d (required %d)\n", name, name_policy, required_policy);
+     }
+@@ -3191,6 +3236,7 @@
+ flatpak_proxy_init (FlatpakProxy *proxy)
+ {
+   proxy->filters = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify) filter_list_free);
++  proxy->own_prefixes = g_ptr_array_new_with_free_func (g_free);
+   flatpak_proxy_add_policy (proxy, "org.freedesktop.DBus", FALSE, FLATPAK_POLICY_TALK);
+ }
+ 
+diff --color -ruN '--color=never' a/flatpak-proxy.h b/flatpak-proxy.h
+--- a/flatpak-proxy.h
++++ b/flatpak-proxy.h
+@@ -53,6 +53,8 @@
+                                        const char   *name,
+                                        gboolean      name_is_subtree,
+                                        FlatpakPolicy policy);
++void         flatpak_proxy_add_own_prefix (FlatpakProxy *proxy,
++                                           const char   *prefix);
+ void         flatpak_proxy_add_call_rule (FlatpakProxy *proxy,
+                                           const char   *name,
+                                           gboolean      name_is_subtree,

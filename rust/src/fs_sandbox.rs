@@ -175,10 +175,13 @@ const PROXY_GRACE: Duration = Duration::from_millis(500);
 /// Without a filter it reaches the Secret Service through the bus — that is
 /// KWallet with every password in it — plus the window list and every other
 /// application. Only the portals and notifications get through.
-const BUS_TALK: [&str; 3] = [
+const BUS_TALK: [&str; 4] = [
     "--talk=org.freedesktop.portal.*",
     "--talk=org.freedesktop.Notifications",
     "--talk=org.kde.StatusNotifierWatcher",
+    // The tray icon's own name (`zone::TRAY_ITEM_NAMES`): in a container the
+    // program's pid is its namespace's, but the name is still one per icon.
+    crate::zone::TRAY_ITEM_NAMES,
 ];
 
 /// The lowest and the number of X display numbers a satellite may take
