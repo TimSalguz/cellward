@@ -747,7 +747,7 @@ mod tests {
         assert_eq!((bare.selector, bare.program), (None, None));
 
         // With its start time on record: the launch.
-        registry::note_start(&running, me).unwrap();
+        registry::note_start(&running, me, false).unwrap();
         let launch = launch_of(&state, window).unwrap();
         assert_eq!(launch.zone, crate::launch::UNCONFINED);
         assert_eq!(launch.selector.as_deref(), Some("sb:work"));

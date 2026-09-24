@@ -207,7 +207,12 @@ pub const STARTED: &str = ".started";
 
 /// Note when the launch `pid` started — ours, just before the record. Swept on
 /// the way: what is left of launches that are over.
-pub fn note_start(running: &Path, pid: i32) -> io::Result<()> {
+///
+/// `from_zone`: the launch was asked for from inside a zone (handed out by the
+/// broker or systemd). A program there chose the id it runs under, so its
+/// record must not make the picker start the user's next click on that
+/// program into its network without a question ([`launched_here`]).
+pub fn note_start(running: &Path, pid: i32, from_zone: bool) -> io::Result<()> {
     let dir = running.join(STARTED);
     fs::create_dir_all(&dir)?;
     sweep_started(running);
@@ -215,7 +220,8 @@ pub fn note_start(running: &Path, pid: i32) -> io::Result<()> {
         .ok_or_else(|| io::Error::other(format!("no start time of pid {pid}")))?;
     // Through a temporary: a reader never sees half a number.
     let tmp = dir.join(format!(".{pid}.tmp"));
-    fs::write(&tmp, format!("{stamp}\n"))?;
+    let mark = if from_zone { "\nfrom-zone" } else { "" };
+    fs::write(&tmp, format!("{stamp}{mark}\n"))?;
     fs::rename(&tmp, dir.join(pid.to_string()))
 }
 
@@ -241,10 +247,19 @@ pub fn sweep_started(running: &Path) -> usize {
     swept
 }
 
+fn recorded(running: &Path, pid: i32) -> Option<String> {
+    fs::read_to_string(running.join(STARTED).join(pid.to_string())).ok()
+}
+
 fn recorded_start(running: &Path, pid: i32) -> Option<String> {
-    fs::read_to_string(running.join(STARTED).join(pid.to_string()))
-        .ok()
-        .map(|s| s.trim().to_owned())
+    recorded(running, pid).and_then(|s| s.lines().next().map(|l| l.trim().to_owned()))
+}
+
+/// [`launched`], and asked for by the user's own launch — not from inside a
+/// zone. What the picker's "already running — start it there" needs.
+pub fn launched_here(running: &Path, pid: i32) -> bool {
+    launched(running, pid)
+        && !recorded(running, pid).is_some_and(|s| s.lines().any(|l| l.trim() == "from-zone"))
 }
 
 /// Is the process `pid` the launch recorded under that pid — its start time on
@@ -666,7 +681,7 @@ mod tests {
         // No note: not certainly a launch, but maybe alive.
         assert!(!launched(&running, me));
         assert!(super::alive(&running, me));
-        note_start(&running, me).unwrap();
+        note_start(&running, me, false).unwrap();
         assert!(launched(&running, me));
         assert!(super::alive(&running, me));
         // A note of another start: the number went to somebody else.
@@ -675,9 +690,22 @@ mod tests {
         assert!(!super::alive(&running, me));
         // Swept as a launch that is over; a new note replaces it.
         assert_eq!(sweep_started(&running), 1);
-        note_start(&running, me).unwrap();
+        note_start(&running, me, false).unwrap();
         assert!(launched(&running, me));
         // The note is not a container.
         assert!(dirs(&running).is_empty());
+    }
+
+    /// A launch asked for from inside a zone is a launch, but not the user's.
+    #[test]
+    fn a_launch_from_a_zone_is_not_the_users_own() {
+        let dir = Dir::new("from-zone");
+        let running = dir.0.join(".running");
+        let me = std::process::id() as i32;
+        note_start(&running, me, true).unwrap();
+        assert!(launched(&running, me));
+        assert!(!launched_here(&running, me));
+        note_start(&running, me, false).unwrap();
+        assert!(launched_here(&running, me));
     }
 }

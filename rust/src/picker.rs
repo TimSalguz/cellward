@@ -1437,8 +1437,10 @@ fn running_record(state: &Path, key: &str) -> Option<Running> {
             .filter_map(registry::parse_record)
             // This one starts a click into that network without a question:
             // only a launch that is certainly still this process counts
-            // (`registry::STARTED`), not whatever holds its number now.
-            .find(|r| registry::launched(&running, r.pid))
+            // (`registry::STARTED`), not whatever holds its number now — and
+            // only one the user started, not one a program in a zone asked
+            // for under an id of its choosing.
+            .find(|r| registry::launched_here(&running, r.pid))
         {
             return Some(Running {
                 zone: record.zone,

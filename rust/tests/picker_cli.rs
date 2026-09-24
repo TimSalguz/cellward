@@ -486,7 +486,7 @@ fn a_running_program_is_started_where_it_already_runs_without_a_word() {
         "state/.running/__main__/firefox",
         &format!("{me} nl sb:work\n"),
     );
-    vpn_zone::registry::note_start(&home.path("state/.running"), me).unwrap();
+    vpn_zone::registry::note_start(&home.path("state/.running"), me, false).unwrap();
     let out = home.run(&pick("firefox"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(home.asked().is_empty(), "{:?}", home.asked());
