@@ -43,7 +43,7 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -420,6 +420,21 @@ fn send_all(sock: RawFd, data: &[u8], fds: &[RawFd]) -> io::Result<()> {
 pub fn run(args: &Args) -> u8 {
     // SAFETY: prctl with these arguments takes no pointers.
     unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) };
+    // The proxy behind is reached through its directory, held from here on:
+    // in a zone that directory is about to be covered (`zone::hide_project_state`),
+    // so that no program there can connect past this filter. And nobody of
+    // the same uid here may borrow the descriptor through `/proc/<pid>/fd`:
+    // not dumpable — its /proc is root's, and reading it takes CAP_SYS_PTRACE
+    // over the namespace, which the zone's programs do not have.
+    // SAFETY: prctl with these arguments takes no pointers.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    let upstream = match held_upstream(&args.upstream) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("bus-filter: cannot open {}: {e}", args.upstream.display());
+            return 1;
+        }
+    };
     let _ = fs::remove_file(&args.listen);
     let listener = match UnixListener::bind(&args.listen) {
         Ok(l) => l,
@@ -433,7 +448,7 @@ pub fn run(args: &Args) -> u8 {
     };
     let _ = fs::set_permissions(&args.listen, fs::Permissions::from_mode(0o600));
     let ctx = Arc::new(Ctx {
-        upstream: args.upstream.clone(),
+        upstream,
         opener: args.opener.clone(),
         via_broker: args.via_broker.clone(),
         opens: Mutex::new(VecDeque::new()),
@@ -535,6 +550,94 @@ fn take_fds(fds: &mut VecDeque<OwnedFd>, n: u32) -> io::Result<Vec<OwnedFd>> {
     Ok(fds.drain(..n).collect())
 }
 
+/// The client's side of the authentication, as the proxy behind reads it.
+///
+/// Where the authentication ends is where this filter starts reading
+/// messages — and where xdg-dbus-proxy starts applying its rules. The two
+/// must agree to the byte: a client that ends it in a way the proxy takes
+/// and this filter does not (`BEGIN` followed by a blank and anything, as
+/// dbus-daemon allows; or a first line glued to the credentials byte) would
+/// have its calls go past the filter unread, OpenURI among them (review
+/// 2026-09-25, third round). So the rules are the proxy's own
+/// (`auth_line_is_valid`, `auth_line_is_begin` in flatpak-proxy.c): the first
+/// byte apart, whole lines, ASCII without control characters beginning with
+/// a capital, and a line the proxy would refuse ends the connection here. The
+/// end is passed on as the plain `BEGIN` — then neither side can read it
+/// differently.
+#[derive(Default)]
+struct Auth {
+    first: bool,
+    line: Vec<u8>,
+    bytes: usize,
+}
+
+impl Auth {
+    /// Take `data`: the lines to pass on, and where the messages start if the
+    /// authentication ended in it.
+    fn feed(&mut self, data: &[u8]) -> io::Result<(Vec<u8>, Option<usize>)> {
+        let mut out = Vec::new();
+        for (i, &b) in data.iter().enumerate() {
+            self.bytes += 1;
+            if self.bytes > MAX_AUTH_BYTES {
+                return Err(io::Error::other("authentication too long"));
+            }
+            if !self.first {
+                // The credentials byte, on its own as the proxy reads it.
+                self.first = true;
+                out.push(b);
+                continue;
+            }
+            self.line.push(b);
+            if !self.line.ends_with(b"\r\n") {
+                continue;
+            }
+            let text = &self.line[..self.line.len() - 2];
+            if !auth_line_is_valid(text) {
+                return Err(io::Error::other(
+                    "an authentication line the bus proxy would refuse",
+                ));
+            }
+            if auth_line_is_begin(text) {
+                out.extend_from_slice(b"BEGIN\r\n");
+                self.line.clear();
+                return Ok((out, Some(i + 1)));
+            }
+            out.extend_from_slice(&self.line);
+            self.line.clear();
+        }
+        Ok((out, None))
+    }
+}
+
+/// xdg-dbus-proxy's `auth_line_is_valid`: ASCII, no control characters, a
+/// capital letter first.
+fn auth_line_is_valid(line: &[u8]) -> bool {
+    line.first().is_some_and(u8::is_ascii_uppercase)
+        && line.iter().all(|&b| b.is_ascii() && b >= b' ')
+}
+
+/// xdg-dbus-proxy's `auth_line_is_begin`: `BEGIN`, alone or followed by a
+/// blank and anything.
+fn auth_line_is_begin(line: &[u8]) -> bool {
+    line.strip_prefix(b"BEGIN")
+        .is_some_and(|rest| matches!(rest.first(), None | Some(b' ' | b'\t')))
+}
+
+/// `upstream` as `/proc/self/fd/N/<name>`, N a descriptor of its directory
+/// kept for the life of the process.
+fn held_upstream(upstream: &Path) -> io::Result<PathBuf> {
+    let (Some(dir), Some(name)) = (upstream.parent(), upstream.file_name()) else {
+        return Err(io::Error::other("not a path to a socket"));
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let fd = sys::open_dir(dir)?.into_raw_fd();
+    Ok(Path::new(&format!("/proc/self/fd/{fd}")).join(name))
+}
+
 fn client_to_bus(
     client: &UnixStream,
     upstream: &UnixStream,
@@ -543,41 +646,25 @@ fn client_to_bus(
 ) -> io::Result<()> {
     let mut buf = vec![0u8; READ_CHUNK];
     let mut fds: VecDeque<OwnedFd> = VecDeque::new();
-    let mut line: Vec<u8> = Vec::new();
-    let mut auth_bytes = 0usize;
+    let mut auth = Auth::default();
     let mut pending: Vec<u8> = Vec::new();
     let up = upstream.as_raw_fd();
     while let Some(n) = read_chunk(client.as_raw_fd(), &mut buf, &mut fds)? {
         let mut data = &buf[..n];
         if !conn.began.load(Ordering::SeqCst) {
-            // The authentication, line by line and passed on as it is, up to
-            // and including BEGIN; what follows BEGIN is messages.
-            let mut split = None;
-            for (i, &b) in data.iter().enumerate() {
-                line.push(b);
-                if line.ends_with(b"\r\n") {
-                    if line == b"BEGIN\r\n" {
-                        split = Some(i + 1);
-                        break;
-                    }
-                    line.clear();
-                }
-            }
-            auth_bytes += split.unwrap_or(data.len());
-            if auth_bytes > MAX_AUTH_BYTES {
-                return Err(io::Error::other("authentication too long"));
-            }
-            let (auth, rest) = data.split_at(split.unwrap_or(data.len()));
+            // The authentication, whole lines at a time, up to BEGIN; what
+            // follows BEGIN is messages.
+            let (lines, split) = auth.feed(data)?;
             if split.is_some() {
                 // Before the bus can answer it, so that the other direction
                 // knows to expect messages.
                 conn.began.store(true, Ordering::SeqCst);
             }
-            send_all(up, auth, &[])?;
-            if split.is_none() {
+            send_all(up, &lines, &[])?;
+            let Some(split) = split else {
                 continue;
-            }
-            data = rest;
+            };
+            data = &data[split..];
         }
         pending.extend_from_slice(data);
         while let Some((msg, h)) = next_message(&mut pending)? {
@@ -947,6 +1034,55 @@ fn notify(ctx: &Ctx, summary: &str, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where the authentication ends, the proxy's way: whatever follows a
+    /// blank after BEGIN, a first line glued to the credentials byte, a line
+    /// cut between two reads. The end goes on as the plain BEGIN.
+    #[test]
+    fn the_authentication_ends_where_the_proxy_says() {
+        let mut auth = Auth::default();
+        let (out, split) = auth
+            .feed(b"\0AUTH EXTERNAL 31303030\r\nBEGIN now\r\nl\x01")
+            .unwrap();
+        assert_eq!(out, b"\0AUTH EXTERNAL 31303030\r\nBEGIN\r\n");
+        assert_eq!(split, Some(36));
+
+        let mut auth = Auth::default();
+        let (out, split) = auth.feed(b"\0BEGIN\r\n").unwrap();
+        assert_eq!((out.as_slice(), split), (&b"\0BEGIN\r\n"[..], Some(8)));
+
+        let mut auth = Auth::default();
+        assert_eq!(
+            auth.feed(b"\0NEGOTIATE_UNIX_FD\r\nBEG").unwrap(),
+            (b"\0NEGOTIATE_UNIX_FD\r\n".to_vec(), None)
+        );
+        assert_eq!(
+            auth.feed(b"IN\r\nl").unwrap(),
+            (b"BEGIN\r\n".to_vec(), Some(4))
+        );
+    }
+
+    /// A line the proxy would refuse ends the connection here as well, rather
+    /// than being read one way here and another there.
+    #[test]
+    fn a_line_the_proxy_refuses_is_refused() {
+        for line in [
+            &b"\0BEGIN\tx\r\n"[..],
+            b"\0BEGIN\0x\r\n",
+            b"\0begin\r\n",
+            b"\0 BEGIN\r\n",
+            b"\0\r\n",
+            b"\0AUTH \xd0\x96\r\n",
+        ] {
+            assert!(Auth::default().feed(line).is_err(), "{line:?}");
+        }
+        // Not the end, and passed on: BEGINNING is another word.
+        let mut auth = Auth::default();
+        assert_eq!(
+            auth.feed(b"\0BEGINNING\r\n").unwrap(),
+            (b"\0BEGINNING\r\n".to_vec(), None)
+        );
+    }
 
     fn call(member: &str, interface: Option<&str>, dest: &str) -> Header {
         Header {

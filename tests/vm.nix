@@ -96,6 +96,58 @@ let
     time.sleep(1)
   '';
 
+  # A raw session-bus client: ends the authentication the way dbus-daemon and
+  # xdg-dbus-proxy allow and the bus filter used to miss ("BEGIN" and more on
+  # the line), then asks the portal to open the link in argv[1]. Prints what
+  # came back.
+  rawBegin = pkgs.writeText "raw-begin.py" ''
+    import os, socket, struct, sys
+    def pad(b, n):
+        return b + b"\0" * ((-len(b)) % n)
+    def s(v):
+        e = v.encode()
+        return struct.pack("<I", len(e)) + e + b"\0"
+    def msg(serial, path, iface, member, dest, sig="", body=b""):
+        fields = b""
+        items = [(1, "o", path), (2, "s", iface), (3, "s", member), (6, "s", dest)]
+        if sig:
+            items.append((8, "g", sig))
+        for code, t, val in items:
+            fields = pad(fields, 8)
+            f = bytes([code, 1]) + t.encode() + b"\0"
+            if t == "g":
+                f += bytes([len(val)]) + val.encode() + b"\0"
+            else:
+                f += s(val)
+            fields += f
+        head = b"l" + bytes([1, 0, 1]) + struct.pack("<III", len(body), serial, len(fields))
+        return pad(head + fields, 8) + body
+    body = pad(pad(s(""), 4) + s(sys.argv[1]), 4) + struct.pack("<I", 0)
+    body = pad(body, 8)
+    c = socket.socket(socket.AF_UNIX)
+    c.connect("/run/user/1000/bus")
+    c.sendall(b"\0AUTH EXTERNAL " + str(os.getuid()).encode().hex().encode() + b"\r\n")
+    ok = c.recv(4096)
+    assert ok.startswith(b"OK"), ok
+    c.sendall(
+        b"BEGIN now\r\n"
+        + msg(1, "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello", "org.freedesktop.DBus")
+        + msg(2, "/org/freedesktop/portal/desktop", "org.freedesktop.portal.OpenURI",
+              "OpenURI", "org.freedesktop.portal.Desktop", "ssa{sv}", body)
+    )
+    c.settimeout(5)
+    data = b""
+    try:
+        while b"/org/freedesktop/portal/desktop/request/" not in data:
+            d = c.recv(4096)
+            if not d:
+                break
+            data += d
+    except socket.timeout:
+        pass
+    print(data)
+  '';
+
   # A CA and a server certificate made at build time, for the container that is
   # DECLARED to trust it (docs/CONTAINERS.md §8). Synthetic, and in the store of
   # this test only.
@@ -154,7 +206,14 @@ let
           # A user manager without a login session: `vpn-zone up` talks to
           # `systemctl --user`, and nobody logs into a test VM.
           linger = true;
+          # A door that a group opens: the session has it, a zone must not.
+          extraGroups = [ "vzdoor" ];
         };
+        users.groups.vzdoor = { };
+        systemd.tmpfiles.rules = [
+          "d /var/lib/vzdoor 0750 root vzdoor -"
+          "f /var/lib/vzdoor/door 0640 root vzdoor - open"
+        ];
 
         # zsh, like on a real desktop: without it /share/zsh is not linked into
         # the per-user profile and the completion assert below would test
@@ -1244,6 +1303,21 @@ let
           assert out.strip() == "u 1", out
           in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.kde.kwalletd6 4'")
           in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.kde.StatusNotifierItem-1.evil 4'")
+          # The project's state out of the zone's reach (review 2026-09-25):
+          # no zone.pid to rewrite, no raw proxy behind the bus filter, no key;
+          # the settings and the shims read-only; the host still writes.
+          out = in_zone(hp, "ls -A /home/alice/.local/state/vpn-zones")
+          assert sorted(out.split()) == [".running", ".throwaway"], out
+          for path in [".local/state/vpn-zones/.running/x", ".config/vpn-zones/x", ".local/share/vpn-zones/x"]:
+              in_zone(hp, f"sh -c '! touch /home/alice/{path}'")
+          alice("touch ~/.config/vpn-zones/from-host && rm ~/.config/vpn-zones/from-host")
+          # A program started in the zone has the user's own group only: the
+          # session's groups open doors (libvirt, docker, /dev/input).
+          alice("cat /var/lib/vzdoor/door")
+          alice("vpn-zone run vmherm -- sh -c 'id -G > /home/alice/zone-groups; cat /var/lib/vzdoor/door > /home/alice/zone-door 2>&1; true'")
+          groups = machine.succeed("cat /home/alice/zone-groups").split()
+          assert groups == ["100"], groups
+          machine.fail("grep -q open /home/alice/zone-door")
           # In the home: the zone's /tmp is its own (LEAK-MODEL §15).
           in_zone(hp, "env VPN_ZONE_CURRENT=vmherm vpn-zone run vmherm -- touch /home/alice/brokered-same")
           machine.wait_until_succeeds("test -e /home/alice/brokered-same", timeout=30)
@@ -1378,6 +1452,15 @@ let
           machine.wait_until_succeeds("grep -q from-zone /home/alice/opened-urls", timeout=30)
           lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
           at = lines.index("https://example.test/from-zone")
+          assert lines[at + 1] == zone_ns, f"{lines} (zone {zone_ns})"
+          # The same call after an authentication ended with more on the
+          # BEGIN line, which the proxy takes as the end: the filter takes it
+          # so too, answers, and the link opens in the zone.
+          out = in_zone(hp, "${pkgs.python3}/bin/python3 ${rawBegin} https://example.test/raw-begin")
+          assert "/org/freedesktop/portal/desktop/request/" in out, out
+          machine.wait_until_succeeds("grep -q raw-begin /home/alice/opened-urls", timeout=30)
+          lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
+          at = lines.index("https://example.test/raw-begin")
           assert lines[at + 1] == zone_ns, f"{lines} (zone {zone_ns})"
           # The zone's bus is still the zone's: names and calls go through.
           in_zone(hp, "busctl --user --timeout=5 call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ListNames")

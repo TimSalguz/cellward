@@ -58,6 +58,9 @@ pub const ENV_CURRENT: &str = "VPN_ZONE_CURRENT";
 pub const ENV_DELEGATED: &str = "VPN_ZONE_DELEGATED";
 /// The launcher's stable key for the program, put there by the picker.
 pub const ENV_APPID: &str = "VPN_ZONE_APPID";
+/// On a delegated launch: the zone it was asked for from. A zone's lock is
+/// out of its own sight (`zone::hide_project_state`), so the host looks it up.
+const ENV_FROM: &str = "VPN_ZONE_FROM";
 /// Print the resulting command and start nothing.
 pub const ENV_DRYRUN: &str = "VPN_ZONE_DRYRUN";
 
@@ -515,6 +518,32 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // registry: a launch asked for from inside a zone is marked so.
     let from_zone = env_nonempty(ENV_DELEGATED).is_some();
     std::env::remove_var(ENV_DELEGATED);
+    let asked_from = env_nonempty(ENV_FROM).filter(|_| from_zone);
+    std::env::remove_var(ENV_FROM);
+    // A locked zone's own launches stay in it (`run_locked`), which the zone
+    // can no longer see for itself: its lock is hidden from it with the rest
+    // of the state. The name comes from the zone and may be a lie — a zone
+    // with `systemd --user` has other ways out anyway, which is what the lock
+    // of such a zone says of itself (`vpn-zone lock`); a hermetic zone has no
+    // way here but the broker, which judges by the kernel.
+    let argv: Vec<OsString> = match asked_from {
+        Some(origin)
+            if argv.first().map(OsString::as_os_str) != Some(origin.as_os_str())
+                && !origin.is_empty()
+                && !origin.to_string_lossy().contains('/')
+                && tools.state.join(&origin).join(NO_ESCAPE).exists() =>
+        {
+            eprintln!(
+                "зона {} заперта: запускаем в ней же",
+                origin.to_string_lossy()
+            );
+            std::iter::once(origin)
+                .chain(argv.iter().skip(1).cloned())
+                .collect()
+        }
+        _ => argv.to_vec(),
+    };
+    let argv = argv.as_slice();
 
     let selection = match Selection::parse(argv) {
         Ok(selection) => selection,
@@ -1021,10 +1050,11 @@ pub struct Entry<'a> {
 ///
 /// A pure function, because every word of it was paid for:
 ///
-/// * **into a zone**: `nsenter --preserve-credentials -U -n -m -t <pid>`, and
-///   with a container also `--keep-caps` — without it CapEff is zeroed on
-///   entering the zone's user namespace and there is nothing left to mount the
-///   layer with (`docs/GOTCHAS.md` §1). The container then gets a private mount
+/// * **into a zone**: `nsenter --preserve-credentials --keep-caps -U -n -m -t
+///   <pid>` — without `--keep-caps` CapEff is zeroed on entering the zone's
+///   user namespace, and there is nothing left to mount a layer with
+///   (`docs/GOTCHAS.md` §1) nor to shed the session's groups with
+///   (`profile::run`). A container then gets a private mount
 ///   namespace of its own (`unshare --mount`), so its layers are seen by this
 ///   launch only and not by the whole zone;
 /// * **`direct` with a container**: there is no zone to borrow a user namespace
@@ -1058,9 +1088,9 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
         Network::Zone(pid) => {
             exec.push(entry.nsenter.into());
             exec.push("--preserve-credentials".into());
-            if container {
-                exec.push("--keep-caps".into());
-            }
+            // Always, a container or not: `profile-run` sheds the session's
+            // groups with them before the program starts (`profile::run`).
+            exec.push("--keep-caps".into());
             exec.extend(["-U".into(), "-n".into(), "-m".into(), "-t".into()]);
             exec.push(pid.to_string().into());
             exec.push("--".into());
@@ -1252,6 +1282,11 @@ fn delegate(tools: &Tools, argv: &[OsString]) -> u8 {
         "--setenv=VPN_ZONE_DELEGATED=1".into(),
     ]);
     exec.push(setenv);
+    if let Some(current) = env_nonempty(ENV_CURRENT) {
+        let mut from = OsString::from(format!("--setenv={ENV_FROM}="));
+        from.push(&current);
+        exec.push(from);
+    }
     exec.push("--".into());
     exec.push(tools.runner.clone().into());
     exec.push("run".into());
@@ -1843,6 +1878,7 @@ mod tests {
             argv(&[
                 "/t/nsenter",
                 "--preserve-credentials",
+                "--keep-caps",
                 "-U",
                 "-n",
                 "-m",

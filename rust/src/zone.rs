@@ -113,7 +113,7 @@ use std::ffi::{CStr, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, ToSocketAddrs};
-use std::os::fd::{IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
@@ -134,6 +134,15 @@ use crate::sysuplink::{self, SysUplinkConfig};
 const STATE_SUBDIR: &str = ".local/state/vpn-zones";
 /// Where the settings are, below `$HOME` — the same as the CLI's `config`.
 const CONFIG_SUBDIR: &str = ".config/vpn-zones";
+/// What a zone keeps of the project's state directory, and whether it may
+/// write there: the throwaway containers' layers (the programs' own data) and
+/// the launch registry, which `profile-run` reads to know whether it is the
+/// last tenant of a throwaway container.
+const ZONE_KEEPS: [(&str, bool); 2] = [(crate::launch::THROWAWAY_DIR, true), (".running", false)];
+/// Under the home, what the host acts on and a zone may read but not write:
+/// the settings (`declared/`, the broker's "always", the pins' neighbours)
+/// and the launcher shims the session runs.
+pub(crate) const READ_ONLY_IN_ZONES: [&str; 2] = [CONFIG_SUBDIR, ".local/share/vpn-zones"];
 
 /// Files of one zone. This set is a contract: `vpn-zone` (bash), the desktop
 /// picker and the smoke test all read them by these names.
@@ -548,6 +557,9 @@ impl Args {
 struct Zone {
     name: OsString,
     dir: PathBuf,
+    /// The user's home: the project's settings and shims under it are made
+    /// read-only in the zone ([`hide_project_state`]).
+    home: PathBuf,
     tools: Tools,
     /// Hermetic (`docs/HERMETICITY.md` §7 C): the runtime directory closed,
     /// the session bus filtered, the broker as the one way out. Decided once,
@@ -628,6 +640,7 @@ pub fn run(args: Args) -> u8 {
     );
     let zone = Zone {
         dir,
+        home,
         name: args.name,
         tools: args.tools,
         hermetic,
@@ -652,6 +665,18 @@ pub fn run(args: Args) -> u8 {
     let _ = fs::remove_file(zone.path(STATUS));
     let _ = fs::remove_file(zone.path(UPLINK_PID));
     let _ = fs::remove_file(zone.path(READY));
+    // What the zone keeps of the project's state has to exist before the zone
+    // hides the rest (`hide_project_state`): a directory created afterwards
+    // would not be seen in there. As the user, so that the host keeps writing
+    // into them.
+    if let Some(state) = zone.dir.parent() {
+        for (name, _) in ZONE_KEEPS {
+            let _ = fs::create_dir_all(state.join(name));
+        }
+    }
+    for dir in READ_ONLY_IN_ZONES {
+        let _ = fs::create_dir_all(zone.home.join(dir));
+    }
 
     let ids = match Ids::current() {
         Ok(ids) => ids,
@@ -2436,6 +2461,86 @@ fn hide_system_tier(zone: &Zone) -> Result<(), String> {
     Ok(())
 }
 
+/// The project's own state out of the zone's reach (review 2026-09-25,
+/// third round). `~/.local/state/vpn-zones` holds what the host trusts about
+/// zones — which namespace is which zone (`zone.pid`, `zone.start`), which is
+/// locked, what was pinned, the raw sockets behind the zone's filters, every
+/// zone's private key — and a program here has the home: it could tell the
+/// broker it is another zone, or connect past the bus filter to the proxy
+/// behind it. A tmpfs over the directory, and back only what a launch needs
+/// inside ([`ZONE_KEEPS`]); the settings and the shims read-only
+/// ([`READ_ONLY_IN_ZONES`]). Fatal: a zone that cannot do it has a way out.
+///
+/// Returns the zone as this process goes on reaching it: its directory is
+/// `/proc/self/fd/N` of a descriptor opened before the tmpfs, kept for good.
+/// Nobody else here can use it — this process is the zone's uid 0, and a
+/// program here, another user of the namespace, cannot open another user's
+/// `/proc/<pid>/fd`.
+fn hide_project_state(zone: &Zone) -> Result<Zone, String> {
+    let own =
+        sys::open_dir(&zone.dir).map_err(|e| format!("cannot open {}: {e}", zone.dir.display()))?;
+    let state = zone
+        .dir
+        .parent()
+        .ok_or("the zone's directory has no parent")?;
+    seal_project_state(state, &zone.home, &ZONE_KEEPS)?;
+    println!("zone {}: the project's state hidden", zone.name());
+    Ok(Zone {
+        name: zone.name.clone(),
+        dir: PathBuf::from(format!("/proc/self/fd/{}", own.into_raw_fd())),
+        home: zone.home.clone(),
+        tools: zone.tools.clone(),
+        hermetic: zone.hermetic,
+    })
+}
+
+/// A tmpfs over `state`, with `keep` bound back (writable or not), and
+/// [`READ_ONLY_IN_ZONES`] under `home` made read-only — in the current mount
+/// namespace. Shared with the system tier's commands (`crate::sysrun`), which
+/// keep nothing.
+pub(crate) fn seal_project_state(
+    state: &Path,
+    home: &Path,
+    keep: &[(&str, bool)],
+) -> Result<(), String> {
+    if state.is_dir() {
+        let kept =
+            sys::open_dir(state).map_err(|e| format!("cannot open {}: {e}", state.display()))?;
+        sys::mount(
+            OsStr::new("tmpfs"),
+            state,
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            "mode=0755,size=64k",
+        )
+        .map_err(|e| format!("cannot hide {}: {e}", state.display()))?;
+        for (name, writable) in keep {
+            let from = PathBuf::from(format!("/proc/self/fd/{}/{name}", kept.as_raw_fd()));
+            if !from.is_dir() {
+                continue;
+            }
+            let to = state.join(name);
+            fs::create_dir(&to).map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+            sys::mount(from.as_os_str(), &to, "", libc::MS_BIND | libc::MS_REC, "")
+                .map_err(|e| format!("cannot bind {} back: {e}", to.display()))?;
+            if !writable {
+                sys::remount_read_only(&to)
+                    .map_err(|e| format!("cannot make {} read-only: {e}", to.display()))?;
+            }
+        }
+    }
+    for dir in READ_ONLY_IN_ZONES {
+        let dir = home.join(dir);
+        if !dir.is_dir() {
+            continue;
+        }
+        sys::mount(dir.as_os_str(), &dir, "", libc::MS_BIND | libc::MS_REC, "")
+            .and_then(|()| sys::remount_read_only(&dir))
+            .map_err(|e| format!("cannot make {} read-only: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
 /// Wait for the app namespace to say it exists.
 fn wait_for_app_namespace(zone_up_r: OwnedFd) -> Result<(), String> {
     let mut zone_up = File::from(zone_up_r);
@@ -2816,6 +2921,9 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         _ => None,
     };
     hide_system_tier(zone)?;
+    // The project's own state, last among the covers: from here on the zone's
+    // directory is reached through a descriptor.
+    let zone = &hide_project_state(zone)?;
 
     let Some(ZoneLinks {
         backend,
