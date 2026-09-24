@@ -141,14 +141,20 @@ pub enum ParseError {
     EmptyKey { line: usize },
 }
 
-/// A config line as a message may show it: the key, never the value.
+/// A config line as a message may show it: its key when that is a plain word,
+/// never the value — nor anything else, since a line's only `=` may be a
+/// base64 key's padding (review 2026-09-25).
 fn shown(text: &str) -> String {
-    match text.split_once('=') {
-        Some((key, _)) => format!("{} = …", key.trim()),
-        None => {
-            text.chars().take(24).collect::<String>()
-                + if text.chars().count() > 24 { "…" } else { "" }
+    let key = text.split_once('=').map_or(text, |(k, _)| k).trim();
+    let word = key.trim_start_matches('[').trim_end_matches(']');
+    if !word.is_empty() && word.len() <= 32 && word.chars().all(|c| c.is_ascii_alphanumeric()) {
+        if text.contains('=') {
+            format!("{key} = …")
+        } else {
+            key.to_owned()
         }
+    } else {
+        "(содержимое не показано)".to_owned()
     }
 }
 
@@ -202,13 +208,19 @@ impl WgConfig {
             }
 
             if let Some(rest) = trimmed.strip_prefix('[') {
-                let name = rest
+                // As wg reads it: whitespace anywhere is dropped, so
+                // `[Inter face]` is `[Interface]` to it — and must be to every
+                // filter here too (review 2026-09-25).
+                let name: String = rest
                     .strip_suffix(']')
                     .ok_or_else(|| ParseError::UnterminatedSection {
                         line,
                         text: trimmed.to_string(),
                     })?
-                    .trim();
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                let name = name.as_str();
                 cfg.sections.push(Section {
                     kind: section_kind(name),
                     name: name.to_string(),
@@ -224,7 +236,11 @@ impl WgConfig {
                         line,
                         text: trimmed.to_string(),
                     })?;
-            let key = key.trim();
+            // The key as wg reads it, whitespace dropped: `Listen Port` is
+            // ListenPort to it, and a filter that compared the typed key would
+            // let it through.
+            let key: String = key.chars().filter(|c| !c.is_whitespace()).collect();
+            let key = key.as_str();
             let value = value.trim();
             if key.is_empty() {
                 return Err(ParseError::EmptyKey { line });

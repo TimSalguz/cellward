@@ -190,7 +190,10 @@ let
         '';
       };
       uplink = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
+        # An interface's name as the kernel allows it: 1–15 characters, no
+        # slash, no space. Anything else — an empty string too — would have
+        # been "no uplink", out by the host's routes (review 2026-09-25).
+        type = lib.types.nullOr (lib.types.strMatching "[A-Za-z0-9_.:@-]{1,15}");
         default = null;
         example = "enp4s0";
         description = ''
@@ -284,7 +287,9 @@ in
       type = lib.types.nullOr lib.types.str;
       default = "wheel";
       description = ''
-        Members may run `vpn-zones-off` and `vpn-zones-on` without a password:
+        Members may run `vpn-zones-off` and `vpn-zones-on` without a password at
+        the machine itself — a process in a local, active login session's own
+        scope — and with their password from anywhere else (ssh, cron, a unit):
         vpn-zones off entirely — zones, the egress policy, services back on the
         host's network — with no rebuild and no network, until turned on again.
         This turns polkit on. `null`: root only.
@@ -440,7 +445,7 @@ in
         group = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = "wheel";
-          description = "Members may start and stop `vpn-zones-egress-open.service` without a password; this turns polkit on. `null`: root only.";
+          description = "Members may start and stop `vpn-zones-egress-open.service` — without a password at the machine itself (a process in a local, active login session's own scope, the TTY included), with their password from anywhere else. This turns polkit on. `null`: root only.";
         };
       };
     };
@@ -1012,15 +1017,30 @@ in
           ];
           security.polkit.enable = lib.mkIf (cfg.switchGroup != null) true;
           security.polkit.extraConfig = lib.mkIf (cfg.switchGroup != null) ''
+            // Is the process in a login session's own scope (session-N.scope)?
+            function inSessionScope(pid) {
+              try {
+                polkit.spawn(["${pkgs.gnugrep}/bin/grep", "-qE",
+                  "^0::/user\\.slice/user-[0-9]+\\.slice/session-[0-9]+\\.scope$",
+                  "/proc/" + pid + "/cgroup"]);
+                return true;
+              } catch (error) {
+                return false;
+              }
+            }
             polkit.addRule(function(action, subject) {
               if (action.id == "org.freedesktop.systemd1.manage-units" &&
                   ["vpn-zones-off.service", "vpn-zones-on.service"].indexOf(action.lookup("unit")) >= 0 &&
                   action.lookup("verb") == "start" &&
                   subject.isInGroup("${cfg.switchGroup}")) {
                 // Without a password from the person at the machine — the
-                // session in front, local and active; from anywhere else (ssh,
-                // cron, a command in a zone with the system bus) with one.
-                return (subject.local && subject.active)
+                // session in front, local and active, AND the asking process
+                // really in that session's scope: polkit takes a process
+                // outside any session (a unit the user's manager started, for
+                // a zone's program with the session bus) for the user's
+                // display session (review 2026-09-25). From anywhere else —
+                // ssh, cron, such a unit — with a password.
+                return (subject.local && subject.active && inSessionScope(subject.pid))
                   ? polkit.Result.YES
                   : polkit.Result.AUTH_SELF_KEEP;
               }
@@ -1183,6 +1203,17 @@ in
           # (emergency.group = null, ключ только у root).
           security.polkit.enable = lib.mkIf (e.emergency.group != null) true;
           security.polkit.extraConfig = lib.mkIf (e.emergency.group != null) ''
+            // Is the process in a login session's own scope (session-N.scope)?
+            function inSessionScopeKey(pid) {
+              try {
+                polkit.spawn(["${pkgs.gnugrep}/bin/grep", "-qE",
+                  "^0::/user\\.slice/user-[0-9]+\\.slice/session-[0-9]+\\.scope$",
+                  "/proc/" + pid + "/cgroup"]);
+                return true;
+              } catch (error) {
+                return false;
+              }
+            }
             polkit.addRule(function(action, subject) {
               if (action.id == "org.freedesktop.systemd1.manage-units" &&
                   action.lookup("unit") == "vpn-zones-egress-open.service" &&
@@ -1190,7 +1221,7 @@ in
                   subject.isInGroup("${e.emergency.group}")) {
                 // As the switch above: no password at the machine itself (the
                 // TTY rescue path included), a password from anywhere else.
-                return (subject.local && subject.active)
+                return (subject.local && subject.active && inSessionScopeKey(subject.pid))
                   ? polkit.Result.YES
                   : polkit.Result.AUTH_SELF_KEEP;
               }

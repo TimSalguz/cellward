@@ -55,6 +55,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **Second review round, the system tier and configs:** a config's keys and
+  section names are read the way wg reads them, whitespace dropped — `Listen
+  Port` and `[Inter face]` passed our filters as something else and wg took
+  them for `ListenPort` and `[Interface]`; polkit's "no password" also
+  requires the asking process to be in a login session's own scope (a unit the
+  user's manager starts was taken for the display session); an uplink is given
+  only when the rule keeping user zones out of the system zone is in, for the
+  bridge group; an empty `uplink` stops the zone and the option is typed; a
+  declared user can take over a config somebody else added on the spot; a
+  command that ignores SIGTERM after its client left is killed after 5 s; the
+  service's descriptors are closed on kernels before 5.11 too; groups that open
+  host daemons (docker, libvirtd, podman, lxd, incus-admin) are dropped from a
+  system zone's command; a parse error shows a key only when it is a plain word.
 - **Second review round (2026-09-25), the launch path:** the zone entered is
   checked from inside — `profile-run` compares its own network namespace with
   the one `vpn-zone run` checked, since `nsenter` finds the zone again by a
