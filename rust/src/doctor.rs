@@ -418,6 +418,13 @@ pub fn probe(uid: u32) -> Vec<Check> {
         }
         checks.push(open_channel_check(id, what, reachable(&path)));
     }
+    checks.push(listed_channel_check(
+        "tmp-sockets",
+        &tmp_sockets(&TMP_DIRS.map(Path::new)),
+        "сокеты во временных каталогах — где /tmp общий с хостом, это сокеты хоста и \
+         других зон: сервер tmux (`run-shell` — команда на хосте, в его сети), IPC \
+         клиентов VPN (§15); у герметичной зоны /tmp свой",
+    ));
     let (raw, ipc) = compositor_entries(Path::new(&format!("/run/user/{uid}")));
     checks.push(listed_channel_check(
         "wayland-raw",
@@ -431,6 +438,42 @@ pub fn probe(uid: u32) -> Vec<Check> {
         "IPC композитора: запуск процесса на хосте (`niri msg action spawn`) (§13)",
     ));
     checks
+}
+
+/// The temporary directories a zone may share with the host
+/// (`docs/LEAK-MODEL.md` §15).
+pub const TMP_DIRS: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
+
+/// Unix sockets in these directories and one level below them — where tmux
+/// (`/tmp/tmux-<uid>/default`), JACK and single-instance programs keep theirs
+/// —, as paths. X11's directory is left to its own check.
+pub fn tmp_sockets(dirs: &[&Path]) -> Vec<String> {
+    let mut found = Vec::new();
+    for dir in dirs {
+        for sub in sockets_in(dir, &mut found) {
+            sockets_in(&sub, &mut found);
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The sockets directly in `dir` into `found`; the directories next to them
+/// (not X11's) returned.
+fn sockets_in(dir: &Path, found: &mut Vec<String>) -> Vec<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
+    let mut below = Vec::new();
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_socket() {
+            found.push(entry.path().to_string_lossy().into_owned());
+        } else if kind.is_dir() && entry.file_name() != ".X11-unix" {
+            below.push(entry.path());
+        }
+    }
+    below
 }
 
 /// The compositor's own sockets and its IPC in a runtime directory, as
@@ -958,6 +1001,29 @@ mod tests {
             ["10.0.0.1", "::1"]
         );
         assert_eq!(resolv_check(Some("search x\n")).level, Level::Warn);
+    }
+
+    #[test]
+    fn sockets_in_temporary_directories_are_found_two_levels_deep() {
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("vz-tmpsock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for sub in ["tmux-1000", ".X11-unix", "a/b"] {
+            fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let _top = UnixListener::bind(dir.join("evil.sock")).unwrap();
+        let _tmux = UnixListener::bind(dir.join("tmux-1000/default")).unwrap();
+        let _x = UnixListener::bind(dir.join(".X11-unix/X0")).unwrap();
+        let _deep = UnixListener::bind(dir.join("a/b/too-deep")).unwrap();
+        fs::write(dir.join("plain"), "").unwrap();
+        let found = tmp_sockets(&[dir.as_path()]);
+        let d = dir.display();
+        assert_eq!(
+            found,
+            [format!("{d}/evil.sock"), format!("{d}/tmux-1000/default")]
+        );
+        assert!(tmp_sockets(&[Path::new("/nonexistent-vz")]).is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

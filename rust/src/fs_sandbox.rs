@@ -916,20 +916,55 @@ fn socket_at(path: PathBuf) -> Option<PathBuf> {
     }
 }
 
-/// A private scratch directory for `/.flatpak-info` and the proxy socket.
+/// Where the scratch directories go: below our part of the runtime directory
+/// (`docs/LEAK-MODEL.md` §15). In a zone that is the zone's own runtime
+/// directory, which no other zone sees and where the zone's holder made this
+/// directory for us; on the host it is `vpn-zones/`, which is never bound into
+/// a zone whole.
+pub const SCRATCH_SUBDIR: &str = "vpn-zones/sandbox";
+
+/// A private scratch directory for `/.flatpak-info` and the proxy socket, and
+/// whether it is private enough for the socket.
 ///
 /// Mode 0700 and never anything else: the filtered bus lives in here, and a
 /// world-writable path would let anybody on the machine hand the sandbox a bus
-/// of their own.
-fn scratch_dir() -> io::Result<PathBuf> {
+/// of their own. It used to be in `/tmp`, which every zone without a sandbox
+/// shares with the host: a program there could connect to the filter of a
+/// sandbox in ANOTHER network and talk on the bus as that program, with its
+/// rules and its upstream bus. `/tmp` is still where `/.flatpak-info` goes when
+/// there is no runtime directory to use — but then without the socket: the
+/// program runs without a session bus rather than with one anybody can reach.
+fn scratch_dir(runtime: &Path) -> io::Result<(PathBuf, bool)> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
-    let path = std::env::temp_dir().join(format!("vpn-fs-sandbox-{}-{nanos}", std::process::id()));
+    let name = format!("vpn-fs-sandbox-{}-{nanos}", std::process::id());
+    let base = runtime.join(SCRATCH_SUBDIR);
+    let private = fs::create_dir_all(&base).is_ok() && is_ours_and_closed(&base);
+    let path = if private {
+        base.join(&name)
+    } else {
+        std::env::temp_dir().join(&name)
+    };
     DirBuilder::new().mode(0o700).create(&path)?;
     // The mode above is still masked by the umask, so say it again outright.
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
-    Ok(path)
+    Ok((path, private))
+}
+
+/// A directory of the caller's own that nobody else may enter — closed here if
+/// it is ours and was not.
+fn is_ours_and_closed(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: getuid(2) cannot fail and takes no pointers.
+    let uid = unsafe { libc::getuid() };
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if !meta.is_dir() || meta.uid() != uid {
+        return false;
+    }
+    meta.mode() & 0o077 == 0 || fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).is_ok()
 }
 
 /// The compiled filter on a descriptor, or `None` with a word on stderr.
@@ -1087,8 +1122,8 @@ pub fn run(args: Args) -> u8 {
     }
 
     // --- SCRATCH: /.flatpak-info AND THE BUS SOCKET ---
-    let dir = match scratch_dir() {
-        Ok(dir) => dir,
+    let (dir, private) = match scratch_dir(&runtime) {
+        Ok(made) => made,
         Err(e) => {
             eprintln!("fs-sandbox: cannot create a scratch directory: {e}");
             return EXIT_NOT_STARTED;
@@ -1106,7 +1141,16 @@ pub fn run(args: Args) -> u8 {
 
     // --- THE BUS THROUGH A FILTER ---
     let socket = cleanup.dir.join("bus");
-    let (proxy, bus_proxy) = start_bus_proxy(&args.tools.dbus_proxy, &socket, &runtime);
+    let (proxy, bus_proxy) = if private {
+        start_bus_proxy(&args.tools.dbus_proxy, &socket, &runtime)
+    } else {
+        eprintln!(
+            "fs-sandbox: no private directory in {} — running without a session bus \
+             rather than with a filter in /tmp",
+            runtime.join(SCRATCH_SUBDIR).display()
+        );
+        (None, None)
+    };
     cleanup.proxy = proxy;
 
     if ASKED_TO_STOP.load(Ordering::SeqCst) {
@@ -1358,6 +1402,46 @@ pub fn run_x11(args: X11Args) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bus filter's directory is in the runtime directory, closed, and
+    /// never in /tmp: with nowhere private to put it there is no filter at all
+    /// (`docs/LEAK-MODEL.md` §15).
+    #[test]
+    fn the_scratch_directory_is_private_or_the_bus_is_not_started() {
+        use std::os::unix::fs::MetadataExt;
+        let runtime = std::env::temp_dir().join(format!("vz-scratch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&runtime);
+        fs::create_dir_all(&runtime).unwrap();
+        let (dir, private) = scratch_dir(&runtime).unwrap();
+        assert!(private);
+        assert!(
+            dir.starts_with(runtime.join(SCRATCH_SUBDIR)),
+            "{}",
+            dir.display()
+        );
+        assert_eq!(fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
+        // Ours but left open by somebody: closed before use.
+        fs::set_permissions(
+            runtime.join(SCRATCH_SUBDIR),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let (again, private) = scratch_dir(&runtime).unwrap();
+        assert!(private);
+        assert_eq!(
+            fs::metadata(runtime.join(SCRATCH_SUBDIR)).unwrap().mode() & 0o777,
+            0o700
+        );
+        // No runtime directory to use: a scratch directory for /.flatpak-info
+        // still, but it says the socket may not go there.
+        let (fallback, private) = scratch_dir(Path::new("/proc/self/nonexistent")).unwrap();
+        assert!(!private);
+        assert!(!fallback.starts_with("/proc"), "{}", fallback.display());
+        for d in [&dir, &again, &fallback] {
+            let _ = fs::remove_dir_all(d);
+        }
+        let _ = fs::remove_dir_all(&runtime);
+    }
 
     fn argv(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()

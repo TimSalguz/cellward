@@ -15,6 +15,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **A hermetic zone has `/tmp`, `/var/tmp` and `/dev/shm` of its own**
+  (`docs/LEAK-MODEL.md` §15). The host's `/tmp` held listening sockets nobody
+  meant for a zone — a tmux server, whose `run-shell` runs a command on the
+  host in the host's network, a VPN client's IPC to a root service,
+  single-instance sockets — and `/dev/shm` other programs' shared memory and
+  JACK's sockets. Now each is an empty tmpfs in the zone, as Flatpak gives an
+  app; a file the host puts into `/tmp` is not seen in there, and the zone's
+  `/tmp` is memory, emptied when the zone goes down. Ordinary zones share the
+  host's `/tmp` as before, like the rest of the session (§1).
+- **A sandbox's bus filter is no longer in `/tmp`.** Its socket lived in the
+  `/tmp` every zone without a sandbox shares with the host: a program there
+  could connect to the filter of a sandbox in another network and talk on the
+  bus as that program. It is now in `$XDG_RUNTIME_DIR/vpn-zones/sandbox/` — in
+  a zone the zone's own runtime directory, which no other zone sees. Without
+  such a directory the sandbox runs without a session bus rather than with a
+  filter in `/tmp`. **Zones up before the update need a restart** (`vpn-zone
+  down` / `up`): the directory is made when the zone starts, and until then
+  their sandboxes run without a session bus.
+- **Throwaway containers moved to `~/.local/state/vpn-zones/.throwaway/`** — on
+  a disk, as before, but out of `/tmp`, which a hermetic zone no longer shares.
+  `gc` and the picker still find the ones started before the update in `/tmp`.
+- **`doctor`: `tmp-sockets`** — the sockets a zone sees in `/tmp`, `/var/tmp`
+  and `/dev/shm`. VM test: the evil host's tmux server, a listening socket, an
+  abstract one and shared memory, none of them reachable from a hermetic zone.
 - **A console program in a system zone (`vpn-zone-sys`) could reach the
   session through `/proc`.** Its own tmpfs hid the session's sockets where they
   lie, but the command ran in the host's user namespace, and the kernel lets

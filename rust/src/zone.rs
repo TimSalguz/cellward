@@ -1905,6 +1905,19 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
         .join(&*zone.name());
     bind_entry(&wayland_host, &wayland_zone)?;
     kept.push(format!("{}/{}", crate::wl_sandbox::SOCKET_DIR, zone.name()));
+    // The scratch directories of the zone's sandboxes, with their bus filters
+    // (`fs_sandbox::SCRATCH_SUBDIR`): in the zone's runtime directory, which no
+    // other zone sees — they used to be in the shared /tmp. Made here, the
+    // user's and closed, because `vpn-zones/` in the zone is ours and the
+    // sandbox runs as the user.
+    let scratch = runtime.join(crate::fs_sandbox::SCRATCH_SUBDIR);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(&scratch)
+            .and_then(|()| std::os::unix::fs::chown(&scratch, Some(uid), Some(gid)))
+            .and_then(|()| fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)))
+            .map_err(|e| format!("cannot create {}: {e}", scratch.display()))?;
+    }
     let broker = held.join(crate::broker::SOCKET);
     if fs::symlink_metadata(&broker).is_ok() {
         bind_entry(&broker, &runtime.join(crate::broker::SOCKET))?;
@@ -1995,6 +2008,52 @@ fn seal_system_bus(zone: &Zone) -> Result<(), String> {
     );
     Ok(())
 }
+
+/// The temporary directories a hermetic zone gets of its own
+/// (`docs/LEAK-MODEL.md` §15): `/tmp`, `/var/tmp` and `/dev/shm`, each an empty
+/// tmpfs of mode 1777 in the zone's mount namespace, as Flatpak gives an app.
+///
+/// What they hid is the host's, and all of it same-user: listening sockets —
+/// tmux's server in `/tmp/tmux-<uid>/` (`tmux -S … run-shell` runs a command
+/// on the host, in the host's network), a VPN client's IPC to a root service,
+/// Chromium's `SingletonSocket` —, JACK's sockets and other programs' shared
+/// memory in `/dev/shm`. Our own things no longer live there: throwaway
+/// containers moved to the state directory and the sandboxes' bus filters to
+/// the runtime directory, so nothing of ours needs the host's `/tmp` in here.
+///
+/// The price, as with Flatpak: a file the host put into `/tmp` is not seen by
+/// a program of the zone, and the zone's `/tmp` is memory, emptied when the
+/// zone goes down. Fatal when it cannot be done: a hermetic zone that shares
+/// the host's sockets is not hermetic.
+fn private_tmp(zone: &Zone) -> Result<(), String> {
+    for dir in PRIVATE_TMP {
+        let dir = Path::new(dir);
+        if !dir.is_dir() {
+            continue;
+        }
+        sys::mount(
+            OsStr::new("tmpfs"),
+            dir,
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV,
+            "mode=1777",
+        )
+        .map_err(|e| {
+            format!(
+                "cannot give the zone a {} of its own: {e} — it would share the host's sockets",
+                dir.display()
+            )
+        })?;
+    }
+    println!(
+        "zone {}: /tmp, /var/tmp and /dev/shm of its own",
+        zone.name()
+    );
+    Ok(())
+}
+
+/// What [`private_tmp`] covers.
+const PRIVATE_TMP: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
 
 /// A tmpfs over `/tmp/.X11-unix` in the zone's mount namespace
 /// (`docs/HERMETICITY.md` §7, A). Created first when the host has none, so
@@ -2388,6 +2447,14 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // Every zone: no compositor socket and no compositor IPC; a hermetic one
     // also no systemd --user and no whole session bus, and the broker.
     seal_runtime(zone)?;
+    // A hermetic zone's temporary directories are its own: the host's /tmp
+    // holds listening sockets nobody meant for a zone — a tmux server, whose
+    // `run-shell` runs on the host, a VPN client's IPC to a root service — and
+    // the filters of other zones' sandboxes. BEFORE the X11 tmpfs, which then
+    // lands inside the new /tmp.
+    if zone.hermetic {
+        private_tmp(zone)?;
+    }
     // One X server shows every client everything: the host's is out of reach,
     // and so are the X servers of other zones — /tmp is shared, this tmpfs
     // is not. A container with the x11 permission runs its own satellite, and

@@ -41,7 +41,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
 use crate::cli::{read_setting, visible_entries, EXIT_TOOLS};
@@ -1463,8 +1463,8 @@ fn live_tenant(inuse: &Path) -> Option<String> {
 }
 
 /// The throwaway containers that are open right now: a registry directory named
-/// `vpn-profile-*` whose `/tmp` directory still exists and which has at least
-/// one live tenant.
+/// `vpn-profile-*` whose directory still exists (below the state directory, or
+/// in `/tmp` from before the move) and which has at least one live tenant.
 fn open_throwaways(running: &Path) -> Vec<TmpJoinRow> {
     let mut out = Vec::new();
     for dir in registry::dirs(running) {
@@ -1474,10 +1474,10 @@ fn open_throwaways(running: &Path) -> Vec<TmpJoinRow> {
         if !name.as_bytes().starts_with(b"vpn-profile-") {
             continue;
         }
-        let tmp = PathBuf::from("/tmp").join(name);
-        if !tmp.is_dir() {
+        let state = running.parent().unwrap_or(running);
+        let Some(tmp) = crate::launch::throwaway_path(state, name) else {
             continue;
-        }
+        };
         let mut who = String::new();
         for file in visible_entries(&dir) {
             if !file.is_file() {

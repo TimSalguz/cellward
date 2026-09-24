@@ -198,6 +198,8 @@ let
           # For the real-tunnel part: TCP client inside the zone, DNS client,
           # and the leak capture on the uplink interface.
           pkgs.socat
+          # The evil host's tmux server (LEAK-MODEL §15).
+          pkgs.tmux
           # A real compositor for the restricted-Wayland check, headless.
           pkgs.sway
           pkgs.wayland-utils
@@ -1175,8 +1177,9 @@ let
           assert out.strip() == "u 1", out
           in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.kde.kwalletd6 4'")
           in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.kde.StatusNotifierItem-1.evil 4'")
-          in_zone(hp, "env VPN_ZONE_CURRENT=vmherm vpn-zone run vmherm -- touch /tmp/brokered-same")
-          machine.wait_until_succeeds("test -e /tmp/brokered-same", timeout=30)
+          # In the home: the zone's /tmp is its own (LEAK-MODEL §15).
+          in_zone(hp, "env VPN_ZONE_CURRENT=vmherm vpn-zone run vmherm -- touch /home/alice/brokered-same")
+          machine.wait_until_succeeds("test -e /home/alice/brokered-same", timeout=30)
           in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm vpn-zone run direct -- touch /tmp/brokered-escape'")
           machine.sleep(3)
           machine.fail("test -e /tmp/brokered-escape")
@@ -1201,6 +1204,55 @@ let
           assert '"target":"unconfined","app":"","decision":"refused"' in out, out
           out = alice("vpn-zone doctor vmherm --json")
           assert '{"id":"session-bus","level":"ok"' in out, out
+
+      # The evil host's /tmp (LEAK-MODEL §15): a tmux server — `run-shell` runs
+      # on the host, in the host's network —, a listening socket, an abstract
+      # one and shared memory. None of it reaches a hermetic zone, whose /tmp,
+      # /var/tmp and /dev/shm are its own; the abstract socket is out of reach
+      # of every zone (its own network namespace). And a sandbox's bus filter
+      # is in the zone's runtime directory, not in the /tmp all zones shared.
+      with subtest("hermetic zone: the host's /tmp, /dev/shm and abstract sockets are out of reach"):
+          alice("tmux new-session -d -s evil 'sleep 600'")
+          machine.wait_until_succeeds("test -S /tmp/tmux-1000/default")
+          alice(
+              "systemd-run --user --unit=eviltmp socat "
+              "UNIX-LISTEN:/tmp/evil.sock,fork OPEN:/tmp/evil-got,creat,append"
+          )
+          alice(
+              "systemd-run --user --unit=evilabs socat "
+              "ABSTRACT-LISTEN:vzevil,fork OPEN:/tmp/evil-abs-got,creat,append"
+          )
+          alice("sh -c 'echo secret > /dev/shm/vzevil && echo secret > /var/tmp/vzevil'")
+          machine.wait_until_succeeds("test -S /tmp/evil.sock")
+          # On the host all of it answers — otherwise the rest proves nothing.
+          alice("tmux -S /tmp/tmux-1000/default ls")
+          alice("echo host | socat -T2 - ABSTRACT-CONNECT:vzevil")
+          machine.wait_until_succeeds("grep -q host /tmp/evil-abs-got")
+          in_zone(hp, "test ! -e /tmp/evil.sock")
+          in_zone(hp, "test ! -e /tmp/tmux-1000")
+          in_zone(hp, "sh -c '! tmux -S /tmp/tmux-1000/default ls'")
+          in_zone(hp, "sh -c '! echo zone | socat -T2 - ABSTRACT-CONNECT:vzevil'")
+          in_zone(hp, "test ! -e /dev/shm/vzevil")
+          in_zone(hp, "test ! -e /var/tmp/vzevil")
+          machine.sleep(1)
+          machine.fail("grep -q zone /tmp/evil-abs-got")
+          out = alice("vpn-zone doctor vmherm --json")
+          assert '{"id":"tmp-sockets","level":"ok"' in out, out
+          # Its own, and writable: what the zone puts there stays there.
+          in_zone(hp, "sh -c 'touch /tmp/from-zone /dev/shm/from-zone && test -d /tmp/.X11-unix'")
+          machine.fail("test -e /tmp/from-zone")
+          machine.fail("test -e /dev/shm/from-zone")
+          # A sandbox's bus filter: in the zone's runtime directory.
+          alice("systemd-run --user --unit=vmsbsleep vpn-zone run vmherm --fs-sandbox -- sleep 60")
+          probe = shlex.quote(
+              "export XDG_RUNTIME_DIR=/run/user/1000; "
+              f"nsenter --preserve-credentials -U -n -m -t {hp} -- "
+              "sh -c 'test -S /run/user/1000/vpn-zones/sandbox/*/bus'"
+          )
+          machine.wait_until_succeeds(f"su -l alice -c {probe}", timeout=30)
+          machine.fail("ls -d /tmp/vpn-fs-sandbox-*")
+          alice("systemctl --user stop vmsbsleep eviltmp evilabs || true")
+          alice("tmux kill-server || true")
           alice("vpn-zone down vmherm")
 
       # --- A network through an interface of the host (CONTAINERS §3.3) -----

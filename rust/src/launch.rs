@@ -41,7 +41,9 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -1187,6 +1189,24 @@ struct ResolvedContainer {
     key: OsString,
 }
 
+/// Where throwaway containers live, below the state directory.
+pub const THROWAWAY_DIR: &str = ".throwaway";
+
+/// Where a throwaway container named `name` is, if it still exists: below the
+/// state directory, or in `/tmp`, where a launch from before the move put it.
+pub fn throwaway_path(state: &Path, name: &OsStr) -> Option<PathBuf> {
+    throwaway_bases(state)
+        .into_iter()
+        .map(|base| base.join(name))
+        .find(|dir| dir.is_dir())
+}
+
+/// The directories throwaway containers are looked for in, the current one
+/// first.
+pub fn throwaway_bases(state: &Path) -> [PathBuf; 2] {
+    [state.join(THROWAWAY_DIR), PathBuf::from("/tmp")]
+}
+
 /// Turn the parsed container into directories, creating a throwaway one.
 ///
 /// `None` means the message has been printed and the launch is over.
@@ -1203,13 +1223,18 @@ fn resolve_container(tools: &Tools, container: &Container) -> Option<ResolvedCon
             (name.clone(), dir, false)
         }
         Container::TmpNew => {
-            // A throwaway layer lives in /tmp deliberately: here that is btrfs
-            // on a disk rather than a tmpfs, so a browser cache does not eat the
-            // RAM. (`docs/GOTCHAS.md` §5)
-            let dir = match mkdtemp("/tmp/vpn-profile-XXXXXXXX") {
+            // On a disk rather than a tmpfs, so a browser cache does not eat the
+            // RAM (`docs/GOTCHAS.md` §5) — and no longer in /tmp: a hermetic
+            // zone has a /tmp of its own, where a layer made on the host would
+            // not be (`docs/LEAK-MODEL.md` §15).
+            let base = tools.state.join(THROWAWAY_DIR);
+            let made = fs::create_dir_all(&base)
+                .and_then(|()| fs::set_permissions(&base, fs::Permissions::from_mode(0o700)))
+                .and_then(|()| mkdtemp(&format!("{}/vpn-profile-XXXXXXXX", base.display())));
+            let dir = match made {
                 Ok(dir) => dir,
                 Err(e) => {
-                    eprintln!("не создать временный контейнер в /tmp: {e}");
+                    eprintln!("не создать временный контейнер в {}: {e}", base.display());
                     return None;
                 }
             };
@@ -1290,6 +1315,22 @@ pub fn restrict_compositor(mode: Option<&str>, appbin: &OsStr, allowlist: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Throwaway containers live below the state directory, not in /tmp: a
+    /// hermetic zone's /tmp is its own (`docs/LEAK-MODEL.md` §15). One from
+    /// before the move is still found where it was.
+    #[test]
+    fn a_throwaway_container_is_found_in_the_state_directory_first() {
+        let state = std::env::temp_dir().join(format!("vz-throwaway-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        let name = OsStr::new("vpn-profile-vzunit01");
+        assert_eq!(throwaway_path(&state, name), None);
+        let dir = state.join(THROWAWAY_DIR).join(name);
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(throwaway_path(&state, name), Some(dir));
+        assert_eq!(throwaway_bases(&state)[1], Path::new("/tmp"));
+        let _ = fs::remove_dir_all(&state);
+    }
 
     fn argv(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
