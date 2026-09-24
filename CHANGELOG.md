@@ -366,6 +366,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `/proc` from the host and from neither kind of zone.
 
 ### Fixed
+- **`vpn-zone watch` does not carry a verdict over a restart**: a zone
+  restarted between two looks inherited "dead" and read so while idle.
+- **A plain system zone with an uplink needs its own `dns`**: the default
+  resolvers are the primary network's, and names meant for one network went
+  out through the other.
 - **`vpn-zone run offline -- …` works without the picker.** The zone with no
   network was created only by the picker, on demand; typed by hand before the
   picker had ever made it, the launch found no zone. `run` creates it the same

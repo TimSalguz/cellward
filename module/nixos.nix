@@ -525,6 +525,14 @@ in
             assertion = z.kind != "plain" || z.configFile == null;
             message = "services.vpn-zones.system.zones.${name}: a plain zone has no tunnel, so no configFile.";
           }) cfg.zones
+          # A plain zone through one interface asks names of its own resolvers:
+          # the defaults are the host's primary network's view, and queries
+          # meant for one network would go out through the other — linking the
+          # two (review 2026-09-25).
+          ++ lib.mapAttrsToList (name: z: {
+            assertion = !(z.kind == "plain" && z.uplink != null) || z.dns != [ ];
+            message = "services.vpn-zones.system.zones.${name}: a plain zone with an uplink needs its own dns — resolvers reached through ${toString z.uplink}.";
+          }) cfg.zones
           ++ lib.mapAttrsToList (unit: s: {
             assertion = cfg.zones ? ${s.zone};
             message = "services.vpn-zones.system.services.${unit}.zone = \"${s.zone}\": there is no such zone in services.vpn-zones.system.zones.";
