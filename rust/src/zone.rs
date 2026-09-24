@@ -141,7 +141,8 @@ const CONFIG: &str = "config.conf";
 const OFFLINE: &str = "offline";
 /// The APP namespace, the one `nsenter` targets. Programs run here.
 const PID: &str = "zone.pid";
-/// When the process of [`PID`] started ([`sys::start_time`]): with it the
+/// When the process of [`PID`] started, and in which boot
+/// ([`sys::process_stamp`]): with it the
 /// number names this holder and not whoever gets the number after it. The
 /// file outlives a stop until the next start, and the number is reused.
 const START: &str = "zone.start";
@@ -2538,8 +2539,8 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // SAFETY: getpid(2) takes no arguments and cannot fail.
     let pid = unsafe { libc::getpid() };
     // The start time first: whoever sees the new number sees its start too.
-    let start = sys::start_time(pid).ok_or("cannot read our own start time")?;
-    fs::write(zone.path(START), format!("{start}\n"))
+    let stamp = sys::process_stamp(pid).ok_or("cannot read our own start time")?;
+    fs::write(zone.path(START), format!("{stamp}\n"))
         .map_err(|e| format!("cannot write {START}: {e}"))?;
     fs::write(zone.path(PID), format!("{pid}\n"))
         .map_err(|e| format!("cannot write {PID}: {e}"))?;

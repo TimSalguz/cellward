@@ -152,10 +152,18 @@ fn zone_of_netns(state: &Path, netns: &Path) -> Option<String> {
     })
 }
 
-/// Which of our networks the namespace `netns` (`net:[…]`) is.
-fn classify(state: &Path, netns: &Path) -> Origin {
-    if std::fs::read_link("/proc/self/ns/net").ok().as_deref() == Some(netns) {
-        return Origin::Host;
+/// Which of our networks the namespaces `netns` and `userns` (`net:[…]`,
+/// `user:[…]`) are. The host is both of the broker's own: a process in the
+/// host's network but a user namespace of its own is somebody's sandbox, not
+/// the host.
+fn classify(state: &Path, netns: &Path, userns: &Path) -> Origin {
+    let own = |ns: &str| std::fs::read_link(format!("/proc/self/ns/{ns}")).ok();
+    if own("net").as_deref() == Some(netns) {
+        return if own("user").as_deref() == Some(userns) {
+            Origin::Host
+        } else {
+            Origin::Unknown
+        };
     }
     if let Some(zone) = zone_of_netns(state, netns) {
         return Origin::Zone(zone);
@@ -202,7 +210,8 @@ fn origin_of(state: &Path, stream: &UnixStream) -> Origin {
     if !alive() {
         return Origin::Unknown;
     }
-    let Ok(netns) = std::fs::read_link(format!("/proc/{pid}/ns/net")) else {
+    let read = |ns: &str| std::fs::read_link(format!("/proc/{pid}/ns/{ns}"));
+    let (Ok(netns), Ok(userns)) = (read("net"), read("user")) else {
         return Origin::Unknown;
     };
     // Still alive after the read: the number was not reused in between, and
@@ -210,7 +219,7 @@ fn origin_of(state: &Path, stream: &UnixStream) -> Origin {
     if !alive() {
         return Origin::Unknown;
     }
-    classify(state, &netns)
+    classify(state, &netns, &userns)
 }
 
 /// The pid of the process on the other end of a Unix socket.
@@ -324,9 +333,100 @@ pub fn program_of(cmd: &[OsString]) -> Option<PathBuf> {
 /// write. A program named by a path the user, or a program in a zone with the
 /// home in reach, could replace (`~/.local/bin/…`) would make "always" a
 /// standing door for whatever is put there next.
+///
+/// Nor for a program that runs whatever it is told: "always" for `sh`, `env`
+/// or `python3` would be "always" for any command at all behind them.
 pub fn may_remember(program: &Path) -> bool {
     program.starts_with("/nix/store/")
         && std::fs::canonicalize(program).is_ok_and(|real| real.starts_with("/nix/store/"))
+        && !program
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(runs_anything)
+}
+
+/// Shells, interpreters and wrappers that run a command given to them.
+fn runs_anything(name: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "sh",
+        "bash",
+        "dash",
+        "zsh",
+        "fish",
+        "ksh",
+        "mksh",
+        "tcsh",
+        "csh",
+        "nu",
+        "xonsh",
+        "env",
+        "busybox",
+        "toybox",
+        "xargs",
+        "nohup",
+        "setsid",
+        "timeout",
+        "nice",
+        "ionice",
+        "chrt",
+        "taskset",
+        "stdbuf",
+        "time",
+        "script",
+        "expect",
+        "sudo",
+        "doas",
+        "pkexec",
+        "su",
+        "runuser",
+        "systemd-run",
+        "flatpak-spawn",
+        "dbus-send",
+        "gdbus",
+        "busctl",
+        "awk",
+        "gawk",
+        "mawk",
+        "sed",
+        "find",
+        "make",
+        "vim",
+        "nvim",
+        "emacs",
+        "vpn-zone",
+        "vpn-zone-pick",
+        "nix",
+        "nix-shell",
+        "nix-env",
+        "nix-build",
+    ];
+    const PREFIXES: &[&str] = &[
+        "python", "perl", "ruby", "node", "lua", "php", "tclsh", "wish",
+    ];
+    EXACT.contains(&name) || PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
+/// A command as it may be shown in a question: no line breaks to start a
+/// paragraph of its own, no angle brackets for the dialog to take for markup,
+/// not endless.
+pub fn shown_command(cmd: &[OsString]) -> String {
+    let mut out: String = cmd
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .map(|c| match c {
+            '<' => '‹',
+            '>' => '›',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    if out.chars().count() > 600 {
+        out = out.chars().take(600).collect::<String>() + "…";
+    }
+    out
 }
 
 /// The line "always" writes, and looks for.
@@ -365,10 +465,12 @@ fn ask(tools: &Tools, origin: &Origin, target: &str, cmd: &[OsString]) -> Result
     if !crate::launch::has_display() {
         return Err("спросить некого (нет графической сессии)".to_owned());
     }
-    let shown: Vec<String> = cmd
-        .iter()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
+    // One question at a time: a stream of them is how a "yes" is got by
+    // accident. The next request while one is open is refused, not queued.
+    static ASKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_asking) = ASKING.try_lock() else {
+        return Err("уже открыт другой вопрос о запуске".to_owned());
+    };
     let network = if target == crate::launch::UNCONFINED {
         "без ограничений (сеть хоста, без VPN и без изоляции зоны)".to_owned()
     } else {
@@ -380,7 +482,7 @@ fn ask(tools: &Tools, origin: &Origin, target: &str, cmd: &[OsString]) -> Result
     };
     let question = format!(
         "Программа из {asker} просит запустить в {network}:\n\n{}\n\nРазрешить?",
-        shown.join(" ")
+        shown_command(cmd)
     );
     // "Always" only where it can be kept safely (`may_remember`).
     let Some(line) = line else {
@@ -522,14 +624,16 @@ mod tests {
 
     #[test]
     fn always_is_kept_for_programs_of_the_store_only() {
-        // A program of the store: `sh`, as the test's own PATH has it.
-        let sh = program_of(&["sh".into()]).unwrap();
+        // A program of the store: `ls`, as the test's own PATH has it — and
+        // `sh` next to it, which runs anything and is never remembered.
+        let ls = program_of(&["ls".into()]).unwrap();
         assert!(
-            sh.starts_with("/nix/store/") && sh.ends_with("sh"),
+            ls.starts_with("/nix/store/") && ls.ends_with("ls"),
             "{}",
-            sh.display()
+            ls.display()
         );
-        assert!(may_remember(&sh));
+        assert!(may_remember(&ls));
+        assert!(!may_remember(&program_of(&["sh".into()]).unwrap()));
         assert!(!may_remember(Path::new(
             "/nix/store/does-not-exist/bin/zen"
         )));
@@ -643,5 +747,32 @@ mod tests {
         let (stream, _) = listener.accept().unwrap();
         assert_eq!(origin_of(&state, &stream), Origin::Unknown);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn always_is_never_offered_for_what_runs_any_command() {
+        for name in [
+            "sh",
+            "bash",
+            "env",
+            "python3",
+            "python3.12",
+            "perl",
+            "node",
+            "systemd-run",
+        ] {
+            assert!(runs_anything(name), "{name}");
+        }
+        for name in ["firefox", "telegram-desktop", "xdg-open", "mpv"] {
+            assert!(!runs_anything(name), "{name}");
+        }
+        assert!(!may_remember(Path::new("/nix/store/x-bash/bin/bash")));
+    }
+
+    #[test]
+    fn a_command_is_shown_on_one_line_and_without_markup() {
+        let shown = shown_command(&["sh".into(), "-c".into(), "<b>ok</b>\n\nбезопасно".into()]);
+        assert_eq!(shown, "sh -c ‹b›ok‹/b›  безопасно");
+        assert!(shown_command(&["x".repeat(1000).into()]).ends_with('…'));
     }
 }

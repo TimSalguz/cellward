@@ -475,6 +475,34 @@ pub const GRANT_ROOTS: [&str; 4] = ["/mnt", "/media", "/run/media", "/srv"];
 ///
 /// Lexical: the caller checks the resolved path as well, since a symlink is
 /// followed by bwrap.
+/// Below the home: where the session finds what to run — launcher entries,
+/// autostart, user units, D-Bus activation, PATH, the environment, the
+/// compositors' and the shells' configs, ssh's and gpg's (both run commands
+/// they are told to). Never granted to a sandbox, nor anything above them.
+const HOST_RUNS: &[&str] = &[
+    ".local/share/applications",
+    ".local/share/dbus-1",
+    ".local/share/systemd",
+    ".local/share/flatpak/exports",
+    ".local/bin",
+    ".local/state/nix",
+    ".local/state/home-manager",
+    ".nix-profile",
+    ".config/autostart",
+    ".config/systemd",
+    ".config/environment.d",
+    ".config/plasma-workspace",
+    ".config/niri",
+    ".config/sway",
+    ".config/hypr",
+    ".config/fish",
+    ".config/home-manager",
+    ".config/nixpkgs",
+    ".config/nix",
+    ".ssh",
+    ".gnupg",
+];
+
 pub fn forbidden_path(home: &Path, path: &Path) -> Option<String> {
     if !path.is_absolute() {
         return Some("нужен абсолютный путь или ~/…".to_owned());
@@ -501,12 +529,25 @@ pub fn forbidden_path(home: &Path, path: &Path) -> Option<String> {
         ".local/state/vpn-profiles",
         ".local/state/vpn-sandboxes",
         ".config/vpn-zones",
+        ".local/share/vpn-zones",
     ] {
         let protected = home.join(protected);
         if path.starts_with(&protected) || protected.starts_with(&path) {
             return Some(format!(
                 "там состояние vpn-zones ({}): ключи зон и данные контейнеров",
                 protected.display()
+            ));
+        }
+    }
+    // What the host runs by itself, outside any zone and sandbox: a file
+    // written there by a sandboxed program is code the session starts for it.
+    for executed in HOST_RUNS {
+        let executed = home.join(executed);
+        if path.starts_with(&executed) || executed.starts_with(&path) {
+            return Some(format!(
+                "это место хост исполняет сам ({}): ярлык, автозапуск, юнит, PATH или \
+                 конфиг, запускающий команды, — выдача дала бы песочнице выход наружу",
+                executed.display()
             ));
         }
     }
@@ -1124,6 +1165,17 @@ mod tests {
             "/home/u/.config/vpn-zones/declared",
             "/home/u/.local/state/vpn-sandboxes/x/home",
             "/home/u/.wine/../.local/state/vpn-zones",
+            // What the host runs by itself: a sandbox writing there would
+            // leave code for the session to start outside it.
+            "/home/u/.local/share/applications",
+            "/home/u/.local/share/applications/wine",
+            "/home/u/.local/share",
+            "/home/u/.local/share/vpn-zones/bin",
+            "/home/u/.config/autostart",
+            "/home/u/.config",
+            "/home/u/.config/systemd/user",
+            "/home/u/.local/bin",
+            "/home/u/.ssh",
         ] {
             assert!(forbidden_path(home, Path::new(bad)).is_some(), "{bad}");
         }

@@ -57,6 +57,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and anything that is not the host, a zone or a system zone is refused. A
   system zone asking is a person's question, never "the same zone" as a user
   zone of its name.
+- **The broker asks one question at a time, and never "always" for a shell.**
+  "Always" was remembered per program, and any program of the store counted:
+  one "always" for `sh`, `env` or `python3` let every command behind it
+  through. Shells, interpreters and wrappers are never remembered now. A
+  request that needs a question while one is open is refused, not queued —
+  a stream of dialogs is how a "yes" is got by accident. The command in the
+  question is shown on one line, without markup.
+- **A zone is entered only when it is ready.** `zone.pid` appears as soon as
+  the namespaces exist, before the host's resolvers are hidden, the system bus
+  filtered, the runtime sealed and the zone's resolv.conf bound; a launch
+  that came then (a second autostart, a double click) copied that half-built
+  mount tree into its container or sandbox and kept the host's resolv.conf for
+  good. `vpn-zone run` now waits for `ready` too.
+- **A sandbox is never granted what the host runs by itself**: launcher
+  entries, autostart, user units, D-Bus services, `~/.local/bin`, the PATH
+  shims, the environment, the compositors' and shells' configs, `~/.ssh`,
+  `~/.gnupg`, home-manager's and nix's state — nor anything above them. A
+  file written there by a sandboxed program was code the session started for
+  it, outside the sandbox and the zone.
+- **`vpn-zone lock` says where it holds.** The lock is kept by the broker, the
+  one door of a hermetic zone; a zone that is not hermetic has
+  `systemd --user` in reach, and the lock there promised what it could not
+  keep. Locking such a zone now warns and says how to make it hermetic.
+- **Process marks carry the boot.** The start time counts from boot, and
+  `zone.start` and the registry's marks outlive a reboot: a mark is now the
+  start time with the boot's id, and one from before a reboot matches nothing.
 - **A pid is not a process: the registry and the zones keep start times.** The
   launch registry is on disk, outlives a reboot and is swept lazily, so after
   a reboot (or once numbers come round in a long session) a record's pid
