@@ -956,20 +956,24 @@ fn gc(tools: &Tools) -> u8 {
     // registry and not by the registry directory existing: after a hard kill
     // that directory stays around full of dead records, and the older check kept
     // the garbage in /tmp forever. (`docs/GOTCHAS.md` §5)
-    for dir in visible_entries(Path::new("/tmp")) {
-        let Some(name) = dir.file_name() else {
-            continue;
-        };
-        if !name.as_bytes().starts_with(b"vpn-profile-") || !dir.is_dir() {
-            continue;
+    // Below the state directory, and in /tmp, where they lived before
+    // (`docs/LEAK-MODEL.md` §15).
+    for base in crate::launch::throwaway_bases(&tools.state) {
+        for dir in visible_entries(&base) {
+            let Some(name) = dir.file_name() else {
+                continue;
+            };
+            if !name.as_bytes().starts_with(b"vpn-profile-") || !dir.is_dir() {
+                continue;
+            }
+            let regdir = running.join(name);
+            if registry::any_live(&regdir, &proc_is_alive) {
+                continue;
+            }
+            let _ = crate::sys::remove_tree(&dir);
+            let _ = crate::sys::remove_tree(&regdir);
+            cleaned += 1;
         }
-        let regdir = running.join(name);
-        if registry::any_live(&regdir, &proc_is_alive) {
-            continue;
-        }
-        let _ = crate::sys::remove_tree(&dir);
-        let _ = crate::sys::remove_tree(&regdir);
-        cleaned += 1;
     }
 
     println!("остановлено зависших выходов в сеть: {killed}, подчищено записей: {cleaned}");

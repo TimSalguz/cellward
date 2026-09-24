@@ -50,7 +50,7 @@ Consequences, in order of importance:
 | `unconfined` | nothing | nothing (host network) |
 | `offline` | a zone with a marker, created on demand | everything network, incl. host resolvers |
 | overlay container ("profile") | `~/.local/state/vpn-profiles/<name>/` | XDG dirs (`.config`, `.local/share`, `.cache`, `.mozilla`, `.pki`) |
-| throwaway container | `/tmp/vpn-profile-*` | same, erased after the last tenant |
+| throwaway container | `~/.local/state/vpn-zones/.throwaway/vpn-profile-*` | same, erased after the last tenant |
 | named sandbox | `~/.local/state/vpn-sandboxes/<name>/{home,perms}` | whole home, bus, runtime dir, seccomp, X11 |
 | per-app sandbox | a named sandbox called `app-<key>` | same |
 | throwaway sandbox | tmpfs | same, erased on exit |

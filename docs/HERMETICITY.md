@@ -19,6 +19,7 @@ sees, in the zone's mount namespace, what every host program sees:
 | `/run/user/<uid>/systemd/private` | the same `systemd --user`, without D-Bus | §1 |
 | `/run/dbus/system_bus_socket` | NetworkManager (real interfaces, SSIDs, addresses), hostname1, resolve1, machined: de-anonymisation without a packet | §3 |
 | `/tmp/.X11-unix/X*`, `DISPLAY` | the host's X server: keyboard, screen and clipboard of the whole machine | §7 |
+| the rest of `/tmp`, `/var/tmp`, `/dev/shm` | the host's listening sockets — a tmux server (`run-shell` runs on the host), a VPN client's IPC to a root service, single-instance sockets —, JACK, other programs' shared memory; a hermetic zone gets all three of its own (tmpfs, as Flatpak) | §15 |
 
 The network topology cannot close any of them: they are Unix sockets, not
 interfaces. Only the mount namespace can, and the sandbox already does it for
