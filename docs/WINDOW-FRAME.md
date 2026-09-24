@@ -751,7 +751,7 @@ configure программе → её `ack_configure` с нашим серийн
 
 | Этап | Что | Объём |
 |---|---|---|
-| 0 | 7б меню по бинду (IPC → pid → реестр → диалог) + 7в индикатор в панели | 2–3 дня |
+| 0 | 7б меню по бинду (IPC → pid → реестр → диалог) + 7в индикатор в панели — **сделано 2026-09-24** (`vpn-zone focused`, `vpn-zone window-menu`, `rust/src/focus.rs`) | 2–3 дня |
 | 1 | Посредник-«прозрачка» на wl-proxy в `wl-sandbox`: надзиратель/посредник, epoll, жизненный цикл, лестница отказа, seccomp, тест «wayland-info напрямую = через посредника минус скрытые»; прогон foot, Firefox, Chromium/Electron, GTK3/4, Qt6, SDL, mpv, vkcube, xwayland-satellite (x11-run), NVIDIA EGL | 4–6 дней |
 | 1а | 7а: метка в конце заголовка с секретом сеанса + include-файл с правилами border | 1–2 дня |
 | 2 | Рамка v1 (сверху, подпись + цвет, без кнопок): геометрия/configure/min/max/bounds, позиционеры, `show_window_menu`, неявная геометрия, sync/desync, fractional-scale, текст, порядок слоёв, фильтр ввода (pointer/touch/tablet/gestures/DnD), fullscreen-скрытие | 7–10 дней |

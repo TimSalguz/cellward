@@ -263,7 +263,7 @@ jobs:
       - name: Собрать драйвер VM-теста
         run: nix-build tests/vm-window.nix -A driver -o vm-window-driver
       - name: Прогнать VM-тест
-        run: env -u XDG_RUNTIME_DIR ./vm-window-driver/bin/nixos-test-driver -o vm-window-out
+        run: mkdir -p vm-window-out && env -u XDG_RUNTIME_DIR ./vm-window-driver/bin/nixos-test-driver -o vm-window-out
       - name: Снимки окна
         if: always()
         uses: actions/upload-artifact@v4

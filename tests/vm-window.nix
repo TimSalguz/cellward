@@ -4,7 +4,7 @@
 # look is checked without a screen — so the test keeps it in its output:
 #
 #   nix-build tests/vm-window.nix -A driver -o vm-window-driver
-#   ./vm-window-driver/bin/nixos-test-driver -o /tmp/vm-window   # launch-window.png
+#   mkdir -p /tmp/vm-window && ./vm-window-driver/bin/nixos-test-driver -o /tmp/vm-window
 #
 # In CI it is a smoke: the window comes up, stays up, and closed starts nothing
 # (the same check is a subtest of tests/vm.nix).
@@ -31,6 +31,20 @@ let
           isNormalUser = true;
           uid = 1000;
           linger = true;
+          # A zone for the hotkey menu's part: the offline one needs nothing
+          # but a user namespace.
+          subUidRanges = [
+            {
+              startUid = 100000;
+              count = 65536;
+            }
+          ];
+          subGidRanges = [
+            {
+              startGid = 100000;
+              count = 65536;
+            }
+          ];
         };
         home-manager.useGlobalPkgs = true;
         home-manager.useUserPackages = true;
@@ -43,6 +57,7 @@ let
           pkgs.sway
           pkgs.grim
           pkgs.wtype
+          pkgs.foot
         ];
         fonts.packages = [ pkgs.dejavu_fonts ];
         virtualisation.memorySize = 1536;
@@ -100,6 +115,37 @@ let
           machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=15)
           machine.sleep(1)
           machine.fail("test -e /tmp/started")
+
+      # The hotkey menu (docs/WINDOW-FRAME.md §7б): a program in a zone opens a
+      # window; `focused` finds its launch through the compositor's IPC — the
+      # pid of the window, up its parents to the registry —, and `window-menu`
+      # offers what can be done with it.
+      swaysock = machine.succeed("ls /run/user/1000/sway-ipc.*.sock | head -1").strip()
+      with subtest("the focused window's zone and program; the hotkey menu"):
+          alice(
+              f"systemd-run --user --unit=vmfoot --setenv=WAYLAND_DISPLAY={display} "
+              "vpn-zone run offline -- foot"
+          )
+          machine.wait_until_succeeds(
+              f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q foot",
+              timeout=60,
+          )
+          out = alice(f"SWAYSOCK={swaysock} vpn-zone focused --json")
+          assert '"zone":"offline"' in out and '"program":"foot"' in out, out
+          out = alice(f"SWAYSOCK={swaysock} vpn-zone focused --bar")
+          assert '"class":"zone-offline"' in out, out
+          alice(
+              f"systemd-run --user --unit=vmmenu --setenv=WAYLAND_DISPLAY={display} "
+              f"--setenv=SWAYSOCK={swaysock} vpn-zone window-menu"
+          )
+          machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
+          machine.sleep(2)
+          alice(f"WAYLAND_DISPLAY={display} grim /tmp/window-menu.png")
+          machine.copy_from_vm("/tmp/window-menu.png", "")
+          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
+          machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=15)
+          # Closed: nothing done — foot is still there.
+          machine.succeed("pgrep -x foot")
     '';
   };
 in

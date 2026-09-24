@@ -33,6 +33,11 @@
 //! pin-net⇥0|1
 //! pin-container⇥0|1
 //! ```
+//!
+//! The same window is the hotkey menu of a running program
+//! (`crate::focus`): `mode⇥menu`, a title, notes, and one
+//! `action⇥<tag>⇥<label>⇥<flags>` per entry (`danger` for one that breaks
+//! something); the answer is `action⇥<tag>`.
 
 /// One row of a column.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -55,6 +60,40 @@ pub struct Request {
     pub containers: Vec<Item>,
     pub pin_net: bool,
     pub pin_container: bool,
+}
+
+/// The hotkey menu: entries to choose one of.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Menu {
+    pub title: String,
+    pub notes: Vec<String>,
+    /// `(tag, label, danger)`.
+    pub actions: Vec<(String, String, bool)>,
+}
+
+/// The menu as the window reads it.
+pub fn render_menu(menu: &Menu) -> String {
+    let mut out = format!("mode\tmenu\ntitle\t{}\n", clean(&menu.title));
+    for note in &menu.notes {
+        out.push_str(&format!("note\t{}\n", clean(note)));
+    }
+    for (tag, label, danger) in &menu.actions {
+        out.push_str(&format!(
+            "action\t{}\t{}\t{}\n",
+            clean(tag),
+            clean(label),
+            if *danger { "danger" } else { "" }
+        ));
+    }
+    out
+}
+
+/// The chosen entry's tag.
+pub fn parse_menu_reply(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|l| l.strip_prefix("action\t"))
+        .map(str::to_owned)
+        .filter(|t| !t.is_empty())
 }
 
 /// What came back.
@@ -180,6 +219,29 @@ mod tests {
              net\tnl\tVPN: nl\tselected\nnet\tde\tVPN: de\tdead\n\
              container\twork\tПрофиль work\tbusy=nl\npin-net\t1\npin-container\t0\n"
         );
+    }
+
+    #[test]
+    fn the_menu_goes_out_one_line_per_entry_and_one_comes_back() {
+        let menu = Menu {
+            title: "Firefox".to_owned(),
+            notes: vec!["сеть nl".to_owned()],
+            actions: vec![
+                ("close".to_owned(), "Закрыть".to_owned(), false),
+                ("kill-zone".to_owned(), "Оборвать сеть nl".to_owned(), true),
+            ],
+        };
+        assert_eq!(
+            render_menu(&menu),
+            "mode\tmenu\ntitle\tFirefox\nnote\tсеть nl\n\
+             action\tclose\tЗакрыть\t\naction\tkill-zone\tОборвать сеть nl\tdanger\n"
+        );
+        assert_eq!(
+            parse_menu_reply("action\tclose\n").as_deref(),
+            Some("close")
+        );
+        assert_eq!(parse_menu_reply("action\t\n"), None);
+        assert_eq!(parse_menu_reply(""), None);
     }
 
     #[test]

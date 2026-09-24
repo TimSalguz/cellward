@@ -1826,13 +1826,7 @@ fn launch(
     // (§13) and the lock included. (`docs/GOTCHAS.md` §10)
     let zone = match crate::launch::network_name(zone_choice) {
         "offline" => {
-            // A zone with no network is created on demand — there is nothing to
-            // keep in a config, it is an empty namespace. (`docs/GOTCHAS.md` §2)
-            let dir = tools.state.join("offline");
-            if !dir.is_dir() {
-                let _ = fs::create_dir_all(&dir);
-                let _ = fs::write(dir.join("offline"), b"");
-            }
+            launch::ensure_offline_zone(&tools.state);
             "offline"
         }
         other => other,

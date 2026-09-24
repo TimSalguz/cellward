@@ -312,6 +312,8 @@ vpn-zone kill <zone>                           # cut a zone off now: its program
 vpn-zone container grant sb:<name> <dir> [--for 2h]  # a directory for a home of its own, for a while
 vpn-zone watch [--json]                        # are the tunnels alive (a timer runs it and notifies)
 vpn-zone status --bar                          # one JSON line for waybar and similar bars
+vpn-zone focused [--json|--bar|--watch]        # the zone and container of the focused window (niri, sway)
+vpn-zone window-menu                           # its menu: pin the network, restart with a choice, close, cut off
 vpn-zone launch <id> [-- args]                 # a launcher entry through the picker (key bindings)
 vpn-zone run <zone> -- firefox                 # run in a zone
 vpn-zone run <zone> --profile work -- firefox  # + data container
@@ -333,6 +335,25 @@ vpn-zone pins / forget <program|--all>         # programs pinned to a network, a
 vpn-zone container list|show|set|assign|merge  # containers: network, programs, X11, merging two
 vpn-zone trust add|list|rm <container> …       # a root certificate for one container only
 ```
+
+**Which zone is this window in.** Bind the menu of the focused window to a key
+of the compositor, and put its zone into the panel:
+
+```kdl
+// niri, config.kdl
+binds {
+    Mod+Shift+Z { spawn "vpn-zone" "window-menu"; }
+}
+```
+
+```jsonc
+// waybar: a line per focus change, a class per zone to colour by
+"custom/vpn-zone": { "exec": "vpn-zone focused --watch", "return-type": "json" }
+```
+
+The window is found by the pid the compositor reports for it, up its parents to
+the launch; a program that detached from its launch is found by its network
+namespace, with the container unknown. Nothing trusts the window's title.
 
 ## The system tier (optional)
 

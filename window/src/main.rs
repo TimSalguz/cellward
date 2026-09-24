@@ -34,6 +34,11 @@ struct Item {
 /// Everything the window shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Request {
+    /// `menu`: the hotkey menu of a running program — entries, one of which
+    /// is chosen. Anything else: the launch window.
+    mode: String,
+    /// The menu's entries: `(tag, label, danger)`.
+    actions: Vec<(String, String, bool)>,
     title: String,
     notes: Vec<String>,
     nets: Vec<Item>,
@@ -71,6 +76,14 @@ fn parse_request(text: &str) -> Request {
     for line in text.lines() {
         let fields: Vec<&str> = line.split('\t').collect();
         match fields[0] {
+            "mode" => req.mode = fields.get(1).unwrap_or(&"").to_string(),
+            "action" if fields.len() >= 3 => req.actions.push((
+                fields[1].to_owned(),
+                fields[2].to_owned(),
+                fields
+                    .get(3)
+                    .is_some_and(|f| f.split(',').any(|f| f == "danger")),
+            )),
             "title" => req.title = fields.get(1).unwrap_or(&"").to_string(),
             "note" => req.notes.push(fields.get(1).unwrap_or(&"").to_string()),
             "net" => req.nets.extend(parse_item(&fields[1..])),
@@ -91,6 +104,8 @@ enum Pane {
 
 #[derive(Debug, Clone)]
 enum Msg {
+    /// A menu entry, by its index.
+    Action(usize),
     Net(usize),
     Container(usize),
     PinNet(bool),
@@ -103,6 +118,8 @@ enum Msg {
 
 struct Window {
     req: Request,
+    /// The highlighted menu entry.
+    entry: usize,
     pane: Pane,
     net: usize,
     container: usize,
@@ -135,8 +152,13 @@ impl Window {
             net,
             container,
             name: String::new(),
+            entry: 0,
             req,
         }
+    }
+
+    fn menu(&self) -> bool {
+        self.req.mode == "menu"
     }
 
     fn net_tag(&self) -> &str {
@@ -219,6 +241,12 @@ impl Window {
 
     fn update(&mut self, msg: Msg) -> Task<Msg> {
         match msg {
+            Msg::Action(i) => {
+                if let Some((tag, _, _)) = self.req.actions.get(i) {
+                    println!("action\t{tag}");
+                    std::process::exit(0);
+                }
+            }
             Msg::Net(i) => {
                 self.pane = Pane::Net;
                 self.net = i;
@@ -251,6 +279,29 @@ impl Window {
     }
 
     fn key(&mut self, key: Key, modifiers: keyboard::Modifiers) -> Task<Msg> {
+        if self.menu() {
+            let n = self.req.actions.len();
+            match key.as_ref() {
+                Key::Named(key::Named::Escape) => return self.update(Msg::Cancel),
+                Key::Named(key::Named::Enter) => return self.update(Msg::Action(self.entry)),
+                Key::Named(key::Named::ArrowUp) if n > 0 => self.entry = (self.entry + n - 1) % n,
+                Key::Named(key::Named::ArrowDown) if n > 0 => self.entry = (self.entry + 1) % n,
+                Key::Character(c) => {
+                    if let Some(d) = c
+                        .chars()
+                        .next()
+                        .and_then(|c| c.to_digit(10))
+                        .filter(|d| *d > 0)
+                    {
+                        if (d as usize) <= n {
+                            self.entry = d as usize - 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return Task::none();
+        }
         match key.as_ref() {
             Key::Named(key::Named::Escape) => return self.update(Msg::Cancel),
             Key::Named(key::Named::Enter) => return self.update(Msg::Launch),
@@ -339,7 +390,48 @@ impl Window {
             .into()
     }
 
+    /// The hotkey menu: the program, what is known of it, the entries.
+    fn view_menu(&self) -> Element<'_, Msg> {
+        let mut page = column![text(&self.req.title).size(20)]
+            .spacing(10)
+            .padding(16);
+        for note in &self.req.notes {
+            page = page.push(text(note.as_str()).size(14));
+        }
+        let mut list = column![].spacing(4);
+        for (i, (_, label, danger)) in self.req.actions.iter().enumerate() {
+            let style = match (i == self.entry, *danger) {
+                (true, true) => button::danger,
+                (true, false) => button::primary,
+                _ => button::text,
+            };
+            let mark = if *danger { "⚠ " } else { "" };
+            list = list.push(
+                button(text(format!("{} {mark}{label}", i + 1)).size(15))
+                    .width(Length::Fill)
+                    .padding([6, 10])
+                    .style(style)
+                    .on_press(Msg::Action(i)),
+            );
+        }
+        page = page.push(list);
+        page = page.push(
+            row![
+                container(text("")).width(Length::Fill),
+                button(text("Закрыть меню  Esc").size(14))
+                    .padding([6, 14])
+                    .style(button::secondary)
+                    .on_press(Msg::Cancel)
+            ]
+            .align_y(Alignment::Center),
+        );
+        page.into()
+    }
+
     fn view(&self) -> Element<'_, Msg> {
+        if self.menu() {
+            return self.view_menu();
+        }
         let nets = self.column_view("Сеть", Pane::Net, &self.req.nets, self.net, Msg::Net);
         let containers = self.column_view(
             "Контейнер",
@@ -410,10 +502,20 @@ fn main() -> iced::Result {
         std::process::exit(1);
     }
     let req = parse_request(&input);
-    // Nothing to choose from is not a window: the picker falls back.
-    if req.nets.is_empty() || req.containers.is_empty() {
+    // Nothing to choose from is not a window: the caller falls back.
+    let empty = if req.mode == "menu" {
+        req.actions.is_empty()
+    } else {
+        req.nets.is_empty() || req.containers.is_empty()
+    };
+    if empty {
         std::process::exit(1);
     }
+    let size = if req.mode == "menu" {
+        iced::Size::new(520.0, 380.0)
+    } else {
+        iced::Size::new(760.0, 460.0)
+    };
     let title = if req.title.is_empty() {
         "Запуск".to_owned()
     } else {
@@ -437,7 +539,7 @@ fn main() -> iced::Result {
     .theme(|_: &Window| None::<iced::Theme>)
     .subscription(Window::subscription)
     .window(iced::window::Settings {
-        size: iced::Size::new(760.0, 460.0),
+        size,
         position: iced::window::Position::Centered,
         ..iced::window::Settings::default()
     })
@@ -490,6 +592,36 @@ mod tests {
             w.answer(),
             "net\tde\ncontainer\twork\npin-net\t1\npin-container\t1\n"
         );
+    }
+
+    #[test]
+    fn the_menu_is_read_and_walked_with_the_keyboard() {
+        let req = parse_request(
+            "mode\tmenu\ntitle\tFirefox\nnote\tсеть nl\n\
+             action\tpin\tВсегда в nl\t\naction\tkill-zone\tОборвать nl\tdanger\n",
+        );
+        assert_eq!(req.mode, "menu");
+        assert_eq!(
+            req.actions,
+            [
+                ("pin".to_owned(), "Всегда в nl".to_owned(), false),
+                ("kill-zone".to_owned(), "Оборвать nl".to_owned(), true)
+            ]
+        );
+        let mut w = Window::new(req);
+        assert!(w.menu());
+        let _ = w.key(
+            Key::Named(key::Named::ArrowDown),
+            keyboard::Modifiers::default(),
+        );
+        assert_eq!(w.entry, 1);
+        let _ = w.key(
+            Key::Named(key::Named::ArrowDown),
+            keyboard::Modifiers::default(),
+        );
+        assert_eq!(w.entry, 0, "round");
+        let _ = w.key(Key::Character("2".into()), keyboard::Modifiers::default());
+        assert_eq!(w.entry, 1);
     }
 
     #[test]
