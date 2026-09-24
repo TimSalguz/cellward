@@ -642,6 +642,9 @@ pub fn run(args: Args) -> u8 {
     // believe this zone is already up.
     let _ = fs::remove_file(zone.path(PID));
     let _ = fs::remove_file(zone.path(START));
+    // And the previous run's liveness: shown until this run's first write,
+    // it said "connected" of a tunnel not there yet (review).
+    let _ = fs::remove_file(zone.path(STATUS));
     let _ = fs::remove_file(zone.path(UPLINK_PID));
     let _ = fs::remove_file(zone.path(READY));
 
@@ -3023,7 +3026,17 @@ fn start_status_mirror(zone: &Zone, mirror: Mirror) {
                     .then(|| fs::read_to_string(format!("/proc/self/fd/{}/status", (*dir)?)).ok())
                     .flatten()
                     .filter(|t| !t.trim().is_empty());
-                Some(tunnel.unwrap_or(own))
+                // Our link up and the system zone's tunnel saying nothing — it
+                // is stopped, or restarting: not "connected" (review; the file
+                // is deleted on down and on restart).
+                Some(match tunnel {
+                    Some(tunnel) => tunnel,
+                    None if own.contains("connected: yes") => format!(
+                        "interface: {TUN_IFACE}\n  backend: system zone {system}\n  \
+                         disconnected: the system zone's tunnel says nothing\n"
+                    ),
+                    None => own,
+                })
             }
         };
         if let Some(text) = text {

@@ -326,9 +326,18 @@ impl WgConfig {
     /// `DNS = 10.8.1.1, fd00::1`. Entries are returned as written: wg-quick
     /// also allows search domains here, and deciding what is what is the
     /// caller's business.
+    /// The resolvers of `DNS =`: addresses only. wg-quick takes the other
+    /// entries for search domains; as a `nameserver` line one would leave no
+    /// resolver at all, and glibc falls back to 127.0.0.1 (review).
     pub fn dns(&self) -> Vec<String> {
         self.first_value("DNS")
-            .map(|v| split_list(v).into_iter().map(str::to_string).collect())
+            .map(|v| {
+                split_list(v)
+                    .into_iter()
+                    .filter(|s| s.parse::<std::net::IpAddr>().is_ok())
+                    .map(str::to_string)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -878,5 +887,11 @@ mod tests {
             WgConfig::parse(b"[Interface]\n\xff\n"),
             Err(ParseError::NotUtf8)
         );
+    }
+
+    #[test]
+    fn dns_takes_addresses_only() {
+        let cfg = WgConfig::parse(b"[Interface]\nDNS = 10.0.0.1, corp.example, fd00::1\n").unwrap();
+        assert_eq!(cfg.dns(), ["10.0.0.1", "fd00::1"]);
     }
 }

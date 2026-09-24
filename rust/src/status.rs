@@ -166,7 +166,7 @@ pub fn networks(tools: &Tools) -> String {
             None
         };
         let alive = mirror.as_deref().map_or("null".to_owned(), |m| {
-            liveness_line(m).is_some().to_string()
+            crate::cli::alive_line(&dir, m).is_some().to_string()
         });
         // Counters for status bars, from the same mirror; `null` when there is
         // nothing to read (down, offline, or a zone from an older version).
