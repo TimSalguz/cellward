@@ -655,11 +655,10 @@ let
           machine.send_chars("alice-console\n")
           machine.wait_until_tty_matches("1", r"\[Enter\].*zone sz")
           machine.send_chars("q")
-          tty_run("vpn-zones-off; echo off=$? > /tmp/seat-off; exit")
-          machine.wait_until_succeeds("grep -q off= /tmp/seat-off", timeout=60)
-          out = machine.succeed("cat /tmp/seat-off")
-          assert "off=0" in out, out
-          machine.succeed("test -e /var/lib/vpn-zones/off")
+          # Judged by what it does: switching off restarts the console too, and
+          # the shell that asked is gone before it could say anything.
+          tty_run("vpn-zones-off")
+          machine.wait_until_succeeds("test -e /var/lib/vpn-zones/off", timeout=60)
           machine.fail("nft list table inet vpnzones_egress")
           machine.fail("systemctl is-active vpn-zone-system@sz")
           machine.succeed("systemctl is-active probe")

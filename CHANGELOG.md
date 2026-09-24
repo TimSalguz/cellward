@@ -55,6 +55,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **The sound server through a filter** (review of 2026-09-25). Every zone,
+  the hermetic and `offline` ones too, got the host's `pulse/native` — where
+  a client may `LOAD_MODULE` `module-tunnel-sink`, `module-rtp-send` or
+  `module-native-protocol-tcp` and make the HOST's sound server connect out,
+  or listen, in the host's network. The holder now starts `pulse-filter` on
+  the host and binds its socket as the zone's `pulse/native`: the protocol's
+  frames pass whole, with their descriptors, except `LOAD_MODULE`,
+  `UNLOAD_MODULE` and `KILL_CLIENT`, answered `ERROR`/`ACCESS`. VM test with a
+  stand-in server that sees what reaches it.
+- **The zone's sockets are bound only as what they are.** The filters' and
+  the system bus proxy's sockets live in the zone's directory, which is the
+  user's: a symlink put there in time gave the zone the host's own system or
+  session bus. They are bound through a descriptor opened without following
+  links and checked to be the user's socket.
+- **A container's roots stay the container's.** The trust layer compared the
+  NSS databases' paths as written: a sandboxed program that made `.pki` or
+  `.mozilla` a link to the host's own had the host's browsers trust the
+  container's roots. Paths are compared resolved now.
 - **Second review round, D-Bus:** the portal's network monitor and proxy
   resolver are answered by the filter (the zone's network up and direct):
   `CanReach` had the host look up and try any name in its own network; the
