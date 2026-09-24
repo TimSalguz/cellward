@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **Tray icons in hermetic zones and containers.** Electron (Claude Desktop,
+  Discord) and Qt (Telegram and its forks) register their icon as
+  `org.kde.StatusNotifierItem-<pid>-<n>` and show none when they may not own
+  that name — and the filter did not let them: xdg-dbus-proxy has only
+  `org.kde.*`-style wildcards, and owning all of `org.kde.*` would own
+  KWallet's name too. The proxy now carries a small patch
+  (`module/patches/xdg-dbus-proxy-own-prefix.patch`): `--own=NAME-*` lets a
+  program take `NAME-<letters, digits, _ and ->` and nothing more — no seeing
+  or talking to other programs' tray items. Checked in the VM test and by hand
+  against a private bus: the icon's name taken, `org.kde.kwalletd6` refused,
+  the tray host's calls reach the program.
+
 ### Changed (behaviour — read before updating)
 - **Zones are hermetic by default** (`docs/HERMETICITY.md` §7 C): with no
   setting of its own a zone has no `systemd --user`, its session bus goes

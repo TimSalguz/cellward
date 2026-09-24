@@ -1158,6 +1158,14 @@ let
           in_zone(hp, f"sh -c '! busctl --user --timeout=5 {units}'")
           in_zone(hp, "sh -c '! systemctl --user is-system-running'")
           in_zone(hp, f"busctl --user --timeout=5 {names}")
+          # Tray icons (owner 2026-09-24: none from Claude Desktop): Electron and
+          # Qt own org.kde.StatusNotifierItem-<pid>-<n> first — that name may be
+          # taken, KWallet's may not (the patched proxy's `--own=…-*`).
+          own = "call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus RequestName su"
+          out = in_zone(hp, f"busctl --user --timeout=5 {own} org.kde.StatusNotifierItem-4242-1 4")
+          assert out.strip() == "u 1", out
+          in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.kde.kwalletd6 4'")
+          in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.kde.StatusNotifierItem-1.evil 4'")
           in_zone(hp, "env VPN_ZONE_CURRENT=vmherm vpn-zone run vmherm -- touch /tmp/brokered-same")
           machine.wait_until_succeeds("test -e /tmp/brokered-same", timeout=30)
           in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm vpn-zone run direct -- touch /tmp/brokered-escape'")

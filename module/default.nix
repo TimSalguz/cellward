@@ -105,6 +105,14 @@ let
   openconnect = "${pkgs.openconnect}/bin/openconnect";
   notify = "${pkgs.libnotify}/bin/notify-send";
   kdialog = "${pkgs.kdePackages.kdialog}/bin/kdialog";
+  # Фильтр сессионной шины с одной правкой: `--own=ИМЯ-*` разрешает ЗАНЯТЬ имя
+  # ИМЯ-<суффикс> и больше ничего (ни видеть, ни говорить с чужими такими именами).
+  # Нужна значкам трея: Electron и Qt регистрируют их под
+  # org.kde.StatusNotifierItem-<pid>-<n>, а шаблоны xdg-dbus-proxy бывают только
+  # вида org.kde.* — а занять любое org.kde.* значит занять и имя KWallet.
+  dbusProxy = pkgs.xdg-dbus-proxy.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ./patches/xdg-dbus-proxy-own-prefix.patch ];
+  });
 
   # --- ЧАСТЬ 0: RUST-ЯДРО ---
   # Здесь ЗАКОНЧИЛСЯ переезд ядра на Rust (ROADMAP M1). Первым переехало то,
@@ -248,7 +256,7 @@ let
       # Эти три CLI не запускает сам — он передаёт их флагами песочнице ФС,
       # ровно как юнит передаёт держателю зоны --ip/--pasta.
       bwrap = "${pkgs.bubblewrap}/bin/bwrap";
-      dbus-proxy = "${pkgs.xdg-dbus-proxy}/bin/xdg-dbus-proxy";
+      dbus-proxy = "${dbusProxy}/bin/xdg-dbus-proxy";
       xwayland = "${pkgs.xwayland-satellite}/bin/xwayland-satellite";
       # Доверенные сертификаты контейнеров (docs/CERTIFICATES.ru.md): openssl
       # разбирает сертификат при `vpn-zone trust add`, certutil ставит его в
@@ -745,7 +753,7 @@ in
       ExecStart =
         "${vpn-zone-rust}/bin/vpn-zone-core zone-holder"
         + " --ip ${iproute} --awg ${awg} --wg ${wg} --pasta ${pasta} --nft ${nft}"
-        + " --openconnect ${openconnect} --dbus-proxy ${pkgs.xdg-dbus-proxy}/bin/xdg-dbus-proxy %i";
+        + " --openconnect ${openconnect} --dbus-proxy ${dbusProxy}/bin/xdg-dbus-proxy %i";
       Restart = "no";
       # KillMode=control-group по умолчанию: гасим зону — гаснет и pasta, и всё,
       # что в зоне работало, теряет сеть. Это и есть kill switch.
