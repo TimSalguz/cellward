@@ -547,7 +547,9 @@ pub fn render_autostart(groups: &[Group], picker: &str, app_key: &str) -> String
         }
         out.push(format!("[{}]", group.name));
         for (key, value) in group.entries() {
-            if matches!(key, "Exec" | "DBusActivatable") || key == MARK {
+            // `Exec[ru]` is Exec too for whoever reads localised keys.
+            let base = key.split('[').next().unwrap_or(key);
+            if matches!(base, "Exec" | "DBusActivatable") || base == MARK {
                 continue;
             }
             out.push(format!("{key}={value}"));
@@ -697,6 +699,56 @@ fn render_intercepted(groups: &[Group], picker: &str, app_key: &str, marker: &st
         out.push(String::new());
     }
     out.join("\n")
+}
+
+/// A user entry that starts nothing itself: no `[Desktop Entry]`, or no
+/// `Exec` in it — a menu editor's "deleted" stub.
+fn is_stub(path: &Path) -> bool {
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    let groups = parse_desktop(&String::from_utf8_lossy(&bytes));
+    desktop_entry(&groups).is_none_or(|e| e.get("Exec").is_none_or(|x| x.trim().is_empty()))
+}
+
+/// The flags of a stub that decide what menus show: `Hidden`, `NoDisplay`.
+fn stub_flags(text: &str) -> Vec<String> {
+    let groups = parse_desktop(text);
+    let Some(entry) = desktop_entry(&groups) else {
+        return vec!["Hidden=true".to_owned()];
+    };
+    ["Hidden", "NoDisplay"]
+        .iter()
+        .filter_map(|k| entry.get(k).map(|v| format!("{k}={v}")))
+        .collect()
+}
+
+/// A rendered entry with `flags` set in its `[Desktop Entry]`, replacing any
+/// of the same keys.
+fn with_flags(text: &str, flags: &[String]) -> String {
+    let keys: Vec<&str> = flags.iter().filter_map(|f| f.split('=').next()).collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut in_entry = false;
+    for line in text.lines() {
+        if line.starts_with('[') {
+            in_entry = line == "[Desktop Entry]";
+            out.push(line.to_owned());
+            if in_entry {
+                out.extend(flags.iter().cloned());
+            }
+            continue;
+        }
+        let key = line.split('=').next().unwrap_or("");
+        if in_entry && keys.contains(&key) {
+            continue;
+        }
+        out.push(line.to_owned());
+    }
+    let mut joined = out.join("\n");
+    if text.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
 }
 
 /// Is this file ours — may it be overwritten or deleted?
@@ -1450,9 +1502,20 @@ fn sync_autostart(
             continue;
         };
         let exec = entry.get("Exec").unwrap_or("");
-        let starts_nothing = exec.is_empty()
-            || entry.get("Hidden") == Some("true")
-            || entry.get("X-GNOME-Autostart-enabled") == Some("false");
+        // What systemd's autostart generator — the one that starts these under
+        // niri and sway — does not start: Hidden or X-systemd-skip, read the
+        // way it reads booleans. Not X-GNOME-Autostart-enabled=false, which it
+        // does not know: such an entry ran around the picker (review
+        // 2026-09-25). It is taken over, the key kept for GNOME.
+        let yes = |key: &str| {
+            entry.get(key).is_some_and(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "true" | "yes" | "1" | "on"
+                )
+            })
+        };
+        let starts_nothing = exec.is_empty() || yes("Hidden") || yes("X-systemd-skip");
         if starts_nothing {
             if taken {
                 given_back += give_back(&path, name);
@@ -1719,7 +1782,20 @@ fn sync_from(
         // left as they are.
         if mode.intercepts() && !app.own_dir {
             let target = out_dir.join(&app.name);
-            if !occupied(&target) || ours(&target) {
+            // A stub of the user's under this name — a menu editor's "delete",
+            // `Hidden=true` and little else — masks the system entry in menus
+            // but not for xdg-open and GLib, which go past it to the system
+            // entry, around the picker (review 2026-09-25). It is taken over
+            // like a foreign entry: kept aside, and in its place the system
+            // entry through the picker, with the stub's own flags.
+            let stub = take_over && regular_file(&target) && !ours(&target) && is_stub(&target);
+            let masked = stub || adopted(&target);
+            let kept = !stub
+                || (fs::create_dir_all(&adopted_dir).is_ok()
+                    && fs::read(&target)
+                        .and_then(|bytes| write_atomically(&adopted_dir.join(&app.name), &bytes))
+                        .is_ok());
+            if kept && (!occupied(&target) || ours(&target) || stub) {
                 wanted.insert(app.name.clone());
                 // A child or a hidden handler is launched under its parent's
                 // id and leaves the parent's label alone.
@@ -1730,7 +1806,15 @@ fn sync_from(
                         app.key()
                     }
                 };
-                written += write_if_changed(&target, &render_picker(&app.groups, picker, app_key));
+                let text = if masked {
+                    let flags = fs::read(adopted_dir.join(&app.name))
+                        .map(|b| stub_flags(&String::from_utf8_lossy(&b)))
+                        .unwrap_or_default();
+                    with_flags(&render_adopted(&app.groups, picker, app_key), &flags)
+                } else {
+                    render_picker(&app.groups, picker, app_key)
+                };
+                written += write_if_changed(&target, &text);
                 shadow_dbus(app, entry, app_key);
             }
         }
@@ -2577,6 +2661,34 @@ Name=not carried over
     /// A "deleted" entry (Hidden=true) that mimeapps.list names is taken
     /// over too; a localised Exec is dropped like Exec itself; entries deep in
     /// Wine's folders are found.
+    /// A menu editor's "deleted" stub under a system entry's name hides it
+    /// from menus, not from xdg-open: taken over with its flags, given back
+    /// as it was.
+    #[test]
+    fn a_stub_masking_a_system_entry_is_taken_over_and_given_back() {
+        let d = Desk::new("stub");
+        fs::write(
+            d.system.join("zen.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Zen\nExec=zen %U\n",
+        )
+        .unwrap();
+        let stub = "[Desktop Entry]\nHidden=true\n";
+        fs::write(d.apps.join("zen.desktop"), stub).unwrap();
+        d.setting("mode", "picker");
+        d.sync();
+        let taken = d.read("zen.desktop");
+        assert!(taken.contains("--id zen -- zen %U"), "{taken}");
+        assert!(taken.contains("Hidden=true"), "{taken}");
+        assert!(taken.contains("X-VPNZone=adopted"), "{taken}");
+        // A second pass keeps it so.
+        d.sync();
+        assert_eq!(d.read("zen.desktop"), taken);
+        // Interception off: the stub comes back byte for byte.
+        d.setting("mode", "off");
+        d.sync();
+        assert_eq!(d.read("zen.desktop"), stub);
+    }
+
     #[test]
     fn deleted_entries_localised_commands_and_deep_folders_are_covered() {
         let d = Desk::new("hidden-localised");
@@ -2755,7 +2867,11 @@ Name=not carried over
         symlink(&target, &link).unwrap();
         d.sync();
         assert_eq!(fs::read_to_string(&hidden_path).unwrap(), hidden);
-        assert_eq!(fs::read_to_string(&disabled_path).unwrap(), disabled);
+        // X-GNOME-Autostart-enabled=false is started by systemd's generator
+        // anyway: taken over, the key kept.
+        let taken = fs::read_to_string(&disabled_path).unwrap();
+        assert!(taken.contains("-- off2"), "{taken}");
+        assert!(taken.contains("X-GNOME-Autostart-enabled=false"), "{taken}");
         assert_eq!(fs::read_to_string(&clone_path).unwrap(), clone);
         assert!(fs::symlink_metadata(&link)
             .unwrap()

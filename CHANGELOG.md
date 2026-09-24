@@ -55,6 +55,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **Second review round, launcher entries and the picker:** an autostart entry
+  with `X-GNOME-Autostart-enabled=false` is taken over (systemd's generator,
+  which starts autostart under niri and sway, does not know the key and ran
+  it around the picker), the key kept for GNOME; a menu editor's "deleted"
+  stub under a system entry's name is taken over with its flags and given
+  back as it was (xdg-open and GLib went past it to the system entry); a
+  localised `Exec[ru]` is dropped from autostart entries too; the launch
+  window starts on the pinned network when "always" is ticked for it; a new
+  profile that cannot be made starts the program in its own sandbox; the
+  window menu cuts more invisible characters from a window's own name and
+  shows no markup through kdialog.
 - **Second review round, the module and the uplink:** a certificate file with
   a private key in it is refused by the option's type, before it is copied to
   the store; container names the runtime reserves (`__…`, `main`, `own`,
