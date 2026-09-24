@@ -64,6 +64,7 @@ impl Home {
             ("openssl", "/nonexistent/openssl".to_owned()),
             ("certutil", "/nonexistent/certutil".to_owned()),
             ("opener", "/nonexistent/xdg-open".to_owned()),
+            ("window", "/nonexistent/vpn-zone-window".to_owned()),
             ("notify-send", "/nonexistent/notify-send".to_owned()),
         ] {
             json.push_str(&format!("  \"{key}\": \"{value}\",\n"));

@@ -157,6 +157,9 @@ let
   # уровня (module/nixos.nix, M10), и два одинаковых текста однажды разошлись
   # бы. Исходники и флаги прежние, поэтому и store-путь прежний.
   vpn-zone-rust = pkgs.callPackage ../package.nix { };
+  # Окно запуска (сеть и контейнер рядом) — отдельный крейт с iced
+  # (../window/package.nix): ядро выше от него не тяжелеет.
+  vpn-zone-window = pkgs.callPackage ../window/package.nix { };
 
   # --- ЧАСТЬ 0б: ПЕСОЧНИЦА ФАЙЛОВОЙ СИСТЕМЫ — В RUST ---
   # Здесь был writeShellScriptBin vpn-fs-sandbox на две сотни строк. Он целиком
@@ -266,6 +269,8 @@ let
       # Ссылки программ из песочницы (LEAK-MODEL §2): их портал отвечает
       # фильтр шины песочницы, а открывает xdg-open — в зоне, мимо портала хоста.
       opener = "${pkgs.xdg-utils}/bin/xdg-open";
+      # Окно запуска: пикер спрашивает им вместо двух меню kdialog.
+      window = "${vpn-zone-window}/bin/vpn-zone-window";
       # awg/wg/pasta/nft/openconnect здесь намеренно НЕТ: их зовёт только
       # держатель зоны, и получает он их флагами ExecStart своего юнита.
       # Дублировать пути в двух местах — значит однажды поменять их в одном.

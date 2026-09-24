@@ -117,6 +117,12 @@ jobs:
             --run 'cargo clippy --all-targets -- -D warnings'
       - name: cargo test
         run: nix-shell ../tests/harness.nix -A rustShell --run 'cargo test'
+      # Окно запуска — крейт отдельный (window/, iced): те же проверки для него.
+      - name: окно запуска — fmt, clippy, test
+        working-directory: window
+        run: |
+          nix-shell ../tests/harness.nix -A rustShell --run \
+            'cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test'
 
   # VM-тест (tests/vm.nix): qemu-машина с настоящим systemd и модулем + вторая
   # VM как живой WireGuard-пир. Закрывает то, до чего смоук не дотягивается
@@ -236,6 +242,35 @@ jobs:
         run: nix-build tests/vm-uplink.nix -A driver -o vm-uplink-driver
       - name: Прогнать VM-тест
         run: env -u XDG_RUNTIME_DIR ./vm-uplink-driver/bin/nixos-test-driver
+
+  # Окно запуска (tests/vm-window.nix): на настоящем композиторе (headless
+  # sway) пикер показывает окно, оно поднимается и держится, клавиатура
+  # доходит, закрытое — ничего не запускает. Снимки окна — в выводе драйвера.
+  vm-window:
+    name: vm-window (NixOS test, the launch window)
+    runs-on: ubuntu-24.04
+    needs: eval
+    steps:
+      - uses: actions/checkout@v4
+      - name: Включить KVM для раннера
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -c /dev/kvm
+      - uses: cachix/install-nix-action@v31
+      - name: Собрать драйвер VM-теста
+        run: nix-build tests/vm-window.nix -A driver -o vm-window-driver
+      - name: Прогнать VM-тест
+        run: env -u XDG_RUNTIME_DIR ./vm-window-driver/bin/nixos-test-driver -o vm-window-out
+      - name: Снимки окна
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: launch-window
+          path: vm-window-out/*.png
+          if-no-files-found: ignore
 
   # Смоук: поднять настоящую зону в непривилегированном userns и проверить её
   # изнутри. Требует fallback на ядерный wireguard (amneziawg-модуля на

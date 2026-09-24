@@ -1142,6 +1142,7 @@ let
           assert "zwp_virtual_keyboard_manager_v1" not in zone, zone
           assert "SWAY-REFUSED" in zone, zone
           alice("vpn-zone down vmsmoke")
+
           alice("systemctl --user stop vmsway.service")
 
       # --- A hermetic zone (docs/HERMETICITY.md §7 C, the prototype) --------

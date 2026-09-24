@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **The launch window** (`vpn-zone-window`, the crate `window/`): the picker
+  asks about the network and the container in ONE window, side by side,
+  instead of two kdialog menus in a row with every entry twice ("… —
+  всегда"). "Always" is a checkbox per column. Keyboard: ←/→ or Tab switch the
+  column, ↑/↓ or a digit choose, Space ticks "always", Enter starts, Esc
+  closes. A container open in another network cannot be chosen with a
+  different one; a new sandbox or profile is named in the window. Drawn in
+  software (iced with tiny-skia, no GPU context to wait for), light or dark as
+  the system is. The picker keeps every decision and takes only what it
+  offered back (`rust/src/window.rs` is the contract); where the window is
+  missing it asks with kdialog as before. Tests: the picker with a fake window,
+  the window's own, and `tests/vm-window.nix` — on a real compositor, with
+  screenshots.
+
 ### Changed
 - **Autostart asks about a program nothing was chosen for**
   (`autostart.unassigned = "ask"`, the new default, the owner's word of

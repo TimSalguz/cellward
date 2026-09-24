@@ -96,11 +96,14 @@ pub struct Tools {
     /// `xdg-open`: what a sandbox's bus filter opens a program's link with, in
     /// the zone rather than through the host's portal (`crate::bus_filter`).
     pub opener: PathBuf,
+    /// `vpn-zone-window`: the launch window, the network and the container in
+    /// one (`crate::window`). Where it is missing the picker asks with kdialog.
+    pub window: PathBuf,
 }
 
 /// The keys of the manifest, in the order they are reported. Kept next to the
 /// struct so that `module/default.nix` and this file can be diffed by eye.
-const KEYS: [&str; 21] = [
+const KEYS: [&str; 22] = [
     "home",
     "state",
     "profiles",
@@ -122,6 +125,7 @@ const KEYS: [&str; 21] = [
     "openssl",
     "certutil",
     "opener",
+    "window",
 ];
 
 /// Why the manifest could not be used. Every variant names the file: when this
@@ -211,6 +215,7 @@ impl Tools {
             openssl: take("openssl")?,
             certutil: take("certutil")?,
             opener: take("opener")?,
+            window: take("window")?,
         })
     }
 
