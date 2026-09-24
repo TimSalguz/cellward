@@ -451,6 +451,28 @@ pub mod body {
         w.buf
     }
 
+    /// `org.freedesktop.Notifications.Notify`'s arguments.
+    pub const NOTIFY_SIGNATURE: &str = "susssasa{sv}i";
+
+    /// A notification: no replaced id, no actions, no hints, the server's
+    /// default timeout.
+    pub fn notification(app: &str, summary: &str, text: &str) -> Vec<u8> {
+        let mut w = Writer { buf: Vec::new() };
+        w.string(app);
+        w.u32(0);
+        w.string("dialog-information");
+        w.string(summary);
+        w.string(text);
+        // `as`: empty.
+        w.u32(0);
+        // `a{sv}`: empty, padded to its elements' alignment.
+        w.u32(0);
+        w.align(8);
+        // `i`: -1, the server's default.
+        w.u32(u32::MAX);
+        w.buf
+    }
+
     /// A portal's `Response`: `(u response, a{sv} results)` with no results.
     pub fn response(code: u32) -> Vec<u8> {
         let mut w = Writer { buf: Vec::new() };
@@ -589,6 +611,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The notification body is exactly its signature: a reader stepping over
+    /// every argument ends where the body ends.
+    #[test]
+    fn a_notification_is_its_signature() {
+        let b = body::notification("vpn-zones", "Файл не открыт", "текст");
+        let mut r = Reader {
+            buf: &b,
+            pos: 0,
+            little: true,
+        };
+        let mut sig: &[u8] = body::NOTIFY_SIGNATURE.as_bytes();
+        while !sig.is_empty() {
+            let used = r.skip(sig, 0).unwrap();
+            sig = &sig[used..];
+        }
+        assert_eq!(r.pos, b.len());
     }
 
     #[test]
