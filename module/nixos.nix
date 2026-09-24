@@ -1017,7 +1017,12 @@ in
                   ["vpn-zones-off.service", "vpn-zones-on.service"].indexOf(action.lookup("unit")) >= 0 &&
                   action.lookup("verb") == "start" &&
                   subject.isInGroup("${cfg.switchGroup}")) {
-                return polkit.Result.YES;
+                // Without a password from the person at the machine — the
+                // session in front, local and active; from anywhere else (ssh,
+                // cron, a command in a zone with the system bus) with one.
+                return (subject.local && subject.active)
+                  ? polkit.Result.YES
+                  : polkit.Result.AUTH_SELF_KEEP;
               }
             });
           '';
@@ -1183,7 +1188,11 @@ in
                   action.lookup("unit") == "vpn-zones-egress-open.service" &&
                   (action.lookup("verb") == "start" || action.lookup("verb") == "stop") &&
                   subject.isInGroup("${e.emergency.group}")) {
-                return polkit.Result.YES;
+                // As the switch above: no password at the machine itself (the
+                // TTY rescue path included), a password from anywhere else.
+                return (subject.local && subject.active)
+                  ? polkit.Result.YES
+                  : polkit.Result.AUTH_SELF_KEEP;
               }
             });
           '';

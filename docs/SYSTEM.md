@@ -56,8 +56,8 @@ and the way a program goes out directly once the host has no network of its own 
 
 | Path | Mode | What |
 |---|---|---|
-| `/var/lib/vpn-zones/system/<name>/config.conf` | 0600 root, dir 0700 | the config, unless `configFile` points elsewhere |
-| `/run/vpn-zones/system/<name>/` | 0750 root:vpn-zones | the zone's run directory |
+| `/var/lib/vpn-zones/system/<name>/config.conf` | 0600 root, dir 0755 | the config, unless `configFile` points elsewhere |
+| `/run/vpn-zones/system/<name>/` | 2750 root:vpn-zones | the zone's run directory |
 | `…/setconf.conf` | 0600 root | the stripped config `setconf` reads (private key inside) |
 | `…/ready` | 0640 | the zone is up |
 | `…/status` | 0640 root:vpn-zones | `awg show awg0`, every 5 s; no private key in it |
@@ -90,8 +90,10 @@ zones. A declared zone that the host's own services go through (`host.*`, `servi
 `containers` — marked `carries`) never has its config replaced by a request: whoever sets its
 tunnel answers for the host's names, clock and services. The socket takes at most 16
 connections per user (`MaxConnectionsPerSource`) and a request within 5 s
-(`SO_RCVTIMEO`), so nobody holds the service from the others — the TTY console's rescue
-path among them.
+(`SO_RCVTIMEO`, cleared once the request is in — the connection is then the command's life), so
+a client that says nothing does not hold the service from the others. Not a wall against a
+member of the group who means it: the count is per uid, and `newuidmap` gives a user several
+(review 2026-09-24) — a way to keep the service busy, not a way into anything.
 
 ## 3. Units
 
@@ -267,7 +269,14 @@ A system zone's namespace belongs to the host's user namespace; entering it take
 - **The terminal** is the client's: it makes a pty, sends only the slave, and relays. The
   command gets the slave as its controlling terminal, so Ctrl-C, job control and the window
   size work without a signal passing through root. Without a terminal, the client's 0, 1 and
-  2 are passed. The client gone, the command gets SIGHUP and SIGTERM.
+  2 are passed. The client gone — the end of the stream or a reset, not a wait that timed
+  out — the command gets SIGHUP and SIGTERM. No other descriptor of the service reaches it.
+- **What the command does not see**, beyond the zone's resolver and the session's sockets:
+  `/run/vpn-zones` (this service's socket — a command in one zone asking for another, and
+  the `vpn-zones` group is not among its groups either), the host's `/tmp`, `/var/tmp` and
+  `/dev/shm` (it gets its own: X11, tmux and other listening sockets there take the user's
+  uid for the user), and the Nix daemon's socket (it builds and fetches in the host's
+  network).
 - The request is one datagram: `VZS1\0`, zone, mode, cwd, argc, argv…, envc, env…, each
   NUL-ended, at most 64 KiB; the answer is `EXIT <code>` or `ERR <why>`.
 
@@ -642,9 +651,9 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
    `/run`.
 3. **Degradation** — the holder stopping deletes `awg0`: `lo` alone. A holder killed
    without its `ExecStopPost` leaves a working tunnel — not a leak.
-4. **The host's Nix daemon** — hidden from containers (§6). Services: a service running as
-   a user may reach the daemon socket; hiding it is `InaccessiblePaths` too, offered but not
-   forced (some services legitimately build).
+4. **The host's Nix daemon** — hidden from containers (§6) and from a user's command
+   (§7). Services: a service running as a user may reach the daemon socket; hiding it is
+   `InaccessiblePaths` too, offered but not forced (some services legitimately build).
 5. **One zone is one network** — everything in a zone shares its `lo` and abstract unix
    sockets. Separation means separate zones.
 6. **The endpoint** — resolved in the host's network, as for user zones (LEAK-MODEL §5).
@@ -652,6 +661,11 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
    the bus and the compositor are how a program asks the host to open something, in the
    host's network. Hidden where they lie is not enough: a user namespace of its own keeps
    the command out of the session's processes' `/proc/<pid>/root` (LEAK-MODEL §16).
+7a. **Fail closed on a broken setting** — an `uplink` that names no interface, or a missing
+   `vpn-zones-bridge` group, stops the zone or the uplink instead of going wherever the host
+   routes; a declared zone never uses a config somebody not among its users added on the
+   spot under its name before it was declared; a config added on the spot gets no
+   `ListenPort` (the socket is the host's). Parse errors show a line's key, never its value.
 8. **The host side has no second echelon** — a system zone's uplink is the host's network
    itself, and a ruleset there would be the host's firewall. Filtering the host's egress is
    stage 5 (§9); a zone's tunnel passes it by its mark.

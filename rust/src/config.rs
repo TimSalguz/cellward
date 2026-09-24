@@ -141,18 +141,39 @@ pub enum ParseError {
     EmptyKey { line: usize },
 }
 
+/// A config line as a message may show it: the key, never the value.
+fn shown(text: &str) -> String {
+    match text.split_once('=') {
+        Some((key, _)) => format!("{} = …", key.trim()),
+        None => {
+            text.chars().take(24).collect::<String>()
+                + if text.chars().count() > 24 { "…" } else { "" }
+        }
+    }
+}
+
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotUtf8 => write!(f, "config is not valid UTF-8"),
+            // The line itself only up to its key: a config holds a private
+            // key, and these messages go to logs — root's journal among them.
             Self::UnterminatedSection { line, text } => {
-                write!(f, "line {line}: section header without `]`: {text}")
+                write!(
+                    f,
+                    "line {line}: section header without `]`: {}",
+                    shown(text)
+                )
             }
             Self::EntryOutsideSection { line, text } => {
-                write!(f, "line {line}: key outside of any section: {text}")
+                write!(
+                    f,
+                    "line {line}: key outside of any section: {}",
+                    shown(text)
+                )
             }
-            Self::MissingEquals { line, text } => {
-                write!(f, "line {line}: not a `Key = value` line: {text}")
+            Self::MissingEquals { line, .. } => {
+                write!(f, "line {line}: not a `Key = value` line")
             }
             Self::EmptyKey { line } => write!(f, "line {line}: empty key"),
         }

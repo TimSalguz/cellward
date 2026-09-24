@@ -256,6 +256,29 @@ pub fn with_tunnel_mark(setconf: &str) -> String {
     out
 }
 
+/// A config added on the spot, without `ListenPort` in `[Interface]`: the
+/// tunnel's socket is the host's, and the port would be any the adder named —
+/// 53, 123, one a host service wants (review). The kernel picks one instead.
+pub fn without_listen_port(config: &str) -> String {
+    let mut out = String::new();
+    let mut in_interface = false;
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_interface = trimmed.eq_ignore_ascii_case("[interface]");
+        } else if in_interface
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("listenport"))
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// The declared zones: the module's list, with anything that isn't a valid
 /// name dropped rather than trusted.
 pub fn declared() -> Vec<String> {
@@ -498,6 +521,11 @@ fn ns_down(args: &Args) {
 // --- THE TUNNEL --------------------------------------------------------------
 
 fn up(args: &Args) -> Result<(), String> {
+    if uplink_invalid(&args.name) {
+        return Err(
+            "its uplink names no interface — it goes out through that one or not at all".to_owned(),
+        );
+    }
     // The flags win (running a verb by hand); the unit passes none, and the
     // zone's own settings say what it is.
     let found = settings(&args.name);
@@ -958,6 +986,24 @@ pub struct Settings {
     pub carries: bool,
 }
 
+/// What a declared zone's config is called when the one on the spot is not
+/// its own: a file that is never there, so the zone does not come up.
+const FOREIGN_CONFIG: &str =
+    "config.conf (added on the spot by someone not among the zone's users)";
+
+/// A zone's `uplink` file that is there but names no interface a name can be
+/// (`.`, `..`, a slash, a control byte): read as "no uplink" it would send the
+/// zone out wherever the host routes, the very thing an uplink is for not
+/// doing (review). Its zone does not come up.
+pub fn uplink_invalid(name: &str) -> bool {
+    let dir = if declared().iter().any(|z| z == name) {
+        declared_dir(name)
+    } else {
+        local_dir(name)
+    };
+    read_trimmed(&dir.join("uplink")).is_some_and(|i| !crate::hostif::valid_interface_name(&i))
+}
+
 pub fn declared_dir(name: &str) -> PathBuf {
     Path::new(crate::sysrun::ZONES_DIR).join(name)
 }
@@ -985,16 +1031,33 @@ pub fn settings(name: &str) -> Option<Settings> {
     } else {
         return None;
     };
-    let config = read_trimmed(&dir.join("config"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| local.join(CONFIG));
+    let users = fs::read_to_string(dir.join("users"))
+        .map(|t| crate::sysrun::parse_users(&t))
+        .unwrap_or_default();
+    let config = match read_trimmed(&dir.join("config")) {
+        Some(path) => PathBuf::from(path),
+        // A zone declared after somebody added one of that name on the spot:
+        // the config there is theirs, and the declared zone — with whatever
+        // services it carries — would have gone out through their server
+        // (review). It is the zone's only when one of its users wrote it; a
+        // declared user's add removes the adder's mark (`serve_add`).
+        None => {
+            let added_by = fs::read_to_string(local.join("users"))
+                .map(|t| crate::sysrun::parse_users(&t))
+                .ok();
+            match added_by {
+                Some(adders) if declared && !adders.iter().any(|a| users.contains(a)) => {
+                    local.join(FOREIGN_CONFIG)
+                }
+                _ => local.join(CONFIG),
+            }
+        }
+    };
     Some(Settings {
         declared,
         plain: read_trimmed(&dir.join("kind")).as_deref() == Some("plain"),
         config,
-        users: fs::read_to_string(dir.join("users"))
-            .map(|t| crate::sysrun::parse_users(&t))
-            .unwrap_or_default(),
+        users,
         system_bus: dir.join("system-bus").exists(),
         dns: fs::read_to_string(dir.join("dns"))
             .map(|t| parse_dns(&t))
@@ -1537,6 +1600,16 @@ mod tests {
         assert_eq!(
             parse_declared("nl\n\n  de  \nBad\nunconfined\n../etc\n"),
             vec!["nl".to_owned(), "de".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_config_added_on_the_spot_gets_no_listen_port() {
+        let text =
+            "[Interface]\nPrivateKey = x\nListenPort = 53\n[Peer]\nPublicKey = y\nListenPort = 1\n";
+        assert_eq!(
+            without_listen_port(text),
+            "[Interface]\nPrivateKey = x\n[Peer]\nPublicKey = y\nListenPort = 1\n"
         );
     }
 }

@@ -55,6 +55,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **The system tier, from the review of 2026-09-24.** Nothing there let a user
+  do more than their own, but:
+  - **every `vpn-zone-sys` command was hung up after 5 s** — the request
+    timeout stayed on the connection, and the watcher took it for the client
+    leaving (the TTY console's shell included). Cleared once the request is
+    in; only the end of the stream or a reset ends the command;
+  - a command in a system zone **reached this service's socket** and could
+    ask for another zone: `/run/vpn-zones` is covered and the `vpn-zones`
+    group dropped from its groups;
+  - it **saw the host's `/tmp`** (X11, tmux, singleton sockets that trust the
+    user's uid) **and the Nix daemon** (fetches in the host's network): it gets
+    its own `/tmp`, `/var/tmp`, `/dev/shm`, and no daemon socket;
+  - the switch-off and emergency-key polkit rules asked nobody from anywhere:
+    no password from the local active session, a password from elsewhere (ssh,
+    cron, a zone's command with the system bus);
+  - fail closed: an `uplink` that names no interface stops the zone instead of
+    going out by the host's routes; no `vpn-zones-bridge` group — no uplink,
+    rather than one into the system zone; a declared zone does not use a
+    config added on the spot under its name by somebody not among its users;
+  - a config added on the spot loses `ListenPort` (the socket is the host's —
+    port 53 was possible); parse errors show a line's key, never its value, in
+    root's journal; the command gets no descriptor of the service but 0–2.
 - **What a zone asks for is a file name, and not the user's launch.** The app
   id the broker passes on from a zone was a path in the registry
   (`/run/user/…`, `../..` — a file rewritten on the host); it is a file name
