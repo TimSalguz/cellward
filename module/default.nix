@@ -856,6 +856,10 @@ in
     Path = {
       PathChanged = [
         "${config.home.homeDirectory}/.local/share/applications"
+        # Wine кладёт ярлык каждой установленной программы в подкаталог
+        # (wine/Programs/<программа>/): его тоже перехватываем сразу. Глубже
+        # слежения нет (PathChanged не рекурсивен) — там догоняет таймер.
+        "${config.home.homeDirectory}/.local/share/applications/wine/Programs"
         # Программа, включившая свой автозапуск, перехватывается сразу, а не
         # через полчаса — до следующего входа в сессию успевает наверняка.
         "${config.home.homeDirectory}/.config/autostart"

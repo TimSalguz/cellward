@@ -52,6 +52,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `/proc` from the host and from neither kind of zone.
 
 ### Fixed
+- **Entries in subdirectories are intercepted** (owner, 2026-09-24: Wine's
+  programs started with no network dialog). Wine puts the entry of every
+  program it installs at `~/.local/share/applications/wine/Programs/…`, and
+  the interception read only the top of each directory: such a program ran in
+  the host's network, around the picker (`docs/LEAK-MODEL.md` §11). Directories
+  are now walked four levels deep, entries named by their desktop-file ID as
+  the menu specification says (`wine/Programs/X.desktop` is
+  `wine-Programs-X.desktop`): the user's are taken over where they lie and
+  given back there, a system one is shadowed by that name from the top of the
+  user's directory. Symlinked and hidden directories are not entered. The
+  path unit also watches `wine/Programs`.
 - **`vpn-zone-gui` is in `PATH`.** The windows were reachable only from their
   menu entries, by a store path; a configurator opening "VPN zone containers"
   by name (`vpn-zone-gui containers`) or a person in a terminal got
