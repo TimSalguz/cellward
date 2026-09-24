@@ -446,14 +446,14 @@ let
           machine.succeed("systemctl start vpn-zones-egress")
           machine.succeed("nft list set inet vpnzones_egress users | grep -q 100000")
 
-      with subtest("the emergency key opens the host and closes it again"):
-          # alice is in wheel: polkit lets her turn the key without a password.
-          machine.succeed(as_user("alice", "systemctl start vpn-zones-egress-open"))
-          out = machine.succeed(as_user("alice", f"socat -T10 - TCP:{server_ip}:8090"))
-          assert "peer=" in out, out
-          machine.succeed(as_user("alice", "systemctl stop vpn-zones-egress-open"))
+      with subtest("the emergency key: not without a password from outside the seat"):
+          # alice is in wheel, but `su` is no local, active session: from
+          # here — as from ssh, cron or a zone's command with the system bus —
+          # the key wants her password, and there is nobody to type it. At the
+          # seat itself it turns without one (the TTY console subtest below).
+          machine.fail(as_user("alice", "systemctl start vpn-zones-egress-open"))
           machine.fail(direct("alice"))
-          # carol is not: no key for her.
+          # carol is not in the group: no key for her at all.
           machine.fail(as_user("carol", "systemctl start vpn-zones-egress-open"))
           machine.fail(direct("carol"))
 
@@ -605,6 +605,17 @@ let
           machine.wait_until_succeeds("grep -q host-exit= /tmp/console-host", timeout=30)
           out = machine.succeed("cat /tmp/console-host")
           assert "peer=" not in out and "host-exit=0" not in out, out
+          # The emergency key, turned at the seat: a local, active session —
+          # no password — and the host is open, then closed again.
+          tty_run("systemctl start vpn-zones-egress-open; echo key=$? > /tmp/console-key")
+          machine.wait_until_succeeds("grep -q key= /tmp/console-key", timeout=30)
+          out = machine.succeed("cat /tmp/console-key")
+          assert "key=0" in out, out
+          out = machine.succeed(as_user("alice", f"socat -T10 - TCP:{server_ip}:8090"))
+          assert "peer=" in out, out
+          tty_run("systemctl stop vpn-zones-egress-open; echo unkey=$? > /tmp/console-unkey")
+          machine.wait_until_succeeds("grep -q unkey=0 /tmp/console-unkey", timeout=30)
+          machine.fail(direct("alice"))
           tty_run("exit")
 
       with subtest("the TTY console: no tunnel, and the plain zone is one key away"):
@@ -634,8 +645,18 @@ let
           # Services are attached by the generator, in /run — not in their units.
           machine.succeed("systemctl cat probe | grep -q NetworkNamespacePath")
           host_ns = machine.succeed("readlink /proc/1/ns/net").strip()
-          # alice is in wheel: the switch needs no password.
-          machine.succeed(as_user("alice", "vpn-zones-off"))
+          # alice is in wheel: at the seat the switch needs no password —
+          # logged in on tty1, the console's host shell ("q").
+          machine.wait_until_tty_matches("1", "login: ")
+          machine.send_chars("alice\n")
+          machine.wait_until_tty_matches("1", "Password: ")
+          machine.send_chars("alice-console\n")
+          machine.wait_until_tty_matches("1", r"\[Enter\].*zone sz")
+          machine.send_chars("q")
+          tty_run("vpn-zones-off; echo off=$? > /tmp/seat-off; exit")
+          machine.wait_until_succeeds("grep -q off= /tmp/seat-off", timeout=60)
+          out = machine.succeed("cat /tmp/seat-off")
+          assert "off=0" in out, out
           machine.succeed("test -e /var/lib/vpn-zones/off")
           machine.fail("nft list table inet vpnzones_egress")
           machine.fail("systemctl is-active vpn-zone-system@sz")
@@ -652,9 +673,11 @@ let
           # Off survives a reload, which is what a reboot does to generators.
           machine.succeed("systemctl daemon-reload")
           machine.fail("systemctl cat probe | grep -q NetworkNamespacePath")
-          # carol is not in wheel.
+          # carol is not in wheel; alice from outside the seat would need her
+          # password, which nobody types here. Root turns it on.
           machine.fail(as_user("carol", "vpn-zones-on"))
-          machine.succeed(as_user("alice", "vpn-zones-on"))
+          machine.fail(as_user("alice", "vpn-zones-on"))
+          machine.succeed("systemctl start vpn-zones-on.service")
           machine.fail("test -e /var/lib/vpn-zones/off")
           machine.succeed("nft list table inet vpnzones_egress")
           machine.wait_until_succeeds("systemctl is-active vpn-zone-system@sz", timeout=60)
