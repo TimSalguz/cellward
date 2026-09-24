@@ -955,6 +955,15 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // —, and entering it would start the program in the host's network under
     // the zone's name. Checked last, as close to the `exec` as it gets.
     if let Network::Zone(pid) = network {
+        // What profile-run will check from inside: the zone's network as it is
+        // now, not as a number will say later.
+        match fs::read_link(format!("/proc/{pid}/ns/net")) {
+            Ok(ns) => std::env::set_var(crate::profile::ENV_EXPECT_NETNS, ns),
+            Err(e) => {
+                eprintln!("зона {zone_name}: её процесс не прочитать ({e}) — запуск остановлен");
+                return 1;
+            }
+        }
         if in_our_network(pid) {
             refuse(
                 tools,

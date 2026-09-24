@@ -55,6 +55,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **Second review round (2026-09-25), the launch path:** the zone entered is
+  checked from inside — `profile-run` compares its own network namespace with
+  the one `vpn-zone run` checked, since `nsenter` finds the zone again by a
+  number, later; a zone without the holder's start note is not up (zones up
+  since before the update are restarted once); the start notes of finished
+  launches stay while a record names them; the broker refuses a request that
+  looks like the host's (the host never needs it), shows the chosen container
+  in its question and keeps it in "always"; `vpn-zone rm` also drops the
+  broker's "always" answers for the zone; the window menu names a program
+  only from the user's own launches.
 - **The portals are asked only for what they would ask the user about**
   (review of 2026-09-25). xdg-desktop-portal knows its caller by the process
   on the other end of its connection — our proxy, outside the sandbox and the

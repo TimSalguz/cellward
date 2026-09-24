@@ -151,12 +151,11 @@ pub fn zone_pid(state: &Path, name: &OsStr) -> Option<i32> {
     let pid: i32 = text.trim().parse().ok()?;
     // The holder notes when it started: a stopped zone leaves its number
     // behind, and once that number is reused a live process is not the zone.
-    // Entering it would put a program into somebody else's namespaces. A
-    // holder from before the note counts by its number, as it always did.
-    match read_setting(&dir.join("zone.start")).map(|s| s.trim().to_owned()) {
-        Some(stamp) => (crate::sys::process_stamp(pid) == Some(stamp)).then_some(pid),
-        None => proc_is_alive(pid).then_some(pid),
-    }
+    // Entering it would put a program into somebody else's namespaces. No
+    // note, no zone: a holder from before the note is restarted once, rather
+    // than trusted by a number that may have outlived it (review 2026-09-25).
+    let stamp = read_setting(&dir.join("zone.start"))?;
+    (crate::sys::process_stamp(pid).as_deref() == Some(stamp.trim())).then_some(pid)
 }
 
 /// Wait for the zone to come up, ten seconds at most: the `ready` marker AND
@@ -680,6 +679,13 @@ fn set_lock(tools: &Tools, args: &[OsString], locked: bool) -> u8 {
                  отсюда программа может запустить что угодно снаружи через systemd --user \
                  (docs/LEAK-MODEL.md §1). Включи герметичность: vpn-zone hermetic {name} on"
             );
+        } else if zone_pid(&tools.state, OsStr::new(&*name)).is_some() {
+            // The setting takes effect when the zone comes up: one up since
+            // before it was switched on is not hermetic yet.
+            eprintln!(
+                "замок держится, если зона поднята уже герметичной; включали герметичность \
+                 после её подъёма — перезапусти зону: vpn-zone down {name}, vpn-zone up {name}"
+            );
         }
     } else {
         let _ = fs::remove_file(&marker);
@@ -971,10 +977,26 @@ fn remove(tools: &Tools, args: &[OsString]) -> u8 {
             }
         }
     }
-    // And the picker's default, if it was this zone.
+    // And the picker's default, if it was this zone, and the broker's
+    // "always" answers from or into it: a new zone of the same name must not
+    // inherit them.
     let default = tools.config.join("default");
     if read_setting(&default).as_deref() == Some(name_text.as_ref()) {
         let _ = fs::remove_file(&default);
+    }
+    let always = tools.config.join(crate::broker::ALWAYS);
+    if let Ok(text) = fs::read_to_string(&always) {
+        let kept: String = text
+            .lines()
+            .filter(|l| {
+                let mut fields = l.split('\t');
+                let origin = fields.next().unwrap_or("");
+                let target = fields.next().unwrap_or("");
+                origin != name_text && target != name_text
+            })
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let _ = fs::write(&always, kept);
     }
     let code = run_sync(tools);
     if code != 0 {
@@ -2406,8 +2428,9 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let me = std::process::id() as i32;
         fs::write(dir.join("zone.pid"), format!("{me}\n")).unwrap();
-        // A holder from before the start time was noted: by its number.
-        assert_eq!(zone_pid(&state, OsStr::new("nl")), Some(me));
+        // No note of the holder's start: not a zone (restarted once after
+        // the update).
+        assert_eq!(zone_pid(&state, OsStr::new("nl")), None);
         let stamp = crate::sys::process_stamp(me).unwrap();
         fs::write(dir.join("zone.start"), format!("{stamp}\n")).unwrap();
         assert_eq!(zone_pid(&state, OsStr::new("nl")), Some(me));

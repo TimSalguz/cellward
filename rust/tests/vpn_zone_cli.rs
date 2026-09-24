@@ -84,11 +84,13 @@ impl Home {
     }
 
     /// Make a zone look like it is up: `zone.pid` naming a process that really
-    /// exists (ourselves) is all `zone_pid` asks for.
+    /// exists (ourselves), with its start noted as the holder notes its own.
     fn zone_is_up(&self, zone: &str) {
         let dir = self.state().join(zone);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("zone.pid"), format!("{}\n", std::process::id())).unwrap();
+        let stamp = vpn_zone::sys::process_stamp(std::process::id() as i32).unwrap();
+        fs::write(dir.join("zone.start"), format!("{stamp}\n")).unwrap();
         fs::write(dir.join("ready"), "").unwrap();
     }
 
