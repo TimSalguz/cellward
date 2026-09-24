@@ -816,8 +816,14 @@ pub fn source_dirs(home: &Path) -> Vec<PathBuf> {
 
 /// One launcher entry found in the sources.
 struct App {
-    /// File name, e.g. `firefox.desktop`.
+    /// The desktop-file ID, e.g. `firefox.desktop`: the file name, or for an
+    /// entry in a subdirectory its path with `-` for `/`
+    /// (`wine/Programs/X.desktop` is `wine-Programs-X.desktop`) — what a menu
+    /// knows it by and what an entry of a higher directory shadows.
     name: String,
+    /// Where the file is below its directory: the name itself at the top,
+    /// `wine/Programs/X.desktop` below it.
+    rel: PathBuf,
     groups: Vec<Group>,
     /// Found in our own output directory. Such files are never intercepted:
     /// they are either ours or the user's.
@@ -1079,6 +1085,51 @@ fn parents(apps: &[App]) -> BTreeMap<String, String> {
     out
 }
 
+/// How deep below an applications directory entries are looked for: Wine's are
+/// at `wine/Programs/<program>/<entry>.desktop`.
+const ENTRY_DEPTH: usize = 4;
+
+/// The `.desktop` files of an applications directory and of its subdirectories,
+/// as `(path below it, desktop-file ID)`, sorted by ID — so that two runs over
+/// the same directory produce the same result, which the "first one found wins"
+/// rule depends on.
+///
+/// Subdirectories count (the XDG menu specification): Wine puts every program
+/// it installs at `wine/Programs/…`, and an entry read only from the top would
+/// start its program in the host's network, around the picker
+/// (`docs/LEAK-MODEL.md` §11). Hidden directories and symlinked ones are not
+/// entered — a link could lead anywhere, round in a circle included.
+fn desktop_files(dir: &Path) -> Vec<(PathBuf, String)> {
+    fn walk(dir: &Path, rel: &Path, depth: usize, out: &mut Vec<(PathBuf, String)>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(String::from) else {
+                continue;
+            };
+            let here = rel.join(&name);
+            let is_real_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+            if is_real_dir {
+                if depth < ENTRY_DEPTH && !name.starts_with('.') {
+                    walk(&entry.path(), &here, depth + 1, out);
+                }
+            } else if name.ends_with(".desktop") {
+                let id = here
+                    .iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("-");
+                out.push((here, id));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, Path::new(""), 1, &mut out);
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out
+}
+
 fn collect_apps(dirs: &[PathBuf], out_dir: &Path, adopted_dir: &Path) -> Vec<App> {
     let resolved = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let out_resolved = resolved(out_dir);
@@ -1087,22 +1138,11 @@ fn collect_apps(dirs: &[PathBuf], out_dir: &Path, adopted_dir: &Path) -> Vec<App
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for dir in dirs {
         let own_dir = resolved(dir) == out_resolved;
-        let Ok(entries) = fs::read_dir(dir) else {
-            continue;
-        };
-        // Sorted, so that two runs over the same directory produce the same
-        // result — the "first one found wins" rule below depends on it.
-        let mut names: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| e.file_name().to_str().map(String::from))
-            .filter(|n| n.ends_with(".desktop"))
-            .collect();
-        names.sort();
-        for name in names {
+        for (rel, name) in desktop_files(dir) {
             if seen.contains(&name) {
                 continue;
             }
-            let path = dir.join(&name);
+            let path = dir.join(&rel);
             // An entry taken over in place is read from the original it
             // replaced, not from what we wrote: the original is the program's
             // entry, ours is only its interception.
@@ -1136,6 +1176,7 @@ fn collect_apps(dirs: &[PathBuf], out_dir: &Path, adopted_dir: &Path) -> Vec<App
             seen.insert(name.clone());
             apps.push(App {
                 name,
+                rel,
                 groups,
                 own_dir,
                 hidden,
@@ -1173,21 +1214,13 @@ fn zone_names(state_dir: &Path) -> Vec<String> {
 /// program's) file. Its original bytes are written back and the backup goes;
 /// without a backup the file is left as it is.
 pub fn cleanup(out_dir: &Path, wanted: &BTreeSet<String>, adopted_dir: &Path) -> u32 {
-    let Ok(entries) = fs::read_dir(out_dir) else {
-        return 0;
-    };
     let mut removed = 0;
-    for entry in entries.flatten() {
-        let Some(name) = entry.file_name().to_str().map(String::from) else {
-            continue;
-        };
-        if !name.ends_with(".desktop")
-            || OWN_ENTRIES.contains(&name.as_str())
-            || wanted.contains(&name)
-        {
+    // Subdirectories too: an entry of Wine's is taken over where it lies.
+    for (rel, name) in desktop_files(out_dir) {
+        if OWN_ENTRIES.contains(&name.as_str()) || wanted.contains(&name) {
             continue;
         }
-        let path = entry.path();
+        let path = out_dir.join(&rel);
         if adopted(&path) {
             let backup = adopted_dir.join(&name);
             if let Ok(original) = fs::read(&backup) {
@@ -1704,7 +1737,8 @@ fn sync_from(
         // either new, or ours rewritten by its program — either way its current
         // bytes are the original now.
         if mode.intercepts() && app.own_dir && take_over {
-            let target = out_dir.join(&app.name);
+            // In place: in its subdirectory, where the menu finds it.
+            let target = out_dir.join(&app.rel);
             if regular_file(&target) {
                 let mut kept = true;
                 if !ours(&target) {
@@ -2410,6 +2444,69 @@ Name=not carried over
             .join(ADOPTED_DIR)
             .join("userapp-My.desktop")
             .exists());
+    }
+
+    /// Wine puts every program it installs below the user's directory, at
+    /// `wine/Programs/<program>/`: read only from the top, such an entry ran
+    /// its program in the host's network, with no picker (owner, 2026-09-24;
+    /// `docs/LEAK-MODEL.md` §11). Taken over where it lies, under its
+    /// desktop-file ID, and given back there.
+    #[test]
+    fn an_entry_in_a_subdirectory_is_taken_over_where_it_lies() {
+        let d = Desk::new("adopt-nested");
+        let dir = d.apps.join("wine/Programs/Game");
+        fs::create_dir_all(&dir).unwrap();
+        let original = "[Desktop Entry]\nName=Game\nExec=env \"WINEPREFIX=/home/u/.wine\" wine \"C:\\\\Game.lnk\"\nType=Application\nPath=/home/u/.wine/drive_c/Game/\n";
+        fs::write(dir.join("Game.desktop"), original).unwrap();
+        d.sync();
+        let taken = d.read("wine/Programs/Game/Game.desktop");
+        assert!(taken.contains("X-VPNZone=adopted"), "{taken}");
+        assert!(
+            taken.contains("Exec=/bin/pick --id wine-Programs-Game-Game -- env \"WINEPREFIX=/home/u/.wine\" wine \"C:\\\\Game.lnk\""),
+            "{taken}"
+        );
+        assert!(
+            taken.contains("Path=/home/u/.wine/drive_c/Game/"),
+            "{taken}"
+        );
+        // Not a second copy at the top: the menu would show the program twice.
+        assert!(!d.apps.join("wine-Programs-Game-Game.desktop").exists());
+        assert_eq!(
+            fs::read_to_string(
+                d.state
+                    .join(ADOPTED_DIR)
+                    .join("wine-Programs-Game-Game.desktop")
+            )
+            .unwrap(),
+            original
+        );
+        d.sync();
+        assert_eq!(d.read("wine/Programs/Game/Game.desktop"), taken);
+        d.setting("mode", "off");
+        d.sync();
+        assert_eq!(d.read("wine/Programs/Game/Game.desktop"), original);
+    }
+
+    /// A system entry in a subdirectory is shadowed by its desktop-file ID from
+    /// the top of the user's directory — the one place with a higher precedence.
+    #[test]
+    fn a_system_entry_in_a_subdirectory_is_shadowed_by_its_id() {
+        let d = Desk::new("nested-system");
+        fs::create_dir_all(d.system.join("kde")).unwrap();
+        fs::write(
+            d.system.join("kde/viewer.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Viewer\nExec=viewer %f\n",
+        )
+        .unwrap();
+        // A symlinked directory is not entered: it could lead anywhere.
+        symlink(d.system.join("kde"), d.system.join("loop")).unwrap();
+        d.sync();
+        let out = d.read("kde-viewer.desktop");
+        assert!(
+            out.contains("Exec=/bin/pick --id kde-viewer -- viewer %f"),
+            "{out}"
+        );
+        assert!(!d.apps.join("loop-viewer.desktop").exists());
     }
 
     #[test]
