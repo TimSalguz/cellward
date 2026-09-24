@@ -102,6 +102,7 @@ pub mod launch;
 pub mod openconnect;
 pub mod picker;
 pub mod profile;
+pub mod pulse_filter;
 pub mod registry;
 pub mod seccomp;
 pub mod status;

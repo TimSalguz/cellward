@@ -48,6 +48,54 @@ let
     overlays = [ ];
   };
 
+  # A stand-in for the sound server's control socket: it records the command
+  # of every frame that reaches it, one number per line.
+  fakePulse = pkgs.writeText "fake-pulse.py" ''
+    import os, socket, struct, threading
+    path = "/run/user/1000/pulse/native"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(path)
+    server.listen(8)
+    def client(c):
+        buf = b""
+        while True:
+            data = c.recv(65536)
+            if not data:
+                return
+            buf += data
+            while len(buf) >= 20:
+                length = struct.unpack(">I", buf[:4])[0]
+                if len(buf) < 20 + length:
+                    break
+                frame, buf = buf[:20 + length], buf[20 + length:]
+                command = struct.unpack(">I", frame[21:25])[0]
+                with open("/tmp/pulse-seen", "a") as log:
+                    log.write(f"{command}\n")
+    while True:
+        c, _ = server.accept()
+        threading.Thread(target=client, args=(c,), daemon=True).start()
+  '';
+  # A client in a zone: LOAD_MODULE, then GET_SERVER_INFO; prints the command
+  # of the answer to the first.
+  pulseClient = pkgs.writeText "pulse-client.py" ''
+    import socket, struct, time
+    def frame(command, tag):
+        payload = b"L" + struct.pack(">I", command) + b"L" + struct.pack(">I", tag)
+        return struct.pack(">IIIII", len(payload), 0xFFFFFFFF, 0, 0, 0) + payload
+    s = socket.socket(socket.AF_UNIX)
+    s.connect("/run/user/1000/pulse/native")
+    s.sendall(frame(51, 1))
+    answer = s.recv(64)
+    print("reply", struct.unpack(">I", answer[21:25])[0])
+    s.sendall(frame(20, 2))
+    time.sleep(1)
+  '';
+
   # A CA and a server certificate made at build time, for the container that is
   # DECLARED to trust it (docs/CONTAINERS.md §8). Synthetic, and in the store of
   # this test only.
@@ -1112,6 +1160,22 @@ let
           assert '{"id":"compositor-ipc","level":"ok"' in out, out
           assert '{"id":"session-bus","level":"warn"' in out, out
           alice("vpn-zone down vmsmoke")
+
+      # The sound server's control socket reaches a zone through the filter
+      # (rust/src/pulse_filter.rs): a zone plays and records, it does not make
+      # the host's sound server load a module that connects out, in the host's
+      # network (review 2026-09-25). A stand-in server records what reaches it.
+      with subtest("pulse: a zone cannot load a module into the host's sound server"):
+          alice("systemd-run --user --unit=fakepulse ${pkgs.python3}/bin/python3 ${fakePulse}")
+          machine.wait_until_succeeds("test -S /run/user/1000/pulse/native")
+          alice("vpn-zone up vmsmoke")
+          zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
+          out = in_zone(zp, "${pkgs.python3}/bin/python3 ${pulseClient}")
+          assert "reply 0" in out, f"LOAD_MODULE was not answered with ERROR: {out}"
+          machine.wait_until_succeeds("grep -qx 20 /tmp/pulse-seen", timeout=15)
+          machine.fail("grep -qx 51 /tmp/pulse-seen")
+          alice("vpn-zone down vmsmoke")
+          alice("systemctl --user stop fakepulse.service")
 
       # A real compositor, headless: sway speaks wp_security_context_v1 and
       # hides its privileged protocols from a restricted client. A program in a
