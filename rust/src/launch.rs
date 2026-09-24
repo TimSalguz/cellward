@@ -47,7 +47,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::cli::{self, zone_pid};
+use crate::cli;
 use crate::profile::{exec_command, EXIT_NOT_STARTED};
 use crate::registry;
 use crate::tools::Tools;
@@ -764,15 +764,18 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         // Nothing to start and nothing to enter: the host's own network.
         Network::Unconfined
     } else {
-        let mut pid = zone_pid(&tools.state, &zone);
+        // Up and READY, not just up: a zone still being set up is not entered
+        // (`cli::zone_up`).
+        let mut pid = cli::zone_up(&tools.state, &zone);
         if pid.is_none() {
-            // The shortcut may well have been clicked while the zone was down.
-            // Starting it is the expected behaviour, not an error — and a
-            // failure here is deliberately ignored, because the check below
-            // says the same thing in words a user can act on.
+            // The shortcut may well have been clicked while the zone was down —
+            // or while it was still coming up. Starting it is the expected
+            // behaviour, not an error (a zone that is starting is left to it),
+            // and a failure here is deliberately ignored, because the check
+            // below says the same thing in words a user can act on.
             let _ = cli::systemctl(tools, "start", &zone);
             cli::wait_ready(&tools.state, &zone);
-            pid = zone_pid(&tools.state, &zone);
+            pid = cli::zone_up(&tools.state, &zone);
         }
         let Some(pid) = pid else {
             eprintln!("зона {zone_name} не поднимается");

@@ -189,7 +189,7 @@ pub fn append(reg: &Path, pid: i32, zone: &str, selector: &str) -> io::Result<()
 }
 
 /// Below the registry: when each launch started, `.started/<pid>` holding the
-/// start time of the process ([`crate::sys::start_time`]).
+/// start time of the process and the boot's id ([`crate::sys::process_stamp`]).
 ///
 /// **A pid alone does not name a process for long.** The registry is on disk
 /// and outlives a reboot, and records are only swept by the next launch of the
@@ -211,11 +211,11 @@ pub fn note_start(running: &Path, pid: i32) -> io::Result<()> {
     let dir = running.join(STARTED);
     fs::create_dir_all(&dir)?;
     sweep_started(running);
-    let start = crate::sys::start_time(pid)
+    let stamp = crate::sys::process_stamp(pid)
         .ok_or_else(|| io::Error::other(format!("no start time of pid {pid}")))?;
     // Through a temporary: a reader never sees half a number.
     let tmp = dir.join(format!(".{pid}.tmp"));
-    fs::write(&tmp, format!("{start}\n"))?;
+    fs::write(&tmp, format!("{stamp}\n"))?;
     fs::rename(&tmp, dir.join(pid.to_string()))
 }
 
@@ -241,12 +241,10 @@ pub fn sweep_started(running: &Path) -> usize {
     swept
 }
 
-fn recorded_start(running: &Path, pid: i32) -> Option<u64> {
+fn recorded_start(running: &Path, pid: i32) -> Option<String> {
     fs::read_to_string(running.join(STARTED).join(pid.to_string()))
-        .ok()?
-        .trim()
-        .parse()
         .ok()
+        .map(|s| s.trim().to_owned())
 }
 
 /// Is the process `pid` the launch recorded under that pid — its start time on
@@ -254,7 +252,7 @@ fn recorded_start(running: &Path, pid: i32) -> Option<u64> {
 /// picker's "already running, start it there", the zone of a window. A record
 /// from before start times were kept is not trusted with that.
 pub fn launched(running: &Path, pid: i32) -> bool {
-    recorded_start(running, pid).is_some_and(|start| crate::sys::start_time(pid) == Some(start))
+    recorded_start(running, pid).is_some_and(|stamp| crate::sys::process_stamp(pid) == Some(stamp))
 }
 
 /// May the launch recorded under `pid` still be running? The same as
@@ -264,7 +262,7 @@ pub fn launched(running: &Path, pid: i32) -> bool {
 /// network, a throwaway container kept, a record not swept.
 pub fn alive(running: &Path, pid: i32) -> bool {
     match recorded_start(running, pid) {
-        Some(start) => crate::sys::start_time(pid) == Some(start),
+        Some(stamp) => crate::sys::process_stamp(pid) == Some(stamp),
         None => crate::profile::proc_is_alive(pid),
     }
 }

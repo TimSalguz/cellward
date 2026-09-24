@@ -486,6 +486,14 @@ pub fn start_time(pid: i32) -> Option<u64> {
     parse_start_time(&stat)
 }
 
+/// A process's mark for the files that name it by pid: its start time and
+/// this boot's id. The start time counts from boot, and the files outlive a
+/// reboot; with the boot's id beside it a mark from before one matches nothing.
+pub fn process_stamp(pid: i32) -> Option<String> {
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    Some(format!("{} {}", start_time(pid)?, boot.trim()))
+}
+
 /// The start time out of a `stat` line. The command name is in parentheses
 /// and may hold anything, spaces and parentheses too, so the fields are counted
 /// after the LAST `)`: the first one there is field 3, the start time field 22.
