@@ -153,6 +153,93 @@ pub fn door(h: &Header) -> Option<Door> {
     }
 }
 
+/// The portal interfaces a program of a zone or a sandbox may call.
+///
+/// **The portal takes it for a host application.** xdg-desktop-portal knows a
+/// caller by the process on the other end of ITS connection — the proxy, which
+/// runs outside the sandbox and outside the zone's mount namespace — and finds
+/// no `/.flatpak-info` there (review 2026-09-25). A host application is
+/// granted without a dialog what a Flatpak would be asked about: the
+/// dynamic launcher installs a `.desktop` entry of the caller's making and
+/// starts it ON THE HOST; location, camera, a non-interactive screenshot, the
+/// Secret portal's key (one for every "host" caller) come the same way. So
+/// the interfaces are named here, and everything else under
+/// `org.freedesktop.portal.` is refused — a portal added later included.
+pub const PORTAL_ALLOWED: &[&str] = &[
+    "org.freedesktop.portal.Request",
+    "org.freedesktop.portal.Session",
+    "org.freedesktop.portal.FileChooser",
+    "org.freedesktop.portal.FileTransfer",
+    // Answered by the filter itself (`door`).
+    "org.freedesktop.portal.OpenURI",
+    "org.freedesktop.portal.Email",
+    "org.freedesktop.portal.Background",
+    // Read-only, or with a dialog of the portal's own every time.
+    "org.freedesktop.portal.Settings",
+    "org.freedesktop.portal.Notification",
+    "org.freedesktop.portal.Inhibit",
+    "org.freedesktop.portal.NetworkMonitor",
+    "org.freedesktop.portal.ProxyResolver",
+    "org.freedesktop.portal.MemoryMonitor",
+    "org.freedesktop.portal.PowerProfileMonitor",
+    "org.freedesktop.portal.Print",
+    "org.freedesktop.portal.Trash",
+    "org.freedesktop.portal.ScreenCast",
+    "org.freedesktop.portal.Account",
+];
+
+/// Why a call is not passed on, if it is not: a portal interface not in
+/// [`PORTAL_ALLOWED`], or a call that names no interface at all — dispatched
+/// by its member alone, it could reach any of them. The bus itself is always
+/// asked directly.
+pub fn refused(h: &Header) -> Option<String> {
+    if h.kind != wire::METHOD_CALL {
+        return None;
+    }
+    match h.interface.as_deref() {
+        None if h.destination.as_deref() != Some("org.freedesktop.DBus") => Some(format!(
+            "{} without an interface",
+            h.member.as_deref().unwrap_or("?")
+        )),
+        Some(i) if i.starts_with("org.freedesktop.portal.") && !PORTAL_ALLOWED.contains(&i) => {
+            Some(format!("{i} is not for programs of a zone"))
+        }
+        _ => None,
+    }
+}
+
+/// Say no to a call the way the bus would: `AccessDenied`, from where it was
+/// sent to. Nothing when no reply is expected.
+fn deny(conn: &Conn, ctx: &Ctx, h: &Header, why: &str) -> io::Result<()> {
+    eprintln!("bus-filter: refused — {why}");
+    if h.flags & wire::NO_REPLY_EXPECTED != 0 {
+        return Ok(());
+    }
+    let unique = conn
+        .unique
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let from = h.destination.clone().unwrap_or_else(|| PORTAL.to_owned());
+    let mut fields = vec![
+        Field::ErrorName("org.freedesktop.DBus.Error.AccessDenied"),
+        Field::ReplySerial(h.serial),
+        Field::Sender(&from),
+    ];
+    if let Some(d) = unique.as_deref() {
+        fields.push(Field::Destination(d));
+    }
+    fields.push(Field::Signature("s"));
+    let reply = wire::message(
+        wire::ERROR,
+        wire::NO_REPLY_EXPECTED,
+        ctx.serial(),
+        &fields,
+        &body::string(&format!("vpn-zones: {why}")),
+    );
+    conn.send(&reply, &[])
+}
+
 /// Whether a link may be handed to the opener, and why not.
 pub fn acceptable(uri: &str) -> Result<(), &'static str> {
     if uri.len() > MAX_URI {
@@ -442,6 +529,10 @@ fn client_to_bus(
             match door(&h) {
                 // The descriptors of an answered call are dropped — closed.
                 Some(which) => answer(conn, ctx, &msg, &h, which)?,
+                // So are those of a refused one.
+                None if refused(&h).is_some() => {
+                    deny(conn, ctx, &h, &refused(&h).unwrap_or_default())?
+                }
                 None => {
                     let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
                     send_all(up, &msg, &raw)?;
@@ -908,5 +999,43 @@ mod tests {
         }
         assert!(!ctx.may_open());
         assert_ne!(ctx.serial(), 0);
+    }
+
+    /// The portal takes a zone's program for a host application: only the
+    /// named portal interfaces get through, and no call without an interface.
+    #[test]
+    fn only_the_named_portal_interfaces_get_through() {
+        let on = |iface: Option<&str>, dest: &str| {
+            let mut h = call("Anything", iface, dest);
+            h.destination = Some(dest.to_owned());
+            refused(&h)
+        };
+        for bad in [
+            "org.freedesktop.portal.DynamicLauncher",
+            "org.freedesktop.portal.Location",
+            "org.freedesktop.portal.Camera",
+            "org.freedesktop.portal.Screenshot",
+            "org.freedesktop.portal.Secret",
+            "org.freedesktop.portal.Realtime",
+            "org.freedesktop.portal.Documents",
+            "org.freedesktop.portal.SomethingNew",
+        ] {
+            assert!(on(Some(bad), PORTAL).is_some(), "{bad}");
+        }
+        for good in [
+            "org.freedesktop.portal.FileChooser",
+            "org.freedesktop.portal.Settings",
+            "org.freedesktop.portal.Request",
+            "org.freedesktop.DBus.Properties",
+            "org.freedesktop.Notifications",
+            "org.kde.StatusNotifierWatcher",
+        ] {
+            assert!(on(Some(good), PORTAL).is_none(), "{good}");
+        }
+        assert!(on(None, PORTAL).is_some());
+        assert!(on(None, "org.freedesktop.DBus").is_none());
+        let mut signal = call("Anything", Some("org.freedesktop.portal.Location"), PORTAL);
+        signal.kind = wire::SIGNAL;
+        assert!(refused(&signal).is_none());
     }
 }

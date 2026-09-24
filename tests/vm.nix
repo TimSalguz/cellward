@@ -1317,6 +1317,17 @@ let
           assert lines[at + 1] == zone_ns, f"{lines} (zone {zone_ns})"
           # The zone's bus is still the zone's: names and calls go through.
           in_zone(hp, "busctl --user --timeout=5 call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ListNames")
+          # But not the portals the portal would grant a "host application"
+          # without a dialog: it sees our proxy, not the program (review
+          # 2026-09-25) — the dynamic launcher installs and starts a launcher
+          # on the host. Refused by the filter, whether a portal runs or not.
+          launcher = (
+              "gdbus call --session --timeout 5 --dest org.freedesktop.portal.Desktop "
+              "--object-path /org/freedesktop/portal/desktop "
+              "--method org.freedesktop.portal.DynamicLauncher.RequestInstallToken"
+          )
+          out = in_zone(hp, f"sh -c \"{launcher} vm '@a{{sv}} {{}}' 2>&1 || true\"")
+          assert "AccessDenied" in out, out
           alice("systemctl --user unset-environment WAYLAND_DISPLAY")
           alice("vpn-zone down vmherm")
           # An ordinary zone: the sandbox's own proxy over the host's bus, the

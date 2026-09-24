@@ -582,9 +582,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // remembered for this key, when there is one. Two programs starting at
     // once each ask their own questions, and a dialog that names its program
     // with a raw id (or not at all) is how the answers get swapped.
+    // A file name, whoever set the variable (`registry_key`).
     let label = pretty_label(
         &tools.state,
-        appid_env.as_deref().unwrap_or(appbin.as_os_str()),
+        &registry_key(appid_env.as_deref().unwrap_or(appbin.as_os_str())),
     );
     let mut cmd = selection.cmd.clone();
 
@@ -654,7 +655,9 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         // shortcut says "discord" while the binary is called "Discord", and two
         // independent permission sets for one program is what taking the binary
         // name gave us. (`docs/GOTCHAS.md` §6)
-        let fsid = appid_env.clone().unwrap_or_else(|| appbin.clone());
+        // Cleaned (`appbin` is the variable's value, sanitized): it becomes a
+        // directory of the sandbox's permissions and the portals' app id.
+        let fsid = appbin.clone();
         let mut wrapped: Vec<OsString> = vec![
             tools.core.clone().into(),
             "fs-sandbox".into(),

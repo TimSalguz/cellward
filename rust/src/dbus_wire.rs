@@ -13,6 +13,7 @@ use std::fmt;
 /// Message types.
 pub const METHOD_CALL: u8 = 1;
 pub const METHOD_RETURN: u8 = 2;
+pub const ERROR: u8 = 3;
 pub const SIGNAL: u8 = 4;
 /// Header flag: the caller does not want a reply.
 pub const NO_REPLY_EXPECTED: u8 = 0x1;
@@ -25,6 +26,7 @@ const MAX_DEPTH: usize = 64;
 const FIELD_PATH: u8 = 1;
 const FIELD_INTERFACE: u8 = 2;
 const FIELD_MEMBER: u8 = 3;
+const FIELD_ERROR_NAME: u8 = 4;
 const FIELD_REPLY_SERIAL: u8 = 5;
 const FIELD_DESTINATION: u8 = 6;
 const FIELD_SENDER: u8 = 7;
@@ -408,6 +410,7 @@ pub enum Field<'a> {
     Path(&'a str),
     Interface(&'a str),
     Member(&'a str),
+    ErrorName(&'a str),
     ReplySerial(u32),
     Destination(&'a str),
     Sender(&'a str),
@@ -427,6 +430,7 @@ pub fn message(kind: u8, flags: u8, serial: u32, fields: &[Field<'_>], body: &[u
             Field::Path(v) => w.field_str(FIELD_PATH, "o", v),
             Field::Interface(v) => w.field_str(FIELD_INTERFACE, "s", v),
             Field::Member(v) => w.field_str(FIELD_MEMBER, "s", v),
+            Field::ErrorName(v) => w.field_str(FIELD_ERROR_NAME, "s", v),
             Field::ReplySerial(v) => w.field_u32(FIELD_REPLY_SERIAL, *v),
             Field::Destination(v) => w.field_str(FIELD_DESTINATION, "s", v),
             Field::Sender(v) => w.field_str(FIELD_SENDER, "s", v),

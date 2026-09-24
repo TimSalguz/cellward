@@ -224,7 +224,10 @@ pub fn launch_of(state: &Path, pid: i32) -> Option<Launch> {
     let mut at = pid;
     for _ in 0..64 {
         if let Some((_, program, record)) = index.get(&at) {
-            if registry::launched(&running, at) {
+            // The user's own launch: one a program in a zone asked for runs
+            // under an id of that program's choosing, and would get the user's
+            // label for it and the "pin" and "restart" entries.
+            if registry::launched_here(&running, at) {
                 if record.zone == zone {
                     return Some(Launch {
                         zone,

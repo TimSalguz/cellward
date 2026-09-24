@@ -55,6 +55,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **The portals are asked only for what they would ask the user about**
+  (review of 2026-09-25). xdg-desktop-portal knows its caller by the process
+  on the other end of its connection — our proxy, outside the sandbox and the
+  zone's mounts — and finds no `/.flatpak-info` there: every program of a
+  hermetic zone or a sandbox was a HOST application to it. A host application
+  gets without a dialog what a Flatpak is asked about: the dynamic launcher
+  installs a launcher of the caller's making and starts it on the host, in the
+  host's network; location, camera, a non-interactive screenshot, the Secret
+  portal's key come the same way. The bus filter now lets through only named
+  portal interfaces (file chooser, file transfer, settings, notifications,
+  inhibit, network and memory monitors, proxy resolver, print, trash,
+  screencast, account — and OpenURI, Email, Background, which it answers
+  itself) and answers the rest, a portal added later included, with
+  AccessDenied; a call that names no interface is refused too. The sandbox's
+  `vpnzone.app.<id>` never reached the portal for the same reason; giving
+  sandboxes their identity with the portals (the proxy inside the sandbox, as
+  Flatpak runs it) is the next step. VM test: the dynamic launcher refused
+  from a hermetic zone.
 - **Only a throwaway container of ours can be joined.** `--tmp-profile
   --join <dir>` took any existing directory for a throwaway layer — which is
   erased behind its last tenant; a directory named by a request through the
