@@ -1318,7 +1318,24 @@ fn resolve_container(tools: &Tools, container: &Container) -> Option<ResolvedCon
                 eprintln!("временного контейнера {} уже нет", dir.display());
                 return None;
             }
-            (basename(dir.as_os_str()).to_owned(), dir.clone(), true)
+            // Only a throwaway container of ours: its layer is ERASED behind the
+            // last tenant, and a directory named here — by a request that came
+            // through the broker, or by a slip of the hand — would go with it.
+            let real = fs::canonicalize(dir).ok()?;
+            let ours = real
+                .file_name()
+                .is_some_and(|n| n.as_bytes().starts_with(b"vpn-profile-"))
+                && throwaway_bases(&tools.state).iter().any(|base| {
+                    fs::canonicalize(base).is_ok_and(|b| real.parent() == Some(b.as_path()))
+                });
+            if !ours {
+                eprintln!(
+                    "{} — не временный контейнер vpn-zones: присоединиться нельзя",
+                    dir.display()
+                );
+                return None;
+            }
+            (basename(real.as_os_str()).to_owned(), real, true)
         }
     };
     let key = if profile.is_empty() {

@@ -605,6 +605,49 @@ fn a_launch_asked_for_from_a_zone_is_marked_and_its_id_is_a_file_name() {
 }
 
 #[test]
+fn only_a_throwaway_container_of_ours_can_be_joined() {
+    // Its layer is erased behind the last tenant: a directory named by a
+    // request would go with it.
+    let home = Home::new("join");
+    home.zone_is_up("nl");
+    let other = home.root.join("documents");
+    fs::create_dir_all(&other).unwrap();
+    let out = home.run_with(
+        &[
+            "run",
+            "nl",
+            "--tmp-profile",
+            "--join",
+            other.to_str().unwrap(),
+            "--",
+            "true",
+        ],
+        &[("VPN_ZONE_DRYRUN", "1")],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("не временный контейнер"),
+        "{}",
+        stderr(&out)
+    );
+    let ours = home.state().join(".throwaway/vpn-profile-abc12345");
+    fs::create_dir_all(&ours).unwrap();
+    let out = home.run_with(
+        &[
+            "run",
+            "nl",
+            "--tmp-profile",
+            "--join",
+            ours.to_str().unwrap(),
+            "--",
+            "true",
+        ],
+        &[("VPN_ZONE_DRYRUN", "1")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
 fn a_zone_whose_process_is_in_our_network_is_not_entered() {
     // `zone.pid` of a stopped zone stays behind, and its number comes round to
     // another process. Here it names this test itself — the host's network:

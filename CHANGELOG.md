@@ -55,6 +55,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **Only a throwaway container of ours can be joined.** `--tmp-profile
+  --join <dir>` took any existing directory for a throwaway layer — which is
+  erased behind its last tenant; a directory named by a request through the
+  broker, or by a slip, would have gone with it.
 - **What says "alive" means it** (review of 2026-09-24): `check`,
   `status --json` and `doctor` took any handshake line for a live tunnel — an
   hours-old one of a dead tunnel too; now a tunnel `vpn-zone watch` found dead
