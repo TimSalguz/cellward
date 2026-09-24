@@ -143,6 +143,7 @@ exit "$code""#,
             ("xwayland", "/nonexistent/xwayland-satellite".to_owned()),
             ("openssl", "/nonexistent/openssl".to_owned()),
             ("certutil", "/nonexistent/certutil".to_owned()),
+            ("opener", "/nonexistent/xdg-open".to_owned()),
         ] {
             json.push_str(&format!("  \"{key}\": \"{value}\",\n"));
         }

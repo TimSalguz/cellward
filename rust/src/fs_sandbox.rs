@@ -198,6 +198,9 @@ pub struct Tools {
     pub dbus_proxy: PathBuf,
     pub kdialog: PathBuf,
     pub xwayland: PathBuf,
+    /// What opens a link the program hands the portal (`crate::bus_filter`):
+    /// `xdg-open`, run in the zone, outside the sandbox.
+    pub opener: PathBuf,
 }
 
 impl Default for Tools {
@@ -209,6 +212,7 @@ impl Default for Tools {
             dbus_proxy: PathBuf::from("xdg-dbus-proxy"),
             kdialog: PathBuf::from("kdialog"),
             xwayland: PathBuf::from("xwayland-satellite"),
+            opener: PathBuf::from("xdg-open"),
         }
     }
 }
@@ -322,6 +326,7 @@ impl Args {
                 "--dbus-proxy" => tools.dbus_proxy = PathBuf::from(value),
                 "--kdialog" => tools.kdialog = PathBuf::from(value),
                 "--xwayland" => tools.xwayland = PathBuf::from(value),
+                "--opener" => tools.opener = PathBuf::from(value),
                 // An empty name is "no named sandbox", the way the shell's
                 // `sbname=""` was: a launcher that lost the value must not end
                 // up creating a sandbox directory called "".
@@ -822,8 +827,10 @@ pub fn dev_nodes(dev: &Path) -> Vec<PathBuf> {
 
 // --- RUNNING -----------------------------------------------------------------
 
-/// The bus proxy and the sandbox, so that a signal can be passed on to them.
+/// The bus proxy, its filter and the sandbox, so that a signal can be passed
+/// on to them.
 static PROXY_PID: AtomicI32 = AtomicI32::new(0);
+static FILTER_PID: AtomicI32 = AtomicI32::new(0);
 static BWRAP_PID: AtomicI32 = AtomicI32::new(0);
 /// Were we asked to stop before the sandbox even started?
 static ASKED_TO_STOP: AtomicBool = AtomicBool::new(false);
@@ -836,7 +843,7 @@ static ASKED_TO_STOP: AtomicBool = AtomicBool::new(false);
 /// proxy, which is a process of ours and not of bwrap's.
 extern "C" fn forward_stop(sig: libc::c_int) {
     ASKED_TO_STOP.store(true, Ordering::SeqCst);
-    for slot in [&BWRAP_PID, &PROXY_PID] {
+    for slot in [&BWRAP_PID, &FILTER_PID, &PROXY_PID] {
         let pid = slot.load(Ordering::SeqCst);
         if pid > 0 {
             // SAFETY: kill(2) is async-signal-safe and takes no pointers.
@@ -861,31 +868,41 @@ fn on_term_and_int(handler: extern "C" fn(libc::c_int)) {
 struct Cleanup {
     dir: PathBuf,
     proxy: Option<Child>,
+    filter: Option<Child>,
 }
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        if let Some(mut proxy) = self.proxy.take() {
+        // The filter first: it is what the program talks to.
+        if let Some(filter) = self.filter.take() {
+            FILTER_PID.store(0, Ordering::SeqCst);
+            stop(filter);
+        }
+        if let Some(proxy) = self.proxy.take() {
             PROXY_PID.store(0, Ordering::SeqCst);
-            // TERM first, as the shell did; a KILL only for a proxy that will
-            // not go, so that the sandbox cannot be outlived by its own bus.
-            // SAFETY: kill(2) takes no pointers and the child has not been
-            // waited for yet, so the pid is still ours.
-            unsafe { libc::kill(proxy.id() as libc::pid_t, libc::SIGTERM) };
-            let deadline = std::time::Instant::now() + PROXY_GRACE;
-            loop {
-                match proxy.try_wait() {
-                    Ok(Some(_)) | Err(_) => break,
-                    Ok(None) if std::time::Instant::now() >= deadline => {
-                        let _ = proxy.kill();
-                        let _ = proxy.wait();
-                        break;
-                    }
-                    Ok(None) => std::thread::sleep(WAIT_STEP),
-                }
-            }
+            stop(proxy);
         }
         let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// TERM first, as the shell did; a KILL only for a helper that will not go, so
+/// that the sandbox cannot be outlived by its own bus.
+fn stop(mut child: Child) {
+    // SAFETY: kill(2) takes no pointers and the child has not been waited for
+    // yet, so the pid is still ours.
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    let deadline = std::time::Instant::now() + PROXY_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+            Ok(None) => std::thread::sleep(WAIT_STEP),
+        }
     }
 }
 
@@ -1059,6 +1076,56 @@ fn start_bus_proxy(tool: &Path, socket: &Path, runtime: &Path) -> (Option<Child>
     (Some(child), None)
 }
 
+/// Start `bus-filter` in front of the proxy's socket and wait for its own.
+/// `None` means no bus for the program.
+fn start_bus_filter(
+    upstream: &Path,
+    socket: &Path,
+    opener: &Path,
+) -> (Option<Child>, Option<PathBuf>) {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            eprintln!(
+                "fs-sandbox: cannot find our own binary ({e}) — the program gets no session bus"
+            );
+            return (None, None);
+        }
+    };
+    let mut child = match Command::new(exe)
+        .arg("bus-filter")
+        .arg("--listen")
+        .arg(socket)
+        .arg("--upstream")
+        .arg(upstream)
+        .arg("--opener")
+        .arg(opener)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!(
+                "fs-sandbox: cannot start the bus filter ({e}) — the program gets no session bus"
+            );
+            return (None, None);
+        }
+    };
+    FILTER_PID.store(child.id() as i32, Ordering::SeqCst);
+    for _ in 0..WAIT_STEPS {
+        if let Some(path) = socket_at(socket.to_path_buf()) {
+            return (Some(child), Some(path));
+        }
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        std::thread::sleep(WAIT_STEP);
+    }
+    eprintln!("fs-sandbox: the bus filter did not come up — the program gets no session bus");
+    (Some(child), None)
+}
+
 /// Everything `fs-sandbox` does, from the permissions to the exit code.
 pub fn run(args: Args) -> u8 {
     let Some(home) = home_dir() else {
@@ -1130,7 +1197,11 @@ pub fn run(args: Args) -> u8 {
         }
     };
     // From here on everything leaves through this guard.
-    let mut cleanup = Cleanup { dir, proxy: None };
+    let mut cleanup = Cleanup {
+        dir,
+        proxy: None,
+        filter: None,
+    };
     on_term_and_int(forward_stop);
 
     let info = cleanup.dir.join("flatpak-info");
@@ -1140,18 +1211,52 @@ pub fn run(args: Args) -> u8 {
     }
 
     // --- THE BUS THROUGH A FILTER ---
+    // program → bus-filter (links, LEAK-MODEL §2) → xdg-dbus-proxy (names) →
+    // the session bus. Without the filter no bus at all: the proxy alone
+    // would hand the program's links to the host's portal.
+    //
+    // In a hermetic zone the bus is filtered already — by the zone's own
+    // xdg-dbus-proxy — and a second one on top of it does not work: the inner
+    // proxy's own calls carry serials the outer one refuses ("Exceeds maximum
+    // value"), and the program gets no bus at all (measured; it did not work
+    // before the filter either). The filter goes straight onto the zone's bus,
+    // and the zone's rules — a superset of a sandbox's: input methods, media
+    // keys, the screensaver inhibitor on top — are the ones in force.
     let socket = cleanup.dir.join("bus");
-    let (proxy, bus_proxy) = if private {
-        start_bus_proxy(&args.tools.dbus_proxy, &socket, &runtime)
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let zones_filter = runtime.join("bus");
+    let bus_proxy = if private && crate::zone::bus_is_zones_filter(&mountinfo, &zones_filter) {
+        match socket_at(zones_filter) {
+            Some(upstream) => {
+                let (filter, at) = start_bus_filter(&upstream, &socket, &args.tools.opener);
+                cleanup.filter = filter;
+                at
+            }
+            None => None,
+        }
+    } else if private {
+        let (proxy, filtered) = start_bus_proxy(
+            &args.tools.dbus_proxy,
+            &cleanup.dir.join("bus-filtered"),
+            &runtime,
+        );
+        cleanup.proxy = proxy;
+        match filtered {
+            Some(upstream) => {
+                let (filter, at) = start_bus_filter(&upstream, &socket, &args.tools.opener);
+                cleanup.filter = filter;
+                at
+            }
+            None => None,
+        }
     } else {
         eprintln!(
             "fs-sandbox: no private directory in {} — running without a session bus \
              rather than with a filter in /tmp",
             runtime.join(SCRATCH_SUBDIR).display()
         );
-        (None, None)
+        None
     };
-    cleanup.proxy = proxy;
 
     if ASKED_TO_STOP.load(Ordering::SeqCst) {
         // Signalled while the proxy was coming up: do not start a sandbox that

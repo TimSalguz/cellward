@@ -263,6 +263,9 @@ let
       # базы NSS контейнера из `profile-run`.
       openssl = "${pkgs.openssl}/bin/openssl";
       certutil = "${pkgs.nss.tools}/bin/certutil";
+      # Ссылки программ из песочницы (LEAK-MODEL §2): их портал отвечает
+      # фильтр шины песочницы, а открывает xdg-open — в зоне, мимо портала хоста.
+      opener = "${pkgs.xdg-utils}/bin/xdg-open";
       # awg/wg/pasta/nft/openconnect здесь намеренно НЕТ: их зовёт только
       # держатель зоны, и получает он их флагами ExecStart своего юнита.
       # Дублировать пути в двух местах — значит однажды поменять их в одном.

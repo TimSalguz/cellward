@@ -12,8 +12,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use vpn_zone::{
-    console, desktop, dnsfwd, egress, fs_sandbox, openconnect, profile, sysrun, system, wl_sandbox,
-    zone,
+    bus_filter, console, desktop, dnsfwd, egress, fs_sandbox, openconnect, profile, sysrun, system,
+    wl_sandbox, zone,
 };
 
 const USAGE: &str = "\
@@ -112,17 +112,26 @@ Usage:
         the command is run as it is, with a warning on stderr.
 
   vpn-zone-core fs-sandbox [--bwrap P] [--dbus-proxy P] [--kdialog P]
-                           [--xwayland P] <app-id> [--name <sandbox>] -- cmd...
+                           [--xwayland P] [--opener P]
+                           <app-id> [--name <sandbox>] -- cmd...
         Run the command in a bwrap sandbox where $HOME is gone: a tmpfs takes
         its place and only what the user allowed sticks out, everything else
         goes through the portals (/.flatpak-info). The session bus is filtered
-        by xdg-dbus-proxy, XDG_RUNTIME_DIR is a tmpfs with the sockets bound in
+        by xdg-dbus-proxy behind bus-filter, which opens the program's links
+        with the opener (xdg-open) in the zone instead of the host's portal
+        (LEAK-MODEL §2), XDG_RUNTIME_DIR is a tmpfs with the sockets bound in
         by name, a seccomp filter is loaded, and with the x11 permission the
         sandbox gets an xwayland-satellite of its own. The permissions are
         asked once with kdialog and remembered in
         ~/.config/vpn-zones/fs-perms/<app-id>; with --name they belong to the
         named sandbox and its persistent home instead. Tool paths are
         substituted by Nix and default to a PATH lookup.
+
+  vpn-zone-core bus-filter --listen S --upstream S --opener P
+        Internal: the sandbox's session bus in front of xdg-dbus-proxy. The
+        portal's OpenURI is answered here and the link handed to the opener in
+        the zone; OpenFile, OpenDirectory, ComposeEmail and file: links are
+        answered as cancelled; everything else is passed on as it is.
 
   vpn-zone-core fs-sandbox-x11 [--xwayland P] <:display> -- cmd...
         Internal: what fs-sandbox runs INSIDE the sandbox when the x11
@@ -233,6 +242,14 @@ fn main() -> ExitCode {
             Ok(parsed) => ExitCode::from(fs_sandbox::run(parsed)),
             Err(e) => {
                 eprintln!("vpn-zone-core fs-sandbox: {e}");
+                eprint!("{USAGE}");
+                ExitCode::from(EXIT_USAGE)
+            }
+        },
+        Some("bus-filter") => match bus_filter::Args::parse(&args[1..]) {
+            Ok(parsed) => ExitCode::from(bus_filter::run(&parsed)),
+            Err(e) => {
+                eprintln!("vpn-zone-core bus-filter: {e}");
                 eprint!("{USAGE}");
                 ExitCode::from(EXIT_USAGE)
             }

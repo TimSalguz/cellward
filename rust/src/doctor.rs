@@ -397,10 +397,7 @@ pub fn probe(uid: u32) -> Vec<Check> {
         // A bus bound into a zone is the filtered one only when what is bound
         // is the zone's proxy: an ordinary zone's sealed runtime binds the
         // host's own bus back, and that is as open as ever.
-        if id == "session-bus"
-            && mount_root_at(&mountinfo, &path.to_string_lossy())
-                .is_some_and(|root| root.ends_with("/session-bus"))
-        {
+        if id == "session-bus" && crate::zone::bus_is_zones_filter(&mountinfo, &path) {
             checks.push(Check::new(
                 "session-bus",
                 Level::Ok,
