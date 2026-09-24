@@ -437,7 +437,27 @@ fn lossy(name: &OsStr) -> std::borrow::Cow<'_, str> {
 ///
 /// Returns only when the program could not be started or when this was a
 /// throwaway container (which has to be outlived and cleaned up).
+/// The network namespace `vpn-zone run` checked before it handed the launch to
+/// `nsenter` (`net:[…]`). Set, it must be the one this process is in.
+pub const ENV_EXPECT_NETNS: &str = "VPN_ZONE_EXPECT_NETNS";
+
 pub fn run(args: Args) -> u8 {
+    // The zone entered is the zone checked: `nsenter` finds it by a number,
+    // later, in a child of wl-sandbox, and a number can change hands in
+    // between (review 2026-09-25). Here, inside, the kernel says which
+    // network this is; anything else than what was checked does not start.
+    if let Some(expected) = std::env::var_os(ENV_EXPECT_NETNS) {
+        std::env::remove_var(ENV_EXPECT_NETNS);
+        let here = fs::read_link("/proc/self/ns/net").ok();
+        if here.as_deref().map(Path::as_os_str) != Some(expected.as_os_str()) {
+            eprintln!(
+                "profile-run: entered {} instead of the zone's {} — not starting",
+                here.map_or("?".to_owned(), |p| p.display().to_string()),
+                expected.to_string_lossy()
+            );
+            return EXIT_NOT_STARTED;
+        }
+    }
     let ensure: &[&str] = if args.trust.is_some() {
         &TRUST_SLOTS
     } else {

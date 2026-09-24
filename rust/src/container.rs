@@ -501,6 +501,28 @@ const HOST_RUNS: &[&str] = &[
     ".config/nix",
     ".ssh",
     ".gnupg",
+    // Second review (2026-09-25): more places the host starts code from.
+    ".config/user-tmpfiles.d",
+    ".local/share/user-tmpfiles.d",
+    ".config/zsh",
+    ".config/uwsm",
+    ".config/river",
+    ".config/labwc",
+    ".config/i3",
+    ".config/pipewire",
+    ".config/wireplumber",
+    ".config/xdg-desktop-portal",
+    ".config/git",
+    ".mozilla/native-messaging-hosts",
+    ".config/chromium/NativeMessagingHosts",
+    ".config/google-chrome/NativeMessagingHosts",
+    ".config/BraveSoftware",
+    ".config/vivaldi/NativeMessagingHosts",
+    ".local/share/kio/servicemenus",
+    ".local/share/kservices5",
+    ".local/share/kservices6",
+    ".local/share/nautilus/scripts",
+    ".local/share/nemo/actions",
 ];
 
 pub fn forbidden_path(home: &Path, path: &Path) -> Option<String> {

@@ -810,6 +810,18 @@ const KEY_MAGIC: &[u8] = b"VZK1\0";
 pub const ENV_PASTA: &str = "VPN_ZONE_PASTA";
 /// The group user zones' pasta runs with in a system zone (`BRIDGE_GROUP`
 /// rule in `system::ns_up`).
+/// Groups a command in a system zone is started without: the one that opens
+/// this service's socket, and those that open a daemon starting things for
+/// the user on the host (docker, libvirt, podman, lxd, incus).
+const DROPPED_GROUPS: &[&str] = &[
+    "vpn-zones",
+    "docker",
+    "libvirtd",
+    "podman",
+    "lxd",
+    "incus-admin",
+];
+
 pub const BRIDGE_GROUP: &str = "vpn-zones-bridge";
 /// How long a client has to say what it wants.
 const REQUEST_WAIT: Duration = Duration::from_secs(5);
@@ -1140,6 +1152,18 @@ fn serve_uplink(
         return Err(format!("{} may not use the system zone {zone}", user.name));
     }
     // What the zone is now: a re-attach later has to find it the same kind.
+    // The rule that keeps user zones out of this one, for the group their
+    // pasta runs as: without it the way through is a way in.
+    let bridge = crate::egress::group_id(BRIDGE_GROUP);
+    let ruled = fs::read_to_string(system::run_dir(zone).join(system::BRIDGE_RULE))
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok());
+    if bridge.is_none() || ruled != bridge {
+        return Err(format!(
+            "the system zone {zone} has no rule keeping user zones out of it — restart \
+             vpn-zone-system-ns-{zone}"
+        ));
+    }
     let plain = system::settings(zone).is_some_and(|s| s.plain);
     if fds.len() != 2 {
         return Err("an uplink comes with the zone's two namespaces".to_owned());
@@ -1373,7 +1397,11 @@ fn serve_add(uid: u32, request: &AddRequest) -> Result<Done, String> {
                 if s.plain { "plain" } else { "a tunnel" }
             ));
         }
-        if s.declared && !s.plain && s.config != system::local_dir(zone).join("config.conf") {
+        if s.declared
+            && !s.plain
+            && s.config != system::local_dir(zone).join("config.conf")
+            && !system::is_foreign_config(zone, &s.config)
+        {
             return Err(format!(
                 "the config of {zone} comes from Nix ({})",
                 s.config.display()
@@ -1465,9 +1493,13 @@ fn serve(sock: RawFd, uid: u32, data: &[u8], fds: Vec<OwnedFd>) -> Result<u8, St
     }
     // Not the group that opens this service's socket: from inside a zone the
     // command must not ask for another one (the tmpfs over /run/vpn-zones in
-    // `seal_mounts` hides the socket as well).
-    if let Some(gid) = crate::egress::group_id("vpn-zones") {
-        user.groups.retain(|g| *g != gid);
+    // `seal_mounts` hides the socket as well). Nor a group that opens a daemon
+    // running things for it on the host, in the host's network — a container
+    // with `--network host` is a way out of any zone (review 2026-09-25).
+    for group in DROPPED_GROUPS {
+        if let Some(gid) = crate::egress::group_id(group) {
+            user.groups.retain(|g| *g != gid);
+        }
     }
     if fds.len() != request.mode.fds() {
         return Err("the descriptors do not match the mode".to_owned());
@@ -1531,6 +1563,15 @@ fn serve(sock: RawFd, uid: u32, data: &[u8], fds: Vec<OwnedFd>) -> Result<u8, St
             libc::kill(-pid, libc::SIGHUP);
             libc::kill(-pid, libc::SIGTERM);
         }
+        // A command that ignores both would outlive its client for good. The
+        // group is ours while its leader lives — held by a pidfd, so a number
+        // reused is never signalled.
+        if let Some(leader) = sys::pidfd_open(pid) {
+            if !sys::pidfd_wait(&leader, Duration::from_secs(5)) {
+                // SAFETY: as above; the leader still runs, so the group is ours.
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
+            }
+        }
     });
     let mut status = 0;
     loop {
@@ -1590,10 +1631,18 @@ fn become_the_command(launch: &Launch) -> String {
         )
     } != 0
     {
-        return format!(
-            "cannot close the service's descriptors: {}",
-            io::Error::last_os_error()
-        );
+        // Before Linux 5.11: one by one, from what /proc says is open.
+        let open: Vec<i32> = fs::read_dir("/proc/self/fd")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str()?.parse().ok())
+            .filter(|fd| *fd >= 3)
+            .collect();
+        for fd in open {
+            // SAFETY: fcntl on a descriptor number; a closed one just fails.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
     }
     if let Err(e) = seal_mounts(launch) {
         return e;

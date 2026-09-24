@@ -88,7 +88,17 @@ let
   iproute = "${pkgs.iproute2}/bin/ip";
   awg = "${pkgs.amneziawg-tools}/bin/awg";
   wg = "${pkgs.wireguard-tools}/bin/wg";
-  pasta = "${pkgs.passt}/bin/pasta";
+  # pasta with a patch: a TCP connection it cannot bind to the zone's outbound
+  # interface is reset, not connected by the host's routes (review 2026-09-25,
+  # patches/passt-bind-outbound-fatal.pl).
+  passtPatched = pkgs.passt.overrideAttrs (old: {
+    nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.perl ];
+    postPatch = (old.postPatch or "") + ''
+      perl ${./patches/passt-bind-outbound-fatal.pl} < tcp.c > tcp.c.new
+      mv tcp.c.new tcp.c
+    '';
+  });
+  pasta = "${passtPatched}/bin/pasta";
   # Второй эшелон герметичности (docs/LEAK-MODEL.md): фаерволл в обоих
   # namespace зоны. Зовёт его только держатель зоны, поэтому путь идёт флагом
   # ExecStart, как ip/awg/wg/pasta, а не манифестом.
@@ -168,8 +178,13 @@ let
   # той зоны, откуда пришла ссылка. `false` в BROWSER — отказ вместо этого;
   # ссылку со схемой, у которой есть обработчик (наш перехваченный ярлык),
   # это не трогает.
+  #
+  # И без портала: с NIXOS_XDG_OPEN_USE_PORTAL (xdg.portal.xdgOpenUsePortal)
+  # xdg-open отдаёт ссылку OpenURI по сессионной шине — у обычной зоны это шина
+  # хоста, и ссылка открывалась бы на хосте, мимо зоны (review 2026-09-25).
   vpn-zone-opener = pkgs.writeShellScript "vpn-zone-opener" ''
     export BROWSER=false
+    unset NIXOS_XDG_OPEN_USE_PORTAL
     exec ${pkgs.xdg-utils}/bin/xdg-open "$@"
   '';
 
@@ -441,7 +456,21 @@ let
   cfg = config.programs.vpn-zones;
 
   # Имя контейнера попадает в путь, в имя файла и в имя деривации.
-  validName = name: builtins.match "[A-Za-z0-9_][A-Za-z0-9_.-]*" name != null;
+  # Не `__…` и не слова, которые меню используют как свои метки: контейнер с
+  # таким именем рантайм не прочитал бы (`__main__`, `__fs__`) или принял бы за
+  # команду (`main`, `own`, `ask`, `pinmain`) — и объявленная привязка к сети
+  # молча не действовала бы (review 2026-09-25).
+  validName =
+    name:
+    builtins.match "[A-Za-z0-9_][A-Za-z0-9_.-]*" name != null
+    && !(lib.hasPrefix "__" name)
+    && !(lib.elem name [
+      "main"
+      "own"
+      "ask"
+      "pinmain"
+      "unpinprof"
+    ]);
 
   # Доверенные корневые сертификаты контейнера (docs/CERTIFICATES.ru.md),
   # приведённые к виду, который читает рантайм: `<sha256>.pem` на сертификат.
@@ -526,7 +555,16 @@ let
       };
       trust = {
         certificates = lib.mkOption {
-          type = lib.types.listOf lib.types.path;
+          # Проверка ключа — в типе, до того как файл скопирован в store: файл
+          # с ключом УЦ (mitmproxy кладёт ключ и сертификат вместе) целиком
+          # оказался бы в /nix/store, открытым для чтения всем, и любой мог бы
+          # подписать сертификат, которому контейнер верит (review 2026-09-25).
+          type = lib.types.listOf (
+            lib.types.addCheck lib.types.path (p: !(lib.hasInfix "PRIVATE KEY" (builtins.readFile p)))
+            // {
+              description = "path to a certificate without a private key";
+            }
+          );
           default = [ ];
           description = "Дополнительные корневые сертификаты (PEM или DER, по одному в файле), которым доверяют ТОЛЬКО программы этого контейнера. Владелец ключа такого сертификата читает и подменяет их TLS-трафик. См. docs/CERTIFICATES.ru.md.";
         };
@@ -603,7 +641,17 @@ in
         description = "Сеть, которую пикер предлагает незнакомой программе: offline, unconfined (без ограничений: сеть хоста, без VPN и без изоляции зоны; прежнее имя direct тоже принимается) или имя зоны. null — не задавать из Nix (`vpn-zone default`).";
       };
       container = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
+        type = lib.types.nullOr (
+          lib.types.addCheck lib.types.str (
+            v:
+            lib.elem v [
+              "ask"
+              "main"
+              "own"
+            ]
+            || validName (lib.removePrefix "sb:" v)
+          )
+        );
         default = null;
         example = "own";
         description = "Контейнер для запусков по умолчанию: ask, main, own (свой дом у каждой программы) или имя контейнера. null — не задавать из Nix.";
@@ -762,8 +810,26 @@ in
         message = "programs.vpn-zones.hermetic.exceptions: имя зоны — непустое и без переводов строки";
       }
       {
-        assertion = cfg.desktop.niri.includeInConfig -> cfg.desktop.niri.enable;
-        message = "programs.vpn-zones.desktop.niri.includeInConfig: подключать нечего — включи desktop.niri.enable";
+        assertion =
+          cfg.desktop.niri.includeInConfig
+          -> (
+            cfg.desktop.niri.enable
+            # Home-manager writes config.kdl as text with more in it than our
+            # line — otherwise the "config" would be one include, and niri would
+            # start with nothing of the user's.
+            && lib.stringLength (lib.trim (config.xdg.configFile."niri/config.kdl".text or ""))
+              > lib.stringLength "include \"vpn-zones.kdl\""
+          );
+        message = "programs.vpn-zones.desktop.niri.includeInConfig: нужно desktop.niri.enable, и config.kdl должен писать home-manager текстом (xdg.configFile.\"niri/config.kdl\".text) — иначе config.kdl стал бы одной строкой include";
+      }
+      {
+        # Где зоны ищут ярлыки, автозапуск и настройки: ~/.local/share и
+        # ~/.config. С другим xdg.dataHome/configHome лаунчеры не увидели бы
+        # перехваченных ярлыков — каждый щелчок мимо пикера (review 2026-09-25).
+        assertion =
+          config.xdg.dataHome == "${config.home.homeDirectory}/.local/share"
+          && config.xdg.configHome == "${config.home.homeDirectory}/.config";
+        message = "programs.vpn-zones: xdg.dataHome и xdg.configHome должны быть по умолчанию (~/.local/share, ~/.config) — перехват ярлыков и настройки vpn-zones живут там";
       }
       {
         assertion = duplicateApps == [ ];
@@ -856,7 +922,7 @@ in
     # есть и bin/vpn-zone, и bin/vpn-zone-pick, и bin/vpn-zone-gui.
     vpn-zone-helpers
     vpn-zone-completions # Tab-дополнение zsh/bash (см. определение выше)
-    pkgs.passt # userspace-сеть для зон
+    passtPatched # userspace-сеть для зон (с патчем привязки к интерфейсу)
     # Клиент зон [OpenConnect]. В профиль он кладётся не ради самих зон — им
     # хватает пути в ExecStart юнита, — а ради ОДНОЙ операции, которую человек
     # делает руками: узнать отпечаток сертификата корпоративного шлюза.

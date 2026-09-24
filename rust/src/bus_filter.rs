@@ -61,6 +61,8 @@ const PORTAL: &str = "org.freedesktop.portal.Desktop";
 const OPEN_URI: &str = "org.freedesktop.portal.OpenURI";
 const EMAIL: &str = "org.freedesktop.portal.Email";
 const BACKGROUND: &str = "org.freedesktop.portal.Background";
+const NETWORK_MONITOR: &str = "org.freedesktop.portal.NetworkMonitor";
+const PROXY_RESOLVER: &str = "org.freedesktop.portal.ProxyResolver";
 const REQUEST: &str = "org.freedesktop.portal.Request";
 /// `Response` codes: done, and "the interaction ended some other way".
 const RESPONSE_OK: u32 = 0;
@@ -135,6 +137,14 @@ pub enum Door {
     /// `Background.RequestBackground`: with `autostart` the portal writes an
     /// autostart entry ON THE HOST, run at the next login outside every zone.
     Background,
+    /// `NetworkMonitor.*`: the HOST's network, as the portal sees it — and
+    /// `CanReach` has the host resolve and try any name, in the host's
+    /// network (review 2026-09-25). Answered here: the zone's network is up,
+    /// not metered, full; any name "reachable" without a packet sent.
+    Network,
+    /// `ProxyResolver.Lookup`: the host's proxy settings. Answered here: a
+    /// zone goes out directly, through its own tunnel.
+    Proxy,
 }
 
 /// Is this call one the filter answers? By member and interface only: the
@@ -149,8 +159,141 @@ pub fn door(h: &Header) -> Option<Door> {
         "OpenFile" | "OpenDirectory" if iface_is(OPEN_URI) => Some(Door::File),
         "ComposeEmail" if iface_is(EMAIL) => Some(Door::Email),
         "RequestBackground" if iface_is(BACKGROUND) => Some(Door::Background),
+        "GetAvailable" | "GetMetered" | "GetConnectivity" | "GetStatus" | "CanReach"
+            if iface_is(NETWORK_MONITOR) =>
+        {
+            Some(Door::Network)
+        }
+        "Lookup" if iface_is(PROXY_RESOLVER) => Some(Door::Proxy),
         _ => None,
     }
+}
+
+/// The portal interfaces a program of a zone or a sandbox may call.
+///
+/// **The portal takes it for a host application.** xdg-desktop-portal knows a
+/// caller by the process on the other end of ITS connection — the proxy, which
+/// runs outside the sandbox and outside the zone's mount namespace — and finds
+/// no `/.flatpak-info` there (review 2026-09-25). A host application is
+/// granted without a dialog what a Flatpak would be asked about: the
+/// dynamic launcher installs a `.desktop` entry of the caller's making and
+/// starts it ON THE HOST; location, camera, a non-interactive screenshot, the
+/// Secret portal's key (one for every "host" caller) come the same way. So
+/// the interfaces are named here, and everything else under
+/// `org.freedesktop.portal.` is refused — a portal added later included.
+pub const PORTAL_ALLOWED: &[&str] = &[
+    "org.freedesktop.portal.Request",
+    "org.freedesktop.portal.Session",
+    "org.freedesktop.portal.FileChooser",
+    "org.freedesktop.portal.FileTransfer",
+    // Answered by the filter itself (`door`).
+    "org.freedesktop.portal.OpenURI",
+    "org.freedesktop.portal.Email",
+    "org.freedesktop.portal.Background",
+    // Read-only, or with a dialog of the portal's own every time.
+    // Answered by the filter as well (`Door::Network`, `Door::Proxy`): no
+    // call of theirs reaches the host.
+    "org.freedesktop.portal.NetworkMonitor",
+    "org.freedesktop.portal.ProxyResolver",
+    "org.freedesktop.portal.Settings",
+    "org.freedesktop.portal.Notification",
+    "org.freedesktop.portal.Inhibit",
+    "org.freedesktop.portal.MemoryMonitor",
+    "org.freedesktop.portal.PowerProfileMonitor",
+    "org.freedesktop.portal.Print",
+    "org.freedesktop.portal.ScreenCast",
+    "org.freedesktop.portal.Account",
+];
+
+/// Why a call is not passed on, if it is not: a portal interface not in
+/// [`PORTAL_ALLOWED`], or a call that names no interface at all — dispatched
+/// by its member alone, it could reach any of them. The bus itself is always
+/// asked directly.
+pub fn refused(h: &Header) -> Option<String> {
+    if h.kind != wire::METHOD_CALL {
+        return None;
+    }
+    match h.interface.as_deref() {
+        None if h.destination.as_deref() != Some("org.freedesktop.DBus") => Some(format!(
+            "{} without an interface",
+            h.member.as_deref().unwrap_or("?")
+        )),
+        Some(i) if i.starts_with("org.freedesktop.portal.") && !PORTAL_ALLOWED.contains(&i) => {
+            Some(format!("{i} is not for programs of a zone"))
+        }
+        _ => None,
+    }
+}
+
+/// Answer a call with a value, as its service would, from where it was sent to.
+fn reply(conn: &Conn, ctx: &Ctx, h: &Header, signature: &str, body: &[u8]) -> io::Result<()> {
+    if h.flags & wire::NO_REPLY_EXPECTED != 0 {
+        return Ok(());
+    }
+    let unique = conn
+        .unique
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let from = h.destination.clone().unwrap_or_else(|| PORTAL.to_owned());
+    let mut fields = vec![Field::ReplySerial(h.serial), Field::Sender(&from)];
+    if let Some(d) = unique.as_deref() {
+        fields.push(Field::Destination(d));
+    }
+    fields.push(Field::Signature(signature));
+    let msg = wire::message(
+        wire::METHOD_RETURN,
+        wire::NO_REPLY_EXPECTED,
+        ctx.serial(),
+        &fields,
+        body,
+    );
+    conn.send(&msg, &[])
+}
+
+/// The answers of `Door::Network` and `Door::Proxy`.
+fn answer_value(conn: &Conn, ctx: &Ctx, h: &Header, which: Door) -> io::Result<()> {
+    match (which, h.member.as_deref().unwrap_or("")) {
+        (Door::Network, "GetStatus") => {
+            reply(conn, ctx, h, "a{sv}", &body::network_status(true, false, 4))
+        }
+        (Door::Network, "GetConnectivity") => reply(conn, ctx, h, "u", &body::uint(4)),
+        (Door::Network, "GetMetered") => reply(conn, ctx, h, "b", &body::boolean(false)),
+        (Door::Network, _) => reply(conn, ctx, h, "b", &body::boolean(true)),
+        _ => reply(conn, ctx, h, "as", &body::strings(&["direct://"])),
+    }
+}
+
+/// Say no to a call the way the bus would: `AccessDenied`, from where it was
+/// sent to. Nothing when no reply is expected.
+fn deny(conn: &Conn, ctx: &Ctx, h: &Header, why: &str) -> io::Result<()> {
+    eprintln!("bus-filter: refused — {why}");
+    if h.flags & wire::NO_REPLY_EXPECTED != 0 {
+        return Ok(());
+    }
+    let unique = conn
+        .unique
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let from = h.destination.clone().unwrap_or_else(|| PORTAL.to_owned());
+    let mut fields = vec![
+        Field::ErrorName("org.freedesktop.DBus.Error.AccessDenied"),
+        Field::ReplySerial(h.serial),
+        Field::Sender(&from),
+    ];
+    if let Some(d) = unique.as_deref() {
+        fields.push(Field::Destination(d));
+    }
+    fields.push(Field::Signature("s"));
+    let reply = wire::message(
+        wire::ERROR,
+        wire::NO_REPLY_EXPECTED,
+        ctx.serial(),
+        &fields,
+        &body::string(&format!("vpn-zones: {why}")),
+    );
+    conn.send(&reply, &[])
 }
 
 /// Whether a link may be handed to the opener, and why not.
@@ -441,7 +584,12 @@ fn client_to_bus(
             let carried = take_fds(&mut fds, h.unix_fds)?;
             match door(&h) {
                 // The descriptors of an answered call are dropped — closed.
+                Some(which @ (Door::Network | Door::Proxy)) => answer_value(conn, ctx, &h, which)?,
                 Some(which) => answer(conn, ctx, &msg, &h, which)?,
+                // So are those of a refused one.
+                None if refused(&h).is_some() => {
+                    deny(conn, ctx, &h, &refused(&h).unwrap_or_default())?
+                }
                 None => {
                     let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
                     send_all(up, &msg, &raw)?;
@@ -578,6 +726,9 @@ fn answer(conn: &Conn, ctx: &Ctx, msg: &[u8], h: &Header, which: Door) -> io::Re
             );
             RESPONSE_OTHER
         }
+        // Answered with a value, never a Request (`answer_value`): here only
+        // if called wrongly, and then refused.
+        Door::Network | Door::Proxy => RESPONSE_OTHER,
     };
 
     let mut fields = vec![
@@ -908,5 +1059,78 @@ mod tests {
         }
         assert!(!ctx.may_open());
         assert_ne!(ctx.serial(), 0);
+    }
+
+    /// The portal takes a zone's program for a host application: only the
+    /// named portal interfaces get through, and no call without an interface.
+    #[test]
+    fn only_the_named_portal_interfaces_get_through() {
+        let on = |iface: Option<&str>, dest: &str| {
+            let mut h = call("Anything", iface, dest);
+            h.destination = Some(dest.to_owned());
+            refused(&h)
+        };
+        for bad in [
+            "org.freedesktop.portal.DynamicLauncher",
+            "org.freedesktop.portal.Location",
+            "org.freedesktop.portal.Camera",
+            "org.freedesktop.portal.Screenshot",
+            "org.freedesktop.portal.Secret",
+            "org.freedesktop.portal.Realtime",
+            "org.freedesktop.portal.Documents",
+            "org.freedesktop.portal.SomethingNew",
+        ] {
+            assert!(on(Some(bad), PORTAL).is_some(), "{bad}");
+        }
+        for good in [
+            "org.freedesktop.portal.FileChooser",
+            "org.freedesktop.portal.Settings",
+            "org.freedesktop.portal.Request",
+            "org.freedesktop.DBus.Properties",
+            "org.freedesktop.Notifications",
+            "org.kde.StatusNotifierWatcher",
+        ] {
+            assert!(on(Some(good), PORTAL).is_none(), "{good}");
+        }
+        assert!(on(None, PORTAL).is_some());
+        assert!(on(None, "org.freedesktop.DBus").is_none());
+        let mut signal = call("Anything", Some("org.freedesktop.portal.Location"), PORTAL);
+        signal.kind = wire::SIGNAL;
+        assert!(refused(&signal).is_none());
+    }
+
+    /// The host's network state is not asked for: the filter answers.
+    #[test]
+    fn network_and_proxy_questions_are_answered_here() {
+        for member in [
+            "GetAvailable",
+            "GetMetered",
+            "GetConnectivity",
+            "GetStatus",
+            "CanReach",
+        ] {
+            assert_eq!(
+                door(&call(member, Some(NETWORK_MONITOR), PORTAL)),
+                Some(Door::Network),
+                "{member}"
+            );
+        }
+        assert_eq!(
+            door(&call("Lookup", Some(PROXY_RESOLVER), PORTAL)),
+            Some(Door::Proxy)
+        );
+        // The trash is not among what passes any more.
+        let mut h = call("TrashFile", Some("org.freedesktop.portal.Trash"), PORTAL);
+        h.destination = Some(PORTAL.to_owned());
+        assert!(refused(&h).is_some());
+        // `as` with one string: length 14, then the string.
+        let b = body::strings(&["direct://"]);
+        assert_eq!(&b[..4], &14u32.to_le_bytes());
+        assert_eq!(&b[4..8], &9u32.to_le_bytes());
+        assert_eq!(&b[8..17], b"direct://");
+        // `a{sv}` of three entries parses back as one array of the stated length.
+        let st = body::network_status(true, false, 4);
+        let len = u32::from_le_bytes(st[..4].try_into().unwrap()) as usize;
+        assert_eq!(st.len(), 8 + len);
     }
 }

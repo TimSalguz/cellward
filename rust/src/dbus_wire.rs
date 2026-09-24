@@ -13,6 +13,7 @@ use std::fmt;
 /// Message types.
 pub const METHOD_CALL: u8 = 1;
 pub const METHOD_RETURN: u8 = 2;
+pub const ERROR: u8 = 3;
 pub const SIGNAL: u8 = 4;
 /// Header flag: the caller does not want a reply.
 pub const NO_REPLY_EXPECTED: u8 = 0x1;
@@ -25,6 +26,7 @@ const MAX_DEPTH: usize = 64;
 const FIELD_PATH: u8 = 1;
 const FIELD_INTERFACE: u8 = 2;
 const FIELD_MEMBER: u8 = 3;
+const FIELD_ERROR_NAME: u8 = 4;
 const FIELD_REPLY_SERIAL: u8 = 5;
 const FIELD_DESTINATION: u8 = 6;
 const FIELD_SENDER: u8 = 7;
@@ -408,6 +410,7 @@ pub enum Field<'a> {
     Path(&'a str),
     Interface(&'a str),
     Member(&'a str),
+    ErrorName(&'a str),
     ReplySerial(u32),
     Destination(&'a str),
     Sender(&'a str),
@@ -427,6 +430,7 @@ pub fn message(kind: u8, flags: u8, serial: u32, fields: &[Field<'_>], body: &[u
             Field::Path(v) => w.field_str(FIELD_PATH, "o", v),
             Field::Interface(v) => w.field_str(FIELD_INTERFACE, "s", v),
             Field::Member(v) => w.field_str(FIELD_MEMBER, "s", v),
+            Field::ErrorName(v) => w.field_str(FIELD_ERROR_NAME, "s", v),
             Field::ReplySerial(v) => w.field_u32(FIELD_REPLY_SERIAL, *v),
             Field::Destination(v) => w.field_str(FIELD_DESTINATION, "s", v),
             Field::Sender(v) => w.field_str(FIELD_SENDER, "s", v),
@@ -474,6 +478,55 @@ pub mod body {
     }
 
     /// A portal's `Response`: `(u response, a{sv} results)` with no results.
+    /// A boolean (`b`).
+    pub fn boolean(v: bool) -> Vec<u8> {
+        let mut w = Writer { buf: Vec::new() };
+        w.u32(u32::from(v));
+        w.buf
+    }
+
+    /// An unsigned 32-bit number (`u`).
+    pub fn uint(v: u32) -> Vec<u8> {
+        let mut w = Writer { buf: Vec::new() };
+        w.u32(v);
+        w.buf
+    }
+
+    /// An array of strings (`as`).
+    pub fn strings(items: &[&str]) -> Vec<u8> {
+        let mut w = Writer { buf: Vec::new() };
+        w.u32(0);
+        let start = w.buf.len();
+        for s in items {
+            w.string(s);
+        }
+        let len = (w.buf.len() - start) as u32;
+        w.buf[start - 4..start].copy_from_slice(&len.to_le_bytes());
+        w.buf
+    }
+
+    /// `NetworkMonitor.GetStatus`'s `a{sv}`: available, metered, connectivity.
+    pub fn network_status(available: bool, metered: bool, connectivity: u32) -> Vec<u8> {
+        let mut w = Writer { buf: Vec::new() };
+        w.u32(0);
+        let len_at = w.buf.len() - 4;
+        w.align(8);
+        let start = w.buf.len();
+        for (key, sig, value) in [
+            ("available", "b", u32::from(available)),
+            ("metered", "b", u32::from(metered)),
+            ("connectivity", "u", connectivity),
+        ] {
+            w.align(8);
+            w.string(key);
+            w.signature(sig);
+            w.u32(value);
+        }
+        let len = (w.buf.len() - start) as u32;
+        w.buf[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
+        w.buf
+    }
+
     pub fn response(code: u32) -> Vec<u8> {
         let mut w = Writer { buf: Vec::new() };
         w.u32(code);

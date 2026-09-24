@@ -913,7 +913,17 @@ fn ask_window(
     let req = window::Request {
         title: format!("Запуск: {label}"),
         notes: Vec::new(),
-        nets: window_nets(&menu_zones(&tools.state), default_net),
+        // "Always" ticked for a pinned network starts on THAT network: on the
+        // remembered one instead, Enter would re-pin the program there
+        // (review 2026-09-25).
+        nets: window_nets(
+            &menu_zones(&tools.state),
+            if memory.pinned.is_empty() {
+                default_net
+            } else {
+                memory.pinned.as_str()
+            },
+        ),
         containers: window_containers(
             key,
             &menu_names(&tools.sandboxes),
@@ -1721,14 +1731,21 @@ fn apply_profile_choice(
                 create(tools, "profile", &name);
             }
             if name.is_empty() || !tools.profiles.join(&name).is_dir() {
+                // A container was asked for: the program's own sandbox, not the
+                // main profile with the whole home (review 2026-09-25).
                 dialog::notify(
                     &tools.notify_send,
                     None,
                     "8000",
                     "Профиль не создан",
-                    "Программа запущена в основном профиле.",
+                    "Программа запущена в своей песочнице — без дома системы.",
                 );
-                return Some(Container::default());
+                return apply_profile_choice(
+                    tools,
+                    key,
+                    ProfileChoice::OwnSandbox { pin: false },
+                    None,
+                );
             }
             Some(Container {
                 profile: name,

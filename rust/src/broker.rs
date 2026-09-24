@@ -126,8 +126,14 @@ pub enum Decision {
 /// The policy, from where the request comes from and the network it asks for.
 pub fn decide(origin: &Origin, origin_locked: bool, target: &str) -> Decision {
     match origin {
-        // The host itself: it could run `vpn-zone` without us.
-        Origin::Host => Decision::Start,
+        // The host never needs the broker — a launch outside a zone, or from
+        // a zone with `systemd --user`, goes without it — so a request that
+        // looks like the host's is refused rather than trusted (review
+        // 2026-09-25: on a kernel without SO_PEERPIDFD the peer is found by
+        // its number, and a number can change hands).
+        Origin::Host => Decision::Refuse(
+            "запрос с хоста: брокер — дверь из герметичной зоны, хосту она не нужна".to_owned(),
+        ),
         Origin::Zone(zone) if zone == target => Decision::Start,
         Origin::Zone(zone) if origin_locked => Decision::Refuse(format!(
             "зона «{zone}» заперта: запуск в другой сети ({target}) запрещён"
@@ -272,10 +278,16 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                     let allowed = match decide(&origin, locked, &target) {
                         Decision::Start => Ok(()),
                         Decision::Refuse(why) => Err(why),
-                        Decision::Ask => ask(tools, &origin, &target, &selection.cmd),
+                        Decision::Ask => ask(
+                            tools,
+                            &origin,
+                            &target,
+                            &selection_selector(&selection),
+                            &selection.cmd,
+                        ),
                     };
                     let answer = match &allowed {
-                        Ok(()) => start(tools, &app_id, &argv),
+                        Ok(()) => start(&app_id, &argv),
                         Err(why) => format!("refused: {why}"),
                     };
                     // Every crossing the broker decides, either way, on the
@@ -452,13 +464,38 @@ fn remember(tools: &Tools, line: &str) {
     }
 }
 
-fn ask(tools: &Tools, origin: &Origin, target: &str, cmd: &[OsString]) -> Result<(), String> {
+/// The container a request asks for, as a selector (`sb:<name>`, `__fs__`,
+/// a profile, `__tmp__`, empty for the main one): shown in the question and
+/// part of what "always" remembers.
+pub fn selection_selector(selection: &crate::launch::Selection) -> String {
+    use crate::launch::{Container, Sandbox};
+    match (&selection.sandbox, &selection.container) {
+        (Sandbox::Named(name), _) => format!("sb:{}", name.to_string_lossy()),
+        (Sandbox::Throwaway, _) => "__fs__".to_owned(),
+        (Sandbox::None, Container::Named(name)) => name.to_string_lossy().into_owned(),
+        (Sandbox::None, Container::TmpNew | Container::TmpJoin(_)) => "__tmp__".to_owned(),
+        (Sandbox::None, Container::Main) => String::new(),
+    }
+}
+
+fn ask(
+    tools: &Tools,
+    origin: &Origin,
+    target: &str,
+    selector: &str,
+    cmd: &[OsString],
+) -> Result<(), String> {
     // Asked before, and "always" said: the same zone, the same network, the
-    // very same program from the store.
+    // same container, the very same program from the store.
     let program = program_of(cmd).filter(|p| may_remember(p));
+    let target_and_container = if selector.is_empty() {
+        target.to_owned()
+    } else {
+        format!("{target}\t{selector}")
+    };
     let line = program
         .as_ref()
-        .map(|p| always_line(&origin.name(), target, p));
+        .map(|p| always_line(&origin.name(), &target_and_container, p));
     if line.as_ref().is_some_and(|l| remembered(tools, l)) {
         return Ok(());
     }
@@ -480,8 +517,9 @@ fn ask(tools: &Tools, origin: &Origin, target: &str, cmd: &[OsString]) -> Result
         Origin::SystemZone(zone) => format!("системной зоны «{zone}»"),
         other => format!("зоны «{}»", other.name()),
     };
+    let container = crate::picker::container_label(selector);
     let question = format!(
-        "Программа из {asker} просит запустить в {network}:\n\n{}\n\nРазрешить?",
+        "Программа из {asker} просит запустить в {network}, контейнер: {container}:\n\n{}\n\nРазрешить?",
         shown_command(cmd)
     );
     // "Always" only where it can be kept safely (`may_remember`).
@@ -524,8 +562,18 @@ fn ask(tools: &Tools, origin: &Origin, target: &str, cmd: &[OsString]) -> Result
     }
 }
 
-fn start(tools: &Tools, app_id: &OsString, argv: &[OsString]) -> String {
-    let mut command = Command::new(&tools.runner);
+fn start(app_id: &OsString, argv: &[OsString]) -> String {
+    // Our own binary, from the store — not the manifest's runner, a profile
+    // path: in a standalone home-manager that is `~/.nix-profile`, a link a
+    // program with the home could point elsewhere, and the broker would run
+    // its binary on the host at once (review 2026-09-25). The manifest is the
+    // one this process runs with (VPN_ZONE_TOOLS, set by the wrapper).
+    let exe = match std::env::current_exe() {
+        Ok(exe) if exe.starts_with("/nix/store/") => exe,
+        Ok(exe) => return format!("refused: {} is not in the store", exe.display()),
+        Err(e) => return format!("refused: cannot find our own binary: {e}"),
+    };
+    let mut command = Command::new(exe);
     command
         .arg("run")
         .args(argv)
@@ -545,7 +593,7 @@ fn start(tools: &Tools, app_id: &OsString, argv: &[OsString]) -> String {
             });
             "ok".to_owned()
         }
-        Err(e) => format!("refused: не запустить {}: {e}", tools.runner.display()),
+        Err(e) => format!("refused: не запустить vpn-zone: {e}"),
     }
 }
 
@@ -690,7 +738,11 @@ mod tests {
             Decision::Refuse(_)
         ));
         assert_eq!(decide(&nl, true, "nl"), Decision::Start);
-        assert_eq!(decide(&Origin::Host, false, "unconfined"), Decision::Start);
+        // The host never needs the broker: a request that looks like it is refused.
+        assert!(matches!(
+            decide(&Origin::Host, false, "unconfined"),
+            Decision::Refuse(_)
+        ));
         // A system zone is never "the same zone" as a user zone of its name.
         let system = Origin::SystemZone("nl".to_owned());
         assert_eq!(decide(&system, false, "nl"), Decision::Ask);

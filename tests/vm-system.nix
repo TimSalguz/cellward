@@ -166,6 +166,7 @@ let
 
     testScript = ''
       import shlex
+      import time
 
       def as_user(user, cmd):
           return f"su -l {user} -c {shlex.quote(cmd)}"
@@ -446,14 +447,14 @@ let
           machine.succeed("systemctl start vpn-zones-egress")
           machine.succeed("nft list set inet vpnzones_egress users | grep -q 100000")
 
-      with subtest("the emergency key opens the host and closes it again"):
-          # alice is in wheel: polkit lets her turn the key without a password.
-          machine.succeed(as_user("alice", "systemctl start vpn-zones-egress-open"))
-          out = machine.succeed(as_user("alice", f"socat -T10 - TCP:{server_ip}:8090"))
-          assert "peer=" in out, out
-          machine.succeed(as_user("alice", "systemctl stop vpn-zones-egress-open"))
+      with subtest("the emergency key: not without a password from outside the seat"):
+          # alice is in wheel, but `su` is no local, active session: from
+          # here — as from ssh, cron or a zone's command with the system bus —
+          # the key wants her password, and there is nobody to type it. At the
+          # seat itself it turns without one (the TTY console subtest below).
+          machine.fail(as_user("alice", "systemctl start vpn-zones-egress-open"))
           machine.fail(direct("alice"))
-          # carol is not: no key for her.
+          # carol is not in the group: no key for her at all.
           machine.fail(as_user("carol", "systemctl start vpn-zones-egress-open"))
           machine.fail(direct("carol"))
 
@@ -579,32 +580,69 @@ let
           assert "peer=10.99.0.2" in out, out
       # The console's text on the virtual terminal is read through /dev/vcs,
       # where Cyrillic does not survive: the checks look at the ASCII in it.
+      # What a shell IN a zone writes goes to the home: a command in a system
+      # zone has a /tmp of its own, which the host does not see.
+      # Text stays on the screen after it stops being true, so every login
+      # starts on a wiped one; and the console drops keys pressed before its
+      # menu is up, so keys for the menu wait for its prompt.
       def tty_run(cmd):
           machine.send_chars(cmd + "\n")
 
-      with subtest("the TTY console: log in, and there is a network already"):
+      def tty_login():
+          machine.succeed("systemctl stop getty@tty1")
+          machine.execute("pkill -KILL -t tty1")
+          machine.wait_until_fails("pgrep -t tty1", timeout=30)
+          machine.succeed("printf '\\033c' > /dev/tty1")
+          machine.succeed("systemctl start getty@tty1")
           machine.wait_until_tty_matches("1", "login: ")
           machine.send_chars("alice\n")
           machine.wait_until_tty_matches("1", "Password: ")
           machine.send_chars("alice-console\n")
+
+      def tty_menu(timeout=60):
+          end = time.monotonic() + timeout
+          while True:
+              lines = [l.strip() for l in machine.get_tty_text("1").splitlines() if l.strip()]
+              if lines and lines[-1] == ">":
+                  return
+              if time.monotonic() > end:
+                  print(machine.get_tty_text("1"))
+                  raise Exception("the console's menu did not come up")
+              time.sleep(0.5)
+
+      with subtest("the TTY console: log in, and there is a network already"):
+          tty_login()
           machine.wait_until_tty_matches("1", "tunnel alive")
           machine.wait_until_tty_matches("1", r"\[Enter\].*zone sz")
+          tty_menu()
           machine.send_chars("\n")
           # A login shell in the zone: the console did not come up again in it.
           machine.wait_until_succeeds("pgrep -u alice -f 'system-run sz'", timeout=30)
-          tty_run("socat -T10 - TCP:10.99.0.1:8080 > /tmp/console-zone 2>&1; echo $VPN_ZONE_CURRENT >> /tmp/console-zone")
-          machine.wait_until_succeeds("grep -q sys:sz /tmp/console-zone", timeout=30)
-          out = machine.succeed("cat /tmp/console-zone")
+          tty_run("socat -T10 - TCP:10.99.0.1:8080 > /home/alice/console-zone 2>&1; echo $VPN_ZONE_CURRENT >> /home/alice/console-zone")
+          machine.wait_until_succeeds("grep -q sys:sz /home/alice/console-zone", timeout=30)
+          out = machine.succeed("cat /home/alice/console-zone")
           assert "peer=10.99.0.2" in out, out
           tty_run("exit")
           # Back in the menu once the zone's shell is gone.
           machine.wait_until_fails("pgrep -u alice -f 'system-run sz'", timeout=30)
+          tty_menu()
           # The plain console: the host, which has no network for alice.
           machine.send_chars("q")
           tty_run(f"socat -T5 - TCP:{server_ip}:8090 > /tmp/console-host 2>&1; echo host-exit=$? >> /tmp/console-host")
           machine.wait_until_succeeds("grep -q host-exit= /tmp/console-host", timeout=30)
           out = machine.succeed("cat /tmp/console-host")
           assert "peer=" not in out and "host-exit=0" not in out, out
+          # The emergency key, turned at the seat: a local, active session —
+          # no password — and the host is open, then closed again.
+          tty_run("systemctl start vpn-zones-egress-open; echo key=$? > /tmp/console-key")
+          machine.wait_until_succeeds("grep -q key= /tmp/console-key", timeout=30)
+          out = machine.succeed("cat /tmp/console-key")
+          assert "key=0" in out, out
+          out = machine.succeed(as_user("alice", f"socat -T10 - TCP:{server_ip}:8090"))
+          assert "peer=" in out, out
+          tty_run("systemctl stop vpn-zones-egress-open; echo unkey=$? > /tmp/console-unkey")
+          machine.wait_until_succeeds("grep -q unkey=0 /tmp/console-unkey", timeout=30)
+          machine.fail(direct("alice"))
           tty_run("exit")
 
       with subtest("the TTY console: no tunnel, and the plain zone is one key away"):
@@ -612,20 +650,20 @@ let
           # handshake.
           server.succeed("ip link set wg0 down")
           machine.succeed("systemctl restart vpn-zone-system@sz")
-          machine.wait_until_tty_matches("1", "login: ")
-          machine.send_chars("alice\n")
-          machine.wait_until_tty_matches("1", "Password: ")
-          machine.send_chars("alice-console\n")
+          tty_login()
           machine.wait_until_tty_matches("1", "no tunnel", timeout=60)
           machine.wait_until_tty_matches("1", r"\[p\].*zone pl")
+          tty_menu()
           machine.send_chars("p")
           machine.wait_until_succeeds("pgrep -u alice -f 'system-run pl'", timeout=60)
-          tty_run(f"socat -T10 - TCP:{server_ip}:8090 > /tmp/console-plain 2>&1; echo $VPN_ZONE_CURRENT >> /tmp/console-plain")
-          machine.wait_until_succeeds("grep -q sys:pl /tmp/console-plain", timeout=30)
-          out = machine.succeed("cat /tmp/console-plain")
+          tty_run(f"socat -T10 - TCP:{server_ip}:8090 > /home/alice/console-plain 2>&1; echo $VPN_ZONE_CURRENT >> /home/alice/console-plain")
+          machine.wait_until_succeeds("grep -q sys:pl /home/alice/console-plain", timeout=30)
+          out = machine.succeed("cat /home/alice/console-plain")
           assert "peer=" in out and "peer=10.99." not in out, out
           tty_run("exit")
           machine.wait_until_fails("pgrep -u alice -f 'system-run pl'", timeout=30)
+          # Back in the menu at once: the tunnel was waited for once already.
+          tty_menu(timeout=10)
           machine.send_chars("q")
           tty_run("exit")
           server.succeed("ip link set wg0 up")
@@ -634,9 +672,23 @@ let
           # Services are attached by the generator, in /run — not in their units.
           machine.succeed("systemctl cat probe | grep -q NetworkNamespacePath")
           host_ns = machine.succeed("readlink /proc/1/ns/net").strip()
-          # alice is in wheel: the switch needs no password.
-          machine.succeed(as_user("alice", "vpn-zones-off"))
-          machine.succeed("test -e /var/lib/vpn-zones/off")
+          # alice is in wheel: at the seat the switch needs no password —
+          # logged in on tty1, the console's host shell ("q").
+          tty_login()
+          machine.wait_until_tty_matches("1", r"\[Enter\].*zone sz")
+          tty_menu()
+          machine.send_chars("q")
+          # Judged by what it does: switching off restarts the console too, and
+          # the shell that asked is gone before it could say anything.
+          tty_run("vpn-zones-off > /home/alice/seat-off.log 2>&1; echo rc=$? >> /home/alice/seat-off.log")
+          try:
+              machine.wait_until_succeeds("test -e /var/lib/vpn-zones/off", timeout=60)
+          except Exception:
+              # What the seat saw: a password prompt, an error, or nothing.
+              print(machine.get_tty_text("1"))
+              print(machine.execute("cat /home/alice/seat-off.log")[1])
+              print(machine.execute("cat /proc/$(pgrep -u alice -n bash)/cgroup")[1])
+              raise
           machine.fail("nft list table inet vpnzones_egress")
           machine.fail("systemctl is-active vpn-zone-system@sz")
           machine.succeed("systemctl is-active probe")
@@ -652,9 +704,11 @@ let
           # Off survives a reload, which is what a reboot does to generators.
           machine.succeed("systemctl daemon-reload")
           machine.fail("systemctl cat probe | grep -q NetworkNamespacePath")
-          # carol is not in wheel.
+          # carol is not in wheel; alice from outside the seat would need her
+          # password, which nobody types here. Root turns it on.
           machine.fail(as_user("carol", "vpn-zones-on"))
-          machine.succeed(as_user("alice", "vpn-zones-on"))
+          machine.fail(as_user("alice", "vpn-zones-on"))
+          machine.succeed("systemctl start vpn-zones-on.service")
           machine.fail("test -e /var/lib/vpn-zones/off")
           machine.succeed("nft list table inet vpnzones_egress")
           machine.wait_until_succeeds("systemctl is-active vpn-zone-system@sz", timeout=60)

@@ -218,6 +218,8 @@ const SESSION_BUS_PROXY: &str = "session-bus";
 /// The bus filter in front of it (`crate::bus_filter`), what the zone gets as
 /// its `bus`.
 const SESSION_BUS_FILTER: &str = "session-bus-filter";
+/// The sound server's control socket as the zone gets it (`pulse_filter`).
+const PULSE_FILTER: &str = "pulse-filter";
 
 /// Is the session bus at `socket` a hermetic zone's filtered one — the zone's
 /// filter (or, from before it, its proxy) bound over it? Read from the mount
@@ -241,6 +243,8 @@ const HOST_RUNTIME_HELD: &str = "r";
 /// not `systemd/` (the manager's private socket — a process outside the zone),
 /// not `gnupg/`, `ssh-agent`, `keyring/`, `at-spi/` — and not the compositor's
 /// socket, which no zone gets (`compositor_private`).
+/// (`pulse` is listed as the sound server it is, but never bound as the
+/// host's: the zone's `pulse/native` is the filter's — `pulse_filter`.)
 const RUNTIME_KEPT: [&str; 3] = ["pipewire-0", "pulse", "doc"];
 /// Ours, below the runtime directory: the broker's socket and the restricted
 /// Wayland sockets. Never bound whole — one zone must not reach another zone's
@@ -272,7 +276,8 @@ pub fn compositor_private(name: &str) -> bool {
 /// open by design (`docs/LEAK-MODEL.md` §1) — except [`compositor_private`].
 /// [`OURS`] is bound piece by piece, never as it is.
 pub fn runtime_entry_kept(name: &str, hermetic: bool) -> bool {
-    if compositor_private(name) || name == OURS {
+    // `pulse`: never the host's — the zone gets the filter's socket there.
+    if compositor_private(name) || name == OURS || name == "pulse" {
         return false;
     }
     !hermetic || RUNTIME_KEPT.contains(&name)
@@ -791,6 +796,7 @@ static UPLINK_CHILD: AtomicI32 = AtomicI32::new(0);
 static PASTA_CHILD: AtomicI32 = AtomicI32::new(0);
 static PROXY_CHILD: AtomicI32 = AtomicI32::new(0);
 static SESSION_PROXY_CHILD: AtomicI32 = AtomicI32::new(0);
+static PULSE_FILTER_CHILD: AtomicI32 = AtomicI32::new(0);
 /// Did the shutdown start with a TERM/INT of our own?
 static ASKED_TO_STOP: AtomicBool = AtomicBool::new(false);
 
@@ -811,6 +817,7 @@ extern "C" fn stop_zone(_sig: libc::c_int) {
         &ZONE_CHILD,
         &PROXY_CHILD,
         &SESSION_PROXY_CHILD,
+        &PULSE_FILTER_CHILD,
     ] {
         let pid = slot.load(Ordering::SeqCst);
         if pid > 0 {
@@ -1130,6 +1137,10 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
     };
     let session_proxy_pid = session_proxy.as_ref().map_or(0, |c| c.id() as i32);
     SESSION_PROXY_CHILD.store(session_proxy_pid, Ordering::SeqCst);
+    // The sound server through a filter, for every zone (`pulse_filter`).
+    let pulse = start_pulse_filter(zone);
+    let pulse_pid = pulse.as_ref().map_or(0, |c| c.id() as i32);
+    PULSE_FILTER_CHILD.store(pulse_pid, Ordering::SeqCst);
 
     let (uplink_up_r, uplink_up_w) =
         sys::pipe().map_err(|e| format!("cannot create a pipe: {e}"))?;
@@ -1391,6 +1402,14 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
             PROXY_CHILD.store(0, Ordering::SeqCst);
             continue;
         }
+        if dead == pulse_pid && dead > 0 && !ASKED_TO_STOP.load(Ordering::SeqCst) {
+            eprintln!(
+                "zone {}: the sound filter died — the zone has no sound server now",
+                zone.name()
+            );
+            PULSE_FILTER_CHILD.store(0, Ordering::SeqCst);
+            continue;
+        }
         if dead == session_proxy_pid && dead > 0 && !ASKED_TO_STOP.load(Ordering::SeqCst) {
             eprintln!(
                 "zone {}: the session bus proxy died — the zone has no session bus now",
@@ -1423,6 +1442,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
         zone_pid,
         PROXY_CHILD.load(Ordering::SeqCst),
         SESSION_PROXY_CHILD.load(Ordering::SeqCst),
+        PULSE_FILTER_CHILD.load(Ordering::SeqCst),
     ] {
         if pid != dead {
             kill_and_reap(pid);
@@ -1655,6 +1675,29 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
     for group in RESOLVER_DIRS {
         hide_first(group)?;
     }
+    // Nor anything else of the host's a client has no business with: the
+    // system bus (resolve1 looks names up in the host's network), the
+    // session's runtime directory (the compositor's raw socket and IPC, which
+    // start programs on the host), /tmp (the session's listening sockets). A
+    // VPN client is a network-facing program a server may try to subvert
+    // (review 2026-09-25).
+    let runtime = host_runtime_dir(zone);
+    for (dir, options) in [
+        (Path::new("/run/dbus"), "mode=0755,size=16k"),
+        (runtime.as_path(), "mode=0700,size=16k"),
+        (Path::new("/tmp"), "mode=1777,size=64m"),
+    ] {
+        if dir.is_dir() {
+            sys::mount(
+                OsStr::new("tmpfs"),
+                dir,
+                "tmpfs",
+                libc::MS_NOSUID | libc::MS_NODEV,
+                options,
+            )
+            .map_err(|e| format!("cannot close {} for the uplink: {e}", dir.display()))?;
+        }
+    }
 
     // SAFETY: getpid(2) takes no arguments and cannot fail.
     let pid = unsafe { libc::getpid() };
@@ -1859,6 +1902,57 @@ fn start_proxy(
 /// the zone by its network namespace — and as the user, like the proxy. A link
 /// a program hands the portal goes to the broker as "open it in this very
 /// zone". It dies with this process (`PR_SET_PDEATHSIG`), which is the zone.
+/// The sound filter (`pulse_filter`), on the host, as the user: listening in
+/// the zone's directory, passing on to the host's `pulse/native`. `None` when
+/// the host has no sound server there.
+fn start_pulse_filter(zone: &Zone) -> Option<Child> {
+    let upstream = host_runtime_dir(zone).join("pulse").join("native");
+    if fs::symlink_metadata(&upstream).is_err() {
+        return None;
+    }
+    let socket = zone.path(PULSE_FILTER);
+    let _ = fs::remove_file(&socket);
+    let (uid, gid) = {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(&zone.dir).ok()?;
+        (meta.uid(), meta.gid())
+    };
+    let exe = std::env::current_exe().ok()?;
+    let mut child = match Command::new(exe)
+        .arg("pulse-filter")
+        .arg("--listen")
+        .arg(&socket)
+        .arg("--upstream")
+        .arg(&upstream)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .uid(uid)
+        .gid(gid)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!(
+                "zone {}: cannot start the sound filter ({e}) — no sound in the zone",
+                zone.name()
+            );
+            return None;
+        }
+    };
+    for _ in 0..WAIT_STEPS {
+        if fs::symlink_metadata(&socket).is_ok() {
+            return Some(child);
+        }
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        thread::sleep(WAIT_STEP);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    None
+}
+
 fn start_session_filter(zone: &Zone) {
     let upstream = zone.path(SESSION_BUS_PROXY);
     if fs::symlink_metadata(&upstream).is_err() {
@@ -1939,6 +2033,65 @@ fn host_runtime_dir(zone: &Zone) -> PathBuf {
     use std::os::unix::fs::MetadataExt;
     let uid = fs::metadata(&zone.dir).map_or(0, |m| m.uid());
     PathBuf::from(format!("/run/user/{uid}"))
+}
+
+/// Bind the socket at `from` — one of ours, in the zone's directory — over `to`.
+///
+/// The zone's directory is the user's, and a program with the user's `$HOME`
+/// can put a symlink where a socket is expected: `mount(2)` follows it, and the
+/// zone would get whatever it pointed at — the host's own system or session
+/// bus (review 2026-09-25). So the socket is opened without following links,
+/// checked to BE a socket and the user's, and bound through that descriptor.
+fn bind_socket(from: &Path, to: &Path, owner: u32) -> Result<(), String> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let c = std::ffi::CString::new(from.as_os_str().as_bytes())
+        .map_err(|_| format!("a NUL in {}", from.display()))?;
+    // SAFETY: a NUL-terminated path and flags; the descriptor is ours.
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "{}: {}",
+            from.display(),
+            io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: just opened, owned from here.
+    let held = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: stat is plain data filled in by the kernel.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid descriptor and a stat buffer.
+    if unsafe { libc::fstat(held.as_raw_fd(), &mut st) } != 0 {
+        return Err(format!(
+            "{}: {}",
+            from.display(),
+            io::Error::last_os_error()
+        ));
+    }
+    if st.st_mode & libc::S_IFMT != libc::S_IFSOCK || st.st_uid != owner {
+        return Err(format!(
+            "{} is not the user's socket — not bound into the zone",
+            from.display()
+        ));
+    }
+    if !to.exists() {
+        if let Some(dir) = to.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(to)
+            .map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+    }
+    let source = PathBuf::from(format!("/proc/self/fd/{}", held.as_raw_fd()));
+    sys::mount(source.as_os_str(), to, "", libc::MS_BIND, "")
+        .map_err(|e| format!("cannot bind {}: {e}", from.display()))
 }
 
 /// Bind `from` over a placeholder at `to`, replacing whatever was bound there:
@@ -2083,13 +2236,28 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
         bind_entry(&broker, &runtime.join(crate::broker::SOCKET))?;
         kept.push("broker".to_owned());
     }
+    // The sound server's control socket, through the filter: never the host's
+    // own, where a client may make the host connect out (`pulse_filter`). No
+    // filter, no sound — the zone is not given the raw one.
+    let pulse = zone.path(PULSE_FILTER);
+    if fs::symlink_metadata(&pulse).is_ok() {
+        let dir = runtime.join("pulse");
+        fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        let _ = std::os::unix::fs::chown(&dir, Some(uid), Some(gid));
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        }
+        bind_socket(&pulse, &dir.join("native"), uid)?;
+        kept.push("pulse (filtered)".to_owned());
+    }
     if zone.hermetic {
         // The filter, never the proxy behind it: the proxy alone would hand
         // the portal's links to the host (LEAK-MODEL §2). No filter, no bus —
         // said out loud.
         let filter = zone.path(SESSION_BUS_FILTER);
         if fs::symlink_metadata(&filter).is_ok() {
-            bind_entry(&filter, &runtime.join("bus"))?;
+            bind_socket(&filter, &runtime.join("bus"), uid)?;
             kept.push("bus (filtered)".to_owned());
         } else if fs::symlink_metadata(zone.path(SESSION_BUS_PROXY)).is_ok() {
             eprintln!(
@@ -2145,15 +2313,12 @@ fn seal_system_bus(zone: &Zone) -> Result<(), String> {
         return Ok(());
     }
     let proxy = zone.path(SYSTEM_BUS_PROXY);
+    let owner = {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(&zone.dir).map(|m| m.uid()).unwrap_or(u32::MAX)
+    };
     if fs::symlink_metadata(&proxy).is_ok()
-        && sys::mount(
-            proxy.as_os_str(),
-            Path::new(SYSTEM_BUS),
-            "",
-            libc::MS_BIND,
-            "",
-        )
-        .is_ok()
+        && bind_socket(&proxy, Path::new(SYSTEM_BUS), owner).is_ok()
     {
         println!(
             "zone {}: system bus filtered (UPower, login1 inhibit/read)",
@@ -3678,9 +3843,13 @@ mod tests {
         ] {
             assert!(runtime_entry_kept(name, false), "{name}");
         }
-        for name in ["pipewire-0", "pulse", "doc"] {
+        for name in ["pipewire-0", "doc"] {
             assert!(runtime_entry_kept(name, true), "{name}");
         }
+        // The sound server's control socket is never the host's own: every
+        // zone gets the filter's in its place (`pulse_filter`).
+        assert!(!runtime_entry_kept("pulse", true));
+        assert!(!runtime_entry_kept("pulse", false));
         for name in ["bus", "systemd", "gnupg", "niri"] {
             assert!(!runtime_entry_kept(name, true), "{name}");
         }

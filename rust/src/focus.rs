@@ -224,7 +224,10 @@ pub fn launch_of(state: &Path, pid: i32) -> Option<Launch> {
     let mut at = pid;
     for _ in 0..64 {
         if let Some((_, program, record)) = index.get(&at) {
-            if registry::launched(&running, at) {
+            // The user's own launch: one a program in a zone asked for runs
+            // under an id of that program's choosing, and would get the user's
+            // label for it and the "pin" and "restart" entries.
+            if registry::launched_here(&running, at) {
                 if record.zone == zone {
                     return Some(Launch {
                         zone,
@@ -264,7 +267,19 @@ fn shown(name: &str) -> String {
 fn reorders(c: char) -> bool {
     matches!(
         c,
-        '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{3164}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{E0000}'..='\u{E007F}'
     )
 }
 
@@ -543,7 +558,14 @@ fn ask_menu(tools: &Tools, menu: &crate::window::Menu) -> Option<String> {
         "--title".into(),
         menu.title.clone().into(),
         "--menu".into(),
-        menu.notes.join("\n").into(),
+        // kdialog shows it in a QLabel, which takes `<` for rich text: a
+        // window's own name must not restyle, or hide, what follows it.
+        menu.notes
+            .join("\n")
+            .replace('<', "‹")
+            .replace('>', "›")
+            .replace('&', "＆")
+            .into(),
     ];
     for (tag, label, _) in &menu.actions {
         argv.push(tag.into());

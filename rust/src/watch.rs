@@ -264,8 +264,18 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
             continue;
         };
         let now = parse_mirror(&mirror);
+        // A verdict about a previous run of the zone — it was restarted between
+        // two looks, faster than a look found it down — is not carried over:
+        // an idle tunnel just brought up would inherit "dead" (review
+        // 2026-09-25).
+        let modified = |p: &std::path::Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+        let this_run = match (modified(&memory_file), modified(&dir.join("zone.pid"))) {
+            (Some(verdict), Some(started)) => verdict >= started,
+            _ => false,
+        };
         let remembered = fs::read_to_string(&memory_file)
             .ok()
+            .filter(|_| this_run)
             .and_then(|t| parse_memory(&t));
         let fresh = verdict(remembered.as_ref().map(|(r, _)| r), &now);
         let last = remembered.as_ref().map(|(_, v)| *v);

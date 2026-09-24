@@ -84,11 +84,13 @@ impl Home {
     }
 
     /// Make a zone look like it is up: `zone.pid` naming a process that really
-    /// exists (ourselves) is all `zone_pid` asks for.
+    /// exists (ourselves), with its start noted as the holder notes its own.
     fn zone_is_up(&self, zone: &str) {
         let dir = self.state().join(zone);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("zone.pid"), format!("{}\n", std::process::id())).unwrap();
+        let stamp = vpn_zone::sys::process_stamp(std::process::id() as i32).unwrap();
+        fs::write(dir.join("zone.start"), format!("{stamp}\n")).unwrap();
         fs::write(dir.join("ready"), "").unwrap();
     }
 
@@ -602,6 +604,49 @@ fn a_launch_asked_for_from_a_zone_is_marked_and_its_id_is_a_file_name() {
         started.iter().any(|s| s.lines().any(|l| l == "from-zone")),
         "{started:?}"
     );
+}
+
+#[test]
+fn only_a_throwaway_container_of_ours_can_be_joined() {
+    // Its layer is erased behind the last tenant: a directory named by a
+    // request would go with it.
+    let home = Home::new("join");
+    home.zone_is_up("nl");
+    let other = home.root.join("documents");
+    fs::create_dir_all(&other).unwrap();
+    let out = home.run_with(
+        &[
+            "run",
+            "nl",
+            "--tmp-profile",
+            "--join",
+            other.to_str().unwrap(),
+            "--",
+            "true",
+        ],
+        &[("VPN_ZONE_DRYRUN", "1")],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("не временный контейнер"),
+        "{}",
+        stderr(&out)
+    );
+    let ours = home.state().join(".throwaway/vpn-profile-abc12345");
+    fs::create_dir_all(&ours).unwrap();
+    let out = home.run_with(
+        &[
+            "run",
+            "nl",
+            "--tmp-profile",
+            "--join",
+            ours.to_str().unwrap(),
+            "--",
+            "true",
+        ],
+        &[("VPN_ZONE_DRYRUN", "1")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
 }
 
 #[test]

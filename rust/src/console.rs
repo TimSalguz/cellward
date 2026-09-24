@@ -169,11 +169,12 @@ fn user_name() -> Option<String> {
 fn menu(config: &Config, user: &str) {
     let zone = config.zone.as_str();
     let mut started = false;
+    let mut waited = false;
     loop {
         // A zone that is down is started — through the system-zone service,
         // which lets the zone's users — and waited for, once per console; a
         // tunnel that was already up but has not shaken hands is waited for
-        // too.
+        // too. Once: back from a shell, the menu says how things are now.
         let mut net = net_of(&system::run_state(zone));
         if net == Net::Down && !started {
             started = true;
@@ -183,9 +184,11 @@ fn menu(config: &Config, user: &str) {
             }
             net = net_of(&system::run_state(zone));
         }
-        if net == Net::Waiting {
+        if net == Net::Waiting && !waited {
+            waited = true;
             net = wait_alive(zone);
         }
+        drop_typeahead();
 
         let fallback = config.fallback.as_deref().filter(|_| net != Net::Alive);
         println!();
@@ -270,6 +273,16 @@ fn menu(config: &Config, user: &str) {
             _ => {}
         }
     }
+}
+
+/// Keys pressed before the menu is on the screen are not choices: typed while
+/// the console waited for the tunnel, left over from the shell that just
+/// ended, or a terminal's answer to something a program there printed. They
+/// are dropped, so nothing reaches `x` or `k` that was not pressed for them.
+fn drop_typeahead() {
+    // SAFETY: descriptor 0 and a constant; on anything but a terminal it fails
+    // and changes nothing.
+    unsafe { libc::tcflush(0, libc::TCIFLUSH) };
 }
 
 /// Poll the zone's state until its tunnel is alive or the wait is over.

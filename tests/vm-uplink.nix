@@ -50,6 +50,9 @@ let
           zones.p2 = {
             kind = "plain";
             uplink = "eth2";
+            # Its own resolvers, as a plain zone with an uplink must have; the
+            # test looks no name up through it.
+            dns = [ "9.9.9.9" ];
           };
           # Strict: the host itself has no way out but the local network, so
           # the uplinks' pasta has to be let out by its owner.

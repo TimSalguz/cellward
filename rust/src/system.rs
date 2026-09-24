@@ -236,7 +236,7 @@ pub fn with_tunnel_mark(setconf: &str) -> String {
     for line in setconf.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
-            in_interface = trimmed.eq_ignore_ascii_case("[interface]");
+            in_interface = squeezed(trimmed).eq_ignore_ascii_case("[interface]");
             out.push_str(line);
             out.push('\n');
             if in_interface {
@@ -246,7 +246,7 @@ pub fn with_tunnel_mark(setconf: &str) -> String {
         }
         let is_mark = trimmed
             .split_once('=')
-            .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("fwmark"));
+            .is_some_and(|(key, _)| squeezed(key).eq_ignore_ascii_case("fwmark"));
         if in_interface && is_mark {
             continue;
         }
@@ -254,6 +254,12 @@ pub fn with_tunnel_mark(setconf: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+/// A key or a section header as wg reads it: every whitespace dropped
+/// (`Listen Port`, `[Inter face]` are `ListenPort`, `[Interface]` to it).
+fn squeezed(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
 /// A config added on the spot, without `ListenPort` in `[Interface]`: the
@@ -265,11 +271,11 @@ pub fn without_listen_port(config: &str) -> String {
     for line in config.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
-            in_interface = trimmed.eq_ignore_ascii_case("[interface]");
+            in_interface = squeezed(trimmed).eq_ignore_ascii_case("[interface]");
         } else if in_interface
             && trimmed
                 .split_once('=')
-                .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("listenport"))
+                .is_some_and(|(key, _)| squeezed(key).eq_ignore_ascii_case("listenport"))
         {
             continue;
         }
@@ -470,14 +476,30 @@ fn ns_up(args: &Args) -> Result<(), String> {
     // User zones go out THROUGH this zone, not into it: their pasta runs with
     // a group of its own, whose packets to this namespace's own addresses —
     // a service listening here, the tunnel's address — are refused.
-    let first: Vec<String> = crate::egress::group_id(crate::sysrun::BRIDGE_GROUP)
+    let bridge = crate::egress::group_id(crate::sysrun::BRIDGE_GROUP);
+    let first: Vec<String> = bridge
         .map(|gid| vec![format!("meta skgid {gid} fib daddr type local reject")])
         .unwrap_or_default();
-    if let Err(e) = feed_ruleset(tools, name, &zone::app_ruleset_with(&first)) {
-        eprintln!(
+    // Which group the rule is for, once it is in: the uplink service gives a
+    // user zone a way through only when it is, and for the group it runs
+    // pasta as (review 2026-09-25: an uplink was given whenever the group
+    // existed, the rule loaded or not).
+    let run = run_dir(name);
+    let marker = run.join(BRIDGE_RULE);
+    let _ = fs::remove_file(&marker);
+    match feed_ruleset(tools, name, &zone::app_ruleset_with(&first)) {
+        Ok(()) => {
+            if let Some(gid) = bridge {
+                if make_run_dir(&run).is_ok() {
+                    let _ = fs::write(&marker, format!("{gid}\n"));
+                }
+            }
+        }
+        Err(e) => eprintln!(
             "system zone {name}: nftables second echelon is OFF ({e}) — the zone is still \
-             hermetic by construction, but nothing insures it against a mistake"
-        );
+             hermetic by construction, but nothing insures it against a mistake; no user zone \
+             gets a way through it"
+        ),
     }
 
     // Empty until the tunnel says otherwise: glibc then asks 127.0.0.1, and
@@ -1024,6 +1046,16 @@ pub struct Settings {
 const FOREIGN_CONFIG: &str =
     "config.conf (added on the spot by someone not among the zone's users)";
 
+/// Is this the config path of a declared zone whose on-the-spot config is
+/// somebody else's? A declared user may add over it.
+pub fn is_foreign_config(name: &str, path: &Path) -> bool {
+    path == local_dir(name).join(FOREIGN_CONFIG)
+}
+
+/// In the run directory: the gid the rule that keeps user zones out of this
+/// zone is for, written once the rule is in.
+pub const BRIDGE_RULE: &str = "bridge-gid";
+
 /// A zone's `uplink` file that is there but names no interface a name can be
 /// (`.`, `..`, a slash, a control byte): read as "no uplink" it would send the
 /// zone out wherever the host routes, the very thing an uplink is for not
@@ -1034,7 +1066,9 @@ pub fn uplink_invalid(name: &str) -> bool {
     } else {
         local_dir(name)
     };
-    read_trimmed(&dir.join("uplink")).is_some_and(|i| !crate::hostif::valid_interface_name(&i))
+    // There and empty is not "no uplink" either (review 2026-09-25).
+    fs::read_to_string(dir.join("uplink"))
+        .is_ok_and(|t| !crate::hostif::valid_interface_name(t.trim()))
 }
 
 pub fn declared_dir(name: &str) -> PathBuf {

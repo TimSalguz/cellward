@@ -225,8 +225,19 @@ pub fn note_start(running: &Path, pid: i32, from_zone: bool) -> io::Result<()> {
     fs::rename(&tmp, dir.join(pid.to_string()))
 }
 
-/// Drop the start times of launches that are over. How many went.
+/// Drop the start times of launches that are over — and whose records are
+/// gone too. A note is the proof that a record is dead: swept before its
+/// record, it would leave the record to count by its number alone (review
+/// 2026-09-25). How many went.
 pub fn sweep_started(running: &Path) -> usize {
+    let mut named = std::collections::HashSet::new();
+    for dir in dirs(running) {
+        for file in files(&dir).into_iter().chain(files(&dir.join(BY_BINARY))) {
+            if let Ok(text) = fs::read_to_string(&file) {
+                named.extend(text.lines().filter_map(parse_record).map(|r| r.pid));
+            }
+        }
+    }
     let mut swept = 0;
     for entry in fs::read_dir(running.join(STARTED))
         .into_iter()
@@ -240,7 +251,8 @@ pub fn sweep_started(running: &Path) -> usize {
         else {
             continue;
         };
-        if !launched(running, pid) && fs::remove_file(entry.path()).is_ok() {
+        if !named.contains(&pid) && !launched(running, pid) && fs::remove_file(entry.path()).is_ok()
+        {
             swept += 1;
         }
     }

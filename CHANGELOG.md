@@ -55,6 +55,113 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **The TTY console drops keys pressed before its menu is up.** Keys typed
+  while it waited for the tunnel, left over from the shell that just ended, or
+  a terminal's answer to something a program printed were read as the menu's
+  choice — `x` switches vpn-zones off, `k` turns the emergency key. The menu
+  flushes the terminal's input before it shows itself. It also waits for the
+  tunnel once per console: back from a shell, it says how things are at once.
+- **pasta resets what it cannot bind to the zone's interface** (review of
+  2026-09-25). Between an interface going away and the watcher killing pasta,
+  pasta connected TCP unbound — by the host's routes, with the host's address
+  (an ISP ending a PPPoE session, a VPN server dropping a system client is
+  enough). The pasta both modules install is built with a small edit that
+  resets such a flow instead; it is applied by meaning, not as a diff, so it
+  fits passt releases that differ, and fails the build loudly where it does
+  not.
+- **Second review round, launcher entries and the picker:** an autostart entry
+  with `X-GNOME-Autostart-enabled=false` is taken over (systemd's generator,
+  which starts autostart under niri and sway, does not know the key and ran
+  it around the picker), the key kept for GNOME; a menu editor's "deleted"
+  stub under a system entry's name is taken over with its flags and given
+  back as it was (xdg-open and GLib went past it to the system entry); a
+  localised `Exec[ru]` is dropped from autostart entries too; the launch
+  window starts on the pinned network when "always" is ticked for it; a new
+  profile that cannot be made starts the program in its own sandbox; the
+  window menu cuts more invisible characters from a window's own name and
+  shows no markup through kdialog.
+- **Second review round, the module and the uplink:** a certificate file with
+  a private key in it is refused by the option's type, before it is copied to
+  the store; container names the runtime reserves (`__…`, `main`, `own`,
+  `ask`, `pinmain`) and bad `defaults.container` values are refused; custom
+  `xdg.dataHome`/`configHome` are refused with a message (the interception
+  lives in the default ones); `niri.includeInConfig` needs a config.kdl
+  home-manager writes as text; the broker starts its own binary from the store,
+  not the profile's `vpn-zone` (a link a program with the home could
+  repoint); a sandbox is never granted browsers' native-messaging hosts,
+  user tmpfiles, more compositors' and shells' configs, pipewire and
+  wireplumber configs, git's, KDE service menus or file managers' scripts;
+  the uplink namespace (where OpenConnect runs) sees neither the system bus,
+  nor the session's runtime directory, nor the host's `/tmp`.
+- **The sound server through a filter** (review of 2026-09-25). Every zone,
+  the hermetic and `offline` ones too, got the host's `pulse/native` — where
+  a client may `LOAD_MODULE` `module-tunnel-sink`, `module-rtp-send` or
+  `module-native-protocol-tcp` and make the HOST's sound server connect out,
+  or listen, in the host's network. The holder now starts `pulse-filter` on
+  the host and binds its socket as the zone's `pulse/native`: the protocol's
+  frames pass whole, with their descriptors, except `LOAD_MODULE`,
+  `UNLOAD_MODULE` and `KILL_CLIENT`, answered `ERROR`/`ACCESS`. VM test with a
+  stand-in server that sees what reaches it.
+- **The zone's sockets are bound only as what they are.** The filters' and
+  the system bus proxy's sockets live in the zone's directory, which is the
+  user's: a symlink put there in time gave the zone the host's own system or
+  session bus. They are bound through a descriptor opened without following
+  links and checked to be the user's socket.
+- **A container's roots stay the container's.** The trust layer compared the
+  NSS databases' paths as written: a sandboxed program that made `.pki` or
+  `.mozilla` a link to the host's own had the host's browsers trust the
+  container's roots. Paths are compared resolved now.
+- **Second review round, D-Bus:** the portal's network monitor and proxy
+  resolver are answered by the filter (the zone's network up and direct):
+  `CanReach` had the host look up and try any name in its own network; the
+  trash is no longer among what passes; the link opener drops
+  `NIXOS_XDG_OPEN_USE_PORTAL`, with which xdg-open handed a link to the
+  portal over the session bus — the host's, in an ordinary zone.
+- **Second review round, the system tier and configs:** a config's keys and
+  section names are read the way wg reads them, whitespace dropped — `Listen
+  Port` and `[Inter face]` passed our filters as something else and wg took
+  them for `ListenPort` and `[Interface]`; polkit's "no password" also
+  requires the asking process to be in a login session's own scope (a unit the
+  user's manager starts was taken for the display session); an uplink is given
+  only when the rule keeping user zones out of the system zone is in, for the
+  bridge group; an empty `uplink` stops the zone and the option is typed; a
+  declared user can take over a config somebody else added on the spot; a
+  command that ignores SIGTERM after its client left is killed after 5 s; the
+  service's descriptors are closed on kernels before 5.11 too; groups that open
+  host daemons (docker, libvirtd, podman, lxd, incus-admin) are dropped from a
+  system zone's command; a parse error shows a key only when it is a plain word.
+- **Second review round (2026-09-25), the launch path:** the zone entered is
+  checked from inside — `profile-run` compares its own network namespace with
+  the one `vpn-zone run` checked, since `nsenter` finds the zone again by a
+  number, later; a zone without the holder's start note is not up (zones up
+  since before the update are restarted once); the start notes of finished
+  launches stay while a record names them; the broker refuses a request that
+  looks like the host's (the host never needs it), shows the chosen container
+  in its question and keeps it in "always"; `vpn-zone rm` also drops the
+  broker's "always" answers for the zone; the window menu names a program
+  only from the user's own launches.
+- **The portals are asked only for what they would ask the user about**
+  (review of 2026-09-25). xdg-desktop-portal knows its caller by the process
+  on the other end of its connection — our proxy, outside the sandbox and the
+  zone's mounts — and finds no `/.flatpak-info` there: every program of a
+  hermetic zone or a sandbox was a HOST application to it. A host application
+  gets without a dialog what a Flatpak is asked about: the dynamic launcher
+  installs a launcher of the caller's making and starts it on the host, in the
+  host's network; location, camera, a non-interactive screenshot, the Secret
+  portal's key come the same way. The bus filter now lets through only named
+  portal interfaces (file chooser, file transfer, settings, notifications,
+  inhibit, network and memory monitors, proxy resolver, print, trash,
+  screencast, account — and OpenURI, Email, Background, which it answers
+  itself) and answers the rest, a portal added later included, with
+  AccessDenied; a call that names no interface is refused too. The sandbox's
+  `vpnzone.app.<id>` never reached the portal for the same reason; giving
+  sandboxes their identity with the portals (the proxy inside the sandbox, as
+  Flatpak runs it) is the next step. VM test: the dynamic launcher refused
+  from a hermetic zone.
+- **Only a throwaway container of ours can be joined.** `--tmp-profile
+  --join <dir>` took any existing directory for a throwaway layer — which is
+  erased behind its last tenant; a directory named by a request through the
+  broker, or by a slip, would have gone with it.
 - **What says "alive" means it** (review of 2026-09-24): `check`,
   `status --json` and `doctor` took any handshake line for a live tunnel — an
   hours-old one of a dead tunnel too; now a tunnel `vpn-zone watch` found dead
@@ -265,6 +372,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `/proc` from the host and from neither kind of zone.
 
 ### Fixed
+- **`vpn-zone watch` does not carry a verdict over a restart**: a zone
+  restarted between two looks inherited "dead" and read so while idle.
+- **A plain system zone with an uplink needs its own `dns`**: the default
+  resolvers are the primary network's, and names meant for one network went
+  out through the other.
 - **`vpn-zone run offline -- …` works without the picker.** The zone with no
   network was created only by the picker, on demand; typed by hand before the
   picker had ever made it, the launch found no zone. `run` creates it the same

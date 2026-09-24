@@ -12,9 +12,11 @@
 //! interface that no longer exists fails (ENODEV), and pasta takes that for
 //! a note in its debug log and connects the TCP socket unbound — by the host's
 //! routes, with the host's address (review 2026-09-24, passt's
-//! `tcp_bind_outbound`). So the holder watches the interface over rtnetlink
-//! ([`watch_interface`]) and kills pasta the moment the interface is deleted or
-//! renamed: the zone goes down, as for any dead uplink.
+//! `tcp_bind_outbound`). Two things close it: the pasta the modules install is
+//! patched so that such a connection is reset instead
+//! (`module/patches/passt-bind-outbound-fatal.pl`), and the holder watches the
+//! interface over rtnetlink ([`watch_interface`]) and kills pasta the moment it
+//! is deleted or renamed — the zone goes down, as for any dead uplink.
 //!
 //! What such a zone does NOT do is encrypt, and it is named for that everywhere
 //! it is shown.

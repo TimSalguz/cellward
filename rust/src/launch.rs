@@ -582,9 +582,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // remembered for this key, when there is one. Two programs starting at
     // once each ask their own questions, and a dialog that names its program
     // with a raw id (or not at all) is how the answers get swapped.
+    // A file name, whoever set the variable (`registry_key`).
     let label = pretty_label(
         &tools.state,
-        appid_env.as_deref().unwrap_or(appbin.as_os_str()),
+        &registry_key(appid_env.as_deref().unwrap_or(appbin.as_os_str())),
     );
     let mut cmd = selection.cmd.clone();
 
@@ -654,7 +655,9 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         // shortcut says "discord" while the binary is called "Discord", and two
         // independent permission sets for one program is what taking the binary
         // name gave us. (`docs/GOTCHAS.md` §6)
-        let fsid = appid_env.clone().unwrap_or_else(|| appbin.clone());
+        // Cleaned (`appbin` is the variable's value, sanitized): it becomes a
+        // directory of the sandbox's permissions and the portals' app id.
+        let fsid = appbin.clone();
         let mut wrapped: Vec<OsString> = vec![
             tools.core.clone().into(),
             "fs-sandbox".into(),
@@ -952,6 +955,15 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // —, and entering it would start the program in the host's network under
     // the zone's name. Checked last, as close to the `exec` as it gets.
     if let Network::Zone(pid) = network {
+        // What profile-run will check from inside: the zone's network as it is
+        // now, not as a number will say later.
+        match fs::read_link(format!("/proc/{pid}/ns/net")) {
+            Ok(ns) => std::env::set_var(crate::profile::ENV_EXPECT_NETNS, ns),
+            Err(e) => {
+                eprintln!("зона {zone_name}: её процесс не прочитать ({e}) — запуск остановлен");
+                return 1;
+            }
+        }
         if in_our_network(pid) {
             refuse(
                 tools,
@@ -1318,7 +1330,24 @@ fn resolve_container(tools: &Tools, container: &Container) -> Option<ResolvedCon
                 eprintln!("временного контейнера {} уже нет", dir.display());
                 return None;
             }
-            (basename(dir.as_os_str()).to_owned(), dir.clone(), true)
+            // Only a throwaway container of ours: its layer is ERASED behind the
+            // last tenant, and a directory named here — by a request that came
+            // through the broker, or by a slip of the hand — would go with it.
+            let real = fs::canonicalize(dir).ok()?;
+            let ours = real
+                .file_name()
+                .is_some_and(|n| n.as_bytes().starts_with(b"vpn-profile-"))
+                && throwaway_bases(&tools.state).iter().any(|base| {
+                    fs::canonicalize(base).is_ok_and(|b| real.parent() == Some(b.as_path()))
+                });
+            if !ours {
+                eprintln!(
+                    "{} — не временный контейнер vpn-zones: присоединиться нельзя",
+                    dir.display()
+                );
+                return None;
+            }
+            (basename(real.as_os_str()).to_owned(), real, true)
         }
     };
     let key = if profile.is_empty() {

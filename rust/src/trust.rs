@@ -391,25 +391,33 @@ fn bind_bundle(dir: &Path, certs: &[(String, Vec<u8>)]) -> Result<(), String> {
 /// container's certificates.
 fn sync_nss(layer: &Layer<'_>, certs: &[(String, Vec<u8>)], warnings: &mut Vec<String>) {
     let want: BTreeSet<String> = certs.iter().map(|(fp, _)| fp.clone()).collect();
-    for db in nss_databases(layer.home) {
-        let stamp_path = db.join(STAMP);
-        let old = fs::read_to_string(&stamp_path)
-            .map(|t| parse_stamp(&t))
-            .unwrap_or_default();
-        if old == want {
-            continue;
-        }
-        if !under_any(&db, layer.private) {
-            // Only worth a word when there is something to put there: an
-            // empty container has nothing to leak.
+    // The roots and each database as they really are, links resolved: a
+    // sandboxed program could make `.pki` or `.mozilla` a link to the host's
+    // own, and a path compared as it is written would pass as the container's
+    // (review 2026-09-25) — the host's browsers would trust the container's
+    // roots then.
+    let roots: Vec<PathBuf> = layer
+        .private
+        .iter()
+        .filter_map(|r| crate::container::resolved(r))
+        .collect();
+    for written in nss_databases(layer.home) {
+        let Some(db) = crate::container::resolved(&written).filter(|r| under_any(r, &roots)) else {
             if !want.is_empty() {
                 warnings.push(format!(
                     "{} is not the container's own (it lies outside its layer) — the extra roots \
                      are NOT installed there; a program reading it needs a container with a home \
                      of its own",
-                    db.display()
+                    written.display()
                 ));
             }
+            continue;
+        };
+        let stamp_path = db.join(STAMP);
+        let old = fs::read_to_string(&stamp_path)
+            .map(|t| parse_stamp(&t))
+            .unwrap_or_default();
+        if old == want {
             continue;
         }
         if let Err(e) = ensure_database(layer.certutil, &db) {
@@ -675,5 +683,31 @@ X509v3 Basic Constraints: critical
         let mut warnings = Vec::new();
         sync_nss(&layer, &[], &mut warnings);
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// `.pki` made a link to the host's own is not the container's, whatever
+    /// its written path says.
+    #[test]
+    fn a_database_linked_out_of_the_layer_is_not_the_containers() {
+        let base = std::env::temp_dir().join(format!("vz-trust-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let home = base.join("sandbox/home");
+        let host = base.join("host/.pki");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&host).unwrap();
+        std::os::unix::fs::symlink(&host, home.join(".pki")).unwrap();
+        let roots = vec![crate::container::resolved(&home).unwrap()];
+        let written = home.join(".pki/nssdb");
+        assert!(
+            under_any(&written, std::slice::from_ref(&home)),
+            "as written it looks inside"
+        );
+        let real = crate::container::resolved(&written).unwrap();
+        assert!(
+            !under_any(&real, &roots),
+            "resolved it is the host's: {}",
+            real.display()
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 }
