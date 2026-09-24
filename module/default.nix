@@ -88,7 +88,17 @@ let
   iproute = "${pkgs.iproute2}/bin/ip";
   awg = "${pkgs.amneziawg-tools}/bin/awg";
   wg = "${pkgs.wireguard-tools}/bin/wg";
-  pasta = "${pkgs.passt}/bin/pasta";
+  # pasta with a patch: a TCP connection it cannot bind to the zone's outbound
+  # interface is reset, not connected by the host's routes (review 2026-09-25,
+  # patches/passt-bind-outbound-fatal.pl).
+  passtPatched = pkgs.passt.overrideAttrs (old: {
+    nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.perl ];
+    postPatch = (old.postPatch or "") + ''
+      perl ${./patches/passt-bind-outbound-fatal.pl} < tcp.c > tcp.c.new
+      mv tcp.c.new tcp.c
+    '';
+  });
+  pasta = "${passtPatched}/bin/pasta";
   # Второй эшелон герметичности (docs/LEAK-MODEL.md): фаерволл в обоих
   # namespace зоны. Зовёт его только держатель зоны, поэтому путь идёт флагом
   # ExecStart, как ip/awg/wg/pasta, а не манифестом.
@@ -912,7 +922,7 @@ in
     # есть и bin/vpn-zone, и bin/vpn-zone-pick, и bin/vpn-zone-gui.
     vpn-zone-helpers
     vpn-zone-completions # Tab-дополнение zsh/bash (см. определение выше)
-    pkgs.passt # userspace-сеть для зон
+    passtPatched # userspace-сеть для зон (с патчем привязки к интерфейсу)
     # Клиент зон [OpenConnect]. В профиль он кладётся не ради самих зон — им
     # хватает пути в ExecStart юнита, — а ради ОДНОЙ операции, которую человек
     # делает руками: узнать отпечаток сертификата корпоративного шлюза.

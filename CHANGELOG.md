@@ -55,6 +55,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **pasta resets what it cannot bind to the zone's interface** (review of
+  2026-09-25). Between an interface going away and the watcher killing pasta,
+  pasta connected TCP unbound — by the host's routes, with the host's address
+  (an ISP ending a PPPoE session, a VPN server dropping a system client is
+  enough). The pasta both modules install is built with a small edit that
+  resets such a flow instead; it is applied by meaning, not as a diff, so it
+  fits passt releases that differ, and fails the build loudly where it does
+  not.
 - **Second review round, launcher entries and the picker:** an autostart entry
   with `X-GNOME-Autostart-enabled=false` is taken over (systemd's generator,
   which starts autostart under niri and sway, does not know the key and ran

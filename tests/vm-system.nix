@@ -657,8 +657,15 @@ let
           machine.send_chars("q")
           # Judged by what it does: switching off restarts the console too, and
           # the shell that asked is gone before it could say anything.
-          tty_run("vpn-zones-off")
-          machine.wait_until_succeeds("test -e /var/lib/vpn-zones/off", timeout=60)
+          tty_run("vpn-zones-off > /home/alice/seat-off.log 2>&1; echo rc=$? >> /home/alice/seat-off.log")
+          try:
+              machine.wait_until_succeeds("test -e /var/lib/vpn-zones/off", timeout=60)
+          except Exception:
+              # What the seat saw: a password prompt, an error, or nothing.
+              print(machine.get_tty_text("1"))
+              print(machine.execute("cat /home/alice/seat-off.log")[1])
+              print(machine.execute("cat /proc/$(pgrep -u alice -n bash)/cgroup")[1])
+              raise
           machine.fail("nft list table inet vpnzones_egress")
           machine.fail("systemctl is-active vpn-zone-system@sz")
           machine.succeed("systemctl is-active probe")

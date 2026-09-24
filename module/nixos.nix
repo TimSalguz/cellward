@@ -34,6 +34,15 @@ let
   cfg = config.services.vpn-zones.system;
 
   vpn-zone-rust = pkgs.callPackage ../package.nix { };
+  # The same patched pasta as the user tier's (module/default.nix): a TCP
+  # connection it cannot bind to the outbound interface is reset.
+  passtPatched = pkgs.passt.overrideAttrs (old: {
+    nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.perl ];
+    postPatch = (old.postPatch or "") + ''
+      perl ${./patches/passt-bind-outbound-fatal.pl} < tcp.c > tcp.c.new
+      mv tcp.c.new tcp.c
+    '';
+  });
   core = "${vpn-zone-rust}/bin/vpn-zone-core";
   # Абсолютные пути, как у пользовательского держателя: часть команд идёт
   # через `ip netns exec`, и PATH там ни при чём.
@@ -42,7 +51,7 @@ let
     "--awg ${pkgs.amneziawg-tools}/bin/awg"
     "--wg ${pkgs.wireguard-tools}/bin/wg"
     "--nft ${pkgs.nftables}/bin/nft"
-    "--pasta ${pkgs.passt}/bin/pasta"
+    "--pasta ${passtPatched}/bin/pasta"
   ];
 
   # Шаблоны: зона — экземпляр, так что зону можно добавить и без пересборки
@@ -801,7 +810,7 @@ in
               "VPN_ZONE_SYSTEMCTL=${config.systemd.package}/bin/systemctl"
               # Выход пользовательской зоны через системную (SYSTEM.md §7b):
               # pasta в сети системной зоны, от имени пользователя.
-              "VPN_ZONE_PASTA=${pkgs.passt}/bin/pasta"
+              "VPN_ZONE_PASTA=${passtPatched}/bin/pasta"
             ];
             # Войти в пространство и смонтировать своё (SYS_ADMIN), стать
             # пользователем (SETUID, SETGID), погасить его программу или pasta,
