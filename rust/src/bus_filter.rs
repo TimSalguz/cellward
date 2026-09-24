@@ -75,17 +75,24 @@ const MAX_OPENS_PER_MINUTE: usize = 10;
 /// The longest link it opens.
 const MAX_URI: usize = 8 * 1024;
 
-/// `vpn-zone-core bus-filter --listen <socket> --upstream <socket> --opener <program>`.
+/// `vpn-zone-core bus-filter --listen <socket> --upstream <socket> --opener <program>
+/// [--via-broker <zone>]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub listen: PathBuf,
     pub upstream: PathBuf,
     pub opener: PathBuf,
+    /// A hermetic zone's own bus: the filter runs in the zone, but not in a
+    /// launch with an environment a link could be opened from — so the link
+    /// goes to the broker as "run the opener in this very zone", which the
+    /// broker starts without a question (it knows the zone by the network
+    /// namespace of the one asking), and from there the usual door.
+    pub via_broker: Option<String>,
 }
 
 impl Args {
     pub fn parse(argv: &[OsString]) -> Result<Self, String> {
-        let (mut listen, mut upstream, mut opener) = (None, None, None);
+        let (mut listen, mut upstream, mut opener, mut via_broker) = (None, None, None, None);
         let mut it = argv.iter();
         while let Some(flag) = it.next() {
             let value = it
@@ -96,6 +103,7 @@ impl Args {
                 Some("--listen") => listen = Some(value),
                 Some("--upstream") => upstream = Some(value),
                 Some("--opener") => opener = Some(value),
+                Some("--via-broker") => via_broker = Some(value.to_string_lossy().into_owned()),
                 _ => return Err(format!("unknown argument {}", flag.to_string_lossy())),
             }
         }
@@ -103,6 +111,7 @@ impl Args {
             listen: listen.ok_or("--listen is required")?,
             upstream: upstream.ok_or("--upstream is required")?,
             opener: opener.ok_or("--opener is required")?,
+            via_broker,
         })
     }
 }
@@ -191,6 +200,7 @@ pub fn handle_path(unique: Option<&str>, token: Option<&str>, fallback: u32) -> 
 struct Ctx {
     upstream: PathBuf,
     opener: PathBuf,
+    via_broker: Option<String>,
     opens: Mutex<VecDeque<Instant>>,
     serial: AtomicU32,
     connections: AtomicU32,
@@ -270,6 +280,7 @@ pub fn run(args: &Args) -> u8 {
     let ctx = Arc::new(Ctx {
         upstream: args.upstream.clone(),
         opener: args.opener.clone(),
+        via_broker: args.via_broker.clone(),
         opens: Mutex::new(VecDeque::new()),
         serial: AtomicU32::new(1),
         connections: AtomicU32::new(0),
@@ -573,6 +584,24 @@ fn open_link(ctx: &Ctx, uri: &str) -> u32 {
         eprintln!("bus-filter: link {shown} refused: more than {MAX_OPENS_PER_MINUTE} a minute");
         return RESPONSE_OTHER;
     }
+    if let Some(zone) = &ctx.via_broker {
+        let argv: Vec<OsString> = vec![
+            zone.into(),
+            "--".into(),
+            ctx.opener.clone().into(),
+            uri.into(),
+        ];
+        return match crate::broker::request(b"", &argv) {
+            Some(0) => {
+                eprintln!("bus-filter: link {shown} → the broker, into the zone {zone}");
+                RESPONSE_OK
+            }
+            other => {
+                eprintln!("bus-filter: link {shown}: the broker did not start it ({other:?})");
+                RESPONSE_OTHER
+            }
+        };
+    }
     match Command::new(&ctx.opener)
         .arg(uri)
         .stdin(Stdio::null())
@@ -752,6 +781,7 @@ mod tests {
         let ctx = Ctx {
             upstream: PathBuf::new(),
             opener: PathBuf::new(),
+            via_broker: None,
             opens: Mutex::new(VecDeque::new()),
             serial: AtomicU32::new(1),
             connections: AtomicU32::new(0),

@@ -210,13 +210,20 @@ pub(crate) const HOSTIF_GATEWAY4: &str = "10.255.255.254";
 
 /// The zone's filtered session bus, in its state directory.
 const SESSION_BUS_PROXY: &str = "session-bus";
+/// The bus filter in front of it (`crate::bus_filter`), what the zone gets as
+/// its `bus`.
+const SESSION_BUS_FILTER: &str = "session-bus-filter";
 
 /// Is the session bus at `socket` a hermetic zone's filtered one — the zone's
-/// proxy bound over it? Read from the mount table (`/proc/self/mountinfo`),
-/// which says what is really there rather than what a variable claims.
+/// filter (or, from before it, its proxy) bound over it? Read from the mount
+/// table (`/proc/self/mountinfo`), which says what is really there rather than
+/// what a variable claims.
 pub fn bus_is_zones_filter(mountinfo: &str, socket: &Path) -> bool {
-    crate::doctor::mount_root_at(mountinfo, &socket.to_string_lossy())
-        .is_some_and(|root| root.ends_with(&format!("/{SESSION_BUS_PROXY}")))
+    crate::doctor::mount_root_at(mountinfo, &socket.to_string_lossy()).is_some_and(|root| {
+        [SESSION_BUS_PROXY, SESSION_BUS_FILTER]
+            .iter()
+            .any(|name| root.ends_with(&format!("/{name}")))
+    })
 }
 /// Where the host's runtime directory is held for the zone's lifetime, to bind
 /// entries from — below a tmpfs only the zone's root may enter, because the
@@ -412,6 +419,9 @@ pub struct Tools {
     pub openconnect: PathBuf,
     /// The filter in front of the system bus (`docs/HERMETICITY.md` §7, B2).
     pub dbus_proxy: PathBuf,
+    /// What a hermetic zone's bus filter asks the broker to open a program's
+    /// link with (`crate::bus_filter`): `xdg-open`.
+    pub opener: PathBuf,
 }
 
 impl Default for Tools {
@@ -426,6 +436,7 @@ impl Default for Tools {
             nft: PathBuf::from("nft"),
             openconnect: PathBuf::from("openconnect"),
             dbus_proxy: PathBuf::from("xdg-dbus-proxy"),
+            opener: PathBuf::from("xdg-open"),
         }
     }
 }
@@ -493,6 +504,7 @@ impl Args {
                 "--nft" => &mut tools.nft,
                 "--openconnect" => &mut tools.openconnect,
                 "--dbus-proxy" => &mut tools.dbus_proxy,
+                "--opener" => &mut tools.opener,
                 _ => return Err(ArgError::UnknownFlag(flag)),
             };
             let value = rest
@@ -1779,6 +1791,83 @@ fn start_proxy(
     None
 }
 
+/// The session bus filter of a hermetic zone (`crate::bus_filter`, LEAK-MODEL
+/// §2), in front of its proxy: in the app namespace — so that the broker knows
+/// the zone by its network namespace — and as the user, like the proxy. A link
+/// a program hands the portal goes to the broker as "open it in this very
+/// zone". It dies with this process (`PR_SET_PDEATHSIG`), which is the zone.
+fn start_session_filter(zone: &Zone) {
+    let upstream = zone.path(SESSION_BUS_PROXY);
+    if fs::symlink_metadata(&upstream).is_err() {
+        return;
+    }
+    let socket = zone.path(SESSION_BUS_FILTER);
+    let _ = fs::remove_file(&socket);
+    let (uid, gid) = match fs::metadata(&zone.dir) {
+        Ok(meta) => {
+            use std::os::unix::fs::MetadataExt;
+            (meta.uid(), meta.gid())
+        }
+        Err(e) => {
+            eprintln!(
+                "zone {}: cannot read {} ({e}) — no session bus filter",
+                zone.name(),
+                zone.dir.display()
+            );
+            return;
+        }
+    };
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            eprintln!(
+                "zone {}: cannot find our own binary ({e}) — no session bus filter",
+                zone.name()
+            );
+            return;
+        }
+    };
+    let mut child = match Command::new(exe)
+        .arg("bus-filter")
+        .arg("--listen")
+        .arg(&socket)
+        .arg("--upstream")
+        .arg(&upstream)
+        .arg("--opener")
+        .arg(&zone.tools.opener)
+        .arg("--via-broker")
+        .arg(&*zone.name())
+        // Where the broker's socket is: the zone's runtime directory, once it
+        // is sealed a moment from now.
+        .env("XDG_RUNTIME_DIR", host_runtime_dir(zone))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .uid(uid)
+        .gid(gid)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!(
+                "zone {}: cannot start the session bus filter ({e})",
+                zone.name()
+            );
+            return;
+        }
+    };
+    for _ in 0..WAIT_STEPS {
+        if fs::symlink_metadata(&socket).is_ok() {
+            return;
+        }
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        thread::sleep(WAIT_STEP);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// The host's runtime directory of the zone's user.
 fn host_runtime_dir(zone: &Zone) -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
@@ -1932,10 +2021,18 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
         kept.push("broker".to_owned());
     }
     if zone.hermetic {
-        let session = zone.path(SESSION_BUS_PROXY);
-        if fs::symlink_metadata(&session).is_ok() {
-            bind_entry(&session, &runtime.join("bus"))?;
+        // The filter, never the proxy behind it: the proxy alone would hand
+        // the portal's links to the host (LEAK-MODEL §2). No filter, no bus —
+        // said out loud.
+        let filter = zone.path(SESSION_BUS_FILTER);
+        if fs::symlink_metadata(&filter).is_ok() {
+            bind_entry(&filter, &runtime.join("bus"))?;
             kept.push("bus (filtered)".to_owned());
+        } else if fs::symlink_metadata(zone.path(SESSION_BUS_PROXY)).is_ok() {
+            eprintln!(
+                "zone {}: the session bus filter is not up — the zone gets no session bus",
+                zone.name()
+            );
         }
     }
     println!(
@@ -2452,6 +2549,12 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // resolve1 is on the system bus too, and NetworkManager tells a program
     // which networks the machine is really on.
     seal_system_bus(zone)?;
+    // A hermetic zone's session bus through the filter that answers the
+    // portal's OpenURI — started in here, in the zone, before the runtime
+    // directory binds its socket in.
+    if zone.hermetic {
+        start_session_filter(zone);
+    }
     // Every zone: no compositor socket and no compositor IPC; a hermetic one
     // also no systemd --user and no whole session bus, and the broker.
     seal_runtime(zone)?;
@@ -3529,6 +3632,8 @@ mod tests {
             "/n/openconnect",
             "--dbus-proxy",
             "/n/xdg-dbus-proxy",
+            "--opener",
+            "/n/xdg-open",
             "nl",
         ]))
         .unwrap();
@@ -3540,6 +3645,7 @@ mod tests {
         assert_eq!(parsed.tools.nft, PathBuf::from("/n/nft"));
         assert_eq!(parsed.tools.openconnect, PathBuf::from("/n/openconnect"));
         assert_eq!(parsed.tools.dbus_proxy, PathBuf::from("/n/xdg-dbus-proxy"));
+        assert_eq!(parsed.tools.opener, PathBuf::from("/n/xdg-open"));
     }
 
     #[test]
