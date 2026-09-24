@@ -692,10 +692,19 @@ fn a_creation_that_fails_still_starts_the_program() {
     let _ = home.run(&pick("firefox"), &[("RUNNER_EXIT", "1")]);
     let launched = home.launched();
     assert_eq!(launched[0], ["sandbox", "create", "новая"]);
-    // No sandbox flag — the container could not be made — but a launch.
+    // The sandbox could not be made, but a sandbox was asked for: the
+    // program's own, not the main profile with the whole home — and a launch.
     assert_eq!(
         launched.last().unwrap(),
-        &["run", "nl", "--", "firefox", "%u"]
+        &[
+            "run",
+            "nl",
+            "--sandbox",
+            "app-firefox",
+            "--",
+            "firefox",
+            "%u"
+        ]
     );
 }
 

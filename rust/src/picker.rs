@@ -192,11 +192,25 @@ pub fn sanitize_name(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
         .map(|c| match c {
-            '/' | '"' | '\'' | '`' | '\\' | ' ' => '_',
+            '/' | '"' | '\'' | '`' | '\\' | ' ' | ':' => '_',
             other => other,
         })
         .collect();
-    cleaned.trim_start_matches(['-', '.']).to_owned()
+    let name = cleaned.trim_start_matches(['-', '.']).to_owned();
+    if reserved_name(&name) {
+        String::new()
+    } else {
+        name
+    }
+}
+
+/// A container name the menus use as a tag of their own: a profile called
+/// `pinmain` or `__fs__` would be read as that command, not as itself. Never
+/// created, by the picker or by `vpn-zone profile|sandbox create`.
+pub fn reserved_name(name: &str) -> bool {
+    name.starts_with("__")
+        || name.contains(':')
+        || matches!(name, "pinmain" | "unpinprof" | "main" | "ask" | "own")
 }
 
 // --- THE STATE THE DECISION IS MADE FROM -------------------------------------
@@ -1640,17 +1654,29 @@ fn apply_profile_choice(
                     ],
                 )?,
             };
+            // A creation that fails (a name that cleans down to nothing, no
+            // space, no permission) must not kill the picker: that used to
+            // happen silently, AFTER every dialog had been answered. But what
+            // was asked for is a sandbox, so it is the program's own sandbox —
+            // not the main profile with the whole home —, and said so.
             let name = sanitize_name(&name);
-            if name.is_empty() {
-                return Some(Container::default());
+            if !name.is_empty() {
+                create(tools, "sandbox", &name);
             }
-            // A creation that fails (no space, no permission) must not kill the
-            // picker: that used to happen silently, AFTER every dialog had been
-            // answered — the user answered the questions and the program did not
-            // start. It did not work out: into the main profile, but GO.
-            create(tools, "sandbox", &name);
-            if !tools.sandboxes.join(&name).is_dir() {
-                return Some(Container::default());
+            if name.is_empty() || !tools.sandboxes.join(&name).is_dir() {
+                dialog::notify(
+                    &tools.notify_send,
+                    None,
+                    "8000",
+                    "Песочница не создана",
+                    "Программа запущена в своей песочнице — без дома системы.",
+                );
+                return apply_profile_choice(
+                    tools,
+                    key,
+                    ProfileChoice::OwnSandbox { pin: false },
+                    None,
+                );
             }
             Some(Container {
                 fs_sandbox: true,
@@ -1687,14 +1713,21 @@ fn apply_profile_choice(
             // Only what actually gets in the way is cleaned (paths, spaces,
             // quotes) and a leading dash is cut off — Cyrillic stays Cyrillic.
             let name = sanitize_name(&name);
-            if name.is_empty() {
-                return Some(Container::default());
-            }
             // The same trap as the sandbox above: without swallowing the error
             // the picker died after all the dialogs, and with a container that
-            // does not exist `vpn-zone run` would honestly refuse to start.
-            create(tools, "profile", &name);
-            if !tools.profiles.join(&name).is_dir() {
+            // does not exist `vpn-zone run` would honestly refuse to start. A
+            // profile sees the whole home either way; the main one, said so.
+            if !name.is_empty() {
+                create(tools, "profile", &name);
+            }
+            if name.is_empty() || !tools.profiles.join(&name).is_dir() {
+                dialog::notify(
+                    &tools.notify_send,
+                    None,
+                    "8000",
+                    "Профиль не создан",
+                    "Программа запущена в основном профиле.",
+                );
                 return Some(Container::default());
             }
             Some(Container {

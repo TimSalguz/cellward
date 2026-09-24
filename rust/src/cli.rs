@@ -266,7 +266,8 @@ fn write_setting(tools: &Tools, name: &str, value: &OsStr) -> Result<(), String>
 /// a word. (`docs/GOTCHAS.md` §11)
 fn safe_name(name: &OsStr) -> bool {
     let bytes = name.as_bytes();
-    !bytes.is_empty()
+    !crate::picker::reserved_name(&name.to_string_lossy())
+        && !bytes.is_empty()
         && !bytes.contains(&b'/')
         && !bytes.contains(&b' ')
         && !bytes.starts_with(b"-")
