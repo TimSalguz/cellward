@@ -711,6 +711,7 @@ fn start_uplink(
     let mut child = pasta
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", tools.pasta.display()))?;
+    watch_uplink(name, interface, &mut child)?;
     // Up once pasta has put its interface there with a default route.
     for _ in 0..50 {
         let routes =
@@ -732,6 +733,34 @@ fn start_uplink(
     Err(format!(
         "pasta gave the uplink no route through {interface} — is it up, with a route?"
     ))
+}
+
+/// pasta bound to `interface` is killed the moment the interface is deleted or
+/// renamed (`hostif::watch_interface`): its sockets would go out unbound, by
+/// the host's routes. Unwatched it does not run at all.
+fn watch_uplink(
+    name: &str,
+    interface: &str,
+    pasta: &mut std::process::Child,
+) -> Result<(), String> {
+    let zone = name.to_owned();
+    let gone = interface.to_owned();
+    let watched = crate::sys::pidfd_open(pasta.id() as i32)
+        .ok_or_else(|| std::io::Error::other("no pidfd"))
+        .and_then(|fd| {
+            crate::hostif::watch_interface(interface, move || {
+                eprintln!(
+                    "system zone {zone}: {gone} is gone — the uplink goes down rather than out \
+                     by the host's routes"
+                );
+                crate::sys::pidfd_signal(&fd, libc::SIGKILL);
+            })
+        });
+    watched.map_err(|e| {
+        let _ = pasta.kill();
+        let _ = pasta.wait();
+        format!("cannot watch {interface} ({e}) — no uplink through it unwatched")
+    })
 }
 
 /// A plain zone: pasta attached to the zone's namespace, as a system user of
@@ -765,7 +794,8 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
         .args(["--config-net", "-q", "-I", TUN, "-f"]);
     // Through one interface of the host (`zones.<name>.uplink`): every socket
     // pasta opens is bound to it — out by it or not at all.
-    if let Some(interface) = settings(name).and_then(|s| s.uplink) {
+    let uplink = settings(name).and_then(|s| s.uplink);
+    if let Some(interface) = uplink.clone() {
         if !Path::new("/sys/class/net").join(&interface).exists() {
             return Err(format!(
                 "the host has no interface {interface} — the zone goes out through it or not at \
@@ -798,6 +828,9 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
     let mut pasta = pasta
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", tools.pasta.display()))?;
+    if let Some(interface) = &uplink {
+        watch_uplink(name, interface, &mut pasta)?;
+    }
     let link = || {
         let args = in_zone_args(&netns(name), &["-o", "link", "show", TUN]);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();

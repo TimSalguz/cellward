@@ -1218,11 +1218,43 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
             .args(PASTA_CLOSED)
             .spawn()
         {
-            Ok(child) => {
+            Ok(mut child) => {
                 PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
-                pasta = Some(child);
-                if let Err(e) = tell_the_zone(moved_w, TOOL_HOSTIF) {
-                    eprintln!("zone {}: {e}", zone.name());
+                // The interface deleted or renamed: pasta down at once, and the
+                // zone with it — not TCP by the host's routes (hostif.rs).
+                let name = zone.name().to_string();
+                let interface = host.interface.clone();
+                let held = sys::pidfd_open(child.id() as i32);
+                let watched = held
+                    .ok_or_else(|| io::Error::other("no pidfd"))
+                    .and_then(|fd| {
+                        hostif::watch_interface(&host.interface, move || {
+                            eprintln!(
+                            "zone {name}: {interface} is gone — the zone goes down rather than \
+                             out by the host's routes"
+                        );
+                            sys::pidfd_signal(&fd, libc::SIGKILL);
+                        })
+                    });
+                match watched {
+                    Ok(()) => {
+                        pasta = Some(child);
+                        if let Err(e) = tell_the_zone(moved_w, TOOL_HOSTIF) {
+                            eprintln!("zone {}: {e}", zone.name());
+                        }
+                    }
+                    Err(e) => {
+                        // Unwatched, the day the interface goes the zone leaks:
+                        // it does not come up (EOF instead of the byte).
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        drop(moved_w);
+                        eprintln!(
+                            "zone {}: cannot watch {} ({e}) — the zone has no way out",
+                            zone.name(),
+                            host.interface
+                        );
+                    }
                 }
             }
             Err(e) => {

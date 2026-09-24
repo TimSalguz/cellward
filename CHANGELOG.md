@@ -55,6 +55,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **A zone through an interface of the host goes down when the interface goes
+  away** (review of 2026-09-24). pasta binds every socket to the interface —
+  and when that fails because the interface is gone, it only notes it in its
+  debug log and connects the TCP socket unbound: by the host's routes, with
+  the host's address (passt's `tcp_bind_outbound`). The holder of such a zone,
+  and a system zone's uplink, now watch the interface over rtnetlink and kill
+  pasta the moment it is deleted or renamed; a zone whose interface cannot be
+  watched does not come up. VM test: the interface deleted under a running
+  zone, the zone down within seconds.
 - **The system tier, from the review of 2026-09-24.** Nothing there let a user
   do more than their own, but:
   - **every `vpn-zone-sys` command was hung up after 5 s** — the request
