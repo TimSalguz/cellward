@@ -579,6 +579,8 @@ let
           assert "peer=10.99.0.2" in out, out
       # The console's text on the virtual terminal is read through /dev/vcs,
       # where Cyrillic does not survive: the checks look at the ASCII in it.
+      # What a shell IN a zone writes goes to the home: a command in a system
+      # zone has a /tmp of its own, which the host does not see.
       def tty_run(cmd):
           machine.send_chars(cmd + "\n")
 
@@ -592,9 +594,9 @@ let
           machine.send_chars("\n")
           # A login shell in the zone: the console did not come up again in it.
           machine.wait_until_succeeds("pgrep -u alice -f 'system-run sz'", timeout=30)
-          tty_run("socat -T10 - TCP:10.99.0.1:8080 > /tmp/console-zone 2>&1; echo $VPN_ZONE_CURRENT >> /tmp/console-zone")
-          machine.wait_until_succeeds("grep -q sys:sz /tmp/console-zone", timeout=30)
-          out = machine.succeed("cat /tmp/console-zone")
+          tty_run("socat -T10 - TCP:10.99.0.1:8080 > /home/alice/console-zone 2>&1; echo $VPN_ZONE_CURRENT >> /home/alice/console-zone")
+          machine.wait_until_succeeds("grep -q sys:sz /home/alice/console-zone", timeout=30)
+          out = machine.succeed("cat /home/alice/console-zone")
           assert "peer=10.99.0.2" in out, out
           tty_run("exit")
           # Back in the menu once the zone's shell is gone.
@@ -631,9 +633,9 @@ let
           machine.wait_until_tty_matches("1", r"\[p\].*zone pl")
           machine.send_chars("p")
           machine.wait_until_succeeds("pgrep -u alice -f 'system-run pl'", timeout=60)
-          tty_run(f"socat -T10 - TCP:{server_ip}:8090 > /tmp/console-plain 2>&1; echo $VPN_ZONE_CURRENT >> /tmp/console-plain")
-          machine.wait_until_succeeds("grep -q sys:pl /tmp/console-plain", timeout=30)
-          out = machine.succeed("cat /tmp/console-plain")
+          tty_run(f"socat -T10 - TCP:{server_ip}:8090 > /home/alice/console-plain 2>&1; echo $VPN_ZONE_CURRENT >> /home/alice/console-plain")
+          machine.wait_until_succeeds("grep -q sys:pl /home/alice/console-plain", timeout=30)
+          out = machine.succeed("cat /home/alice/console-plain")
           assert "peer=" in out and "peer=10.99." not in out, out
           tty_run("exit")
           machine.wait_until_fails("pgrep -u alice -f 'system-run pl'", timeout=30)
