@@ -10,14 +10,27 @@
 //! profile-run, and a program opens its windows from its own children too. So:
 //! up the parent chain from the window's pid to a pid of the registry.
 //!
-//! A program that detached from its parent (a double fork, reparented to init)
-//! is not found that way. Its network still is, by its network namespace
-//! against the zones' — the container is then unknown, and said so. A window
-//! whose namespace is the one this command runs in is the host's own.
+//! **The network is the kernel's word, and only the kernel's.** It is the
+//! network namespace of the window's own process, held against the host's (the
+//! one this command runs in: a zone has no compositor IPC) and the zones' — a
+//! user zone by its holder, checked by its start time (`crate::cli::zone_pid`),
+//! a system zone by `/run/netns/vz-<name>`, which only root writes. The
+//! registry is on disk: a record outlives its process, its pid comes round to
+//! somebody else, and a program with the whole `$HOME` can write it
+//! (`docs/LEAK-MODEL.md` §9). So it only ever adds the container and the
+//! program — a record of a launch that is certainly still this process
+//! (`crate::registry::launched`), and in the network the kernel says. A window
+//! in the host's namespace is the host's, whatever any file claims. A namespace
+//! that is none of these is not guessed at.
 //!
-//! This reads what the compositor says about a window; a window cannot lie
-//! about its pid (the kernel's `SO_PEERCRED`), but a program can pretend to be
-//! another in its title — nothing here trusts the title.
+//! A program that detached from its parent (a double fork, reparented to init)
+//! is not found in the registry either: its network is known, its container is
+//! not, and it is said so.
+//!
+//! A window cannot lie about its pid (the kernel's `SO_PEERCRED`), but a program
+//! can call itself anything in its title and app id: nothing here trusts the
+//! title, and the app id is only shown — cut clean — when nothing else names
+//! the program.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -183,45 +196,81 @@ fn registry_index(running: &Path) -> HashMap<i32, (String, String, registry::Rec
     index
 }
 
-/// The launch of the process `pid`: up its parent chain to a registry record,
-/// or else its network by its namespace.
-pub fn launch_of(state: &Path, pid: i32) -> Option<Launch> {
-    let index = registry_index(&state.join(".running"));
-    let mut at = pid;
-    for _ in 0..64 {
-        if let Some((_, program, record)) = index.get(&at) {
-            return Some(Launch {
-                zone: record.zone.clone(),
-                selector: Some(record.selector.clone()),
-                program: Some(program.clone()),
-            });
-        }
-        match parent(at) {
-            Some(p) if p > 1 => at = p,
-            _ => break,
-        }
-    }
-    // Detached from its launch: the network by the namespace.
-    let ns = netns(&pid.to_string())?;
-    if netns("self").as_deref() == Some(ns.as_str()) {
-        return Some(Launch {
-            zone: crate::launch::UNCONFINED.to_owned(),
-            ..Launch::default()
-        });
+/// Which of our networks the namespace `ns` (`net:[…]`) is: the host's, a user
+/// zone's, a system zone's. `None` for any other.
+fn network_of(state: &Path, ns: &str) -> Option<String> {
+    if netns("self").as_deref() == Some(ns) {
+        return Some(crate::launch::UNCONFINED.to_owned());
     }
     for entry in fs::read_dir(state).into_iter().flatten().flatten() {
         let name = entry.file_name();
         let Some(zone_pid) = crate::cli::zone_pid(state, &name) else {
             continue;
         };
-        if netns(&zone_pid.to_string()).as_deref() == Some(ns.as_str()) {
-            return Some(Launch {
-                zone: name.to_string_lossy().into_owned(),
-                ..Launch::default()
-            });
+        if netns(&zone_pid.to_string()).as_deref() == Some(ns) {
+            return Some(name.to_string_lossy().into_owned());
+        }
+    }
+    for entry in fs::read_dir("/run/netns").into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(zone) = name.strip_prefix("vz-") else {
+            continue;
+        };
+        use std::os::unix::fs::MetadataExt;
+        if fs::metadata(entry.path()).is_ok_and(|m| format!("net:[{}]", m.ino()) == ns) {
+            return Some(zone.to_owned());
         }
     }
     None
+}
+
+/// The launch of the process `pid`: its network by its namespace, its
+/// container and program by the nearest launch up its parent chain — when that
+/// launch is certainly still running and in the same network.
+pub fn launch_of(state: &Path, pid: i32) -> Option<Launch> {
+    let zone = network_of(state, &netns(&pid.to_string())?)?;
+    let running = state.join(".running");
+    let index = registry_index(&running);
+    let mut at = pid;
+    for _ in 0..64 {
+        if let Some((_, program, record)) = index.get(&at) {
+            if registry::launched(&running, at) {
+                if record.zone == zone {
+                    return Some(Launch {
+                        zone,
+                        selector: Some(record.selector.clone()),
+                        program: Some(program.clone()),
+                    });
+                }
+                // The nearest launch is somewhere else than the kernel says —
+                // a program entered by hand into another network: its network
+                // is known, its container is not.
+                break;
+            }
+        }
+        match parent(at) {
+            Some(p) if p > 1 => at = p,
+            _ => break,
+        }
+    }
+    Some(Launch {
+        zone,
+        ..Launch::default()
+    })
+}
+
+/// A name a program gave itself, fit to be shown: no control characters (a
+/// line break would start a line of its own in a dialog), not endless.
+fn shown(name: &str) -> String {
+    name.chars().filter(|c| !c.is_control()).take(80).collect()
+}
+
+/// Text for a markup parser: waybar reads `text` and `tooltip` as Pango
+/// markup, and a container or a program is named by people and programs.
+fn markup(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// The network as a person says it.
@@ -255,20 +304,28 @@ fn label(state: &Path, program: &str) -> String {
         .unwrap_or_else(|| program.to_owned())
 }
 
-/// One line for a person.
-pub fn describe(state: &Path, window: &Window, launch: Option<&Launch>) -> String {
-    let name = launch
+/// The program of a window as a person knows it: its label, or else the app
+/// id it gave itself, or else its pid.
+fn window_name(state: &Path, window: &Window, launch: Option<&Launch>) -> String {
+    launch
         .and_then(|l| l.program.as_deref())
         .map(|p| label(state, p))
+        .map(|l| shown(&l))
         .unwrap_or_else(|| {
-            if window.app_id.is_empty() {
+            let app_id = shown(&window.app_id);
+            if app_id.is_empty() {
                 format!("pid {}", window.pid)
             } else {
-                window.app_id.clone()
+                app_id
             }
-        });
+        })
+}
+
+/// One line for a person.
+pub fn describe(state: &Path, window: &Window, launch: Option<&Launch>) -> String {
+    let name = window_name(state, window, launch);
     match launch {
-        None => format!("{name}: не запуск vpn-zones — его сеть не известна"),
+        None => format!("{name}: сеть не известна — не хост и не зона vpn-zones"),
         Some(l) => {
             let container = match &l.selector {
                 Some(s) => crate::picker::container_label(s),
@@ -322,8 +379,8 @@ pub fn bar_line(state: &Path, window: Option<&Window>, launch: Option<&Launch>) 
         .unwrap_or_default();
     format!(
         "{{\"text\":{},\"tooltip\":{},\"class\":{}}}",
-        json::quote(&text),
-        json::quote(&tooltip),
+        json::quote(&markup(&text)),
+        json::quote(&markup(&tooltip)),
         json::quote(&class)
     )
 }
@@ -491,11 +548,6 @@ fn ask_menu(tools: &Tools, menu: &crate::window::Menu) -> Option<String> {
     crate::dialog::ask(&tools.kdialog, &argv)
 }
 
-/// Is the process still there?
-fn alive(pid: i32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
-}
-
 /// `vpn-zone window-menu`: what can be done with the program of the focused
 /// window — for a key binding of the compositor.
 pub fn menu(tools: &Tools) -> u8 {
@@ -514,18 +566,12 @@ pub fn menu(tools: &Tools) -> u8 {
             return 1;
         }
     };
+    // Held from here on: the menu may stay open a while, and a number can
+    // change hands in that time — "close" reaches this process or nobody.
+    let target = crate::sys::pidfd_open(window.pid);
     let launch = launch_of(&tools.state, window.pid);
     let program = launch.as_ref().and_then(|l| l.program.clone());
-    let label = program
-        .as_deref()
-        .map(|p| label(&tools.state, p))
-        .unwrap_or_else(|| {
-            if window.app_id.is_empty() {
-                format!("pid {}", window.pid)
-            } else {
-                window.app_id.clone()
-            }
-        });
+    let label = window_name(&tools.state, &window, launch.as_ref());
     let pinned = program
         .as_deref()
         .and_then(|p| crate::cli::read_setting(&tools.state.join(".pinned").join(p)));
@@ -564,8 +610,12 @@ pub fn menu(tools: &Tools) -> u8 {
             }
         }
         "close" => {
-            // SAFETY: kill(2) with a pid the compositor named and a plain signal.
-            unsafe { libc::kill(window.pid, libc::SIGTERM) };
+            if !target
+                .as_ref()
+                .is_some_and(|fd| crate::sys::pidfd_signal(fd, libc::SIGTERM))
+            {
+                notify(&label, "Программа уже закрылась");
+            }
         }
         "restart" => {
             let Some(p) = &program else { return 0 };
@@ -575,15 +625,12 @@ pub fn menu(tools: &Tools) -> u8 {
             )) {
                 return 0;
             }
-            // SAFETY: as above.
-            unsafe { libc::kill(window.pid, libc::SIGTERM) };
-            for _ in 0..100 {
-                if !alive(window.pid) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            if alive(window.pid) {
+            // No descriptor: the process was gone before the menu came up.
+            let closed = target.as_ref().is_none_or(|fd| {
+                crate::sys::pidfd_signal(fd, libc::SIGTERM);
+                crate::sys::pidfd_wait(fd, std::time::Duration::from_secs(10))
+            });
+            if !closed {
                 notify(
                     &label,
                     "Программа не закрылась за 10 секунд — запуск отменён",
@@ -682,46 +729,70 @@ mod tests {
     }
 
     /// Up the parent chain to the registry: a child of the recorded launch is
-    /// that launch; the host's own process is the host.
+    /// that launch — when the record is certainly still that process and in
+    /// the network the kernel says.
     #[test]
     fn a_window_of_a_child_is_found_through_its_parents() {
         let state = std::env::temp_dir().join(format!("vz-focus-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);
-        let dir = state.join(".running").join("sb:work");
+        let running = state.join(".running");
+        let dir = running.join("sb:work");
         fs::create_dir_all(&dir).unwrap();
         fs::create_dir_all(state.join(".labels")).unwrap();
-        fs::write(state.join(".labels").join("firefox"), "Огненный лис").unwrap();
+        fs::write(state.join(".labels").join("firefox"), "Огненный <лис>").unwrap();
         // This test process is "the launch"; a child of it is "the window".
-        fs::write(
-            dir.join("firefox"),
-            format!("{} nl sb:work\n", std::process::id()),
-        )
-        .unwrap();
+        // Both are in our own namespace — the host's, to this command.
+        let me = std::process::id() as i32;
+        let record = |zone: &str| {
+            fs::write(dir.join("firefox"), format!("{me} {zone} sb:work\n")).unwrap();
+        };
         let mut child = Command::new("sleep").arg("5").spawn().unwrap();
-        let launch = launch_of(&state, child.id() as i32).unwrap();
-        let _ = child.kill();
-        let _ = child.wait();
-        assert_eq!(launch.zone, "nl");
+        let window = child.id() as i32;
+
+        // A record from before start times were kept: its pid may be anybody's
+        // by now. The network is still the kernel's; the container is unknown.
+        record(crate::launch::UNCONFINED);
+        let bare = launch_of(&state, window).unwrap();
+        assert_eq!(bare.zone, crate::launch::UNCONFINED);
+        assert_eq!((bare.selector, bare.program), (None, None));
+
+        // With its start time on record: the launch.
+        registry::note_start(&running, me).unwrap();
+        let launch = launch_of(&state, window).unwrap();
+        assert_eq!(launch.zone, crate::launch::UNCONFINED);
         assert_eq!(launch.selector.as_deref(), Some("sb:work"));
         assert_eq!(launch.program.as_deref(), Some("firefox"));
+
+        // A record that says "nl" of a process in the host's namespace does
+        // not make the window a zone's: the kernel says host, and host it is.
+        record("nl");
+        let host = launch_of(&state, window).unwrap();
+        assert_eq!(host.zone, crate::launch::UNCONFINED);
+        assert_eq!(host.program, None);
+
+        // A start time of somebody else: the number was reused.
+        record(crate::launch::UNCONFINED);
+        fs::write(running.join(registry::STARTED).join(me.to_string()), "1\n").unwrap();
+        assert_eq!(launch_of(&state, window).unwrap().program, None);
+        let _ = child.kill();
+        let _ = child.wait();
+
         let w = Window {
             pid: 1,
-            app_id: "firefox".to_owned(),
+            app_id: "fire\nfox".to_owned(),
             title: String::new(),
         };
         assert_eq!(
             describe(&state, &w, Some(&launch)),
-            "Огненный лис: сеть nl, контейнер: песочница work"
+            "Огненный <лис>: без ограничений, контейнер: песочница work"
         );
+        // Markup is escaped for the bar: waybar parses it.
         assert_eq!(
             bar_line(&state, Some(&w), Some(&launch)),
-            "{\"text\":\"nl · песочница work\",\"tooltip\":\"Огненный лис: сеть nl, контейнер: песочница work\",\"class\":\"zone-nl\"}"
+            "{\"text\":\"без ограничений · песочница work\",\"tooltip\":\"Огненный &lt;лис&gt;: без ограничений, контейнер: песочница work\",\"class\":\"zone-unconfined\"}"
         );
-        // Not in the registry, in our own namespace: the host.
-        fs::remove_file(dir.join("firefox")).unwrap();
-        let own = launch_of(&state, std::process::id() as i32).unwrap();
-        assert_eq!(own.zone, crate::launch::UNCONFINED);
-        assert_eq!(own.selector, None);
+        // Nothing but the app id: shown without its line break.
+        assert!(describe(&state, &w, None).starts_with("firefox: "));
         let _ = fs::remove_dir_all(&state);
     }
 }

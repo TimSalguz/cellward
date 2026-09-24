@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::cli::{self, zone_pid};
-use crate::profile::{exec_command, proc_is_alive, EXIT_NOT_STARTED};
+use crate::profile::{exec_command, EXIT_NOT_STARTED};
 use crate::registry;
 use crate::tools::Tools;
 
@@ -680,7 +680,8 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             appbin.clone()
         }
     });
-    let regdir = tools.state.join(".running").join(container.key.as_os_str());
+    let running = tools.state.join(".running");
+    let regdir = running.join(container.key.as_os_str());
     let reg = regdir.join(&appname);
     // The same program under its BINARY name as well. The key above is the
     // launcher's id when there is one, and two ids for one single-instance
@@ -699,10 +700,11 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     let busy = match registry::lock(&regdir) {
         Ok(_guard) => {
             let live = |file: &Path| {
-                registry::rewrite_live(file, &zone_name, proc_is_alive).unwrap_or_else(|e| {
-                    eprintln!("реестр запусков {}: {e}", file.display());
-                    None
-                })
+                registry::rewrite_live(file, &zone_name, |pid| registry::alive(&running, pid))
+                    .unwrap_or_else(|e| {
+                        eprintln!("реестр запусков {}: {e}", file.display());
+                        None
+                    })
             };
             let by_id = live(reg.as_path());
             let by_binary = binreg.as_deref().and_then(live);
@@ -817,6 +819,9 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                     eprintln!("реестр запусков {}: {e}", file.display());
                 }
             }
+            if let Err(e) = registry::note_start(&running, std::process::id() as i32) {
+                eprintln!("реестр запусков {}: {e}", running.display());
+            }
         }
         Err(e) => eprintln!("реестр запусков {}: {e}", regdir.display()),
     }
@@ -916,6 +921,24 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
         None => exec,
     };
+
+    // A zone is a network namespace of its own, and ours is the host's here: a
+    // launch from inside a zone was handed outwards in step 1. A zone process
+    // in OUR namespace is not the zone — `zone.pid` naming some other process
+    // —, and entering it would start the program in the host's network under
+    // the zone's name. Checked last, as close to the `exec` as it gets.
+    if let Network::Zone(pid) = network {
+        if in_our_network(pid) {
+            refuse(
+                tools,
+                &format!(
+                    "Зона {zone_name} указывает на процесс в сети хоста — запуск остановлен. \
+                     Перезапусти зону: vpn-zone down {zone_name}, затем vpn-zone up {zone_name}"
+                ),
+            );
+            return 1;
+        }
+    }
 
     let e = exec_command(&exec);
     eprintln!("не удалось запустить {}: {e}", exec[0].to_string_lossy());
@@ -1072,6 +1095,12 @@ fn identity_refusal(tools: &Tools, selection: &Selection, zone: &str) -> Option<
     let container = crate::container::load(tools, &selector)?;
     let running = crate::container::running_network(tools, &container);
     crate::container::refusal(&container, zone, running.as_deref())
+}
+
+/// Is the process `pid` in our network namespace?
+fn in_our_network(pid: i32) -> bool {
+    let ns = |p: &str| fs::read_link(format!("/proc/{p}/ns/net")).ok();
+    ns(&pid.to_string()).is_some_and(|theirs| Some(theirs) == ns("self"))
 }
 
 /// Say no, where the person can see it: a dialog when there is a graphical

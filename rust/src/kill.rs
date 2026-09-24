@@ -27,10 +27,11 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 
 use crate::cli::zone_pid;
+use crate::sys::{pidfd_open, pidfd_signal};
 use crate::tools::Tools;
 
 /// Exit codes, a contract for the tools that put a button on this:
@@ -53,26 +54,6 @@ struct Target {
     pid: i32,
     name: String,
     fd: OwnedFd,
-}
-
-fn pidfd_open(pid: i32) -> Option<OwnedFd> {
-    // SAFETY: pidfd_open(2) takes a pid and flags and returns a new descriptor
-    // or -1; the descriptor is owned by nobody else.
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-    (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as i32) })
-}
-
-fn pidfd_signal(fd: &OwnedFd, signal: i32) -> bool {
-    // SAFETY: a valid pidfd, a signal number, no siginfo, no flags.
-    unsafe {
-        libc::syscall(
-            libc::SYS_pidfd_send_signal,
-            fd.as_raw_fd(),
-            signal,
-            std::ptr::null::<libc::siginfo_t>(),
-            0,
-        ) == 0
-    }
 }
 
 /// The cgroup of a process, from `/proc/<pid>/cgroup` (the v2 line).

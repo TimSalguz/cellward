@@ -475,3 +475,91 @@ pub fn recv_into_with_fds(
     let truncated = msg.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0;
     Ok((n.unsigned_abs(), fds, truncated))
 }
+
+/// When a process started, in clock ticks after boot: field 22 of
+/// `/proc/<pid>/stat`. A pid is reused — at once after a reboot, after a while
+/// in a long session —, a pid with its start time is not: together they name
+/// one process for the life of the system. `None` when there is no such
+/// process.
+pub fn start_time(pid: i32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_start_time(&stat)
+}
+
+/// The start time out of a `stat` line. The command name is in parentheses
+/// and may hold anything, spaces and parentheses too, so the fields are counted
+/// after the LAST `)`: the first one there is field 3, the start time field 22.
+pub fn parse_start_time(stat: &str) -> Option<u64> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// A descriptor of the process `pid`: whatever happens to the number later, a
+/// signal sent through it reaches this process or nobody.
+pub fn pidfd_open(pid: i32) -> Option<OwnedFd> {
+    // SAFETY: pidfd_open(2) takes a pid and flags and returns a new descriptor
+    // or -1; the descriptor is owned by nobody else.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
+/// Send `signal` through a pidfd. False when the process is gone.
+pub fn pidfd_signal(fd: &OwnedFd, signal: i32) -> bool {
+    use std::os::fd::AsRawFd;
+    // SAFETY: a valid pidfd, a signal number, no siginfo, no flags.
+    unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            fd.as_raw_fd(),
+            signal,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        ) == 0
+    }
+}
+
+/// Wait up to `timeout` for the process of a pidfd to exit. True when it has.
+pub fn pidfd_wait(fd: &OwnedFd, timeout: std::time::Duration) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut pfd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: one valid pollfd for the duration of the call. A pidfd polls
+    // readable when its process has exited.
+    unsafe { libc::poll(&mut pfd, 1, ms) == 1 }
+}
+
+#[cfg(test)]
+mod process_identity {
+    use super::*;
+
+    #[test]
+    fn the_start_time_is_found_whatever_the_command_is_called() {
+        // Field 22 of a real line, with a name that has ") (" in it.
+        let line = "4242 (evil) (name x) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 1000 10 18446744073709551615";
+        assert_eq!(parse_start_time(line), Some(987654));
+        assert_eq!(parse_start_time("4242 (short) S 1"), None);
+        assert_eq!(parse_start_time("no parenthesis"), None);
+    }
+
+    #[test]
+    fn our_own_start_time_is_steady_and_a_pidfd_waits_for_its_process() {
+        let me = std::process::id() as i32;
+        assert!(start_time(me).is_some());
+        assert_eq!(start_time(me), start_time(me));
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let fd = pidfd_open(pid).unwrap();
+        assert!(!pidfd_wait(&fd, std::time::Duration::from_millis(50)));
+        assert!(pidfd_signal(&fd, libc::SIGTERM));
+        let _ = child.wait();
+        assert!(pidfd_wait(&fd, std::time::Duration::from_millis(50)));
+        assert!(!pidfd_signal(&fd, libc::SIGTERM));
+    }
+}

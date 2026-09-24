@@ -481,10 +481,12 @@ fn a_running_program_is_started_where_it_already_runs_without_a_word() {
     // remembered and its sandbox lost.
     let home = Home::new("running");
     home.zone("nl");
+    let me = std::process::id() as i32;
     home.write(
         "state/.running/__main__/firefox",
-        &format!("{} nl sb:work\n", std::process::id()),
+        &format!("{me} nl sb:work\n"),
     );
+    vpn_zone::registry::note_start(&home.path("state/.running"), me).unwrap();
     let out = home.run(&pick("firefox"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(home.asked().is_empty(), "{:?}", home.asked());
@@ -492,6 +494,28 @@ fn a_running_program_is_started_where_it_already_runs_without_a_word() {
         home.launched()[0],
         ["run", "nl", "--sandbox", "work", "--", "firefox", "%u"]
     );
+}
+
+#[test]
+fn a_record_whose_number_went_to_another_process_does_not_skip_the_question() {
+    // The registry outlives a reboot, and the numbers in it are soon other
+    // processes'. A live pid is not a running program: without its start time
+    // on record — or with another one — the picker asks, it does not start a
+    // click into the old network without a word.
+    let home = Home::new("reused");
+    home.zone("nl");
+    let me = std::process::id() as i32;
+    home.write(
+        "state/.running/__main__/firefox",
+        &format!("{me} unconfined\n"),
+    );
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(home.asked().len(), 1, "no start time: asked");
+    home.write(&format!("state/.running/.started/{me}"), "1\n");
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(home.asked().len(), 2, "another start time: asked");
 }
 
 #[test]

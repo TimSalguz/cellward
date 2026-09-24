@@ -188,6 +188,87 @@ pub fn append(reg: &Path, pid: i32, zone: &str, selector: &str) -> io::Result<()
     writeln!(file, "{pid} {zone} {selector}")
 }
 
+/// Below the registry: when each launch started, `.started/<pid>` holding the
+/// start time of the process ([`crate::sys::start_time`]).
+///
+/// **A pid alone does not name a process for long.** The registry is on disk
+/// and outlives a reboot, and records are only swept by the next launch of the
+/// same program: after a reboot every pid in it is soon somebody else's, and in
+/// a long session the numbers come round too. A record whose pid now belongs to
+/// another process says a program runs when it does not — and the picker
+/// starts a click on a "running" program into its network WITHOUT asking,
+/// `unconfined` included. The start time tells the launch from its successor.
+///
+/// A side file rather than a fourth field: the record's shape is a contract
+/// (the selector takes the rest of the line), and a `vpn-zone` from before
+/// this, still running during a home-manager switch, reads records it can
+/// parse. A dot-directory: no walk of the registry takes it for a container.
+pub const STARTED: &str = ".started";
+
+/// Note when the launch `pid` started — ours, just before the record. Swept on
+/// the way: what is left of launches that are over.
+pub fn note_start(running: &Path, pid: i32) -> io::Result<()> {
+    let dir = running.join(STARTED);
+    fs::create_dir_all(&dir)?;
+    sweep_started(running);
+    let start = crate::sys::start_time(pid)
+        .ok_or_else(|| io::Error::other(format!("no start time of pid {pid}")))?;
+    // Through a temporary: a reader never sees half a number.
+    let tmp = dir.join(format!(".{pid}.tmp"));
+    fs::write(&tmp, format!("{start}\n"))?;
+    fs::rename(&tmp, dir.join(pid.to_string()))
+}
+
+/// Drop the start times of launches that are over. How many went.
+pub fn sweep_started(running: &Path) -> usize {
+    let mut swept = 0;
+    for entry in fs::read_dir(running.join(STARTED))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if !launched(running, pid) && fs::remove_file(entry.path()).is_ok() {
+            swept += 1;
+        }
+    }
+    swept
+}
+
+fn recorded_start(running: &Path, pid: i32) -> Option<u64> {
+    fs::read_to_string(running.join(STARTED).join(pid.to_string()))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Is the process `pid` the launch recorded under that pid — its start time on
+/// record and the same? For what a record makes happen WITHOUT a question: the
+/// picker's "already running, start it there", the zone of a window. A record
+/// from before start times were kept is not trusted with that.
+pub fn launched(running: &Path, pid: i32) -> bool {
+    recorded_start(running, pid).is_some_and(|start| crate::sys::start_time(pid) == Some(start))
+}
+
+/// May the launch recorded under `pid` still be running? The same as
+/// [`launched`], except that a record from before start times were kept counts
+/// by its pid alone, as it always did. For the decisions that are the safe
+/// ones when a program is taken for running: a container refused a second
+/// network, a throwaway container kept, a record not swept.
+pub fn alive(running: &Path, pid: i32) -> bool {
+    match recorded_start(running, pid) {
+        Some(start) => crate::sys::start_time(pid) == Some(start),
+        None => crate::profile::proc_is_alive(pid),
+    }
+}
+
 /// Where is this container open? The zone of the first live record found.
 ///
 /// Used by `vpn-zone profile list` and by the picker's idea of "busy". A live
@@ -575,5 +656,30 @@ mod tests {
             tmp_path(Path::new("/r/.running/__main__/org.kde.dolphin")),
             PathBuf::from("/r/.running/__main__/org.kde.dolphin.new")
         );
+    }
+
+    /// A pid with its start time names one process; without the note a
+    /// record counts by its pid only where that is the safe side.
+    #[test]
+    fn a_launch_is_known_by_its_start_time_and_not_by_its_number() {
+        let dir = Dir::new("started");
+        let running = dir.0.join(".running");
+        let me = std::process::id() as i32;
+        // No note: not certainly a launch, but maybe alive.
+        assert!(!launched(&running, me));
+        assert!(super::alive(&running, me));
+        note_start(&running, me).unwrap();
+        assert!(launched(&running, me));
+        assert!(super::alive(&running, me));
+        // A note of another start: the number went to somebody else.
+        fs::write(running.join(STARTED).join(me.to_string()), "1\n").unwrap();
+        assert!(!launched(&running, me));
+        assert!(!super::alive(&running, me));
+        // Swept as a launch that is over; a new note replaces it.
+        assert_eq!(sweep_started(&running), 1);
+        note_start(&running, me).unwrap();
+        assert!(launched(&running, me));
+        // The note is not a container.
+        assert!(dirs(&running).is_empty());
     }
 }
