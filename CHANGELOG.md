@@ -55,6 +55,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **What says "alive" means it** (review of 2026-09-24): `check`,
+  `status --json` and `doctor` took any handshake line for a live tunnel — an
+  hours-old one of a dead tunnel too; now a tunnel `vpn-zone watch` found dead
+  in this run of the zone is not alive. A zone through a system zone whose
+  tunnel says nothing is "disconnected", not its own link's "connected"; the
+  previous run's status is removed when a zone starts.
+- **The uplink namespace does not see the host's resolvers**: OpenConnect runs
+  there, and a name it looked up (a redirect, a gateway list) went to the
+  host's resolved over its socket, in the host's network.
+- **`DNS =` takes addresses only**: wg-quick's search domains became
+  `nameserver` lines, and a list of domains only left no resolver at all.
+- **Declared settings are applied whatever `xdg.configHome` is.** They were
+  written below `xdg.configHome` and read from `~/.config`: with a custom one,
+  the declared network bindings of containers silently did not apply.
+  `containers.<n>.network` and `defaults.network` are typed to a network name.
 - **A zone through an interface of the host goes down when the interface goes
   away** (review of 2026-09-24). pasta binds every socket to the interface —
   and when that fails because the interface is gone, it only notes it in its
