@@ -1647,6 +1647,14 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
         "",
     )
     .map_err(|e| format!("cannot make the mount tree private: {e}"))?;
+    // The host's resolvers are not the uplink's either: a whole third-party
+    // client runs here (OpenConnect), and a name it looks up — a redirect, a
+    // portal's gateway list — would be asked of the host's resolved over its
+    // socket, in the host's network (review 2026-09-24). The endpoint was
+    // resolved before this namespace existed; nothing here needs a resolver.
+    for group in RESOLVER_DIRS {
+        hide_first(group)?;
+    }
 
     // SAFETY: getpid(2) takes no arguments and cannot fail.
     let pid = unsafe { libc::getpid() };
