@@ -1328,6 +1328,16 @@ let
           )
           out = in_zone(hp, f"sh -c \"{launcher} vm '@a{{sv}} {{}}' 2>&1 || true\"")
           assert "AccessDenied" in out, out
+          # Nor the host's network state: the filter answers for the zone —
+          # no name is looked up or tried by the host.
+          desk = (
+              "gdbus call --session --timeout 5 --dest org.freedesktop.portal.Desktop "
+              "--object-path /org/freedesktop/portal/desktop --method "
+          )
+          out = in_zone(hp, f"{desk}org.freedesktop.portal.ProxyResolver.Lookup https://example.test")
+          assert "direct://" in out, out
+          out = in_zone(hp, f"{desk}org.freedesktop.portal.NetworkMonitor.CanReach leak.test 443")
+          assert "true" in out, out
           alice("systemctl --user unset-environment WAYLAND_DISPLAY")
           alice("vpn-zone down vmherm")
           # An ordinary zone: the sandbox's own proxy over the host's bus, the

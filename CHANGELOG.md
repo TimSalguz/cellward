@@ -55,6 +55,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **Second review round, D-Bus:** the portal's network monitor and proxy
+  resolver are answered by the filter (the zone's network up and direct):
+  `CanReach` had the host look up and try any name in its own network; the
+  trash is no longer among what passes; the link opener drops
+  `NIXOS_XDG_OPEN_USE_PORTAL`, with which xdg-open handed a link to the
+  portal over the session bus — the host's, in an ordinary zone.
 - **Second review round, the system tier and configs:** a config's keys and
   section names are read the way wg reads them, whitespace dropped — `Listen
   Port` and `[Inter face]` passed our filters as something else and wg took

@@ -168,8 +168,13 @@ let
   # той зоны, откуда пришла ссылка. `false` в BROWSER — отказ вместо этого;
   # ссылку со схемой, у которой есть обработчик (наш перехваченный ярлык),
   # это не трогает.
+  #
+  # И без портала: с NIXOS_XDG_OPEN_USE_PORTAL (xdg.portal.xdgOpenUsePortal)
+  # xdg-open отдаёт ссылку OpenURI по сессионной шине — у обычной зоны это шина
+  # хоста, и ссылка открывалась бы на хосте, мимо зоны (review 2026-09-25).
   vpn-zone-opener = pkgs.writeShellScript "vpn-zone-opener" ''
     export BROWSER=false
+    unset NIXOS_XDG_OPEN_USE_PORTAL
     exec ${pkgs.xdg-utils}/bin/xdg-open "$@"
   '';
 
