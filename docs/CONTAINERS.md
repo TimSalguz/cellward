@@ -516,9 +516,9 @@ and `vpn-zone container show <name> --json` print subsets of the same schema.
     "container": { "value": "own",     "source": "nix" },
     "launcher_mode": { "value": "picker", "source": "default" },
     "compositor_restriction": { "value": true, "source": "default" },
-    "autostart_unassigned": { "value": "offline", "source": "default" },
+    "autostart_unassigned": { "value": "ask", "source": "default" },
     "user_entries": { "value": "take-over", "source": "default" },
-    "hermetic": { "value": false, "source": "default" }
+    "hermetic": { "value": true, "source": "default" }
   },
   "networks": [
     { "name": "unconfined", "kind": "unconfined", "aliases": ["direct"],
