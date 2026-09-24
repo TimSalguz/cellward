@@ -1053,10 +1053,18 @@ let
           )
           machine.wait_until_succeeds("test -S /run/user/1000/niri.wayland-9.4242.sock")
           machine.wait_until_succeeds("test -S /run/user/1000/wayland-9")
+          # Not only where the socket lies: through the process that holds it,
+          # /proc/<pid>/root (LEAK-MODEL §16). On the host that path works —
+          # otherwise the refusal below would prove nothing.
+          niri_pid = alice("systemctl --user show -p MainPID --value fakeniri").strip()
+          via_proc = f"/proc/{niri_pid}/root/run/user/1000/niri.wayland-9.4242.sock"
+          alice(f"echo proc-from-host | socat - UNIX-CONNECT:{via_proc}")
+          machine.wait_until_succeeds("grep -q proc-from-host /tmp/niri-got")
           machine.succeed(
               "printf '%s\\n' 'echo \"NIRI=$NIRI_SOCKET\"' "
               "'echo spawn-from-zone | socat - UNIX-CONNECT:/run/user/1000/niri.wayland-9.4242.sock || echo NIRI-REFUSED' "
               "'echo raw-from-zone | socat - UNIX-CONNECT:/run/user/1000/wayland-9 || echo RAW-REFUSED' "
+              f"'echo proc-from-zone | socat - UNIX-CONNECT:{via_proc} || echo PROC-REFUSED' "
               "> /tmp/niri-probe.sh && chmod 755 /tmp/niri-probe.sh"
           )
           out = alice(
@@ -1064,9 +1072,10 @@ let
               "vpn-zone run vmsmoke -- sh /tmp/niri-probe.sh"
           )
           assert "NIRI=/run" not in out, out
-          assert "NIRI-REFUSED" in out and "RAW-REFUSED" in out, out
+          assert "NIRI-REFUSED" in out and "RAW-REFUSED" in out and "PROC-REFUSED" in out, out
           machine.sleep(2)
           machine.fail("grep -q spawn-from-zone /tmp/niri-got")
+          machine.fail("grep -q proc-from-zone /tmp/niri-got")
           machine.fail("grep -q raw-from-zone /tmp/wayland-got")
           zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
           # The ordinary zone keeps its bus and systemd --user (LEAK-MODEL §1).

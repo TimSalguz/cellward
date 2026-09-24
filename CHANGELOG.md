@@ -14,6 +14,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   login. What was chosen still starts without a question. `offline` keeps the
   closed variant, and so does a login with no screen to ask on.
 
+### Security
+- **A console program in a system zone (`vpn-zone-sys`) could reach the
+  session through `/proc`.** Its own tmpfs hid the session's sockets where they
+  lie, but the command ran in the host's user namespace, and the kernel lets
+  the same user walk into another process's file system view:
+  `/proc/<pid>/root` of any process of the session led to the compositor's IPC
+  (whose `spawn` runs on the host, around the tunnel) and the session bus. The
+  command now gets a user namespace of its own, the user mapped onto itself —
+  the wall user zones already stand behind (`docs/LEAK-MODEL.md` §16); files of
+  other users, root included, are seen as `nobody` inside. VM tests for both
+  tiers: a socket in the session's runtime directory is reached through
+  `/proc` from the host and from neither kind of zone.
+
 ### Fixed
 - **`vpn-zone-gui` is in `PATH`.** The windows were reachable only from their
   menu entries, by a store path; a configurator opening "VPN zone containers"

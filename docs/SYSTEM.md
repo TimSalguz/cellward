@@ -258,7 +258,9 @@ A system zone's namespace belongs to the host's user namespace; entering it take
   the zone's resolv.conf and nsswitch.conf bound in, the system bus hidden unless
   `systemBus`, an empty `/run/user/<uid>` over the session's sockets — then drops to the
   user's groups, gid and uid and sets `NO_NEW_PRIVS`: `sudo` inside would be root in the
-  zone's namespace.
+  zone's namespace. Last, a user namespace of the command's own, the user mapped onto
+  itself: from the host's one, `/proc/<pid>/root` of any process of the session would lead
+  around the empty `/run/user/<uid>` to the sockets it hides (LEAK-MODEL §16).
 - **What root does not do:** interpret the request. The command, its directory and its
   environment are applied after the privileges are gone, as the user; the zone's name is
   checked like any zone name before it becomes a path.
@@ -648,7 +650,8 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
 6. **The endpoint** — resolved in the host's network, as for user zones (LEAK-MODEL §5).
 7. **A user's program** (§7) gets the same hiding as a service plus the session's sockets:
    the bus and the compositor are how a program asks the host to open something, in the
-   host's network.
+   host's network. Hidden where they lie is not enough: a user namespace of its own keeps
+   the command out of the session's processes' `/proc/<pid>/root` (LEAK-MODEL §16).
 8. **The host side has no second echelon** — a system zone's uplink is the host's network
    itself, and a ruleset there would be the host's firewall. Filtering the host's egress is
    stage 5 (§9); a zone's tunnel passes it by its mark.
@@ -677,7 +680,9 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
   7. `vpn-zone-sys` as a listed user: the tunnel's network and names, the user's uid,
      `NoNewPrivs: 1` and no capabilities, `lo` and `awg0` only, `ip link add` refused, the
      zone's nsswitch, the command's exit code, a pty with a terminal, the launch in the
-     journal; a user of another zone and a user outside the group are refused;
+     journal; a socket in the session's runtime directory reached through `/proc/<pid>/root`
+     from the host and not from the zone; a user of another zone and a user outside the
+     group are refused;
   8. a plain zone: `lo` and `awg0`, pasta as `vpn-zones-plain`, the server sees the machine,
      the host's loopback unreachable by the gateway and by `127.0.0.1`, the resolvers the
      host knows (QEMU's, from resolved) and no loopback among them,
