@@ -34,6 +34,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   filter, no bus), and a link goes to the broker as "open it in this very
   zone", which the broker starts without a question. The zone holder takes
   `--opener`. Zones up before the update need a restart.
+  A refusal is not silent: a file (`OpenFile`, a `file:` link) or a mail the
+  filter did not open shows a notification saying why — at most one in 30
+  seconds, so a program cannot flood the desktop with them.
 - **A hermetic zone has `/tmp`, `/var/tmp` and `/dev/shm` of its own**
   (`docs/LEAK-MODEL.md` §15). The host's `/tmp` held listening sockets nobody
   meant for a zone — a tmux server, whose `run-shell` runs a command on the

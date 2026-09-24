@@ -42,11 +42,11 @@
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -74,6 +74,12 @@ const MAX_CONNECTIONS: usize = 64;
 const MAX_OPENS_PER_MINUTE: usize = 10;
 /// The longest link it opens.
 const MAX_URI: usize = 8 * 1024;
+/// How often a notice about a refusal may be shown.
+const NOTICE_EVERY: Duration = Duration::from_secs(30);
+/// What a refused file says.
+const FILE_NOTICE: &str = "Программа из контейнера попросила открыть файл другой программой. \
+     Сейчас это сделала бы программа хоста, в сети хоста, — поэтому файл не открыт. Откройте \
+     его из файлового менеджера или из самой программы.";
 
 /// `vpn-zone-core bus-filter --listen <socket> --upstream <socket> --opener <program>
 /// [--via-broker <zone>]`.
@@ -202,6 +208,7 @@ struct Ctx {
     opener: PathBuf,
     via_broker: Option<String>,
     opens: Mutex<VecDeque<Instant>>,
+    last_notice: Mutex<Option<Instant>>,
     serial: AtomicU32,
     connections: AtomicU32,
 }
@@ -282,6 +289,7 @@ pub fn run(args: &Args) -> u8 {
         opener: args.opener.clone(),
         via_broker: args.via_broker.clone(),
         opens: Mutex::new(VecDeque::new()),
+        last_notice: Mutex::new(None),
         serial: AtomicU32::new(1),
         connections: AtomicU32::new(0),
     });
@@ -542,11 +550,18 @@ fn answer(conn: &Conn, ctx: &Ctx, msg: &[u8], h: &Header, which: Door) -> io::Re
                 "bus-filter: {} refused — a file of the sandbox is not opened on the host",
                 h.member.as_deref().unwrap_or("?")
             );
+            notify(ctx, "Файл не открыт", FILE_NOTICE);
             RESPONSE_OTHER
         }
         Door::Email => {
             eprintln!(
                 "bus-filter: ComposeEmail refused — the host's mail client is outside the zone"
+            );
+            notify(
+                ctx,
+                "Письмо не создано",
+                "Программа из контейнера попросила почтовый клиент хоста — он вне её зоны, \
+                 поэтому не открыт.",
             );
             RESPONSE_OTHER
         }
@@ -578,6 +593,9 @@ fn open_link(ctx: &Ctx, uri: &str) -> u32 {
     let shown = loggable(uri);
     if let Err(why) = acceptable(uri) {
         eprintln!("bus-filter: link {shown} refused: {why}");
+        if why == "a local file" {
+            notify(ctx, "Файл не открыт", FILE_NOTICE);
+        }
         return RESPONSE_OTHER;
     }
     if !ctx.may_open() {
@@ -628,61 +646,138 @@ fn open_link(ctx: &Ctx, uri: &str) -> u32 {
     }
 }
 
-/// The portal's unique name, asked on a short connection of our own through
-/// the same filtered bus.
-fn portal_owner(upstream: &PathBuf) -> Option<String> {
-    let stream = UnixStream::connect(upstream).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .ok()?;
-    let mut writer = stream.try_clone().ok()?;
-    let mut reader = BufReader::new(stream);
-    // SAFETY: getuid(2) cannot fail and takes no pointers.
-    let uid = unsafe { libc::getuid() }.to_string();
-    let hex: String = uid.bytes().map(|b| format!("{b:02x}")).collect();
-    writer
-        .write_all(format!("\0AUTH EXTERNAL {hex}\r\n").as_bytes())
-        .ok()?;
-    let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
-    if !line.starts_with("OK ") {
-        return None;
-    }
-    writer.write_all(b"BEGIN\r\n").ok()?;
-    let bus = |serial: u32, member: &str, body_sig: Option<&str>, body: &[u8]| {
-        let mut fields = vec![
-            Field::Path("/org/freedesktop/DBus"),
-            Field::Interface("org.freedesktop.DBus"),
-            Field::Member(member),
-            Field::Destination("org.freedesktop.DBus"),
-        ];
-        if let Some(sig) = body_sig {
-            fields.push(Field::Signature(sig));
-        }
-        wire::message(wire::METHOD_CALL, 0, serial, &fields, body)
-    };
-    writer.write_all(&bus(1, "Hello", None, &[])).ok()?;
-    writer
-        .write_all(&bus(2, "GetNameOwner", Some("s"), &body::string(PORTAL)))
-        .ok()?;
-    let mut pending: Vec<u8> = reader.buffer().to_vec();
-    let mut raw = reader.into_inner();
-    let mut chunk = [0u8; 4096];
-    loop {
-        while let Ok(Some((msg, h))) = next_message(&mut pending) {
-            if h.reply_serial == Some(2) {
-                return (h.kind == wire::METHOD_RETURN)
-                    .then(|| wire::body_string(&msg, &h).ok())
-                    .flatten();
+/// A short connection of the filter's own through the same filtered bus: the
+/// same rules as the program's, nothing the program could not ask itself.
+struct OwnConn {
+    stream: UnixStream,
+    pending: Vec<u8>,
+    serial: u32,
+}
+
+impl OwnConn {
+    fn open(upstream: &Path) -> Option<Self> {
+        let mut stream = UnixStream::connect(upstream).ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .ok()?;
+        // SAFETY: getuid(2) cannot fail and takes no pointers.
+        let uid = unsafe { libc::getuid() }.to_string();
+        let hex: String = uid.bytes().map(|b| format!("{b:02x}")).collect();
+        stream
+            .write_all(format!("\0AUTH EXTERNAL {hex}\r\n").as_bytes())
+            .ok()?;
+        let mut pending = Vec::new();
+        let mut chunk = [0u8; 512];
+        let line_end = loop {
+            if let Some(end) = pending.windows(2).position(|w| w == b"\r\n") {
+                break end;
             }
-        }
-        let n = io::Read::read(&mut raw, &mut chunk).ok()?;
-        if n == 0 || pending.len() > 1 << 20 {
+            let n = io::Read::read(&mut stream, &mut chunk).ok()?;
+            if n == 0 || pending.len() > MAX_AUTH_BYTES {
+                return None;
+            }
+            pending.extend_from_slice(&chunk[..n]);
+        };
+        if !pending.starts_with(b"OK ") {
             return None;
         }
-        pending.extend_from_slice(&chunk[..n]);
+        pending.drain(..line_end + 2);
+        stream.write_all(b"BEGIN\r\n").ok()?;
+        let mut conn = Self {
+            stream,
+            pending,
+            serial: 0,
+        };
+        conn.call(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "Hello",
+            None,
+            &[],
+        )?;
+        Some(conn)
     }
+
+    /// A method call and its reply (or error), within the read timeout.
+    fn call(
+        &mut self,
+        dest: &str,
+        path: &str,
+        iface: &str,
+        member: &str,
+        sig: Option<&str>,
+        body: &[u8],
+    ) -> Option<(Vec<u8>, Header)> {
+        self.serial += 1;
+        let serial = self.serial;
+        let mut fields = vec![
+            Field::Path(path),
+            Field::Interface(iface),
+            Field::Member(member),
+            Field::Destination(dest),
+        ];
+        if let Some(sig) = sig {
+            fields.push(Field::Signature(sig));
+        }
+        self.stream
+            .write_all(&wire::message(wire::METHOD_CALL, 0, serial, &fields, body))
+            .ok()?;
+        let mut chunk = [0u8; 4096];
+        loop {
+            while let Ok(Some((msg, h))) = next_message(&mut self.pending) {
+                if h.reply_serial == Some(serial) {
+                    return Some((msg, h));
+                }
+            }
+            let n = io::Read::read(&mut self.stream, &mut chunk).ok()?;
+            if n == 0 || self.pending.len() > 1 << 20 {
+                return None;
+            }
+            self.pending.extend_from_slice(&chunk[..n]);
+        }
+    }
+}
+
+/// The portal's unique name, asked on a connection of our own.
+fn portal_owner(upstream: &Path) -> Option<String> {
+    let mut conn = OwnConn::open(upstream)?;
+    let (msg, h) = conn.call(
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+        "GetNameOwner",
+        Some("s"),
+        &body::string(PORTAL),
+    )?;
+    (h.kind == wire::METHOD_RETURN)
+        .then(|| wire::body_string(&msg, &h).ok())
+        .flatten()
+}
+
+/// Say why nothing opened: a refusal nobody sees looks like a broken program.
+/// At most one notice in [`NOTICE_EVERY`], so that a program cannot flood the
+/// desktop with them.
+fn notify(ctx: &Ctx, summary: &str, text: &str) {
+    {
+        let mut last = ctx.last_notice.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|t| t.elapsed() < NOTICE_EVERY) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    let Some(mut conn) = OwnConn::open(&ctx.upstream) else {
+        return;
+    };
+    let _ = conn.call(
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+        "Notify",
+        Some(body::NOTIFY_SIGNATURE),
+        &body::notification("vpn-zones", summary, text),
+    );
 }
 
 #[cfg(test)]
@@ -783,6 +878,7 @@ mod tests {
             opener: PathBuf::new(),
             via_broker: None,
             opens: Mutex::new(VecDeque::new()),
+            last_notice: Mutex::new(None),
             serial: AtomicU32::new(1),
             connections: AtomicU32::new(0),
         };
