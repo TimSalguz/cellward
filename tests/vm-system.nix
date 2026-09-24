@@ -335,8 +335,23 @@ let
               as_user("alice", "script -qec 'vpn-zone-sys sz -- tty' /dev/null")
           )
           assert "/dev/pts/" in out, out
-          # Every launch is a unit of its own, and the journal names who ran what.
-          machine.succeed("journalctl -u 'vpn-zone-sysrun@*' | grep -q 'alice runs socat'")
+          # Every launch is a unit of its own, and the journal names who ran what
+          # (the program quoted: a line break in it cannot forge a line).
+          machine.succeed("journalctl -u 'vpn-zone-sysrun@*' | grep -q 'alice runs .socat.'")
+          # A command longer than the request's 5 s is not hung up (review: the
+          # timeout stayed on the connection and ended every command at 5 s).
+          machine.succeed(as_user("alice", "vpn-zone-sys sz -- sleep 8"))
+          # What the command does not see: this service's socket (asking for
+          # another zone), the host's /tmp, the Nix daemon.
+          machine.succeed("touch /tmp/host-probe && chmod 644 /tmp/host-probe")
+          machine.fail(as_user("alice", "vpn-zone-sys sz -- test -e /tmp/host-probe"))
+          machine.fail(as_user("alice", "vpn-zone-sys sz -- test -e /run/vpn-zones/sysrun.sock"))
+          machine.fail(
+              as_user("alice", "vpn-zone-sys sz -- test -e /nix/var/nix/daemon-socket/socket")
+          )
+          out = machine.succeed(as_user("alice", "vpn-zone-sys sz -- id -G")).split()
+          vz = machine.succeed("getent group vpn-zones | cut -d: -f3").strip()
+          assert vz not in out, f"the vpn-zones group {vz} is among {out}"
 
       with subtest("the session is out of reach through /proc, not only where it lies"):
           # A host process of alice's with a socket in her runtime directory — what
