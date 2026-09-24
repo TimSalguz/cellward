@@ -633,21 +633,28 @@ env -u WAYLAND_DISPLAY -u DISPLAY "$FSCORE" fs-sandbox \
     done
   ' sh "$LIVESLEEP" 2>"$WORK/live.err" &
 LIVEPID=$!
+# Read once per round and judge what was read: the program rewrites the file
+# with `>` — truncate, then write —, and a second read after the loop could land
+# between the two and see it empty (CI 2026-09-24: SEEN, then "" a moment later).
+live=""
 for _ in $(seq 50); do
-  [ "$(cat "$LIVEHOME/home/live-status" 2>/dev/null)" = SEEN ] && break
+  live=$(cat "$LIVEHOME/home/live-status" 2>/dev/null || true)
+  [ "$live" = SEEN ] && break
   sleep 0.1
 done
-[ "$(cat "$LIVEHOME/home/live-status" 2>/dev/null)" = SEEN ] \
+[ "$live" = SEEN ] \
   || fail "запущенная песочница не видит выданный каталог: $(cat "$WORK/live.err")"
 mkdir -p "$STATE/.running/__main__"
 printf '%s unconfined sb:smokelive\n' "$LIVEPID" > "$STATE/.running/__main__/smoke-live"
 printf 'until=1 %s\n' "$LIVE" > "$LIVEHOME/paths"
 "$VPN_ZONE" container expire || fail "expire не отмонтировал каталог у запущенной программы"
+live=""
 for _ in $(seq 50); do
-  [ "$(cat "$LIVEHOME/home/live-status" 2>/dev/null)" = GONE ] && break
+  live=$(cat "$LIVEHOME/home/live-status" 2>/dev/null || true)
+  [ "$live" = GONE ] && break
   sleep 0.1
 done
-[ "$(cat "$LIVEHOME/home/live-status" 2>/dev/null)" = GONE ] \
+[ "$live" = GONE ] \
   || fail "после истечения срока запущенная программа всё ещё видит каталог; где смонтирован: $(grep -l smoke-live /proc/[0-9]*/mountinfo 2>/dev/null | while read -r f; do echo "$f: $(grep smoke-live "$f")"; done)"
 [ -e "$LIVE/probe" ] || fail "отмонтирование задело сам каталог на хосте"
 [ ! -s "$LIVEHOME/paths" ] || fail "истёкшая выдача осталась в файле: $(cat "$LIVEHOME/paths")"
