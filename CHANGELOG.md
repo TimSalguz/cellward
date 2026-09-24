@@ -19,6 +19,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   is missing). Nothing is taken from the window's title. VM test: a program in
   a zone opens a window on sway, `focused` names its zone and program, the
   menu comes up and closes having done nothing.
+  The window has an app id, `vpn-zone-window`, for a compositor's window rule
+  (README: floating in niri).
 - **The launch window** (`vpn-zone-window`, the crate `window/`): the picker
   asks about the network and the container in ONE window, side by side,
   instead of two kdialog menus in a row with every entry twice ("… —

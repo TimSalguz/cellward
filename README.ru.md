@@ -335,6 +335,11 @@ vpn-zone trust add|list|rm <контейнер> …       # корневой с�
 binds {
     Mod+Shift+Z { spawn "vpn-zone" "window-menu"; }
 }
+// окно запуска и меню — плавающие, а не отдельной колонкой
+window-rule {
+    match app-id="^vpn-zone-window$"
+    open-floating true
+}
 ```
 
 ```jsonc
