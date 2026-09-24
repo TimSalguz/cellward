@@ -449,24 +449,19 @@ programs.vpn-zones = {
 
   launcher.mode = "picker";              # picker | per-zone (deprecated) | both (deprecated) | off
   defaults = {
-    network = "offline";                 # offline | unconfined | <network>
+    network = "offline";                 # offline | unconfined | <zone>
     container = "own";                   # own | ask | main | <container>
   };
   compositorRestriction.enable = true;
-
-  networks.lan-uplink = {                # zones are local (keys); this is the rootless kind
-    kind = "host-interface";
-    interface = "enp4s0";
-  };
+  hermetic.default = true;               # and hermetic.exceptions = [ "<zone>" ]
+  zoneX11 = [ ];                         # zones whose programs get an X server of their own
 
   containers.work = {
     home = "private";                    # private | overlay
-    network = "nl";                      # <zone> | <network> | unconfined | offline | "ask"
-    routes = [ ];                        # e.g. [ "192.168.1.0/24" ] — explicit holes
+    network = "nl";                      # <zone> | unconfined | offline | ask
     apps = [ "firefox" "org.telegram.desktop" ];
     permissions = {
-      filesystem = [ "downloads" ];      # downloads | documents | pictures | home
-      paths = [ ];                       # e.g. [ "~/.wine" ]
+      paths = [ ];                       # e.g. [ "~/.wine" ] — private homes only
       x11 = false;
     };
     trust = {                            # CERTIFICATES.md
@@ -475,17 +470,27 @@ programs.vpn-zones = {
     };
   };
 
-  autostart.unassigned = "offline";      # offline (no dialog, notification) | as-is
-  interception = {
-    dbusActivation = true;
-    userEntries = "take-over";           # take-over | leave — LAUNCHERS.md §3.2
+  autostart.unassigned = "ask";          # ask (the default) | offline | as-is
+  interception.userEntries = "take-over";  # take-over | leave — LAUNCHERS.md §3.2
+  desktop = {                            # the window menu's key and our windows' rule
+    windowMenu.key = null;               # e.g. "Mod+Shift+V", niri's notation
+    niri.enable = false;
+    sway.enable = false;
   };
 };
 ```
 
+A zone through an interface of the host is a zone like the others, made from a
+`[HostInterface]` file with `vpn-zone add` — not an option. Named extra routes
+beside a network and filesystem presets (`downloads`, `documents`) are not
+there; `permissions.paths` is what a private home is given.
+
 - Zones themselves are not declared: a zone config is a private key and must
   never enter the Nix store. A declared container naming a network that does
-  not exist is a launch-time refusal (I6), not an evaluation error.
+  not exist is a launch-time refusal (I6), not an evaluation error; a value that
+  cannot be a network name at all is one (the option's type).
+- Declared values are written below `~/.config/vpn-zones/declared/` whatever
+  `xdg.configHome` is: that is the path every reader reads.
 - Assertions: `trust.certificates != []` requires `acknowledgeRisk`; one
   program in two containers' `apps` is an error; `permissions.paths` on an
   `overlay` home is an error (it does not apply), and so is a path that is
