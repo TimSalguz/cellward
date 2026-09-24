@@ -519,6 +519,13 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         return 1;
     }
 
+    // The zone with no network is created on demand, here as in the picker:
+    // `vpn-zone run offline -- …` by hand used to find no zone at all when the
+    // picker had never made one.
+    if zone == OFFLINE {
+        ensure_offline_zone(&tools.state);
+    }
+
     // --- 1a. ONE IDENTITY, ONE NETWORK ---
     // Before anything is created: a container bound to a network runs in that
     // network only, and a container never runs in two networks at once
@@ -1138,6 +1145,17 @@ fn run_locked(current: &OsStr, argv: &[OsString]) -> u8 {
     let e = exec_command(&cmd);
     eprintln!("не удалось запустить {}: {e}", cmd[0].to_string_lossy());
     EXIT_NOT_STARTED
+}
+
+/// The zone with no network: a directory with the `offline` marker and nothing
+/// else — there is no config to keep, it is an empty namespace
+/// (`docs/GOTCHAS.md` §2).
+pub fn ensure_offline_zone(state: &Path) {
+    let dir = state.join(OFFLINE);
+    if !dir.is_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(OFFLINE), b"");
+    }
 }
 
 /// Hand the launch to `systemd --user`, which lives outside every zone.

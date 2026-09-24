@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Which zone is the focused window in** (`docs/WINDOW-FRAME.md` §7б, §7в, the
+  frame's first step). `vpn-zone focused [--json|--bar|--watch]` asks the
+  compositor (niri, sway) for the focused window and its pid, and finds its
+  launch up the pid's parents in the registry — or, for a program that
+  detached from its launch, its network by its network namespace. `--watch`
+  prints a status bar line (waybar's JSON, a class per zone) every time the
+  focus moves. `vpn-zone window-menu` is the menu of that window for a key
+  binding: pin the program to its network or ask again, close it and start it
+  again through the picker, close it, cut its zone off — the last three
+  confirmed. It is the launch window in a menu mode (kdialog where the window
+  is missing). Nothing is taken from the window's title. VM test: a program in
+  a zone opens a window on sway, `focused` names its zone and program, the
+  menu comes up and closes having done nothing.
 - **The launch window** (`vpn-zone-window`, the crate `window/`): the picker
   asks about the network and the container in ONE window, side by side,
   instead of two kdialog menus in a row with every entry twice ("… —
@@ -89,6 +102,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `/proc` from the host and from neither kind of zone.
 
 ### Fixed
+- **`vpn-zone run offline -- …` works without the picker.** The zone with no
+  network was created only by the picker, on demand; typed by hand before the
+  picker had ever made it, the launch found no zone. `run` creates it the same
+  way now.
 - **A sandbox in a hermetic zone has a session bus again.** Its own
   `xdg-dbus-proxy` sat on top of the zone's, and xdg-dbus-proxy cannot be
   stacked: the inner one's own calls carry serials the outer one refuses
