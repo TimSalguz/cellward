@@ -1,14 +1,17 @@
 # vpn-zones
 
 Читать по-русски: [README.ru.md](README.ru.md) · Development plan: [ROADMAP.md](ROADMAP.md)
-· Design proposals: [containers by default](docs/CONTAINERS.md),
+· Design: [architecture](docs/ARCHITECTURE.md), [leak model](docs/LEAK-MODEL.md),
+[the system tier](docs/SYSTEM.md), [containers by default](docs/CONTAINERS.md),
 [launcher entries](docs/LAUNCHERS.md), [per-container certificates](docs/CERTIFICATES.md),
-[zone hermeticity: decisions to take](docs/HERMETICITY.md)
+[zone hermeticity](docs/HERMETICITY.md)
 
 Launch programs with a choice of network, data container and sandbox — straight
-from the app's launcher entry. Everything runs as your user: root is not needed
-either to create a zone or to launch, and no system configuration changes are
-required.
+from the app's launcher entry. The user tier runs entirely as your user: root is
+not needed either to create a zone or to launch, and no system configuration
+changes are required. An optional [system tier](#the-system-tier-optional) — a
+NixOS module — holds zones from boot for services, NixOS containers and the
+text console, and can close the host's own network to everything outside a zone.
 
 You click a launcher entry — it asks which network to run in (through which VPN,
 without VPN, or with no network at all) and in which environment (shared with
@@ -29,6 +32,14 @@ can be any number of zones, each with its own config. There are built-in
 zone around the program: no VPN, the host's resolver, session bus and
 `systemd --user`. `offline` means the literal absence of a route, not a
 firewall rule.
+
+Zones are **hermetic by default** (since 2026-09): a program in a zone has no
+`systemd --user` and a filtered session bus — portals, notifications, tray
+icons, media players and input methods get through, starting a process outside
+the zone does not. A program that opens something in another network (a link,
+another program) goes through the broker, which asks which network, and
+remembers "Always" for a program you trust. `vpn-zone hermetic <zone> off`
+gives a zone the host's session back.
 
 **Data.** Five modes:
 
@@ -119,8 +130,29 @@ naming the degraded layer in `vpn-zone doctor` instead of on stderr alone.
 ```
 
 After a rebuild, the launcher gets the entries "Add VPN zone", "Remove VPN
-zone", "Create container", "Remove profile", "VPN zone settings" and "Reset app
-networks".
+zone", "Cut off a VPN zone", "Create container", "Remove profile (container)",
+"VPN zone containers" (a window with every container, its network, programs and
+granted directories), "VPN zone settings" and "Reset app networks".
+
+What should always be so can be declared instead of clicked — containers, their
+networks and programs, the defaults:
+
+```nix
+programs.vpn-zones = {
+  enable = true;
+  defaults.network = "offline";              # an unknown program gets no internet
+  containers.work = {
+    home = "private";                        # a home of its own
+    network = "nl";                          # launches in another network are refused
+    apps = [ "firefox" ];                    # launched in it without a question
+    permissions.paths = [ "~/Downloads" ];
+  };
+  pathShims.enable = true;                   # typed in a terminal — through the picker too
+};
+```
+
+`vpn-zone status --json` shows every value with where it came from (Nix, set
+locally, or the default).
 
 ## How to use it
 
@@ -266,6 +298,8 @@ host's addresses are.
 Then just launch programs from the launcher. The same from the terminal:
 
 ```sh
+vpn-zone add <zone> <file.conf>                # a zone from an AmneziaWG/WireGuard/OpenConnect config
+vpn-zone add <zone> --system <system zone>     # a zone through a system zone's tunnel
 vpn-zone list                                  # zones and their state
 vpn-zone up <zone> / down <zone>
 vpn-zone check <zone>                          # is the tunnel alive
@@ -288,10 +322,64 @@ vpn-zone perms list|reset <app|--all>          # granted file accesses
 vpn-zone lock|unlock <zone>                    # forbid leaving for other networks
 vpn-zone x11 <zone> on|off                     # an X server of their own for the zone's programs
 vpn-zone hermetic <zone> on|off|default        # no systemd --user, a filtered session bus, the broker
-vpn-zone hermetic --default on|off             # for zones without a setting of their own (off)
+vpn-zone hermetic --default on|off             # for zones without a setting of their own (on since 2026-09)
 vpn-zone default-profile ask|main|own|<name>
 vpn-zone mode picker|per-zone|both|off         # how launcher entries behave (per-zone, both: deprecated)
+vpn-zone default offline|unconfined|<zone>     # what the picker offers an unknown program
+vpn-zone pins / forget <program|--all>         # programs pinned to a network, and unpinning
+vpn-zone container list|show|set|assign|merge  # containers: network, programs, X11, merging two
+vpn-zone trust add|list|rm <container> …       # a root certificate for one container only
 ```
+
+## The system tier (optional)
+
+Everything above is the user tier: a session, your user, no root. The system
+tier is a NixOS module on top of it — zones held by systemd from boot, for what
+has no session:
+
+- **services and NixOS containers in a zone**
+  (`services.<unit>.zone`, `containers.<name>.zone`): the service gets the
+  zone's namespace and resolv.conf, with nscd, resolved and the system bus hidden;
+- **plain zones** (`kind = "plain"`): no tunnel, out through the host's network
+  by pasta — "directly", but still a namespace with nothing of the host's;
+- **the host's own services through a zone**: the Nix daemon's downloads
+  (`host.nix`), the clock (`host.time`), the host's name lookups (`host.dns`);
+- **the host egress policy** (`egress`): `audit` logs which programs outside
+  every zone went to the network, `enforce` cuts them off, `strict` keeps root
+  and the system's users to the local network as well — what has to go further
+  goes through a zone;
+- **one VPN, one connection**: a user zone can have no tunnel of its own and go
+  through a system zone's (`vpn-zone add <name> --system <zone>`);
+- **the TTY console** (`console`): logging in on a text console lands in a menu
+  with a network already — a terminal in a VPN zone, a plain fallback when the
+  VPN does not come up;
+- **an off switch**: `vpn-zones-off` puts everything back on the host's network
+  with no rebuild and no network, and survives a reboot; `vpn-zones-on` undoes it.
+
+```nix
+# NixOS
+imports = [ inputs.vpn-zones.nixosModules.default ];
+services.vpn-zones.system = {
+  enable = true;
+  users = [ "alice" ];               # may see the zones' state and add zones on the spot
+  zones.direct0.kind = "plain";      # "directly"
+  host.nix = "direct0";
+  host.time = "direct0";
+  egress = { enable = true; mode = "audit"; };   # watch first, then enforce
+};
+```
+
+```sh
+vpn-zone-sys <zone> -- <command>          # a console program in a system zone (the zone's users)
+vpn-zone-sys --add <zone> <file.conf>     # a system zone on the spot (system.users)
+vpn-zones-off / vpn-zones-on              # everything off and back on (wheel, no password)
+systemctl start vpn-zones-egress-open     # lift the egress policy for 15 minutes (wheel)
+```
+
+A zone's key never goes into Nix: `configFile` names a file at run time (a
+decrypted secret, say), or the config is put in
+`/var/lib/vpn-zones/system/<zone>/`. What it does, what it does not, and every
+decision on the way: [docs/SYSTEM.md](docs/SYSTEM.md).
 
 ## What this does not replace
 
@@ -350,7 +438,19 @@ The subtleties that took the most time are commented in detail in
   `nsswitch.conf`). Both sockets are hidden inside a zone — without that,
   names resolve past the tunnel and a leak test names your real ISP;
 - Amnezia configs come in CRLF, and recent ones also with empty `I1`–`I5`
-  parameters, on which `awg setconf` rejects the whole file.
+  parameters, on which `awg setconf` rejects the whole file;
+- the session bus filter is `xdg-dbus-proxy` with one small patch of ours
+  (`module/patches/`): its wildcards are only `org.kde.*`-shaped, and a tray
+  icon of Electron or Qt must own `org.kde.StatusNotifierItem-<pid>-<n>` —
+  owning all of `org.kde.*` would own KWallet's name too, so `--own=NAME-*`
+  owns that prefix and nothing more;
+- the system tier's services join a zone through a systemd generator, not
+  through their unit files — that is why `vpn-zones-off` returns them to the
+  host's network without a rebuild; the host egress policy tells programs apart
+  by the owner of the socket in nftables. Its allowances are added on top of a
+  table `nft` loads by itself, so our code failing leaves the host more closed;
+  a table that does not load at all is a failed unit, and the host is as it was
+  without the policy (`docs/SYSTEM.md`).
 
 ## License
 

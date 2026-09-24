@@ -2,10 +2,12 @@
 
 Related: [ARCHITECTURE.md](ARCHITECTURE.md) §3, [LEAK-MODEL.md](LEAK-MODEL.md)
 
-**Status, 2026-09-23.** Stages 1–3 (system zones, services and NixOS containers in them) are
-in `main`, with `tests/vm-system.nix` green locally and in CI. Stage 4 (a user's console
-program in a system zone, §7) is in `main` too; stage 5 (the host egress policy, §9) is on
-the branch `feat/host-egress`, green in the same VM test.
+**Status, 2026-09-24.** Stages 1–5 are in `main`, green in CI: system zones, services and
+NixOS containers in them (`tests/vm-system.nix`), a user's console program in a system zone
+and the TTY console (§7, §7a), the host egress policy with `strict` and the host's own
+services through a zone (§9, §9b, §9c — `tests/vm-host.nix`), a user zone through a system
+zone (§7b — `tests/vm-bridge.nix`), a zone through one interface (§4a —
+`tests/vm-uplink.nix`) and the off switch (§9a).
 
 ## 1. What it is
 
@@ -15,7 +17,8 @@ Its uplink is the host's network, so there is no pasta and no user namespace: ro
 the interface in the host's namespace and moves it into `/run/netns/vz-<name>`.
 
 What joins it: system services (`NetworkNamespacePath=`) and NixOS containers
-(`containers.<name>.networkNamespace`). Programs of a user can't yet (stage 4, the broker).
+(`containers.<name>.networkNamespace`). A user's programs join it through `vpn-zone-sys`
+(§7) or through a user zone of their own on top of it (§7b).
 
 Stages 1–3 carry WireGuard/AmneziaWG zones only. OpenConnect and host-interface configs are
 refused with a message; they need the uplink to be a namespace of its own and come later.
