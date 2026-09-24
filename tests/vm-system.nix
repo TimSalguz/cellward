@@ -166,6 +166,7 @@ let
 
     testScript = ''
       import shlex
+      import time
 
       def as_user(user, cmd):
           return f"su -l {user} -c {shlex.quote(cmd)}"
@@ -581,16 +582,39 @@ let
       # where Cyrillic does not survive: the checks look at the ASCII in it.
       # What a shell IN a zone writes goes to the home: a command in a system
       # zone has a /tmp of its own, which the host does not see.
+      # Text stays on the screen after it stops being true, so every login
+      # starts on a wiped one; and the console drops keys pressed before its
+      # menu is up, so keys for the menu wait for its prompt.
       def tty_run(cmd):
           machine.send_chars(cmd + "\n")
 
-      with subtest("the TTY console: log in, and there is a network already"):
+      def tty_login():
+          machine.succeed("systemctl stop getty@tty1")
+          machine.execute("pkill -KILL -t tty1")
+          machine.wait_until_fails("pgrep -t tty1", timeout=30)
+          machine.succeed("printf '\\033c' > /dev/tty1")
+          machine.succeed("systemctl start getty@tty1")
           machine.wait_until_tty_matches("1", "login: ")
           machine.send_chars("alice\n")
           machine.wait_until_tty_matches("1", "Password: ")
           machine.send_chars("alice-console\n")
+
+      def tty_menu(timeout=60):
+          end = time.monotonic() + timeout
+          while True:
+              lines = [l.strip() for l in machine.get_tty_text("1").splitlines() if l.strip()]
+              if lines and lines[-1] == ">":
+                  return
+              if time.monotonic() > end:
+                  print(machine.get_tty_text("1"))
+                  raise Exception("the console's menu did not come up")
+              time.sleep(0.5)
+
+      with subtest("the TTY console: log in, and there is a network already"):
+          tty_login()
           machine.wait_until_tty_matches("1", "tunnel alive")
           machine.wait_until_tty_matches("1", r"\[Enter\].*zone sz")
+          tty_menu()
           machine.send_chars("\n")
           # A login shell in the zone: the console did not come up again in it.
           machine.wait_until_succeeds("pgrep -u alice -f 'system-run sz'", timeout=30)
@@ -601,6 +625,7 @@ let
           tty_run("exit")
           # Back in the menu once the zone's shell is gone.
           machine.wait_until_fails("pgrep -u alice -f 'system-run sz'", timeout=30)
+          tty_menu()
           # The plain console: the host, which has no network for alice.
           machine.send_chars("q")
           tty_run(f"socat -T5 - TCP:{server_ip}:8090 > /tmp/console-host 2>&1; echo host-exit=$? >> /tmp/console-host")
@@ -625,12 +650,10 @@ let
           # handshake.
           server.succeed("ip link set wg0 down")
           machine.succeed("systemctl restart vpn-zone-system@sz")
-          machine.wait_until_tty_matches("1", "login: ")
-          machine.send_chars("alice\n")
-          machine.wait_until_tty_matches("1", "Password: ")
-          machine.send_chars("alice-console\n")
+          tty_login()
           machine.wait_until_tty_matches("1", "no tunnel", timeout=60)
           machine.wait_until_tty_matches("1", r"\[p\].*zone pl")
+          tty_menu()
           machine.send_chars("p")
           machine.wait_until_succeeds("pgrep -u alice -f 'system-run pl'", timeout=60)
           tty_run(f"socat -T10 - TCP:{server_ip}:8090 > /home/alice/console-plain 2>&1; echo $VPN_ZONE_CURRENT >> /home/alice/console-plain")
@@ -639,6 +662,8 @@ let
           assert "peer=" in out and "peer=10.99." not in out, out
           tty_run("exit")
           machine.wait_until_fails("pgrep -u alice -f 'system-run pl'", timeout=30)
+          # Back in the menu at once: the tunnel was waited for once already.
+          tty_menu(timeout=10)
           machine.send_chars("q")
           tty_run("exit")
           server.succeed("ip link set wg0 up")
@@ -649,11 +674,9 @@ let
           host_ns = machine.succeed("readlink /proc/1/ns/net").strip()
           # alice is in wheel: at the seat the switch needs no password —
           # logged in on tty1, the console's host shell ("q").
-          machine.wait_until_tty_matches("1", "login: ")
-          machine.send_chars("alice\n")
-          machine.wait_until_tty_matches("1", "Password: ")
-          machine.send_chars("alice-console\n")
+          tty_login()
           machine.wait_until_tty_matches("1", r"\[Enter\].*zone sz")
+          tty_menu()
           machine.send_chars("q")
           # Judged by what it does: switching off restarts the console too, and
           # the shell that asked is gone before it could say anything.

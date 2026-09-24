@@ -55,6 +55,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **The TTY console drops keys pressed before its menu is up.** Keys typed
+  while it waited for the tunnel, left over from the shell that just ended, or
+  a terminal's answer to something a program printed were read as the menu's
+  choice — `x` switches vpn-zones off, `k` turns the emergency key. The menu
+  flushes the terminal's input before it shows itself. It also waits for the
+  tunnel once per console: back from a shell, it says how things are at once.
 - **pasta resets what it cannot bind to the zone's interface** (review of
   2026-09-25). Between an interface going away and the watcher killing pasta,
   pasta connected TCP unbound — by the host's routes, with the host's address
