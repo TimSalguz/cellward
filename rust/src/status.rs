@@ -79,7 +79,7 @@ pub fn defaults(tools: &Tools) -> String {
     let (container, container_source) = setting(tools, "default-profile", "ask");
     let (mode, mode_source) = setting(tools, "mode", "picker");
     let (wayland, wayland_source) = setting(tools, "wayland-sandbox", "on");
-    let (autostart, autostart_source) = setting(tools, "autostart", "offline");
+    let (autostart, autostart_source) = setting(tools, "autostart", "ask");
     let (user_entries, user_entries_source) = setting(tools, "user-entries", "take-over");
     let (hermetic, hermetic_source) = crate::hermetic::default_setting(&tools.config);
     format!(

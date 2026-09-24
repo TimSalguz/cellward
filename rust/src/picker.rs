@@ -432,11 +432,13 @@ pub struct AutostartPlan {
 
 /// The decision for an autostart launch — never a dialog.
 ///
-/// At login nobody is looking yet: a dialog would wait on a screen that is
-/// still being drawn, or be answered by a stray click, and the program used to
-/// start uncontained in the host's network. The owner's decision
-/// (2026-09-17): what was chosen for the program is honoured, and what was not
-/// chosen is the closed variant.
+/// What was chosen for the program is honoured without a dialog. What was not
+/// chosen is, with `autostart.unassigned = "ask"` (the default since
+/// 2026-09-24, the owner's word), the picker's question — see
+/// [`autostart_asks`]; with `offline` (2026-09-17 to 2026-09-24), or with no
+/// screen to ask on, the closed variant below: a stray click on a dialog drawn
+/// at login is a choice nobody made, and the old default started the program
+/// uncontained in the host's network.
 ///
 /// * running already — where it runs, like a click would;
 /// * the container: the pinned or assigned one; otherwise the global default
@@ -917,7 +919,12 @@ pub fn main() -> ExitCode {
 
     let memory = read_memory(&tools, &key);
     if args.autostart {
-        return autostart(&tools, &key, &label, &memory, &args.cmd);
+        if let Some(code) = autostart(&tools, &key, &label, &memory, &args.cmd) {
+            return code;
+        }
+        // Nothing chosen for it, and the setting says ask (owner, 2026-09-24):
+        // the same picker a click shows, with its "always".
+        eprintln!("vpn-zone-pick: автозапуск «{label}»: для неё ничего не выбрано — спрашиваю");
     }
     let mut asksolo = false;
     let zone_choice: String;
@@ -1043,9 +1050,32 @@ pub fn main() -> ExitCode {
     launch(&tools, &key, &zone_choice, &container, &args.cmd)
 }
 
+/// `autostart.unassigned`: the declared setting, then the local one; `ask` by
+/// default (owner, 2026-09-24 — `offline` before).
+fn autostart_setting(tools: &Tools) -> String {
+    read_setting(&tools.config.join("declared/autostart"))
+        .or_else(|| read_setting(&tools.config.join("autostart")))
+        .map(|v| v.trim().to_owned())
+        .unwrap_or_else(|| "ask".to_owned())
+}
+
+/// Whether an autostart launch shows the picker instead of guessing: with
+/// `ask`, when something had to be guessed, and when there is a screen to ask
+/// on — a login on a text console gets the closed variant as before.
+pub fn autostart_asks(setting: &str, plan: &AutostartPlan, screen: bool) -> bool {
+    setting == "ask" && (plan.network_guessed || plan.container_guessed) && screen
+}
+
 /// A launch from XDG autostart: [`autostart_plan`], a notification for what
-/// was guessed, and the launch itself.
-fn autostart(tools: &Tools, key: &str, label: &str, memory: &Memory, cmd: &[OsString]) -> ExitCode {
+/// was guessed, and the launch itself. `None`: the picker asks instead
+/// ([`autostart_asks`]).
+fn autostart(
+    tools: &Tools,
+    key: &str,
+    label: &str,
+    memory: &Memory,
+    cmd: &[OsString],
+) -> Option<ExitCode> {
     let profiles = tools.profiles.clone();
     let plan = autostart_plan(
         memory,
@@ -1060,6 +1090,11 @@ fn autostart(tools: &Tools, key: &str, label: &str, memory: &Memory, cmd: &[OsSt
             })
         },
     );
+    let screen = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
+        || std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+    if autostart_asks(&autostart_setting(tools), &plan, screen) {
+        return None;
+    }
     let mut lines = Vec::new();
     if plan.network_guessed {
         lines.push(
@@ -1099,7 +1134,7 @@ fn autostart(tools: &Tools, key: &str, label: &str, memory: &Memory, cmd: &[OsSt
             &lines.join("\n"),
         );
     }
-    launch(tools, key, &plan.zone, &plan.container, cmd)
+    Some(launch(tools, key, &plan.zone, &plan.container, cmd))
 }
 
 /// Read the three levels of memory, dropping the pins that have gone stale.
@@ -1773,6 +1808,34 @@ mod tests {
             default_profile: "ask".to_owned(),
             ..Memory::default()
         }
+    }
+
+    /// `ask` shows the picker at login only when something had to be guessed
+    /// and there is a screen; what is chosen starts without a question, and
+    /// `offline` or a text console keep the closed variant.
+    #[test]
+    fn autostart_asks_only_for_what_was_not_chosen_and_only_on_a_screen() {
+        let plan = |network_guessed, container_guessed| AutostartPlan {
+            zone: "offline".to_owned(),
+            container: Container::default(),
+            network_guessed,
+            container_guessed,
+        };
+        assert!(autostart_asks("ask", &plan(true, true), true));
+        assert!(autostart_asks("ask", &plan(true, false), true));
+        assert!(autostart_asks("ask", &plan(false, true), true));
+        assert!(
+            !autostart_asks("ask", &plan(false, false), true),
+            "all chosen: no question"
+        );
+        assert!(
+            !autostart_asks("ask", &plan(true, true), false),
+            "a text console: nobody to ask"
+        );
+        assert!(
+            !autostart_asks("offline", &plan(true, true), true),
+            "the closed variant, when set"
+        );
     }
 
     #[test]
