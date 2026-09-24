@@ -287,7 +287,7 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                         ),
                     };
                     let answer = match &allowed {
-                        Ok(()) => start(tools, &app_id, &argv),
+                        Ok(()) => start(&app_id, &argv),
                         Err(why) => format!("refused: {why}"),
                     };
                     // Every crossing the broker decides, either way, on the
@@ -562,8 +562,18 @@ fn ask(
     }
 }
 
-fn start(tools: &Tools, app_id: &OsString, argv: &[OsString]) -> String {
-    let mut command = Command::new(&tools.runner);
+fn start(app_id: &OsString, argv: &[OsString]) -> String {
+    // Our own binary, from the store — not the manifest's runner, a profile
+    // path: in a standalone home-manager that is `~/.nix-profile`, a link a
+    // program with the home could point elsewhere, and the broker would run
+    // its binary on the host at once (review 2026-09-25). The manifest is the
+    // one this process runs with (VPN_ZONE_TOOLS, set by the wrapper).
+    let exe = match std::env::current_exe() {
+        Ok(exe) if exe.starts_with("/nix/store/") => exe,
+        Ok(exe) => return format!("refused: {} is not in the store", exe.display()),
+        Err(e) => return format!("refused: cannot find our own binary: {e}"),
+    };
+    let mut command = Command::new(exe);
     command
         .arg("run")
         .args(argv)
@@ -583,7 +593,7 @@ fn start(tools: &Tools, app_id: &OsString, argv: &[OsString]) -> String {
             });
             "ok".to_owned()
         }
-        Err(e) => format!("refused: не запустить {}: {e}", tools.runner.display()),
+        Err(e) => format!("refused: не запустить vpn-zone: {e}"),
     }
 }
 

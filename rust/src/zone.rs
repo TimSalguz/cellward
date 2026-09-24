@@ -1675,6 +1675,29 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
     for group in RESOLVER_DIRS {
         hide_first(group)?;
     }
+    // Nor anything else of the host's a client has no business with: the
+    // system bus (resolve1 looks names up in the host's network), the
+    // session's runtime directory (the compositor's raw socket and IPC, which
+    // start programs on the host), /tmp (the session's listening sockets). A
+    // VPN client is a network-facing program a server may try to subvert
+    // (review 2026-09-25).
+    let runtime = host_runtime_dir(zone);
+    for (dir, options) in [
+        (Path::new("/run/dbus"), "mode=0755,size=16k"),
+        (runtime.as_path(), "mode=0700,size=16k"),
+        (Path::new("/tmp"), "mode=1777,size=64m"),
+    ] {
+        if dir.is_dir() {
+            sys::mount(
+                OsStr::new("tmpfs"),
+                dir,
+                "tmpfs",
+                libc::MS_NOSUID | libc::MS_NODEV,
+                options,
+            )
+            .map_err(|e| format!("cannot close {} for the uplink: {e}", dir.display()))?;
+        }
+    }
 
     // SAFETY: getpid(2) takes no arguments and cannot fail.
     let pid = unsafe { libc::getpid() };

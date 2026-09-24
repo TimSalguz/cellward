@@ -55,6 +55,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **Second review round, the module and the uplink:** a certificate file with
+  a private key in it is refused by the option's type, before it is copied to
+  the store; container names the runtime reserves (`__…`, `main`, `own`,
+  `ask`, `pinmain`) and bad `defaults.container` values are refused; custom
+  `xdg.dataHome`/`configHome` are refused with a message (the interception
+  lives in the default ones); `niri.includeInConfig` needs a config.kdl
+  home-manager writes as text; the broker starts its own binary from the store,
+  not the profile's `vpn-zone` (a link a program with the home could
+  repoint); a sandbox is never granted browsers' native-messaging hosts,
+  user tmpfiles, more compositors' and shells' configs, pipewire and
+  wireplumber configs, git's, KDE service menus or file managers' scripts;
+  the uplink namespace (where OpenConnect runs) sees neither the system bus,
+  nor the session's runtime directory, nor the host's `/tmp`.
 - **The sound server through a filter** (review of 2026-09-25). Every zone,
   the hermetic and `offline` ones too, got the host's `pulse/native` — where
   a client may `LOAD_MODULE` `module-tunnel-sink`, `module-rtp-send` or
