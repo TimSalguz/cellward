@@ -252,7 +252,20 @@ pub fn launch_of(state: &Path, pid: i32) -> Option<Launch> {
 /// A name a program gave itself, fit to be shown: no control characters (a
 /// line break would start a line of its own in a dialog), not endless.
 fn shown(name: &str) -> String {
-    name.chars().filter(|c| !c.is_control()).take(80).collect()
+    name.chars()
+        .filter(|c| !c.is_control() && !reorders(*c))
+        .take(80)
+        .collect()
+}
+
+/// Invisible characters that change the order text is shown in, or hide in
+/// it: bidi marks, embeddings, isolates, zero-width joiners and spaces. With
+/// them a name can make the network after it read as something else.
+fn reorders(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+    )
 }
 
 /// Text for a markup parser: waybar reads `text` and `tooltip` as Pango
@@ -302,11 +315,12 @@ fn window_name(state: &Path, window: &Window, launch: Option<&Launch>) -> String
         .map(|p| label(state, p))
         .map(|l| shown(&l))
         .unwrap_or_else(|| {
+            // The window's own name, in quotes: nothing vouches for it.
             let app_id = shown(&window.app_id);
             if app_id.is_empty() {
                 format!("pid {}", window.pid)
             } else {
-                app_id
+                format!("«{app_id}»")
             }
         })
 }
@@ -782,7 +796,9 @@ mod tests {
             "{\"text\":\"без ограничений · песочница work\",\"tooltip\":\"Огненный &lt;лис&gt;: без ограничений, контейнер: песочница work\",\"class\":\"zone-unconfined\"}"
         );
         // Nothing but the app id: shown without its line break.
-        assert!(describe(&state, &w, None).starts_with("firefox: "));
+        assert!(describe(&state, &w, None).starts_with("«firefox»: "));
+        // Bidi controls are cut: they could make the network read otherwise.
+        assert_eq!(shown("a\u{202E}b\u{2066}c"), "abc");
         let _ = fs::remove_dir_all(&state);
     }
 }

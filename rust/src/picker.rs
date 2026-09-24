@@ -746,7 +746,7 @@ pub fn profile_menu(
 
 /// The network column: the menu's choices, once — "always" is a checkbox now.
 pub fn window_nets(zones: &[MenuZone], selected: &str) -> Vec<window::Item> {
-    net_menu(zones, "", "")
+    let mut items = net_menu(zones, "", "")
         .into_iter()
         .take_while(|(tag, _)| !tag.starts_with("pin:"))
         .map(|(tag, label)| {
@@ -763,7 +763,14 @@ pub fn window_nets(zones: &[MenuZone], selected: &str) -> Vec<window::Item> {
                 ..window::Item::default()
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // Nothing remembered is offered: `offline`, not the first row.
+    if !items.iter().any(|i| i.selected) {
+        for it in &mut items {
+            it.selected = it.tag == "offline";
+        }
+    }
+    items
 }
 
 /// The container column: what the container menu offers, once each.
@@ -830,8 +837,12 @@ pub fn window_containers(
         it.selected = !found && it.tag == selected;
         found |= it.selected;
     }
+    // What was remembered is gone (a sandbox removed, a profile renamed): the
+    // program's own sandbox, not the main profile with the whole home.
     if !found {
-        items[0].selected = true;
+        for it in &mut items {
+            it.selected = it.tag == "__ownsb__";
+        }
     }
     items
 }
@@ -1159,6 +1170,18 @@ pub fn main() -> ExitCode {
             asksolo = ask_container;
         }
         NetStep::Ask { default } => {
+            // The row the question starts on: the remembered one while it is
+            // still offered, else `offline` — never whatever comes first, which
+            // is the host's network. A zone removed after `vpn-zone default`
+            // named it (or after it was last chosen) is not offered.
+            let default = if default == "offline"
+                || default == launch::UNCONFINED
+                || menu_zones(&tools.state).iter().any(|z| z.name == default)
+            {
+                default
+            } else {
+                "offline".to_owned()
+            };
             // One window for both questions, where there is one.
             if launch::has_display() {
                 match ask_window(&tools, &key, &label, &default, &memory) {
@@ -2766,5 +2789,35 @@ mod tests {
                 assert_eq!(parsed.sandbox, Sandbox::Throwaway, "«{tag}»");
             }
         }
+    }
+
+    /// A remembered choice that is no longer offered starts the question on
+    /// the safe rows — never the first one, which is the host's network, nor
+    /// the main profile with the whole home.
+    #[test]
+    fn a_choice_that_is_gone_is_not_replaced_by_the_first_row() {
+        let zones = vec![MenuZone {
+            name: "de".to_owned(),
+            host_interface: false,
+            system_zone: None,
+            dead: false,
+        }];
+        let nets = window_nets(&zones, "nl-removed");
+        let chosen: Vec<&str> = nets
+            .iter()
+            .filter(|i| i.selected)
+            .map(|i| i.tag.as_str())
+            .collect();
+        assert_eq!(chosen, ["offline"]);
+        assert!(window_nets(&zones, "de")
+            .iter()
+            .any(|i| i.selected && i.tag == "de"));
+        let containers = window_containers("firefox", &[], &[], &[], "sb:removed");
+        let chosen: Vec<&str> = containers
+            .iter()
+            .filter(|i| i.selected)
+            .map(|i| i.tag.as_str())
+            .collect();
+        assert_eq!(chosen, ["__ownsb__"]);
     }
 }

@@ -112,6 +112,7 @@ pub fn notify(notify_send: &Path, urgency: Option<&str>, timeout: &str, title: &
     if let Some(urgency) = urgency {
         cmd.arg("-u").arg(urgency);
     }
-    cmd.arg("-t").arg(timeout).arg(title).arg(body);
+    // `--`: a title made of a window's own name may start with a dash.
+    cmd.arg("-t").arg(timeout).arg("--").arg(title).arg(body);
     let _ = cmd.status();
 }
