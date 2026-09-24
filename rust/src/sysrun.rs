@@ -11,6 +11,7 @@
 //!                                                 host's resolvers, system bus and
 //!                                                 session sockets hidden
 //!                                                 drop to the user, NO_NEW_PRIVS
+//!                                                 a user namespace of its own
 //!                                                 exec the command
 //!  ◄── EXIT <code>                         wait, answer
 //! ```
@@ -1546,6 +1547,9 @@ fn become_the_command(launch: &Launch) -> String {
     if let Err(e) = drop_to(&launch.user) {
         return e;
     }
+    if let Err(e) = own_user_namespace(&launch.user) {
+        return e;
+    }
     if std::env::set_current_dir(&launch.request.cwd).is_err()
         && std::env::set_current_dir(&launch.user.home).is_err()
     {
@@ -1663,6 +1667,55 @@ fn drop_to(user: &User) -> Result<(), String> {
     // SAFETY: a documented prctl with constant arguments.
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(fail("set no_new_privs"));
+    }
+    Ok(())
+}
+
+/// A user namespace of the command's own, the user mapped onto itself
+/// (`docs/LEAK-MODEL.md` §16).
+///
+/// The tmpfs of [`seal_mounts`] hides the session's sockets where they lie, but
+/// in the host's user namespace the command could still walk into any process
+/// of the session through `/proc/<pid>/root` — the compositor's IPC, the
+/// session bus — because the kernel lets the same user read another process's
+/// view of the file system. From a namespace of its own it cannot: reading a
+/// process of another user namespace takes `CAP_SYS_PTRACE` in that one. The
+/// same wall user zones stand behind. Files of other users, root included, are
+/// seen as `nobody` inside, exactly as in a user zone.
+///
+/// Fatal when it cannot be made: a command that sees into the session is worse
+/// than no command. Done as the user, after `NO_NEW_PRIVS` — the capabilities
+/// the new namespace hands out are over nothing that already exists, and the
+/// `execve` that follows drops them (the uid inside is not 0).
+fn own_user_namespace(user: &User) -> Result<(), String> {
+    // setuid() from root cleared the dumpable flag, and a process that is not
+    // dumpable has its /proc/self owned by root: the maps below would be
+    // refused (measured: EACCES on setgroups). The execve that follows sets it
+    // back anyway — the command is the user's, with the user's ids — so this
+    // only brings that moment forward; `unshare --map-current-user` does the
+    // same, as does the zone holder (zone.rs).
+    // SAFETY: prctl with these arguments takes no pointers.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) } != 0 {
+        return Err(format!(
+            "cannot make the command dumpable: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: unshare takes flags only; the child is single-threaded.
+    if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+        return Err(format!(
+            "cannot make a user namespace for the command ({}) — it would see into the session's processes",
+            io::Error::last_os_error()
+        ));
+    }
+    // `deny` first: without it an unprivileged process may not write gid_map.
+    // The groups already set stay in force.
+    for (file, text) in [
+        ("/proc/self/setgroups", "deny".to_owned()),
+        ("/proc/self/uid_map", format!("{0} {0} 1\n", user.uid)),
+        ("/proc/self/gid_map", format!("{0} {0} 1\n", user.gid)),
+    ] {
+        fs::write(file, text).map_err(|e| format!("cannot write {file}: {e}"))?;
     }
     Ok(())
 }

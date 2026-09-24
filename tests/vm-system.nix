@@ -338,6 +338,37 @@ let
           # Every launch is a unit of its own, and the journal names who ran what.
           machine.succeed("journalctl -u 'vpn-zone-sysrun@*' | grep -q 'alice runs socat'")
 
+      with subtest("the session is out of reach through /proc, not only where it lies"):
+          # A host process of alice's with a socket in her runtime directory — what
+          # a compositor's IPC or the session bus is. The command's own tmpfs hides
+          # the directory; the process holding the socket must not be a way around
+          # it: /proc/<pid>/root is that process's view of the file system
+          # (docs/LEAK-MODEL.md §16).
+          uid = machine.succeed("id -u alice").strip()
+          machine.succeed("loginctl enable-linger alice")
+          machine.wait_until_succeeds(f"test -d /run/user/{uid}")
+          machine.succeed(
+              f"systemd-run --unit=session-sock -p User=alice "
+              f"socat UNIX-LISTEN:/run/user/{uid}/probe.sock,fork SYSTEM:'echo session'"
+          )
+          machine.wait_until_succeeds(f"test -S /run/user/{uid}/probe.sock")
+          pid = machine.succeed("systemctl show -p MainPID --value session-sock").strip()
+          # On the host alice reaches it that way — otherwise the rest proves nothing.
+          out = machine.succeed(
+              as_user("alice", f"socat -T5 - UNIX-CONNECT:/proc/{pid}/root/run/user/{uid}/probe.sock")
+          )
+          assert "session" in out, out
+          machine.fail(as_user("alice", f"vpn-zone-sys sz -- test -e /run/user/{uid}/probe.sock"))
+          machine.fail(
+              as_user("alice", f"vpn-zone-sys sz -- socat -T5 - UNIX-CONNECT:/proc/{pid}/root/run/user/{uid}/probe.sock")
+          )
+          machine.fail(as_user("alice", f"vpn-zone-sys sz -- ls /proc/{pid}/root/"))
+          machine.fail(as_user("alice", f"vpn-zone-sys sz -- cat /proc/{pid}/environ"))
+          # Still alice, still without privileges, still her files.
+          out = machine.succeed(as_user("alice", "vpn-zone-sys sz -- sh -c 'id -un; touch ~/in-zone && stat -c %U ~/in-zone'"))
+          assert out.split() == ["alice", "alice"], out
+          machine.succeed("systemctl stop session-sock")
+
       with subtest("the zone's list of users is the only way in"):
           out = machine.fail(as_user("bob", "vpn-zone-sys sz -- true") + " 2>&1")
           assert "may not run programs in the system zone sz" in out, out
