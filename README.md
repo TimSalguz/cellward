@@ -344,6 +344,11 @@ of the compositor, and put its zone into the panel:
 binds {
     Mod+Shift+Z { spawn "vpn-zone" "window-menu"; }
 }
+// the launch window and the menu float instead of taking a column
+window-rule {
+    match app-id="^vpn-zone-window$"
+    open-floating true
+}
 ```
 
 ```jsonc

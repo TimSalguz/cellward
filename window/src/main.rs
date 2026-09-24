@@ -541,6 +541,13 @@ fn main() -> iced::Result {
     .window(iced::window::Settings {
         size,
         position: iced::window::Position::Centered,
+        // The name a compositor's window rule matches — to float it in a
+        // tiling one, say. Without it the window has no app id at all.
+        #[cfg(target_os = "linux")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: "vpn-zone-window".to_owned(),
+            ..Default::default()
+        },
         ..iced::window::Settings::default()
     })
     .run()

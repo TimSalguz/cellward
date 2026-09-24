@@ -140,6 +140,8 @@ let
           )
           machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
           machine.sleep(2)
+          # Its app id, for a compositor's window rule.
+          alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree | grep -q '\"app_id\": *\"vpn-zone-window\"'")
           alice(f"WAYLAND_DISPLAY={display} grim /tmp/window-menu.png")
           machine.copy_from_vm("/tmp/window-menu.png", "")
           alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
