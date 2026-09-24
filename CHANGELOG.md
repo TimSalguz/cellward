@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- **A home of its own looks like the desktop.** A program in a private home —
+  its own container, or started at login before anything was chosen for it —
+  got the toolkit's light defaults: the colours, GTK's settings and the icon
+  themes live in the real home (owner, 2026-09-24: KeePassXC started at login
+  and Claude Desktop in its container were white while the desktop is dark).
+  The sandbox now binds them read-only, as Flathub's KDE and GTK builds get
+  `xdg-config/kdeglobals:ro`: `kdeglobals`, KDE's defaults, qt5ct/qt6ct,
+  Kvantum, fontconfig, GTK's settings and style sheets (not its bookmarks),
+  icon and cursor themes, fonts. A path that resolves into the state of this
+  project is left out. A theme changed while the program runs reaches it at
+  its next start: a file replaced on disk stays the old one under a bind.
 - **Tray icons in hermetic zones and containers.** Electron (Claude Desktop,
   Discord) and Qt (Telegram and its forks) register their icon as
   `org.kde.StatusNotifierItem-<pid>-<n>` and show none when they may not own

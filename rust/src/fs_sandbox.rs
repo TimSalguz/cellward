@@ -482,6 +482,8 @@ pub struct Layout {
     pub granted: Vec<(PathBuf, PathBuf)>,
     /// `~/.config/mimeapps.list`, when it exists.
     pub mimeapps: Option<PathBuf>,
+    /// The desktop's look, read-only, for a home of its own ([`appearance`]).
+    pub appearance: Vec<PathBuf>,
     /// The sandbox's own `/etc/machine-id`, bound over the host's.
     pub machine_id: Option<PathBuf>,
     /// The file `/etc/resolv.conf` really is, when that is outside `/etc`.
@@ -516,6 +518,67 @@ fn bind(v: &mut Vec<OsString>, kind: &str, src: &Path, dst: &Path) {
 
 fn bind_same(v: &mut Vec<OsString>, kind: &str, path: &Path) {
     bind(v, kind, path, path);
+}
+
+/// What a home of its own gets of the real one to look like the desktop around
+/// it: the colours (`kdeglobals`, qt5ct/qt6ct, Kvantum, KDE's defaults), GTK's
+/// settings and style sheets, icon and cursor themes, fonts and fontconfig —
+/// read-only, the way Flathub's KDE and GTK builds are given
+/// `xdg-config/kdeglobals:ro` and `xdg-config/gtk-3.0:ro`. Not dconf, which
+/// holds every program's settings; the colour scheme comes over the portal.
+const APPEARANCE: [&str; 14] = [
+    ".config/kdeglobals",
+    ".config/kdedefaults",
+    ".config/qt5ct",
+    ".config/qt6ct",
+    ".config/Kvantum",
+    ".config/fontconfig",
+    ".gtkrc-2.0",
+    ".config/gtkrc-2.0",
+    ".icons",
+    ".local/share/icons",
+    ".themes",
+    ".local/share/themes",
+    ".fonts",
+    ".local/share/fonts",
+];
+
+/// GTK's directories give only their settings and style sheets: the file
+/// manager's bookmarks live next to them, and they are not a look.
+const GTK_DIRS: [&str; 2] = [".config/gtk-3.0", ".config/gtk-4.0"];
+
+/// The appearance files and directories of `home` that exist, as they will be
+/// bound. A symlink is followed by bwrap, so the resolved path is checked too:
+/// below the home and not into the state of this project (the zone keys), or
+/// in the store — home-manager's files are links there.
+pub fn appearance(home: &Path, real_home: &Path) -> Vec<PathBuf> {
+    let ok = |path: &Path, home: &Path| {
+        path.starts_with("/nix/store") || crate::container::forbidden_path(home, path).is_none()
+    };
+    // Only what exists, so the path resolves whole (`container::resolved` is for
+    // grants that may not exist yet, and leaves a trailing `/` on a file).
+    let wanted = |path: &Path| {
+        fs::canonicalize(path).is_ok_and(|real| ok(path, home) && ok(&real, real_home))
+    };
+    let mut out: Vec<PathBuf> = APPEARANCE
+        .iter()
+        .map(|rel| home.join(rel))
+        .filter(|p| wanted(p))
+        .collect();
+    for dir in GTK_DIRS {
+        let Ok(entries) = fs::read_dir(home.join(dir)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if (name == "settings.ini" || name.ends_with(".css")) && wanted(&entry.path()) {
+                out.push(entry.path());
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// The whole bwrap command line, in the order bwrap applies it.
@@ -576,6 +639,13 @@ pub fn bwrap_args(layout: &Layout, cmd: &[OsString]) -> Vec<OsString> {
                 push(&mut a, "--tmpfs");
                 a.push(layout.home.as_os_str().to_owned());
             }
+        }
+        // The desktop's look, read-only: without it a private home falls back
+        // to the toolkit's own light defaults (owner, 2026-09-24: KeePassXC
+        // started at login and Claude Desktop in its container both white).
+        // Before the permissions below, so a grant of the same place still wins.
+        for path in &layout.appearance {
+            bind_same(&mut a, "--ro-bind", path);
         }
         // `--bind-try`: a permission granted for a directory that does not
         // exist (~/Pictures is not guaranteed to) used to be a bwrap failure,
@@ -1111,6 +1181,12 @@ pub fn run(args: Args) -> u8 {
         }
     }
 
+    // The real home is bound whole with the `home` permission; nothing to add.
+    let look = if perms.home {
+        Vec::new()
+    } else {
+        appearance(&home, &real_home)
+    };
     let layout = Layout {
         app_id: args.app_id.clone(),
         home: home.clone(),
@@ -1123,6 +1199,7 @@ pub fn run(args: Args) -> u8 {
         sandbox_home,
         granted,
         mimeapps: home.join(MIMEAPPS).is_file().then(|| home.join(MIMEAPPS)),
+        appearance: look,
         resolv: resolv_file(),
         dev_nodes: dev_nodes(Path::new("/dev")),
         // An absolute WAYLAND_DISPLAY is legal (libwayland accepts one) and is
@@ -1473,6 +1550,7 @@ mod tests {
             granted: Vec::new(),
             machine_id: None,
             mimeapps: None,
+            appearance: Vec::new(),
             resolv: Some(PathBuf::from("/run/systemd/resolve/stub-resolv.conf")),
             dev_nodes: Vec::new(),
             wayland: None,
@@ -1511,6 +1589,81 @@ mod tests {
         "/run/systemd/resolve/stub-resolv.conf",
         "/run/systemd/resolve/stub-resolv.conf",
     ];
+
+    /// The desktop's look in a home of its own: read-only, after the home is
+    /// replaced (bound before, the tmpfs would cover it) and before the grants
+    /// (a grant of the same place is the stronger word).
+    #[test]
+    fn a_private_home_gets_the_look_read_only_between_the_home_and_the_grants() {
+        let l = Layout {
+            appearance: vec![PathBuf::from("/home/u/.config/kdeglobals")],
+            granted: vec![(PathBuf::from("/home/u/g"), PathBuf::from("/home/u/g"))],
+            ..layout()
+        };
+        let got = strs(&bwrap_args(&l, &argv(&["prog"])));
+        let at = |needle: &[&str]| {
+            got.windows(needle.len())
+                .position(|w| w == needle)
+                .unwrap_or_else(|| panic!("{needle:?} not in {got:?}"))
+        };
+        let home = at(&["--tmpfs", "/home/u"]);
+        let look = at(&[
+            "--ro-bind",
+            "/home/u/.config/kdeglobals",
+            "/home/u/.config/kdeglobals",
+        ]);
+        let grant = at(&["--bind", "/home/u/g", "/home/u/g"]);
+        assert!(home < look && look < grant, "{got:?}");
+    }
+
+    /// What of the real home counts as the look: the colours, GTK's settings and
+    /// style sheets but not its bookmarks, themes and fonts — and nothing that
+    /// resolves into the state of this project, where the zone keys are.
+    #[test]
+    fn the_look_is_theme_files_and_never_the_state_of_vpn_zones() {
+        let dir = std::env::temp_dir().join(format!("vz-look-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let home = dir.join("home");
+        for d in [
+            ".config/gtk-3.0",
+            ".config/qt5ct",
+            ".local/state/vpn-zones",
+            ".icons",
+        ] {
+            fs::create_dir_all(home.join(d)).unwrap();
+        }
+        for f in [
+            ".config/kdeglobals",
+            ".config/gtk-3.0/settings.ini",
+            ".config/gtk-3.0/gtk.css",
+            ".config/gtk-3.0/bookmarks",
+            ".local/state/vpn-zones/zone.conf",
+        ] {
+            fs::write(home.join(f), "x").unwrap();
+        }
+        // A "theme" that is really the zones' keys.
+        std::os::unix::fs::symlink(
+            home.join(".local/state/vpn-zones"),
+            home.join(".config/qt6ct"),
+        )
+        .unwrap();
+        let got = appearance(&home, &home);
+        let rel: Vec<String> = got
+            .iter()
+            .map(|p| p.strip_prefix(&home).unwrap().display().to_string())
+            .collect();
+        assert_eq!(
+            rel,
+            [
+                ".config/gtk-3.0/gtk.css",
+                ".config/gtk-3.0/settings.ini",
+                ".config/kdeglobals",
+                ".config/qt5ct",
+                ".icons"
+            ]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// The host resolver's socket lives in /run/systemd/resolve, and a
     /// sandbox that can reach it resolves names in the HOST's network however
