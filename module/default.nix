@@ -765,7 +765,10 @@ in
       ExecStart =
         "${vpn-zone-rust}/bin/vpn-zone-core zone-holder"
         + " --ip ${iproute} --awg ${awg} --wg ${wg} --pasta ${pasta} --nft ${nft}"
-        + " --openconnect ${openconnect} --dbus-proxy ${dbusProxy}/bin/xdg-dbus-proxy %i";
+        + " --openconnect ${openconnect} --dbus-proxy ${dbusProxy}/bin/xdg-dbus-proxy"
+        # Чем фильтр шины герметичной зоны просит брокера открыть ссылку
+        # программы — в той же зоне (LEAK-MODEL §2).
+        + " --opener ${pkgs.xdg-utils}/bin/xdg-open %i";
       Restart = "no";
       # KillMode=control-group по умолчанию: гасим зону — гаснет и pasta, и всё,
       # что в зоне работало, теряет сеть. Это и есть kill switch.

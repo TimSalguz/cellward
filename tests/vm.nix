@@ -1301,6 +1301,22 @@ let
           assert "/org/freedesktop/portal/desktop/request/" in out, out
           machine.sleep(2)
           machine.fail("grep -q hostname /home/alice/opened-urls")
+          # WITHOUT a sandbox (libportal, GTK4 with portals): the hermetic
+          # zone's own bus filter answers, and asks the broker to open the link
+          # in this very zone — no question for the same zone. The broker runs
+          # the launch with the session manager's environment: the display
+          # variable goes there (see xdg-open above).
+          alice("systemctl --user set-environment WAYLAND_DISPLAY=wayland-vmtest")
+          alice("systemctl --user stop vpn-zone-broker.service || true")
+          out = in_zone(hp, f"{portal} ''' 'https://example.test/from-zone' '@a{{sv}} {{}}'")
+          assert "/org/freedesktop/portal/desktop/request/" in out, out
+          machine.wait_until_succeeds("grep -q from-zone /home/alice/opened-urls", timeout=30)
+          lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
+          at = lines.index("https://example.test/from-zone")
+          assert lines[at + 1] == zone_ns, f"{lines} (zone {zone_ns})"
+          # The zone's bus is still the zone's: names and calls go through.
+          in_zone(hp, "busctl --user --timeout=5 call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ListNames")
+          alice("systemctl --user unset-environment WAYLAND_DISPLAY")
           alice("vpn-zone down vmherm")
           # An ordinary zone: the sandbox's own proxy over the host's bus, the
           # filter in front of it — the link opens in THAT zone.
