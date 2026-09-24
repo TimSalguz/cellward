@@ -108,6 +108,14 @@ let
             exceptions = [ "agents" ];
           };
           compositorRestriction.enable = true;
+          desktop = {
+            windowMenu.key = "Mod+Shift+Z";
+            niri = {
+              enable = true;
+              includeInConfig = true;
+            };
+            sway.enable = true;
+          };
           containers.work = {
             home = "overlay";
             network = "direct";
@@ -129,6 +137,13 @@ let
           inherit username homeDirectory;
           stateVersion = "26.05";
         };
+        # The user's own niri config, written by home-manager as text — what
+        # desktop.niri.includeInConfig appends its line to.
+        xdg.configFile."niri/config.kdl".text = ''
+          binds {
+              Mod+Return { spawn "foot"; }
+          }
+        '';
       };
   };
 
@@ -142,6 +157,48 @@ in
 
   # Every declarative option set (docs/CONTAINERS.md §8).
   declaredActivation = hmDeclared.activationPackage;
+
+  # The window menu's key and our windows' rule as the compositors read them:
+  # niri validates its config with the include resolved, sway checks its
+  # file. The store paths inside are cut loose — validating a line does not
+  # need the binary it names built.
+  #   nix-build tests/harness.nix -A compositorSnippets
+  compositorSnippets =
+    let
+      files = hmDeclared.config.xdg.configFile;
+      text = name: builtins.unsafeDiscardStringContext files.${name}.text;
+    in
+    pkgs.runCommand "vpn-zones-compositor-snippets"
+      {
+        nativeBuildInputs = [
+          pkgs.niri
+          # The package `sway` wraps the binary in dbus-run-session.
+          pkgs.sway-unwrapped
+        ];
+        niriConfig = text "niri/config.kdl";
+        niriSnippet = text "niri/vpn-zones.kdl";
+        swaySnippet = text "sway/vpn-zones.conf";
+        passAsFile = [
+          "niriConfig"
+          "niriSnippet"
+          "swaySnippet"
+        ];
+      }
+      ''
+        mkdir -p niri
+        cp "$niriConfigPath" niri/config.kdl
+        cp "$niriSnippetPath" niri/vpn-zones.kdl
+        cat niri/config.kdl niri/vpn-zones.kdl
+        grep -q '^include "vpn-zones.kdl"$' niri/config.kdl
+        grep -q 'Mod+Shift+Z hotkey-overlay-title=' niri/vpn-zones.kdl
+        niri validate -c niri/config.kdl
+        cat "$swaySnippetPath"
+        grep -q '^bindsym Mod4+Shift+z exec /nix/store/.*/bin/vpn-zone window-menu$' "$swaySnippetPath"
+        # --validate still makes a backend: a headless one, drawn in software.
+        export XDG_RUNTIME_DIR=$TMPDIR WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
+        sway --validate --config "$swaySnippetPath"
+        touch $out
+      '';
 
   # Каждый скрипт — отдельным атрибутом: nix-build tests/harness.nix -A scripts.<имя>
   scripts = lib.genAttrs scriptNames scriptByName // {

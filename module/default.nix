@@ -523,6 +523,55 @@ let
       };
     };
   };
+
+  # --- desktop: the window menu's key and our windows' rule ----------------
+  menuKey = cfg.desktop.windowMenu.key;
+  menuCommand = "${vpn-zone}/bin/vpn-zone";
+  keyParts = lib.splitString "+" menuKey;
+  # sway: Mod4 is the logo key (niri's Mod on a TTY), Mod1 Alt; a letter is its
+  # lower-case keysym, as sway's own examples write it.
+  swayModifier =
+    m:
+    {
+      Mod = "Mod4";
+      Super = "Mod4";
+      Ctrl = "Control";
+      Control = "Control";
+      Alt = "Mod1";
+      Shift = "Shift";
+    }
+    .${m};
+  swayKey =
+    let
+      key = lib.last keyParts;
+    in
+    lib.concatStringsSep "+" (
+      map swayModifier (lib.init keyParts)
+      ++ [ (if builtins.stringLength key == 1 then lib.toLower key else key) ]
+    );
+  niriSnippet = ''
+    // vpn-zones: programs.vpn-zones.desktop — written by home-manager.
+  ''
+  + lib.optionalString (menuKey != null) ''
+    binds {
+        ${menuKey} hotkey-overlay-title="Сеть и контейнер окна (vpn-zones)" { spawn "${menuCommand}" "window-menu"; }
+    }
+  ''
+  + lib.optionalString cfg.desktop.floatWindows ''
+    window-rule {
+        match app-id="^vpn-zone-window$"
+        open-floating true
+    }
+  '';
+  swaySnippet = ''
+    # vpn-zones: programs.vpn-zones.desktop — written by home-manager.
+  ''
+  + lib.optionalString (menuKey != null) ''
+    bindsym ${swayKey} exec ${menuCommand} window-menu
+  ''
+  + lib.optionalString cfg.desktop.floatWindows ''
+    for_window [app_id="^vpn-zone-window$"] floating enable
+  '';
 in
 {
   options.programs.vpn-zones = {
@@ -617,6 +666,39 @@ in
       description = "Отбирать ли у программ захват экрана, фоновый буфер обмена и эмуляцию ввода. null — не задавать из Nix (по умолчанию включено).";
     };
 
+    desktop = {
+      windowMenu.key = lib.mkOption {
+        type = lib.types.nullOr (
+          lib.types.strMatching "((Mod|Super|Ctrl|Control|Alt|Shift)[+])*[A-Za-z0-9_]+"
+        );
+        default = null;
+        example = "Mod+Shift+Z";
+        description = "Клавиша меню окна в фокусе (`vpn-zone window-menu`: его сеть и контейнер, закрепить, перезапустить с выбором, закрыть, оборвать зону) — в записи niri: модификаторы Mod, Super, Ctrl, Alt, Shift через +, затем клавиша (имя XKB). Попадает в фрагменты композиторов ниже (desktop.niri, desktop.sway); сама по себе ничего не включает. null — без клавиши.";
+      };
+      floatWindows = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Окно запуска и меню окна — плавающие (правило по app id vpn-zone-window), а не отдельная колонка или плитка. Попадает в те же фрагменты.";
+      };
+      niri = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = "Писать ~/.config/niri/vpn-zones.kdl: клавиша меню окна и правило окон vpn-zones. Подключается строкой `include \"vpn-zones.kdl\"` в config.kdl (niri 25.11+) — её добавляет desktop.niri.includeInConfig, или впиши сам.";
+        };
+        includeInConfig = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = "Дописать `include \"vpn-zones.kdl\"` в конец xdg.configFile.\"niri/config.kdl\".text. Только если config.kdl пишет home-manager текстом: иначе home-manager создаст файл из одной этой строки (или откажется затереть твой). Подключённое в конце перекрывает твои привязки той же клавиши.";
+        };
+      };
+      sway.enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Писать ~/.config/sway/vpn-zones.conf: клавиша меню окна и правило окон vpn-zones. С модулем sway из home-manager строка include добавляется в его extraConfig сама; иначе впиши `include ~/.config/sway/vpn-zones.conf`.";
+      };
+    };
+
     containers = lib.mkOption {
       type = lib.types.attrsOf (lib.types.submodule containerModule);
       default = { };
@@ -625,6 +707,14 @@ in
   };
 
   config = lib.mkIf config.programs.vpn-zones.enable {
+  # The window menu's key and the rule that floats our windows, in each
+  # compositor's words. The key is written the niri way and checked by the
+  # option's type — only modifier names, `+` and a keysym, nothing that could
+  # close a KDL string or start a sway command.
+  wayland.windowManager.sway.extraConfig = lib.mkIf (
+    cfg.desktop.sway.enable && config.wayland.windowManager.sway.enable
+  ) (lib.mkAfter "include ${config.xdg.configHome}/sway/vpn-zones.conf");
+
   assertions =
     lib.mapAttrsToList (name: _: {
       assertion = validName name;
@@ -654,12 +744,27 @@ in
         message = "programs.vpn-zones.hermetic.exceptions: имя зоны — непустое и без переводов строки";
       }
       {
+        assertion = cfg.desktop.niri.includeInConfig -> cfg.desktop.niri.enable;
+        message = "programs.vpn-zones.desktop.niri.includeInConfig: подключать нечего — включи desktop.niri.enable";
+      }
+      {
         assertion = duplicateApps == [ ];
         message = "programs.vpn-zones.containers: программы назначены нескольким контейнерам сразу: ${lib.concatStringsSep ", " duplicateApps}";
       }
     ];
 
   xdg.configFile = lib.mkMerge [
+    (lib.mkIf cfg.desktop.niri.enable {
+      "niri/vpn-zones.kdl".text = niriSnippet;
+    })
+    (lib.mkIf (cfg.desktop.niri.enable && cfg.desktop.niri.includeInConfig) {
+      "niri/config.kdl".text = lib.mkAfter ''
+        include "vpn-zones.kdl"
+      '';
+    })
+    (lib.mkIf cfg.desktop.sway.enable {
+      "sway/vpn-zones.conf".text = swaySnippet;
+    })
     (lib.mkIf (cfg.defaults.network != null) {
       "vpn-zones/declared/default".text = cfg.defaults.network;
     })

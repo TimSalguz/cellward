@@ -51,6 +51,12 @@ let
         home-manager.users.alice = {
           imports = [ ../module ];
           programs.vpn-zones.enable = true;
+          # The window menu on a key and our windows floating: the snippet
+          # sway is started with below.
+          programs.vpn-zones.desktop = {
+            windowMenu.key = "Mod+Shift+Z";
+            sway.enable = true;
+          };
           home.stateVersion = "25.05";
         };
         environment.systemPackages = [
@@ -64,6 +70,7 @@ let
       };
 
     testScript = ''
+      import json
       import shlex
 
       def alice(cmd):
@@ -86,7 +93,7 @@ let
           "systemd-run --user --unit=vmsway "
           "--setenv=WLR_BACKENDS=headless --setenv=WLR_LIBINPUT_NO_DEVICES=1 "
           "--setenv=WLR_RENDERER=pixman --setenv=WLR_HEADLESS_OUTPUTS=1 "
-          "sway -c /dev/null"
+          "sway -c /home/alice/.config/sway/vpn-zones.conf"
       )
       machine.wait_until_succeeds("ls /run/user/1000/sway-ipc.*.sock", timeout=60)
       display = machine.succeed(
@@ -147,6 +154,30 @@ let
           alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
           machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=15)
           # Closed: nothing done — foot is still there.
+          machine.succeed("pgrep -x foot")
+
+      # The key of programs.vpn-zones.desktop.windowMenu.key, pressed on the
+      # compositor: the menu comes up by itself, floating by the window rule.
+      def find(node, app_id):
+          if node.get("app_id") == app_id:
+              return node
+          for child in node.get("nodes", []) + node.get("floating_nodes", []):
+              found = find(child, app_id)
+              if found:
+                  return found
+          return None
+
+      with subtest("the window menu's key of the module opens the menu, floating"):
+          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -M logo -M shift -k z -m shift -m logo")
+          machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
+          machine.sleep(2)
+          tree = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r"))
+          menu = find(tree, "vpn-zone-window")
+          assert menu is not None and menu["type"] == "floating_con", menu
+          alice(f"WAYLAND_DISPLAY={display} grim /tmp/window-menu-key.png")
+          machine.copy_from_vm("/tmp/window-menu-key.png", "")
+          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
+          machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=15)
           machine.succeed("pgrep -x foot")
     '';
   };

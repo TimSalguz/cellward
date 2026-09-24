@@ -336,29 +336,49 @@ vpn-zone container list|show|set|assign|merge  # containers: network, programs, 
 vpn-zone trust add|list|rm <container> …       # a root certificate for one container only
 ```
 
-**Which zone is this window in.** Bind the menu of the focused window to a key
-of the compositor, and put its zone into the panel:
+**Which zone is this window in.** The menu of the focused window goes on a key
+of the compositor, its zone into the panel. With home-manager the module writes
+the compositor's part:
+
+```nix
+programs.vpn-zones.desktop = {
+  windowMenu.key = "Mod+Shift+Z";   # niri's notation; null — no key
+  floatWindows = true;              # the launch window and the menu float (default)
+  niri.enable = true;               # ~/.config/niri/vpn-zones.kdl
+  niri.includeInConfig = true;      # append `include "vpn-zones.kdl"` to a config.kdl
+                                    # home-manager writes as text
+  sway.enable = true;               # ~/.config/sway/vpn-zones.conf (included by
+                                    # home-manager's sway module by itself)
+};
+```
+
+Without home-manager, the same by hand:
 
 ```kdl
 // niri, config.kdl
 binds {
     Mod+Shift+Z { spawn "vpn-zone" "window-menu"; }
 }
-// the launch window and the menu float instead of taking a column
 window-rule {
     match app-id="^vpn-zone-window$"
     open-floating true
 }
 ```
 
+An included file is read where its `include` stands: at the end of config.kdl
+it overrides a binding of the same key above it.
+
 ```jsonc
 // waybar: a line per focus change, a class per zone to colour by
 "custom/vpn-zone": { "exec": "vpn-zone focused --watch", "return-type": "json" }
 ```
 
-The window is found by the pid the compositor reports for it, up its parents to
-the launch; a program that detached from its launch is found by its network
-namespace, with the container unknown. Nothing trusts the window's title.
+The network of a window is the network namespace of its own process — the pid
+the compositor has from the kernel —, compared with the host's and the zones';
+the container comes from the nearest launch up its parents, when that launch
+is certainly still running (its start time on record) and in the same network.
+A program that detached from its launch shows its network with the container
+unknown. Nothing trusts the window's title; the bar line escapes markup.
 
 ## The system tier (optional)
 

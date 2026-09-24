@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The window menu's key and our windows' rule, written by the module**
+  (`programs.vpn-zones.desktop`): `windowMenu.key` in niri's notation,
+  `floatWindows` (the launch window and the menu float, by the app id
+  `vpn-zone-window`), `niri.enable` writes `~/.config/niri/vpn-zones.kdl` and
+  `niri.includeInConfig` appends its `include` to a config.kdl home-manager
+  writes as text; `sway.enable` writes `~/.config/sway/vpn-zones.conf`, which
+  home-manager's sway module includes by itself. The key's type admits only
+  modifier names, `+` and a keysym. CI validates both snippets with niri and
+  sway themselves; the VM test presses the key on sway and gets the menu,
+  floating.
 - **Which zone is the focused window in** (`docs/WINDOW-FRAME.md` §7б, §7в, the
   frame's first step). `vpn-zone focused [--json|--bar|--watch]` asks the
   compositor (niri, sway) for the focused window and its pid, and finds its
