@@ -55,6 +55,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **A link with no handler opens nothing, instead of a browser around the
+  picker.** Links of sandboxes and hermetic zones are opened with xdg-open in
+  the zone; for a scheme with no handler it ran `$BROWSER` or the first of
+  its own list (firefox, chromium, …) by itself — past the picker, with the
+  main profile, in the network the link came from. The opener now runs it
+  with `BROWSER=false`.
 - **The portals by name, the sandbox's app id in a namespace of our own, no
   background requests** (found by a review on 2026-09-24). The bus of a
   sandbox and of a hermetic zone let through `org.freedesktop.portal.*` — a
