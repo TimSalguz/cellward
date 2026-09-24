@@ -50,6 +50,8 @@ jobs:
             echo "=== nix-build -A scripts.$s"
             nix-build tests/harness.nix -A "scripts.$s" -o "results/$s"
           done
+      - name: Фрагменты композиторов (клавиша меню окна, правило окон)
+        run: nix-build tests/harness.nix -A compositorSnippets --no-out-link
       - name: shellcheck по собранным скриптам
         run: |
           set -euo pipefail
