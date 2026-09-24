@@ -266,7 +266,8 @@ fn write_setting(tools: &Tools, name: &str, value: &OsStr) -> Result<(), String>
 /// a word. (`docs/GOTCHAS.md` §11)
 fn safe_name(name: &OsStr) -> bool {
     let bytes = name.as_bytes();
-    !bytes.is_empty()
+    !crate::picker::reserved_name(&name.to_string_lossy())
+        && !bytes.is_empty()
         && !bytes.contains(&b'/')
         && !bytes.contains(&b' ')
         && !bytes.starts_with(b"-")
@@ -276,7 +277,9 @@ fn safe_name(name: &OsStr) -> bool {
 /// A zone name, which is stricter still: it ends up in unit names and in
 /// generated `.desktop` files.
 fn safe_zone_name(name: &OsStr) -> bool {
+    // Not from a dash: a zone name is an argument to kdialog and systemctl.
     !name.as_bytes().is_empty()
+        && !name.as_bytes().starts_with(b"-")
         && name
             .as_bytes()
             .iter()
@@ -940,6 +943,11 @@ fn remove(tools: &Tools, args: &[OsString]) -> u8 {
                 let _ = fs::remove_file(&file);
             }
         }
+    }
+    // And the picker's default, if it was this zone.
+    let default = tools.config.join("default");
+    if read_setting(&default).as_deref() == Some(name_text.as_ref()) {
+        let _ = fs::remove_file(&default);
     }
     let code = run_sync(tools);
     if code != 0 {
@@ -2222,6 +2230,14 @@ fn default_network(tools: &Tools, args: &[OsString]) -> u8 {
     } else {
         value.as_os_str()
     };
+    // A zone that is not there would be a row the picker does not offer.
+    if value != "offline"
+        && value != launch::UNCONFINED
+        && !tools.state.join(value).join("config.conf").is_file()
+    {
+        eprintln!("зоны {} нет", value.to_string_lossy());
+        return 1;
+    }
     if let Err(e) = write_setting(tools, "default", value) {
         eprintln!("не записать {e}");
         return 1;

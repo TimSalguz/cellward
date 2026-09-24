@@ -369,7 +369,10 @@ pub fn claimed_schemes(entry: &Group) -> Vec<String> {
 }
 
 /// A hidden application entry of the user's own directory, with or without a
-/// `MimeType`: not deleted (`Hidden`), not ours, with a command.
+/// `MimeType`: not ours, with a command. Deleted ones (`Hidden=true`, what a
+/// menu editor writes to "remove" an entry) count too: menus skip them, but
+/// xdg-open does not, and a `mimeapps.list` default naming such a file ran
+/// its command as it was — around the picker, on the host.
 fn is_hidden_user_entry(file_name: &str, entry: Option<&Group>) -> bool {
     let Some(entry) = entry else {
         return false;
@@ -383,8 +386,7 @@ fn is_hidden_user_entry(file_name: &str, entry: Option<&Group>) -> bool {
     !file_name.starts_with(PREFIX)
         && !entry.has(MARK)
         && entry.get("Type").unwrap_or("Application") == "Application"
-        && flag("NoDisplay")
-        && !flag("Hidden")
+        && (flag("NoDisplay") || flag("Hidden"))
         && entry.get("Exec").is_some_and(|e| !e.is_empty())
 }
 
@@ -670,7 +672,9 @@ fn render_intercepted(groups: &[Group], picker: &str, app_key: &str, marker: &st
         }
         out.push(format!("[{}]", group.name));
         for (key, value) in group.entries() {
-            if PICKER_DROPPED_KEYS.contains(&key) || key == MARK {
+            // `Exec[ru]` is Exec too for whoever reads localised keys.
+            let base = key.split('[').next().unwrap_or(key);
+            if PICKER_DROPPED_KEYS.contains(&base) || base == MARK {
                 continue;
             }
             out.push(format!("{key}={value}"));
@@ -1087,7 +1091,10 @@ fn parents(apps: &[App]) -> BTreeMap<String, String> {
 
 /// How deep below an applications directory entries are looked for: Wine's are
 /// at `wine/Programs/<program>/<entry>.desktop`.
-const ENTRY_DEPTH: usize = 4;
+/// Wine nests them deeper when an installer makes folders of its own
+/// (`wine/Programs/<vendor>/<product>/<entry>.desktop`), and menus look
+/// without a limit — an entry below ours would start around the picker.
+const ENTRY_DEPTH: usize = 16;
 
 /// The `.desktop` files of an applications directory and of its subdirectories,
 /// as `(path below it, desktop-file ID)`, sorted by ID — so that two runs over
@@ -2565,6 +2572,38 @@ Name=not carried over
         assert!(taken.contains("NoDisplay=true"), "{taken}");
         // A hidden entry gets no clones.
         assert!(!d.apps.join("vpn-zone-nl-userapp-Zen-ABC.desktop").exists());
+    }
+
+    /// A "deleted" entry (Hidden=true) that mimeapps.list names is taken
+    /// over too; a localised Exec is dropped like Exec itself; entries deep in
+    /// Wine's folders are found.
+    #[test]
+    fn deleted_entries_localised_commands_and_deep_folders_are_covered() {
+        let d = Desk::new("hidden-localised");
+        fs::write(
+            d.system.join("zen.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Zen\nExec=zen %U\n",
+        )
+        .unwrap();
+        fs::write(
+            d.apps.join("userapp-Zen-DEL.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Zen\nHidden=true\nExec=/bin/zen %u\nExec[ru]=/bin/zen %u\n",
+        )
+        .unwrap();
+        let deep = d.apps.join("wine/Programs/Vendor/Product");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(
+            deep.join("Game.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Game\nExec=env WINEPREFIX=/w wine game.exe\n",
+        )
+        .unwrap();
+        d.setting("mode", "picker");
+        d.sync();
+        let taken = d.read("userapp-Zen-DEL.desktop");
+        assert!(taken.contains("-- /bin/zen %u"), "{taken}");
+        assert!(!taken.contains("Exec[ru]"), "{taken}");
+        let game = d.read("wine/Programs/Vendor/Product/Game.desktop");
+        assert!(game.contains("--id "), "{game}");
     }
 
     #[test]

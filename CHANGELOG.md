@@ -55,6 +55,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **What a zone asks for is a file name, and not the user's launch.** The app
+  id the broker passes on from a zone was a path in the registry
+  (`/run/user/…`, `../..` — a file rewritten on the host); it is a file name
+  now. A launch asked for from inside a zone is marked, and the picker's
+  "already running — start it there" follows only the user's own launches: a
+  program in a zone could start something under the id `firefox` and have the
+  next click on Firefox go to its network without a question.
+- **The picker never falls back to the least safe row.** A remembered network
+  that is no longer offered (a zone removed after `vpn-zone default` named it)
+  used to leave the first row marked — the host's network; a remembered
+  container that is gone left the main profile marked. They start on
+  `offline` and on the program's own sandbox now; `vpn-zone default` refuses
+  a zone that does not exist, `vpn-zone rm` clears a default that named it. A
+  new sandbox that cannot be made starts the program in its own sandbox, not
+  in the main profile, and says so. Container names the menus use as tags
+  (`pinmain`, `__fs__`, anything with `:`) are refused.
+- **Launcher entries: deleted ones, localised commands, deep folders.** A
+  user entry "deleted" by a menu editor (`Hidden=true`) is still what
+  xdg-open runs when `mimeapps.list` names it — it is taken over now; a
+  localised `Exec[ru]=` was copied into our entries past the picker and is
+  dropped like `Exec`; Wine's entries are found at any depth, not three
+  folders down.
+- **Small ones from the same review:** a window's own name is shown in quotes
+  and without bidi characters; notify-send gets `--`; a zone name cannot
+  start with a dash.
+- **A link with no handler opens nothing, instead of a browser around the
+  picker.** Links of sandboxes and hermetic zones are opened with xdg-open in
+  the zone; for a scheme with no handler it ran `$BROWSER` or the first of
+  its own list (firefox, chromium, …) by itself — past the picker, with the
+  main profile, in the network the link came from. The opener now runs it
+  with `BROWSER=false`.
+- **The portals by name, the sandbox's app id in a namespace of our own, no
+  background requests** (found by a review on 2026-09-24). The bus of a
+  sandbox and of a hermetic zone let through `org.freedesktop.portal.*` — a
+  subtree with `org.freedesktop.portal.Flatpak` in it, the portal that starts
+  processes outside the caller's sandbox. Only the desktop and the document
+  portals are let through now, by name. The portals know a program by the
+  `name=` of its `/.flatpak-info` and keep what the user allowed under it; the
+  name was the program's own id, which a program started into a zone can
+  choose — `org.mozilla.firefox` would have inherited an installed Flatpak's
+  camera, location, screencast or Secret grants. It is `vpnzone.app.<id>` now
+  (grants given to sandboxed programs before are asked again once).
+  `Background.RequestBackground`, with which the portal writes an autostart
+  entry on the host, is refused by the filter.
 - **The broker refuses what it cannot place** (found by a review on
   2026-09-24). The one door out of a hermetic zone learnt the asking zone from
   `/proc/<peer pid>/ns/net` after reading the request — and a peer it could not

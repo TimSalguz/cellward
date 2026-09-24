@@ -486,7 +486,7 @@ fn a_running_program_is_started_where_it_already_runs_without_a_word() {
         "state/.running/__main__/firefox",
         &format!("{me} nl sb:work\n"),
     );
-    vpn_zone::registry::note_start(&home.path("state/.running"), me).unwrap();
+    vpn_zone::registry::note_start(&home.path("state/.running"), me, false).unwrap();
     let out = home.run(&pick("firefox"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(home.asked().is_empty(), "{:?}", home.asked());
@@ -692,10 +692,19 @@ fn a_creation_that_fails_still_starts_the_program() {
     let _ = home.run(&pick("firefox"), &[("RUNNER_EXIT", "1")]);
     let launched = home.launched();
     assert_eq!(launched[0], ["sandbox", "create", "новая"]);
-    // No sandbox flag — the container could not be made — but a launch.
+    // The sandbox could not be made, but a sandbox was asked for: the
+    // program's own, not the main profile with the whole home — and a launch.
     assert_eq!(
         launched.last().unwrap(),
-        &["run", "nl", "--", "firefox", "%u"]
+        &[
+            "run",
+            "nl",
+            "--sandbox",
+            "app-firefox",
+            "--",
+            "firefox",
+            "%u"
+        ]
     );
 }
 

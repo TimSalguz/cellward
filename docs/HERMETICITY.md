@@ -45,7 +45,7 @@ the zone gets it — not per launch):
 
 ## 3. Decision C — the session bus and the broker
 
-A filter with the rules of the sandbox (`portal.*`, `Notifications`,
+A filter with the rules of the sandbox (the desktop and document portals by name, `Notifications`,
 `StatusNotifierWatcher`) applied to EVERY program of a zone breaks, measured
 by what those programs use the bus for:
 

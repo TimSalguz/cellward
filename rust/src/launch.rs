@@ -422,6 +422,28 @@ impl TrimSlash for [u8] {
 /// Byte-wise on purpose, like the `tr` it replaces: a non-ASCII name becomes a
 /// row of underscores, which is ugly and stable, and the shell version has been
 /// answering that way for as long as the permission files have existed.
+/// The registry's file name for a program: the picker's keys as they are
+/// (`desktop::stable_key` makes them of these characters already), anything
+/// else reduced to them — never a path, never `.` or `..`, never empty.
+pub fn registry_key(raw: &OsStr) -> OsString {
+    let kept: Vec<u8> = raw
+        .as_bytes()
+        .iter()
+        .take(200)
+        .map(|&b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-') {
+                b
+            } else {
+                b'_'
+            }
+        })
+        .collect();
+    if kept.is_empty() || kept.iter().all(|&b| b == b'.') {
+        return OsString::from("программа");
+    }
+    OsString::from_vec(kept)
+}
+
 pub fn sanitize_app_id(raw: &OsStr) -> OsString {
     let mut out: Vec<u8> = Vec::with_capacity(raw.as_bytes().len());
     for &b in raw.as_bytes() {
@@ -489,7 +511,9 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // carried `VPN_ZONE_DELEGATED=1` for the rest of its life, so a link
     // clicked in THAT browser skipped the delegation above and died in
     // `nsenter` with "reassociate to namespaces failed" — the very failure the
-    // delegation exists to avoid.
+    // delegation exists to avoid. Whether it was there is kept for the
+    // registry: a launch asked for from inside a zone is marked so.
+    let from_zone = env_nonempty(ENV_DELEGATED).is_some();
     std::env::remove_var(ENV_DELEGATED);
 
     let selection = match Selection::parse(argv) {
@@ -673,13 +697,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     }
 
     // --- 4. IS IT ALREADY RUNNING SOMEWHERE ELSE? ---
-    let appname = appid_env.clone().unwrap_or_else(|| {
-        if appbin.is_empty() {
-            OsString::from("программа")
-        } else {
-            appbin.clone()
-        }
-    });
+    // A file name in the registry, whoever set the variable: the broker
+    // passes on what a zone asked for, and `/run/user/…` or `../..` would have
+    // been a path to rewrite on the host.
+    let appname = registry_key(appid_env.as_deref().unwrap_or(&appbin));
     let running = tools.state.join(".running");
     let regdir = running.join(container.key.as_os_str());
     let reg = regdir.join(&appname);
@@ -822,7 +843,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                     eprintln!("реестр запусков {}: {e}", file.display());
                 }
             }
-            if let Err(e) = registry::note_start(&running, std::process::id() as i32) {
+            if let Err(e) = registry::note_start(&running, std::process::id() as i32, from_zone) {
                 eprintln!("реестр запусков {}: {e}", running.display());
             }
         }
@@ -1910,5 +1931,22 @@ mod tests {
             "unconfined is the host's network"
         );
         assert!(!line.contains(&os("/t/nsenter")));
+    }
+
+    /// What a zone asked the broker for is a file name in the registry, not
+    /// a path on the host.
+    #[test]
+    fn a_registry_key_is_never_a_path() {
+        for (raw, key) in [
+            ("firefox", "firefox"),
+            ("org.telegram.desktop", "org.telegram.desktop"),
+            ("/run/user/1000/x", "_run_user_1000_x"),
+            ("../../.bashrc", ".._.._.bashrc"),
+            ("..", "программа"),
+            (".", "программа"),
+            ("", "программа"),
+        ] {
+            assert_eq!(registry_key(OsStr::new(raw)), OsString::from(key), "{raw}");
+        }
     }
 }

@@ -161,6 +161,18 @@ let
   # (../window/package.nix): ядро выше от него не тяжелеет.
   vpn-zone-window = pkgs.callPackage ../window/package.nix { };
 
+  # Чем открываются ссылки программ зоны и песочницы (LEAK-MODEL §2): xdg-open,
+  # но без запасного браузера. Для схемы без обработчика xdg-open берёт
+  # $BROWSER, а без него — первый нашедшийся из своего списка (firefox,
+  # chromium, …) и запускает его САМ: мимо пикера, с основным профилем, в сети
+  # той зоны, откуда пришла ссылка. `false` в BROWSER — отказ вместо этого;
+  # ссылку со схемой, у которой есть обработчик (наш перехваченный ярлык),
+  # это не трогает.
+  vpn-zone-opener = pkgs.writeShellScript "vpn-zone-opener" ''
+    export BROWSER=false
+    exec ${pkgs.xdg-utils}/bin/xdg-open "$@"
+  '';
+
   # --- ЧАСТЬ 0б: ПЕСОЧНИЦА ФАЙЛОВОЙ СИСТЕМЫ — В RUST ---
   # Здесь был writeShellScriptBin vpn-fs-sandbox на две сотни строк. Он целиком
   # переехал в крейт — `vpn-zone-core fs-sandbox`, модуль rust/src/fs_sandbox.rs,
@@ -268,7 +280,7 @@ let
       certutil = "${pkgs.nss.tools}/bin/certutil";
       # Ссылки программ из песочницы (LEAK-MODEL §2): их портал отвечает
       # фильтр шины песочницы, а открывает xdg-open — в зоне, мимо портала хоста.
-      opener = "${pkgs.xdg-utils}/bin/xdg-open";
+      opener = "${vpn-zone-opener}";
       # Окно запуска: пикер спрашивает им вместо двух меню kdialog.
       window = "${vpn-zone-window}/bin/vpn-zone-window";
       # awg/wg/pasta/nft/openconnect здесь намеренно НЕТ: их зовёт только
@@ -878,7 +890,7 @@ in
         + " --openconnect ${openconnect} --dbus-proxy ${dbusProxy}/bin/xdg-dbus-proxy"
         # Чем фильтр шины герметичной зоны просит брокера открыть ссылку
         # программы — в той же зоне (LEAK-MODEL §2).
-        + " --opener ${pkgs.xdg-utils}/bin/xdg-open %i";
+        + " --opener ${vpn-zone-opener} %i";
       Restart = "no";
       # KillMode=control-group по умолчанию: гасим зону — гаснет и pasta, и всё,
       # что в зоне работало, теряет сеть. Это и есть kill switch.

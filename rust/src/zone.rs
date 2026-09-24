@@ -292,9 +292,23 @@ pub fn runtime_entry_kept(name: &str, hermetic: bool) -> bool {
 /// that name (owner, 2026-09-24: no tray icon from Claude Desktop in a hermetic
 /// zone). `--own=org.kde.*` would do it too — and let the program take
 /// `org.kde.kwalletd6` and collect other programs' passwords.
-pub const SESSION_BUS_RULES: [&str; 11] = [
+///
+/// The portals by name, not `org.freedesktop.portal.*`: that subtree has
+/// `org.freedesktop.portal.Flatpak` in it too, whose whole job is starting
+/// processes outside the caller's sandbox, and whatever portal service a
+/// host adds later. Named: the desktop portal (every interface a program
+/// uses: file chooser, OpenURI — answered by the bus filter —, screenshots and
+/// screencasts on the user's say-so, settings, notifications) and the document
+/// portal a chosen file travels through.
+pub const PORTALS: [&str; 2] = [
+    "--talk=org.freedesktop.portal.Desktop",
+    "--talk=org.freedesktop.portal.Documents",
+];
+
+pub const SESSION_BUS_RULES: [&str; 12] = [
     "--filter",
-    "--talk=org.freedesktop.portal.*",
+    PORTALS[0],
+    PORTALS[1],
     "--talk=org.freedesktop.Notifications",
     "--talk=org.kde.StatusNotifierWatcher",
     TRAY_ITEM_NAMES,

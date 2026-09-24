@@ -192,11 +192,25 @@ pub fn sanitize_name(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
         .map(|c| match c {
-            '/' | '"' | '\'' | '`' | '\\' | ' ' => '_',
+            '/' | '"' | '\'' | '`' | '\\' | ' ' | ':' => '_',
             other => other,
         })
         .collect();
-    cleaned.trim_start_matches(['-', '.']).to_owned()
+    let name = cleaned.trim_start_matches(['-', '.']).to_owned();
+    if reserved_name(&name) {
+        String::new()
+    } else {
+        name
+    }
+}
+
+/// A container name the menus use as a tag of their own: a profile called
+/// `pinmain` or `__fs__` would be read as that command, not as itself. Never
+/// created, by the picker or by `vpn-zone profile|sandbox create`.
+pub fn reserved_name(name: &str) -> bool {
+    name.starts_with("__")
+        || name.contains(':')
+        || matches!(name, "pinmain" | "unpinprof" | "main" | "ask" | "own")
 }
 
 // --- THE STATE THE DECISION IS MADE FROM -------------------------------------
@@ -746,7 +760,7 @@ pub fn profile_menu(
 
 /// The network column: the menu's choices, once — "always" is a checkbox now.
 pub fn window_nets(zones: &[MenuZone], selected: &str) -> Vec<window::Item> {
-    net_menu(zones, "", "")
+    let mut items = net_menu(zones, "", "")
         .into_iter()
         .take_while(|(tag, _)| !tag.starts_with("pin:"))
         .map(|(tag, label)| {
@@ -763,7 +777,14 @@ pub fn window_nets(zones: &[MenuZone], selected: &str) -> Vec<window::Item> {
                 ..window::Item::default()
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // Nothing remembered is offered: `offline`, not the first row.
+    if !items.iter().any(|i| i.selected) {
+        for it in &mut items {
+            it.selected = it.tag == "offline";
+        }
+    }
+    items
 }
 
 /// The container column: what the container menu offers, once each.
@@ -830,8 +851,12 @@ pub fn window_containers(
         it.selected = !found && it.tag == selected;
         found |= it.selected;
     }
+    // What was remembered is gone (a sandbox removed, a profile renamed): the
+    // program's own sandbox, not the main profile with the whole home.
     if !found {
-        items[0].selected = true;
+        for it in &mut items {
+            it.selected = it.tag == "__ownsb__";
+        }
     }
     items
 }
@@ -1159,6 +1184,18 @@ pub fn main() -> ExitCode {
             asksolo = ask_container;
         }
         NetStep::Ask { default } => {
+            // The row the question starts on: the remembered one while it is
+            // still offered, else `offline` — never whatever comes first, which
+            // is the host's network. A zone removed after `vpn-zone default`
+            // named it (or after it was last chosen) is not offered.
+            let default = if default == "offline"
+                || default == launch::UNCONFINED
+                || menu_zones(&tools.state).iter().any(|z| z.name == default)
+            {
+                default
+            } else {
+                "offline".to_owned()
+            };
             // One window for both questions, where there is one.
             if launch::has_display() {
                 match ask_window(&tools, &key, &label, &default, &memory) {
@@ -1437,8 +1474,10 @@ fn running_record(state: &Path, key: &str) -> Option<Running> {
             .filter_map(registry::parse_record)
             // This one starts a click into that network without a question:
             // only a launch that is certainly still this process counts
-            // (`registry::STARTED`), not whatever holds its number now.
-            .find(|r| registry::launched(&running, r.pid))
+            // (`registry::STARTED`), not whatever holds its number now — and
+            // only one the user started, not one a program in a zone asked
+            // for under an id of its choosing.
+            .find(|r| registry::launched_here(&running, r.pid))
         {
             return Some(Running {
                 zone: record.zone,
@@ -1615,17 +1654,29 @@ fn apply_profile_choice(
                     ],
                 )?,
             };
+            // A creation that fails (a name that cleans down to nothing, no
+            // space, no permission) must not kill the picker: that used to
+            // happen silently, AFTER every dialog had been answered. But what
+            // was asked for is a sandbox, so it is the program's own sandbox —
+            // not the main profile with the whole home —, and said so.
             let name = sanitize_name(&name);
-            if name.is_empty() {
-                return Some(Container::default());
+            if !name.is_empty() {
+                create(tools, "sandbox", &name);
             }
-            // A creation that fails (no space, no permission) must not kill the
-            // picker: that used to happen silently, AFTER every dialog had been
-            // answered — the user answered the questions and the program did not
-            // start. It did not work out: into the main profile, but GO.
-            create(tools, "sandbox", &name);
-            if !tools.sandboxes.join(&name).is_dir() {
-                return Some(Container::default());
+            if name.is_empty() || !tools.sandboxes.join(&name).is_dir() {
+                dialog::notify(
+                    &tools.notify_send,
+                    None,
+                    "8000",
+                    "Песочница не создана",
+                    "Программа запущена в своей песочнице — без дома системы.",
+                );
+                return apply_profile_choice(
+                    tools,
+                    key,
+                    ProfileChoice::OwnSandbox { pin: false },
+                    None,
+                );
             }
             Some(Container {
                 fs_sandbox: true,
@@ -1662,14 +1713,21 @@ fn apply_profile_choice(
             // Only what actually gets in the way is cleaned (paths, spaces,
             // quotes) and a leading dash is cut off — Cyrillic stays Cyrillic.
             let name = sanitize_name(&name);
-            if name.is_empty() {
-                return Some(Container::default());
-            }
             // The same trap as the sandbox above: without swallowing the error
             // the picker died after all the dialogs, and with a container that
-            // does not exist `vpn-zone run` would honestly refuse to start.
-            create(tools, "profile", &name);
-            if !tools.profiles.join(&name).is_dir() {
+            // does not exist `vpn-zone run` would honestly refuse to start. A
+            // profile sees the whole home either way; the main one, said so.
+            if !name.is_empty() {
+                create(tools, "profile", &name);
+            }
+            if name.is_empty() || !tools.profiles.join(&name).is_dir() {
+                dialog::notify(
+                    &tools.notify_send,
+                    None,
+                    "8000",
+                    "Профиль не создан",
+                    "Программа запущена в основном профиле.",
+                );
                 return Some(Container::default());
             }
             Some(Container {
@@ -2764,5 +2822,35 @@ mod tests {
                 assert_eq!(parsed.sandbox, Sandbox::Throwaway, "«{tag}»");
             }
         }
+    }
+
+    /// A remembered choice that is no longer offered starts the question on
+    /// the safe rows — never the first one, which is the host's network, nor
+    /// the main profile with the whole home.
+    #[test]
+    fn a_choice_that_is_gone_is_not_replaced_by_the_first_row() {
+        let zones = vec![MenuZone {
+            name: "de".to_owned(),
+            host_interface: false,
+            system_zone: None,
+            dead: false,
+        }];
+        let nets = window_nets(&zones, "nl-removed");
+        let chosen: Vec<&str> = nets
+            .iter()
+            .filter(|i| i.selected)
+            .map(|i| i.tag.as_str())
+            .collect();
+        assert_eq!(chosen, ["offline"]);
+        assert!(window_nets(&zones, "de")
+            .iter()
+            .any(|i| i.selected && i.tag == "de"));
+        let containers = window_containers("firefox", &[], &[], &[], "sb:removed");
+        let chosen: Vec<&str> = containers
+            .iter()
+            .filter(|i| i.selected)
+            .map(|i| i.tag.as_str())
+            .collect();
+        assert_eq!(chosen, ["__ownsb__"]);
     }
 }

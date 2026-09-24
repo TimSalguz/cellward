@@ -143,7 +143,13 @@ const NAME_FIELD: &str = "new-container-name";
 
 impl Window {
     fn new(req: Request) -> Self {
-        let net = req.nets.iter().position(|i| i.selected).unwrap_or(0);
+        // Nothing marked: `offline`, never the first row (the host's network).
+        let net = req
+            .nets
+            .iter()
+            .position(|i| i.selected)
+            .or_else(|| req.nets.iter().position(|i| i.tag == "offline"))
+            .unwrap_or(0);
         let container = req.containers.iter().position(|i| i.selected).unwrap_or(0);
         Self {
             pin_net: req.pin_net,

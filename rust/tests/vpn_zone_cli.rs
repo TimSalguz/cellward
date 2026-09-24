@@ -578,6 +578,33 @@ fn two_entries_for_one_binary_see_each_other() {
 }
 
 #[test]
+fn a_launch_asked_for_from_a_zone_is_marked_and_its_id_is_a_file_name() {
+    // The broker hands on what a program in a zone asked for — the app id
+    // too. It is a file name in the registry, and the launch is marked as
+    // not the user's own (the picker does not follow it without asking).
+    let home = Home::new("from-zone");
+    home.zone_is_up("nl");
+    let _ = home.run_with(
+        &["run", "nl", "--", "true"],
+        &[
+            ("VPN_ZONE_DELEGATED", "1"),
+            ("VPN_ZONE_APPID", "/tmp/../x/firefox"),
+        ],
+    );
+    let main = home.state().join(".running/__main__");
+    assert!(main.join("_tmp_.._x_firefox").is_file());
+    let started: Vec<String> = fs::read_dir(home.state().join(".running/.started"))
+        .unwrap()
+        .flatten()
+        .map(|e| fs::read_to_string(e.path()).unwrap())
+        .collect();
+    assert!(
+        started.iter().any(|s| s.lines().any(|l| l == "from-zone")),
+        "{started:?}"
+    );
+}
+
+#[test]
 fn a_zone_whose_process_is_in_our_network_is_not_entered() {
     // `zone.pid` of a stopped zone stays behind, and its number comes round to
     // another process. Here it names this test itself — the host's network:
