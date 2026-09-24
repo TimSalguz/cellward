@@ -960,9 +960,9 @@ fn sync_shims(
 }
 
 /// Whether XDG autostart entries of the user are taken over: the declared
-/// setting (`autostart.unassigned`), then the local one, `offline` by default
-/// (the owner's decision of 2026-09-17). `as-is` leaves them, and gives back
-/// the ones taken over.
+/// setting (`autostart.unassigned`), then the local one — `ask` by default
+/// since 2026-09-24, `offline` before; both take over. `as-is` leaves them, and
+/// gives back the ones taken over.
 fn takes_over_autostart(home: &Path) -> bool {
     let config = home.join(".config/vpn-zones");
     let value = fs::read_to_string(config.join("declared/autostart"))

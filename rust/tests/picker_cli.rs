@@ -808,8 +808,10 @@ fn every_shape_of_memory_ends_in_a_launch_or_in_a_cancel() {
 
 #[test]
 fn an_unassigned_autostart_starts_offline_in_its_own_home_without_a_dialog() {
-    // docs/CONTAINERS.md §5.2: at login nobody is looking at a dialog.
+    // docs/CONTAINERS.md §5.2, `autostart.unassigned = "offline"` — the closed
+    // variant, the default until 2026-09-24.
     let home = Home::new("autostart-unassigned");
+    home.write("config/autostart", "offline");
     home.zone("nl");
     // What a dialog would preselect is not a consent to go online unasked.
     home.write("state/.last/tg", "nl");
@@ -843,6 +845,36 @@ fn an_unassigned_autostart_starts_offline_in_its_own_home_without_a_dialog() {
     let notified = home.read("notify.log").unwrap_or_default();
     assert!(notified.contains("Автозапуск"), "{notified}");
     assert!(notified.contains("без сети"), "{notified}");
+}
+
+/// The default since 2026-09-24 (the owner's word): at login, a program with
+/// nothing chosen for it gets the picker's question, and its "always" is kept
+/// like a click's.
+#[test]
+fn an_unassigned_autostart_asks_and_remembers_always() {
+    let home = Home::new("autostart-asks");
+    home.zone("nl");
+    home.answers(&["pin:nl"]);
+    let out = home.run(
+        &["--autostart", "--id", "tg", "--", "telegram", "-autostart"],
+        &[],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!home.asked().is_empty(), "the picker asked");
+    assert_eq!(home.read("state/.pinned/tg").as_deref(), Some("nl"));
+    assert_eq!(home.launched()[0][1], "nl");
+}
+
+/// With nothing to draw a dialog on (a login on a text console) the question
+/// cannot be asked: the closed variant, as with `offline`.
+#[test]
+fn an_unassigned_autostart_without_a_screen_starts_offline() {
+    let home = Home::new("autostart-headless");
+    home.zone("nl");
+    let out = home.run_headless(&["--autostart", "--id", "tg", "--", "telegram"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.asked().is_empty(), "{:?}", home.asked());
+    assert_eq!(home.launched()[0][1], "offline");
 }
 
 #[test]

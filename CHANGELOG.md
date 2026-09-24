@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- **Autostart asks about a program nothing was chosen for**
+  (`autostart.unassigned = "ask"`, the new default, the owner's word of
+  2026-09-24): the same picker a click shows, with its "always", at the login
+  the program first starts at — instead of starting it offline in an empty home
+  of its own, where a password manager had no database and a messenger no
+  login. What was chosen still starts without a question. `offline` keeps the
+  closed variant, and so does a login with no screen to ask on.
+
 ### Fixed
 - **A home of its own looks like the desktop.** A program in a private home —
   its own container, or started at login before anything was chosen for it —

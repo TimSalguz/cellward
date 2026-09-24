@@ -271,7 +271,7 @@ boundary is the container → outside direction (§6).
 | entries programs write into the user directory (Steam games, `userapp-*`, web apps, Wine) | not intercepted: foreign files are never rewritten | **done**: taken over in place with a backup and re-taken when rewritten ([LAUNCHERS.md](LAUNCHERS.md) §3.2); the invariant changed in a commit of its own | 3 |
 | `xdg-open`, `gio open`, `kde-open`, "open with" | resolve to a `.desktop` → the shadow entry | unchanged | — |
 | D-Bus activation (`gapplication launch`, `DBusActivatable=true`) | the service file activates around the shadow | **done** (§5.3): shadow session service files in `$XDG_DATA_HOME/dbus-1/services/<id>.service` for intercepted ids only; never for portal or system names | 3 |
-| XDG autostart | runs uncontained | **done** (§5.2): assigned programs start in their container; **unassigned ones start offline, in a home of their own, without a dialog, and a notification says so** | 3 |
+| XDG autostart | runs uncontained | **done** (§5.2): assigned programs start in their container; **unassigned ones get the picker at login** (`ask`, since 2026-09-24) — or, with `offline` or no screen, start offline in a home of their own with a notification | 3 |
 | compositor key bindings | only if the binding calls `vpn-zone-pick` | **done** (§5.1): `vpn-zone launch <launcher-id>` reads the entry's `Exec` and goes through the picker | 3 |
 | shell | uncontained | **done**: opt-in PATH shims for assigned programs (`pathShims.enable`); never a boundary | 3 |
 | portal `OpenURI` from a host program | portal → handler entry → shadow → picker | unchanged | — |
@@ -322,13 +322,19 @@ is `vpn-zone-pick --autostart --id <key> -- <original command>`.
   next to `org.telegram.desktop.desktop`). A copied picker entry gives its
   `--id`; otherwise a launcher entry of the same file name; otherwise one of
   the same program; otherwise the file name.
-- **The picker never asks** with `--autostart`. Running already — where it
-  runs. The container: the pinned or assigned one, else the global default when
-  it is an answer (`main`, `own`, an existing container), else a home of its
-  own. The network: the one that container is bound to, else the pin, else
-  `offline`. The last choice and the global network default are NOT used: they
-  are what a dialog preselects, not a consent to go online unasked. Nothing is
-  remembered. What was guessed is said in a notification.
+- **What was chosen starts without a question** with `--autostart`. Running
+  already — where it runs. The container: the pinned or assigned one, else the
+  global default when it is an answer (`main`, `own`, an existing container).
+  The network: the one that container is bound to, else the pin.
+- **What was not chosen** depends on `autostart.unassigned`. `ask` (the default
+  since 2026-09-24, the owner's word): the same picker a click shows, with its
+  "always" — so a program is asked about once, at the login it first starts at,
+  and not started into an empty home of its own where it has no data (the
+  owner's KeePassXC, 2026-09-24: no database, no theme). `offline` (the default
+  2026-09-17…24), and `ask` with no screen to ask on: a home of its own and
+  `offline`; the last choice and the global network default are NOT used —
+  they are what a dialog preselects, not a consent to go online unasked;
+  nothing is remembered, and a notification says what was guessed.
 - **No file access dialog either**: a home of its own that has never been
   started gets an empty permission file — the answer given when there is no
   screen to ask on.
@@ -635,6 +641,7 @@ would match too.
 3. **Everything in containers, including entries in the user directory** →
    take-over in place with a backup ([LAUNCHERS.md](LAUNCHERS.md) §3.2, with the
    cost and risk per kind of entry); the invariant changes in its own commit.
-4. **Unassigned autostart: offline, no dialog, a notification** → §5.
+4. **Unassigned autostart: offline, no dialog, a notification** → §5. Changed
+   2026-09-24: the picker asks (`ask`), the closed variant stays as `offline`.
 5. **Per-zone clones deprecated now** → [LAUNCHERS.md](LAUNCHERS.md) §4.
 6. **`feat/openconnect-backend` merged first** → done.
