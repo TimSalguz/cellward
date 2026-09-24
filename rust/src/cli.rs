@@ -143,11 +143,20 @@ fn required<'a>(args: &'a [OsString], idx: usize, message: &str) -> Option<&'a O
 /// Pid of a zone's APP namespace, if it is up.
 ///
 /// `zone.pid` names the namespace programs run in — the one `nsenter` targets.
-/// A stale file (the holder was killed) is not "up": the process has to exist.
+/// A stale file (the holder was killed, or stopped and its number reused) is
+/// not "up": the process has to exist, and be the one that wrote it.
 pub fn zone_pid(state: &Path, name: &OsStr) -> Option<i32> {
-    let text = fs::read_to_string(state.join(name).join("zone.pid")).ok()?;
+    let dir = state.join(name);
+    let text = fs::read_to_string(dir.join("zone.pid")).ok()?;
     let pid: i32 = text.trim().parse().ok()?;
-    proc_is_alive(pid).then_some(pid)
+    // The holder notes when it started: a stopped zone leaves its number
+    // behind, and once that number is reused a live process is not the zone.
+    // Entering it would put a program into somebody else's namespaces. A
+    // holder from before the note counts by its number, as it always did.
+    match read_setting(&dir.join("zone.start")).and_then(|s| s.trim().parse::<u64>().ok()) {
+        Some(start) => (crate::sys::start_time(pid) == Some(start)).then_some(pid),
+        None => proc_is_alive(pid).then_some(pid),
+    }
 }
 
 /// Wait for the zone to come up, ten seconds at most: the `ready` marker AND
@@ -951,7 +960,8 @@ fn gc(tools: &Tools) -> u8 {
     }
 
     let running = tools.state.join(".running");
-    let mut cleaned = registry::sweep_dead(&running, &proc_is_alive);
+    let mut cleaned = registry::sweep_dead(&running, &|pid| registry::alive(&running, pid));
+    registry::sweep_started(&running);
 
     // Abandoned throwaway containers. Their home is erased behind the last
     // tenant, but a hard kill leaves the directory. Judged by live PIDs in the
@@ -969,7 +979,7 @@ fn gc(tools: &Tools) -> u8 {
                 continue;
             }
             let regdir = running.join(name);
-            if registry::any_live(&regdir, &proc_is_alive) {
+            if registry::any_live(&regdir, &|pid| registry::alive(&running, pid)) {
                 continue;
             }
             let _ = crate::sys::remove_tree(&dir);
@@ -1219,7 +1229,9 @@ fn profile(tools: &Tools, args: &[OsString]) -> u8 {
                 let size = human_size(tree_size(&dir));
                 // Who has it open, from the shared launch registry — the same
                 // one the network-conflict warning reads.
-                match registry::live_zone(&running.join(&name), &proc_is_alive) {
+                match registry::live_zone(&running.join(&name), &|pid| {
+                    registry::alive(&running, pid)
+                }) {
                     Some(zone) => println!("{name} — открыт в сети {zone} ({size})"),
                     None => println!("{name} — свободен ({size})"),
                 }
@@ -2293,6 +2305,25 @@ fn run_sync(tools: &Tools) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `zone.pid` outlives a stopped zone; with the holder's start time beside
+    /// it, a number that went to another process is not the zone.
+    #[test]
+    fn a_zone_is_up_only_while_its_own_holder_lives() {
+        let state = std::env::temp_dir().join(format!("vz-zone-pid-{}", std::process::id()));
+        let dir = state.join("nl");
+        fs::create_dir_all(&dir).unwrap();
+        let me = std::process::id() as i32;
+        fs::write(dir.join("zone.pid"), format!("{me}\n")).unwrap();
+        // A holder from before the start time was noted: by its number.
+        assert_eq!(zone_pid(&state, OsStr::new("nl")), Some(me));
+        let start = crate::sys::start_time(me).unwrap();
+        fs::write(dir.join("zone.start"), format!("{start}\n")).unwrap();
+        assert_eq!(zone_pid(&state, OsStr::new("nl")), Some(me));
+        fs::write(dir.join("zone.start"), "1\n").unwrap();
+        assert_eq!(zone_pid(&state, OsStr::new("nl")), None);
+        let _ = fs::remove_dir_all(&state);
+    }
 
     #[test]
     fn carriage_returns_go_only_from_the_ends_of_lines() {

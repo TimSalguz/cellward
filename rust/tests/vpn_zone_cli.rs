@@ -578,6 +578,22 @@ fn two_entries_for_one_binary_see_each_other() {
 }
 
 #[test]
+fn a_zone_whose_process_is_in_our_network_is_not_entered() {
+    // `zone.pid` of a stopped zone stays behind, and its number comes round to
+    // another process. Here it names this test itself — the host's network:
+    // entering it would start the program on the host under the zone's name.
+    let home = Home::new("zone-is-host");
+    home.zone_is_up("nl");
+    let out = home.run(&["run", "nl", "--", "true"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("указывает на процесс в сети хоста"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
 fn a_trusted_certificate_needs_a_real_container_and_one_certificate() {
     let home = Home::new("trust-add");
     let pem = home.root.join("ca.pem");

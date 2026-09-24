@@ -541,7 +541,10 @@ pub fn run(args: Args) -> u8 {
     // it when the first one exits would pull the filesystem out from under the
     // others. The count comes from the shared launch registry; our own pid —
     // which survived the `exec` into this binary — is excluded.
-    if others_alive(&args.regdir, std::process::id() as i32, proc_is_alive) {
+    let running = args.regdir.parent().unwrap_or(Path::new(""));
+    if others_alive(&args.regdir, std::process::id() as i32, |pid| {
+        crate::registry::alive(running, pid)
+    }) {
         let name = args
             .profile_dir
             .file_name()

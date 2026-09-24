@@ -25,7 +25,6 @@ use crate::config::WgConfig;
 use crate::container::{self, Container, Home, Source};
 use crate::fs_sandbox::Perms;
 use crate::launch::NO_ESCAPE;
-use crate::profile::proc_is_alive;
 use crate::registry;
 use crate::tools::Tools;
 
@@ -289,13 +288,17 @@ pub fn system_networks() -> String {
 fn running(tools: &Tools, c: &Container) -> String {
     let base = tools.state.join(".running");
     let records = match c.home {
-        Home::Overlay => registry::live_records(&base.join(&c.name), &proc_is_alive),
+        Home::Overlay => {
+            registry::live_records(&base.join(&c.name), &|pid| registry::alive(&base, pid))
+        }
         Home::Private => {
             let selector = c.selector();
-            registry::live_records(&base.join(registry::MAIN), &proc_is_alive)
-                .into_iter()
-                .filter(|(_, r)| r.selector == selector)
-                .collect()
+            registry::live_records(&base.join(registry::MAIN), &|pid| {
+                registry::alive(&base, pid)
+            })
+            .into_iter()
+            .filter(|(_, r)| r.selector == selector)
+            .collect()
         }
     };
     array(
@@ -545,7 +548,8 @@ pub fn bar(tools: &Tools) -> String {
 /// per live pid (a launch is recorded under its id and its binary both).
 pub fn unconfined_launches(state: &std::path::Path) -> Vec<String> {
     let mut seen = std::collections::BTreeMap::new();
-    for dir in crate::registry::dirs(&state.join(".running")) {
+    let running = state.join(".running");
+    for dir in crate::registry::dirs(&running) {
         for file in visible_entries(&dir) {
             if !file.is_file() {
                 continue;
@@ -560,7 +564,7 @@ pub fn unconfined_launches(state: &std::path::Path) -> Vec<String> {
                 .into_owned();
             for record in text.lines().filter_map(crate::registry::parse_record) {
                 if record.zone == crate::launch::UNCONFINED
-                    && crate::profile::proc_is_alive(record.pid)
+                    && crate::registry::alive(&running, record.pid)
                 {
                     seen.entry(record.pid).or_insert_with(|| name.clone());
                 }

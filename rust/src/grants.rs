@@ -110,8 +110,11 @@ pub fn mounted_at(mountinfo: &str, dest: &Path) -> bool {
 /// The live pids of a sandbox's programs and all their descendants.
 fn sandbox_processes(tools: &Tools, selector: &str) -> BTreeSet<i32> {
     let mut roots: Vec<i32> = Vec::new();
-    for dir in crate::registry::dirs(&tools.state.join(".running")) {
-        for (_, record) in crate::registry::live_records(&dir, &crate::profile::proc_is_alive) {
+    let running = tools.state.join(".running");
+    for dir in crate::registry::dirs(&running) {
+        for (_, record) in
+            crate::registry::live_records(&dir, &|pid| crate::registry::alive(&running, pid))
+        {
             if record.selector == selector {
                 roots.push(record.pid);
             }

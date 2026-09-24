@@ -141,6 +141,10 @@ const CONFIG: &str = "config.conf";
 const OFFLINE: &str = "offline";
 /// The APP namespace, the one `nsenter` targets. Programs run here.
 const PID: &str = "zone.pid";
+/// When the process of [`PID`] started ([`sys::start_time`]): with it the
+/// number names this holder and not whoever gets the number after it. The
+/// file outlives a stop until the next start, and the number is reused.
+const START: &str = "zone.start";
 /// The uplink namespace: pasta attaches to it and `vpn-zone gc` recognises a
 /// stray pasta by the number in its command line.
 const UPLINK_PID: &str = "uplink.pid";
@@ -622,6 +626,7 @@ pub fn run(args: Args) -> u8 {
     // Leftovers of a previous run would make `vpn-zone up` and the picker
     // believe this zone is already up.
     let _ = fs::remove_file(zone.path(PID));
+    let _ = fs::remove_file(zone.path(START));
     let _ = fs::remove_file(zone.path(UPLINK_PID));
     let _ = fs::remove_file(zone.path(READY));
 
@@ -2532,6 +2537,10 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // the number `vpn-zone run`/`status` enter by.
     // SAFETY: getpid(2) takes no arguments and cannot fail.
     let pid = unsafe { libc::getpid() };
+    // The start time first: whoever sees the new number sees its start too.
+    let start = sys::start_time(pid).ok_or("cannot read our own start time")?;
+    fs::write(zone.path(START), format!("{start}\n"))
+        .map_err(|e| format!("cannot write {START}: {e}"))?;
     fs::write(zone.path(PID), format!("{pid}\n"))
         .map_err(|e| format!("cannot write {PID}: {e}"))?;
     zone.ip(&["link", "set", "lo", "up"])?;

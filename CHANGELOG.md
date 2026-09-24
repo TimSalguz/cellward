@@ -45,6 +45,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **A pid is not a process: the registry and the zones keep start times.** The
+  launch registry is on disk, outlives a reboot and is swept lazily, so after
+  a reboot (or once numbers come round in a long session) a record's pid
+  belonged to somebody else — and the picker, taking the program for running,
+  started a click into its old network WITHOUT asking, `unconfined` included.
+  `vpn-zone run` now notes the start time of each launch
+  (`.running/.started/<pid>`); what a record makes happen without a question
+  (the picker's "already running — start it there", the zone of a window)
+  needs it to match. `zone.pid` gets `zone.start` the same way: a stopped
+  zone whose number went to another process is not "up" — `vpn-zone run`
+  would have entered that process's namespaces, the host's network among
+  them. And right before the `exec`, a zone whose process is in the host's own
+  network namespace is refused. Records and zones from before the update
+  count by their pid as before; a zone restarted after it gets the check.
+- **The zone of a window is the kernel's word** (`vpn-zone focused`,
+  `window-menu`, found in review on the day they were added). The network is
+  the network namespace of the window's own process against the host's and the
+  zones'; the registry only adds the container and the program, and only for
+  a launch that is certainly still that process and in that network. A window
+  in the host's namespace shows as the host's whatever a file says. The menu
+  signals the program through a pidfd opened before it shows, not by a number
+  that can change hands while it is open; the bar line escapes Pango markup,
+  and a program's app id is shown cut clean of control characters.
 - **A sandboxed program's links open in its zone, not through the host's
   portal** (`docs/LEAK-MODEL.md` §2). A program in a sandbox sees
   `/.flatpak-info`, so GTK, Qt, Firefox and `xdg-open` open a link with the

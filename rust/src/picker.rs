@@ -48,7 +48,7 @@ use crate::cli::{read_setting, visible_entries, EXIT_TOOLS};
 use crate::desktop::sanitize;
 use crate::dialog;
 use crate::launch::{self, basename, is_assignment};
-use crate::profile::{exec_command, proc_is_alive, EXIT_NOT_STARTED};
+use crate::profile::{exec_command, EXIT_NOT_STARTED};
 use crate::registry;
 use crate::tools::Tools;
 use crate::window;
@@ -866,8 +866,10 @@ fn ask_window(
     let profiles: Vec<ProfileRow> = menu_names(&tools.profiles)
         .into_iter()
         .map(|name| {
-            let busy_in = live_tenant(&tools.profiles.join(&name).join("inuse"))
-                .or_else(|| registry::live_zone(&running.join(&name), &proc_is_alive))
+            let busy_in = live_tenant(&running, &tools.profiles.join(&name).join("inuse"))
+                .or_else(|| {
+                    registry::live_zone(&running.join(&name), &|pid| registry::alive(&running, pid))
+                })
                 .unwrap_or_default();
             ProfileRow { name, busy_in }
         })
@@ -1425,14 +1427,18 @@ fn read_memory(tools: &Tools, key: &str) -> Memory {
 /// Where is this program running right now? The first live record found, over
 /// every container's registry directory.
 fn running_record(state: &Path, key: &str) -> Option<Running> {
-    for dir in registry::dirs(&state.join(".running")) {
+    let running = state.join(".running");
+    for dir in registry::dirs(&running) {
         let Ok(text) = fs::read_to_string(dir.join(key)) else {
             continue;
         };
         if let Some(record) = text
             .lines()
             .filter_map(registry::parse_record)
-            .find(|r| proc_is_alive(r.pid))
+            // This one starts a click into that network without a question:
+            // only a launch that is certainly still this process counts
+            // (`registry::STARTED`), not whatever holds its number now.
+            .find(|r| registry::launched(&running, r.pid))
         {
             return Some(Running {
                 zone: record.zone,
@@ -1520,8 +1526,10 @@ fn ask_profile(
     let profiles: Vec<ProfileRow> = menu_names(&tools.profiles)
         .into_iter()
         .map(|name| {
-            let busy_in = live_tenant(&tools.profiles.join(&name).join("inuse"))
-                .or_else(|| registry::live_zone(&running.join(&name), &proc_is_alive))
+            let busy_in = live_tenant(&running, &tools.profiles.join(&name).join("inuse"))
+                .or_else(|| {
+                    registry::live_zone(&running.join(&name), &|pid| registry::alive(&running, pid))
+                })
                 .unwrap_or_default();
             ProfileRow { name, busy_in }
         })
@@ -1701,11 +1709,11 @@ fn create(tools: &Tools, kind: &str, name: &str) {
 /// still read (a container from that era may carry one), and the launch
 /// registry — the same source `vpn-zone profile list` and the container removal
 /// dialog use — answers the question for everything else.
-fn live_tenant(inuse: &Path) -> Option<String> {
+fn live_tenant(running: &Path, inuse: &Path) -> Option<String> {
     let text = fs::read_to_string(inuse).ok()?;
     text.lines()
         .filter_map(registry::parse_record)
-        .find(|record| proc_is_alive(record.pid))
+        .find(|record| registry::alive(running, record.pid))
         .map(|record| record.zone)
         .filter(|zone| !zone.is_empty())
 }
@@ -1740,7 +1748,7 @@ fn open_throwaways(running: &Path) -> Vec<TmpJoinRow> {
                 .lines()
                 .next()
                 .and_then(registry::parse_record)
-                .is_some_and(|record| proc_is_alive(record.pid));
+                .is_some_and(|record| registry::alive(running, record.pid));
             if alive {
                 who.push(' ');
                 who.push_str(&file.file_name().unwrap_or_default().to_string_lossy());

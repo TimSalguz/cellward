@@ -25,7 +25,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::cli::{read_setting, visible_entries};
-use crate::profile::proc_is_alive;
 use crate::registry;
 use crate::tools::Tools;
 
@@ -943,11 +942,13 @@ pub fn set_x11(tools: &Tools, selector: &str, on: bool) -> Result<(), String> {
 pub fn running_network(tools: &Tools, container: &Container) -> Option<String> {
     let running = tools.state.join(".running");
     match container.home {
-        Home::Overlay => registry::live_zone(&running.join(&container.name), &proc_is_alive),
+        Home::Overlay => registry::live_zone(&running.join(&container.name), &|pid| {
+            registry::alive(&running, pid)
+        }),
         Home::Private => registry::live_zone_of_selector(
             &running.join(registry::MAIN),
             &container.selector(),
-            &proc_is_alive,
+            &|pid| registry::alive(&running, pid),
         ),
     }
 }

@@ -33,7 +33,6 @@ use std::process::{Command, ExitCode, Stdio};
 use crate::cli::{human_size, read_setting, tree_size, visible_entries, EXIT_TOOLS};
 use crate::dialog;
 use crate::picker::{sanitize_name, MAIN};
-use crate::profile::proc_is_alive;
 use crate::registry;
 use crate::tools::Tools;
 
@@ -189,9 +188,10 @@ fn zone_is_up(dir: &Path) -> bool {
     if !dir.join("ready").is_file() {
         return false;
     }
-    read_setting(&dir.join("zone.pid"))
-        .and_then(|text| text.trim().parse::<i32>().ok())
-        .is_some_and(proc_is_alive)
+    match (dir.parent(), dir.file_name()) {
+        (Some(state), Some(name)) => crate::cli::zone_pid(state, name).is_some(),
+        _ => false,
+    }
 }
 
 // --- ADD A ZONE --------------------------------------------------------------
@@ -499,7 +499,7 @@ fn profile_rm(tools: &Tools) -> u8 {
         .map(|dir| {
             let name = name_of(dir);
             let size = human_size(tree_size(dir));
-            match registry::live_zone(&running.join(&name), &proc_is_alive) {
+            match registry::live_zone(&running.join(&name), &|pid| registry::alive(&running, pid)) {
                 Some(zone) => row(
                     &name,
                     format!("{name} — {size}, сейчас открыт в сети {zone}"),
