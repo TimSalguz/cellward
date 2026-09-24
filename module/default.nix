@@ -144,7 +144,7 @@ let
   # И последними — ПИКЕР СЕТИ и ВСЯ GUI-ОБВЯЗКА: четыреста строк vpn-zone-pick
   # и шесть writeShellScriptBin с диалогами (rust/src/picker.rs, rust/src/gui.rs
   # и общий rust/src/dialog.rs). Логики на shell в проекте не осталось нигде:
-  # в этом файле от неё три двухстрочные обёртки, которые назначают
+  # в этом файле от неё четыре двухстрочные обёртки, которые назначают
   # VPN_ZONE_TOOLS и делают exec.
   #
   # Пять бинарей: vpn-zone-seccomp (фильтр отдельной командой — он же selftest),
@@ -393,15 +393,24 @@ let
   # передавал kdialog литеральные «\n» (в Nix-строке '' … '' обратный слэш
   # ничего не экранирует, и эти два символа так и доезжали до диалога).
   #
-  # Обёртки у этого бинаря нет, и она не нужна: ярлыки ниже пишет сам
-  # home-manager и пересобирает их на каждом switch, так что store-путь в них не
-  # протухает. (У Exec, который генерирует НАШ sync, путь наоборот профильный —
-  # там между пересборками никто ярлыки не переписывает, docs/GOTCHAS.md §10.)
-  # Манифест ярлык несёт сам, через env(1) абсолютным путём:
+  # Ярлыкам обёртка не нужна: их пишет сам home-manager и пересобирает на
+  # каждом switch, так что store-путь в них не протухает. (У Exec, который
+  # генерирует НАШ sync, путь наоборот профильный — там между пересборками никто
+  # ярлыки не переписывает, docs/GOTCHAS.md §10.) Манифест ярлык несёт сам,
+  # через env(1) абсолютным путём:
   #   Exec=env VPN_ZONE_TOOLS=… …/vpn-zone-gui add
   guiExec =
     verb:
     "${pkgs.coreutils}/bin/env VPN_ZONE_TOOLS=${vpn-zone-tools} ${vpn-zone-rust}/bin/vpn-zone-gui ${verb}";
+
+  # А в PATH окна кладёт двухстрочная обёртка, как у vpn-zone: их открывают и
+  # не из ярлыков — конфигуратор («Открыть «Контейнеры VPN-зон»» в nix_cm зовёт
+  # `vpn-zone-gui containers`), человек из терминала. Без неё такой запуск
+  # падал с ENOENT: бинарь был только в store-пути ярлыков.
+  vpn-zone-gui = pkgs.writeShellScriptBin "vpn-zone-gui" ''
+    export VPN_ZONE_TOOLS=${vpn-zone-tools}
+    exec ${vpn-zone-rust}/bin/vpn-zone-gui "$@"
+  '';
 
   # --- ЧАСТЬ 5: ДЕКЛАРАТИВНАЯ СТОРОНА (docs/CONTAINERS.ru.md §8) ---
   # Опции ниже — единственный интерфейс для конфигураторов (nix_cm и подобных):
@@ -701,13 +710,12 @@ in
     vpn-zone
     vpn-zone-sync
     vpn-zone-pick
+    vpn-zone-gui
     # Помощники Rust-ядра: vpn-zone-core (подкоманды zone-holder, profile-run,
     # sync, wl-sandbox и fs-sandbox — их зовут юнит и сам CLI) и
-    # vpn-zone-seccomp (генератор фильтра, он же selftest). Сам CLI и пикер
-    # приходят обёртками выше — крейт целиком сюда класть нельзя, в нём есть и
-    # bin/vpn-zone, и bin/vpn-zone-pick. Ярлычного бинаря vpn-zone-gui здесь
-    # нет намеренно: его зовут только .desktop-записи,
-    # своим store-путём и со своим VPN_ZONE_TOOLS.
+    # vpn-zone-seccomp (генератор фильтра, он же selftest). Сам CLI, пикер и
+    # окна приходят обёртками выше — крейт целиком сюда класть нельзя, в нём
+    # есть и bin/vpn-zone, и bin/vpn-zone-pick, и bin/vpn-zone-gui.
     vpn-zone-helpers
     vpn-zone-completions # Tab-дополнение zsh/bash (см. определение выше)
     pkgs.passt # userspace-сеть для зон
