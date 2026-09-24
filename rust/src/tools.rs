@@ -93,11 +93,14 @@ pub struct Tools {
     /// `certutil` from NSS: installs a container's certificates into its NSS
     /// databases. The CLI passes it on to `profile-run`.
     pub certutil: PathBuf,
+    /// `xdg-open`: what a sandbox's bus filter opens a program's link with, in
+    /// the zone rather than through the host's portal (`crate::bus_filter`).
+    pub opener: PathBuf,
 }
 
 /// The keys of the manifest, in the order they are reported. Kept next to the
 /// struct so that `module/default.nix` and this file can be diffed by eye.
-const KEYS: [&str; 20] = [
+const KEYS: [&str; 21] = [
     "home",
     "state",
     "profiles",
@@ -118,6 +121,7 @@ const KEYS: [&str; 20] = [
     "xwayland",
     "openssl",
     "certutil",
+    "opener",
 ];
 
 /// Why the manifest could not be used. Every variant names the file: when this
@@ -206,6 +210,7 @@ impl Tools {
             xwayland: take("xwayland")?,
             openssl: take("openssl")?,
             certutil: take("certutil")?,
+            opener: take("opener")?,
         })
     }
 

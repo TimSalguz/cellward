@@ -525,7 +525,7 @@ fn exchange(request: &[u8]) -> Result<Done, String> {
              vpn-zones?"
         )
     })?;
-    send_with_fds(sock.as_raw_fd(), request, &[])
+    sys::send_with_fds(sock.as_raw_fd(), request, &[])
         .map_err(|e| format!("cannot send the request: {e}"))?;
     let mut buf = [0u8; 4096];
     // SAFETY: a valid descriptor and a buffer of the length given.
@@ -570,7 +570,7 @@ fn run_client(zone: &str, argv: Vec<OsString>) -> Result<u8, String> {
     }
     match mode {
         Mode::Pipes => {
-            send_with_fds(sock.as_raw_fd(), &request, &[0, 1, 2])
+            sys::send_with_fds(sock.as_raw_fd(), &request, &[0, 1, 2])
                 .map_err(|e| format!("cannot send the request: {e}"))?;
             wait_answer(sock.as_raw_fd())
         }
@@ -585,7 +585,7 @@ fn pty_session(sock: &OwnedFd, request: &[u8]) -> Result<u8, String> {
     if let Some(size) = size {
         set_window_size(master.as_raw_fd(), size);
     }
-    send_with_fds(sock.as_raw_fd(), request, &[slave.as_raw_fd()])
+    sys::send_with_fds(sock.as_raw_fd(), request, &[slave.as_raw_fd()])
         .map_err(|e| format!("cannot send the request: {e}"))?;
     drop(slave);
 
@@ -765,8 +765,8 @@ fn serve_any(sock: RawFd) -> Result<Vec<u8>, String> {
     // A client that connects and says nothing must not hold the unit — and
     // one of the few connections the socket allows — for ever (review).
     set_recv_timeout(sock, REQUEST_WAIT);
-    let (data, fds) =
-        recv_with_fds(sock, MAX_REQUEST, 3).map_err(|e| format!("cannot read the request: {e}"))?;
+    let (data, fds) = sys::recv_with_fds(sock, MAX_REQUEST, 3)
+        .map_err(|e| format!("cannot read the request: {e}"))?;
     if system::is_off() {
         // The zones are down and stay down (their units check the same
         // flag): say so, rather than "the zone did not come up".
@@ -871,7 +871,7 @@ pub fn request_uplink(zone: &str, pid: i32) -> Result<(OwnedFd, Vec<String>), St
              vpn-zones?"
         )
     })?;
-    send_with_fds(
+    sys::send_with_fds(
         sock.as_raw_fd(),
         &encode_uplink(zone, pid),
         &[userns.as_raw_fd(), netns.as_raw_fd()],
@@ -1834,94 +1834,6 @@ fn connect(path: &str) -> io::Result<OwnedFd> {
     Ok(sock)
 }
 
-/// Room for `count` descriptors in a control message, in u64s so that the
-/// buffer is aligned the way `cmsghdr` wants.
-fn control_buffer(count: usize) -> (Vec<u64>, usize) {
-    let payload = (count * std::mem::size_of::<libc::c_int>()) as libc::c_uint;
-    // SAFETY: CMSG_SPACE is arithmetic.
-    let space = unsafe { libc::CMSG_SPACE(payload) } as usize;
-    (vec![0u64; space.div_ceil(8)], space)
-}
-
-fn send_with_fds(sock: RawFd, data: &[u8], fds: &[RawFd]) -> io::Result<()> {
-    let mut iov = libc::iovec {
-        iov_base: data.as_ptr().cast_mut().cast(),
-        iov_len: data.len(),
-    };
-    let (mut control, space) = control_buffer(fds.len());
-    // SAFETY: msghdr is plain data; every pointer set below outlives sendmsg.
-    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = &mut iov;
-    msg.msg_iovlen = 1;
-    if !fds.is_empty() {
-        msg.msg_control = control.as_mut_ptr().cast();
-        msg.msg_controllen = space as _;
-        let payload = std::mem::size_of_val(fds) as libc::c_uint;
-        // SAFETY: the control buffer has room for one header and `fds`, and is
-        // aligned for cmsghdr.
-        unsafe {
-            let cmsg = libc::CMSG_FIRSTHDR(&msg);
-            (*cmsg).cmsg_level = libc::SOL_SOCKET;
-            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-            (*cmsg).cmsg_len = libc::CMSG_LEN(payload) as _;
-            let data = libc::CMSG_DATA(cmsg).cast::<libc::c_int>();
-            for (i, fd) in fds.iter().enumerate() {
-                data.add(i).write_unaligned(*fd);
-            }
-        }
-    }
-    // SAFETY: a valid descriptor and a filled msghdr.
-    let sent = unsafe { libc::sendmsg(sock, &msg, libc::MSG_NOSIGNAL) };
-    if sent < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if sent.unsigned_abs() != data.len() {
-        return Err(io::Error::other("the request was cut short"));
-    }
-    Ok(())
-}
-
-fn recv_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> {
-    let mut data = vec![0u8; max];
-    let mut iov = libc::iovec {
-        iov_base: data.as_mut_ptr().cast(),
-        iov_len: data.len(),
-    };
-    let (mut control, space) = control_buffer(max_fds);
-    // SAFETY: msghdr is plain data; every pointer set below outlives recvmsg.
-    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = &mut iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = control.as_mut_ptr().cast();
-    msg.msg_controllen = space as _;
-    // SAFETY: a valid descriptor and a prepared msghdr.
-    let n = unsafe { libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC) };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut fds = Vec::new();
-    // SAFETY: walking the control messages the kernel wrote into our buffer;
-    // every descriptor found is ours from here on.
-    unsafe {
-        let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
-        while !cmsg.is_null() {
-            if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
-                let payload = (*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
-                let base = libc::CMSG_DATA(cmsg).cast::<libc::c_int>();
-                for i in 0..payload / std::mem::size_of::<libc::c_int>() {
-                    fds.push(OwnedFd::from_raw_fd(base.add(i).read_unaligned()));
-                }
-            }
-            cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
-        }
-    }
-    if msg.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0 {
-        return Err(io::Error::other("the request is too large"));
-    }
-    data.truncate(n.unsigned_abs());
-    Ok((data, fds))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2140,9 +2052,9 @@ mod tests {
         // SAFETY: both are fresh descriptors of ours.
         let (a, b) = unsafe { (OwnedFd::from_raw_fd(pair[0]), OwnedFd::from_raw_fd(pair[1])) };
         let (r, w) = sys::pipe().unwrap();
-        send_with_fds(a.as_raw_fd(), b"hello", &[w.as_raw_fd()]).unwrap();
+        sys::send_with_fds(a.as_raw_fd(), b"hello", &[w.as_raw_fd()]).unwrap();
         drop(w);
-        let (data, fds) = recv_with_fds(b.as_raw_fd(), 64, 3).unwrap();
+        let (data, fds) = sys::recv_with_fds(b.as_raw_fd(), 64, 3).unwrap();
         assert_eq!(data, b"hello");
         assert_eq!(fds.len(), 1);
         File::from(fds.into_iter().next().unwrap())

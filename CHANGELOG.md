@@ -15,6 +15,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **A sandboxed program's links open in its zone, not through the host's
+  portal** (`docs/LEAK-MODEL.md` §2). A program in a sandbox sees
+  `/.flatpak-info`, so GTK, Qt, Firefox and `xdg-open` open a link with the
+  portal's `OpenURI` — and the portal, on the host, handed it to the default
+  browser in the host's network or wherever that browser already ran, with
+  nobody asked. The sandbox's session bus now goes through `vpn-zone-core
+  bus-filter` in front of `xdg-dbus-proxy`: it answers `OpenURI` itself, the
+  way the portal would, and opens the link with `xdg-open` in the zone,
+  outside the sandbox — from where it takes the door every link from a zone
+  takes, the picker and, for another network, the broker's question. The call
+  is recognised by method and interface, not by destination. `file:` links,
+  `OpenFile`, `OpenDirectory` and `ComposeEmail` are answered as cancelled for
+  now. The tools manifest gains `opener` (`xdg-utils`' `xdg-open`).
 - **A hermetic zone has `/tmp`, `/var/tmp` and `/dev/shm` of its own**
   (`docs/LEAK-MODEL.md` §15). The host's `/tmp` held listening sockets nobody
   meant for a zone — a tmux server, whose `run-shell` runs a command on the
@@ -52,6 +65,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `/proc` from the host and from neither kind of zone.
 
 ### Fixed
+- **A sandbox in a hermetic zone has a session bus again.** Its own
+  `xdg-dbus-proxy` sat on top of the zone's, and xdg-dbus-proxy cannot be
+  stacked: the inner one's own calls carry serials the outer one refuses
+  ("Invalid client serial: Exceeds maximum value"), so every connection was
+  dropped during authentication — no portals, notifications or tray icon for
+  a sandboxed program in a hermetic zone. Found by the new VM test. In a
+  hermetic zone the sandbox's bus filter now goes straight onto the zone's
+  filtered bus (recognised from the mount table), and the zone's rules — a
+  sandbox's plus input methods, media keys and the screensaver inhibitor —
+  are the ones in force.
 - **Entries in subdirectories are intercepted** (owner, 2026-09-24: Wine's
   programs started with no network dialog). Wine puts the entry of every
   program it installs at `~/.local/share/applications/wine/Programs/…`, and

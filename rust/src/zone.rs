@@ -210,6 +210,14 @@ pub(crate) const HOSTIF_GATEWAY4: &str = "10.255.255.254";
 
 /// The zone's filtered session bus, in its state directory.
 const SESSION_BUS_PROXY: &str = "session-bus";
+
+/// Is the session bus at `socket` a hermetic zone's filtered one — the zone's
+/// proxy bound over it? Read from the mount table (`/proc/self/mountinfo`),
+/// which says what is really there rather than what a variable claims.
+pub fn bus_is_zones_filter(mountinfo: &str, socket: &Path) -> bool {
+    crate::doctor::mount_root_at(mountinfo, &socket.to_string_lossy())
+        .is_some_and(|root| root.ends_with(&format!("/{SESSION_BUS_PROXY}")))
+}
 /// Where the host's runtime directory is held for the zone's lifetime, to bind
 /// entries from — below a tmpfs only the zone's root may enter, because the
 /// hold has everything, the compositor's own socket included.

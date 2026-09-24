@@ -635,6 +635,8 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             tools.kdialog.clone().into(),
             "--xwayland".into(),
             tools.xwayland.clone().into(),
+            "--opener".into(),
+            tools.opener.clone().into(),
             fsid,
         ];
         if let Sandbox::Named(name) = &selection.sandbox {

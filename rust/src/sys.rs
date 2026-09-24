@@ -9,7 +9,7 @@
 
 use std::ffi::{CString, OsStr};
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -366,4 +366,112 @@ mod inotify_tests {
         assert_eq!(names, ["pipewire-0"]);
         assert!(overflow);
     }
+}
+
+// --- DESCRIPTORS OVER A UNIX SOCKET -----------------------------------------
+
+/// Room for `count` descriptors in a control message, in u64s so that the
+/// buffer is aligned the way `cmsghdr` wants.
+fn control_buffer(count: usize) -> (Vec<u64>, usize) {
+    let payload = (count * std::mem::size_of::<libc::c_int>()) as libc::c_uint;
+    // SAFETY: CMSG_SPACE is arithmetic.
+    let space = unsafe { libc::CMSG_SPACE(payload) } as usize;
+    (vec![0u64; space.div_ceil(8)], space)
+}
+
+pub fn send_with_fds(sock: RawFd, data: &[u8], fds: &[RawFd]) -> io::Result<()> {
+    let mut iov = libc::iovec {
+        iov_base: data.as_ptr().cast_mut().cast(),
+        iov_len: data.len(),
+    };
+    let (mut control, space) = control_buffer(fds.len());
+    // SAFETY: msghdr is plain data; every pointer set below outlives sendmsg.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    if !fds.is_empty() {
+        msg.msg_control = control.as_mut_ptr().cast();
+        msg.msg_controllen = space as _;
+        let payload = std::mem::size_of_val(fds) as libc::c_uint;
+        // SAFETY: the control buffer has room for one header and `fds`, and is
+        // aligned for cmsghdr.
+        unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(payload) as _;
+            let data = libc::CMSG_DATA(cmsg).cast::<libc::c_int>();
+            for (i, fd) in fds.iter().enumerate() {
+                data.add(i).write_unaligned(*fd);
+            }
+        }
+    }
+    // SAFETY: a valid descriptor and a filled msghdr.
+    let sent = unsafe { libc::sendmsg(sock, &msg, libc::MSG_NOSIGNAL) };
+    if sent < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if sent.unsigned_abs() != data.len() {
+        return Err(io::Error::other("the request was cut short"));
+    }
+    Ok(())
+}
+
+pub fn recv_with_fds(
+    sock: RawFd,
+    max: usize,
+    max_fds: usize,
+) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> {
+    let mut data = vec![0u8; max];
+    let (n, fds, truncated) = recv_into_with_fds(sock, &mut data, max_fds)?;
+    if truncated {
+        return Err(io::Error::other("the request is too large"));
+    }
+    data.truncate(n);
+    Ok((data, fds))
+}
+
+/// One `recvmsg` into `buf`: how many bytes, the descriptors that came with
+/// them, and whether anything was cut off — the data (`MSG_TRUNC`, only on
+/// datagram sockets) or descriptors that did not fit (`MSG_CTRUNC`: the kernel
+/// closed them, and a stream that carries them is broken from here on).
+pub fn recv_into_with_fds(
+    sock: RawFd,
+    buf: &mut [u8],
+    max_fds: usize,
+) -> io::Result<(usize, Vec<OwnedFd>, bool)> {
+    let mut iov = libc::iovec {
+        iov_base: buf.as_mut_ptr().cast(),
+        iov_len: buf.len(),
+    };
+    let (mut control, space) = control_buffer(max_fds);
+    // SAFETY: msghdr is plain data; every pointer set below outlives recvmsg.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = space as _;
+    // SAFETY: a valid descriptor and a prepared msghdr.
+    let n = unsafe { libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC) };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut fds = Vec::new();
+    // SAFETY: walking the control messages the kernel wrote into our buffer;
+    // every descriptor found is ours from here on.
+    unsafe {
+        let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+        while !cmsg.is_null() {
+            if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
+                let payload = (*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
+                let base = libc::CMSG_DATA(cmsg).cast::<libc::c_int>();
+                for i in 0..payload / std::mem::size_of::<libc::c_int>() {
+                    fds.push(OwnedFd::from_raw_fd(base.add(i).read_unaligned()));
+                }
+            }
+            cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
+        }
+    }
+    let truncated = msg.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0;
+    Ok((n.unsigned_abs(), fds, truncated))
 }

@@ -200,6 +200,8 @@ let
           pkgs.socat
           # The evil host's tmux server (LEAK-MODEL §15).
           pkgs.tmux
+          # gdbus: a sandboxed program calling the portal (LEAK-MODEL §2).
+          pkgs.glib
           # A real compositor for the restricted-Wayland check, headless.
           pkgs.sway
           pkgs.wayland-utils
@@ -1253,7 +1255,64 @@ let
           machine.fail("ls -d /tmp/vpn-fs-sandbox-*")
           alice("systemctl --user stop vmsbsleep eviltmp evilabs || true")
           alice("tmux kill-server || true")
+
+      # LEAK-MODEL §2: a sandboxed program (it sees /.flatpak-info) opens a link
+      # through the portal's OpenURI. The sandbox's bus filter answers the call
+      # itself and hands the link to xdg-open IN THE ZONE — never to the host's
+      # portal. The handler is a symlinked entry, which the interception leaves
+      # alone, so what runs is exactly what xdg-open picked: it records the link
+      # and its network namespace. A file: link is answered and not opened.
+      with subtest("sandbox: a link through the portal opens in the zone, a file: link not at all"):
+          alice("mkdir -p ~/.local/share/vmurl ~/.local/share/applications ~/.config")
+          alice(
+              "printf '#!/bin/sh\\necho \"$1\" >> /home/alice/opened-urls\\n"
+              "readlink /proc/self/ns/net >> /home/alice/opened-urls\\n' "
+              "> ~/.local/share/vmurl/record && chmod 755 ~/.local/share/vmurl/record"
+          )
+          alice(
+              "printf '[Desktop Entry]\\nType=Application\\nName=VM URL\\n"
+              "Exec=/home/alice/.local/share/vmurl/record %%u\\n"
+              "MimeType=x-scheme-handler/https;\\n' > ~/.local/share/vmurl/vmurl.desktop"
+          )
+          alice("ln -sfn ~/.local/share/vmurl/vmurl.desktop ~/.local/share/applications/vmurl.desktop")
+          alice("printf '[Default Applications]\\nx-scheme-handler/https=vmurl.desktop\\n' > ~/.config/mimeapps.list")
+          # xdg-open looks for a scheme handler only in a graphical session
+          # (WAYLAND_DISPLAY or DISPLAY set) and goes for console browsers
+          # otherwise; the VM has no compositor, only the variable is needed.
+          portal = (
+              "gdbus call --session --dest org.freedesktop.portal.Desktop "
+              "--object-path /org/freedesktop/portal/desktop "
+              "--method org.freedesktop.portal.OpenURI.OpenURI"
+          )
+          # The sandbox's bus works at all in a hermetic zone: a second
+          # xdg-dbus-proxy on the zone's own used to refuse every connection.
+          alice(
+              "vpn-zone run vmherm --fs-sandbox -- gdbus call --session --dest org.freedesktop.DBus "
+              "--object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetId"
+          )
+          out = alice(f"WAYLAND_DISPLAY=wayland-vmtest vpn-zone run vmherm --fs-sandbox -- {portal} ''' 'https://example.test/from-sandbox' '@a{{sv}} {{}}'")
+          assert "/org/freedesktop/portal/desktop/request/" in out, out
+          machine.wait_until_succeeds("grep -q from-sandbox /home/alice/opened-urls", timeout=30)
+          zone_ns = machine.succeed(f"readlink /proc/{hp}/ns/net").strip()
+          host_ns = machine.succeed("readlink /proc/1/ns/net").strip()
+          opened = machine.succeed("cat /home/alice/opened-urls")
+          assert zone_ns in opened and host_ns not in opened, f"{opened} (zone {zone_ns})"
+          out = alice(f"WAYLAND_DISPLAY=wayland-vmtest vpn-zone run vmherm --fs-sandbox -- {portal} ''' 'file:///etc/hostname' '@a{{sv}} {{}}'")
+          assert "/org/freedesktop/portal/desktop/request/" in out, out
+          machine.sleep(2)
+          machine.fail("grep -q hostname /home/alice/opened-urls")
           alice("vpn-zone down vmherm")
+          # An ordinary zone: the sandbox's own proxy over the host's bus, the
+          # filter in front of it — the link opens in THAT zone.
+          out = alice(f"WAYLAND_DISPLAY=wayland-vmtest vpn-zone run vmsmoke --fs-sandbox -- {portal} ''' 'https://example.test/from-ordinary' '@a{{sv}} {{}}'")
+          assert "/org/freedesktop/portal/desktop/request/" in out, out
+          machine.wait_until_succeeds("grep -q from-ordinary /home/alice/opened-urls", timeout=30)
+          sp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
+          smoke_ns = machine.succeed(f"readlink /proc/{sp}/ns/net").strip()
+          lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
+          at = lines.index("https://example.test/from-ordinary")
+          assert lines[at + 1] == smoke_ns, f"{lines} (zone {smoke_ns})"
+          alice("vpn-zone down vmsmoke")
 
       # --- A network through an interface of the host (CONTAINERS §3.3) -----
       # No tunnel: pasta attached to the app namespace and bound to one host

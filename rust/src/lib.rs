@@ -77,11 +77,13 @@
 //! own selftest).
 
 pub mod broker;
+pub mod bus_filter;
 pub mod cli;
 pub mod completion;
 pub mod config;
 pub mod console;
 pub mod container;
+pub mod dbus_wire;
 pub mod desktop;
 pub mod dialog;
 pub mod dnsfwd;
