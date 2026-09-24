@@ -9,15 +9,27 @@
 //! hermetic zone has no `systemd --user` to reach, and this socket instead.
 //!
 //! The broker is a user service on the host. It learns WHICH zone asks from the
-//! kernel — the network namespace of the peer's pid — never from the request,
-//! and it answers:
+//! kernel — the network namespace of the process that connected — never from
+//! the request, and it answers:
 //!
+//! * the host's own namespace: started — a host program could run `vpn-zone`
+//!   itself;
 //! * a launch into the very zone that asks: started, no dialog — the program
 //!   is in that zone already;
 //! * a locked zone asking for another network: refused;
-//! * anything else — another zone, `unconfined`: a person is asked, with the
-//!   asking zone and the command in the question; with nobody to ask (no
-//!   graphical session), refused.
+//! * another zone asking — for another zone, for `unconfined`: a person is
+//!   asked, with the asking zone and the command in the question; with nobody
+//!   to ask (no graphical session), refused;
+//! * a namespace that is none of these, or a process that can no longer be
+//!   told: refused. It used to be "not a zone, so the host", and started:
+//!   a program that asked and exited before the broker looked had its request
+//!   run on the host with the host's network, no question asked.
+//!
+//! **The process is held, not its number.** The peer is pinned when the
+//! connection is taken — the kernel's pidfd of the very process that connected
+//! (`SO_PEERPIDFD`, Linux 6.5; before that, one opened by its pid at once) —
+//! and its namespace is read only while that process is still alive, before
+//! and after the read. A pid that went to somebody else is never looked at.
 //!
 //! The request is `VZB1\0`, the app-id, then the arguments of `vpn-zone run`,
 //! each terminated by a NUL; the client closes its writing half, the broker
@@ -25,7 +37,7 @@
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -75,6 +87,33 @@ pub fn decode(bytes: &[u8]) -> Option<(OsString, Vec<OsString>)> {
     Some((app_id, argv))
 }
 
+/// Where a request comes from, by the kernel's word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// The host's own network namespace, the broker's.
+    Host,
+    /// A zone of this user.
+    Zone(String),
+    /// A system zone (`/run/netns/vz-<name>`, root's).
+    SystemZone(String),
+    /// Anything else: a namespace that is none of ours, or a process gone
+    /// before it could be looked at.
+    Unknown,
+}
+
+impl Origin {
+    /// How the journal and "always" name it; a system zone apart from a user
+    /// zone of the same name.
+    pub fn name(&self) -> String {
+        match self {
+            Origin::Host => String::new(),
+            Origin::Zone(zone) => zone.clone(),
+            Origin::SystemZone(zone) => format!("system:{zone}"),
+            Origin::Unknown => "?".to_owned(),
+        }
+    }
+}
+
 /// What the broker decides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -84,28 +123,94 @@ pub enum Decision {
     Refuse(String),
 }
 
-/// The policy, from the asking zone and the requested one.
-pub fn decide(origin: Option<&str>, origin_locked: bool, target: &str) -> Decision {
+/// The policy, from where the request comes from and the network it asks for.
+pub fn decide(origin: &Origin, origin_locked: bool, target: &str) -> Decision {
     match origin {
-        // Not from a zone at all: a host program could run `vpn-zone` itself.
-        None => Decision::Start,
-        Some(origin) if origin == target => Decision::Start,
-        Some(origin) if origin_locked => Decision::Refuse(format!(
-            "зона «{origin}» заперта: запуск в другой сети ({target}) запрещён"
+        // The host itself: it could run `vpn-zone` without us.
+        Origin::Host => Decision::Start,
+        Origin::Zone(zone) if zone == target => Decision::Start,
+        Origin::Zone(zone) if origin_locked => Decision::Refuse(format!(
+            "зона «{zone}» заперта: запуск в другой сети ({target}) запрещён"
         )),
-        Some(_) => Decision::Ask,
+        Origin::Zone(_) | Origin::SystemZone(_) => Decision::Ask,
+        Origin::Unknown => Decision::Refuse(
+            "не понять, откуда запрос: не хост и не зона (или процесс уже вышел)".to_owned(),
+        ),
     }
 }
 
-/// The zone whose app namespace has this network namespace, if any.
-fn zone_of_netns(tools: &Tools, netns: &Path) -> Option<String> {
-    let wanted = std::fs::read_link(netns).ok()?;
-    visible_entries(&tools.state).into_iter().find_map(|dir| {
+/// The zone whose app namespace is `netns` (`net:[…]`), if any.
+fn zone_of_netns(state: &Path, netns: &Path) -> Option<String> {
+    visible_entries(state).into_iter().find_map(|dir| {
         let name = dir.file_name()?.to_os_string();
-        let pid = zone_pid(&tools.state, &name)?;
-        (std::fs::read_link(format!("/proc/{pid}/ns/net")).ok()? == wanted)
+        let pid = zone_pid(state, &name)?;
+        (std::fs::read_link(format!("/proc/{pid}/ns/net"))
+            .ok()?
+            .as_path()
+            == netns)
             .then(|| name.to_string_lossy().into_owned())
     })
+}
+
+/// Which of our networks the namespace `netns` (`net:[…]`) is.
+fn classify(state: &Path, netns: &Path) -> Origin {
+    if std::fs::read_link("/proc/self/ns/net").ok().as_deref() == Some(netns) {
+        return Origin::Host;
+    }
+    if let Some(zone) = zone_of_netns(state, netns) {
+        return Origin::Zone(zone);
+    }
+    if let Some(zone) = crate::system::zone_of_netns(&netns.to_string_lossy()) {
+        return Origin::SystemZone(zone);
+    }
+    Origin::Unknown
+}
+
+/// The process on the other end, pinned: the kernel's pidfd of the very
+/// process that connected, or — on a kernel without `SO_PEERPIDFD` — one opened
+/// by its pid now.
+fn peer_pidfd(stream: &UnixStream, pid: i32) -> Option<OwnedFd> {
+    let mut fd: libc::c_int = -1;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: a valid descriptor, a buffer of one int and its length.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERPIDFD,
+            (&mut fd as *mut libc::c_int).cast(),
+            &mut len,
+        )
+    };
+    if rc == 0 && fd >= 0 {
+        // SAFETY: the kernel just gave us this descriptor to own.
+        return Some(unsafe { OwnedFd::from_raw_fd(fd) });
+    }
+    crate::sys::pidfd_open(pid)
+}
+
+/// Where the peer of `stream` is, looked at while it is certainly the process
+/// that connected.
+fn origin_of(state: &Path, stream: &UnixStream) -> Origin {
+    let Some(pid) = peer_pid(stream) else {
+        return Origin::Unknown;
+    };
+    let Some(pidfd) = peer_pidfd(stream, pid) else {
+        return Origin::Unknown;
+    };
+    let alive = || !crate::sys::pidfd_wait(&pidfd, std::time::Duration::ZERO);
+    if !alive() {
+        return Origin::Unknown;
+    }
+    let Ok(netns) = std::fs::read_link(format!("/proc/{pid}/ns/net")) else {
+        return Origin::Unknown;
+    };
+    // Still alive after the read: the number was not reused in between, and
+    // the namespace read is the peer's own.
+    if !alive() {
+        return Origin::Unknown;
+    }
+    classify(state, &netns)
 }
 
 /// The pid of the process on the other end of a Unix socket.
@@ -130,6 +235,8 @@ fn peer_pid(stream: &UnixStream) -> Option<i32> {
 }
 
 fn handle(tools: &Tools, mut stream: UnixStream) {
+    // First, before the request is read: the peer may leave while it is.
+    let origin = origin_of(&tools.state, &stream);
     let mut bytes = Vec::new();
     if (&mut stream)
         .take(MAX_REQUEST)
@@ -141,24 +248,22 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
     let answer = match decode(&bytes) {
         None => "refused: не запрос брокера".to_owned(),
         Some((app_id, argv)) => {
-            let origin = peer_pid(&stream)
-                .and_then(|pid| zone_of_netns(tools, Path::new(&format!("/proc/{pid}/ns/net"))));
             match crate::launch::Selection::parse(&argv) {
                 Err(e) => format!("refused: {e}"),
                 Ok(selection) => {
                     let target = selection.zone.to_string_lossy().into_owned();
-                    let locked = origin.as_ref().is_some_and(|o| {
-                        tools.state.join(o).join(crate::launch::NO_ESCAPE).exists()
-                    });
-                    let allowed = match decide(origin.as_deref(), locked, &target) {
+                    let locked = match &origin {
+                        Origin::Zone(zone) => tools
+                            .state
+                            .join(zone)
+                            .join(crate::launch::NO_ESCAPE)
+                            .exists(),
+                        _ => false,
+                    };
+                    let allowed = match decide(&origin, locked, &target) {
                         Decision::Start => Ok(()),
                         Decision::Refuse(why) => Err(why),
-                        Decision::Ask => ask(
-                            tools,
-                            origin.as_deref().unwrap_or("?"),
-                            &target,
-                            &selection.cmd,
-                        ),
+                        Decision::Ask => ask(tools, &origin, &target, &selection.cmd),
                     };
                     let answer = match &allowed {
                         Ok(()) => start(tools, &app_id, &argv),
@@ -172,7 +277,7 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                         &tools.state,
                         "broker",
                         &[
-                            ("origin", origin.as_deref().unwrap_or("")),
+                            ("origin", origin.name().as_str()),
                             ("target", target.as_str()),
                             ("app", &*app_id.to_string_lossy()),
                             ("decision", decision),
@@ -247,11 +352,13 @@ fn remember(tools: &Tools, line: &str) {
     }
 }
 
-fn ask(tools: &Tools, origin: &str, target: &str, cmd: &[OsString]) -> Result<(), String> {
+fn ask(tools: &Tools, origin: &Origin, target: &str, cmd: &[OsString]) -> Result<(), String> {
     // Asked before, and "always" said: the same zone, the same network, the
     // very same program from the store.
     let program = program_of(cmd).filter(|p| may_remember(p));
-    let line = program.as_ref().map(|p| always_line(origin, target, p));
+    let line = program
+        .as_ref()
+        .map(|p| always_line(&origin.name(), target, p));
     if line.as_ref().is_some_and(|l| remembered(tools, l)) {
         return Ok(());
     }
@@ -267,8 +374,12 @@ fn ask(tools: &Tools, origin: &str, target: &str, cmd: &[OsString]) -> Result<()
     } else {
         format!("сети «{target}»")
     };
+    let asker = match origin {
+        Origin::SystemZone(zone) => format!("системной зоны «{zone}»"),
+        other => format!("зоны «{}»", other.name()),
+    };
     let question = format!(
-        "Программа из зоны «{origin}» просит запустить в {network}:\n\n{}\n\nРазрешить?",
+        "Программа из {asker} просит запустить в {network}:\n\n{}\n\nРазрешить?",
         shown.join(" ")
     );
     // "Always" only where it can be kept safely (`may_remember`).
@@ -465,15 +576,72 @@ mod tests {
     }
 
     #[test]
-    fn only_the_same_zone_starts_without_a_person() {
-        assert_eq!(decide(Some("nl"), false, "nl"), Decision::Start);
-        assert_eq!(decide(Some("nl"), false, "de"), Decision::Ask);
-        assert_eq!(decide(Some("nl"), false, "unconfined"), Decision::Ask);
+    fn only_the_host_and_the_same_zone_start_without_a_person() {
+        let nl = Origin::Zone("nl".to_owned());
+        assert_eq!(decide(&nl, false, "nl"), Decision::Start);
+        assert_eq!(decide(&nl, false, "de"), Decision::Ask);
+        assert_eq!(decide(&nl, false, "unconfined"), Decision::Ask);
         assert!(matches!(
-            decide(Some("nl"), true, "unconfined"),
+            decide(&nl, true, "unconfined"),
             Decision::Refuse(_)
         ));
-        assert_eq!(decide(Some("nl"), true, "nl"), Decision::Start);
-        assert_eq!(decide(None, false, "unconfined"), Decision::Start);
+        assert_eq!(decide(&nl, true, "nl"), Decision::Start);
+        assert_eq!(decide(&Origin::Host, false, "unconfined"), Decision::Start);
+        // A system zone is never "the same zone" as a user zone of its name.
+        let system = Origin::SystemZone("nl".to_owned());
+        assert_eq!(decide(&system, false, "nl"), Decision::Ask);
+        assert_eq!(system.name(), "system:nl");
+        // Not the host and not a zone — or gone before it was looked at: no.
+        assert!(matches!(
+            decide(&Origin::Unknown, false, "unconfined"),
+            Decision::Refuse(_)
+        ));
+        assert!(matches!(
+            decide(&Origin::Unknown, false, "nl"),
+            Decision::Refuse(_)
+        ));
+    }
+
+    /// The peer of a connection is found while it lives, and a peer that has
+    /// left is nobody — not the host.
+    #[test]
+    fn a_peer_that_left_before_it_was_looked_at_is_unknown() {
+        let state = std::env::temp_dir().join(format!("vz-broker-{}", std::process::id()));
+        // Ourselves, alive, in our own namespace: the host.
+        let (a, b) = UnixStream::pair().unwrap();
+        assert_eq!(origin_of(&state, &a), Origin::Host);
+        drop((a, b));
+        // A child that connects and exits before the broker looks.
+        let dir = std::env::temp_dir().join(format!("vz-broker-sock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("s");
+        let listener = UnixListener::bind(&socket).unwrap();
+        // The address is made before the fork: the child only calls the kernel.
+        // SAFETY: sockaddr_un is plain data.
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (dst, src) in addr.sun_path.iter_mut().zip(socket.as_os_str().as_bytes()) {
+            *dst = *src as libc::c_char;
+        }
+        // SAFETY: the child makes three system calls and leaves with _exit.
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            unsafe {
+                let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+                libc::connect(
+                    fd,
+                    (&addr as *const libc::sockaddr_un).cast(),
+                    std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+                );
+                libc::_exit(0);
+            }
+        }
+        let mut status = 0;
+        // SAFETY: waiting for our own child.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        let (stream, _) = listener.accept().unwrap();
+        assert_eq!(origin_of(&state, &stream), Origin::Unknown);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

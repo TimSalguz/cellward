@@ -144,6 +144,23 @@ pub fn uplink_netns(name: &str) -> String {
     format!("vzu-{name}")
 }
 
+/// The system zone whose namespace is `netns` (`net:[…]`, as the link in
+/// `/proc/<pid>/ns/net` reads): the one `/run/netns/vz-<name>` is, which only
+/// root creates.
+pub fn zone_of_netns(netns: &str) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::read_dir("/run/netns")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .find_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let zone = name.strip_prefix("vz-")?.to_owned();
+            let meta = std::fs::metadata(entry.path()).ok()?;
+            (format!("net:[{}]", meta.ino()) == netns).then_some(zone)
+        })
+}
+
 /// `/run/netns/vz-<name>`: what services and containers are given.
 pub fn netns_path(name: &str) -> PathBuf {
     Path::new("/run/netns").join(netns(name))

@@ -45,6 +45,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **The broker refuses what it cannot place** (found by a review on
+  2026-09-24). The one door out of a hermetic zone learnt the asking zone from
+  `/proc/<peer pid>/ns/net` after reading the request — and a peer it could not
+  place was taken for the host and started without a question, `unconfined`
+  included. A program that asked and exited before the broker looked (or asked
+  from a namespace of its own) had its command run on the host, in the host's
+  network. The peer is now pinned when the connection is taken — the kernel's
+  pidfd of the very process that connected (`SO_PEERPIDFD`), a pidfd opened at
+  once on older kernels —, its namespace read only while that process lives,
+  and anything that is not the host, a zone or a system zone is refused. A
+  system zone asking is a person's question, never "the same zone" as a user
+  zone of its name.
 - **A pid is not a process: the registry and the zones keep start times.** The
   launch registry is on disk, outlives a reboot and is swept lazily, so after
   a reboot (or once numbers come round in a long session) a record's pid

@@ -211,17 +211,7 @@ fn network_of(state: &Path, ns: &str) -> Option<String> {
             return Some(name.to_string_lossy().into_owned());
         }
     }
-    for entry in fs::read_dir("/run/netns").into_iter().flatten().flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(zone) = name.strip_prefix("vz-") else {
-            continue;
-        };
-        use std::os::unix::fs::MetadataExt;
-        if fs::metadata(entry.path()).is_ok_and(|m| format!("net:[{}]", m.ino()) == ns) {
-            return Some(zone.to_owned());
-        }
-    }
-    None
+    crate::system::zone_of_netns(ns)
 }
 
 /// The launch of the process `pid`: its network by its namespace, its
