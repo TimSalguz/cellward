@@ -175,8 +175,11 @@ const PROXY_GRACE: Duration = Duration::from_millis(500);
 /// Without a filter it reaches the Secret Service through the bus — that is
 /// KWallet with every password in it — plus the window list and every other
 /// application. Only the portals and notifications get through.
-const BUS_TALK: [&str; 4] = [
-    "--talk=org.freedesktop.portal.*",
+const BUS_TALK: [&str; 5] = [
+    // By name (`zone::PORTALS`): not the Flatpak portal, which starts
+    // processes outside the sandbox.
+    crate::zone::PORTALS[0],
+    crate::zone::PORTALS[1],
     "--talk=org.freedesktop.Notifications",
     "--talk=org.kde.StatusNotifierWatcher",
     // The tray icon's own name (`zone::TRAY_ITEM_NAMES`): in a container the
@@ -717,7 +720,7 @@ pub fn bwrap_args(layout: &Layout, cmd: &[OsString]) -> Vec<OsString> {
     a.push(addr);
     push(&mut a, "--setenv");
     push(&mut a, "FLATPAK_ID");
-    push(&mut a, &layout.app_id);
+    push(&mut a, &portal_app_id(&layout.app_id));
     push(&mut a, "--setenv");
     push(&mut a, "ELECTRON_OZONE_PLATFORM_HINT");
     push(&mut a, "auto");
@@ -772,11 +775,54 @@ fn resolv_file() -> Option<PathBuf> {
     (!target.starts_with("/etc") && target.is_file()).then_some(target)
 }
 
+/// The app id a sandbox shows the portals: the program's id in a namespace of
+/// our own, `vpnzone.app.<id>`.
+///
+/// The portals take the id from `/.flatpak-info` and nothing else, and keep
+/// what the user allowed — camera, location, screencast, background, the
+/// Secret portal's key — under it. The id is the program's (`VPN_ZONE_APPID`,
+/// the launcher entry's), and a program started into a zone can name itself:
+/// with the bare id it could be `org.mozilla.firefox` and silently get what an
+/// installed Flatpak of that name was once allowed. No Flatpak lives under
+/// `vpnzone.`. Each element is made a valid one — letters, digits, `_`, a
+/// hyphen in the last only, never a leading digit.
+pub fn portal_app_id(app_id: &str) -> String {
+    let parts: Vec<&str> = app_id.split('.').filter(|p| !p.is_empty()).collect();
+    let last = parts.len().saturating_sub(1);
+    let elements: Vec<String> = parts
+        .iter()
+        .enumerate()
+        .map(|(i, part)| {
+            let mut e: String = part
+                .chars()
+                .map(|c| match c {
+                    'A'..='Z' | 'a'..='z' | '0'..='9' | '_' => c,
+                    '-' if i == last => c,
+                    _ => '_',
+                })
+                .collect();
+            if e.starts_with(|c: char| c.is_ascii_digit()) {
+                e.insert(0, '_');
+            }
+            e
+        })
+        .collect();
+    let id = if elements.is_empty() {
+        "program".to_owned()
+    } else {
+        elements.join(".")
+    };
+    let mut out = format!("vpnzone.app.{id}");
+    out.truncate(255);
+    out
+}
+
 /// The `/.flatpak-info` a toolkit looks at to decide it is sandboxed.
 ///
 /// The minimal `[Application]` section is enough to switch GTK, Qt, Chromium and
-/// Electron over to the portals.
+/// Electron over to the portals. The name is [`portal_app_id`]'s.
 pub fn flatpak_info(app_id: &str, instance: u32) -> String {
+    let app_id = portal_app_id(app_id);
     format!(
         "[Application]\n\
          name={app_id}\n\
@@ -1915,7 +1961,7 @@ mod tests {
                 "unix:path=/run/user/1000/bus",
                 "--setenv",
                 "FLATPAK_ID",
-                "discord",
+                "vpnzone.app.discord",
                 "--setenv",
                 "ELECTRON_OZONE_PLATFORM_HINT",
                 "auto",
@@ -2159,12 +2205,26 @@ mod tests {
         let text = flatpak_info("discord", 4242);
         assert_eq!(
             text,
-            "[Application]\nname=discord\n\n[Instance]\ninstance-id=4242\n\
+            "[Application]\nname=vpnzone.app.discord\n\n[Instance]\ninstance-id=4242\n\
              session-bus-proxy=true\nsystem-bus-proxy=false\n"
         );
         // The two things a toolkit actually reads.
         assert!(text.starts_with("[Application]\n"));
-        assert!(text.contains("\nname=discord\n"));
+        assert!(text.contains("\nname=vpnzone.app.discord\n"));
+    }
+
+    /// A program cannot take an installed Flatpak's id, and so its grants.
+    #[test]
+    fn the_portals_see_an_id_in_our_own_namespace() {
+        assert_eq!(
+            portal_app_id("org.mozilla.firefox"),
+            "vpnzone.app.org.mozilla.firefox"
+        );
+        assert_eq!(portal_app_id("7zip"), "vpnzone.app._7zip");
+        assert_eq!(portal_app_id("my-app.beta-1"), "vpnzone.app.my_app.beta-1");
+        assert_eq!(portal_app_id(".."), "vpnzone.app.program");
+        assert_eq!(portal_app_id("a b/c"), "vpnzone.app.a_b_c");
+        assert!(portal_app_id(&"x".repeat(400)).len() <= 255);
     }
 
     #[test]

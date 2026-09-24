@@ -55,6 +55,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **The portals by name, the sandbox's app id in a namespace of our own, no
+  background requests** (found by a review on 2026-09-24). The bus of a
+  sandbox and of a hermetic zone let through `org.freedesktop.portal.*` — a
+  subtree with `org.freedesktop.portal.Flatpak` in it, the portal that starts
+  processes outside the caller's sandbox. Only the desktop and the document
+  portals are let through now, by name. The portals know a program by the
+  `name=` of its `/.flatpak-info` and keep what the user allowed under it; the
+  name was the program's own id, which a program started into a zone can
+  choose — `org.mozilla.firefox` would have inherited an installed Flatpak's
+  camera, location, screencast or Secret grants. It is `vpnzone.app.<id>` now
+  (grants given to sandboxed programs before are asked again once).
+  `Background.RequestBackground`, with which the portal writes an autostart
+  entry on the host, is refused by the filter.
 - **The broker refuses what it cannot place** (found by a review on
   2026-09-24). The one door out of a hermetic zone learnt the asking zone from
   `/proc/<peer pid>/ns/net` after reading the request — and a peer it could not

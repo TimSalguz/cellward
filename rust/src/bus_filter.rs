@@ -60,6 +60,7 @@ use crate::sys;
 const PORTAL: &str = "org.freedesktop.portal.Desktop";
 const OPEN_URI: &str = "org.freedesktop.portal.OpenURI";
 const EMAIL: &str = "org.freedesktop.portal.Email";
+const BACKGROUND: &str = "org.freedesktop.portal.Background";
 const REQUEST: &str = "org.freedesktop.portal.Request";
 /// `Response` codes: done, and "the interaction ended some other way".
 const RESPONSE_OK: u32 = 0;
@@ -131,6 +132,9 @@ pub enum Door {
     File,
     /// `Email.ComposeEmail`.
     Email,
+    /// `Background.RequestBackground`: with `autostart` the portal writes an
+    /// autostart entry ON THE HOST, run at the next login outside every zone.
+    Background,
 }
 
 /// Is this call one the filter answers? By member and interface only: the
@@ -144,6 +148,7 @@ pub fn door(h: &Header) -> Option<Door> {
         "OpenURI" if iface_is(OPEN_URI) => Some(Door::Uri),
         "OpenFile" | "OpenDirectory" if iface_is(OPEN_URI) => Some(Door::File),
         "ComposeEmail" if iface_is(EMAIL) => Some(Door::Email),
+        "RequestBackground" if iface_is(BACKGROUND) => Some(Door::Background),
         _ => None,
     }
 }
@@ -565,6 +570,14 @@ fn answer(conn: &Conn, ctx: &Ctx, msg: &[u8], h: &Header, which: Door) -> io::Re
             );
             RESPONSE_OTHER
         }
+        Door::Background => {
+            // No note to the user: programs ask this at every start, and the
+            // answer changes nothing they can do while running.
+            eprintln!(
+                "bus-filter: RequestBackground refused — autostart would be the host's, outside the zone"
+            );
+            RESPONSE_OTHER
+        }
     };
 
     let mut fields = vec![
@@ -815,6 +828,14 @@ mod tests {
         assert_eq!(
             door(&call("ComposeEmail", Some(EMAIL), PORTAL)),
             Some(Door::Email)
+        );
+        assert_eq!(
+            door(&call("RequestBackground", Some(BACKGROUND), PORTAL)),
+            Some(Door::Background)
+        );
+        assert_eq!(
+            door(&call("RequestBackground", None, ":1.7")),
+            Some(Door::Background)
         );
         // The same member on another interface, a query, a signal: passed on.
         assert_eq!(
