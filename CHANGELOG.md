@@ -15,6 +15,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Fixed
+- **`vpn-zone-gui` is in `PATH`.** The windows were reachable only from their
+  menu entries, by a store path; a configurator opening "VPN zone containers"
+  by name (`vpn-zone-gui containers`) or a person in a terminal got
+  `No such file or directory`. It now comes as a two-line wrapper, like
+  `vpn-zone` and `vpn-zone-pick`.
 - **A home of its own looks like the desktop.** A program in a private home —
   its own container, or started at login before anything was chosen for it —
   got the toolkit's light defaults: the colours, GTK's settings and the icon
