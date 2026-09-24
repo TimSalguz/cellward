@@ -141,18 +141,39 @@ pub enum ParseError {
     EmptyKey { line: usize },
 }
 
+/// A config line as a message may show it: the key, never the value.
+fn shown(text: &str) -> String {
+    match text.split_once('=') {
+        Some((key, _)) => format!("{} = …", key.trim()),
+        None => {
+            text.chars().take(24).collect::<String>()
+                + if text.chars().count() > 24 { "…" } else { "" }
+        }
+    }
+}
+
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotUtf8 => write!(f, "config is not valid UTF-8"),
+            // The line itself only up to its key: a config holds a private
+            // key, and these messages go to logs — root's journal among them.
             Self::UnterminatedSection { line, text } => {
-                write!(f, "line {line}: section header without `]`: {text}")
+                write!(
+                    f,
+                    "line {line}: section header without `]`: {}",
+                    shown(text)
+                )
             }
             Self::EntryOutsideSection { line, text } => {
-                write!(f, "line {line}: key outside of any section: {text}")
+                write!(
+                    f,
+                    "line {line}: key outside of any section: {}",
+                    shown(text)
+                )
             }
-            Self::MissingEquals { line, text } => {
-                write!(f, "line {line}: not a `Key = value` line: {text}")
+            Self::MissingEquals { line, .. } => {
+                write!(f, "line {line}: not a `Key = value` line")
             }
             Self::EmptyKey { line } => write!(f, "line {line}: empty key"),
         }
@@ -305,9 +326,18 @@ impl WgConfig {
     /// `DNS = 10.8.1.1, fd00::1`. Entries are returned as written: wg-quick
     /// also allows search domains here, and deciding what is what is the
     /// caller's business.
+    /// The resolvers of `DNS =`: addresses only. wg-quick takes the other
+    /// entries for search domains; as a `nameserver` line one would leave no
+    /// resolver at all, and glibc falls back to 127.0.0.1 (review).
     pub fn dns(&self) -> Vec<String> {
         self.first_value("DNS")
-            .map(|v| split_list(v).into_iter().map(str::to_string).collect())
+            .map(|v| {
+                split_list(v)
+                    .into_iter()
+                    .filter(|s| s.parse::<std::net::IpAddr>().is_ok())
+                    .map(str::to_string)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -857,5 +887,11 @@ mod tests {
             WgConfig::parse(b"[Interface]\n\xff\n"),
             Err(ParseError::NotUtf8)
         );
+    }
+
+    #[test]
+    fn dns_takes_addresses_only() {
+        let cfg = WgConfig::parse(b"[Interface]\nDNS = 10.0.0.1, corp.example, fd00::1\n").unwrap();
+        assert_eq!(cfg.dns(), ["10.0.0.1", "fd00::1"]);
     }
 }

@@ -1378,6 +1378,19 @@ let
           in_zone(wpid, f"sh -c '! timeout 10 socat -T5 - TCP:{server_ip}:8090'")
           alice("vpn-zone down vmwan")
 
+      # The interface deleted under a running zone: pasta binding a socket to
+      # an interface that is gone connects it UNBOUND (review 2026-09-24), so
+      # the holder watches the interface and takes the zone down at once.
+      with subtest("host-interface zone: its interface deleted, the zone goes down"):
+          alice("vpn-zone up vmwan")
+          wpid = machine.succeed(f"cat {STATE}/vmwan/zone.pid").strip()
+          machine.succeed("ip link del vmdummy")
+          machine.wait_until_fails(f"test -e /proc/{wpid}", timeout=15)
+          machine.fail(
+              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
+              "systemctl --user is-active vpn-zone@vmwan'"
+          )
+
       with subtest("host-interface zone: a missing interface refuses to come up"):
           alice("printf '[HostInterface]\\nInterface = nosuchif0\\n' > /tmp/vmnone.conf")
           alice("vpn-zone add vmnone /tmp/vmnone.conf")

@@ -642,6 +642,9 @@ pub fn run(args: Args) -> u8 {
     // believe this zone is already up.
     let _ = fs::remove_file(zone.path(PID));
     let _ = fs::remove_file(zone.path(START));
+    // And the previous run's liveness: shown until this run's first write,
+    // it said "connected" of a tunnel not there yet (review).
+    let _ = fs::remove_file(zone.path(STATUS));
     let _ = fs::remove_file(zone.path(UPLINK_PID));
     let _ = fs::remove_file(zone.path(READY));
 
@@ -1218,11 +1221,43 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
             .args(PASTA_CLOSED)
             .spawn()
         {
-            Ok(child) => {
+            Ok(mut child) => {
                 PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
-                pasta = Some(child);
-                if let Err(e) = tell_the_zone(moved_w, TOOL_HOSTIF) {
-                    eprintln!("zone {}: {e}", zone.name());
+                // The interface deleted or renamed: pasta down at once, and the
+                // zone with it — not TCP by the host's routes (hostif.rs).
+                let name = zone.name().to_string();
+                let interface = host.interface.clone();
+                let held = sys::pidfd_open(child.id() as i32);
+                let watched = held
+                    .ok_or_else(|| io::Error::other("no pidfd"))
+                    .and_then(|fd| {
+                        hostif::watch_interface(&host.interface, move || {
+                            eprintln!(
+                            "zone {name}: {interface} is gone — the zone goes down rather than \
+                             out by the host's routes"
+                        );
+                            sys::pidfd_signal(&fd, libc::SIGKILL);
+                        })
+                    });
+                match watched {
+                    Ok(()) => {
+                        pasta = Some(child);
+                        if let Err(e) = tell_the_zone(moved_w, TOOL_HOSTIF) {
+                            eprintln!("zone {}: {e}", zone.name());
+                        }
+                    }
+                    Err(e) => {
+                        // Unwatched, the day the interface goes the zone leaks:
+                        // it does not come up (EOF instead of the byte).
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        drop(moved_w);
+                        eprintln!(
+                            "zone {}: cannot watch {} ({e}) — the zone has no way out",
+                            zone.name(),
+                            host.interface
+                        );
+                    }
                 }
             }
             Err(e) => {
@@ -1612,6 +1647,14 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
         "",
     )
     .map_err(|e| format!("cannot make the mount tree private: {e}"))?;
+    // The host's resolvers are not the uplink's either: a whole third-party
+    // client runs here (OpenConnect), and a name it looks up — a redirect, a
+    // portal's gateway list — would be asked of the host's resolved over its
+    // socket, in the host's network (review 2026-09-24). The endpoint was
+    // resolved before this namespace existed; nothing here needs a resolver.
+    for group in RESOLVER_DIRS {
+        hide_first(group)?;
+    }
 
     // SAFETY: getpid(2) takes no arguments and cannot fail.
     let pid = unsafe { libc::getpid() };
@@ -2991,7 +3034,17 @@ fn start_status_mirror(zone: &Zone, mirror: Mirror) {
                     .then(|| fs::read_to_string(format!("/proc/self/fd/{}/status", (*dir)?)).ok())
                     .flatten()
                     .filter(|t| !t.trim().is_empty());
-                Some(tunnel.unwrap_or(own))
+                // Our link up and the system zone's tunnel saying nothing — it
+                // is stopped, or restarting: not "connected" (review; the file
+                // is deleted on down and on restart).
+                Some(match tunnel {
+                    Some(tunnel) => tunnel,
+                    None if own.contains("connected: yes") => format!(
+                        "interface: {TUN_IFACE}\n  backend: system zone {system}\n  \
+                         disconnected: the system zone's tunnel says nothing\n"
+                    ),
+                    None => own,
+                })
             }
         };
         if let Some(text) = text {

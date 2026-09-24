@@ -496,7 +496,10 @@ let
         description = "Дом контейнера: private — свой пустой дом (песочница), overlay — слой над XDG-каталогами настоящего дома.";
       };
       network = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
+        # Имя зоны (латиница, цифры, _ и -, не с дефиса), ask, offline,
+        # unconfined или direct: что-то другое не привязало бы ни к чему —
+        # CLI молча брал бы локальное значение (review 2026-09-24).
+        type = lib.types.nullOr (lib.types.strMatching "[A-Za-z0-9_][A-Za-z0-9_-]*");
         default = null;
         example = "offline";
         description = "Сеть контейнера: имя зоны, unconfined (без ограничений: сеть хоста, без VPN и без изоляции зоны; прежнее имя direct тоже принимается) или offline. Запуск в другой сети — отказ. null — сеть не задана в Nix и меняется локально (`vpn-zone container set`).";
@@ -591,7 +594,10 @@ in
 
     defaults = {
       network = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
+        # Имя зоны (латиница, цифры, _ и -, не с дефиса), ask, offline,
+        # unconfined или direct: что-то другое не привязало бы ни к чему —
+        # CLI молча брал бы локальное значение (review 2026-09-24).
+        type = lib.types.nullOr (lib.types.strMatching "[A-Za-z0-9_][A-Za-z0-9_-]*");
         default = null;
         example = "offline";
         description = "Сеть, которую пикер предлагает незнакомой программе: offline, unconfined (без ограничений: сеть хоста, без VPN и без изоляции зоны; прежнее имя direct тоже принимается) или имя зоны. null — не задавать из Nix (`vpn-zone default`).";
@@ -675,7 +681,7 @@ in
     compositorRestriction.enable = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
-      description = "Отбирать ли у программ захват экрана, фоновый буфер обмена и эмуляцию ввода. null — не задавать из Nix (по умолчанию включено).";
+      description = "Отбирать ли у программ захват экрана, фоновый буфер обмена и эмуляцию ввода (сокет композитора с wp_security_context). false — программы, в том числе в песочнице и в сети unconfined, получают сырой сокет композитора: захват экрана, эмуляцию ввода и список окон — это выход из песочницы через рабочий стол, а не только потеря приватности. null — не задавать из Nix (по умолчанию включено).";
     };
 
     desktop = {
@@ -777,39 +783,46 @@ in
     (lib.mkIf cfg.desktop.sway.enable {
       "sway/vpn-zones.conf".text = swaySnippet;
     })
+  ];
+
+  # Объявленное — в ~/.config/vpn-zones/declared, а не в xdg.configHome: CLI,
+  # держатель и генератор ярлыков читают именно этот путь, и при своём
+  # xdg.configHome объявленное молча не применялось бы — привязки контейнеров
+  # к сетям тоже (review 2026-09-24).
+  home.file = lib.mkMerge [
     (lib.mkIf (cfg.defaults.network != null) {
-      "vpn-zones/declared/default".text = cfg.defaults.network;
+      ".config/vpn-zones/declared/default".text = cfg.defaults.network;
     })
     (lib.mkIf (cfg.defaults.container != null) {
-      "vpn-zones/declared/default-profile".text = cfg.defaults.container;
+      ".config/vpn-zones/declared/default-profile".text = cfg.defaults.container;
     })
     (lib.mkIf (cfg.launcher.mode != null) {
-      "vpn-zones/declared/mode".text = cfg.launcher.mode;
+      ".config/vpn-zones/declared/mode".text = cfg.launcher.mode;
     })
     (lib.mkIf (cfg.zoneX11 != [ ]) {
-      "vpn-zones/declared/zone-x11".text = lib.concatStringsSep "\n" cfg.zoneX11 + "\n";
+      ".config/vpn-zones/declared/zone-x11".text = lib.concatStringsSep "\n" cfg.zoneX11 + "\n";
     })
     (lib.mkIf (cfg.hermetic.default != null) {
-      "vpn-zones/declared/hermetic-default".text = if cfg.hermetic.default then "on" else "off";
+      ".config/vpn-zones/declared/hermetic-default".text = if cfg.hermetic.default then "on" else "off";
     })
     (lib.mkIf (cfg.hermetic.exceptions != [ ]) {
-      "vpn-zones/declared/hermetic-exceptions".text =
+      ".config/vpn-zones/declared/hermetic-exceptions".text =
         lib.concatStringsSep "\n" cfg.hermetic.exceptions + "\n";
     })
     (lib.mkIf cfg.pathShims.enable {
-      "vpn-zones/declared/path-shims".text = "on";
+      ".config/vpn-zones/declared/path-shims".text = "on";
     })
     (lib.mkIf (cfg.autostart.unassigned != null) {
-      "vpn-zones/declared/autostart".text = cfg.autostart.unassigned;
+      ".config/vpn-zones/declared/autostart".text = cfg.autostart.unassigned;
     })
     (lib.mkIf (cfg.interception.userEntries != null) {
-      "vpn-zones/declared/user-entries".text = cfg.interception.userEntries;
+      ".config/vpn-zones/declared/user-entries".text = cfg.interception.userEntries;
     })
     (lib.mkIf (cfg.compositorRestriction.enable != null) {
-      "vpn-zones/declared/wayland-sandbox".text = if cfg.compositorRestriction.enable then "on" else "off";
+      ".config/vpn-zones/declared/wayland-sandbox".text = if cfg.compositorRestriction.enable then "on" else "off";
     })
     (lib.mapAttrs' (
-      name: c: lib.nameValuePair "vpn-zones/declared/containers/${c.home}-${name}.conf" { text = renderContainer name c; }
+      name: c: lib.nameValuePair ".config/vpn-zones/declared/containers/${c.home}-${name}.conf" { text = renderContainer name c; }
     ) cfg.containers)
   ];
 

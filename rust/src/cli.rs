@@ -830,7 +830,7 @@ fn check(tools: &Tools, args: &[OsString]) -> u8 {
         println!("перезапусти её: vpn-zone down {name_text} && vpn-zone up {name_text}");
         return 3;
     };
-    match liveness_line(&mirror) {
+    match alive_line(&tools.state.join(name), &mirror) {
         Some(line) => {
             println!("зона {name_text}: туннель живой ({line})");
             0
@@ -840,6 +840,33 @@ fn check(tools: &Tools, args: &[OsString]) -> u8 {
             1
         }
     }
+}
+
+/// [`liveness_line`], unless `vpn-zone watch` found this run of the zone's
+/// tunnel dead at its last look.
+///
+/// A handshake line says only that there WAS one: an idle tunnel's is hours
+/// old and fine, a dead one's is hours old too. `watch` tells them apart by
+/// age and counters, a minute at a time; a verdict older than the zone's
+/// current start is about a previous run and is not read (review 2026-09-24:
+/// `check`, `status --json` and `doctor` said "alive" of a dead tunnel).
+pub fn alive_line(zone_dir: &Path, mirror: &str) -> Option<String> {
+    let line = liveness_line(mirror)?;
+    let (Some(name), Some(state)) = (zone_dir.file_name(), zone_dir.parent()) else {
+        return Some(line);
+    };
+    let memory = state.join(crate::watch::WATCH_DIR).join(name);
+    let modified = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    let about_this_run = match (modified(&memory), modified(&zone_dir.join("zone.pid"))) {
+        (Some(verdict), Some(started)) => verdict >= started,
+        _ => false,
+    };
+    let dead = about_this_run
+        && fs::read_to_string(&memory)
+            .ok()
+            .and_then(|t| crate::watch::parse_memory(&t))
+            .is_some_and(|(_, v)| v == crate::watch::Verdict::Dead);
+    (!dead).then_some(line)
 }
 
 /// The line of the status mirror that says the tunnel is alive, whichever
@@ -2345,6 +2372,30 @@ fn run_sync(tools: &Tools) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A handshake line is "alive" unless watch found THIS run of the tunnel
+    /// dead; a verdict from before the zone's start is not read.
+    #[test]
+    fn a_tunnel_watch_found_dead_is_not_alive() {
+        let state = std::env::temp_dir().join(format!("vz-alive-{}", std::process::id()));
+        let dir = state.join("nl");
+        fs::create_dir_all(state.join(crate::watch::WATCH_DIR)).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let mirror = "peer: p\n  latest handshake: 3 hours ago\n";
+        let memory = state.join(crate::watch::WATCH_DIR).join("nl");
+        // A verdict from before this run...
+        fs::write(&memory, "10 10 dead\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(dir.join("zone.pid"), "1\n").unwrap();
+        assert!(alive_line(&dir, mirror).is_some());
+        // ...and one about it.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&memory, "10 10 dead\n").unwrap();
+        assert!(alive_line(&dir, mirror).is_none());
+        fs::write(&memory, "10 10 alive\n").unwrap();
+        assert!(alive_line(&dir, mirror).is_some());
+        let _ = fs::remove_dir_all(&state);
+    }
 
     /// `zone.pid` outlives a stopped zone; with the holder's start time beside
     /// it, a number that went to another process is not the zone.

@@ -30,7 +30,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::cli::{liveness_line, visible_entries, zone_pid};
+use crate::cli::{visible_entries, zone_pid};
 use crate::status::string as json_string;
 use crate::tools::Tools;
 
@@ -796,7 +796,7 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     }
     if !offline {
         checks.push(match fs::read_to_string(dir.join("status")) {
-            Ok(mirror) => match liveness_line(&mirror) {
+            Ok(mirror) => match crate::cli::alive_line(&dir, &mirror) {
                 Some(line) => Check::new("tunnel", Level::Ok, format!("туннель живой ({line})")),
                 None => Check::new(
                     "tunnel",

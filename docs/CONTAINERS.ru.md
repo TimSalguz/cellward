@@ -441,39 +441,41 @@ programs.vpn-zones = {
 
   launcher.mode = "picker";              # picker | per-zone (устарел) | both (устарел) | off
   defaults = {
-    network = "offline";                 # offline | unconfined | <сеть>
+    network = "offline";                 # offline | unconfined | <зона>
     container = "own";                   # own | ask | main | <контейнер>
   };
   compositorRestriction.enable = true;
-
-  networks.lan-uplink = {                # зоны локальны (ключи); это вид без root
-    kind = "host-interface";
-    interface = "enp4s0";
-  };
+  hermetic.default = true;               # и hermetic.exceptions = [ "<зона>" ]
+  zoneX11 = [ ];                         # зоны, чьим программам — свой X-сервер
 
   containers.work = {
     home = "private";                    # private | overlay
-    network = "nl";                      # <зона> | <сеть> | unconfined | offline | "ask"
-    routes = [ ];                        # например [ "192.168.1.0/24" ] — явные дыры
+    network = "nl";                      # <зона> | unconfined | offline | ask
     apps = [ "firefox" "org.telegram.desktop" ];
     permissions = {
-      filesystem = [ "downloads" ];      # downloads | documents | pictures | home
-      paths = [ ];                       # например [ "~/.wine" ]
+      paths = [ ];                       # напр. [ "~/.wine" ] — только своему дому
       x11 = false;
     };
     trust = {                            # CERTIFICATES.ru.md
       certificates = [ ./certs/some-root-ca.pem ];
-      acknowledgeRisk = true;            # обязательно при непустом certificates
+      acknowledgeRisk = true;            # обязательно, если certificates не пуст
     };
   };
 
-  autostart.unassigned = "offline";      # offline (без диалога, с уведомлением) | as-is
-  interception = {
-    dbusActivation = true;
-    userEntries = "take-over";           # take-over | leave — LAUNCHERS.ru.md §3.2
+  autostart.unassigned = "ask";          # ask (по умолчанию) | offline | as-is
+  interception.userEntries = "take-over";  # take-over | leave — LAUNCHERS.ru.md §3.2
+  desktop = {                            # клавиша меню окна и правило наших окон
+    windowMenu.key = null;               # напр. "Mod+Shift+V", запись niri
+    niri.enable = false;
+    sway.enable = false;
   };
 };
 ```
+
+Зона через интерфейс хоста — такая же зона, из файла `[HostInterface]` через
+`vpn-zone add`, не опция. Именованных дополнительных маршрутов рядом с сетью и
+готовых наборов каталогов (`downloads`, `documents`) нет: своему дому выдаётся
+`permissions.paths`.
 
 - Сами зоны не декларируются: конфиг зоны — это приватный ключ, в Nix store ему
   не место никогда. Декларативный контейнер, названный на несуществующую сеть, —

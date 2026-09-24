@@ -767,6 +767,10 @@ fn serve_any(sock: RawFd) -> Result<Vec<u8>, String> {
     set_recv_timeout(sock, REQUEST_WAIT);
     let (data, fds) = sys::recv_with_fds(sock, MAX_REQUEST, 3)
         .map_err(|e| format!("cannot read the request: {e}"))?;
+    // The request is in: from here the connection is the command's life, and
+    // a wait on it must not end after five seconds (review: every command was
+    // hung up then — the watcher took the timeout for the client leaving).
+    set_recv_timeout(sock, Duration::ZERO);
     if system::is_off() {
         // The zones are down and stay down (their units check the same
         // flag): say so, rather than "the zone did not come up".
@@ -1062,7 +1066,10 @@ fn spawn_uplink_pasta(
     // listening in the system zone was reachable from the user zone).
     let (uid, gid) = (
         user.uid,
-        crate::egress::group_id(BRIDGE_GROUP).unwrap_or(user.gid),
+        // Without that group the system zone's refusal of it never applies:
+        // no uplink, rather than one into the system zone (review).
+        crate::egress::group_id(BRIDGE_GROUP)
+            .ok_or_else(|| format!("the group {BRIDGE_GROUP} is missing — no uplink without it"))?,
     );
     let pasta = std::env::var_os(ENV_PASTA).unwrap_or_else(|| "pasta".into());
     let mut cmd = Command::new(pasta);
@@ -1401,8 +1408,16 @@ fn serve_add(uid: u32, request: &AddRequest) -> Result<Done, String> {
     let local = system::local_dir(zone);
     fs::create_dir_all(&local).map_err(|e| format!("cannot create {}: {e}", local.display()))?;
     if !request.plain {
-        crate::zone::write_private(&local.join("config.conf"), &request.config)
-            .map_err(|e| format!("cannot write the config: {e}"))?;
+        crate::zone::write_private(
+            &local.join("config.conf"),
+            system::without_listen_port(&String::from_utf8_lossy(&request.config)).as_bytes(),
+        )
+        .map_err(|e| format!("cannot write the config: {e}"))?;
+    }
+    if existing.as_ref().is_some_and(|s| s.declared) {
+        // A declared user wrote this config: it is the declared zone's now,
+        // whoever added one of that name on the spot before (`system::settings`).
+        let _ = fs::remove_file(local.join("users"));
     }
     if !existing.as_ref().is_some_and(|s| s.declared) {
         let kind = if request.plain { "plain\n" } else { "tunnel\n" };
@@ -1441,12 +1456,18 @@ fn serve(sock: RawFd, uid: u32, data: &[u8], fds: Vec<OwnedFd>) -> Result<u8, St
         // tunnel; root has `ip netns exec` anyway.
         return Err("root does not go through here — `ip netns exec` is root's".to_owned());
     }
-    let user = user_of(uid)?;
+    let mut user = user_of(uid)?;
     if !allowed_users(&zone).contains(&user.name) {
         return Err(format!(
             "{} may not run programs in the system zone {zone}",
             user.name
         ));
+    }
+    // Not the group that opens this service's socket: from inside a zone the
+    // command must not ask for another one (the tmpfs over /run/vpn-zones in
+    // `seal_mounts` hides the socket as well).
+    if let Some(gid) = crate::egress::group_id("vpn-zones") {
+        user.groups.retain(|g| *g != gid);
     }
     if fds.len() != request.mode.fds() {
         return Err("the descriptors do not match the mode".to_owned());
@@ -1456,8 +1477,10 @@ fn serve(sock: RawFd, uid: u32, data: &[u8], fds: Vec<OwnedFd>) -> Result<u8, St
     let runtime = Path::new("/run/user").join(uid.to_string());
     let runtime = runtime.is_dir().then_some(runtime);
     let env = child_env(&request.env, &user, &zone, runtime.as_deref());
+    // Debug-quoted: a program name with a line break in it would forge a
+    // line of root's journal.
     println!(
-        "sysrun: {} runs {} in the system zone {zone}",
+        "sysrun: {} runs {:?} in the system zone {zone}",
         user.name,
         request.argv[0].to_string_lossy()
     );
@@ -1484,17 +1507,29 @@ fn serve(sock: RawFd, uid: u32, data: &[u8], fds: Vec<OwnedFd>) -> Result<u8, St
     }
     drop(launch);
 
-    // The client gone means nobody wants the command any more.
+    // The client gone means nobody wants the command any more: the end of the
+    // stream or a reset — not an interrupted or timed-out wait, and not a byte
+    // it sent after the request.
     thread::spawn(move || {
         let mut byte = [0u8; 1];
-        // SAFETY: a valid descriptor and a buffer of the length given.
-        let n = unsafe { libc::recv(sock, byte.as_mut_ptr().cast(), 1, 0) };
-        if n <= 0 {
-            // SAFETY: the child's process group — it made itself a session.
-            unsafe {
-                libc::kill(-pid, libc::SIGHUP);
-                libc::kill(-pid, libc::SIGTERM);
+        loop {
+            // SAFETY: a valid descriptor and a buffer of the length given.
+            let n = unsafe { libc::recv(sock, byte.as_mut_ptr().cast(), 1, 0) };
+            if n > 0 {
+                continue;
             }
+            if n < 0 {
+                let err = io::Error::last_os_error().raw_os_error();
+                if matches!(err, Some(libc::EINTR | libc::EAGAIN)) {
+                    continue;
+                }
+            }
+            break;
+        }
+        // SAFETY: the child's process group — it made itself a session.
+        unsafe {
+            libc::kill(-pid, libc::SIGHUP);
+            libc::kill(-pid, libc::SIGTERM);
         }
     });
     let mut status = 0;
@@ -1540,6 +1575,25 @@ fn become_the_command(launch: &Launch) -> String {
     // SAFETY: a descriptor of /run/netns/vz-<zone>.
     if unsafe { libc::setns(launch.netns.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
         return format!("cannot enter the zone: {}", io::Error::last_os_error());
+    }
+    // Nothing but the three standard descriptors goes into the command: the
+    // connection systemd passed is fd 3, and with it the command could answer
+    // its own client in the service's name (review). Marked close-on-exec,
+    // so the ones still needed until the exec stay usable.
+    // SAFETY: close_range(2) takes numbers and flags only.
+    if unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3u32,
+            u32::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    } != 0
+    {
+        return format!(
+            "cannot close the service's descriptors: {}",
+            io::Error::last_os_error()
+        );
     }
     if let Err(e) = seal_mounts(launch) {
         return e;
@@ -1618,6 +1672,41 @@ fn seal_mounts(launch: &Launch) -> Result<(), String> {
         );
         sys::mount(OsStr::new("tmpfs"), dir, "tmpfs", 0, &options)
             .map_err(|e| format!("cannot hide the session's sockets: {e}"))?;
+    }
+    // This service's own socket: a command in one zone asking for another
+    // (review) — the same cover a user zone gets.
+    let tier = Path::new("/run/vpn-zones");
+    if tier.is_dir() {
+        sys::mount(OsStr::new("tmpfs"), tier, "tmpfs", 0, "mode=0755,size=16k")
+            .map_err(|e| format!("cannot hide the system tier's socket: {e}"))?;
+    }
+    // Temporary directories of its own: the host's /tmp holds the session's
+    // listening sockets — X11, tmux, singletons —, and the user's uid gets
+    // through their peer checks (review).
+    for dir in ["/tmp", "/var/tmp", "/dev/shm"] {
+        let dir = Path::new(dir);
+        if dir.is_dir() {
+            sys::mount(
+                OsStr::new("tmpfs"),
+                dir,
+                "tmpfs",
+                libc::MS_NOSUID | libc::MS_NODEV,
+                "mode=1777,size=512m",
+            )
+            .map_err(|e| format!("cannot give {} of its own: {e}", dir.display()))?;
+        }
+    }
+    // The Nix daemon builds and fetches in the host's network.
+    let daemon = Path::new("/nix/var/nix/daemon-socket");
+    if daemon.is_dir() {
+        sys::mount(
+            OsStr::new("tmpfs"),
+            daemon,
+            "tmpfs",
+            0,
+            "mode=0755,size=16k",
+        )
+        .map_err(|e| format!("cannot hide the Nix daemon: {e}"))?;
     }
     Ok(())
 }
