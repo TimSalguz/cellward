@@ -110,6 +110,7 @@ pub mod sysuplink;
 pub mod tools;
 pub mod trust;
 pub mod watch;
+pub mod window;
 pub mod wl_sandbox;
 pub mod x11;
 pub mod zone;

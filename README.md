@@ -113,9 +113,12 @@ Check the compositor:
 wayland-info | grep -i security_context   # the protocol is there
 ```
 
-`kdialog` is installed by the module itself, so no KDE session is needed —
-only the binary. A zenity/kdialog abstraction is on the roadmap (M6), and so is
-naming the degraded layer in `vpn-zone doctor` instead of on stderr alone.
+The picker asks in a window of its own, `vpn-zone-window` (the network and the
+container side by side, keyboard-driven, the system's light or dark scheme);
+the other dialogs are `kdialog`, installed by the module itself, so no KDE
+session is needed — only the binary. Where the window is missing the picker
+asks with `kdialog` too. Naming the degraded layer in `vpn-zone doctor` instead
+of on stderr alone is on the roadmap.
 
 ## Installation
 

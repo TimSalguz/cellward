@@ -1,0 +1,30 @@
+[package]
+name = "vpn-zone-window"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The launch window of vpn-zones: the network and the container of a program, side by side"
+publish = false
+
+# A crate of its own, not a member of rust/: the toolkit is large, and the core
+# of vpn-zones (holders, sandboxes, the picker) must not grow by it. The picker
+# runs this binary the way it runs kdialog (`vpn-zone::window` is the
+# contract) and asks with kdialog where it is missing.
+[dependencies]
+# Software rendering (tiny-skia) only: the window opens at every launch, and a
+# GPU context costs more than the window itself. The system's colour scheme
+# decides light or dark (linux-theme-detection).
+iced = { version = "0.14", default-features = false, features = [
+    "tiny-skia",
+    "crisp",
+    "thread-pool",
+    "fira-sans",
+    "linux-theme-detection",
+    "wayland",
+    "x11",
+] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = true

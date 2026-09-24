@@ -51,6 +51,7 @@ use crate::launch::{self, basename, is_assignment};
 use crate::profile::{exec_command, proc_is_alive, EXIT_NOT_STARTED};
 use crate::registry;
 use crate::tools::Tools;
+use crate::window;
 
 /// Force the dialog even for a pinned program.
 pub const ENV_ASK: &str = "VPN_ZONE_ASK";
@@ -741,6 +742,215 @@ pub fn profile_menu(
     menu
 }
 
+// --- THE LAUNCH WINDOW (`crate::window`) -------------------------------------
+
+/// The network column: the menu's choices, once — "always" is a checkbox now.
+pub fn window_nets(zones: &[MenuZone], selected: &str) -> Vec<window::Item> {
+    net_menu(zones, "", "")
+        .into_iter()
+        .take_while(|(tag, _)| !tag.starts_with("pin:"))
+        .map(|(tag, label)| {
+            let dead = zones.iter().any(|z| z.name == tag && z.dead);
+            let label = label
+                .strip_suffix(" — туннель не отвечает")
+                .map(str::to_owned)
+                .unwrap_or(label);
+            window::Item {
+                selected: tag == selected,
+                dead,
+                tag,
+                label,
+                ..window::Item::default()
+            }
+        })
+        .collect()
+}
+
+/// The container column: what the container menu offers, once each.
+/// `current` is the selector in force (pinned, set, or the last one).
+pub fn window_containers(
+    key: &str,
+    sandboxes: &[String],
+    profiles: &[ProfileRow],
+    tmp_joins: &[TmpJoinRow],
+    current: &str,
+) -> Vec<window::Item> {
+    let item = |tag: &str, label: &str| window::Item {
+        tag: tag.to_owned(),
+        label: label.to_owned(),
+        ..window::Item::default()
+    };
+    let own = format!("{SANDBOX_PREFIX}app-{key}");
+    let mut items = vec![
+        item("", "Основной (общий с системой)"),
+        item(
+            "__ownsb__",
+            "Своя песочница — постоянный дом только этой программы",
+        ),
+        item(THROWAWAY, "Разовая песочница — стирается при выходе"),
+    ];
+    for name in sandboxes {
+        if format!("{SANDBOX_PREFIX}{name}") == own {
+            continue;
+        }
+        items.push(item(
+            &format!("{SANDBOX_PREFIX}{name}"),
+            &format!("Песочница «{name}»"),
+        ));
+    }
+    for profile in profiles {
+        let mut it = item(&profile.name, &format!("Профиль {}", profile.name));
+        it.busy = Some(profile.busy_in.clone()).filter(|z| !z.is_empty());
+        items.push(it);
+    }
+    for join in tmp_joins {
+        items.push(item(
+            &format!("{TMPJOIN_PREFIX}{}", join.dir),
+            &format!("К открытому временному:{}", join.who),
+        ));
+    }
+    items.push(item(
+        TMP,
+        "Новый временный — сотрётся, когда выйдет последняя программа",
+    ));
+    let mut new_sandbox = item("__newsb__", "Новая песочница…");
+    new_sandbox.new = true;
+    items.push(new_sandbox);
+    let mut new_profile = item("__new__", "Новый профиль…");
+    new_profile.new = true;
+    items.push(new_profile);
+
+    let selected = match current {
+        "" | MAIN => "",
+        c if c == own => "__ownsb__",
+        c => c,
+    };
+    let mut found = false;
+    for it in &mut items {
+        it.selected = !found && it.tag == selected;
+        found |= it.selected;
+    }
+    if !found {
+        items[0].selected = true;
+    }
+    items
+}
+
+/// A container answer of the window as the menu would have said it, with its
+/// pin: the menu had an "— всегда" row where the window has a checkbox.
+pub fn window_container_choice(tag: &str, pin: bool) -> ProfileChoice {
+    match tag {
+        _ if !pin => parse_profile_choice(tag),
+        "" => parse_profile_choice("pinmain"),
+        TMP | "__newsb__" | "__new__" => parse_profile_choice(tag),
+        t if t.starts_with(TMPJOIN_PREFIX) => parse_profile_choice(t),
+        t => parse_profile_choice(&format!("pin:{t}")),
+    }
+}
+
+/// The launch window instead of the two menus. `None`: there is no window to
+/// show — none installed, or it would not start — and kdialog asks.
+/// `Some(None)`: the window was closed, and the launch is over. Otherwise the
+/// network and the container, with their pins already written.
+fn ask_window(
+    tools: &Tools,
+    key: &str,
+    label: &str,
+    default_net: &str,
+    memory: &Memory,
+) -> Option<Option<(String, Container)>> {
+    if tools.window.as_os_str().is_empty() {
+        return None;
+    }
+    let running = tools.state.join(".running");
+    let profiles: Vec<ProfileRow> = menu_names(&tools.profiles)
+        .into_iter()
+        .map(|name| {
+            let busy_in = live_tenant(&tools.profiles.join(&name).join("inuse"))
+                .or_else(|| registry::live_zone(&running.join(&name), &proc_is_alive))
+                .unwrap_or_default();
+            ProfileRow { name, busy_in }
+        })
+        .collect();
+    // In force: the pin, then the global setting, then the last choice.
+    let current = if !memory.pinned_profile.is_empty() {
+        memory.pinned_profile.clone()
+    } else {
+        match memory.default_profile.as_str() {
+            "ask" => memory.last_profile.clone(),
+            "main" => String::new(),
+            "own" => format!("{SANDBOX_PREFIX}app-{key}"),
+            name => name.to_owned(),
+        }
+    };
+    let req = window::Request {
+        title: format!("Запуск: {label}"),
+        notes: Vec::new(),
+        nets: window_nets(&menu_zones(&tools.state), default_net),
+        containers: window_containers(
+            key,
+            &menu_names(&tools.sandboxes),
+            &profiles,
+            &open_throwaways(&running),
+            &current,
+        ),
+        pin_net: !memory.pinned.is_empty(),
+        pin_container: !memory.pinned_profile.is_empty(),
+    };
+
+    let mut child = Command::new(&tools.window)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = std::io::Write::write_all(&mut stdin, window::render(&req).as_bytes());
+    }
+    // From here on a failure is a close, never the menus on top of a window
+    // the person has already answered.
+    let Ok(out) = child.wait_with_output() else {
+        return Some(None);
+    };
+    if !out.status.success() {
+        return Some(None);
+    }
+    let Some(reply) = window::parse_reply(&String::from_utf8_lossy(&out.stdout)) else {
+        return Some(None);
+    };
+    // Only what was offered: an answer from outside the list starts nothing.
+    let offered_net = req.nets.iter().any(|n| n.tag == reply.net);
+    let offered_container = req.containers.iter().any(|c| c.tag == reply.container);
+    if !offered_net || !offered_container {
+        eprintln!("vpn-zone-pick: окно запуска ответило тем, чего не предлагали — не запускаю");
+        return Some(None);
+    }
+
+    if reply.pin_net {
+        remember(&tools.state, ".pinned", key, &reply.net);
+    } else if !memory.pinned.is_empty() {
+        let _ = fs::remove_file(tools.state.join(".pinned").join(key));
+    }
+    remember(&tools.state, ".last", key, &reply.net);
+
+    if !reply.pin_container && !memory.pinned_profile.is_empty() {
+        let _ = fs::remove_file(tools.state.join(".pinnedprofile").join(key));
+    }
+    let is_new = matches!(reply.container.as_str(), "__newsb__" | "__new__");
+    let choice = window_container_choice(&reply.container, reply.pin_container);
+    let Some(container) = apply_profile_choice(tools, key, choice, reply.name.clone()) else {
+        return Some(None);
+    };
+    let selector = container.selector();
+    if is_new && reply.pin_container {
+        remember(&tools.state, ".pinnedprofile", key, &selector);
+    }
+    if !container.is_throwaway_container() {
+        remember(&tools.state, ".lastprofile", key, &selector);
+    }
+    Some(Some((reply.net, container)))
+}
+
 // --- WHAT CAME BACK ----------------------------------------------------------
 
 /// The answer to the network dialog.
@@ -947,6 +1157,16 @@ pub fn main() -> ExitCode {
             asksolo = ask_container;
         }
         NetStep::Ask { default } => {
+            // One window for both questions, where there is one.
+            if launch::has_display() {
+                match ask_window(&tools, &key, &label, &default, &memory) {
+                    Some(Some((zone, container))) => {
+                        return launch(&tools, &key, &zone, &container, &args.cmd)
+                    }
+                    Some(None) => return ExitCode::SUCCESS,
+                    None => {}
+                }
+            }
             let current = if memory.pinned_profile.is_empty() {
                 &memory.last_profile
             } else {
@@ -1030,6 +1250,17 @@ pub fn main() -> ExitCode {
     // The second question — the container. It is not asked when one is pinned
     // separately or set globally (`vpn-zone default-profile`).
     let container = if asksolo {
+        // The network is pinned and the container is asked: the same window,
+        // the pinned network chosen and its checkbox ticked.
+        if launch::has_display() {
+            match ask_window(&tools, &key, &label, &zone_choice, &memory) {
+                Some(Some((zone, container))) => {
+                    return launch(&tools, &key, &zone, &container, &args.cmd)
+                }
+                Some(None) => return ExitCode::SUCCESS,
+                None => {}
+            }
+        }
         let Some(container) = ask_profile(&tools, &key, &label, &zone_choice, &memory) else {
             return ExitCode::SUCCESS;
         };
@@ -1317,9 +1548,20 @@ fn ask_profile(
         ),
     );
     let answer = dialog::ask(&tools.kdialog, &argv)?;
+    apply_profile_choice(tools, key, parse_profile_choice(&answer), None)
+}
 
+/// A container choice made real: its pin written, a new sandbox or profile
+/// created. `new_name` is the new one's name when the launch window already
+/// asked for it; without it kdialog asks, as the menu always did.
+fn apply_profile_choice(
+    tools: &Tools,
+    key: &str,
+    choice: ProfileChoice,
+    new_name: Option<String>,
+) -> Option<Container> {
     let pin = |selector: &str| remember(&tools.state, ".pinnedprofile", key, selector);
-    match parse_profile_choice(&answer) {
+    match choice {
         ProfileChoice::Main { pin: false } => Some(Container::default()),
         ProfileChoice::Main { pin: true } => {
             // "Основной — всегда": pinned separately from the network.
@@ -1352,16 +1594,19 @@ fn ask_profile(
             })
         }
         ProfileChoice::NewSandbox => {
-            let name = dialog::ask(
-                &tools.kdialog,
-                [
-                    "--title",
-                    "Новая песочница",
-                    "--inputbox",
-                    "Название песочницы. У неё будет свой пустой дом, общий для всех программ, которые ты в ней запустишь.",
-                    "",
-                ],
-            )?;
+            let name = match new_name {
+                Some(name) => name,
+                None => dialog::ask(
+                    &tools.kdialog,
+                    [
+                        "--title",
+                        "Новая песочница",
+                        "--inputbox",
+                        "Название песочницы. У неё будет свой пустой дом, общий для всех программ, которые ты в ней запустишь.",
+                        "",
+                    ],
+                )?,
+            };
             let name = sanitize_name(&name);
             if name.is_empty() {
                 return Some(Container::default());
@@ -1393,16 +1638,19 @@ fn ask_profile(
             Some(Container::default())
         }
         ProfileChoice::NewProfile => {
-            let name = dialog::ask(
-                &tools.kdialog,
-                [
-                    "--title",
-                    "Новый профиль",
-                    "--inputbox",
-                    "Название профиля (буквы, цифры, дефис):",
-                    "",
-                ],
-            )?;
+            let name = match new_name {
+                Some(name) => name,
+                None => dialog::ask(
+                    &tools.kdialog,
+                    [
+                        "--title",
+                        "Новый профиль",
+                        "--inputbox",
+                        "Название профиля (буквы, цифры, дефис):",
+                        "",
+                    ],
+                )?,
+            };
             // Only what actually gets in the way is cleaned (paths, spaces,
             // quotes) and a leading dash is cut off — Cyrillic stays Cyrillic.
             let name = sanitize_name(&name);

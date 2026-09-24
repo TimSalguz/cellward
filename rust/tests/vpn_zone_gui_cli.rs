@@ -110,6 +110,7 @@ exit "${RUNNER_EXIT:-0}""#,
             ("openssl", "/nonexistent/openssl".to_owned()),
             ("certutil", "/nonexistent/certutil".to_owned()),
             ("opener", "/nonexistent/xdg-open".to_owned()),
+            ("window", "/nonexistent/vpn-zone-window".to_owned()),
         ] {
             json.push_str(&format!("  \"{key}\": \"{value}\",\n"));
         }

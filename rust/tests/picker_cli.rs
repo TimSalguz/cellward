@@ -144,6 +144,10 @@ exit "$code""#,
             ("openssl", "/nonexistent/openssl".to_owned()),
             ("certutil", "/nonexistent/certutil".to_owned()),
             ("opener", "/nonexistent/xdg-open".to_owned()),
+            // Absent unless a test puts a fake one there with `window()`:
+            // without it the picker asks with kdialog, as every other test
+            // here expects.
+            ("window", format!("{bin}/vpn-zone-window")),
         ] {
             json.push_str(&format!("  \"{key}\": \"{value}\",\n"));
         }
@@ -172,6 +176,19 @@ exit "$code""#,
 
     fn read(&self, rel: &str) -> Option<String> {
         fs::read_to_string(self.path(rel)).ok()
+    }
+
+    /// The launch window: record what it was told, answer `reply`, exit with
+    /// `code`.
+    fn window(&self, reply: &str, code: i32) {
+        let log = self.path("window.in");
+        self.script(
+            "vpn-zone-window",
+            &format!(
+                "while IFS= read -r line; do printf '%s\\n' \"$line\" >> '{}'; done\nprintf '%s' '{reply}'\nexit {code}",
+                log.display()
+            ),
+        );
     }
 
     /// The answers the dialogs will be given, in order.
@@ -910,5 +927,114 @@ fn an_assigned_autostart_starts_where_it_was_put_and_says_nothing() {
     assert_eq!(
         home.launched()[0],
         ["run", "unconfined", "--profile", "work", "--", "telegram"]
+    );
+}
+
+#[test]
+fn the_launch_window_asks_both_questions_at_once() {
+    let home = Home::new("window");
+    home.zone("nl");
+    home.window(
+        "net\tnl\ncontainer\t__ownsb__\npin-net\t1\npin-container\t0\n",
+        0,
+    );
+    let out = home.run(
+        &[
+            "--label",
+            "Огненный лис",
+            "--id",
+            "firefox",
+            "--",
+            "firefox",
+            "%u",
+        ],
+        &[],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    // One window instead of the two menus: kdialog never asked.
+    assert!(home.asked().is_empty(), "{:?}", home.asked());
+    let told = home.read("window.in").unwrap();
+    assert!(told.contains("title\tЗапуск: Огненный лис\n"), "{told}");
+    assert!(told.contains("net\tnl\tVPN: nl\t"), "{told}");
+    assert!(told.contains("container\t__ownsb__\t"), "{told}");
+    assert!(
+        told.contains("container\t__newsb__\tНовая песочница…\tnew\n"),
+        "{told}"
+    );
+    // "Always" is a checkbox, not a second row per choice.
+    assert!(!told.contains("pin:"), "{told}");
+    let launched = home.launched();
+    assert_eq!(launched.len(), 1, "{launched:?}");
+    assert_eq!(launched[0][..2], ["run", "nl"]);
+    assert!(
+        launched[0]
+            .windows(2)
+            .any(|w| w == ["--sandbox", "app-firefox"]),
+        "{launched:?}"
+    );
+    assert_eq!(home.read("state/.pinned/firefox").as_deref(), Some("nl"));
+    assert_eq!(home.read("state/.last/firefox").as_deref(), Some("nl"));
+    assert_eq!(home.read("state/.pinnedprofile/firefox"), None);
+}
+
+#[test]
+fn a_closed_launch_window_starts_nothing_and_asks_nothing_more() {
+    let home = Home::new("window-closed");
+    home.zone("nl");
+    home.window("", 1);
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.launched().is_empty(), "{:?}", home.launched());
+    assert!(home.asked().is_empty(), "{:?}", home.asked());
+}
+
+#[test]
+fn the_launch_window_cannot_start_what_it_was_not_offered() {
+    let home = Home::new("window-foreign");
+    home.zone("nl");
+    home.window("net\tsomewhere\ncontainer\t\n", 0);
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.launched().is_empty(), "{:?}", home.launched());
+    assert!(
+        stderr(&out).contains("чего не предлагали"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn a_new_sandbox_is_named_in_the_window_and_pinned_by_its_checkbox() {
+    let home = Home::new("window-new");
+    home.zone("nl");
+    // The pinned network stays pinned only while its box stays ticked.
+    home.write("state/.pinned/firefox", "nl");
+    home.window(
+        "net\tnl\ncontainer\t__newsb__\nname\tобщая\npin-net\t0\npin-container\t1\n",
+        0,
+    );
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.asked().is_empty(), "no inputbox: {:?}", home.asked());
+    let launched = home.launched();
+    assert!(
+        launched
+            .iter()
+            .any(|l| l[..3] == ["sandbox", "create", "общая"]),
+        "{launched:?}"
+    );
+    let run = launched.iter().find(|l| l[0] == "run").unwrap();
+    assert!(
+        run.windows(2).any(|w| w == ["--sandbox", "общая"]),
+        "{run:?}"
+    );
+    assert_eq!(
+        home.read("state/.pinnedprofile/firefox").as_deref(),
+        Some("sb:общая")
+    );
+    assert_eq!(
+        home.read("state/.pinned/firefox"),
+        None,
+        "unticked: the pin is gone"
     );
 }
