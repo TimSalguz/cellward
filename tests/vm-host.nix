@@ -272,7 +272,7 @@ let
               f"grep -q 'nameserver {server_ip}' /etc/netns/vz-direct0/resolv.conf", timeout=30
           )
           nmhost.wait_until_succeeds("getent ahostsv4 nm.internal | grep -q 10.66.0.1", timeout=60)
-          out = nmhost.succeed("dig +short @127.0.0.60 nmdig.internal").strip()
+          out = nmhost.succeed("dig +short +tries=3 +time=5 @127.0.0.60 nmdig.internal").strip()
           assert out == "10.66.0.1", out
 
       with subtest("the first boot: the early units in order, no cycle"):
@@ -328,7 +328,7 @@ let
           machine.succeed("grep -q 'nameserver 198.51.100.1' /etc/netns/vz-pl/resolv.conf")
           host_resolves("leaktest.internal")
           assert netns_of("vpn-zones-dns") == zone_netns(), netns_of("vpn-zones-dns")
-          out = machine.succeed("dig +short @127.0.0.60 udp.internal").strip()
+          out = machine.succeed("dig +short +tries=3 +time=5 @127.0.0.60 udp.internal").strip()
           assert out == "10.77.0.1", out
           out = machine.succeed("dig +tcp +short @127.0.0.60 tcp.internal").strip()
           assert out == "10.77.0.1", out
