@@ -511,6 +511,10 @@ const HOST_RUNS: &[&str] = &[
     ".config/i3",
     ".config/pipewire",
     ".config/wireplumber",
+    // WirePlumber's scripts (looked for here before the system's: the zones'
+    // PipeWire policy is one) and its state (the host's default devices).
+    ".local/share/wireplumber",
+    ".local/state/wireplumber",
     ".config/xdg-desktop-portal",
     ".config/git",
     ".mozilla/native-messaging-hosts",
@@ -1228,6 +1232,9 @@ mod tests {
             "/home/u/.config/systemd/user",
             "/home/u/.local/bin",
             "/home/u/.ssh",
+            // WirePlumber's scripts: the zones' PipeWire policy is one.
+            "/home/u/.local/share/wireplumber/scripts",
+            "/home/u/.local/state/wireplumber",
         ] {
             assert!(forbidden_path(home, Path::new(bad)).is_some(), "{bad}");
         }

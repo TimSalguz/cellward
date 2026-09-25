@@ -153,6 +153,22 @@ programs.vpn-zones = {
 `vpn-zone status --json` показывает каждое значение и откуда оно (Nix, задано на
 месте или умолчание).
 
+Звук в герметичной зоне идёт через фильтр pulse (PulseAudio) и через свой
+сокет PipeWire зоны, клиенты которого видят то, что им разрешает политика
+WirePlumber из этого проекта: свои потоки, выходы, куда играть, микрофон —
+только как скажет `vpn-zone microphone`; никогда то, что играет хост, и
+никогда чужой поток. Политика включается один раз:
+
+```nix
+services.vpn-zones.pipewirePolicy.enable = true;  # NixOS: nixosModules.default
+programs.vpn-zones.pipewirePolicy = true;         # или home-manager без NixOS
+programs.vpn-zones.audioManager = [ "mixer" ];    # зона для pavucontrol/qpwgraph:
+                                                  # сырой PipeWire хоста, громко
+```
+
+Без политики у герметичной зоны PipeWire нет вовсе — только путь PulseAudio,
+которым пользуется большинство программ (`docs/LEAK-MODEL.md` §20).
+
 ## Как пользоваться
 
 Создать зону: ярлык **«Добавить VPN-зону»** → выбрать `.conf` → задать имя.

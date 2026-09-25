@@ -289,6 +289,10 @@ let
   };
 in
 {
+  # Политика WirePlumber для PipeWire зон (docs/LEAK-MODEL.md §20): от
+  # системных зон не зависит — нужна пользовательскому уровню.
+  imports = [ ./wireplumber/nixos.nix ];
+
   options.services.vpn-zones.system = {
     enable = lib.mkEnableOption "system zones of vpn-zones: network namespaces with a tunnel as their only way out, held from boot, for services and NixOS containers";
 

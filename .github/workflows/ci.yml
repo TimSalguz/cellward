@@ -245,6 +245,30 @@ jobs:
       - name: Прогнать VM-тест
         run: env -u XDG_RUNTIME_DIR ./vm-uplink-driver/bin/nixos-test-driver
 
+  # PipeWire герметичной зоны (tests/vm-audio.nix): настоящие PipeWire и
+  # WirePlumber с политикой модуля NixOS, нулевые выход и микрофон. Изнутри
+  # зоны: свой контекст безопасности вместо сырого pipewire-0 (и после
+  # перезапуска PipeWire), свои потоки и выход — да, чужие потоки, монитор и
+  # связи — нет, микрофон — по переключателю, менеджер звука — сырой сокет.
+  vm-audio:
+    name: vm-audio (NixOS test, a hermetic zone's PipeWire)
+    runs-on: ubuntu-24.04
+    needs: eval
+    steps:
+      - uses: actions/checkout@v4
+      - name: Включить KVM для раннера
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -c /dev/kvm
+      - uses: cachix/install-nix-action@v31
+      - name: Собрать драйвер VM-теста
+        run: nix-build tests/vm-audio.nix -A driver -o vm-audio-driver
+      - name: Прогнать VM-тест
+        run: env -u XDG_RUNTIME_DIR ./vm-audio-driver/bin/nixos-test-driver
+
   # Окно запуска (tests/vm-window.nix): на настоящем композиторе (headless
   # sway) пикер показывает окно, оно поднимается и держится, клавиатура
   # доходит, закрытое — ничего не запускает. Снимки окна — в выводе драйвера.

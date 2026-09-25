@@ -897,6 +897,9 @@ pub enum HostSocket {
     NixDaemon,
     Compositor,
     PipewireManager,
+    /// The host's raw `pipewire-0`, in a hermetic zone that is not an audio
+    /// manager.
+    Pipewire,
     Pulse,
     X11,
     SessionBus,
@@ -904,12 +907,13 @@ pub enum HostSocket {
 }
 
 impl HostSocket {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Resolver,
         Self::SystemTier,
         Self::NixDaemon,
         Self::Compositor,
         Self::PipewireManager,
+        Self::Pipewire,
         Self::Pulse,
         Self::X11,
         Self::SessionBus,
@@ -923,6 +927,7 @@ impl HostSocket {
             Self::NixDaemon => "nix-daemon",
             Self::Compositor => "compositor",
             Self::PipewireManager => "pipewire-manager",
+            Self::Pipewire => "pipewire",
             Self::Pulse => "pulse",
             Self::X11 => "x11",
             Self::SessionBus => "bus",
@@ -944,6 +949,10 @@ impl HostSocket {
             Self::Compositor => "композитор хоста под другим именем (тот же сокет, §13)",
             Self::PipewireManager => {
                 "PipeWire без ограничений под другим именем (тот же сокет, §17)"
+            }
+            Self::Pipewire => {
+                "PipeWire хоста без ограничений в герметичной зоне под другим именем \
+                 (тот же сокет, §17)"
             }
             Self::Pulse => {
                 "звуковой сервер хоста без фильтра под другим именем (тот же сокет, §17)"
@@ -990,6 +999,9 @@ pub struct Context {
     pub hermetic: bool,
     /// The zone is let reach the Nix daemon.
     pub nix_daemon: bool,
+    /// A hermetic zone let have the host's raw `pipewire-0`
+    /// (`hermetic::audio_manager`).
+    pub audio_manager: bool,
     /// The zone's `/proc/self/mountinfo`: which of our sockets is bound where.
     pub mountinfo: String,
     /// [`own_devs`].
@@ -1139,7 +1151,29 @@ fn runtime_verdict(rest: &Path, full: &Path, ctx: &Context) -> Option<Verdict> {
         );
     }
     if rest == Path::new("pipewire-0") {
-        return Some(Verdict::Own("pipewire-0"));
+        // The security context's socket (`pw_context`): the zone's clients
+        // see what WirePlumber's policy lets them. Anything else here is the
+        // host's raw one — every stream, monitor and link of the host.
+        return Some(
+            if crate::zone::pipewire_is_zones_context(&ctx.mountinfo, full) {
+                Verdict::Own("ограниченный PipeWire")
+            } else if ctx.hermetic && !ctx.audio_manager {
+                Verdict::Closed(
+                    "PipeWire хоста без ограничений в герметичной зоне: запись того, что \
+                     играет хост, чужие потоки и связи (§17)",
+                )
+            } else if ctx.hermetic {
+                Verdict::Open(
+                    "PipeWire хоста без ограничений — зона объявлена менеджером звука \
+                     (vpn-zone audio-manager): всё, что играет хост, чужие потоки и связи (§17)",
+                )
+            } else {
+                Verdict::Open(
+                    "PipeWire хоста без ограничений: всё, что играет хост, чужие потоки и \
+                     связи — обычной зоне по замыслу, как и systemd --user (§17)",
+                )
+            },
+        );
     }
     if rest == Path::new(crate::broker::SOCKET) {
         return Some(Verdict::Own("брокер"));
@@ -1710,7 +1744,8 @@ mod tests {
         let mut c = ctx();
         c.mountinfo = "30 29 8:2 /h/.local/state/vpn-zones/nl/session-bus-filter /run/user/1000/bus rw - ext4 /dev/x rw\n\
                        31 29 8:2 /h/.local/state/vpn-zones/nl/pulse-filter /run/user/1000/pulse/native rw - ext4 /dev/x rw\n\
-                       32 29 8:2 /h/.local/state/vpn-zones/nl/system-bus /run/dbus/system_bus_socket rw - ext4 /dev/x rw\n"
+                       32 29 8:2 /h/.local/state/vpn-zones/nl/system-bus /run/dbus/system_bus_socket rw - ext4 /dev/x rw\n\
+                       33 29 8:2 /h/.local/state/vpn-zones/nl/pipewire-context /run/user/1000/pipewire-0 rw - ext4 /dev/x rw\n"
             .to_owned();
         for path in [
             "/run/user/1000/bus",
@@ -1743,6 +1778,34 @@ mod tests {
         assert!(matches!(
             classify(b"/tmp/tmux-1000/default", (0, 50), 7, &c),
             Verdict::Own(_)
+        ));
+    }
+
+    /// `pipewire-0`: the zone's restricted socket is its own; the host's raw
+    /// one fails in a hermetic zone, is named in an audio manager and in an
+    /// ordinary zone, and fails under any other name when promised closed.
+    #[test]
+    fn the_raw_pipewire_is_named_and_in_a_hermetic_zone_a_failure() {
+        let mut c = ctx();
+        let pw = "/run/user/1000/pipewire-0";
+        assert_eq!(level(pw, &c), Level::Warn);
+        c.hermetic = true;
+        assert_eq!(level(pw, &c), Level::Fail);
+        c.audio_manager = true;
+        assert_eq!(level(pw, &c), Level::Warn);
+        c.audio_manager = false;
+        c.mountinfo = "33 29 8:2 /h/.local/state/vpn-zones/nl/pipewire-context /run/user/1000/pipewire-0 rw - ext4 /dev/x rw\n"
+            .to_owned();
+        assert_eq!(level(pw, &c), Level::Ok);
+        // A socket named like ours elsewhere is not ours over pipewire-0.
+        c.mountinfo =
+            "33 29 8:2 /h/pipewire-context-evil /run/user/1000/pipewire-0 rw - ext4 /dev/x rw\n"
+                .to_owned();
+        assert_eq!(level(pw, &c), Level::Fail);
+        c.closed = parse_closed("pipewire:0:31:7");
+        assert!(matches!(
+            classify(b"/home/alice/pw", (0, 31), 7, &c),
+            Verdict::Closed(w) if w.contains("PipeWire")
         ));
     }
 
@@ -1846,7 +1909,9 @@ mod tests {
 
     #[test]
     fn the_summary_and_the_lines_say_what_is_in_reach() {
-        let c = ctx();
+        let mut c = ctx();
+        c.mountinfo = "33 29 8:2 /h/.local/state/vpn-zones/nl/pipewire-context /run/user/1000/pipewire-0 rw - ext4 /dev/x rw\n"
+            .to_owned();
         let found = |path: &[u8], dev: Dev| Found {
             path: path.to_vec(),
             dev,
@@ -1866,7 +1931,7 @@ mod tests {
         assert_eq!(checks[0].id, "sockets");
         assert_eq!(checks[0].level, Level::Fail);
         assert!(
-            checks[0].detail.contains("pipewire-0"),
+            checks[0].detail.contains("ограниченный PipeWire"),
             "{}",
             checks[0].detail
         );

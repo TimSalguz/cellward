@@ -16,6 +16,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Enter. A file with a term out of bounds is passed over, never read as no
   pause. The microphone's question uses it now; the other permissions will
   (`docs/PERMISSIONS.md` §3е).
+- **Audio managers**: a hermetic zone that runs a mixer or a patchbay
+  (pavucontrol, qpwgraph, EasyEffects) can be given the host's raw
+  `pipewire-0` instead of the restricted one — `vpn-zone audio-manager
+  <zone> on|off|default`, `programs.vpn-zones.audioManager` (a list of zone
+  names, written to `declared/audio-manager`), and
+  `"audio_manager":{"value","source"}` for every zone in `vpn-zone status
+  --json` (`null` for `unconfined`); from the zone's next start. Said
+  loudly: by the CLI, in the unit's journal and as a `warn` of the doctor's
+  `pipewire` check — the zone hears everything the host plays, records the
+  microphone around its switch and moves other programs' streams.
 - **The microphone by permission** (`rust/src/microphone.rs`,
   `rust/src/pulse_filter.rs`, LEAK-MODEL §17; the owner's decision of
   2026-09-25). A program in a zone records the microphone only as the zone's
@@ -68,11 +78,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the hermetic test zone refused with Nix's `no` over its own `yes`); from
   a zone, neither the marker by its path nor through `/proc/<pid>/root` of
   the filter, the proxies or the question's kdialog (held open on an X
-  server that never answers) can be reached. Only the PulseAudio path: raw
-  `pipewire-0` records around it in every zone (ROADMAP §17), and in a zone
-  that is not hermetic so does the host's `systemd --user` — which can also
-  rewrite the setting; `vpn-zone microphone` says both when it sets `no` or
-  `ask`.
+  server that never answers) can be reached. The PulseAudio path, and the
+  restricted PipeWire of a hermetic zone (below, Security: `yes` or not —
+  `ask` refuses there): raw `pipewire-0` records around it in an ordinary
+  zone and an audio manager, and in a zone that is not hermetic so does the
+  host's `systemd --user` — which can also rewrite the setting; `vpn-zone
+  microphone` says what goes around it when it sets `no` or `ask`.
 - **The title strip: the zone's name on the window** (`rust/src/wl_title.rs`,
   `rust/src/wl_frame.rs`, `docs/WINDOW-FRAME.md` §8 «Этап 2, заголовок»;
   stage 2 of the window frame, its second part — no buttons yet). Under the
@@ -315,7 +326,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Security
 - **A "yes" sooner than a question can be read is a stray key**
-  (`rust/src/dialog.rs` `TOO_FAST`, LEAK-MODEL §21). The questions a zone's
+  (`rust/src/dialog.rs` `TOO_FAST`, LEAK-MODEL §22). The questions a zone's
   program brings up — the microphone, a launch in another network through
   the broker — are kdialog boxes whose default button is the first, "allow",
   and the new dialog takes the focus: an Enter meant for a chat, at the
@@ -324,7 +335,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   person opens themselves are unchanged. Next: a dialog of our own with
   "deny" as its default (`docs/PERMISSIONS.md` §9).
 - **A screen cast from a zone asks every time** (`rust/src/dbus_wire.rs`
-  `sanitized_screencast_sources`, LEAK-MODEL §20). The screen cast portal
+  `sanitized_screencast_sources`, LEAK-MODEL §21). The screen cast portal
   lets a program ask for its choice to be remembered (`persist_mode`); the
   next cast with the token it got back starts WITHOUT the portal's dialog,
   and niri shows nothing while a cast runs. The portal took a zone's program
@@ -334,6 +345,99 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   no `persist_mode`, no `restore_token`, nothing a later portal adds. A
   selection it cannot read is refused. Like Android, which asks before every
   screen capture.
+- **A hermetic zone's PipeWire is its own, restricted socket**
+  (`rust/src/pw_context.rs`, `module/wireplumber/`, LEAK-MODEL §20; the
+  owner's decision of 2026-09-25). Every zone got the host's raw
+  `pipewire-0`, where `module-access` in its legacy mode makes a client that
+  is not a Flatpak unrestricted: it recorded the monitor of any output,
+  moved and killed other programs' streams, linked any port to any port —
+  around the sound filter and the microphone's switch. A hermetic zone now
+  gets only a security context (`PipeWire:Interface:SecurityContext`, v3):
+  a helper on the host, as the user, started by the zone's unit beside the
+  sound filter (`vpn-zone-core pipewire-context`, the native protocol spoken
+  from Rust, no libpipewire), makes the zone's listening socket (0600) and
+  hands it to PipeWire with `create(listen_fd, close_fd, props)` — every
+  client of it carries `pipewire.sec.engine = "vpn-zone"`, the zone as
+  `pipewire.sec.app-id`, the holder's pid as `pipewire.sec.instance-id` and
+  `pipewire.access = "restricted"` (never a word of our own: a stock
+  WirePlumber grants everything to an access it does not know), properties
+  a client cannot change; a pipe's write end is the `close_fd`, so PipeWire
+  stops listening when the zone goes. `seal_runtime` binds that socket as
+  the zone's `pipewire-0`, and the runtime watcher never binds the host's
+  over it, not when PipeWire restarts either — the helper keeps the socket
+  and hands the same descriptor to the new daemon. The permissions are a
+  WirePlumber policy (`module/wireplumber/policy.lua` and
+  `90-vpn-zones.conf`), for WirePlumber 0.5.14 and 0.5.15+ alike: no default
+  permission (an `access.rules` entry, and on 0.5.15+ a `select-access` step
+  before the config's rules); the core last; its own stream nodes `rwx` and
+  their ports `r`, the streams of the zone's other programs `r`, any other
+  node of its own (a virtual sink, a filter, a link group) destroyed at once; the host's sinks `r`; capture sources `r`
+  only while the zone's microphone is `yes` (the helper publishes the switch
+  in the `vpn-zones` metadata every second; revoked, the script breaks the
+  links); the `default` metadata `r`; the `client-node` factory `r` — no
+  link factory, no adapter or device factory. Links: only WirePlumber's,
+  only a zone's stream to a host's sink and a host's source to a zone's
+  capture stream on `yes` — never a sink's monitor, never a zone's node with
+  anybody else's — a guard in WirePlumber's linking chain and a watchdog on
+  every link; a zone's node is never a default device. The script writes
+  `vpn-zones.policy = "1"` into that metadata, and only when its access rule
+  is in force; without the key the helper does not hand the socket out —
+  what connects is closed at once, and the zone has the pulse path only.
+  Ordinary zones keep the raw socket (they have `systemd --user`). `ask` is
+  a refusal on this path for now: the question is asked on the pulse path.
+  The policy: `services.vpn-zones.pipewirePolicy.enable` (NixOS, through
+  `services.pipewire.wireplumber.extraScripts`, the fragment as a config
+  package — `extraConfig` would quote the feature names, which WirePlumber
+  0.5.14 reads with their quotes, and it would not start at all) or
+  `programs.vpn-zones.pipewirePolicy` (home-manager without NixOS, the same
+  files in `~/.config/wireplumber` and `~/.local/share/wireplumber`; both on
+  do not duplicate). `doctor`: a `pipewire` check per hermetic zone (the
+  policy in force, or why not), the restricted socket counted as the zone's
+  own, the host's raw one a failure in a hermetic zone and a warning in an
+  ordinary one or an audio manager — by path and by identity. Tests: the
+  messages byte by byte, broken ones an error, the decision, the helper
+  against a stand-in daemon (nothing handed out before the marker; the
+  listening socket and the pipe after; the pipe broken when the metadata
+  goes); VM (`tests/vm-audio.nix`, a new CI job): a real PipeWire and
+  WirePlumber with the NixOS module's policy — from the offline zone its
+  `pipewire-0` is the context's (after a PipeWire restart too), `pw-dump`
+  shows its own streams and the sink but no host stream, no sink port, no
+  link, no link factory; it plays; a sink's monitor records zero bytes; the
+  microphone is absent on `no`, records on `yes`, and its link breaks on
+  `no` mid-recording; a virtual sink it makes is destroyed and never the
+  default.
+- **The zones' PipeWire policy out of the zones' reach, and tighter**
+  (review of the restricted socket, LEAK-MODEL §20). WirePlumber looks for
+  scripts in `~/.local/share/wireplumber` before the system's and for
+  fragments in `~/.config/wireplumber` first, and the policy the restricted
+  socket depends on is such a script: a program in a hermetic zone could
+  put its own `vpn-zones/policy.lua` there, marker and all, and at
+  WirePlumber's next start every hermetic zone's socket would be handed out
+  with everything granted (a `pw-module` component would load native code
+  into the host's daemon). `~/.config/pipewire`, `~/.config/wireplumber`,
+  `~/.local/share/wireplumber` and `~/.local/state/wireplumber` are now
+  entry points of the session: made before a hermetic zone comes up when
+  missing, and read-only in it; never granted to a sandbox either. The
+  zone's microphone is published before the socket is handed out, on the
+  same connection, so WirePlumber has this run's value before any client of
+  the zone (the key outlives a helper: a zone brought up on `no` after a
+  `yes` recorded until the next tick), right after the metadata is bound,
+  and again whenever the metadata says otherwise. `Audio/Duplex` is no
+  capture source (WirePlumber gives a duplex node monitor ports: recording
+  it was recording the host's playback); the watchdog, deciding by the
+  nodes' classes like the guard, refuses it too. A zone's stream that
+  claims the graph
+  (`node.exclusive`, a forced or locked quantum or rate, `node.driver`) is
+  destroyed, when it appears and when its properties change; an exclusive
+  or passthrough link of a zone's stream is refused. A zone has at most 128
+  clients and 256 nodes. A link whose ends the watchdog does not know yet is
+  looked at again when they come, never let through. Documented what
+  closing the context does: PipeWire disconnects every client that came
+  through it. Tests: the helper against the stand-in daemon (the value at
+  once, a stale one put right, published before the context's bind); VM —
+  a duplex device records nothing with the microphone on, an earlier run's
+  `yes` records nothing in a zone brought up on `no`, and from a hermetic
+  zone the four directories cannot be written, missing before or not.
 - **The zone's helpers run in the host's user namespace, out of the zone's
   reach through `/proc`** (`rust/src/zone.rs` `Helpers`, LEAK-MODEL §16;
   review 2026-09-25). The holder started the system bus proxy, a hermetic

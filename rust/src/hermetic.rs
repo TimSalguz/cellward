@@ -127,6 +127,22 @@ pub fn camera(zone_dir: &Path, config: &Path, zone: &str) -> (bool, Source) {
     allowance(zone_dir, config, zone, CAMERA, CAMERA, "on")
 }
 
+/// Whether a hermetic zone gets the host's raw `pipewire-0` instead of the
+/// restricted one (`crate::pw_context`): a marker in the zone's directory
+/// (`on`/`off`, `vpn-zone audio-manager`), or the zone named in
+/// `declared/audio-manager` (Nix, `programs.vpn-zones.audioManager`). Off by
+/// default (owner, 2026-09-25): the raw socket is every stream and device of
+/// the host — for a zone that runs a mixer or a patchbay (pavucontrol,
+/// qpwgraph, EasyEffects) and is trusted with the host's sound. An ordinary
+/// zone has the raw socket anyway: it has the host's `systemd --user`.
+pub const AUDIO_MANAGER: &str = "audio-manager";
+
+/// Whether the zone in `zone_dir` gets the raw PipeWire socket: `(on,
+/// source)`.
+pub fn audio_manager(zone_dir: &Path, config: &Path, zone: &str) -> (bool, Source) {
+    allowance(zone_dir, config, zone, AUDIO_MANAGER, AUDIO_MANAGER, "on")
+}
+
 /// Whether the zone in `zone_dir` reaches the Nix daemon: `(on, source)`.
 pub fn nix_daemon(zone_dir: &Path, config: &Path, zone: &str) -> (bool, Source) {
     allowance(zone_dir, config, zone, NIX_DAEMON, NIX_DAEMON, "on")
@@ -219,6 +235,27 @@ mod tests {
         assert_eq!(
             host_files_writable(&d.zone(), &d.config(), "nl"),
             (false, Source::Local)
+        );
+        // The raw PipeWire socket: never by accident.
+        assert_eq!(
+            audio_manager(&d.zone(), &d.config(), "nl"),
+            (false, Source::Default)
+        );
+        d.write("zone/audio-manager", "yes");
+        assert_eq!(
+            audio_manager(&d.zone(), &d.config(), "nl"),
+            (false, Source::Local)
+        );
+        d.write("zone/audio-manager", "on");
+        assert_eq!(
+            audio_manager(&d.zone(), &d.config(), "nl"),
+            (true, Source::Local)
+        );
+        d.write("zone/audio-manager", "off");
+        d.write("config/declared/audio-manager", "nl\n");
+        assert_eq!(
+            audio_manager(&d.zone(), &d.config(), "nl"),
+            (true, Source::Nix)
         );
     }
 

@@ -7,6 +7,7 @@
 //! ```text
 //! vpn-zone-core zone-holder <name>        (systemd main process, host user)
 //!  ├─ xdg-dbus-proxy ×1–2, pulse-filter    [the zone's helpers, host userns]
+//!  │  (+ pipewire-context, hermetic zones)
 //!  └─ fork ─ user namespace, uid 0 inside                    [holder]
 //!      ├─ fork ─ net + mount namespace: THE UPLINK      [uplink.pid]
 //!      │           pasta's tap, the only route to the world, and the UDP
@@ -256,6 +257,14 @@ pub fn pulse_is_zones_filter(mountinfo: &str, socket: &Path) -> bool {
     crate::doctor::mount_root_at(mountinfo, &socket.to_string_lossy())
         .is_some_and(|root| root.ends_with(&format!("/{PULSE_FILTER}")))
 }
+/// Is the PipeWire socket at `socket` the zone's restricted one — the
+/// security context's socket (`crate::pw_context`) bound over it — and not
+/// the host's raw `pipewire-0`? Read from the mount table, as
+/// [`bus_is_zones_filter`].
+pub fn pipewire_is_zones_context(mountinfo: &str, socket: &Path) -> bool {
+    crate::doctor::mount_root_at(mountinfo, &socket.to_string_lossy())
+        .is_some_and(|root| root.ends_with(&format!("/{}", crate::pw_context::SOCKET)))
+}
 /// Where the host's runtime directory is held for the zone's lifetime, to bind
 /// entries from — below a tmpfs only the zone's root may enter, because the
 /// hold has everything, the compositor's own socket included.
@@ -268,7 +277,9 @@ const HOST_RUNTIME_HELD: &str = "r";
 /// not `gnupg/`, `ssh-agent`, `keyring/`, `at-spi/` — and not the compositor's
 /// socket, which no zone gets (`compositor_private`).
 /// (`pulse` is listed as the sound server it is, but never bound as the
-/// host's: the zone's `pulse/native` is the filter's — `pulse_filter`.)
+/// host's: the zone's `pulse/native` is the filter's — `pulse_filter`. Nor is
+/// `pipewire-0`, unless the zone is an audio manager: the zone's is the
+/// restricted one of `pw_context`.)
 const RUNTIME_KEPT: [&str; 3] = ["pipewire-0", "pulse", "doc"];
 /// Ours, below the runtime directory: the broker's socket and the restricted
 /// Wayland sockets. Never bound whole — one zone must not reach another zone's
@@ -295,11 +306,16 @@ pub fn compositor_private(name: &str) -> bool {
 
 /// Is this entry of the host's runtime directory bound into a zone?
 ///
-/// A hermetic zone keeps what [`RUNTIME_KEPT`] names and nothing else. An
-/// ordinary zone keeps everything — its session bus and `systemd --user` are
-/// open by design (`docs/LEAK-MODEL.md` §1) — except [`compositor_private`].
-/// [`OURS`] is bound piece by piece, never as it is.
-pub fn runtime_entry_kept(name: &str, hermetic: bool) -> bool {
+/// A hermetic zone keeps what [`RUNTIME_KEPT`] names and nothing else — the
+/// host's raw `pipewire-0` only with `raw_pipewire` (`vpn-zone
+/// audio-manager`): otherwise the zone's `pipewire-0` is the restricted one
+/// (`pw_context`), and the host's must not come in over it, not even when
+/// PipeWire restarts and makes its socket anew (the watcher asks this too).
+/// An ordinary zone keeps everything — its session bus and `systemd --user`
+/// are open by design (`docs/LEAK-MODEL.md` §1), and so the raw `pipewire-0`
+/// — except [`compositor_private`]. [`OURS`] is bound piece by piece, never
+/// as it is.
+pub fn runtime_entry_kept(name: &str, hermetic: bool, raw_pipewire: bool) -> bool {
     // `pulse`: never the host's — the zone gets the filter's socket there.
     // PipeWire's manager socket, `pipewire-0-manager`, never: it is the
     // unrestricted one, meant for the session manager — every client killed,
@@ -310,6 +326,9 @@ pub fn runtime_entry_kept(name: &str, hermetic: bool) -> bool {
         || (name.starts_with("pipewire-") && name.ends_with("-manager"))
     {
         return false;
+    }
+    if hermetic && name == "pipewire-0" {
+        return raw_pipewire;
     }
     !hermetic || RUNTIME_KEPT.contains(&name)
 }
@@ -606,6 +625,9 @@ struct Zone {
     host_files_writable: bool,
     /// The host's cameras as devices (`hermetic::camera`); off by default.
     camera: bool,
+    /// The host's raw PipeWire socket in a hermetic zone
+    /// (`hermetic::audio_manager`); off by default: the restricted one.
+    audio_manager: bool,
 }
 
 impl Zone {
@@ -679,6 +701,7 @@ pub fn run(args: Args) -> u8 {
     let (nix_daemon, _) = crate::hermetic::nix_daemon(&dir, &config, &label);
     let (host_files_writable, _) = crate::hermetic::host_files_writable(&dir, &config, &label);
     let (camera, _) = crate::hermetic::camera(&dir, &config, &label);
+    let (audio_manager, _) = crate::hermetic::audio_manager(&dir, &config, &label);
     let zone = Zone {
         dir,
         home,
@@ -688,6 +711,7 @@ pub fn run(args: Args) -> u8 {
         nix_daemon,
         host_files_writable,
         camera,
+        audio_manager,
     };
 
     // A directory is a zone if it has a config or the offline marker; anything
@@ -1003,8 +1027,9 @@ fn hold(zone: &Zone, ids: &Ids) -> Result<u8, String> {
 }
 
 /// The zone's helpers on the host: the filtered system bus, a hermetic zone's
-/// session bus, the sound filter — started by the unit's own process, in the
-/// HOST's user namespace, and never by the holder.
+/// session bus, the sound filter, a hermetic zone's PipeWire security context
+/// — started by the unit's own process, in the HOST's user namespace, and
+/// never by the holder.
 ///
 /// Why not by the holder (review 2026-09-25): a process the holder starts as
 /// the user lives in the zone's user namespace, with the very uid and no
@@ -1025,6 +1050,7 @@ struct Helpers {
     system_bus: libc::pid_t,
     session_bus: libc::pid_t,
     pulse: libc::pid_t,
+    pipewire: libc::pid_t,
 }
 
 impl Helpers {
@@ -1047,10 +1073,19 @@ impl Helpers {
         };
         // The sound server through a filter, for every zone (`pulse_filter`).
         let pulse = pid(start_pulse_filter(zone));
+        // PipeWire through a security context and WirePlumber's policy, for a
+        // hermetic zone that is not an audio manager (`pw_context`); the
+        // others keep the raw socket (`runtime_entry_kept`).
+        let pipewire = if zone.hermetic && !zone.audio_manager {
+            pid(start_pipewire_context(zone))
+        } else {
+            0
+        };
         Self {
             system_bus,
             session_bus,
             pulse,
+            pipewire,
         }
     }
 
@@ -1067,6 +1102,9 @@ impl Helpers {
         } else if dead == self.pulse {
             self.pulse = 0;
             "the sound filter died — the zone has no sound server now"
+        } else if dead == self.pipewire {
+            self.pipewire = 0;
+            "the PipeWire context died — the zone's pipewire-0 refuses everything now"
         } else {
             return;
         };
@@ -1077,7 +1115,12 @@ impl Helpers {
 
     /// Nothing may outlive the zone.
     fn stop(&mut self) {
-        for pid in [&mut self.system_bus, &mut self.session_bus, &mut self.pulse] {
+        for pid in [
+            &mut self.system_bus,
+            &mut self.session_bus,
+            &mut self.pulse,
+            &mut self.pipewire,
+        ] {
             kill_and_reap(*pid);
             *pid = 0;
         }
@@ -2083,6 +2126,67 @@ fn start_pulse_filter(zone: &Zone) -> Option<Child> {
     None
 }
 
+/// A hermetic zone's PipeWire socket (`crate::pw_context`), on the host — from
+/// the unit's own process, in the host's user namespace (`Helpers`) — as the
+/// user: listening in the zone's directory, handed to the host's PipeWire as
+/// a security context once WirePlumber's policy of vpn-zones is there, and
+/// closing what connects until then. Started whether or not PipeWire is up:
+/// it waits for the daemon, and the zone's socket exists from the start.
+/// `None` when it cannot start — the zone then has no `pipewire-0` at all.
+fn start_pipewire_context(zone: &Zone) -> Option<Child> {
+    let upstream = host_runtime_dir(zone).join("pipewire-0");
+    let socket = zone.path(crate::pw_context::SOCKET);
+    let _ = fs::remove_file(&socket);
+    let _ = fs::remove_file(zone.path(crate::pw_context::STATE_FILE));
+    let (uid, gid) = {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(&zone.dir).ok()?;
+        (meta.uid(), meta.gid())
+    };
+    let exe = std::env::current_exe().ok()?;
+    let mut child = match Command::new(exe)
+        .arg("pipewire-context")
+        .arg("--listen")
+        .arg(&socket)
+        .arg("--upstream")
+        .arg(&upstream)
+        .arg("--zone")
+        .arg(&zone.name)
+        .arg("--zone-dir")
+        .arg(&zone.dir)
+        .arg("--config")
+        .arg(zone.home.join(CONFIG_SUBDIR))
+        .arg("--instance")
+        .arg(std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .uid(uid)
+        .gid(gid)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!(
+                "zone {}: cannot start the PipeWire context ({e}) — no pipewire-0 in the zone",
+                zone.name()
+            );
+            return None;
+        }
+    };
+    for _ in 0..WAIT_STEPS {
+        if fs::symlink_metadata(&socket).is_ok() {
+            return Some(child);
+        }
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        thread::sleep(WAIT_STEP);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    None
+}
+
 /// The session bus filter of a hermetic zone (`crate::bus_filter`, LEAK-MODEL
 /// §2), in front of its proxy: in the app namespace — so that the broker knows
 /// the zone by its network namespace — and as the user, like the proxy. A link
@@ -2379,7 +2483,7 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
     let mut kept = Vec::new();
     for entry in fs::read_dir(&held).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if runtime_entry_kept(&name, zone.hermetic) {
+        if runtime_entry_kept(&name, zone.hermetic, zone.audio_manager) {
             match bind_entry(&entry.path(), &runtime.join(&name)) {
                 Ok(()) => kept.push(name),
                 // Skipped is hidden: what could not be bound is simply not there.
@@ -2438,6 +2542,29 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
         bind_socket(&pulse, &dir.join("native"), uid)?;
         kept.push("pulse (filtered)".to_owned());
     }
+    // A hermetic zone's `pipewire-0`: the security context's socket
+    // (`pw_context`), never the host's raw one — unless the zone is an audio
+    // manager, which kept the host's above and is said so. No context, no
+    // PipeWire: the pulse path stays.
+    if zone.hermetic && !zone.audio_manager {
+        let context = zone.path(crate::pw_context::SOCKET);
+        if fs::symlink_metadata(&context).is_ok() {
+            bind_socket(&context, &runtime.join("pipewire-0"), uid)?;
+            kept.push("pipewire-0 (restricted)".to_owned());
+        } else {
+            eprintln!(
+                "zone {}: no PipeWire context — no pipewire-0 in the zone (sound through pulse only)",
+                zone.name()
+            );
+        }
+    } else if zone.hermetic {
+        eprintln!(
+            "zone {}: AUDIO MANAGER — the host's raw pipewire-0 in a hermetic zone: every stream \
+             and device of the host (vpn-zone audio-manager {} off)",
+            zone.name(),
+            zone.name()
+        );
+    }
     if zone.hermetic {
         // The filter, never the proxy behind it: the proxy alone would hand
         // the portal's links to the host (LEAK-MODEL §2). No filter, no bus —
@@ -2463,6 +2590,7 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
     match watch {
         Some(watch) => {
             let hermetic = zone.hermetic;
+            let raw_pipewire = zone.audio_manager;
             let name = zone.name().into_owned();
             // The hold is below the zone's directory, which is covered a
             // moment later (`hide_project_state`): the watcher goes on
@@ -2484,7 +2612,7 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
                     }
                 };
                 for entry in names {
-                    if !runtime_entry_kept(&entry, hermetic) {
+                    if !runtime_entry_kept(&entry, hermetic, raw_pipewire) {
                         continue;
                     }
                     if let Err(e) = bind_entry(&held.join(&entry), &runtime.join(&entry)) {
@@ -2850,7 +2978,20 @@ fn hide_input_methods(zone: &Zone) -> Result<(), String> {
 
 /// The session's own entry points below the home: created when missing before
 /// a hermetic zone comes up (`run`), so that they can be read-only in it.
-const ENTRY_POINTS: [&str; 8] = [
+///
+/// The sound server's among them (review 2026-09-25): the zones' PipeWire
+/// policy is a WirePlumber script, and WirePlumber looks for its scripts in
+/// `~/.local/share/wireplumber/scripts` BEFORE the system's (XDG_DATA_HOME
+/// ahead of XDG_DATA_DIRS), and for its fragments in `~/.config/wireplumber`
+/// first — a fragment of the same name replaces the system's. A zone that
+/// could write there would put its own `vpn-zones/policy.lua` in, marker and
+/// all, and every hermetic zone's socket would be handed out with everything
+/// granted at WirePlumber's next start; a `pw-module` component or a
+/// PipeWire fragment would load native code into the host's daemon. Only
+/// "where it exists" would leave the NixOS host, where nothing is there,
+/// open to the very first write. `~/.local/state/wireplumber` holds the
+/// default devices and the streams' remembered targets: the host's routing.
+const ENTRY_POINTS: [&str; 12] = [
     ".config/autostart",
     ".config/systemd",
     ".config/environment.d",
@@ -2859,6 +3000,10 @@ const ENTRY_POINTS: [&str; 8] = [
     ".local/share/dbus-1",
     ".local/share/systemd",
     ".local/share/user-tmpfiles.d",
+    ".config/pipewire",
+    ".config/wireplumber",
+    ".local/share/wireplumber",
+    ".local/state/wireplumber",
 ];
 
 /// What the host runs from the home besides [`ENTRY_POINTS`], read-only in a
@@ -2887,8 +3032,6 @@ const HOST_RUNS_IN_ZONES: &[&str] = &[
     ".config/nix",
     ".config/direnv",
     ".local/share/direnv",
-    ".config/pipewire",
-    ".config/wireplumber",
     ".config/xdg-desktop-portal",
     ".config/git",
     ".ssh",
@@ -3009,6 +3152,7 @@ fn hide_project_state(zone: &Zone) -> Result<Zone, String> {
         nix_daemon: zone.nix_daemon,
         host_files_writable: zone.host_files_writable,
         camera: zone.camera,
+        audio_manager: zone.audio_manager,
     })
 }
 
@@ -4467,8 +4611,10 @@ mod tests {
             "i3",
             "vpn-zones",
         ] {
-            assert!(!runtime_entry_kept(name, false), "{name}");
-            assert!(!runtime_entry_kept(name, true), "{name}");
+            for raw in [false, true] {
+                assert!(!runtime_entry_kept(name, false, raw), "{name}");
+                assert!(!runtime_entry_kept(name, true, raw), "{name}");
+            }
         }
         // An ordinary zone keeps the rest, the bus and systemd --user included;
         // a hermetic one only the sound servers and the document portal.
@@ -4479,15 +4625,19 @@ mod tests {
             "pipewire-0",
             "noctalia-wayland-1.sock",
         ] {
-            assert!(runtime_entry_kept(name, false), "{name}");
+            assert!(runtime_entry_kept(name, false, false), "{name}");
         }
-        for name in ["pipewire-0", "doc"] {
-            assert!(runtime_entry_kept(name, true), "{name}");
-        }
+        assert!(runtime_entry_kept("doc", true, false));
+        // The host's raw PipeWire: an ordinary zone keeps it (it has
+        // systemd --user anyway), a hermetic one only as an audio manager —
+        // its own is the restricted socket of `pw_context`.
+        assert!(runtime_entry_kept("pipewire-0", false, false));
+        assert!(!runtime_entry_kept("pipewire-0", true, false));
+        assert!(runtime_entry_kept("pipewire-0", true, true));
         // The sound server's control socket is never the host's own: every
         // zone gets the filter's in its place (`pulse_filter`).
-        assert!(!runtime_entry_kept("pulse", true));
-        assert!(!runtime_entry_kept("pulse", false));
+        assert!(!runtime_entry_kept("pulse", true, false));
+        assert!(!runtime_entry_kept("pulse", false, false));
         // A camera's nodes, and nothing that merely starts like one.
         assert!(is_capture_node("video0") && is_capture_node("media12"));
         assert!(
@@ -4495,15 +4645,34 @@ mod tests {
                 && !is_capture_node("videox")
                 && !is_capture_node("vhost-net")
         );
-        // PipeWire's unrestricted socket, for the session manager: no zone.
-        assert!(!runtime_entry_kept("pipewire-0-manager", false));
-        assert!(!runtime_entry_kept("pipewire-0-manager", true));
-        assert!(runtime_entry_kept("pipewire-0", true));
-        for name in ["bus", "systemd", "gnupg", "niri"] {
-            assert!(!runtime_entry_kept(name, true), "{name}");
+        // PipeWire's unrestricted socket, for the session manager: no zone,
+        // an audio manager neither.
+        for raw in [false, true] {
+            assert!(!runtime_entry_kept("pipewire-0-manager", false, raw));
+            assert!(!runtime_entry_kept("pipewire-0-manager", true, raw));
+        }
+        for name in ["bus", "systemd", "gnupg", "niri", "pipewire-1"] {
+            assert!(!runtime_entry_kept(name, true, true), "{name}");
         }
         // A name that only looks like niri's is not hidden by accident.
-        assert!(runtime_entry_kept("niri-config.kdl", false));
+        assert!(runtime_entry_kept("niri-config.kdl", false, false));
+    }
+
+    #[test]
+    fn where_the_sound_server_loads_code_from_is_made_before_it_is_covered() {
+        // The zones' PipeWire policy is a WirePlumber script: a place it is
+        // looked for that a zone could write — or make, being missing — is a
+        // policy of the zone's own (review 2026-09-25). Created beforehand,
+        // then covered: an entry point, not "where it exists".
+        for dir in [
+            ".config/pipewire",
+            ".config/wireplumber",
+            ".local/share/wireplumber",
+            ".local/state/wireplumber",
+        ] {
+            assert!(ENTRY_POINTS.contains(&dir), "{dir}");
+            assert!(!HOST_RUNS_IN_ZONES.contains(&dir), "{dir} twice");
+        }
     }
 
     fn argv(args: &[&str]) -> Vec<OsString> {

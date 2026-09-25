@@ -732,6 +732,19 @@ in
       description = "Зоны (по имени), программам которых видны камеры хоста (/dev/video*). По умолчанию ни одной: у сеанса на камеры есть право, и программа зоны — тот же пользователь, она снимала бы без вопроса. Без пересборки — vpn-zone camera <зона> on (действует после перезапуска зоны). Звуковые устройства (/dev/snd) зонам не видны никогда: звук — через фильтр pulse и PipeWire. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
+    audioManager = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "mixer" ];
+      description = "Герметичные зоны (по имени), которым вместо ограниченного PipeWire отдаётся pipewire-0 хоста как есть — для микшера или коммутатора (pavucontrol, qpwgraph, EasyEffects). По умолчанию ни одной: такая зона слышит всё, что играет хост, записывает микрофон мимо microphone, двигает и глушит чужие потоки и меняет права других клиентов PipeWire; vpn-zone status и doctor говорят об этом громко. Обычная (негерметичная) зона получает pipewire-0 хоста и без этого — у неё и так systemd --user. Без пересборки — vpn-zone audio-manager <зона> on (действует после перезапуска зоны). Сами зоны в Nix не описываются: здесь только имена.";
+    };
+
+    pipewirePolicy = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Положить политику WirePlumber для PipeWire зон в ~/.config/wireplumber/wireplumber.conf.d/90-vpn-zones.conf и ~/.local/share/wireplumber/scripts/vpn-zones/policy.lua — для home-manager без NixOS (на NixOS то же делает services.vpn-zones.pipewirePolicy.enable; включённые оба не дублируются). Без политики герметичная зона PipeWire не получает вовсе — звук только через pulse; с ней её программы видят только свои потоки, выходы для звука и — по настройке microphone — микрофоны, и никогда не мониторы. Подействует после перезапуска WirePlumber (systemctl --user restart wireplumber). Политика — скрипт WirePlumber, а WirePlumber ищет скрипты сначала в ~/.local/share/wireplumber, фрагменты — сначала в ~/.config/wireplumber: поэтому в герметичной зоне эти каталоги, ~/.config/pipewire и ~/.local/state/wireplumber только для чтения и создаются заранее, если их нет. Зона из hostFilesWritable может подменить политику для всех зон. См. docs/LEAK-MODEL.md §20.";
+    };
+
     hostFilesWritable = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -752,7 +765,7 @@ in
         calls = "yes";
         offline = "no";
       };
-      description = "Может ли программа зоны записывать микрофон (как разрешения в телефоне): имя зоны → yes (без вопроса), no (никогда) или ask — при первой записи программы зоны на хосте спрашивают: разрешить один раз, всегда или отказать. Зона без значения здесь и без своего (vpn-zone microphone <зона> yes|no|ask) — ask; без графической сессии или без ответа за 25 с — отказ. «Всегда» — всей зоне, любой её программе: пишет yes в настройку зоны; для зоны, заданной здесь, его не предлагают. После отказа зону не спрашивают askAgainAfter (по умолчанию 3 минуты). Действует сразу, без перезапуска зоны. Звук, который играет хост (мониторы выходов), зоне не записать никогда. Только путь PulseAudio: сырой pipewire-0 этим не закрыт (ROADMAP §17), а в негерметичной зоне — и systemd --user хоста. Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Может ли программа зоны записывать микрофон (как разрешения в телефоне): имя зоны → yes (без вопроса), no (никогда) или ask — при первой записи программы зоны на хосте спрашивают: разрешить один раз, всегда или отказать. Зона без значения здесь и без своего (vpn-zone microphone <зона> yes|no|ask) — ask; без графической сессии или без ответа за 25 с — отказ. «Всегда» — всей зоне, любой её программе: пишет yes в настройку зоны; для зоны, заданной здесь, его не предлагают. После отказа зону не спрашивают askAgainAfter (по умолчанию 3 минуты). Действует сразу, без перезапуска зоны. Звук, который играет хост (мониторы выходов), зоне не записать никогда. Путь PulseAudio и ограниченный PipeWire герметичной зоны (на нём ask — отказ: там не спрашивают); мимо — сырой pipewire-0 обычной зоны и зоны-менеджера звука (audioManager), а в негерметичной зоне и systemd --user хоста. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     askAgainAfter = lib.mkOption {
@@ -922,8 +935,10 @@ in
         message = "programs.vpn-zones.microphone: имя зоны — непустое и без пробелов";
       }
       {
-        assertion = lib.all (z: z != "" && !(lib.hasInfix "\n" z)) (cfg.nixDaemon ++ cfg.hostFilesWritable ++ cfg.camera);
-        message = "programs.vpn-zones.nixDaemon / hostFilesWritable: имя зоны — непустое и без переводов строки";
+        assertion = lib.all (z: z != "" && !(lib.hasInfix "\n" z)) (
+          cfg.nixDaemon ++ cfg.hostFilesWritable ++ cfg.camera ++ cfg.audioManager
+        );
+        message = "programs.vpn-zones.nixDaemon / hostFilesWritable / camera / audioManager: имя зоны — непустое и без переводов строки";
       }
       {
         assertion =
@@ -965,7 +980,17 @@ in
     (lib.mkIf cfg.desktop.sway.enable {
       "sway/vpn-zones.conf".text = swaySnippet;
     })
+    # The WirePlumber policy for the zones' PipeWire (docs/LEAK-MODEL.md §20),
+    # for a home-manager without NixOS: the same fragment the NixOS module
+    # writes, under the same name — the user's copy replaces the system's.
+    (lib.mkIf cfg.pipewirePolicy {
+      "wireplumber/wireplumber.conf.d/90-vpn-zones.conf".source = ./wireplumber/90-vpn-zones.conf;
+    })
   ];
+
+  xdg.dataFile = lib.mkIf cfg.pipewirePolicy {
+    "wireplumber/scripts/vpn-zones/policy.lua".source = ./wireplumber/policy.lua;
+  };
 
   # Объявленное — в ~/.config/vpn-zones/declared, а не в xdg.configHome: CLI,
   # держатель и генератор ярлыков читают именно этот путь, и при своём
@@ -992,6 +1017,9 @@ in
     })
     (lib.mkIf (cfg.camera != [ ]) {
       ".config/vpn-zones/declared/camera".text = lib.concatStringsSep "\n" cfg.camera + "\n";
+    })
+    (lib.mkIf (cfg.audioManager != [ ]) {
+      ".config/vpn-zones/declared/audio-manager".text = lib.concatStringsSep "\n" cfg.audioManager + "\n";
     })
     (lib.mkIf (cfg.hostFilesWritable != [ ]) {
       ".config/vpn-zones/declared/host-files-writable".text =

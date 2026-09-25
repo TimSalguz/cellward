@@ -114,6 +114,8 @@ let
             agents = "ask";
           };
           askAgainAfter = "10m";
+          audioManager = [ "mixer" ];
+          pipewirePolicy = true;
           desktop = {
             windowMenu.key = "Mod+Shift+Z";
             niri = {
