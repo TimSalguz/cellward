@@ -2611,6 +2611,61 @@ fn hide_nix_daemon(zone: &Zone) -> Result<(), String> {
 /// Where the Nix daemon listens.
 pub(crate) const NIX_DAEMON_DIR: &str = "/nix/var/nix/daemon-socket";
 
+/// What of `/run/systemd` a zone keeps: the journal's sockets (a program
+/// logs), `system/` (`sd_booted()`: "is this systemd"), and logind's state
+/// files (`sd_session_*`, `sd_uid_*` read them).
+const RUN_SYSTEMD_KEPT: [&str; 5] = ["journal", "system", "seats", "sessions", "users"];
+
+/// Daemons under /run that answer whoever connects, and that no zone needs:
+/// dhcpcd's unprivileged socket (the host's interfaces, addresses and
+/// leases), sshd on a unix socket (a login on the host without a network, for
+/// a key a program without a sandbox reads in `~/.ssh`).
+const RUN_HIDDEN: [&str; 2] = ["/run/dhcpcd", "/run/ssh-unix-local"];
+
+/// `/run/systemd` by an allow-list, and the daemons of [`RUN_HIDDEN`] out of
+/// reach (review 2026-09-25: found by `vpn-zone doctor`'s inventory,
+/// `docs/LEAK-MODEL.md` §18). systemd's services answer over varlink there,
+/// open to everyone — `io.systemd.Hostname` the machine's name, model and id,
+/// `io.systemd.Network` its interfaces and addresses: what the system bus
+/// filter keeps from a zone, past it; and what systemd adds there next is out
+/// of reach from the start. A tmpfs over the directory, and back what a
+/// program uses ([`RUN_SYSTEMD_KEPT`]), bound whole, so that a restarted
+/// journal's new sockets are in reach again. For every zone and for the
+/// system tier's commands (`crate::sysrun`), in the current mount namespace.
+pub(crate) fn seal_run() -> Result<(), String> {
+    let dir = Path::new("/run/systemd");
+    if dir.is_dir() {
+        let kept = sys::open_dir(dir).map_err(|e| format!("cannot open {}: {e}", dir.display()))?;
+        sys::mount(
+            OsStr::new("tmpfs"),
+            dir,
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            "mode=0755,size=64k",
+        )
+        .map_err(|e| format!("cannot close {}: {e}", dir.display()))?;
+        for name in RUN_SYSTEMD_KEPT {
+            let from = PathBuf::from(format!("/proc/self/fd/{}/{name}", kept.as_raw_fd()));
+            if !from.is_dir() {
+                continue;
+            }
+            let to = dir.join(name);
+            fs::create_dir(&to).map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+            sys::mount(from.as_os_str(), &to, "", libc::MS_BIND | libc::MS_REC, "")
+                .map_err(|e| format!("cannot bind {} back: {e}", to.display()))?;
+        }
+    }
+    for dir in RUN_HIDDEN {
+        let dir = Path::new(dir);
+        if !dir.is_dir() {
+            continue;
+        }
+        sys::mount(OsStr::new("tmpfs"), dir, "tmpfs", 0, "mode=0755,size=16k")
+            .map_err(|e| format!("cannot hide {}: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
 /// IBus's private bus out of reach (review 2026-09-25, third round): it
 /// listens on a socket by path in `$XDG_CACHE_HOME/ibus` and writes its
 /// address to `~/.config/ibus/bus`, both in the home a program has — past
@@ -3200,6 +3255,10 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // looking for and carries out with it anything that can be spelled into a
     // hostname. The policy "an unknown program gets no network" is only true
     // once these are gone.
+    // The system's own services under /run first — before the resolvers,
+    // whose directory is below /run/systemd, and before resolv.conf is bound
+    // at the end of its chain there.
+    seal_run().map_err(|e| format!("zone {}: {e}", zone.name()))?;
     hide_host_resolvers(zone)?;
     // The same hole closed as a class rather than by a list of sockets.
     own_nsswitch(zone);

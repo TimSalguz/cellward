@@ -228,6 +228,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   "always" is not offered for a command with options; the question shows every
   word on its own line, without text-reordering characters, and a command too
   long to show whole is refused rather than cut.
+- **`/run/systemd` by an allow-list in every zone** (and for the system
+  tier's commands): systemd's services answer over varlink there, open to
+  everyone — `io.systemd.Hostname` the machine's name, model and id,
+  `io.systemd.Network` its interfaces and addresses — past the system bus
+  filter. A tmpfs over it, with the journal's sockets, `system/` and logind's
+  state bound back. dhcpcd's unprivileged socket and sshd's unix socket
+  (`/run/ssh-unix-local`, a login on the host for a key in `~/.ssh`) are
+  hidden. Found by the doctor's socket inventory; a clean hermetic zone now
+  names none.
 - **Input methods by their portals only.** A zone's bus let programs talk
   to `org.fcitx.Fcitx5`, fcitx5's whole controller: `Configure` starts a
   program on the host, `OpenX11Connection("host:0")` has the host's fcitx5
