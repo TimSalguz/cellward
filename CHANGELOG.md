@@ -166,7 +166,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   stream and every move name the source it is linked to, and a monitor there
   (a default source that is one, a fallback, a restored target) ends the
   connection before the reply or any sound reaches the program. A microphone
-  and the default source stay allowed. VM test: a module load and a
+  and the default source stay allowed. The filter reads a packet only for a
+  command it may pass and only after the handshake, and gives up a packet of
+  more than 4096 values (its own and its property lists' entries) as
+  unreadable: a 16 MiB frame of one-byte values would otherwise have cost the
+  host some 800 MiB per connection. VM test: a module load and a
   monitor's recording are answered by the filter and never reach the server,
   a playback stream reaches it without its target, a record stream the
   server links to a monitor loses the connection with nothing heard. Raw

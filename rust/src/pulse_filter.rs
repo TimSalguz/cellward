@@ -32,7 +32,11 @@
 //!   `record_source_refused`): see "Monitors" below;
 //! - **every tag new** (`Session::tag_refused`): the filter pairs the
 //!   server's replies with the program's requests by their tags, which a
-//!   program could otherwise reuse to have one reply stand for another.
+//!   program could otherwise reuse to have one reply stand for another;
+//! - **a bounded read** (`MAX_VALUES`): a packet is read only for a command
+//!   that may pass, after `AUTH`, and one of more values than any real
+//!   command has is refused unread — a 16 MiB frame of one-byte values would
+//!   otherwise cost the host some 800 MiB of the filter's memory.
 //!
 //! **Monitors.** A monitor is a sink's output as a source. How a record
 //! stream reaches one: by the monitor's name (`<sink>.monitor`,
@@ -105,6 +109,14 @@ const PROTOCOL_VERSION_MASK: u32 = 0xffff;
 /// Streams and unanswered requests a connection may have: the filter keeps a
 /// line for each, and a program does not need thousands.
 const MAX_STREAMS: usize = 1024;
+/// The values `parse` reads from one packet — its own values and the entries
+/// of its property lists together — before it gives the packet up as
+/// unreadable. A frame may be 16 MiB, and a value as short as one byte (`1`,
+/// `0`, `N`) is a line of the filter's own 48 bytes: unbounded, one frame
+/// would cost the host ~800 MiB, and a zone opens many connections. The
+/// largest real command — a stream request with a few dozen properties and
+/// its formats — has some hundreds.
+const MAX_VALUES: usize = 4096;
 
 // The tags of a packet's values (pipewire-pulse `message.h`, PulseAudio
 // `tagstruct.h`): every value says what it is.
@@ -533,9 +545,16 @@ pub struct Item {
 struct Cursor<'a> {
     p: &'a [u8],
     at: usize,
+    /// What is left of `MAX_VALUES`.
+    left: usize,
 }
 
 impl Cursor<'_> {
+    /// One more value of the packet's; `None` past `MAX_VALUES`.
+    fn count(&mut self) -> Option<()> {
+        self.left = self.left.checked_sub(1)?;
+        Some(())
+    }
     fn take(&mut self, n: usize) -> Option<&[u8]> {
         let end = self.at.checked_add(n)?;
         let bytes = self.p.get(self.at..end)?;
@@ -561,6 +580,7 @@ impl Cursor<'_> {
     fn props(&mut self) -> Option<Vec<(Vec<u8>, Range<usize>)>> {
         let mut entries = Vec::new();
         loop {
+            self.count()?;
             let start = self.at;
             match self.byte()? {
                 TAG_STRING_NULL => return Some(entries),
@@ -586,11 +606,16 @@ impl Cursor<'_> {
 }
 
 /// Every value of a command's payload, or `None` for one the filter cannot
-/// read to its end — and does not pass on.
+/// read to its end, or that has more than `MAX_VALUES` — and does not pass on.
 pub fn parse(payload: &[u8]) -> Option<Vec<Item>> {
-    let mut c = Cursor { p: payload, at: 0 };
+    let mut c = Cursor {
+        p: payload,
+        at: 0,
+        left: MAX_VALUES,
+    };
     let mut items = Vec::new();
     while c.at < payload.len() {
+        c.count()?;
         let start = c.at;
         let tag = c.byte()?;
         let value = match tag {
@@ -837,17 +862,24 @@ impl Session {
         if let Some(why) = self.tag_refused(command, tag) {
             return Up::Refuse(tag, format!("{name}: {why}"));
         }
+        // What is refused anyway is refused unread: the packet is read — the
+        // costliest thing the filter does for a program — only for a command
+        // it may pass, and only after AUTH, AUTH itself aside.
+        let rule = rule(command);
+        match rule {
+            Rule::Refuse => return Up::Refuse(tag, name.to_owned()),
+            Rule::Auth if self.authed => return Up::Refuse(tag, "a second AUTH".to_owned()),
+            Rule::Auth => {}
+            _ if !self.authed => return Up::Refuse(tag, format!("{name} before AUTH")),
+            _ => {}
+        }
         let Some(items) = parse(&frame[DESCRIPTOR..]) else {
             return Up::Refuse(tag, format!("{name} (unreadable)"));
         };
         let values = &items[2..];
-        let rule = rule(command);
         match rule {
             Rule::Refuse => return Up::Refuse(tag, name.to_owned()),
             Rule::Auth => {
-                if self.authed {
-                    return Up::Refuse(tag, "a second AUTH".to_owned());
-                }
                 // The server reads every later request by this version:
                 // from 13 on, the flags above it are taken off (both servers).
                 match u32_at(values, 0) {
@@ -857,7 +889,6 @@ impl Session {
                 self.authed = true;
                 return Up::Forward(frame.to_vec());
             }
-            _ if !self.authed => return Up::Refuse(tag, format!("{name} before AUTH")),
             Rule::Pass => {}
             Rule::Create(kind) => {
                 if self.creating.contains_key(&tag)
@@ -1542,6 +1573,47 @@ mod tests {
         // A command packet that is not one at all ends the connection.
         let junk = framed(COMMAND_CHANNEL, b"hello, server");
         assert!(matches!(s.up(&junk), Up::Close(_)));
+    }
+
+    /// One-byte values fill a frame with ~48 times their size in the filter's
+    /// memory: a packet with more than `MAX_VALUES` is refused unread, and
+    /// one that would be refused anyway is not read at all.
+    #[test]
+    fn a_packet_of_countless_values_is_refused_not_read() {
+        let flood = |cmd, tag, n| {
+            let mut p = payload(&[V::L(cmd), V::L(tag)]);
+            p.resize(p.len() + n, TAG_TRUE);
+            framed(COMMAND_CHANNEL, &p)
+        };
+        // As much as fits: 2 values of its own, and the rest.
+        let mut s = authed();
+        let fits = flood(COMMAND_SET_CLIENT_NAME, 1, MAX_VALUES - 2);
+        assert!(matches!(s.up(&fits), Up::Forward(_)));
+        let over = flood(COMMAND_SET_CLIENT_NAME, 2, MAX_VALUES - 1);
+        assert!(refused(s.up(&over)).contains("unreadable"));
+        // The largest frame the server takes: refused, and at no more cost.
+        let huge = flood(COMMAND_SET_CLIENT_NAME, 3, FRAME_MAX - 10);
+        assert_eq!(frame_len(&huge).unwrap(), Some(huge.len()));
+        assert!(parse(&huge[DESCRIPTOR..]).is_none());
+        assert!(refused(s.up(&huge)).contains("unreadable"));
+        // The entries of a property list count too.
+        let mut many = payload(&[V::L(COMMAND_SET_CLIENT_NAME), V::L(4)]);
+        many.push(TAG_PROPLIST);
+        for _ in 0..MAX_VALUES {
+            many.extend_from_slice(&payload(&[V::S(Some("media.name")), V::L(0)]));
+            many.push(TAG_ARBITRARY);
+            many.extend_from_slice(&0u32.to_be_bytes());
+        }
+        many.push(TAG_STRING_NULL);
+        let many = framed(COMMAND_CHANNEL, &many);
+        assert!(refused(s.up(&many)).contains("unreadable"));
+        // A command refused anyway, or one before AUTH, is refused unread:
+        // by its name, not as unreadable.
+        let module = flood(COMMAND_LOAD_MODULE, 5, FRAME_MAX - 10);
+        assert_eq!(refused(s.up(&module)), "LOAD_MODULE");
+        let mut fresh = Session::default();
+        let early = flood(COMMAND_GET_SERVER_INFO, 1, FRAME_MAX - 10);
+        assert!(refused(fresh.up(&early)).contains("before AUTH"));
     }
 
     #[test]
