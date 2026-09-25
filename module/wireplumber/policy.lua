@@ -252,7 +252,7 @@ nodes_om:connect ("object-added", function (_, node)
   local nid = node ["bound-id"]
   if z ~= nil and not own_node_allowed (node) then
     log:notice (node, string.format (
-        "zone %s: node %d (%s) is not a stream — destroyed", z.zone, nid,
+        "zone %s: node %d (%s) is not a plain stream (a device, a filter, a link group) — destroyed", z.zone, nid,
         tostring (prop (node, "media.class"))))
     z.client:update_permissions { [nid] = "-" }
     node:request_destroy ()
