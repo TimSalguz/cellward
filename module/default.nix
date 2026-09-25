@@ -725,7 +725,7 @@ in
     pipewirePolicy = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Положить политику WirePlumber для PipeWire зон в ~/.config/wireplumber/wireplumber.conf.d/90-vpn-zones.conf и ~/.local/share/wireplumber/scripts/vpn-zones/policy.lua — для home-manager без NixOS (на NixOS то же делает services.vpn-zones.pipewirePolicy.enable; включённые оба не дублируются). Без политики герметичная зона PipeWire не получает вовсе — звук только через pulse; с ней её программы видят только свои потоки, выходы для звука и — по настройке microphone — микрофоны, и никогда не мониторы. Подействует после перезапуска WirePlumber (systemctl --user restart wireplumber). См. docs/LEAK-MODEL.md §17.";
+      description = "Положить политику WirePlumber для PipeWire зон в ~/.config/wireplumber/wireplumber.conf.d/90-vpn-zones.conf и ~/.local/share/wireplumber/scripts/vpn-zones/policy.lua — для home-manager без NixOS (на NixOS то же делает services.vpn-zones.pipewirePolicy.enable; включённые оба не дублируются). Без политики герметичная зона PipeWire не получает вовсе — звук только через pulse; с ней её программы видят только свои потоки, выходы для звука и — по настройке microphone — микрофоны, и никогда не мониторы. Подействует после перезапуска WirePlumber (systemctl --user restart wireplumber). Политика — скрипт WirePlumber, а WirePlumber ищет скрипты сначала в ~/.local/share/wireplumber, фрагменты — сначала в ~/.config/wireplumber: поэтому в герметичной зоне эти каталоги, ~/.config/pipewire и ~/.local/state/wireplumber только для чтения и создаются заранее, если их нет. Зона из hostFilesWritable может подменить политику для всех зон. См. docs/LEAK-MODEL.md §20.";
     };
 
     hostFilesWritable = lib.mkOption {
@@ -943,7 +943,7 @@ in
     (lib.mkIf cfg.desktop.sway.enable {
       "sway/vpn-zones.conf".text = swaySnippet;
     })
-    # The WirePlumber policy for the zones' PipeWire (docs/LEAK-MODEL.md §17),
+    # The WirePlumber policy for the zones' PipeWire (docs/LEAK-MODEL.md §20),
     # for a home-manager without NixOS: the same fragment the NixOS module
     # writes, under the same name — the user's copy replaces the system's.
     (lib.mkIf cfg.pipewirePolicy {

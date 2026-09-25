@@ -22,7 +22,11 @@
     to and — as its microphone setting says — the capture sources, never a
     monitor, and make no links. Without it a hermetic zone gets no PipeWire
     socket at all (sound through the pulse filter only). WirePlumber picks it
-    up when it restarts'';
+    up when it restarts. WirePlumber looks for scripts and fragments in the
+    home first (~/.local/share/wireplumber, ~/.config/wireplumber): a
+    hermetic zone has those, ~/.config/pipewire and ~/.local/state/wireplumber
+    read-only, made beforehand when missing — a zone that may write the
+    host's files (hostFilesWritable) can replace the policy for every zone'';
 
   config = lib.mkIf config.services.vpn-zones.pipewirePolicy.enable {
     services.pipewire.wireplumber.configPackages = [

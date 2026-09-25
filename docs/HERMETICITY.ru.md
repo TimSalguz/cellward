@@ -43,7 +43,11 @@ English: [HERMETICITY.md](HERMETICITY.md) · Связанные документ
    который помощник зоны отдаёт PipeWire, и наша политика WirePlumber: свои
    потоки, выходы, микрофоны только при `yes`, никогда монитор и свои связи;
    без политики PipeWire нет вовсе; сырой `pipewire-0` хоста — только зоне,
-   объявленной менеджером звука, `vpn-zone audio-manager`;
+   объявленной менеджером звука, `vpn-zone audio-manager`; откуда WirePlumber
+   и PipeWire берут скрипты и фрагменты в доме — `~/.config/pipewire`,
+   `~/.config/wireplumber`, `~/.local/share/wireplumber`,
+   `~/.local/state/wireplumber` — в зоне только для чтения и создаются
+   заранее, иначе программа подменила бы политику;
    `docs/LEAK-MODEL.md` §20),
    PulseAudio (сокет фильтра `pulse-filter`: список разрешённых команд, без
    записи монитора — `docs/LEAK-MODEL.md` §17) и два наших сокета —

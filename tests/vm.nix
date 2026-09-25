@@ -1715,6 +1715,14 @@ let
           for path in [".config/autostart/x.desktop", ".local/share/applications/x.desktop", ".config/systemd/x"]:
               in_zone(hp, f"sh -c '! touch /home/alice/{path}'")
           alice("touch ~/.config/autostart/from-host && rm ~/.config/autostart/from-host")
+          # Where WirePlumber and PipeWire load scripts and fragments from —
+          # the home before the system: the zones' PipeWire policy is one.
+          # Made beforehand, so covered even where nothing was there.
+          for path in [".local/share/wireplumber/x", ".local/state/wireplumber/x", ".config/pipewire/x"]:
+              in_zone(hp, f"sh -c '! touch /home/alice/{path}'")
+          in_zone(hp, "sh -c '! mkdir -p /home/alice/.config/wireplumber/wireplumber.conf.d'")
+          in_zone(hp, "sh -c '! mkdir -p /home/alice/.local/share/wireplumber/scripts/vpn-zones'")
+          alice("touch ~/.local/share/wireplumber/from-host && rm ~/.local/share/wireplumber/from-host")
           # Sound and camera devices out of reach: the capture device is not
           # there, the camera is /dev/null — and so is one plugged in later.
           in_zone(hp, "test ! -e /dev/snd/pcmC9D0c")

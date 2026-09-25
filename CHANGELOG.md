@@ -317,6 +317,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   microphone is absent on `no`, records on `yes`, and its link breaks on
   `no` mid-recording; a virtual sink it makes is destroyed and never the
   default.
+- **The zones' PipeWire policy out of the zones' reach, and tighter**
+  (review of the restricted socket, LEAK-MODEL §20). WirePlumber looks for
+  scripts in `~/.local/share/wireplumber` before the system's and for
+  fragments in `~/.config/wireplumber` first, and the policy the restricted
+  socket depends on is such a script: a program in a hermetic zone could
+  put its own `vpn-zones/policy.lua` there, marker and all, and at
+  WirePlumber's next start every hermetic zone's socket would be handed out
+  with everything granted (a `pw-module` component would load native code
+  into the host's daemon). `~/.config/pipewire`, `~/.config/wireplumber`,
+  `~/.local/share/wireplumber` and `~/.local/state/wireplumber` are now
+  entry points of the session: made before a hermetic zone comes up when
+  missing, and read-only in it; never granted to a sandbox either. The
+  zone's microphone is published before the socket is handed out, on the
+  same connection, so WirePlumber has this run's value before any client of
+  the zone (the key outlives a helper: a zone brought up on `no` after a
+  `yes` recorded until the next tick), right after the metadata is bound,
+  and again whenever the metadata says otherwise. `Audio/Duplex` is no
+  capture source (WirePlumber gives a duplex node monitor ports: recording
+  it was recording the host's playback), and the watchdog refuses a zone's
+  capture from any monitor port. A zone's stream that claims the graph
+  (`node.exclusive`, a forced or locked quantum or rate, `node.driver`) is
+  destroyed, when it appears and when its properties change; an exclusive
+  or passthrough link of a zone's stream is refused. A zone has at most 128
+  clients and 256 nodes. A link whose ends the watchdog does not know yet is
+  looked at again when they come, never let through. Documented what
+  closing the context does: PipeWire disconnects every client that came
+  through it. Tests: the helper against the stand-in daemon (the value at
+  once, a stale one put right, published before the context's bind); VM —
+  a duplex device records nothing with the microphone on, an earlier run's
+  `yes` records nothing in a zone brought up on `no`, and from a hermetic
+  zone the four directories cannot be written, missing before or not.
 - **The zone's helpers run in the host's user namespace, out of the zone's
   reach through `/proc`** (`rust/src/zone.rs` `Helpers`, LEAK-MODEL §16;
   review 2026-09-25). The holder started the system bus proxy, a hermetic

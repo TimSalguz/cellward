@@ -1,4 +1,4 @@
-# A hermetic zone's PipeWire (docs/LEAK-MODEL.md §17, rust/src/pw_context.rs,
+# A hermetic zone's PipeWire (docs/LEAK-MODEL.md §20, rust/src/pw_context.rs,
 # module/wireplumber/policy.lua): a real PipeWire and WirePlumber for the user
 # in the VM, with the policy of the NixOS module, a sink and a microphone that
 # are null devices (the VM has no sound card), and the offline zone —
@@ -9,9 +9,11 @@
 # included); it sees its own streams and the sink, not the host's streams,
 # not the sink's ports, not the link factory; it plays; a sink's monitor
 # records nothing; the microphone is not there on "no" and is on "yes" — and
-# taken back on "no" while recording; a virtual sink it makes is destroyed
-# and never becomes the default; an audio manager gets the raw socket, and
-# the doctor says so loudly.
+# taken back on "no" while recording; a duplex device is never recorded
+# from (its capture ports are a monitor); an earlier run's "yes" left in the
+# metadata never decides for a zone brought up on "no"; a virtual sink it
+# makes is destroyed and never becomes the default; an audio manager gets
+# the raw socket, and the doctor says so loudly.
 #
 #   nix-build tests/vm-audio.nix -A driver -o vm-audio-driver
 #   ./vm-audio-driver/bin/nixos-test-driver
@@ -28,13 +30,15 @@ let
   };
 
   # A null device as the daemon itself makes it: owned by no client.
-  nullDevice = name: class: {
+  # `priority`: which one WirePlumber takes as the default.
+  nullDevice = name: class: priority: {
     factory = "adapter";
     args = {
       "factory.name" = "support.null-audio-sink";
       "node.name" = name;
       "node.description" = name;
       "media.class" = class;
+      "priority.session" = priority;
       "audio.position" = [
         "FL"
         "FR"
@@ -76,8 +80,10 @@ let
           wireplumber.enable = true;
           extraConfig.pipewire."90-vm-devices" = {
             "context.objects" = [
-              (nullDevice "vm-sink" "Audio/Sink")
-              (nullDevice "vm-mic" "Audio/Source/Virtual")
+              (nullDevice "vm-sink" "Audio/Sink" 2000)
+              (nullDevice "vm-mic" "Audio/Source/Virtual" 2000)
+              # Never the default: the zone's streams go to vm-sink.
+              (nullDevice "vm-duplex" "Audio/Duplex" 1)
             ];
           };
         };
@@ -169,7 +175,7 @@ let
               logs()
               raise
           n = nodes(host_dump())
-          assert "vm-sink" in n and "vm-mic" in n, n
+          assert "vm-sink" in n and "vm-mic" in n and "vm-duplex" in n, n
 
       with subtest("the zone's pipewire-0 is the restricted one, never the host's"):
           zone("true")
@@ -270,6 +276,12 @@ let
               "sh -c 'timeout 5 pw-record --raw --target vm-mic -P node.name=vz-mic - | wc -c'"
           )
           assert int(out.strip()) > 10000, f"nothing recorded with the microphone on: {out}"
+          # A duplex device is a sink to WirePlumber: its capture ports are
+          # its monitor — what the host plays there — microphone or not.
+          out = zone(
+              "sh -c 'timeout 5 pw-record --raw --target vm-duplex -P node.name=vz-duplex - | wc -c'"
+          )
+          assert out.strip() == "0", f"the zone recorded a duplex device's monitor: {out}"
           # Taken back while recording: the link goes at once.
           alice(
               "systemd-run --user --unit=zonerec vpn-zone run offline -- "
@@ -290,6 +302,30 @@ let
               logs()
               raise Exception("the microphone stayed linked after no")
           alice("systemctl --user stop zonerec.service || true")
+
+      with subtest("an earlier run's yes never decides for a zone brought up on no"):
+          # The key outlives the zone's helper: WirePlumber keeps it. The
+          # helper publishes this run's value before the socket goes out.
+          mic_key = "pw-metadata -n vpn-zones 0 vpn-zones.microphone.offline"
+          alice("vpn-zone microphone offline yes")
+          machine.wait_until_succeeds(
+              "su -l alice -c " + shlex.quote("XDG_RUNTIME_DIR=/run/user/1000 " + mic_key)
+              + " | grep -q \"value:'yes'\"",
+              timeout=30,
+          )
+          alice("systemctl --user stop zoneplay.service || true")
+          alice("vpn-zone down offline")
+          alice("vpn-zone microphone offline no")
+          out = alice(mic_key)
+          assert "value:'yes'" in out, f"no stale yes to test against: {out}"
+          # Recorded from the first moment the zone's socket answers.
+          out = zone(
+              "sh -c 'timeout 30 sh -c \"until pw-cli info 0 >/dev/null 2>&1; do sleep 0.05; done\"; "
+              "timeout 4 pw-record --raw --target vm-mic -P node.name=vz-stale - | wc -c'"
+          )
+          assert out.strip() == "0", f"recorded by an earlier run's yes: {out}"
+          out = alice(mic_key)
+          assert "value:'no'" in out, out
 
       with subtest("a device the zone makes is destroyed and never the default"):
           alice(

@@ -2978,7 +2978,20 @@ fn hide_input_methods(zone: &Zone) -> Result<(), String> {
 
 /// The session's own entry points below the home: created when missing before
 /// a hermetic zone comes up (`run`), so that they can be read-only in it.
-const ENTRY_POINTS: [&str; 8] = [
+///
+/// The sound server's among them (review 2026-09-25): the zones' PipeWire
+/// policy is a WirePlumber script, and WirePlumber looks for its scripts in
+/// `~/.local/share/wireplumber/scripts` BEFORE the system's (XDG_DATA_HOME
+/// ahead of XDG_DATA_DIRS), and for its fragments in `~/.config/wireplumber`
+/// first — a fragment of the same name replaces the system's. A zone that
+/// could write there would put its own `vpn-zones/policy.lua` in, marker and
+/// all, and every hermetic zone's socket would be handed out with everything
+/// granted at WirePlumber's next start; a `pw-module` component or a
+/// PipeWire fragment would load native code into the host's daemon. Only
+/// "where it exists" would leave the NixOS host, where nothing is there,
+/// open to the very first write. `~/.local/state/wireplumber` holds the
+/// default devices and the streams' remembered targets: the host's routing.
+const ENTRY_POINTS: [&str; 12] = [
     ".config/autostart",
     ".config/systemd",
     ".config/environment.d",
@@ -2987,6 +3000,10 @@ const ENTRY_POINTS: [&str; 8] = [
     ".local/share/dbus-1",
     ".local/share/systemd",
     ".local/share/user-tmpfiles.d",
+    ".config/pipewire",
+    ".config/wireplumber",
+    ".local/share/wireplumber",
+    ".local/state/wireplumber",
 ];
 
 /// What the host runs from the home besides [`ENTRY_POINTS`], read-only in a
@@ -3015,8 +3032,6 @@ const HOST_RUNS_IN_ZONES: &[&str] = &[
     ".config/nix",
     ".config/direnv",
     ".local/share/direnv",
-    ".config/pipewire",
-    ".config/wireplumber",
     ".config/xdg-desktop-portal",
     ".config/git",
     ".ssh",
@@ -4641,6 +4656,23 @@ mod tests {
         }
         // A name that only looks like niri's is not hidden by accident.
         assert!(runtime_entry_kept("niri-config.kdl", false, false));
+    }
+
+    #[test]
+    fn where_the_sound_server_loads_code_from_is_made_before_it_is_covered() {
+        // The zones' PipeWire policy is a WirePlumber script: a place it is
+        // looked for that a zone could write — or make, being missing — is a
+        // policy of the zone's own (review 2026-09-25). Created beforehand,
+        // then covered: an entry point, not "where it exists".
+        for dir in [
+            ".config/pipewire",
+            ".config/wireplumber",
+            ".local/share/wireplumber",
+            ".local/state/wireplumber",
+        ] {
+            assert!(ENTRY_POINTS.contains(&dir), "{dir}");
+            assert!(!HOST_RUNS_IN_ZONES.contains(&dir), "{dir} twice");
+        }
     }
 
     fn argv(args: &[&str]) -> Vec<OsString> {

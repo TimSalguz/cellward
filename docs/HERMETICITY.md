@@ -50,7 +50,11 @@ the zone gets it — not per launch):
    what its clients see: their own streams, the outputs, the microphones
    only on `yes`, never a monitor or a link of their own — without the
    policy no PipeWire at all; the host's raw `pipewire-0` only for a zone
-   declared an audio manager, `vpn-zone audio-manager`;
+   declared an audio manager, `vpn-zone audio-manager`; where WirePlumber
+   and PipeWire load scripts and fragments from in the home —
+   `~/.config/pipewire`, `~/.config/wireplumber`,
+   `~/.local/share/wireplumber`, `~/.local/state/wireplumber` — read-only in
+   the zone and made beforehand, or a program would replace the policy;
    `docs/LEAK-MODEL.md` §20), PulseAudio (the `pulse-filter` socket: an
    allow-list of commands, no recording of a monitor, the microphone only by
    the zone's permission — `yes`, `no` or `ask`, the default, a question on

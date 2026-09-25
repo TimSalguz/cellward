@@ -289,7 +289,7 @@ let
   };
 in
 {
-  # Политика WirePlumber для PipeWire зон (docs/LEAK-MODEL.md §17): от
+  # Политика WirePlumber для PipeWire зон (docs/LEAK-MODEL.md §20): от
   # системных зон не зависит — нужна пользовательскому уровню.
   imports = [ ./wireplumber/nixos.nix ];
 

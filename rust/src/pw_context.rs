@@ -1,5 +1,5 @@
 //! `pipewire-context` — the PipeWire socket a hermetic zone gets (owner,
-//! 2026-09-25; `docs/LEAK-MODEL.md` §17).
+//! 2026-09-25; `docs/LEAK-MODEL.md` §20).
 //!
 //! **Why.** Every zone used to get the host's `pipewire-0` as it is. PipeWire's
 //! `module-access` in its legacy mode makes a client that is not a Flatpak
@@ -26,7 +26,7 @@
 //! stops listening when this process ends — with the zone, or when it closes
 //! the context itself.
 //!
-//! **The policy is WirePlumber's** (`module/wireplumber/vpn-zones.lua`): a
+//! **The policy is WirePlumber's** (`module/wireplumber/policy.lua`): a
 //! restricted client gets from a stock WirePlumber read and execute on every
 //! object — every other program's node, every monitor, the link factory. The
 //! script gives the zone's clients their own nodes, the sinks to play to, the
@@ -37,16 +37,24 @@
 //! restarted without the script — a connection to the zone's socket is taken
 //! here and closed at once: the zone has only the pulse path, and a program
 //! learns that at once instead of hanging in the backlog. When the key goes
-//! (WirePlumber restarted), the context is closed and the daemon stops
-//! listening; connections already made keep what the policy gave them.
+//! (WirePlumber restarted), the context is closed: the daemon stops
+//! listening AND destroys every client that came through it
+//! (`module-protocol-native`: a broken `close_fd` destroys the server, and
+//! the server its clients). Fail-closed by construction — no permission a
+//! policy gave outlives the policy; the zone's programs connect again, to a
+//! socket that is closed until the policy is back.
 //!
 //! **The daemon restarts**: this process keeps its own descriptor of the
 //! socket, so the socket stays bound and listening; this process connects
 //! again every [`TICK`] and hands the same descriptor to the new daemon.
 //!
 //! **The microphone** (`crate::microphone`): the zone's setting is published
-//! in the same metadata, [`MICROPHONE_KEY`]`<zone>` = `yes` or `no`, read
-//! again every [`TICK`] — a change applies at once, as on the pulse path. The
+//! in the same metadata, [`MICROPHONE_KEY`]`<zone>` = `yes` or `no`: as soon
+//! as the metadata is bound, again right before the socket is handed out (on
+//! the same connection, so WirePlumber has it before any client of the zone
+//! — the key outlives a helper, and an earlier run's `yes` must not decide),
+//! whenever the metadata says otherwise, and read again every [`TICK`] — a
+//! change applies at once, as on the pulse path. The
 //! policy lets the zone's clients see capture sources, and be linked to one,
 //! only on `yes`. `ask` is `no` here: the question is asked on the pulse path,
 //! where the sound filter can hold the request; a question for a native
@@ -748,6 +756,8 @@ struct Session<'a> {
     policy: Option<String>,
     /// The pipe's read end: while it is held, the daemon listens.
     context: Option<OwnedFd>,
+    /// Where the zone's microphone setting is read.
+    mic: &'a dyn MicSource,
     /// What was last published for the microphone, on this metadata object.
     mic_published: Option<&'static str>,
 }
@@ -829,6 +839,9 @@ impl<'a> Session<'a> {
                     self.metadata_proxy = Some(proxy);
                     self.policy = None;
                     self.mic_published = None;
+                    // At once, not on the next tick: whatever the metadata
+                    // holds for this zone was left by an earlier run.
+                    self.publish(false)?;
                 }
             }
             Event::GlobalRemove { id } => {
@@ -848,9 +861,24 @@ impl<'a> Session<'a> {
                 key: Some(key),
                 value,
             } if key == POLICY_KEY => self.policy = value,
+            // The zone's own key, as the metadata holds it now: an earlier
+            // run's value (the key outlives a helper — WirePlumber keeps it
+            // for as long as it runs), or somebody else's write. Put right at
+            // once; its own value coming back changes nothing.
+            Event::Property {
+                subject: 0,
+                key: Some(key),
+                value,
+            } if key == self.mic_key() => {
+                if value.as_deref() != self.mic_published {
+                    self.mic_published = None;
+                    self.publish(false)?;
+                }
+            }
             Event::Property { key: None, .. } => {
                 self.policy = None;
                 self.mic_published = None;
+                self.publish(false)?;
             }
             Event::Property { .. } | Event::Other => {}
         }
@@ -864,6 +892,15 @@ impl<'a> Session<'a> {
             let Some(global) = self.security_context else {
                 return Ok(());
             };
+            // The microphone as it is NOW, before the socket is handed
+            // out, on this same connection: the daemon passes the value on
+            // to WirePlumber's metadata before it can accept a client of the
+            // zone, so the policy never decides by a value an earlier run
+            // left (`yes`, then `vpn-zone microphone <zone> no` while the
+            // zone was down: a program connecting at once would record until
+            // the next tick). Sent again even when it is what was published:
+            // the setting may have changed since the last tick.
+            self.publish(true)?;
             let proxy = match self.security_context_proxy {
                 Some(p) => p,
                 None => {
@@ -900,14 +937,20 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
-    /// The microphone setting, published when it changed.
-    fn publish(&mut self, mic: &dyn MicSource) -> io::Result<()> {
+    /// The zone's microphone key in the metadata.
+    fn mic_key(&self) -> String {
+        format!("{MICROPHONE_KEY}{}", self.zone)
+    }
+
+    /// The microphone setting, published when it changed (`always`: sent
+    /// whatever was published before).
+    fn publish(&mut self, always: bool) -> io::Result<()> {
         let Some(proxy) = self.metadata_proxy else {
             return Ok(());
         };
-        let value = published(mic.setting());
-        if self.mic_published != Some(value) {
-            let key = format!("{MICROPHONE_KEY}{}", self.zone);
+        let value = published(self.mic.setting());
+        if always || self.mic_published != Some(value) {
+            let key = self.mic_key();
             self.send(request::set_property(proxy, &key, Some(value)), &[])?;
             self.mic_published = Some(value);
         }
@@ -981,6 +1024,7 @@ fn serve(
         metadata_proxy: None,
         policy: None,
         context: None,
+        mic,
         mic_published: None,
     };
     s.start()?;
@@ -1000,7 +1044,7 @@ fn serve(
             refuse_waiting(listener, say, "no WirePlumber policy of vpn-zones");
         }
         if Instant::now() >= next_tick {
-            s.publish(mic)?;
+            s.publish(false)?;
             next_tick = Instant::now() + TICK;
         }
         report(s.state());
@@ -1431,6 +1475,17 @@ mod tests {
         }
     }
 
+    /// A message that sets the zone "nl"'s microphone to `value`.
+    fn assert_mic(m: &Incoming, value: &str) {
+        assert_eq!((m.id, m.opcode), (3, METADATA_SET_PROPERTY));
+        let (v, _) = pod::decode(&m.body).unwrap();
+        assert_eq!(
+            v.members().unwrap()[1],
+            Value::String("vpn-zones.microphone.nl".into())
+        );
+        assert_eq!(v.members().unwrap()[3], Value::String(value.into()));
+    }
+
     /// Whether the pipe's read end is gone, waiting up to `ms` for it — what
     /// the daemon's loop watches `close_fd` for (no events asked: an error
     /// is always reported).
@@ -1499,15 +1554,18 @@ mod tests {
         let (v, _) = pod::decode(&m.body).unwrap();
         assert_eq!(v.members().unwrap()[0], Value::Int(32));
         assert_eq!(v.members().unwrap()[3], Value::Int(3));
-        // The microphone ("ask" is "no" here), within a tick.
+        // The microphone ("ask" is "no" here), at once.
         let (m, _) = d.next();
-        assert_eq!((m.id, m.opcode), (3, METADATA_SET_PROPERTY));
-        let (v, _) = pod::decode(&m.body).unwrap();
-        assert_eq!(
-            v.members().unwrap()[1],
-            Value::String("vpn-zones.microphone.nl".into())
-        );
-        assert_eq!(v.members().unwrap()[3], Value::String("no".into()));
+        assert_mic(&m, "no");
+        // A value an earlier run left (the metadata keeps it for as long as
+        // WirePlumber runs) is put right at once; the helper's own value
+        // coming back changes nothing.
+        d.property(3, "vpn-zones.microphone.nl", Some("yes"));
+        let (m, _) = d.next();
+        assert_mic(&m, "no");
+        d.property(3, "vpn-zones.microphone.nl", Some("no"));
+        // Another zone's key is not this helper's business.
+        d.property(3, "vpn-zones.microphone.other", Some("yes"));
         // A marker of another shape is no marker: nothing is created.
         d.property(3, POLICY_KEY, Some("2"));
         // A ping is answered — and proves the marker above was read first.
@@ -1521,6 +1579,10 @@ mod tests {
         assert!(states_rx.try_iter().all(|s| s == State::NoPolicy));
 
         d.property(3, POLICY_KEY, Some(POLICY_VERSION));
+        // The microphone again, BEFORE the socket goes out: the policy sees
+        // this run's value when the zone's first client comes.
+        let (m, _) = d.next();
+        assert_mic(&m, "no");
         let (m, _) = d.next();
         assert_eq!((m.id, m.opcode), (REGISTRY, REGISTRY_BIND));
         let (v, _) = pod::decode(&m.body).unwrap();
