@@ -39,6 +39,12 @@
 //!   made by the SUPERVISOR, which connects to the security context's listener
 //!   and nothing else, and hands the descriptor over. A proxy taken over by its
 //!   client gets what the client already had — restricted connections;
+//! * only the launch's own processes: a connection is passed on when the
+//!   process that made it is the supervisor's descendant, which the
+//!   supervisor asks the kernel ([`of_this_launch`]). The zone's directory of
+//!   sockets is shared by all its launches, and is read-only in the zone
+//!   (`crate::zone`): a program of one launch can neither take another's
+//!   socket nor be passed on through it;
 //! * limits, so that a client cannot make it hold unbounded memory or
 //!   descriptors: connections, connections waiting for their upstream, objects
 //!   per connection, globals per registry, the bytes waiting for a client that
@@ -47,12 +53,16 @@
 //!   `wl-proxy` bounds a message (4096 bytes) and the descriptors of one read
 //!   (28, the rest the kernel closes); descriptors a client sends ahead and
 //!   never uses stay queued until the process limit — which starves this
-//!   launch's own connections only (§3.2);
+//!   launch's own connections only, since nobody else's are taken (§3.2);
+//!   out of descriptors, accepting rests a while and is tried again;
+//! * it dies with its supervisor (`PR_SET_PDEATHSIG`): a window's pid
+//!   upstream is the supervisor's, and never a dead one's.
 //!
 //! **Fail-closed.** The proxy dying takes the program's display with it; the
 //! program is never handed the compositor's socket instead. When it cannot
 //! START, `wl-sandbox` falls back to exactly what it did before the proxy: the
-//! compositor listens on the zone's path itself (§8, the fallback ladder).
+//! compositor listens on the zone's path itself (§8, the fallback ladder) —
+//! and if that cannot be set up either, the program is not started.
 //!
 //! **Lifetime.** Until the main program exits, the proxy accepts. Then the
 //! supervisor closes the channel between them, and the proxy stops accepting —
@@ -61,7 +71,9 @@
 //! terminal's child keeps its window. It exits with the last of them, and the
 //! supervisor, which adopted the program's orphans (`PR_SET_CHILD_SUBREAPER`)
 //! so that a window of one of them still leads to its launch
-//! (`crate::focus`), exits after it.
+//! (`crate::focus`), exits after it. A SIGTERM, SIGINT or SIGHUP sent to the
+//! supervisor is passed on to the program and those orphans ([`FORWARDED`]):
+//! the launch's pid is the supervisor's, and "close" is sent to it.
 //!
 //! **Whose pid a window has.** The compositor takes a client's pid from the
 //! connection (`SO_PEERCRED`: whoever called `connect`), and upstream it is the
@@ -72,14 +84,14 @@
 //! children for the network.
 
 use std::cell::Cell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use libseccomp::{ScmpAction, ScmpArgCompare, ScmpCompareOp, ScmpFilterContext, ScmpSyscall};
 use wl_proxy::baseline::Baseline;
@@ -167,7 +179,9 @@ const MAX_WAITING: usize = 16;
 /// holds a few thousand; the proxy's share of each is a few hundred bytes.
 const MAX_OBJECTS: usize = 100_000;
 /// How often (in dispatches of a connection) its objects are counted: the
-/// count walks all of them, and one read of 8 KiB creates at most ~700.
+/// count walks all of them. A dispatch reads the client's socket once
+/// (wl-proxy's `may_read_from_socket`), into a buffer of 8 KiB, and that
+/// creates at most ~700 — so the limit is overshot by 45 000 at the most.
 const COUNT_OBJECTS_EVERY: u32 = 64;
 /// Globals remembered per registry. The compositor's to fill, not the
 /// program's, but an output plugged in and out forever must not grow it.
@@ -184,6 +198,8 @@ const MAX_FDS: libc::rlim_t = 1024;
 const MAX_DATA: libc::rlim_t = 512 << 20;
 /// How long the supervisor waits for the proxy to say it is ready.
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long accepting rests after the process ran out of descriptors.
+const ACCEPT_PAUSE: Duration = Duration::from_secs(1);
 /// The longest compositor error text passed on to the program.
 const MAX_ERROR_TEXT: usize = 1024;
 
@@ -239,6 +255,90 @@ pub struct Proxy {
     channel: Option<UnixStream>,
     upstream: PathBuf,
     adopting: bool,
+    /// The signals taken over in [`Proxy::take_over`].
+    signals: Option<Signals>,
+}
+
+/// The signals the supervisor passes on to its launch. The pid of the launch
+/// — its registry record, and the pid of every window it opens through the
+/// proxy — is the supervisor's, so "close it" reaches the supervisor: the
+/// window menu's "close" and "restart" (`crate::focus`), a `kill` by hand.
+/// Before the proxy it reached the program itself, which is why they are
+/// passed on instead of ending the supervisor and leaving the program running,
+/// its windows open and its record dead (review 2026-09-25).
+const FORWARDED: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
+
+/// [`FORWARDED`] and `SIGCHLD` (which only wakes the supervisor up to reap),
+/// blocked and read from a signalfd in [`Proxy::supervise`].
+struct Signals {
+    fd: OwnedFd,
+    /// The mask before, which the program is given back.
+    old: libc::sigset_t,
+}
+
+impl Signals {
+    fn take() -> io::Result<Self> {
+        // SAFETY: sigset_t is plain data, filled by sigemptyset/sigaddset;
+        // sigprocmask and signalfd read it and write `old`, all valid for the
+        // calls. The descriptor signalfd returns is owned by nobody else.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            for sig in FORWARDED.iter().chain(&[libc::SIGCHLD]) {
+                libc::sigaddset(&mut set, *sig);
+            }
+            let mut old: libc::sigset_t = std::mem::zeroed();
+            if libc::sigprocmask(libc::SIG_BLOCK, &set, &mut old) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let fd = libc::signalfd(-1, &set, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK);
+            if fd < 0 {
+                let e = io::Error::last_os_error();
+                libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+                return Err(e);
+            }
+            Ok(Self {
+                fd: OwnedFd::from_raw_fd(fd),
+                old,
+            })
+        }
+    }
+
+    /// The mask as it was. In the program's child before its `execve` (the
+    /// mask is inherited across both), and in the supervisor on a path that
+    /// runs the program itself: a signal that came meanwhile is delivered
+    /// then, as it would have been.
+    fn restore(&self) {
+        // SAFETY: a valid sigset_t; async-signal-safe, fit for a fresh child.
+        unsafe { libc::sigprocmask(libc::SIG_SETMASK, &self.old, std::ptr::null_mut()) };
+    }
+
+    /// The signals that have come: each with whether a process sent it.
+    fn read(&self) -> Vec<(libc::c_int, bool)> {
+        let mut out = Vec::new();
+        loop {
+            // SAFETY: signalfd_siginfo is plain data.
+            let mut info: libc::signalfd_siginfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<libc::signalfd_siginfo>();
+            // SAFETY: reads at most `size` bytes into `info`.
+            let n = unsafe {
+                libc::read(
+                    self.fd.as_raw_fd(),
+                    (&mut info as *mut libc::signalfd_siginfo).cast(),
+                    size,
+                )
+            };
+            if n != size as isize {
+                return out;
+            }
+            // SI_USER (kill, pidfd_send_signal), SI_QUEUE and SI_TKILL are
+            // zero or below. A signal the kernel makes — SIGINT of a
+            // terminal's Ctrl+C, SIGHUP of its hang-up — is SI_KERNEL, above
+            // zero, and goes to the whole foreground process group, the
+            // program included: passed on, it would come to it twice.
+            out.push((info.ssi_signo as libc::c_int, info.ssi_code <= 0));
+        }
+    }
 }
 
 /// Start the proxy on `zone_listener`, the socket the program will be told
@@ -251,6 +351,8 @@ pub struct Proxy {
 pub fn start(zone_listener: &UnixListener, upstream: &Path) -> Result<Proxy, String> {
     let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
     let listener = zone_listener.try_clone().map_err(|e| format!("dup: {e}"))?;
+    // SAFETY: getpid takes nothing and cannot fail.
+    let supervisor = unsafe { libc::getpid() };
     // SAFETY: single-threaded here (wl-sandbox has no threads), so the child
     // may allocate before it confines itself.
     let pid = unsafe { libc::fork() };
@@ -261,9 +363,10 @@ pub fn start(zone_listener: &UnixListener, upstream: &Path) -> Result<Proxy, Str
         drop(ours);
         // A panic ends the proxy here: unwinding further would run the
         // supervisor's code (`wl_sandbox::run`) in this child.
-        let code =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| child(listener, theirs)))
-                .unwrap_or(101);
+        let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            child(listener, theirs, supervisor)
+        }))
+        .unwrap_or(101);
         // _exit: the parent's atexit handlers and buffers are not ours.
         // SAFETY: always sound.
         unsafe { libc::_exit(code) };
@@ -276,6 +379,7 @@ pub fn start(zone_listener: &UnixListener, upstream: &Path) -> Result<Proxy, Str
         channel: Some(ours),
         upstream: upstream.to_path_buf(),
         adopting: false,
+        signals: None,
     };
     match proxy.await_ready() {
         Ok(()) => Ok(proxy),
@@ -311,6 +415,12 @@ impl Proxy {
     /// is certainly running: the subreaper flag survives `execve`, and a
     /// fallback that runs the program in this very process must not keep it
     /// ([`Proxy::kill`] takes it back; the name goes with the `execve`).
+    ///
+    /// And the signals of [`FORWARDED`] are taken over from here on: one that
+    /// comes before the program is started is passed on once it is. The
+    /// program's child gives them back ([`Proxy::in_program_child`]). Without
+    /// a signalfd (out of descriptors) the supervisor dies of them as it did
+    /// before, with a warning, and the proxy with it.
     pub fn take_over(&mut self) {
         if let Ok(name) = std::ffi::CString::new(SUPERVISOR_NAME) {
             // SAFETY: PR_SET_NAME reads a NUL-terminated string that outlives
@@ -319,6 +429,21 @@ impl Proxy {
         }
         // SAFETY: prctl with these arguments takes no pointers.
         self.adopting = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0;
+        match Signals::take() {
+            Ok(signals) => self.signals = Some(signals),
+            Err(e) => eprintln!(
+                "wl-sandbox: cannot take over the signals ({e}) — a signal to the launch ends the \
+                 supervisor instead of reaching the program"
+            ),
+        }
+    }
+
+    /// In the program's child, between `fork` and `execve`: the signal mask
+    /// the program would have had. Async-signal-safe.
+    pub fn in_program_child(&self) {
+        if let Some(signals) = &self.signals {
+            signals.restore();
+        }
     }
 
     /// Stop it at once, on a path that will not start the program behind it.
@@ -326,6 +451,9 @@ impl Proxy {
         if self.adopting {
             // SAFETY: as in `take_over`.
             unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0) };
+        }
+        if let Some(signals) = self.signals.take() {
+            signals.restore();
         }
         self.channel = None;
         match &self.pidfd {
@@ -344,18 +472,42 @@ impl Proxy {
     /// Answer the proxy's requests until the program `main` exits, call
     /// `on_main_exit`, stop the proxy accepting and wait for it to finish
     /// with the connections it has. Returns `main`'s wait status.
+    ///
+    /// Meanwhile a signal of [`FORWARDED`] sent to this process is passed on
+    /// to its children but the proxy: the program while it runs, and the
+    /// orphans it left, which are adopted here. After a SIGTERM a child
+    /// adopted later gets it too: a wrapper that dies of it (a throwaway
+    /// container's `profile-run`, `x11-run`) leaves the program behind it to
+    /// this process, and that program is what "close" was meant for.
     pub fn supervise(mut self, main: libc::pid_t, on_main_exit: impl FnOnce()) -> libc::c_int {
         let main_fd = sys::pidfd_open(main);
+        let mut on_main_exit = Some(on_main_exit);
         let mut main_status = None;
         let mut proxy_alive = true;
+        let mut terminating = false;
+        // The children SIGTERM has been passed on to (and not reaped since).
+        let mut told = HashSet::new();
         loop {
-            self.reap(main, &mut main_status, &mut proxy_alive);
+            self.reap(main, &mut main_status, &mut proxy_alive, &mut told);
             if main_status.is_some() {
-                break;
+                if let Some(on_main_exit) = on_main_exit.take() {
+                    on_main_exit();
+                    // The proxy stops accepting when this closes, and exits
+                    // with its last connection.
+                    self.channel = None;
+                }
+                if !proxy_alive {
+                    break;
+                }
             }
-            let mut fds = Vec::with_capacity(3);
-            if let Some(fd) = &main_fd {
-                fds.push(pollfd(fd.as_raw_fd()));
+            if terminating {
+                self.pass_on(libc::SIGTERM, &mut told);
+            }
+            let mut fds = Vec::with_capacity(4);
+            if main_status.is_none() {
+                if let Some(fd) = &main_fd {
+                    fds.push(pollfd(fd.as_raw_fd()));
+                }
             }
             let channel_at = self.channel.as_ref().map(|c| {
                 fds.push(pollfd(c.as_raw_fd()));
@@ -366,9 +518,17 @@ impl Proxy {
                     fds.push(pollfd(fd.as_raw_fd()));
                 }
             }
-            // Orphans are reaped on every wake-up; without a pidfd for the
-            // program its exit is only noticed on this timeout.
-            let timeout = if main_fd.is_some() { 2000 } else { 200 };
+            let signals_at = self.signals.as_ref().map(|s| {
+                fds.push(pollfd(s.fd.as_raw_fd()));
+                fds.len() - 1
+            });
+            // Orphans are reaped on every wake-up (SIGCHLD is one); without
+            // the pidfds an exit is only noticed on this timeout.
+            let timeout = if main_fd.is_some() && self.pidfd.is_some() {
+                2000
+            } else {
+                200
+            };
             if let Err(e) = poll(&mut fds, timeout) {
                 if e.kind() != io::ErrorKind::Interrupted {
                     eprintln!("wl-sandbox: poll: {e}");
@@ -381,20 +541,39 @@ impl Proxy {
                     self.channel = None;
                 }
             }
-        }
-        on_main_exit();
-        // The proxy stops accepting when this closes, and exits with its
-        // last connection.
-        self.channel = None;
-        while proxy_alive {
-            let mut status = 0;
-            match wait(-1, &mut status, 0) {
-                Some(pid) if pid == self.pid => proxy_alive = false,
-                Some(_) => {}
-                None => break,
+            if let (Some(at), Some(signals)) = (signals_at, &self.signals) {
+                if fds[at].revents != 0 {
+                    for (sig, sent) in signals.read() {
+                        if !sent || !FORWARDED.contains(&sig) {
+                            continue;
+                        }
+                        if sig == libc::SIGTERM {
+                            terminating = true;
+                            self.pass_on(sig, &mut told);
+                        } else {
+                            self.pass_on(sig, &mut HashSet::new());
+                        }
+                    }
+                }
             }
         }
         main_status.unwrap_or(0)
+    }
+
+    /// Send `sig` to every child of this process but the proxy that is not in
+    /// `told`, and put it there. By number, and safely so: a child's number
+    /// is not given to anybody else before it is reaped, and nothing is
+    /// reaped between the listing and the signal.
+    fn pass_on(&self, sig: libc::c_int, told: &mut HashSet<libc::pid_t>) {
+        // SAFETY: getpid takes nothing and cannot fail.
+        let me = unsafe { libc::getpid() };
+        for child in sys::children_of(me) {
+            if child == self.pid || !told.insert(child) {
+                continue;
+            }
+            // SAFETY: kill(2) takes no pointers; the pid is our unreaped child.
+            unsafe { libc::kill(child, sig) };
+        }
     }
 
     /// Reap whatever has exited: the program, the proxy, adopted orphans.
@@ -403,22 +582,38 @@ impl Proxy {
         main: libc::pid_t,
         main_status: &mut Option<libc::c_int>,
         proxy_alive: &mut bool,
+        told: &mut HashSet<libc::pid_t>,
     ) {
         loop {
             let mut status = 0;
             match wait(-1, &mut status, libc::WNOHANG) {
-                Some(0) | None => return,
-                Some(pid) if pid == main => *main_status = Some(status),
-                Some(pid) if pid == self.pid => {
+                Some(0) => return,
+                // Nothing left to wait for at all (ECHILD).
+                None => {
                     *proxy_alive = false;
-                    // Fail-closed: the program's connections died with the
-                    // proxy, and it is not given another way to the compositor.
-                    eprintln!(
-                        "wl-sandbox: the Wayland proxy exited ({}) — the program has no display now",
-                        describe(status)
-                    );
+                    main_status.get_or_insert(0);
+                    return;
                 }
-                Some(_) => {}
+                Some(pid) => {
+                    told.remove(&pid);
+                    if pid == main {
+                        *main_status = Some(status);
+                    } else if pid == self.pid {
+                        *proxy_alive = false;
+                        // Fail-closed: the program's connections died with
+                        // the proxy, and it is not given another way to the
+                        // compositor. (After the program, its exit is the
+                        // ordinary end.)
+                        if main_status.is_some() {
+                            continue;
+                        }
+                        eprintln!(
+                            "wl-sandbox: the Wayland proxy exited ({}) — the program has no \
+                             display now",
+                            describe(status)
+                        );
+                    }
+                }
             }
         }
     }
@@ -429,13 +624,27 @@ impl Proxy {
             return false;
         };
         let mut byte = [0u8; 1];
-        // No descriptors are expected from the proxy; any it sends are closed
-        // by the kernel (`MSG_CTRUNC`).
-        match sys::recv_into_with_fds(channel.as_raw_fd(), &mut byte, 0) {
-            Ok((1, _, _)) if byte[0] == CONNECT => {}
+        // A request comes with the client's socket, for its peer to be looked
+        // at; any other descriptor the proxy sends is closed by the kernel
+        // (`MSG_CTRUNC`), and this one is closed here once looked at: the
+        // supervisor only asks the kernel who connected, it never reads.
+        let client = match sys::recv_into_with_fds(channel.as_raw_fd(), &mut byte, 1) {
+            Ok((1, mut fds, _)) if byte[0] == CONNECT => fds.pop(),
             Ok((1, _, _)) => return true,
             Ok(_) => return false,
             Err(e) => return e.kind() == io::ErrorKind::Interrupted,
+        };
+        let peer = client.as_ref().and_then(|c| sys::peer_pid(c.as_raw_fd()));
+        let ours = client
+            .as_ref()
+            .is_some_and(|c| of_this_launch(c.as_raw_fd()));
+        drop(client);
+        if !ours {
+            eprintln!(
+                "wl-sandbox: a Wayland connection from outside this launch (pid {}) — refused",
+                peer.map_or("?".to_owned(), |p| p.to_string())
+            );
+            return sys::send_with_fds(channel.as_raw_fd(), &[REFUSED], &[]).is_ok();
         }
         // The one place a connection upstream is made: to the security
         // context's listener, never to anything the proxy names.
@@ -445,6 +654,31 @@ impl Proxy {
         };
         sent.is_ok()
     }
+}
+
+/// Whether the process that connected on `client` belongs to this launch:
+/// this process or one below it (review 2026-09-25).
+///
+/// The zone's directory of sockets is every launch's of that zone, and it is
+/// in the zone whole: a program of another launch can connect to this one's
+/// socket. The compositor takes the pid of a window from the connection
+/// upstream, which is this process's, so such a window would carry this
+/// launch's pid — its container and program in `vpn-zone focused`, the target
+/// of the window menu. Only the launch's own processes are passed on. That is
+/// sound because this process is a subreaper ([`Proxy::take_over`]): an orphan
+/// of the program is given to it, and nothing of the launch ever leaves its
+/// subtree. The peer is held by a pidfd — the kernel's own (`SO_PEERPIDFD`)
+/// where there is one — while its ancestry is read ([`sys::descends_from`]).
+fn of_this_launch(client: RawFd) -> bool {
+    // SAFETY: getpid takes nothing and cannot fail.
+    let me = unsafe { libc::getpid() };
+    let Some(pid) = sys::peer_pid(client) else {
+        return false;
+    };
+    let Some(pidfd) = sys::peer_pidfd(client, pid) else {
+        return false;
+    };
+    sys::descends_from(pid, &pidfd, me)
 }
 
 /// `waitpid`, retried on EINTR. `None` when there is nothing (left) to wait for.
@@ -472,8 +706,8 @@ fn describe(status: libc::c_int) -> String {
 // --- THE PROXY'S SIDE -------------------------------------------------------
 
 /// The forked proxy: confine, report ready, serve.
-fn child(listener: UnixListener, channel: UnixStream) -> libc::c_int {
-    if let Err(e) = confine(&listener, &channel) {
+fn child(listener: UnixListener, channel: UnixStream, supervisor: libc::pid_t) -> libc::c_int {
+    if let Err(e) = confine(&listener, &channel, supervisor) {
         eprintln!("wl-sandbox: the Wayland proxy cannot confine itself: {e}");
         return 1;
     }
@@ -484,15 +718,36 @@ fn child(listener: UnixListener, channel: UnixStream) -> libc::c_int {
 }
 
 /// Everything that makes the process what [`filter`] assumes, in an order
-/// that leaves it no moment to be anything else: a name, not dumpable, no
-/// descriptor but its own and the standard three, the limits, the filter.
-fn confine(listener: &UnixListener, channel: &UnixStream) -> Result<(), String> {
+/// that leaves it no moment to be anything else: a name, not dumpable, dying
+/// with its supervisor, no descriptor but its own and the standard three, the
+/// limits, the filter.
+fn confine(
+    listener: &UnixListener,
+    channel: &UnixStream,
+    supervisor: libc::pid_t,
+) -> Result<(), String> {
     let name = std::ffi::CString::new(PROCESS_NAME).map_err(|e| e.to_string())?;
     // SAFETY: PR_SET_NAME reads a NUL-terminated string that outlives the call.
     unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr(), 0, 0, 0) };
     // SAFETY: prctl with these arguments takes no pointers.
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
         return Err(format!("PR_SET_DUMPABLE: {}", io::Error::last_os_error()));
+    }
+    // The proxy does not outlive its supervisor (review 2026-09-25). A
+    // window's pid upstream is the supervisor's; a proxy that went on
+    // serving after it died would leave its windows with the number of a
+    // dead process, which the next process to get it — a host one, say —
+    // would lend its network in `vpn-zone focused`. A process of the zone
+    // may kill the supervisor (kill(2) asks only for the uid, LEAK-MODEL
+    // §16): then the display goes too. Fail-closed. Checked after it is set:
+    // a supervisor that died before would not have been seen doing it.
+    // SAFETY: prctl with these arguments takes no pointers.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
+        return Err(format!("PR_SET_PDEATHSIG: {}", io::Error::last_os_error()));
+    }
+    // SAFETY: getppid takes nothing and cannot fail.
+    if unsafe { libc::getppid() } != supervisor {
+        return Err("the supervisor is gone".to_owned());
     }
     close_all_but(&mut [0, 1, 2, listener.as_raw_fd(), channel.as_raw_fd()])?;
     listener
@@ -657,13 +912,20 @@ fn serve(listener: UnixListener, channel: UnixStream) -> libc::c_int {
     // Accepted, their upstream asked for, in the order asked.
     let mut waiting: VecDeque<OwnedFd> = VecDeque::new();
     let mut conns: Vec<Conn> = Vec::new();
+    // Out of descriptors: accepting is paused until then.
+    let mut paused: Option<Instant> = None;
     loop {
         if channel.is_none() && conns.is_empty() {
             return 0;
         }
         conns.retain_mut(Conn::flush);
+        let now = Instant::now();
+        if paused.is_some_and(|until| now >= until) {
+            paused = None;
+        }
+        let accepting = listener.as_ref().filter(|_| paused.is_none());
         let mut fds = Vec::with_capacity(2 + conns.len());
-        if let Some(l) = &listener {
+        if let Some(l) = accepting {
             fds.push(pollfd(l.as_raw_fd()));
         }
         if let Some(c) = &channel {
@@ -671,11 +933,18 @@ fn serve(listener: UnixListener, channel: UnixStream) -> libc::c_int {
         }
         let first_conn = fds.len();
         fds.extend(conns.iter().map(|c| pollfd(c.state.poll_fd().as_raw_fd())));
-        let timeout = if conns.iter().any(|c| c.stopped) {
+        let mut timeout = if conns.iter().any(|c| c.stopped) {
             RECHECK_MS
         } else {
             -1
         };
+        if let Some(until) = paused {
+            let left = until.saturating_duration_since(now).as_millis();
+            let left = libc::c_int::try_from(left)
+                .unwrap_or(libc::c_int::MAX)
+                .max(1);
+            timeout = if timeout < 0 { left } else { timeout.min(left) };
+        }
         match poll(&mut fds, timeout) {
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -685,16 +954,19 @@ fn serve(listener: UnixListener, channel: UnixStream) -> libc::c_int {
             }
         }
         let mut at = 0;
-        if let Some(l) = &listener {
+        if let Some(l) = accepting {
             if fds[at].revents != 0 {
                 let busy = conns.len();
                 if !accept(l, channel.as_ref(), &mut waiting, busy) {
-                    // Out of descriptors: this launch holds too many. It keeps
-                    // what it has; new connections are refused from here on.
+                    // Out of descriptors: this launch holds too many (its
+                    // own: nobody else is passed on). It keeps what it has;
+                    // a new connection waits in the backlog, and accepting
+                    // is tried again in a while — a descriptor freed by a
+                    // connection that ended is one to take it with.
                     eprintln!(
-                        "wl-sandbox: the Wayland proxy is out of descriptors — no new connections"
+                        "wl-sandbox: the Wayland proxy is out of descriptors — new connections wait"
                     );
-                    listener = None;
+                    paused = Some(Instant::now() + ACCEPT_PAUSE);
                 }
             }
             at += 1;
@@ -715,8 +987,9 @@ fn serve(listener: UnixListener, channel: UnixStream) -> libc::c_int {
                     }
                     Answer::Nothing => {}
                     Answer::Closed => {
-                        // The program has exited (or the supervisor is gone):
-                        // no new connections, those waiting are dropped.
+                        // The program has exited: no new connections, those
+                        // waiting are dropped. (A supervisor that died took
+                        // this process with it: PR_SET_PDEATHSIG.)
                         channel = None;
                         listener = None;
                         waiting.clear();
@@ -755,7 +1028,9 @@ fn accept(
         if busy + waiting.len() >= MAX_CONNECTIONS || waiting.len() >= MAX_WAITING {
             continue;
         }
-        if sys::send_with_fds(channel.as_raw_fd(), &[CONNECT], &[]).is_ok() {
+        // With the socket, for the supervisor to ask the kernel who is on its
+        // other end: only this launch's own processes are passed on.
+        if sys::send_with_fds(channel.as_raw_fd(), &[CONNECT], &[sock.as_raw_fd()]).is_ok() {
             waiting.push_back(sock);
         }
     }
@@ -1558,18 +1833,21 @@ mod tests {
         assert_eq!(rig.finish(), 0);
     }
 
-    /// `start` forks, and a fork of the multi-threaded test harness is no
-    /// place to confine a process in: the test runs itself again, alone.
-    #[test]
-    fn the_proxy_starts_confined_serves_and_ends_with_its_last_connection() {
+    /// Where a test run alone ([`run_alone`]) and its foreign client meet.
+    const TEST_DIR: &str = "VZ_WL_PROXY_TEST_DIR";
+
+    /// One ignored test of this module in a process of its own, with `dir`
+    /// for its directory. Whether it passed, and what it said.
+    fn run_alone(test: &str, dir: &Path) -> (bool, String) {
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "wl_proxy::tests::supervised",
+                test,
                 "--ignored",
                 "--test-threads=1",
                 "--nocapture",
             ])
+            .env(TEST_DIR, dir)
             .output()
             .unwrap();
         let text = format!(
@@ -1577,13 +1855,89 @@ mod tests {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        assert!(out.status.success() && text.contains("1 passed"), "{text}");
+        (out.status.success() && text.contains("1 passed"), text)
+    }
+
+    /// `start` forks, and a fork of the multi-threaded test harness is no
+    /// place to confine a process in: the test runs itself again, alone. A
+    /// client from outside the launch is started beside it — a sibling of the
+    /// supervisor, not a process below it.
+    #[test]
+    fn the_proxy_starts_confined_serves_and_ends_with_its_last_connection() {
+        let dir = std::env::temp_dir().join(format!("vz-wl-proxy-sup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut foreign = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "wl_proxy::tests::foreign_client",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env(TEST_DIR, &dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let (passed, text) = run_alone("wl_proxy::tests::supervised", &dir);
+        let _ = foreign.kill();
+        let _ = foreign.wait();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(passed, "{text}");
+    }
+
+    /// Waits for `file` in `dir` to appear, up to 20 s; its text.
+    fn await_file(dir: &Path, file: &str) -> String {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Ok(text) = fs::read_to_string(dir.join(file)) {
+                return text;
+            }
+            assert!(std::time::Instant::now() < deadline, "no {file}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A program of another launch: connects to the zone's socket of the one
+    /// under test, asks for a roundtrip, and writes down whether it was
+    /// served. The process under test waits for `connected` before it
+    /// supervises, so the request is in while the proxy accepts.
+    #[test]
+    #[ignore = "run by the_proxy_starts_confined_serves_and_ends_with_its_last_connection"]
+    fn foreign_client() {
+        let Some(dir) = std::env::var_os(TEST_DIR).map(PathBuf::from) else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut client = loop {
+            match UnixStream::connect(dir.join("zone-sock")) {
+                Ok(client) => break client,
+                Err(e) => {
+                    assert!(std::time::Instant::now() < deadline, "{e}");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        };
+        fs::write(dir.join("connected"), "").unwrap();
+        let mut sync = Vec::new();
+        event(&mut sync, 1, 0, |a| {
+            a.extend_from_slice(&2u32.to_ne_bytes())
+        });
+        // Refused, the socket may be closed before this is written.
+        let _ = client.write_all(&sync);
+        let got = drain(&mut client);
+        let verdict = if got.is_empty() { "refused" } else { "served" };
+        fs::write(dir.join("foreign"), verdict).unwrap();
     }
 
     #[test]
     #[ignore = "run by the_proxy_starts_confined_serves_and_ends_with_its_last_connection"]
     fn supervised() {
-        let dir = std::env::temp_dir().join(format!("vz-wl-proxy-sup-{}", std::process::id()));
+        // Without the directory of the outer test: no foreign client either.
+        let shared = std::env::var_os(TEST_DIR).map(PathBuf::from);
+        let dir = shared.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("vz-wl-proxy-sup-{}", std::process::id()))
+        });
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         // The security context's listener, played by a fake compositor.
@@ -1594,6 +1948,9 @@ mod tests {
         // Before any thread: the fork in `start` has to be the only thing.
         let mut proxy = start(&zone, &up.path).unwrap();
         drop(zone);
+        if shared.is_some() {
+            await_file(&dir, "connected");
+        }
         let pid = proxy.pid;
         let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
         let field = |k: &str| {
@@ -1684,7 +2041,89 @@ mod tests {
         );
         // And after the program, nothing new is taken.
         assert!(UnixStream::connect(&zone_path).is_err());
+        // A process that is not below the supervisor — another launch's, in
+        // the same zone — was not passed on: its window would have carried
+        // this launch's pid (review 2026-09-25).
+        if shared.is_some() {
+            assert_eq!(await_file(&dir, "foreign"), "refused");
+        }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A signal to the supervisor — the pid of the launch, the pid of its
+    /// windows — reaches the program, and the program's orphans; it does not
+    /// end the supervisor and leave them running (review 2026-09-25).
+    #[test]
+    fn a_signal_to_the_supervisor_reaches_the_program_and_its_orphans() {
+        let dir = std::env::temp_dir().join(format!("vz-wl-proxy-sig-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (passed, text) = run_alone("wl_proxy::tests::supervised_signals", &dir);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(passed, "{text}");
+    }
+
+    #[test]
+    #[ignore = "run by a_signal_to_the_supervisor_reaches_the_program_and_its_orphans"]
+    fn supervised_signals() {
+        let Some(dir) = std::env::var_os(TEST_DIR).map(PathBuf::from) else {
+            return;
+        };
+        let up = Upstream::bind(&dir, 43).unwrap();
+        let zone = UnixListener::bind(dir.join("zone-sock")).unwrap();
+        let mut proxy = start(&zone, &up.path).unwrap();
+        drop(zone);
+        drop(up.listener);
+        proxy.take_over();
+        // The program: a shell that leaves a `sleep` behind when it dies of
+        // the signal — adopted here, and what "close" meant all the same.
+        let orphan_file = dir.join("orphan");
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "sleep 60 & echo $! > \"$0\"; wait"])
+            .arg(&orphan_file);
+        // What `wl_sandbox::run` does in its child (`in_program_child`): the
+        // mask is inherited, and std's spawn leaves it as it is.
+        // SAFETY: sigprocmask is async-signal-safe; the set is plain data.
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+                let mut none: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut none);
+                libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+        #[allow(clippy::zombie_processes)]
+        let main = command.spawn().unwrap();
+        let orphan: i32 = loop {
+            match fs::read_to_string(&orphan_file) {
+                Ok(text) if text.ends_with('\n') => break text.trim().parse().unwrap(),
+                _ => std::thread::sleep(Duration::from_millis(20)),
+            }
+        };
+        let orphan_fd = sys::pidfd_open(orphan).unwrap();
+        // "Close" from the window menu: a SIGTERM to the supervisor. To this
+        // thread, which holds it blocked; the harness's other threads do not.
+        // SAFETY: tgkill takes numbers only.
+        unsafe {
+            libc::syscall(
+                libc::SYS_tgkill,
+                libc::getpid(),
+                libc::gettid(),
+                libc::SIGTERM,
+            )
+        };
+        let started = std::time::Instant::now();
+        let status = proxy.supervise(main.id() as libc::pid_t, || {});
+        assert!(
+            libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGTERM,
+            "the program was not ended by the signal: {status:#x}"
+        );
+        assert!(
+            sys::pidfd_wait(&orphan_fd, Duration::from_secs(10)),
+            "the orphan outlived the close"
+        );
+        assert!(started.elapsed() < Duration::from_secs(30));
     }
 
     #[test]

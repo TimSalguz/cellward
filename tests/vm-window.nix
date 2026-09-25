@@ -190,6 +190,24 @@ let
           alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
           machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=15)
           machine.succeed("pgrep -x foot")
+
+      # "Close" from the menu signals the window's pid, which behind the proxy
+      # is the supervisor's: it passes the signal on to the program, and goes
+      # after it, the proxy and the sockets with it — it does not die alone
+      # and leave foot running (review 2026-09-25). Entries: pin, restart,
+      # close; the third is picked by its number.
+      with subtest("the window menu's close ends the program behind the proxy, and its supervisor"):
+          tree = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r"))
+          sup = find(tree, "foot")["pid"]
+          machine.succeed(f"test -e /run/user/1000/vpn-zones/wayland/offline/wl-sandbox-{sup}")
+          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -M logo -M shift -k z -m shift -m logo")
+          machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
+          machine.sleep(2)
+          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k 3 -k Return")
+          machine.wait_until_fails("pgrep -x foot", timeout=30)
+          machine.wait_until_fails(f"test -e /proc/{sup}", timeout=30)
+          machine.wait_until_fails("pgrep -x vz-wl-proxy", timeout=30)
+          machine.fail(f"test -e /run/user/1000/vpn-zones/wayland/offline/wl-sandbox-{sup}")
     '';
   };
 in

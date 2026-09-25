@@ -24,21 +24,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   caps on connections, objects and globals, and a client that does not read
   its events is not read either. It never connects anywhere itself: the
   supervisor connects to the restricted listener and hands the descriptor
-  over. It lives while a connection is open (a terminal's child keeps its
-  window); after the program exits nothing new is accepted, as before. The
-  fallback: a proxy that cannot start leaves the compositor listening on the
-  zone's socket itself, as before, with a warning (`--no-proxy` asks for that);
-  a proxy that dies takes the program's display, never the unrestricted
-  socket. The supervisor makes every connection upstream, so the compositor
-  gives every window of the launch the supervisor's pid — the pid of the
-  launch's record; it goes by `vz-wl-sandbox` meanwhile, adopts the program's
-  orphans, and `vpn-zone focused` and `window-menu` take the network of such a
-  window from the supervisor's children, as the kernel says. Tests: the proxy between a real client
-  library and a fake compositor under its own filter, the supervised start in
-  a process of its own; VM: through the proxy and straight on sway's restricted
+  over — and only for a process of its own launch: the proxy hands it the
+  client's socket, the supervisor asks the kernel who connected
+  (`SO_PEERPIDFD`) and passes the connection on only when that process is
+  below it, every step of its ancestry read while held by a pidfd. It lives
+  while a connection is open (a terminal's child keeps its window), never
+  longer than its supervisor (`PR_SET_PDEATHSIG`); after the program exits
+  nothing new is accepted, as before; out of descriptors, it rests and accepts
+  again. The fallback: a proxy that cannot start leaves the compositor
+  listening on the zone's socket itself, as before, with a warning
+  (`--no-proxy` asks for that), and if that cannot be registered the program
+  is not started — never unrestricted once the compositor has shown it speaks
+  the protocol; a proxy that dies takes the program's display, never the
+  unrestricted socket. The supervisor makes every connection upstream, so the
+  compositor gives every window of the launch the supervisor's pid — the pid
+  of the launch's record; it goes by `vz-wl-sandbox` meanwhile, adopts the
+  program's orphans, passes SIGTERM, SIGINT and SIGHUP on to the program and
+  them (the window menu's "close" and "restart" signal that pid), and
+  `vpn-zone focused` and `window-menu` take the network of such a window from
+  the supervisor's children, as the kernel says — for a process that runs our
+  own `vpn-zone-core` and is a launch on record, not for one that merely took
+  the name. Tests: the proxy between a real client library and a fake
+  compositor under its own filter; the supervised start in a process of its
+  own, with a client of another process beside it refused; a SIGTERM to the
+  supervisor ending the program and the orphan it left; a process's ancestry
+  through pidfds; VM: through the proxy and straight on sway's restricted
   socket the same globals minus the policy's, the proxy confined and its
-  listener out of the zone, a foot window whose pid is the supervisor's still
-  named by its zone and program.
+  listener out of the zone, a zone process that is not of the launch not
+  passed on while a child of it is, a foot window whose pid is the
+  supervisor's still named by its zone and program, and the window menu's
+  "close" ending foot, then the supervisor, the proxy and the socket.
 - **The window menu's key and our windows' rule, written by the module**
   (`programs.vpn-zones.desktop`): `windowMenu.key` in niri's notation,
   `floatWindows` (the launch window and the menu float, by the app id
@@ -88,6 +103,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **The zone's Wayland directory is read-only in the zone**
+  (`vpn-zones/wayland/<zone>`, `rust/src/zone.rs`). It holds the socket of
+  every launch of the zone, and it was bound writable: a program of one launch
+  could unlink another launch's `wl-sandbox-<pid>` and listen there itself,
+  and that launch's next connection — a new window, a dialog — came to it,
+  keys and clipboard with it. connect(2) still works; unlink and bind get
+  EROFS. `wl-sandbox` makes its sockets through the host's path. VM: from the
+  zone a launch's socket cannot be removed nor a file put beside it.
+- **The broker holds a peer that has exited by nothing.** `SO_PEERPIDFD`
+  answering ESRCH (the peer has gone) used to fall back to a pidfd opened by
+  the peer's number — whoever had it by then. Only a kernel without the option
+  (`ENOPROTOOPT`) falls back now; the helper is shared with the Wayland proxy
+  (`sys::peer_pidfd`).
 - **Third review round: a zone loses sight of the project's own state.** A
   program in a zone without a sandbox has the home, and the project's state
   lay in it: the raw xdg-dbus-proxy socket behind the zone's bus filter (a

@@ -41,9 +41,12 @@
 //! program on to it — the same globals minus the hidden ones, nothing added.
 //! It is the base the window frame is built on (`docs/WINDOW-FRAME.md` §8).
 //! When the proxy cannot start, the compositor listens on the zone's path
-//! itself, as it did before there was a proxy (with a warning); `--no-proxy`
-//! asks for that from the start. The program is never given more than the
-//! restricted socket either way: a proxy that dies takes its display along.
+//! itself, as it did before there was a proxy (with a warning), and when that
+//! cannot be registered either the program is not started at all — never
+//! unrestricted once the compositor has shown it speaks the protocol;
+//! `--no-proxy` asks for the compositor on the zone's path from the start.
+//! The program is never given more than the restricted socket either way: a
+//! proxy that dies takes its display along.
 //!
 //! This was a C program (`module/wl-sandbox.c`) until it moved here; there is
 //! no C in this project any more. Two things changed with the move:
@@ -254,9 +257,9 @@ struct Compositor {
 }
 
 impl Compositor {
-    /// Connect and find the manager. The error is the warning to print before
-    /// running `program` unrestricted.
-    fn connect(program: &OsString) -> Result<Self, String> {
+    /// Connect and find the manager. The error says what went wrong, not what
+    /// comes of it: that is the caller's to say.
+    fn connect() -> Result<Self, String> {
         // `connect_to_env` follows libwayland: WAYLAND_SOCKET (an inherited
         // descriptor, which it takes over and unsets) first, then
         // WAYLAND_DISPLAY inside XDG_RUNTIME_DIR, absolute paths included. The
@@ -265,16 +268,12 @@ impl Compositor {
         // leaves the variable unset ends up unrestricted with a warning
         // instead of sandboxed silently.
         let conn = Connection::connect_to_env()
-            .map_err(|e| format!("no connection to the compositor ({e}) — running unrestricted"))?;
-        let (globals, queue) = registry_queue_init::<State>(&conn).map_err(|e| {
-            format!("cannot read the compositor's globals ({e}) — running unrestricted")
-        })?;
-        let manager = globals.bind(&queue.handle(), 1..=1, ()).map_err(|e| {
-            format!(
-                "the compositor does not support security-context ({e}) — running {} unrestricted",
-                program.to_string_lossy()
-            )
-        })?;
+            .map_err(|e| format!("no connection to the compositor ({e})"))?;
+        let (globals, queue) = registry_queue_init::<State>(&conn)
+            .map_err(|e| format!("cannot read the compositor's globals ({e})"))?;
+        let manager = globals
+            .bind(&queue.handle(), 1..=1, ())
+            .map_err(|e| format!("the compositor does not support security-context ({e})"))?;
         Ok(Self {
             conn,
             queue,
@@ -301,9 +300,7 @@ impl Compositor {
             // inside another is a protocol error) must not cost the user the
             // program: the socket we built is dropped and the program starts
             // as it would have without us.
-            return Err(format!(
-                "the compositor refused the security context ({e}) — running unrestricted"
-            ));
+            return Err(format!("the compositor refused the security context ({e})"));
         }
         ctx.destroy();
         let _ = self.conn.flush();
@@ -329,10 +326,13 @@ pub fn run(args: Args) -> u8 {
     };
     let runtime_dir = PathBuf::from(runtime_dir);
 
-    let compositor = match Compositor::connect(&args.cmd[0]) {
+    let compositor = match Compositor::connect() {
         Ok(compositor) => compositor,
         Err(why) => {
-            eprintln!("wl-sandbox: {why}");
+            eprintln!(
+                "wl-sandbox: {why} — running {} unrestricted",
+                args.cmd[0].to_string_lossy()
+            );
             return run_plain(&args.cmd);
         }
     };
@@ -412,7 +412,7 @@ pub fn run(args: Args) -> u8 {
         .as_ref()
         .map_or(listener.as_fd(), |up| up.listener.as_fd());
     if let Err(why) = compositor.register(target, close_read.as_fd(), &args.app_id) {
-        eprintln!("wl-sandbox: {why}");
+        eprintln!("wl-sandbox: {why} — running unrestricted");
         drop(close_write);
         let _ = fs::remove_file(&sock_path);
         forget_upstream(&upstream);
@@ -433,6 +433,13 @@ pub fn run(args: Args) -> u8 {
                 // The second rung: the proxy did not start. The context made
                 // for it is switched off, and the zone's path is registered
                 // itself — exactly what happened before there was a proxy.
+                // Should that fail, the program is NOT run unrestricted, as
+                // the other fallbacks do: the compositor has just taken a
+                // security context, so it speaks the protocol and a failure
+                // now is no older compositor — and our first connection has
+                // used up a WAYLAND_SOCKET, so without WAYLAND_DISPLAY the
+                // program's libwayland would go looking for `wayland-0`
+                // (review 2026-09-25).
                 eprintln!(
                     "wl-sandbox: the Wayland proxy did not start ({e}) — the compositor listens \
                      for the program itself"
@@ -440,11 +447,9 @@ pub fn run(args: Args) -> u8 {
                 drop(close_write);
                 let _ = fs::remove_file(&up.path);
                 let registered = sys::pipe()
-                    .map_err(|e| {
-                        format!("cannot create the close-fd pipe ({e}) — running unrestricted")
-                    })
+                    .map_err(|e| format!("cannot create the close-fd pipe ({e})"))
                     .and_then(|(close_read, switch)| {
-                        Compositor::connect(&args.cmd[0])?.register(
+                        Compositor::connect()?.register(
                             listener.as_fd(),
                             close_read.as_fd(),
                             &args.app_id,
@@ -454,9 +459,13 @@ pub fn run(args: Args) -> u8 {
                 match registered {
                     Ok(switch) => close_write = switch,
                     Err(why) => {
-                        eprintln!("wl-sandbox: {why}");
+                        eprintln!(
+                            "wl-sandbox: {why} — the Wayland sandbox could not be set up a second \
+                             time; {} is not started",
+                            args.cmd[0].to_string_lossy()
+                        );
                         let _ = fs::remove_file(&sock_path);
-                        return run_plain(&args.cmd);
+                        return EXIT_NOT_STARTED;
                     }
                 }
             }
@@ -484,6 +493,10 @@ pub fn run(args: Args) -> u8 {
         // The switch belongs to the parent. O_CLOEXEC would close this copy at
         // execve anyway; doing it here covers the case where the exec fails.
         drop(close_write);
+        // The signals the supervisor took over are the program's again.
+        if let Some((proxy, _)) = &proxy {
+            proxy.in_program_child();
+        }
         let e = exec_command(&args.cmd);
         eprintln!(
             "wl-sandbox: cannot start {}: {e}",

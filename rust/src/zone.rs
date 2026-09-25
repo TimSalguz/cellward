@@ -2324,6 +2324,19 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
         .join(crate::wl_sandbox::SOCKET_DIR)
         .join(&*zone.name());
     bind_entry(&wayland_host, &wayland_zone)?;
+    // Read-only in the zone (review 2026-09-25): the sockets of every launch
+    // of the zone are in it, and a program of one launch could otherwise
+    // unlink another's `wl-sandbox-<pid>` and listen there itself — the next
+    // connection of that launch (a new window, a dialog) would come to it,
+    // keys and clipboard with it. connect(2) needs no write access to the
+    // directory, unlink and bind do (EROFS). `wl-sandbox` makes its sockets
+    // through the host's path, which stays writable. Through the bind's own
+    // descriptor, not the path: the path is in the zone's runtime directory.
+    let bound = sys::open_dir(&wayland_zone)
+        .map_err(|e| format!("cannot open {}: {e}", wayland_zone.display()))?;
+    sys::remount_read_only(Path::new(&format!("/proc/self/fd/{}", bound.as_raw_fd())))
+        .map_err(|e| format!("cannot make {} read-only: {e}", wayland_zone.display()))?;
+    drop(bound);
     kept.push(format!("{}/{}", crate::wl_sandbox::SOCKET_DIR, zone.name()));
     // The scratch directories of the zone's sandboxes, with their bus filters
     // (`fs_sandbox::SCRATCH_SUBDIR`): in the zone's runtime directory, which no

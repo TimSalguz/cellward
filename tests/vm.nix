@@ -1321,7 +1321,30 @@ let
           zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
           in_zone(zp, "test ! -e /run/user/1000/vpn-zones/wl-up")
           in_zone(zp, "sh -c 'ls /run/user/1000/vpn-zones/wayland/vmsmoke | grep -q wl-sandbox-'")
+          # The zone's directory of sockets is read-only in the zone: a
+          # program cannot take another launch's socket's place, nor put one
+          # of its own there (review 2026-09-25).
+          wl_dir = "/run/user/1000/vpn-zones/wayland/vmsmoke"
+          sock = in_zone(zp, f"sh -c 'ls {wl_dir} | grep wl-sandbox- | head -1'").strip()
+          assert sock, "no socket of the launch"
+          in_zone(zp, f"sh -c '! rm -f {wl_dir}/{sock}'")
+          in_zone(zp, f"sh -c '! touch {wl_dir}/x'")
+          in_zone(zp, f"test -S {wl_dir}/{sock}")
+          # A process of the zone that is not of this launch — entered by
+          # hand, not below its supervisor — is not passed on by its proxy:
+          # its window would carry the launch's pid (review 2026-09-25).
+          foreign = in_zone(
+              zp,
+              f"sh -c 'WAYLAND_DISPLAY=vpn-zones/wayland/vmsmoke/{sock} wayland-info 2>&1; true'",
+          )
+          assert "wl_compositor" not in foreign, foreign
+          # The launch's own processes are: a child of the held program.
           alice("systemctl --user stop vmwlhold.service")
+          machine.wait_until_fails("pgrep -x vz-wl-proxy", timeout=30)
+          own = alice(
+              f"WAYLAND_DISPLAY={display} vpn-zone run vmsmoke -- sh -c 'sh -c wayland-info'"
+          )
+          assert "wl_compositor" in own, own
           machine.wait_until_fails("pgrep -x vz-wl-proxy", timeout=30)
           alice("vpn-zone down vmsmoke")
 

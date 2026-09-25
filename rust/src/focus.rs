@@ -159,11 +159,7 @@ pub fn focused_window() -> Result<Option<Window>, String> {
 
 /// The parent of a process, from `/proc/<pid>/status`.
 fn parent(pid: i32) -> Option<i32> {
-    fs::read_to_string(format!("/proc/{pid}/status"))
-        .ok()?
-        .lines()
-        .find_map(|l| l.strip_prefix("PPid:"))
-        .and_then(|v| v.trim().parse().ok())
+    crate::sys::parent_of(pid)
 }
 
 fn netns(pid: &str) -> Option<String> {
@@ -234,17 +230,30 @@ enum Proxied {
 /// all agree on one we know; a nested one (a browser's sandbox) is not
 /// counted, and two is not guessed between.
 ///
-/// Known by its name ([`crate::wl_proxy::SUPERVISOR_NAME`]): a process of a
-/// zone can call itself anything, but it cannot put a process into the host's
-/// namespace — and one in a zone's own namespace is taken by that, whatever
-/// it is called.
-fn proxied(state: &Path, pid: i32) -> Proxied {
+/// Known by its name ([`crate::wl_proxy::SUPERVISOR_NAME`]) — and not by
+/// that alone, since a name is anybody's (review 2026-09-25): a process in a
+/// zone's own namespace is taken by that namespace, whatever it is called;
+/// one on the host counts only when the kernel says it runs our own
+/// `vpn-zone-core` (`core`) and it is a launch on record. A host process that
+/// merely calls itself so — one an ordinary zone started through
+/// `systemd --user`, with a child put into that zone — gets no network at all
+/// instead of its children's: its windows are its own, and they must not wear
+/// the zone's label. A real supervisor passes on only the connections of its
+/// own launch (`crate::wl_proxy`), and no process below it in a zone can bring
+/// a host process into its subtree — so its children's network is its
+/// windows'. After an update of the package a supervisor started before it
+/// runs the old file: its windows show no network until the program is
+/// started again — the safe way round.
+fn proxied(state: &Path, core: &Path, pid: i32) -> Proxied {
     if comm(pid) != crate::wl_proxy::SUPERVISOR_NAME {
         return Proxied::No;
     }
     let own = netns(&pid.to_string()).and_then(|ns| network_of(state, &ns));
     if own.is_some_and(|zone| zone != crate::launch::UNCONFINED) {
         return Proxied::No;
+    }
+    if !runs_core(pid, core) || !registry::launched(&state.join(".running"), pid) {
+        return Proxied::Unknown;
     }
     let networks = children(pid)
         .into_iter()
@@ -269,24 +278,32 @@ fn one_network(networks: impl IntoIterator<Item = String>) -> Option<String> {
     networks.all(|n| n == first).then_some(first)
 }
 
-/// The children of `pid`, by the `PPid` of every process.
 fn children(pid: i32) -> Vec<i32> {
-    fs::read_dir("/proc")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
-        .filter(|&child| parent(child) == Some(pid))
-        .collect()
+    crate::sys::children_of(pid)
+}
+
+/// Whether `pid` runs our own `vpn-zone-core` (`core`, as the tools manifest
+/// names it): the file the kernel executed, which a process cannot rename.
+/// Readable for a process of the same user that is dumpable, as the
+/// supervisor is.
+fn runs_core(pid: i32, core: &Path) -> bool {
+    let (Ok(exe), Ok(core)) = (
+        fs::read_link(format!("/proc/{pid}/exe")),
+        fs::canonicalize(core),
+    ) else {
+        return false;
+    };
+    exe == core
 }
 
 /// The launch of the process `pid`: its network by its namespace, its
 /// container and program by the nearest launch up its parent chain — when that
 /// launch is certainly still running and in the same network. A window of a
 /// program behind the Wayland proxy has its supervisor's pid, whose network is
-/// its children's ([`proxied`]).
-pub fn launch_of(state: &Path, pid: i32) -> Option<Launch> {
-    let zone = match proxied(state, pid) {
+/// its children's ([`proxied`]); `core` is our `vpn-zone-core`, the file a
+/// supervisor runs.
+pub fn launch_of(state: &Path, core: &Path, pid: i32) -> Option<Launch> {
+    let zone = match proxied(state, core, pid) {
         Proxied::No => network_of(state, &netns(&pid.to_string())?)?,
         Proxied::Yes(zone) => zone,
         Proxied::Unknown => return None,
@@ -489,7 +506,9 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
             return 1;
         }
     };
-    let launch = window.as_ref().and_then(|w| launch_of(&tools.state, w.pid));
+    let launch = window
+        .as_ref()
+        .and_then(|w| launch_of(&tools.state, &tools.core, w.pid));
     match flag {
         "--json" => println!(
             "{}",
@@ -543,7 +562,9 @@ fn watch(tools: &Tools) -> u8 {
     let mut last = String::new();
     let mut show = || {
         let window = focused_window().ok().flatten();
-        let launch = window.as_ref().and_then(|w| launch_of(&tools.state, w.pid));
+        let launch = window
+            .as_ref()
+            .and_then(|w| launch_of(&tools.state, &tools.core, w.pid));
         let line = bar_line(&tools.state, window.as_ref(), launch.as_ref());
         if line != last {
             println!("{line}");
@@ -667,7 +688,7 @@ pub fn menu(tools: &Tools) -> u8 {
     // Held from here on: the menu may stay open a while, and a number can
     // change hands in that time — "close" reaches this process or nobody.
     let target = crate::sys::pidfd_open(window.pid);
-    let launch = launch_of(&tools.state, window.pid);
+    let launch = launch_of(&tools.state, &tools.core, window.pid);
     let program = launch.as_ref().and_then(|l| l.program.clone());
     let label = window_name(&tools.state, &window, launch.as_ref());
     let pinned = program
@@ -877,14 +898,27 @@ mod tests {
             format!("{sup} {} sb:work\n", crate::launch::UNCONFINED),
         )
         .unwrap();
+        // The file the kernel runs for it: "our vpn-zone-core" in this test.
+        let core = find("bash");
+        // The name alone is not a supervisor: no launch on record yet, and
+        // then a file that is not ours — no network, not the children's.
+        assert!(matches!(proxied(&state, &core, sup), Proxied::Unknown));
         registry::note_start(&running, sup, false).unwrap();
+        assert!(matches!(
+            proxied(&state, &find("sleep"), sup),
+            Proxied::Unknown
+        ));
+        assert!(launch_of(&state, &find("sleep"), sup).is_none());
         // Taken for a supervisor, its network is its children's; a child is
         // taken for itself.
         assert!(
-            matches!(proxied(&state, sup), Proxied::Yes(ref z) if z == crate::launch::UNCONFINED)
+            matches!(proxied(&state, &core, sup), Proxied::Yes(ref z) if z == crate::launch::UNCONFINED)
         );
-        assert!(matches!(proxied(&state, children(sup)[0]), Proxied::No));
-        let launch = launch_of(&state, sup).unwrap();
+        assert!(matches!(
+            proxied(&state, &core, children(sup)[0]),
+            Proxied::No
+        ));
+        let launch = launch_of(&state, &core, sup).unwrap();
         assert_eq!(launch.zone, crate::launch::UNCONFINED);
         assert_eq!(launch.program.as_deref(), Some("foot"));
         assert_eq!(launch.selector.as_deref(), Some("sb:work"));
@@ -921,13 +955,13 @@ mod tests {
         // A record from before start times were kept: its pid may be anybody's
         // by now. The network is still the kernel's; the container is unknown.
         record(crate::launch::UNCONFINED);
-        let bare = launch_of(&state, window).unwrap();
+        let bare = launch_of(&state, Path::new(""), window).unwrap();
         assert_eq!(bare.zone, crate::launch::UNCONFINED);
         assert_eq!((bare.selector, bare.program), (None, None));
 
         // With its start time on record: the launch.
         registry::note_start(&running, me, false).unwrap();
-        let launch = launch_of(&state, window).unwrap();
+        let launch = launch_of(&state, Path::new(""), window).unwrap();
         assert_eq!(launch.zone, crate::launch::UNCONFINED);
         assert_eq!(launch.selector.as_deref(), Some("sb:work"));
         assert_eq!(launch.program.as_deref(), Some("firefox"));
@@ -935,14 +969,17 @@ mod tests {
         // A record that says "nl" of a process in the host's namespace does
         // not make the window a zone's: the kernel says host, and host it is.
         record("nl");
-        let host = launch_of(&state, window).unwrap();
+        let host = launch_of(&state, Path::new(""), window).unwrap();
         assert_eq!(host.zone, crate::launch::UNCONFINED);
         assert_eq!(host.program, None);
 
         // A start time of somebody else: the number was reused.
         record(crate::launch::UNCONFINED);
         fs::write(running.join(registry::STARTED).join(me.to_string()), "1\n").unwrap();
-        assert_eq!(launch_of(&state, window).unwrap().program, None);
+        assert_eq!(
+            launch_of(&state, Path::new(""), window).unwrap().program,
+            None
+        );
         let _ = child.kill();
         let _ = child.wait();
 
