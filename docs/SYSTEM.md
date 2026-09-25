@@ -445,7 +445,7 @@ the network, however it was started.
   — no binary of this project involved, so it works when ours is broken — for
   `emergency.minutes` (15), then puts the policy back — also when stopped earlier. And
   `vpnzones.egress=off` on the kernel command line keeps the policy from loading at all.
-  `emergency.group` (`wheel`) may start and stop it without a password at the machine itself (a process in a local, active login session's own scope) and with a password from anywhere else — through polkit,
+  `emergency.group` (`wheel`) may start it with a password — at the machine too (2026-09-25: a line a zone's program slips into the shell's startup would otherwise turn it at the next login) — and stop it without one at the machine itself (a process in a local, active login session's own scope) — through polkit,
   which the module therefore turns on (NixOS has it off by default; the VM test found the
   key refused without it). The TTY console of ARCHITECTURE §4 turns it with one key.
 - **What it does not close.** Names: a blocked program still resolves them through the
@@ -496,7 +496,7 @@ systemd stops a service bound to a zone that is not up; `try-restart` would not 
 zone up either, it pulls in no dependencies. Both are oneshot units run by systemd with
 coreutils, `nft` and `systemctl` — none of our binaries; the commands are wrappers around
 `systemctl start`, and polkit lets `services.vpn-zones.system.switchGroup` (`wheel` by
-default, `null` for root only) start exactly these two units — without a password at the machine itself, with one from anywhere else. The console
+default, `null` for root only) start exactly these two units: `off` with a password, at the machine too, `on` without one at the machine itself. The console
 has it as `[x]`. On the kernel command line, `vpnzones=off` does the same for one boot
 without touching the flag. The user tier has its own switch, `vpn-zone mode off`; user zones
 do not depend on the system tier and keep working.

@@ -264,7 +264,7 @@ fn shown(name: &str) -> String {
 /// Invisible characters that change the order text is shown in, or hide in
 /// it: bidi marks, embeddings, isolates, zero-width joiners and spaces. With
 /// them a name can make the network after it read as something else.
-fn reorders(c: char) -> bool {
+pub(crate) fn reorders(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'

@@ -55,6 +55,74 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **Third review round: a zone loses sight of the project's own state.** A
+  program in a zone without a sandbox has the home, and the project's state
+  lay in it: the raw xdg-dbus-proxy socket behind the zone's bus filter (a
+  connection past the portal allow-list), `zone.pid`/`zone.start` (the broker
+  took a namespace for whatever zone those files named — a launch in another
+  zone, or on the host, without a question), the locks, the pins, and every
+  zone's private key. The zone's mount namespace now covers
+  `~/.local/state/vpn-zones` with a tmpfs and binds back only the throwaway
+  containers' layers (writable) and the launch registry (read-only);
+  `~/.config/vpn-zones` and `~/.local/share/vpn-zones` are read-only there.
+  System-zone commands get the same cover. **Zones up before the update have
+  to be restarted.**
+- **The Nix daemon is out of a zone's reach, unless the zone is let**
+  (`vpn-zone nix-daemon <zone> on`, or `programs.vpn-zones.nixDaemon`): it
+  builds and fetches in the host's network, and a fixed-output derivation
+  fetches any address a program names — from any zone, an offline one too.
+  **A zone where `nix-shell` or `nix build` is used has to be let before it
+  is restarted.**
+- **In a hermetic zone, what the host runs from the home is read-only**
+  (owner, 2026-09-25): autostart, user units, launcher entries, D-Bus
+  services, the shells' and compositors' configs, `~/.ssh`, browsers'
+  native-messaging hosts. The session's entry points are created when missing,
+  so that there is something to cover. A zone that has to write there is let
+  (`vpn-zone host-files <zone> writable`, `programs.vpn-zones.hostFilesWritable`).
+  home-manager's links in the home itself cannot be covered by a mount — the
+  sandbox is what protects those.
+- **`vpn-zones-off` and turning the emergency key take a password at the
+  machine too** (owner, 2026-09-25): a line a zone's program slips into the
+  shell's startup would otherwise switch the protection off at the next login
+  on the seat. Turning it back on, and the key back, need none there.
+- **The bus filter reads the end of the authentication as the proxy does.**
+  It took only an exact `BEGIN\r\n`; xdg-dbus-proxy (like dbus-daemon) also
+  takes `BEGIN` followed by a blank and anything. After such a line the proxy
+  applied its rules to messages the filter still passed on unread — OpenURI to
+  the host's portal among them. Now the filter follows the proxy's own rules,
+  refuses the lines the proxy would refuse and passes the end on as the plain
+  `BEGIN`. VM test with a raw client.
+- **Programs in a zone keep the user's own group only.** They kept the
+  session's supplementary groups: `libvirtd` and `docker` start things in the
+  host's network for their members, `input` reads every key pressed.
+  `profile-run` sheds them in the zone's user namespace (`nsenter
+  --keep-caps` for every zone launch now); the system tier's commands keep the
+  account's own group too — an allow-list instead of a list of groups to drop.
+- **Egress:** the system tunnel's mark lets out only UDP from a socket with no
+  owner or root's (a program able to mark its own socket went anywhere);
+  IGMP, MLD and router solicitations go to multicast only, neighbour
+  discovery with hop limit 255; in `strict` a `forward` chain keeps routed
+  guests (docker's and libvirt's bridges) to the local network.
+- **A plain system zone does not reach the host itself**: a host table refuses
+  its pasta the host's own addresses, which the kernel delivers over `lo`
+  past every firewall.
+- **An OpenConnect zone needs its uplink filter**: for a userspace client it
+  is the only thing keeping it to its gateway, so the zone does not come up
+  without it.
+- **The broker**: never "the same zone" for the host's network by name;
+  "always" is not offered for a command with options; the question shows every
+  word on its own line, without text-reordering characters, and a command too
+  long to show whole is refused rather than cut.
+- **The sound filter closes a connection whose server offers a shared ring
+  buffer** (`ENABLE_SRBCHANNEL`): after it, commands would travel past the
+  filter. pipewire-pulse never offers one; a PulseAudio server would, and then
+  a zone gets no sound rather than an unfiltered one.
+- **Smaller**: PipeWire's unrestricted `pipewire-0-manager` is never bound
+  into a zone; io_uring and userfaultfd answer ENOSYS in the sandbox; the TTY
+  console's `x` and `k` take the key twice; `vpn-zone gc` signals through a
+  pidfd; the runtime watcher does not follow a link a program put in its way;
+  a sandbox cannot be granted a shell's init file or direnv's, docker's or
+  containers' configuration.
 - **The TTY console drops keys pressed before its menu is up.** Keys typed
   while it waited for the tunnel, left over from the shell that just ended, or
   a terminal's answer to something a program printed were read as the menu's

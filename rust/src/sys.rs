@@ -65,6 +65,53 @@ pub fn mount(
     Ok(())
 }
 
+/// A directory as a descriptor that only names it (`O_PATH`): what a process
+/// keeps to reach a directory that is about to be covered by a mount, through
+/// `/proc/self/fd/N`.
+pub fn open_dir(path: &Path) -> io::Result<OwnedFd> {
+    let c = cstring(path.as_os_str().as_bytes())?;
+    // SAFETY: a NUL-terminated path and constant flags.
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a descriptor just opened and owned by nobody else.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Make the mount at `path` read-only. In a user namespace the flags a mount
+/// came with from the parent are locked (nosuid, nodev, noexec, the atime
+/// ones), and a remount that leaves one out is refused: they are read back and
+/// kept.
+pub fn remount_read_only(path: &Path) -> io::Result<()> {
+    let c = cstring(path.as_os_str().as_bytes())?;
+    // SAFETY: statvfs is plain data; the call fills it or fails.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a NUL-terminated path and a statvfs to fill.
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut flags = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY;
+    for (st_flag, ms_flag) in [
+        (libc::ST_NOSUID, libc::MS_NOSUID),
+        (libc::ST_NODEV, libc::MS_NODEV),
+        (libc::ST_NOEXEC, libc::MS_NOEXEC),
+        (libc::ST_NOATIME, libc::MS_NOATIME),
+        (libc::ST_NODIRATIME, libc::MS_NODIRATIME),
+        (libc::ST_RELATIME, libc::MS_RELATIME),
+    ] {
+        if st.f_flag & st_flag != 0 {
+            flags |= ms_flag;
+        }
+    }
+    mount(OsStr::new(""), path, "", flags, "")
+}
+
 /// `pipe2(O_CLOEXEC)` as an owning pair (read end, write end).
 pub fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut fds: [libc::c_int; 2] = [0; 2];

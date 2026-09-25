@@ -322,6 +322,17 @@ fn enter_start_dir(cwd: Option<&Path>) {
     }
 }
 
+/// The supplementary groups: the primary one alone.
+fn own_group_only() -> io::Result<()> {
+    // SAFETY: getgid(2) takes no arguments and cannot fail.
+    let gid = unsafe { libc::getgid() };
+    // SAFETY: a list of one gid and its length.
+    if unsafe { libc::setgroups(1, &gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Drop the ambient capability set before handing control to the program.
 ///
 /// Errors are ignored deliberately: on a kernel without ambient capabilities
@@ -455,6 +466,17 @@ pub fn run(args: Args) -> u8 {
                 here.map_or("?".to_owned(), |p| p.display().to_string()),
                 expected.to_string_lossy()
             );
+            return EXIT_NOT_STARTED;
+        }
+        // In a zone, the user's own group and no other (review 2026-09-25,
+        // third round). The session's groups open doors a zone must not
+        // have: libvirt's and docker's daemons start things in the host's
+        // network for their members, `input` reads every key pressed. Only
+        // here can they go — in the zone's user namespace, with the
+        // capabilities `nsenter --keep-caps` carried over — and a launch
+        // that cannot shed them does not start.
+        if let Err(e) = own_group_only() {
+            eprintln!("profile-run: cannot shed the session's groups ({e}) — not starting");
             return EXIT_NOT_STARTED;
         }
     }

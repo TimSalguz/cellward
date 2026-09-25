@@ -523,6 +523,36 @@ const HOST_RUNS: &[&str] = &[
     ".local/share/kservices6",
     ".local/share/nautilus/scripts",
     ".local/share/nemo/actions",
+    // Third review (2026-09-25): tools that run what their config names, and
+    // the shells' own files in the home itself — a grant is not only a
+    // directory, the command line takes a file too.
+    ".config/direnv",
+    ".local/share/direnv",
+    ".docker",
+    ".config/containers",
+    ".profile",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_logout",
+    ".zshenv",
+    ".zshrc",
+    ".zprofile",
+    ".zlogin",
+    ".zlogout",
+    ".login",
+    ".cshrc",
+    ".tcshrc",
+    ".xprofile",
+    ".xsession",
+    ".xsessionrc",
+    ".xinitrc",
+    ".Xresources",
+    ".pam_environment",
+    ".inputrc",
+    ".npmrc",
+    ".config/nushell",
+    ".config/xonsh",
 ];
 
 pub fn forbidden_path(home: &Path, path: &Path) -> Option<String> {

@@ -113,7 +113,7 @@ use std::ffi::{CStr, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, ToSocketAddrs};
-use std::os::fd::{IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
@@ -134,6 +134,15 @@ use crate::sysuplink::{self, SysUplinkConfig};
 const STATE_SUBDIR: &str = ".local/state/vpn-zones";
 /// Where the settings are, below `$HOME` — the same as the CLI's `config`.
 const CONFIG_SUBDIR: &str = ".config/vpn-zones";
+/// What a zone keeps of the project's state directory, and whether it may
+/// write there: the throwaway containers' layers (the programs' own data) and
+/// the launch registry, which `profile-run` reads to know whether it is the
+/// last tenant of a throwaway container.
+const ZONE_KEEPS: [(&str, bool); 2] = [(crate::launch::THROWAWAY_DIR, true), (".running", false)];
+/// Under the home, what the host acts on and a zone may read but not write:
+/// the settings (`declared/`, the broker's "always", the pins' neighbours)
+/// and the launcher shims the session runs.
+pub(crate) const READ_ONLY_IN_ZONES: [&str; 2] = [CONFIG_SUBDIR, ".local/share/vpn-zones"];
 
 /// Files of one zone. This set is a contract: `vpn-zone` (bash), the desktop
 /// picker and the smoke test all read them by these names.
@@ -277,7 +286,14 @@ pub fn compositor_private(name: &str) -> bool {
 /// [`OURS`] is bound piece by piece, never as it is.
 pub fn runtime_entry_kept(name: &str, hermetic: bool) -> bool {
     // `pulse`: never the host's — the zone gets the filter's socket there.
-    if compositor_private(name) || name == OURS || name == "pulse" {
+    // PipeWire's manager socket, `pipewire-0-manager`, never: it is the
+    // unrestricted one, meant for the session manager — every client killed,
+    // every stream moved (review 2026-09-25, third round).
+    if compositor_private(name)
+        || name == OURS
+        || name == "pulse"
+        || (name.starts_with("pipewire-") && name.ends_with("-manager"))
+    {
         return false;
     }
     !hermetic || RUNTIME_KEPT.contains(&name)
@@ -548,12 +564,20 @@ impl Args {
 struct Zone {
     name: OsString,
     dir: PathBuf,
+    /// The user's home: the project's settings and shims under it are made
+    /// read-only in the zone ([`hide_project_state`]).
+    home: PathBuf,
     tools: Tools,
     /// Hermetic (`docs/HERMETICITY.md` §7 C): the runtime directory closed,
     /// the session bus filtered, the broker as the one way out. Decided once,
     /// when the zone comes up, so the bus proxy and the sealed runtime
     /// directory cannot disagree about it.
     hermetic: bool,
+    /// The host's Nix daemon in reach (`hermetic::nix_daemon`); off by default.
+    nix_daemon: bool,
+    /// What the host runs from the home left writable in a hermetic zone
+    /// (`hermetic::host_files_writable`); read-only by default.
+    host_files_writable: bool,
 }
 
 impl Zone {
@@ -621,16 +645,19 @@ pub fn run(args: Args) -> u8 {
         return 1;
     };
     let dir = home.join(STATE_SUBDIR).join(&args.name);
-    let (hermetic, _) = crate::hermetic::zone_setting(
-        &dir,
-        &home.join(CONFIG_SUBDIR),
-        &args.name.to_string_lossy(),
-    );
+    let config = home.join(CONFIG_SUBDIR);
+    let label = args.name.to_string_lossy().into_owned();
+    let (hermetic, _) = crate::hermetic::zone_setting(&dir, &config, &label);
+    let (nix_daemon, _) = crate::hermetic::nix_daemon(&dir, &config, &label);
+    let (host_files_writable, _) = crate::hermetic::host_files_writable(&dir, &config, &label);
     let zone = Zone {
         dir,
+        home,
         name: args.name,
         tools: args.tools,
         hermetic,
+        nix_daemon,
+        host_files_writable,
     };
 
     // A directory is a zone if it has a config or the offline marker; anything
@@ -652,6 +679,33 @@ pub fn run(args: Args) -> u8 {
     let _ = fs::remove_file(zone.path(STATUS));
     let _ = fs::remove_file(zone.path(UPLINK_PID));
     let _ = fs::remove_file(zone.path(READY));
+    // What the zone keeps of the project's state has to exist before the zone
+    // hides the rest (`hide_project_state`): a directory created afterwards
+    // would not be seen in there. As the user, so that the host keeps writing
+    // into them.
+    if let Some(state) = zone.dir.parent() {
+        for (name, _) in ZONE_KEEPS {
+            let _ = fs::create_dir_all(state.join(name));
+        }
+    }
+    for dir in READ_ONLY_IN_ZONES {
+        let _ = fs::create_dir_all(zone.home.join(dir));
+    }
+    // The session's own entry points, when the zone is to have them
+    // read-only: a directory that is not there cannot be, and a program would
+    // make it (`protect_host_files`).
+    if zone.hermetic && !zone.host_files_writable {
+        for dir in ENTRY_POINTS {
+            let path = zone.home.join(dir);
+            if fs::symlink_metadata(&path).is_err() {
+                use std::os::unix::fs::DirBuilderExt;
+                let _ = fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(&path);
+            }
+        }
+    }
 
     let ids = match Ids::current() {
         Ok(ids) => ids,
@@ -1675,6 +1729,8 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
     for group in RESOLVER_DIRS {
         hide_first(group)?;
     }
+    // And no NSS module talking to a daemon of the host's, as in the zone.
+    own_nsswitch(zone);
     // Nor anything else of the host's a client has no business with: the
     // system bus (resolve1 looks names up in the host's network), the
     // session's runtime directory (the compositor's raw socket and IPC, which
@@ -1716,7 +1772,22 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
     // kernel ran here; with an OpenConnect zone a whole third-party client runs
     // in this namespace, and the rule is what says it may talk to its gateway
     // and to nowhere else — no DNS, no update check, no second server.
-    zone.seal("uplink", &uplink_ruleset(&backend.sockets()));
+    //
+    // For that client the rule is not an insurance but the only wall
+    // (review 2026-09-25, third round): pasta gives this namespace the whole
+    // internet, and nothing in the topology keeps a userspace client to one
+    // gateway, as the kernel's WireGuard socket keeps itself to its peer. So
+    // an OpenConnect zone whose rule does not load does not come up.
+    if matches!(backend, Backend::Oc(_)) {
+        feed_nft(&zone.tools.nft, &uplink_ruleset(&backend.sockets())).map_err(|e| {
+            format!(
+                "the uplink's filter did not load ({e}) — an OpenConnect client would \
+                 reach the whole internet from here, so the zone does not come up"
+            )
+        })?;
+    } else {
+        zone.seal("uplink", &uplink_ruleset(&backend.sockets()));
+    }
 
     // The holder is waiting for this to attach pasta to us.
     let mut ready = File::from(ready_w);
@@ -2043,7 +2114,6 @@ fn host_runtime_dir(zone: &Zone) -> PathBuf {
 /// bus (review 2026-09-25). So the socket is opened without following links,
 /// checked to BE a socket and the user's, and bound through that descriptor.
 fn bind_socket(from: &Path, to: &Path, owner: u32) -> Result<(), String> {
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let c = std::ffi::CString::new(from.as_os_str().as_bytes())
         .map_err(|_| format!("a NUL in {}", from.display()))?;
     // SAFETY: a NUL-terminated path and flags; the descriptor is ours.
@@ -2099,9 +2169,17 @@ fn bind_socket(from: &Path, to: &Path, owner: u32) -> Result<(), String> {
 fn bind_entry(from: &Path, to: &Path) -> Result<(), String> {
     let target = std::ffi::CString::new(to.as_os_str().as_bytes())
         .map_err(|_| format!("a NUL in {}", to.display()))?;
-    // SAFETY: a NUL-terminated path; MNT_DETACH takes no pointers. Until
+    // `to` is in the zone's runtime directory, which its programs write: a
+    // link put there must not take the bind anywhere else (review 2026-09-25,
+    // third round). Not followed here, and the mount goes onto what was
+    // opened without following one.
+    if fs::symlink_metadata(to).is_ok_and(|m| m.file_type().is_symlink()) {
+        let _ = fs::remove_file(to);
+    }
+    // SAFETY: a NUL-terminated path; the flags take no pointers. Until
     // nothing is bound there any more.
-    while unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) } == 0 {}
+    while unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH | libc::UMOUNT_NOFOLLOW) } == 0 {
+    }
     let is_dir = fs::metadata(from)
         .map_err(|e| format!("{}: {e}", from.display()))?
         .is_dir();
@@ -2125,12 +2203,41 @@ fn bind_entry(from: &Path, to: &Path) -> Result<(), String> {
             .create(true)
             .write(true)
             .truncate(false)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(to)
             .map(|_| ())
     }
     .map_err(|e| format!("cannot create {}: {e}", to.display()))?;
-    sys::mount(from.as_os_str(), to, "", libc::MS_BIND | libc::MS_REC, "")
-        .map_err(|e| format!("cannot bind {}: {e}", from.display()))
+    // SAFETY: a NUL-terminated path and constant flags.
+    let fd = unsafe {
+        libc::open(
+            target.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "cannot open {}: {}",
+            to.display(),
+            io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: a descriptor just opened and owned by nobody else.
+    let held = unsafe { OwnedFd::from_raw_fd(fd) };
+    let meta = fs::metadata(format!("/proc/self/fd/{fd}"))
+        .map_err(|e| format!("cannot look at {}: {e}", to.display()))?;
+    if meta.is_dir() != is_dir {
+        return Err(format!("{} changed under the bind", to.display()));
+    }
+    let point = PathBuf::from(format!("/proc/self/fd/{}", held.as_raw_fd()));
+    sys::mount(
+        from.as_os_str(),
+        &point,
+        "",
+        libc::MS_BIND | libc::MS_REC,
+        "",
+    )
+    .map_err(|e| format!("cannot bind {}: {e}", from.display()))
 }
 
 /// The zone's runtime directory (`docs/HERMETICITY.md` §2,
@@ -2277,6 +2384,17 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
         Some(watch) => {
             let hermetic = zone.hermetic;
             let name = zone.name().into_owned();
+            // The hold is below the zone's directory, which is covered a
+            // moment later (`hide_project_state`): the watcher goes on
+            // through a descriptor, by our pid, as the holder does.
+            let held = match sys::open_dir(&held) {
+                Ok(fd) => {
+                    // SAFETY: getpid(2) takes no arguments and cannot fail.
+                    let pid = unsafe { libc::getpid() };
+                    PathBuf::from(format!("/proc/{pid}/fd/{}", fd.into_raw_fd()))
+                }
+                Err(e) => return Err(format!("cannot open {}: {e}", held.display())),
+            };
             thread::spawn(move || loop {
                 let names = match watch.names() {
                     Ok(names) => names,
@@ -2433,6 +2551,240 @@ fn hide_system_tier(zone: &Zone) -> Result<(), String> {
         )
     })?;
     println!("zone {}: the system tier's service hidden", zone.name());
+    Ok(())
+}
+
+/// The Nix daemon out of reach (review 2026-09-25, third round): it builds
+/// and fetches in the host's network, and a fixed-output derivation fetches
+/// whatever address a program names — from any zone, an offline one too.
+/// A zone that needs it is let (`vpn-zone nix-daemon <zone> on`, or
+/// `programs.vpn-zones.nixDaemon` in Nix). Fatal when it cannot be hidden.
+fn hide_nix_daemon(zone: &Zone) -> Result<(), String> {
+    let dir = Path::new(NIX_DAEMON_DIR);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    sys::mount(OsStr::new("tmpfs"), dir, "tmpfs", 0, "mode=0755,size=16k").map_err(|e| {
+        format!(
+            "cannot hide {}: {e} — programs in the zone would have the host's Nix daemon fetch \
+             for them",
+            dir.display()
+        )
+    })?;
+    println!("zone {}: the Nix daemon hidden", zone.name());
+    Ok(())
+}
+
+/// Where the Nix daemon listens.
+const NIX_DAEMON_DIR: &str = "/nix/var/nix/daemon-socket";
+
+/// The session's own entry points below the home: created when missing before
+/// a hermetic zone comes up (`run`), so that they can be read-only in it.
+const ENTRY_POINTS: [&str; 8] = [
+    ".config/autostart",
+    ".config/systemd",
+    ".config/environment.d",
+    ".config/user-tmpfiles.d",
+    ".local/share/applications",
+    ".local/share/dbus-1",
+    ".local/share/systemd",
+    ".local/share/user-tmpfiles.d",
+];
+
+/// What the host runs from the home besides [`ENTRY_POINTS`], read-only in a
+/// hermetic zone where it exists: the compositors' and the shells' configs,
+/// tools that run what their config names, browsers' native-messaging hosts —
+/// not a program's own data (a browser's profile is not here).
+const HOST_RUNS_IN_ZONES: &[&str] = &[
+    ".local/share/flatpak/exports",
+    ".local/bin",
+    ".local/state/nix",
+    ".local/state/home-manager",
+    ".config/plasma-workspace",
+    ".config/niri",
+    ".config/sway",
+    ".config/hypr",
+    ".config/river",
+    ".config/labwc",
+    ".config/i3",
+    ".config/uwsm",
+    ".config/fish",
+    ".config/zsh",
+    ".config/nushell",
+    ".config/xonsh",
+    ".config/home-manager",
+    ".config/nixpkgs",
+    ".config/nix",
+    ".config/direnv",
+    ".local/share/direnv",
+    ".config/pipewire",
+    ".config/wireplumber",
+    ".config/xdg-desktop-portal",
+    ".config/git",
+    ".ssh",
+    ".gnupg",
+    ".docker",
+    ".config/containers",
+    ".mozilla/native-messaging-hosts",
+    ".config/chromium/NativeMessagingHosts",
+    ".config/google-chrome/NativeMessagingHosts",
+    ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts",
+    ".config/vivaldi/NativeMessagingHosts",
+    ".local/share/kio/servicemenus",
+    ".local/share/kservices5",
+    ".local/share/kservices6",
+    ".local/share/nautilus/scripts",
+    ".local/share/nemo/actions",
+    ".profile",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_logout",
+    ".zshenv",
+    ".zshrc",
+    ".zprofile",
+    ".zlogin",
+    ".zlogout",
+    ".login",
+    ".cshrc",
+    ".tcshrc",
+    ".xprofile",
+    ".xsession",
+    ".xsessionrc",
+    ".xinitrc",
+    ".pam_environment",
+    ".inputrc",
+];
+
+/// What the host runs from the home, read-only in a hermetic zone (owner,
+/// 2026-09-25; `docs/LEAK-MODEL.md` §9): without a sandbox a program has the
+/// home, and a line in `~/.bashrc`, an entry in `~/.config/autostart`, a
+/// launcher in `~/.local/share/applications` is code the host starts later —
+/// outside the zone, around its tunnel. A zone that has to write there is let
+/// (`vpn-zone host-files <zone> writable`, or
+/// `programs.vpn-zones.hostFilesWritable` in Nix).
+///
+/// A symlink cannot be covered — a mount follows it, and the link itself
+/// stays a name in a directory the program can write: home-manager's
+/// dotfiles in the home itself (`~/.zshrc` → the store) are left as they are,
+/// and said so. A directory home-manager fills with links is covered whole.
+/// Fatal when a real one cannot be made read-only.
+fn protect_host_files(zone: &Zone) -> Result<(), String> {
+    let mut covered = 0;
+    let mut links = Vec::new();
+    for entry in ENTRY_POINTS.iter().chain(HOST_RUNS_IN_ZONES) {
+        let path = zone.home.join(entry);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => links.push(*entry),
+            Ok(_) => {
+                sys::mount(
+                    path.as_os_str(),
+                    &path,
+                    "",
+                    libc::MS_BIND | libc::MS_REC,
+                    "",
+                )
+                .and_then(|()| sys::remount_read_only(&path))
+                .map_err(|e| format!("cannot make {} read-only: {e}", path.display()))?;
+                covered += 1;
+            }
+            Err(_) => {}
+        }
+    }
+    println!(
+        "zone {}: {covered} of the host's startup places read-only{}",
+        zone.name(),
+        if links.is_empty() {
+            String::new()
+        } else {
+            format!("; links, which a mount cannot cover: {}", links.join(", "))
+        }
+    );
+    Ok(())
+}
+
+/// The project's own state out of the zone's reach (review 2026-09-25,
+/// third round). `~/.local/state/vpn-zones` holds what the host trusts about
+/// zones — which namespace is which zone (`zone.pid`, `zone.start`), which is
+/// locked, what was pinned, the raw sockets behind the zone's filters, every
+/// zone's private key — and a program here has the home: it could tell the
+/// broker it is another zone, or connect past the bus filter to the proxy
+/// behind it. A tmpfs over the directory, and back only what a launch needs
+/// inside ([`ZONE_KEEPS`]); the settings and the shims read-only
+/// ([`READ_ONLY_IN_ZONES`]). Fatal: a zone that cannot do it has a way out.
+///
+/// Returns the zone as this process goes on reaching it: its directory is
+/// `/proc/<our pid>/fd/N` of a descriptor opened before the tmpfs, kept for
+/// good — by pid and not `self`, so that the tools it starts (`wg setconf`
+/// reads a file there) reach it too. Nobody else here can use it: this
+/// process and its children are the zone's uid 0, and a program here,
+/// another user of the namespace, cannot open another user's `/proc/<pid>/fd`.
+fn hide_project_state(zone: &Zone) -> Result<Zone, String> {
+    let own =
+        sys::open_dir(&zone.dir).map_err(|e| format!("cannot open {}: {e}", zone.dir.display()))?;
+    let state = zone
+        .dir
+        .parent()
+        .ok_or("the zone's directory has no parent")?;
+    seal_project_state(state, &zone.home, &ZONE_KEEPS)?;
+    println!("zone {}: the project's state hidden", zone.name());
+    // SAFETY: getpid(2) takes no arguments and cannot fail.
+    let pid = unsafe { libc::getpid() };
+    Ok(Zone {
+        name: zone.name.clone(),
+        dir: PathBuf::from(format!("/proc/{pid}/fd/{}", own.into_raw_fd())),
+        home: zone.home.clone(),
+        tools: zone.tools.clone(),
+        hermetic: zone.hermetic,
+        nix_daemon: zone.nix_daemon,
+        host_files_writable: zone.host_files_writable,
+    })
+}
+
+/// A tmpfs over `state`, with `keep` bound back (writable or not), and
+/// [`READ_ONLY_IN_ZONES`] under `home` made read-only — in the current mount
+/// namespace. Shared with the system tier's commands (`crate::sysrun`), which
+/// keep nothing.
+pub(crate) fn seal_project_state(
+    state: &Path,
+    home: &Path,
+    keep: &[(&str, bool)],
+) -> Result<(), String> {
+    if state.is_dir() {
+        let kept =
+            sys::open_dir(state).map_err(|e| format!("cannot open {}: {e}", state.display()))?;
+        sys::mount(
+            OsStr::new("tmpfs"),
+            state,
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            "mode=0755,size=64k",
+        )
+        .map_err(|e| format!("cannot hide {}: {e}", state.display()))?;
+        for (name, writable) in keep {
+            let from = PathBuf::from(format!("/proc/self/fd/{}/{name}", kept.as_raw_fd()));
+            if !from.is_dir() {
+                continue;
+            }
+            let to = state.join(name);
+            fs::create_dir(&to).map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+            sys::mount(from.as_os_str(), &to, "", libc::MS_BIND | libc::MS_REC, "")
+                .map_err(|e| format!("cannot bind {} back: {e}", to.display()))?;
+            if !writable {
+                sys::remount_read_only(&to)
+                    .map_err(|e| format!("cannot make {} read-only: {e}", to.display()))?;
+            }
+        }
+    }
+    for dir in READ_ONLY_IN_ZONES {
+        let dir = home.join(dir);
+        if !dir.is_dir() {
+            continue;
+        }
+        sys::mount(dir.as_os_str(), &dir, "", libc::MS_BIND | libc::MS_REC, "")
+            .and_then(|()| sys::remount_read_only(&dir))
+            .map_err(|e| format!("cannot make {} read-only: {e}", dir.display()))?;
+    }
     Ok(())
 }
 
@@ -2816,6 +3168,15 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         _ => None,
     };
     hide_system_tier(zone)?;
+    if !zone.nix_daemon {
+        hide_nix_daemon(zone)?;
+    }
+    if zone.hermetic && !zone.host_files_writable {
+        protect_host_files(zone)?;
+    }
+    // The project's own state, last among the covers: from here on the zone's
+    // directory is reached through a descriptor.
+    let zone = &hide_project_state(zone)?;
 
     let Some(ZoneLinks {
         backend,
@@ -3850,6 +4211,10 @@ mod tests {
         // zone gets the filter's in its place (`pulse_filter`).
         assert!(!runtime_entry_kept("pulse", true));
         assert!(!runtime_entry_kept("pulse", false));
+        // PipeWire's unrestricted socket, for the session manager: no zone.
+        assert!(!runtime_entry_kept("pipewire-0-manager", false));
+        assert!(!runtime_entry_kept("pipewire-0-manager", true));
+        assert!(runtime_entry_kept("pipewire-0", true));
         for name in ["bus", "systemd", "gnupg", "niri"] {
             assert!(!runtime_entry_kept(name, true), "{name}");
         }

@@ -134,7 +134,11 @@ pub fn decide(origin: &Origin, origin_locked: bool, target: &str) -> Decision {
         Origin::Host => Decision::Refuse(
             "запрос с хоста: брокер — дверь из герметичной зоны, хосту она не нужна".to_owned(),
         ),
-        Origin::Zone(zone) if zone == target => Decision::Start,
+        // The same zone — never the host's network under that name, whatever
+        // took itself for a zone called so (review 2026-09-25, third round).
+        Origin::Zone(zone) if zone == target && !crate::launch::is_unconfined_name(target) => {
+            Decision::Start
+        }
         Origin::Zone(zone) if origin_locked => Decision::Refuse(format!(
             "зона «{zone}» заперта: запуск в другой сети ({target}) запрещён"
         )),
@@ -418,27 +422,55 @@ fn runs_anything(name: &str) -> bool {
     EXACT.contains(&name) || PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
-/// A command as it may be shown in a question: no line breaks to start a
-/// paragraph of its own, no angle brackets for the dialog to take for markup,
-/// not endless.
-pub fn shown_command(cmd: &[OsString]) -> String {
-    let mut out: String = cmd
+/// How many words a command in a question may have: every one is shown.
+const SHOWN_WORDS: usize = 24;
+/// How much of one word is shown — its beginning, which says what it is: an
+/// option is a word of its own, and a word cut short says how much is left.
+const SHOWN_WORD: usize = 300;
+
+/// A command as it may be shown in a question: one word a line, so that none
+/// hides in another; no control characters, no angle brackets for the dialog
+/// to take for markup, none of the invisible ones that reorder text. `None`
+/// for a command too long to show whole — it is not asked about (review
+/// 2026-09-25, third round: a cut at 600 characters could leave an option
+/// behind the "…").
+pub fn shown_command(cmd: &[OsString]) -> Option<String> {
+    if cmd.len() > SHOWN_WORDS {
+        return None;
+    }
+    let words: Vec<String> = cmd
         .iter()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .map(|c| match c {
-            '<' => '‹',
-            '>' => '›',
-            c if c.is_control() => ' ',
-            c => c,
+        .map(|word| {
+            let clean: String = word
+                .to_string_lossy()
+                .chars()
+                .filter(|c| !crate::focus::reorders(*c))
+                .map(|c| match c {
+                    '<' => '‹',
+                    '>' => '›',
+                    c if c.is_control() => ' ',
+                    c => c,
+                })
+                .collect();
+            let n = clean.chars().count();
+            if n > SHOWN_WORD {
+                let head: String = clean.chars().take(SHOWN_WORD).collect();
+                format!("{head}… (ещё {} симв.)", n - SHOWN_WORD)
+            } else {
+                clean
+            }
         })
         .collect();
-    if out.chars().count() > 600 {
-        out = out.chars().take(600).collect::<String>() + "…";
-    }
-    out
+    Some(words.join("\n"))
+}
+
+/// No option among the words after the program: "always" is for a program,
+/// and an option can make it run something else (a browser's helper, a
+/// player's script, git's `-c`).
+fn plain_arguments(cmd: &[OsString]) -> bool {
+    cmd.iter()
+        .skip(1)
+        .all(|a| !a.to_string_lossy().starts_with('-'))
 }
 
 /// The line "always" writes, and looks for.
@@ -487,7 +519,9 @@ fn ask(
 ) -> Result<(), String> {
     // Asked before, and "always" said: the same zone, the same network, the
     // same container, the very same program from the store.
-    let program = program_of(cmd).filter(|p| may_remember(p));
+    let program = program_of(cmd)
+        .filter(|p| may_remember(p))
+        .filter(|_| plain_arguments(cmd));
     let target_and_container = if selector.is_empty() {
         target.to_owned()
     } else {
@@ -518,9 +552,13 @@ fn ask(
         other => format!("зоны «{}»", other.name()),
     };
     let container = crate::picker::container_label(selector);
+    let Some(shown) = shown_command(cmd) else {
+        return Err(format!(
+            "команда длиннее {SHOWN_WORDS} слов — целиком её не показать, а не целиком не спрашивают"
+        ));
+    };
     let question = format!(
-        "Программа из {asker} просит запустить в {network}, контейнер: {container}:\n\n{}\n\nРазрешить?",
-        shown_command(cmd)
+        "Программа из {asker} просит запустить в {network}, контейнер: {container}:\n\n{shown}\n\nРазрешить?"
     );
     // "Always" only where it can be kept safely (`may_remember`).
     let Some(line) = line else {
@@ -670,6 +708,29 @@ pub fn request(app_id: &[u8], argv: &[OsString]) -> Option<u8> {
 mod tests {
     use super::*;
 
+    /// Every word on a line of its own, whole up to a length and marked when
+    /// cut; nothing that reorders text; a command too long to show is not
+    /// asked about. "Always" is not for a command with options.
+    #[test]
+    fn a_question_shows_every_word() {
+        let cmd: Vec<OsString> = ["firefox", "--x\u{202E}y", "a<b>"]
+            .map(OsString::from)
+            .to_vec();
+        assert_eq!(shown_command(&cmd).unwrap(), "firefox\n--xy\na‹b›");
+        assert!(shown_command(&vec![OsString::from("x"); SHOWN_WORDS + 1]).is_none());
+        let word = OsString::from("a".repeat(SHOWN_WORD + 5));
+        assert!(shown_command(&[word]).unwrap().ends_with("(ещё 5 симв.)"));
+        assert!(plain_arguments(&[
+            "firefox".into(),
+            "https://x.test".into()
+        ]));
+        assert!(!plain_arguments(&[
+            "chromium".into(),
+            "https://x.test".into(),
+            "--renderer-cmd-prefix=sh".into()
+        ]));
+    }
+
     #[test]
     fn always_is_kept_for_programs_of_the_store_only() {
         // A program of the store: `ls`, as the test's own PATH has it — and
@@ -731,6 +792,12 @@ mod tests {
     fn only_the_host_and_the_same_zone_start_without_a_person() {
         let nl = Origin::Zone("nl".to_owned());
         assert_eq!(decide(&nl, false, "nl"), Decision::Start);
+        // A zone that calls itself the host's network is not let through as
+        // "the same zone".
+        let fake = Origin::Zone("unconfined".to_owned());
+        assert_eq!(decide(&fake, false, "unconfined"), Decision::Ask);
+        let fake = Origin::Zone("direct".to_owned());
+        assert_eq!(decide(&fake, false, "direct"), Decision::Ask);
         assert_eq!(decide(&nl, false, "de"), Decision::Ask);
         assert_eq!(decide(&nl, false, "unconfined"), Decision::Ask);
         assert!(matches!(
@@ -822,9 +889,8 @@ mod tests {
     }
 
     #[test]
-    fn a_command_is_shown_on_one_line_and_without_markup() {
+    fn a_command_is_shown_a_word_a_line_and_without_markup() {
         let shown = shown_command(&["sh".into(), "-c".into(), "<b>ok</b>\n\nбезопасно".into()]);
-        assert_eq!(shown, "sh -c ‹b›ok‹/b›  безопасно");
-        assert!(shown_command(&["x".repeat(1000).into()]).ends_with('…'));
+        assert_eq!(shown.as_deref(), Some("sh\n-c\n‹b›ok‹/b›  безопасно"));
     }
 }

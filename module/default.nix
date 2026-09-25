@@ -701,6 +701,20 @@ in
       description = "Зоны (по имени), программы которых получают свой X-сервер (xwayland-satellite) — для X11-only программ вроде Steam без контейнеров. X-сервер хоста из зон недоступен всегда. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
+    nixDaemon = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "agents" ];
+      description = "Зоны (по имени), программам которых виден Nix-демон хоста (nix-shell, nix build). По умолчанию ни одной: демон качает и собирает в сети хоста, мимо VPN зоны, и производная с фиксированным хешем скачает любой адрес, который назовёт программа, даже из offline-зоны. Без пересборки — vpn-zone nix-daemon <зона> on (действует после перезапуска зоны). Сами зоны в Nix не описываются: здесь только имена.";
+    };
+
+    hostFilesWritable = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "dev" ];
+      description = "Герметичные зоны (по имени), программы которых могут писать туда, что хост потом исполняет из дома: автозапуск, юниты, ярлыки, конфиги оболочек и композитора, ~/.ssh. По умолчанию в герметичной зоне это только для чтения: иначе программа без песочницы подложит хосту код в обход зоны. Точечные файлы, которые home-manager делает ссылками в корне дома (~/.zshrc → store), монтированием не закрыть — их защищает песочница. Без пересборки — vpn-zone host-files <зона> writable. Сами зоны в Nix не описываются: здесь только имена.";
+    };
+
     hermetic.default = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
@@ -810,6 +824,10 @@ in
         message = "programs.vpn-zones.hermetic.exceptions: имя зоны — непустое и без переводов строки";
       }
       {
+        assertion = lib.all (z: z != "" && !(lib.hasInfix "\n" z)) (cfg.nixDaemon ++ cfg.hostFilesWritable);
+        message = "programs.vpn-zones.nixDaemon / hostFilesWritable: имя зоны — непустое и без переводов строки";
+      }
+      {
         assertion =
           cfg.desktop.niri.includeInConfig
           -> (
@@ -870,6 +888,13 @@ in
     })
     (lib.mkIf (cfg.hermetic.default != null) {
       ".config/vpn-zones/declared/hermetic-default".text = if cfg.hermetic.default then "on" else "off";
+    })
+    (lib.mkIf (cfg.nixDaemon != [ ]) {
+      ".config/vpn-zones/declared/nix-daemon".text = lib.concatStringsSep "\n" cfg.nixDaemon + "\n";
+    })
+    (lib.mkIf (cfg.hostFilesWritable != [ ]) {
+      ".config/vpn-zones/declared/host-files-writable".text =
+        lib.concatStringsSep "\n" cfg.hostFilesWritable + "\n";
     })
     (lib.mkIf (cfg.hermetic.exceptions != [ ]) {
       ".config/vpn-zones/declared/hermetic-exceptions".text =

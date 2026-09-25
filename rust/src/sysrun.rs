@@ -810,18 +810,6 @@ const KEY_MAGIC: &[u8] = b"VZK1\0";
 pub const ENV_PASTA: &str = "VPN_ZONE_PASTA";
 /// The group user zones' pasta runs with in a system zone (`BRIDGE_GROUP`
 /// rule in `system::ns_up`).
-/// Groups a command in a system zone is started without: the one that opens
-/// this service's socket, and those that open a daemon starting things for
-/// the user on the host (docker, libvirt, podman, lxd, incus).
-const DROPPED_GROUPS: &[&str] = &[
-    "vpn-zones",
-    "docker",
-    "libvirtd",
-    "podman",
-    "lxd",
-    "incus-admin",
-];
-
 pub const BRIDGE_GROUP: &str = "vpn-zones-bridge";
 /// How long a client has to say what it wants.
 const REQUEST_WAIT: Duration = Duration::from_secs(5);
@@ -1491,16 +1479,13 @@ fn serve(sock: RawFd, uid: u32, data: &[u8], fds: Vec<OwnedFd>) -> Result<u8, St
             user.name
         ));
     }
-    // Not the group that opens this service's socket: from inside a zone the
-    // command must not ask for another one (the tmpfs over /run/vpn-zones in
-    // `seal_mounts` hides the socket as well). Nor a group that opens a daemon
-    // running things for it on the host, in the host's network — a container
-    // with `--network host` is a way out of any zone (review 2026-09-25).
-    for group in DROPPED_GROUPS {
-        if let Some(gid) = crate::egress::group_id(group) {
-            user.groups.retain(|g| *g != gid);
-        }
-    }
+    // The account's own group and no other (review 2026-09-25, third round:
+    // a list of groups to drop was a list of doors not yet thought of). Not
+    // the group that opens this service's socket — from inside a zone the
+    // command must not ask for another one; nor one that opens a daemon
+    // running things for it on the host, in the host's network (docker,
+    // libvirt: a way out of any zone); nor `input`, every key pressed.
+    user.groups = vec![user.gid];
     if fds.len() != request.mode.fds() {
         return Err("the descriptors do not match the mode".to_owned());
     }
@@ -1757,6 +1742,11 @@ fn seal_mounts(launch: &Launch) -> Result<(), String> {
         )
         .map_err(|e| format!("cannot hide the Nix daemon: {e}"))?;
     }
+    // The user zones' state and the project's settings, as in a user zone
+    // (`zone::hide_project_state`): the command has the user's home, and from
+    // there could rewrite which namespace the host takes for which zone.
+    let home = &launch.user.home;
+    zone::seal_project_state(&home.join(".local/state/vpn-zones"), home, &[])?;
     Ok(())
 }
 
