@@ -281,8 +281,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `90-vpn-zones.conf`), for WirePlumber 0.5.14 and 0.5.15+ alike: no default
   permission (an `access.rules` entry, and on 0.5.15+ a `select-access` step
   before the config's rules); the core last; its own stream nodes `rwx` and
-  their ports `r`, any other node of its own (a virtual sink, a filter, a
-  link group) destroyed at once; the host's sinks `r`; capture sources `r`
+  their ports `r`, the streams of the zone's other programs `r`, any other
+  node of its own (a virtual sink, a filter, a link group) destroyed at once; the host's sinks `r`; capture sources `r`
   only while the zone's microphone is `yes` (the helper publishes the switch
   in the `vpn-zones` metadata every second; revoked, PipeWire breaks the
   links); the `default` metadata `r`; the `client-node` factory `r` — no

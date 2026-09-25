@@ -14,9 +14,9 @@
 --    (90-vpn-zones.conf) and again here; the core only once the rest is set
 --    (a client without R on the core is held by the daemon);
 --  * its own stream nodes and their ports: yes (rwx on the nodes, r on the
---    ports); any other node of its own — a virtual sink or source, a filter —
---    is destroyed at once: a zone makes no devices the host could be routed
---    to;
+--    ports), the streams of the zone's other programs read only; any other
+--    node of its own — a virtual sink or source, a filter — is destroyed at
+--    once: a zone makes no devices the host could be routed to;
 --  * sinks (Audio/Sink, Audio/Duplex) of the host: read only — to play to,
 --    never to destroy or reconfigure;
 --  * capture sources of the host: read only, and only while the zone's
@@ -90,11 +90,16 @@ local SOURCES = {
   ["Audio/Duplex"] = true,
 }
 
--- What a zone's client may do with a node that is not its own.
+-- What a zone's client may do with a node: its own, rwx; another program's
+-- of the same zone, read (a zone is one trust domain — its programs share
+-- its files anyway); another zone's, nothing.
 local function node_permission (z, node)
   local other = owner (node)
   if other ~= nil then
-    return other == z and "rwx" or "-"
+    if other == z then
+      return "rwx"
+    end
+    return other.zone == z.zone and "r" or "-"
   end
   local class = prop (node, "media.class")
   if class and SINKS [class] then
