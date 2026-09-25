@@ -1,4 +1,4 @@
-# CI vpn-zones: eval модуля, адресная сборка скриптов + shellcheck, смоук в
+# CI cellward: eval модуля, адресная сборка скриптов + shellcheck, смоук в
 # непривилегированном userns. Подробности — tests/README.md.
 name: CI
 
@@ -16,6 +16,9 @@ concurrency:
 jobs:
   # Полный eval home-manager-конфигурации с модулем: падает на любой ошибке
   # вычисления module/default.nix. Ничего не собирает (только instantiate).
+  # Плюс две проверки вычислением: прежние имена опций (programs.vpn-zones,
+  # services.vpn-zones) дают то же самое с предупреждением и называют все
+  # опции новых, и единый вход services.cellward.enable включает своё.
   eval:
     name: eval (nix-instantiate)
     runs-on: ubuntu-24.04
@@ -28,12 +31,15 @@ jobs:
             -A activationPackage -A declaredActivation -A scripts -A zoneHolder -A smokeTools -A ocTools
           # строка ExecStart юнита vpn-zone@ должна вычисляться
           nix-instantiate --eval tests/harness.nix -A zoneHolderExec
+      - name: Прежние имена опций и единый вход
+        run: nix-instantiate --eval --strict tests/harness.nix -A oldNames -A singleEntry
 
   # Адресная сборка каждой script-деривации + shellcheck по собранным bin/*.
   #
   # Список из четырёх — это итог M1: shell в модуле остался ровно обёртками над
-  # бинарями крейта (vpn-zone, vpn-zone-pick, vpn-zone-gui — по две строки,
-  # vpn-zone-sync — одна с четырьмя аргументами). Пикер и шесть GUI-ярлыков теперь бинари, их
+  # бинарями крейта (cellward, vpn-zone-pick, cellward-gui — по две строки,
+  # у cellward и cellward-gui рядом ссылки-псевдонимы cw, vpn-zone и
+  # vpn-zone-gui; vpn-zone-sync — одна с четырьмя аргументами). Пикер и шесть GUI-ярлыков теперь бинари, их
   # проверяет job rust. Цикл и shellcheck остаются: обёртки — тоже код, и
   # смоук-скрипт проверяется здесь же.
   scripts:
@@ -46,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p results
-          for s in vpn-zone vpn-zone-pick vpn-zone-sync vpn-zone-gui; do
+          for s in cellward vpn-zone-pick vpn-zone-sync cellward-gui; do
             echo "=== nix-build -A scripts.$s"
             nix-build tests/harness.nix -A "scripts.$s" -o "results/$s"
           done
@@ -79,12 +85,12 @@ jobs:
   # Rust-ядро (ROADMAP M1/M2): формат, линт и тесты крейта rust/ — парсер
   # конфигов WG/AWG, генератор seccomp-фильтра, слои профилей, генератор
   # .desktop-ярлыков, ограничитель доступа к композитору (wl-sandbox),
-  # песочница файловой системы (fs-sandbox), CLI vpn-zone (разбор аргументов
+  # песочница файловой системы (fs-sandbox), CLI cellward (разбор аргументов
   # запуска, реестр запусков, манифест путей инструментов), пикер сети
   # (машина выбора как чистая функция + сквозные сценарии с подставными
-  # kdialog и vpn-zone) и шесть GUI-ярлыков.
-  # В job scripts крейт тоже собирается (обёртки vpn-zone/vpn-zone-pick,
-  # vpn-zone-gui и vpn-zone-sync на него ссылаются), но без clippy и без тестов: компилятор и
+  # kdialog и cellward) и шесть GUI-ярлыков.
+  # В job scripts крейт тоже собирается (обёртки cellward/vpn-zone-pick,
+  # cellward-gui и vpn-zone-sync на него ссылаются), но без clippy и без тестов: компилятор и
   # линтер живут здесь.
   #
   # Интеграционные тесты крейта, которым нужен настоящий bwrap, помечены

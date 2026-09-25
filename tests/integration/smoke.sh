@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Смоук-тест vpn-zones: поднимает настоящую зону в непривилегированном userns
+# Смоук-тест cellward: поднимает настоящую зону в непривилегированном userns
 # и проверяет её изнутри. Работает без systemd --user юнита: держатель зоны
 # запускается напрямую (атрибут zoneHolder из tests/harness.nix).
 #
@@ -14,7 +14,7 @@
 #
 # АРХИТЕКТУРА, КОТОРУЮ ЭТО ПРОВЕРЯЕТ (docs/LEAK-MODEL.md): у зоны ДВА сетевых
 # namespace. В uplink-ns (uplink.pid) живут pasta и UDP-сокет туннеля; в app-ns
-# (zone.pid — туда же ходит nsenter из vpn-zone run/status) нет ничего, кроме lo
+# (zone.pid — туда же ходит nsenter из cellward run/status) нет ничего, кроме lo
 # и awg0. Главный ассерт теста — именно это «ничего, кроме»: пока других
 # интерфейсов нет, утечка невозможна не по правилу, а по отсутствию пути.
 #
@@ -127,12 +127,12 @@ build() {
     --argstr username "$(id -un)" --argstr homeDirectory "$HOME" \
     -A "$1" -o "$WORK/$2" >/dev/null
 }
-build scripts.vpn-zone vpn-zone
+build scripts.cellward cellward
 build scripts.vpn-zone-pick vpn-zone-pick
 build zoneHolder zone-holder
 build smokeTools tools
 
-VPN_ZONE="$WORK/vpn-zone/bin/vpn-zone"
+VPN_ZONE="$WORK/cellward/bin/cellward"
 VPN_ZONE_PICK="$WORK/vpn-zone-pick/bin/vpn-zone-pick"
 ZONE_HOLDER="$WORK/zone-holder/bin/zone-holder"
 WG="$WORK/tools/bin/wg"
@@ -150,6 +150,14 @@ grep -q "^$u:" /etc/subgid || fail "в /etc/subgid нет диапазона д�
 command -v newuidmap >/dev/null || fail "нет newuidmap (пакет uidmap)"
 "$UNSHARE" --user --map-root-user true || fail "непривилегированные userns запрещены"
 echo "ok: subuid/subgid, tun, newuidmap, userns"
+
+# cw — короткое имя cellward, vpn-zone — прежнее: тот же скрипт, ссылками.
+step "Псевдонимы команды: cw и vpn-zone — это cellward"
+for alias in cw vpn-zone; do
+  [ "$(readlink -f "$WORK/cellward/bin/$alias")" = "$(readlink -f "$VPN_ZONE")" ] \
+    || fail "$alias — не cellward: $(readlink -f "$WORK/cellward/bin/$alias")"
+done
+echo "ok: cw и vpn-zone ведут на cellward"
 
 step "Убираю остатки прошлых прогонов"
 for z in "${TEST_ZONES[@]}"; do
@@ -182,15 +190,15 @@ Endpoint = 192.0.2.1:51820
 EOF
 echo "ok: $WORK/smoke.conf"
 
-# --- 3. vpn-zone add ---------------------------------------------------------
-step "vpn-zone add smoke"
+# --- 3. cellward add ---------------------------------------------------------
+step "cellward add smoke"
 "$VPN_ZONE" add smoke "$WORK/smoke.conf"
 [ -d "$STATE/smoke" ] || fail "каталог зоны не появился"
 [ -f "$STATE/smoke/config.conf" ] || fail "конфиг не скопирован в зону"
 grep -q "PrivateKey" "$STATE/smoke/config.conf" || fail "в копии конфига нет PrivateKey"
 echo "ok: зона создана, конфиг скопирован"
 
-step "vpn-zone add smoke-crlf (тот же конфиг в CRLF)"
+step "cellward add smoke-crlf (тот же конфиг в CRLF)"
 sed 's/$/\r/' "$WORK/smoke.conf" > "$WORK/smoke-crlf.conf"
 "$VPN_ZONE" add smoke-crlf "$WORK/smoke-crlf.conf"
 if grep -q $'\r' "$STATE/smoke-crlf/config.conf"; then
@@ -236,7 +244,7 @@ in_uplink() {
 # (docs/GOTCHAS.md §1), а nfnetlink требует CAP_NET_ADMIN даже на ЧТЕНИЕ
 # ruleset'а — ровно по этой же причине зона пишет зеркало `awg show` сама изнутри
 # (§4). Заодно это и есть свойство второго эшелона: программа, вошедшая в зону
-# обычным `vpn-zone run`, правил не то что снять — прочитать не может.
+# обычным `cellward run`, правил не то что снять — прочитать не может.
 in_zone_root() {
   "$NSENTER" -U -n -m -t "$ZPID" -- "$@"
 }
@@ -373,11 +381,11 @@ step "Внутри аплинка: второй эшелон — наружу т
 check_echelon in_uplink_root "$WORK/holder-smoke.log" "uplink-ns" \
   'chain output' 'policy drop' 'daddr 192\.0\.2\.1 udp dport 51820 accept'
 
-# --- 6. Контейнер данных (профиль) через vpn-zone run ------------------------
+# --- 6. Контейнер данных (профиль) через cellward run ------------------------
 # Проверяется весь путь запуска: nsenter в зону с --keep-caps, свой mount
 # namespace, overlay поверх XDG-каталогов и сброс ambient capabilities — то, что
 # делает `vpn-zone-core profile-run` (крейт rust/, модуль profile).
-step "vpn-zone profile create $TEST_PROFILE"
+step "cellward profile create $TEST_PROFILE"
 "$VPN_ZONE" profile create "$TEST_PROFILE"
 [ -d "$PROFILES/$TEST_PROFILE" ] || fail "каталог профиля не создан"
 
@@ -385,7 +393,7 @@ step "vpn-zone profile create $TEST_PROFILE"
 # запись ушла бы в настоящий дом — то есть тест проверял бы не то.
 mkdir -p "$HOME/.config"
 
-step "vpn-zone run smoke --profile $TEST_PROFILE — запись в слой профиля"
+step "cellward run smoke --profile $TEST_PROFILE — запись в слой профиля"
 # Зона smoke сейчас поднята держателем, поэтому zone_pid её находит и systemctl
 # не понадобится. Графики на раннере нет: kdialog-ветки (предупреждение «уже
 # запущена в другой сети») не срабатывают, а wl-sandbox без композитора пишет
@@ -414,12 +422,12 @@ echo "ok: каталог сохранён, и это каталог внутри
 # --- 6а. Тот же контейнер без ограничений зоны (unconfined, прежде direct) ----
 # Раньше пикер при выборе direct просто становился командой, и выбранный
 # контейнер молча терялся: программа писала в настоящий дом. Теперь unconfined идёт
-# через `vpn-zone run`, а user namespace, которого у зоны тут не занять, делает
+# через `cellward run`, а user namespace, которого у зоны тут не занять, делает
 # `unshare --map-current-user --keep-caps` (rust/src/launch.rs, entry_argv).
 # Проверяется ровно то, что должно быть: запись ушла в слой, netns — хостовый
 # (unconfined — это сеть хоста; второй запуск — по прежнему имени direct),
 # userns — свой.
-step "vpn-zone run unconfined --profile $TEST_PROFILE — контейнер без зоны"
+step "cellward run unconfined --profile $TEST_PROFILE — контейнер без зоны"
 "$VPN_ZONE" run unconfined --profile "$TEST_PROFILE" -- \
   sh -c 'echo marker > "$HOME/.config/vpn-smoke-direct-marker"'
 DIRECT_UPPER="$PROFILES/$TEST_PROFILE/.config/upper/vpn-smoke-direct-marker"
@@ -438,10 +446,10 @@ grep -q "\"event\":\"launch-unconfined\".*\"container\":\"$TEST_PROFILE\"" "$STA
   || fail "запуск без ограничений не записан в журнал: $(tail -3 "$STATE/.journal" 2>&1)"
 [ "$(stat -c %a "$STATE/.journal")" = 600 ] || fail "журнал читаем не только пользователем: $(stat -c %a "$STATE/.journal")"
 "$VPN_ZONE" journal | grep -q "без ограничений: .*контейнер $TEST_PROFILE" \
-  || fail "vpn-zone journal не показывает запуск: $("$VPN_ZONE" journal 2>&1 | tail -3)"
-echo "ok: запуск без ограничений в журнале (0600), vpn-zone journal его показывает"
+  || fail "cellward journal не показывает запуск: $("$VPN_ZONE" journal 2>&1 | tail -3)"
+echo "ok: запуск без ограничений в журнале (0600), cellward journal его показывает"
 
-step "vpn-zone profile rm $TEST_PROFILE"
+step "cellward profile rm $TEST_PROFILE"
 # При провале — владельцы и права всего дерева: без этого EACCES нечитаем.
 "$VPN_ZONE" profile rm "$TEST_PROFILE" || {
   ls -lnRa "$PROFILES/$TEST_PROFILE" >&2 || true
@@ -455,17 +463,17 @@ step "vpn-zone profile rm $TEST_PROFILE"
 # отдельный слой, и запускается она в обычной сети раннера.
 #
 # Пути инструментов НЕ собираются отдельно, а достаются из МАНИФЕСТА — того
-# самого JSON, на который показывает обёртка vpn-zone (VPN_ZONE_TOOLS). Так тест
+# самого JSON, на который показывает обёртка cellward (VPN_ZONE_TOOLS). Так тест
 # проверяет ровно то, что поедет пользователю, а не свою сборку. Раньше они
 # грепались из текста shell-скрипта vpn-zone; скрипта больше нет, есть бинарь и
 # двухстрочная обёртка к нему.
-step "Песочница ФС: достаю пути инструментов из манифеста собранного vpn-zone"
+step "Песочница ФС: достаю пути инструментов из манифеста собранного cellward"
 # «grep -m1 -o», а не «grep -o | head -1»: под set -o pipefail head, закрывший
 # трубу первым, обрекает пайплайн на 141, и весь смоук падал бы по случайности
 # размера вывода. -m1 останавливает сам grep, а искомых подстрок в первой же
 # подходящей строке ровно по одной.
 TOOLS=$(grep -m1 -o '/nix/store/[^ "]*-vpn-zone-tools.json' "$VPN_ZONE")
-[ -n "$TOOLS" ] && [ -f "$TOOLS" ] || fail "в обёртке vpn-zone нет пути к манифесту инструментов"
+[ -n "$TOOLS" ] && [ -f "$TOOLS" ] || fail "в обёртке cellward нет пути к манифесту инструментов"
 # Плоский JSON «ключ: значение» — «|| true» на случай отсутствующего ключа:
 # пустое значение поймает общая проверка ниже и скажет, какого именно нет.
 tool() {
@@ -481,7 +489,7 @@ FSPROXY=$(tool dbus-proxy)
 FSSH=$(head -1 "$VPN_ZONE" | sed 's|^#!||')
 FSCOREUTILS="$WORK/tools/bin"
 for v in FSCORE FSBWRAP FSPROXY FSSH FSCOREUTILS; do
-  [ -n "${!v}" ] || fail "не нашёл $v в тексте собранного vpn-zone"
+  [ -n "${!v}" ] || fail "не нашёл $v в тексте собранного cellward"
 done
 [ -x "$FSCORE" ] || fail "vpn-zone-core не исполняемый: $FSCORE"
 [ -x "$FSBWRAP" ] || fail "bwrap не исполняемый: $FSBWRAP"
@@ -609,7 +617,7 @@ echo "ok: выданный каталог работает, ключи зон н
 # Срок выдачи (rust/src/grants.rs): у программы, которая УЖЕ работает, каталог
 # обязан исчезнуть по истечении срока, а не при следующем запуске. Запись в
 # реестре делается руками: песочница здесь запускается напрямую, мимо
-# `vpn-zone run`, который пишет её сам.
+# `cellward run`, который пишет её сам.
 step "Песочница ФС: истёкший срок забирает каталог и у запущенной программы"
 LIVE="$HOME/smoke-live"
 LIVEHOME="$HOME/.local/state/vpn-sandboxes/smokelive"
@@ -675,20 +683,20 @@ echo "ok: срок истёк — каталог отмонтирован у р�
 # ПОЧЕМУ ИМЕННО direct, А НЕ offline. Ветка offline поднимает зону через
 # `systemctl --user`, которого на раннере нет вовсе (сессионного systemd в
 # контейнере CI не бывает) — тест падал бы не по делу. direct ничего не
-# поднимает: пикер становится `vpn-zone run direct`, а тот — самой командой
+# поднимает: пикер становится `cellward run direct`, а тот — самой командой
 # (обёрнутой в wl-sandbox, который без композитора запускает её как есть).
 #
-# ПОЧЕМУ СВОЙ МАНИФЕСТ. В Exec и в манифесте пикер зовёт `vpn-zone` по пути в
+# ПОЧЕМУ СВОЙ МАНИФЕСТ. В Exec и в манифесте пикер зовёт `cellward` по пути в
 # ПРОФИЛЕ (docs/GOTCHAS.md §10), а профиля home-manager на раннере нет. Поэтому
 # пикер запускается бинарём крейта напрямую, с копией манифеста, где `runner` —
-# собранная обёртка vpn-zone. Остальные пути — те самые, что поедут
-# пользователю. Раньше это было не нужно: для direct пикер `vpn-zone run` не
+# собранная обёртка cellward. Остальные пути — те самые, что поедут
+# пользователю. Раньше это было не нужно: для direct пикер `cellward run` не
 # звал вовсе — и именно поэтому терял выбранный контейнер.
 #
 # Выбор задаётся файлом памяти .last у синтетического ключа, а не командой
-# `vpn-zone default`: смоук гоняют и на рабочей машине, а `default` — настоящая
+# `cellward default`: смоук гоняют и на рабочей машине, а `default` — настоящая
 # настройка пользователя, её трогать нельзя. Файл памяти на своём ключе — нет.
-step "Пикер без графики: берёт прошлый выбор и запускает через vpn-zone run"
+step "Пикер без графики: берёт прошлый выбор и запускает через cellward run"
 PICK_BIN=$(grep -m1 -o '/nix/store/[^ "]*/bin/vpn-zone-pick' "$VPN_ZONE_PICK")
 PICK_TOOLS=$(grep -m1 -o '/nix/store/[^ "]*-vpn-zone-tools.json' "$VPN_ZONE_PICK")
 [ -x "$PICK_BIN" ] && [ -f "$PICK_TOOLS" ] || fail "в обёртке vpn-zone-pick нет бинаря или манифеста"
@@ -973,7 +981,7 @@ EOF
   fi
   echo "ok: $OCPIN"
 
-  step "vpn-zone add ocsmoke (конфиг с секцией [OpenConnect])"
+  step "cellward add ocsmoke (конфиг с секцией [OpenConnect])"
   cat > "$WORK/ocsmoke.conf" <<EOF
 [OpenConnect]
 Server = $SRVIP:4443
@@ -1081,13 +1089,13 @@ EOF
     || fail "из зоны не достучаться до конца туннеля — трафик через туннель не идёт"
   echo "ok: соединение через туннель открылось"
 
-  step "Зона OpenConnect: зеркало состояния и vpn-zone check"
+  step "Зона OpenConnect: зеркало состояния и cellward check"
   wait_file "$STATE/ocsmoke/status" 100 || fail "зеркало состояния не появилось"
   ocstatus=$(cat "$STATE/ocsmoke/status")
   echo "$ocstatus"
   echo "$ocstatus" | grep -q 'backend: openconnect' || fail "в зеркале нет строки о бэкенде"
   echo "$ocstatus" | grep -q 'connected: yes' || fail "в зеркале нет connected: yes"
-  "$VPN_ZONE" check ocsmoke || fail "vpn-zone check не признал OpenConnect-зону живой"
+  "$VPN_ZONE" check ocsmoke || fail "cellward check не признал OpenConnect-зону живой"
 
   step "Зона OpenConnect: смерть клиента валит зону"
   # Fail-closed: клиента убиваем, и зона обязана уйти целиком — держатель
@@ -1133,7 +1141,7 @@ HOLDER_PIDS=()
 step "Проверяю, что pasta умерла вместе с зоной"
 # Ищем ровно НАШУ pasta, а не любую на машине. В шлюзовой архитектуре pasta
 # цепляется к АПЛИНКУ, а не к namespace приложений — по этому же номеру её
-# находит и `vpn-zone gc` (он читает /proc/N/ns/net из её cmdline).
+# находит и `cellward gc` (он читает /proc/N/ns/net из её cmdline).
 pasta_pat="pasta --netns /proc/$UPID/ns/net"
 for _ in $(seq 1 50); do
   pgrep -f "$pasta_pat" >/dev/null || break

@@ -1,12 +1,13 @@
 # Автономная тестовая обвязка: собирает home-manager-конфигурацию с модулем
-# vpn-zones БЕЗ flake-инпутов (у flake.nix их нет намеренно). nixpkgs и
+# cellward БЕЗ flake-инпутов (у flake.nix их нет намеренно). nixpkgs и
 # home-manager пинуются в tests/pins.nix — конкретный коммит стабильной ветки с
 # явным sha256, сборка воспроизводима и не едет вслед за веткой. Оттуда же пины
 # берёт и VM-тест (tests/vm.nix).
 #
 # Использование:
 #   nix-instantiate tests/harness.nix -A activationPackage        # только eval
-#   nix-build tests/harness.nix -A scripts.vpn-zone               # адресная сборка
+#   nix-build tests/harness.nix -A scripts.cellward               # адресная сборка
+#   nix-instantiate --eval --strict tests/harness.nix -A oldNames -A singleEntry
 #   nix-build tests/harness.nix -A zoneHolder \
 #     --argstr username "$(id -un)" --argstr homeDirectory "$HOME"
 {
@@ -35,7 +36,7 @@ let
       { ... }:
       {
         imports = [ ../module ];
-        programs.vpn-zones.enable = true;
+        programs.cellward.enable = true;
         home = {
           inherit username homeDirectory;
           # Фиксируем: тестовая конфигурация всегда «свежая», миграций нет.
@@ -46,18 +47,19 @@ let
 
   # Скрипты модуля — внутренние let-биндинги, наружу они попадают только через
   # home.packages. Вытаскиваем их оттуда по имени деривации (lib.getName
-  # отбрасывает версию: «vpn-zone-rust-0.1.0» → «vpn-zone-rust»), чтобы CI мог
-  # собирать каждый адресно, не собирая activationPackage целиком.
+  # отбрасывает версию: «cellward-0.1.0» → «cellward»), чтобы CI мог собирать
+  # каждый адресно, не собирая activationPackage целиком.
   #
   # Список короткий, и это результат: shell в модуле остался ровно четырьмя
-  # двухстрочными обёртками над бинарями крейта. Пикер, шесть GUI-ярлыков, обе
-  # песочницы и сам CLI — теперь подкоманды и бинари vpn-zone-rust, а он
-  # собирается своим job'ом.
+  # двухстрочными обёртками над бинарями крейта (у cellward и cellward-gui
+  # рядом ещё ссылки-псевдонимы: cw и vpn-zone, vpn-zone-gui). Пикер, шесть
+  # GUI-ярлыков, обе песочницы и сам CLI — теперь подкоманды и бинари крейта,
+  # а он собирается своим job'ом.
   scriptNames = [
-    "vpn-zone"
+    "cellward"
     "vpn-zone-pick"
     "vpn-zone-sync"
-    "vpn-zone-gui"
+    "cellward-gui"
   ];
 
   scriptByName =
@@ -79,81 +81,211 @@ let
   # ini) — нормализуем обратно в строку.
   # A synthetic CA made at build time — for the declared trust option only; no
   # certificate or key is kept in git.
-  testCa = pkgs.runCommand "vpn-zones-test-ca" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+  testCa = pkgs.runCommand "cellward-test-ca" { nativeBuildInputs = [ pkgs.openssl ]; } ''
     mkdir -p "$out"
-    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=vpn-zones harness CA" \
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=cellward harness CA" \
       -addext "basicConstraints=critical,CA:TRUE" -keyout "$out/ca.key" -out "$out/ca.pem" 2>/dev/null
   '';
+
+  # Every declarative option set (docs/CONTAINERS.md §8): under the new
+  # names in hmDeclared, under the old ones in hmOldNames.
+  declaredOptions = {
+    enable = true;
+    defaults = {
+      network = "offline";
+      container = "own";
+    };
+    launcher.mode = "picker";
+    autostart.unassigned = "offline";
+    pathShims.enable = true;
+    hermetic = {
+      default = true;
+      exceptions = [ "agents" ];
+    };
+    compositorRestriction.enable = true;
+    microphone = {
+      calls = "yes";
+      offline = "no";
+      agents = "ask";
+    };
+    askAgainAfter = "10m";
+    audioManager = [ "mixer" ];
+    pipewirePolicy = true;
+    desktop = {
+      windowMenu.key = "Mod+Shift+Z";
+      niri = {
+        enable = true;
+        includeInConfig = true;
+      };
+      sway.enable = true;
+    };
+    containers.work = {
+      home = "overlay";
+      network = "direct";
+      apps = [ "firefox" ];
+      trust = {
+        certificates = [ "${testCa}/ca.pem" ];
+        acknowledgeRisk = true;
+      };
+    };
+    containers.dev = {
+      apps = [ "org.telegram.desktop" ];
+      permissions.paths = [
+        "~/.wine"
+        "/mnt/games"
+      ];
+    };
+  };
 
   # The same module with every declarative option set: the eval job
   # instantiates it, so an option that stops evaluating (or an assertion that
   # fires on a valid configuration) is red in CI and not on somebody's switch.
-  hmDeclared = import "${homeManagerSrc}/modules" {
-    inherit pkgs;
-    configuration =
-      { ... }:
-      {
-        imports = [ ../module ];
-        programs.vpn-zones = {
-          enable = true;
-          defaults = {
-            network = "offline";
-            container = "own";
+  declaredHome =
+    optionRoot:
+    import "${homeManagerSrc}/modules" {
+      inherit pkgs;
+      configuration =
+        { ... }:
+        {
+          imports = [ ../module ];
+          programs.${optionRoot} = declaredOptions;
+          home = {
+            inherit username homeDirectory;
+            stateVersion = "26.05";
           };
-          launcher.mode = "picker";
-          autostart.unassigned = "offline";
-          pathShims.enable = true;
-          hermetic = {
-            default = true;
-            exceptions = [ "agents" ];
-          };
-          compositorRestriction.enable = true;
-          microphone = {
-            calls = "yes";
-            offline = "no";
-            agents = "ask";
-          };
-          askAgainAfter = "10m";
-          audioManager = [ "mixer" ];
-          pipewirePolicy = true;
-          desktop = {
-            windowMenu.key = "Mod+Shift+Z";
-            niri = {
-              enable = true;
-              includeInConfig = true;
-            };
-            sway.enable = true;
-          };
-          containers.work = {
-            home = "overlay";
-            network = "direct";
-            apps = [ "firefox" ];
-            trust = {
-              certificates = [ "${testCa}/ca.pem" ];
-              acknowledgeRisk = true;
-            };
-          };
-          containers.dev = {
-            apps = [ "org.telegram.desktop" ];
-            permissions.paths = [
-              "~/.wine"
-              "/mnt/games"
-            ];
-          };
+          # The user's own niri config, written by home-manager as text — what
+          # desktop.niri.includeInConfig appends its line to.
+          xdg.configFile."niri/config.kdl".text = ''
+            binds {
+                Mod+Return { spawn "foot"; }
+            }
+          '';
         };
-        home = {
-          inherit username homeDirectory;
-          stateVersion = "26.05";
-        };
-        # The user's own niri config, written by home-manager as text — what
-        # desktop.niri.includeInConfig appends its line to.
-        xdg.configFile."niri/config.kdl".text = ''
-          binds {
-              Mod+Return { spawn "foot"; }
-          }
-        '';
+    };
+  hmDeclared = declaredHome "cellward";
+  # The names the project had until 2026-09 (programs.vpn-zones): they must
+  # still give the same home, with a warning (oldNames below).
+  hmOldNames = declaredHome "vpn-zones";
+
+  # A NixOS machine with the NixOS module and home-manager's, evaluated and
+  # never built or booted: what the single entry and the old option names do
+  # to a system.
+  nixos =
+    modules:
+    import "${nixpkgsSrc}/nixos/lib/eval-config.nix" {
+      inherit system;
+      modules = [
+        ../module/nixos.nix
+        "${homeManagerSrc}/nixos"
+        {
+          fileSystems."/" = {
+            device = "/dev/null";
+            fsType = "ext4";
+          };
+          boot.loader.grub.enable = false;
+          documentation.enable = false;
+          system.stateVersion = "26.05";
+          users.users.alice.isNormalUser = true;
+          home-manager.useGlobalPkgs = true;
+          home-manager.users.alice.home.stateVersion = "26.05";
+        }
+      ]
+      ++ modules;
+    };
+
+  # The system tier with most of its options set — once under the new names,
+  # once under the old ones (services.vpn-zones, until 2026-09).
+  systemOptions = {
+    enable = true;
+    users = [ "alice" ];
+    zones = {
+      nl = {
+        users = [ "alice" ];
+        configFile = "/run/secrets/vpn-nl";
       };
+      direct0.kind = "plain";
+    };
+    services.demo.zone = "nl";
+    console = {
+      enable = true;
+      zone = "nl";
+      fallback = "direct0";
+    };
+    host = {
+      nix = "direct0";
+      time = "direct0";
+      dns = "direct0";
+    };
+    egress = {
+      enable = true;
+      mode = "strict";
+      allowUsers = [ "alice" ];
+      emergency.minutes = 5;
+    };
   };
+  systemTier =
+    root:
+    nixos [
+      {
+        services.${root} = {
+          system = systemOptions;
+          pipewirePolicy.enable = true;
+        };
+        services.pipewire.enable = true;
+      }
+    ];
+  systemNew = systemTier "cellward";
+  systemOld = systemTier "vpn-zones";
+
+  # The single entry, services.cellward.enable: with the system tier and its
+  # egress policy (and the home-manager module imported by hand as well —
+  # the same module, taken once), with the defaults it sets overridden, and
+  # alone.
+  entry = nixos [
+    {
+      services.cellward = {
+        enable = true;
+        system = {
+          enable = true;
+          egress.enable = true;
+        };
+      };
+      services.pipewire.enable = true;
+      home-manager.users.alice.imports = [ ../module ];
+      users.users.bob.isNormalUser = true;
+      home-manager.users.bob = {
+        home.stateVersion = "26.05";
+        programs.cellward.enable = false;
+      };
+    }
+  ];
+  entryOverridden = nixos [
+    {
+      services.cellward = {
+        enable = true;
+        system = {
+          enable = true;
+          egress.enable = true;
+          host.nix = null;
+          host.time = null;
+          amneziawg = false;
+        };
+      };
+    }
+  ];
+  entryAlone = nixos [ { services.cellward.enable = true; } ];
+
+  # `true`, or a failure that says what went wrong.
+  expect = what: ok: if ok then true else throw "tests/harness.nix: ${what}";
+  # Every option below a prefix, by its path under it.
+  optionPaths =
+    depth: opts:
+    lib.sort lib.lessThan (
+      map (o: lib.concatStringsSep "." (lib.drop depth o.loc)) (lib.collect lib.isOption opts)
+    );
+  count = x: list: lib.length (lib.filter (y: y == x) list);
+  warnsOf = what: config: lib.any (lib.hasInfix what) config.warnings;
+  toplevel = machine: builtins.seq machine.config.system.build.toplevel.drvPath true;
 
   rawExecStart = hm.config.systemd.user.services."vpn-zone@".Service.ExecStart;
   zoneHolderExecLine = if lib.isList rawExecStart then lib.head rawExecStart else rawExecStart;
@@ -166,6 +298,88 @@ in
   # Every declarative option set (docs/CONTAINERS.md §8).
   declaredActivation = hmDeclared.activationPackage;
 
+  # The old option names — programs.vpn-zones and services.vpn-zones, the
+  # project's until 2026-09 — name every option of the new ones, and give
+  # the same home and the same system, with a warning:
+  #   nix-instantiate --eval --strict tests/harness.nix -A oldNames
+  oldNames = lib.all lib.id [
+    (expect "an option of programs.cellward has no old name, or an old name no option" (
+      optionPaths 2 hmDeclared.options.programs.cellward
+      == optionPaths 2 hmDeclared.options.programs.vpn-zones
+    ))
+    (expect "programs.vpn-zones gives another home than programs.cellward" (
+      hmOldNames.activationPackage.drvPath == hmDeclared.activationPackage.drvPath
+    ))
+    (expect "programs.vpn-zones does not warn" (warnsOf "programs.vpn-zones" hmOldNames.config))
+    (expect "programs.cellward warns of an old name" (!warnsOf "vpn-zones" hmDeclared.config))
+    (expect "an option of services.cellward.system has no old name, or an old name no option" (
+      optionPaths 3 systemNew.options.services.cellward.system
+      == optionPaths 3 systemNew.options.services.vpn-zones.system
+    ))
+    (expect "services.vpn-zones.pipewirePolicy.enable has no new name" (
+      systemOld.config.services.cellward.pipewirePolicy.enable
+    ))
+    (expect "services.vpn-zones gives another system than services.cellward" (
+      systemOld.config.system.build.toplevel.drvPath == systemNew.config.system.build.toplevel.drvPath
+    ))
+    (expect "services.vpn-zones does not warn" (warnsOf "services.vpn-zones" systemOld.config))
+    (expect "services.cellward warns of an old name" (!warnsOf "vpn-zones" systemNew.config))
+  ];
+
+  # What the single entry turns on, what it leaves to an explicit choice, and
+  # that a machine with it evaluates:
+  #   nix-instantiate --eval --strict tests/harness.nix -A singleEntry
+  singleEntry =
+    let
+      e = entry.config;
+      o = entryOverridden.config;
+      a = entryAlone.config;
+    in
+    lib.all lib.id [
+      (expect "the kernel modules of a zone are not loaded" (
+        lib.all (m: count m e.boot.kernelModules == 1) [
+          "amneziawg"
+          "wireguard"
+          "tun"
+          "nf_tables"
+        ]
+        && count "amneziawg" a.boot.kernelModules == 1
+        && lib.length e.boot.extraModulePackages == 1
+        && lib.length a.boot.extraModulePackages == 1
+      ))
+      (expect "system.amneziawg = false still loads amneziawg" (
+        count "amneziawg" o.boot.kernelModules == 0 && o.boot.extraModulePackages == [ ]
+      ))
+      (expect "the PipeWire policy is not on with WirePlumber, or on without it" (
+        e.services.cellward.pipewirePolicy.enable && !a.services.cellward.pipewirePolicy.enable
+      ))
+      (expect "the home-manager module is not on for a home-manager user" (
+        e.home-manager.users.alice.programs.cellward.enable
+        && !e.home-manager.users.bob.programs.cellward.enable
+        && a.home-manager.users.alice.programs.cellward.enable
+      ))
+      (expect "with the egress policy, the Nix daemon and the clock do not go through direct0" (
+        e.services.cellward.system.host.nix == "direct0"
+        && e.services.cellward.system.host.time == "direct0"
+        && e.services.cellward.system.zones.direct0.kind == "plain"
+      ))
+      (expect "an explicit host.nix/host.time does not win over the single entry" (
+        o.services.cellward.system.host.nix == null
+        && o.services.cellward.system.host.time == null
+        && !(o.services.cellward.system.zones ? direct0)
+      ))
+      (expect "the single entry turned on what stays a choice" (
+        !a.services.cellward.system.enable
+        && !a.services.cellward.system.egress.enable
+        && a.services.cellward.system.host.nix == null
+        && e.services.cellward.system.host.dns == null
+        && !e.services.cellward.system.console.enable
+      ))
+      (toplevel entry)
+      (toplevel entryOverridden)
+      (toplevel entryAlone)
+    ];
+
   # The window menu's key and our windows' rule as the compositors read them:
   # niri validates its config with the include resolved, sway checks its
   # file. The store paths inside are cut loose — validating a line does not
@@ -176,7 +390,7 @@ in
       files = hmDeclared.config.xdg.configFile;
       text = name: builtins.unsafeDiscardStringContext files.${name}.text;
     in
-    pkgs.runCommand "vpn-zones-compositor-snippets"
+    pkgs.runCommand "cellward-compositor-snippets"
       {
         nativeBuildInputs = [
           pkgs.niri
@@ -201,7 +415,7 @@ in
         grep -q 'Mod+Shift+Z hotkey-overlay-title=' niri/vpn-zones.kdl
         niri validate -c niri/config.kdl
         cat "$swaySnippetPath"
-        grep -q '^bindsym Mod4+Shift+z exec /nix/store/.*/bin/vpn-zone window-menu$' "$swaySnippetPath"
+        grep -q '^bindsym Mod4+Shift+z exec /nix/store/.*/bin/cellward window-menu$' "$swaySnippetPath"
         # --validate still makes a backend: a headless one, drawn in software.
         export XDG_RUNTIME_DIR=$TMPDIR WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
         sway --validate --config "$swaySnippetPath"
@@ -235,7 +449,7 @@ in
   # не быть — смоук на раннере так и упал («util-linux/bin/unshare: No such
   # file»). buildEnv собирает bin/ всех инструментов в один выход.
   smokeTools = pkgs.buildEnv {
-    name = "vpn-zones-smoke-tools";
+    name = "cellward-smoke-tools";
     paths = with pkgs; [
       wireguard-tools
       iproute2
@@ -268,7 +482,7 @@ in
   #   • openssl — сертификат, ключ и crypt-хеш пароля для plain-аутентификации
   #     ocserv (формат файла — username:группы:crypt(3)).
   ocTools = pkgs.buildEnv {
-    name = "vpn-zones-oc-tools";
+    name = "cellward-oc-tools";
     paths = with pkgs; [
       ocserv
       openconnect

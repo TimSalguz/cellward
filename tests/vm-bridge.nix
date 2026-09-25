@@ -28,7 +28,7 @@ let
   };
 
   test = pkgs.testers.runNixOSTest {
-    name = "vpn-zones-vm-bridge";
+    name = "cellward-vm-bridge";
 
     nodes.machine =
       { pkgs, ... }:
@@ -38,7 +38,7 @@ let
           "${pins.home-manager}/nixos"
         ];
 
-        services.vpn-zones.system = {
+        services.cellward.system = {
           enable = true;
           zones.sz = {
             # Not at boot: the config only exists once the test has written it.
@@ -75,7 +75,7 @@ let
         home-manager.useUserPackages = true;
         home-manager.users.alice = {
           imports = [ ../module ];
-          programs.vpn-zones.enable = true;
+          programs.cellward.enable = true;
           home.stateVersion = "26.05";
         };
 
@@ -183,36 +183,36 @@ let
           machine.wait_for_unit("user@1000.service")
           # alice outside every zone: no network (the policy is enforced).
           machine.fail(alice(f"timeout 10 socat -T5 - TCP:{server_ip}:8090"))
-          out = machine.succeed(alice("vpn-zone add mz --system sz"))
+          out = machine.succeed(alice("cellward add mz --system sz"))
           assert "sz" in out, out
           # No key of its own: the config names the system zone, nothing else.
           machine.succeed("grep -q 'Name = sz' /home/alice/.local/state/vpn-zones/mz/config.conf")
           machine.fail("grep -q PrivateKey /home/alice/.local/state/vpn-zones/mz/config.conf")
-          out = machine.succeed(alice("vpn-zone status --json"))
+          out = machine.succeed(alice("cellward status --json"))
           assert '"name":"mz","kind":"system-zone"' in out and '"system_zone":"sz"' in out, out
-          machine.succeed(alice("vpn-zone up mz"))
+          machine.succeed(alice("cellward up mz"))
           # The server sees the system zone's tunnel address: the same tunnel.
-          out = machine.succeed(alice("vpn-zone run mz -- socat -T10 - TCP:10.99.0.1:8080"))
+          out = machine.succeed(alice("cellward run mz -- socat -T10 - TCP:10.99.0.1:8080"))
           assert "peer=10.99.0.2" in out, out
           # lo and pasta's awg0, nothing else; the tunnel's resolver.
-          out = machine.succeed(alice("vpn-zone run mz -- ip -o link show"))
+          out = machine.succeed(alice("cellward run mz -- ip -o link show"))
           assert len(links(out)) == 2 and ": awg0" in out, out
-          out = machine.succeed(alice("vpn-zone run mz -- getent ahostsv4 leaktest.internal"))
+          out = machine.succeed(alice("cellward run mz -- getent ahostsv4 leaktest.internal"))
           assert "10.99.0.9" in out, out
           # Not the host: the only way out is sz's tunnel.
-          machine.fail(alice(f"vpn-zone run mz -- timeout 5 socat -T3 - TCP:{machine_ip}:8092"))
+          machine.fail(alice(f"cellward run mz -- timeout 5 socat -T3 - TCP:{machine_ip}:8092"))
           # pasta runs in the system zone's namespace, as alice — not as root.
           out = in_sz()
           assert pastas("alice") and not pastas("root"), out
           # Its liveness is the system zone's handshake.
-          machine.wait_until_succeeds(alice("vpn-zone check mz"), timeout=60)
+          machine.wait_until_succeeds(alice("cellward check mz"), timeout=60)
 
       with subtest("from inside a user zone, no door to the system tier (review)"):
           # The service's socket is hidden in every user zone: a program in
           # one could otherwise have added a zone, or run itself in one, and
           # gone out around its own tunnel.
-          machine.succeed(alice("vpn-zone run mz -- test ! -e /run/vpn-zones/sysrun.sock"))
-          machine.fail(alice("vpn-zone run mz -- vpn-zone-sys sz -- true"))
+          machine.succeed(alice("cellward run mz -- test ! -e /run/vpn-zones/sysrun.sock"))
+          machine.fail(alice("cellward run mz -- vpn-zone-sys sz -- true"))
           # A way out through a system zone is asked for by a zone, not by a
           # program of the user's, even outside every zone.
           core = machine.succeed(
@@ -235,19 +235,19 @@ let
           )
           out = machine.succeed(
               alice(
-                  "vpn-zone run mz -- sh -c "
+                  "cellward run mz -- sh -c "
                   "'timeout -s KILL 5 socat -T3 - TCP:10.99.0.2:8093 </dev/null; true'"
               )
           )
           assert "inside" not in out, out
-          out = machine.succeed(alice("vpn-zone run mz -- socat -T10 - TCP:10.99.0.1:8080"))
+          out = machine.succeed(alice("cellward run mz -- socat -T10 - TCP:10.99.0.1:8080"))
           assert "peer=10.99.0.2" in out, out
 
       with subtest("the system zone's key in a user zone: through the system zone, not twice"):
           machine.succeed(
               "install -o alice -m 600 /var/lib/vpn-zones/system/sz/config.conf /home/alice/sz.conf"
           )
-          out = machine.succeed(alice("vpn-zone add mz2 /home/alice/sz.conf"))
+          out = machine.succeed(alice("cellward add mz2 /home/alice/sz.conf"))
           assert "sz" in out, out
           machine.succeed("grep -q 'Name = sz' /home/alice/.local/state/vpn-zones/mz2/config.conf")
           machine.fail("grep -q PrivateKey /home/alice/.local/state/vpn-zones/mz2/config.conf")
@@ -255,11 +255,11 @@ let
 
       with subtest("it fails closed with the tunnel, and lets go of its pasta when down"):
           machine.succeed("systemctl stop vpn-zone-system@sz")
-          machine.fail(alice("vpn-zone run mz -- timeout 5 socat -T3 - TCP:10.99.0.1:8080"))
-          machine.fail(alice(f"vpn-zone run mz -- timeout 5 socat -T3 - TCP:{machine_ip}:8092"))
+          machine.fail(alice("cellward run mz -- timeout 5 socat -T3 - TCP:10.99.0.1:8080"))
+          machine.fail(alice(f"cellward run mz -- timeout 5 socat -T3 - TCP:{machine_ip}:8092"))
           machine.succeed("systemctl start vpn-zone-system@sz")
           machine.wait_until_succeeds(
-              alice("vpn-zone run mz -- socat -T5 - TCP:10.99.0.1:8080 | grep peer=10.99.0.2"),
+              alice("cellward run mz -- socat -T5 - TCP:10.99.0.1:8080 | grep peer=10.99.0.2"),
               timeout=60,
           )
 
@@ -272,7 +272,7 @@ let
           out = machine.succeed("ip netns exec vz-sz cat /proc/sys/net/ipv4/ip_default_ttl").strip()
           assert out == "64", f"the namespace was not recreated: ttl {out}"
           machine.wait_until_succeeds(
-              alice("vpn-zone run mz -- socat -T5 - TCP:10.99.0.1:8080 | grep peer=10.99.0.2"),
+              alice("cellward run mz -- socat -T5 - TCP:10.99.0.1:8080 | grep peer=10.99.0.2"),
               timeout=60,
           )
           # One pasta of alice's, in the new namespace; the old one is gone.
@@ -281,17 +281,17 @@ let
 
       with subtest("vpn-zones off and on again: the user zone waits, then goes on"):
           machine.succeed("systemctl start vpn-zones-off.service")
-          machine.fail(alice("vpn-zone run mz -- timeout 5 socat -T3 - TCP:10.99.0.1:8080"))
-          machine.fail(alice(f"vpn-zone run mz -- timeout 5 socat -T3 - TCP:{machine_ip}:8092"))
+          machine.fail(alice("cellward run mz -- timeout 5 socat -T3 - TCP:10.99.0.1:8080"))
+          machine.fail(alice(f"cellward run mz -- timeout 5 socat -T3 - TCP:{machine_ip}:8092"))
           machine.succeed("systemctl start vpn-zones-on.service")
           machine.succeed("systemctl start vpn-zone-system@sz")
           machine.wait_until_succeeds(
-              alice("vpn-zone run mz -- socat -T5 - TCP:10.99.0.1:8080 | grep peer=10.99.0.2"),
+              alice("cellward run mz -- socat -T5 - TCP:10.99.0.1:8080 | grep peer=10.99.0.2"),
               timeout=60,
           )
 
       with subtest("down: nothing of alice's left in the system zone"):
-          machine.succeed(alice("vpn-zone down mz"))
+          machine.succeed(alice("cellward down mz"))
           machine.wait_until_succeeds(
               "test -z \"$(for p in $(ip netns pids vz-sz); do ps -o user= -p $p || true; done | grep alice)\"",
               timeout=30,

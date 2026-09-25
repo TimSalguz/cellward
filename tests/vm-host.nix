@@ -27,14 +27,14 @@ let
   };
 
   test = pkgs.testers.runNixOSTest {
-    name = "vpn-zones-vm-host";
+    name = "cellward-vm-host";
 
     nodes.machine =
       { lib, pkgs, ... }:
       {
         imports = [ ../module/nixos.nix ];
 
-        services.vpn-zones.system = {
+        services.cellward.system = {
           enable = true;
           zones.pl = {
             kind = "plain";
@@ -92,7 +92,7 @@ let
       { lib, pkgs, ... }:
       {
         imports = [ ../module/nixos.nix ];
-        services.vpn-zones.system = {
+        services.cellward.system = {
           enable = true;
           zones.direct0.kind = "plain";
           host.dns = "direct0";

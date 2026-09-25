@@ -1,12 +1,12 @@
 # NixOS VM test: boots a real machine with the vpn-zones home-manager module
 # and exercises exactly the paths the CI smoke test cannot reach — a runner
-# has no systemd user session, so `vpn-zone up/down` (the vpn-zone@ template
-# unit), the unit autostart inside `vpn-zone run`, and the picker's offline
+# has no systemd user session, so `cellward up/down` (the vpn-zone@ template
+# unit), the unit autostart inside `cellward run`, and the picker's offline
 # branch have no coverage there. Here they do, plus the same hermeticity
 # asserts as the smoke test, checked through the systemd path this time.
 #
 # A second VM acts as a REAL WireGuard peer on the test's private VLAN, so
-# the handshake, the traffic, the DNS= path and `vpn-zone check`'s "tunnel
+# the handshake, the traffic, the DNS= path and `cellward check`'s "tunnel
 # alive" branch are exercised for real — with a tcpdump on the client's
 # physical interface asserting that nothing but the tunnel's own UDP ever
 # leaves towards the server (a first cut of the ROADMAP leak tests). Keys
@@ -334,7 +334,7 @@ let
   '';
 
   test = pkgs.testers.runNixOSTest {
-    name = "vpn-zones-vm";
+    name = "cellward-vm";
 
     nodes.machine =
       { config, pkgs, ... }:
@@ -359,7 +359,7 @@ let
               count = 65536;
             }
           ];
-          # A user manager without a login session: `vpn-zone up` talks to
+          # A user manager without a login session: `cellward up` talks to
           # `systemctl --user`, and nobody logs into a test VM.
           linger = true;
           # A door that a group opens: the session has it, a zone must not.
@@ -383,21 +383,21 @@ let
         home-manager.useUserPackages = true;
         home-manager.users.alice = {
           imports = [ ../module ];
-          programs.vpn-zones.enable = true;
+          programs.cellward.enable = true;
           # Hermeticity declared the way an owner switches it on for one zone:
           # the default spelled out (off, as it is anyway) and the zone as the
           # exception. The holder has to find this in ~/.config on its own.
-          programs.vpn-zones.hermetic = {
+          programs.cellward.hermetic = {
             default = false;
             exceptions = [ "vmherm" ];
           };
           # The microphone declared for one zone: Nix's word over the zone's
           # own, asserted in the hermetic subtest.
-          programs.vpn-zones.microphone.vmherm = "no";
+          programs.cellward.microphone.vmherm = "no";
           # A container declared in Nix: bound to direct, trusting a CA made
           # at build time. What the module writes, the runtime obeys and the
           # CLI refuses to change is asserted below.
-          programs.vpn-zones.containers.vmdecl = {
+          programs.cellward.containers.vmdecl = {
             home = "overlay";
             network = "direct";
             apps = [ "vmdeclapp" ];
@@ -544,7 +544,7 @@ let
           )
 
       def in_zone(pid, cmd):
-          """Enter the app namespace the way `vpn-zone run` does."""
+          """Enter the app namespace the way `cellward run` does."""
           return alice(f"nsenter --preserve-credentials -U -n -m -t {pid} -- {cmd}")
 
       def in_zone_root(pid, cmd):
@@ -563,14 +563,23 @@ let
       machine.wait_for_unit("user@1000.service")
 
       with subtest("module delivered: CLI in PATH, template unit installed"):
-          alice("command -v vpn-zone")
+          # cellward, its short name and its old one: the same program.
+          for name in ["cellward", "cw", "vpn-zone", "cellward-gui", "vpn-zone-gui"]:
+              alice(f"command -v {name}")
+          assert alice("readlink -f $(command -v cw)") == alice("readlink -f $(command -v vpn-zone)")
           alice("systemctl --user cat vpn-zone@.service > /dev/null")
           alice("systemctl --user cat vpn-zone-desktop-sync.timer > /dev/null")
           alice("systemctl --user cat vpn-zone-watch.timer > /dev/null")
           machine.succeed(
               "test -f /etc/profiles/per-user/alice"
-              "/share/zsh/site-functions/_vpn-zone"
+              "/share/zsh/site-functions/_cellward"
           )
+          # bash-completion finds a completion by the name typed: one for each.
+          for name in ["cellward", "cw", "vpn-zone"]:
+              machine.succeed(
+                  "test -e /etc/profiles/per-user/alice"
+                  f"/share/bash-completion/completions/{name}"
+              )
 
       # The DNS leak test needs two resolvers that disagree: the HOST's, which
       # a zone must never reach, and the tunnel's own further down. One lookup
@@ -589,18 +598,18 @@ let
           )
           machine.succeed("test -S /run/systemd/resolve/io.systemd.Resolve")
 
-      with subtest("vpn-zone add: synthetic config (wg genkey, TEST-NET endpoint)"):
+      with subtest("cellward add: synthetic config (wg genkey, TEST-NET endpoint)"):
           alice(
               "priv=$(wg genkey); peer=$(wg genkey | wg pubkey); "
               "printf '[Interface]\\nPrivateKey = %s\\nAddress = 10.99.0.2/32\\n\\n"
               "[Peer]\\nPublicKey = %s\\nAllowedIPs = 0.0.0.0/0\\n"
               "Endpoint = 192.0.2.1:51820\\n' \"$priv\" \"$peer\" > /tmp/vmsmoke.conf"
           )
-          alice("vpn-zone add vmsmoke /tmp/vmsmoke.conf")
+          alice("cellward add vmsmoke /tmp/vmsmoke.conf")
           machine.succeed(f"test -f {STATE}/vmsmoke/config.conf")
 
-      with subtest("vpn-zone up: starts the vpn-zone@ unit and waits for ready"):
-          alice("vpn-zone up vmsmoke")
+      with subtest("cellward up: starts the vpn-zone@ unit and waits for ready"):
+          alice("cellward up vmsmoke")
           alice("systemctl --user is-active vpn-zone@vmsmoke.service")
           machine.succeed(f"test -f {STATE}/vmsmoke/ready")
 
@@ -652,12 +661,12 @@ let
           machine.wait_until_succeeds("test -S /tmp/.X11-unix/X77")
           zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
           in_zone(zp, "test ! -e /tmp/.X11-unix/X77")
-          out = alice("DISPLAY=:77 vpn-zone run vmsmoke -- sh -c 'echo D=$DISPLAY.'")
+          out = alice("DISPLAY=:77 cellward run vmsmoke -- sh -c 'echo D=$DISPLAY.'")
           assert "D=." in out, f"DISPLAY reached the zone: {out}"
           machine.succeed("systemctl stop fakex")
 
       with subtest("tab completion offers the zone where a zone is expected"):
-          out = alice("vpn-zone _complete -- vpn-zone up \"\" 3")
+          out = alice("cellward _complete -- cw up \"\" 3")
           assert "vmsmoke" in out.split(), out
 
       zpid = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
@@ -725,13 +734,13 @@ let
           ]:
               assert pat in rules, f"uplink ruleset lacks {pat!r}:\n{rules}"
 
-      with subtest("vpn-zone down: unit stops, cgroup takes pasta with it"):
-          alice("vpn-zone down vmsmoke")
+      with subtest("cellward down: unit stops, cgroup takes pasta with it"):
+          alice("cellward down vmsmoke")
           status = alice(
               "systemctl --user is-active vpn-zone@vmsmoke.service || true"
           ).strip()
           assert status in ("inactive", "failed"), status
-          # The same needle `vpn-zone gc` uses to find an orphaned pasta —
+          # The same needle `cellward gc` uses to find an orphaned pasta —
           # except for the [p]: the test driver runs every command through
           # `timeout N bash -c '…'`, and THAT process carries the pattern text
           # in its argv, so a plain pattern matches its own invocation forever.
@@ -747,29 +756,29 @@ let
                   "pid=$(pgrep -of '[p]asta --netns'); "
                   "ps -p $pid -o pid,ppid,uid,args; cat /proc/$pid/cgroup"
               )
-              raise Exception(f"pasta survived vpn-zone down:\n{dump}")
-          out = alice("vpn-zone list")
+              raise Exception(f"pasta survived cellward down:\n{dump}")
+          out = alice("cellward list")
           assert "vmsmoke — опущена" in out, out
 
-      with subtest("vpn-zone run on a down zone starts the unit by itself"):
-          out = alice("vpn-zone run vmsmoke -- ip -o link show")
+      with subtest("cellward run on a down zone starts the unit by itself"):
+          out = alice("cellward run vmsmoke -- ip -o link show")
           assert ": awg0" in out, f"run did not enter the zone: {out}"
           status = alice(
               "systemctl --user is-active vpn-zone@vmsmoke.service || true"
           ).strip()
           assert status == "active", f"run did not leave the unit running: {status}"
-          alice("vpn-zone down vmsmoke")
+          alice("cellward down vmsmoke")
 
       # `down` takes the network away; `kill` also takes away the programs,
       # which live in cgroups of their own. The host's are not touched.
-      with subtest("vpn-zone kill: the zone's programs die, the zone is down, the host's live"):
-          alice("systemd-run --user --unit=vmremote vpn-zone run vmsmoke -- sleep 4242")
+      with subtest("cellward kill: the zone's programs die, the zone is down, the host's live"):
+          alice("systemd-run --user --unit=vmremote cellward run vmsmoke -- sleep 4242")
           alice("systemd-run --user --unit=vmhostsleep sleep 4343")
           # The program itself, not the launch still waiting for the zone:
           # only the exec'd sleep has exactly this command line.
           machine.wait_until_succeeds("pgrep -f '^(/[^ ]*/)?sleep 424[2]$'", timeout=60)
           machine.wait_until_succeeds("pgrep -f 'sleep 434[3]'", timeout=30)
-          out = alice("vpn-zone kill vmsmoke")
+          out = alice("cellward kill vmsmoke")
           assert "оборвана" in out, out
           machine.wait_until_fails("pgrep -f 'sleep 424[2]'", timeout=15)
           machine.succeed("pgrep -f 'sleep 434[3]'")
@@ -777,7 +786,7 @@ let
               "systemctl --user is-active vpn-zone@vmsmoke.service || true"
           ).strip()
           assert status != "active", f"the zone is still up: {status}"
-          out = alice("vpn-zone journal --json")
+          out = alice("cellward journal --json")
           assert '"event":"kill","zone":"vmsmoke"' in out and '"down":"yes"' in out, out
           assert re.search(r'"killed":"[1-9]', out), out
           alice("systemctl --user stop vmhostsleep.service")
@@ -812,16 +821,16 @@ let
           opid = machine.succeed(f"cat {STATE}/offline/zone.pid").strip()
           in_zone(opid, "test ! -e /run/systemd/resolve/io.systemd.Resolve")
           in_zone(opid, "sh -c '! getent ahostsv4 leaktest.internal'")
-          alice("vpn-zone down offline")
+          alice("cellward down offline")
 
-      # `vpn-zone doctor` (ROADMAP M5): the probe runs INSIDE the zone and must
+      # `cellward doctor` (ROADMAP M5): the probe runs INSIDE the zone and must
       # find nothing wrong there — and, run in the host's own namespaces, it
       # must find exactly what a zone hides: a second way out, the resolver's
       # socket, the host's nsswitch.conf. A probe that passes the host would
       # prove nothing about the zone.
       with subtest("doctor: a zone passes, the host's own namespace does not"):
-          alice("vpn-zone up vmsmoke")
-          out = alice("vpn-zone doctor vmsmoke --json")
+          alice("cellward up vmsmoke")
+          out = alice("cellward doctor vmsmoke --json")
           assert out.startswith('{"schema_version":1,'), out
           assert '"worst":"fail"' not in out, out
           for must in ["links", "route4", "route6", "nsswitch", "resolvers"]:
@@ -830,13 +839,13 @@ let
           assert '{"id":"session-bus","level":"warn"' in out, out
           tools = alice(
               "grep -m1 -o '/nix/store/[^ \"]*-vpn-zone-tools.json' "
-              "$(readlink -f $(command -v vpn-zone))"
+              "$(readlink -f $(command -v cellward))"
           ).strip()
           core = machine.succeed(f"grep -o '\"core\": *\"[^\"]*\"' {tools}").strip().split('"')[3]
           host = alice(f"{core} doctor-probe 1000")
           for leak in ["links", "resolvers", "nsswitch"]:
               assert f"{leak}\tfail\t" in host, (leak, host)
-          alice("vpn-zone down vmsmoke")
+          alice("cellward down vmsmoke")
 
       # --- Per-container trust (docs/CERTIFICATES.md) ------------------------
       # A CA generated here and nowhere else. On NixOS every bundle path is a
@@ -846,7 +855,7 @@ let
       CA = "/tmp/vmca"
 
       def in_container(profile, net, cmd):
-          return alice(f"vpn-zone run {net} --profile {profile} -- {cmd}")
+          return alice(f"cellward run {net} --profile {profile} -- {cmd}")
 
       with subtest("trust: a CA and a server certificate made on the fly"):
           alice(
@@ -862,8 +871,8 @@ let
               "openssl x509 -req -in srv.csr -CA ca.pem -CAkey ca.key "
               "-CAcreateserial -days 2 -extfile ext -out srv.pem 2>/dev/null"
           )
-          alice("vpn-zone profile create vmca && vpn-zone profile create vmnoca")
-          alice(f"vpn-zone trust add vmca {CA}/ca.pem --yes")
+          alice("cellward profile create vmca && cellward profile create vmnoca")
+          alice(f"cellward trust add vmca {CA}/ca.pem --yes")
 
       with subtest("trust: the container trusts it, through the store-file bind and p11-kit"):
           in_container("vmca", "direct", f"openssl verify {CA}/srv.pem")
@@ -882,11 +891,11 @@ let
           machine.fail("su -l alice -c 'trust list --filter=ca-anchors | grep -q \"vpn-zones vm CA\"'")
           machine.fail(
               "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
-              f"vpn-zone run direct --profile vmnoca -- openssl verify {CA}/srv.pem'"
+              f"cellward run direct --profile vmnoca -- openssl verify {CA}/srv.pem'"
           )
           machine.fail(
               "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
-              f"vpn-zone run vmsmoke --profile vmnoca -- openssl verify {CA}/srv.pem'"
+              f"cellward run vmsmoke --profile vmnoca -- openssl verify {CA}/srv.pem'"
           )
           machine.fail("grep -q 'vpn-zones vm CA' /etc/ssl/certs/ca-certificates.crt")
           machine.fail(
@@ -913,14 +922,14 @@ let
           alice("systemctl --user unset-environment SSL_CERT_FILE NIX_SSL_CERT_FILE")
 
       with subtest("trust: after a reset the container does not trust it either"):
-          alice("vpn-zone trust reset vmca")
+          alice("cellward trust reset vmca")
           machine.fail(
               "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
-              f"vpn-zone run direct --profile vmca -- openssl verify {CA}/srv.pem'"
+              f"cellward run direct --profile vmca -- openssl verify {CA}/srv.pem'"
           )
           out = in_container("vmca", "direct", "sh -c 'certutil -L -d sql:$HOME/.pki/nssdb || true'")
           assert "vpn-zones " not in out, f"the reset left the CA in the NSS database:\n{out}"
-          alice("vpn-zone down vmsmoke")
+          alice("cellward down vmsmoke")
 
       # --- Entries in the user's own directory (docs/LAUNCHERS.md §3.2) -----
       # The directory XDG gives the highest precedence, where programs write the
@@ -937,18 +946,18 @@ let
               "NoDisplay=true\\nExec=/bin/sh -c true %%u\\n' > /tmp/vmforeign.orig"
           )
           alice(f"cp /tmp/vmforeign.orig {APPS}/userapp-vmforeign.desktop")
-          alice("vpn-zone sync")
+          alice("cellward sync")
           out = alice(f"cat {APPS}/userapp-vmforeign.desktop")
           assert "X-VPNZone=adopted" in out, out
           assert "vpn-zone-pick --id userapp-vmforeign --" in out, out
-          alice("vpn-zone mode off")
+          alice("cellward mode off")
           alice(f"cmp {APPS}/userapp-vmforeign.desktop /tmp/vmforeign.orig")
-          alice("vpn-zone mode picker")
+          alice("cellward mode picker")
           alice(f"rm -f {APPS}/userapp-vmforeign.desktop")
           # A symlink is somebody's managed entry (home-manager's xdg.dataFile,
           # a dotfile manager): left as it is, never written through.
           alice(f"cp /tmp/vmforeign.orig /tmp/vmlink.desktop && ln -s /tmp/vmlink.desktop {APPS}/userapp-vmlink.desktop")
-          alice("vpn-zone sync")
+          alice("cellward sync")
           alice(f"test -L {APPS}/userapp-vmlink.desktop")
           alice("cmp /tmp/vmlink.desktop /tmp/vmforeign.orig")
           alice(f"rm -f {APPS}/userapp-vmlink.desktop")
@@ -970,7 +979,7 @@ let
           alice(f"printf offline > {STATE}/.pinned/{APP}")
           alice(f"printf __main__ > {STATE}/.pinnedprofile/{APP}")
           machine.succeed("rm -f /tmp/vmactivated")
-          alice("vpn-zone sync")
+          alice("cellward sync")
           out = alice(f"cat /home/alice/.local/share/dbus-1/services/{APP}.service")
           assert f"vpn-zone-pick --id {APP} --" in out, out
           alice("systemctl --user reload dbus.service")
@@ -982,10 +991,10 @@ let
           out = machine.succeed("cat /tmp/vmactivated")
           lines = [l for l in out.strip().splitlines() if ": " in l]
           assert len(lines) == 1 and ": lo:" in lines[0], f"activation ran outside the zone: {out}"
-          alice("vpn-zone mode off")
+          alice("cellward mode off")
           alice(f"test ! -e /home/alice/.local/share/dbus-1/services/{APP}.service")
-          alice("vpn-zone mode picker")
-          alice("vpn-zone down offline || true")
+          alice("cellward mode picker")
+          alice("cellward down offline || true")
 
       AUTOSTART = "/home/alice/.config/autostart"
       with subtest("autostart: taken over, and an unassigned program starts offline in its own home"):
@@ -994,13 +1003,13 @@ let
               "Exec=vmauto-program --flag\\n' > /tmp/vmauto.orig"
           )
           alice(f"mkdir -p {AUTOSTART} && cp /tmp/vmauto.orig {AUTOSTART}/vmauto.desktop")
-          alice("vpn-zone sync")
+          alice("cellward sync")
           out = alice(f"cat {AUTOSTART}/vmauto.desktop")
           assert "vpn-zone-pick --autostart --id vmauto -- vmauto-program --flag" in out, out
           assert "X-VPNZone=adopted" in out, out
-          alice("vpn-zone mode off")
+          alice("cellward mode off")
           alice(f"cmp {AUTOSTART}/vmauto.desktop /tmp/vmauto.orig")
-          alice("vpn-zone mode picker")
+          alice("cellward mode picker")
           alice(f"rm -f {AUTOSTART}/vmauto.desktop")
 
           # What the rewritten entry runs, as the session would run it.
@@ -1015,35 +1024,35 @@ let
           alice("test -d /home/alice/.local/state/vpn-sandboxes/app-vmauto/home")
           # Nothing remembered: autostart is not a choice.
           alice(f"test ! -e {STATE}/.pinned/vmauto && test ! -e {STATE}/.last/vmauto")
-          alice("vpn-zone down offline || true")
+          alice("cellward down offline || true")
 
       # --- Declared in Nix (docs/CONTAINERS.md §8) ---------------------------
       DECLCA = "${declaredCa}"
 
       with subtest("declared: status --json names Nix as the source, and the CLI leaves it alone"):
-          out = alice("vpn-zone status --json")
+          out = alice("cellward status --json")
           assert out.startswith('{"schema_version":1,'), out
           assert '"selector":"vmdecl"' in out, out
           # Declared as `direct`, the old name: read as the new one.
           assert '"network":{"value":"unconfined","source":"nix"}' in out, out
           assert '"container":{"value":"vmdecl","source":"nix"}' in out, out
           assert '"source":"nix"}]' in out or '"source":"nix"}' in out, out
-          alice("sh -c '! vpn-zone container set vmdecl network offline'")
+          alice("sh -c '! cellward container set vmdecl network offline'")
           alice("test -d /home/alice/.local/state/vpn-profiles/vmdecl")
 
       with subtest("declared: the container runs in its network only, trusting its declared CA"):
           in_container("vmdecl", "direct", f"openssl verify {DECLCA}/srv.pem")
           machine.fail(
               "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
-              "vpn-zone run offline --profile vmdecl -- true'"
+              "cellward run offline --profile vmdecl -- true'"
           )
           machine.fail(f"su -l alice -c 'openssl verify {DECLCA}/srv.pem'")
-          alice("vpn-zone down offline || true")
+          alice("cellward down offline || true")
 
       # --- The real tunnel: an actual WireGuard peer on the second VM -------
       # Everything above used an unreachable endpoint and checked mechanics;
       # from here on the handshake, the traffic and the DNS are real. This is
-      # the first coverage of `vpn-zone check`'s "tunnel alive" branch, and a
+      # the first coverage of `cellward check`'s "tunnel alive" branch, and a
       # first cut of the ROADMAP leak tests: while the zone is in active use,
       # the only thing allowed to leave the client machine towards the server
       # is the tunnel's own UDP.
@@ -1080,18 +1089,18 @@ let
               "--address=/leaktest.internal/10.99.0.9"
           )
 
-      with subtest("vpn-zone add vmreal: config with DNS= and a live endpoint"):
+      with subtest("cellward add vmreal: config with DNS= and a live endpoint"):
           alice(
               f"printf '[Interface]\\nPrivateKey = {cpriv}\\nAddress = 10.99.0.2/32\\n"
               f"DNS = 10.99.0.1\\n\\n[Peer]\\nPublicKey = {spub}\\n"
               f"AllowedIPs = 0.0.0.0/0\\nEndpoint = {server_ip}:51820\\n' "
               "> /tmp/vmreal.conf"
           )
-          alice("vpn-zone add vmreal /tmp/vmreal.conf")
-          alice("vpn-zone up vmreal")
+          alice("cellward add vmreal /tmp/vmreal.conf")
+          alice("cellward up vmreal")
 
       # The capture starts BEFORE any traffic, so the handshake itself is
-      # under watch too. `vpn-zone gc`-style precision is not needed: filter
+      # under watch too. `cellward gc`-style precision is not needed: filter
       # by the server address and drop the one flow that is allowed.
       with subtest("leak watch armed on the physical interface"):
           machine.succeed(
@@ -1107,7 +1116,7 @@ let
       # (docs/CONTAINERS.md §9, `uplink_owner`): counted from here on, every
       # packet of the tunnel must leave from a socket of the zone's uid 0.
       with subtest("egress marker: status --json names the owner of the zone's sockets"):
-          owner = json.loads(alice("vpn-zone status --json"))["uplink_owner"]
+          owner = json.loads(alice("cellward status --json"))["uplink_owner"]
           assert owner and owner["uid"] != 1000, f"no usable uplink_owner: {owner}"
           machine.succeed(
               "nft add table inet vzowner && "
@@ -1161,12 +1170,12 @@ let
           out = machine.succeed("getent ahostsv4 leaktest.internal")
           assert "10.66.66.66" in out, f"the zone broke the host's own resolver: {out}"
 
-      with subtest("vpn-zone check reports a live tunnel"):
+      with subtest("cellward check reports a live tunnel"):
           # The status mirror refreshes every 5 seconds from inside the zone;
           # give it a couple of cycles after the first handshake.
           machine.wait_until_succeeds(
               "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
-              "vpn-zone check vmreal'",
+              "cellward check vmreal'",
               timeout=60,
           )
 
@@ -1178,7 +1187,7 @@ let
           if count != "0":
               escaped = machine.succeed("tcpdump -nr /tmp/leak.pcap 2>/dev/null")
               raise AssertionError(f"packets escaped the tunnel:\n{escaped}")
-          alice("vpn-zone down vmreal")
+          alice("cellward down vmreal")
 
       with subtest("egress marker: every tunnel packet left from the zone's uid"):
           out = machine.succeed("nft list chain inet vzowner out")
@@ -1243,14 +1252,14 @@ let
               "'SYSTEM:echo peer=$SOCAT_PEERADDR'"
           )
 
-      with subtest("vpn-zone add vmawg: a config with real obfuscation parameters"):
+      with subtest("cellward add vmawg: a config with real obfuscation parameters"):
           alice(
               f"printf '[Interface]\\nPrivateKey = {opriv}\\nAddress = 10.98.0.2/32\\n"
               + AWG_JUNK
               + f"\\n[Peer]\\nPublicKey = {apub}\\nAllowedIPs = 0.0.0.0/0\\n"
               + f"Endpoint = {server_ip}:51821\\n' > /tmp/vmawg.conf"
           )
-          alice("vpn-zone add vmawg /tmp/vmawg.conf")
+          alice("cellward add vmawg /tmp/vmawg.conf")
 
       # Armed before the zone comes up, so the very first junk packet is under
       # watch: towards the server, only the obfuscated tunnel's own UDP may
@@ -1265,8 +1274,8 @@ let
               "journalctl -u leakawg | grep -q 'listening on eth1'"
           )
 
-      with subtest("vpn-zone up vmawg: the obfuscated zone comes up"):
-          alice("vpn-zone up vmawg")
+      with subtest("cellward up vmawg: the obfuscated zone comes up"):
+          alice("cellward up vmawg")
           alice("systemctl --user is-active vpn-zone@vmawg.service")
           machine.succeed(f"test -f {STATE}/vmawg/ready")
 
@@ -1279,18 +1288,18 @@ let
       # Traffic FIRST, handshake second — and not the other way round: nothing
       # in the zone sends anything of its own, and WireGuard (AmneziaWG with
       # it) only initiates a handshake when there is a packet to carry. Asking
-      # `vpn-zone check` before any traffic waits forever on a tunnel that is
+      # `cellward check` before any traffic waits forever on a tunnel that is
       # perfectly fine, merely idle. The TCP connection is what starts it: the
       # SYN queues behind the handshake and its retransmit gets through.
       with subtest("real traffic through the obfuscated tunnel"):
           out = in_zone(azpid, "socat -T10 - TCP:10.98.0.1:8081")
           assert "peer=10.98.0.2" in out, f"server saw someone else: {out}"
 
-      with subtest("obfuscated handshake: vpn-zone check reports a live tunnel"):
+      with subtest("obfuscated handshake: cellward check reports a live tunnel"):
           # Same 5-second status mirror as above; give it a couple of cycles.
           machine.wait_until_succeeds(
               "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
-              "vpn-zone check vmawg'",
+              "cellward check vmawg'",
               timeout=60,
           )
 
@@ -1304,7 +1313,7 @@ let
               raise AssertionError(
                   f"packets escaped the obfuscated tunnel:\n{escaped}"
               )
-          alice("vpn-zone down vmawg")
+          alice("cellward down vmawg")
 
       # --- The compositor's IPC and its raw socket (docs/LEAK-MODEL.md §13) --
       # Fake listeners first, where niri keeps its IPC socket and a compositor
@@ -1339,7 +1348,7 @@ let
           )
           out = alice(
               "NIRI_SOCKET=/run/user/1000/niri.wayland-9.4242.sock "
-              "vpn-zone run vmsmoke -- sh /tmp/niri-probe.sh"
+              "cellward run vmsmoke -- sh /tmp/niri-probe.sh"
           )
           assert "NIRI=/run" not in out, out
           assert "NIRI-REFUSED" in out and "RAW-REFUSED" in out and "PROC-REFUSED" in out, out
@@ -1373,11 +1382,11 @@ let
           in_zone(zp, "test ! -e /run/user/1000/wayland-8")
           in_zone(zp, "test ! -e /run/user/1000/wayland-9")
           in_zone(zp, "test ! -e /run/user/1000/niri.wayland-9.4242.sock")
-          out = alice("vpn-zone doctor vmsmoke --json")
+          out = alice("cellward doctor vmsmoke --json")
           assert '{"id":"wayland-raw","level":"ok"' in out, out
           assert '{"id":"compositor-ipc","level":"ok"' in out, out
           assert '{"id":"session-bus","level":"warn"' in out, out
-          alice("vpn-zone down vmsmoke")
+          alice("cellward down vmsmoke")
 
       # The sound server's control socket reaches a zone through the filter
       # (rust/src/pulse_filter.rs): a zone plays and records, it does not make
@@ -1394,24 +1403,24 @@ let
       with subtest("pulse: a zone cannot load a module or record a monitor; the microphone by permission"):
           alice("systemd-run --user --unit=fakepulse ${pkgs.python3}/bin/python3 ${fakePulse}")
           machine.wait_until_succeeds("test -S /run/user/1000/pulse/native")
-          alice("vpn-zone up vmsmoke")
+          alice("cellward up vmsmoke")
           zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
-          status = json.loads(alice("vpn-zone status --json"))
+          status = json.loads(alice("cellward status --json"))
           zone = next(n for n in status["networks"] if n["name"] == "vmsmoke")
           assert zone["microphone"] == {"value": "ask", "source": "default"}, zone
           mic = lambda: in_zone(zp, "${pkgs.python3}/bin/python3 ${pulseMic}")
           out = mic()
           assert "mic refused" in out, f"ask with nobody to ask was not refused: {out}"
-          events = json.loads(alice("vpn-zone journal --json"))["events"]
+          events = json.loads(alice("cellward journal --json"))["events"]
           told = [e for e in events if e["event"] == "microphone"]
           assert told and told[-1]["zone"] == "vmsmoke" and told[-1]["decision"] == "refused", events
           assert "графической" in told[-1]["why"], told
-          alice("vpn-zone microphone vmsmoke no")
+          alice("cellward microphone vmsmoke no")
           out = mic()
           assert "mic refused" in out, f"microphone=no was not refused: {out}"
           machine.fail("grep -q '^5 mic' /tmp/pulse-seen")
-          alice("vpn-zone microphone vmsmoke yes")
-          status = json.loads(alice("vpn-zone status --json"))
+          alice("cellward microphone vmsmoke yes")
+          status = json.loads(alice("cellward status --json"))
           zone = next(n for n in status["networks"] if n["name"] == "vmsmoke")
           assert zone["microphone"] == {"value": "yes", "source": "local"}, zone
           out = mic()
@@ -1432,7 +1441,7 @@ let
           # connection ends before its reply or its sound reach the zone.
           machine.succeed("grep -qx '5 default' /tmp/pulse-seen")
           assert "conn2 closed 0" in out, f"a monitor's sound reached the zone: {out}"
-          alice("vpn-zone microphone vmsmoke default")
+          alice("cellward microphone vmsmoke default")
           # The setting is out of the zone's reach, and so are the helpers
           # the zone's unit starts (review 2026-09-25): the marker by its path
           # is under the zone's cover, and /proc/<pid>/root of the sound
@@ -1468,9 +1477,9 @@ let
               "ABSTRACT-LISTEN:/tmp/.X11-unix/X99,fork 'EXEC:sleep 120'"
           )
           machine.wait_until_succeeds("grep -q '@/tmp/.X11-unix/X99' /proc/net/unix")
-          alice("vpn-zone down vmsmoke")
+          alice("cellward down vmsmoke")
           alice("systemctl --user set-environment DISPLAY=:99 QT_QPA_PLATFORM=xcb")
-          alice("vpn-zone up vmsmoke")
+          alice("cellward up vmsmoke")
           alice("systemctl --user unset-environment DISPLAY QT_QPA_PLATFORM")
           zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
           heard = lambda: machine.succeed("grep -c '^5 mic' /tmp/pulse-seen || true").strip()
@@ -1490,14 +1499,14 @@ let
           # The dialog gone without an answer: a refusal.
           alice(f"kill {kd}")
           machine.wait_until_succeeds(
-              "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 vpn-zone journal --json' "
+              "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 cellward journal --json' "
               "| grep -q 'диалог не открылся'",
               timeout=30,
           )
           machine.fail(f"test -e {marker}")
           assert heard() == heard_before, "a refused stream reached the server"
           alice("systemctl --user stop stuckx.service askingmic.service || true")
-          alice("vpn-zone down vmsmoke")
+          alice("cellward down vmsmoke")
           alice("systemctl --user stop fakepulse.service")
 
       # A real compositor, headless: sway speaks wp_security_context_v1 and
@@ -1522,7 +1531,7 @@ let
           alice(f"SWAYSOCK={swaysock} swaymsg -t get_version")
           zone = alice(
               f"WAYLAND_DISPLAY={display} SWAYSOCK={swaysock} "
-              "vpn-zone run vmsmoke -- sh -c 'wayland-info; echo SWAY; swaymsg -t get_version || echo SWAY-REFUSED'"
+              "cellward run vmsmoke -- sh -c 'wayland-info; echo SWAY; swaymsg -t get_version || echo SWAY-REFUSED'"
           )
           assert "wl_compositor" in zone, zone
           assert "zwlr_screencopy_manager_v1" not in zone, zone
@@ -1571,7 +1580,7 @@ let
           # context's listener is in a directory no zone has.
           alice(
               f"systemd-run --user --unit=vmwlhold --setenv=WAYLAND_DISPLAY={display} "
-              "vpn-zone run vmsmoke -- sleep 300"
+              "cellward run vmsmoke -- sleep 300"
           )
           machine.wait_until_succeeds("pgrep -x vz-wl-proxy", timeout=30)
           proxy_pid = machine.succeed("pgrep -x vz-wl-proxy | head -1").strip()
@@ -1606,11 +1615,11 @@ let
           alice("systemctl --user stop vmwlhold.service")
           machine.wait_until_fails("pgrep -x vz-wl-proxy", timeout=30)
           own = alice(
-              f"WAYLAND_DISPLAY={display} vpn-zone run vmsmoke -- sh -c 'sh -c wayland-info'"
+              f"WAYLAND_DISPLAY={display} cellward run vmsmoke -- sh -c 'sh -c wayland-info'"
           )
           assert "wl_compositor" in own, own
           machine.wait_until_fails("pgrep -x vz-wl-proxy", timeout=30)
-          alice("vpn-zone down vmsmoke")
+          alice("cellward down vmsmoke")
 
           alice("systemctl --user stop vmsway.service")
 
@@ -1620,8 +1629,8 @@ let
       # filter. The broker starts a launch into the same zone and refuses one
       # into another network with nobody to ask.
       with subtest("hermetic zone: no systemd --user, a filtered bus, the broker as the door"):
-          alice("vpn-zone add vmherm /tmp/vmsmoke.conf")
-          out = json.loads(alice("vpn-zone status --json"))
+          alice("cellward add vmherm /tmp/vmsmoke.conf")
+          out = json.loads(alice("cellward status --json"))
           herm = next(n for n in out["networks"] if n["name"] == "vmherm")["hermetic"]
           assert herm == {"value": True, "source": "nix"}, herm
           # What the zone is let besides: nothing, until said.
@@ -1631,17 +1640,17 @@ let
           # The microphone Nix declared for it: its own setting does not
           # override that.
           assert zone["microphone"] == {"value": "no", "source": "nix"}, zone
-          alice("vpn-zone microphone vmherm yes")
-          out = json.loads(alice("vpn-zone status --json"))
+          alice("cellward microphone vmherm yes")
+          out = json.loads(alice("cellward status --json"))
           zone = next(n for n in out["networks"] if n["name"] == "vmherm")
           assert zone["microphone"] == {"value": "no", "source": "nix"}, zone
           # …and the running filter goes by it too (below): a sound server
           # for the zone to come up with.
           alice("systemd-run --user --unit=fakepulseherm ${pkgs.python3}/bin/python3 ${fakePulse}")
           machine.wait_until_succeeds("test -S /run/user/1000/pulse/native")
-          out = json.loads(alice("vpn-zone status --json"))
+          out = json.loads(alice("cellward status --json"))
           assert out["defaults"]["hermetic"] == {"value": False, "source": "nix"}, out["defaults"]
-          alice("sh -c '! vpn-zone hermetic vmherm off'")
+          alice("sh -c '! cellward hermetic vmherm off'")
           # IBus's private bus, where ibus-daemon puts it: a socket by path in
           # the home, which the network namespace does not cut.
           alice(
@@ -1658,7 +1667,7 @@ let
           )
           # The broker is socket-activated, and every zone wants its socket:
           # no race with the session (red on main and in CI before).
-          alice("vpn-zone up vmherm")
+          alice("cellward up vmherm")
           alice("systemctl --user is-active vpn-zone-broker.socket")
           hp = machine.succeed(f"cat {STATE}/vmherm/zone.pid").strip()
           # Nix's "no" over the zone's own "yes", as the running filter
@@ -1668,7 +1677,7 @@ let
           out = in_zone(hp, "${pkgs.python3}/bin/python3 ${pulseMic}")
           assert "mic refused" in out, f"Nix's no did not hold against the zone's yes: {out}"
           machine.fail("grep -q '^5 mic' /tmp/pulse-seen")
-          alice("vpn-zone microphone vmherm default")
+          alice("cellward microphone vmherm default")
           alice("systemctl --user stop fakepulseherm.service")
           # The session bus proxy holds the host's unfiltered bus: through
           # its /proc/<pid>/root the zone would have it all. It lives in the
@@ -1737,20 +1746,20 @@ let
           # Input methods by their portals only: IBus's private bus is hidden,
           # and programs are told to take the portal.
           in_zone(hp, "test ! -e /home/alice/.cache/ibus/dbus-vmtest")
-          alice("vpn-zone run vmherm -- sh -c 'echo ibus=$IBUS_USE_PORTAL > /home/alice/zone-ibus'")
+          alice("cellward run vmherm -- sh -c 'echo ibus=$IBUS_USE_PORTAL > /home/alice/zone-ibus'")
           machine.succeed("grep -qx ibus=1 /home/alice/zone-ibus")
           alice("systemctl --user stop fakeibus || true")
           # A program started in the zone has the user's own group only: the
           # session's groups open doors (libvirt, docker, /dev/input).
           alice("cat /var/lib/vzdoor/door")
-          alice("vpn-zone run vmherm -- sh -c 'id -G > /home/alice/zone-groups; cat /var/lib/vzdoor/door > /home/alice/zone-door 2>&1; true'")
+          alice("cellward run vmherm -- sh -c 'id -G > /home/alice/zone-groups; cat /var/lib/vzdoor/door > /home/alice/zone-door 2>&1; true'")
           groups = machine.succeed("cat /home/alice/zone-groups").split()
           assert groups == ["100"], groups
           machine.fail("grep -q open /home/alice/zone-door")
           # In the home: the zone's /tmp is its own (LEAK-MODEL §15).
-          in_zone(hp, "env VPN_ZONE_CURRENT=vmherm vpn-zone run vmherm -- touch /home/alice/brokered-same")
+          in_zone(hp, "env VPN_ZONE_CURRENT=vmherm cellward run vmherm -- touch /home/alice/brokered-same")
           machine.wait_until_succeeds("test -e /home/alice/brokered-same", timeout=30)
-          in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm vpn-zone run direct -- touch /tmp/brokered-escape'")
+          in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm cellward run direct -- touch /tmp/brokered-escape'")
           machine.sleep(3)
           machine.fail("test -e /tmp/brokered-escape")
           # "Always" said before for this very program of the store (the
@@ -1762,17 +1771,17 @@ let
               "mkdir -p ~/.config/vpn-zones && "
               f"printf 'vmherm\tunconfined\t%s\n' {touch} >> ~/.config/vpn-zones/broker-always"
           )
-          in_zone(hp, f"env VPN_ZONE_CURRENT=vmherm vpn-zone run direct -- {touch} /tmp/brokered-always")
+          in_zone(hp, f"env VPN_ZONE_CURRENT=vmherm cellward run direct -- {touch} /tmp/brokered-always")
           machine.wait_until_succeeds("test -e /tmp/brokered-always", timeout=30)
           # Only that program: another one is asked about — and refused.
-          in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm vpn-zone run direct -- mkdir /tmp/brokered-other'")
+          in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm cellward run direct -- mkdir /tmp/brokered-other'")
           machine.sleep(3)
           machine.fail("test -e /tmp/brokered-other")
           # Both decisions are on the record, the escape under the new name.
-          out = alice("vpn-zone journal --json")
+          out = alice("cellward journal --json")
           assert '"event":"broker","origin":"vmherm","target":"vmherm"' in out, out
           assert '"target":"unconfined","app":"","decision":"refused"' in out, out
-          out = alice("vpn-zone doctor vmherm --json")
+          out = alice("cellward doctor vmherm --json")
           assert '{"id":"session-bus","level":"ok"' in out, out
 
       # The evil host's /tmp (LEAK-MODEL §15): a tmux server — `run-shell` runs
@@ -1806,14 +1815,14 @@ let
           in_zone(hp, "test ! -e /var/tmp/vzevil")
           machine.sleep(1)
           machine.fail("grep -q zone /tmp/evil-abs-got")
-          out = alice("vpn-zone doctor vmherm --json")
+          out = alice("cellward doctor vmherm --json")
           assert '{"id":"tmp-sockets","level":"ok"' in out, out
           # Its own, and writable: what the zone puts there stays there.
           in_zone(hp, "sh -c 'touch /tmp/from-zone /dev/shm/from-zone && test -d /tmp/.X11-unix'")
           machine.fail("test -e /tmp/from-zone")
           machine.fail("test -e /dev/shm/from-zone")
           # A sandbox's bus filter: in the zone's runtime directory.
-          alice("systemd-run --user --unit=vmsbsleep vpn-zone run vmherm --fs-sandbox -- sleep 60")
+          alice("systemd-run --user --unit=vmsbsleep cellward run vmherm --fs-sandbox -- sleep 60")
           probe = shlex.quote(
               "export XDG_RUNTIME_DIR=/run/user/1000; "
               f"nsenter --preserve-credentials -U -n -m -t {hp} -- "
@@ -1869,10 +1878,10 @@ let
           in_zone(hp, "socat -T2 - UNIX-CONNECT:/run/vzevil-run.sock </dev/null")
           in_zone(hp, "socat -T2 - UNIX-CONNECT:/home/alice/.ssh/vzevil-master </dev/null")
           alice(
-              "vpn-zone run vmherm -- sh -c "
+              "cellward run vmherm -- sh -c "
               "'! socat -T2 - UNIX-CONNECT:/run/vzevil-group.sock </dev/null'"
           )
-          out = alice("vpn-zone doctor vmherm --json")
+          out = alice("cellward doctor vmherm --json")
           found = named(out)
           print(f"sockets in reach of vmherm: {found}")
           assert found.get("/run/vzevil-run.sock") == "warn", found
@@ -1908,7 +1917,7 @@ let
           machine.succeed(
               "rm -f /run/vzevil-run.sock /run/vzevil-group.sock /home/alice/.ssh/vzevil-master"
           )
-          out = alice("vpn-zone doctor vmherm --json")
+          out = alice("cellward doctor vmherm --json")
           found = named(out)
           print(f"sockets in reach of a clean vmherm: {found}")
           assert not found, found
@@ -1930,23 +1939,23 @@ let
               "UNIX-LISTEN:/run/user/1000/vzbound/evil.sock,fork OPEN:/dev/null"
           )
           machine.wait_until_succeeds("test -S /run/user/1000/vzbound/evil.sock")
-          alice("vpn-zone nix-daemon vmsmoke on")
-          alice("vpn-zone up vmsmoke")
+          alice("cellward nix-daemon vmsmoke on")
+          alice("cellward up vmsmoke")
           sp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
           in_zone(sp, "socat -T2 - UNIX-CONNECT:/run/user/1000/vzbound/evil.sock </dev/null")
           in_zone(sp, "test -S /nix/var/nix/daemon-socket/socket")
-          out = alice("vpn-zone doctor vmsmoke --json")
+          out = alice("cellward doctor vmsmoke --json")
           found = named(out, "vmsmoke")
           print(f"sockets in reach of vmsmoke: {found}")
           assert found.get("/run/user/1000/vzbound/evil.sock") == "warn", found
           assert found.get("/nix/var/nix/daemon-socket/socket") == "warn", found
-          alice("vpn-zone nix-daemon vmsmoke off")
-          out = alice("vpn-zone doctor vmsmoke --json || true")
+          alice("cellward nix-daemon vmsmoke off")
+          out = alice("cellward doctor vmsmoke --json || true")
           found = named(out, "vmsmoke")
           assert found.get("/nix/var/nix/daemon-socket/socket") == "fail", found
           assert '"worst":"fail"' in out, out
-          alice("vpn-zone nix-daemon vmsmoke default")
-          alice("vpn-zone down vmsmoke")
+          alice("cellward nix-daemon vmsmoke default")
+          alice("cellward down vmsmoke")
           alice("systemctl --user stop evilbound")
           alice("rm -rf /run/user/1000/vzbound")
 
@@ -1981,17 +1990,17 @@ let
           # The sandbox's bus works at all in a hermetic zone: a second
           # xdg-dbus-proxy on the zone's own used to refuse every connection.
           alice(
-              "vpn-zone run vmherm --fs-sandbox -- gdbus call --session --dest org.freedesktop.DBus "
+              "cellward run vmherm --fs-sandbox -- gdbus call --session --dest org.freedesktop.DBus "
               "--object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetId"
           )
-          out = alice(f"WAYLAND_DISPLAY=wayland-vmtest vpn-zone run vmherm --fs-sandbox -- {portal} ''' 'https://example.test/from-sandbox' '@a{{sv}} {{}}'")
+          out = alice(f"WAYLAND_DISPLAY=wayland-vmtest cellward run vmherm --fs-sandbox -- {portal} ''' 'https://example.test/from-sandbox' '@a{{sv}} {{}}'")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
           machine.wait_until_succeeds("grep -q from-sandbox /home/alice/opened-urls", timeout=30)
           zone_ns = machine.succeed(f"readlink /proc/{hp}/ns/net").strip()
           host_ns = machine.succeed("readlink /proc/1/ns/net").strip()
           opened = machine.succeed("cat /home/alice/opened-urls")
           assert zone_ns in opened and host_ns not in opened, f"{opened} (zone {zone_ns})"
-          out = alice(f"WAYLAND_DISPLAY=wayland-vmtest vpn-zone run vmherm --fs-sandbox -- {portal} ''' 'file:///etc/hostname' '@a{{sv}} {{}}'")
+          out = alice(f"WAYLAND_DISPLAY=wayland-vmtest cellward run vmherm --fs-sandbox -- {portal} ''' 'file:///etc/hostname' '@a{{sv}} {{}}'")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
           machine.sleep(2)
           machine.fail("grep -q hostname /home/alice/opened-urls")
@@ -2062,10 +2071,10 @@ let
           out = in_zone(hp, f"{desk}org.freedesktop.portal.NetworkMonitor.CanReach leak.test 443")
           assert "true" in out, out
           alice("systemctl --user unset-environment WAYLAND_DISPLAY")
-          alice("vpn-zone down vmherm")
+          alice("cellward down vmherm")
           # An ordinary zone: the sandbox's own proxy over the host's bus, the
           # filter in front of it — the link opens in THAT zone.
-          out = alice(f"WAYLAND_DISPLAY=wayland-vmtest vpn-zone run vmsmoke --fs-sandbox -- {portal} ''' 'https://example.test/from-ordinary' '@a{{sv}} {{}}'")
+          out = alice(f"WAYLAND_DISPLAY=wayland-vmtest cellward run vmsmoke --fs-sandbox -- {portal} ''' 'https://example.test/from-ordinary' '@a{{sv}} {{}}'")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
           machine.wait_until_succeeds("grep -q from-ordinary /home/alice/opened-urls", timeout=30)
           sp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
@@ -2073,7 +2082,7 @@ let
           lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
           at = lines.index("https://example.test/from-ordinary")
           assert lines[at + 1] == smoke_ns, f"{lines} (zone {smoke_ns})"
-          alice("vpn-zone down vmsmoke")
+          alice("cellward down vmsmoke")
 
       # --- A network through an interface of the host (CONTAINERS §3.3) -----
       # No tunnel: pasta attached to the app namespace and bound to one host
@@ -2087,8 +2096,8 @@ let
               "'SYSTEM:echo peer=$SOCAT_PEERADDR'"
           )
           alice("printf '[HostInterface]\\nInterface = eth1\\n' > /tmp/vmlan.conf")
-          alice("vpn-zone add vmlan /tmp/vmlan.conf")
-          alice("vpn-zone up vmlan")
+          alice("cellward add vmlan /tmp/vmlan.conf")
+          alice("cellward up vmlan")
           lpid = machine.succeed(f"cat {STATE}/vmlan/zone.pid").strip()
           links = in_zone(lpid, "ip -o link show")
           assert len(links.strip().splitlines()) == 2 and ": awg0" in links, links
@@ -2100,12 +2109,12 @@ let
           rules = in_zone_root(lpid, "nft list ruleset")
           assert 'oifname "awg0" accept' in rules and "policy drop" in rules, rules
           machine.wait_until_succeeds(
-              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; vpn-zone check vmlan'",
+              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; cellward check vmlan'",
               timeout=30,
           )
-          out = alice("vpn-zone doctor vmlan --json")
+          out = alice("cellward doctor vmlan --json")
           assert '"worst":"fail"' not in out, out
-          alice("vpn-zone down vmlan")
+          alice("cellward down vmlan")
 
       # A dummy interface with an address and no way to the server: bound to
       # it, the zone must not reach the server even though the host itself
@@ -2116,17 +2125,17 @@ let
               "&& ip link set vmdummy up"
           )
           alice("printf '[HostInterface]\\nInterface = vmdummy\\n' > /tmp/vmwan.conf")
-          alice("vpn-zone add vmwan /tmp/vmwan.conf")
-          alice("vpn-zone up vmwan")
+          alice("cellward add vmwan /tmp/vmwan.conf")
+          alice("cellward up vmwan")
           wpid = machine.succeed(f"cat {STATE}/vmwan/zone.pid").strip()
           in_zone(wpid, f"sh -c '! timeout 10 socat -T5 - TCP:{server_ip}:8090'")
-          alice("vpn-zone down vmwan")
+          alice("cellward down vmwan")
 
       # The interface deleted under a running zone: pasta binding a socket to
       # an interface that is gone connects it UNBOUND (review 2026-09-24), so
       # the holder watches the interface and takes the zone down at once.
       with subtest("host-interface zone: its interface deleted, the zone goes down"):
-          alice("vpn-zone up vmwan")
+          alice("cellward up vmwan")
           wpid = machine.succeed(f"cat {STATE}/vmwan/zone.pid").strip()
           machine.succeed("ip link del vmdummy")
           machine.wait_until_fails(f"test -e /proc/{wpid}", timeout=15)
@@ -2137,9 +2146,9 @@ let
 
       with subtest("host-interface zone: a missing interface refuses to come up"):
           alice("printf '[HostInterface]\\nInterface = nosuchif0\\n' > /tmp/vmnone.conf")
-          alice("vpn-zone add vmnone /tmp/vmnone.conf")
+          alice("cellward add vmnone /tmp/vmnone.conf")
           machine.fail(
-              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; vpn-zone up vmnone'"
+              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; cellward up vmnone'"
           )
           machine.fail(f"test -f {STATE}/vmnone/ready")
     '';

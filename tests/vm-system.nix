@@ -25,14 +25,14 @@ let
   };
 
   test = pkgs.testers.runNixOSTest {
-    name = "vpn-zones-vm-system";
+    name = "cellward-vm-system";
 
     nodes.machine =
       { config, pkgs, ... }:
       {
         imports = [ ../module/nixos.nix ];
 
-        services.vpn-zones.system = {
+        services.cellward.system = {
           enable = true;
           # Who may add zones on the spot: alice, and nobody else — bob is in
           # the group through `other` and may not.
@@ -723,7 +723,7 @@ let
           assert "peer=" in out, out
           # Zones do not come up behind the switch's back.
           out = machine.fail(as_user("alice", "vpn-zone-sys sz -- true") + " 2>&1")
-          assert "vpn-zones are off" in out, out
+          assert "cellward is off" in out, out
           machine.fail("systemctl is-active vpn-zone-system@sz")
           # Off survives a reload, which is what a reboot does to generators.
           machine.succeed("systemctl daemon-reload")

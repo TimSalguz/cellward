@@ -25,7 +25,7 @@ let
   };
 
   test = pkgs.testers.runNixOSTest {
-    name = "vpn-zones-vm-uplink";
+    name = "cellward-vm-uplink";
 
     nodes.machine =
       { pkgs, ... }:
@@ -36,7 +36,7 @@ let
           2
         ];
 
-        services.vpn-zones.system = {
+        services.cellward.system = {
           enable = true;
           # Not at boot: the configs only exist once the test has written them.
           zones.t2 = {

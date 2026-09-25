@@ -1,8 +1,10 @@
 # A hermetic zone's PipeWire (docs/LEAK-MODEL.md §20, rust/src/pw_context.rs,
 # module/wireplumber/policy.lua): a real PipeWire and WirePlumber for the user
-# in the VM, with the policy of the NixOS module, a sink and a microphone that
-# are null devices (the VM has no sound card), and the offline zone —
-# hermetic by default, and needing nothing but a user namespace.
+# in the VM, with the policy of the NixOS module — switched on by its single
+# entry, services.cellward.enable, as a machine does it —, a sink and a
+# microphone that are null devices (the VM has no sound card), and the
+# offline zone — hermetic by default, and needing nothing but a user
+# namespace.
 #
 # What is asserted, from inside the zone: its pipewire-0 is the security
 # context's socket and never the host's raw one (a PipeWire restart
@@ -48,7 +50,7 @@ let
   };
 
   test = pkgs.testers.runNixOSTest {
-    name = "vpn-zones-vm-audio";
+    name = "cellward-vm-audio";
 
     nodes.machine =
       { ... }:
@@ -87,17 +89,16 @@ let
             ];
           };
         };
-        # The policy under test, as the NixOS module ships it.
-        services.vpn-zones.pipewirePolicy.enable = true;
+        # The single entry (module/entry.nix), as a machine switches cellward
+        # on: the policy under test comes on by itself with WirePlumber, the
+        # home-manager module for alice by itself too, and the kernel modules
+        # of a zone are loaded at boot.
+        services.cellward.enable = true;
         # The policy's own log lines, for a failure to be read.
         systemd.user.services.wireplumber.environment.WIREPLUMBER_DEBUG = "2,s-vpn-zones:4";
         home-manager.useGlobalPkgs = true;
         home-manager.useUserPackages = true;
-        home-manager.users.alice = {
-          imports = [ ../module ];
-          programs.vpn-zones.enable = true;
-          home.stateVersion = "26.05";
-        };
+        home-manager.users.alice.home.stateVersion = "26.05";
         virtualisation.memorySize = 1536;
       };
 
@@ -119,7 +120,7 @@ let
           )[1]
 
       def zone(cmd):
-          return alice("vpn-zone run offline -- " + cmd)
+          return alice("cellward run offline -- " + cmd)
 
       def parse(out):
           return json.loads(out[out.index("["):])
@@ -163,6 +164,11 @@ let
       machine.wait_for_unit("home-manager-alice.service")
       machine.wait_for_unit("user@1000.service")
 
+      with subtest("the single entry: the home-manager module, a zone's kernel modules"):
+          alice("command -v cellward && command -v cw && command -v vpn-zone")
+          for module in ["amneziawg", "wireguard", "nf_tables"]:
+              machine.succeed(f"grep -q '^{module} ' /proc/modules")
+
       with subtest("PipeWire, WirePlumber and the policy are up"):
           alice("systemctl --user start pipewire.service pipewire-pulse.service wireplumber.service")
           try:
@@ -193,11 +199,11 @@ let
           except Exception:
               logs()
               raise
-          out = json.loads(alice("vpn-zone status --json"))
+          out = json.loads(alice("cellward status --json"))
           z = next(n for n in out["networks"] if n["name"] == "offline")
           assert z["audio_manager"] == {"value": False, "source": "default"}, z
           assert z["hermetic"]["value"] is True, z
-          out = json.loads(alice_any("vpn-zone doctor offline --json"))
+          out = json.loads(alice_any("cellward doctor offline --json"))
           checks = next(z for z in out["zones"] if z["name"] == "offline")["checks"]
           pw = [c for c in checks if c["id"] == "pipewire"]
           assert pw and pw[0]["level"] == "ok", checks
@@ -212,7 +218,7 @@ let
               "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 pw-dump' | grep -q host-player"
           )
           alice(
-              "systemd-run --user --unit=zoneplay vpn-zone run offline -- "
+              "systemd-run --user --unit=zoneplay cellward run offline -- "
               "pw-play --raw -P node.name=vz-player /dev/zero"
           )
           for _ in range(60):
@@ -243,8 +249,8 @@ let
               if o["type"] == "PipeWire:Interface:Port":
                   assert props.get("node.id") != names["vm-sink"], o
           # Nothing of the host's to destroy or link: the sink stays.
-          alice_any(f"vpn-zone run offline -- timeout 10 pw-cli destroy {names['vm-sink']}")
-          alice_any("vpn-zone run offline -- timeout 10 pw-link vm-sink vz-player")
+          alice_any(f"cellward run offline -- timeout 10 pw-cli destroy {names['vm-sink']}")
+          alice_any("cellward run offline -- timeout 10 pw-link vm-sink vz-player")
           objs = host_dump()
           assert "vm-sink" in nodes(objs), "the zone destroyed the sink"
           assert not linked(objs, "vm-sink", "vz-player"), "the zone made a link"
@@ -257,14 +263,14 @@ let
           assert out.strip() == "0", f"the zone recorded the host's sound: {out}"
 
       with subtest("the microphone as the zone's switch says"):
-          alice("vpn-zone microphone offline no")
+          alice("cellward microphone offline no")
           machine.sleep(3)
           assert "vm-mic" not in nodes(zone_dump())
           out = zone(
               "sh -c 'timeout 5 pw-record --raw --target vm-mic -P node.name=vz-mic - | wc -c'"
           )
           assert out.strip() == "0", f"recorded with the microphone off: {out}"
-          alice("vpn-zone microphone offline yes")
+          alice("cellward microphone offline yes")
           for _ in range(30):
               if "vm-mic" in nodes(zone_dump()):
                   break
@@ -289,7 +295,7 @@ let
           assert out.strip() == "0", f"the zone recorded a duplex device's monitor: {out}"
           # Taken back while recording: the link goes at once.
           alice(
-              "systemd-run --user --unit=zonerec vpn-zone run offline -- "
+              "systemd-run --user --unit=zonerec cellward run offline -- "
               "sh -c 'pw-record --raw --target vm-mic -P node.name=vz-rec - > /dev/null'"
           )
           for _ in range(60):
@@ -298,7 +304,7 @@ let
               machine.sleep(1)
           else:
               raise Exception("the recording was never linked")
-          alice("vpn-zone microphone offline no")
+          alice("cellward microphone offline no")
           for _ in range(30):
               if not linked(host_dump(), "vm-mic", "vz-rec"):
                   break
@@ -312,15 +318,15 @@ let
           # The key outlives the zone's helper: WirePlumber keeps it. The
           # helper publishes this run's value before the socket goes out.
           mic_key = "pw-metadata -n vpn-zones 0 vpn-zones.microphone.offline"
-          alice("vpn-zone microphone offline yes")
+          alice("cellward microphone offline yes")
           machine.wait_until_succeeds(
               "su -l alice -c " + shlex.quote("XDG_RUNTIME_DIR=/run/user/1000 " + mic_key)
               + " | grep -q \"value:'yes'\"",
               timeout=30,
           )
           alice("systemctl --user stop zoneplay.service || true")
-          alice("vpn-zone down offline")
-          alice("vpn-zone microphone offline no")
+          alice("cellward down offline")
+          alice("cellward microphone offline no")
           out = alice(mic_key)
           assert "value:'yes'" in out, f"no stale yes to test against: {out}"
           # Recorded from the first moment the zone's socket answers.
@@ -334,7 +340,7 @@ let
 
       with subtest("a device the zone makes is destroyed and never the default"):
           alice(
-              "systemd-run --user --unit=zonesink vpn-zone run offline -- "
+              "systemd-run --user --unit=zonesink cellward run offline -- "
               "pw-loopback --capture-props=media.class=Audio/Sink,node.name=zone-vsink "
               "--playback-props=node.name=zone-vsink-out"
           )
@@ -366,10 +372,10 @@ let
               "systemd-run --user --unit=hostplay2 pw-play --raw --target vm-sink "
               "-P node.name=host-player /dev/urandom"
           )
-          out = alice("vpn-zone audio-manager offline on")
+          out = alice("cellward audio-manager offline on")
           assert "ВНИМАНИЕ" in out, out
           alice("systemctl --user stop zoneplay.service || true")
-          alice("vpn-zone down offline")
+          alice("cellward down offline")
           zone("true")
           mounts = zone("cat /proc/self/mountinfo")
           assert "/pipewire-context /run/user/1000/pipewire-0 " not in mounts, mounts
@@ -377,15 +383,15 @@ let
               "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 pw-dump' | grep -q host-player"
           )
           assert "host-player" in nodes(zone_dump())
-          out = json.loads(alice_any("vpn-zone doctor offline --json"))
+          out = json.loads(alice_any("cellward doctor offline --json"))
           checks = next(z for z in out["zones"] if z["name"] == "offline")["checks"]
           pw = [c for c in checks if c["id"] == "pipewire"]
           assert pw and pw[0]["level"] == "warn" and "МЕНЕДЖЕР ЗВУКА" in pw[0]["detail"], checks
-          out = json.loads(alice("vpn-zone status --json"))
+          out = json.loads(alice("cellward status --json"))
           z = next(n for n in out["networks"] if n["name"] == "offline")
           assert z["audio_manager"] == {"value": True, "source": "local"}, z
-          alice("vpn-zone audio-manager offline default")
-          alice("vpn-zone down offline")
+          alice("cellward audio-manager offline default")
+          alice("cellward down offline")
     '';
   };
 in

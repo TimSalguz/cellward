@@ -21,7 +21,7 @@ let
   };
 
   test = pkgs.testers.runNixOSTest {
-    name = "vpn-zones-vm-window";
+    name = "cellward-vm-window";
 
     nodes.machine =
       { pkgs, ... }:
@@ -50,16 +50,16 @@ let
         home-manager.useUserPackages = true;
         home-manager.users.alice = {
           imports = [ ../module ];
-          programs.vpn-zones.enable = true;
+          programs.cellward.enable = true;
           # The window menu on a key and our windows floating: the snippet
           # sway is started with below.
-          programs.vpn-zones.desktop = {
+          programs.cellward.desktop = {
             windowMenu.key = "Mod+Shift+Z";
             sway.enable = true;
           };
           # The zone's border around foot below: a colour nothing else on
           # the screen has, and a width that is not the default.
-          programs.vpn-zones.frame = {
+          programs.cellward.frame = {
             colors.offline = "#ff00ff";
             width = 6;
           };
@@ -146,7 +146,7 @@ let
       with subtest("the focused window's zone and program; the hotkey menu"):
           alice(
               f"systemd-run --user --unit=vmfoot --setenv=WAYLAND_DISPLAY={display} "
-              "vpn-zone run offline -- foot"
+              "cellward run offline -- foot"
           )
           machine.wait_until_succeeds(
               f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q foot",
@@ -163,13 +163,13 @@ let
           comm = machine.succeed(f"cat /proc/{foot['pid']}/comm").strip()
           assert comm == "vz-wl-sandbox", comm
           machine.succeed(f"pgrep -x -P {foot['pid']} vz-wl-proxy")
-          out = alice(f"SWAYSOCK={swaysock} vpn-zone focused --json")
+          out = alice(f"SWAYSOCK={swaysock} cellward focused --json")
           assert '"zone":"offline"' in out and '"program":"foot"' in out, out
-          out = alice(f"SWAYSOCK={swaysock} vpn-zone focused --bar")
+          out = alice(f"SWAYSOCK={swaysock} cellward focused --bar")
           assert '"class":"zone-offline"' in out, out
           alice(
               f"systemd-run --user --unit=vmmenu --setenv=WAYLAND_DISPLAY={display} "
-              f"--setenv=SWAYSOCK={swaysock} vpn-zone window-menu"
+              f"--setenv=SWAYSOCK={swaysock} cellward window-menu"
           )
           machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
           machine.sleep(2)
@@ -319,15 +319,15 @@ let
           alice(f"SWAYSOCK={swaysock} swaymsg output {output} scale 1")
           machine.sleep(3)
 
-      # The switch (`vpn-zone frame hide`, for sharing the screen) is read
+      # The switch (`cellward frame hide`, for sharing the screen) is read
       # when a program connects: a window opened after it has no border, one
       # opened before keeps it — now half the screen wide, the border
       # following the resize.
       with subtest("hidden, a new window comes up without the border"):
-          alice("vpn-zone frame hide")
+          alice("cellward frame hide")
           alice(
               f"systemd-run --user --unit=vmbare --setenv=WAYLAND_DISPLAY={display} "
-              "vpn-zone run offline -- foot --app-id bare"
+              "cellward run offline -- foot --app-id bare"
           )
           machine.wait_until_succeeds(
               f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q '\"app_id\": *\"bare\"'",
@@ -341,7 +341,7 @@ let
           x, y, w, h = view("foot")
           framed(at, x, y, w, h, top=width + title)
           titled(at, x, y, w)
-          alice("vpn-zone frame show")
+          alice("cellward frame show")
           alice("systemctl --user stop vmbare")
           machine.wait_until_fails(
               f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q '\"app_id\": *\"bare\"'",
@@ -349,17 +349,17 @@ let
           )
           machine.sleep(2)
 
-      # `vpn-zone frame title hover` (read at launch): the strip takes no
+      # `cellward frame title hover` (read at launch): the strip takes no
       # room and is not there until the pointer comes to the window's top
       # edge — which this seat, with no pointer device at all, never does
       # (the coming out is the proxy's unit test). The status names it.
       with subtest("a hover title takes no room and is not shown by itself"):
-          alice("vpn-zone frame title hover")
-          out = alice("vpn-zone status --json")
+          alice("cellward frame title hover")
+          out = alice("cellward status --json")
           assert '"frame_title":{"value":"hover","source":"local"}' in out, out
           alice(
               f"systemd-run --user --unit=vmhover --setenv=WAYLAND_DISPLAY={display} "
-              "vpn-zone run offline -- foot --app-id hover"
+              "cellward run offline -- foot --app-id hover"
           )
           machine.wait_until_succeeds(
               f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q '\"app_id\": *\"hover\"'",
@@ -372,7 +372,7 @@ let
           # The older window keeps its strip: the mode is its launch's.
           x, y, w, h = view("foot")
           framed(at, x, y, w, h, top=width + title)
-          alice("vpn-zone frame title default")
+          alice("cellward frame title default")
           alice("systemctl --user stop vmhover")
           machine.wait_until_fails(
               f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q '\"app_id\": *\"hover\"'",
@@ -380,7 +380,7 @@ let
           )
           machine.sleep(2)
 
-      # The key of programs.vpn-zones.desktop.windowMenu.key, pressed on the
+      # The key of programs.cellward.desktop.windowMenu.key, pressed on the
       # compositor: the menu comes up by itself, floating by the window rule.
       with subtest("the window menu's key of the module opens the menu, floating"):
           alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -M logo -M shift -k z -m shift -m logo")
