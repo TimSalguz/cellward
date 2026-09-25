@@ -51,8 +51,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   strip and text laid before the program's commit, a new buffer at 1.5
   shown at once, fullscreen and back, hover out at the top edge and in
   below. VM (`tests/vm-window.nix`): the strip and its text on the
-  screenshot above foot's content, gone in fullscreen, at 1.5 with pixels of
-  the ink itself, and a hover window without it.
+  screenshot above foot's content, gone in fullscreen, crisp at 1.5 (a fifth
+  of its pixels or more at least three quarters ink: 41% drawn at 1.5, 6%
+  if stretched from 1), and a hover window without it.
 - **The zone's border around its programs' windows** (`rust/src/wl_frame.rs`,
   `docs/WINDOW-FRAME.md` §8 «Этап 2, обводка»; stage 2 of the window frame,
   its first part — no title bar or buttons yet). The Wayland proxy draws a

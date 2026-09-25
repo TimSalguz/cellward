@@ -267,16 +267,20 @@ let
           return [(c, r) for r in rows for c in cols if at(c, r) != border]
 
       def titled(at, x, y, w, scale=1):
-          """The zone's name in the strip: text there, of the ink's colour
-          (drawn at this scale, not blurred up from another), at the left
-          after the pad, and nowhere else."""
+          """The zone's name in the strip: text there, at the left after the
+          pad, and nowhere else; and crisp — drawn at this scale, not
+          blurred up from another: a fifth of its pixels or more at least
+          three quarters ink (the line drawn at 1 and 1.5 has 26% and 41%;
+          drawn at 1 and stretched to 1.5 bilinearly, 6%). On magenta the
+          ink's share of a pixel is in its red: 255 - 235 × share."""
           text = lettering(at, x, y, w, scale)
           assert len(text) > 100 * scale * scale, f"no text in the title strip: {len(text)}"
-          inked = sum(1 for c, r in text if at(c, r) == ink)
-          assert inked > 20 * scale * scale, f"the text is not crisp: {inked} of {len(text)}"
+          strong = sum(1 for c, r in text if at(c, r)[0] <= 255 - 0.75 * (255 - ink[0]))
+          assert strong >= 0.2 * len(text), f"the text is not crisp: {strong} of {len(text)}"
           left = min(c for c, _ in text)
           pad = round((x + width + 8) * scale)
-          assert pad - 1 <= left <= pad + 3 * scale, (left, pad)
+          # The first glyph's own side bearing: 2 pixels at 1.
+          assert pad - 1 <= left <= pad + 4 * scale, (left, pad)
           assert max(c for c, _ in text) < round((x + w / 2) * scale), "text across the strip"
 
       with subtest("the zone's border and title: inside the window, the declared colour and width"):
