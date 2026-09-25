@@ -61,6 +61,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   section numbers of `docs/LEAK-MODEL.md`.
 
 ### Added
+- **The portal knows the zone** (`rust/src/bus_filter.rs` `register`,
+  `rust/src/desktop.rs` `zone_app_id`, LEAK-MODEL §23). Each zone has an
+  application id of its own, `cellward.zone.<id>` — the zone's name with
+  every character but `[A-Za-z0-9_]` turned into `_` and a `_` before a
+  leading digit, plus an FNV-1a hash when the name changed on the way, so
+  that `work-vpn` and `work_vpn` never share one. The bus filter registers
+  each program connection under it with the portal's host registry
+  (`org.freedesktop.host.portal.Registry.Register`, xdg-desktop-portal
+  1.19+): the program's Hello goes up as it is; once the bus has answered
+  it, the filter sends its own `Register` on that connection, under a
+  reserved serial below xdg-dbus-proxy's `MAX_CLIENT_SERIAL`, and holds
+  everything the program sent after the Hello — in order, with its
+  descriptors — until the portal answers, for 2 s at most. The answer never
+  reaches the program, and the program's own `Register` stays refused. The
+  portal's dialogs then name the zone ("cellward · <zone>") and what the
+  portal remembers is kept under the zone, not under the nameless host
+  application every zone shared. It only helps: nothing is let because of
+  it. No answer or an error (an older portal, no entry) leaves the
+  connection as it was, said once in the zone's unit journal. The zone's
+  holder writes the entry the portal needs,
+  `~/.local/share/applications/cellward.zone.<id>.desktop` (`NoDisplay`, a
+  harmless `Exec` of `cellward status <zone>` by the profile's path — GLib
+  takes an entry only when it finds its program — marked
+  `X-VPNZone=portal`), as the zone comes up; sync keeps it while the zone
+  exists, whatever the launcher mode, and `cellward rm` takes it. The
+  holder has a new flag, `--runner`, which the unit passes. A hermetic
+  zone's session bus filter registers every connection of the zone,
+  sandboxed ones included; the filter of a file sandbox (`--fs-sandbox`)
+  in a zone that is not hermetic registers its own — `fs-sandbox` is told
+  the zone (`--zone`) by the launch, and `bus-filter` takes the id as
+  `--portal-app`.
 - **How long a refused zone is not asked again is a setting** (the owner's
   request of 2026-09-25): `vpn-zone ask-again <term>|default`, Nix
   `programs.vpn-zones.askAgainAfter`, `ask_again` in the defaults of
