@@ -455,17 +455,6 @@ let
   # Машиночитаемый ответ, откуда какое значение, — `vpn-zone status --json`.
   cfg = config.programs.vpn-zones;
 
-  # Фрагмент политики WirePlumber для PipeWire зон (docs/LEAK-MODEL.md §17) —
-  # как его пишет модуль NixOS (services.pipewire.wireplumber.extraConfig):
-  # «раздел = JSON» построчно.
-  wireplumberConf =
-    lib.concatStringsSep "\n" (
-      lib.mapAttrsToList (section: content: "${section} = " + builtins.toJSON content) (
-        import ./wireplumber/config.nix
-      )
-    )
-    + "\n";
-
   # Имя контейнера попадает в путь, в имя файла и в имя деривации.
   # Не `__…` и не слова, которые меню используют как свои метки: контейнер с
   # таким именем рантайм не прочитал бы (`__main__`, `__fs__`) или принял бы за
@@ -958,7 +947,7 @@ in
     # for a home-manager without NixOS: the same fragment the NixOS module
     # writes, under the same name — the user's copy replaces the system's.
     (lib.mkIf cfg.pipewirePolicy {
-      "wireplumber/wireplumber.conf.d/90-vpn-zones.conf".text = wireplumberConf;
+      "wireplumber/wireplumber.conf.d/90-vpn-zones.conf".source = ./wireplumber/90-vpn-zones.conf;
     })
   ];
 

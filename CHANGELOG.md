@@ -297,7 +297,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Ordinary zones keep the raw socket (they have `systemd --user`). `ask` is
   a refusal on this path for now: the question is asked on the pulse path.
   The policy: `services.vpn-zones.pipewirePolicy.enable` (NixOS, through
-  `services.pipewire.wireplumber.extraConfig`/`extraScripts`) or
+  `services.pipewire.wireplumber.extraScripts`, the fragment as a config
+  package — `extraConfig` would quote the feature names, which WirePlumber
+  0.5.14 reads with their quotes, and it would not start at all) or
   `programs.vpn-zones.pipewirePolicy` (home-manager without NixOS, the same
   files in `~/.config/wireplumber` and `~/.local/share/wireplumber`; both on
   do not duplicate). `doctor`: a `pipewire` check per hermetic zone (the

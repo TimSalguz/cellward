@@ -1226,7 +1226,10 @@ PulseAudio; родной протокол PipeWire шёл мимо него.
    проверка `pipewire` говорит, действует ли политика.
 3. Политика — скрипт WirePlumber `module/wireplumber/policy.lua` и фрагмент
    `90-vpn-zones.conf` (`services.vpn-zones.pipewirePolicy.enable` в модуле
-   NixOS — через `services.pipewire.wireplumber.extraConfig`/`extraScripts`;
+   NixOS — скрипт через `services.pipewire.wireplumber.extraScripts`,
+   фрагмент пакетом (`configPackages`): `extraConfig` пишет имена
+   возможностей в кавычках, а WirePlumber 0.5.14 читает их с кавычками и не
+   поднимается вовсе;
    `programs.vpn-zones.pipewirePolicy` в home-manager без NixOS — те же файлы
    в `~/.config/wireplumber` и `~/.local/share/wireplumber`). Стоковый
    WirePlumber дал бы «restricted» клиенту чтение и исполнение на ВСЁ —
