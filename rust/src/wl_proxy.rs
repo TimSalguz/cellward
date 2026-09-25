@@ -2286,7 +2286,11 @@ mod tests {
     /// A compositor that knows which interface every object is — of what
     /// the proxy and the client create — answers `get_registry` with
     /// [`FRAME_GLOBALS`] and `sync` with `done`, and logs every request.
-    fn frame_compositor(mut sock: UnixStream, log: mpsc::Sender<Msg>) {
+    fn frame_compositor(
+        mut sock: UnixStream,
+        log: mpsc::Sender<Msg>,
+        globals: &'static [(&'static str, u32)],
+    ) {
         let mut ifaces: HashMap<u32, String> = HashMap::from([(1, "wl_display".to_owned())]);
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
@@ -2313,7 +2317,7 @@ mod tests {
                 match (iface.as_str(), opcode) {
                     ("wl_display", 1) => {
                         new(args[0], "wl_registry");
-                        for (name, (global, version)) in FRAME_GLOBALS.iter().enumerate() {
+                        for (name, (global, version)) in globals.iter().enumerate() {
                             event(&mut out, args[0], 0, |a| {
                                 a.extend_from_slice(&(name as u32 + 1).to_ne_bytes());
                                 string(a, global);
@@ -2362,7 +2366,11 @@ mod tests {
         /// A client connects and is answered `answer` (`UPSTREAM` or
         /// `UPSTREAM_BARE`) with an upstream to a [`frame_compositor`]; the
         /// client, a way to write events as the compositor, and its log.
-        fn connect_framed(&self, answer: u8) -> (UnixStream, UnixStream, mpsc::Receiver<Msg>) {
+        fn connect_framed(
+            &self,
+            answer: u8,
+            globals: &'static [(&'static str, u32)],
+        ) -> (UnixStream, UnixStream, mpsc::Receiver<Msg>) {
             let client = UnixStream::connect(&self.path).unwrap();
             let channel = self.channel.as_ref().unwrap();
             let mut byte = [0u8];
@@ -2371,7 +2379,7 @@ mod tests {
             let (up, compositor) = UnixStream::pair().unwrap();
             let writer = compositor.try_clone().unwrap();
             let (log_tx, log) = mpsc::channel();
-            std::thread::spawn(move || frame_compositor(compositor, log_tx));
+            std::thread::spawn(move || frame_compositor(compositor, log_tx, globals));
             sys::send_with_fds(channel.as_raw_fd(), &[answer], &[up.as_raw_fd()]).unwrap();
             (client, writer, log)
         }
@@ -2457,7 +2465,7 @@ mod tests {
     #[test]
     fn a_window_gets_the_border_inside_its_geometry_and_input_on_it_is_dropped() {
         let rig = Rig::with_border("border", Some((4, Rgb(0xff, 0, 0x80))));
-        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM);
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, FRAME_GLOBALS);
         a_window(&mut client);
         // Up to the program's commit of its surface; the strips' own
         // commits come before it.
@@ -2620,7 +2628,7 @@ mod tests {
     #[test]
     fn a_connection_without_the_border_is_passed_on_as_it_is() {
         let rig = Rig::with_border("bare", Some((4, Rgb(0xff, 0, 0x80))));
-        let (mut client, _compositor, log) = rig.connect_framed(UPSTREAM_BARE);
+        let (mut client, _compositor, log) = rig.connect_framed(UPSTREAM_BARE, FRAME_GLOBALS);
         a_window(&mut client);
         let got = log_until(&log, |m| m.iface == "wl_surface" && m.opcode == 6);
         assert!(
@@ -2633,6 +2641,60 @@ mod tests {
             .filter(|m| m.iface == "xdg_surface" && m.opcode == 3)
             .collect();
         assert_eq!(geometry[0].args, [10, 20, 300, 200]);
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    /// A compositor without `wl_subcompositor` (in its place, at the same
+    /// name, something else): the border cannot be drawn, and then nothing
+    /// is translated either — the window is stage 1's, not a window with a
+    /// gap where the border would be.
+    #[test]
+    fn without_a_subcompositor_a_window_goes_without_the_border() {
+        const NO_SUBCOMPOSITOR: &[(&str, u32)] = &[
+            ("wl_compositor", 6),
+            ("wp_presentation", 1),
+            ("wl_shm", 1),
+            ("wp_viewporter", 1),
+            ("xdg_wm_base", 6),
+            ("wl_seat", 7),
+        ];
+        let rig = Rig::with_border("cannot", Some((4, Rgb(0xff, 0, 0x80))));
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, NO_SUBCOMPOSITOR);
+        a_window(&mut client);
+        let mut got = log_until(&log, |m| m.iface == "xdg_wm_base" && m.opcode == 2);
+        let (xdg, root) = (got.last().unwrap().args[0], got.last().unwrap().args[1]);
+        got.extend(log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        }));
+        let geometry: Vec<&Msg> = got
+            .iter()
+            .filter(|m| m.iface == "xdg_surface" && m.opcode == 3)
+            .collect();
+        assert_eq!(geometry[0].args, [10, 20, 300, 200]);
+        assert!(
+            got.iter().all(|m| m.iface != "wp_viewport"),
+            "strips made: {got:#?}"
+        );
+        let toplevel = got
+            .iter()
+            .find(|m| m.iface == "xdg_surface" && m.opcode == 1)
+            .map(|m| m.args[0])
+            .unwrap();
+        let mut out = Vec::new();
+        event(&mut out, toplevel, 0, |a| {
+            a.extend_from_slice(&words(&[800, 600, 0]))
+        });
+        event(&mut out, xdg, 0, |a| {
+            a.extend_from_slice(&5u32.to_ne_bytes())
+        });
+        compositor.write_all(&out).unwrap();
+        let events = events_until(&mut client, |o, op, _| o == 8 && op == 0);
+        let configure = events
+            .iter()
+            .find(|(o, op, _)| *o == 9 && *op == 0)
+            .expect("no configure");
+        assert_eq!(configure.2[..2], [800, 600]);
         drop(client);
         assert_eq!(rig.finish(), 0);
     }
