@@ -6,6 +6,10 @@
   lib,
   rustPlatform,
   patchelf,
+  makeBinaryWrapper,
+  makeFontsConf,
+  dejavu_fonts,
+  noto-fonts-color-emoji,
   wayland,
   libxkbcommon,
   libx11,
@@ -28,6 +32,18 @@ let
     libxrandr
     libxi
   ];
+  # Шрифты окна — свои, короткий список. iced при каждом запуске читает ВСЕ
+  # шрифты системы (cosmic-text: «до секунды даже в release»), а у живой
+  # машины их больше тысячи: под нагрузкой окно открывалось секундами
+  # (владелец, 2026-09-26). Основной шрифт встроен (Fira Sans: латиница,
+  # кириллица); отсюда — только запасные для знаков (● ○ ▸ ⚠ ⓘ) и значков
+  # (🔒 🗑 ➕).
+  fontsConf = makeFontsConf {
+    fontDirectories = [
+      dejavu_fonts
+      noto-fonts-color-emoji
+    ];
+  };
 in
 rustPlatform.buildRustPackage {
   pname = "vpn-zone-window";
@@ -44,10 +60,16 @@ rustPlatform.buildRustPackage {
 
   cargoLock.lockFile = ./Cargo.lock;
 
-  nativeBuildInputs = [ patchelf ];
+  nativeBuildInputs = [
+    patchelf
+    makeBinaryWrapper
+  ];
 
+  # Обёртка — двоичная (makeBinaryWrapper), без оболочки: окно открывается
+  # на каждый запуск программы, и ждать ещё и bash незачем.
   postFixup = ''
     patchelf --add-rpath ${lib.makeLibraryPath runtimeLibs} $out/bin/vpn-zone-window
+    wrapProgram $out/bin/vpn-zone-window --set FONTCONFIG_FILE ${fontsConf}
   '';
 
   meta = {
