@@ -11,25 +11,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   2026-09-25). A program in a zone records the microphone only as the zone's
   switch says, like an app on a phone: `yes`, `no`, or `ask` — the default.
   With `ask`, the first time a program of the zone records, the person on the
-  host is asked (kdialog): allow once (that one stream), allow always
-  (writes `yes` into the zone's setting; not offered when Nix set the
-  zone's value), or deny — which stands for that connection, so the
-  program's retries on it are not asked about again. The sound filter holds
+  host is asked (kdialog): allow once (that one stream), always — to the
+  whole zone, and the button and the text say so (`Всегда — всей зоне «…»`),
+  since the program's name there is only its own word; it writes `yes` into
+  the zone's setting and is not offered when Nix set the zone's value — or
+  deny, which stands for that connection, so the program's retries on it are
+  not asked about again, and quiets the zone for 3 minutes: no program of it
+  is asked meanwhile, so one that reconnects after every "no" cannot keep a
+  dialog up for a stray Enter. The sound filter holds
   that one `CREATE_RECORD_STREAM` while it asks — the connection's other
   commands go on, the server answers the held one by its tag when it gets
   it — and then forwards it or answers it `ERROR`/`ACCESS`. One question at
-  a time per zone: a request while one is open is refused, not queued. No
+  a time per zone: a request while one is open is refused, not queued, and
+  the connection's deny is in place before the question closes. No
   graphical session (neither `WAYLAND_DISPLAY` nor `DISPLAY` in the filter's
-  environment, i.e. the zone unit's) or no answer within 60 s is a refusal,
+  environment, i.e. the zone unit's) or no answer within 25 s — under
+  libpulse's own 30 s wait for a reply, so a late "yes" never opens the
+  microphone for a stream the program has given up on — is a refusal,
   said in the unit's journal and in `vpn-zone journal` (a new event,
   `microphone`; refusals nobody was asked about at most one line per 10 s).
   The question names the filter's own zone, never anything the program
   says, and the program by its own `application.name`, cleaned of control
   characters, markup and reordering marks. The filter reads the setting for
   every record stream, so a change applies at once, without restarting the
-  zone; it lives where no zone writes — the marker in the zone's state
-  directory and `~/.config/vpn-zones/declared/microphone` — Nix over the
-  marker, an unknown value or an unreadable file meaning `no`. Monitors stay
+  zone; it lives outside the zone's own file system — the marker in the
+  zone's state directory and `~/.config/vpn-zones/declared/microphone` —
+  Nix over the marker, an unknown value or an unreadable file meaning `no`;
+  the filter and its kdialog run in the host's user namespace (Security,
+  below), out of the zone's reach through `/proc`. Monitors stay
   unrecordable whatever the switch says. Settings: `vpn-zone microphone
   <zone> yes|no|ask|default`, `programs.vpn-zones.microphone.<zone> =
   "yes"|"no"|"ask"`, and `"microphone":{"value","source"}` for every zone in
@@ -45,8 +54,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `ask` with no display and `no` refuse a record stream on the default
   source, `yes` lets the microphone's sound through, all on a running zone;
   the monitor refusal still holds; a value declared in Nix wins over the
-  zone's own. Only the PulseAudio path: raw `pipewire-0` still records
-  around it (ROADMAP §17).
+  zone's own, in the status and in the running filter (a record stream of
+  the hermetic test zone refused with Nix's `no` over its own `yes`); from
+  a zone, neither the marker by its path nor through `/proc/<pid>/root` of
+  the filter, the proxies or the question's kdialog (held open on an X
+  server that never answers) can be reached. Only the PulseAudio path: raw
+  `pipewire-0` records around it in every zone (ROADMAP §17), and in a zone
+  that is not hermetic so does the host's `systemd --user` — which can also
+  rewrite the setting; `vpn-zone microphone` says both when it sets `no` or
+  `ask`.
 - **The zone's border around its programs' windows** (`rust/src/wl_frame.rs`,
   `docs/WINDOW-FRAME.md` §8 «Этап 2, обводка»; stage 2 of the window frame,
   its first part — no title bar or buttons yet). The Wayland proxy draws a
@@ -229,6 +245,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **The zone's helpers run in the host's user namespace, out of the zone's
+  reach through `/proc`** (`rust/src/zone.rs` `Helpers`, LEAK-MODEL §16;
+  review 2026-09-25). The holder started the system bus proxy, a hermetic
+  zone's session bus proxy and the sound filter as the user — inside the
+  zone's user namespace, with the zone programs' very uid and no
+  capabilities, and dumpable again after `exec`. The kernel lets such a
+  process be read by its peers (`PTRACE_MODE_READ`, which Yama does not
+  limit), so a program of any zone (outside a sandbox) could open
+  `/proc/<pid>/root` of a helper: the host's file system as the host sees
+  it, none of the zone's covers — the unfiltered session bus (then
+  `StartTransientUnit`: code on the host, in its network) even from a
+  hermetic zone, `pulse/native` around the filter, the compositor's socket,
+  the project's state. The unit's own process now starts them before the
+  holder goes on, in the host's user namespace, where a zone's programs
+  have no `CAP_SYS_PTRACE`; the holder
+  no longer supervises them (the unit's process logs a helper's death and
+  stops them with the zone). The sound filter also makes itself not dumpable
+  first thing, as the bus filter does, and whatever it starts — the
+  microphone question's kdialog — is in the host's namespace as well. They
+  keep the unit's supplementary groups now (the zone's namespace dropped
+  them), which the sound server and the buses do not judge a client by.
+  VM: from a zone, `/proc/<pid>/root` of the sound filter, of both proxies
+  and of an open question's kdialog is refused, from the host the proxy's
+  and the kdialog's read; each is in the host's user namespace.
 - **The sound filter passes an allow-list, and a zone no longer records what
   the host plays** (`rust/src/pulse_filter.rs`, LEAK-MODEL §17). It refused
   four commands and passed the rest: a zone could set the default output,

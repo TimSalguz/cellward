@@ -10,8 +10,9 @@
 //! `/.flatpak-info` is a client on the host to it. And a client may record
 //! the monitor of any output: everything the host plays.
 //!
-//! **What.** A filter in front of the socket, started by the zone's holder on
-//! the host and bound into the zone as `pulse/native`. It reads the protocol's
+//! **What.** A filter in front of the socket, started by the zone's unit on
+//! the host — in the host's user namespace, out of the zone's reach through
+//! `/proc` (`zone::Helpers`) — and bound into the zone as `pulse/native`. It reads the protocol's
 //! frames — a 20-byte descriptor (length, channel, offset, flags; big-endian)
 //! and a payload — and passes on only what an ordinary program needs:
 //!
@@ -1324,15 +1325,25 @@ fn ask(
             Arc::clone(&mic),
         );
         thread::Builder::new().spawn(move || {
-            let allowed = mic.ask(&held.program, held.remember);
+            // The connection's state by the answer, while the zone's question
+            // is still open: a request of this connection that comes in
+            // meanwhile is refused as "a question is open", and one after it
+            // finds the deny standing — none gets a question of its own.
+            let allowed = mic.ask(&held.program, held.remember, |allowed| {
+                let mut s = lock(&session);
+                if allowed {
+                    s.creating.insert(held.tag, Kind::Record);
+                } else {
+                    s.mic_denied = true;
+                }
+                allowed
+            });
             // The connection may be gone by now: then these sends fail, and
             // there is nobody to tell.
             if allowed {
-                lock(&session).creating.insert(held.tag, Kind::Record);
                 let raw: Vec<RawFd> = held.carried.iter().map(AsRawFd::as_raw_fd).collect();
                 let _ = to_server.send(&held.frame, &raw);
             } else {
-                lock(&session).mic_denied = true;
                 let _ = to_client.send(&error_frame(held.tag), &[]);
             }
         })
@@ -1409,10 +1420,20 @@ fn report(e: &io::Error) {
     }
 }
 
-/// Serve until the holder that started us goes.
+/// Serve until the zone's unit that started us goes.
 pub fn run(args: &Args) -> u8 {
     // SAFETY: prctl with these arguments takes no pointers.
     unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) };
+    // Nobody of the same uid may read this process through /proc/<pid>/:
+    // its `root` is the host's file system, `pulse/native` unfiltered and
+    // the zone's microphone setting in it, and its `fd` hold both. The zone
+    // starts it in the host's user namespace (`zone::Helpers`), which a
+    // zone's programs cannot read anyway; not dumpable, it stays out of reach
+    // wherever it is started from (`bus_filter::run` does the same). What it
+    // starts — kdialog — is dumpable again after exec, and is safe only by
+    // where this process lives.
+    // SAFETY: prctl with these arguments takes no pointers.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
     let _ = fs::remove_file(&args.listen);
     let listener = match UnixListener::bind(&args.listen) {
         Ok(l) => l,
@@ -2330,7 +2351,7 @@ mod tests {
         let question = wait_asked();
         assert!(question.contains("зоны «nl»"), "{question}");
         assert!(question.contains("«‹b›Evil‹/b› Зона: host»"), "{question}");
-        assert!(question.contains("Разрешить всегда"), "{question}");
+        assert!(question.contains("Всегда — всей зоне «nl»"), "{question}");
         // Once: this stream reaches the server now; nothing is remembered.
         answer("0");
         assert_eq!(next(), (COMMAND_CREATE_RECORD_STREAM, 2));

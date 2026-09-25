@@ -13,11 +13,19 @@
 //! the question is its own word (its properties) and is shown as that,
 //! cleaned (`shown_program`).
 //!
-//! **Where the setting lives** is out of every zone's reach, so that a program
-//! cannot answer its own question: the zone's marker in its state directory
-//! (`~/.local/state/vpn-zones/<zone>/microphone`, hidden from zones —
-//! LEAK-MODEL §17), and `declared/microphone` below `~/.config/vpn-zones`
-//! (Nix, `programs.vpn-zones.microphone`; read-only in zones).
+//! **Where the setting lives** is out of the zone's own file system, so that a
+//! program cannot answer its own question: the zone's marker in its state
+//! directory (`~/.local/state/vpn-zones/<zone>/microphone`, hidden from zones
+//! — LEAK-MODEL §17), and `declared/microphone` below `~/.config/vpn-zones`
+//! (Nix, `programs.vpn-zones.microphone`; read-only in zones). The filter
+//! that reads and writes them runs in the host's user namespace
+//! (`zone::Helpers`), and so does the kdialog it asks with: a program of the
+//! zone cannot reach the host's file system through their `/proc/<pid>/root`.
+//! What this does NOT hold: a zone that is not hermetic keeps the host's
+//! `systemd --user`, and through it runs anything on the host — a recorder,
+//! or a write to the marker; and the raw `pipewire-0` records past the sound
+//! filter in every zone (LEAK-MODEL §17, ROADMAP §17). The switch is the
+//! PulseAudio path's.
 //!
 //! **Which wins**: Nix over the zone's marker, the marker over the default
 //! (`ask`). A value that is none of the three, or a file that is there but
@@ -31,7 +39,11 @@
 //! question at a time per zone: a request while one is open is refused, not
 //! queued — a stream of questions is how a "yes" is got by accident (the
 //! broker's rule). A person's "deny" stands for that connection: the
-//! program's retries on it are refused without asking again.
+//! program's retries on it are refused without asking again; and for
+//! [`AFTER_DENY`] no program of the zone is asked at all, so that one that
+//! reconnects after every refusal cannot keep a dialog waiting for a stray
+//! Enter. "Always" is the ZONE's: the button and the text say so, since the
+//! program's name in the question is only its own word.
 //!
 //! Monitors (what the host plays) are not a microphone, and never recordable
 //! whatever this says (`pulse_filter::record_refused`, the server's word).
@@ -49,8 +61,16 @@ use crate::container::Source;
 pub const MARKER: &str = "microphone";
 /// The values Nix declared, below `declared/`: `<zone> <value>` per line.
 pub const DECLARED: &str = "microphone";
-/// How long a question waits for its answer.
-pub const TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a question waits for its answer. Under libpulse's own wait for a
+/// reply (`DEFAULT_TIMEOUT`, 30 s): past that the program has failed the
+/// stream and stopped waiting, and a late "yes" would open the microphone
+/// for a request nobody waits on — the server capturing, the sound going to
+/// a socket whose program has moved on.
+pub const TIMEOUT: Duration = Duration::from_secs(25);
+/// After a refusal of the person's — or a question nobody answered — the
+/// zone is not asked again for this long: its requests are refused without
+/// a dialog.
+pub const AFTER_DENY: Duration = Duration::from_secs(180);
 /// At most one line in `vpn-zone journal` per this long for refusals nobody
 /// was asked about: a program asking in a loop must not wash the journal's
 /// history out (it rotates at a megabyte). stderr gets every one.
@@ -185,13 +205,28 @@ pub fn shown_program(name: &str) -> String {
 }
 
 /// The question's text. The zone is the filter's; the program is named as
-/// it names itself, and said to be that.
-pub fn question(zone: &str, program: &str) -> String {
+/// it names itself, and said to be that. `remember`: "always" is offered —
+/// and said to be the whole zone's, not the named program's.
+pub fn question(zone: &str, program: &str, remember: bool) -> String {
+    let always = if remember {
+        format!(
+            "«{}» — это любой программе зоны «{zone}», без вопросов, пока это не \
+             отменить (vpn-zone microphone {zone} ask).\n\n",
+            always_label(zone)
+        )
+    } else {
+        String::new()
+    };
     format!(
         "Программа из зоны «{zone}» хочет записывать звук с микрофона.\n\n\
-         Она называет себя: «{}».\n\nРазрешить?",
+         Она называет себя: «{}» — это её собственные слова.\n\n{always}Разрешить?",
         shown_program(program)
     )
+}
+
+/// The "always" button: whose it is, in its own words.
+pub fn always_label(zone: &str) -> String {
+    format!("Всегда — всей зоне «{zone}»")
 }
 
 /// What the filter of one zone knows to decide by. One per filter process,
@@ -211,6 +246,9 @@ pub struct Policy {
     journal: Option<PathBuf>,
     /// A question is open for this zone.
     asking: AtomicBool,
+    /// No question before then: the person refused, or did not answer.
+    quiet_until: Mutex<Option<Instant>>,
+    after_deny: Duration,
     /// The last journal line for a refusal nobody was asked about.
     last_told: Mutex<Option<Instant>>,
 }
@@ -235,6 +273,8 @@ impl Policy {
             timeout: TIMEOUT,
             journal,
             asking: AtomicBool::new(false),
+            quiet_until: Mutex::new(None),
+            after_deny: AFTER_DENY,
             last_told: Mutex::new(None),
         }
     }
@@ -250,6 +290,8 @@ impl Policy {
             timeout: TIMEOUT,
             journal: None,
             asking: AtomicBool::new(false),
+            quiet_until: Mutex::new(None),
+            after_deny: AFTER_DENY,
             last_told: Mutex::new(None),
         }
     }
@@ -280,6 +322,14 @@ impl Policy {
             Verdict::Refuse(why) if setting == Setting::Ask => {
                 self.tell(program, false, why, false)
             }
+            Verdict::Ask { .. } if self.quiet() => {
+                let why = format!(
+                    "человек недавно отказал — зону не спрашивают {} мин",
+                    self.after_deny.as_secs().div_ceil(60)
+                );
+                self.tell(program, false, &why, false);
+                return Verdict::Refuse(why);
+            }
             // The zone's one question: taken here, closed by `ask`.
             Verdict::Ask { .. }
                 if self
@@ -296,9 +346,19 @@ impl Policy {
         verdict
     }
 
+    /// Within the quiet after a refusal.
+    fn quiet(&self) -> bool {
+        let until = self.quiet_until.lock().unwrap_or_else(|e| e.into_inner());
+        until.is_some_and(|t| Instant::now() < t)
+    }
+
     /// Ask the person, and settle it: "always" is written, every answer
-    /// told. `true` when the stream may go on. Closes the open question.
-    pub fn ask(&self, program: &str, remember: bool) -> bool {
+    /// told. `then` gets whether the stream may go on, and its result is
+    /// returned; it runs BEFORE the zone's question is open again, so that
+    /// what the answer means for the connection (a deny standing for it) is
+    /// in place before the next request of that connection can ask. Closes
+    /// the open question.
+    pub fn ask<R>(&self, program: &str, remember: bool, then: impl FnOnce(bool) -> R) -> R {
         struct Close<'a>(&'a AtomicBool);
         impl Drop for Close<'_> {
             fn drop(&mut self) {
@@ -306,8 +366,9 @@ impl Policy {
             }
         }
         let _close = Close(&self.asking);
-        let text = question(&self.zone, program);
+        let text = question(&self.zone, program, remember);
         let title = format!("Микрофон — зона «{}»", self.zone);
+        let always = always_label(&self.zone);
         let code = if remember {
             crate::dialog::choose_within(
                 &self.kdialog,
@@ -317,7 +378,7 @@ impl Policy {
                     "--yes-label",
                     "Разрешить один раз",
                     "--no-label",
-                    "Разрешить всегда",
+                    always.as_str(),
                     "--cancel-label",
                     "Отказать",
                     "--warningyesnocancel",
@@ -341,7 +402,8 @@ impl Policy {
                 self.timeout,
             )
         };
-        self.settle(program, &answer_of(code, remember))
+        let allowed = self.settle(program, &answer_of(code, remember));
+        then(allowed)
     }
 
     /// Close the open question without asking (it could not be asked).
@@ -370,6 +432,8 @@ impl Policy {
                 true
             }
             Answer::Deny(why) => {
+                *self.quiet_until.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(Instant::now() + self.after_deny);
                 self.tell(program, false, why, true);
                 false
             }
@@ -435,6 +499,12 @@ impl Policy {
             timeout,
             ..Self::new("nl", zone_dir, config, kdialog)
         }
+    }
+
+    /// The quiet after a refusal, shortened (or none).
+    pub(crate) fn with_after_deny(mut self, after_deny: Duration) -> Self {
+        self.after_deny = after_deny;
+        self
     }
 }
 
@@ -567,9 +637,19 @@ mod tests {
         assert_eq!(shown_program(" \u{200B}"), "без имени");
         let long = shown_program(&"a".repeat(500));
         assert_eq!(long.chars().count(), SHOWN_NAME + 1);
-        let q = question("nl", "zoom\n\nЗона: host");
+        let q = question("nl", "zoom\n\nЗона: host", true);
         assert!(q.contains("зоны «nl»"), "{q}");
-        assert!(q.contains("«zoom  Зона: host»"), "{q}");
+        assert!(
+            q.contains("«zoom  Зона: host» — это её собственные слова"),
+            "{q}"
+        );
+        // "Always" is the zone's, and the text says so where it is offered.
+        assert!(
+            q.contains("«Всегда — всей зоне «nl»» — это любой программе зоны «nl»"),
+            "{q}"
+        );
+        let q = question("nl", "zoom", false);
+        assert!(!q.contains("Всегда"), "{q}");
     }
 
     #[test]
@@ -579,17 +659,17 @@ mod tests {
         // Once: this stream, nothing written.
         let p = d.policy(d.kdialog("once", "exit 0"), true, TIMEOUT);
         assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
-        assert!(p.ask("app", true));
+        assert!(p.ask("app", true, |a| a));
         assert!(!marker.exists());
         // Deny.
         let p = d.policy(d.kdialog("deny", "exit 2"), true, TIMEOUT);
         assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
-        assert!(!p.ask("app", true));
+        assert!(!p.ask("app", true, |a| a));
         assert!(!marker.exists());
         // Always: yes in the marker, and the next stream is not asked about.
         let p = d.policy(d.kdialog("always", "exit 1"), true, TIMEOUT);
         assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
-        assert!(p.ask("app", true));
+        assert!(p.ask("app", true, |a| a));
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "yes");
         assert_eq!(p.decide("app"), Verdict::Allow);
         // Nix says ask: "always" is not offered, and its button is a no.
@@ -597,7 +677,7 @@ mod tests {
         d.write("config/declared/microphone", "nl ask\n");
         let p = d.policy(d.kdialog("two", "exit 1"), true, TIMEOUT);
         assert_eq!(p.decide("app"), Verdict::Ask { remember: false });
-        assert!(!p.ask("app", false));
+        assert!(!p.ask("app", false, |a| a));
         assert!(!marker.exists());
         let journal = d.journal();
         assert_eq!(journal.matches("\"event\":\"microphone\"").count(), 4);
@@ -616,7 +696,7 @@ mod tests {
         let p = d.policy(kdialog, true, Duration::from_secs(1));
         assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
         let started = Instant::now();
-        assert!(!p.ask("app", true));
+        assert!(!p.ask("app", true, |a| a));
         assert!(started.elapsed() < Duration::from_secs(10));
         let pid: i32 = std::fs::read_to_string(&pidfile)
             .unwrap()
@@ -629,15 +709,65 @@ mod tests {
             0,
             "the dialog outlived its deadline"
         );
-        assert!(
-            d.journal().contains("нет ответа за 60 с"),
-            "{}",
-            d.journal()
-        );
+        let said = format!("нет ответа за {} с", TIMEOUT.as_secs());
+        assert!(d.journal().contains(&said), "{}", d.journal());
+        // Under libpulse's own wait for the reply (30 s): an answer the
+        // program no longer waits for must not open the microphone.
+        assert!(TIMEOUT < Duration::from_secs(30));
+        // Nobody answered: the zone is not asked again for a while either.
+        assert!(matches!(p.decide("app"), Verdict::Refuse(why) if why.contains("недавно")));
         // A kdialog that cannot be started is no answer either.
         let p = d.policy(d.base.join("missing"), true, TIMEOUT);
         assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
-        assert!(!p.ask("app", true));
+        assert!(!p.ask("app", true, |a| a));
+    }
+
+    /// After a refusal the zone is not asked for a while: a program that
+    /// reconnects after every "no" cannot keep a dialog up for a stray Enter.
+    #[test]
+    fn a_refusal_quiets_the_zone_for_a_while() {
+        let d = Dirs::new("quiet");
+        let asked = d.base.join("asked");
+        let kdialog = d.kdialog("deny", &format!("touch {}; exit 2", asked.display()));
+        let p = d.policy(kdialog.clone(), true, TIMEOUT);
+        assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
+        assert!(!p.ask("app", true, |a| a));
+        std::fs::remove_file(&asked).unwrap();
+        let Verdict::Refuse(why) = p.decide("app") else {
+            panic!("asked again right after a refusal");
+        };
+        assert!(why.contains("недавно отказал"), "{why}");
+        assert!(!asked.exists());
+        // The switch itself still decides: yes lets it through at once.
+        d.write("state/nl/microphone", "yes");
+        assert_eq!(p.decide("app"), Verdict::Allow);
+        std::fs::remove_file(d.zone().join(MARKER)).unwrap();
+        // Once the quiet is over, the zone is asked again.
+        let p = d
+            .policy(kdialog, true, TIMEOUT)
+            .with_after_deny(Duration::ZERO);
+        assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
+        assert!(!p.ask("app", true, |a| a));
+        assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
+        p.abandon();
+    }
+
+    /// What an answer means for the connection is settled while the zone's
+    /// question is still open: a request in between is refused as "a
+    /// question is open", never asked about anew.
+    #[test]
+    fn the_answer_is_settled_before_the_question_closes() {
+        let d = Dirs::new("settle");
+        let p = d.policy(d.kdialog("once", "exit 0"), true, TIMEOUT);
+        assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
+        let meanwhile = p.ask("app", true, |allowed| {
+            assert!(allowed);
+            p.decide("app")
+        });
+        assert!(
+            matches!(&meanwhile, Verdict::Refuse(why) if why.contains("уже открыт")),
+            "{meanwhile:?}"
+        );
     }
 
     /// No display: refused without a dialog, said in the journal; one
@@ -662,10 +792,10 @@ mod tests {
         let p = d.policy(kdialog, true, TIMEOUT);
         assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
         assert!(matches!(p.decide("other"), Verdict::Refuse(why) if why.contains("уже открыт")));
-        assert!(p.ask("app", true));
+        assert!(p.ask("app", true, |a| a));
         assert!(asked.exists());
         // Answered: the next one may ask again.
         assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
-        assert!(p.ask("app", true));
+        assert!(p.ask("app", true, |a| a));
     }
 }

@@ -1388,7 +1388,9 @@ let
       # The microphone by permission (rust/src/microphone.rs, owner
       # 2026-09-25): ask by default — and the unit has no graphical session,
       # so there is nobody to ask and it is refused; no refuses; yes lets it
-      # through. Each applies at once, to the running zone.
+      # through. Each applies at once, to the running zone. Neither the
+      # setting nor the processes that hold it — the filter, the question's
+      # kdialog — are within the zone's reach.
       with subtest("pulse: a zone cannot load a module or record a monitor; the microphone by permission"):
           alice("systemd-run --user --unit=fakepulse ${pkgs.python3}/bin/python3 ${fakePulse}")
           machine.wait_until_succeeds("test -S /run/user/1000/pulse/native")
@@ -1431,6 +1433,70 @@ let
           machine.succeed("grep -qx '5 default' /tmp/pulse-seen")
           assert "conn2 closed 0" in out, f"a monitor's sound reached the zone: {out}"
           alice("vpn-zone microphone vmsmoke default")
+          # The setting is out of the zone's reach, and so are the helpers
+          # the zone's unit starts (review 2026-09-25): the marker by its path
+          # is under the zone's cover, and /proc/<pid>/root of the sound
+          # filter and of the system bus proxy — the host's file system, the
+          # unfiltered pulse/native and session bus in it — is refused: they
+          # live in the host's user namespace, not in the zone's.
+          host_ns = machine.succeed("readlink /proc/1/ns/user").strip()
+          fp = machine.succeed(
+              "pgrep -u alice -f 'pulse-filter --liste[n] .*--zone vmsmoke --zone-dir'"
+          ).split()[0]
+          bp = machine.succeed(
+              "pgrep -u alice -f '[x]dg-dbus-proxy unix:path=/run/dbus/system_bus_socket .*/vmsmoke/'"
+          ).split()[0]
+          marker = f"{STATE}/vmsmoke/microphone"
+          for pid in (fp, bp):
+              ns = machine.succeed(f"readlink /proc/{pid}/ns/user").strip()
+              assert ns == host_ns, f"helper {pid} is in {ns}, not the host's {host_ns}"
+              in_zone(zp, f"sh -c '! ls /proc/{pid}/root/'")
+              in_zone(zp, f"sh -c '! echo yes > /proc/{pid}/root{marker}'")
+          # The proxy is dumpable, and from the host its root reads: the
+          # refusal above is the zone's namespace, not the path. The filter
+          # is not dumpable at all.
+          alice(f"ls /proc/{bp}/root/ > /dev/null")
+          alice(f"sh -c '! ls /proc/{fp}/root/'")
+          in_zone(zp, f"sh -c '! echo yes > {marker}'")
+          machine.fail(f"test -e {marker}")
+          # A question open: its kdialog is the filter's child, in the host's
+          # user namespace too. It is held open by an X server that never
+          # answers — an abstract socket, where libxcb looks first — for as
+          # long as the filter waits.
+          alice(
+              "systemd-run --user --unit=stuckx socat "
+              "ABSTRACT-LISTEN:/tmp/.X11-unix/X99,fork 'EXEC:sleep 120'"
+          )
+          machine.wait_until_succeeds("grep -q '@/tmp/.X11-unix/X99' /proc/net/unix")
+          alice("vpn-zone down vmsmoke")
+          alice("systemctl --user set-environment DISPLAY=:99 QT_QPA_PLATFORM=xcb")
+          alice("vpn-zone up vmsmoke")
+          alice("systemctl --user unset-environment DISPLAY QT_QPA_PLATFORM")
+          zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
+          heard = lambda: machine.succeed("grep -c '^5 mic' /tmp/pulse-seen || true").strip()
+          heard_before = heard()
+          alice(
+              f"systemd-run --user --unit=askingmic nsenter --preserve-credentials "
+              f"-U -n -m -t {zp} -- ${pkgs.python3}/bin/python3 ${pulseMic}"
+          )
+          kd = machine.wait_until_succeeds(
+              "pgrep -u alice -f -- '--warningyesnocance[l]'", timeout=30
+          ).split()[0]
+          ns = machine.succeed(f"readlink /proc/{kd}/ns/user").strip()
+          assert ns == host_ns, f"the question's kdialog is in {ns}, not the host's {host_ns}"
+          alice(f"ls /proc/{kd}/root/ > /dev/null")
+          in_zone(zp, f"sh -c '! ls /proc/{kd}/root/'")
+          in_zone(zp, f"sh -c '! echo yes > /proc/{kd}/root{marker}'")
+          # The dialog gone without an answer: a refusal.
+          alice(f"kill {kd}")
+          machine.wait_until_succeeds(
+              "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 vpn-zone journal --json' "
+              "| grep -q 'диалог не открылся'",
+              timeout=30,
+          )
+          machine.fail(f"test -e {marker}")
+          assert heard() == heard_before, "a refused stream reached the server"
+          alice("systemctl --user stop stuckx.service askingmic.service || true")
           alice("vpn-zone down vmsmoke")
           alice("systemctl --user stop fakepulse.service")
 
@@ -1569,7 +1635,10 @@ let
           out = json.loads(alice("vpn-zone status --json"))
           zone = next(n for n in out["networks"] if n["name"] == "vmherm")
           assert zone["microphone"] == {"value": "no", "source": "nix"}, zone
-          alice("vpn-zone microphone vmherm default")
+          # …and the running filter goes by it too (below): a sound server
+          # for the zone to come up with.
+          alice("systemd-run --user --unit=fakepulseherm ${pkgs.python3}/bin/python3 ${fakePulse}")
+          machine.wait_until_succeeds("test -S /run/user/1000/pulse/native")
           out = json.loads(alice("vpn-zone status --json"))
           assert out["defaults"]["hermetic"] == {"value": False, "source": "nix"}, out["defaults"]
           alice("sh -c '! vpn-zone hermetic vmherm off'")
@@ -1585,6 +1654,25 @@ let
           alice("vpn-zone up vmherm")
           alice("systemctl --user is-active vpn-zone-broker.socket")
           hp = machine.succeed(f"cat {STATE}/vmherm/zone.pid").strip()
+          # Nix's "no" over the zone's own "yes", as the running filter
+          # applies it: the record stream is refused and never reaches the
+          # server.
+          machine.succeed("rm -f /tmp/pulse-seen")
+          out = in_zone(hp, "${pkgs.python3}/bin/python3 ${pulseMic}")
+          assert "mic refused" in out, f"Nix's no did not hold against the zone's yes: {out}"
+          machine.fail("grep -q '^5 mic' /tmp/pulse-seen")
+          alice("vpn-zone microphone vmherm default")
+          alice("systemctl --user stop fakepulseherm.service")
+          # The session bus proxy holds the host's unfiltered bus: through
+          # its /proc/<pid>/root the zone would have it all. It lives in the
+          # host's user namespace — from the host that path reads, from the
+          # zone it does not (review 2026-09-25).
+          sp = machine.succeed(
+              "pgrep -u alice -f '[x]dg-dbus-proxy unix:path=/run/user/1000/bus .*/vmherm/'"
+          ).split()[0]
+          alice(f"ls /proc/{sp}/root/ > /dev/null")
+          in_zone(hp, f"sh -c '! ls /proc/{sp}/root/'")
+          in_zone(hp, f"sh -c '! socat -T2 - UNIX-CONNECT:/proc/{sp}/root/run/user/1000/bus </dev/null'")
           # Neither the compositor's IPC nor its own socket (LEAK-MODEL §13).
           in_zone(hp, "test ! -e /run/user/1000/niri.wayland-9.4242.sock")
           in_zone(hp, "test ! -e /run/user/1000/wayland-9")

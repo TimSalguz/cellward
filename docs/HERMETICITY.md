@@ -48,9 +48,13 @@ the zone gets it — not per launch):
    bound back PipeWire, PulseAudio (the `pulse-filter` socket: an allow-list
    of commands, no recording of a monitor, the microphone only by the zone's
    permission — `yes`, `no` or `ask`, the default, a question on the host;
+   a switch of the PulseAudio path only, raw `pipewire-0` records around it;
    `docs/LEAK-MODEL.md` §17),
    and two sockets of ours: a **filtered session bus** (`xdg-dbus-proxy`) and
-   the **broker**. `systemd/private` is not bound back.
+   the **broker**. `systemd/private` is not bound back. The proxies and the
+   sound filter run in the host's user namespace, not the zone's: a
+   program of the zone cannot reach the host's file system — the unfiltered
+   bus in it — through their `/proc/<pid>/root` (`docs/LEAK-MODEL.md` §16).
 2. **tmpfs over `/tmp/.X11-unix`** and `DISPLAY` unset in the launch
    environment; a container granted `x11` gets its own `xwayland-satellite`
    (decision A).

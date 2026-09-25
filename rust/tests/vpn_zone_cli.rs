@@ -1504,6 +1504,11 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     let out = home.run(&["microphone", "nl", "no"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("недоступен"), "{}", stdout(&out));
+    // Said for what it is: pulse's switch, pipewire-0 goes around it; the
+    // zone is hermetic here, so systemd --user is not named.
+    assert!(stdout(&out).contains("(pulse)"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("pipewire-0"), "{}", stdout(&out));
+    assert!(!stdout(&out).contains("systemd --user"), "{}", stdout(&out));
     assert_eq!(
         fs::read_to_string(home.state().join("nl/microphone")).unwrap(),
         "no"
@@ -1538,6 +1543,13 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
         json.contains("\"hermetic\":{\"value\":true,\"source\":\"default\"}}"),
         "{json}"
     );
+    // A zone that is not hermetic: its "no" is said to be no boundary
+    // against systemd --user, which records on the host and writes the
+    // setting.
+    let out = home.run(&["microphone", "nl", "no"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("systemd --user"), "{}", stdout(&out));
+    assert!(home.run(&["microphone", "nl", "default"]).status.success());
     // A local default, and a zone that follows it again.
     let out = home.run(&["hermetic", "--default", "on"]);
     assert!(out.status.success(), "{}", stderr(&out));

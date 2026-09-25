@@ -6,6 +6,7 @@
 //!
 //! ```text
 //! vpn-zone-core zone-holder <name>        (systemd main process, host user)
+//!  ├─ xdg-dbus-proxy ×1–2, pulse-filter    [the zone's helpers, host userns]
 //!  └─ fork ─ user namespace, uid 0 inside                    [holder]
 //!      ├─ fork ─ net + mount namespace: THE UPLINK      [uplink.pid]
 //!      │           pasta's tap, the only route to the world, and the UDP
@@ -873,9 +874,6 @@ static USERNS_CHILD: AtomicI32 = AtomicI32::new(0);
 static ZONE_CHILD: AtomicI32 = AtomicI32::new(0);
 static UPLINK_CHILD: AtomicI32 = AtomicI32::new(0);
 static PASTA_CHILD: AtomicI32 = AtomicI32::new(0);
-static PROXY_CHILD: AtomicI32 = AtomicI32::new(0);
-static SESSION_PROXY_CHILD: AtomicI32 = AtomicI32::new(0);
-static PULSE_FILTER_CHILD: AtomicI32 = AtomicI32::new(0);
 /// Did the shutdown start with a TERM/INT of our own?
 static ASKED_TO_STOP: AtomicBool = AtomicBool::new(false);
 
@@ -890,14 +888,7 @@ extern "C" fn forward_signal(sig: libc::c_int) {
 
 extern "C" fn stop_zone(_sig: libc::c_int) {
     ASKED_TO_STOP.store(true, Ordering::SeqCst);
-    for slot in [
-        &PASTA_CHILD,
-        &UPLINK_CHILD,
-        &ZONE_CHILD,
-        &PROXY_CHILD,
-        &SESSION_PROXY_CHILD,
-        &PULSE_FILTER_CHILD,
-    ] {
+    for slot in [&PASTA_CHILD, &UPLINK_CHILD, &ZONE_CHILD] {
         let pid = slot.load(Ordering::SeqCst);
         if pid > 0 {
             // SAFETY: as above.
@@ -984,14 +975,109 @@ fn hold(zone: &Zone, ids: &Ids) -> Result<u8, String> {
         let _ = reap(pid);
         return Err(e);
     }
+    // The helpers, before the holder goes on: its namespaces bind their
+    // sockets in as one of their first steps.
+    let mut helpers = Helpers::start(zone);
     let mut mapped = File::from(mapped_w);
     if mapped.write_all(&[SYNC_OK]).is_err() {
         let _ = reap(pid);
+        helpers.stop();
         return Err("the zone stopped listening before the mapping was done".to_string());
     }
     drop(mapped);
 
-    Ok(stopped_cleanly(reap(pid)))
+    // The holder's end is the zone's end; a helper's is only that helper's.
+    let code = loop {
+        let (dead, code) = wait_any();
+        if dead == pid || dead == -1 {
+            break code;
+        }
+        helpers.died(zone, dead);
+    };
+    helpers.stop();
+    Ok(stopped_cleanly(code))
+}
+
+/// The zone's helpers on the host: the filtered system bus, a hermetic zone's
+/// session bus, the sound filter — started by the unit's own process, in the
+/// HOST's user namespace, and never by the holder.
+///
+/// Why not by the holder (review 2026-09-25): a process the holder starts as
+/// the user lives in the zone's user namespace, with the very uid and no
+/// capabilities, the same as the zone's programs — and `exec` makes it
+/// dumpable again. The kernel then lets a program of the zone read it through
+/// `/proc/<pid>/`: its `root` is the host's file system as the host sees it
+/// (the zone's covers are in the zone's mount namespace, not in the helper's),
+/// with the session bus, `pulse/native` unfiltered, the compositor's socket
+/// and the zone's microphone setting in reach. A process of the host's user
+/// namespace is not readable from a zone's (`cap_ptrace_access_check`:
+/// another namespace wants `CAP_SYS_PTRACE` over it — LEAK-MODEL §16), and
+/// neither is what it starts: the sound filter's kdialog.
+///
+/// What they lose by it is the zone's `setgroups(0)`: they keep the unit's
+/// supplementary groups, which the sound server and the two buses do not
+/// judge a client by — and the bus proxies pass only their allow-lists.
+struct Helpers {
+    system_bus: libc::pid_t,
+    session_bus: libc::pid_t,
+    pulse: libc::pid_t,
+}
+
+impl Helpers {
+    fn start(zone: &Zone) -> Self {
+        let pid = |child: Option<Child>| child.map_or(0, |c| c.id() as libc::pid_t);
+        // The filtered system bus: without one the zone closes it altogether
+        // (`seal_system_bus`).
+        let system_bus = pid(start_system_bus_proxy(zone));
+        // A hermetic zone's session bus the same way.
+        let session_bus = if zone.hermetic {
+            pid(start_proxy(
+                zone,
+                &format!("unix:path={}", host_runtime_dir(zone).join("bus").display()),
+                SESSION_BUS_PROXY,
+                &SESSION_BUS_RULES,
+                "session bus",
+            ))
+        } else {
+            0
+        };
+        // The sound server through a filter, for every zone (`pulse_filter`).
+        let pulse = pid(start_pulse_filter(zone));
+        Self {
+            system_bus,
+            session_bus,
+            pulse,
+        }
+    }
+
+    /// A helper died on its own. No reason to take the zone down: the bind
+    /// to its socket stays, and connecting to a dead socket is refused — what
+    /// it served is simply gone for the zone, which is closed, not open.
+    fn died(&mut self, zone: &Zone, dead: libc::pid_t) {
+        let what = if dead == self.system_bus {
+            self.system_bus = 0;
+            "the system bus proxy died — the zone has no system bus now"
+        } else if dead == self.session_bus {
+            self.session_bus = 0;
+            "the session bus proxy died — the zone has no session bus now"
+        } else if dead == self.pulse {
+            self.pulse = 0;
+            "the sound filter died — the zone has no sound server now"
+        } else {
+            return;
+        };
+        if !ASKED_TO_STOP.load(Ordering::SeqCst) {
+            eprintln!("zone {}: {what}", zone.name());
+        }
+    }
+
+    /// Nothing may outlive the zone.
+    fn stop(&mut self) {
+        for pid in [&mut self.system_bus, &mut self.session_bus, &mut self.pulse] {
+            kill_and_reap(*pid);
+            *pid = 0;
+        }
+    }
 }
 
 /// Wait for a child, retrying on `EINTR` (our own signal handlers cause it).
@@ -1198,28 +1284,8 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
         Some(prepare(zone)?)
     };
 
-    // The filtered system bus, before the zone exists: its namespace binds the
-    // socket in as one of its first steps.
-    let proxy = start_system_bus_proxy(zone);
-    let proxy_pid = proxy.as_ref().map_or(0, |c| c.id() as i32);
-    // A hermetic zone's session bus the same way.
-    let session_proxy = if zone.hermetic {
-        start_proxy(
-            zone,
-            &format!("unix:path={}", host_runtime_dir(zone).join("bus").display()),
-            SESSION_BUS_PROXY,
-            &SESSION_BUS_RULES,
-            "session bus",
-        )
-    } else {
-        None
-    };
-    let session_proxy_pid = session_proxy.as_ref().map_or(0, |c| c.id() as i32);
-    SESSION_PROXY_CHILD.store(session_proxy_pid, Ordering::SeqCst);
-    // The sound server through a filter, for every zone (`pulse_filter`).
-    let pulse = start_pulse_filter(zone);
-    let pulse_pid = pulse.as_ref().map_or(0, |c| c.id() as i32);
-    PULSE_FILTER_CHILD.store(pulse_pid, Ordering::SeqCst);
+    // The buses' proxies and the sound filter are up already: the unit's own
+    // process started them, out of the zone's user namespace (`Helpers`).
 
     let (uplink_up_r, uplink_up_w) =
         sys::pipe().map_err(|e| format!("cannot create a pipe: {e}"))?;
@@ -1468,37 +1534,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
     // left to serve. pasta counts too — a zone whose way out is gone is a zone
     // that only pretends to work.
     let pasta_pid = pasta.as_ref().map_or(0, |c| c.id() as i32);
-    let (dead, code) = loop {
-        let (dead, code) = wait_any();
-        // The proxy dying is no reason to take the zone down: the bind to its
-        // socket stays, and connecting to a dead socket is refused — the
-        // system bus is simply gone for the zone, which is closed, not open.
-        if dead == proxy_pid && dead > 0 && !ASKED_TO_STOP.load(Ordering::SeqCst) {
-            eprintln!(
-                "zone {}: the system bus proxy died — the zone has no system bus now",
-                zone.name()
-            );
-            PROXY_CHILD.store(0, Ordering::SeqCst);
-            continue;
-        }
-        if dead == pulse_pid && dead > 0 && !ASKED_TO_STOP.load(Ordering::SeqCst) {
-            eprintln!(
-                "zone {}: the sound filter died — the zone has no sound server now",
-                zone.name()
-            );
-            PULSE_FILTER_CHILD.store(0, Ordering::SeqCst);
-            continue;
-        }
-        if dead == session_proxy_pid && dead > 0 && !ASKED_TO_STOP.load(Ordering::SeqCst) {
-            eprintln!(
-                "zone {}: the session bus proxy died — the zone has no session bus now",
-                zone.name()
-            );
-            SESSION_PROXY_CHILD.store(0, Ordering::SeqCst);
-            continue;
-        }
-        break (dead, code);
-    };
+    let (dead, code) = wait_any();
     if !ASKED_TO_STOP.load(Ordering::SeqCst) {
         let what = if dead == zone_pid {
             "the zone"
@@ -1515,14 +1551,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
     // Nothing may outlive the zone: a stray pasta would keep an interface on a
     // dead namespace and `vpn-zone gc` would have to clean up after us, and a
     // surviving uplink would keep a namespace nobody can reach any more.
-    for pid in [
-        pasta_pid,
-        uplink_pid,
-        zone_pid,
-        PROXY_CHILD.load(Ordering::SeqCst),
-        SESSION_PROXY_CHILD.load(Ordering::SeqCst),
-        PULSE_FILTER_CHILD.load(Ordering::SeqCst),
-    ] {
+    for pid in [pasta_pid, uplink_pid, zone_pid] {
         if pid != dead {
             kill_and_reap(pid);
         }
@@ -1911,18 +1940,13 @@ fn start_system_bus_proxy(zone: &Zone) -> Option<Child> {
     if fs::symlink_metadata(SYSTEM_BUS).is_err() {
         return None;
     }
-    let child = start_proxy(
+    start_proxy(
         zone,
         &format!("unix:path={SYSTEM_BUS}"),
         SYSTEM_BUS_PROXY,
         &SYSTEM_BUS_RULES,
         "system bus",
-    );
-    PROXY_CHILD.store(
-        child.as_ref().map_or(0, |c| c.id() as i32),
-        Ordering::SeqCst,
-    );
-    child
+    )
 }
 
 /// Start `xdg-dbus-proxy` for `address`, listening at `socket_name` in the
@@ -1936,12 +1960,11 @@ fn start_proxy(
 ) -> Option<Child> {
     let socket = zone.path(socket_name);
     let _ = fs::remove_file(&socket);
-    // As the user, not as the holder: uid 0 in here is a subordinate uid on the
-    // host, and the bus would see a stranger connect — while a program in the
-    // zone, which runs as the user, presents the user's uid. Through a proxy of
-    // the wrong uid every call fails, the allowed ones included. The zone's
-    // directory belongs to the user, and its owner is the uid mapped onto
-    // itself.
+    // As the user, and from the unit's own process (`Helpers`): never as the
+    // holder, whose uid 0 is a subordinate uid on the host — the bus would see
+    // a stranger connect, while a program in the zone presents the user's uid,
+    // and through a proxy of the wrong uid every call fails. The zone's
+    // directory belongs to the user; `.uid` says so, not only the caller.
     let (uid, gid) = match fs::metadata(&zone.dir) {
         Ok(meta) => {
             use std::os::unix::fs::MetadataExt;
@@ -1993,13 +2016,9 @@ fn start_proxy(
     None
 }
 
-/// The session bus filter of a hermetic zone (`crate::bus_filter`, LEAK-MODEL
-/// §2), in front of its proxy: in the app namespace — so that the broker knows
-/// the zone by its network namespace — and as the user, like the proxy. A link
-/// a program hands the portal goes to the broker as "open it in this very
-/// zone". It dies with this process (`PR_SET_PDEATHSIG`), which is the zone.
-/// The sound filter (`pulse_filter`), on the host, as the user: listening in
-/// the zone's directory, passing on to the host's `pulse/native`. `None` when
+/// The sound filter (`pulse_filter`), on the host — from the unit's own
+/// process, in the host's user namespace (`Helpers`) — as the user: listening
+/// in the zone's directory, passing on to the host's `pulse/native`. `None` when
 /// the host has no sound server there. It is told the zone and where its
 /// microphone setting is (`crate::microphone`): it reads it for every record
 /// stream, and asks with kdialog in the environment it inherits — the unit's,
@@ -2060,6 +2079,14 @@ fn start_pulse_filter(zone: &Zone) -> Option<Child> {
     None
 }
 
+/// The session bus filter of a hermetic zone (`crate::bus_filter`, LEAK-MODEL
+/// §2), in front of its proxy: in the app namespace — so that the broker knows
+/// the zone by its network namespace — and as the user, like the proxy. A link
+/// a program hands the portal goes to the broker as "open it in this very
+/// zone". It dies with this process (`PR_SET_PDEATHSIG`), which is the zone.
+/// Unlike the `Helpers` it lives in the zone's user namespace, beside the
+/// zone's programs: that is why it makes itself not dumpable first thing and
+/// starts nothing (`--via-broker`) — what it started would be dumpable again.
 fn start_session_filter(zone: &Zone) {
     let upstream = zone.path(SESSION_BUS_PROXY);
     if fs::symlink_metadata(&upstream).is_err() {
