@@ -517,6 +517,8 @@ and `vpn-zone container show <name> --json` print subsets of the same schema.
     "launcher_mode": { "value": "picker", "source": "default" },
     "compositor_restriction": { "value": true, "source": "default" },
     "wayland_proxy": { "value": true, "source": "default" },
+    "frames": { "value": true, "source": "default" },
+    "frame_width": { "value": 4, "source": "default" },
     "autostart_unassigned": { "value": "ask", "source": "default" },
     "user_entries": { "value": "take-over", "source": "default" },
     "hermetic": { "value": true, "source": "default" }
@@ -532,7 +534,8 @@ and `vpn-zone container show <name> --json` print subsets of the same schema.
       "interface": null,
       "hermetic":            { "value": true,  "source": "default" },
       "nix_daemon":          { "value": false, "source": "default" },
-      "host_files_writable": { "value": false, "source": "default" } },
+      "host_files_writable": { "value": false, "source": "default" },
+      "frame_color":         { "value": "#4cacd9", "source": "default" } },
     { "name": "lan", "kind": "host-interface", "aliases": [], "source": "local",
       "up": false, "locked": false, "tunnel_alive": null,
       "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,

@@ -39,7 +39,12 @@ the zone gets it — not per launch):
    a program cannot take another launch's socket's place), and served there by
    its confined proxy (`docs/WINDOW-FRAME.md` §8), which passes on only the
    launch's own processes — the compositor's own sandbox socket is in
-   `vpn-zones/wl-up/`, which no zone has. A hermetic zone gets
+   `vpn-zones/wl-up/`, which no zone has. The same proxy draws the zone's
+   coloured border around the program's windows (§8, «Этап 2, обводка»),
+   with objects of its own the program cannot name, and shows the program no
+   new global; its colour, width and the switch that hides it are in
+   `~/.config/vpn-zones` and the zones' state, which a zone cannot write. A
+   hermetic zone gets
    bound back PipeWire, PulseAudio,
    and two sockets of ours: a **filtered session bus** (`xdg-dbus-proxy`) and
    the **broker**. `systemd/private` is not bound back.

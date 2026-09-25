@@ -6,6 +6,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The zone's border around its programs' windows** (`rust/src/wl_frame.rs`,
+  `docs/WINDOW-FRAME.md` §8 «Этап 2, обводка»; stage 2 of the window frame,
+  its first part — no title bar or buttons yet). The Wayland proxy draws a
+  band of the zone's colour around every toplevel of a program in a zone:
+  four subsurfaces of the program's own root surface, each the middle pixel
+  of a 3×3 buffer stretched by `wp_viewport` — crisp at any scale, fractional
+  included, nothing redrawn on a resize. The band lies INSIDE the window
+  geometry: the proxy grows `set_window_geometry` and the size limits by it
+  and takes it off `configure`, `configure_bounds`, popups' positions and
+  the window menu's, so sway (which clips every tiled window) and niri with
+  `clip-to-geometry` show it, and the compositor gets exactly the size it
+  asked for; a program with no geometry of its own is framed around its
+  surface's size. Geometry and limits go up just before the program's own
+  commit, together with the strips' new place — synchronized subsurfaces,
+  applied by that one commit. Maximized, tiled and fullscreen windows keep
+  it. The program cannot name the strips (they have no id in its table), a
+  subsurface of its own is put back below them, and input on them —
+  pointer, touch, tablet tool, gestures, a drag — is dropped, not passed to
+  it. What the proxy draws with it binds on a registry of its own: the
+  program is shown no new global. Without `wl_subcompositor`, `wl_shm` or
+  `wp_viewporter`, windows go without the border and the proxy says so once
+  — never worse than without it. The colour is one pixel in a sealed memfd
+  made before the proxy's filter is loaded (the filter is unchanged: no
+  `memfd_create`, no mapping of a descriptor). Settings: the colour per zone
+  (`programs.vpn-zones.frame.colors.<zone> = "#rrggbb"`, `vpn-zone frame
+  color <zone> #rrggbb|default`; otherwise one derived from the zone's name,
+  the same on every machine), the width (`frame.width`, `vpn-zone frame width
+  <1–32>|default`, 4 logical pixels by default), and a switch that hides
+  every border for sharing the screen (`vpn-zone frame hide|show`, local
+  only), which the supervisor reads for each new connection. `vpn-zone
+  status --json` shows `frames` and `frame_width` in `defaults` and
+  `frame_color` per zone, each with its source. `wl-sandbox` takes `--frame
+  <rrggbb>:<width>` and `--frame-switch <dir>`. Tests: the arithmetic
+  (configure in and out, geometry, limits, the strips tiling the band), the
+  settings, and the proxy between a client and a fake compositor — the
+  geometry grown, four strips laid and committed before the program's
+  commit, a configure less the border, a pointer over a strip unseen by the
+  program, a new subsurface put below the strips, the strips gone with the
+  toplevel, nothing of it on a connection that is hidden. VM
+  (`tests/vm-window.nix`, sway): foot in a zone, screenshots read pixel by
+  pixel — the border in the declared colour and width at every edge of the
+  window, foot's own pixels exactly inside it, in fullscreen too, at scale
+  1.5 after the resize it brings, and a window opened after `vpn-zone frame
+  hide` without it while the older one keeps it.
 - **`vpn-zone doctor` names every unix socket a zone can reach**
   (`docs/LEAK-MODEL.md` §18, the invariant the third review round asked for).
   A socket by path is a helper outside that acts for whoever connects — an ssh
