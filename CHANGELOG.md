@@ -28,25 +28,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   request's own command, word for word. A container of the host's network,
   and a zone without a broker, keep their own picker.
 
-### Security
-- **The broker's listening socket reached the programs it started** (found
-  in the review above): systemd passes it as fd 3, and it was not closed on
-  `exec` — a program a zone started into itself (no question for that) could
-  take other zones' requests, their commands and links, and answer them. It
-  is close-on-exec now, and `LISTEN_*` leave the broker's environment.
-- **The broker is harder to flood**: a zone is asked at most four times a
-  minute and not for 15 s after a "no"; a request past 64 KiB or with an
-  app-id past 255 bytes is refused whole (it was cut and read); 32 requests at
-  most are handled at once, and one that sends nothing is dropped after 5 s.
 - **`ping` works in a zone** (`rust/src/zone.rs` `allow_ping`, the owner,
   2026-09-25: "missing cap_net_raw+p capability"). A new network namespace
   lets nobody open the kernel's ICMP echo sockets (`net.ipv4.ping_group_range`
   is `1 0`), so `ping` wanted raw sockets, which a program in a zone does not
   have and must not get. The holder now opens echo sockets to the user's own
   groups in the zone (the one line of the zone's `gid_map` mapped to
-  itself: a range over the zone's root as well is empty to the kernel). Nothing new leaves by it: the kernel builds the
-  echo requests, and they take the zone's routes — the tunnel, or nowhere in
-  an offline zone. Applies to a zone started after the update.
+  itself: a range over the zone's root as well is empty to the kernel).
+  Nothing new leaves by it: the kernel builds the echo requests, and they
+  take the zone's routes — the tunnel, or nowhere in an offline zone. Applies to a zone started after the update.
 - **A running terminal no longer takes every next one into its network**
   (`rust/src/picker.rs`, the owner, 2026-09-25). A click on a running
   program started it where it ran, with no question — right for a browser or
@@ -81,6 +71,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `/proc/<pid>/cgroup`, with the start time read before and after, so the
   look was at that very process), and the note is written for it. A number
   outside the unit is still not a zone.
+
+### Security
+- **The broker's listening socket reached the programs it started** (found
+  in the review above): systemd passes it as fd 3, and it was not closed on
+  `exec` — a program a zone started into itself (no question for that) could
+  take other zones' requests, their commands and links, and answer them. It
+  is close-on-exec now, and `LISTEN_*` leave the broker's environment.
+- **The broker is harder to flood**: a zone is asked at most four times a
+  minute and not for 15 s after a "no"; a request past 64 KiB or with an
+  app-id past 255 bytes is refused whole (it was cut and read); 32 requests at
+  most are handled at once, and one that sends nothing is dropped after 5 s.
 
 ### Changed
 - **The single entry is `programs.cellward.enable`** (NixOS), the same name as
