@@ -1784,7 +1784,13 @@ fn sandbox(tools: &Tools, args: &[OsString]) -> u8 {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
-                let perms = fs::read_to_string(dir.join("perms"))
+                crate::container::migrate_policy(tools);
+                let policy = crate::container::policy_dir_in(
+                    &tools.config,
+                    crate::container::Home::Private,
+                    &name,
+                );
+                let perms = fs::read_to_string(policy.join("perms"))
                     .unwrap_or_default()
                     .replace('\n', " ");
                 let perms = if perms.is_empty() {
@@ -1815,6 +1821,14 @@ fn sandbox(tools: &Tools, args: &[OsString]) -> u8 {
                 eprintln!("не удалить {}: {e}", dir.display());
                 return 1;
             }
+            // Its policy with it: a sandbox made again under the name must
+            // not inherit the old one's grants and network.
+            let policy = crate::container::policy_dir_in(
+                &tools.config,
+                crate::container::Home::Private,
+                &name.to_string_lossy(),
+            );
+            let _ = crate::sys::remove_tree(&policy);
             println!(
                 "песочница {} удалена вместе со своим домом",
                 name.to_string_lossy()
@@ -1895,6 +1909,12 @@ fn profile(tools: &Tools, args: &[OsString]) -> u8 {
                 eprintln!("не удалить {}: {e}", dir.display());
                 return 1;
             }
+            let policy = crate::container::policy_dir_in(
+                &tools.config,
+                crate::container::Home::Overlay,
+                &name.to_string_lossy(),
+            );
+            let _ = crate::sys::remove_tree(&policy);
             println!("профиль {} удалён", name.to_string_lossy());
             0
         }

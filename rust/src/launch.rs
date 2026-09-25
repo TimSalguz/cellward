@@ -99,6 +99,13 @@ pub fn network_name(name: &str) -> &str {
     }
 }
 
+/// Whether this process is a zone's: a program started into a zone carries
+/// [`ENV_CURRENT`]. A program that drops the variable only loses what the
+/// host would do for it; the zone's walls are the kernel's.
+pub fn in_zone() -> bool {
+    std::env::var_os(ENV_CURRENT).is_some_and(|v| !v.is_empty())
+}
+
 /// Names a zone directory cannot be entered by: they mean [`UNCONFINED`].
 pub fn is_unconfined_name(name: &str) -> bool {
     matches!(name, UNCONFINED | UNCONFINED_ALIAS)

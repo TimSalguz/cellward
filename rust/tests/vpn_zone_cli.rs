@@ -1037,7 +1037,7 @@ fn a_private_home_is_granted_directories_but_never_the_state() {
     let out = home.run(&["container", "grant", "sb:dev", "~/.wine", "--for", "2h"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains(" до 20"), "{}", stdout(&out));
-    let line = fs::read_to_string(home.root.join("sandboxes/dev/paths")).unwrap();
+    let line = fs::read_to_string(home.root.join("config/containers/sandboxes/dev/paths")).unwrap();
     assert!(
         line.starts_with("until=") && line.trim_end().ends_with(&format!(" {r}/.wine")),
         "{line}"
@@ -1054,7 +1054,7 @@ fn a_private_home_is_granted_directories_but_never_the_state() {
     }
     // A term that is over is not granted to anything, before any cleanup.
     fs::write(
-        home.root.join("sandboxes/dev/paths"),
+        home.root.join("config/containers/sandboxes/dev/paths"),
         format!("until=1 {r}/.wine\n{r}/games\n"),
     )
     .unwrap();
@@ -1070,7 +1070,7 @@ fn a_private_home_is_granted_directories_but_never_the_state() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("истёк"), "{}", stdout(&out));
     assert_eq!(
-        fs::read_to_string(home.root.join("sandboxes/dev/paths")).unwrap(),
+        fs::read_to_string(home.root.join("config/containers/sandboxes/dev/paths")).unwrap(),
         format!("{r}/games\n")
     );
     let journal = stdout(&home.run(&["journal", "--json"]));
@@ -1167,7 +1167,13 @@ fn a_merge_keeps_what_the_target_has_and_moves_the_programs() {
         fs::read_to_string(work.join("local-share/upper/history")).unwrap(),
         "old"
     );
-    assert!(work.join("trust").join(format!("{sha}.pem")).is_file());
+    // With the container's policy, not next to its data (the certificate was
+    // put there in the old layout, and moved with the first look).
+    assert!(home
+        .root
+        .join("config/containers/profiles/work/trust")
+        .join(format!("{sha}.pem"))
+        .is_file());
     assert_eq!(fs::read_to_string(pins.join("firefox")).unwrap(), "work");
     assert_eq!(fs::read_to_string(pins.join("tg")).unwrap(), "sb:other");
     // The source stays until it is removed by hand.

@@ -28,8 +28,19 @@ use crate::cli::{read_setting, visible_entries};
 use crate::registry;
 use crate::tools::Tools;
 
-/// The local settings of a container, in its own directory.
+/// The local settings of a container, in its policy directory
+/// ([`policy_dir`]).
 pub const FILE: &str = "container.conf";
+/// Where a container's policy lives, below the config dir: its settings,
+/// grants, file permissions and trusted certificates — `profiles/<name>` or
+/// `sandboxes/<name>`. Not next to its data: container storage is written
+/// through every zone's home layer (`docs/HOME-LAYER.md`), and a program in a
+/// zone could otherwise bind a container to the host's network or grant it
+/// a directory (review 2026-09-25, P1). The config dir is read-only in zones.
+pub const POLICY_DIR: &str = "containers";
+/// The mark that the policy files of this version's layout were moved there
+/// ([`migrate_policy`]): once, and never again.
+pub const POLICY_MIGRATED: &str = ".migrated";
 /// Where home-manager puts the declared containers, below the config dir.
 pub const DECLARED: &str = "declared/containers";
 /// The prefix of a named sandbox's selector.
@@ -172,6 +183,9 @@ pub struct Container {
     /// The container's own directory. May not exist yet for a container that
     /// is only declared.
     pub dir: PathBuf,
+    /// Its policy: settings, grants, permissions, certificates
+    /// ([`policy_dir`]).
+    pub policy: PathBuf,
 }
 
 impl Container {
@@ -181,7 +195,7 @@ impl Container {
     }
 
     pub fn trust_dir(&self) -> PathBuf {
-        self.dir.join(crate::trust::DIR)
+        self.policy.join(crate::trust::DIR)
     }
 }
 
@@ -235,6 +249,86 @@ pub fn declared_file(tools: &Tools, home: Home, name: &str) -> PathBuf {
         .join(format!("{}-{name}.conf", home.as_str()))
 }
 
+/// Where the policy of a container lives ([`POLICY_DIR`]).
+pub fn policy_dir(tools: &Tools, home: Home, name: &str) -> PathBuf {
+    policy_dir_in(&tools.config, home, name)
+}
+
+/// [`policy_dir`], from the config dir alone.
+pub fn policy_dir_in(config: &Path, home: Home, name: &str) -> PathBuf {
+    config
+        .join(POLICY_DIR)
+        .join(match home {
+            Home::Overlay => "profiles",
+            Home::Private => "sandboxes",
+        })
+        .join(name)
+}
+
+/// The files a container's policy is made of, as they were next to its data.
+const POLICY_FILES: [&str; 4] = [FILE, PATHS_FILE, "perms", crate::trust::DIR];
+
+/// Move the policy files of the old layout from each container's own
+/// directory into its policy directory — once, on the host, and marked done.
+/// Once, and not at every start: after the move a file there is nobody's
+/// business, and a program in a zone could put one next to a container's
+/// data, which a move at every start would then take for its policy. A
+/// file whose place is taken already stays where it was. In a zone nothing
+/// is moved: its config is read-only there, and its state not the host's.
+pub fn migrate_policy(tools: &Tools) {
+    if !crate::launch::in_zone() {
+        migrate_policy_in(&tools.config, &tools.profiles, &tools.sandboxes);
+    }
+}
+
+/// [`migrate_policy`] for a home, where no manifest is at hand
+/// (`fs_sandbox::settle_permissions`).
+pub fn migrate_policy_of_home(home: &Path) {
+    if !crate::launch::in_zone() {
+        migrate_policy_in(
+            &home.join(".config/vpn-zones"),
+            &home.join(".local/state/vpn-profiles"),
+            &home.join(".local/state/vpn-sandboxes"),
+        );
+    }
+}
+
+/// [`migrate_policy`], from the three directories alone, wherever it runs.
+pub fn migrate_policy_in(config: &Path, profiles: &Path, sandboxes: &Path) {
+    let mark = config.join(POLICY_DIR).join(POLICY_MIGRATED);
+    if mark.exists() {
+        return;
+    }
+    for (storage, home) in [(profiles, Home::Overlay), (sandboxes, Home::Private)] {
+        let Ok(entries) = fs::read_dir(storage) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let from = entry.path();
+            if !from.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let to = policy_dir_in(config, home, &name);
+            for file in POLICY_FILES {
+                let old = from.join(file);
+                let new = to.join(file);
+                if fs::symlink_metadata(&old).is_err() || fs::symlink_metadata(&new).is_ok() {
+                    continue;
+                }
+                if let Err(e) = fs::create_dir_all(&to).and_then(|()| fs::rename(&old, &new)) {
+                    eprintln!(
+                        "cellward: не перенести {} в {}: {e}",
+                        old.display(),
+                        new.display()
+                    );
+                }
+            }
+        }
+    }
+    let _ = fs::create_dir_all(config.join(POLICY_DIR)).and_then(|()| fs::write(&mark, ""));
+}
+
 fn home_dir_of(tools: &Tools, home: Home, name: &str) -> PathBuf {
     match home {
         Home::Overlay => tools.profiles.join(name),
@@ -245,14 +339,16 @@ fn home_dir_of(tools: &Tools, home: Home, name: &str) -> PathBuf {
 /// Read one container. `None` when it neither exists on disk nor is declared.
 pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
     let (home, name) = parse_selector(selector)?;
+    migrate_policy(tools);
     let dir = home_dir_of(tools, home, name);
+    let policy = policy_dir(tools, home, name);
     let declared = fs::read_to_string(declared_file(tools, home, name))
         .map(|t| parse_conf(&t))
         .ok();
     if !dir.is_dir() && declared.is_none() {
         return None;
     }
-    let local = fs::read_to_string(dir.join(FILE))
+    let local = fs::read_to_string(policy.join(FILE))
         .map(|t| parse_conf(&t))
         .unwrap_or_default();
 
@@ -318,7 +414,7 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
         }
     }
     let mut expires = Vec::new();
-    if let Ok(text) = fs::read_to_string(dir.join(PATHS_FILE)) {
+    if let Ok(text) = fs::read_to_string(policy.join(PATHS_FILE)) {
         let now = now();
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let (path, until) = grant_line(line);
@@ -372,6 +468,7 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
         expires,
         x11,
         dir,
+        policy,
     })
 }
 
@@ -659,7 +756,7 @@ pub fn set_path(
     {
         return Err(format!("{} выдан в Nix — забирается там", value.display()));
     }
-    let file = container.dir.join(PATHS_FILE);
+    let file = container.policy.join(PATHS_FILE);
     let now = now();
     let mut lines: Vec<String> = fs::read_to_string(&file)
         .unwrap_or_default()
@@ -678,7 +775,7 @@ pub fn set_path(
             None => path.into_owned(),
         });
     }
-    fs::create_dir_all(&container.dir)
+    fs::create_dir_all(&container.policy)
         .and_then(|()| {
             fs::write(
                 &file,
@@ -694,7 +791,8 @@ pub fn set_path(
 pub fn expire_grants(tools: &Tools) -> Vec<(String, PathBuf)> {
     let now = now();
     let mut taken = Vec::new();
-    let Ok(entries) = fs::read_dir(&tools.sandboxes) else {
+    migrate_policy(tools);
+    let Ok(entries) = fs::read_dir(tools.config.join(POLICY_DIR).join("sandboxes")) else {
         return taken;
     };
     for entry in entries.flatten() {
@@ -982,9 +1080,9 @@ pub fn set_network(tools: &Tools, selector: &str, network: &Network) -> Result<(
             ));
         }
     }
-    fs::create_dir_all(&container.dir)
-        .map_err(|e| format!("не создать {}: {e}", container.dir.display()))?;
-    let path = container.dir.join(FILE);
+    fs::create_dir_all(&container.policy)
+        .map_err(|e| format!("не создать {}: {e}", container.policy.display()))?;
+    let path = container.policy.join(FILE);
     let mut conf: Vec<(String, String)> = fs::read_to_string(&path)
         .map(|t| parse_conf(&t))
         .unwrap_or_default();
@@ -1010,9 +1108,9 @@ pub fn set_x11(tools: &Tools, selector: &str, on: bool) -> Result<(), String> {
             "x11 контейнера {selector} задан в Nix — меняется там"
         ));
     }
-    fs::create_dir_all(&container.dir)
-        .map_err(|e| format!("не создать {}: {e}", container.dir.display()))?;
-    let path = container.dir.join(FILE);
+    fs::create_dir_all(&container.policy)
+        .map_err(|e| format!("не создать {}: {e}", container.policy.display()))?;
+    let path = container.policy.join(FILE);
     let mut conf: Vec<(String, String)> = fs::read_to_string(&path)
         .map(|t| parse_conf(&t))
         .unwrap_or_default();
@@ -1148,6 +1246,54 @@ mod tests {
         assert_eq!(values(&conf, "app").collect::<Vec<_>>(), ["firefox", "tg"]);
     }
 
+    /// The old layout's policy files move to the policy directory once, and
+    /// what a program in a zone puts next to a container's data afterwards is
+    /// no policy: the move is marked done and never runs again.
+    #[test]
+    fn the_policy_moves_once_and_not_again() {
+        let base = std::env::temp_dir().join(format!("vz-policy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (config, profiles, sandboxes) = (
+            base.join("config"),
+            base.join("profiles"),
+            base.join("sandboxes"),
+        );
+        fs::create_dir_all(sandboxes.join("dev/trust")).unwrap();
+        fs::create_dir_all(profiles.join("work")).unwrap();
+        fs::write(sandboxes.join("dev/perms"), "downloads\n").unwrap();
+        fs::write(sandboxes.join("dev/paths"), "~/g\n").unwrap();
+        fs::write(sandboxes.join("dev/trust/a.pem"), "x").unwrap();
+        fs::write(profiles.join("work/container.conf"), "network = nl\n").unwrap();
+        // A place taken already keeps what is there.
+        let dev = policy_dir_in(&config, Home::Private, "dev");
+        fs::create_dir_all(&dev).unwrap();
+        fs::write(dev.join("paths"), "~/kept\n").unwrap();
+
+        migrate_policy_in(&config, &profiles, &sandboxes);
+        assert_eq!(
+            fs::read_to_string(dev.join("perms")).unwrap(),
+            "downloads\n"
+        );
+        assert!(dev.join("trust/a.pem").is_file());
+        assert_eq!(fs::read_to_string(dev.join("paths")).unwrap(), "~/kept\n");
+        assert!(!sandboxes.join("dev/perms").exists());
+        let work = policy_dir_in(&config, Home::Overlay, "work");
+        assert_eq!(
+            fs::read_to_string(work.join(FILE)).unwrap(),
+            "network = nl\n"
+        );
+
+        // Afterwards: a file next to the data is nobody's.
+        fs::write(
+            sandboxes.join("dev/container.conf"),
+            "network = unconfined\n",
+        )
+        .unwrap();
+        migrate_policy_in(&config, &profiles, &sandboxes);
+        assert!(!dev.join(FILE).exists(), "moved after the move was done");
+        let _ = fs::remove_dir_all(&base);
+    }
+
     fn container(network: Network, source: Source) -> Container {
         Container {
             name: "work".into(),
@@ -1165,6 +1311,7 @@ mod tests {
                 source: Source::Default,
             },
             dir: PathBuf::from("/s/work"),
+            policy: PathBuf::from("/c/containers/sandboxes/work"),
         }
     }
 
