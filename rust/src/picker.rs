@@ -235,6 +235,10 @@ pub struct Running {
 pub struct Memory {
     /// A live registry record for this program, if it is running somewhere.
     pub running: Option<Running>,
+    /// `.handover/<key>`: the program was seen handing a launch over to the
+    /// copy already running ([`HANDOVER`]) — a click on it while it runs
+    /// raises that copy's window, with no question.
+    pub hands_over: bool,
     /// `.pinned/<key>`, empty when the network is not pinned.
     pub pinned: String,
     /// `.pinnedprofile/<key>`, empty when the container is not pinned.
@@ -257,12 +261,14 @@ pub struct Memory {
 /// What the first (network) question resolves to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetStep {
-    /// The program is already running: a click on the shortcut of a running
-    /// program means "raise the window", not "start another one". Asking about
-    /// the network would be pointless — a program with one process per profile
-    /// hands the command to the instance that is already up and it stays in ITS
-    /// network — so it is started into the same place and no dialog is shown.
-    /// (`docs/GOTCHAS.md` §11)
+    /// The program is already running AND is known to hand a launch over to
+    /// the copy that is up ([`Memory::hands_over`]): a click on its shortcut
+    /// means "raise the window", not "start another one". Asking about the
+    /// network would be pointless — the command goes to the instance that is
+    /// already up and it stays in ITS network — so it is started into the
+    /// same place and no dialog is shown. A program not known to do that (a
+    /// terminal: every window its own process) is asked, with the network it
+    /// runs in chosen. (`docs/GOTCHAS.md` §11)
     Running { zone: String, selector: String },
     /// The network is pinned. `ask_container` is the case of a pinned network
     /// and a free container: the "change container" entry lives in the network
@@ -275,7 +281,7 @@ pub enum NetStep {
 /// The first decision, without touching anything.
 pub fn net_step(memory: &Memory) -> NetStep {
     if !memory.ask {
-        if let Some(running) = &memory.running {
+        if let Some(running) = memory.running.as_ref().filter(|_| memory.hands_over) {
             return NetStep::Running {
                 zone: running.zone.clone(),
                 selector: running.selector.clone(),
@@ -302,12 +308,37 @@ pub fn net_step(memory: &Memory) -> NetStep {
         }
     }
     NetStep::Ask {
-        default: if memory.last.is_empty() {
-            memory.fallback.clone()
-        } else {
-            memory.last.clone()
+        // Running already: where it runs is what Enter keeps.
+        default: match &memory.running {
+            Some(running) => crate::launch::network_name(&running.zone).to_owned(),
+            None if memory.last.is_empty() => memory.fallback.clone(),
+            None => memory.last.clone(),
         },
     }
+}
+
+/// How long a launch into the network the program already runs in is
+/// watched: a program that hands the launch over to the running copy
+/// (browsers, messengers, Electron) exits within it, with success; one that
+/// opens a window of its own (terminals) is still there.
+pub const HANDOVER_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Where [`Memory::hands_over`] is kept, one empty file per program.
+pub const HANDOVER: &str = ".handover";
+
+/// Whether a launch is watched for a hand-over ([`HANDOVER_WINDOW`]): the
+/// program runs, it is not known to hand over yet, and it is started into
+/// the network it runs in — the one case where the new process exiting at
+/// once can mean nothing else. Another network is not watched: there `run`
+/// warns first, and a cancel there exits with success too. Not from inside
+/// a zone either (`in_zone`): the launch is delegated to the host and the
+/// launcher returns at once.
+pub fn watch_handover(memory: &Memory, zone: &str, in_zone: bool) -> bool {
+    !in_zone
+        && !memory.hands_over
+        && memory.running.as_ref().is_some_and(|running| {
+            crate::launch::network_name(&running.zone) == crate::launch::network_name(zone)
+        })
 }
 
 /// The container of a launch: exactly the three variables the shell carried
@@ -901,18 +932,22 @@ fn ask_window(
             ProfileRow { name, busy_in }
         })
         .collect();
-    // In force: the pin, then the global setting, then the last choice.
+    // In force: the pin, then the global setting, then the running copy's,
+    // then the last choice.
     let current = if !memory.pinned_profile.is_empty() {
         memory.pinned_profile.clone()
     } else {
         match memory.default_profile.as_str() {
-            "ask" => memory.last_profile.clone(),
+            "ask" => match &memory.running {
+                Some(running) => running.selector.clone(),
+                None => memory.last_profile.clone(),
+            },
             "main" => String::new(),
             "own" => format!("{SANDBOX_PREFIX}app-{key}"),
             name => name.to_owned(),
         }
     };
-    let req = window::Request {
+    let mut req = window::Request {
         title: format!("Запуск: {label}"),
         notes: Vec::new(),
         // "Always" ticked for a pinned network starts on THAT network: on the
@@ -936,6 +971,15 @@ fn ask_window(
         pin_net: !memory.pinned.is_empty(),
         pin_container: !memory.pinned_profile.is_empty(),
     };
+    if let Some(running) = &memory.running {
+        let zone = launch::network_name(&running.zone);
+        let shown = req
+            .nets
+            .iter()
+            .find(|n| n.tag == zone)
+            .map_or(zone, |n| n.label.as_str());
+        req.notes.push(format!("Уже открыта: {shown}"));
+    }
 
     let mut child = Command::new(&tools.window)
         .stdin(Stdio::piped())
@@ -1212,7 +1256,7 @@ pub fn main() -> ExitCode {
             if launch::has_display() {
                 match ask_window(&tools, &key, &label, &default, &memory) {
                     Some(Some((zone, container))) => {
-                        return launch(&tools, &key, &zone, &container, &args.cmd)
+                        return launch_asked(&tools, &key, &zone, &container, &args.cmd, &memory)
                     }
                     Some(None) => return ExitCode::SUCCESS,
                     None => {}
@@ -1306,7 +1350,7 @@ pub fn main() -> ExitCode {
         if launch::has_display() {
             match ask_window(&tools, &key, &label, &zone_choice, &memory) {
                 Some(Some((zone, container))) => {
-                    return launch(&tools, &key, &zone, &container, &args.cmd)
+                    return launch_asked(&tools, &key, &zone, &container, &args.cmd, &memory)
                 }
                 Some(None) => return ExitCode::SUCCESS,
                 None => {}
@@ -1329,7 +1373,7 @@ pub fn main() -> ExitCode {
         )
     };
 
-    launch(&tools, &key, &zone_choice, &container, &args.cmd)
+    launch_asked(&tools, &key, &zone_choice, &container, &args.cmd, &memory)
 }
 
 /// `autostart.unassigned`: the declared setting, then the local one; `ask` by
@@ -1444,8 +1488,19 @@ fn read_memory(tools: &Tools, key: &str) -> Memory {
         pinned_profile.clear();
     }
 
+    let running = running_records(state, key);
+    // Two copies alive at once: whatever handed over once, this program runs
+    // side by side (two containers of one browser, or a wrong guess) — ask
+    // again.
+    let handover_path = state.join(HANDOVER).join(key);
+    let mut hands_over = handover_path.is_file();
+    if hands_over && running.len() > 1 {
+        let _ = fs::remove_file(&handover_path);
+        hands_over = false;
+    }
     let mut memory = Memory {
-        running: running_record(state, key),
+        running: running.into_iter().next(),
+        hands_over,
         pinned,
         pinned_profile,
         last: crate::launch::network_name(
@@ -1473,31 +1528,31 @@ fn read_memory(tools: &Tools, key: &str) -> Memory {
     memory
 }
 
-/// Where is this program running right now? The first live record found, over
-/// every container's registry directory.
-fn running_record(state: &Path, key: &str) -> Option<Running> {
+/// Where is this program running right now? Every live record, over every
+/// container's registry directory; the first one is where a click goes.
+fn running_records(state: &Path, key: &str) -> Vec<Running> {
     let running = state.join(".running");
+    let mut out = Vec::new();
     for dir in registry::dirs(&running) {
         let Ok(text) = fs::read_to_string(dir.join(key)) else {
             continue;
         };
-        if let Some(record) = text
-            .lines()
-            .filter_map(registry::parse_record)
-            // This one starts a click into that network without a question:
-            // only a launch that is certainly still this process counts
-            // (`registry::STARTED`), not whatever holds its number now — and
-            // only one the user started, not one a program in a zone asked
-            // for under an id of its choosing.
-            .find(|r| registry::launched_here(&running, r.pid))
-        {
-            return Some(Running {
-                zone: record.zone,
-                selector: record.selector,
-            });
-        }
+        out.extend(
+            text.lines()
+                .filter_map(registry::parse_record)
+                // This one starts a click into that network without a
+                // question: only a launch that is certainly still this
+                // process counts (`registry::STARTED`), not whatever holds its
+                // number now — and only one the user started, not one a
+                // program in a zone asked for under an id of its choosing.
+                .filter(|r| registry::launched_here(&running, r.pid))
+                .map(|record| Running {
+                    zone: record.zone,
+                    selector: record.selector,
+                }),
+        );
     }
-    None
+    out
 }
 
 /// The zones that can be started into: a directory with a config in it.
@@ -1895,6 +1950,65 @@ fn launch(
     container: &Container,
     cmd: &[OsString],
 ) -> ExitCode {
+    let argv = launch_argv(tools, key, zone_choice, container, cmd);
+    let e = exec_command(&argv);
+    eprintln!("не удалось запустить {}: {e}", tools.runner.display());
+    ExitCode::from(EXIT_NOT_STARTED)
+}
+
+/// [`launch`] of an answer the person gave, watched for a hand-over when
+/// [`watch_handover`] says so: the program is then started as a child
+/// instead of in place. Gone within [`HANDOVER_WINDOW`], with success: it
+/// handed the launch to the copy that runs, and [`HANDOVER`] remembers that —
+/// the next click on it while it runs raises that copy with no question, as
+/// every click on a running program did before. Still there: the picker
+/// leaves, and the program goes on without it.
+fn launch_asked(
+    tools: &Tools,
+    key: &str,
+    zone_choice: &str,
+    container: &Container,
+    cmd: &[OsString],
+    memory: &Memory,
+) -> ExitCode {
+    let in_zone = std::env::var_os(launch::ENV_CURRENT).is_some_and(|v| !v.is_empty());
+    if !watch_handover(memory, zone_choice, in_zone) {
+        return launch(tools, key, zone_choice, container, cmd);
+    }
+    let argv = launch_argv(tools, key, zone_choice, container, cmd);
+    let mut child = match Command::new(&argv[0]).args(&argv[1..]).spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("не удалось запустить {}: {e}", tools.runner.display());
+            return ExitCode::from(EXIT_NOT_STARTED);
+        }
+    };
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    let dir = tools.state.join(HANDOVER);
+                    let _ = fs::create_dir_all(&dir).and_then(|()| fs::write(dir.join(key), ""));
+                }
+                return ExitCode::from(status.code().map_or(1, |c| c as u8));
+            }
+            Ok(None) if started.elapsed() < HANDOVER_WINDOW => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            _ => return ExitCode::SUCCESS,
+        }
+    }
+}
+
+/// The `run` command line of a launch, with the environment it needs.
+fn launch_argv(
+    tools: &Tools,
+    key: &str,
+    zone_choice: &str,
+    container: &Container,
+    cmd: &[OsString],
+) -> Vec<OsString> {
     // The shortcut's key is also the app-id the compositor restriction and the
     // sandbox permissions are keyed by. (`docs/GOTCHAS.md` §6, §7)
     std::env::set_var(launch::ENV_APPID, key);
@@ -1917,10 +2031,7 @@ fn launch(
         other => other,
     };
 
-    let argv = run_argv(&tools.runner, zone, container, cmd);
-    let e = exec_command(&argv);
-    eprintln!("не удалось запустить {}: {e}", tools.runner.display());
-    ExitCode::from(EXIT_NOT_STARTED)
+    run_argv(&tools.runner, zone, container, cmd)
 }
 
 #[cfg(test)]
@@ -2166,12 +2277,13 @@ mod tests {
     }
 
     #[test]
-    fn a_running_program_is_started_where_it_already_runs() {
+    fn a_running_program_that_hands_over_is_started_where_it_already_runs() {
         let mut m = memory();
         m.running = Some(Running {
             zone: "nl".to_owned(),
             selector: "sb:work".to_owned(),
         });
+        m.hands_over = true;
         // Even a pin does not get a say: the window is going to be raised by the
         // process that is already up.
         m.pinned = "de".to_owned();
@@ -2187,9 +2299,72 @@ mod tests {
         assert_eq!(
             net_step(&m),
             NetStep::Ask {
-                default: "offline".to_owned()
+                default: "nl".to_owned()
             }
         );
+    }
+
+    /// A terminal opened in a zone left every next one in that zone with no
+    /// question (owner, 2026-09-25): a program not known to hand over is
+    /// asked, with the network it runs in chosen — and its pin still holds.
+    #[test]
+    fn a_running_program_not_known_to_hand_over_is_asked() {
+        let mut m = memory();
+        m.last = "de".to_owned();
+        m.running = Some(Running {
+            zone: "nl".to_owned(),
+            selector: String::new(),
+        });
+        assert_eq!(
+            net_step(&m),
+            NetStep::Ask {
+                default: "nl".to_owned()
+            }
+        );
+        // The host's network under its old name is chosen as the new one.
+        m.running = Some(Running {
+            zone: "direct".to_owned(),
+            selector: String::new(),
+        });
+        assert_eq!(
+            net_step(&m),
+            NetStep::Ask {
+                default: "unconfined".to_owned()
+            }
+        );
+        m.pinned = "de".to_owned();
+        assert_eq!(
+            net_step(&m),
+            NetStep::Pinned {
+                zone: "de".to_owned(),
+                ask_container: true
+            }
+        );
+    }
+
+    /// Only a launch into the network the program runs in is watched, only
+    /// while it is not known to hand over, and never from inside a zone.
+    #[test]
+    fn a_hand_over_is_watched_for_only_where_it_can_be_told() {
+        let mut m = memory();
+        assert!(!watch_handover(&m, "nl", false), "not running");
+        m.running = Some(Running {
+            zone: "nl".to_owned(),
+            selector: String::new(),
+        });
+        assert!(watch_handover(&m, "nl", false));
+        assert!(
+            !watch_handover(&m, "de", false),
+            "another network: run warns"
+        );
+        assert!(!watch_handover(&m, "nl", true), "delegated from a zone");
+        m.running = Some(Running {
+            zone: "direct".to_owned(),
+            selector: String::new(),
+        });
+        assert!(watch_handover(&m, "unconfined", false));
+        m.hands_over = true;
+        assert!(!watch_handover(&m, "unconfined", false), "known already");
     }
 
     #[test]
@@ -2205,12 +2380,17 @@ mod tests {
                 ask_container: false
             }
         );
-        // A running instance still wins: its window is raised where it is.
+        // A running instance that hands over still wins: its window is
+        // raised where it is.
         m.running = Some(Running {
             zone: "nl".to_owned(),
             selector: "work".to_owned(),
         });
+        m.hands_over = true;
         assert!(matches!(net_step(&m), NetStep::Running { .. }));
+        // One that does not: the container's network, no question.
+        m.hands_over = false;
+        assert!(matches!(net_step(&m), NetStep::Pinned { .. }));
         // And VPN_ZONE_ASK still opens the dialog.
         m.running = None;
         m.ask = true;

@@ -234,8 +234,10 @@ bwrap binds recursively, so what steps 1–3 mounted is what the sandbox sees.
 
 Resolution order for a launch of program `P`:
 
-1. a running instance of `P` (by launcher id): the same container — clicking a
-   running program means "raise the window" ([GOTCHAS](GOTCHAS.md) §11);
+1. a running instance of `P` (by launcher id) of a program seen handing a
+   launch over to its running copy: the same container — clicking such a
+   program means "raise the window" ([GOTCHAS](GOTCHAS.md) §11); any other
+   running program is asked, with its network and container chosen;
 2. an assignment from Nix (`programs.cellward.containers.<c>.apps`);
 3. a local assignment (made in the picker);
 4. `defaults.container`: `own` — a new private container named after the

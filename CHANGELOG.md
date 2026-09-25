@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- **A running terminal no longer takes every next one into its network**
+  (`rust/src/picker.rs`, the owner, 2026-09-25). A click on a running
+  program started it where it ran, with no question — right for a browser or
+  a messenger, which hand the launch over to the copy that is up, and wrong
+  for a terminal, whose every window is a process of its own: one Alacritty
+  opened in a zone left each next one there. Now a running program is asked,
+  with the network and container it runs in chosen (Enter keeps them) and a
+  note of where it is open. A launch into that same network is watched for
+  five seconds: a program that exits in them with success handed the launch
+  over, and is remembered (`.handover/<id>` in the state) — from then on a
+  click on it while it runs raises it with no question, as before. So a
+  browser or a messenger is asked once more after this update, and never
+  again; two copies of one program alive at once drop the mark.
 - **A program with OpenAL sound hung in a hermetic zone without the WirePlumber
   policy** (`rust/src/pw_context.rs`, found on the owner's machine 2026-09-25:
   AyuGram never showed a window, and every new launch queued behind the hung

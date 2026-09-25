@@ -475,10 +475,11 @@ fn asking_the_network_again_drops_the_pin_and_keeps_the_pinned_container() {
 }
 
 #[test]
-fn a_running_program_is_started_where_it_already_runs_without_a_word() {
-    // A click on a running program means "raise the window". The selector is
-    // read back too: without it the program came back "bare", with its network
-    // remembered and its sandbox lost.
+fn a_running_program_that_hands_over_is_started_where_it_already_runs_without_a_word() {
+    // A click on a running program that hands a launch over to the copy that
+    // is up means "raise the window". The selector is read back too: without
+    // it the program came back "bare", with its network remembered and its
+    // sandbox lost.
     let home = Home::new("running");
     home.zone("nl");
     let me = std::process::id() as i32;
@@ -487,6 +488,7 @@ fn a_running_program_is_started_where_it_already_runs_without_a_word() {
         &format!("{me} nl sb:work\n"),
     );
     vpn_zone::registry::note_start(&home.path("state/.running"), me, false).unwrap();
+    home.write("state/.handover/firefox", "");
     let out = home.run(&pick("firefox"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(home.asked().is_empty(), "{:?}", home.asked());
@@ -494,6 +496,53 @@ fn a_running_program_is_started_where_it_already_runs_without_a_word() {
         home.launched()[0],
         ["run", "nl", "--sandbox", "work", "--", "firefox", "%u"]
     );
+}
+
+#[test]
+fn a_running_program_is_asked_until_it_is_seen_handing_over() {
+    // A terminal opened in a zone left every next one there with no question
+    // (owner, 2026-09-25). Not known to hand over: asked, with the network it
+    // runs in chosen. Started there and gone at once with success — the
+    // stand-in runner does exactly that — it handed over, and is remembered.
+    let home = Home::new("running-ask");
+    home.zone("nl");
+    home.zone("de");
+    let me = std::process::id() as i32;
+    home.write("state/.running/__main__/firefox", &format!("{me} nl\n"));
+    vpn_zone::registry::note_start(&home.path("state/.running"), me, false).unwrap();
+    home.write("state/.last/firefox", "de\n");
+    home.answers(&["nl"]);
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(home.asked().len(), 1);
+    let asked = &home.asked()[0];
+    let default = asked.iter().position(|a| a == "--default").unwrap();
+    assert_eq!(asked[default + 1], "nl", "{asked:?}");
+    assert_eq!(home.launched()[0], ["run", "nl", "--", "firefox", "%u"]);
+    assert!(home.path("state/.handover/firefox").is_file());
+
+    // Into another network: not watched (`run` warns there, and its cancel
+    // exits with success too).
+    let other = Home::new("running-other");
+    other.zone("nl");
+    other.zone("de");
+    other.write("state/.running/__main__/alacritty", &format!("{me} nl\n"));
+    vpn_zone::registry::note_start(&other.path("state/.running"), me, false).unwrap();
+    other.answers(&["de"]);
+    let out = other.run(&pick("alacritty"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(other.launched()[0], ["run", "de", "--", "firefox", "%u"]);
+    assert!(!other.path("state/.handover/alacritty").exists());
+
+    // A launch that fails is no hand-over.
+    let failed = Home::new("running-failed");
+    failed.zone("nl");
+    failed.write("state/.running/__main__/firefox", &format!("{me} nl\n"));
+    vpn_zone::registry::note_start(&failed.path("state/.running"), me, false).unwrap();
+    failed.answers(&["nl"]);
+    let _ = failed.run(&pick("firefox"), &[("RUNNER_EXIT", "3")]);
+    assert_eq!(failed.launched().len(), 1);
+    assert!(!failed.path("state/.handover/firefox").exists());
 }
 
 #[test]
@@ -509,6 +558,7 @@ fn a_record_whose_number_went_to_another_process_does_not_skip_the_question() {
         "state/.running/__main__/firefox",
         &format!("{me} unconfined\n"),
     );
+    home.write("state/.handover/firefox", "");
     let out = home.run(&pick("firefox"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(home.asked().len(), 1, "no start time: asked");
