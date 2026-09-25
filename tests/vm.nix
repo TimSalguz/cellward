@@ -1143,6 +1143,15 @@ let
           out = in_zone(rzpid, "socat -T10 - TCP:10.99.0.1:8080")
           assert "peer=10.99.0.2" in out, f"server saw someone else: {out}"
 
+      # ping without raw sockets: the zone's own groups get the kernel's echo
+      # sockets (`zone::allow_ping`) — the owner's ping said "missing
+      # cap_net_raw" — and the echo goes where everything goes: the tunnel.
+      with subtest("ping works in a zone, through the tunnel"):
+          out = in_zone(rzpid, "cat /proc/sys/net/ipv4/ping_group_range")
+          assert out.split() != ["1", "0"], f"echo sockets still off: {out}"
+          out = in_zone(rzpid, "ping -c1 -W5 10.99.0.1")
+          assert " 0% packet loss" in out, out
+
       with subtest("DNS from the config: resolv.conf points into the tunnel and answers"):
           out = in_zone(rzpid, "cat /etc/resolv.conf")
           assert "nameserver 10.99.0.1" in out, out
