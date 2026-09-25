@@ -113,6 +113,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   "always" is not offered for a command with options; the question shows every
   word on its own line, without text-reordering characters, and a command too
   long to show whole is refused rather than cut.
+- **The sound filter closes a connection whose server offers a shared ring
+  buffer** (`ENABLE_SRBCHANNEL`): after it, commands would travel past the
+  filter. pipewire-pulse never offers one; a PulseAudio server would, and then
+  a zone gets no sound rather than an unfiltered one.
 - **Smaller**: PipeWire's unrestricted `pipewire-0-manager` is never bound
   into a zone; io_uring and userfaultfd answer ENOSYS in the sandbox; the TTY
   console's `x` and `k` take the key twice; `vpn-zone gc` signals through a

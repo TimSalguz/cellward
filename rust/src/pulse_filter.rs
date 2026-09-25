@@ -51,6 +51,11 @@ const COMMAND_ERROR: u32 = 0;
 const COMMAND_KILL_CLIENT: u32 = 48;
 const COMMAND_LOAD_MODULE: u32 = 51;
 const COMMAND_UNLOAD_MODULE: u32 = 52;
+/// A ring buffer in shared memory for the rest of the connection: after it,
+/// commands go through it and past this filter. pipewire-pulse refuses it
+/// (`do_error_access`, as `REGISTER_MEMFD_SHMID`); a PulseAudio server offers
+/// it — and then the connection is closed rather than filtered no more.
+const COMMAND_ENABLE_SRBCHANNEL: u32 = 101;
 /// `ERR_ACCESS`.
 const ERR_ACCESS: u32 = 1;
 
@@ -123,6 +128,7 @@ pub fn refused(command: u32) -> Option<&'static str> {
         COMMAND_LOAD_MODULE => Some("LOAD_MODULE"),
         COMMAND_UNLOAD_MODULE => Some("UNLOAD_MODULE"),
         COMMAND_KILL_CLIENT => Some("KILL_CLIENT"),
+        COMMAND_ENABLE_SRBCHANNEL => Some("ENABLE_SRBCHANNEL"),
         _ => None,
     }
 }
@@ -203,6 +209,14 @@ fn pump(from: &UnixStream, to: &Out, answer: Option<&Out>) -> io::Result<()> {
                     return Err(io::Error::other("descriptors in the middle of a frame"));
                 }
                 carried = marks.pop_front().map(|(_, f)| f).unwrap_or_default();
+            }
+            if answer.is_none()
+                && command_of(&frame).is_some_and(|(c, _)| c == COMMAND_ENABLE_SRBCHANNEL)
+            {
+                return Err(io::Error::other(
+                    "the sound server offers a shared ring buffer, which would carry commands \
+                     past this filter — the connection is closed",
+                ));
             }
             if let (Some(answer), Some((command, tag))) = (answer, command_of(&frame)) {
                 if let Some(what) = refused(command) {
@@ -329,6 +343,7 @@ mod tests {
             COMMAND_LOAD_MODULE,
             COMMAND_UNLOAD_MODULE,
             COMMAND_KILL_CLIENT,
+            COMMAND_ENABLE_SRBCHANNEL,
         ] {
             assert!(refused(cmd).is_some(), "{cmd}");
         }
