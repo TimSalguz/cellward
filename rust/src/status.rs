@@ -81,16 +81,19 @@ pub fn defaults(tools: &Tools) -> String {
     let (container, container_source) = setting(tools, "default-profile", "ask");
     let (mode, mode_source) = setting(tools, "mode", "picker");
     let (wayland, wayland_source) = setting(tools, "wayland-sandbox", "on");
+    // As `launch::proxy_wanted` decides it: only `off` switches it off.
+    let (proxy, proxy_source) = setting(tools, "wayland-proxy", "on");
     let (autostart, autostart_source) = setting(tools, "autostart", "ask");
     let (user_entries, user_entries_source) = setting(tools, "user-entries", "take-over");
     let (hermetic, hermetic_source) = crate::hermetic::default_setting(&tools.config);
     format!(
         "{{\"network\":{},\"container\":{},\"launcher_mode\":{},\"compositor_restriction\":{},\
-         \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{}}}",
+         \"wayland_proxy\":{},\"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{}}}",
         sourced_str(&network, network_source),
         sourced_str(&container, container_source),
         sourced_str(&mode, mode_source),
         sourced((wayland == "on").to_string(), wayland_source),
+        sourced((proxy.trim() != "off").to_string(), proxy_source),
         sourced_str(&autostart, autostart_source),
         sourced_str(&user_entries, user_entries_source),
         sourced(hermetic.to_string(), hermetic_source)
