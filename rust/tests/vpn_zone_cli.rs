@@ -1525,7 +1525,7 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
         "{json}"
     );
     assert!(
-        json.contains("\"microphone\":null,\"audio_manager\":null,"),
+        json.contains("\"microphone\":null,\"screencast\":null,\"audio_manager\":null,"),
         "{json}"
     );
     let out = home.run(&["audio-manager", "nl", "on"]);
@@ -1588,6 +1588,53 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     fs::remove_file(home.root.join("config/declared/microphone")).unwrap();
     assert!(home.run(&["microphone", "nl", "default"]).status.success());
     assert!(!home.state().join("nl/microphone").exists());
+    // The screen cast: ask by default, the zone's marker, Nix over it —
+    // next to the microphone in status; the host's own network has none.
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains(
+            "\"microphone\":{\"value\":\"ask\",\"source\":\"default\"},\
+             \"screencast\":{\"value\":\"ask\",\"source\":\"default\"}"
+        ),
+        "{json}"
+    );
+    let out = home.run(&["screencast", "nl", "no"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("недоступна"), "{}", stdout(&out));
+    assert_eq!(
+        fs::read_to_string(home.state().join("nl/screencast")).unwrap(),
+        "no"
+    );
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"screencast\":{\"value\":\"no\",\"source\":\"local\"}"),
+        "{json}"
+    );
+    // yes, in a hermetic zone: said to need the portal to know the zone,
+    // and to be ask in a file sandbox.
+    let out = home.run(&["screencast", "nl", "yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("запомнить"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("знает зону по имени"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(!stdout(&out).contains("не герметична"), "{}", stdout(&out));
+    assert!(!home.run(&["screencast", "nl", "maybe"]).status.success());
+    assert!(!home.run(&["screencast", "nowhere", "yes"]).status.success());
+    assert!(!home.run(&["screencast", "nl"]).status.success());
+    fs::write(home.root.join("config/declared/screencast"), "nl ask\n").unwrap();
+    let out = home.run(&["screencast", "nl", "no"]);
+    assert!(stdout(&out).contains("задано в Nix"), "{}", stdout(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"screencast\":{\"value\":\"ask\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    fs::remove_file(home.root.join("config/declared/screencast")).unwrap();
+    assert!(home.run(&["screencast", "nl", "default"]).status.success());
+    assert!(!home.state().join("nl/screencast").exists());
     // The pause after a refusal: a term within 30s…1d, Nix over it.
     let out = home.run(&["ask-again", "10m"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -1635,6 +1682,11 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("systemd --user"), "{}", stdout(&out));
     assert!(home.run(&["microphone", "nl", "default"]).status.success());
+    // Nor is its screen cast switch: no filter reads it there.
+    let out = home.run(&["screencast", "nl", "no"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("не герметична"), "{}", stdout(&out));
+    assert!(home.run(&["screencast", "nl", "default"]).status.success());
     // A local default, and a zone that follows it again.
     let out = home.run(&["hermetic", "--default", "on"]);
     assert!(out.status.success(), "{}", stderr(&out));

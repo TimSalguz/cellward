@@ -108,6 +108,11 @@ let
       offline = "no";
       agents = "ask";
     };
+    screencast = {
+      calls = "yes";
+      offline = "no";
+      agents = "ask";
+    };
     askAgainAfter = "10m";
     audioManager = [ "mixer" ];
     pipewirePolicy = true;

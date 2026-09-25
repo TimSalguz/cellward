@@ -34,6 +34,13 @@
 //! them in the zone needs the file brought along, which is the next step.
 //! Better nothing than the host.
 //!
+//! **Who the program is to the portal** (LEAK-MODEL §23): with
+//! `--portal-app`, each connection is registered with the portal as the zone
+//! before anything of the program's passes (`register`). **The screen cast
+//! switch** (`crate::screencast`): with `--zone`, each call of the ScreenCast
+//! portal is judged by the zone's switch as it is at that call
+//! (`screencast_verdict`).
+//!
 //! Every byte comes from the sandboxed program, so the parsing is
 //! `crate::dbus_wire`'s, bounds-checked throughout; a message that does not
 //! parse ends the connection. The filter dies with the sandbox launcher
@@ -104,7 +111,8 @@ const FILE_NOTICE: &str = "Программа из контейнера попр
      его из файлового менеджера или из самой программы.";
 
 /// `vpn-zone-core bus-filter --listen <socket> --upstream <socket> --opener <program>
-/// [--via-broker <zone>] [--portal-app <app-id>]`.
+/// [--via-broker <zone>] [--portal-app <app-id>]
+/// [--zone <zone> --zone-dir <dir> --config <dir>]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub listen: PathBuf,
@@ -124,12 +132,26 @@ pub struct Args {
     /// as the program's is (`refused`) — and that one has already registered
     /// the connection.
     pub portal_app: Option<String>,
+    /// `--zone`, `--zone-dir`, `--config`, all three or none: the zone whose
+    /// screen cast switch the filter reads for every call of the portal's
+    /// ScreenCast (`crate::screencast`), its state directory and
+    /// `~/.config/vpn-zones`. None: every cast asks, as before the switch.
+    pub zone: Option<ZoneArgs>,
+}
+
+/// The zone a filter reads the screen cast switch of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZoneArgs {
+    pub name: String,
+    pub dir: PathBuf,
+    pub config: PathBuf,
 }
 
 impl Args {
     pub fn parse(argv: &[OsString]) -> Result<Self, String> {
         let (mut listen, mut upstream, mut opener, mut via_broker) = (None, None, None, None);
         let mut portal_app = None;
+        let (mut zone, mut zone_dir, mut config) = (None, None, None);
         let mut it = argv.iter();
         while let Some(flag) = it.next() {
             let value = it
@@ -148,15 +170,32 @@ impl Args {
                         .ok_or("--portal-app is not an application id")?;
                     portal_app = Some(id.to_owned());
                 }
+                Some("--zone") => {
+                    zone = Some(
+                        value
+                            .to_str()
+                            .filter(|z| !z.is_empty())
+                            .ok_or("--zone is not a zone's name")?
+                            .to_owned(),
+                    )
+                }
+                Some("--zone-dir") => zone_dir = Some(value),
+                Some("--config") => config = Some(value),
                 _ => return Err(format!("unknown argument {}", flag.to_string_lossy())),
             }
         }
+        let zone = match (zone, zone_dir, config) {
+            (Some(name), Some(dir), Some(config)) => Some(ZoneArgs { name, dir, config }),
+            (None, None, None) => None,
+            _ => return Err("--zone, --zone-dir and --config go together".to_owned()),
+        };
         Ok(Self {
             listen: listen.ok_or("--listen is required")?,
             upstream: upstream.ok_or("--upstream is required")?,
             opener: opener.ok_or("--opener is required")?,
             via_broker,
             portal_app,
+            zone,
         })
     }
 }
@@ -330,6 +369,12 @@ fn answer_value(conn: &Conn, ctx: &Ctx, h: &Header, which: Door) -> io::Result<(
 /// sent to. Nothing when no reply is expected.
 fn deny(conn: &Conn, ctx: &Ctx, h: &Header, why: &str) -> io::Result<()> {
     eprintln!("bus-filter: refused — {why}");
+    error_reply(conn, ctx, h, "org.freedesktop.DBus.Error.AccessDenied", why)
+}
+
+/// The error `name` with the text `why` for a call, from where it was sent
+/// to. Nothing when no reply is expected.
+fn error_reply(conn: &Conn, ctx: &Ctx, h: &Header, name: &str, why: &str) -> io::Result<()> {
     if h.flags & wire::NO_REPLY_EXPECTED != 0 {
         return Ok(());
     }
@@ -340,7 +385,7 @@ fn deny(conn: &Conn, ctx: &Ctx, h: &Header, why: &str) -> io::Result<()> {
         .clone();
     let from = h.destination.clone().unwrap_or_else(|| PORTAL.to_owned());
     let mut fields = vec![
-        Field::ErrorName("org.freedesktop.DBus.Error.AccessDenied"),
+        Field::ErrorName(name),
         Field::ReplySerial(h.serial),
         Field::Sender(&from),
     ];
@@ -356,6 +401,70 @@ fn deny(conn: &Conn, ctx: &Ctx, h: &Header, why: &str) -> io::Result<()> {
         &body::string(&format!("{}: {why}", crate::dialog::APP)),
     );
     conn.send(&reply, &[])
+}
+
+/// The portal's own error for "not allowed".
+const NOT_ALLOWED: &str = "org.freedesktop.portal.Error.NotAllowed";
+
+/// What becomes of a call as the zone's screen cast switch has it
+/// (`crate::screencast`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Cast {
+    /// As before the switch: `SelectSources` without a remembered choice,
+    /// everything else as it is.
+    Pass,
+    /// `SelectSources` with the choice it may remember (`yes`, on a
+    /// connection the portal knows as the zone).
+    Remember,
+    /// Refused (`no`), and the text for the program.
+    Refuse(String),
+}
+
+/// The switch for one call, read now: a change applies to the next call.
+/// Only calls on the ScreenCast interface — one without an interface is
+/// refused already (`refused`) — and only with a zone to read the switch of.
+fn screencast_verdict(conn: &Conn, ctx: &Ctx, h: &Header) -> Cast {
+    use crate::screencast::{Setting, INTERFACE};
+    if h.kind != wire::METHOD_CALL || h.interface.as_deref() != Some(INTERFACE) {
+        return Cast::Pass;
+    }
+    let Some(policy) = &ctx.screencast else {
+        return Cast::Pass;
+    };
+    let (setting, source) = policy.setting();
+    match setting {
+        Setting::No => Cast::Refuse(policy.refused(source)),
+        Setting::Ask => Cast::Pass,
+        // Only the selection carries a choice to remember.
+        Setting::Yes if h.member.as_deref() != Some("SelectSources") => Cast::Pass,
+        Setting::Yes if identified(conn, ctx, h) => Cast::Remember,
+        Setting::Yes => {
+            if !ctx.told_unremembered.swap(true, Ordering::SeqCst) {
+                eprintln!(
+                    "bus-filter: zone {}: screen cast yes is ask on a connection the portal does \
+                     not know as the zone — no choice is kept for a nameless host application; \
+                     said once",
+                    policy.zone()
+                );
+            }
+            Cast::Pass
+        }
+    }
+}
+
+/// Whether a call goes to the portal that knows this connection as the zone
+/// (`register`): by that portal's unique name, or by the well-known one while
+/// that portal still owns it — one started since knows the connection by no
+/// name, and would keep the choice for the nameless host application.
+fn identified(conn: &Conn, ctx: &Ctx, h: &Header) -> bool {
+    let Some(portal) = conn.portal() else {
+        return false;
+    };
+    match h.destination.as_deref() {
+        Some(to) if to == portal => true,
+        Some(PORTAL) => portal_owner(&ctx.upstream).is_some_and(|owner| owner == portal),
+        _ => false,
+    }
 }
 
 /// Whether a link may be handed to the opener, and why not.
@@ -426,6 +535,10 @@ struct Ctx {
     /// filter, not once per connection — an old portal would say it for
     /// every program.
     told_register: AtomicBool,
+    /// The zone's screen cast switch, its directories held (`--zone`).
+    screencast: Option<crate::screencast::Policy>,
+    /// That `yes` was `ask` for want of an id has been said, once.
+    told_unremembered: AtomicBool,
     opens: Mutex<VecDeque<Instant>>,
     last_notice: Mutex<Option<Instant>>,
     serial: AtomicU32,
@@ -433,7 +546,7 @@ struct Ctx {
 }
 
 impl Ctx {
-    fn new(upstream: PathBuf, args: &Args) -> Self {
+    fn new(upstream: PathBuf, args: &Args, screencast: Option<crate::screencast::Policy>) -> Self {
         Self {
             upstream,
             opener: args.opener.clone(),
@@ -442,6 +555,8 @@ impl Ctx {
             hello_wait: HELLO_WAIT,
             register_wait: REGISTER_WAIT,
             told_register: AtomicBool::new(false),
+            screencast,
+            told_unremembered: AtomicBool::new(false),
             opens: Mutex::new(VecDeque::new()),
             last_notice: Mutex::new(None),
             serial: AtomicU32::new(1),
@@ -588,6 +703,11 @@ impl Conn {
             reg.stage = Stage::Closed;
         }
         self.settled.notify_all();
+    }
+
+    /// The portal that took the zone's id for this connection, if one did.
+    fn portal(&self) -> Option<String> {
+        self.registration().portal.clone()
     }
 }
 
@@ -763,6 +883,13 @@ pub fn run(args: &Args) -> u8 {
             return 1;
         }
     };
+    // The zone's directories for its screen cast switch, held before the
+    // socket appears: the holder waits for the socket and then covers the
+    // project's state in this very mount namespace.
+    let screencast = args
+        .zone
+        .as_ref()
+        .map(|z| crate::screencast::Policy::hold(&z.name, &z.dir, &z.config));
     let _ = fs::remove_file(&args.listen);
     let listener = match UnixListener::bind(&args.listen) {
         Ok(l) => l,
@@ -775,7 +902,7 @@ pub fn run(args: &Args) -> u8 {
         }
     };
     let _ = fs::set_permissions(&args.listen, fs::Permissions::from_mode(0o600));
-    let ctx = Arc::new(Ctx::new(upstream, args));
+    let ctx = Arc::new(Ctx::new(upstream, args, screencast));
     for client in listener.incoming() {
         let Ok(client) = client else {
             continue;
@@ -946,11 +1073,11 @@ fn auth_line_is_begin(line: &[u8]) -> bool {
 
 /// A call the host may have from a zone only rewritten: a notification
 /// (`dbus_wire::sanitized_notify`, `sanitized_portal_notification`) and a
-/// screen cast's choice of sources, which is not remembered
-/// (`sanitized_screencast_sources`). The message rewritten, an error for one
-/// the filter cannot read (refused, not passed on unread), `None` for
-/// anything else.
-fn rewritten(msg: &[u8], h: &Header) -> Option<Result<Vec<u8>, wire::WireError>> {
+/// screen cast's choice of sources, which is not remembered unless
+/// `remember` (`sanitized_screencast_sources`, `screencast_verdict`). The
+/// message rewritten, an error for one the filter cannot read (refused, not
+/// passed on unread), `None` for anything else.
+fn rewritten(msg: &[u8], h: &Header, remember: bool) -> Option<Result<Vec<u8>, wire::WireError>> {
     if h.kind != wire::METHOD_CALL {
         return None;
     }
@@ -965,7 +1092,7 @@ fn rewritten(msg: &[u8], h: &Header) -> Option<Result<Vec<u8>, wire::WireError>>
             wire::sanitized_portal_notification(msg, h)
         }
         (Some("org.freedesktop.portal.ScreenCast"), Some("SelectSources")) => {
-            wire::sanitized_screencast_sources(msg, h)
+            wire::sanitized_screencast_sources(msg, h, remember)
         }
         _ => return None,
     };
@@ -1063,17 +1190,23 @@ fn client_to_bus(
                 None if refused(&h).is_some() => {
                     deny(conn, ctx, &h, &refused(&h).unwrap_or_default())?
                 }
-                None => {
-                    let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
-                    match rewritten(&msg, &h) {
-                        // Passed on without what would point the host's daemon
-                        // at the network or at an application, or have the
-                        // screen shown again without a question.
-                        Some(Ok(message)) => send_all(up, &message, &raw)?,
-                        Some(Err(e)) => deny(conn, ctx, &h, &format!("call refused: {e}"))?,
-                        None => send_all(up, &msg, &raw)?,
+                // The zone's screen cast switch (`crate::screencast`): `no`
+                // refuses the call — and closes its descriptors.
+                None => match screencast_verdict(conn, ctx, &h) {
+                    Cast::Refuse(why) => error_reply(conn, ctx, &h, NOT_ALLOWED, &why)?,
+                    cast => {
+                        let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
+                        match rewritten(&msg, &h, cast == Cast::Remember) {
+                            // Passed on without what would point the host's
+                            // daemon at the network or at an application, or
+                            // have the screen shown again without a question
+                            // where the switch does not say so.
+                            Some(Ok(message)) => send_all(up, &message, &raw)?,
+                            Some(Err(e)) => deny(conn, ctx, &h, &format!("call refused: {e}"))?,
+                            None => send_all(up, &msg, &raw)?,
+                        }
                     }
-                }
+                },
             }
         }
     }
@@ -1674,13 +1807,14 @@ mod tests {
                 opener: PathBuf::new(),
                 via_broker: None,
                 portal_app: portal_app.map(str::to_owned),
+                zone: None,
             };
             Self {
                 // Generous: a busy runner must not make a test of the
                 // answered case a test of the timeout.
                 hello_wait: Duration::from_secs(10),
                 register_wait: Duration::from_secs(10),
-                ..Self::new(upstream, &args)
+                ..Self::new(upstream, &args, None)
             }
         }
     }
@@ -1870,7 +2004,7 @@ mod tests {
         conn: Arc<Conn>,
         ctx: Arc<Ctx>,
         serving: Option<thread::JoinHandle<()>>,
-        _stand: Stand,
+        stand: Stand,
     }
 
     impl Served {
@@ -1892,7 +2026,7 @@ mod tests {
                 conn,
                 ctx,
                 serving: Some(serving),
-                _stand: stand,
+                stand,
             }
         }
 
@@ -2177,5 +2311,279 @@ mod tests {
         );
         assert!(args(&["--portal-app", "not an id"]).is_err());
         assert!(args(&["--portal-app"]).is_err());
+        // The zone of the screen cast switch: all three, or none.
+        let zone = args(&["--zone", "nl", "--zone-dir", "/s/nl", "--config", "/c"]).unwrap();
+        assert_eq!(
+            zone.zone,
+            Some(ZoneArgs {
+                name: "nl".to_owned(),
+                dir: PathBuf::from("/s/nl"),
+                config: PathBuf::from("/c"),
+            })
+        );
+        assert!(args(&["--zone", "nl"]).is_err());
+        assert!(args(&["--zone-dir", "/s/nl", "--config", "/c"]).is_err());
+        assert!(args(&["--zone", "", "--zone-dir", "/s/nl", "--config", "/c"]).is_err());
+    }
+
+    // --- THE SCREEN CAST SWITCH ----------------------------------------------
+
+    const SCREENCAST: &str = crate::screencast::INTERFACE;
+
+    /// A zone's state and config directories, and its switch held on them.
+    struct ZoneDirs {
+        base: PathBuf,
+    }
+
+    impl ZoneDirs {
+        fn new(tag: &str) -> Self {
+            let base = std::env::temp_dir().join(format!(
+                "vpn-zone-bus-filter-cast-{tag}-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&base);
+            fs::create_dir_all(base.join("state/nl")).unwrap();
+            fs::create_dir_all(base.join("config/declared")).unwrap();
+            Self { base }
+        }
+
+        fn policy(&self) -> crate::screencast::Policy {
+            crate::screencast::Policy::hold(
+                "nl",
+                &self.base.join("state/nl"),
+                &self.base.join("config"),
+            )
+        }
+
+        fn write(&self, path: &str, text: &str) {
+            fs::write(self.base.join(path), text).unwrap();
+        }
+
+        fn journal(&self) -> String {
+            fs::read_to_string(self.base.join("state").join(crate::journal::FILE))
+                .unwrap_or_default()
+        }
+    }
+
+    impl Drop for ZoneDirs {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    /// `SelectSources(o, a{sv})` the way a program asking to be remembered
+    /// sends it: a token, a remembered choice, a restore token, the types.
+    fn select_sources(serial: u32, dest: &str) -> Vec<u8> {
+        fn pad(b: &mut Vec<u8>, n: usize) {
+            b.resize(b.len().next_multiple_of(n), 0);
+        }
+        fn string(b: &mut Vec<u8>, s: &str) {
+            pad(b, 4);
+            b.extend((s.len() as u32).to_le_bytes());
+            b.extend(s.as_bytes());
+            b.push(0);
+        }
+        fn entry(b: &mut Vec<u8>, key: &str, sig: &str) {
+            pad(b, 8);
+            string(b, key);
+            b.push(sig.len() as u8);
+            b.extend(sig.as_bytes());
+            b.push(0);
+        }
+        let mut b = Vec::new();
+        string(&mut b, "/org/freedesktop/portal/desktop/session/1_42/s");
+        pad(&mut b, 4);
+        let len_at = b.len();
+        b.extend([0; 4]);
+        pad(&mut b, 8);
+        let start = b.len();
+        entry(&mut b, "handle_token", "s");
+        string(&mut b, "t1");
+        entry(&mut b, "persist_mode", "u");
+        pad(&mut b, 4);
+        b.extend(2u32.to_le_bytes());
+        entry(&mut b, "restore_token", "s");
+        string(&mut b, "remembered");
+        entry(&mut b, "types", "u");
+        pad(&mut b, 4);
+        b.extend(1u32.to_le_bytes());
+        let len = (b.len() - start) as u32;
+        b[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
+        wire::message(
+            wire::METHOD_CALL,
+            0,
+            serial,
+            &[
+                Field::Path(PORTAL_PATH),
+                Field::Interface(SCREENCAST),
+                Field::Member("SelectSources"),
+                Field::Destination(dest),
+                Field::Signature("oa{sv}"),
+            ],
+            &b,
+        )
+    }
+
+    /// Whether a message the bus got asks for the choice to be remembered.
+    fn remembers(msg: &[u8]) -> (bool, bool) {
+        let has = |word: &[u8]| msg.windows(word.len()).any(|w| w == word);
+        (has(b"persist_mode"), has(b"restore_token"))
+    }
+
+    impl Served {
+        /// The program's connection up and — with an id — registered, the
+        /// portal `:1.7` answering; the program has its Hello's answer.
+        fn registered(&mut self) {
+            let mut first = AUTH.to_vec();
+            first.extend(hello(1));
+            self.program.send(&first, &[]);
+            self.authenticated();
+            let _ = self.bus.message();
+            self.bus.send(&reply_to(1, "org.freedesktop.DBus"), &[]);
+            if self.ctx.portal_app.is_some() {
+                let (msg, h, _) = self.bus.message();
+                assert_register(&msg, &h, REGISTER_SERIAL);
+                self.bus.send(&reply_to(REGISTER_SERIAL, ":1.7"), &[]);
+            }
+            let (_, h, _) = self.program.message();
+            assert_eq!(h.reply_serial, Some(1));
+        }
+
+        /// A call of the program's, and what the bus got of it.
+        fn through(&mut self, msg: &[u8]) -> Vec<u8> {
+            self.program.send(msg, &[]);
+            self.bus.message().0
+        }
+    }
+
+    /// The filter's own short connection (`portal_owner`), answered by the
+    /// stand-in: the portal's name is owned by `owner`.
+    fn answer_owner(stand: &Stand, owner: &str) {
+        let mut own = stand.accept();
+        assert!(own.line().starts_with(b"\0AUTH EXTERNAL "));
+        own.send(b"OK 0123456789abcdef\r\n", &[]);
+        assert_eq!(own.line(), b"BEGIN\r\n");
+        let (_, h, _) = own.message();
+        assert_eq!(h.member.as_deref(), Some("Hello"));
+        own.send(&reply_to(h.serial, "org.freedesktop.DBus"), &[]);
+        let (msg, h, _) = own.message();
+        assert_eq!(h.member.as_deref(), Some("GetNameOwner"));
+        assert_eq!(wire::body_string(&msg, &h).unwrap(), PORTAL);
+        own.send(
+            &wire::message(
+                wire::METHOD_RETURN,
+                wire::NO_REPLY_EXPECTED,
+                9,
+                &[Field::ReplySerial(h.serial), Field::Signature("s")],
+                &body::string(owner),
+            ),
+            &[],
+        );
+    }
+
+    /// The switch as it is at each call: `ask` strips the remembered
+    /// choice, `yes` on the zone's own connection keeps it, `no` refuses
+    /// every call of the interface with the portal's own error — the
+    /// program told why, the journal told, the bus told nothing — and Nix
+    /// over the zone's own word, at once.
+    #[test]
+    fn the_screen_cast_switch_is_read_for_every_call() {
+        let d = ZoneDirs::new("switch");
+        let policy = d.policy();
+        let mut s = Served::start("cast", Some("cellward.zone.nl"), |c| Ctx {
+            screencast: Some(policy),
+            ..c
+        });
+        s.registered();
+        // ask, the default.
+        let got = s.through(&select_sources(10, ":1.7"));
+        assert_eq!(remembers(&got), (false, false));
+        // yes: remembered, the token passed.
+        d.write("state/nl/screencast", "yes");
+        let got = s.through(&select_sources(11, ":1.7"));
+        assert_eq!(remembers(&got), (true, true));
+        // Other calls of the interface pass as they are.
+        let got = s.through(&method(12, ":1.7", SCREENCAST, "CreateSession", 0));
+        assert_eq!(wire::parse_header(&got).unwrap().serial, 12);
+        // no: refused, whatever the call.
+        d.write("state/nl/screencast", "no");
+        for (serial, member) in [(13, "CreateSession"), (14, "Start")] {
+            s.program
+                .send(&method(serial, PORTAL, SCREENCAST, member, 0), &[]);
+            let (msg, h, _) = s.program.message();
+            assert_eq!((h.kind, h.reply_serial), (wire::ERROR, Some(serial)));
+            assert_eq!(h.error_name.as_deref(), Some(NOT_ALLOWED));
+            let text = wire::body_string(&msg, &h).unwrap();
+            assert!(
+                text.contains("трансляция экрана выключена для зоны «nl»"),
+                "{text}"
+            );
+        }
+        s.program.send(&select_sources(15, ":1.7"), &[]);
+        let (_, h, _) = s.program.message();
+        assert_eq!((h.kind, h.reply_serial), (wire::ERROR, Some(15)));
+        assert!(s.bus.quiet(HELD), "a refused call went up");
+        // Once in the journal for the three: at most a line per ten seconds.
+        assert_eq!(d.journal().matches("\"event\":\"screencast\"").count(), 1);
+        // Nix over the zone's own word, at once.
+        d.write("config/declared/screencast", "nl ask\n");
+        let got = s.through(&select_sources(16, ":1.7"));
+        assert_eq!(remembers(&got), (false, false));
+        d.write("config/declared/screencast", "nl no\n");
+        s.program.send(&select_sources(17, ":1.7"), &[]);
+        let (msg, h, _) = s.program.message();
+        assert_eq!(h.reply_serial, Some(17));
+        assert!(wire::body_string(&msg, &h)
+            .unwrap()
+            .ends_with("(задано в Nix)"));
+    }
+
+    /// `yes` remembers only for the zone: not on a connection the portal
+    /// does not know as it, not for another name, not for a portal started
+    /// since the one that took the id — and for the one that did, by its
+    /// well-known name.
+    #[test]
+    fn yes_is_ask_where_the_portal_does_not_know_the_zone() {
+        let d = ZoneDirs::new("unknown");
+        d.write("state/nl/screencast", "yes");
+        // No id at all.
+        let policy = d.policy();
+        let mut s = Served::start("cast-anon", None, |c| Ctx {
+            screencast: Some(policy),
+            ..c
+        });
+        s.registered();
+        let got = s.through(&select_sources(10, PORTAL));
+        assert_eq!(remembers(&got), (false, false));
+        drop(s);
+
+        let policy = d.policy();
+        let mut s = Served::start("cast-known", Some("cellward.zone.nl"), |c| Ctx {
+            screencast: Some(policy),
+            ..c
+        });
+        s.registered();
+        // Another name than the portal that took the id.
+        let got = s.through(&select_sources(10, ":1.99"));
+        assert_eq!(remembers(&got), (false, false));
+        // By the well-known name: the portal that took it still owns it.
+        s.program.send(&select_sources(11, PORTAL), &[]);
+        answer_owner(&s.stand, ":1.7");
+        assert_eq!(remembers(&s.bus.message().0), (true, true));
+        // A portal started since: it knows the connection by no name.
+        s.program.send(&select_sources(12, PORTAL), &[]);
+        answer_owner(&s.stand, ":1.8");
+        assert_eq!(remembers(&s.bus.message().0), (false, false));
+        assert!(s.ctx.told_unremembered.load(Ordering::SeqCst));
+    }
+
+    /// Without a zone to read (a sandbox's own filter, an unconfined one),
+    /// every cast asks, as before the switch.
+    #[test]
+    fn without_a_zone_every_cast_asks() {
+        let mut s = Served::start("cast-none", Some("cellward.zone.nl"), |c| c);
+        s.registered();
+        let got = s.through(&select_sources(10, ":1.7"));
+        assert_eq!(remembers(&got), (false, false));
     }
 }

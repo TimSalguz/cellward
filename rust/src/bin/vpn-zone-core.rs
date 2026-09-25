@@ -140,12 +140,15 @@ Usage:
 
   vpn-zone-core bus-filter --listen S --upstream S --opener P
                            [--via-broker <zone>] [--portal-app <app-id>]
+                           [--zone <zone> --zone-dir <dir> --config <dir>]
         Internal: the sandbox's session bus in front of xdg-dbus-proxy. The
         portal's OpenURI is answered here and the link handed to the opener in
         the zone; OpenFile, OpenDirectory, ComposeEmail and file: links are
         answered as cancelled; everything else is passed on as it is.
         --portal-app: each connection is registered with the portal's host
         registry under this id before the program's first call passes.
+        --zone/--zone-dir/--config: the zone whose screen cast switch
+        (yes|no|ask) is read for every call of the ScreenCast portal.
 
   vpn-zone-core fs-sandbox-x11 [--xwayland P] <:display> -- cmd...
         Internal: what fs-sandbox runs INSIDE the sandbox when the x11

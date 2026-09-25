@@ -634,6 +634,7 @@ let
     "pipewirePolicy"
     "hostFilesWritable"
     "microphone"
+    "screencast"
     "askAgainAfter"
     "hermetic.default"
     "hermetic.exceptions"
@@ -836,6 +837,22 @@ in
       description = "Может ли программа зоны записывать микрофон (как разрешения в телефоне): имя зоны → yes (без вопроса), no (никогда) или ask — при первой записи программы зоны на хосте спрашивают: разрешить один раз, всегда или отказать. Зона без значения здесь и без своего (cellward microphone <зона> yes|no|ask) — ask; без графической сессии или без ответа за 25 с — отказ. «Всегда» — всей зоне, любой её программе: пишет yes в настройку зоны; для зоны, заданной здесь, его не предлагают. После отказа зону не спрашивают askAgainAfter (по умолчанию 3 минуты). Действует сразу, без перезапуска зоны. Звук, который играет хост (мониторы выходов), зоне не записать никогда. Путь PulseAudio и ограниченный PipeWire герметичной зоны (на нём ask — отказ: там не спрашивают); мимо — сырой pipewire-0 обычной зоны и зоны-менеджера звука (audioManager), а в негерметичной зоне и systemd --user хоста. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
+    screencast = lib.mkOption {
+      type = lib.types.attrsOf (
+        lib.types.enum [
+          "yes"
+          "no"
+          "ask"
+        ]
+      );
+      default = { };
+      example = {
+        calls = "yes";
+        offline = "no";
+      };
+      description = "Может ли программа зоны транслировать экран через портал: имя зоны → ask (по умолчанию: диалог портала каждый раз, запомнить выбор нельзя), no (каждый вызов портала ScreenCast — отказ с объяснением и строкой в cellward journal) или yes (выбор можно запомнить: следующую трансляцию портал начнёт без диалога). yes действует, только если портал знает зону по имени (xdg-desktop-portal 1.19+, docs/LEAK-MODEL.md §23), иначе — как ask, и в песочнице файлов (--fs-sandbox) тоже как ask. Действует сразу, без перезапуска зоны. Держит фильтр сессионной шины герметичной зоны: программы негерметичной зоны говорят с порталом напрямую, мимо этого переключателя. Без пересборки — cellward screencast <зона> yes|no|ask|default. Сами зоны в Nix не описываются: здесь только имена.";
+    };
+
     askAgainAfter = lib.mkOption {
       type = lib.types.nullOr askAgainTerm;
       default = null;
@@ -1003,6 +1020,10 @@ in
         message = "programs.cellward.microphone: имя зоны — непустое и без пробелов";
       }
       {
+        assertion = lib.all (z: builtins.match "[^[:space:]]+" z != null) (lib.attrNames cfg.screencast);
+        message = "programs.cellward.screencast: имя зоны — непустое и без пробелов";
+      }
+      {
         assertion = lib.all (z: z != "" && !(lib.hasInfix "\n" z)) (
           cfg.nixDaemon ++ cfg.hostFilesWritable ++ cfg.camera ++ cfg.audioManager
         );
@@ -1121,6 +1142,11 @@ in
     (lib.mkIf (cfg.microphone != { }) {
       ".config/vpn-zones/declared/microphone".text = lib.concatStrings (
         lib.mapAttrsToList (zone: value: "${zone} ${value}\n") cfg.microphone
+      );
+    })
+    (lib.mkIf (cfg.screencast != { }) {
+      ".config/vpn-zones/declared/screencast".text = lib.concatStrings (
+        lib.mapAttrsToList (zone: value: "${zone} ${value}\n") cfg.screencast
       );
     })
     (lib.mkIf (cfg.askAgainAfter != null) {

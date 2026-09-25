@@ -101,6 +101,7 @@ const VERBS: &[&str] = &[
     "host-files",
     "camera",
     "microphone",
+    "screencast",
     "ask-again",
     "audio-manager",
     "doctor",
@@ -124,6 +125,7 @@ const ZONE_VERBS: &[&str] = &[
     "host-files",
     "camera",
     "microphone",
+    "screencast",
     "audio-manager",
     "up",
     "down",
@@ -191,7 +193,9 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             "nix-daemon" if pos == 3 => strs(&mut out, &["on", "off", "default"]),
             "host-files" if pos == 3 => strs(&mut out, &["read-only", "writable", "default"]),
             "camera" | "audio-manager" if pos == 3 => strs(&mut out, &["on", "off", "default"]),
-            "microphone" if pos == 3 => strs(&mut out, &["yes", "no", "ask", "default"]),
+            "microphone" | "screencast" if pos == 3 => {
+                strs(&mut out, &["yes", "no", "ask", "default"])
+            }
             "ask-again" if pos == 2 => strs(&mut out, &["1m", "3m", "10m", "1h", "default"]),
             "hermetic" if pos == 3 => match word(2) {
                 "--default" => strs(&mut out, &["on", "off"]),
@@ -434,6 +438,11 @@ mod tests {
             complete(&["vpn-zone", "hermetic", "nl", "d"], 4),
             ["default"]
         );
+        assert_eq!(
+            complete(&["cellward", "screencast", "nl", ""], 4),
+            ["yes", "no", "ask", "default"]
+        );
+        assert_eq!(complete(&["cellward", "screencast", ""], 3), ["nl", "ru"]);
         assert_eq!(
             complete(&["vpn-zone", "container", "grant", ""], 4),
             ["sb:dev"]

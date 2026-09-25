@@ -2263,6 +2263,16 @@ fn start_session_filter(zone: &Zone) {
         // passes; the entry that names it was written as the zone came up.
         .arg("--portal-app")
         .arg(crate::desktop::zone_app_id(&zone.name()))
+        // The zone's screen cast switch (`crate::screencast`), read for every
+        // call through descriptors the filter opens before its socket
+        // appears — the project's state is covered right after that
+        // (`hide_project_state`).
+        .arg("--zone")
+        .arg(&*zone.name())
+        .arg("--zone-dir")
+        .arg(&zone.dir)
+        .arg("--config")
+        .arg(zone.home.join(CONFIG_SUBDIR))
         // Where the broker's socket is: the zone's runtime directory, once it
         // is sealed a moment from now.
         .env("XDG_RUNTIME_DIR", host_runtime_dir(zone))
