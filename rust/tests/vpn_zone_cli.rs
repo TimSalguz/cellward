@@ -1498,7 +1498,7 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
         "{json}"
     );
     assert!(
-        json.contains("\"host_files_writable\":null,\"microphone\":null,"),
+        json.contains("\"camera\":null,\"microphone\":null,"),
         "{json}"
     );
     let out = home.run(&["microphone", "nl", "no"]);
