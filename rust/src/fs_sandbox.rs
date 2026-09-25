@@ -1250,6 +1250,11 @@ pub fn run(args: Args) -> u8 {
         } else {
             Perms::default()
         };
+        // Outside a zone the store is writable; in one it is not, and the
+        // answer is kept for this launch only.
+        if let Some(dir) = perm_file.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
         if let Err(e) = fs::write(&perm_file, perms.render()) {
             eprintln!(
                 "fs-sandbox: cannot write {}: {e} — asking again next time",
