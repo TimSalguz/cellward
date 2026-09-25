@@ -1278,6 +1278,10 @@ let
           out = json.loads(alice("vpn-zone status --json"))
           herm = next(n for n in out["networks"] if n["name"] == "vmherm")["hermetic"]
           assert herm == {"value": True, "source": "nix"}, herm
+          # What the zone is let besides: nothing, until said.
+          zone = next(n for n in out["networks"] if n["name"] == "vmherm")
+          assert zone["nix_daemon"] == {"value": False, "source": "default"}, zone
+          assert zone["host_files_writable"] == {"value": False, "source": "default"}, zone
           assert out["defaults"]["hermetic"] == {"value": False, "source": "nix"}, out["defaults"]
           alice("sh -c '! vpn-zone hermetic vmherm off'")
           # The broker is socket-activated, and every zone wants its socket:

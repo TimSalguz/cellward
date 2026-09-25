@@ -136,7 +136,7 @@ pub fn networks(tools: &Tools) -> String {
         // 2026-09, may still be in a configuration or in Nix.
         "{\"name\":\"unconfined\",\"kind\":\"unconfined\",\"aliases\":[\"direct\"],\"source\":\"default\",\"up\":true,\
          \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"system_zone\":null}"
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"system_zone\":null}"
             .to_owned(),
     ];
     let mut offline_listed = false;
@@ -201,13 +201,23 @@ pub fn networks(tools: &Tools) -> String {
             let (on, source) = crate::hermetic::zone_setting(&dir, &tools.config, &name);
             sourced(on.to_string(), source)
         };
+        // What the zone is let besides (`vpn-zone nix-daemon`, `host-files`):
+        // in force when it next comes up, and from where.
+        let nix_daemon = {
+            let (on, source) = crate::hermetic::nix_daemon(&dir, &tools.config, &name);
+            sourced(on.to_string(), source)
+        };
+        let host_files_writable = {
+            let (on, source) = crate::hermetic::host_files_writable(&dir, &tools.config, &name);
+            sourced(on.to_string(), source)
+        };
         let source = if kind == "offline" {
             "default"
         } else {
             "local"
         };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"system_zone\":{system_zone}}}",
+            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"system_zone\":{system_zone}}}",
             string(&name),
             dir.join(NO_ESCAPE).exists()
         ));
@@ -216,7 +226,7 @@ pub fn networks(tools: &Tools) -> String {
         items.push(
             "{\"name\":\"offline\",\"kind\":\"offline\",\"aliases\":[],\"source\":\"default\",\"up\":false,\
              \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"system_zone\":null}"
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"system_zone\":null}"
                 .to_owned(),
         );
     }
