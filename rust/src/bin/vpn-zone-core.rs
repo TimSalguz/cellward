@@ -102,13 +102,17 @@ Usage:
         Regenerate the .desktop entries for the zones. <runner> and <picker>
         are the paths that end up in the generated Exec lines.
 
-  vpn-zone-core wl-sandbox <app-id> -- cmd...
+  vpn-zone-core wl-sandbox <app-id> [--zone <zone>] [--no-proxy] -- cmd...
         Run the command on a Wayland socket of its own, registered with the
         compositor as a sandbox (wp_security_context_v1): no screen capture,
         no background clipboard reads, no input emulation, no list of other
         windows. The socket goes into $XDG_RUNTIME_DIR/vpn-zones/wayland/<zone>/
         (--zone <zone> after <app-id>; unconfined without it), the directory a
-        zone gets bound in. Without the protocol — an older compositor, an X11 session —
+        zone gets bound in. A confined proxy listens there and passes the
+        program's connections on to the compositor, whose own sandbox socket
+        is in $XDG_RUNTIME_DIR/vpn-zones/wl-up/ (docs/WINDOW-FRAME.md);
+        --no-proxy lets the compositor listen on the zone's socket itself.
+        Without the protocol — an older compositor, an X11 session —
         the command is run as it is, with a warning on stderr.
 
   vpn-zone-core fs-sandbox [--bwrap P] [--dbus-proxy P] [--kdialog P]

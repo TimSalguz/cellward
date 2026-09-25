@@ -123,6 +123,15 @@ let
           machine.sleep(1)
           machine.fail("test -e /tmp/started")
 
+      def find(node, app_id):
+          if node.get("app_id") == app_id:
+              return node
+          for child in node.get("nodes", []) + node.get("floating_nodes", []):
+              found = find(child, app_id)
+              if found:
+                  return found
+          return None
+
       # The hotkey menu (docs/WINDOW-FRAME.md §7б): a program in a zone opens a
       # window; `focused` finds its launch through the compositor's IPC — the
       # pid of the window, up its parents to the registry —, and `window-menu`
@@ -137,6 +146,15 @@ let
               f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q foot",
               timeout=60,
           )
+          # The window came through wl-sandbox's Wayland proxy (§8): the
+          # compositor's pid of it is the proxy's, which runs on the host, not
+          # dumpable — and still the launch and its zone are found, through the
+          # supervisor the proxy is a child of.
+          tree = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r"))
+          foot = find(tree, "foot")
+          assert foot is not None, tree
+          comm = machine.succeed(f"cat /proc/{foot['pid']}/comm").strip()
+          assert comm == "vz-wl-proxy", comm
           out = alice(f"SWAYSOCK={swaysock} vpn-zone focused --json")
           assert '"zone":"offline"' in out and '"program":"foot"' in out, out
           out = alice(f"SWAYSOCK={swaysock} vpn-zone focused --bar")
@@ -158,15 +176,6 @@ let
 
       # The key of programs.vpn-zones.desktop.windowMenu.key, pressed on the
       # compositor: the menu comes up by itself, floating by the window rule.
-      def find(node, app_id):
-          if node.get("app_id") == app_id:
-              return node
-          for child in node.get("nodes", []) + node.get("floating_nodes", []):
-              found = find(child, app_id)
-              if found:
-                  return found
-          return None
-
       with subtest("the window menu's key of the module opens the menu, floating"):
           alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -M logo -M shift -k z -m shift -m logo")
           machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)

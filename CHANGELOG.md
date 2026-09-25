@@ -6,6 +6,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A Wayland proxy between a program and the compositor** (`wl-sandbox`,
+  `rust/src/wl_proxy.rs`; `docs/WINDOW-FRAME.md` §8, stage 1 of the window
+  frame — nothing is drawn yet). The compositor's sandbox socket
+  (`wp_security_context_v1`) now lives in `$XDG_RUNTIME_DIR/vpn-zones/wl-up/`
+  (0700, never bound into a zone), and a proxy process listens on the zone's
+  socket, the same path as before: each connection of the program gets a
+  connection of its own to the restricted socket, through the pinned crate
+  `wl-proxy` (`=0.1.4`), which keeps the two id spaces apart. The program sees
+  the same globals minus the hidden ones and nothing added: only the protocols
+  compiled in pass (the list in `rust/Cargo.toml` is the policy) — not
+  `wp_drm_lease_device_v1`, not what security-context exists to hide, not
+  NVIDIA's EGLStream or anything else unknown — and a bind to a name the
+  connection was never shown is refused. The proxy is confined: not dumpable,
+  an allow-list seccomp filter (no open, socket, connect, exec, fork,
+  executable memory; killed on anything else), `RLIMIT_NOFILE`/`RLIMIT_DATA`,
+  caps on connections, objects and globals, and a client that does not read
+  its events is not read either. It never connects anywhere itself: the
+  supervisor connects to the restricted listener and hands the descriptor
+  over. It lives while a connection is open (a terminal's child keeps its
+  window); after the program exits nothing new is accepted, as before. The
+  fallback: a proxy that cannot start leaves the compositor listening on the
+  zone's socket itself, as before, with a warning (`--no-proxy` asks for that);
+  a proxy that dies takes the program's display, never the unrestricted
+  socket. `vpn-zone focused` and `window-menu` find the launch of a window
+  whose pid is now the proxy's through its supervisor, and its network through
+  the supervisor's other children. Tests: the proxy between a real client
+  library and a fake compositor under its own filter, the supervised start in
+  a process of its own; VM: through the proxy and straight on sway's restricted
+  socket the same globals minus the policy's, the proxy confined and its
+  listener out of the zone, a foot window whose pid is the proxy's still named
+  by its zone and program.
 - **The window menu's key and our windows' rule, written by the module**
   (`programs.vpn-zones.desktop`): `windowMenu.key` in niri's notation,
   `floatWindows` (the launch window and the menu float, by the app id

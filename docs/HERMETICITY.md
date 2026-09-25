@@ -34,7 +34,9 @@ the zone gets it — not per launch):
 1. **tmpfs over `/run/user/<uid>`** — since `docs/LEAK-MODEL.md` §13 in EVERY
    zone, with the compositor's own `wayland-*` socket and its IPC never bound
    back; the restricted Wayland socket is made per launch by `wl-sandbox` on
-   the host, in the zone's `vpn-zones/wayland/<zone>/`. A hermetic zone gets
+   the host, in the zone's `vpn-zones/wayland/<zone>/`, and served there by its
+   confined proxy (`docs/WINDOW-FRAME.md` §8) — the compositor's own sandbox
+   socket is in `vpn-zones/wl-up/`, which no zone has. A hermetic zone gets
    bound back PipeWire, PulseAudio,
    and two sockets of ours: a **filtered session bus** (`xdg-dbus-proxy`) and
    the **broker**. `systemd/private` is not bound back.
