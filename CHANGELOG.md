@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- **A program with OpenAL sound hung in a hermetic zone without the WirePlumber
+  policy** (`rust/src/pw_context.rs`, found on the owner's machine 2026-09-25:
+  AyuGram never showed a window, and every new launch queued behind the hung
+  one). The zone's `pipewire-0` took a connection and closed it at once while
+  there was no policy; OpenAL Soft (Telegram Desktop and its forks, games)
+  connects, then waits for its first reply forever when the connection closes
+  under it. The socket now does not listen until it is first handed to the
+  daemon: a program's `connect` is refused, and it takes the pulse path at
+  once. Once the policy has been there, a connection that comes while it is
+  gone (WirePlumber restarting) is still taken and closed — a socket cannot
+  stop listening. Applies to a zone started after the update.
 - **Nothing could be launched into a zone that an update left running**
   (`rust/src/cli.rs` `zone_pid`, found on the owner's machine 2026-09-25). An
   update keeps running zones (`X-SwitchMethod=keep-old`, below), but a holder

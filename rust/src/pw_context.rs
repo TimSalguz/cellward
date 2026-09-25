@@ -34,15 +34,18 @@
 //! announces itself with the key [`POLICY_KEY`] = [`POLICY_VERSION`] in the
 //! metadata object [`METADATA`] it makes. Only then is the socket handed to
 //! the daemon ([`wanted`]). Until then — no WirePlumber, a stock one, one
-//! restarted without the script — a connection to the zone's socket is taken
-//! here and closed at once: the zone has only the pulse path, and a program
-//! learns that at once instead of hanging in the backlog. When the key goes
+//! restarted without the script — the socket does not even listen: a
+//! program's `connect` is refused, the zone has only the pulse path, and the
+//! program learns that at once. (Taking the connection and closing it hung
+//! OpenAL Soft for good — [`listen`].) When the key goes
 //! (WirePlumber restarted), the context is closed: the daemon stops
 //! listening AND destroys every client that came through it
 //! (`module-protocol-native`: a broken `close_fd` destroys the server, and
 //! the server its clients). Fail-closed by construction — no permission a
 //! policy gave outlives the policy; the zone's programs connect again, to a
-//! socket that is closed until the policy is back.
+//! socket that takes and closes each connection until the policy is back (a
+//! socket cannot stop listening once it has: for the moments WirePlumber
+//! restarts).
 //!
 //! **The daemon restarts**: this process keeps its own descriptor of the
 //! socket, so the socket stays bound and listening; this process connects
@@ -74,7 +77,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -611,9 +614,9 @@ pub enum State {
     /// Handed to the daemon: the zone's programs reach PipeWire through the
     /// policy.
     Active,
-    /// The daemon is there, the policy is not: connections are closed.
+    /// The daemon is there, the policy is not: connections are refused.
     NoPolicy,
-    /// No daemon to reach: connections are closed.
+    /// No daemon to reach: connections are refused.
     NoPipewire,
 }
 
@@ -913,6 +916,7 @@ impl<'a> Session<'a> {
                     p
                 }
             };
+            start_listening(self.listener)?;
             let (read_end, write_end) = crate::sys::pipe()?;
             let props = context_props(self.zone, self.instance);
             let props: Vec<(&str, &str)> = props.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -1032,7 +1036,7 @@ fn serve(
     let mut next_tick = Instant::now();
     loop {
         let mut fds = vec![s.stream.as_raw_fd()];
-        if s.context.is_none() {
+        if s.context.is_none() && is_listening(listener) {
             fds.push(listener.as_raw_fd());
         }
         let wait = next_tick.saturating_duration_since(Instant::now());
@@ -1066,16 +1070,86 @@ fn write_state(zone_dir: &Path, state: State, last: &mut Option<State>) {
     }
 }
 
-/// The zone's listening socket, 0600 (in the zone's directory, which is the
-/// user's and closed anyway), and not blocking: a flag of the open file that
-/// the daemon's copy shares, and the daemon's loop must never block in
+/// The zone's socket, 0600 (in the zone's directory, which is the user's and
+/// closed anyway), bound and NOT listening yet: until the socket is first
+/// handed to the daemon ([`start_listening`]), a program's `connect` is
+/// refused at once and it takes the pulse path. Taking the connection and
+/// closing it was a hang: OpenAL Soft (Telegram Desktop and its forks,
+/// games) connects, then waits for its first `done` forever when the
+/// connection closes under it (found on the owner's machine, 2026-09-25,
+/// without the policy installed). Not blocking: a flag of the open file
+/// that the daemon's copy shares, and the daemon's loop must never block in
 /// `accept`.
 fn listen(path: &Path) -> io::Result<UnixListener> {
     let _ = fs::remove_file(path);
-    let listener = UnixListener::bind(path)?;
+    let bytes = path.as_os_str().as_encoded_bytes();
+    // SAFETY: sockaddr_un is plain data.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    if bytes.len() >= addr.sun_path.len() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path too long"));
+    }
+    for (slot, byte) in addr.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    // SAFETY: plain constants.
+    let raw = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            0,
+        )
+    };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a fresh descriptor of ours.
+    let sock = unsafe { OwnedFd::from_raw_fd(raw) };
+    let len = (std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1) as libc::socklen_t;
+    // SAFETY: a valid descriptor and an address of the length given.
+    let rc = unsafe {
+        libc::bind(
+            sock.as_raw_fd(),
+            (&addr as *const libc::sockaddr_un).cast(),
+            len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    listener.set_nonblocking(true)?;
-    Ok(listener)
+    Ok(UnixListener::from(sock))
+}
+
+/// Start listening on the zone's socket, right before it is handed to the
+/// daemon. It cannot stop again: once the policy has been there, a
+/// connection that comes while it is gone is taken and closed
+/// ([`refuse_waiting`]) — only for the moments WirePlumber restarts, and the
+/// socket is handed out again when it is back.
+fn start_listening(listener: &UnixListener) -> io::Result<()> {
+    // SAFETY: a descriptor we hold.
+    if unsafe { libc::listen(listener.as_raw_fd(), 128) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Whether the socket listens: a stream socket that does not is "hung up"
+/// to `poll`, and its `accept` fails — polled, it would spin.
+fn is_listening(listener: &UnixListener) -> bool {
+    let mut value: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: a descriptor we hold and an int of the length given.
+    let rc = unsafe {
+        libc::getsockopt(
+            listener.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_ACCEPTCONN,
+            (&mut value as *mut libc::c_int).cast(),
+            &mut len,
+        )
+    };
+    rc == 0 && value != 0
 }
 
 pub fn run(args: &Args) -> u8 {
@@ -1137,7 +1211,12 @@ pub fn run(args: &Args) -> u8 {
             )),
         }
         write_state(&args.zone_dir, State::NoPipewire, &mut last_state);
-        // Until the daemon is back, what connects is closed.
+        // Until the daemon is back, what connects is refused — by the
+        // socket itself if it never listened, else closed here.
+        if !is_listening(&listener) {
+            std::thread::sleep(TICK);
+            continue;
+        }
         let until = Instant::now() + TICK;
         while let Ok(ready) = poll_in(
             &[listener.as_raw_fd()],
@@ -1513,6 +1592,15 @@ mod tests {
         let listener = listen(&path).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+        // Before the policy the socket does not listen: a program is refused
+        // at once, and does not wait on a connection that closes under it.
+        assert!(!is_listening(&listener));
+        let refused = UnixStream::connect(&path).unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            io::ErrorKind::ConnectionRefused,
+            "{refused}"
+        );
         let (helper, daemon) = UnixStream::pair().unwrap();
         let (states_tx, states_rx) = mpsc::channel();
         let handle = thread::spawn(move || {
@@ -1577,6 +1665,10 @@ mod tests {
         let (m, _) = d.next();
         assert_eq!((m.id, m.opcode), (CORE, CORE_PONG));
         assert!(states_rx.try_iter().all(|s| s == State::NoPolicy));
+        assert_eq!(
+            UnixStream::connect(&path).unwrap_err().kind(),
+            io::ErrorKind::ConnectionRefused
+        );
 
         d.property(3, POLICY_KEY, Some(POLICY_VERSION));
         // The microphone again, BEFORE the socket goes out: the policy sees
