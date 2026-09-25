@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- **An update no longer cuts running zones off the network**
+  (`module/default.nix`, `module/nixos.nix`, `tests/harness.nix`
+  `keepOnSwitch`). home-manager's sd-switch restarted a zone whose unit had
+  changed — every cellward update did — and a restarted holder left the
+  zone's programs in a namespace without its tunnel until they were started
+  again. `vpn-zone@` and the broker's socket now say `X-SwitchMethod=keep-old`
+  (the socket is carried into zones when they come up: a new one would not
+  reach the running ones); a system zone's tunnel (`vpn-zone-system@`) is not
+  restarted by `nixos-rebuild` either, like its namespace already was. sd-switch
+  reads this from the NEW unit, so the first update to this version already
+  leaves running zones alone. A zone takes the new build when it is restarted;
+  the holder's own fixes apply from then.
+
 ### Changed (read before updating)
 - **The project is cellward now** (formerly vpn-zones; the owner's decision
   of 2026-09-25). The flake is `github:TimSalguz/cellward`; the old URL

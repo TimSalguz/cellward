@@ -7,7 +7,7 @@
 # Использование:
 #   nix-instantiate tests/harness.nix -A activationPackage        # только eval
 #   nix-build tests/harness.nix -A scripts.cellward               # адресная сборка
-#   nix-instantiate --eval --strict tests/harness.nix -A oldNames -A singleEntry
+#   nix-instantiate --eval --strict tests/harness.nix -A oldNames -A singleEntry -A keepOnSwitch
 #   nix-build tests/harness.nix -A zoneHolder \
 #     --argstr username "$(id -un)" --argstr homeDirectory "$HOME"
 {
@@ -328,6 +328,29 @@ in
 
   # What the single entry turns on, what it leaves to an explicit choice, and
   # that a machine with it evaluates:
+  # An update leaves running zones alone: home-manager's sd-switch keeps a
+  # running zone and the broker's socket as they are, and NixOS's switch
+  # does not restart a system zone's namespace or its tunnel — otherwise the
+  # programs in a zone lose the network on every update.
+  #   nix-instantiate --eval --strict tests/harness.nix -A keepOnSwitch
+  keepOnSwitch =
+    let
+      u = hmDeclared.config.systemd.user;
+      s = entry.config.systemd.services;
+    in
+    lib.all lib.id [
+      (expect "a running zone is restarted by a switch" (
+        u.services."vpn-zone@".Unit.X-SwitchMethod == "keep-old"
+      ))
+      (expect "the broker's socket is made anew by a switch" (
+        u.sockets.vpn-zone-broker.Unit.X-SwitchMethod == "keep-old"
+      ))
+      (expect "a system zone's tunnel is restarted by a switch" (!s."vpn-zone-system@".restartIfChanged))
+      (expect "a system zone's namespace is restarted by a switch" (
+        !s."vpn-zone-system-ns@".restartIfChanged
+      ))
+    ];
+
   #   nix-instantiate --eval --strict tests/harness.nix -A singleEntry
   singleEntry =
     let

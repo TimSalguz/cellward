@@ -32,7 +32,7 @@ jobs:
           # строка ExecStart юнита vpn-zone@ должна вычисляться
           nix-instantiate --eval tests/harness.nix -A zoneHolderExec
       - name: Прежние имена опций и единый вход
-        run: nix-instantiate --eval --strict tests/harness.nix -A oldNames -A singleEntry
+        run: nix-instantiate --eval --strict tests/harness.nix -A oldNames -A singleEntry -A keepOnSwitch
 
   # Адресная сборка каждой script-деривации + shellcheck по собранным bin/*.
   #

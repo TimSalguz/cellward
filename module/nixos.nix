@@ -778,6 +778,11 @@ in
         };
         systemd.services."vpn-zone-system@" = {
           description = "cellward: the way out of the system zone %i";
+          # Like its namespace: a switch does not restart the tunnel under
+          # the services running in the zone — they would lose the network
+          # for its whole restart. The zone takes the new build when it is
+          # restarted.
+          restartIfChanged = false;
           unitConfig.ConditionPathExists = "!${offFlag}";
           unitConfig.ConditionKernelCommandLine = "!vpnzones=off";
           bindsTo = [ "vpn-zone-system-ns@%i.service" ];

@@ -221,6 +221,13 @@ programs.cellward.audioManager = [ "mixer" ];    # a zone for pavucontrol/qpwgra
 Without the policy a hermetic zone has no PipeWire at all — the PulseAudio path
 only, which most programs use (`docs/LEAK-MODEL.md` §20).
 
+**Updating does not cut running zones off.** A switch (home-manager or
+`nixos-rebuild`) leaves a running zone, the broker's socket and a system
+zone's tunnel as they are: the programs in the zone keep their network, and
+new launches already go through the new `cellward`. A zone takes the new
+build when it is restarted (`cellward down <zone>; cellward up <zone>`), at a
+moment that suits you — until then the holder's own fixes do not apply to it.
+
 ## How to use it
 
 Create a zone: the **"Add VPN zone"** entry → pick a `.conf` → give it a name.
