@@ -366,6 +366,9 @@ fn runs_anything(name: &str) -> bool {
         "vim",
         "nvim",
         "emacs",
+        // Our own command under every name it has: `run` takes any command.
+        "cellward",
+        "cw",
         "vpn-zone",
         "vpn-zone-pick",
         "nix",
@@ -848,6 +851,10 @@ mod tests {
             "perl",
             "node",
             "systemd-run",
+            "cellward",
+            "cw",
+            "vpn-zone",
+            "vpn-zone-pick",
         ] {
             assert!(runs_anything(name), "{name}");
         }
@@ -855,6 +862,7 @@ mod tests {
             assert!(!runs_anything(name), "{name}");
         }
         assert!(!may_remember(Path::new("/nix/store/x-bash/bin/bash")));
+        assert!(!may_remember(Path::new("/nix/store/x-cellward/bin/cw")));
     }
 
     #[test]

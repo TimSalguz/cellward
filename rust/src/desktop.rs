@@ -124,7 +124,7 @@ impl Mode {
         self.clones().then_some(
             "режим ярлыков per-zone/both устарел и будет убран: ярлык на каждую зону — это выбор \
              сети на каждый клик, так одна программа оказывается в двух сетях. Замена — один \
-             ярлык с пикером (vpn-zone mode picker), а позже ярлыки контейнеров \
+             ярлык с пикером (cellward mode picker), а позже ярлыки контейнеров \
              (docs/LAUNCHERS.ru.md §4)",
         )
     }
@@ -908,7 +908,7 @@ fn wants_shims(home: &Path) -> bool {
 /// directory, so a shim never calls itself.
 pub fn render_shim(picker: &str, key: &str, real: &Path) -> String {
     format!(
-        "#!/bin/sh\n{SHIM_MARK}\n# Written by vpn-zone sync; `pathShims.enable = false` removes it.\n\
+        "#!/bin/sh\n{SHIM_MARK}\n# Written by cellward sync; `pathShims.enable = false` removes it.\n\
          exec {picker} --id {} -- {} \"$@\"\n",
         stable_key(key),
         shell_quote(&real.to_string_lossy())
@@ -933,6 +933,13 @@ pub fn real_program(name: &str, search: &[PathBuf], shim_dir: &Path) -> Option<P
             fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
                 && !fs::read(path).is_ok_and(|b| String::from_utf8_lossy(&b).contains(SHIM_MARK))
         })
+}
+
+/// Our own commands, by every name they have (`cellward`, `cw`, the old
+/// `vpn-zone` and the helpers): never shimmed — a shim of that name, first on
+/// `PATH`, would stand in for the command itself.
+pub fn is_ours(program: &str) -> bool {
+    program.starts_with("vpn-zone") || program.starts_with("cellward") || program == "cw"
 }
 
 /// Write a shim for every program assigned to a container, remove the ones
@@ -983,8 +990,7 @@ fn sync_shims(
             else {
                 continue;
             };
-            if program.contains('/') || program.starts_with("vpn-zone") || wanted.contains(&program)
-            {
+            if program.contains('/') || is_ours(&program) || wanted.contains(&program) {
                 continue;
             }
             let Some(real) = real_program(&program, search, &dir) else {
@@ -3282,5 +3288,56 @@ Name=not carried over
         assert_eq!(removed, 1);
         assert!(!shims.join("tgapp").exists());
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    /// Our own command under any of its names is never shimmed, even when an
+    /// entry that runs it is assigned to a container: the shim would stand in
+    /// for the command first on `PATH`.
+    #[test]
+    fn our_own_commands_are_never_shimmed() {
+        let d = Desk::new("shims-ours");
+        let bin = d.home.join("realbin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(d.state.join(".pinnedprofile")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let names = ["cellward", "cw", "vpn-zone", "cellward-gui", "vpn-zone-gui"];
+        for name in names {
+            let real = bin.join(name);
+            fs::write(&real, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::write(
+                d.system.join(format!("org.example.{name}.desktop")),
+                format!("[Desktop Entry]\nType=Application\nName={name}\nExec={name} list\n"),
+            )
+            .unwrap();
+            fs::write(
+                d.state.join(format!(".pinnedprofile/org.example.{name}")),
+                "work",
+            )
+            .unwrap();
+            assert!(is_ours(name), "{name}");
+        }
+        assert!(!is_ours("cwm") && !is_ours("firefox"));
+        d.setting("path-shims", "on");
+        let apps = collect_apps(
+            &[d.apps.clone(), d.system.clone()],
+            &d.apps,
+            &d.state.join(ADOPTED_DIR),
+        );
+        let parents = parents(&apps);
+        let shims = d.home.join(SHIM_DIR);
+        let search = vec![shims.clone(), bin.clone()];
+        let (written, _) = sync_shims(
+            &d.home,
+            &d.state,
+            "/bin/pick",
+            &apps,
+            &parents,
+            Some(&search),
+        );
+        assert_eq!(written, 0);
+        for name in names {
+            assert!(!shims.join(name).exists(), "{name}");
+        }
     }
 }

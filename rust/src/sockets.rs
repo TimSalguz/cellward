@@ -1165,7 +1165,7 @@ fn runtime_verdict(rest: &Path, full: &Path, ctx: &Context) -> Option<Verdict> {
             } else if ctx.hermetic {
                 Verdict::Open(
                     "PipeWire хоста без ограничений — зона объявлена менеджером звука \
-                     (vpn-zone audio-manager): всё, что играет хост, чужие потоки и связи (§17)",
+                     (cellward audio-manager): всё, что играет хост, чужие потоки и связи (§17)",
                 )
             } else {
                 Verdict::Open(

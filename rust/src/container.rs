@@ -590,7 +590,7 @@ pub fn forbidden_path(home: &Path, path: &Path) -> Option<String> {
         let protected = home.join(protected);
         if path.starts_with(&protected) || protected.starts_with(&path) {
             return Some(format!(
-                "там состояние vpn-zones ({}): ключи зон и данные контейнеров",
+                "там состояние cellward ({}): ключи зон и данные контейнеров",
                 protected.display()
             ));
         }
@@ -647,7 +647,7 @@ pub fn set_path(
                     let near = |p: &Path| p.starts_with(dir) || dir.starts_with(p);
                     near(lexical(&value).as_path()) || real.as_deref().is_some_and(near)
                 })
-                .map(|dir| format!("там состояние vpn-zones ({})", dir.display()))
+                .map(|dir| format!("там состояние cellward ({})", dir.display()))
             });
         if let Some(why) = why {
             return Err(format!("{} выдать нельзя: {why}", value.display()));
@@ -993,8 +993,8 @@ pub fn set_network(tools: &Tools, selector: &str, network: &Network) -> Result<(
         conf.push(("network".to_owned(), network.as_str().to_owned()));
     }
     let mut text = String::from(
-        "# Локальные настройки контейнера vpn-zones (docs/CONTAINERS.md).\n\
-         # Пишет `vpn-zone container`; значения из Nix лежат в ~/.config/vpn-zones/declared.\n",
+        "# Локальные настройки контейнера cellward (docs/CONTAINERS.md).\n\
+         # Пишет `cellward container`; значения из Nix лежат в ~/.config/vpn-zones/declared.\n",
     );
     for (k, v) in &conf {
         text.push_str(&format!("{k} = {v}\n"));
@@ -1021,8 +1021,8 @@ pub fn set_x11(tools: &Tools, selector: &str, on: bool) -> Result<(), String> {
         conf.push(("x11".to_owned(), "true".to_owned()));
     }
     let mut text = String::from(
-        "# Локальные настройки контейнера vpn-zones (docs/CONTAINERS.md).\n\
-         # Пишет `vpn-zone container`; значения из Nix лежат в ~/.config/vpn-zones/declared.\n",
+        "# Локальные настройки контейнера cellward (docs/CONTAINERS.md).\n\
+         # Пишет `cellward container`; значения из Nix лежат в ~/.config/vpn-zones/declared.\n",
     );
     for (k, v) in &conf {
         text.push_str(&format!("{k} = {v}\n"));
@@ -1072,7 +1072,7 @@ pub fn refusal(container: &Container, zone: &str, running: Option<&str>) -> Opti
         let how = if container.network.source == Source::Nix {
             "сеть задана в Nix и меняется там".to_owned()
         } else {
-            format!("сменить сеть контейнера: vpn-zone container set {selector} network {zone}")
+            format!("сменить сеть контейнера: cellward container set {selector} network {zone}")
         };
         return Some(format!(
             "контейнер «{selector}» работает в сети «{bound}», а запуск просит «{zone}». \
@@ -1178,7 +1178,7 @@ mod tests {
             "{why}"
         );
         assert!(
-            why.contains("vpn-zone container set sb:work network unconfined"),
+            why.contains("cellward container set sb:work network unconfined"),
             "{why}"
         );
         // Declared in Nix: the way out is the module, not the CLI.

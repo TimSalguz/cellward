@@ -1041,7 +1041,7 @@ fn serve(
             return Ok(());
         }
         if s.context.is_none() && ready.get(1).copied().unwrap_or(false) {
-            refuse_waiting(listener, say, "no WirePlumber policy of vpn-zones");
+            refuse_waiting(listener, say, "no WirePlumber policy of cellward");
         }
         if Instant::now() >= next_tick {
             s.publish(false)?;

@@ -276,7 +276,7 @@ pub fn run(tools: &crate::tools::Tools, args: &[std::ffi::OsString]) -> u8 {
                 count = n.parse().unwrap_or(count)
             }
             _ => {
-                eprintln!("vpn-zone journal [--json] [<сколько последних>]");
+                eprintln!("cellward journal [--json] [<сколько последних>]");
                 return 1;
             }
         }

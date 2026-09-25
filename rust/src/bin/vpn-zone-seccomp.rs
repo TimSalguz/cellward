@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use vpn_zone::seccomp::{selftest, Filter, FilterOptions};
 
 const USAGE: &str = "\
-vpn-zone-seccomp — seccomp-bpf filter for the vpn-zones filesystem sandbox
+vpn-zone-seccomp — seccomp-bpf filter for the cellward filesystem sandbox
 
 Usage:
   vpn-zone-seccomp export [--deny-userns]     write the compiled cBPF program to

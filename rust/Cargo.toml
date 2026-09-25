@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Rootless network zones: config parsing, seccomp filters, data containers and .desktop generation"
-repository = "https://github.com/TimSalguz/vpn-zones"
+repository = "https://github.com/TimSalguz/cellward"
 publish = false
 
 [lib]
@@ -24,11 +24,12 @@ name = "vpn-zone-core"
 path = "src/bin/vpn-zone-core.rs"
 
 # The command line itself, formerly the `writeShellScriptBin vpn-zone` of
-# `module/default.nix`. It takes the name the users, the picker and the
-# generated `.desktop` files already use; in `home.packages` the same name
-# belongs to a two-line wrapper that points VPN_ZONE_TOOLS at the manifest and
-# execs this, so the crate goes into the profile through a symlink farm of its
-# helper binaries only (see `module/default.nix`).
+# `module/default.nix`. In `home.packages` it is a two-line wrapper named
+# `cellward` (with `cw` and the old `vpn-zone` beside it) that points
+# VPN_ZONE_TOOLS at the manifest and execs this, so the crate goes into the
+# profile through a symlink farm of its helper binaries only (see
+# `module/default.nix`). The binary keeps its old name: it is reached
+# through the wrapper, never by name.
 [[bin]]
 name = "vpn-zone"
 path = "src/bin/vpn-zone.rs"

@@ -573,11 +573,11 @@ pub fn bar(tools: &Tools) -> String {
         "up"
     };
     let mut tooltip = if up.is_empty() {
-        "VPN-зоны: ни одна не поднята".to_owned()
+        "cellward: ни одна зона не поднята".to_owned()
     } else if dead {
-        "VPN-зоны: туннель не отвечает (✗)".to_owned()
+        "cellward: туннель не отвечает (✗)".to_owned()
     } else {
-        "VPN-зоны: поднятые зоны".to_owned()
+        "cellward: поднятые зоны".to_owned()
     };
     // What runs with nothing of a zone around it is to be seen, not looked
     // for: a mark in the text and the programs in the tooltip.

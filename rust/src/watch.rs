@@ -228,7 +228,7 @@ pub fn announcement(zone: &str, last: Option<Verdict>, now: Verdict) -> Option<(
         (_, Verdict::Dead) => Some((
             format!("Зона «{zone}»: туннель не отвечает"),
             "Программы зоны отправляют данные и ничего не получают: сети у них нет. Утечки нет — \
-             выход закрыт. Проверь сервер или конфиг: vpn-zone check, vpn-zone doctor."
+             выход закрыт. Проверь сервер или конфиг: cellward check, cellward doctor."
                 .to_owned(),
         )),
         (Some(Verdict::Dead), Verdict::Alive) => Some((

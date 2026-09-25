@@ -433,7 +433,7 @@ fn window_name(state: &Path, window: &Window, launch: Option<&Launch>) -> String
 pub fn describe(state: &Path, window: &Window, launch: Option<&Launch>) -> String {
     let name = window_name(state, window, launch);
     match launch {
-        None => format!("{name}: сеть не известна — не хост и не зона vpn-zones"),
+        None => format!("{name}: сеть не известна — не хост и не зона cellward"),
         Some(l) => {
             let container = match &l.selector {
                 Some(s) => crate::picker::container_label(s),
@@ -502,7 +502,7 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     let window = match focused_window() {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("vpn-zone focused: {e}");
+            eprintln!("cellward focused: {e}");
             return 1;
         }
     };
@@ -523,7 +523,7 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
             None => println!("нет окна в фокусе"),
         },
         other => {
-            eprintln!("vpn-zone focused [--json | --bar | --watch], не {other}");
+            eprintln!("cellward focused [--json | --bar | --watch], не {other}");
             return 1;
         }
     }
@@ -540,7 +540,7 @@ fn watch(tools: &Tools) -> u8 {
             &["-t", "subscribe", "-m", "[\"window\",\"workspace\"]"],
         ),
         None => {
-            eprintln!("vpn-zone focused --watch: нужен niri или sway");
+            eprintln!("cellward focused --watch: нужен niri или sway");
             return 1;
         }
     };
@@ -552,7 +552,7 @@ fn watch(tools: &Tools) -> u8 {
     {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("vpn-zone focused --watch: {program}: {e}");
+            eprintln!("cellward focused --watch: {program}: {e}");
             return 1;
         }
     };
@@ -680,7 +680,7 @@ pub fn menu(tools: &Tools) -> u8 {
             return 0;
         }
         Err(e) => {
-            eprintln!("vpn-zone window-menu: {e}");
+            eprintln!("cellward window-menu: {e}");
             notify(crate::dialog::APP, &e);
             return 1;
         }
@@ -779,7 +779,7 @@ pub fn menu(tools: &Tools) -> u8 {
                 .args(["kill", l.zone.as_str()])
                 .status();
         }
-        other => eprintln!("vpn-zone window-menu: неизвестный выбор {other}"),
+        other => eprintln!("cellward window-menu: неизвестный выбор {other}"),
     }
     0
 }

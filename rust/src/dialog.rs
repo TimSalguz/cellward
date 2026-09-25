@@ -27,7 +27,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Application name every notification of this project carries.
-pub const APP: &str = "VPN-зоны";
+pub const APP: &str = "cellward";
 
 /// One dialog that returns a choice: `--menu`, `--inputbox`,
 /// `--getopenfilename`.
@@ -159,7 +159,7 @@ where
         .status();
 }
 
-/// `notify-send -a "VPN-зоны" [-u <urgency>] -t <ms> <title> <body>`.
+/// `notify-send -a "cellward" [-u <urgency>] -t <ms> <title> <body>`.
 ///
 /// The argument order is the shell's, urgency included: `notify-send` takes
 /// options before the positional summary, and a flag after it would be shown as

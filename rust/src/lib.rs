@@ -1,12 +1,13 @@
-//! Core of vpn-zones: rootless network zones with VPN, data containers and
-//! sandboxes (see `ROADMAP.md`).
+//! Core of cellward (formerly vpn-zones): rootless network zones with VPN, data
+//! containers and sandboxes (see `ROADMAP.md`).
 //!
 //! The project used to be a Nix module full of shell; this crate is what it has
 //! been replaced with, one piece at a time, and each piece stayed in shell until
 //! parity was proven. What is left in `module/` is the packaging and three
 //! two-line wrappers that point `VPN_ZONE_TOOLS` at the manifest. What is here:
 //!
-//! * [`cli`] — the `vpn-zone` command line itself: the zone verbs, the
+//! * [`cli`] — the `cellward` command line itself (`cw`, the old `vpn-zone`),
+//!   the crate's `vpn-zone` binary: the zone verbs, the
 //!   containers, the sandboxes, the settings and the garbage collection;
 //! * [`picker`] — `vpn-zone-pick`, the dialog an intercepted launcher entry
 //!   opens: which network, which container, and the three levels of memory

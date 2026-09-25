@@ -564,8 +564,8 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             &format!(
                 "«{UNCONFINED}» теперь значит «без ограничений» (сеть хоста, без VPN и изоляции зоны), \
                  а у тебя есть зона с таким именем — запуск остановлен, чтобы не уйти мимо её VPN. \
-                 Переименуй зону: vpn-zone down {UNCONFINED}, переименуй каталог \
-                 {} и снова vpn-zone up",
+                 Переименуй зону: cellward down {UNCONFINED}, переименуй каталог \
+                 {} и снова cellward up",
                 tools.state.join(UNCONFINED).display()
             ),
         );
@@ -1036,7 +1036,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 tools,
                 &format!(
                     "Зона {zone_name} указывает на процесс в сети хоста — запуск остановлен. \
-                     Перезапусти зону: vpn-zone down {zone_name}, затем vpn-zone up {zone_name}"
+                     Перезапусти зону: cellward down {zone_name}, затем cellward up {zone_name}"
                 ),
             );
             return 1;
@@ -1390,7 +1390,7 @@ fn resolve_container(tools: &Tools, container: &Container) -> Option<ResolvedCon
             let dir = tools.profiles.join(name);
             if !dir.is_dir() {
                 let name = name.to_string_lossy();
-                eprintln!("профиля {name} нет — создай: vpn-zone profile create {name}");
+                eprintln!("профиля {name} нет — создай: cellward profile create {name}");
                 return None;
             }
             (name.clone(), dir, false)
@@ -1430,7 +1430,7 @@ fn resolve_container(tools: &Tools, container: &Container) -> Option<ResolvedCon
                 });
             if !ours {
                 eprintln!(
-                    "{} — не временный контейнер vpn-zones: присоединиться нельзя",
+                    "{} — не временный контейнер cellward: присоединиться нельзя",
                     dir.display()
                 );
                 return None;
@@ -1475,7 +1475,7 @@ fn wayland_sandbox_wanted(tools: &Tools, appbin: &OsStr) -> bool {
 
 /// Whether the Wayland proxy stands between this program and the compositor
 /// (`crate::wl_proxy`): on unless switched off — for all programs
-/// (`vpn-zone wayland-proxy off`, `programs.vpn-zones.waylandProxy.enable`)
+/// (`vpn-zone wayland-proxy off`, `programs.cellward.waylandProxy.enable`)
 /// or for this one (`~/.config/vpn-zones/wayland-no-proxy`, one program per
 /// line, and its declared twin). Off, the compositor listens on the zone's
 /// path itself, as before there was a proxy: still the restricted socket.

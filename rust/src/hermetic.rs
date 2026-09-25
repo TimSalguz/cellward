@@ -76,7 +76,7 @@ pub fn zone_setting(zone_dir: &Path, config: &Path, zone: &str) -> (bool, Source
 
 /// Whether a zone's programs reach the host's Nix daemon: a marker in the
 /// zone's directory (`on`/`off`, `vpn-zone nix-daemon`), or the zone named in
-/// `declared/nix-daemon` (Nix, `programs.vpn-zones.nixDaemon`). Off by default
+/// `declared/nix-daemon` (Nix, `programs.cellward.nixDaemon`). Off by default
 /// (review 2026-09-25, third round): the daemon builds and fetches in the
 /// host's network — a fixed-output derivation fetches any address a program
 /// in any zone names, offline included.
@@ -86,7 +86,7 @@ pub const NIX_DAEMON: &str = "nix-daemon";
 /// home (autostart, units, launcher entries, shells' and compositors'
 /// configs): a marker in the zone's directory (`writable`/`read-only`,
 /// `vpn-zone host-files`), or the zone named in `declared/host-files-writable`
-/// (Nix, `programs.vpn-zones.hostFilesWritable`). Read-only by default (owner,
+/// (Nix, `programs.cellward.hostFilesWritable`). Read-only by default (owner,
 /// 2026-09-25).
 pub const HOST_FILES: &str = "host-files";
 /// The zones Nix lets write the host's files, one name per line.
@@ -117,7 +117,7 @@ fn allowance(
 /// Whether a zone's programs reach the host's cameras as devices
 /// (`/dev/video*`, `/dev/media*`): a marker in the zone's directory
 /// (`on`/`off`, `vpn-zone camera`), or the zone named in `declared/camera`
-/// (Nix, `programs.vpn-zones.camera`). Off by default (review 2026-09-25):
+/// (Nix, `programs.cellward.camera`). Off by default (review 2026-09-25):
 /// the session's ACL on them is the user's, and a program in a zone is the
 /// user — it filmed without a question.
 pub const CAMERA: &str = "camera";
@@ -130,7 +130,7 @@ pub fn camera(zone_dir: &Path, config: &Path, zone: &str) -> (bool, Source) {
 /// Whether a hermetic zone gets the host's raw `pipewire-0` instead of the
 /// restricted one (`crate::pw_context`): a marker in the zone's directory
 /// (`on`/`off`, `vpn-zone audio-manager`), or the zone named in
-/// `declared/audio-manager` (Nix, `programs.vpn-zones.audioManager`). Off by
+/// `declared/audio-manager` (Nix, `programs.cellward.audioManager`). Off by
 /// default (owner, 2026-09-25): the raw socket is every stream and device of
 /// the host — for a zone that runs a mixer or a patchbay (pavucontrol,
 /// qpwgraph, EasyEffects) and is trusted with the host's sound. An ordinary

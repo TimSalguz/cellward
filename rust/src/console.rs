@@ -3,7 +3,7 @@
 //! with nothing to type and nothing to know.
 //!
 //! ```text
-//!  vpn-zones — console · alice
+//!  cellward — console · alice
 //!    network: sz — tunnel alive
 //!    [Enter] a terminal with the network (zone sz)
 //!    [n]     the admin tool, if one is configured
@@ -192,7 +192,7 @@ fn menu(config: &Config, user: &str) {
 
         let fallback = config.fallback.as_deref().filter(|_| net != Net::Alive);
         println!();
-        println!("  vpn-zones — консоль · {user}");
+        println!("  cellward — консоль · {user}");
         println!(
             "    сеть: {zone} — {}",
             match net {
@@ -217,7 +217,9 @@ fn menu(config: &Config, user: &str) {
             println!("    [p]     напрямую, без VPN (zone {plain})");
         }
         println!("    [k]     аварийный ключ: сеть на хосте на время (emergency key)");
-        println!("    [x]     выключить vpn-zones целиком — сеть хоста, пока не включишь (vpn-zones off)");
+        println!(
+            "    [x]     выключить cellward целиком — сеть хоста, пока не включишь (cellward off)"
+        );
         println!("    [q]     обычная консоль, без сети (plain console)");
         print!("  > ");
         let _ = io::stdout().flush();
@@ -243,7 +245,7 @@ fn menu(config: &Config, user: &str) {
             }
             b'k' | b'K' if !confirmed(b'k', "аварийный ключ: у хоста будет сеть") =>
                 {}
-            b'x' | b'X' if !confirmed(b'x', "выключить vpn-zones целиком") => {}
+            b'x' | b'X' if !confirmed(b'x', "выключить cellward целиком") => {}
             b'k' | b'K' => {
                 let ok = Command::new("systemctl")
                     .args(["start", "vpn-zones-egress-open.service"])
@@ -265,8 +267,8 @@ fn menu(config: &Config, user: &str) {
                     .is_ok_and(|s| s.success());
                 if ok {
                     println!(
-                        "vpn-zones выключены: у хоста своя сеть. Включить обратно — vpn-zones-on. \
-                         (vpn-zones off)"
+                        "cellward выключен: у хоста своя сеть. Включить обратно — vpn-zones-on. \
+                         (cellward off)"
                     );
                     return;
                 }

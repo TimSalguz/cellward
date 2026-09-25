@@ -1387,7 +1387,7 @@ fn autostart(
     }
     if plan.container_guessed {
         lines.push(format!(
-            "контейнер не выбран — запущена в своём доме ({}). Назначить: vpn-zone container \
+            "контейнер не выбран — запущена в своём доме ({}). Назначить: cellward container \
              assign {key} <контейнер>",
             container_label(&plan.container.selector())
         ));

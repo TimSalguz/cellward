@@ -1,4 +1,6 @@
-//! `vpn-zone` — the user-facing command line.
+//! `cellward` — the user-facing command line. The profile has it as `cellward`,
+//! `cw` and the old `vpn-zone`: one wrapper execing this crate's `vpn-zone`
+//! binary.
 //!
 //! This was the last big shell script of the project (`module/default.nix`,
 //! part 3). What it does has not changed and is not supposed to: the same verbs,
@@ -44,7 +46,7 @@ pub const EXIT_TOOLS: u8 = 2;
 const READY_TRIES: u32 = 100;
 const READY_STEP: Duration = Duration::from_millis(100);
 
-const USAGE: &str = "vpn-zone — сетевые зоны с VPN, без root\n\n  vpn-zone add <имя> <файл.conf>   создать зону из конфига AmneziaWG/WireGuard\n                                   или OpenConnect (секция [OpenConnect])\n  vpn-zone add <имя> --system <з.> зона через туннель системной зоны <з.>:\n                                   своего туннеля нет, один VPN — одно\n                                   подключение (конфиг с ключом системной\n                                   зоны становится такой зоной сам)\n  vpn-zone up <имя>                поднять\n  vpn-zone down <имя>              опустить\n  vpn-zone list                    список зон и их состояние\n  vpn-zone status <имя>            подробности (адрес, handshake)\n  vpn-zone status --json           всё состояние машиночитаемо: зоны, контейнеры,\n                                   программы, откуда взято каждое значение\n  vpn-zone status --bar            одна строка JSON для статус-бара (waybar):\n                                   поднятые зоны и живы ли их туннели\n  vpn-zone run <имя> -- <кмд>      запустить программу внутри зоны\n  vpn-zone launch <id> [-- <арг.>] запустить ярлык по id через пикер, как\n                                   щелчок по нему, — для биндов композитора\n  vpn-zone rm <имя>                удалить зону вместе с ярлыками\n  vpn-zone sync                    пересобрать .desktop-ярлыки\n  vpn-zone mode <режим>            как ярлыки работают:\n                                     picker   — один ярлык, спрашивает сеть\n                                                при запуске (по умолчанию)\n                                     per-zone — отдельный ярлык на каждую зону\n                                                (устарел, будет убран)\n                                     both     — и то, и другое (устарел)\n                                     off      — не трогать ярлыки вовсе\n  vpn-zone default <вариант>       что предлагать в пикере для незнакомой\n                                   программы: offline (по умолчанию),\n                                   unconfined (без ограничений: сеть хоста,\n                                   без VPN и изоляции зоны; прежнее имя —\n                                   direct) или имя зоны\n  vpn-zone gc                      убрать зависшие держатели зон, осиротевшую\n                                   обвязку и мёртвые записи\n  vpn-zone perms list|reset <прог.|--all>\n                                   какие доступы к файлам выданы программам\n                                   в песочнице; reset — спросить заново\n  vpn-zone sandbox create|list|rm <имя>\n                                   именованные песочницы: свой дом, общий для\n                                   всех программ, запущенных в этой песочнице\n  vpn-zone run <имя> --sandbox <п> -- <кмд>\n                                   запустить в именованной песочнице\n  vpn-zone run <имя> --fs-sandbox -- <кмд>\n                                   запустить в песочнице файловой системы:\n                                   вместо $HOME — пустой каталог, наружу\n                                   видно только разрешённое, остальное — через\n                                   диалог выбора файла (порталы)\n  vpn-zone run <имя> --tmp-profile -- <кмд>\n                                   запустить в одноразовом контейнере: слой\n                                   создаётся в /tmp и стирается по выходе\n  vpn-zone default-profile <v>     контейнер по умолчанию для всех запусков:\n                                   ask (спрашивать), main (основной),\n                                   own (своя песочница у каждой программы)\n                                   или имя контейнера\n  vpn-zone pins                    какие программы закреплены за сетями\n  vpn-zone forget <прог.|--all>    снять закрепление (снова будет спрашивать)\n  vpn-zone isolate <overlay|off>   свой слой профиля у зоны (overlay — по\n                                   умолчанию). Без него браузер откроет окно\n                                   в уже запущенном процессе, мимо VPN\n  vpn-zone reset-profile <имя>     очистить слой профиля зоны\n  vpn-zone wayland-proxy on|off    посредник между программами и\n                                   композитором (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-no-proxy)\n  vpn-zone wayland-sandbox on|off  отбирать ли у программ захват экрана,\n                                   чтение буфера в фоне и эмуляцию ввода\n                                   (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-allow)\n  vpn-zone frame show|hide         рамка цвета зоны вокруг окон её программ;\n                                   hide — спрятать у окон, открытых после\n                                   этого (для показа экрана)\n  vpn-zone frame width <1–32>|default\n                                   толщина рамки, логические пиксели (4)\n  vpn-zone frame color <зона> <#rrggbb>|default\n                                   цвет рамки зоны (по умолчанию — из имени)\n  vpn-zone frame title always|hover|off|default\n                                   полоса заголовка «зона · контейнер» сверху:\n                                   всегда (по умолчанию), при наведении (поверх\n                                   окна, у верхнего края) или нет\n  vpn-zone check <имя>             прошло ли рукопожатие (жив ли конфиг)\n  vpn-zone watch [--json]          живы ли туннели поднятых зон; при смерти и\n                                   возвращении — уведомление (зовёт таймер)\n  vpn-zone kill <зона>             оборвать зону сейчас: заморозить все её\n                                   программы, опустить зону, убить программы\n                                   (для удалённого доступа, который надо\n                                   прекратить немедленно)\n  vpn-zone journal [--json] [<N>]  последние события: запуски без ограничений\n                                   (unconfined) и решения брокера\n  vpn-zone focused [--json|--bar|--watch]\n                                   в какой сети и контейнере программа окна в\n                                   фокусе (niri, sway); --bar — строка для\n                                   статус-бара, --watch — такая строка при\n                                   каждой смене фокуса\n  vpn-zone window-menu             меню программы окна в фокусе — для бинда\n                                   композитора: закрепить сеть, перезапустить\n                                   с выбором сети, закрыть, оборвать зону\n  vpn-zone doctor [<зона>…] [--json]\n                                   что на деле закрыто: готовность системы и\n                                   проверки изнутри каждой поднятой зоны\n                                   (выходы, маршруты, резолверы, открытые\n                                   каналы); код 1 — есть нарушения\n  vpn-zone hermetic <зона> on|off|default\n                                   герметичная зона: без systemd --user,\n                                   сессионная шина через фильтр, запуск\n                                   наружу через брокер; default — как\n                                   у всех зон\n  vpn-zone hermetic --default on|off\n                                   герметичны ли зоны без своей настройки\n                                   (по умолчанию on, с 2026-09)\n  vpn-zone x11 <зона> on|off       свой X-сервер программам зоны (X хоста в\n                                   зонах недоступен всегда)\n  vpn-zone nix-daemon <зона> on|off|default\n                                   виден ли программам зоны Nix-демон хоста\n                                   (по умолчанию нет: он качает в сети хоста)\n  vpn-zone camera <зона> on|off|default\n                                   видны ли программам зоны камеры хоста\n                                   (по умолчанию нет)\n  vpn-zone audio-manager <зона> on|off|default\n                                   PipeWire хоста без ограничений в\n                                   герметичной зоне — для микшера\n                                   (pavucontrol, qpwgraph); по умолчанию\n                                   нет: свои потоки и выходы для звука\n  vpn-zone microphone <зона> yes|no|ask|default\n                                   может ли программа зоны записывать\n                                   микрофон: ask (по умолчанию) — спросить\n                                   при первой записи: один раз, всегда,\n                                   отказать; действует сразу. Звук, который\n                                   играет хост, не записать никогда. Это\n                                   переключатель пути pulse: сырой\n                                   pipewire-0 и systemd --user\n                                   негерметичной зоны идут мимо\n  vpn-zone ask-again <срок>|default\n                                   через сколько после отказа снова спросить\n                                   о разрешении (микрофон): 30s…1d, по\n                                   умолчанию 3m; до того запросы зоны\n                                   отказаны без вопроса\n  vpn-zone host-files <зона> read-only|writable|default\n                                   может ли герметичная зона писать то, что\n                                   хост исполняет из дома (по умолчанию нет)\n  vpn-zone lock|unlock <имя>       запретить/разрешить программам этой зоны\n                                   запускать что-либо в ДРУГИХ сетях\n                                   (по умолчанию разрешено; держится только\n                                   в герметичной зоне)\n  vpn-zone trust add <контейнер> <сертификат> [--yes]\n                                   дополнительный корневой сертификат ТОЛЬКО\n                                   для программ этого контейнера (профиль или\n                                   sb:<песочница>): хост и другие контейнеры\n                                   ему не доверяют. Его владелец сможет читать\n                                   TLS-трафик программ контейнера\n  vpn-zone trust list [<контейнер>] [--json]\n  vpn-zone trust rm <контейнер> <начало sha256>\n  vpn-zone trust reset <контейнер> убрать все дополнительные сертификаты\n  vpn-zone container list|show [<контейнер>] [--json]\n                                   контейнеры (профиль или sb:<песочница>):\n                                   их сеть, программы, сертификаты\n  vpn-zone container set <контейнер> network <сеть|ask>\n                                   привязать контейнер к сети: запуск в\n                                   другой сети будет отказом\n  vpn-zone container set <контейнер> x11 on|off\n                                   свой X-сервер в зонах (X хоста в зонах\n                                   недоступен всегда)\n  vpn-zone container assign <программа> <контейнер>\n  vpn-zone container unassign <программа>\n  vpn-zone container grant sb:<песочница> <каталог> [--for 2h]\n  vpn-zone container revoke sb:<песочница> <каталог>\n                                   выдать песочнице каталог настоящего дома\n                                   или диска (/mnt, /media, /run/media, /srv):\n                                   префикс Wine, библиотеку Steam; --for —\n                                   на срок (30s, 15m, 2h, 7d), по истечении\n                                   и при revoke каталог отмонтируется и у\n                                   уже запущенных программ\n  vpn-zone container merge <из> <в> [--yes]\n                                   объединить два контейнера одного вида:\n                                   совпавшее остаётся у <в>, версии из <из>\n                                   кладутся рядом; --yes — согласие принять\n                                   чужие корневые сертификаты\n";
+const USAGE: &str = "cellward — сетевые зоны с VPN, без root\n(коротко — cw; прежнее имя vpn-zone тоже работает)\n\n  cellward add <имя> <файл.conf>   создать зону из конфига AmneziaWG/WireGuard\n                                   или OpenConnect (секция [OpenConnect])\n  cellward add <имя> --system <з.> зона через туннель системной зоны <з.>:\n                                   своего туннеля нет, один VPN — одно\n                                   подключение (конфиг с ключом системной\n                                   зоны становится такой зоной сам)\n  cellward up <имя>                поднять\n  cellward down <имя>              опустить\n  cellward list                    список зон и их состояние\n  cellward status <имя>            подробности (адрес, handshake)\n  cellward status --json           всё состояние машиночитаемо: зоны, контейнеры,\n                                   программы, откуда взято каждое значение\n  cellward status --bar            одна строка JSON для статус-бара (waybar):\n                                   поднятые зоны и живы ли их туннели\n  cellward run <имя> -- <кмд>      запустить программу внутри зоны\n  cellward launch <id> [-- <арг.>] запустить ярлык по id через пикер, как\n                                   щелчок по нему, — для биндов композитора\n  cellward rm <имя>                удалить зону вместе с ярлыками\n  cellward sync                    пересобрать .desktop-ярлыки\n  cellward mode <режим>            как ярлыки работают:\n                                     picker   — один ярлык, спрашивает сеть\n                                                при запуске (по умолчанию)\n                                     per-zone — отдельный ярлык на каждую зону\n                                                (устарел, будет убран)\n                                     both     — и то, и другое (устарел)\n                                     off      — не трогать ярлыки вовсе\n  cellward default <вариант>       что предлагать в пикере для незнакомой\n                                   программы: offline (по умолчанию),\n                                   unconfined (без ограничений: сеть хоста,\n                                   без VPN и изоляции зоны; прежнее имя —\n                                   direct) или имя зоны\n  cellward gc                      убрать зависшие держатели зон, осиротевшую\n                                   обвязку и мёртвые записи\n  cellward perms list|reset <прог.|--all>\n                                   какие доступы к файлам выданы программам\n                                   в песочнице; reset — спросить заново\n  cellward sandbox create|list|rm <имя>\n                                   именованные песочницы: свой дом, общий для\n                                   всех программ, запущенных в этой песочнице\n  cellward run <имя> --sandbox <п> -- <кмд>\n                                   запустить в именованной песочнице\n  cellward run <имя> --fs-sandbox -- <кмд>\n                                   запустить в песочнице файловой системы:\n                                   вместо $HOME — пустой каталог, наружу\n                                   видно только разрешённое, остальное — через\n                                   диалог выбора файла (порталы)\n  cellward run <имя> --tmp-profile -- <кмд>\n                                   запустить в одноразовом контейнере: слой\n                                   создаётся в /tmp и стирается по выходе\n  cellward default-profile <v>     контейнер по умолчанию для всех запусков:\n                                   ask (спрашивать), main (основной),\n                                   own (своя песочница у каждой программы)\n                                   или имя контейнера\n  cellward pins                    какие программы закреплены за сетями\n  cellward forget <прог.|--all>    снять закрепление (снова будет спрашивать)\n  cellward isolate <overlay|off>   свой слой профиля у зоны (overlay — по\n                                   умолчанию). Без него браузер откроет окно\n                                   в уже запущенном процессе, мимо VPN\n  cellward reset-profile <имя>     очистить слой профиля зоны\n  cellward wayland-proxy on|off    посредник между программами и\n                                   композитором (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-no-proxy)\n  cellward wayland-sandbox on|off  отбирать ли у программ захват экрана,\n                                   чтение буфера в фоне и эмуляцию ввода\n                                   (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-allow)\n  cellward frame show|hide         рамка цвета зоны вокруг окон её программ;\n                                   hide — спрятать у окон, открытых после\n                                   этого (для показа экрана)\n  cellward frame width <1–32>|default\n                                   толщина рамки, логические пиксели (4)\n  cellward frame color <зона> <#rrggbb>|default\n                                   цвет рамки зоны (по умолчанию — из имени)\n  cellward frame title always|hover|off|default\n                                   полоса заголовка «зона · контейнер» сверху:\n                                   всегда (по умолчанию), при наведении (поверх\n                                   окна, у верхнего края) или нет\n  cellward check <имя>             прошло ли рукопожатие (жив ли конфиг)\n  cellward watch [--json]          живы ли туннели поднятых зон; при смерти и\n                                   возвращении — уведомление (зовёт таймер)\n  cellward kill <зона>             оборвать зону сейчас: заморозить все её\n                                   программы, опустить зону, убить программы\n                                   (для удалённого доступа, который надо\n                                   прекратить немедленно)\n  cellward journal [--json] [<N>]  последние события: запуски без ограничений\n                                   (unconfined) и решения брокера\n  cellward focused [--json|--bar|--watch]\n                                   в какой сети и контейнере программа окна в\n                                   фокусе (niri, sway); --bar — строка для\n                                   статус-бара, --watch — такая строка при\n                                   каждой смене фокуса\n  cellward window-menu             меню программы окна в фокусе — для бинда\n                                   композитора: закрепить сеть, перезапустить\n                                   с выбором сети, закрыть, оборвать зону\n  cellward doctor [<зона>…] [--json]\n                                   что на деле закрыто: готовность системы и\n                                   проверки изнутри каждой поднятой зоны\n                                   (выходы, маршруты, резолверы, открытые\n                                   каналы); код 1 — есть нарушения\n  cellward hermetic <зона> on|off|default\n                                   герметичная зона: без systemd --user,\n                                   сессионная шина через фильтр, запуск\n                                   наружу через брокер; default — как\n                                   у всех зон\n  cellward hermetic --default on|off\n                                   герметичны ли зоны без своей настройки\n                                   (по умолчанию on, с 2026-09)\n  cellward x11 <зона> on|off       свой X-сервер программам зоны (X хоста в\n                                   зонах недоступен всегда)\n  cellward nix-daemon <зона> on|off|default\n                                   виден ли программам зоны Nix-демон хоста\n                                   (по умолчанию нет: он качает в сети хоста)\n  cellward camera <зона> on|off|default\n                                   видны ли программам зоны камеры хоста\n                                   (по умолчанию нет)\n  cellward audio-manager <зона> on|off|default\n                                   PipeWire хоста без ограничений в\n                                   герметичной зоне — для микшера\n                                   (pavucontrol, qpwgraph); по умолчанию\n                                   нет: свои потоки и выходы для звука\n  cellward microphone <зона> yes|no|ask|default\n                                   может ли программа зоны записывать\n                                   микрофон: ask (по умолчанию) — спросить\n                                   при первой записи: один раз, всегда,\n                                   отказать; действует сразу. Звук, который\n                                   играет хост, не записать никогда. Это\n                                   переключатель пути pulse: сырой\n                                   pipewire-0 и systemd --user\n                                   негерметичной зоны идут мимо\n  cellward ask-again <срок>|default\n                                   через сколько после отказа снова спросить\n                                   о разрешении (микрофон): 30s…1d, по\n                                   умолчанию 3m; до того запросы зоны\n                                   отказаны без вопроса\n  cellward host-files <зона> read-only|writable|default\n                                   может ли герметичная зона писать то, что\n                                   хост исполняет из дома (по умолчанию нет)\n  cellward lock|unlock <имя>       запретить/разрешить программам этой зоны\n                                   запускать что-либо в ДРУГИХ сетях\n                                   (по умолчанию разрешено; держится только\n                                   в герметичной зоне)\n  cellward trust add <контейнер> <сертификат> [--yes]\n                                   дополнительный корневой сертификат ТОЛЬКО\n                                   для программ этого контейнера (профиль или\n                                   sb:<песочница>): хост и другие контейнеры\n                                   ему не доверяют. Его владелец сможет читать\n                                   TLS-трафик программ контейнера\n  cellward trust list [<контейнер>] [--json]\n  cellward trust rm <контейнер> <начало sha256>\n  cellward trust reset <контейнер> убрать все дополнительные сертификаты\n  cellward container list|show [<контейнер>] [--json]\n                                   контейнеры (профиль или sb:<песочница>):\n                                   их сеть, программы, сертификаты\n  cellward container set <контейнер> network <сеть|ask>\n                                   привязать контейнер к сети: запуск в\n                                   другой сети будет отказом\n  cellward container set <контейнер> x11 on|off\n                                   свой X-сервер в зонах (X хоста в зонах\n                                   недоступен всегда)\n  cellward container assign <программа> <контейнер>\n  cellward container unassign <программа>\n  cellward container grant sb:<песочница> <каталог> [--for 2h]\n  cellward container revoke sb:<песочница> <каталог>\n                                   выдать песочнице каталог настоящего дома\n                                   или диска (/mnt, /media, /run/media, /srv):\n                                   префикс Wine, библиотеку Steam; --for —\n                                   на срок (30s, 15m, 2h, 7d), по истечении\n                                   и при revoke каталог отмонтируется и у\n                                   уже запущенных программ\n  cellward container merge <из> <в> [--yes]\n                                   объединить два контейнера одного вида:\n                                   совпавшее остаётся у <в>, версии из <из>\n                                   кладутся рядом; --yes — согласие принять\n                                   чужие корневые сертификаты\n";
 
 /// Entry point of the `vpn-zone` binary.
 pub fn main() -> ExitCode {
@@ -65,7 +67,7 @@ pub fn main() -> ExitCode {
     let tools = match Tools::from_env() {
         Ok(tools) => tools,
         Err(e) => {
-            eprintln!("vpn-zone: {e}");
+            eprintln!("cellward: {e}");
             return ExitCode::from(EXIT_TOOLS);
         }
     };
@@ -256,7 +258,7 @@ pub fn setting(tools: &Tools, name: &str) -> Option<(String, crate::container::S
 fn write_setting(tools: &Tools, name: &str, value: &OsStr) -> Result<(), String> {
     if tools.config.join(DECLARED_DIR).join(name).exists() {
         return Err(format!(
-            "«{name}» задано в Nix (programs.vpn-zones) и меняется там"
+            "«{name}» задано в Nix (programs.cellward) и меняется там"
         ));
     }
     fs::create_dir_all(&tools.config).map_err(|e| format!("{}: {e}", tools.config.display()))?;
@@ -685,14 +687,14 @@ fn set_lock(tools: &Tools, args: &[OsString], locked: bool) -> u8 {
             eprintln!(
                 "⚠ зона {name} не герметична: замок держится только в герметичной зоне — \
                  отсюда программа может запустить что угодно снаружи через systemd --user \
-                 (docs/LEAK-MODEL.md §1). Включи герметичность: vpn-zone hermetic {name} on"
+                 (docs/LEAK-MODEL.md §1). Включи герметичность: cellward hermetic {name} on"
             );
         } else if zone_pid(&tools.state, OsStr::new(&*name)).is_some() {
             // The setting takes effect when the zone comes up: one up since
             // before it was switched on is not hermetic yet.
             eprintln!(
                 "замок держится, если зона поднята уже герметичной; включали герметичность \
-                 после её подъёма — перезапусти зону: vpn-zone down {name}, vpn-zone up {name}"
+                 после её подъёма — перезапусти зону: cellward down {name}, cellward up {name}"
             );
         }
     } else {
@@ -709,7 +711,7 @@ fn set_lock(tools: &Tools, args: &[OsString], locked: bool) -> u8 {
 /// order in which the settings win.
 fn zone_hermetic(tools: &Tools, args: &[OsString]) -> u8 {
     const USAGE: &str =
-        "vpn-zone hermetic <зона> on|off|default\nvpn-zone hermetic --default on|off";
+        "cellward hermetic <зона> on|off|default\ncellward hermetic --default on|off";
     let (Some(name), Some(value)) = (args.first(), args.get(1)) else {
         eprintln!("{USAGE}");
         return 1;
@@ -744,7 +746,7 @@ fn zone_hermetic(tools: &Tools, args: &[OsString]) -> u8 {
     }
     let up = zone_pid(&tools.state, OsStr::new(&*name)).is_some();
     let restart = if up {
-        format!(" — подействует после перезапуска зоны: vpn-zone down {name} && vpn-zone up {name}")
+        format!(" — подействует после перезапуска зоны: cellward down {name} && cellward up {name}")
     } else {
         String::new()
     };
@@ -798,7 +800,7 @@ const NIX_DAEMON_SWITCH: Switch = Switch {
     marker: crate::hermetic::NIX_DAEMON,
     on: "on",
     off: "off",
-    nix: "programs.vpn-zones.nixDaemon",
+    nix: "programs.cellward.nixDaemon",
     read: crate::hermetic::nix_daemon,
     said_on:
         "программам зоны виден Nix-демон хоста — он качает и собирает в сети хоста, мимо её VPN",
@@ -810,7 +812,7 @@ const HOST_FILES_SWITCH: Switch = Switch {
     marker: crate::hermetic::HOST_FILES,
     on: "writable",
     off: "read-only",
-    nix: "programs.vpn-zones.hostFilesWritable",
+    nix: "programs.cellward.hostFilesWritable",
     read: crate::hermetic::host_files_writable,
     said_on: "программы зоны могут писать туда, что хост потом исполняет (автозапуск, ярлыки, конфиги оболочек и композитора)",
     said_off: "в герметичной зоне то, что хост исполняет из дома, только для чтения",
@@ -821,7 +823,7 @@ const CAMERA_SWITCH: Switch = Switch {
     marker: crate::hermetic::CAMERA,
     on: "on",
     off: "off",
-    nix: "programs.vpn-zones.camera",
+    nix: "programs.cellward.camera",
     read: crate::hermetic::camera,
     said_on: "программам зоны видны камеры хоста — снимать они могут без вопроса",
     said_off: "камеры хоста программам зоны не видны",
@@ -834,7 +836,7 @@ const AUDIO_MANAGER_SWITCH: Switch = Switch {
     marker: crate::hermetic::AUDIO_MANAGER,
     on: "on",
     off: "off",
-    nix: "programs.vpn-zones.audioManager",
+    nix: "programs.cellward.audioManager",
     read: crate::hermetic::audio_manager,
     said_on: "ВНИМАНИЕ: зоне отдан PipeWire хоста без ограничений — её программы слышат всё, что играет хост, записывают микрофон мимо настройки microphone, двигают и глушат чужие потоки и меняют права других клиентов; только для доверенного микшера (pavucontrol, qpwgraph, EasyEffects)",
     said_off: "герметичная зона получает ограниченный PipeWire: свои потоки, выходы для звука, микрофон по настройке microphone",
@@ -844,7 +846,7 @@ const AUDIO_MANAGER_SWITCH: Switch = Switch {
 /// <on>|<off>|default`.
 fn zone_allowance(tools: &Tools, args: &[OsString], switch: &Switch) -> u8 {
     let usage = format!(
-        "vpn-zone {} <зона> {}|{}|default",
+        "cellward {} <зона> {}|{}|default",
         switch.verb, switch.on, switch.off
     );
     let (Some(name), Some(value)) = (args.first(), args.get(1)) else {
@@ -880,7 +882,7 @@ fn zone_allowance(tools: &Tools, args: &[OsString], switch: &Switch) -> u8 {
         crate::container::Source::Default => " (умолчание)".to_owned(),
     };
     let restart = if zone_pid(&tools.state, OsStr::new(&*name)).is_some() {
-        format!(" — подействует после перезапуска зоны: vpn-zone down {name} && vpn-zone up {name}")
+        format!(" — подействует после перезапуска зоны: cellward down {name} && cellward up {name}")
     } else {
         String::new()
     };
@@ -895,12 +897,12 @@ fn zone_allowance(tools: &Tools, args: &[OsString], switch: &Switch) -> u8 {
 fn ask_again(tools: &Tools, args: &[OsString]) -> u8 {
     use crate::container::Source;
     use crate::grants::{ask_again_term, term_text, ASK_AGAIN_SETTING};
-    const USAGE: &str = "vpn-zone ask-again <срок>|default   (30s…1d; по умолчанию 3m)";
+    const USAGE: &str = "cellward ask-again <срок>|default   (30s…1d; по умолчанию 3m)";
     let show = |tools: &Tools| {
         let (secs, source) = crate::grants::ask_again(&tools.config);
         let from = match source {
             Source::Local => String::new(),
-            Source::Nix => " (задано в Nix: programs.vpn-zones.askAgainAfter)".to_owned(),
+            Source::Nix => " (задано в Nix: programs.cellward.askAgainAfter)".to_owned(),
             Source::Default => " (умолчание)".to_owned(),
         };
         println!(
@@ -927,7 +929,7 @@ fn ask_again(tools: &Tools, args: &[OsString]) -> u8 {
             .exists()
         {
             Err(format!(
-                "«{ASK_AGAIN_SETTING}» задано в Nix (programs.vpn-zones) и меняется там"
+                "«{ASK_AGAIN_SETTING}» задано в Nix (programs.cellward) и меняется там"
             ))
         } else {
             match fs::remove_file(tools.config.join(ASK_AGAIN_SETTING)) {
@@ -958,7 +960,7 @@ fn ask_again(tools: &Tools, args: &[OsString]) -> u8 {
 fn zone_microphone(tools: &Tools, args: &[OsString]) -> u8 {
     use crate::container::Source;
     use crate::microphone::{Setting, MARKER};
-    const USAGE: &str = "vpn-zone microphone <зона> yes|no|ask|default";
+    const USAGE: &str = "cellward microphone <зона> yes|no|ask|default";
     let (Some(name), Some(value)) = (args.first(), args.get(1)) else {
         eprintln!("{USAGE}");
         return 1;
@@ -1019,7 +1021,7 @@ fn zone_microphone(tools: &Tools, args: &[OsString]) -> u8 {
     };
     let from = match source {
         Source::Local => String::new(),
-        Source::Nix => " (задано в Nix: programs.vpn-zones.microphone — своя настройка зоны \
+        Source::Nix => " (задано в Nix: programs.cellward.microphone — своя настройка зоны \
                         не действует, пока оно там)"
             .to_owned(),
         Source::Default => " (умолчание)".to_owned(),
@@ -1032,12 +1034,12 @@ fn zone_microphone(tools: &Tools, args: &[OsString]) -> u8 {
             println!(
                 "  мимо этого переключателя: сырой pipewire-0 и systemd --user хоста — зона \
                  не герметична, её программа запишет микрофон или перепишет эту настройку \
-                 сама (vpn-zone hermetic {name} on)"
+                 сама (cellward hermetic {name} on)"
             );
         } else if audio_manager {
             println!(
                 "  мимо этого переключателя: сырой pipewire-0 — зона объявлена менеджером \
-                 звука (vpn-zone audio-manager {name} off)"
+                 звука (cellward audio-manager {name} off)"
             );
         }
     }
@@ -1048,7 +1050,7 @@ fn zone_microphone(tools: &Tools, args: &[OsString]) -> u8 {
 /// zone (`docs/HERMETICITY.md` §7, A). The host's stays out of reach either way.
 fn zone_x11(tools: &Tools, args: &[OsString]) -> u8 {
     let (Some(name), Some(value)) = (args.first(), args.get(1)) else {
-        eprintln!("vpn-zone x11 <зона> on|off");
+        eprintln!("cellward x11 <зона> on|off");
         return 1;
     };
     let dir = tools.state.join(name);
@@ -1081,7 +1083,7 @@ fn zone_x11(tools: &Tools, args: &[OsString]) -> u8 {
             0
         }
         _ => {
-            eprintln!("vpn-zone x11 <зона> on|off");
+            eprintln!("cellward x11 <зона> on|off");
             1
         }
     }
@@ -1105,7 +1107,7 @@ fn check(tools: &Tools, args: &[OsString]) -> u8 {
     // dead. (`docs/GOTCHAS.md` §4)
     let Ok(mirror) = fs::read_to_string(tools.state.join(name).join("status")) else {
         println!("зона {name_text}: состояние неизвестно — она поднята старой версией,");
-        println!("перезапусти её: vpn-zone down {name_text} && vpn-zone up {name_text}");
+        println!("перезапусти её: cellward down {name_text} && cellward up {name_text}");
         return 3;
     };
     match alive_line(&tools.state.join(name), &mirror) {
@@ -1199,7 +1201,7 @@ fn reset_profile(tools: &Tools, args: &[OsString]) -> u8 {
     }
     if zone_pid(&tools.state, name).is_some() {
         eprintln!(
-            "сначала опусти зону: vpn-zone down {}",
+            "сначала опусти зону: cellward down {}",
             name.to_string_lossy()
         );
         return 1;
@@ -1450,7 +1452,7 @@ fn perms(tools: &Tools, args: &[OsString]) -> u8 {
             0
         }
         _ => {
-            eprintln!("vpn-zone perms list|reset <программа|--all>");
+            eprintln!("cellward perms list|reset <программа|--all>");
             1
         }
     }
@@ -1491,7 +1493,7 @@ fn sandbox(tools: &Tools, args: &[OsString]) -> u8 {
                 .filter(|d| d.is_dir())
                 .collect();
             if dirs.is_empty() {
-                println!("песочниц нет. Создать: vpn-zone sandbox create <имя>");
+                println!("песочниц нет. Создать: cellward sandbox create <имя>");
                 return 0;
             }
             for dir in dirs {
@@ -1538,7 +1540,7 @@ fn sandbox(tools: &Tools, args: &[OsString]) -> u8 {
             0
         }
         _ => {
-            eprintln!("vpn-zone sandbox create|list|rm <имя>");
+            eprintln!("cellward sandbox create|list|rm <имя>");
             1
         }
     }
@@ -1576,7 +1578,7 @@ fn profile(tools: &Tools, args: &[OsString]) -> u8 {
                 .filter(|d| d.is_dir())
                 .collect();
             if dirs.is_empty() {
-                println!("профилей нет. Создать: vpn-zone profile create <имя>");
+                println!("профилей нет. Создать: cellward profile create <имя>");
                 return 0;
             }
             let running = tools.state.join(".running");
@@ -1615,7 +1617,7 @@ fn profile(tools: &Tools, args: &[OsString]) -> u8 {
             0
         }
         _ => {
-            eprintln!("vpn-zone profile create|list|rm <имя>");
+            eprintln!("cellward profile create|list|rm <имя>");
             1
         }
     }
@@ -1638,7 +1640,7 @@ fn trust(tools: &Tools, args: &[OsString]) -> u8 {
         b"rm" => trust_remove(tools, rest, false),
         b"reset" => trust_remove(tools, rest, true),
         _ => {
-            eprintln!("vpn-zone trust add|list|rm|reset <контейнер> …");
+            eprintln!("cellward trust add|list|rm|reset <контейнер> …");
             1
         }
     }
@@ -1674,7 +1676,7 @@ fn trust_target(tools: &Tools, name: &OsStr) -> Result<TrustTarget, String> {
         let dir = tools.sandboxes.join(sandbox);
         if !dir.is_dir() {
             return Err(format!(
-                "песочницы {sandbox} нет — создай: vpn-zone sandbox create {sandbox}"
+                "песочницы {sandbox} нет — создай: cellward sandbox create {sandbox}"
             ));
         }
         return Ok(TrustTarget {
@@ -1691,7 +1693,7 @@ fn trust_target(tools: &Tools, name: &OsStr) -> Result<TrustTarget, String> {
     let dir = tools.profiles.join(name);
     if !dir.is_dir() {
         return Err(format!(
-            "контейнера {text} нет — создай: vpn-zone profile create {text}"
+            "контейнера {text} нет — создай: cellward profile create {text}"
         ));
     }
     Ok(TrustTarget {
@@ -1963,7 +1965,7 @@ fn trust_remove(tools: &Tools, args: &[OsString], all: bool) -> u8 {
         let Some(prefix) = required(
             args,
             1,
-            "нужно начало отпечатка SHA-256 (vpn-zone trust list)",
+            "нужно начало отпечатка SHA-256 (cellward trust list)",
         ) else {
             return 1;
         };
@@ -2032,13 +2034,13 @@ fn launch_entry(tools: &Tools, args: &[OsString]) -> u8 {
     let extra: &[OsString] = match args.iter().position(|a| a == "--") {
         Some(at) => &args[at + 1..],
         None if args.len() > 1 => {
-            eprintln!("аргументы программы — после --: vpn-zone launch {id} -- <аргументы>");
+            eprintln!("аргументы программы — после --: cellward launch {id} -- <аргументы>");
             return 1;
         }
         None => &[],
     };
     if id.starts_with(crate::desktop::PREFIX) {
-        eprintln!("{id} — служебный ярлык vpn-zones: его запускают как есть, не через пикер");
+        eprintln!("{id} — служебный ярлык cellward: его запускают как есть, не через пикер");
         return 1;
     }
     let dirs = crate::desktop::source_dirs(&tools.home);
@@ -2124,7 +2126,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
             let (Some(selector), Some(key), Some(value)) =
                 (words.first(), words.get(1), words.get(2))
             else {
-                eprintln!("vpn-zone container set <контейнер> network <сеть|ask> | x11 on|off");
+                eprintln!("cellward container set <контейнер> network <сеть|ask> | x11 on|off");
                 return 1;
             };
             if key == "x11" {
@@ -2164,7 +2166,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
             };
             if let crate::container::Network::Named(name) = &network {
                 if !network_exists(tools, name) {
-                    eprintln!("сети {name} нет — есть unconfined, offline и зоны из vpn-zone list");
+                    eprintln!("сети {name} нет — есть unconfined, offline и зоны из cellward list");
                     return 1;
                 }
             }
@@ -2188,7 +2190,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
         }
         b"assign" => {
             let (Some(app), Some(selector)) = (words.first(), words.get(1)) else {
-                eprintln!("vpn-zone container assign <программа> <контейнер>");
+                eprintln!("cellward container assign <программа> <контейнер>");
                 return 1;
             };
             if crate::container::load(tools, selector).is_none() {
@@ -2212,7 +2214,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
         }
         b"unassign" => {
             let Some(app) = words.first() else {
-                eprintln!("vpn-zone container unassign <программа>");
+                eprintln!("cellward container unassign <программа>");
                 return 1;
             };
             let _ = fs::remove_file(
@@ -2233,8 +2235,8 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
         b"grant" | b"revoke" => {
             let grant = sub == "grant";
             const USAGE: &str =
-                "vpn-zone container grant sb:<песочница> <каталог> [--for 30m|2h|7d]\n\
-                 vpn-zone container revoke sb:<песочница> <каталог>";
+                "cellward container grant sb:<песочница> <каталог> [--for 30m|2h|7d]\n\
+                 cellward container revoke sb:<песочница> <каталог>";
             let (Some(selector), Some(path)) = (words.first(), words.get(1)) else {
                 eprintln!("{USAGE}");
                 return 1;
@@ -2278,7 +2280,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                                 ""
                             } else {
                                 " (таймер не поставить: уже запущенные программы сохранят \
-                                 доступ до `vpn-zone container expire`, новые его не получат)"
+                                 доступ до `cellward container expire`, новые его не получат)"
                             };
                             format!(
                                 " до {} UTC{timer}",
@@ -2316,7 +2318,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                     } else {
                         eprintln!(
                             "  у части запущенных программ отмонтировать не удалось ({}) — \
-                             завершите их или оборвите зону: vpn-zone kill",
+                             завершите их или оборвите зону: cellward kill",
                             failed.join("; ")
                         );
                         1
@@ -2330,7 +2332,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
         }
         b"merge" => {
             let (Some(from), Some(into)) = (words.first(), words.get(1)) else {
-                eprintln!("vpn-zone container merge <из контейнера> <в контейнер> [--yes]");
+                eprintln!("cellward container merge <из контейнера> <в контейнер> [--yes]");
                 return 1;
             };
             match crate::container::merge(tools, from, into, yes) {
@@ -2345,7 +2347,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
             }
         }
         _ => {
-            eprintln!("vpn-zone container list|show|set|assign|unassign|grant|revoke|merge …");
+            eprintln!("cellward container list|show|set|assign|unassign|grant|revoke|merge …");
             1
         }
     }
@@ -2385,11 +2387,11 @@ fn print_merge(tools: &Tools, from: &str, into: &str, report: &crate::container:
                 .unwrap_or_default();
             eprintln!("    {} {subject}", &sha[..16.min(sha.len())]);
         }
-        eprintln!("  убрать: vpn-zone trust rm {into} <начало sha256>");
+        eprintln!("  убрать: cellward trust rm {into} <начало sha256>");
     }
     let remove = match from.strip_prefix(crate::container::SANDBOX_PREFIX) {
-        Some(name) => format!("vpn-zone sandbox rm {name}"),
-        None => format!("vpn-zone profile rm {from}"),
+        Some(name) => format!("cellward sandbox rm {name}"),
+        None => format!("cellward profile rm {from}"),
     };
     println!("  {from} остался (без программ); удалить, когда проверишь результат: {remove}");
 }
@@ -2435,7 +2437,7 @@ fn print_container(tools: &Tools, c: &crate::container::Container) {
     let certs = crate::trust::stored(&c.trust_dir()).len();
     if certs > 0 {
         println!(
-            "  ⚠ дополнительных корневых сертификатов: {certs} (vpn-zone trust list {})",
+            "  ⚠ дополнительных корневых сертификатов: {certs} (cellward trust list {})",
             c.selector()
         );
     }
@@ -2455,7 +2457,7 @@ fn container_list(tools: &Tools, json: bool) -> u8 {
     }
     let all = crate::container::load_all(tools);
     if all.is_empty() {
-        println!("контейнеров нет. Создать: vpn-zone profile create <имя> или vpn-zone sandbox create <имя>");
+        println!("контейнеров нет. Создать: cellward profile create <имя> или cellward sandbox create <имя>");
         return 0;
     }
     for c in &all {
@@ -2526,9 +2528,9 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
     use crate::frame::{
         Rgb, TitleMode, COLOR_FILE, MAX_WIDTH, SWITCH_SETTING, TITLE_SETTING, WIDTH_SETTING,
     };
-    const USAGE: &str = "vpn-zone frame show|hide\nvpn-zone frame width <1–32>|default\n\
-                         vpn-zone frame title always|hover|off|default\n\
-                         vpn-zone frame color <зона> <#rrggbb>|default";
+    const USAGE: &str = "cellward frame show|hide\ncellward frame width <1–32>|default\n\
+                         cellward frame title always|hover|off|default\n\
+                         cellward frame color <зона> <#rrggbb>|default";
     let title_words = |mode: TitleMode| match mode {
         TitleMode::Always => "всегда (always)",
         TitleMode::Hover => "при наведении (hover)",
@@ -2543,16 +2545,16 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
         None => {
             let (width, source) = crate::frame::width(&tools.config);
             let shown = if crate::frame::hidden(&tools.config) {
-                "спрятаны (vpn-zone frame show — вернуть)"
+                "спрятаны (cellward frame show — вернуть)"
             } else {
                 "рисуются"
             };
             let (title, title_source) = crate::frame::title_mode(&tools.config);
             println!(
                 "рамки зон: {shown}; толщина {width}{}; заголовок: {}{}",
-                from(source, "programs.vpn-zones.frame.width"),
+                from(source, "programs.cellward.frame.width"),
                 title_words(title),
-                from(title_source, "programs.vpn-zones.frame.title")
+                from(title_source, "programs.cellward.frame.title")
             );
             0
         }
@@ -2564,7 +2566,7 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
             let written = if value == "default" {
                 if tools.config.join(DECLARED_DIR).join(TITLE_SETTING).exists() {
                     Err(format!(
-                        "«{TITLE_SETTING}» задано в Nix (programs.vpn-zones) и меняется там"
+                        "«{TITLE_SETTING}» задано в Nix (programs.cellward) и меняется там"
                     ))
                 } else {
                     match fs::remove_file(tools.config.join(TITLE_SETTING)) {
@@ -2589,7 +2591,7 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
             println!(
                 "заголовок рамки: {}{} — у программ, запущенных после этого",
                 title_words(title),
-                from(source, "programs.vpn-zones.frame.title")
+                from(source, "programs.cellward.frame.title")
             );
             0
         }
@@ -2602,7 +2604,7 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
             if verb == "hide" {
                 println!(
                     "рамки зон спрятаны: окна, открытые после этого, — без рамки (уже открытые \
-                     остаются с ней). Вернуть: vpn-zone frame show"
+                     остаются с ней). Вернуть: cellward frame show"
                 );
             } else {
                 println!("рамки зон снова рисуются — у окон, открытых после этого");
@@ -2617,7 +2619,7 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
             let written = if value == "default" {
                 if tools.config.join(DECLARED_DIR).join(WIDTH_SETTING).exists() {
                     Err(format!(
-                        "«{WIDTH_SETTING}» задано в Nix (programs.vpn-zones) и меняется там"
+                        "«{WIDTH_SETTING}» задано в Nix (programs.cellward) и меняется там"
                     ))
                 } else {
                     match fs::remove_file(tools.config.join(WIDTH_SETTING)) {
@@ -2643,7 +2645,7 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
             let (width, source) = crate::frame::width(&tools.config);
             println!(
                 "толщина рамки: {width}{} — у программ, запущенных после этого",
-                from(source, "programs.vpn-zones.frame.width")
+                from(source, "programs.cellward.frame.width")
             );
             0
         }
@@ -2680,7 +2682,7 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
             println!(
                 "зона {name}: рамка {}{} — у программ, запущенных после этого",
                 color.hex(),
-                from(source, "programs.vpn-zones.frame.colors")
+                from(source, "programs.cellward.frame.colors")
             );
             0
         }
@@ -3061,7 +3063,7 @@ peer: p
             "container",
         ] {
             assert!(
-                USAGE.contains(&format!("vpn-zone {verb}")),
+                USAGE.contains(&format!("cellward {verb}")),
                 "в справке нет «{verb}»"
             );
         }

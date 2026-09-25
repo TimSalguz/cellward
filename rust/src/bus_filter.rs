@@ -303,7 +303,7 @@ fn deny(conn: &Conn, ctx: &Ctx, h: &Header, why: &str) -> io::Result<()> {
         wire::NO_REPLY_EXPECTED,
         ctx.serial(),
         &fields,
-        &body::string(&format!("vpn-zones: {why}")),
+        &body::string(&format!("{}: {why}", crate::dialog::APP)),
     );
     conn.send(&reply, &[])
 }
@@ -1095,7 +1095,7 @@ fn notify(ctx: &Ctx, summary: &str, text: &str) {
         "org.freedesktop.Notifications",
         "Notify",
         Some(body::NOTIFY_SIGNATURE),
-        &body::notification("vpn-zones", summary, text),
+        &body::notification(crate::dialog::APP, summary, text),
     );
 }
 

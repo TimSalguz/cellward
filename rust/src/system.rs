@@ -66,7 +66,7 @@ pub const RUN_DIR: &str = "/run/vpn-zones/system";
 /// The declared zones, one name per line, written by the NixOS module. What
 /// `vpn-zone status --json` lists.
 pub const DECLARED: &str = "/etc/vpn-zones/system-zones";
-/// `services.vpn-zones.system.users`, one per line: who may add zones.
+/// `services.cellward.system.users`, one per line: who may add zones.
 pub const ADDERS: &str = "/etc/vpn-zones/system-adders";
 /// Namespaces are `vz-<name>`: apart from anybody else's `ip netns add`.
 pub const NETNS_PREFIX: &str = "vz-";
@@ -1143,7 +1143,7 @@ pub fn settings(name: &str) -> Option<Settings> {
     })
 }
 
-/// Who may add system zones on the spot: `services.vpn-zones.system.users`,
+/// Who may add system zones on the spot: `services.cellward.system.users`,
 /// written by the module. No file, nobody.
 pub fn adders() -> Vec<String> {
     fs::read_to_string(ADDERS)

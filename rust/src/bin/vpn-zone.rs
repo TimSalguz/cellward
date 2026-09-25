@@ -1,5 +1,6 @@
 //! `vpn-zone` — the command line the user (and the picker, and the GUI
-//! wrappers, and the generated `.desktop` files) call.
+//! wrappers, and the generated `.desktop` files) call. The profile names it
+//! `cellward`, `cw` and the old `vpn-zone`: one wrapper, this binary.
 //!
 //! Everything is in [`vpn_zone::cli`]; this file exists so that the logic can be
 //! unit-tested as a library. The one thing that has to be true before it runs is

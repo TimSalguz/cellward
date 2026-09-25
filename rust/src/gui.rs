@@ -1,4 +1,5 @@
-//! `vpn-zone-gui` — the six launcher entries, one subcommand each.
+//! `vpn-zone-gui` — the six launcher entries, one subcommand each. On `PATH` it
+//! is `cellward-gui` (and the old `vpn-zone-gui`).
 //!
 //! These were six `writeShellScriptBin` wrappers in `module/default.nix`, one
 //! per `.desktop` file: add a zone, remove a zone, create a container, remove a
@@ -37,19 +38,20 @@ use crate::registry;
 use crate::tools::Tools;
 
 const USAGE: &str = "\
-vpn-zone-gui — графические ярлыки vpn-zones (kdialog над vpn-zone)
+cellward-gui — графические ярлыки cellward (kdialog над cellward)
+(прежнее имя vpn-zone-gui тоже работает)
 
-  vpn-zone-gui add          выбрать .conf и создать зону
-  vpn-zone-gui remove       остановить и удалить зону
-  vpn-zone-gui profile-add  завести контейнер данных
-  vpn-zone-gui profile-rm   удалить контейнер (или все)
-  vpn-zone-gui settings     сеть/контейнер по умолчанию, ярлыки, замки
-  vpn-zone-gui forget       забыть закреплённые сети программ
-  vpn-zone-gui containers   сеть контейнера, объединение, выданные каталоги
-  vpn-zone-gui kill         оборвать зону: убить её программы и опустить
+  cellward-gui add          выбрать .conf и создать зону
+  cellward-gui remove       остановить и удалить зону
+  cellward-gui profile-add  завести контейнер данных
+  cellward-gui profile-rm   удалить контейнер (или все)
+  cellward-gui settings     сеть/контейнер по умолчанию, ярлыки, замки
+  cellward-gui forget       забыть закреплённые сети программ
+  cellward-gui containers   сеть контейнера, объединение, выданные каталоги
+  cellward-gui kill         оборвать зону: убить её программы и опустить
 
-Эти же действия есть в CLI: vpn-zone add|rm|profile|default|mode|forget|kill.
-Пути инструментов приходят манифестом VPN_ZONE_TOOLS, как и у vpn-zone.
+Эти же действия есть в CLI: cellward add|rm|profile|default|mode|forget|kill.
+Пути инструментов приходят манифестом VPN_ZONE_TOOLS, как и у cellward.
 ";
 
 /// Entry point of the `vpn-zone-gui` binary.
@@ -65,7 +67,7 @@ pub fn main() -> ExitCode {
     let tools = match Tools::from_env() {
         Ok(tools) => tools,
         Err(e) => {
-            eprintln!("vpn-zone-gui: {e}");
+            eprintln!("cellward-gui: {e}");
             return ExitCode::from(EXIT_TOOLS);
         }
     };
@@ -817,7 +819,7 @@ fn settings(tools: &Tools) -> u8 {
 
     let Some(what) = menu(
         tools,
-        "Настройки VPN-зон",
+        "Настройки cellward",
         "Что настроить?",
         &[
             row("net", format!("Сеть по умолчанию — сейчас: {current_net}")),

@@ -156,10 +156,16 @@ fn the_help_works_without_a_manifest() {
         .unwrap();
     assert!(out.status.success());
     let text = stdout(&out);
-    assert!(text.starts_with("vpn-zone — сетевые зоны"), "{text}");
-    for verb in ["vpn-zone run", "vpn-zone check", "vpn-zone gc"] {
+    assert!(text.starts_with("cellward — сетевые зоны"), "{text}");
+    for verb in ["cellward run", "cellward check", "cellward gc"] {
         assert!(text.contains(verb), "в справке нет «{verb}»");
     }
+    // The short name and the old one are named in the header.
+    let header = text.lines().take(2).collect::<Vec<_>>().join("\n");
+    assert!(
+        header.contains("cw") && header.contains("vpn-zone"),
+        "{header}"
+    );
 }
 
 #[test]
@@ -454,7 +460,7 @@ fn a_missing_container_stops_the_launch_with_the_way_out() {
     );
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        stderr(&out).contains("профиля work нет — создай: vpn-zone profile create work"),
+        stderr(&out).contains("профиля work нет — создай: cellward profile create work"),
         "{}",
         stderr(&out)
     );
@@ -504,7 +510,7 @@ fn containers_and_sandboxes_are_created_listed_and_removed() {
 
     assert_eq!(
         stdout(&home.run(&["profile", "list"])).trim(),
-        "профилей нет. Создать: vpn-zone profile create <имя>"
+        "профилей нет. Создать: cellward profile create <имя>"
     );
     assert!(home.run(&["profile", "create", "work"]).status.success());
     assert!(home.root.join("profiles/work").is_dir());
@@ -799,7 +805,7 @@ fn a_container_bound_to_a_network_runs_there_only() {
         stderr(&out)
     );
     assert!(
-        stderr(&out).contains("vpn-zone container set work network unconfined"),
+        stderr(&out).contains("cellward container set work network unconfined"),
         "{}",
         stderr(&out)
     );
@@ -1167,7 +1173,7 @@ fn a_merge_keeps_what_the_target_has_and_moves_the_programs() {
     // The source stays until it is removed by hand.
     assert!(old.join("config/upper/app/settings").is_file());
     assert!(
-        stdout(&out).contains("vpn-zone profile rm old"),
+        stdout(&out).contains("cellward profile rm old"),
         "{}",
         stdout(&out)
     );
@@ -1380,7 +1386,7 @@ fn watch_announces_a_dead_tunnel_once_and_its_recovery() {
     let bar = stdout(&home.run(&["status", "--bar"]));
     assert_eq!(
         bar.trim(),
-        "{\"text\":\"nl\",\"tooltip\":\"VPN-зоны: поднятые зоны\",\"class\":\"up\",\"unconfined\":0}"
+        "{\"text\":\"nl\",\"tooltip\":\"cellward: поднятые зоны\",\"class\":\"up\",\"unconfined\":0}"
     );
 
     // A program running unconfined is marked, dead records are not.
@@ -1397,7 +1403,7 @@ fn watch_announces_a_dead_tunnel_once_and_its_recovery() {
     let bar = stdout(&home.run(&["status", "--bar"]));
     assert_eq!(
         bar.trim(),
-        "{\"text\":\"nl ⚠1\",\"tooltip\":\"VPN-зоны: поднятые зоны\\nБез ограничений (⚠) сейчас: firefox\",\"class\":\"up\",\"unconfined\":1}"
+        "{\"text\":\"nl ⚠1\",\"tooltip\":\"cellward: поднятые зоны\\nБез ограничений (⚠) сейчас: firefox\",\"class\":\"up\",\"unconfined\":1}"
     );
     fs::remove_file(&reg).unwrap();
 

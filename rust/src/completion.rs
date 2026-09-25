@@ -1,6 +1,7 @@
-//! Tab completion for the `vpn-zone` CLI.
+//! Tab completion for the `cellward` CLI (`cw` and the old `vpn-zone` are the
+//! same program).
 //!
-//! One machine, two thin shells: the hidden verb `vpn-zone _complete --
+//! One machine, two thin shells: the hidden verb `cellward _complete --
 //! <words…> <cursor>` prints one candidate per line, and the zsh/bash scripts
 //! installed by the module (module/default.nix) do nothing but call it. The
 //! rules live HERE, next to the verbs they describe, so a new verb and its
@@ -339,6 +340,27 @@ mod tests {
         assert!(!complete(&["vpn-zone", "_"], 2)
             .iter()
             .any(|c| c == "_complete"));
+    }
+
+    /// `cellward`, `cw` and the old `vpn-zone` are one program: the command's
+    /// own name is not what the answer depends on.
+    #[test]
+    fn every_name_of_the_command_completes_the_same() {
+        for line in [
+            &["", "de"][..],
+            &["", "run", "nl", "--profile", ""],
+            &["", "container", "set", "sb:dev", "network", "o"],
+        ] {
+            let expected = complete(&[&["vpn-zone"], &line[1..]].concat(), line.len());
+            assert!(!expected.is_empty(), "{line:?}");
+            for name in ["cellward", "cw"] {
+                assert_eq!(
+                    complete(&[&[name], &line[1..]].concat(), line.len()),
+                    expected,
+                    "{name} {line:?}"
+                );
+            }
+        }
     }
 
     #[test]

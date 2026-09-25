@@ -774,7 +774,7 @@ fn serve_any(sock: RawFd) -> Result<Vec<u8>, String> {
     if system::is_off() {
         // The zones are down and stay down (their units check the same
         // flag): say so, rather than "the zone did not come up".
-        return Err("vpn-zones are off; `vpn-zones-on` turns them on".to_owned());
+        return Err("cellward is off; `vpn-zones-on` turns it on".to_owned());
     }
     if let Some(body) = data.strip_prefix(ADD_MAGIC) {
         return serve_add(uid, &AddRequest::decode(body)?).map(|d| answer_done(&d));
@@ -1362,12 +1362,12 @@ fn serve_add(uid: u32, request: &AddRequest) -> Result<Done, String> {
         return Err("root adds a zone by declaring it".to_owned());
     }
     let user = user_of(uid)?;
-    // `services.vpn-zones.system.users`, and nobody else: a zone's own users
+    // `services.cellward.system.users`, and nobody else: a zone's own users
     // may use it, not add zones (review — a program in a user zone, where the
     // group reaches, could have added a plain zone and gone out by it).
     if !system::adders().contains(&user.name) {
         return Err(format!(
-            "{} may not add system zones (services.vpn-zones.system.users)",
+            "{} may not add system zones (services.cellward.system.users)",
             user.name
         ));
     }

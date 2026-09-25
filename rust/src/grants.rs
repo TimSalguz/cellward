@@ -321,7 +321,7 @@ pub fn expire(tools: &Tools) -> u8 {
             code = 1;
             text.push_str(&format!(
                 "; у части запущенных программ отмонтировать не удалось ({}) — \
-                 завершите их или оборвите зону: vpn-zone kill",
+                 завершите их или оборвите зону: cellward kill",
                 failed.join("; ")
             ));
         }

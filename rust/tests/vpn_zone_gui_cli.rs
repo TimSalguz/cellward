@@ -214,7 +214,7 @@ fn the_help_works_without_a_manifest() {
         "settings",
         "forget",
     ] {
-        assert!(text.contains(&format!("vpn-zone-gui {verb}")), "{text}");
+        assert!(text.contains(&format!("cellward-gui {verb}")), "{text}");
     }
 
     let out = Command::new(BIN)

@@ -1335,21 +1335,21 @@ pub fn pipewire_check(
             Level::Warn,
             "МЕНЕДЖЕР ЗВУКА: зоне отдан PipeWire хоста без ограничений — всё, что играет \
              хост, микрофон мимо настройки microphone, чужие потоки и связи \
-             (vpn-zone audio-manager <зона> off)",
+             (cellward audio-manager <зона> off)",
         )
     } else {
         match state {
             Some(State::Active) => Check::new(
                 "pipewire",
                 Level::Ok,
-                "ограниченный: политика WirePlumber vpn-zones действует",
+                "ограниченный: политика WirePlumber cellward действует",
             ),
             Some(State::NoPolicy) => Check::new(
                 "pipewire",
                 Level::Warn,
-                "политики WirePlumber vpn-zones нет — PipeWire зоне закрыт, звук только \
-                 через pulse (services.vpn-zones.pipewirePolicy или \
-                 programs.vpn-zones.pipewirePolicy)",
+                "политики WirePlumber cellward нет — PipeWire зоне закрыт, звук только \
+                 через pulse (services.cellward.pipewirePolicy или \
+                 programs.cellward.pipewirePolicy)",
             ),
             Some(State::NoPipewire) => Check::new(
                 "pipewire",

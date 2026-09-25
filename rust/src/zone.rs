@@ -2560,7 +2560,7 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
     } else if zone.hermetic {
         eprintln!(
             "zone {}: AUDIO MANAGER — the host's raw pipewire-0 in a hermetic zone: every stream \
-             and device of the host (vpn-zone audio-manager {} off)",
+             and device of the host (cellward audio-manager {} off)",
             zone.name(),
             zone.name()
         );
@@ -2861,7 +2861,7 @@ fn hide_system_tier(zone: &Zone) -> Result<(), String> {
 /// and fetches in the host's network, and a fixed-output derivation fetches
 /// whatever address a program names — from any zone, an offline one too.
 /// A zone that needs it is let (`vpn-zone nix-daemon <zone> on`, or
-/// `programs.vpn-zones.nixDaemon` in Nix). Fatal when it cannot be hidden.
+/// `programs.cellward.nixDaemon` in Nix). Fatal when it cannot be hidden.
 fn hide_nix_daemon(zone: &Zone) -> Result<(), String> {
     let dir = Path::new(NIX_DAEMON_DIR);
     if !dir.is_dir() {
@@ -3075,7 +3075,7 @@ const HOST_RUNS_IN_ZONES: &[&str] = &[
 /// launcher in `~/.local/share/applications` is code the host starts later —
 /// outside the zone, around its tunnel. A zone that has to write there is let
 /// (`vpn-zone host-files <zone> writable`, or
-/// `programs.vpn-zones.hostFilesWritable` in Nix).
+/// `programs.cellward.hostFilesWritable` in Nix).
 ///
 /// A symlink cannot be covered — a mount follows it, and the link itself
 /// stays a name in a directory the program can write: home-manager's

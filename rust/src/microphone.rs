@@ -17,7 +17,7 @@
 //! program cannot answer its own question: the zone's marker in its state
 //! directory (`~/.local/state/vpn-zones/<zone>/microphone`, hidden from zones
 //! — LEAK-MODEL §17), and `declared/microphone` below `~/.config/vpn-zones`
-//! (Nix, `programs.vpn-zones.microphone`; read-only in zones). The filter
+//! (Nix, `programs.cellward.microphone`; read-only in zones). The filter
 //! that reads and writes them runs in the host's user namespace
 //! (`zone::Helpers`), and so does the kdialog it asks with: a program of the
 //! zone cannot reach the host's file system through their `/proc/<pid>/root`.
@@ -230,7 +230,7 @@ pub fn question(zone: &str, program: &str, remember: bool) -> String {
     let always = if remember {
         format!(
             "«{}» — это любой программе зоны «{zone}», без вопросов, пока это не \
-             отменить (vpn-zone microphone {zone} ask).\n\n",
+             отменить (cellward microphone {zone} ask).\n\n",
             always_label(zone)
         )
     } else {

@@ -145,7 +145,7 @@ impl fmt::Display for Error {
         match self {
             Self::NotSet => write!(
                 f,
-                "не задана {ENV_VAR} — vpn-zone запускают обёрткой из home.packages, а не напрямую"
+                "не задана {ENV_VAR} — cellward запускают обёрткой из home.packages, а не напрямую"
             ),
             Self::Unreadable(path, e) => {
                 write!(f, "не читается список инструментов {}: {e}", path.display())

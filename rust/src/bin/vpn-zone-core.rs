@@ -17,7 +17,7 @@ use vpn_zone::{
 };
 
 const USAGE: &str = "\
-vpn-zone-core — helper commands of vpn-zones
+vpn-zone-core — helper commands of cellward
 
 Usage:
   vpn-zone-core zone-holder [--ip P] [--awg P] [--wg P] [--pasta P] [--nft P]
@@ -93,7 +93,7 @@ Usage:
   vpn-zone-core profile-run [--cwd DIR] <profiledir> <zone> <ephemeral 0|1> <regdir> -- cmd...
         Stack the container's overlay layers over the XDG directories, change
         into DIR (falling back to $HOME and /), drop the ambient capabilities
-        and run the command. Called from `vpn-zone run`, already inside the
+        and run the command. Called from `cellward run`, already inside the
         zone's namespaces. An empty <profiledir> means the main profile: no
         layers are stacked. With <ephemeral> = 1 the command
         is run as a child and the container is removed after the last program

@@ -136,7 +136,7 @@ fn freeze(netns: &Path, unit: Option<&str>, spare: &[i32]) -> (Vec<Target>, Opti
 /// `vpn-zone kill <zone>`.
 pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     let Some(name) = args.first().filter(|n| !n.is_empty()) else {
-        eprintln!("vpn-zone kill <зона>");
+        eprintln!("cellward kill <зона>");
         return EXIT_REFUSED;
     };
     let text = name.to_string_lossy();
