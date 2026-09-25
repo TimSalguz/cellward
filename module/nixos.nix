@@ -1,4 +1,5 @@
-# СИСТЕМНЫЙ УРОВЕНЬ vpn-zones (ROADMAP M10, docs/SYSTEM.md, docs/ARCHITECTURE.ru.md).
+# СИСТЕМНЫЙ УРОВЕНЬ cellward (прежнее имя — vpn-zones; ROADMAP M10, docs/SYSTEM.md,
+# docs/ARCHITECTURE.ru.md).
 #
 # Та же зона, что у пользовательского уровня, — namespace, где есть только lo и
 # туннель, — но держит её systemd с загрузки, а не сеанс. К ней подключаются
@@ -31,7 +32,36 @@
 }:
 
 let
-  cfg = config.services.vpn-zones.system;
+  cfg = config.services.cellward.system;
+
+  # Every option of services.cellward.system, by its path below it: each also
+  # answers to its old name under services.vpn-zones.system, with a warning
+  # (the project was vpn-zones until 2026-09). One rename per option — a
+  # renamed subtree would be one option of an empty submodule type.
+  # tests/harness.nix checks that this list names every option.
+  renamedOptions = [
+    "enable"
+    "switchGroup"
+    "users"
+    "zones"
+    "services"
+    "containers"
+    "console.enable"
+    "console.zone"
+    "console.fallback"
+    "console.admin"
+    "egress.enable"
+    "egress.mode"
+    "egress.localNetworks"
+    "egress.allowUsers"
+    "egress.allowGroups"
+    "egress.emergency.minutes"
+    "egress.emergency.group"
+    "host.nix"
+    "host.dns"
+    "host.time"
+    "amneziawg"
+  ];
 
   vpn-zone-rust = pkgs.callPackage ../package.nix { };
   # The same patched pasta as the user tier's (module/default.nix): a TCP
@@ -291,10 +321,18 @@ in
 {
   # Политика WirePlumber для PipeWire зон (docs/LEAK-MODEL.md §20): от
   # системных зон не зависит — нужна пользовательскому уровню.
-  imports = [ ./wireplumber/nixos.nix ];
+  imports = [
+    ./wireplumber/nixos.nix
+  ]
+  ++ map (
+    name:
+    lib.mkRenamedOptionModule (lib.splitString "." "services.vpn-zones.system.${name}") (
+      lib.splitString "." "services.cellward.system.${name}"
+    )
+  ) renamedOptions;
 
-  options.services.vpn-zones.system = {
-    enable = lib.mkEnableOption "system zones of vpn-zones: network namespaces with a tunnel as their only way out, held from boot, for services and NixOS containers";
+  options.services.cellward.system = {
+    enable = lib.mkEnableOption "system zones of cellward: network namespaces with a tunnel as their only way out, held from boot, for services and NixOS containers";
 
     switchGroup = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
@@ -305,7 +343,7 @@ in
         otherwise switch the protection off at the next login — and
         `vpn-zones-on` without one at the machine itself (a process in a local,
         active login session's own scope), with it from anywhere else:
-        vpn-zones off entirely — zones, the egress policy, services back on the
+        cellward off entirely — zones, the egress policy, services back on the
         host's network — with no rebuild and no network, until turned on again.
         This turns polkit on. `null`: root only.
       '';
@@ -513,8 +551,9 @@ in
       default = true;
       description = ''
         Load the out-of-tree amneziawg kernel module (built for the running
-        kernel). Without it only configs with no obfuscation parameters work,
-        through the in-tree wireguard module.
+        kernel), with `enable` or with the single entry `services.cellward.enable`
+        — the user tier's zones need it too. Without it only configs with no
+        obfuscation parameters work, through the in-tree wireguard module.
       '';
     };
   };
@@ -525,11 +564,11 @@ in
         assertions =
           lib.mapAttrsToList (name: _: {
             assertion = validName name;
-            message = "services.vpn-zones.system.zones.${name}: a system zone is named by 1 to 12 of a-z, 0-9 and '-', not starting with '-', and not unconfined, direct or offline.";
+            message = "services.cellward.system.zones.${name}: a system zone is named by 1 to 12 of a-z, 0-9 and '-', not starting with '-', and not unconfined, direct or offline.";
           }) cfg.zones
           ++ lib.mapAttrsToList (name: z: {
             assertion = z.kind != "plain" || z.configFile == null;
-            message = "services.vpn-zones.system.zones.${name}: a plain zone has no tunnel, so no configFile.";
+            message = "services.cellward.system.zones.${name}: a plain zone has no tunnel, so no configFile.";
           }) cfg.zones
           # A plain zone through one interface asks names of its own resolvers:
           # the defaults are the host's primary network's view, and queries
@@ -537,11 +576,11 @@ in
           # two (review 2026-09-25).
           ++ lib.mapAttrsToList (name: z: {
             assertion = !(z.kind == "plain" && z.uplink != null) || z.dns != [ ];
-            message = "services.vpn-zones.system.zones.${name}: a plain zone with an uplink needs its own dns — resolvers reached through ${toString z.uplink}.";
+            message = "services.cellward.system.zones.${name}: a plain zone with an uplink needs its own dns — resolvers reached through ${toString z.uplink}.";
           }) cfg.zones
           ++ lib.mapAttrsToList (unit: s: {
             assertion = cfg.zones ? ${s.zone};
-            message = "services.vpn-zones.system.services.${unit}.zone = \"${s.zone}\": there is no such zone in services.vpn-zones.system.zones.";
+            message = "services.cellward.system.services.${unit}.zone = \"${s.zone}\": there is no such zone in services.cellward.system.zones.";
           }) cfg.services
           ++ lib.concatLists (
             lib.mapAttrsToList
@@ -550,11 +589,11 @@ in
                 lib.optionals (cfg.host.${what} != null) [
                   {
                     assertion = cfg.zones ? ${cfg.host.${what}};
-                    message = "services.vpn-zones.system.host.${what} = \"${cfg.host.${what}}\": there is no such zone in services.vpn-zones.system.zones.";
+                    message = "services.cellward.system.host.${what} = \"${cfg.host.${what}}\": there is no such zone in services.cellward.system.zones.";
                   }
                   {
                     assertion = !(cfg.services ? ${unit});
-                    message = "services.vpn-zones.system.host.${what} and services.vpn-zones.system.services.${unit} both put ${unit} into a zone: one of them.";
+                    message = "services.cellward.system.host.${what} and services.cellward.system.services.${unit} both put ${unit} into a zone: one of them.";
                   }
                 ]
               )
@@ -571,7 +610,7 @@ in
                 # Строже, чем проверит программа (она пропустит только адрес):
                 # опечатка должна остановить сборку, а не молча выпасть.
                 assertion = builtins.match "[0-9a-fA-F.:]+" a != null;
-                message = "services.vpn-zones.system.zones.${name}.dns: \"${a}\" is not an address.";
+                message = "services.cellward.system.zones.${name}.dns: \"${a}\" is not an address.";
               }) z.dns
             ) cfg.zones
           )
@@ -579,12 +618,12 @@ in
             # Как проверит программа (`hostif::valid_interface_name`): имя
             # интерфейса Linux, 1–15 байт, без `/`, `:` и пробелов.
             assertion = z.uplink == null || builtins.match "[^/: \t\n]{1,15}" z.uplink != null;
-            message = "services.vpn-zones.system.zones.${name}.uplink: \"${toString z.uplink}\" is not an interface name.";
+            message = "services.cellward.system.zones.${name}.uplink: \"${toString z.uplink}\" is not an interface name.";
           }) cfg.zones
           ++ [
             {
               assertion = cfg.host.time == null || config.services.timesyncd.enable;
-              message = "services.vpn-zones.system.host.time is for systemd-timesyncd, which is off here; another time daemon goes into a zone with services.vpn-zones.system.services.<unit>.";
+              message = "services.cellward.system.host.time is for systemd-timesyncd, which is off here; another time daemon goes into a zone with services.cellward.system.services.<unit>.";
             }
           ]
           ++ lib.concatLists (
@@ -596,7 +635,7 @@ in
               [
                 {
                   assertion = cfg.zones ? ${a.zone};
-                  message = "services.vpn-zones.system.containers.${c}.zone = \"${a.zone}\": there is no such zone in services.vpn-zones.system.zones.";
+                  message = "services.cellward.system.containers.${c}.zone = \"${a.zone}\": there is no such zone in services.cellward.system.zones.";
                 }
                 {
                   # Без своего user namespace root контейнера — root и в
@@ -634,14 +673,14 @@ in
         users.users.${plainUser} = {
           isSystemUser = true;
           group = plainUser;
-          description = "vpn-zones pasta of plain system zones";
+          description = "cellward pasta of plain system zones";
         };
         users.groups.${plainUser} = { };
         # pasta пользовательских зон через системную: своя группа, чтобы
         # системная зона отказала её пакетам к своим же адресам (ревью).
         users.groups.vpn-zones-bridge = { };
 
-        # Список для `vpn-zone status --json` (system_networks), и по зоне —
+        # Список для `cellward status --json` (system_networks), и по зоне —
         # кто может запускать в ней программы (посредник, rust/src/sysrun.rs).
         environment.etc = {
           "vpn-zones/system-zones".text = lib.concatMapStrings (name: name + "\n") (
@@ -711,7 +750,7 @@ in
         # Держатель сам читает настройки зоны: объявленной — из /etc, добавленной
         # на ходу — из /var/lib/vpn-zones/system/<имя>/. Юниту нужно одно имя.
         systemd.services."vpn-zone-system-ns@" = {
-          description = "vpn-zones: network namespace of the system zone %i";
+          description = "cellward: network namespace of the system zone %i";
           restartIfChanged = false;
           # Раннее: пространство нужно и службам ранней загрузки (timesyncd —
           # до sysinit.target). Ему хватает /run, /etc и стора — сети не надо;
@@ -736,7 +775,7 @@ in
           };
         };
         systemd.services."vpn-zone-system@" = {
-          description = "vpn-zones: the way out of the system zone %i";
+          description = "cellward: the way out of the system zone %i";
           unitConfig.ConditionPathExists = "!${offFlag}";
           unitConfig.ConditionKernelCommandLine = "!vpnzones=off";
           bindsTo = [ "vpn-zone-system-ns@%i.service" ];
@@ -798,7 +837,7 @@ in
       # команда — уже от имени пользователя и с NO_NEW_PRIVS.
       {
         systemd.sockets.vpn-zone-sysrun = {
-          description = "vpn-zones: programs of users in system zones";
+          description = "cellward: programs of users in system zones";
           wantedBy = [ "sockets.target" ];
           socketConfig = {
             ListenSequentialPacket = "/run/vpn-zones/sysrun.sock";
@@ -813,7 +852,7 @@ in
           };
         };
         systemd.services."vpn-zone-sysrun@" = {
-          description = "vpn-zones: a program in a system zone";
+          description = "cellward: a program in a system zone";
           serviceConfig = {
             ExecStart = "${core} system-run-service";
             StandardInput = "socket";
@@ -880,13 +919,13 @@ in
         in
         {
           systemd.sockets.vpn-zones-dns = {
-            description = "vpn-zones: the host's DNS, asked through the zone ${cfg.host.dns}";
+            description = "cellward: the host's DNS, asked through the zone ${cfg.host.dns}";
             wantedBy = [ "sockets.target" ];
             listenDatagrams = [ hostDnsListen ];
             listenStreams = [ hostDnsListen ];
           };
           systemd.services.vpn-zones-dns = {
-            description = "vpn-zones: the host's DNS through a zone";
+            description = "cellward: the host's DNS through a zone";
             serviceConfig = {
               ExecStart =
                 "${core} dns-forward --host-resolvers"
@@ -943,7 +982,7 @@ in
           # выполняется в той же оболочке перед хуками, на каждом интерфейсе,
           # а список пропусков читается заново перед каждым хуком.
           environment.etc."dhcpcd.enter-hook".text = ''
-            # vpn-zones host.dns: the resolvers DHCP hands out never reach the
+            # cellward host.dns: the resolvers DHCP hands out never reach the
             # host's resolver — its names go through the zone.
             skip_hooks="$skip_hooks resolv.conf"
           '';
@@ -953,10 +992,10 @@ in
           assertions = [
             {
               assertion = !(config.systemd.network.enable && config.services.resolved.enable) || networkdLeaks == { };
-              message = "services.vpn-zones.system.host.dns: systemd-networkd would hand resolved the resolvers of ${lib.concatStringsSep ", " (lib.attrNames networkdLeaks)}, and the host's names would go to them around the zone. For each: dhcpV4Config.UseDNS = false; dhcpV6Config.UseDNS = false; ipv6AcceptRAConfig.UseDNS = false; and no networkConfig.DNS.";
+              message = "services.cellward.system.host.dns: systemd-networkd would hand resolved the resolvers of ${lib.concatStringsSep ", " (lib.attrNames networkdLeaks)}, and the host's names would go to them around the zone. For each: dhcpV4Config.UseDNS = false; dhcpV6Config.UseDNS = false; ipv6AcceptRAConfig.UseDNS = false; and no networkConfig.DNS.";
             }
           ];
-          warnings = lib.optional ((cfg.zones.${cfg.host.dns}.kind or "plain") != "plain") "services.vpn-zones.system.host.dns = \"${cfg.host.dns}\" is a VPN zone: the host's names go through it, and so would the name of its own endpoint — give the endpoint as an address, or the zone never comes up.";
+          warnings = lib.optional ((cfg.zones.${cfg.host.dns}.kind or "plain") != "plain") "services.cellward.system.host.dns = \"${cfg.host.dns}\" is a VPN zone: the host's names go through it, and so would the name of its own endpoint — give the endpoint as an address, or the zone never comes up.";
         }
       ))
 
@@ -999,7 +1038,7 @@ in
         in
         {
           systemd.services.vpn-zones-off = {
-            description = "vpn-zones: off — everything back on the host's network until vpn-zones-on";
+            description = "cellward: off — everything back on the host's network until vpn-zones-on";
             serviceConfig = {
               Type = "oneshot";
               ExecStart = [
@@ -1018,7 +1057,7 @@ in
             };
           };
           systemd.services.vpn-zones-on = {
-            description = "vpn-zones: on again";
+            description = "cellward: on again";
             serviceConfig = {
               Type = "oneshot";
               # Политика — первой: хост закрывается как можно раньше. Не
@@ -1032,7 +1071,7 @@ in
                 ${lib.optionalString (autoStarted != [ ]) "${systemctl} start ${lib.concatStringsSep " " autoStarted} || true"}
                 ${reattach} || true
                 if [ "$policy" != 0 ]; then
-                  echo "vpn-zones on, but the egress policy did not load — the host keeps its own network" >&2
+                  echo "cellward on, but the egress policy did not load — the host keeps its own network" >&2
                   exit 1
                 fi
               '';
@@ -1094,13 +1133,13 @@ in
         assertions = [
           {
             assertion = cfg.zones ? ${cfg.console.zone} && cfg.zones.${cfg.console.zone}.users != [ ];
-            message = "services.vpn-zones.system.console.zone = \"${cfg.console.zone}\" has to be a declared zone with users.";
+            message = "services.cellward.system.console.zone = \"${cfg.console.zone}\" has to be a declared zone with users.";
           }
           {
             assertion =
               cfg.console.fallback == null
               || (cfg.zones ? ${cfg.console.fallback} && cfg.zones.${cfg.console.fallback}.kind == "plain");
-            message = "services.vpn-zones.system.console.fallback has to be a declared plain zone.";
+            message = "services.cellward.system.console.fallback has to be a declared plain zone.";
           }
         ];
         environment.etc."vpn-zones/console".text =
@@ -1177,13 +1216,13 @@ in
           assertions = [
             {
               assertion = !strict || cfg.host.nix != null;
-              message = "services.vpn-zones.system.egress.mode = \"strict\" closes the network to the Nix daemon: substitutes and the builds that fetch would fail, and the next rebuild with them. Put it into a zone: services.vpn-zones.system.host.nix = \"<zone>\" (a plain zone is directly).";
+              message = "services.cellward.system.egress.mode = \"strict\" closes the network to the Nix daemon: substitutes and the builds that fetch would fail, and the next rebuild with them. Put it into a zone: services.cellward.system.host.nix = \"<zone>\" (a plain zone is directly).";
             }
           ];
           warnings =
             lib.optional (
               strict && cfg.host.time == null && config.services.timesyncd.enable
-            ) "services.vpn-zones.system.egress.mode = \"strict\" closes the network to systemd-timesyncd: the clock will drift. Put it into a zone: services.vpn-zones.system.host.time = \"<zone>\" (a plain zone is directly).";
+            ) "services.cellward.system.egress.mode = \"strict\" closes the network to systemd-timesyncd: the clock will drift. Put it into a zone: services.cellward.system.host.time = \"<zone>\" (a plain zone is directly).";
 
           # Проверка связности NetworkManager (root, в интернет) под strict
           # не пройдёт, и NM сообщит «ограниченное подключение» всем, кто
@@ -1193,7 +1232,7 @@ in
           ) (lib.mkDefault false);
 
           systemd.services.vpn-zones-egress = {
-            description = "vpn-zones: the host egress policy (${e.mode})";
+            description = "cellward: the host egress policy (${e.mode})";
             # Путь спасения без единого нашего бинарника: `vpnzones.egress=off`
             # в строке ядра (в меню загрузки — `e`) — и политика не поднимается.
             unitConfig.ConditionKernelCommandLine = [
@@ -1222,7 +1261,7 @@ in
           # e.emergency.minutes и возвращается само — и по истечении, и при
           # остановке юнита.
           systemd.services.vpn-zones-egress-open = {
-            description = "vpn-zones: the host egress policy lifted for ${toString e.emergency.minutes} minutes";
+            description = "cellward: the host egress policy lifted for ${toString e.emergency.minutes} minutes";
             serviceConfig = {
               Type = "simple";
               # Сам nft, без vpn-zone-core: ключ должен повернуться и тогда,

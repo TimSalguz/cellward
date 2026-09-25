@@ -1,4 +1,5 @@
-# VPN-ЗОНЫ: сетевые «контейнеры» с VPN, создаваемые и управляемые ИЗ-ПОД ПОЛЬЗОВАТЕЛЯ.
+# CELLWARD (прежнее имя — vpn-zones): сетевые «контейнеры» с VPN, создаваемые
+# и управляемые ИЗ-ПОД ПОЛЬЗОВАТЕЛЯ.
 #
 # ЧТО ЭТО ДАЁТ. Зона — это отдельное сетевое пространство с поднятым в нём
 # туннелем. Приложение, запущенное «в зоне», ходит в сеть только через её VPN;
@@ -44,12 +45,12 @@
 # интернет, без сети, или любая из зон. Выбранное запоминается, а пунктом
 # «Всегда: …» закрепляется навсегда — тогда диалога больше не будет. Сбросить
 # закрепление можно ярлыком «Сбросить сети программ» (у одной программы или у
-# всех) либо командой `vpn-zone forget`.
+# всех) либо командой `cellward forget`.
 #
 # Незнакомая программа по умолчанию предлагает вариант «Без сети» — это и есть
 # политика «интернет не выдаётся, пока его явно не дали». Поменять:
-# `vpn-zone default unconfined`. Кому больше нравится прежний вид — «Firefox (nl)»
-# отдельным ярлыком на каждую зону — включается `vpn-zone mode per-zone`
+# `cellward default unconfined`. Кому больше нравится прежний вид — «Firefox (nl)»
+# отдельным ярлыком на каждую зону — включается `cellward mode per-zone`
 # (или both, чтобы работало и то, и другое).
 #
 # ЧЕГО ЭТО НЕ ДЕЛАЕТ. Зона изолирует ТОЛЬКО сеть. Файловая система, буфер обмена,
@@ -249,7 +250,7 @@ let
   # команд. Всё переехало в крейт — `vpn-zone` (rust/src/cli.rs), запуск со
   # всеми граблями (rust/src/launch.rs) и реестр (rust/src/registry.rs).
   # Пользовательские тексты и коды выхода сохранены дословно: их читает человек
-  # в терминале, а `vpn-zone check` ещё и грепают.
+  # в терминале, а `cellward check` ещё и грепают.
   #
   # ПУТИ ИНСТРУМЕНТОВ — МАНИФЕСТОМ. Скомпилированный бинарь не умеет того, на
   # чём стоял скрипт: подстановки строк Nix'ом. А абсолютные пути обязательны —
@@ -266,9 +267,11 @@ let
       sandboxes = "${config.home.homeDirectory}/.local/state/vpn-sandboxes";
       config = "${config.home.homeDirectory}/.config/vpn-zones";
       # ПРОФИЛЬНЫЕ пути, а не store: так разрывается зависимость по кругу
-      # (vpn-zone зовёт sync, sync подставляет vpn-zone в ярлыки) и ярлыки не
+      # (cellward зовёт sync, sync подставляет cellward в ярлыки) и ярлыки не
       # протухают после каждой пересборки пакета (docs/GOTCHAS.md §10).
-      runner = "${config.home.profileDirectory}/bin/vpn-zone";
+      # Главное имя, а не прежнее vpn-zone: ярлыки, которые пишет sync, и
+      # запуски пикера не должны зависеть от псевдонима, который однажды уйдёт.
+      runner = "${config.home.profileDirectory}/bin/cellward";
       picker = "${config.home.profileDirectory}/bin/vpn-zone-pick";
       # А ядро — наоборот, store-путём: оно версионируется вместе с CLI, и
       # разъезжаться им нельзя.
@@ -289,7 +292,7 @@ let
       dbus-proxy = "${dbusProxy}/bin/xdg-dbus-proxy";
       xwayland = "${pkgs.xwayland-satellite}/bin/xwayland-satellite";
       # Доверенные сертификаты контейнеров (docs/CERTIFICATES.ru.md): openssl
-      # разбирает сертификат при `vpn-zone trust add`, certutil ставит его в
+      # разбирает сертификат при `cellward trust add`, certutil ставит его в
       # базы NSS контейнера из `profile-run`.
       openssl = "${pkgs.openssl}/bin/openssl";
       certutil = "${pkgs.nss.tools}/bin/certutil";
@@ -304,14 +307,31 @@ let
     }
   );
 
-  # Обёртка в две строки: назначить манифест и стать бинарём. Имя vpn-zone
-  # занимает именно она — по нему CLI зовут пикер, GUI и ярлыки. Такой же
-  # bin/vpn-zone есть и в крейте, поэтому крейт целиком в профиль не кладётся
-  # (см. vpn-zone-helpers ниже), иначе два одинаковых имени столкнулись бы.
-  vpn-zone = pkgs.writeShellScriptBin "vpn-zone" ''
-    export VPN_ZONE_TOOLS=${vpn-zone-tools}
-    exec ${vpn-zone-rust}/bin/vpn-zone "$@"
-  '';
+  # Команда с псевдонимами: скрипт в две строки — назначить манифест и стать
+  # бинарём крейта, — и ссылки на него под другими именами в том же пакете.
+  withAliases =
+    name: aliases: binary:
+    pkgs.runCommand name { } (
+      ''
+        install -Dm755 ${pkgs.writeShellScript name ''
+          export VPN_ZONE_TOOLS=${vpn-zone-tools}
+          exec ${vpn-zone-rust}/bin/${binary} "$@"
+        ''} $out/bin/${name}
+      ''
+      + lib.concatMapStrings (alias: ''
+        ln -s ${name} $out/bin/${alias}
+      '') aliases
+    );
+
+  # Главная команда — cellward, cw — её короткое имя, vpn-zone — прежнее, на
+  # время перехода: один и тот же скрипт. По имени cellward CLI зовут пикер,
+  # GUI и ярлыки (runner в манифесте). Бинарь в крейте по-прежнему
+  # bin/vpn-zone, поэтому крейт целиком в профиль не кладётся (см.
+  # vpn-zone-helpers ниже), иначе два одинаковых имени столкнулись бы.
+  cellward = withAliases "cellward" [
+    "cw"
+    "vpn-zone"
+  ] "vpn-zone";
 
   # Помощники крейта в PATH: ядро (его зовёт юнит vpn-zone@ и сам CLI) и
   # генератор seccomp-фильтра — тем же бинарём проверяется, что фильтр вообще
@@ -324,29 +344,31 @@ let
   '';
 
   # Tab-дополнение для zsh и bash — тонкие обёртки над скрытой подкомандой
-  # `vpn-zone _complete` (rust/src/completion.rs): правила и знание зон,
+  # `cellward _complete` (rust/src/completion.rs): правила и знание зон,
   # профилей и песочниц живут в крейте рядом с самими командами и покрыты
   # тестами, оболочка только спрашивает и подставляет. Протокол: слова
   # командной строки + 1-based позиция курсора, кандидаты по одному на строку;
   # специальный ответ __files__ — «дополняй файлами сам». NixOS кладёт
   # site-functions профилей в fpath через NIX_PROFILES (/etc/zshrc), bash
-  # подхватывает completions профиля пакетом bash-completion.
-  vpn-zone-completions =
+  # подхватывает completions профиля пакетом bash-completion. Одно дополнение
+  # на все три имени команды: zsh берёт их из #compdef, а bash-completion ищет
+  # файл по имени набранной команды — отсюда ссылки cw и vpn-zone на cellward.
+  cellward-completions =
     let
-      zshScript = pkgs.writeText "vpn-zone.zsh-completion" ''
-        #compdef vpn-zone
+      zshScript = pkgs.writeText "cellward.zsh-completion" ''
+        #compdef cellward cw vpn-zone
         local -a candidates
-        candidates=("''${(@f)$(vpn-zone _complete -- "''${(@)words}" "$CURRENT" 2>/dev/null)}")
+        candidates=("''${(@f)$(cellward _complete -- "''${(@)words}" "$CURRENT" 2>/dev/null)}")
         if [[ "''${candidates[1]-}" == __files__ ]]; then
           _files
           return
         fi
         [[ -n "''${candidates[1]-}" ]] && compadd -- "''${candidates[@]}"
       '';
-      bashScript = pkgs.writeText "vpn-zone.bash-completion" ''
-        _vpn_zone() {
+      bashScript = pkgs.writeText "cellward.bash-completion" ''
+        _cellward() {
           local -a reply
-          mapfile -t reply < <(vpn-zone _complete -- "''${COMP_WORDS[@]}" "$((COMP_CWORD + 1))" 2>/dev/null)
+          mapfile -t reply < <(cellward _complete -- "''${COMP_WORDS[@]}" "$((COMP_CWORD + 1))" 2>/dev/null)
           if [[ "''${reply[0]-}" == __files__ ]]; then
             compopt -o default
             COMPREPLY=()
@@ -354,12 +376,14 @@ let
           fi
           COMPREPLY=("''${reply[@]}")
         }
-        complete -F _vpn_zone vpn-zone
+        complete -F _cellward cellward cw vpn-zone
       '';
     in
-    pkgs.runCommand "vpn-zone-completions" { } ''
-      install -Dm444 ${zshScript} $out/share/zsh/site-functions/_vpn-zone
-      install -Dm444 ${bashScript} $out/share/bash-completion/completions/vpn-zone
+    pkgs.runCommand "cellward-completions" { } ''
+      install -Dm444 ${zshScript} $out/share/zsh/site-functions/_cellward
+      install -Dm444 ${bashScript} $out/share/bash-completion/completions/cellward
+      ln -s cellward $out/share/bash-completion/completions/cw
+      ln -s cellward $out/share/bash-completion/completions/vpn-zone
     '';
 
   # --- ЧАСТЬ 3б: ПИКЕР СЕТИ ---
@@ -378,7 +402,7 @@ let
   #   1. ЗАКРЕПЛЕНИЕ (.pinned/<программа>) — диалога нет вообще, программа сразу
   #      уходит в назначенную сеть. Ставится пунктом «Всегда: …» прямо в меню,
   #      снимается пунктом «Спрашивать снова», ярлыком «Сбросить сети программ»
-  #      или командой `vpn-zone forget`.
+  #      или командой `cellward forget`.
   #   2. ПОСЛЕДНИЙ ВЫБОР (.last/<программа>) — диалог показывается, но нужный
   #      пункт уже выделен.
   #   3. ОБЩИЙ ДЕФОЛТ (~/.config/vpn-zones/default), по умолчанию «offline».
@@ -392,7 +416,7 @@ let
   # контейнер между двумя проходами («⚙ Сменить контейнер» → снова вопрос о
   # сети). Руками её ставить незачем, и она снимается сразу после чтения.
   #
-  # Обёртка двухстрочная, как у vpn-zone, и по той же причине: имя
+  # Обёртка двухстрочная, как у cellward, и по той же причине: имя
   # vpn-zone-pick В ПРОФИЛЕ занимает именно она, потому что этот путь попадает в
   # Exec сгенерированных ярлыков и не должен протухать при каждой пересборке
   # пакета (docs/GOTCHAS.md §10).
@@ -406,15 +430,15 @@ let
   # ini с локализованными ключами и экранированием, и разбирать его построчно
   # значит однажды получить ярлык с поехавшим Exec. Здесь остаётся тонкая
   # обёртка, которая подставляет четыре пути.
-  # Третий аргумент — путь к vpn-zone, который попадёт в Exec ярлыков. Берём
+  # Третий аргумент — путь к cellward, который попадёт в Exec ярлыков. Берём
   # ПРОФИЛЬНЫЙ путь, а не store: во-первых, это разрывает зависимость по кругу
-  # (vpn-zone зовёт sync, sync подставляет vpn-zone), во-вторых, ярлыки не
+  # (cellward зовёт sync, sync подставляет cellward), во-вторых, ярлыки не
   # протухают при каждом обновлении пакета — иначе после любой пересборки они
   # указывали бы на старый store-путь до следующего sync.
   vpn-zone-sync = pkgs.writeShellScriptBin "vpn-zone-sync" ''
     exec ${vpn-zone-rust}/bin/vpn-zone-core sync \
       "${stateDir}" "${config.home.homeDirectory}" \
-      "${config.home.profileDirectory}/bin/vpn-zone" \
+      "${config.home.profileDirectory}/bin/cellward" \
       "${config.home.profileDirectory}/bin/vpn-zone-pick" \
       "${pkgs.systemd}/bin/systemctl"
   '';
@@ -438,23 +462,21 @@ let
     verb:
     "${pkgs.coreutils}/bin/env VPN_ZONE_TOOLS=${vpn-zone-tools} ${vpn-zone-rust}/bin/vpn-zone-gui ${verb}";
 
-  # А в PATH окна кладёт двухстрочная обёртка, как у vpn-zone: их открывают и
-  # не из ярлыков — конфигуратор («Открыть «Контейнеры VPN-зон»» в nix_cm зовёт
-  # `vpn-zone-gui containers`), человек из терминала. Без неё такой запуск
-  # падал с ENOENT: бинарь был только в store-пути ярлыков.
-  vpn-zone-gui = pkgs.writeShellScriptBin "vpn-zone-gui" ''
-    export VPN_ZONE_TOOLS=${vpn-zone-tools}
-    exec ${vpn-zone-rust}/bin/vpn-zone-gui "$@"
-  '';
+  # А в PATH окна кладёт двухстрочная обёртка, как у cellward: их открывают и
+  # не из ярлыков — конфигуратор (nix_cm зовёт `vpn-zone-gui containers`),
+  # человек из терминала. Без неё такой запуск падал с ENOENT: бинарь был
+  # только в store-пути ярлыков. cellward-gui — главное имя, vpn-zone-gui —
+  # прежнее, на время перехода.
+  cellward-gui = withAliases "cellward-gui" [ "vpn-zone-gui" ] "vpn-zone-gui";
 
   # --- ЧАСТЬ 5: ДЕКЛАРАТИВНАЯ СТОРОНА (docs/CONTAINERS.ru.md §8) ---
   # Опции ниже — единственный интерфейс для конфигураторов (nix_cm и подобных):
   # они ставят опции, а модуль пишет файлы в ~/.config/vpn-zones/declared/.
   # Рантайм читает их первыми (Nix сильнее локального) и отказывается менять из
   # CLI/GUI то, что задано здесь, — вместо того чтобы молча не сработать.
-  # Машиночитаемый ответ, откуда какое значение, — `vpn-zone status --json`.
-  cfg = config.programs.vpn-zones;
-  # A term as `vpn-zone ask-again` takes it (`30s`, `3m`, `1h`, `1d`) in
+  # Машиночитаемый ответ, откуда какое значение, — `cellward status --json`.
+  cfg = config.programs.cellward;
+  # A term as `cellward ask-again` takes it (`30s`, `3m`, `1h`, `1d`) in
   # seconds; bounds as in rust/src/grants.rs (ASK_AGAIN_MIN, ASK_AGAIN_MAX).
   termSeconds =
     t:
@@ -519,7 +541,7 @@ let
   renderContainer =
     name: c:
     lib.concatStringsSep "\n" (
-      [ "# Объявлено в Nix: programs.vpn-zones.containers.${name}. Меняется там, не здесь." ]
+      [ "# Объявлено в Nix: programs.cellward.containers.${name}. Меняется там, не здесь." ]
       ++ lib.optional (c.network != null) "network = ${c.network}"
       ++ map (app: "app = ${app}") c.apps
       ++ lib.optional (c.trust.certificates != [ ]) "trust = ${trustDir name c.trust.certificates}"
@@ -548,7 +570,7 @@ let
         type = lib.types.nullOr (lib.types.strMatching "[A-Za-z0-9_][A-Za-z0-9_-]*");
         default = null;
         example = "offline";
-        description = "Сеть контейнера: имя зоны, unconfined (без ограничений: сеть хоста, без VPN и без изоляции зоны; прежнее имя direct тоже принимается) или offline. Запуск в другой сети — отказ. null — сеть не задана в Nix и меняется локально (`vpn-zone container set`).";
+        description = "Сеть контейнера: имя зоны, unconfined (без ограничений: сеть хоста, без VPN и без изоляции зоны; прежнее имя direct тоже принимается) или offline. Запуск в другой сети — отказ. null — сеть не задана в Nix и меняется локально (`cellward container set`).";
       };
       apps = lib.mkOption {
         type = lib.types.listOf lib.types.str;
@@ -568,7 +590,7 @@ let
           "~/.wine"
           "/mnt/games/SteamLibrary"
         ];
-        description = "Только для home = \"private\": каталоги настоящего дома (~/…) или дисков (/mnt, /media, /run/media, /srv), которые программы контейнера видят и меняют. Состояние vpn-zones, весь дом и остальные места (/run, /tmp, /etc…) не выдаются — это стены песочницы; такой путь пропускается при запуске с предупреждением. То, что программы положат сюда, видно вне контейнера.";
+        description = "Только для home = \"private\": каталоги настоящего дома (~/…) или дисков (/mnt, /media, /run/media, /srv), которые программы контейнера видят и меняют. Состояние cellward, весь дом и остальные места (/run, /tmp, /etc…) не выдаются — это стены песочницы; такой путь пропускается при запуске с предупреждением. То, что программы положат сюда, видно вне контейнера.";
       };
       trust = {
         certificates = lib.mkOption {
@@ -594,9 +616,46 @@ let
     };
   };
 
+  # Every option of programs.cellward, by its path below it: each one is renamed
+  # on its own, not the subtree — a renamed subtree is one option of an empty
+  # submodule type and would refuse every definition under it.
+  # tests/harness.nix checks that this list names every option.
+  renamedOptions = [
+    "enable"
+    "defaults.network"
+    "defaults.container"
+    "launcher.mode"
+    "interception.userEntries"
+    "autostart.unassigned"
+    "zoneX11"
+    "nixDaemon"
+    "camera"
+    "audioManager"
+    "pipewirePolicy"
+    "hostFilesWritable"
+    "microphone"
+    "askAgainAfter"
+    "hermetic.default"
+    "hermetic.exceptions"
+    "pathShims.enable"
+    "tunnelWatch.enable"
+    "waylandProxy.enable"
+    "waylandProxy.exceptions"
+    "frame.colors"
+    "frame.width"
+    "frame.title"
+    "compositorRestriction.enable"
+    "desktop.windowMenu.key"
+    "desktop.floatWindows"
+    "desktop.niri.enable"
+    "desktop.niri.includeInConfig"
+    "desktop.sway.enable"
+    "containers"
+  ];
+
   # --- desktop: the window menu's key and our windows' rule ----------------
   menuKey = cfg.desktop.windowMenu.key;
-  menuCommand = "${vpn-zone}/bin/vpn-zone";
+  menuCommand = "${cellward}/bin/cellward";
   keyParts = lib.splitString "+" menuKey;
   # sway: Mod4 is the logo key (niri's Mod on a TTY), Mod1 Alt; a letter is its
   # lower-case keysym, as sway's own examples write it.
@@ -620,11 +679,11 @@ let
       ++ [ (if builtins.stringLength key == 1 then lib.toLower key else key) ]
     );
   niriSnippet = ''
-    // vpn-zones: programs.vpn-zones.desktop — written by home-manager.
+    // cellward: programs.cellward.desktop — written by home-manager.
   ''
   + lib.optionalString (menuKey != null) ''
     binds {
-        ${menuKey} hotkey-overlay-title="Сеть и контейнер окна (vpn-zones)" { spawn "${menuCommand}" "window-menu"; }
+        ${menuKey} hotkey-overlay-title="Сеть и контейнер окна (cellward)" { spawn "${menuCommand}" "window-menu"; }
     }
   ''
   + lib.optionalString cfg.desktop.floatWindows ''
@@ -634,7 +693,7 @@ let
     }
   '';
   swaySnippet = ''
-    # vpn-zones: programs.vpn-zones.desktop — written by home-manager.
+    # cellward: programs.cellward.desktop — written by home-manager.
   ''
   + lib.optionalString (menuKey != null) ''
     bindsym ${swayKey} exec ${menuCommand} window-menu
@@ -644,8 +703,17 @@ let
   '';
 in
 {
-  options.programs.vpn-zones = {
-    enable = lib.mkEnableOption "сетевые зоны с VPN, контейнеры данных и песочницы для запуска программ";
+  # The project was vpn-zones until 2026-09: every option of programs.cellward
+  # also answers to its old name under programs.vpn-zones, with a warning.
+  imports = map (
+    name:
+    lib.mkRenamedOptionModule (lib.splitString "." "programs.vpn-zones.${name}") (
+      lib.splitString "." "programs.cellward.${name}"
+    )
+  ) renamedOptions;
+
+  options.programs.cellward = {
+    enable = lib.mkEnableOption "cellward: сетевые зоны с VPN, контейнеры данных и песочницы для запуска программ";
 
     defaults = {
       network = lib.mkOption {
@@ -655,7 +723,7 @@ in
         type = lib.types.nullOr (lib.types.strMatching "[A-Za-z0-9_][A-Za-z0-9_-]*");
         default = null;
         example = "offline";
-        description = "Сеть, которую пикер предлагает незнакомой программе: offline, unconfined (без ограничений: сеть хоста, без VPN и без изоляции зоны; прежнее имя direct тоже принимается) или имя зоны. null — не задавать из Nix (`vpn-zone default`).";
+        description = "Сеть, которую пикер предлагает незнакомой программе: offline, unconfined (без ограничений: сеть хоста, без VPN и без изоляции зоны; прежнее имя direct тоже принимается) или имя зоны. null — не задавать из Nix (`cellward default`).";
       };
       container = lib.mkOption {
         type = lib.types.nullOr (
@@ -722,34 +790,34 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "agents" ];
-      description = "Зоны (по имени), программам которых виден Nix-демон хоста (nix-shell, nix build). По умолчанию ни одной: демон качает и собирает в сети хоста, мимо VPN зоны, и производная с фиксированным хешем скачает любой адрес, который назовёт программа, даже из offline-зоны. Без пересборки — vpn-zone nix-daemon <зона> on (действует после перезапуска зоны). Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Зоны (по имени), программам которых виден Nix-демон хоста (nix-shell, nix build). По умолчанию ни одной: демон качает и собирает в сети хоста, мимо VPN зоны, и производная с фиксированным хешем скачает любой адрес, который назовёт программа, даже из offline-зоны. Без пересборки — cellward nix-daemon <зона> on (действует после перезапуска зоны). Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     camera = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "calls" ];
-      description = "Зоны (по имени), программам которых видны камеры хоста (/dev/video*). По умолчанию ни одной: у сеанса на камеры есть право, и программа зоны — тот же пользователь, она снимала бы без вопроса. Без пересборки — vpn-zone camera <зона> on (действует после перезапуска зоны). Звуковые устройства (/dev/snd) зонам не видны никогда: звук — через фильтр pulse и PipeWire. Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Зоны (по имени), программам которых видны камеры хоста (/dev/video*). По умолчанию ни одной: у сеанса на камеры есть право, и программа зоны — тот же пользователь, она снимала бы без вопроса. Без пересборки — cellward camera <зона> on (действует после перезапуска зоны). Звуковые устройства (/dev/snd) зонам не видны никогда: звук — через фильтр pulse и PipeWire. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     audioManager = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "mixer" ];
-      description = "Герметичные зоны (по имени), которым вместо ограниченного PipeWire отдаётся pipewire-0 хоста как есть — для микшера или коммутатора (pavucontrol, qpwgraph, EasyEffects). По умолчанию ни одной: такая зона слышит всё, что играет хост, записывает микрофон мимо microphone, двигает и глушит чужие потоки и меняет права других клиентов PipeWire; vpn-zone status и doctor говорят об этом громко. Обычная (негерметичная) зона получает pipewire-0 хоста и без этого — у неё и так systemd --user. Без пересборки — vpn-zone audio-manager <зона> on (действует после перезапуска зоны). Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Герметичные зоны (по имени), которым вместо ограниченного PipeWire отдаётся pipewire-0 хоста как есть — для микшера или коммутатора (pavucontrol, qpwgraph, EasyEffects). По умолчанию ни одной: такая зона слышит всё, что играет хост, записывает микрофон мимо microphone, двигает и глушит чужие потоки и меняет права других клиентов PipeWire; cellward status и doctor говорят об этом громко. Обычная (негерметичная) зона получает pipewire-0 хоста и без этого — у неё и так systemd --user. Без пересборки — cellward audio-manager <зона> on (действует после перезапуска зоны). Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     pipewirePolicy = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Положить политику WirePlumber для PipeWire зон в ~/.config/wireplumber/wireplumber.conf.d/90-vpn-zones.conf и ~/.local/share/wireplumber/scripts/vpn-zones/policy.lua — для home-manager без NixOS (на NixOS то же делает services.vpn-zones.pipewirePolicy.enable; включённые оба не дублируются). Без политики герметичная зона PipeWire не получает вовсе — звук только через pulse; с ней её программы видят только свои потоки, выходы для звука и — по настройке microphone — микрофоны, и никогда не мониторы. Подействует после перезапуска WirePlumber (systemctl --user restart wireplumber). Политика — скрипт WirePlumber, а WirePlumber ищет скрипты сначала в ~/.local/share/wireplumber, фрагменты — сначала в ~/.config/wireplumber: поэтому в герметичной зоне эти каталоги, ~/.config/pipewire и ~/.local/state/wireplumber только для чтения и создаются заранее, если их нет. Зона из hostFilesWritable может подменить политику для всех зон. См. docs/LEAK-MODEL.md §20.";
+      description = "Положить политику WirePlumber для PipeWire зон в ~/.config/wireplumber/wireplumber.conf.d/90-vpn-zones.conf и ~/.local/share/wireplumber/scripts/vpn-zones/policy.lua — для home-manager без NixOS (на NixOS то же делает services.cellward.pipewirePolicy.enable; включённые оба не дублируются). Без политики герметичная зона PipeWire не получает вовсе — звук только через pulse; с ней её программы видят только свои потоки, выходы для звука и — по настройке microphone — микрофоны, и никогда не мониторы. Подействует после перезапуска WirePlumber (systemctl --user restart wireplumber). Политика — скрипт WirePlumber, а WirePlumber ищет скрипты сначала в ~/.local/share/wireplumber, фрагменты — сначала в ~/.config/wireplumber: поэтому в герметичной зоне эти каталоги, ~/.config/pipewire и ~/.local/state/wireplumber только для чтения и создаются заранее, если их нет. Зона из hostFilesWritable может подменить политику для всех зон. См. docs/LEAK-MODEL.md §20.";
     };
 
     hostFilesWritable = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "dev" ];
-      description = "Герметичные зоны (по имени), программы которых могут писать туда, что хост потом исполняет из дома: автозапуск, юниты, ярлыки, конфиги оболочек и композитора, ~/.ssh. По умолчанию в герметичной зоне это только для чтения: иначе программа без песочницы подложит хосту код в обход зоны. Точечные файлы, которые home-manager делает ссылками в корне дома (~/.zshrc → store), монтированием не закрыть — их защищает песочница. Без пересборки — vpn-zone host-files <зона> writable. Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Герметичные зоны (по имени), программы которых могут писать туда, что хост потом исполняет из дома: автозапуск, юниты, ярлыки, конфиги оболочек и композитора, ~/.ssh. По умолчанию в герметичной зоне это только для чтения: иначе программа без песочницы подложит хосту код в обход зоны. Точечные файлы, которые home-manager делает ссылками в корне дома (~/.zshrc → store), монтированием не закрыть — их защищает песочница. Без пересборки — cellward host-files <зона> writable. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     microphone = lib.mkOption {
@@ -765,20 +833,20 @@ in
         calls = "yes";
         offline = "no";
       };
-      description = "Может ли программа зоны записывать микрофон (как разрешения в телефоне): имя зоны → yes (без вопроса), no (никогда) или ask — при первой записи программы зоны на хосте спрашивают: разрешить один раз, всегда или отказать. Зона без значения здесь и без своего (vpn-zone microphone <зона> yes|no|ask) — ask; без графической сессии или без ответа за 25 с — отказ. «Всегда» — всей зоне, любой её программе: пишет yes в настройку зоны; для зоны, заданной здесь, его не предлагают. После отказа зону не спрашивают askAgainAfter (по умолчанию 3 минуты). Действует сразу, без перезапуска зоны. Звук, который играет хост (мониторы выходов), зоне не записать никогда. Путь PulseAudio и ограниченный PipeWire герметичной зоны (на нём ask — отказ: там не спрашивают); мимо — сырой pipewire-0 обычной зоны и зоны-менеджера звука (audioManager), а в негерметичной зоне и systemd --user хоста. Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Может ли программа зоны записывать микрофон (как разрешения в телефоне): имя зоны → yes (без вопроса), no (никогда) или ask — при первой записи программы зоны на хосте спрашивают: разрешить один раз, всегда или отказать. Зона без значения здесь и без своего (cellward microphone <зона> yes|no|ask) — ask; без графической сессии или без ответа за 25 с — отказ. «Всегда» — всей зоне, любой её программе: пишет yes в настройку зоны; для зоны, заданной здесь, его не предлагают. После отказа зону не спрашивают askAgainAfter (по умолчанию 3 минуты). Действует сразу, без перезапуска зоны. Звук, который играет хост (мониторы выходов), зоне не записать никогда. Путь PulseAudio и ограниченный PipeWire герметичной зоны (на нём ask — отказ: там не спрашивают); мимо — сырой pipewire-0 обычной зоны и зоны-менеджера звука (audioManager), а в негерметичной зоне и systemd --user хоста. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     askAgainAfter = lib.mkOption {
       type = lib.types.nullOr askAgainTerm;
       default = null;
       example = "10m";
-      description = "Через сколько после отказа снова спросить о разрешении (сейчас — микрофон): до того запросы программ зоны отказаны без вопроса, чтобы программа, которая переподключается после каждого «нет», не держала диалог открытым в ожидании случайного Enter. Срок — число и единица: 30s…1d (45s, 3m, 1h). null — не задавать из Nix (тогда vpn-zone ask-again <срок>, иначе 3m). Действует сразу, без перезапуска зон.";
+      description = "Через сколько после отказа снова спросить о разрешении (сейчас — микрофон): до того запросы программ зоны отказаны без вопроса, чтобы программа, которая переподключается после каждого «нет», не держала диалог открытым в ожидании случайного Enter. Срок — число и единица: 30s…1d (45s, 3m, 1h). null — не задавать из Nix (тогда cellward ask-again <срок>, иначе 3m). Действует сразу, без перезапуска зон.";
     };
 
     hermetic.default = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
-      description = "Герметичны ли зоны без своей настройки: без systemd --user, сессионная шина через фильтр (xdg-dbus-proxy), запуск в других сетях — только через брокер с вопросом человеку. null — не задавать из Nix (тогда действует vpn-zone hermetic --default, иначе вкл.: с 2026-09 зоны герметичны по умолчанию; прежнее поведение — hermetic.default = false или исключения). Своя настройка зоны (vpn-zone hermetic <зона> on|off) важнее умолчания. См. docs/HERMETICITY.ru.md §7.";
+      description = "Герметичны ли зоны без своей настройки: без systemd --user, сессионная шина через фильтр (xdg-dbus-proxy), запуск в других сетях — только через брокер с вопросом человеку. null — не задавать из Nix (тогда действует cellward hermetic --default, иначе вкл.: с 2026-09 зоны герметичны по умолчанию; прежнее поведение — hermetic.default = false или исключения). Своя настройка зоны (cellward hermetic <зона> on|off) важнее умолчания. См. docs/HERMETICITY.ru.md §7.";
     };
 
     hermetic.exceptions = lib.mkOption {
@@ -797,13 +865,13 @@ in
     tunnelWatch.enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Раз в минуту проверять, живы ли туннели поднятых зон (`vpn-zone watch`), и присылать уведомление, когда туннель перестал отвечать и когда снова заработал.";
+      description = "Раз в минуту проверять, живы ли туннели поднятых зон (`cellward watch`), и присылать уведомление, когда туннель перестал отвечать и когда снова заработал.";
     };
 
     waylandProxy.enable = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
-      description = "Посредник Wayland между программами и композитором (rust/src/wl_proxy.rs): программа видит только свои окна и протоколы из белого списка. null — не задавать из Nix (тогда vpn-zone wayland-proxy, иначе вкл.). false — композитор слушает для программ сам, как раньше; ограничения security-context остаются.";
+      description = "Посредник Wayland между программами и композитором (rust/src/wl_proxy.rs): программа видит только свои окна и протоколы из белого списка. null — не задавать из Nix (тогда cellward wayland-proxy, иначе вкл.). false — композитор слушает для программ сам, как раньше; ограничения security-context остаются.";
     };
 
     waylandProxy.exceptions = lib.mkOption {
@@ -820,14 +888,14 @@ in
         work = "#3366ff";
         offline = "#808080";
       };
-      description = "Цвет рамки, которую посредник Wayland рисует вокруг окон программ зоны (docs/WINDOW-FRAME.md §0а): имя зоны → #rrggbb. Зона без цвета здесь и без своего (vpn-zone frame color <зона> #rrggbb) получает цвет из своего имени — один и тот же на любой машине. Сами зоны в Nix не описываются: здесь только имена. Действует для программ, запущенных после смены.";
+      description = "Цвет рамки, которую посредник Wayland рисует вокруг окон программ зоны (docs/WINDOW-FRAME.md §0а): имя зоны → #rrggbb. Зона без цвета здесь и без своего (cellward frame color <зона> #rrggbb) получает цвет из своего имени — один и тот же на любой машине. Сами зоны в Nix не описываются: здесь только имена. Действует для программ, запущенных после смены.";
     };
 
     frame.width = lib.mkOption {
       type = lib.types.nullOr (lib.types.ints.between 1 32);
       default = null;
       example = 6;
-      description = "Толщина рамки окон программ зон, логические пиксели. null — не задавать из Nix (тогда vpn-zone frame width, иначе 4: целое число пикселей при масштабах 1,25/1,5/1,75/2). Рамка лежит внутри окна: программе достаётся размер меньше на две толщины. Спрятать рамки на время показа экрана — vpn-zone frame hide (переключатель только локальный: его щёлкают туда и обратно).";
+      description = "Толщина рамки окон программ зон, логические пиксели. null — не задавать из Nix (тогда cellward frame width, иначе 4: целое число пикселей при масштабах 1,25/1,5/1,75/2). Рамка лежит внутри окна: программе достаётся размер меньше на две толщины. Спрятать рамки на время показа экрана — cellward frame hide (переключатель только локальный: его щёлкают туда и обратно).";
     };
 
     frame.title = lib.mkOption {
@@ -840,7 +908,7 @@ in
       );
       default = null;
       example = "hover";
-      description = "Полоса заголовка «зона · контейнер» цвета зоны вдоль верха окон программ зон (docs/WINDOW-FRAME.md §0а). always — всегда, внутри окна: программе достаётся высота меньше на полосу; hover — поверх верха содержимого, выезжает, когда указатель у верхнего края окна, места не занимает; off — только обводка. В fullscreen полосы нет в любом режиме. null — не задавать из Nix (тогда vpn-zone frame title, иначе always). Действует для программ, запущенных после смены.";
+      description = "Полоса заголовка «зона · контейнер» цвета зоны вдоль верха окон программ зон (docs/WINDOW-FRAME.md §0а). always — всегда, внутри окна: программе достаётся высота меньше на полосу; hover — поверх верха содержимого, выезжает, когда указатель у верхнего края окна, места не занимает; off — только обводка. В fullscreen полосы нет в любом режиме. null — не задавать из Nix (тогда cellward frame title, иначе always). Действует для программ, запущенных после смены.";
     };
 
     compositorRestriction.enable = lib.mkOption {
@@ -856,7 +924,7 @@ in
         );
         default = null;
         example = "Mod+Shift+Z";
-        description = "Клавиша меню окна в фокусе (`vpn-zone window-menu`: его сеть и контейнер, закрепить, перезапустить с выбором, закрыть, оборвать зону) — в записи niri: модификаторы Mod, Super, Ctrl, Alt, Shift через +, затем клавиша (имя XKB). Попадает в фрагменты композиторов ниже (desktop.niri, desktop.sway); сама по себе ничего не включает. null — без клавиши.";
+        description = "Клавиша меню окна в фокусе (`cellward window-menu`: его сеть и контейнер, закрепить, перезапустить с выбором, закрыть, оборвать зону) — в записи niri: модификаторы Mod, Super, Ctrl, Alt, Shift через +, затем клавиша (имя XKB). Попадает в фрагменты композиторов ниже (desktop.niri, desktop.sway); сама по себе ничего не включает. null — без клавиши.";
       };
       floatWindows = lib.mkOption {
         type = lib.types.bool;
@@ -867,7 +935,7 @@ in
         enable = lib.mkOption {
           type = lib.types.bool;
           default = false;
-          description = "Писать ~/.config/niri/vpn-zones.kdl: клавиша меню окна и правило окон vpn-zones. Подключается строкой `include \"vpn-zones.kdl\"` в config.kdl (niri 25.11+) — её добавляет desktop.niri.includeInConfig, или впиши сам.";
+          description = "Писать ~/.config/niri/vpn-zones.kdl: клавиша меню окна и правило окон cellward. Подключается строкой `include \"vpn-zones.kdl\"` в config.kdl (niri 25.11+) — её добавляет desktop.niri.includeInConfig, или впиши сам.";
         };
         includeInConfig = lib.mkOption {
           type = lib.types.bool;
@@ -878,18 +946,18 @@ in
       sway.enable = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description = "Писать ~/.config/sway/vpn-zones.conf: клавиша меню окна и правило окон vpn-zones. С модулем sway из home-manager строка include добавляется в его extraConfig сама; иначе впиши `include ~/.config/sway/vpn-zones.conf`.";
+        description = "Писать ~/.config/sway/vpn-zones.conf: клавиша меню окна и правило окон cellward. С модулем sway из home-manager строка include добавляется в его extraConfig сама; иначе впиши `include ~/.config/sway/vpn-zones.conf`.";
       };
     };
 
     containers = lib.mkOption {
       type = lib.types.attrsOf (lib.types.submodule containerModule);
       default = { };
-      description = "Контейнеры: дом, сеть, программы, доверенные сертификаты (docs/CONTAINERS.ru.md). Состояние с источником каждого значения — `vpn-zone status --json`.";
+      description = "Контейнеры: дом, сеть, программы, доверенные сертификаты (docs/CONTAINERS.ru.md). Состояние с источником каждого значения — `cellward status --json`.";
     };
   };
 
-  config = lib.mkIf config.programs.vpn-zones.enable {
+  config = lib.mkIf config.programs.cellward.enable {
   # The window menu's key and the rule that floats our windows, in each
   # compositor's words. The key is written the niri way and checked by the
   # option's type — only modifier names, `+` and a keysym, nothing that could
@@ -901,44 +969,44 @@ in
   assertions =
     lib.mapAttrsToList (name: _: {
       assertion = validName name;
-      message = "programs.vpn-zones.containers.${name}: имя контейнера — латиница, цифры, _ . - и не с точки или дефиса";
+      message = "programs.cellward.containers.${name}: имя контейнера — латиница, цифры, _ . - и не с точки или дефиса";
     }) cfg.containers
     ++ lib.mapAttrsToList (name: c: {
       assertion = c.trust.certificates == [ ] || c.trust.acknowledgeRisk;
-      message = "programs.vpn-zones.containers.${name}.trust: дополнительный корневой сертификат позволяет его владельцу читать TLS-трафик программ контейнера — подтверди это: trust.acknowledgeRisk = true";
+      message = "programs.cellward.containers.${name}.trust: дополнительный корневой сертификат позволяет его владельцу читать TLS-трафик программ контейнера — подтверди это: trust.acknowledgeRisk = true";
     }) cfg.containers
     ++ lib.mapAttrsToList (name: c: {
       assertion = c.permissions.paths == [ ] || c.home == "private";
-      message = "programs.vpn-zones.containers.${name}.permissions.paths: каталоги выдаются только своему дому (home = \"private\") — слою над домом и так виден весь настоящий дом";
+      message = "programs.cellward.containers.${name}.permissions.paths: каталоги выдаются только своему дому (home = \"private\") — слою над домом и так виден весь настоящий дом";
     }) cfg.containers
     ++ lib.mapAttrsToList (name: c: {
       assertion = lib.all (
         v: !(lib.hasInfix "\n" v) && (lib.hasPrefix "/" v || lib.hasPrefix "~/" v)
       ) c.permissions.paths && lib.all (v: !(lib.hasInfix "\n" v)) c.apps;
-      message = "programs.vpn-zones.containers.${name}: каталог в permissions.paths — абсолютный путь или ~/…, без переводов строки (и id программ тоже без них)";
+      message = "programs.cellward.containers.${name}: каталог в permissions.paths — абсолютный путь или ~/…, без переводов строки (и id программ тоже без них)";
     }) cfg.containers
     ++ [
       {
         assertion = cfg.hermetic.exceptions == [ ] || cfg.hermetic.default != null;
-        message = "programs.vpn-zones.hermetic.exceptions: исключения — это зоны с обратным умолчанию значением, поэтому нужно явное hermetic.default (true или false)";
+        message = "programs.cellward.hermetic.exceptions: исключения — это зоны с обратным умолчанию значением, поэтому нужно явное hermetic.default (true или false)";
       }
       {
         assertion = lib.all (z: z != "" && !(lib.hasInfix "\n" z)) cfg.hermetic.exceptions;
-        message = "programs.vpn-zones.hermetic.exceptions: имя зоны — непустое и без переводов строки";
+        message = "programs.cellward.hermetic.exceptions: имя зоны — непустое и без переводов строки";
       }
       {
         assertion = lib.all (z: builtins.match "[^[:space:]]+" z != null) (lib.attrNames cfg.frame.colors);
-        message = "programs.vpn-zones.frame.colors: имя зоны — непустое и без пробелов";
+        message = "programs.cellward.frame.colors: имя зоны — непустое и без пробелов";
       }
       {
         assertion = lib.all (z: builtins.match "[^[:space:]]+" z != null) (lib.attrNames cfg.microphone);
-        message = "programs.vpn-zones.microphone: имя зоны — непустое и без пробелов";
+        message = "programs.cellward.microphone: имя зоны — непустое и без пробелов";
       }
       {
         assertion = lib.all (z: z != "" && !(lib.hasInfix "\n" z)) (
           cfg.nixDaemon ++ cfg.hostFilesWritable ++ cfg.camera ++ cfg.audioManager
         );
-        message = "programs.vpn-zones.nixDaemon / hostFilesWritable / camera / audioManager: имя зоны — непустое и без переводов строки";
+        message = "programs.cellward.nixDaemon / hostFilesWritable / camera / audioManager: имя зоны — непустое и без переводов строки";
       }
       {
         assertion =
@@ -951,7 +1019,7 @@ in
             && lib.stringLength (lib.trim (config.xdg.configFile."niri/config.kdl".text or ""))
               > lib.stringLength "include \"vpn-zones.kdl\""
           );
-        message = "programs.vpn-zones.desktop.niri.includeInConfig: нужно desktop.niri.enable, и config.kdl должен писать home-manager текстом (xdg.configFile.\"niri/config.kdl\".text) — иначе config.kdl стал бы одной строкой include";
+        message = "programs.cellward.desktop.niri.includeInConfig: нужно desktop.niri.enable, и config.kdl должен писать home-manager текстом (xdg.configFile.\"niri/config.kdl\".text) — иначе config.kdl стал бы одной строкой include";
       }
       {
         # Где зоны ищут ярлыки, автозапуск и настройки: ~/.local/share и
@@ -960,11 +1028,11 @@ in
         assertion =
           config.xdg.dataHome == "${config.home.homeDirectory}/.local/share"
           && config.xdg.configHome == "${config.home.homeDirectory}/.config";
-        message = "programs.vpn-zones: xdg.dataHome и xdg.configHome должны быть по умолчанию (~/.local/share, ~/.config) — перехват ярлыков и настройки vpn-zones живут там";
+        message = "programs.cellward: xdg.dataHome и xdg.configHome должны быть по умолчанию (~/.local/share, ~/.config) — перехват ярлыков и настройки cellward живут там";
       }
       {
         assertion = duplicateApps == [ ];
-        message = "programs.vpn-zones.containers: программы назначены нескольким контейнерам сразу: ${lib.concatStringsSep ", " duplicateApps}";
+        message = "programs.cellward.containers: программы назначены нескольким контейнерам сразу: ${lib.concatStringsSep ", " duplicateApps}";
       }
     ];
 
@@ -1091,17 +1159,17 @@ in
   );
 
   home.packages = [
-    vpn-zone
+    cellward # и псевдонимы cw, vpn-zone
     vpn-zone-sync
     vpn-zone-pick
-    vpn-zone-gui
+    cellward-gui # и псевдоним vpn-zone-gui
     # Помощники Rust-ядра: vpn-zone-core (подкоманды zone-holder, profile-run,
     # sync, wl-sandbox и fs-sandbox — их зовут юнит и сам CLI) и
     # vpn-zone-seccomp (генератор фильтра, он же selftest). Сам CLI, пикер и
     # окна приходят обёртками выше — крейт целиком сюда класть нельзя, в нём
     # есть и bin/vpn-zone, и bin/vpn-zone-pick, и bin/vpn-zone-gui.
     vpn-zone-helpers
-    vpn-zone-completions # Tab-дополнение zsh/bash (см. определение выше)
+    cellward-completions # Tab-дополнение zsh/bash (см. определение выше)
     passtPatched # userspace-сеть для зон (с патчем привязки к интерфейсу)
     # Клиент зон [OpenConnect]. В профиль он кладётся не ради самих зон — им
     # хватает пути в ExecStart юнита, — а ради ОДНОЙ операции, которую человек
@@ -1201,7 +1269,7 @@ in
       After = [ "vpn-zone-broker.socket" ];
     };
     Service = {
-      ExecStart = "${vpn-zone}/bin/vpn-zone _broker";
+      ExecStart = "${cellward}/bin/cellward _broker";
       Restart = "on-failure";
     };
   };
@@ -1210,7 +1278,7 @@ in
     Unit.Description = "Проверка живости туннелей VPN-зон";
     Service = {
       Type = "oneshot";
-      ExecStart = "${vpn-zone}/bin/vpn-zone watch";
+      ExecStart = "${cellward}/bin/cellward watch";
     };
   };
 
@@ -1295,7 +1363,7 @@ in
   };
 
   xdg.desktopEntries."vpn-zone-settings" = {
-    name = "Настройки VPN-зон";
+    name = "Настройки cellward";
     comment = "Сеть и контейнер по умолчанию, поведение ярлыков, замки зон";
     exec = guiExec "settings";
     icon = "configure";
@@ -1315,7 +1383,7 @@ in
   };
 
   xdg.desktopEntries."vpn-zone-containers" = {
-    name = "Контейнеры VPN-зон";
+    name = "Контейнеры cellward";
     comment = "Сеть контейнера, объединение двух контейнеров, выданные каталоги";
     exec = guiExec "containers";
     icon = "folder-network";

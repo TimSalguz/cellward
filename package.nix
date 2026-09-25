@@ -1,7 +1,8 @@
-# Rust-крейт vpn-zones: пять бинарей (vpn-zone-seccomp, vpn-zone-core, vpn-zone,
-# vpn-zone-pick, vpn-zone-gui). Общий для обоих модулей — home-manager
+# Rust-крейт cellward (прежнее имя — vpn-zones): пять бинарей (vpn-zone-seccomp,
+# vpn-zone-core, vpn-zone, vpn-zone-pick, vpn-zone-gui) — имена бинарей
+# внутренние и прежние, команды cellward, cw и cellward-gui делает из них
+# module/default.nix. Общий для обоих модулей — home-manager
 # (module/default.nix) и NixOS (module/nixos.nix, системный уровень M10).
-# Текст деривации перенесён сюда без изменений, поэтому store-путь прежний.
 {
   lib,
   rustPlatform,
@@ -11,7 +12,7 @@
 }:
 
 rustPlatform.buildRustPackage {
-  pname = "vpn-zone-rust";
+  pname = "cellward";
   version = "0.1.0";
   # Крейт — сосед этого файла в репозитории. В store кладём только исходники:
   # попади туда ещё и target/ (появляется, стоит один раз запустить cargo
