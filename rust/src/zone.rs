@@ -241,6 +241,20 @@ pub fn bus_is_zones_filter(mountinfo: &str, socket: &Path) -> bool {
             .any(|name| root.ends_with(&format!("/{name}")))
     })
 }
+/// The same, and nothing older: the zone's bus FILTER bound over the socket.
+/// The proxy alone would hand the portal's links to the host (LEAK-MODEL §2),
+/// which is what `seal_runtime` refuses to bind; the socket inventory holds a
+/// hermetic zone to this (`crate::sockets`).
+pub fn bus_is_zones_bus_filter(mountinfo: &str, socket: &Path) -> bool {
+    crate::doctor::mount_root_at(mountinfo, &socket.to_string_lossy())
+        .is_some_and(|root| root.ends_with(&format!("/{SESSION_BUS_FILTER}")))
+}
+/// Is the sound server's socket at `socket` the zone's filter bound over it
+/// (`seal_runtime`)? Read from the mount table, as [`bus_is_zones_filter`].
+pub fn pulse_is_zones_filter(mountinfo: &str, socket: &Path) -> bool {
+    crate::doctor::mount_root_at(mountinfo, &socket.to_string_lossy())
+        .is_some_and(|root| root.ends_with(&format!("/{PULSE_FILTER}")))
+}
 /// Where the host's runtime directory is held for the zone's lifetime, to bind
 /// entries from — below a tmpfs only the zone's root may enter, because the
 /// hold has everything, the compositor's own socket included.
@@ -345,7 +359,7 @@ pub const SESSION_BUS_RULES: [&str; 12] = [
 pub const TRAY_ITEM_NAMES: &str = "--own=org.kde.StatusNotifierItem-*";
 
 /// The host's system bus.
-const SYSTEM_BUS: &str = "/run/dbus/system_bus_socket";
+pub(crate) const SYSTEM_BUS: &str = "/run/dbus/system_bus_socket";
 /// The zone's filtered system bus, in its state directory.
 const SYSTEM_BUS_PROXY: &str = "system-bus";
 
@@ -430,7 +444,7 @@ const TOOL_HOSTIF: u8 = b'h';
 const TOOL_SYSZONE: u8 = b's';
 /// The system tier's run directory: its root service's socket and the system
 /// zones' state. Hidden in every zone (`hide_system_tier`).
-const SYSTEM_TIER_DIR: &str = "/run/vpn-zones";
+pub(crate) const SYSTEM_TIER_DIR: &str = "/run/vpn-zones";
 /// The system zone's resolvers, as the service said them, one per line: what
 /// the app namespace's resolv.conf is written from.
 const SYS_RESOLVERS: &str = "system-resolvers";
@@ -2576,7 +2590,7 @@ fn hide_nix_daemon(zone: &Zone) -> Result<(), String> {
 }
 
 /// Where the Nix daemon listens.
-const NIX_DAEMON_DIR: &str = "/nix/var/nix/daemon-socket";
+pub(crate) const NIX_DAEMON_DIR: &str = "/nix/var/nix/daemon-socket";
 
 /// The session's own entry points below the home: created when missing before
 /// a hermetic zone comes up (`run`), so that they can be read-only in it.

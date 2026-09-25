@@ -6,6 +6,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **`vpn-zone doctor` names every unix socket a zone can reach**
+  (`docs/LEAK-MODEL.md` §18, the invariant the third review round asked for).
+  A socket by path is a helper outside that acts for whoever connects — an ssh
+  master, a root daemon in `/run`, the Nix daemon, an editor's server — and the
+  zone's own network namespace cuts none of them. The probe walks, from inside
+  the zone, the runtime directory, `~/.ssh`, `/run`, `/var/lib`, `/nix/var`,
+  the home, `/tmp`, `/var/tmp` and `/dev/shm` with a program's rights (the
+  session's groups shed, no capabilities; the doctor now enters with
+  `nsenter --keep-caps`, as a launch does), never through a link a program
+  may have made, never opening a file, never into FUSE, network filesystems
+  or automount points (told by the device before a directory is opened,
+  whatever it is called, and named), bounded in depth, and each place and
+  each directory on a budget of its own, so that a program filling `/tmp`
+  costs `/tmp` and nothing else — what it did not see it says. The zone's own
+  sockets (its bus and pulse filters, `pipewire-0`, the broker, its own
+  Wayland directory, its sandboxes', anything on a filesystem only the zone
+  has) and the journal's are counted in a `sockets` summary; every other one
+  is a `socket` line with its path at `warn` (at most 200, the rest counted),
+  and what the project promises closed — the compositor, another zone's
+  Wayland sockets, the system tier, the Nix daemon of a zone not let, the
+  host's session bus (or the bus proxy without its filter) in a hermetic
+  zone, the unfiltered sound server, the host's X server, a resolver — at
+  `fail`, by its path and, told by the doctor, by its identity: a hard link
+  under another name is the same socket. A new system check, `hardlinks`,
+  warns when `fs.protected_hardlinks` is off.
+  `tmp-sockets` is now the part of it in the temporary directories. What it
+  found at once: systemd's varlink services in `/run/systemd` (`hostnamed`,
+  `networkd`) answer every zone past the system bus filter, and so does
+  dhcpcd's unprivileged socket; sshd on `/run/ssh-unix-local/socket`. Both named, not closed yet. VM test: the evil
+  host's sockets in the home and in `/run` are named, one only the session's
+  group may open is not, a clean hermetic zone names nothing but systemd's
+  and dhcpcd's services; in an ordinary zone a socket in a bound runtime
+  entry is named, and the Nix daemon taken away without a restart fails.
 - **The window menu's key and our windows' rule, written by the module**
   (`programs.vpn-zones.desktop`): `windowMenu.key` in niri's notation,
   `floatWindows` (the launch window and the menu float, by the app id
@@ -55,6 +88,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **`vpn-zone doctor`'s probe is no longer open to the zone it checks.**
+  Without capabilities it was an ordinary, dumpable process of the zone: a
+  program there could read its `/proc/<pid>/environ` — the environment of the
+  terminal the doctor was run from — and open its `/proc/<pid>/fd/1`, the pipe
+  to the doctor, to write lines of its own ahead of the probe's, or stop it
+  and hang the doctor. The probe is now not dumpable before it drops its
+  rights, gets no environment but `HOME`, and is waited for 30 s at most and
+  read up to 4 MB; an answer that names a check twice is not taken. The text
+  report writes out every control character (and bidirectional overrides):
+  a file named with an escape sequence in the zone's runtime directory no
+  longer reaches the owner's terminal — erasing the `✗` lines, or setting the
+  clipboard with OSC 52. `--json` escapes DEL and C1 too.
 - **Third review round: a zone loses sight of the project's own state.** A
   program in a zone without a sandbox has the home, and the project's state
   lay in it: the raw xdg-dbus-proxy socket behind the zone's bus filter (a

@@ -6,7 +6,8 @@
 
 **Status: decided (the owner, 2026-09-17), implementation in progress** — see
 §7 for the decisions. `vpn-zone doctor` reports every channel below as `warn`
-until it is closed.
+until it is closed, and names by path every unix socket a program of the zone
+can connect to that is not the zone's own (`docs/LEAK-MODEL.md` §18).
 
 ## 1. What is open today
 
