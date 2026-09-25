@@ -3150,6 +3150,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let (a, _b) = UnixStream::pair().unwrap();
+            let (_memfd, writer) = title_memfd(64).unwrap();
             filter(ScmpAction::Errno(libc::EPERM))
                 .unwrap()
                 .load()
@@ -3200,17 +3201,29 @@ mod tests {
                         eperm(libc::ioctl(0, libc::FIONREAD, &mut 0i32) as _),
                     ),
                     ("kill", eperm(libc::kill(1, 0) as _)),
+                    // The title's memory is made before the filter: none
+                    // after it, and none resized.
+                    (
+                        "memfd_create",
+                        eperm(libc::memfd_create(c"x".as_ptr(), libc::MFD_CLOEXEC) as _),
+                    ),
+                    ("ftruncate", eperm(libc::ftruncate(a.as_raw_fd(), 0) as _)),
                 ]
             };
             // And what it needs still works.
             let v: Vec<u8> = vec![1; 1 << 20];
-            let fine = v.len() == 1 << 20 && outq(a.as_raw_fd()) == 0;
+            // The title's pixels are written into the memory made before.
+            let title = {
+                use std::os::unix::fs::FileExt;
+                fs::File::from(writer).write_all_at(&[7; 8], 56).is_ok()
+            };
+            let fine = v.len() == 1 << 20 && outq(a.as_raw_fd()) == 0 && title;
             tx.send((results, fine)).unwrap();
         });
         let (results, fine) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
         for (what, refused) in results {
             assert!(refused, "{what} was allowed");
         }
-        assert!(fine, "memory or TIOCOUTQ was refused");
+        assert!(fine, "memory, TIOCOUTQ or the title's pwrite was refused");
     }
 }
