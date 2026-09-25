@@ -1,5 +1,5 @@
 # СИСТЕМНЫЙ УРОВЕНЬ cellward (прежнее имя — vpn-zones; ROADMAP M10, docs/SYSTEM.md,
-# docs/ARCHITECTURE.ru.md).
+# docs/ARCHITECTURE.ru.md). Единый вход services.cellward.enable — в ./entry.nix.
 #
 # Та же зона, что у пользовательского уровня, — namespace, где есть только lo и
 # туннель, — но держит её systemd с загрузки, а не сеанс. К ней подключаются
@@ -323,6 +323,8 @@ in
   # системных зон не зависит — нужна пользовательскому уровню.
   imports = [
     ./wireplumber/nixos.nix
+    # The single entry, services.cellward.enable.
+    ./entry.nix
   ]
   ++ map (
     name:
