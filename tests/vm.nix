@@ -1528,7 +1528,7 @@ let
               "--object-path /org/freedesktop/Notifications --method org.freedesktop.Notifications.Notify "
               "vmapp 0 https://evil.test/icon.png summary "
               "'<a href=\"https://link.test\">clicktext</a> <b>boldtext</b>' '[]' "
-              "'{\"desktop-entry\": <\"firefox\">, \"urgency\": <byte 1>, \"x-kde-urls\": <[\"https://kde.test\"]>}' -1"
+              "'{\"desktop-entry\": <\"firefox\">, \"urgency\": <byte 1>, \"x-kde-urls\": <[\"https://kde.test\"]>}' 5000"
           )
           in_zone(hp, f"sh -c {shlex.quote(notify + ' || true')}")
           machine.wait_until_succeeds("grep -q clicktext /home/alice/notify-got", timeout=30)
