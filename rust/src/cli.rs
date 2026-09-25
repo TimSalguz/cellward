@@ -46,7 +46,7 @@ pub const EXIT_TOOLS: u8 = 2;
 const READY_TRIES: u32 = 100;
 const READY_STEP: Duration = Duration::from_millis(100);
 
-const USAGE: &str = "cellward — сетевые зоны с VPN, без root\n(коротко — cw; прежнее имя vpn-zone тоже работает)\n\n  cellward add <имя> <файл.conf>   создать зону из конфига AmneziaWG/WireGuard\n                                   или OpenConnect (секция [OpenConnect])\n  cellward add <имя> --system <з.> зона через туннель системной зоны <з.>:\n                                   своего туннеля нет, один VPN — одно\n                                   подключение (конфиг с ключом системной\n                                   зоны становится такой зоной сам)\n  cellward up <имя>                поднять\n  cellward down <имя>              опустить\n  cellward list                    список зон и их состояние\n  cellward status <имя>            подробности (адрес, handshake)\n  cellward status --json           всё состояние машиночитаемо: зоны, контейнеры,\n                                   программы, откуда взято каждое значение\n  cellward status --bar            одна строка JSON для статус-бара (waybar):\n                                   поднятые зоны и живы ли их туннели\n  cellward run <имя> -- <кмд>      запустить программу внутри зоны\n  cellward launch <id> [-- <арг.>] запустить ярлык по id через пикер, как\n                                   щелчок по нему, — для биндов композитора\n  cellward rm <имя>                удалить зону вместе с ярлыками\n  cellward sync                    пересобрать .desktop-ярлыки\n  cellward mode <режим>            как ярлыки работают:\n                                     picker   — один ярлык, спрашивает сеть\n                                                при запуске (по умолчанию)\n                                     per-zone — отдельный ярлык на каждую зону\n                                                (устарел, будет убран)\n                                     both     — и то, и другое (устарел)\n                                     off      — не трогать ярлыки вовсе\n  cellward default <вариант>       что предлагать в пикере для незнакомой\n                                   программы: offline (по умолчанию),\n                                   unconfined (без ограничений: сеть хоста,\n                                   без VPN и изоляции зоны; прежнее имя —\n                                   direct) или имя зоны\n  cellward gc                      убрать зависшие держатели зон, осиротевшую\n                                   обвязку и мёртвые записи\n  cellward perms list|reset <прог.|--all>\n                                   какие доступы к файлам выданы программам\n                                   в песочнице; reset — спросить заново\n  cellward sandbox create|list|rm <имя>\n                                   именованные песочницы: свой дом, общий для\n                                   всех программ, запущенных в этой песочнице\n  cellward run <имя> --sandbox <п> -- <кмд>\n                                   запустить в именованной песочнице\n  cellward run <имя> --fs-sandbox -- <кмд>\n                                   запустить в песочнице файловой системы:\n                                   вместо $HOME — пустой каталог, наружу\n                                   видно только разрешённое, остальное — через\n                                   диалог выбора файла (порталы)\n  cellward run <имя> --tmp-profile -- <кмд>\n                                   запустить в одноразовом контейнере: слой\n                                   создаётся в /tmp и стирается по выходе\n  cellward default-profile <v>     контейнер по умолчанию для всех запусков:\n                                   ask (спрашивать), main (основной),\n                                   own (своя песочница у каждой программы)\n                                   или имя контейнера\n  cellward pins                    какие программы закреплены за сетями\n  cellward forget <прог.|--all>    снять закрепление (снова будет спрашивать)\n  cellward isolate <overlay|off>   свой слой профиля у зоны (overlay — по\n                                   умолчанию). Без него браузер откроет окно\n                                   в уже запущенном процессе, мимо VPN\n  cellward reset-profile <имя>     очистить слой профиля зоны\n  cellward wayland-proxy on|off    посредник между программами и\n                                   композитором (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-no-proxy)\n  cellward wayland-sandbox on|off  отбирать ли у программ захват экрана,\n                                   чтение буфера в фоне и эмуляцию ввода\n                                   (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-allow)\n  cellward frame show|hide         рамка цвета зоны вокруг окон её программ;\n                                   hide — спрятать у окон, открытых после\n                                   этого (для показа экрана)\n  cellward frame width <1–32>|default\n                                   толщина рамки, логические пиксели (4)\n  cellward frame color <зона> <#rrggbb>|default\n                                   цвет рамки зоны (по умолчанию — из имени)\n  cellward frame title always|hover|off|default\n                                   полоса заголовка «зона · контейнер» сверху:\n                                   всегда (по умолчанию), при наведении (поверх\n                                   окна, у верхнего края) или нет\n  cellward check <имя>             прошло ли рукопожатие (жив ли конфиг)\n  cellward watch [--json]          живы ли туннели поднятых зон; при смерти и\n                                   возвращении — уведомление (зовёт таймер)\n  cellward kill <зона>             оборвать зону сейчас: заморозить все её\n                                   программы, опустить зону, убить программы\n                                   (для удалённого доступа, который надо\n                                   прекратить немедленно)\n  cellward journal [--json] [<N>]  последние события: запуски без ограничений\n                                   (unconfined) и решения брокера\n  cellward focused [--json|--bar|--watch]\n                                   в какой сети и контейнере программа окна в\n                                   фокусе (niri, sway); --bar — строка для\n                                   статус-бара, --watch — такая строка при\n                                   каждой смене фокуса\n  cellward window-menu             меню программы окна в фокусе — для бинда\n                                   композитора: закрепить сеть, перезапустить\n                                   с выбором сети, закрыть, оборвать зону\n  cellward doctor [<зона>…] [--json]\n                                   что на деле закрыто: готовность системы и\n                                   проверки изнутри каждой поднятой зоны\n                                   (выходы, маршруты, резолверы, открытые\n                                   каналы); код 1 — есть нарушения\n  cellward hermetic <зона> on|off|default\n                                   герметичная зона: без systemd --user,\n                                   сессионная шина через фильтр, запуск\n                                   наружу через брокер; default — как\n                                   у всех зон\n  cellward hermetic --default on|off\n                                   герметичны ли зоны без своей настройки\n                                   (по умолчанию on, с 2026-09)\n  cellward x11 <зона> on|off       свой X-сервер программам зоны (X хоста в\n                                   зонах недоступен всегда)\n  cellward nix-daemon <зона> on|off|default\n                                   виден ли программам зоны Nix-демон хоста\n                                   (по умолчанию нет: он качает в сети хоста)\n  cellward camera <зона> on|off|default\n                                   видны ли программам зоны камеры хоста\n                                   (по умолчанию нет)\n  cellward audio-manager <зона> on|off|default\n                                   PipeWire хоста без ограничений в\n                                   герметичной зоне — для микшера\n                                   (pavucontrol, qpwgraph); по умолчанию\n                                   нет: свои потоки и выходы для звука\n  cellward microphone <зона> yes|no|ask|default\n                                   может ли программа зоны записывать\n                                   микрофон: ask (по умолчанию) — спросить\n                                   при первой записи: один раз, всегда,\n                                   отказать; действует сразу. Звук, который\n                                   играет хост, не записать никогда. Это\n                                   переключатель пути pulse: сырой\n                                   pipewire-0 и systemd --user\n                                   негерметичной зоны идут мимо\n  cellward screencast <зона> yes|no|ask|default\n                                   может ли программа зоны транслировать\n                                   экран через портал: ask (по умолчанию) —\n                                   портал спрашивает каждый раз; no — отказ;\n                                   yes — выбор можно запомнить, если портал\n                                   знает зону по имени. Действует сразу;\n                                   держит фильтр шины герметичной зоны\n  cellward ask-again <срок>|default\n                                   через сколько после отказа снова спросить\n                                   о разрешении (микрофон): 30s…1d, по\n                                   умолчанию 3m; до того запросы зоны\n                                   отказаны без вопроса\n  cellward host-files <зона> read-only|writable|default\n                                   может ли герметичная зона писать то, что\n                                   хост исполняет из дома (по умолчанию нет)\n  cellward lock|unlock <имя>       запретить/разрешить программам этой зоны\n                                   запускать что-либо в ДРУГИХ сетях\n                                   (по умолчанию разрешено; держится только\n                                   в герметичной зоне)\n  cellward trust add <контейнер> <сертификат> [--yes]\n                                   дополнительный корневой сертификат ТОЛЬКО\n                                   для программ этого контейнера (профиль или\n                                   sb:<песочница>): хост и другие контейнеры\n                                   ему не доверяют. Его владелец сможет читать\n                                   TLS-трафик программ контейнера\n  cellward trust list [<контейнер>] [--json]\n  cellward trust rm <контейнер> <начало sha256>\n  cellward trust reset <контейнер> убрать все дополнительные сертификаты\n  cellward container list|show [<контейнер>] [--json]\n                                   контейнеры (профиль или sb:<песочница>):\n                                   их сеть, программы, сертификаты\n  cellward container set <контейнер> network <сеть|ask>\n                                   привязать контейнер к сети: запуск в\n                                   другой сети будет отказом\n  cellward container set <контейнер> x11 on|off\n                                   свой X-сервер в зонах (X хоста в зонах\n                                   недоступен всегда)\n  cellward container assign <программа> <контейнер>\n  cellward container unassign <программа>\n  cellward container grant sb:<песочница> <каталог> [--for 2h]\n  cellward container revoke sb:<песочница> <каталог>\n                                   выдать песочнице каталог настоящего дома\n                                   или диска (/mnt, /media, /run/media, /srv):\n                                   префикс Wine, библиотеку Steam; --for —\n                                   на срок (30s, 15m, 2h, 7d), по истечении\n                                   и при revoke каталог отмонтируется и у\n                                   уже запущенных программ\n  cellward container merge <из> <в> [--yes]\n                                   объединить два контейнера одного вида:\n                                   совпавшее остаётся у <в>, версии из <из>\n                                   кладутся рядом; --yes — согласие принять\n                                   чужие корневые сертификаты\n";
+const USAGE: &str = "cellward — сетевые зоны с VPN, без root\n(коротко — cw; прежнее имя vpn-zone тоже работает)\n\n  cellward add <имя> <файл.conf>   создать зону из конфига AmneziaWG/WireGuard\n                                   или OpenConnect (секция [OpenConnect])\n  cellward add <имя> --system <з.> зона через туннель системной зоны <з.>:\n                                   своего туннеля нет, один VPN — одно\n                                   подключение (конфиг с ключом системной\n                                   зоны становится такой зоной сам)\n  cellward up <имя>                поднять\n  cellward down <имя>              опустить\n  cellward list                    список зон и их состояние\n  cellward status <имя>            подробности (адрес, handshake)\n  cellward status --json           всё состояние машиночитаемо: зоны, контейнеры,\n                                   программы, откуда взято каждое значение\n  cellward status --bar            одна строка JSON для статус-бара (waybar):\n                                   поднятые зоны и живы ли их туннели\n  cellward run <имя> -- <кмд>      запустить программу внутри зоны\n  cellward launch <id> [-- <арг.>] запустить ярлык по id через пикер, как\n                                   щелчок по нему, — для биндов композитора\n  cellward rm <имя>                удалить зону вместе с ярлыками\n  cellward sync                    пересобрать .desktop-ярлыки\n  cellward mode <режим>            как ярлыки работают:\n                                     picker   — один ярлык, спрашивает сеть\n                                                при запуске (по умолчанию)\n                                     per-zone — отдельный ярлык на каждую зону\n                                                (устарел, будет убран)\n                                     both     — и то, и другое (устарел)\n                                     off      — не трогать ярлыки вовсе\n  cellward default <вариант>       что предлагать в пикере для незнакомой\n                                   программы: offline (по умолчанию),\n                                   unconfined (без ограничений: сеть хоста,\n                                   без VPN и изоляции зоны; прежнее имя —\n                                   direct) или имя зоны\n  cellward gc                      убрать зависшие держатели зон, осиротевшую\n                                   обвязку и мёртвые записи\n  cellward perms list|reset <прог.|--all>\n                                   какие доступы к файлам выданы программам\n                                   в песочнице; reset — спросить заново\n  cellward sandbox create|list|rm <имя>\n                                   именованные песочницы: свой дом, общий для\n                                   всех программ, запущенных в этой песочнице\n  cellward run <имя> --sandbox <п> -- <кмд>\n                                   запустить в именованной песочнице\n  cellward run <имя> --fs-sandbox -- <кмд>\n                                   запустить в песочнице файловой системы:\n                                   вместо $HOME — пустой каталог, наружу\n                                   видно только разрешённое, остальное — через\n                                   диалог выбора файла (порталы)\n  cellward run <имя> --tmp-profile -- <кмд>\n                                   запустить в одноразовом контейнере: слой\n                                   создаётся в /tmp и стирается по выходе\n  cellward default-profile <v>     контейнер по умолчанию для всех запусков:\n                                   ask (спрашивать), main (основной),\n                                   own (своя песочница у каждой программы)\n                                   или имя контейнера\n  cellward pins                    какие программы закреплены за сетями\n  cellward forget <прог.|--all>    снять закрепление (снова будет спрашивать)\n  cellward isolate <overlay|off>   свой слой профиля у зоны (overlay — по\n                                   умолчанию). Без него браузер откроет окно\n                                   в уже запущенном процессе, мимо VPN\n  cellward reset-profile <имя>     очистить слой профиля зоны\n  cellward wayland-proxy on|off    посредник между программами и\n                                   композитором (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-no-proxy)\n  cellward wayland-sandbox on|off  отбирать ли у программ захват экрана,\n                                   чтение буфера в фоне и эмуляцию ввода\n                                   (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-allow)\n  cellward frame show|hide         рамка цвета зоны вокруг окон её программ;\n                                   hide — спрятать у окон, открытых после\n                                   этого (для показа экрана)\n  cellward frame width <1–32>|default\n                                   толщина рамки, логические пиксели (4)\n  cellward frame color <зона> <#rrggbb>|default\n                                   цвет рамки зоны (по умолчанию — из имени)\n  cellward frame title always|hover|off|default\n                                   полоса заголовка «зона · контейнер» сверху:\n                                   всегда (по умолчанию), при наведении (поверх\n                                   окна, у верхнего края) или нет\n  cellward check <имя>             прошло ли рукопожатие (жив ли конфиг)\n  cellward watch [--json]          живы ли туннели поднятых зон; при смерти и\n                                   возвращении — уведомление (зовёт таймер)\n  cellward kill <зона>             оборвать зону сейчас: заморозить все её\n                                   программы, опустить зону, убить программы\n                                   (для удалённого доступа, который надо\n                                   прекратить немедленно)\n  cellward journal [--json] [<N>]  последние события: запуски без ограничений\n                                   (unconfined) и решения брокера\n  cellward focused [--json|--bar|--watch]\n                                   в какой сети и контейнере программа окна в\n                                   фокусе (niri, sway); --bar — строка для\n                                   статус-бара, --watch — такая строка при\n                                   каждой смене фокуса\n  cellward window-menu             меню программы окна в фокусе — для бинда\n                                   композитора: закрепить сеть, перезапустить\n                                   с выбором сети, закрыть, оборвать зону\n  cellward doctor [<зона>…] [--json]\n                                   что на деле закрыто: готовность системы и\n                                   проверки изнутри каждой поднятой зоны\n                                   (выходы, маршруты, резолверы, открытые\n                                   каналы); код 1 — есть нарушения\n  cellward hermetic <зона> on|off|default\n                                   герметичная зона: без systemd --user,\n                                   сессионная шина через фильтр, запуск\n                                   наружу через брокер; default — как\n                                   у всех зон\n  cellward hermetic --default on|off\n                                   герметичны ли зоны без своей настройки\n                                   (по умолчанию on, с 2026-09)\n  cellward x11 <зона> on|off       свой X-сервер программам зоны (X хоста в\n                                   зонах недоступен всегда)\n  cellward nix-daemon <зона> on|off|default\n                                   виден ли программам зоны Nix-демон хоста\n                                   (по умолчанию нет: он качает в сети хоста)\n  cellward camera <зона> on|off|default\n                                   видны ли программам зоны камеры хоста\n                                   (по умолчанию нет)\n  cellward audio-manager <зона> on|off|default\n                                   PipeWire хоста без ограничений в\n                                   герметичной зоне — для микшера\n                                   (pavucontrol, qpwgraph); по умолчанию\n                                   нет: свои потоки и выходы для звука\n  cellward microphone <зона> yes|no|ask|default\n                                   может ли программа зоны записывать\n                                   микрофон: ask (по умолчанию) — спросить\n                                   при первой записи: один раз, всегда,\n                                   отказать; действует сразу. Звук, который\n                                   играет хост, не записать никогда. Это\n                                   переключатель пути pulse: сырой\n                                   pipewire-0 и systemd --user\n                                   негерметичной зоны идут мимо\n  cellward screencast <зона> yes|no|ask|default\n                                   может ли программа зоны транслировать\n                                   экран через портал: ask (по умолчанию) —\n                                   портал спрашивает каждый раз; no — отказ;\n                                   yes — выбор можно запомнить, если портал\n                                   знает зону по имени. Действует сразу;\n                                   держит фильтр шины герметичной зоны\n  cellward ask-again <срок>|default\n                                   через сколько после отказа снова спросить\n                                   о разрешении (микрофон): 30s…1d, по\n                                   умолчанию 3m; до того запросы зоны\n                                   отказаны без вопроса\n  cellward host-files <зона> read-only|writable|default\n                                   может ли герметичная зона писать то, что\n                                   хост исполняет из дома (по умолчанию нет)\n  cellward home <зона>             дом зоны: слой поверх настоящего (всё, что\n                                   зона пишет, остаётся в её слое), общие пути\n  cellward home <зона> share|unshare <путь>   путь от дома, который зона\n                                   пишет насквозь, в настоящий дом\n  cellward home <зона> files       открыть слой зоны (вынести файлы)\n  cellward home <зона> reset       очистить слой при следующем запуске зоны\n  cellward home <зона> layer|passthrough|default   слой или настоящий дом\n  cellward lock|unlock <имя>       запретить/разрешить программам этой зоны\n                                   запускать что-либо в ДРУГИХ сетях\n                                   (по умолчанию разрешено; держится только\n                                   в герметичной зоне)\n  cellward trust add <контейнер> <сертификат> [--yes]\n                                   дополнительный корневой сертификат ТОЛЬКО\n                                   для программ этого контейнера (профиль или\n                                   sb:<песочница>): хост и другие контейнеры\n                                   ему не доверяют. Его владелец сможет читать\n                                   TLS-трафик программ контейнера\n  cellward trust list [<контейнер>] [--json]\n  cellward trust rm <контейнер> <начало sha256>\n  cellward trust reset <контейнер> убрать все дополнительные сертификаты\n  cellward container list|show [<контейнер>] [--json]\n                                   контейнеры (профиль или sb:<песочница>):\n                                   их сеть, программы, сертификаты\n  cellward container set <контейнер> network <сеть|ask>\n                                   привязать контейнер к сети: запуск в\n                                   другой сети будет отказом\n  cellward container set <контейнер> x11 on|off\n                                   свой X-сервер в зонах (X хоста в зонах\n                                   недоступен всегда)\n  cellward container assign <программа> <контейнер>\n  cellward container unassign <программа>\n  cellward container grant sb:<песочница> <каталог> [--for 2h]\n  cellward container revoke sb:<песочница> <каталог>\n                                   выдать песочнице каталог настоящего дома\n                                   или диска (/mnt, /media, /run/media, /srv):\n                                   префикс Wine, библиотеку Steam; --for —\n                                   на срок (30s, 15m, 2h, 7d), по истечении\n                                   и при revoke каталог отмонтируется и у\n                                   уже запущенных программ\n  cellward container merge <из> <в> [--yes]\n                                   объединить два контейнера одного вида:\n                                   совпавшее остаётся у <в>, версии из <из>\n                                   кладутся рядом; --yes — согласие принять\n                                   чужие корневые сертификаты\n";
 
 /// Entry point of the `vpn-zone` binary.
 pub fn main() -> ExitCode {
@@ -91,6 +91,7 @@ pub fn main() -> ExitCode {
         b"hermetic" => zone_hermetic(&tools, rest),
         b"nix-daemon" => zone_allowance(&tools, rest, &NIX_DAEMON_SWITCH),
         b"host-files" => zone_allowance(&tools, rest, &HOST_FILES_SWITCH),
+        b"home" => home(&tools, rest),
         b"camera" => zone_allowance(&tools, rest, &CAMERA_SWITCH),
         b"microphone" => zone_microphone(&tools, rest),
         b"screencast" => zone_screencast(&tools, rest),
@@ -849,6 +850,163 @@ const NIX_DAEMON_SWITCH: Switch = Switch {
         "программам зоны виден Nix-демон хоста — он качает и собирает в сети хоста, мимо её VPN",
     said_off: "Nix-демон хоста программам зоны не виден",
 };
+
+const HOME_SWITCH: Switch = Switch {
+    verb: "home",
+    marker: crate::home_layer::MARKER,
+    on: "passthrough",
+    off: "layer",
+    nix: "programs.cellward.home.passthrough",
+    read: crate::home_layer::passthrough,
+    said_on: "у зоны настоящий дом — что её программы запишут, хост может потом исполнить",
+    said_off: "дом зоны — слой поверх настоящего: что зона пишет, остаётся в её слое",
+};
+
+/// `cellward home <zone> …` (`docs/HOME-LAYER.md`): the zone's home — a
+/// layer over the real one, or the real one — the paths it writes through,
+/// its layer opened on the host, and emptied.
+fn home(tools: &Tools, args: &[OsString]) -> u8 {
+    use crate::container::Source;
+    use crate::home_layer::{layer_dirs, shared, valid_shared, FAILED, SHARED};
+    const USAGE: &str =
+        "cellward home <зона> [layer|passthrough|default|share <путь>|unshare <путь>|files|reset]";
+    let Some(name) = args.first() else {
+        eprintln!("{USAGE}");
+        return 1;
+    };
+    let dir = tools.state.join(name);
+    if !safe_zone_name(name) || !dir.is_dir() {
+        eprintln!("зоны {} нет", name.to_string_lossy());
+        return 1;
+    }
+    let zone = name.to_string_lossy().into_owned();
+    let (upper, _) = layer_dirs(&dir);
+    let verb = args.get(1).and_then(|v| v.to_str());
+    match verb {
+        None => {
+            let (passthrough, source) = crate::home_layer::passthrough(&dir, &tools.config, &zone);
+            let from = match source {
+                Source::Nix => " (задано в Nix)",
+                Source::Local => "",
+                Source::Default => " (умолчание)",
+            };
+            if passthrough {
+                println!("зона {zone}: настоящий дом{from} — слоя нет");
+            } else {
+                println!("зона {zone}: слой поверх настоящего дома{from}");
+                println!("  слой: {}", upper.display());
+            }
+            let (paths, source) = shared(&dir, &tools.config, &zone);
+            let from = if source == Source::Nix {
+                " (задано в Nix)"
+            } else {
+                ""
+            };
+            if paths.is_empty() {
+                println!("  общих путей нет{from}: всё, что зона пишет, остаётся в слое");
+            } else {
+                println!("  пишет насквозь{from}: {}", paths.join(", "));
+            }
+            if let Some(why) = read_setting(&upper.with_file_name(FAILED)) {
+                println!(
+                    "  ⚠ при последнем запуске слоя не было, у зоны был настоящий дом: {}",
+                    why.trim()
+                );
+            }
+            0
+        }
+        Some("layer" | "passthrough" | "default") => zone_allowance(tools, args, &HOME_SWITCH),
+        Some(verb @ ("share" | "unshare")) => {
+            let Some(path) = args.get(2).and_then(|p| p.to_str()) else {
+                eprintln!("{USAGE}");
+                return 1;
+            };
+            let path = match valid_shared(path) {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
+            let (_, source) = shared(&dir, &tools.config, &zone);
+            if source == Source::Nix {
+                eprintln!("общие пути зоны {zone} заданы в Nix (programs.cellward.home.shared) — меняй там");
+                return 1;
+            }
+            let file = dir.join(SHARED);
+            let mut lines: Vec<String> = fs::read_to_string(&file)
+                .unwrap_or_default()
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && *l != path)
+                .map(str::to_owned)
+                .collect();
+            if verb == "share" {
+                lines.push(path.clone());
+            }
+            let text = lines.iter().map(|l| format!("{l}\n")).collect::<String>();
+            if let Err(e) = fs::write(&file, text) {
+                eprintln!("не записать {}: {e}", file.display());
+                return 1;
+            }
+            let restart = if zone_pid(&tools.state, OsStr::new(&zone)).is_some() {
+                format!(" — подействует после перезапуска зоны: cellward down {zone} && cellward up {zone}")
+            } else {
+                String::new()
+            };
+            if verb == "share" {
+                println!("зона {zone}: ~/{path} пишется насквозь, в настоящий дом{restart}");
+            } else {
+                println!("зона {zone}: ~/{path} снова в слое зоны{restart}");
+            }
+            0
+        }
+        Some("files") => {
+            if std::env::var_os(crate::launch::ENV_CURRENT).is_some_and(|v| !v.is_empty()) {
+                eprintln!("слой зоны открывается на хосте, не из зоны");
+                return 1;
+            }
+            if !upper.is_dir() {
+                println!("зона {zone} ещё ничего не написала: слоя нет");
+                return 0;
+            }
+            match Command::new(&tools.opener).arg(&upper).status() {
+                Ok(s) if s.success() => 0,
+                _ => {
+                    eprintln!(
+                        "не открыть {} — вот он: {}",
+                        tools.opener.display(),
+                        upper.display()
+                    );
+                    1
+                }
+            }
+        }
+        Some("reset") => {
+            if zone_pid(&tools.state, OsStr::new(&zone)).is_some() {
+                eprintln!("зона {zone} поднята: сначала cellward down {zone}");
+                return 1;
+            }
+            let marker = upper.with_file_name(crate::home_layer::RESET);
+            match fs::create_dir_all(upper.parent().unwrap_or(&dir))
+                .and_then(|()| fs::write(&marker, ""))
+            {
+                Ok(()) => {
+                    println!("зона {zone}: слой очистится при следующем запуске — всё, что её программы записали, пропадёт");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("не записать {}: {e}", marker.display());
+                    1
+                }
+            }
+        }
+        _ => {
+            eprintln!("{USAGE}");
+            1
+        }
+    }
+}
 
 const HOST_FILES_SWITCH: Switch = Switch {
     verb: "host-files",

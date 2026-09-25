@@ -1205,6 +1205,60 @@ pub fn build_check(age: crate::build::Age) -> Check {
     }
 }
 
+/// The zone's home (`docs/HOME-LAYER.md`), as its holder left it: whether
+/// the home is under an overlay in the zone's mount table, the setting, why
+/// the layer failed at the last start if it did.
+pub fn home_check(
+    has_layer: bool,
+    passthrough: bool,
+    failed: Option<&str>,
+    shared: usize,
+) -> Check {
+    match (has_layer, passthrough, failed) {
+        (true, _, _) if shared == 0 => Check::new(
+            "home",
+            Level::Ok,
+            "дом зоны — слой поверх настоящего: что зона пишет, остаётся в её слое",
+        ),
+        (true, _, _) => Check::new(
+            "home",
+            Level::Ok,
+            format!(
+                "дом зоны — слой поверх настоящего; насквозь, в настоящий дом, пишет путей: {shared}"
+            ),
+        ),
+        (false, true, _) => Check::new(
+            "home",
+            Level::Warn,
+            "у зоны настоящий дом (home passthrough): что её программы запишут, хост может потом \
+             исполнить — автозапуск, конфиги оболочки, хуки git",
+        ),
+        (false, false, Some(why)) => Check::new(
+            "home",
+            Level::Fail,
+            format!("слоя нет, у зоны настоящий дом: {why}"),
+        ),
+        (false, false, None) => Check::new(
+            "home",
+            Level::Warn,
+            "слоя пока нет: зона поднята сборкой без него — появится после cellward down/up",
+        ),
+    }
+}
+
+/// Whether the mount table of a zone (`/proc/<pid>/mountinfo`) has an
+/// overlay at `home`.
+pub fn home_is_layered(mountinfo: &str, home: &std::path::Path) -> bool {
+    mountinfo.lines().any(|line| {
+        let mut halves = line.splitn(2, " - ");
+        let (Some(left), Some(right)) = (halves.next(), halves.next()) else {
+            return false;
+        };
+        left.split(' ').nth(4).map(std::path::Path::new) == Some(home)
+            && right.split(' ').next() == Some("overlay")
+    })
+}
+
 pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     let Some(pid) = zone_pid(&tools.state, name.as_ref()) else {
         return (
@@ -1222,6 +1276,22 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
         &dir,
         &crate::build::installed(tools),
     ))];
+    {
+        let (passthrough, _) = crate::home_layer::passthrough(&dir, &tools.config, name);
+        let (shared, _) = crate::home_layer::shared(&dir, &tools.config, name);
+        let (upper, _) = crate::home_layer::layer_dirs(&dir);
+        let failed = crate::cli::read_setting(&upper.with_file_name(crate::home_layer::FAILED));
+        let layered = home_is_layered(
+            &std::fs::read_to_string(format!("/proc/{pid}/mountinfo")).unwrap_or_default(),
+            &tools.home,
+        );
+        checks.push(home_check(
+            layered,
+            passthrough,
+            failed.as_deref().map(str::trim),
+            shared.len(),
+        ));
+    }
     // What the zone is to be, read as its holder reads it: the probe judges
     // the host's bus and the Nix daemon by it.
     let (hermetic, _) = crate::hermetic::zone_setting(&dir, &tools.config, name);
@@ -1489,6 +1559,25 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_home_is_told_as_the_zone_has_it() {
+        let info = "36 1 0:32 / / rw - btrfs /dev/x rw\n\
+                    90 36 0:77 / /home/u rw,nosuid,nodev - overlay overlay rw,lowerdir=/home/u\n";
+        assert!(home_is_layered(info, std::path::Path::new("/home/u")));
+        assert!(!home_is_layered(info, std::path::Path::new("/home/v")));
+        assert!(!home_is_layered(
+            "40 36 8:17 / /home/u rw - ext4 /dev/sdb rw\n",
+            std::path::Path::new("/home/u")
+        ));
+        assert_eq!(home_check(true, false, None, 0).level, Level::Ok);
+        assert_eq!(home_check(false, true, None, 0).level, Level::Warn);
+        assert_eq!(
+            home_check(false, false, Some("refused"), 0).level,
+            Level::Fail
+        );
+        assert_eq!(home_check(false, false, None, 0).level, Level::Warn);
+    }
 
     #[test]
     fn a_zone_has_loopback_and_its_tunnel_and_nothing_else() {

@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Security
+- **A zone's home is a layer over the real one** (`docs/HOME-LAYER.md`,
+  `rust/src/home_layer.rs`, `zone::mount_home_layer`; the owner's decision
+  of 2026-09-26). A program in a zone without a sandbox had the whole home to
+  write, and a line in a shell's startup file, an autostart entry, a git hook,
+  a browser extension is code the host runs later, around the zone's tunnel —
+  a list of such places (`protect_host_files`) is never complete. Every zone
+  now mounts an overlay over the home: it sees the whole home, and everything
+  it writes stays in its layer (`~/.local/state/vpn-zones/<zone>/home`,
+  hidden from the zone). Given back from the real home over it: the
+  project's state, container storage, mounts below the home (another disk
+  under `~/Games`), and the paths the person shares with the zone — none by
+  default: `programs.cellward.home.shared.<zone>` or `cellward home <zone>
+  share <path>`. `cellward home <zone> files` opens the layer on the host to
+  take files out; `reset` empties it at the next start; `passthrough`
+  (`programs.cellward.home.passthrough`) gives a trusted zone the real home
+  again. A kernel that refuses the overlay leaves the zone with the real home,
+  as before, and `doctor` fails on it; `status --json` has `home`. Applies to
+  a zone started after the update — a zone whose programs work on real files
+  (projects, `~/.claude`) needs them shared first.
+
 ### Fixed
 - **The launch window opens faster, most of all under load**
   (`window/package.nix`, the owner, 2026-09-26: Firefox took long to open

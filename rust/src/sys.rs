@@ -222,6 +222,17 @@ pub fn parse_inotify(mut buf: &[u8]) -> (Vec<String>, bool) {
     (names, overflow)
 }
 
+/// Detach the mount at `path` with everything mounted on it
+/// (`umount2(MNT_DETACH)`), once.
+pub fn detach(path: &Path) -> io::Result<()> {
+    let c = cstring(path.as_os_str().as_bytes())?;
+    // SAFETY: a NUL-terminated path and constant flags.
+    if unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn cstring(bytes: &[u8]) -> io::Result<CString> {
     CString::new(bytes)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument contains a NUL byte"))

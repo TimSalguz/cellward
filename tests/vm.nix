@@ -1097,6 +1097,9 @@ let
               "> /tmp/vmreal.conf"
           )
           alice("cellward add vmreal /tmp/vmreal.conf")
+          # A path shared through the zone's home layer (docs/HOME-LAYER.md),
+          # before the zone comes up: the holder reads it then.
+          alice("mkdir -p ~/shared-probe && cellward home vmreal share shared-probe")
           alice("cellward up vmreal")
 
       # The capture starts BEFORE any traffic, so the handshake itself is
@@ -1132,6 +1135,25 @@ let
       # module present `ip link add awg0 type amneziawg` succeeds and `awg`
       # configures the interface. (The fallback to the in-tree wireguard
       # module lives in the CI smoke test — its runner has no amneziawg.)
+      # The zone's home is a layer over the real one: what a program in it
+      # writes stays in the zone's layer, and the host never sees — let alone
+      # runs — it; a shared path writes the real home; the project's state is
+      # the real one (the zone came up, its pid file is where the host reads).
+      with subtest("home layer: the zone writes its layer, a shared path the real home"):
+          in_zone(rzpid, "sh -c 'echo zone > $HOME/layer-probe && mkdir -p $HOME/.config/autostart-probe'")
+          in_zone(rzpid, "grep -q zone /home/alice/layer-probe")
+          machine.fail("test -e /home/alice/layer-probe")
+          machine.fail("test -e /home/alice/.config/autostart-probe")
+          machine.succeed(f"grep -q zone {STATE}/vmreal/home/upper/layer-probe")
+          in_zone(rzpid, "sh -c 'echo shared > $HOME/shared-probe/x'")
+          machine.succeed("grep -q shared /home/alice/shared-probe/x")
+          out = alice("cellward status --json")
+          home = next(n for n in json.loads(out)["networks"] if n["name"] == "vmreal")["home"]
+          assert home["value"] == "layer" and home["shared"] == ["shared-probe"], home
+          assert home["failed"] is None, home
+          out = alice("cellward home vmreal")
+          assert "слой поверх настоящего дома" in out, out
+
       with subtest("the tunnel is a real amneziawg link, not the wireguard fallback"):
           out = in_zone(rzpid, "ip -d link show awg0")
           assert "amneziawg" in out, f"awg0 is not an amneziawg link:\n{out}"

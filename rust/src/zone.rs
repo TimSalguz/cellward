@@ -635,6 +635,12 @@ struct Zone {
     /// The host's raw PipeWire socket in a hermetic zone
     /// (`hermetic::audio_manager`); off by default: the restricted one.
     audio_manager: bool,
+    /// The real home instead of a layer over it (`home_layer::passthrough`);
+    /// off by default.
+    home_passthrough: bool,
+    /// The paths the zone writes through its layer into the real home
+    /// (`home_layer::shared`).
+    home_shared: Vec<String>,
 }
 
 impl Zone {
@@ -709,6 +715,8 @@ pub fn run(args: Args) -> u8 {
     let (host_files_writable, _) = crate::hermetic::host_files_writable(&dir, &config, &label);
     let (camera, _) = crate::hermetic::camera(&dir, &config, &label);
     let (audio_manager, _) = crate::hermetic::audio_manager(&dir, &config, &label);
+    let (home_passthrough, _) = crate::home_layer::passthrough(&dir, &config, &label);
+    let (home_shared, _) = crate::home_layer::shared(&dir, &config, &label);
     let zone = Zone {
         dir,
         home,
@@ -719,6 +727,8 @@ pub fn run(args: Args) -> u8 {
         host_files_writable,
         camera,
         audio_manager,
+        home_passthrough,
+        home_shared,
     };
 
     // A directory is a zone if it has a config or the offline marker; anything
@@ -3153,6 +3163,178 @@ fn protect_host_files(zone: &Zone) -> Result<(), String> {
     Ok(())
 }
 
+/// The zone's home under a layer (`docs/HOME-LAYER.md`,
+/// `crate::home_layer`): the real home below, the zone's layer above, and
+/// back from the real home over it what must stay real — the project's
+/// state (the holder's own files and sockets live there, and the host reads
+/// them), container storage, the mounts below the home, the paths shared
+/// with the zone. Everything else a program here writes stays in the layer,
+/// and the host never runs it. In the current mount namespace, which must be
+/// the zone's own and private.
+///
+/// A kernel that refuses the overlay (before Linux 5.11, or a filesystem
+/// without user extended attributes), or a path of the project's that cannot
+/// be given back, leaves the zone with the real home — what every zone had
+/// before the layer, so no new hole — and says so loudly: in the journal, and
+/// in [`crate::home_layer::FAILED`] for `doctor` and `status`. Not fatal: a
+/// zone that does not come up at all takes the network away from everything
+/// in it. A shared path that cannot be given back is skipped and said.
+fn mount_home_layer(zone: &Zone) -> Result<(), String> {
+    let (upper, _) = crate::home_layer::layer_dirs(&zone.dir);
+    let failed = upper.with_file_name(crate::home_layer::FAILED);
+    let _ = fs::remove_file(&failed);
+    if zone.home_passthrough {
+        println!(
+            "zone {}: the real home — no layer (home passthrough)",
+            zone.name()
+        );
+        return Ok(());
+    }
+    match layer_home(zone) {
+        Ok(shared) => {
+            println!(
+                "zone {}: the home under the zone's layer; {shared} shared path(s) write the real home",
+                zone.name()
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "zone {}: NO HOME LAYER ({e}) — the zone has the real home, as before the layer: \
+                 what its programs write, the host may run",
+                zone.name()
+            );
+            let _ = fs::write(&failed, format!("{e}\n"));
+        }
+    }
+    Ok(())
+}
+
+/// [`mount_home_layer`]'s mounts: the number of shared paths given back, or
+/// why there is no layer — then the overlay is off again.
+fn layer_home(zone: &Zone) -> Result<usize, String> {
+    let home = &zone.home;
+    let (upper, work) = crate::home_layer::layer_dirs(&zone.dir);
+    // Emptied on request (`cellward home <zone> reset`): here, by the zone's
+    // uid 0 — the overlay's work directory is its own, not the user's.
+    let reset = upper.with_file_name(crate::home_layer::RESET);
+    if reset.exists() {
+        for dir in [&upper, &work] {
+            if let Err(e) = fs::remove_dir_all(dir) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!("cannot empty {}: {e}", dir.display()));
+                }
+            }
+        }
+        let _ = fs::remove_file(&reset);
+        println!("zone {}: the layer emptied, as asked", zone.name());
+    }
+    for dir in [&upper, &work] {
+        fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    // The layer's root is the user's: what the zone's programs create there
+    // is theirs anyway, and the person takes files out of it on the host.
+    let owner = fs::metadata(home).map_err(|e| format!("cannot read {}: {e}", home.display()))?;
+    {
+        use std::os::unix::fs::MetadataExt;
+        let _ = std::os::unix::fs::chown(&upper, Some(owner.uid()), Some(owner.gid()));
+    }
+    let options = crate::home_layer::overlay_options(home, &upper, &work).ok_or_else(|| {
+        format!(
+            "the home's path {} has a comma, a colon or a backslash — overlayfs cannot be told it",
+            home.display()
+        )
+    })?;
+    // What was mounted below the home before the layer: an overlay shows
+    // none of it.
+    let below = crate::home_layer::submounts(
+        &fs::read_to_string("/proc/self/mountinfo").unwrap_or_default(),
+        home,
+    );
+    let real = sys::open_dir(home).map_err(|e| format!("cannot open {}: {e}", home.display()))?;
+    sys::mount(
+        OsStr::new("overlay"),
+        home,
+        "overlay",
+        libc::MS_NOSUID | libc::MS_NODEV,
+        &options,
+    )
+    .map_err(|e| format!("overlayfs refused the home: {e}"))?;
+    let mut shared = 0;
+    for rel in crate::home_layer::passthroughs(&zone.home_shared, &below) {
+        let is_shared = zone
+            .home_shared
+            .iter()
+            .any(|s| Path::new(s.trim_end_matches('/')) == rel);
+        match give_back(&real, home, &rel) {
+            Ok(true) if is_shared => shared += 1,
+            Ok(_) => {}
+            Err(e) if is_shared => eprintln!(
+                "zone {}: shared path {} stays in the layer: {e}",
+                zone.name(),
+                rel.display()
+            ),
+            Err(e) => {
+                // The project's state or a mount below the home: without
+                // it the zone's own files would land in the layer, where
+                // the host does not look. Off with the whole layer.
+                // MNT_DETACH takes the overlay and everything bound on it.
+                let _ = sys::detach(home);
+                return Err(e);
+            }
+        }
+    }
+    Ok(shared)
+}
+
+/// Bind `rel` of the real home (`real`, a descriptor opened before the
+/// layer) over the layer: `Ok(false)` when the real home has no such path.
+///
+/// The target is the zone's view, which its layer shapes: a link the zone
+/// left there once (`~/.local` → elsewhere) would take the bind where the
+/// zone likes — the project's state over something else, or something else
+/// over it. Every part of the path below the home is made a plain directory
+/// first (a link is removed, which only whites it out in the layer), and so
+/// is the target, of the source's kind. Nothing of the zone runs yet: this is
+/// the holder's setup, before any program enters.
+fn give_back(real: &OwnedFd, home: &Path, rel: &Path) -> Result<bool, String> {
+    let from = PathBuf::from(format!("/proc/self/fd/{}", real.as_raw_fd())).join(rel);
+    let Ok(meta) = fs::metadata(&from) else {
+        return Ok(false);
+    };
+    let mut at = home.to_path_buf();
+    let parts: Vec<_> = rel.components().collect();
+    for (i, part) in parts.iter().enumerate() {
+        at.push(part);
+        let last = i + 1 == parts.len();
+        let seen = fs::symlink_metadata(&at);
+        let fits = match &seen {
+            Ok(m) if m.file_type().is_symlink() => false,
+            Ok(m) if !last => m.is_dir(),
+            Ok(m) => m.is_dir() == meta.is_dir(),
+            Err(_) => false,
+        };
+        if fits {
+            continue;
+        }
+        if seen.is_ok() {
+            let gone = match &seen {
+                Ok(m) if m.is_dir() => fs::remove_dir_all(&at),
+                _ => fs::remove_file(&at),
+            };
+            gone.map_err(|e| format!("cannot clear {} in the layer: {e}", at.display()))?;
+        }
+        let made = if !last || meta.is_dir() {
+            fs::create_dir(&at)
+        } else {
+            fs::File::create(&at).map(drop)
+        };
+        made.map_err(|e| format!("cannot make {} in the layer: {e}", at.display()))?;
+    }
+    sys::mount(from.as_os_str(), &at, "", libc::MS_BIND | libc::MS_REC, "")
+        .map_err(|e| format!("cannot give {} back: {e}", at.display()))?;
+    Ok(true)
+}
+
 /// The project's own state out of the zone's reach (review 2026-09-25,
 /// third round). `~/.local/state/vpn-zones` holds what the host trusts about
 /// zones — which namespace is which zone (`zone.pid`, `zone.start`), which is
@@ -3190,6 +3372,8 @@ fn hide_project_state(zone: &Zone) -> Result<Zone, String> {
         host_files_writable: zone.host_files_writable,
         camera: zone.camera,
         audio_manager: zone.audio_manager,
+        home_passthrough: zone.home_passthrough,
+        home_shared: zone.home_shared.clone(),
     })
 }
 
@@ -3559,6 +3743,9 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         "",
     )
     .map_err(|e| format!("cannot make the mount tree private: {e}"))?;
+    // The home under a layer, before anything of the zone's own is mounted
+    // below it: everything after lands on the layer.
+    mount_home_layer(zone)?;
 
     // Only now: the file's appearance means "the namespaces exist", and this is
     // the number `vpn-zone run`/`status` enter by.

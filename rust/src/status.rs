@@ -156,7 +156,7 @@ pub fn networks(tools: &Tools) -> String {
         // 2026-09, may still be in a configuration or in Nix.
         "{\"name\":\"unconfined\",\"kind\":\"unconfined\",\"aliases\":[\"direct\"],\"source\":\"default\",\"up\":true,\
          \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\"microphone\":null,\"screencast\":null,\"audio_manager\":null,\"system_zone\":null,\"frame_color\":null,\"build\":null}"
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\"microphone\":null,\"screencast\":null,\"audio_manager\":null,\"home\":null,\"system_zone\":null,\"frame_color\":null,\"build\":null}"
             .to_owned(),
     ];
     let mut offline_listed = false;
@@ -262,6 +262,23 @@ pub fn networks(tools: &Tools) -> String {
             let (on, source) = crate::hermetic::audio_manager(&dir, &tools.config, &name);
             sourced(on.to_string(), source)
         };
+        // Its home: a layer over the real one or the real one, what it
+        // writes through, and whether the layer failed at its last start
+        // (`docs/HOME-LAYER.md`); from its next start.
+        let home = {
+            let (passthrough, source) = crate::home_layer::passthrough(&dir, &tools.config, &name);
+            let (shared, shared_source) = crate::home_layer::shared(&dir, &tools.config, &name);
+            let (upper, _) = crate::home_layer::layer_dirs(&dir);
+            let failed = crate::cli::read_setting(&upper.with_file_name(crate::home_layer::FAILED))
+                .map_or("null".to_owned(), |why| string(why.trim()));
+            format!(
+                "{{\"value\":{},\"source\":{},\"shared\":{},\"shared_source\":{},\"failed\":{failed}}}",
+                string(if passthrough { "passthrough" } else { "layer" }),
+                string(source.as_str()),
+                array(shared.iter().map(|p| string(p)).collect()),
+                string(shared_source.as_str()),
+            )
+        };
         // The colour of the border around its programs' windows.
         let frame_color = {
             let (color, source) = crate::frame::zone_color(&tools.state, &tools.config, &name);
@@ -273,7 +290,7 @@ pub fn networks(tools: &Tools) -> String {
             "local"
         };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"camera\":{camera},\"microphone\":{microphone},\"screencast\":{screencast},\"audio_manager\":{audio_manager},\"system_zone\":{system_zone},\"frame_color\":{frame_color},\"build\":{build}}}",
+            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"camera\":{camera},\"microphone\":{microphone},\"screencast\":{screencast},\"audio_manager\":{audio_manager},\"home\":{home},\"system_zone\":{system_zone},\"frame_color\":{frame_color},\"build\":{build}}}",
             string(&name),
             dir.join(NO_ESCAPE).exists()
         ));
@@ -290,7 +307,7 @@ pub fn networks(tools: &Tools) -> String {
             "{{\"name\":\"offline\",\"kind\":\"offline\",\"aliases\":[],\"source\":\"default\",\"up\":false,\
              \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
              \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\
-             \"microphone\":{},\"screencast\":{},\"audio_manager\":null,\"system_zone\":null,\"frame_color\":{},\"build\":null}}",
+             \"microphone\":{},\"screencast\":{},\"audio_manager\":null,\"home\":null,\"system_zone\":null,\"frame_color\":{},\"build\":null}}",
             sourced_str(mic.as_str(), mic_source),
             sourced_str(cast.as_str(), cast_source),
             sourced_str(&color.hex(), source)

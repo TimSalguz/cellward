@@ -103,6 +103,7 @@ pub mod fs_sandbox;
 pub mod grants;
 pub mod gui;
 pub mod hermetic;
+pub mod home_layer;
 pub mod hostif;
 pub mod journal;
 pub mod json;

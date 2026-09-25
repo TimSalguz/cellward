@@ -633,6 +633,8 @@ let
     "audioManager"
     "pipewirePolicy"
     "hostFilesWritable"
+    "home.passthrough"
+    "home.shared"
     "microphone"
     "screencast"
     "askAgainAfter"
@@ -812,6 +814,21 @@ in
       type = lib.types.bool;
       default = false;
       description = "Положить политику WirePlumber для PipeWire зон в ~/.config/wireplumber/wireplumber.conf.d/90-vpn-zones.conf и ~/.local/share/wireplumber/scripts/vpn-zones/policy.lua — для home-manager без NixOS (на NixOS то же делает services.cellward.pipewirePolicy.enable; включённые оба не дублируются). Без политики герметичная зона PipeWire не получает вовсе — звук только через pulse; с ней её программы видят только свои потоки, выходы для звука и — по настройке microphone — микрофоны, и никогда не мониторы. Подействует после перезапуска WirePlumber (systemctl --user restart wireplumber). Политика — скрипт WirePlumber, а WirePlumber ищет скрипты сначала в ~/.local/share/wireplumber, фрагменты — сначала в ~/.config/wireplumber: поэтому в герметичной зоне эти каталоги, ~/.config/pipewire и ~/.local/state/wireplumber только для чтения и создаются заранее, если их нет. Зона из hostFilesWritable может подменить политику для всех зон. См. docs/LEAK-MODEL.md §20.";
+    };
+
+    home = {
+      passthrough = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "trusted" ];
+        description = "Зоны (по имени) с настоящим домом, без слоя. По умолчанию у каждой зоны дом — слой поверх настоящего: что её программы пишут, остаётся в её слое (~/.local/state/vpn-zones/<зона>/home), а в настоящий дом зона не пишет ничего, кроме общих путей (home.shared) — ни конфигов оболочки, ни автозапуска, ни хуков git, которые хост потом исполнил бы. Настоящий дом — только зоне, которой это доверено. Без пересборки — cellward home <зона> passthrough. См. docs/HOME-LAYER.md.";
+      };
+      shared = lib.mkOption {
+        type = lib.types.attrsOf (lib.types.listOf lib.types.str);
+        default = { };
+        example = lib.literalExpression ''{ work = [ "Projects" ".claude" ".claude.json" ]; }'';
+        description = "Пути от дома, которые зона пишет насквозь, в настоящий дом, мимо своего слоя: для зоны, которая работает с настоящими файлами. По умолчанию — ни одного: сделанное в зоне выносится руками (cellward home <зона> files открывает её слой на хосте). Путь — без «/» в начале, «.» и «..», не настройки и не состояние cellward. Что лежит в общем пути, остаётся мостом: зона, правящая flake, который потом собирает root, исполняет код от root. Задано здесь — cellward home <зона> share отказывает. См. docs/HOME-LAYER.md.";
+      };
     };
 
     hostFilesWritable = lib.mkOption {
@@ -1025,9 +1042,22 @@ in
       }
       {
         assertion = lib.all (z: z != "" && !(lib.hasInfix "\n" z)) (
-          cfg.nixDaemon ++ cfg.hostFilesWritable ++ cfg.camera ++ cfg.audioManager
+          cfg.nixDaemon ++ cfg.hostFilesWritable ++ cfg.camera ++ cfg.audioManager ++ cfg.home.passthrough
         );
-        message = "programs.cellward.nixDaemon / hostFilesWritable / camera / audioManager: имя зоны — непустое и без переводов строки";
+        message = "programs.cellward.nixDaemon / hostFilesWritable / camera / audioManager / home.passthrough: имя зоны — непустое и без переводов строки";
+      }
+      {
+        assertion = lib.all (
+          z: z != "" && !(lib.hasInfix "/" z) && !(lib.hasInfix "\n" z) && !(lib.hasPrefix "." z)
+        ) (lib.attrNames cfg.home.shared);
+        message = "programs.cellward.home.shared: имя зоны — непустое, без «/», переводов строки и точки в начале";
+      }
+      {
+        assertion = lib.all (
+          p: p != "" && !(lib.hasPrefix "/" p) && !(lib.hasInfix "\n" p)
+          && !(lib.elem "." (lib.splitString "/" p)) && !(lib.elem ".." (lib.splitString "/" p))
+        ) (lib.concatLists (lib.attrValues cfg.home.shared));
+        message = "programs.cellward.home.shared: путь — от дома, без «/» в начале, «.» и «..»";
       }
       {
         assertion =
@@ -1110,6 +1140,16 @@ in
     (lib.mkIf (cfg.audioManager != [ ]) {
       ".config/vpn-zones/declared/audio-manager".text = lib.concatStringsSep "\n" cfg.audioManager + "\n";
     })
+    (lib.mkIf (cfg.home.passthrough != [ ]) {
+      ".config/vpn-zones/declared/home-passthrough".text =
+        lib.concatStringsSep "\n" cfg.home.passthrough + "\n";
+    })
+    (lib.mapAttrs' (
+      zone: paths:
+      lib.nameValuePair ".config/vpn-zones/declared/home-shared/${zone}" {
+        text = lib.concatMapStrings (p: "${p}\n") paths;
+      }
+    ) cfg.home.shared)
     (lib.mkIf (cfg.hostFilesWritable != [ ]) {
       ".config/vpn-zones/declared/host-files-writable".text =
         lib.concatStringsSep "\n" cfg.hostFilesWritable + "\n";
