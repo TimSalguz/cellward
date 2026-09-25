@@ -292,6 +292,22 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
         rows.push((name, now, kept, notified));
     }
 
+    // Zones an update left on the previous build: said once per installed
+    // build, not every minute (`crate::build`).
+    let previous = crate::build::previous_zones(tools);
+    // Hidden: the other files here are named after zones.
+    let told_file = memory_dir.join(".installed-build");
+    let installed = crate::build::installed(tools).display().to_string();
+    let told = fs::read_to_string(&told_file).unwrap_or_default();
+    if !previous.is_empty() && told.trim() != installed {
+        let (title, body) = crate::build::notice(&previous);
+        crate::dialog::notify(&tools.notify_send, None, "0", &title, &body);
+        eprintln!("{title}");
+        if fs::create_dir_all(&memory_dir).is_ok() {
+            let _ = write_memory(&told_file, &format!("{installed}\n"));
+        }
+    }
+
     if json {
         let items: Vec<String> = rows
             .iter()

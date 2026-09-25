@@ -85,6 +85,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   section numbers of `docs/LEAK-MODEL.md`.
 
 ### Added
+- **Which build a running zone is on** (`rust/src/build.rs`). An update leaves
+  running zones alone, so a zone can run a previous build for a while — and
+  the holder's newer fixes do not apply to it until it is restarted. The
+  holder notes its build (`zone.build`, the store directory of the program,
+  next to `zone.pid`); `status --json` has `"build": "current" | "previous"`
+  for every running network (`null` when down), `cellward doctor` warns about
+  a zone on a previous build, and the tunnel watch says it once per installed
+  build, with the zones and how to restart them. A holder from before the
+  note reads as the previous build.
 - **A screen cast switch per zone** (`rust/src/screencast.rs`,
   `rust/src/bus_filter.rs` `screencast_verdict`, LEAK-MODEL §21,
   PERMISSIONS §3д): `cellward screencast <zone> yes|no|ask|default` (with

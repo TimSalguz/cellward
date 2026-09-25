@@ -84,6 +84,7 @@
 //! own selftest).
 
 pub mod broker;
+pub mod build;
 pub mod bus_filter;
 pub mod cli;
 pub mod completion;

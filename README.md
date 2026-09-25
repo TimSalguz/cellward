@@ -240,6 +240,9 @@ zone's tunnel as they are: the programs in the zone keep their network, and
 new launches already go through the new `cellward`. A zone takes the new
 build when it is restarted (`cellward down <zone>; cellward up <zone>`), at a
 moment that suits you — until then the holder's own fixes do not apply to it.
+`cellward status --json` (`"build": "current" | "previous"`) and `cellward
+doctor` show which zones are left on the previous build, and the tunnel watch
+says so once after an update.
 
 ## How to use it
 

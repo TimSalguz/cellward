@@ -3570,6 +3570,9 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         .map_err(|e| format!("cannot write {START}: {e}"))?;
     fs::write(zone.path(PID), format!("{pid}\n"))
         .map_err(|e| format!("cannot write {PID}: {e}"))?;
+    // Which build runs the zone: an update leaves it running (keep-old), and
+    // status/doctor/watch tell the person it is left on the previous one.
+    crate::build::record(&zone.dir);
     zone.ip(&["link", "set", "lo", "up"])?;
 
     // BEFORE the offline branch, and deliberately so: an "offline" zone that

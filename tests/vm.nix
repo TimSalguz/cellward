@@ -1408,6 +1408,15 @@ let
           status = json.loads(alice("cellward status --json"))
           zone = next(n for n in status["networks"] if n["name"] == "vmsmoke")
           assert zone["microphone"] == {"value": "ask", "source": "default"}, zone
+          # The holder noted its build: the one installed now. A zone with no
+          # note (one an update left running from before it) reads as the
+          # previous build, and doctor says so.
+          assert zone["build"] == "current", zone
+          machine.succeed(f"test -s {STATE}/vmsmoke/zone.build")
+          machine.succeed(f"mv {STATE}/vmsmoke/zone.build {STATE}/vmsmoke/zone.build.kept")
+          status = json.loads(alice("cellward status --json"))
+          assert next(n for n in status["networks"] if n["name"] == "vmsmoke")["build"] == "previous", status
+          machine.succeed(f"mv {STATE}/vmsmoke/zone.build.kept {STATE}/vmsmoke/zone.build")
           mic = lambda: in_zone(zp, "${pkgs.python3}/bin/python3 ${pulseMic}")
           out = mic()
           assert "mic refused" in out, f"ask with nobody to ask was not refused: {out}"

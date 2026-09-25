@@ -1188,6 +1188,23 @@ pub fn system_checks(tools: &Tools, uid: u32) -> Vec<Check> {
 }
 
 /// The zone's own checks: the probe inside it, and the tunnel from outside.
+/// A running zone on the build installed now, or left on a previous one by
+/// an update (`crate::build`): not a leak, but the holder's newer fixes do
+/// not apply to it until it is restarted.
+pub fn build_check(age: crate::build::Age) -> Check {
+    match age {
+        crate::build::Age::Current => {
+            Check::new("build", Level::Ok, "зона на текущей сборке cellward")
+        }
+        crate::build::Age::Previous => Check::new(
+            "build",
+            Level::Warn,
+            "зона на прошлой сборке cellward: обновление её не перезапустило; исправления \
+             новой сборки придут после cellward down/up",
+        ),
+    }
+}
+
 pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     let Some(pid) = zone_pid(&tools.state, name.as_ref()) else {
         return (
@@ -1201,7 +1218,10 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     };
     let dir = tools.state.join(name);
     let offline = dir.join("offline").exists();
-    let mut checks = Vec::new();
+    let mut checks = vec![build_check(crate::build::age(
+        &dir,
+        &crate::build::installed(tools),
+    ))];
     // What the zone is to be, read as its holder reads it: the probe judges
     // the host's bus and the Nix daemon by it.
     let (hermetic, _) = crate::hermetic::zone_setting(&dir, &tools.config, name);
