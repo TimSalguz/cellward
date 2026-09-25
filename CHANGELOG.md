@@ -61,6 +61,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   section numbers of `docs/LEAK-MODEL.md`.
 
 ### Added
+- **A screen cast switch per zone** (`rust/src/screencast.rs`,
+  `rust/src/bus_filter.rs` `screencast_verdict`, LEAK-MODEL §21,
+  PERMISSIONS §3д): `cellward screencast <zone> yes|no|ask|default` (with
+  completion), Nix `programs.cellward.screencast.<zone> = "yes"|"no"|"ask"`
+  (renamed from `programs.vpn-zones.screencast` like every option, written
+  to `declared/screencast`), and `"screencast":{"value","source"}` for every
+  zone in `cellward status --json` (`null` for `unconfined`). The
+  microphone's rules: the zone's marker, Nix over it, `ask` without either;
+  a value that is none of the three, or a file that cannot be read, is `no`.
+  A hermetic zone's session bus filter reads it for every call, so it
+  applies at once, to running programs too — through descriptors of the
+  zone's, config and state directories it opens before its socket appears,
+  since the zone covers the project's state right after (the filter's new
+  `--zone`, `--zone-dir`, `--config`). `ask`, the default, is what every
+  zone had: the portal's dialog every time, `SelectSources` without
+  `persist_mode` and `restore_token`. `no` refuses every call of
+  `org.freedesktop.portal.ScreenCast` with the portal's own
+  `org.freedesktop.portal.Error.NotAllowed` and "трансляция экрана выключена
+  для зоны «…»", a line in the zone's unit journal each time and a
+  `screencast` event in `cellward journal` at most once per 10 s. `yes`
+  passes `persist_mode` and `restore_token` as well, so a remembered choice
+  works — only on a connection the portal knows as the zone (the entry
+  above), and only while the call goes to the portal that took the id: by
+  its unique name, or by the well-known one while that portal still owns it
+  (asked on a short connection of the filter's own). Anywhere else `yes` is
+  `ask`: a choice is never kept for the nameless host application every
+  zone shares, nor by a portal restarted since. Not in force where no zone
+  filter reads it: a zone that is not hermetic talks to the portal
+  directly, and in a file sandbox `yes` is `ask` (its own filter does not
+  see the zone's state; a hermetic zone's filter behind it holds `no`) —
+  `cellward screencast` says so.
 - **The portal knows the zone** (`rust/src/bus_filter.rs` `register`,
   `rust/src/desktop.rs` `zone_app_id`, LEAK-MODEL §23). Each zone has an
   application id of its own, `cellward.zone.<id>` — the zone's name with

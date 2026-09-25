@@ -221,6 +221,19 @@ programs.cellward.audioManager = [ "mixer" ];    # a zone for pavucontrol/qpwgra
 Without the policy a hermetic zone has no PipeWire at all — the PulseAudio path
 only, which most programs use (`docs/LEAK-MODEL.md` §20).
 
+A screen cast goes through the portal only, and has a switch per zone too:
+`cellward screencast <zone> yes|no|ask|default`. `ask` (the default) is the
+portal's dialog every time, `no` refuses, `yes` lets the choice be remembered
+when the portal knows the zone by name: the bus filter names each connection of
+the zone to the portal (`cellward.zone.<zone>`), and its dialogs say
+"cellward · <zone>" rather than "a host application" (`docs/LEAK-MODEL.md`
+§21, §23). It applies at once; a hermetic zone's bus filter holds it.
+
+```nix
+programs.cellward.microphone.calls = "ask";      # yes | no | ask
+programs.cellward.screencast.calls = "yes";      # yes | no | ask
+```
+
 ## How to use it
 
 Create a zone: the **"Add VPN zone"** entry → pick a `.conf` → give it a name.
