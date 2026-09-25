@@ -2384,6 +2384,17 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
         Some(watch) => {
             let hermetic = zone.hermetic;
             let name = zone.name().into_owned();
+            // The hold is below the zone's directory, which is covered a
+            // moment later (`hide_project_state`): the watcher goes on
+            // through a descriptor, by our pid, as the holder does.
+            let held = match sys::open_dir(&held) {
+                Ok(fd) => {
+                    // SAFETY: getpid(2) takes no arguments and cannot fail.
+                    let pid = unsafe { libc::getpid() };
+                    PathBuf::from(format!("/proc/{pid}/fd/{}", fd.into_raw_fd()))
+                }
+                Err(e) => return Err(format!("cannot open {}: {e}", held.display())),
+            };
             thread::spawn(move || loop {
                 let names = match watch.names() {
                     Ok(names) => names,
