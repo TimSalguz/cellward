@@ -7,20 +7,26 @@
 # фрагмент и скрипт с тем же именем в каталоге пользователя заменяют
 # системные.
 {
-  # Скрипт — в профиле main. «optional», а не «required»: сломанный скрипт не
-  # должен оставить без звука весь сеанс. Не загрузился — нет и метки
-  # vpn-zones.policy, и помощник зоны сокет не отдаёт: зоне закрыто (только
-  # pulse).
+  # Скрипт — в профиле main, через виртуальный компонент, который его
+  # «хочет» (wants), а не требует: сломанный скрипт не должен оставить без
+  # звука весь сеанс, а «optional» в профиле сам ничего не загружает. Не
+  # загрузился — нет и метки vpn-zones.policy, и помощник зоны сокет не
+  # отдаёт: зоне закрыто (только pulse).
   "wireplumber.components" = [
     {
       name = "vpn-zones/policy.lua";
       type = "script/lua";
+      provides = "custom.vpn-zones.policy";
+    }
+    {
+      type = "virtual";
       provides = "custom.vpn-zones";
+      wants = [ "custom.vpn-zones.policy" ];
     }
   ];
   "wireplumber.profiles" = {
     main = {
-      "custom.vpn-zones" = "optional";
+      "custom.vpn-zones" = "required";
     };
   };
   # Клиенту зоны по умолчанию — никаких прав: без этого правила WirePlumber

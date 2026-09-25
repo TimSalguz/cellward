@@ -83,6 +83,8 @@ let
         };
         # The policy under test, as the NixOS module ships it.
         services.vpn-zones.pipewirePolicy.enable = true;
+        # The policy's own log lines, for a failure to be read.
+        systemd.user.services.wireplumber.environment.WIREPLUMBER_DEBUG = "2,s-vpn-zones:4";
         home-manager.useGlobalPkgs = true;
         home-manager.useUserPackages = true;
         home-manager.users.alice = {
