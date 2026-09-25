@@ -158,23 +158,63 @@ pub fn ruleset(policy: &Policy) -> String {
         "meta skuid @users accept".to_owned(),
         "meta skgid @groups accept".to_owned(),
         // A system zone's tunnel: the kernel's own UDP socket has no owner,
-        // so its packets carry a mark instead (`system::TUNNEL_MARK`).
-        format!("meta mark {:#x} accept", crate::system::TUNNEL_MARK),
+        // so its packets carry a mark instead (`system::TUNNEL_MARK`). The
+        // mark alone is not a pass (review 2026-09-25, third round): a
+        // program able to mark its own socket — CAP_NET_ADMIN, or CAP_NET_RAW
+        // since Linux 5.17, which some tools get from a file capability —
+        // would go anywhere. A socket with an owner other than root is judged
+        // like any other (`meta skuid` matches nothing on a socket without an
+        // owner, so the kernel's own go on to the next line), and only UDP.
+        format!(
+            "meta mark {:#x} meta skuid != 0 goto refuse",
+            crate::system::TUNNEL_MARK
+        ),
+        format!(
+            "meta mark {:#x} meta l4proto udp accept",
+            crate::system::TUNNEL_MARK
+        ),
         // The kernel's own, with no socket and so no owner: neighbour
-        // discovery and group membership.
-        "icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, \
-         mld-listener-report, mld2-listener-report } accept"
+        // discovery and group membership — to where they go and nowhere
+        // else, so that a raw socket cannot dress a payload up as them.
+        "icmpv6 type { nd-router-solicit, mld-listener-report, mld2-listener-report } \
+         ip6 daddr ff00::/8 accept"
             .to_owned(),
-        "ip protocol igmp accept".to_owned(),
-        format!("limit rate 10/second burst 20 packets log prefix \"{LOG_PREFIX}\" flags skuid"),
+        "icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } ip6 hoplimit 255 accept"
+            .to_owned(),
+        "ip protocol igmp ip daddr 224.0.0.0/4 accept".to_owned(),
+        "goto refuse".to_owned(),
     ]) {
         out.push_str("\t\t");
         out.push_str(&rule);
         out.push('\n');
     }
+    out.push_str("\t}\n");
+    if policy.strict {
+        // What the host routes for others — docker's and libvirt's bridges,
+        // NAT for containers and VMs — never passes `output`: in strict it
+        // keeps to the local network as well (review 2026-09-25).
+        out.push_str("\tchain forward {\n");
+        out.push_str("\t\ttype filter hook forward priority -160; policy accept;\n");
+        for rule in [
+            "ct state established,related accept",
+            "ip daddr @local4 accept",
+            "ip6 daddr @local6 accept",
+            "goto refuse",
+        ] {
+            out.push_str("\t\t");
+            out.push_str(rule);
+            out.push('\n');
+        }
+        out.push_str("\t}\n");
+    }
+    // What is not let out: logged, and in `enforce` and `strict` refused —
+    // at once rather than dropped, so a program fails in a moment instead of
+    // hanging until its own timeout.
+    out.push_str("\tchain refuse {\n");
+    out.push_str(&format!(
+        "\t\tlimit rate 10/second burst 20 packets log prefix \"{LOG_PREFIX}\" flags skuid\n"
+    ));
     if policy.enforce || policy.strict {
-        // Refused at once rather than dropped: a program fails in a moment
-        // instead of hanging until its own timeout.
         out.push_str("\t\treject with icmpx admin-prohibited\n");
     }
     out.push_str("\t}\n}\n");
@@ -505,7 +545,8 @@ mod tests {
         assert!(text.contains("elements = { 30000 }"));
         assert!(text.contains("meta skuid < 1000 accept"));
         assert!(text.contains("meta skuid 61184-65519 accept"));
-        assert!(text.contains("meta mark 0x767a accept"));
+        assert!(text.contains("meta mark 0x767a meta skuid != 0 goto refuse"));
+        assert!(text.contains("meta mark 0x767a meta l4proto udp accept"));
         assert!(text.contains("log prefix \"vpn-zones-egress: \" flags skuid"));
         assert!(!text.contains("reject"), "{text}");
     }
@@ -547,7 +588,10 @@ mod tests {
         assert!(text.contains("flags interval"));
         assert!(text.contains("meta skuid < 1000 udp sport 68 udp dport 67 accept"));
         // The ways out that are not the host's own stay as they are.
-        assert!(text.contains("meta mark 0x767a accept"));
+        assert!(text.contains("meta mark 0x767a meta l4proto udp accept"));
+        // What the host routes for others keeps to the local network too.
+        assert!(text.contains("chain forward {"), "{text}");
+        assert!(text.contains("hook forward priority -160"), "{text}");
         assert!(text.contains("meta skuid @users accept"));
         // Strict refuses, whatever `enforce` says.
         assert!(text.contains("reject with icmpx admin-prohibited"));

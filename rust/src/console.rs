@@ -241,6 +241,9 @@ fn menu(config: &Config, user: &str) {
                     shell_in(plain);
                 }
             }
+            b'k' | b'K' if !confirmed(b'k', "аварийный ключ: у хоста будет сеть") =>
+                {}
+            b'x' | b'X' if !confirmed(b'x', "выключить vpn-zones целиком") => {}
             b'k' | b'K' => {
                 let ok = Command::new("systemctl")
                     .args(["start", "vpn-zones-egress-open.service"])
@@ -275,6 +278,21 @@ fn menu(config: &Config, user: &str) {
     }
 }
 
+/// The same key once more, pressed after the question is on the screen: the
+/// two choices that open the host take two keys, so that one stray byte —
+/// a terminal's answer, a key held down — does not (review 2026-09-25).
+fn confirmed(key: u8, what: &str) -> bool {
+    print!(
+        "  {what} — нажми «{}» ещё раз, любая другая клавиша — отмена: ",
+        key as char
+    );
+    let _ = io::stdout().flush();
+    drop_typeahead();
+    let again = read_key();
+    println!();
+    again.is_some_and(|k| k.to_ascii_lowercase() == key)
+}
+
 /// Keys pressed before the menu is on the screen are not choices: typed while
 /// the console waited for the tunnel, left over from the shell that just
 /// ended, or a terminal's answer to something a program there printed. They
@@ -307,6 +325,13 @@ fn wait_alive(zone: &str) -> Net {
 /// this one: the client's relay leaves a thread blocked on the terminal, which
 /// would take the next key meant for the menu.
 fn shell_in(zone: &str) {
+    shell_in_zone(zone);
+    // A terminal answers what a program printed last a moment after it is
+    // gone: the answer lands here, and the menu's own drop comes after it.
+    thread::sleep(Duration::from_millis(300));
+}
+
+fn shell_in_zone(zone: &str) {
     let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
     let core = std::env::current_exe().unwrap_or_else(|_| "vpn-zone-core".into());
     let status = Command::new(core)

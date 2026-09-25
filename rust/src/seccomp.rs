@@ -60,8 +60,15 @@ const DENY_EPERM: [&str; 14] = [
 ];
 
 /// Answered with `ENOSYS` so that callers take their "this kernel is older"
-/// path instead of treating the call as a hard failure.
-const DENY_ENOSYS: [&str; 8] = [
+/// path instead of treating the call as a hard failure. `io_uring` and
+/// `userfaultfd` too (review 2026-09-25, third round): a large share of the
+/// kernel's own bugs of recent years, and nothing a desktop program cannot do
+/// without — liburing falls back to plain calls.
+const DENY_ENOSYS: [&str; 12] = [
+    "io_uring_setup",
+    "io_uring_enter",
+    "io_uring_register",
+    "userfaultfd",
     "clone3",
     "open_tree",
     "move_mount",
@@ -409,6 +416,26 @@ mod tests {
 
     fn insn_code(insn: &[u8]) -> u16 {
         u16::from_ne_bytes([insn[0], insn[1]])
+    }
+
+    /// x32 shares x86_64's audit arch and tells itself apart by a bit in the
+    /// syscall number: a filter that did not know it would let every x32
+    /// call past the rules (review 2026-09-25 asked). libseccomp checks the
+    /// bit and sends such calls to the bad-arch action — killed, not let
+    /// through; this keeps it so.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x32_calls_are_not_let_past_the_rules() {
+        const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+        let bpf = Filter::build(FilterOptions::default())
+            .unwrap()
+            .export_bpf()
+            .unwrap();
+        let checks_the_bit = bpf.chunks(INSN_LEN).any(|insn| {
+            u32::from_ne_bytes([insn[4], insn[5], insn[6], insn[7]]) == X32_SYSCALL_BIT
+                && insn_code(insn) & 0x07 == 0x05
+        });
+        assert!(checks_the_bit, "no jump on the x32 bit in the program");
     }
 
     #[test]

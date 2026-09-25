@@ -483,6 +483,14 @@ let
           assert gw, "the plain zone has no default route"
           machine.succeed(f"ip netns exec vz-pl sh -c '! timeout 5 socat -T3 - TCP:{gw}:7777'")
           machine.succeed("ip netns exec vz-pl sh -c '! timeout 5 socat -T3 - TCP:127.0.0.1:7777'")
+          # Nor a service of the host's on any of its own addresses: pasta
+          # connects from the host, and the kernel would deliver it over lo,
+          # past the firewall (review 2026-09-25).
+          machine.succeed("systemd-run --unit=hostany socat TCP-LISTEN:7778,fork,reuseaddr 'SYSTEM:echo any'")
+          own = machine.succeed("ip -4 -o addr show eth1 | awk '{print $4}' | cut -d/ -f1").strip()
+          machine.wait_until_succeeds(f'test "$(socat -T2 - TCP:{own}:7778 </dev/null)" = any', timeout=30)
+          machine.succeed(f"ip netns exec vz-pl sh -c '! timeout 5 socat -T3 - TCP:{own}:7778'")
+          machine.succeed("nft list table inet vpnzones_plain | grep -q 'fib daddr type local reject'")
           # "Directly" asks the router's resolvers, as the host knows them —
           # here QEMU's, which resolved has for eth0 — and never the host's
           # own stub on loopback.

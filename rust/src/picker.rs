@@ -186,11 +186,13 @@ pub fn fallback_key(cmd: &[OsString]) -> OsString {
 }
 
 /// A name a person typed into a dialog, cleaned of exactly what would break —
-/// path separators, quotes, spaces — and of the leading dash or dot kdialog
-/// takes for an option. Cyrillic stays Cyrillic. (`docs/GOTCHAS.md` §11)
+/// path separators, quotes, spaces, line breaks and the invisible characters
+/// that reorder text — and of the leading dash or dot kdialog takes for an
+/// option. Cyrillic stays Cyrillic. (`docs/GOTCHAS.md` §11)
 pub fn sanitize_name(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
+        .filter(|c| !c.is_control() && !crate::focus::reorders(*c))
         .map(|c| match c {
             '/' | '"' | '\'' | '`' | '\\' | ' ' | ':' => '_',
             other => other,

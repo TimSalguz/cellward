@@ -113,7 +113,7 @@ use std::ffi::{CStr, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, ToSocketAddrs};
-use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
@@ -286,7 +286,14 @@ pub fn compositor_private(name: &str) -> bool {
 /// [`OURS`] is bound piece by piece, never as it is.
 pub fn runtime_entry_kept(name: &str, hermetic: bool) -> bool {
     // `pulse`: never the host's — the zone gets the filter's socket there.
-    if compositor_private(name) || name == OURS || name == "pulse" {
+    // PipeWire's manager socket, `pipewire-0-manager`, never: it is the
+    // unrestricted one, meant for the session manager — every client killed,
+    // every stream moved (review 2026-09-25, third round).
+    if compositor_private(name)
+        || name == OURS
+        || name == "pulse"
+        || (name.starts_with("pipewire-") && name.ends_with("-manager"))
+    {
         return false;
     }
     !hermetic || RUNTIME_KEPT.contains(&name)
@@ -1700,6 +1707,8 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
     for group in RESOLVER_DIRS {
         hide_first(group)?;
     }
+    // And no NSS module talking to a daemon of the host's, as in the zone.
+    own_nsswitch(zone);
     // Nor anything else of the host's a client has no business with: the
     // system bus (resolve1 looks names up in the host's network), the
     // session's runtime directory (the compositor's raw socket and IPC, which
@@ -1741,7 +1750,22 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
     // kernel ran here; with an OpenConnect zone a whole third-party client runs
     // in this namespace, and the rule is what says it may talk to its gateway
     // and to nowhere else — no DNS, no update check, no second server.
-    zone.seal("uplink", &uplink_ruleset(&backend.sockets()));
+    //
+    // For that client the rule is not an insurance but the only wall
+    // (review 2026-09-25, third round): pasta gives this namespace the whole
+    // internet, and nothing in the topology keeps a userspace client to one
+    // gateway, as the kernel's WireGuard socket keeps itself to its peer. So
+    // an OpenConnect zone whose rule does not load does not come up.
+    if matches!(backend, Backend::Oc(_)) {
+        feed_nft(&zone.tools.nft, &uplink_ruleset(&backend.sockets())).map_err(|e| {
+            format!(
+                "the uplink's filter did not load ({e}) — an OpenConnect client would \
+                 reach the whole internet from here, so the zone does not come up"
+            )
+        })?;
+    } else {
+        zone.seal("uplink", &uplink_ruleset(&backend.sockets()));
+    }
 
     // The holder is waiting for this to attach pasta to us.
     let mut ready = File::from(ready_w);
@@ -2068,7 +2092,6 @@ fn host_runtime_dir(zone: &Zone) -> PathBuf {
 /// bus (review 2026-09-25). So the socket is opened without following links,
 /// checked to BE a socket and the user's, and bound through that descriptor.
 fn bind_socket(from: &Path, to: &Path, owner: u32) -> Result<(), String> {
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let c = std::ffi::CString::new(from.as_os_str().as_bytes())
         .map_err(|_| format!("a NUL in {}", from.display()))?;
     // SAFETY: a NUL-terminated path and flags; the descriptor is ours.
@@ -2124,9 +2147,17 @@ fn bind_socket(from: &Path, to: &Path, owner: u32) -> Result<(), String> {
 fn bind_entry(from: &Path, to: &Path) -> Result<(), String> {
     let target = std::ffi::CString::new(to.as_os_str().as_bytes())
         .map_err(|_| format!("a NUL in {}", to.display()))?;
-    // SAFETY: a NUL-terminated path; MNT_DETACH takes no pointers. Until
+    // `to` is in the zone's runtime directory, which its programs write: a
+    // link put there must not take the bind anywhere else (review 2026-09-25,
+    // third round). Not followed here, and the mount goes onto what was
+    // opened without following one.
+    if fs::symlink_metadata(to).is_ok_and(|m| m.file_type().is_symlink()) {
+        let _ = fs::remove_file(to);
+    }
+    // SAFETY: a NUL-terminated path; the flags take no pointers. Until
     // nothing is bound there any more.
-    while unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) } == 0 {}
+    while unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH | libc::UMOUNT_NOFOLLOW) } == 0 {
+    }
     let is_dir = fs::metadata(from)
         .map_err(|e| format!("{}: {e}", from.display()))?
         .is_dir();
@@ -2150,12 +2181,41 @@ fn bind_entry(from: &Path, to: &Path) -> Result<(), String> {
             .create(true)
             .write(true)
             .truncate(false)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(to)
             .map(|_| ())
     }
     .map_err(|e| format!("cannot create {}: {e}", to.display()))?;
-    sys::mount(from.as_os_str(), to, "", libc::MS_BIND | libc::MS_REC, "")
-        .map_err(|e| format!("cannot bind {}: {e}", from.display()))
+    // SAFETY: a NUL-terminated path and constant flags.
+    let fd = unsafe {
+        libc::open(
+            target.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "cannot open {}: {}",
+            to.display(),
+            io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: a descriptor just opened and owned by nobody else.
+    let held = unsafe { OwnedFd::from_raw_fd(fd) };
+    let meta = fs::metadata(format!("/proc/self/fd/{fd}"))
+        .map_err(|e| format!("cannot look at {}: {e}", to.display()))?;
+    if meta.is_dir() != is_dir {
+        return Err(format!("{} changed under the bind", to.display()));
+    }
+    let point = PathBuf::from(format!("/proc/self/fd/{}", held.as_raw_fd()));
+    sys::mount(
+        from.as_os_str(),
+        &point,
+        "",
+        libc::MS_BIND | libc::MS_REC,
+        "",
+    )
+    .map_err(|e| format!("cannot bind {}: {e}", from.display()))
 }
 
 /// The zone's runtime directory (`docs/HERMETICITY.md` §2,
@@ -2472,10 +2532,11 @@ fn hide_system_tier(zone: &Zone) -> Result<(), String> {
 /// ([`READ_ONLY_IN_ZONES`]). Fatal: a zone that cannot do it has a way out.
 ///
 /// Returns the zone as this process goes on reaching it: its directory is
-/// `/proc/self/fd/N` of a descriptor opened before the tmpfs, kept for good.
-/// Nobody else here can use it — this process is the zone's uid 0, and a
-/// program here, another user of the namespace, cannot open another user's
-/// `/proc/<pid>/fd`.
+/// `/proc/<our pid>/fd/N` of a descriptor opened before the tmpfs, kept for
+/// good — by pid and not `self`, so that the tools it starts (`wg setconf`
+/// reads a file there) reach it too. Nobody else here can use it: this
+/// process and its children are the zone's uid 0, and a program here,
+/// another user of the namespace, cannot open another user's `/proc/<pid>/fd`.
 fn hide_project_state(zone: &Zone) -> Result<Zone, String> {
     let own =
         sys::open_dir(&zone.dir).map_err(|e| format!("cannot open {}: {e}", zone.dir.display()))?;
@@ -2485,9 +2546,11 @@ fn hide_project_state(zone: &Zone) -> Result<Zone, String> {
         .ok_or("the zone's directory has no parent")?;
     seal_project_state(state, &zone.home, &ZONE_KEEPS)?;
     println!("zone {}: the project's state hidden", zone.name());
+    // SAFETY: getpid(2) takes no arguments and cannot fail.
+    let pid = unsafe { libc::getpid() };
     Ok(Zone {
         name: zone.name.clone(),
-        dir: PathBuf::from(format!("/proc/self/fd/{}", own.into_raw_fd())),
+        dir: PathBuf::from(format!("/proc/{pid}/fd/{}", own.into_raw_fd())),
         home: zone.home.clone(),
         tools: zone.tools.clone(),
         hermetic: zone.hermetic,
@@ -3958,6 +4021,10 @@ mod tests {
         // zone gets the filter's in its place (`pulse_filter`).
         assert!(!runtime_entry_kept("pulse", true));
         assert!(!runtime_entry_kept("pulse", false));
+        // PipeWire's unrestricted socket, for the session manager: no zone.
+        assert!(!runtime_entry_kept("pipewire-0-manager", false));
+        assert!(!runtime_entry_kept("pipewire-0-manager", true));
+        assert!(runtime_entry_kept("pipewire-0", true));
         for name in ["bus", "systemd", "gnupg", "niri"] {
             assert!(!runtime_entry_kept(name, true), "{name}");
         }

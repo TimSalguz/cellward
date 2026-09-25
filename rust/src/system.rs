@@ -809,6 +809,14 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
     // As a system user, not as root and not as pasta's default `nobody`: the
     // host's egress policy lets system users out, and knows this one by name.
     let (uid, gid) = user_ids(runas).ok_or_else(|| format!("there is no user {runas}"))?;
+    // Nothing of the host's own: pasta connects from the host, and the kernel
+    // delivers a connection to one of the host's own addresses over `lo`,
+    // past every firewall — a service listening on any address, docker's and
+    // libvirt's bridges, a second card (review 2026-09-25, third round). A
+    // table of its own in the host's network, before pasta starts; the zone
+    // does not come up without it.
+    feed_host_ruleset(tools, &plain_host_ruleset(uid))
+        .map_err(|e| format!("cannot keep the zone from the host's own addresses: {e}"))?;
     let mut pasta = Command::new(&tools.pasta);
     pasta
         .arg("--netns")
@@ -1481,6 +1489,45 @@ fn show(tools: &Tools, name: &str, wgtool: &Path, extra: &[&str]) -> Result<Stri
 }
 
 /// `nft -f -` inside the zone, the ruleset on stdin (see `zone::feed_nft`).
+/// The host's table for plain zones' pasta: whatever its owner sends to an
+/// address of the host's own is refused. Made anew each time, in one
+/// transaction — the same text for every plain zone.
+pub fn plain_host_ruleset(uid: u32) -> String {
+    format!(
+        "add table inet {PLAIN_TABLE}\ndelete table inet {PLAIN_TABLE}\n\
+         table inet {PLAIN_TABLE} {{\n\tchain output {{\n\
+         \t\ttype filter hook output priority -170; policy accept;\n\
+         \t\tmeta skuid {uid} fib daddr type local reject with icmpx admin-prohibited\n\
+         \t}}\n}}\n"
+    )
+}
+
+/// The host's table for [`plain_host_ruleset`].
+pub const PLAIN_TABLE: &str = "vpnzones_plain";
+
+/// `nft -f -` in the host's own network namespace.
+fn feed_host_ruleset(tools: &Tools, ruleset: &str) -> Result<(), String> {
+    let mut child = Command::new(&tools.nft)
+        .args(["-f", "-"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run {}: {e}", tools.nft.display()))?;
+    let fed = match child.stdin.take() {
+        Some(mut pipe) => pipe
+            .write_all(ruleset.as_bytes())
+            .map_err(|e| format!("cannot hand the ruleset to nft: {e}")),
+        None => Err("nft was given no stdin".to_owned()),
+    };
+    let status = child
+        .wait()
+        .map_err(|e| format!("cannot wait for {}: {e}", tools.nft.display()))?;
+    fed?;
+    if !status.success() {
+        return Err(format!("{} -f - failed ({status})", tools.nft.display()));
+    }
+    Ok(())
+}
+
 fn feed_ruleset(tools: &Tools, name: &str, ruleset: &str) -> Result<(), String> {
     feed_ruleset_ns(tools, &netns(name), ruleset)
 }
@@ -1525,6 +1572,24 @@ fn write_group_readable(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Plain zones' pasta keeps away from the host's own addresses, whatever
+    /// the egress policy says, in a table made anew in one go.
+    #[test]
+    fn a_plain_zone_does_not_reach_the_host_itself() {
+        let text = plain_host_ruleset(990);
+        assert!(
+            text.starts_with("add table inet vpnzones_plain\ndelete table inet vpnzones_plain\n")
+        );
+        assert!(
+            text.contains("meta skuid 990 fib daddr type local reject"),
+            "{text}"
+        );
+        assert!(
+            text.contains("hook output priority -170; policy accept;"),
+            "{text}"
+        );
+    }
 
     fn os(words: &[&str]) -> Vec<OsString> {
         words.iter().map(OsString::from).collect()

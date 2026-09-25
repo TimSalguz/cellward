@@ -1020,6 +1020,12 @@ fn remove(tools: &Tools, args: &[OsString]) -> u8 {
 fn gc(tools: &Tools) -> u8 {
     let mut killed = 0;
     for pid in processes_named("pasta") {
+        // Held from here on: every check below is of THIS process, and the
+        // signal goes to it or to nobody — a number can change hands between
+        // reading /proc and kill(2) (review 2026-09-25).
+        let Some(pidfd) = crate::sys::pidfd_open(pid) else {
+            continue;
+        };
         let cgroup = fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap_or_default();
         if cgroup.contains("vpn-zone@") {
             continue;
@@ -1033,9 +1039,10 @@ fn gc(tools: &Tools) -> u8 {
         if proc_is_alive(target) {
             continue;
         }
-        // SAFETY: kill(2) with a pid we read out of /proc and a plain signal
-        // number; the worst a race can do is deliver TERM to nothing.
-        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+        // Still pasta, now that it is held: the number may have been a new
+        // process's by the time the descriptor was opened.
+        let still = fs::read(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim_ascii() == b"pasta");
+        if still && crate::sys::pidfd_signal(&pidfd, libc::SIGTERM) {
             killed += 1;
         }
     }
