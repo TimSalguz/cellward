@@ -12,7 +12,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   start — over a thousand on a desktop, up to a second even when idle — and
   the window needs one: Fira Sans is built in. It now gets a list of its own
   (`FONTCONFIG_FILE`: DejaVu for signs, Noto Color Emoji for the icons),
-  through a binary wrapper, not a shell.
+  set by the window itself from a path built into it — no wrapper, which
+  would have renamed the process.
 - **A link opened from a program in a zone offered no zones** (the owner,
   2026-09-25): the picker it starts runs in the zone, which no longer sees
   the project's state, so the launch window listed only "Без ограничений"

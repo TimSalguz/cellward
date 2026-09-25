@@ -6,7 +6,6 @@
   lib,
   rustPlatform,
   patchelf,
-  makeBinaryWrapper,
   makeFontsConf,
   dejavu_fonts,
   noto-fonts-color-emoji,
@@ -60,16 +59,16 @@ rustPlatform.buildRustPackage {
 
   cargoLock.lockFile = ./Cargo.lock;
 
-  nativeBuildInputs = [
-    patchelf
-    makeBinaryWrapper
-  ];
+  # Путь вшивается в бинарь при сборке (`option_env!` в main.rs), и окно
+  # само ставит себе FONTCONFIG_FILE: без обёртки — у той процесс назывался
+  # бы `.vpn-zone-window-wrapped`, и его не находил бы никто, кто ищет окно
+  # по имени (VM-тест, pgrep).
+  VPN_ZONE_WINDOW_FONTS = fontsConf;
 
-  # Обёртка — двоичная (makeBinaryWrapper), без оболочки: окно открывается
-  # на каждый запуск программы, и ждать ещё и bash незачем.
+  nativeBuildInputs = [ patchelf ];
+
   postFixup = ''
     patchelf --add-rpath ${lib.makeLibraryPath runtimeLibs} $out/bin/vpn-zone-window
-    wrapProgram $out/bin/vpn-zone-window --set FONTCONFIG_FILE ${fontsConf}
   '';
 
   meta = {

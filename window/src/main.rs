@@ -678,6 +678,13 @@ fn arm_after(guard: u64, holds: u64) -> Task<Msg> {
 }
 
 fn main() -> iced::Result {
+    // The fonts of this window: a short list of its own (package.nix), not
+    // every font of the system — iced reads all it is given at each start,
+    // over a thousand on a desktop, seconds under load. Set before anything
+    // starts a thread.
+    if let Some(fonts) = option_env!("VPN_ZONE_WINDOW_FONTS") {
+        std::env::set_var("FONTCONFIG_FILE", fonts);
+    }
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {
         std::process::exit(1);
