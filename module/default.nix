@@ -708,6 +708,13 @@ in
       description = "Зоны (по имени), программам которых виден Nix-демон хоста (nix-shell, nix build). По умолчанию ни одной: демон качает и собирает в сети хоста, мимо VPN зоны, и производная с фиксированным хешем скачает любой адрес, который назовёт программа, даже из offline-зоны. Без пересборки — vpn-zone nix-daemon <зона> on (действует после перезапуска зоны). Сами зоны в Nix не описываются: здесь только имена.";
     };
 
+    camera = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "calls" ];
+      description = "Зоны (по имени), программам которых видны камеры хоста (/dev/video*). По умолчанию ни одной: у сеанса на камеры есть право, и программа зоны — тот же пользователь, она снимала бы без вопроса. Без пересборки — vpn-zone camera <зона> on (действует после перезапуска зоны). Звуковые устройства (/dev/snd) зонам не видны никогда: звук — через фильтр pulse и PipeWire. Сами зоны в Nix не описываются: здесь только имена.";
+    };
+
     hostFilesWritable = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -878,7 +885,7 @@ in
         message = "programs.vpn-zones.microphone: имя зоны — непустое и без пробелов";
       }
       {
-        assertion = lib.all (z: z != "" && !(lib.hasInfix "\n" z)) (cfg.nixDaemon ++ cfg.hostFilesWritable);
+        assertion = lib.all (z: z != "" && !(lib.hasInfix "\n" z)) (cfg.nixDaemon ++ cfg.hostFilesWritable ++ cfg.camera);
         message = "programs.vpn-zones.nixDaemon / hostFilesWritable: имя зоны — непустое и без переводов строки";
       }
       {
@@ -945,6 +952,9 @@ in
     })
     (lib.mkIf (cfg.nixDaemon != [ ]) {
       ".config/vpn-zones/declared/nix-daemon".text = lib.concatStringsSep "\n" cfg.nixDaemon + "\n";
+    })
+    (lib.mkIf (cfg.camera != [ ]) {
+      ".config/vpn-zones/declared/camera".text = lib.concatStringsSep "\n" cfg.camera + "\n";
     })
     (lib.mkIf (cfg.hostFilesWritable != [ ]) {
       ".config/vpn-zones/declared/host-files-writable".text =

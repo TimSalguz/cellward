@@ -99,6 +99,7 @@ const VERBS: &[&str] = &[
     "nix-daemon",
     "host-files",
     "microphone",
+    "camera",
     "doctor",
     "watch",
     "journal",
@@ -119,6 +120,7 @@ const ZONE_VERBS: &[&str] = &[
     "nix-daemon",
     "host-files",
     "microphone",
+    "camera",
     "up",
     "down",
     "status",
@@ -185,6 +187,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             "nix-daemon" if pos == 3 => strs(&mut out, &["on", "off", "default"]),
             "host-files" if pos == 3 => strs(&mut out, &["read-only", "writable", "default"]),
             "microphone" if pos == 3 => strs(&mut out, &["yes", "no", "ask", "default"]),
+            "camera" if pos == 3 => strs(&mut out, &["on", "off", "default"]),
             "hermetic" if pos == 3 => match word(2) {
                 "--default" => strs(&mut out, &["on", "off"]),
                 _ => strs(&mut out, &["on", "off", "default"]),

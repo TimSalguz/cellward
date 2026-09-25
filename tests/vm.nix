@@ -1649,6 +1649,13 @@ let
               "socat UNIX-LISTEN:/home/alice/.cache/ibus/dbus-vmtest,fork OPEN:/dev/null"
           )
           machine.wait_until_succeeds("test -S /home/alice/.cache/ibus/dbus-vmtest")
+          # A camera and a capture device, as logind hands them to the
+          # session's user (logind gives it an ACL; here the node is simply hers).
+          machine.succeed(
+              "mknod -m 600 /dev/video7 c 81 7 && chown alice /dev/video7 && "
+              "mkdir -p /dev/snd && mknod -m 600 /dev/snd/pcmC9D0c c 116 99 && "
+              "chown alice /dev/snd/pcmC9D0c"
+          )
           # The broker is socket-activated, and every zone wants its socket:
           # no race with the session (red on main and in CI before).
           alice("vpn-zone up vmherm")
@@ -1708,6 +1715,17 @@ let
           for path in [".config/autostart/x.desktop", ".local/share/applications/x.desktop", ".config/systemd/x"]:
               in_zone(hp, f"sh -c '! touch /home/alice/{path}'")
           alice("touch ~/.config/autostart/from-host && rm ~/.config/autostart/from-host")
+          # Sound and camera devices out of reach: the capture device is not
+          # there, the camera is /dev/null — and so is one plugged in later.
+          in_zone(hp, "test ! -e /dev/snd/pcmC9D0c")
+          out = in_zone(hp, "stat -c %t:%T /dev/video7").strip()
+          assert out == "1:3", f"the camera is in reach: {out}"
+          machine.succeed("mknod -m 600 /dev/video8 c 81 8 && chown alice /dev/video8")
+          machine.wait_until_succeeds(
+              f"su -l alice -c \"nsenter --preserve-credentials -U -n -m -t {hp} -- stat -c %t:%T /dev/video8\" | grep -qx 1:3",
+              timeout=30,
+          )
+          machine.succeed("rm -f /dev/video7 /dev/video8 /dev/snd/pcmC9D0c")
           # Input methods by their portals only: IBus's private bus is hidden,
           # and programs are told to take the portal.
           in_zone(hp, "test ! -e /home/alice/.cache/ibus/dbus-vmtest")
