@@ -524,6 +524,10 @@ fn ask(
     let question = format!(
         "Программа из {asker} просит запустить в {network}, контейнер: {container}:\n\n{shown}\n\nРазрешить?"
     );
+    // A "yes" sooner than the question can be read is a key meant for
+    // something else: the dialog takes the focus, and its default allows
+    // (`dialog::TOO_FAST`).
+    let asked = std::time::Instant::now();
     // "Always" only where it can be kept safely (`may_remember`).
     let Some(line) = line else {
         return if crate::dialog::confirm(
@@ -535,7 +539,7 @@ fn ask(
                 question.as_str(),
             ],
         ) {
-            Ok(())
+            crate::dialog::not_too_soon(asked)
         } else {
             Err("человек отказал".to_owned())
         };
@@ -555,8 +559,9 @@ fn ask(
             question.as_str(),
         ],
     ) {
-        Some(0) => Ok(()),
+        Some(0) => crate::dialog::not_too_soon(asked),
         Some(1) => {
+            crate::dialog::not_too_soon(asked)?;
             remember(tools, &line);
             Ok(())
         }

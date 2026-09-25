@@ -314,6 +314,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **A "yes" sooner than a question can be read is a stray key**
+  (`rust/src/dialog.rs` `TOO_FAST`, LEAK-MODEL §21). The questions a zone's
+  program brings up — the microphone, a launch in another network through
+  the broker — are kdialog boxes whose default button is the first, "allow",
+  and the new dialog takes the focus: an Enter meant for a chat, at the
+  moment the program chose, said yes. An allowing answer within 1.5 s of
+  starting kdialog is now a refusal, said in the journal. Questions the
+  person opens themselves are unchanged. Next: a dialog of our own with
+  "deny" as its default (`docs/PERMISSIONS.md` §9).
 - **A screen cast from a zone asks every time** (`rust/src/dbus_wire.rs`
   `sanitized_screencast_sources`, LEAK-MODEL §20). The screen cast portal
   lets a program ask for its choice to be remembered (`persist_mode`); the

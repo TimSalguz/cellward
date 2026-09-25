@@ -68,6 +68,10 @@ pub const DECLARED: &str = "microphone";
 /// for a request nobody waits on — the server capturing, the sound going to
 /// a socket whose program has moved on.
 pub const TIMEOUT: Duration = Duration::from_secs(25);
+/// An allowing answer sooner than this is a key meant for something else
+/// (`dialog::TOO_FAST`).
+pub const TOO_FAST: Duration = crate::dialog::TOO_FAST;
+
 /// After a refusal of the person's — or a question nobody answered — the
 /// zone is not asked again for this long: its requests are refused without
 /// a dialog.
@@ -186,6 +190,18 @@ pub fn answer_of(code: Option<i32>, remember: bool) -> Answer {
     }
 }
 
+/// `answer`, given `after` the question was put: one that allows sooner
+/// than `too_fast` is a refusal (see [`TOO_FAST`]).
+pub fn considered(answer: Answer, after: Duration, too_fast: Duration) -> Answer {
+    match answer {
+        Answer::Once | Answer::Always if after < too_fast => Answer::Deny(format!(
+            "ответ через {} мс — быстрее, чем читают вопрос: принят за случайное нажатие",
+            after.as_millis()
+        )),
+        other => other,
+    }
+}
+
 /// How much of a program's name a question shows.
 const SHOWN_NAME: usize = 80;
 
@@ -243,6 +259,8 @@ pub struct Policy {
     /// A graphical session to ask on, from the filter's environment.
     display: bool,
     timeout: Duration,
+    /// An allowing answer sooner than this is a refusal ([`TOO_FAST`]).
+    too_fast: Duration,
     /// Where `vpn-zone journal` lives; `None` to write none.
     journal: Option<PathBuf>,
     /// A question is open for this zone.
@@ -274,6 +292,7 @@ impl Policy {
             kdialog,
             display: crate::launch::has_display(),
             timeout: TIMEOUT,
+            too_fast: TOO_FAST,
             journal,
             asking: AtomicBool::new(false),
             quiet_until: Mutex::new(None),
@@ -291,6 +310,7 @@ impl Policy {
             kdialog: PathBuf::from("/nonexistent/kdialog"),
             display,
             timeout: TIMEOUT,
+            too_fast: TOO_FAST,
             journal: None,
             asking: AtomicBool::new(false),
             quiet_until: Mutex::new(None),
@@ -395,6 +415,7 @@ impl Policy {
         let text = question(&self.zone, program, remember);
         let title = format!("Микрофон — зона «{}»", self.zone);
         let always = always_label(&self.zone);
+        let asked = Instant::now();
         let code = if remember {
             crate::dialog::choose_within(
                 &self.kdialog,
@@ -428,7 +449,8 @@ impl Policy {
                 self.timeout,
             )
         };
-        let allowed = self.settle(program, &answer_of(code, remember));
+        let answer = considered(answer_of(code, remember), asked.elapsed(), self.too_fast);
+        let allowed = self.settle(program, &answer);
         then(allowed)
     }
 
@@ -523,8 +545,16 @@ impl Policy {
         Self {
             display,
             timeout,
+            // The test's kdialog answers at once.
+            too_fast: Duration::ZERO,
             ..Self::new("nl", zone_dir, config, kdialog)
         }
+    }
+
+    /// With the real guard against a stray key.
+    pub(crate) fn with_too_fast(mut self, too_fast: Duration) -> Self {
+        self.too_fast = too_fast;
+        self
     }
 
     /// The quiet after a refusal, shortened (or none).
@@ -774,6 +804,44 @@ mod tests {
         assert!(!p.ask("app", true, |a| a));
         assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
         p.abandon();
+    }
+
+    /// An "allow" sooner than a question can be read is a key meant for
+    /// something else — the dialog took the focus, and its default button
+    /// allows. A refusal, however soon, stays one; so does an answer given
+    /// in time.
+    #[test]
+    fn an_allow_too_soon_is_a_stray_key() {
+        let fast = Duration::from_millis(1500);
+        let soon = Duration::from_millis(300);
+        let late = Duration::from_secs(3);
+        for answer in [Answer::Once, Answer::Always] {
+            assert!(matches!(
+                considered(answer.clone(), soon, fast),
+                Answer::Deny(why) if why.contains("случайное нажатие")
+            ));
+            assert_eq!(considered(answer.clone(), late, fast), answer);
+        }
+        let no = Answer::Deny("человек отказал".to_owned());
+        assert_eq!(considered(no.clone(), soon, fast), no);
+        // Through the question: the kdialog says "once" at once, the
+        // microphone stays shut, and the zone is quiet as after a refusal.
+        let d = Dirs::new("stray");
+        let p = d
+            .policy(d.kdialog("once", "exit 0"), true, TIMEOUT)
+            .with_too_fast(TOO_FAST);
+        assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
+        assert!(!p.ask("app", true, |a| a));
+        assert!(!d.zone().join(MARKER).exists());
+        assert!(d.journal().contains("случайное нажатие"), "{}", d.journal());
+        assert!(matches!(p.decide("app"), Verdict::Refuse(_)));
+        // Answered after a moment: allowed.
+        let d = Dirs::new("read");
+        let p = d
+            .policy(d.kdialog("once", "sleep 0.3; exit 0"), true, TIMEOUT)
+            .with_too_fast(Duration::from_millis(200));
+        assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
+        assert!(p.ask("app", true, |a| a));
     }
 
     /// The pause after a refusal is the setting's, Nix's first — read when

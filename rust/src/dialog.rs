@@ -71,6 +71,30 @@ where
         .is_ok_and(|s| s.success())
 }
 
+/// An answer that allows, given sooner than this after a question a zone's
+/// program brought up, is taken for a key pressed for something else.
+/// kdialog's default button is its first — "allow" in every question here
+/// (a `QDialogButtonBox`'s first accepting button; a yes/no box has no way to
+/// pick another) — and the new dialog takes the focus from whatever the
+/// person was typing into: an Enter meant for a chat would say yes. A program
+/// can bring the question up at the moment it likes. Counted from the start
+/// of kdialog, which takes a few hundred milliseconds to show its window —
+/// about a second is left to read the question, and nobody reads it in that.
+pub const TOO_FAST: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// A "yes" to a question put at `asked`: a refusal when it came sooner than
+/// [`TOO_FAST`].
+pub fn not_too_soon(asked: std::time::Instant) -> Result<(), String> {
+    let after = asked.elapsed();
+    if after < TOO_FAST {
+        return Err(format!(
+            "ответ через {} мс — быстрее, чем читают вопрос: принят за случайное нажатие",
+            after.as_millis()
+        ));
+    }
+    Ok(())
+}
+
 /// A three-way question (`--yesnocancel` with its own labels): `Some(0)` yes,
 /// `Some(1)` no, `Some(2)` cancel; `None` when kdialog could not be started or
 /// was killed — which the caller reads as the safe answer.
@@ -173,4 +197,22 @@ pub(crate) fn test_program(path: &Path, script: &str) {
         .write_all(script.as_bytes())
         .unwrap();
     assert!(sh.wait().unwrap().success(), "{}", path.display());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A "yes" right after the question is a stray key; one after a moment
+    /// to read it stands.
+    #[test]
+    fn a_yes_too_soon_is_a_stray_key() {
+        let why = not_too_soon(Instant::now()).unwrap_err();
+        assert!(why.contains("случайное нажатие"), "{why}");
+        let long_ago = Instant::now()
+            .checked_sub(TOO_FAST + Duration::from_millis(10))
+            .unwrap();
+        assert_eq!(not_too_soon(long_ago), Ok(()));
+    }
 }
