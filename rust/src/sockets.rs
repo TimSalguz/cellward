@@ -723,6 +723,8 @@ fn describe(p: &Path) -> &'static str {
     // `~/.ssh` is an agent, `S.gpg-agent.ssh` is one too.
     if name == "S.gpg-agent.ssh" || any(&["/keyring/ssh", "/ssh-agent", "/ssh-auth"]) {
         "ssh-агент: вход на машины вашими ключами"
+    } else if s.contains("dhcpcd") {
+        "dhcpcd: интерфейсы, адреса и аренды хоста (§3)"
     } else if s.starts_with("/run/ssh-unix-local/") {
         "sshd хоста по unix-сокету (systemd-ssh-generator): вход на хост, если есть ключ или \
          пароль"
@@ -897,7 +899,14 @@ pub fn places(home: Option<&Path>) -> Vec<(PathBuf, usize)> {
 pub fn known(runtime: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = KNOWN.iter().map(PathBuf::from).collect();
     out.extend(crate::doctor::RESOLVER_SOCKETS.iter().map(PathBuf::from));
-    for name in ["bus", "systemd/private", "pulse/native"] {
+    // The broker too: in a zone its directory is the holder's, which a
+    // program may pass through but not list (seen in the VM, 2026-09-25).
+    for name in [
+        "bus",
+        "systemd/private",
+        "pulse/native",
+        crate::broker::SOCKET,
+    ] {
         out.push(runtime.join(name));
     }
     out

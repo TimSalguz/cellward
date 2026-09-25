@@ -1477,10 +1477,11 @@ let
               assert f"socket\twarn\t{path} — " in host, (path, host)
           assert "socket\tfail\t/nix/var/nix/daemon-socket/socket — " in host, host
 
-          # A clean zone: nothing of the session, nothing of the home, no
-          # daemon. What is left are the system manager's own services
-          # (varlink in /run/systemd), which no zone closes yet
-          # (LEAK-MODEL §17) — named, and nothing else.
+          # A clean zone: nothing of the session, nothing of the home. What is
+          # left are the system's own network services, which no zone closes
+          # yet (LEAK-MODEL §18): systemd's over varlink in /run/systemd, and
+          # dhcpcd's unprivileged socket (this VM gets its address by DHCP) —
+          # named, and nothing else.
           machine.succeed("systemctl stop evilrun evilgroup")
           alice("systemctl --user stop evilhome")
           machine.succeed(
@@ -1489,7 +1490,11 @@ let
           out = alice("vpn-zone doctor vmherm --json")
           found = named(out)
           print(f"sockets in reach of a clean vmherm: {found}")
-          unexpected = {p: l for p, l in found.items() if not p.startswith("/run/systemd/")}
+          unexpected = {
+              p: l
+              for p, l in found.items()
+              if not p.startswith("/run/systemd/") and p != "/run/dhcpcd/unpriv.sock"
+          }
           assert not unexpected, found
           assert all(level == "warn" for level in found.values()), found
 

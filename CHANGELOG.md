@@ -25,11 +25,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   unfiltered sound server, the host's X server, a resolver — at `fail`.
   `tmp-sockets` is now the part of it in the temporary directories. What it
   found at once: systemd's varlink services in `/run/systemd` (`hostnamed`,
-  `networkd`) answer every zone past the system bus filter; sshd on
-  `/run/ssh-unix-local/socket`. Both named, not closed yet. VM test: the evil
+  `networkd`) answer every zone past the system bus filter, and so does
+  dhcpcd's unprivileged socket; sshd on `/run/ssh-unix-local/socket`. Both named, not closed yet. VM test: the evil
   host's sockets in the home and in `/run` are named, one only the session's
   group may open is not, a clean hermetic zone names nothing but systemd's
-  own services.
+  and dhcpcd's services.
 - **The window menu's key and our windows' rule, written by the module**
   (`programs.vpn-zones.desktop`): `windowMenu.key` in niri's notation,
   `floatWindows` (the launch window and the menu float, by the app id
