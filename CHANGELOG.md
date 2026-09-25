@@ -305,6 +305,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   "always" is not offered for a command with options; the question shows every
   word on its own line, without text-reordering characters, and a command too
   long to show whole is refused rather than cut.
+- **Sound and camera devices out of every zone's reach.** logind gives the
+  session's user an ACL on `/dev/snd/*` and `/dev/video*`, and a program in a
+  zone is that user: it opened the microphone's capture device directly, past
+  PipeWire and any permission. `/dev/snd` is covered in every zone (sound goes
+  through the pulse filter and PipeWire); cameras (`/dev/video*`,
+  `/dev/media*`, `/dev/v4l`) are `/dev/null` there, including one plugged in
+  later, unless the zone is let (`vpn-zone camera <zone> on`,
+  `programs.vpn-zones.camera`; `camera` in `status --json`).
 - **`/run/systemd` by an allow-list in every zone** (and for the system
   tier's commands): systemd's services answer over varlink there, open to
   everyone — `io.systemd.Hostname` the machine's name, model and id,
