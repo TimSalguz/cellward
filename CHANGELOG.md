@@ -284,7 +284,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   their ports `r`, the streams of the zone's other programs `r`, any other
   node of its own (a virtual sink, a filter, a link group) destroyed at once; the host's sinks `r`; capture sources `r`
   only while the zone's microphone is `yes` (the helper publishes the switch
-  in the `vpn-zones` metadata every second; revoked, PipeWire breaks the
+  in the `vpn-zones` metadata every second; revoked, the script breaks the
   links); the `default` metadata `r`; the `client-node` factory `r` — no
   link factory, no adapter or device factory. Links: only WirePlumber's,
   only a zone's stream to a host's sink and a host's source to a zone's

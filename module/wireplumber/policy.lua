@@ -21,7 +21,7 @@
 --    never to destroy or reconfigure;
 --  * capture sources of the host: read only, and only while the zone's
 --    microphone is "yes" (the helper publishes it in the metadata object
---    "vpn-zones"); revoked, the daemon breaks the links at once;
+--    "vpn-zones"); revoked, the links are broken here at once;
 --  * the metadata "default": read only (which sink is the default);
 --  * the "client-node" factory, read: a stream is a client node. Not the link
 --    factory, not the adapter or device factories: a zone links nothing
@@ -290,7 +290,7 @@ end)
 
 -- The watchdog: a link WirePlumber's chain did not refuse, or somebody else
 -- made — destroyed if it is not one the policy allows.
-links_om:connect ("object-added", function (_, link)
+local function check_link (link)
   local out_node = node_by_id (prop (link, "link.output.node"))
   local in_node = node_by_id (prop (link, "link.input.node"))
   if out_node == nil or in_node == nil then
@@ -313,7 +313,20 @@ links_om:connect ("object-added", function (_, link)
         out_node ["bound-id"], in_node ["bound-id"]))
     link:request_destroy ()
   end
+end
+
+links_om:connect ("object-added", function (_, link)
+  check_link (link)
 end)
+
+-- Every link again, when what is allowed changed (a zone's microphone): the
+-- daemon breaks a link only when a PORT's permission changes, and the policy
+-- grants nodes — so a microphone taken back is unlinked here.
+local function check_all_links ()
+  for link in links_om:iterate () do
+    check_link (link)
+  end
+end
 
 -- The guard in WirePlumber's linking chain: after every hook that picks a
 -- target, before the link is made.
@@ -440,6 +453,7 @@ impl_metadata:activate (Features.ALL, function (m, e)
   m:connect ("changed", function (_, subject, key, _, _)
     if subject == 0 and key ~= nil and key:sub (1, #MIC_PREFIX) == MIC_PREFIX then
       regrant_sources (key:sub (#MIC_PREFIX + 1))
+      check_all_links ()
       rescan_linking ()
     end
   end)
