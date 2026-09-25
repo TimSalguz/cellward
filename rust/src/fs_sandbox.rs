@@ -175,7 +175,7 @@ const PROXY_GRACE: Duration = Duration::from_millis(500);
 /// Without a filter it reaches the Secret Service through the bus — that is
 /// KWallet with every password in it — plus the window list and every other
 /// application. Only the portals and notifications get through.
-const BUS_TALK: [&str; 5] = [
+const BUS_TALK: [&str; 7] = [
     // By name (`zone::PORTALS`): not the Flatpak portal, which starts
     // processes outside the sandbox.
     crate::zone::PORTALS[0],
@@ -185,6 +185,9 @@ const BUS_TALK: [&str; 5] = [
     // The tray icon's own name (`zone::TRAY_ITEM_NAMES`): in a container the
     // program's pid is its namespace's, but the name is still one per icon.
     crate::zone::TRAY_ITEM_NAMES,
+    // Typing, through the input methods' portals only (`zone::SESSION_BUS_RULES`).
+    "--talk=org.freedesktop.portal.IBus",
+    "--talk=org.freedesktop.portal.Fcitx",
 ];
 
 /// The lowest and the number of X display numbers a satellite may take

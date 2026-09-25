@@ -947,6 +947,13 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         for var in COMPOSITOR_IPC_VARS {
             std::env::remove_var(var);
         }
+        // Input methods through their portals only (review 2026-09-25): the
+        // daemons' own interfaces run and fetch things on the host, and the
+        // zone's bus and mount namespace keep them out
+        // (`zone::SESSION_BUS_RULES`, `zone::hide_input_methods`). libibus
+        // takes its portal only in Flatpak or when told so; fcitx5's clients
+        // fall back to theirs by themselves.
+        std::env::set_var("IBUS_USE_PORTAL", "1");
     }
 
     // The caller's working directory, which `nsenter` would otherwise lose. A
