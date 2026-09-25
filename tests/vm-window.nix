@@ -147,14 +147,16 @@ let
               timeout=60,
           )
           # The window came through wl-sandbox's Wayland proxy (§8): the
-          # compositor's pid of it is the proxy's, which runs on the host, not
-          # dumpable — and still the launch and its zone are found, through the
-          # supervisor the proxy is a child of.
+          # compositor's pid of it is the supervisor's — it makes the
+          # connection upstream —, which runs on the host with the proxy for a
+          # child; and still the zone is found, through the supervisor's
+          # children.
           tree = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r"))
           foot = find(tree, "foot")
           assert foot is not None, tree
           comm = machine.succeed(f"cat /proc/{foot['pid']}/comm").strip()
-          assert comm == "vz-wl-proxy", comm
+          assert comm == "vz-wl-sandbox", comm
+          machine.succeed(f"pgrep -x -P {foot['pid']} vz-wl-proxy")
           out = alice(f"SWAYSOCK={swaysock} vpn-zone focused --json")
           assert '"zone":"offline"' in out and '"program":"foot"' in out, out
           out = alice(f"SWAYSOCK={swaysock} vpn-zone focused --bar")

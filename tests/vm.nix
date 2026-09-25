@@ -1294,7 +1294,8 @@ let
               "wp_security_context_manager_v1", "zwp_fullscreen_shell_v1",
               "zwlr_layer_shell_v1", "zwlr_output_manager_v1",
               "zwlr_output_power_manager_v1", "zwlr_gamma_control_manager_v1",
-              "wl_eglstream_display", "mutter_x11_interop",
+              "zwlr_input_inhibit_manager_v1", "zxdg_exporter_v1", "zxdg_importer_v1",
+              "gtk_shell1", "wl_eglstream_display", "mutter_x11_interop",
           }
           print(f"restricted: {sorted(direct)}")
           print(f"hidden by the proxy: {sorted(direct - proxied)}")

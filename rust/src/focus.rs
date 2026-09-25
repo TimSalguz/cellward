@@ -214,48 +214,52 @@ fn network_of(state: &Path, ns: &str) -> Option<String> {
     crate::system::zone_of_netns(ns)
 }
 
-/// Whether `pid` is the Wayland proxy of a launch (`crate::wl_proxy`), and if
-/// so, the launch's supervisor and its network.
+/// Whether `pid` is the supervisor of a launch behind the Wayland proxy
+/// (`crate::wl_proxy`), and if so, the launch's network.
 enum Proxied {
     No,
-    /// `(supervisor, network)`.
-    Yes(i32, String),
-    /// A proxy whose program's network cannot be told.
+    /// The supervisor's program is in this network.
+    Yes(String),
+    /// A supervisor whose program's network cannot be told.
     Unknown,
 }
 
-/// A window behind the proxy has the PROXY's pid: the connection the
-/// compositor sees is the proxy's. The proxy runs on the host and cannot be
-/// read (not dumpable), so its own namespace says nothing of the program's.
-/// The kernel still does: the proxy's parent is the launch's supervisor
-/// (`wl-sandbox`, the pid of the registry record), and the supervisor's other
-/// children are the program and the orphans it adopted — in the program's
-/// network. That network, when they all agree on one we know; a nested one
-/// (a browser's sandbox) is not counted, and two is not guessed between.
+/// A window behind the proxy has the SUPERVISOR's pid: upstream, the
+/// supervisor (`wl-sandbox`, the pid of the registry record) makes the
+/// connection the compositor takes the pid from, for every window of its
+/// launch. It runs on the host, so its own namespace says nothing of the
+/// program's. The kernel still does: its children are the program and the
+/// orphans it adopted — in the program's network — and the proxy (not
+/// dumpable, its namespace unread; and not counted). That network, when they
+/// all agree on one we know; a nested one (a browser's sandbox) is not
+/// counted, and two is not guessed between.
 ///
-/// Known by its name: a process of a zone can call itself anything, but it
-/// cannot put a process into the host's namespace — and one in a zone's own
-/// namespace is taken by that, whatever it is called.
+/// Known by its name ([`crate::wl_proxy::SUPERVISOR_NAME`]): a process of a
+/// zone can call itself anything, but it cannot put a process into the host's
+/// namespace — and one in a zone's own namespace is taken by that, whatever
+/// it is called.
 fn proxied(state: &Path, pid: i32) -> Proxied {
-    let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-    if comm.trim_end() != crate::wl_proxy::PROCESS_NAME {
+    if comm(pid) != crate::wl_proxy::SUPERVISOR_NAME {
         return Proxied::No;
     }
     let own = netns(&pid.to_string()).and_then(|ns| network_of(state, &ns));
     if own.is_some_and(|zone| zone != crate::launch::UNCONFINED) {
         return Proxied::No;
     }
-    let Some(supervisor) = parent(pid).filter(|&p| p > 1) else {
-        return Proxied::Unknown;
-    };
-    let networks = children(supervisor)
+    let networks = children(pid)
         .into_iter()
-        .filter(|&child| child != pid)
+        .filter(|&child| comm(child) != crate::wl_proxy::PROCESS_NAME)
         .filter_map(|child| network_of(state, &netns(&child.to_string())?));
     match one_network(networks) {
-        Some(zone) => Proxied::Yes(supervisor, zone),
+        Some(zone) => Proxied::Yes(zone),
         None => Proxied::Unknown,
     }
+}
+
+fn comm(pid: i32) -> String {
+    fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|c| c.trim_end().to_owned())
+        .unwrap_or_default()
 }
 
 /// The one network all of these are in; `None` for none or several.
@@ -279,12 +283,12 @@ fn children(pid: i32) -> Vec<i32> {
 /// The launch of the process `pid`: its network by its namespace, its
 /// container and program by the nearest launch up its parent chain — when that
 /// launch is certainly still running and in the same network. A window of a
-/// program behind the Wayland proxy is looked up from its supervisor instead
-/// ([`proxied`]).
+/// program behind the Wayland proxy has its supervisor's pid, whose network is
+/// its children's ([`proxied`]).
 pub fn launch_of(state: &Path, pid: i32) -> Option<Launch> {
-    let (pid, zone) = match proxied(state, pid) {
-        Proxied::No => (pid, network_of(state, &netns(&pid.to_string())?)?),
-        Proxied::Yes(supervisor, zone) => (supervisor, zone),
+    let zone = match proxied(state, pid) {
+        Proxied::No => network_of(state, &netns(&pid.to_string())?)?,
+        Proxied::Yes(zone) => zone,
         Proxied::Unknown => return None,
     };
     let running = state.join(".running");
@@ -831,8 +835,8 @@ mod tests {
         assert_eq!(n(&[]), None);
     }
 
-    /// A window behind the Wayland proxy has the proxy's pid; its launch is the
-    /// proxy's parent, its network the one of that parent's other children.
+    /// A window behind the Wayland proxy has the supervisor's pid: its launch is
+    /// that pid's record, its network the one of the supervisor's children.
     #[test]
     fn a_window_of_a_proxied_program_is_found_through_the_supervisor() {
         let state = std::env::temp_dir().join(format!("vz-focus-proxy-{}", std::process::id()));
@@ -840,54 +844,56 @@ mod tests {
         let running = state.join(".running");
         let dir = running.join("sb:work");
         fs::create_dir_all(&dir).unwrap();
-        // This test process is the supervisor; a `sleep` is its program, and a
-        // `sleep` started under the proxy's name is the proxy.
-        let me = std::process::id() as i32;
-        fs::write(
-            dir.join("foot"),
-            format!("{me} {} sb:work\n", crate::launch::UNCONFINED),
-        )
-        .unwrap();
-        registry::note_start(&running, me, false).unwrap();
-        let sleep = std::env::var_os("PATH")
-            .and_then(|p| {
-                std::env::split_paths(&p)
-                    .map(|d| d.join("sleep"))
-                    .find(|p| p.is_file())
-            })
-            .unwrap();
-        let named = state.join(crate::wl_proxy::PROCESS_NAME);
-        std::os::unix::fs::symlink(&sleep, &named).unwrap();
-        // The name the kernel takes is the file's; argv[0] stays `sleep` for a
-        // multi-call coreutils.
-        let mut proxy = {
-            use std::os::unix::process::CommandExt;
-            Command::new(&named).arg0("sleep").arg("5").spawn().unwrap()
+        let find = |name: &str| {
+            std::env::var_os("PATH")
+                .and_then(|p| {
+                    std::env::split_paths(&p)
+                        .map(|d| d.join(name))
+                        .find(|p| p.is_file())
+                })
+                .unwrap()
         };
-        // Until it has exec'd, it is still called what the test binary is.
-        for _ in 0..100 {
-            let comm = fs::read_to_string(format!("/proc/{}/comm", proxy.id())).unwrap_or_default();
-            if comm.trim_end() == crate::wl_proxy::PROCESS_NAME {
+        // The supervisor: a shell under the supervisor's name (the kernel
+        // takes the name of the file run), with a `sleep` for its program and
+        // one more under the proxy's name.
+        let supervisor_name = state.join(crate::wl_proxy::SUPERVISOR_NAME);
+        let proxy_name = state.join(crate::wl_proxy::PROCESS_NAME);
+        std::os::unix::fs::symlink(find("bash"), &supervisor_name).unwrap();
+        std::os::unix::fs::symlink(find("sleep"), &proxy_name).unwrap();
+        let mut supervisor = Command::new(&supervisor_name)
+            .args(["-c", "(exec -a sleep \"$0\" 5) & sleep 5 & wait"])
+            .arg(&proxy_name)
+            .spawn()
+            .unwrap();
+        let sup = supervisor.id() as i32;
+        for _ in 0..200 {
+            if children(sup).len() == 2 && comm(sup) == crate::wl_proxy::SUPERVISOR_NAME {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let mut program = Command::new(&sleep).arg("5").spawn().unwrap();
-        let window = proxy.id() as i32;
-        // Taken for a proxy, and its network is its siblings' (the real one
-        // cannot be read: not dumpable); the program is taken for itself.
+        fs::write(
+            dir.join("foot"),
+            format!("{sup} {} sb:work\n", crate::launch::UNCONFINED),
+        )
+        .unwrap();
+        registry::note_start(&running, sup, false).unwrap();
+        // Taken for a supervisor, its network is its children's; a child is
+        // taken for itself.
         assert!(
-            matches!(proxied(&state, window), Proxied::Yes(s, ref z) if s == me && z == crate::launch::UNCONFINED)
+            matches!(proxied(&state, sup), Proxied::Yes(ref z) if z == crate::launch::UNCONFINED)
         );
-        assert!(matches!(proxied(&state, program.id() as i32), Proxied::No));
-        let launch = launch_of(&state, window).unwrap();
+        assert!(matches!(proxied(&state, children(sup)[0]), Proxied::No));
+        let launch = launch_of(&state, sup).unwrap();
         assert_eq!(launch.zone, crate::launch::UNCONFINED);
         assert_eq!(launch.program.as_deref(), Some("foot"));
         assert_eq!(launch.selector.as_deref(), Some("sb:work"));
-        for child in [&mut proxy, &mut program] {
-            let _ = child.kill();
-            let _ = child.wait();
+        for child in children(sup) {
+            // SAFETY: a plain signal to a child of our child, still running.
+            unsafe { libc::kill(child, libc::SIGKILL) };
         }
+        let _ = supervisor.kill();
+        let _ = supervisor.wait();
         let _ = fs::remove_dir_all(&state);
     }
 

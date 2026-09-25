@@ -473,7 +473,7 @@ pub fn run(args: Args) -> u8 {
     std::env::remove_var("WAYLAND_SOCKET");
 
     if let Some((proxy, _)) = &mut proxy {
-        proxy.adopt_orphans();
+        proxy.take_over();
     }
     // NOT exec: after the program exits somebody has to close the switch and
     // unlink the socket, so it is started as a child.

@@ -29,14 +29,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   fallback: a proxy that cannot start leaves the compositor listening on the
   zone's socket itself, as before, with a warning (`--no-proxy` asks for that);
   a proxy that dies takes the program's display, never the unrestricted
-  socket. `vpn-zone focused` and `window-menu` find the launch of a window
-  whose pid is now the proxy's through its supervisor, and its network through
-  the supervisor's other children. Tests: the proxy between a real client
+  socket. The supervisor makes every connection upstream, so the compositor
+  gives every window of the launch the supervisor's pid — the pid of the
+  launch's record; it goes by `vz-wl-sandbox` meanwhile, adopts the program's
+  orphans, and `vpn-zone focused` and `window-menu` take the network of such a
+  window from the supervisor's children, as the kernel says. Tests: the proxy between a real client
   library and a fake compositor under its own filter, the supervised start in
   a process of its own; VM: through the proxy and straight on sway's restricted
   socket the same globals minus the policy's, the proxy confined and its
-  listener out of the zone, a foot window whose pid is the proxy's still named
-  by its zone and program.
+  listener out of the zone, a foot window whose pid is the supervisor's still
+  named by its zone and program.
 - **The window menu's key and our windows' rule, written by the module**
   (`programs.vpn-zones.desktop`): `windowMenu.key` in niri's notation,
   `floatWindows` (the launch window and the menu float, by the app id

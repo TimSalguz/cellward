@@ -62,6 +62,14 @@
 //! supervisor, which adopted the program's orphans (`PR_SET_CHILD_SUBREAPER`)
 //! so that a window of one of them still leads to its launch
 //! (`crate::focus`), exits after it.
+//!
+//! **Whose pid a window has.** The compositor takes a client's pid from the
+//! connection (`SO_PEERCRED`: whoever called `connect`), and upstream it is the
+//! supervisor that connects. Every window of the launch therefore has the
+//! supervisor's pid — the very pid of the launch's registry record — whichever
+//! process of the program opened it; the supervisor goes by
+//! [`SUPERVISOR_NAME`] meanwhile, so that `crate::focus` knows to ask its
+//! children for the network.
 
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -84,10 +92,14 @@ use wl_proxy::state::{State, StateHandler};
 
 use crate::sys;
 
-/// The proxy's process name (`/proc/<pid>/comm`, 15 bytes at most). A window
-/// of a proxied program has the proxy's pid, and [`crate::focus`] knows it by
-/// this name.
+/// The proxy's process name (`/proc/<pid>/comm`, 15 bytes at most).
 pub const PROCESS_NAME: &str = "vz-wl-proxy";
+
+/// The supervisor's process name while it runs a proxy. A window of a proxied
+/// program has the SUPERVISOR's pid (it made the connection upstream), and
+/// [`crate::focus`] knows it by this name: the network is not the
+/// supervisor's own (the host's) but its children's.
+pub const SUPERVISOR_NAME: &str = "vz-wl-sandbox";
 
 /// Below the runtime directory: the listeners of the security contexts, one
 /// per launch. `crate::zone` keeps nothing of `vpn-zones/` in a zone but the
@@ -134,6 +146,12 @@ pub const HIDDEN: &[&str] = &[
     "zwlr_output_manager_v1",
     "zwlr_output_power_manager_v1",
     "zwlr_gamma_control_manager_v1",
+    "zwlr_input_inhibit_manager_v1",
+    // Unknown to wl-proxy 0.1.4 altogether. xdg-foreign v1 is GTK3's: a
+    // portal dialog of a GTK3 program comes up unparented (v2 passes).
+    "zxdg_exporter_v1",
+    "zxdg_importer_v1",
+    "gtk_shell1",
     "wl_eglstream_display",
     "mutter_x11_interop",
 ];
@@ -241,7 +259,11 @@ pub fn start(zone_listener: &UnixListener, upstream: &Path) -> Result<Proxy, Str
     }
     if pid == 0 {
         drop(ours);
-        let code = child(listener, theirs);
+        // A panic ends the proxy here: unwinding further would run the
+        // supervisor's code (`wl_sandbox::run`) in this child.
+        let code =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| child(listener, theirs)))
+                .unwrap_or(101);
         // _exit: the parent's atexit handlers and buffers are not ours.
         // SAFETY: always sound.
         unsafe { libc::_exit(code) };
@@ -282,12 +304,19 @@ impl Proxy {
         }
     }
 
-    /// From here on the program's orphans come to the supervisor: a window
-    /// of a process whose parent has gone still leads to its launch
-    /// (`crate::focus`). Only once the proxy is certainly running: the flag
-    /// survives `execve`, and a fallback that runs the program in this very
-    /// process must not make it a subreaper.
-    pub fn adopt_orphans(&mut self) {
+    /// Become the supervisor, just before the program is started: the name
+    /// `crate::focus` knows the windows by ([`SUPERVISOR_NAME`]), and the
+    /// program's orphans come here — a window of a process whose parent has
+    /// gone still leads to its launch, and to its network. Only once the proxy
+    /// is certainly running: the subreaper flag survives `execve`, and a
+    /// fallback that runs the program in this very process must not keep it
+    /// ([`Proxy::kill`] takes it back; the name goes with the `execve`).
+    pub fn take_over(&mut self) {
+        if let Ok(name) = std::ffi::CString::new(SUPERVISOR_NAME) {
+            // SAFETY: PR_SET_NAME reads a NUL-terminated string that outlives
+            // the call.
+            unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr(), 0, 0, 0) };
+        }
         // SAFETY: prctl with these arguments takes no pointers.
         self.adopting = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0;
     }
@@ -295,7 +324,7 @@ impl Proxy {
     /// Stop it at once, on a path that will not start the program behind it.
     pub fn kill(mut self) {
         if self.adopting {
-            // SAFETY: as in `adopt_orphans`.
+            // SAFETY: as in `take_over`.
             unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0) };
         }
         self.channel = None;
@@ -1582,9 +1611,28 @@ mod tests {
         assert!(fs::read_dir(format!("/proc/{pid}/fd")).is_err());
 
         let (binds, _) = mpsc::channel();
+        let (peers_tx, peers) = mpsc::channel();
         let listener = up.listener;
         std::thread::spawn(move || {
             for sock in listener.incoming().flatten() {
+                // Whose pid the compositor sees: whoever connected.
+                let mut cred = libc::ucred {
+                    pid: 0,
+                    uid: 0,
+                    gid: 0,
+                };
+                let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+                // SAFETY: SO_PEERCRED fills one ucred, whose size is passed.
+                unsafe {
+                    libc::getsockopt(
+                        sock.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_PEERCRED,
+                        (&mut cred as *mut libc::ucred).cast(),
+                        &mut len,
+                    )
+                };
+                let _ = peers_tx.send(cred.pid);
                 let binds = binds.clone();
                 std::thread::spawn(move || fake_compositor(sock, GLOBALS, binds));
             }
@@ -1611,7 +1659,7 @@ mod tests {
             await_event(&mut client, 3);
             seen_tx.send(0).unwrap();
         });
-        proxy.adopt_orphans();
+        proxy.take_over();
         let exited = Rc::new(Cell::new(false));
         let flag = exited.clone();
         let started = std::time::Instant::now();
@@ -1619,6 +1667,10 @@ mod tests {
         assert!(exited.get());
         assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
         assert_eq!(seen_rx.recv().unwrap(), 3);
+        // Every connection upstream is the supervisor's: its windows have the
+        // pid of the launch's record (`crate::focus`).
+        let me = std::process::id() as libc::pid_t;
+        assert_eq!(peers.try_iter().collect::<Vec<_>>(), [me, me]);
         assert_eq!(
             seen_rx.recv().unwrap(),
             0,
