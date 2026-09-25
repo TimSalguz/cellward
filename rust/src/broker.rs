@@ -398,17 +398,7 @@ pub fn shown_command(cmd: &[OsString]) -> Option<String> {
     let words: Vec<String> = cmd
         .iter()
         .map(|word| {
-            let clean: String = word
-                .to_string_lossy()
-                .chars()
-                .filter(|c| !crate::focus::reorders(*c))
-                .map(|c| match c {
-                    '<' => '‹',
-                    '>' => '›',
-                    c if c.is_control() => ' ',
-                    c => c,
-                })
-                .collect();
+            let clean = shown_word(&word.to_string_lossy());
             let n = clean.chars().count();
             if n > SHOWN_WORD {
                 let head: String = clean.chars().take(SHOWN_WORD).collect();
@@ -419,6 +409,23 @@ pub fn shown_command(cmd: &[OsString]) -> Option<String> {
         })
         .collect();
     Some(words.join("\n"))
+}
+
+/// One word a program chose, fit for a dialog's text: no control characters
+/// (a line break would start a line of its own), no angle brackets for the
+/// dialog to take for markup (kdialog shows text that looks like HTML as
+/// HTML), none of the invisible ones that reorder or hide text. Not cut: the
+/// caller decides how much of it is shown.
+pub fn shown_word(word: &str) -> String {
+    word.chars()
+        .filter(|c| !crate::focus::reorders(*c))
+        .map(|c| match c {
+            '<' => '‹',
+            '>' => '›',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect()
 }
 
 /// No option among the words after the program: "always" is for a program,

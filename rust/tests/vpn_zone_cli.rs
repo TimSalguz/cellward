@@ -1490,6 +1490,43 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     assert!(!home.run(&["nix-daemon", "nl", "yes"]).status.success());
     assert!(home.run(&["nix-daemon", "nl", "default"]).status.success());
     assert!(home.run(&["host-files", "nl", "default"]).status.success());
+    // The microphone: ask by default, the zone's marker, Nix over it; the
+    // host's own network has none to set.
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"microphone\":{\"value\":\"ask\",\"source\":\"default\"}"),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"host_files_writable\":null,\"microphone\":null,"),
+        "{json}"
+    );
+    let out = home.run(&["microphone", "nl", "no"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("недоступен"), "{}", stdout(&out));
+    assert_eq!(
+        fs::read_to_string(home.state().join("nl/microphone")).unwrap(),
+        "no"
+    );
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"microphone\":{\"value\":\"no\",\"source\":\"local\"}"),
+        "{json}"
+    );
+    assert!(!home.run(&["microphone", "nl", "maybe"]).status.success());
+    assert!(!home.run(&["microphone", "nowhere", "yes"]).status.success());
+    fs::create_dir_all(home.root.join("config/declared")).unwrap();
+    fs::write(home.root.join("config/declared/microphone"), "nl yes\n").unwrap();
+    let out = home.run(&["microphone", "nl", "ask"]);
+    assert!(stdout(&out).contains("задано в Nix"), "{}", stdout(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"microphone\":{\"value\":\"yes\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    fs::remove_file(home.root.join("config/declared/microphone")).unwrap();
+    assert!(home.run(&["microphone", "nl", "default"]).status.success());
+    assert!(!home.state().join("nl/microphone").exists());
     let out = home.run(&["hermetic", "nl", "off"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let json = stdout(&home.run(&["status", "--json"]));

@@ -535,6 +535,7 @@ and `vpn-zone container show <name> --json` print subsets of the same schema.
       "hermetic":            { "value": true,  "source": "default" },
       "nix_daemon":          { "value": false, "source": "default" },
       "host_files_writable": { "value": false, "source": "default" },
+      "microphone":          { "value": "ask", "source": "default" },
       "frame_color":         { "value": "#4cacd9", "source": "default" } },
     { "name": "lan", "kind": "host-interface", "aliases": [], "source": "local",
       "up": false, "locked": false, "tunnel_alive": null,

@@ -6,6 +6,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The microphone by permission** (`rust/src/microphone.rs`,
+  `rust/src/pulse_filter.rs`, LEAK-MODEL §17; the owner's decision of
+  2026-09-25). A program in a zone records the microphone only as the zone's
+  switch says, like an app on a phone: `yes`, `no`, or `ask` — the default.
+  With `ask`, the first time a program of the zone records, the person on the
+  host is asked (kdialog): allow once (that one stream), allow always
+  (writes `yes` into the zone's setting; not offered when Nix set the
+  zone's value), or deny — which stands for that connection, so the
+  program's retries on it are not asked about again. The sound filter holds
+  that one `CREATE_RECORD_STREAM` while it asks — the connection's other
+  commands go on, the server answers the held one by its tag when it gets
+  it — and then forwards it or answers it `ERROR`/`ACCESS`. One question at
+  a time per zone: a request while one is open is refused, not queued. No
+  graphical session (neither `WAYLAND_DISPLAY` nor `DISPLAY` in the filter's
+  environment, i.e. the zone unit's) or no answer within 60 s is a refusal,
+  said in the unit's journal and in `vpn-zone journal` (a new event,
+  `microphone`; refusals nobody was asked about at most one line per 10 s).
+  The question names the filter's own zone, never anything the program
+  says, and the program by its own `application.name`, cleaned of control
+  characters, markup and reordering marks. The filter reads the setting for
+  every record stream, so a change applies at once, without restarting the
+  zone; it lives where no zone writes — the marker in the zone's state
+  directory and `~/.config/vpn-zones/declared/microphone` — Nix over the
+  marker, an unknown value or an unreadable file meaning `no`. Monitors stay
+  unrecordable whatever the switch says. Settings: `vpn-zone microphone
+  <zone> yes|no|ask|default`, `programs.vpn-zones.microphone.<zone> =
+  "yes"|"no"|"ask"`, and `"microphone":{"value","source"}` for every zone in
+  `vpn-zone status --json` (`null` for `unconfined`). `pulse-filter` takes
+  `--zone`, `--zone-dir`, `--config` and `--kdialog`, all required; the
+  zone holder `--kdialog`. Tests: the setting's precedence, the verdict
+  (no display, "always" only where the marker decides), the buttons,
+  once/always/deny with a stand-in kdialog, the deadline (the dialog
+  killed), one question at a time, the program's name cleaned, and the
+  filter between a client and a stand-in server — the held stream reaching
+  the server only after "once" while a later command got there first, a
+  denied one answered `ERROR` and the connection not asked again. VM:
+  `ask` with no display and `no` refuse a record stream on the default
+  source, `yes` lets the microphone's sound through, all on a running zone;
+  the monitor refusal still holds; a value declared in Nix wins over the
+  zone's own. Only the PulseAudio path: raw `pipewire-0` still records
+  around it (ROADMAP §17).
 - **The zone's border around its programs' windows** (`rust/src/wl_frame.rs`,
   `docs/WINDOW-FRAME.md` §8 «Этап 2, обводка»; stage 2 of the window frame,
   its first part — no title bar or buttons yet). The Wayland proxy draws a

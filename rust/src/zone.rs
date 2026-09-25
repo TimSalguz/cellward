@@ -482,6 +482,9 @@ pub struct Tools {
     /// What a hermetic zone's bus filter asks the broker to open a program's
     /// link with (`crate::bus_filter`): `xdg-open`.
     pub opener: PathBuf,
+    /// What the sound filter asks the person with when a program of the
+    /// zone would record the microphone (`crate::microphone`).
+    pub kdialog: PathBuf,
 }
 
 impl Default for Tools {
@@ -497,6 +500,7 @@ impl Default for Tools {
             openconnect: PathBuf::from("openconnect"),
             dbus_proxy: PathBuf::from("xdg-dbus-proxy"),
             opener: PathBuf::from("xdg-open"),
+            kdialog: PathBuf::from("kdialog"),
         }
     }
 }
@@ -537,7 +541,7 @@ impl std::error::Error for ArgError {}
 
 impl Args {
     /// Parse `[--ip P] [--awg P] [--wg P] [--pasta P] [--nft P]
-    /// [--openconnect P] <name>`.
+    /// [--openconnect P] [--dbus-proxy P] [--opener P] [--kdialog P] <name>`.
     ///
     /// Only `--`-prefixed words are flags, so a zone name is free to start with
     /// a single dash. The order does not matter, but the unit puts the tool
@@ -565,6 +569,7 @@ impl Args {
                 "--openconnect" => &mut tools.openconnect,
                 "--dbus-proxy" => &mut tools.dbus_proxy,
                 "--opener" => &mut tools.opener,
+                "--kdialog" => &mut tools.kdialog,
                 _ => return Err(ArgError::UnknownFlag(flag)),
             };
             let value = rest
@@ -1995,7 +2000,10 @@ fn start_proxy(
 /// zone". It dies with this process (`PR_SET_PDEATHSIG`), which is the zone.
 /// The sound filter (`pulse_filter`), on the host, as the user: listening in
 /// the zone's directory, passing on to the host's `pulse/native`. `None` when
-/// the host has no sound server there.
+/// the host has no sound server there. It is told the zone and where its
+/// microphone setting is (`crate::microphone`): it reads it for every record
+/// stream, and asks with kdialog in the environment it inherits — the unit's,
+/// whose `WAYLAND_DISPLAY`/`DISPLAY` say whether there is anyone to ask.
 fn start_pulse_filter(zone: &Zone) -> Option<Child> {
     let upstream = host_runtime_dir(zone).join("pulse").join("native");
     if fs::symlink_metadata(&upstream).is_err() {
@@ -2015,6 +2023,14 @@ fn start_pulse_filter(zone: &Zone) -> Option<Child> {
         .arg(&socket)
         .arg("--upstream")
         .arg(&upstream)
+        .arg("--zone")
+        .arg(&zone.name)
+        .arg("--zone-dir")
+        .arg(&zone.dir)
+        .arg("--config")
+        .arg(zone.home.join(CONFIG_SUBDIR))
+        .arg("--kdialog")
+        .arg(&zone.tools.kdialog)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .uid(uid)
@@ -4378,9 +4394,12 @@ mod tests {
             "/n/xdg-dbus-proxy",
             "--opener",
             "/n/xdg-open",
+            "--kdialog",
+            "/n/kdialog",
             "nl",
         ]))
         .unwrap();
+        assert_eq!(parsed.tools.kdialog, PathBuf::from("/n/kdialog"));
         assert_eq!(parsed.name, OsString::from("nl"));
         assert_eq!(parsed.tools.ip, PathBuf::from("/n/ip"));
         assert_eq!(parsed.tools.awg, PathBuf::from("/n/awg"));

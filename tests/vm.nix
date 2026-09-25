@@ -71,13 +71,23 @@ let
     def frame(*values, channel=INVALID):
         payload = b"".join(values)
         return struct.pack(">IIIII", len(payload), channel, 0, 0, 0) + payload
+    def auth(tag):
+        return frame(L(8), L(tag), L(0x80000000 | 35), b"x" + struct.pack(">I", 256) + bytes(256))
+    def record(tag, source, props=(("application.name", "zone"),)):
+        return frame(
+            L(5), L(tag), SPEC, MAP, L(INVALID), S(source), L(INVALID), B(False), L(INVALID),
+            *[B(False)] * 7, B(False), B(True), P(props), L(INVALID),
+            B(False), B(False), B(False), b"B\0", CVOL, *[B(False)] * 5,
+        )
   '';
 
   # A stand-in for the sound server's control socket: it records the command
   # of every frame that reaches it, one per line — a record stream with the
-  # word "monitor" if it asked for one, a playback stream with "target" if its
-  # properties still name one. A record stream it answers the way a server
-  # that linked it to a monitor would, and sends it the host's sound.
+  # word "monitor" if it asked for one, "mic" if it is the microphone client's
+  # below, a playback stream with "target" if its properties still name one.
+  # A record stream it answers the way a server that linked it to a monitor
+  # would, and sends it the host's sound; the microphone client's it links to
+  # a microphone, and sends it the microphone's.
   fakePulse = pkgs.writeText "fake-pulse.py" (
     pulseWire
     + ''
@@ -105,18 +115,19 @@ let
                 f, buf = buf[:20 + length], buf[20 + length:]
                 command, tag = struct.unpack(">I", f[21:25])[0], struct.unpack(">I", f[26:30])[0]
                 line = str(command)
+                mic = b"mic-test" in f
                 if command == 5:
-                    line += " monitor" if b"monitor" in f else " default"
+                    line += " monitor" if b"monitor" in f else " mic" if mic else " default"
                 if command == 3:
                     line += " target" if b"target.object" in f else " clean"
                 with open("/tmp/pulse-seen", "a") as log:
                     log.write(line + "\n")
                 if command == 5:
+                    source = "alsa_input.pci.analog-stereo" if mic else "alsa_output.pci.analog-stereo.monitor"
                     c.sendall(
                         frame(L(2), L(tag), L(0), L(9), L(4096), L(1024), SPEC, MAP,
-                              L(3), S("alsa_output.pci.analog-stereo.monitor"), B(False),
-                              b"U" + bytes(8))
-                        + frame(b"HOST-SOUND", channel=0)
+                              L(3), S(source), B(False), b"U" + bytes(8))
+                        + frame(b"MIC-SOUND" if mic else b"HOST-SOUND", channel=0)
                     )
     while True:
         c, _ = server.accept()
@@ -132,14 +143,6 @@ let
     pulseWire
     + ''
     import socket, time
-    def auth(tag):
-        return frame(L(8), L(tag), L(0x80000000 | 35), b"x" + struct.pack(">I", 256) + bytes(256))
-    def record(tag, source):
-        return frame(
-            L(5), L(tag), SPEC, MAP, L(INVALID), S(source), L(INVALID), B(False), L(INVALID),
-            *[B(False)] * 7, B(False), B(True), P([("application.name", "zone")]), L(INVALID),
-            B(False), B(False), B(False), b"B\0", CVOL, *[B(False)] * 5,
-        )
     def playback(tag):
         props = P([("application.name", "zone"), ("target.object", "alsa_output.pci.analog-stereo")])
         return frame(L(3), L(tag), SPEC, MAP, L(INVALID), S(None), props)
@@ -173,6 +176,36 @@ let
         print("conn2 closed", len(heard))
     except socket.timeout:
         print("conn2 open", len(heard))
+  ''
+  );
+  # A program in a zone that records the microphone (the default source):
+  # prints "mic refused" when the answer is ERROR, "mic heard" when the
+  # microphone's sound reaches it, else what it got.
+  pulseMic = pkgs.writeText "pulse-mic.py" (
+    pulseWire
+    + ''
+    import socket
+    s = socket.socket(socket.AF_UNIX)
+    s.connect("/run/user/1000/pulse/native")
+    s.settimeout(15)
+    s.sendall(auth(0))
+    s.sendall(record(1, None, (("application.name", "vmmic"), ("media.name", "mic-test"))))
+    got = b""
+    try:
+        while True:
+            if len(got) >= 25 and got[21:25] == struct.pack(">I", 0):
+                print("mic refused")
+                break
+            if b"MIC-SOUND" in got:
+                print("mic heard")
+                break
+            data = s.recv(65536)
+            if not data:
+                print("mic closed", len(got))
+                break
+            got += data
+    except socket.timeout:
+        print("mic timeout", len(got))
   ''
   );
 
@@ -358,6 +391,9 @@ let
             default = false;
             exceptions = [ "vmherm" ];
           };
+          # The microphone declared for one zone: Nix's word over the zone's
+          # own, asserted in the hermetic subtest.
+          programs.vpn-zones.microphone.vmherm = "no";
           # A container declared in Nix: bound to direct, trusting a CA made
           # at build time. What the module writes, the runtime obeys and the
           # CLI refuses to change is asserted below.
@@ -1348,11 +1384,38 @@ let
       # the host's sound server load a module that connects out, in the host's
       # network, and does not record what the host plays (review 2026-09-25).
       # A stand-in server records what reaches it.
-      with subtest("pulse: a zone cannot load a module or record a monitor"):
+      #
+      # The microphone by permission (rust/src/microphone.rs, owner
+      # 2026-09-25): ask by default — and the unit has no graphical session,
+      # so there is nobody to ask and it is refused; no refuses; yes lets it
+      # through. Each applies at once, to the running zone.
+      with subtest("pulse: a zone cannot load a module or record a monitor; the microphone by permission"):
           alice("systemd-run --user --unit=fakepulse ${pkgs.python3}/bin/python3 ${fakePulse}")
           machine.wait_until_succeeds("test -S /run/user/1000/pulse/native")
           alice("vpn-zone up vmsmoke")
           zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
+          status = json.loads(alice("vpn-zone status --json"))
+          zone = next(n for n in status["networks"] if n["name"] == "vmsmoke")
+          assert zone["microphone"] == {"value": "ask", "source": "default"}, zone
+          mic = lambda: in_zone(zp, "${pkgs.python3}/bin/python3 ${pulseMic}")
+          out = mic()
+          assert "mic refused" in out, f"ask with nobody to ask was not refused: {out}"
+          events = json.loads(alice("vpn-zone journal --json"))["events"]
+          told = [e for e in events if e["event"] == "microphone"]
+          assert told and told[-1]["zone"] == "vmsmoke" and told[-1]["decision"] == "refused", events
+          assert "графической" in told[-1]["why"], told
+          alice("vpn-zone microphone vmsmoke no")
+          out = mic()
+          assert "mic refused" in out, f"microphone=no was not refused: {out}"
+          machine.fail("grep -q '^5 mic' /tmp/pulse-seen")
+          alice("vpn-zone microphone vmsmoke yes")
+          status = json.loads(alice("vpn-zone status --json"))
+          zone = next(n for n in status["networks"] if n["name"] == "vmsmoke")
+          assert zone["microphone"] == {"value": "yes", "source": "local"}, zone
+          out = mic()
+          assert "mic heard" in out, f"microphone=yes did not let the microphone through: {out}"
+          machine.succeed("grep -qx '5 mic' /tmp/pulse-seen")
+          # With the microphone let, what the host plays is still refused.
           out = in_zone(zp, "${pkgs.python3}/bin/python3 ${pulseClient}")
           # Refused commands are answered ERROR by the filter…
           assert "reply-load 0" in out, f"LOAD_MODULE was not answered with ERROR: {out}"
@@ -1367,6 +1430,7 @@ let
           # connection ends before its reply or its sound reach the zone.
           machine.succeed("grep -qx '5 default' /tmp/pulse-seen")
           assert "conn2 closed 0" in out, f"a monitor's sound reached the zone: {out}"
+          alice("vpn-zone microphone vmsmoke default")
           alice("vpn-zone down vmsmoke")
           alice("systemctl --user stop fakepulse.service")
 
@@ -1498,6 +1562,15 @@ let
           zone = next(n for n in out["networks"] if n["name"] == "vmherm")
           assert zone["nix_daemon"] == {"value": False, "source": "default"}, zone
           assert zone["host_files_writable"] == {"value": False, "source": "default"}, zone
+          # The microphone Nix declared for it: its own setting does not
+          # override that.
+          assert zone["microphone"] == {"value": "no", "source": "nix"}, zone
+          alice("vpn-zone microphone vmherm yes")
+          out = json.loads(alice("vpn-zone status --json"))
+          zone = next(n for n in out["networks"] if n["name"] == "vmherm")
+          assert zone["microphone"] == {"value": "no", "source": "nix"}, zone
+          alice("vpn-zone microphone vmherm default")
+          out = json.loads(alice("vpn-zone status --json"))
           assert out["defaults"]["hermetic"] == {"value": False, "source": "nix"}, out["defaults"]
           alice("sh -c '! vpn-zone hermetic vmherm off'")
           # IBus's private bus, where ibus-daemon puts it: a socket by path in
