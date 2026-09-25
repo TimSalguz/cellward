@@ -35,6 +35,14 @@
 //! The request is `VZB1\0`, the app-id, then the arguments of `vpn-zone run`,
 //! each terminated by a NUL; the client closes its writing half, the broker
 //! answers one line: `ok` or `refused: <why>`.
+//!
+//! **A choice to make** (`VZP1\0`, the app-id, then the command): the picker
+//! in a zone sees none of the zones, and a window the zone draws is one its
+//! programs could draw too — so the broker shows the launch window on the
+//! host instead ([`handle_pick`], `picker::pick_for_zone`), with the asking
+//! zone and the command in it. What the person chose comes back as the
+//! arguments of `run`; the broker checks them against the request and starts
+//! them. No question after that one: the window was the question.
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -49,6 +57,8 @@ use crate::tools::Tools;
 
 /// The magic that starts a request.
 const MAGIC: &[u8] = b"VZB1\0";
+/// The magic of a choice to make ([`handle_pick`]).
+const PICK_MAGIC: &[u8] = b"VZP1\0";
 /// The socket, below the runtime directory.
 pub const SOCKET: &str = "vpn-zones/broker";
 /// The largest request the broker reads: a command line, not a file.
@@ -65,7 +75,16 @@ pub fn runtime_dir() -> PathBuf {
 
 /// A request as bytes.
 pub fn encode(app_id: &[u8], argv: &[OsString]) -> Vec<u8> {
-    let mut out = MAGIC.to_vec();
+    encode_with(MAGIC, app_id, argv)
+}
+
+/// A choice to make, as bytes: the app-id and the command.
+pub fn encode_pick(app_id: &[u8], cmd: &[OsString]) -> Vec<u8> {
+    encode_with(PICK_MAGIC, app_id, cmd)
+}
+
+fn encode_with(magic: &[u8], app_id: &[u8], argv: &[OsString]) -> Vec<u8> {
+    let mut out = magic.to_vec();
     out.extend_from_slice(app_id);
     out.push(0);
     for arg in argv {
@@ -77,7 +96,16 @@ pub fn encode(app_id: &[u8], argv: &[OsString]) -> Vec<u8> {
 
 /// A request from bytes: `(app_id, argv)`.
 pub fn decode(bytes: &[u8]) -> Option<(OsString, Vec<OsString>)> {
-    let rest = bytes.strip_prefix(MAGIC)?;
+    decode_with(MAGIC, bytes)
+}
+
+/// A choice to make from bytes: `(app_id, cmd)`.
+pub fn decode_pick(bytes: &[u8]) -> Option<(OsString, Vec<OsString>)> {
+    decode_with(PICK_MAGIC, bytes)
+}
+
+fn decode_with(magic: &[u8], bytes: &[u8]) -> Option<(OsString, Vec<OsString>)> {
+    let rest = bytes.strip_prefix(magic)?;
     let mut parts = rest.split(|b| *b == 0);
     let app_id = OsString::from_vec(parts.next()?.to_vec());
     let mut argv: Vec<OsString> = parts.map(|p| OsString::from_vec(p.to_vec())).collect();
@@ -219,6 +247,12 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
         .read_to_end(&mut bytes)
         .is_err()
     {
+        return;
+    }
+    if let Some((app_id, cmd)) = decode_pick(&bytes) {
+        let answer = handle_pick(tools, &origin, &app_id, &cmd);
+        eprintln!("broker: {answer}");
+        let _ = stream.write_all(format!("{answer}\n").as_bytes());
         return;
     }
     let answer = match decode(&bytes) {
@@ -505,7 +539,6 @@ fn ask(
     }
     // One question at a time: a stream of them is how a "yes" is got by
     // accident. The next request while one is open is refused, not queued.
-    static ASKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let Ok(_asking) = ASKING.try_lock() else {
         return Err("уже открыт другой вопрос о запуске".to_owned());
     };
@@ -572,16 +605,169 @@ fn ask(
     }
 }
 
+/// One question at a time, a window or a dialog: a stream of them is how a
+/// "yes" is got by accident. The next request while one is open is refused,
+/// not queued.
+static ASKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Our own binary, from the store — never the manifest's runner, a link in
+/// the profile a program with the home could point elsewhere (review
+/// 2026-09-25).
+fn own_binary() -> Result<PathBuf, String> {
+    match std::env::current_exe() {
+        Ok(exe) if exe.starts_with("/nix/store/") => Ok(exe),
+        Ok(exe) => Err(format!("{} is not in the store", exe.display())),
+        Err(e) => Err(format!("cannot find our own binary: {e}")),
+    }
+}
+
+/// A choice to make for a program in a zone: the launch window on the host
+/// (`picker::pick_for_zone`), then what the person chose, checked and
+/// started. From the host or from nowhere known: refused, as a request is.
+/// A locked zone is offered only itself, and anything else coming back is
+/// refused here again. The answer must be the request's own command, word
+/// for word — the window chooses where, never what — and it must not come
+/// sooner than a person could have read the window (`dialog::TOO_FAST`).
+fn handle_pick(tools: &Tools, origin: &Origin, app_id: &OsString, cmd: &[OsString]) -> String {
+    let (zone, locked) = match origin {
+        Origin::Zone(zone) => (
+            zone.clone(),
+            tools
+                .state
+                .join(zone)
+                .join(crate::launch::NO_ESCAPE)
+                .exists(),
+        ),
+        Origin::SystemZone(_) => (origin.name(), false),
+        Origin::Host => {
+            return "refused: запрос с хоста: брокер — дверь из зоны, хосту она не нужна".to_owned()
+        }
+        Origin::Unknown => {
+            return "refused: не понять, откуда запрос: не хост и не зона (или процесс уже вышел)"
+                .to_owned()
+        }
+    };
+    let result = pick_and_check(&zone, locked, app_id, cmd);
+    let (answer, target) = match result {
+        Ok(argv) => {
+            let target = argv
+                .first()
+                .map(|z| z.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (start(app_id, &argv), target)
+        }
+        Err(why) => (format!("refused: {why}"), String::new()),
+    };
+    let why = answer.strip_prefix("refused: ").unwrap_or("");
+    let decision = if answer == "ok" { "started" } else { "refused" };
+    if let Err(e) = crate::journal::append(
+        &tools.state,
+        "broker",
+        &[
+            ("origin", origin.name().as_str()),
+            ("target", target.as_str()),
+            ("app", &*app_id.to_string_lossy()),
+            ("decision", decision),
+            ("why", why),
+        ],
+    ) {
+        eprintln!("broker: journal: {e}");
+    }
+    answer
+}
+
+/// The window, and its answer as the arguments of `run`, checked.
+fn pick_and_check(
+    zone: &str,
+    locked: bool,
+    app_id: &OsString,
+    cmd: &[OsString],
+) -> Result<Vec<OsString>, String> {
+    if cmd.is_empty() {
+        return Err("нечего запускать".to_owned());
+    }
+    if shown_command(cmd).is_none() {
+        return Err(format!(
+            "команда длиннее {SHOWN_WORDS} слов — целиком её не показать, а не целиком не спрашивают"
+        ));
+    }
+    if !crate::launch::has_display() {
+        return Err("спросить некого (нет графической сессии)".to_owned());
+    }
+    let Ok(_asking) = ASKING.try_lock() else {
+        return Err("уже открыт другой вопрос о запуске".to_owned());
+    };
+    let exe = own_binary()?;
+    let picker = exe.with_file_name("vpn-zone-pick");
+    let mut command = Command::new(&picker);
+    command.arg("--from-zone").arg(zone);
+    if locked {
+        command.arg("--locked");
+    }
+    command
+        .arg("--id")
+        .arg(app_id)
+        .arg("--")
+        .args(cmd)
+        .env(crate::picker::ENV_PICK_RUNNER, &exe)
+        .env_remove(crate::launch::ENV_CURRENT)
+        .env_remove(crate::launch::ENV_DELEGATED)
+        .env_remove("VPN_ZONE_ASK")
+        .env_remove("VPN_ZONE_PROFILE")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let asked = std::time::Instant::now();
+    let out = command
+        .output()
+        .map_err(|e| format!("не открыть окно запуска ({}): {e}", picker.display()))?;
+    if !out.status.success() {
+        return Err("человек отказал".to_owned());
+    }
+    crate::dialog::not_too_soon(asked)?;
+    let mut argv: Vec<OsString> = out
+        .stdout
+        .split(|b| *b == 0)
+        .map(|w| OsString::from_vec(w.to_vec()))
+        .collect();
+    // Every word ends with a NUL, which leaves one empty piece behind.
+    if argv.last().is_some_and(|a| a.is_empty()) {
+        argv.pop();
+    }
+    check_pick(&argv, zone, locked, cmd)?;
+    Ok(argv)
+}
+
+/// What the window chose, against the request: the arguments of `run`, with
+/// the very command asked for and, from a locked zone, that zone.
+pub fn check_pick(
+    argv: &[OsString],
+    zone: &str,
+    locked: bool,
+    cmd: &[OsString],
+) -> Result<(), String> {
+    let selection =
+        crate::launch::Selection::parse(argv).map_err(|e| format!("окно ответило не так: {e}"))?;
+    if selection.cmd != cmd {
+        return Err("окно ответило другой командой".to_owned());
+    }
+    if locked && selection.zone.as_os_str() != std::ffi::OsStr::new(zone) {
+        return Err(format!(
+            "зона «{zone}» заперта: запуск в другой сети запрещён"
+        ));
+    }
+    Ok(())
+}
+
 fn start(app_id: &OsString, argv: &[OsString]) -> String {
     // Our own binary, from the store — not the manifest's runner, a profile
     // path: in a standalone home-manager that is `~/.nix-profile`, a link a
     // program with the home could point elsewhere, and the broker would run
     // its binary on the host at once (review 2026-09-25). The manifest is the
     // one this process runs with (VPN_ZONE_TOOLS, set by the wrapper).
-    let exe = match std::env::current_exe() {
-        Ok(exe) if exe.starts_with("/nix/store/") => exe,
-        Ok(exe) => return format!("refused: {} is not in the store", exe.display()),
-        Err(e) => return format!("refused: cannot find our own binary: {e}"),
+    let exe = match own_binary() {
+        Ok(exe) => exe,
+        Err(why) => return format!("refused: {why}"),
     };
     let mut command = Command::new(exe);
     command
@@ -656,9 +842,20 @@ fn accept_forever(tools: &Tools, listener: &UnixListener) -> u8 {
 /// The client half, for `delegate`: `Some(code)` when a broker answered,
 /// `None` when there is none to ask.
 pub fn request(app_id: &[u8], argv: &[OsString]) -> Option<u8> {
+    exchange(&encode(app_id, argv))
+}
+
+/// The client half of a choice to make, for the picker in a zone: `Some(code)`
+/// when a broker answered (after the window was answered or closed), `None`
+/// when there is none to ask.
+pub fn pick(app_id: &[u8], cmd: &[OsString]) -> Option<u8> {
+    exchange(&encode_pick(app_id, cmd))
+}
+
+fn exchange(request: &[u8]) -> Option<u8> {
     let socket = runtime_dir().join(SOCKET);
     let mut stream = UnixStream::connect(&socket).ok()?;
-    if stream.write_all(&encode(app_id, argv)).is_err() {
+    if stream.write_all(request).is_err() {
         return Some(crate::profile::EXIT_NOT_STARTED);
     }
     let _ = stream.shutdown(std::net::Shutdown::Write);
@@ -758,6 +955,73 @@ mod tests {
         assert!(decode(b"junk").is_none());
         let (app_id, back) = decode(&encode(b"", &[])).unwrap();
         assert!(app_id.is_empty() && back.is_empty());
+    }
+
+    /// A choice to make is not a request, nor the other way round: one kind
+    /// is never read as the other.
+    #[test]
+    fn a_choice_to_make_survives_the_socket_and_is_no_request() {
+        let cmd: Vec<OsString> = ["firefox", "https://a b", ""]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let bytes = encode_pick(b"firefox", &cmd);
+        let (app_id, back) = decode_pick(&bytes).unwrap();
+        assert_eq!(app_id, OsString::from("firefox"));
+        assert_eq!(back, cmd);
+        assert!(decode(&bytes).is_none());
+        assert!(decode_pick(&encode(b"firefox", &cmd)).is_none());
+    }
+
+    /// What the window chose is started only as asked: the same command word
+    /// for word, `run`'s own arguments, and from a locked zone that zone.
+    #[test]
+    fn the_window_chooses_where_and_never_what() {
+        let os = |words: &[&str]| -> Vec<OsString> { words.iter().map(OsString::from).collect() };
+        let cmd = os(&["firefox", "https://a"]);
+        assert!(check_pick(
+            &os(&["de", "--", "firefox", "https://a"]),
+            "nl",
+            false,
+            &cmd
+        )
+        .is_ok());
+        assert!(check_pick(
+            &os(&["de", "--sandbox", "work", "--", "firefox", "https://a"]),
+            "nl",
+            false,
+            &cmd
+        )
+        .is_ok());
+        assert!(check_pick(
+            &os(&["unconfined", "--", "firefox", "https://a"]),
+            "nl",
+            false,
+            &cmd
+        )
+        .is_ok());
+        // Another command, or more of it.
+        assert!(check_pick(&os(&["de", "--", "sh", "-c", "x"]), "nl", false, &cmd).is_err());
+        assert!(check_pick(
+            &os(&["de", "--", "firefox", "https://a", "-P"]),
+            "nl",
+            false,
+            &cmd
+        )
+        .is_err());
+        // Not `run`'s arguments at all.
+        assert!(check_pick(&os(&["--bogus"]), "nl", false, &cmd).is_err());
+        assert!(check_pick(&[], "nl", false, &cmd).is_err());
+        // A locked zone: only itself.
+        assert!(check_pick(&os(&["nl", "--", "firefox", "https://a"]), "nl", true, &cmd).is_ok());
+        assert!(check_pick(&os(&["de", "--", "firefox", "https://a"]), "nl", true, &cmd).is_err());
+        assert!(check_pick(
+            &os(&["unconfined", "--", "firefox", "https://a"]),
+            "nl",
+            true,
+            &cmd
+        )
+        .is_err());
     }
 
     #[test]

@@ -18,6 +18,8 @@
 //! container⇥<tag>⇥<label>⇥<flags>
 //! pin-net⇥0|1
 //! pin-container⇥0|1
+//! guard⇥<ms>                          (nothing starts before; optional)
+//! pins⇥0                              (no "always"; optional)
 //! ```
 //!
 //! Flags, comma-separated: `selected`; `dead` (the tunnel does not answer);
@@ -60,6 +62,12 @@ pub struct Request {
     pub containers: Vec<Item>,
     pub pin_net: bool,
     pub pin_container: bool,
+    /// Milliseconds after the window opens during which nothing is started:
+    /// the answer to a program in a zone that brought the window up, which
+    /// takes the focus from whatever the person was typing into.
+    pub guard_ms: u64,
+    /// No "always" in the window (`crate::picker` from a zone).
+    pub no_pins: bool,
 }
 
 /// The hotkey menu: entries to choose one of.
@@ -157,6 +165,12 @@ pub fn render(req: &Request) -> String {
     }
     out.push_str(&format!("pin-net\t{}\n", u8::from(req.pin_net)));
     out.push_str(&format!("pin-container\t{}\n", u8::from(req.pin_container)));
+    if req.guard_ms > 0 {
+        out.push_str(&format!("guard\t{}\n", req.guard_ms));
+    }
+    if req.no_pins {
+        out.push_str("pins\t0\n");
+    }
     out
 }
 
@@ -212,6 +226,7 @@ mod tests {
             }],
             pin_net: true,
             pin_container: false,
+            ..Request::default()
         };
         assert_eq!(
             render(&req),
@@ -219,6 +234,20 @@ mod tests {
              net\tnl\tVPN: nl\tselected\nnet\tde\tVPN: de\tdead\n\
              container\twork\tПрофиль work\tbusy=nl\npin-net\t1\npin-container\t0\n"
         );
+    }
+
+    /// A window a zone's program brought up: the guard and no "always" go
+    /// along; an ordinary one says neither.
+    #[test]
+    fn the_guard_and_no_always_are_said_only_when_set() {
+        let req = Request {
+            guard_ms: 1500,
+            no_pins: true,
+            ..Request::default()
+        };
+        assert!(render(&req).ends_with("guard\t1500\npins\t0\n"));
+        let plain = render(&Request::default());
+        assert!(!plain.contains("guard") && !plain.contains("pins\t"));
     }
 
     #[test]

@@ -107,6 +107,22 @@ where nothing in a zone can write: a program in `~/.local/bin` could be replaced
 program in the zone and would make "always" a standing door. The name a launch gives itself
 (the app-id) is not trusted — the program that asks sends it.
 
+**The choice from a zone (2026-09-25).** The picker a program in a zone starts (a link it
+opens) sees none of the zones — the project's state is hidden from zones — and a window a
+zone draws is one its programs could draw too. So it asks the broker (`VZP1`, the app-id and
+the command), and the broker shows the launch window on the host (`vpn-zone-pick
+--from-zone`): the asking zone in the title, the command word by word, the asking zone
+chosen, a locked zone offered only itself, no "always" (the zone picks which launcher's name
+the window carries). Nothing is decided without the window — a pin or a running copy only
+choose where it starts. It takes no key and starts nothing until the keyboard has been still
+for `dialog::TOO_FAST`: it takes the focus, and a person still typing elsewhere would pick a
+row with a digit and say yes with Enter. The answer comes back as `run`'s arguments; the
+broker checks it is the request's own command word for word (and, from a locked zone, that
+zone), that it did not come sooner than a person could read the window, and starts it. The
+window is the question: no second one. A container of the host's network (`unconfined` in
+`VPN_ZONE_CURRENT`) is no zone to the broker and keeps its own picker, as does a zone
+without a broker to ask.
+
 Inside the zone `xdg-open`/`$BROWSER` resolve to the broker client, and the
 portal's `OpenURI`/`OpenFile` are filtered out of the bus proxy (`--call`
 rules) so that GTK/Qt fall back to `xdg-open`. Firefox and GTK under

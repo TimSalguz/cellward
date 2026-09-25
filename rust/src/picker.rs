@@ -108,6 +108,10 @@ pub struct Args {
     /// `--autostart`: started by XDG autostart at login, where nobody is
     /// looking at a dialog yet. Never asks (`docs/CONTAINERS.md` §5).
     pub autostart: bool,
+    /// `--from-zone <zone>`: the broker asks on behalf of a program in that
+    /// zone ([`pick_for_zone`]); `--locked`: that zone is locked.
+    pub from_zone: Option<String>,
+    pub locked: bool,
     pub cmd: Vec<OsString>,
 }
 
@@ -128,6 +132,8 @@ impl Args {
 
         let mut id = None;
         let mut autostart = false;
+        let mut from_zone = None;
+        let mut locked = false;
         let mut at = 0;
         while at < rest.len() {
             match rest[at].as_bytes() {
@@ -143,6 +149,17 @@ impl Args {
                     autostart = true;
                     at += 1;
                 }
+                b"--from-zone" => {
+                    from_zone = rest
+                        .get(at + 1)
+                        .map(|z| z.to_string_lossy().into_owned())
+                        .filter(|z| !z.is_empty());
+                    at += 2;
+                }
+                b"--locked" => {
+                    locked = true;
+                    at += 1;
+                }
                 b"--" => {
                     at += 1;
                     break;
@@ -155,6 +172,8 @@ impl Args {
             id: id.filter(|v| !v.is_empty()),
             label: label.filter(|v| !v.is_empty()),
             autostart,
+            from_zone,
+            locked,
             cmd: rest.get(at..).unwrap_or(&[]).to_vec(),
         }
     }
@@ -920,6 +939,45 @@ fn ask_window(
     if tools.window.as_os_str().is_empty() {
         return None;
     }
+    let req = window_request(tools, key, label, default_net, memory);
+    let reply = match show_window(tools, &req)? {
+        Some(reply) => reply,
+        None => return Some(None),
+    };
+
+    if reply.pin_net {
+        remember(&tools.state, ".pinned", key, &reply.net);
+    } else if !memory.pinned.is_empty() {
+        let _ = fs::remove_file(tools.state.join(".pinned").join(key));
+    }
+    remember(&tools.state, ".last", key, &reply.net);
+
+    if !reply.pin_container && !memory.pinned_profile.is_empty() {
+        let _ = fs::remove_file(tools.state.join(".pinnedprofile").join(key));
+    }
+    let is_new = matches!(reply.container.as_str(), "__newsb__" | "__new__");
+    let choice = window_container_choice(&reply.container, reply.pin_container);
+    let Some(container) = apply_profile_choice(tools, key, choice, reply.name.clone()) else {
+        return Some(None);
+    };
+    let selector = container.selector();
+    if is_new && reply.pin_container {
+        remember(&tools.state, ".pinnedprofile", key, &selector);
+    }
+    if !container.is_throwaway_container() {
+        remember(&tools.state, ".lastprofile", key, &selector);
+    }
+    Some(Some((reply.net, container)))
+}
+
+/// What the launch window is asked: both columns as the memory has them.
+fn window_request(
+    tools: &Tools,
+    key: &str,
+    label: &str,
+    default_net: &str,
+    memory: &Memory,
+) -> window::Request {
     let running = tools.state.join(".running");
     let profiles: Vec<ProfileRow> = menu_names(&tools.profiles)
         .into_iter()
@@ -970,6 +1028,7 @@ fn ask_window(
         ),
         pin_net: !memory.pinned.is_empty(),
         pin_container: !memory.pinned_profile.is_empty(),
+        ..window::Request::default()
     };
     if let Some(running) = &memory.running {
         let zone = launch::network_name(&running.zone);
@@ -980,7 +1039,13 @@ fn ask_window(
             .map_or(zone, |n| n.label.as_str());
         req.notes.push(format!("Уже открыта: {shown}"));
     }
+    req
+}
 
+/// Show the launch window. `None`: it would not start. `Some(None)`: closed,
+/// or an answer that is none — the launch is over. Only what was offered
+/// comes back: an answer from outside the lists starts nothing.
+fn show_window(tools: &Tools, req: &window::Request) -> Option<Option<window::Reply>> {
     let mut child = Command::new(&tools.window)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -988,7 +1053,7 @@ fn ask_window(
         .spawn()
         .ok()?;
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = std::io::Write::write_all(&mut stdin, window::render(&req).as_bytes());
+        let _ = std::io::Write::write_all(&mut stdin, window::render(req).as_bytes());
     }
     // From here on a failure is a close, never the menus on top of a window
     // the person has already answered.
@@ -1008,30 +1073,7 @@ fn ask_window(
         eprintln!("vpn-zone-pick: окно запуска ответило тем, чего не предлагали — не запускаю");
         return Some(None);
     }
-
-    if reply.pin_net {
-        remember(&tools.state, ".pinned", key, &reply.net);
-    } else if !memory.pinned.is_empty() {
-        let _ = fs::remove_file(tools.state.join(".pinned").join(key));
-    }
-    remember(&tools.state, ".last", key, &reply.net);
-
-    if !reply.pin_container && !memory.pinned_profile.is_empty() {
-        let _ = fs::remove_file(tools.state.join(".pinnedprofile").join(key));
-    }
-    let is_new = matches!(reply.container.as_str(), "__newsb__" | "__new__");
-    let choice = window_container_choice(&reply.container, reply.pin_container);
-    let Some(container) = apply_profile_choice(tools, key, choice, reply.name.clone()) else {
-        return Some(None);
-    };
-    let selector = container.selector();
-    if is_new && reply.pin_container {
-        remember(&tools.state, ".pinnedprofile", key, &selector);
-    }
-    if !container.is_throwaway_container() {
-        remember(&tools.state, ".lastprofile", key, &selector);
-    }
-    Some(Some((reply.net, container)))
+    Some(Some(reply))
 }
 
 // --- WHAT CAME BACK ----------------------------------------------------------
@@ -1191,6 +1233,21 @@ pub fn main() -> ExitCode {
         None => sanitize(&fallback_key(&args.cmd).to_string_lossy()),
     };
 
+    // From inside a zone the question is the host's: the zone sees none of
+    // the zones (`zone::hide_project_state`), and a window the zone draws is
+    // one its programs could draw as well. The broker shows it
+    // (`broker::pick`). No broker to ask — a zone from before it — and the
+    // picker asks here, as before; `run` still goes through the broker.
+    // Not for a container of the host's network (`unconfined` in the
+    // variable): it sees the state, and the broker knows no zone of it.
+    let in_zone = std::env::var(launch::ENV_CURRENT)
+        .is_ok_and(|z| !z.is_empty() && !launch::is_unconfined_name(&z));
+    if args.from_zone.is_none() && in_zone {
+        if let Some(code) = crate::broker::pick(key.as_bytes(), &args.cmd) {
+            return ExitCode::from(code);
+        }
+    }
+
     // The name for the dialogs: from the label the shortcut generator left, or
     // from `--label`, or the key itself.
     let label = match &args.label {
@@ -1211,6 +1268,9 @@ pub fn main() -> ExitCode {
     std::env::remove_var(ENV_PROFILE);
 
     let memory = read_memory(&tools, &key);
+    if let Some(zone) = &args.from_zone {
+        return pick_for_zone(&tools, &key, &memory, &args.cmd, zone, args.locked);
+    }
     if args.autostart {
         if let Some(code) = autostart(&tools, &key, &label, &memory, &args.cmd) {
             return code;
@@ -1375,6 +1435,107 @@ pub fn main() -> ExitCode {
 
     launch_asked(&tools, &key, &zone_choice, &container, &args.cmd, &memory)
 }
+
+/// How long the window a zone's program brought up starts nothing: the
+/// question's own `dialog::TOO_FAST`.
+const FROM_ZONE_GUARD: std::time::Duration = crate::dialog::TOO_FAST;
+
+/// The picker for a program in a zone (`--from-zone`, run by the broker on
+/// the host, `broker::pick`): the window, and the answer on stdout — the
+/// arguments of `run`, each ended by a NUL — for the broker to check and
+/// start. Nothing is started here and nothing is remembered.
+///
+/// Nothing is decided without the window either: a pin, a container's
+/// network, a running copy only choose what the window starts on. The program
+/// in the zone chose which launcher's name this is, and a pin of that name
+/// must not start the zone's command anywhere unasked; for the same reason
+/// the window has no "always" (a pin of that name would decide the menu's
+/// next launch of the real program), and the title says who asks and the
+/// notes what, word by word — not the launcher's name. Starting is off for
+/// its first moments ([`FROM_ZONE_GUARD`], in the window and checked here
+/// again): it takes the focus, and a key meant for something else must not
+/// answer it. A locked zone is offered only itself.
+fn pick_for_zone(
+    tools: &Tools,
+    key: &str,
+    memory: &Memory,
+    cmd: &[OsString],
+    zone: &str,
+    locked: bool,
+) -> ExitCode {
+    let refuse = |why: &str| {
+        eprintln!("vpn-zone-pick: {why}");
+        ExitCode::from(1)
+    };
+    if cmd.is_empty() {
+        return refuse("нечего запускать");
+    }
+    // New containers are made by our own binary from the store, which the
+    // broker names — not by the manifest's runner, a link in the profile a
+    // program with the home could point elsewhere.
+    let mut tools = tools.clone();
+    match std::env::var_os(ENV_PICK_RUNNER).map(std::path::PathBuf::from) {
+        Some(runner) if runner.starts_with("/nix/store/") => tools.runner = runner,
+        _ => return refuse("брокер не назвал своего бинаря — не спрашиваю"),
+    }
+    if tools.window.as_os_str().is_empty() {
+        return refuse("окна запуска нет");
+    }
+    let Some(shown) = crate::broker::shown_command(cmd) else {
+        return refuse("команда слишком длинная, чтобы показать её целиком");
+    };
+    let mut req = window_request(&tools, key, "", zone, memory);
+    req.title = match zone.strip_prefix("system:") {
+        Some(system) => format!("Запрос из системной зоны «{system}»"),
+        None => format!("Запрос из зоны «{zone}»"),
+    };
+    req.notes = std::iter::once("Программа оттуда просит запустить:".to_owned())
+        .chain(shown.lines().map(str::to_owned))
+        .collect();
+    for net in &mut req.nets {
+        net.selected = net.tag == zone;
+    }
+    if locked {
+        req.nets.retain(|n| n.tag == zone);
+        req.notes
+            .push("Зона заперта: запустить можно только в ней самой.".to_owned());
+    }
+    req.pin_net = false;
+    req.pin_container = false;
+    req.no_pins = true;
+    req.guard_ms = FROM_ZONE_GUARD.as_millis() as u64;
+
+    let asked = std::time::Instant::now();
+    let reply = match show_window(&tools, &req) {
+        Some(Some(reply)) => reply,
+        Some(None) => return ExitCode::from(1),
+        None => return refuse("окно запуска не открылось"),
+    };
+    if let Err(why) = crate::dialog::not_too_soon(asked) {
+        return refuse(&why);
+    }
+    let choice = window_container_choice(&reply.container, false);
+    let Some(container) = apply_profile_choice(&tools, key, choice, reply.name.clone()) else {
+        return ExitCode::from(1);
+    };
+    let net = launch::network_name(&reply.net);
+    if net == "offline" {
+        launch::ensure_offline_zone(&tools.state);
+    }
+    let argv = run_argv(Path::new(""), net, &container, cmd);
+    let mut out = Vec::new();
+    for word in &argv[2..] {
+        out.extend_from_slice(word.as_bytes());
+        out.push(0);
+    }
+    if std::io::Write::write_all(&mut std::io::stdout(), &out).is_err() {
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
+}
+
+/// Where the broker names its own binary for [`pick_for_zone`].
+pub const ENV_PICK_RUNNER: &str = "VPN_ZONE_PICK_RUNNER";
 
 /// `autostart.unassigned`: the declared setting, then the local one; `ask` by
 /// default (owner, 2026-09-24 — `offline` before).

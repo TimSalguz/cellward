@@ -1121,3 +1121,190 @@ fn a_new_sandbox_is_named_in_the_window_and_pinned_by_its_checkbox() {
         "unticked: the pin is gone"
     );
 }
+
+// --- A CHOICE ASKED FOR FROM A ZONE (`broker::pick`) --------------------------
+
+/// `sleep` from PATH, for a stand-in window that answers like a person — not
+/// sooner than the guard. `None` where there is none: the scenario is then
+/// not run (the guard's refusal of a quick answer is checked either way).
+fn sleep_binary() -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join("sleep"))
+        .find(|p| p.is_file())
+}
+
+/// The launch window a person answers after a while.
+fn slow_window(home: &Home, reply: &str) -> bool {
+    let Some(sleep) = sleep_binary() else {
+        eprintln!("нет sleep в PATH — сценарий с окном из зоны пропущен");
+        return false;
+    };
+    let log = home.path("window.in");
+    home.script(
+        "vpn-zone-window",
+        &format!(
+            "while IFS= read -r line; do printf '%s\\n' \"$line\" >> '{}'; done\n'{}' 1.7\nprintf '%s' '{reply}'",
+            log.display(),
+            sleep.display()
+        ),
+    );
+    true
+}
+
+const FROM_ZONE_RUNNER: (&str, &str) =
+    ("VPN_ZONE_PICK_RUNNER", "/nix/store/x-cellward/bin/vpn-zone");
+
+#[test]
+fn a_choice_for_a_zone_is_the_window_only_and_comes_back_on_stdout() {
+    // The broker asks the host's picker for a program in zone nl. The window
+    // says who asks and what, word by word; nothing starts, nothing is
+    // remembered — a pin of the name the zone chose starts nothing either:
+    // the window is shown on the asking zone, with no "always".
+    let home = Home::new("from-zone");
+    home.zone("nl");
+    home.zone("de");
+    home.write("state/.pinned/firefox", "de\n");
+    if !slow_window(&home, "net\tnl\ncontainer\t\n") {
+        return;
+    }
+    let out = home.run(
+        &[
+            "--from-zone",
+            "nl",
+            "--id",
+            "firefox",
+            "--",
+            "firefox",
+            "https://example.org/a b",
+        ],
+        &[FROM_ZONE_RUNNER],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "nl\0--\0firefox\0https://example.org/a b\0");
+    assert!(
+        home.launched().is_empty(),
+        "the picker started something itself"
+    );
+    assert!(home.asked().is_empty());
+    let told = home.read("window.in").unwrap();
+    assert!(told.contains("title\tЗапрос из зоны «nl»\n"), "{told}");
+    assert!(told.contains("note\tfirefox\n"), "{told}");
+    assert!(told.contains("note\thttps://example.org/a b\n"), "{told}");
+    assert!(told.contains("net\tnl\tVPN: nl\tselected\n"), "{told}");
+    assert!(told.contains("net\tde\tVPN: de\t\n"), "a pin chose: {told}");
+    assert!(
+        told.contains("pin-net\t0\n") && told.contains("pins\t0\n"),
+        "{told}"
+    );
+    assert!(told.contains("guard\t1500\n"), "{told}");
+    assert_eq!(home.read("state/.last/firefox"), None);
+    assert_eq!(home.read("state/.pinned/firefox").as_deref(), Some("de\n"));
+}
+
+#[test]
+fn a_locked_zone_is_offered_only_itself() {
+    let home = Home::new("from-zone-locked");
+    home.zone("nl");
+    home.zone("de");
+    if !slow_window(&home, "net\tnl\ncontainer\t\n") {
+        return;
+    }
+    let out = home.run(
+        &[
+            "--from-zone",
+            "nl",
+            "--locked",
+            "--id",
+            "x",
+            "--",
+            "firefox",
+        ],
+        &[FROM_ZONE_RUNNER],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let told = home.read("window.in").unwrap();
+    let nets: Vec<&str> = told.lines().filter(|l| l.starts_with("net\t")).collect();
+    assert_eq!(nets, ["net\tnl\tVPN: nl\tselected"], "{told}");
+}
+
+#[test]
+fn a_choice_for_a_zone_answered_at_once_or_without_our_binary_starts_nothing() {
+    // Answered sooner than a person could have read it: a key meant for
+    // something else.
+    let home = Home::new("from-zone-fast");
+    home.zone("nl");
+    home.window("net\tnl\ncontainer\t\n", 0);
+    let out = home.run(
+        &["--from-zone", "nl", "--id", "firefox", "--", "firefox"],
+        &[FROM_ZONE_RUNNER],
+    );
+    assert!(!out.status.success());
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+    // No binary of ours named by the broker: not asked at all.
+    let _ = fs::remove_file(home.path("window.in"));
+    let out = home.run(
+        &["--from-zone", "nl", "--id", "firefox", "--", "firefox"],
+        &[("VPN_ZONE_PICK_RUNNER", "/home/x/.nix-profile/bin/vpn-zone")],
+    );
+    assert!(!out.status.success());
+    assert!(stdout(&out).is_empty());
+    assert!(home.read("window.in").is_none(), "the window was shown");
+}
+
+#[test]
+fn inside_a_zone_the_picker_asks_the_broker_and_shows_nothing_itself() {
+    use std::io::{Read, Write};
+    // A stand-in broker: takes the request, answers "ok".
+    let home = Home::new("in-zone");
+    home.zone("nl");
+    let runtime = home.path("runtime");
+    fs::create_dir_all(runtime.join("vpn-zones")).unwrap();
+    let listener =
+        std::os::unix::net::UnixListener::bind(runtime.join("vpn-zones/broker")).unwrap();
+    let broker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).unwrap();
+        stream.write_all(b"ok\n").unwrap();
+        request
+    });
+    let runtime_dir = runtime.to_string_lossy().into_owned();
+    let out = home.run(
+        &pick("firefox"),
+        &[
+            ("VPN_ZONE_CURRENT", "nl"),
+            ("XDG_RUNTIME_DIR", runtime_dir.as_str()),
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(broker.join().unwrap(), b"VZP1\0firefox\0firefox\0%u\0");
+    assert!(home.asked().is_empty() && home.launched().is_empty());
+
+    // No broker to ask: the picker asks itself, as before.
+    let empty = home.path("no-broker");
+    fs::create_dir_all(&empty).unwrap();
+    let empty = empty.to_string_lossy().into_owned();
+    home.answers(&["nl"]);
+    let out = home.run(
+        &pick("firefox"),
+        &[
+            ("VPN_ZONE_CURRENT", "nl"),
+            ("XDG_RUNTIME_DIR", empty.as_str()),
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(home.asked().len(), 1);
+
+    // A container of the host's network is no zone to the broker.
+    let _ = fs::remove_file(home.path("kdialog.log"));
+    home.answers(&["nl"]);
+    let out = home.run(
+        &pick("firefox"),
+        &[
+            ("VPN_ZONE_CURRENT", "unconfined"),
+            ("XDG_RUNTIME_DIR", runtime_dir.as_str()),
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(home.asked().len(), 1, "asked by the picker itself");
+}

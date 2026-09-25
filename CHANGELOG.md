@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- **A link opened from a program in a zone offered no zones** (the owner,
+  2026-09-25): the picker it starts runs in the zone, which no longer sees
+  the project's state, so the launch window listed only "Без ограничений"
+  and "Без сети" — not even the zone itself. The picker in a zone now asks
+  the broker (`VZP1`), and the broker shows the launch window on the host
+  (`vpn-zone-pick --from-zone`, `rust/src/broker.rs` `handle_pick`): every
+  zone, the asking one chosen, "Запрос из зоны «…»" in the title and the
+  command word by word; a locked zone is offered only itself. The window is
+  the question — no second one from the broker — and it is built not to be
+  answered by accident: it takes no key and starts nothing until the
+  keyboard has been still for 1.5 s (`guard` in the window's contract), has
+  no "always", and decides nothing without being shown, pins included. The
+  broker starts only the request's own command, word for word. A container
+  of the host's network, and a zone without a broker, keep their own picker.
 - **A running terminal no longer takes every next one into its network**
   (`rust/src/picker.rs`, the owner, 2026-09-25). A click on a running
   program started it where it ran, with no question — right for a browser or

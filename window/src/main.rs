@@ -9,7 +9,14 @@
 //! nothing is started.
 //!
 //! Keyboard: ←/→ or Tab switch the column, ↑/↓ or a digit choose in it, Space
-//! ticks "always" of that column, Enter starts, Esc closes. A container that is
+//! ticks "always" of that column, Enter starts, Esc closes.
+//!
+//! A window a program in a zone brought up (`guard`, `pins`) takes no key and
+//! starts nothing until the keyboard has been still for the guard's time — it
+//! takes the focus, and a person still typing into something else would pick
+//! a row with a digit and say yes with Enter — and has no "always": a program
+//! there picks which launcher's name the window carries, and "always" for
+//! that name would decide later launches from the menu. A container that is
 //! open in another network (or belongs to one) cannot go with a different
 //! network: it is shown greyed out with the reason, and the choice skips it.
 
@@ -45,6 +52,10 @@ struct Request {
     containers: Vec<Item>,
     pin_net: bool,
     pin_container: bool,
+    /// For how long, in milliseconds, nothing is started (`guard⇥<ms>`).
+    guard: u64,
+    /// `pins⇥0`: no "always" checkboxes, and none ticked.
+    no_pins: bool,
 }
 
 fn parse_item(fields: &[&str]) -> Option<Item> {
@@ -90,8 +101,14 @@ fn parse_request(text: &str) -> Request {
             "container" => req.containers.extend(parse_item(&fields[1..])),
             "pin-net" => req.pin_net = fields.get(1) == Some(&"1"),
             "pin-container" => req.pin_container = fields.get(1) == Some(&"1"),
+            "guard" => req.guard = fields.get(1).and_then(|v| v.parse().ok()).unwrap_or(0),
+            "pins" => req.no_pins = fields.get(1) == Some(&"0"),
             _ => {}
         }
+    }
+    if req.no_pins {
+        req.pin_net = false;
+        req.pin_container = false;
     }
     req
 }
@@ -114,6 +131,9 @@ enum Msg {
     Launch,
     Cancel,
     Key(Key, keyboard::Modifiers),
+    /// The guard's time is over, if no key came since this count of them:
+    /// starting is possible.
+    Armed(u64),
 }
 
 struct Window {
@@ -126,6 +146,10 @@ struct Window {
     pin_net: bool,
     pin_container: bool,
     name: String,
+    /// False while the request's guard runs.
+    armed: bool,
+    /// Keys pressed while the guard ran: each one starts it again.
+    held_keys: u64,
 }
 
 /// Why a container cannot go with this network, if it cannot.
@@ -159,6 +183,8 @@ impl Window {
             container,
             name: String::new(),
             entry: 0,
+            armed: req.guard == 0,
+            held_keys: 0,
             req,
         }
     }
@@ -178,13 +204,13 @@ impl Window {
             .is_some_and(|c| blocked(c, self.net_tag()).is_none())
     }
 
-    /// Everything needed to start: a container that goes with the network, and
-    /// a name for a new one.
+    /// Everything needed to start: a container that goes with the network, a
+    /// name for a new one, and the guard's time over.
     fn ready(&self) -> bool {
         let Some(c) = self.req.containers.get(self.container) else {
             return false;
         };
-        self.container_ok(self.container) && (!c.new || !self.name.trim().is_empty())
+        self.armed && self.container_ok(self.container) && (!c.new || !self.name.trim().is_empty())
     }
 
     fn naming(&self) -> bool {
@@ -266,8 +292,9 @@ impl Window {
                     }
                 }
             }
-            Msg::PinNet(v) => self.pin_net = v,
-            Msg::PinContainer(v) => self.pin_container = v,
+            Msg::PinNet(v) => self.pin_net = v && !self.req.no_pins,
+            Msg::PinContainer(v) => self.pin_container = v && !self.req.no_pins,
+            Msg::Armed(keys) => self.armed |= keys == self.held_keys,
             Msg::Name(name) => self.name = name,
             Msg::Launch => {
                 if self.naming() && self.name.trim().is_empty() {
@@ -285,6 +312,12 @@ impl Window {
     }
 
     fn key(&mut self, key: Key, modifiers: keyboard::Modifiers) -> Task<Msg> {
+        // Guarded: a key is somebody typing elsewhere — nothing, and the
+        // guard from the start. Esc still closes.
+        if !self.armed && key.as_ref() != Key::Named(key::Named::Escape) {
+            self.held_keys += 1;
+            return arm_after(self.req.guard, self.held_keys);
+        }
         if self.menu() {
             let n = self.req.actions.len();
             match key.as_ref() {
@@ -321,7 +354,7 @@ impl Window {
             }
             Key::Named(key::Named::ArrowUp) => self.step(-1),
             Key::Named(key::Named::ArrowDown) => self.step(1),
-            Key::Named(key::Named::Space) => match self.pane {
+            Key::Named(key::Named::Space) if !self.req.no_pins => match self.pane {
                 Pane::Net => self.pin_net = !self.pin_net,
                 Pane::Container => self.pin_container = !self.pin_container,
             },
@@ -456,19 +489,19 @@ impl Window {
                     .padding(6),
             );
         }
-        right = right.push(
-            checkbox(self.pin_container)
-                .label("Всегда этот контейнер")
-                .on_toggle(Msg::PinContainer),
-        );
-        let left = column![
-            nets,
-            checkbox(self.pin_net)
-                .label("Всегда эту сеть")
-                .on_toggle(Msg::PinNet),
-        ]
-        .spacing(8)
-        .width(Length::FillPortion(1));
+        let mut left = column![nets].spacing(8).width(Length::FillPortion(1));
+        if !self.req.no_pins {
+            right = right.push(
+                checkbox(self.pin_container)
+                    .label("Всегда этот контейнер")
+                    .on_toggle(Msg::PinContainer),
+            );
+            left = left.push(
+                checkbox(self.pin_net)
+                    .label("Всегда эту сеть")
+                    .on_toggle(Msg::PinNet),
+            );
+        }
 
         // The program's name inside the window too: niri draws no title bars.
         let mut page = column![text(&self.req.title).size(20)]
@@ -478,10 +511,17 @@ impl Window {
             page = page.push(text(format!("ⓘ {note}")).size(14));
         }
         page = page.push(row![left, right].spacing(16).height(Length::Fill));
-        let launch = button(text("Запустить  Enter").size(14))
-            .padding([6, 14])
-            .style(button::primary)
-            .on_press_maybe(self.ready().then_some(Msg::Launch));
+        let launch = button(
+            text(if self.armed {
+                "Запустить  Enter"
+            } else {
+                "Секунду…"
+            })
+            .size(14),
+        )
+        .padding([6, 14])
+        .style(button::primary)
+        .on_press_maybe(self.ready().then_some(Msg::Launch));
         let cancel = button(text("Отмена  Esc").size(14))
             .padding([6, 14])
             .style(button::secondary)
@@ -500,6 +540,16 @@ impl Window {
             _ => None,
         })
     }
+}
+
+/// `Msg::Armed(keys)` after `guard` milliseconds: a plain sleep on the
+/// executor's pool — no timer backend in this build, and the pool has threads
+/// to spare for it.
+fn arm_after(guard: u64, keys: u64) -> Task<Msg> {
+    let guard = std::time::Duration::from_millis(guard);
+    Task::perform(async move { std::thread::sleep(guard) }, move |()| {
+        Msg::Armed(keys)
+    })
 }
 
 fn main() -> iced::Result {
@@ -535,7 +585,13 @@ fn main() -> iced::Result {
                 .ok()
                 .and_then(|mut r| r.take())
                 .unwrap_or_default();
-            Window::new(req)
+            let window = Window::new(req);
+            let arm = if window.armed {
+                Task::none()
+            } else {
+                arm_after(window.req.guard, 0)
+            };
+            (window, arm)
         },
         Window::update,
         Window::view,
@@ -635,6 +691,36 @@ mod tests {
         assert_eq!(w.entry, 0, "round");
         let _ = w.key(Key::Character("2".into()), keyboard::Modifiers::default());
         assert_eq!(w.entry, 1);
+    }
+
+    /// A window a zone's program brought up: nothing starts during the guard,
+    /// and there is no "always" to tick.
+    #[test]
+    fn a_guarded_window_starts_nothing_at_first_and_has_no_always() {
+        let req = parse_request(&format!("{REQUEST}guard\t1500\npins\t0\n"));
+        assert_eq!(req.guard, 1500);
+        assert!(req.no_pins && !req.pin_net, "a pin sent along is dropped");
+        let mut w = Window::new(req);
+        assert!(!w.armed && !w.ready());
+        let _ = w.key(
+            Key::Named(key::Named::Space),
+            keyboard::Modifiers::default(),
+        );
+        let _ = w.update(Msg::PinContainer(true));
+        assert!(!w.pin_net && !w.pin_container);
+        // Somebody still typing: a digit picks nothing, Enter starts nothing,
+        // and the guard that was running no longer arms the window.
+        let _ = w.key(Key::Character("1".into()), keyboard::Modifiers::default());
+        assert_eq!(w.net, 2, "a digit during the guard picked a row");
+        let _ = w.key(
+            Key::Named(key::Named::Enter),
+            keyboard::Modifiers::default(),
+        );
+        let _ = w.update(Msg::Armed(0));
+        assert!(!w.armed, "a key came after that guard began");
+        let _ = w.update(Msg::Armed(w.held_keys));
+        assert!(w.ready());
+        assert!(w.answer().ends_with("pin-net\t0\npin-container\t0\n"));
     }
 
     #[test]
