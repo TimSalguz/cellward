@@ -145,9 +145,13 @@ let
           )
 
       def logs():
+          """What to read when something here fails: the policy's, the
+          helper's and the zone's programs' lines, and the host's clients."""
           print(machine.execute(
-              "journalctl --no-pager _UID=1000 | grep -i -E 'wireplumber|vpn-zones|pipewire-context|zone offline' | tail -120"
+              "journalctl --no-pager _UID=1000 | grep -v -E 'su\\[|pam_unix' | tail -150"
           )[1])
+          print(alice_any("pw-cli ls Client"))
+          print(alice_any("pw-cli ls Node"))
 
       machine.wait_for_unit("multi-user.target")
       machine.wait_for_unit("home-manager-alice.service")
@@ -177,6 +181,12 @@ let
           mounts = zone("cat /proc/self/mountinfo")
           assert "/pipewire-context /run/user/1000/pipewire-0 " in mounts, mounts
           zone("test ! -e /run/user/1000/pipewire-0-manager")
+          # A client of the zone gets through at all.
+          try:
+              print(zone("timeout 20 pw-cli info 0"))
+          except Exception:
+              logs()
+              raise
           out = json.loads(alice("vpn-zone status --json"))
           z = next(n for n in out["networks"] if n["name"] == "offline")
           assert z["audio_manager"] == {"value": False, "source": "default"}, z

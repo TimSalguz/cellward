@@ -51,19 +51,18 @@ local MIC_PREFIX = "vpn-zones.microphone."
 -- bound id of a zone's client -> { zone = <app-id>, client = <WpClient> }
 local zones = {}
 
+-- A property of a node, port, link or client: its info properties (what
+-- the object says of itself now; the global ones carry only some keys).
 local function prop (obj, key)
-  local ok, props = pcall (function () return obj.properties end)
-  if ok and props then
-    local v = props [key]
-    if v ~= nil then
-      return v
-    end
-  end
-  local ok2, gprops = pcall (function () return obj ["global-properties"] end)
-  if ok2 and gprops then
-    return gprops [key]
-  end
-  return nil
+  local props = obj.properties
+  return props and props [key] or nil
+end
+
+-- A property of a factory or a metadata object: they have no info
+-- properties, only the global ones.
+local function gprop (obj, key)
+  local props = obj ["global-properties"]
+  return props and props [key] or nil
 end
 
 -- The zone client that owns a node, or nil.
@@ -189,7 +188,7 @@ local function finalize (z)
     end
   end
   for factory in factories_om:iterate () do
-    if prop (factory, "factory.name") == "client-node" then
+    if gprop (factory, "factory.name") == "client-node" then
       perms [factory ["bound-id"]] = "r"
     end
   end
@@ -223,7 +222,10 @@ local function regrant_sources (zone)
 end
 
 clients_om:connect ("object-added", function (_, client)
-  if prop (client, "pipewire.sec.engine") ~= ENGINE then
+  local engine = prop (client, "pipewire.sec.engine")
+  log:info (client, string.format ("client %d added (engine %s)",
+      client ["bound-id"], tostring (engine)))
+  if engine ~= ENGINE then
     return
   end
   local zone = prop (client, "pipewire.sec.app-id") or ""
@@ -261,7 +263,7 @@ ports_om:connect ("object-added", function (_, port)
 end)
 
 factories_om:connect ("object-added", function (_, factory)
-  if prop (factory, "factory.name") == "client-node" then
+  if gprop (factory, "factory.name") == "client-node" then
     for _, z in pairs (zones) do
       z.client:update_permissions { [factory ["bound-id"]] = "r" }
     end
@@ -269,7 +271,7 @@ factories_om:connect ("object-added", function (_, factory)
 end)
 
 metadata_om:connect ("object-added", function (_, m)
-  local name = prop (m, "metadata.name")
+  local name = gprop (m, "metadata.name")
   if name == "default" then
     for _, z in pairs (zones) do
       z.client:update_permissions { [m ["bound-id"]] = "r" }
