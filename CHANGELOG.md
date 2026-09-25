@@ -6,6 +6,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The title strip: the zone's name on the window** (`rust/src/wl_title.rs`,
+  `rust/src/wl_frame.rs`, `docs/WINDOW-FRAME.md` §8 «Этап 2, заголовок»;
+  stage 2 of the window frame, its second part — no buttons yet). Under the
+  border's top band the proxy draws a strip of the zone's colour, 20 logical
+  pixels high, with `<zone> · <container>` on it — the container as the
+  launch knows it (`основной`, a profile, `песочница <name>`, `разовая
+  песочница`, `временный`), cleaned of control and bidi characters and
+  bounded (40 characters a part, 480 logical pixels a line). It is a
+  subsurface of the program's root like the border's strips, with the text a
+  subsurface of it: no id in the program's table, input on it dropped, a new
+  subsurface of the program put below it. Modes (§0а): `always` (the
+  default) — inside the window, the program is told a size less the strip
+  and every translation of the border takes it too; `hover` — no room taken,
+  over the top of the content, out while the pointer is at the window's top
+  edge or on the strip (seen on the program's own `wl_pointer`), in when it
+  goes below; `off` — the border alone. In fullscreen the strip goes and so
+  does its room: which state a commit is of is the configure the program
+  acked last, kept by serial. The text is rasterized at the scale the
+  compositor prefers for it — `wp_fractional_scale_v1` where it is offered
+  to the restricted client (bound on the proxy's own registry, never shown
+  to the program), else `preferred_buffer_scale` — into a buffer of exactly
+  `round(logical × scale)` pixels given its size by `wp_viewport`; a resize
+  never redraws it, a narrow window shows its left part. A new scale and the
+  hover strip show at once (`set_desync`, the strip's commit, `set_sync`).
+  The font is DejaVu Sans from the Nix package by store path
+  (`VPN_ZONE_FRAME_FONT`, built in by `package.nix`; no fontconfig), read by
+  the supervisor before the proxy is forked; the rasterizer is `ab_glyph`,
+  pinned `=0.2.32`, no default features. The pixels live in one memfd per
+  launch, made and sealed before the proxy's filter, in four regions of one
+  scale each, a region redrawn only when no buffer of it is held by the
+  compositor; the filter gains `pwrite64` only. Without a font the strip goes
+  without text. Settings: `programs.vpn-zones.frame.title =
+  "always"|"hover"|"off"`, `vpn-zone frame title always|hover|off|default`;
+  `vpn-zone status --json` shows `frame_title` in `defaults` with its
+  source. `wl-sandbox` takes `--frame <rrggbb>:<width>:<mode>` and
+  `--frame-title <text>`. Tests: the layout (the frame with and without the
+  strip tiling the band, a configured window exactly the compositor's
+  size), the text cut to a narrow strip, hover, fullscreen from a
+  configure's states, the text's cleaning, the mode's sources, the
+  rasterizer (ink on the colour at 1–2×, clean edge rows, an ellipsis, a
+  readable contrast on every default colour), the memfd's regions; the
+  proxy between a client and a fake compositor — room for the strip,
+  strip and text laid before the program's commit, a new buffer at 1.5
+  shown at once, fullscreen and back, hover out at the top edge and in
+  below. VM (`tests/vm-window.nix`): the strip and its text on the
+  screenshot above foot's content, gone in fullscreen, at 1.5 with pixels of
+  the ink itself, and a hover window without it.
 - **The zone's border around its programs' windows** (`rust/src/wl_frame.rs`,
   `docs/WINDOW-FRAME.md` §8 «Этап 2, обводка»; stage 2 of the window frame,
   its first part — no title bar or buttons yet). The Wayland proxy draws a
@@ -664,6 +711,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `/proc` from the host and from neither kind of zone.
 
 ### Fixed
+- **A flaky proxy test**: `when_the_compositor_goes_the_client_loses_its_display`
+  wrote its request after the proxy may already have closed the client
+  (EPIPE on a loaded runner). It only checks now that nothing comes back.
 - **`vpn-zone watch` does not carry a verdict over a restart**: a zone
   restarted between two looks inherited "dead" and read so while idle.
 - **A plain system zone with an uplink needs its own `dns`**: the default
