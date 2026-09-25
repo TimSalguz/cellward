@@ -335,8 +335,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `yes` recorded until the next tick), right after the metadata is bound,
   and again whenever the metadata says otherwise. `Audio/Duplex` is no
   capture source (WirePlumber gives a duplex node monitor ports: recording
-  it was recording the host's playback), and the watchdog refuses a zone's
-  capture from any monitor port. A zone's stream that claims the graph
+  it was recording the host's playback); the watchdog, deciding by the
+  nodes' classes like the guard, refuses it too. A zone's stream that
+  claims the graph
   (`node.exclusive`, a forced or locked quantum or rate, `node.driver`) is
   destroyed, when it appears and when its properties change; an exclusive
   or passthrough link of a zone's stream is refused. A zone has at most 128

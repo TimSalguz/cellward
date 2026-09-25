@@ -40,8 +40,8 @@
 --    a zone's node standing in for a device), never a link that would hold a
 --    device for a zone alone (exclusive, passthrough). The guard sits in
 --    WirePlumber's own linking chain, and a watchdog destroys any link that
---    got past it — a link whose ends it does not know yet is looked at again
---    when they come, never let through unseen;
+--    got past it — a link whose nodes it does not know yet is looked at
+--    again when they come, never let through unseen;
 --  * default nodes: a zone's node is never a candidate.
 --
 -- The script announces itself with vpn-zones.policy = "1" in the metadata
@@ -218,16 +218,6 @@ local function node_by_id (id)
   }
 end
 
-local function port_by_id (id)
-  id = id and tonumber (id)
-  if id == nil then
-    return nil
-  end
-  return ports_om:lookup {
-    Constraint { "bound-id", "=", id, type = "gobject" },
-  }
-end
-
 local function rescan_linking ()
   local source = Plugin.find ("standard-event-source")
   if source ~= nil then
@@ -395,10 +385,9 @@ metadata_om:connect ("object-added", function (_, m)
   end
 end)
 
--- Links whose ends (nodes, or the port a zone would record from) this
--- script does not know yet, by bound id: looked at again when a node or a
--- port comes. The second line never lets a link through because it saw it
--- too early.
+-- Links whose nodes this script does not know yet, by bound id: looked at
+-- again when a node comes. The second line never lets a link through
+-- because it saw it too early.
 local pending = {}
 
 -- The watchdog: a link WirePlumber's chain did not refuse, or somebody else
@@ -422,21 +411,11 @@ local function check_link (link)
   elseif oz ~= nil then
     ok = link_allowed (out_node, in_node, true)
   else
+    -- By the node's class, not by the port: a check of `port.monitor` on
+    -- the link's output port refused the VM test's virtual microphone (a
+    -- null sink as Audio/Source/Virtual, whose capture ports are what a
+    -- sink's monitor is); a duplex node is no source at all (SOURCES).
     ok = link_allowed (in_node, out_node, false)
-    if ok then
-      -- A zone records: from a capture port, never a monitor, whatever the
-      -- node's class says. A link that does not say its port is refused.
-      local pid = prop (link, "link.output.port")
-      local port = port_by_id (pid)
-      if pid == nil then
-        ok = false
-      elseif port == nil then
-        pending [lid] = link
-        return
-      elseif truthy (prop (port, "port.monitor")) then
-        ok = false
-      end
-    end
   end
   if not ok then
     log:notice (link, string.format ("link %d -> %d of a zone refused — destroyed",
@@ -467,10 +446,6 @@ local function check_pending ()
 end
 
 nodes_om:connect ("object-added", function (_, _)
-  check_pending ()
-end)
-
-ports_om:connect ("object-added", function (_, _)
   check_pending ()
 end)
 
