@@ -44,7 +44,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   geometry grown, four strips laid and committed before the program's
   commit, a configure less the border, a pointer over a strip unseen by the
   program, a new subsurface put below the strips, the strips gone with the
-  toplevel, nothing of it on a connection that is hidden. VM
+  toplevel, nothing of it on a connection that is hidden nor with a
+  compositor that has no `wl_subcompositor`. VM
   (`tests/vm-window.nix`, sway): foot in a zone, screenshots read pixel by
   pixel — the border in the declared colour and width at every edge of the
   window, foot's own pixels exactly inside it, in fullscreen too, at scale
