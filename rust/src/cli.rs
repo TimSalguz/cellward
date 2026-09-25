@@ -44,7 +44,7 @@ pub const EXIT_TOOLS: u8 = 2;
 const READY_TRIES: u32 = 100;
 const READY_STEP: Duration = Duration::from_millis(100);
 
-const USAGE: &str = "vpn-zone — сетевые зоны с VPN, без root\n\n  vpn-zone add <имя> <файл.conf>   создать зону из конфига AmneziaWG/WireGuard\n                                   или OpenConnect (секция [OpenConnect])\n  vpn-zone add <имя> --system <з.> зона через туннель системной зоны <з.>:\n                                   своего туннеля нет, один VPN — одно\n                                   подключение (конфиг с ключом системной\n                                   зоны становится такой зоной сам)\n  vpn-zone up <имя>                поднять\n  vpn-zone down <имя>              опустить\n  vpn-zone list                    список зон и их состояние\n  vpn-zone status <имя>            подробности (адрес, handshake)\n  vpn-zone status --json           всё состояние машиночитаемо: зоны, контейнеры,\n                                   программы, откуда взято каждое значение\n  vpn-zone status --bar            одна строка JSON для статус-бара (waybar):\n                                   поднятые зоны и живы ли их туннели\n  vpn-zone run <имя> -- <кмд>      запустить программу внутри зоны\n  vpn-zone launch <id> [-- <арг.>] запустить ярлык по id через пикер, как\n                                   щелчок по нему, — для биндов композитора\n  vpn-zone rm <имя>                удалить зону вместе с ярлыками\n  vpn-zone sync                    пересобрать .desktop-ярлыки\n  vpn-zone mode <режим>            как ярлыки работают:\n                                     picker   — один ярлык, спрашивает сеть\n                                                при запуске (по умолчанию)\n                                     per-zone — отдельный ярлык на каждую зону\n                                                (устарел, будет убран)\n                                     both     — и то, и другое (устарел)\n                                     off      — не трогать ярлыки вовсе\n  vpn-zone default <вариант>       что предлагать в пикере для незнакомой\n                                   программы: offline (по умолчанию),\n                                   unconfined (без ограничений: сеть хоста,\n                                   без VPN и изоляции зоны; прежнее имя —\n                                   direct) или имя зоны\n  vpn-zone gc                      убрать зависшие держатели зон, осиротевшую\n                                   обвязку и мёртвые записи\n  vpn-zone perms list|reset <прог.|--all>\n                                   какие доступы к файлам выданы программам\n                                   в песочнице; reset — спросить заново\n  vpn-zone sandbox create|list|rm <имя>\n                                   именованные песочницы: свой дом, общий для\n                                   всех программ, запущенных в этой песочнице\n  vpn-zone run <имя> --sandbox <п> -- <кмд>\n                                   запустить в именованной песочнице\n  vpn-zone run <имя> --fs-sandbox -- <кмд>\n                                   запустить в песочнице файловой системы:\n                                   вместо $HOME — пустой каталог, наружу\n                                   видно только разрешённое, остальное — через\n                                   диалог выбора файла (порталы)\n  vpn-zone run <имя> --tmp-profile -- <кмд>\n                                   запустить в одноразовом контейнере: слой\n                                   создаётся в /tmp и стирается по выходе\n  vpn-zone default-profile <v>     контейнер по умолчанию для всех запусков:\n                                   ask (спрашивать), main (основной),\n                                   own (своя песочница у каждой программы)\n                                   или имя контейнера\n  vpn-zone pins                    какие программы закреплены за сетями\n  vpn-zone forget <прог.|--all>    снять закрепление (снова будет спрашивать)\n  vpn-zone isolate <overlay|off>   свой слой профиля у зоны (overlay — по\n                                   умолчанию). Без него браузер откроет окно\n                                   в уже запущенном процессе, мимо VPN\n  vpn-zone reset-profile <имя>     очистить слой профиля зоны\n  vpn-zone wayland-proxy on|off    посредник между программами и\n                                   композитором (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-no-proxy)\n  vpn-zone wayland-sandbox on|off  отбирать ли у программ захват экрана,\n                                   чтение буфера в фоне и эмуляцию ввода\n                                   (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-allow)\n  vpn-zone check <имя>             прошло ли рукопожатие (жив ли конфиг)\n  vpn-zone watch [--json]          живы ли туннели поднятых зон; при смерти и\n                                   возвращении — уведомление (зовёт таймер)\n  vpn-zone kill <зона>             оборвать зону сейчас: заморозить все её\n                                   программы, опустить зону, убить программы\n                                   (для удалённого доступа, который надо\n                                   прекратить немедленно)\n  vpn-zone journal [--json] [<N>]  последние события: запуски без ограничений\n                                   (unconfined) и решения брокера\n  vpn-zone focused [--json|--bar|--watch]\n                                   в какой сети и контейнере программа окна в\n                                   фокусе (niri, sway); --bar — строка для\n                                   статус-бара, --watch — такая строка при\n                                   каждой смене фокуса\n  vpn-zone window-menu             меню программы окна в фокусе — для бинда\n                                   композитора: закрепить сеть, перезапустить\n                                   с выбором сети, закрыть, оборвать зону\n  vpn-zone doctor [<зона>…] [--json]\n                                   что на деле закрыто: готовность системы и\n                                   проверки изнутри каждой поднятой зоны\n                                   (выходы, маршруты, резолверы, открытые\n                                   каналы); код 1 — есть нарушения\n  vpn-zone hermetic <зона> on|off|default\n                                   герметичная зона: без systemd --user,\n                                   сессионная шина через фильтр, запуск\n                                   наружу через брокер; default — как\n                                   у всех зон\n  vpn-zone hermetic --default on|off\n                                   герметичны ли зоны без своей настройки\n                                   (по умолчанию on, с 2026-09)\n  vpn-zone x11 <зона> on|off       свой X-сервер программам зоны (X хоста в\n                                   зонах недоступен всегда)\n  vpn-zone nix-daemon <зона> on|off|default\n                                   виден ли программам зоны Nix-демон хоста\n                                   (по умолчанию нет: он качает в сети хоста)\n  vpn-zone host-files <зона> read-only|writable|default\n                                   может ли герметичная зона писать то, что\n                                   хост исполняет из дома (по умолчанию нет)\n  vpn-zone lock|unlock <имя>       запретить/разрешить программам этой зоны\n                                   запускать что-либо в ДРУГИХ сетях\n                                   (по умолчанию разрешено; держится только\n                                   в герметичной зоне)\n  vpn-zone trust add <контейнер> <сертификат> [--yes]\n                                   дополнительный корневой сертификат ТОЛЬКО\n                                   для программ этого контейнера (профиль или\n                                   sb:<песочница>): хост и другие контейнеры\n                                   ему не доверяют. Его владелец сможет читать\n                                   TLS-трафик программ контейнера\n  vpn-zone trust list [<контейнер>] [--json]\n  vpn-zone trust rm <контейнер> <начало sha256>\n  vpn-zone trust reset <контейнер> убрать все дополнительные сертификаты\n  vpn-zone container list|show [<контейнер>] [--json]\n                                   контейнеры (профиль или sb:<песочница>):\n                                   их сеть, программы, сертификаты\n  vpn-zone container set <контейнер> network <сеть|ask>\n                                   привязать контейнер к сети: запуск в\n                                   другой сети будет отказом\n  vpn-zone container set <контейнер> x11 on|off\n                                   свой X-сервер в зонах (X хоста в зонах\n                                   недоступен всегда)\n  vpn-zone container assign <программа> <контейнер>\n  vpn-zone container unassign <программа>\n  vpn-zone container grant sb:<песочница> <каталог> [--for 2h]\n  vpn-zone container revoke sb:<песочница> <каталог>\n                                   выдать песочнице каталог настоящего дома\n                                   или диска (/mnt, /media, /run/media, /srv):\n                                   префикс Wine, библиотеку Steam; --for —\n                                   на срок (30s, 15m, 2h, 7d), по истечении\n                                   и при revoke каталог отмонтируется и у\n                                   уже запущенных программ\n  vpn-zone container merge <из> <в> [--yes]\n                                   объединить два контейнера одного вида:\n                                   совпавшее остаётся у <в>, версии из <из>\n                                   кладутся рядом; --yes — согласие принять\n                                   чужие корневые сертификаты\n";
+const USAGE: &str = "vpn-zone — сетевые зоны с VPN, без root\n\n  vpn-zone add <имя> <файл.conf>   создать зону из конфига AmneziaWG/WireGuard\n                                   или OpenConnect (секция [OpenConnect])\n  vpn-zone add <имя> --system <з.> зона через туннель системной зоны <з.>:\n                                   своего туннеля нет, один VPN — одно\n                                   подключение (конфиг с ключом системной\n                                   зоны становится такой зоной сам)\n  vpn-zone up <имя>                поднять\n  vpn-zone down <имя>              опустить\n  vpn-zone list                    список зон и их состояние\n  vpn-zone status <имя>            подробности (адрес, handshake)\n  vpn-zone status --json           всё состояние машиночитаемо: зоны, контейнеры,\n                                   программы, откуда взято каждое значение\n  vpn-zone status --bar            одна строка JSON для статус-бара (waybar):\n                                   поднятые зоны и живы ли их туннели\n  vpn-zone run <имя> -- <кмд>      запустить программу внутри зоны\n  vpn-zone launch <id> [-- <арг.>] запустить ярлык по id через пикер, как\n                                   щелчок по нему, — для биндов композитора\n  vpn-zone rm <имя>                удалить зону вместе с ярлыками\n  vpn-zone sync                    пересобрать .desktop-ярлыки\n  vpn-zone mode <режим>            как ярлыки работают:\n                                     picker   — один ярлык, спрашивает сеть\n                                                при запуске (по умолчанию)\n                                     per-zone — отдельный ярлык на каждую зону\n                                                (устарел, будет убран)\n                                     both     — и то, и другое (устарел)\n                                     off      — не трогать ярлыки вовсе\n  vpn-zone default <вариант>       что предлагать в пикере для незнакомой\n                                   программы: offline (по умолчанию),\n                                   unconfined (без ограничений: сеть хоста,\n                                   без VPN и изоляции зоны; прежнее имя —\n                                   direct) или имя зоны\n  vpn-zone gc                      убрать зависшие держатели зон, осиротевшую\n                                   обвязку и мёртвые записи\n  vpn-zone perms list|reset <прог.|--all>\n                                   какие доступы к файлам выданы программам\n                                   в песочнице; reset — спросить заново\n  vpn-zone sandbox create|list|rm <имя>\n                                   именованные песочницы: свой дом, общий для\n                                   всех программ, запущенных в этой песочнице\n  vpn-zone run <имя> --sandbox <п> -- <кмд>\n                                   запустить в именованной песочнице\n  vpn-zone run <имя> --fs-sandbox -- <кмд>\n                                   запустить в песочнице файловой системы:\n                                   вместо $HOME — пустой каталог, наружу\n                                   видно только разрешённое, остальное — через\n                                   диалог выбора файла (порталы)\n  vpn-zone run <имя> --tmp-profile -- <кмд>\n                                   запустить в одноразовом контейнере: слой\n                                   создаётся в /tmp и стирается по выходе\n  vpn-zone default-profile <v>     контейнер по умолчанию для всех запусков:\n                                   ask (спрашивать), main (основной),\n                                   own (своя песочница у каждой программы)\n                                   или имя контейнера\n  vpn-zone pins                    какие программы закреплены за сетями\n  vpn-zone forget <прог.|--all>    снять закрепление (снова будет спрашивать)\n  vpn-zone isolate <overlay|off>   свой слой профиля у зоны (overlay — по\n                                   умолчанию). Без него браузер откроет окно\n                                   в уже запущенном процессе, мимо VPN\n  vpn-zone reset-profile <имя>     очистить слой профиля зоны\n  vpn-zone wayland-proxy on|off    посредник между программами и\n                                   композитором (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-no-proxy)\n  vpn-zone wayland-sandbox on|off  отбирать ли у программ захват экрана,\n                                   чтение буфера в фоне и эмуляцию ввода\n                                   (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-allow)\n  vpn-zone frame show|hide         рамка цвета зоны вокруг окон её программ;\n                                   hide — спрятать у окон, открытых после\n                                   этого (для показа экрана)\n  vpn-zone frame width <1–32>|default\n                                   толщина рамки, логические пиксели (4)\n  vpn-zone frame color <зона> <#rrggbb>|default\n                                   цвет рамки зоны (по умолчанию — из имени)\n  vpn-zone check <имя>             прошло ли рукопожатие (жив ли конфиг)\n  vpn-zone watch [--json]          живы ли туннели поднятых зон; при смерти и\n                                   возвращении — уведомление (зовёт таймер)\n  vpn-zone kill <зона>             оборвать зону сейчас: заморозить все её\n                                   программы, опустить зону, убить программы\n                                   (для удалённого доступа, который надо\n                                   прекратить немедленно)\n  vpn-zone journal [--json] [<N>]  последние события: запуски без ограничений\n                                   (unconfined) и решения брокера\n  vpn-zone focused [--json|--bar|--watch]\n                                   в какой сети и контейнере программа окна в\n                                   фокусе (niri, sway); --bar — строка для\n                                   статус-бара, --watch — такая строка при\n                                   каждой смене фокуса\n  vpn-zone window-menu             меню программы окна в фокусе — для бинда\n                                   композитора: закрепить сеть, перезапустить\n                                   с выбором сети, закрыть, оборвать зону\n  vpn-zone doctor [<зона>…] [--json]\n                                   что на деле закрыто: готовность системы и\n                                   проверки изнутри каждой поднятой зоны\n                                   (выходы, маршруты, резолверы, открытые\n                                   каналы); код 1 — есть нарушения\n  vpn-zone hermetic <зона> on|off|default\n                                   герметичная зона: без systemd --user,\n                                   сессионная шина через фильтр, запуск\n                                   наружу через брокер; default — как\n                                   у всех зон\n  vpn-zone hermetic --default on|off\n                                   герметичны ли зоны без своей настройки\n                                   (по умолчанию on, с 2026-09)\n  vpn-zone x11 <зона> on|off       свой X-сервер программам зоны (X хоста в\n                                   зонах недоступен всегда)\n  vpn-zone nix-daemon <зона> on|off|default\n                                   виден ли программам зоны Nix-демон хоста\n                                   (по умолчанию нет: он качает в сети хоста)\n  vpn-zone host-files <зона> read-only|writable|default\n                                   может ли герметичная зона писать то, что\n                                   хост исполняет из дома (по умолчанию нет)\n  vpn-zone lock|unlock <имя>       запретить/разрешить программам этой зоны\n                                   запускать что-либо в ДРУГИХ сетях\n                                   (по умолчанию разрешено; держится только\n                                   в герметичной зоне)\n  vpn-zone trust add <контейнер> <сертификат> [--yes]\n                                   дополнительный корневой сертификат ТОЛЬКО\n                                   для программ этого контейнера (профиль или\n                                   sb:<песочница>): хост и другие контейнеры\n                                   ему не доверяют. Его владелец сможет читать\n                                   TLS-трафик программ контейнера\n  vpn-zone trust list [<контейнер>] [--json]\n  vpn-zone trust rm <контейнер> <начало sha256>\n  vpn-zone trust reset <контейнер> убрать все дополнительные сертификаты\n  vpn-zone container list|show [<контейнер>] [--json]\n                                   контейнеры (профиль или sb:<песочница>):\n                                   их сеть, программы, сертификаты\n  vpn-zone container set <контейнер> network <сеть|ask>\n                                   привязать контейнер к сети: запуск в\n                                   другой сети будет отказом\n  vpn-zone container set <контейнер> x11 on|off\n                                   свой X-сервер в зонах (X хоста в зонах\n                                   недоступен всегда)\n  vpn-zone container assign <программа> <контейнер>\n  vpn-zone container unassign <программа>\n  vpn-zone container grant sb:<песочница> <каталог> [--for 2h]\n  vpn-zone container revoke sb:<песочница> <каталог>\n                                   выдать песочнице каталог настоящего дома\n                                   или диска (/mnt, /media, /run/media, /srv):\n                                   префикс Wine, библиотеку Steam; --for —\n                                   на срок (30s, 15m, 2h, 7d), по истечении\n                                   и при revoke каталог отмонтируется и у\n                                   уже запущенных программ\n  vpn-zone container merge <из> <в> [--yes]\n                                   объединить два контейнера одного вида:\n                                   совпавшее остаётся у <в>, версии из <из>\n                                   кладутся рядом; --yes — согласие принять\n                                   чужие корневые сертификаты\n";
 
 /// Entry point of the `vpn-zone` binary.
 pub fn main() -> ExitCode {
@@ -109,6 +109,7 @@ pub fn main() -> ExitCode {
         b"profile" => profile(&tools, rest),
         b"wayland-sandbox" => wayland_sandbox(&tools, rest),
         b"wayland-proxy" => wayland_proxy(&tools, rest),
+        b"frame" => frame(&tools, rest),
         b"isolate" => isolate(&tools, rest),
         b"reset-profile" => reset_profile(&tools, rest),
         b"rm" => remove(&tools, rest),
@@ -2327,6 +2328,134 @@ fn wayland_proxy(tools: &Tools, args: &[OsString]) -> u8 {
         );
     }
     0
+}
+
+/// `vpn-zone frame show|hide`, `vpn-zone frame width <px>|default`,
+/// `vpn-zone frame color <zone> <#rrggbb>|default`: the border of the zone's
+/// colour the Wayland proxy draws around its programs' windows
+/// (`crate::frame`, `docs/WINDOW-FRAME.md` §0а). Each takes effect for
+/// windows opened after it: the colour and the width when a program is
+/// launched, the switch when it connects.
+fn frame(tools: &Tools, args: &[OsString]) -> u8 {
+    use crate::container::Source;
+    use crate::frame::{Rgb, COLOR_FILE, MAX_WIDTH, SWITCH_SETTING, WIDTH_SETTING};
+    const USAGE: &str = "vpn-zone frame show|hide\nvpn-zone frame width <1–32>|default\n\
+                         vpn-zone frame color <зона> <#rrggbb>|default";
+    let from = |source: Source, nix: &str| match source {
+        Source::Local => String::new(),
+        Source::Nix => format!(" (задано в Nix: {nix})"),
+        Source::Default => " (умолчание)".to_owned(),
+    };
+    match args.first().and_then(|a| a.to_str()) {
+        None => {
+            let (width, source) = crate::frame::width(&tools.config);
+            let shown = if crate::frame::hidden(&tools.config) {
+                "спрятаны (vpn-zone frame show — вернуть)"
+            } else {
+                "рисуются"
+            };
+            println!(
+                "рамки зон: {shown}; толщина {width}{}",
+                from(source, "programs.vpn-zones.frame.width")
+            );
+            0
+        }
+        Some(verb @ ("show" | "hide")) => {
+            let value = if verb == "hide" { "hidden" } else { "shown" };
+            if let Err(e) = write_setting(tools, SWITCH_SETTING, OsStr::new(value)) {
+                eprintln!("не записать {e}");
+                return 1;
+            }
+            if verb == "hide" {
+                println!(
+                    "рамки зон спрятаны: окна, открытые после этого, — без рамки (уже открытые \
+                     остаются с ней). Вернуть: vpn-zone frame show"
+                );
+            } else {
+                println!("рамки зон снова рисуются — у окон, открытых после этого");
+            }
+            0
+        }
+        Some("width") => {
+            let Some(value) = args.get(1).and_then(|v| v.to_str()) else {
+                eprintln!("{USAGE}");
+                return 1;
+            };
+            let written = if value == "default" {
+                if tools.config.join(DECLARED_DIR).join(WIDTH_SETTING).exists() {
+                    Err(format!(
+                        "«{WIDTH_SETTING}» задано в Nix (programs.vpn-zones) и меняется там"
+                    ))
+                } else {
+                    match fs::remove_file(tools.config.join(WIDTH_SETTING)) {
+                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+                        _ => Ok(()),
+                    }
+                }
+            } else {
+                match value.parse::<i32>() {
+                    Ok(w) if (1..=MAX_WIDTH).contains(&w) => {
+                        write_setting(tools, WIDTH_SETTING, OsStr::new(&w.to_string()))
+                    }
+                    _ => {
+                        eprintln!("толщина — целое от 1 до {MAX_WIDTH} или default");
+                        return 1;
+                    }
+                }
+            };
+            if let Err(e) = written {
+                eprintln!("не записать {e}");
+                return 1;
+            }
+            let (width, source) = crate::frame::width(&tools.config);
+            println!(
+                "толщина рамки: {width}{} — у программ, запущенных после этого",
+                from(source, "programs.vpn-zones.frame.width")
+            );
+            0
+        }
+        Some("color") => {
+            let (Some(name), Some(value)) = (args.get(1), args.get(2).and_then(|v| v.to_str()))
+            else {
+                eprintln!("{USAGE}");
+                return 1;
+            };
+            let dir = tools.state.join(name);
+            if !safe_zone_name(name) || !dir.is_dir() {
+                eprintln!("зоны {} нет", name.to_string_lossy());
+                return 1;
+            }
+            let name = name.to_string_lossy();
+            let file = dir.join(COLOR_FILE);
+            let written = if value == "default" {
+                match fs::remove_file(&file) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                    _ => Ok(()),
+                }
+            } else {
+                let Some(color) = Rgb::parse(value) else {
+                    eprintln!("цвет — #rrggbb (например, #3366ff) или default");
+                    return 1;
+                };
+                fs::write(&file, color.hex())
+            };
+            if let Err(e) = written {
+                eprintln!("не записать {}: {e}", file.display());
+                return 1;
+            }
+            let (color, source) = crate::frame::zone_color(&tools.state, &tools.config, &name);
+            println!(
+                "зона {name}: рамка {}{} — у программ, запущенных после этого",
+                color.hex(),
+                from(source, "programs.vpn-zones.frame.colors")
+            );
+            0
+        }
+        Some(_) => {
+            eprintln!("{USAGE}");
+            1
+        }
+    }
 }
 
 fn isolate(tools: &Tools, args: &[OsString]) -> u8 {

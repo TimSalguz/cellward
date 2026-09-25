@@ -57,6 +57,12 @@ let
             windowMenu.key = "Mod+Shift+Z";
             sway.enable = true;
           };
+          # The zone's border around foot below: a colour nothing else on
+          # the screen has, and a width that is not the default.
+          programs.vpn-zones.frame = {
+            colors.offline = "#ff00ff";
+            width = 6;
+          };
           home.stateVersion = "25.05";
         };
         environment.systemPackages = [
@@ -175,6 +181,128 @@ let
           machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=15)
           # Closed: nothing done — foot is still there.
           machine.succeed("pgrep -x foot")
+
+      # The zone's border (docs/WINDOW-FRAME.md §0а, rust/src/wl_frame.rs),
+      # seen on the screen: the proxy draws it INSIDE the window geometry —
+      # sway clips a tiled window to it —, in the colour and width the module
+      # declared, and what is inside is foot's own, the window's size less the
+      # border on every side: foot was told that size and drew it.
+      border = (255, 0, 255)
+      width = 6
+
+      def view(app_id):
+          """Where sway shows a window's contents, in logical pixels."""
+          tree = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r"))
+          node = find(tree, app_id)
+          assert node is not None, tree
+          r, w = node["rect"], node["window_rect"]
+          return r["x"] + w["x"], r["y"] + w["y"], w["width"], w["height"]
+
+      def shot(name):
+          """The screen as grim sees it (device pixels): a PNG to look at,
+          a PPM to read pixels from."""
+          alice(f"WAYLAND_DISPLAY={display} grim /tmp/{name}.png")
+          machine.copy_from_vm(f"/tmp/{name}.png", "")
+          alice(f"WAYLAND_DISPLAY={display} grim -t ppm /tmp/{name}.ppm")
+          machine.copy_from_vm(f"/tmp/{name}.ppm", "")
+          ppm = machine.out_dir / f"{name}.ppm"
+          magic, size, _depth, pixels = ppm.read_bytes().split(b"\n", 3)
+          ppm.unlink()
+          assert magic == b"P6", magic
+          w, h = map(int, size.split())
+
+          def at(x, y):
+              if not (0 <= x < w and 0 <= y < h):
+                  return None
+              i = (y * w + x) * 3
+              return tuple(pixels[i : i + 3])
+
+          return at
+
+      def span(at, x, y, dx, dy):
+          """The run of the border's colour through (x, y) along (dx, dy):
+          where it starts, and how long it is."""
+          assert at(x, y) == border, (x, y, at(x, y))
+          back = 0
+          while back < 64 and at(x - (back + 1) * dx, y - (back + 1) * dy) == border:
+              back += 1
+          ahead = 0
+          while ahead < 64 and at(x + (ahead + 1) * dx, y + (ahead + 1) * dy) == border:
+              ahead += 1
+          return (x - back * dx, y - back * dy), back + ahead + 1
+
+      def framed(at, x, y, w, h, scale=1, slack=0):
+          """The border on all four sides of the view (x, y, w, h), `width`
+          wide at `scale`, starting at the view's edge, and not a pixel of it
+          across the middle: that is foot's, (w - 2 width) wide."""
+          d = lambda v: int(round(v * scale))
+          b = width / 2
+          sides = [
+              (d(x + b), d(y + h / 2), 1, 0, (d(x), d(y + h / 2))),
+              (d(x + w - b), d(y + h / 2), -1, 0, (d(x + w) - 1, d(y + h / 2))),
+              (d(x + w / 2), d(y + b), 0, 1, (d(x + w / 2), d(y))),
+              (d(x + w / 2), d(y + h - b), 0, -1, (d(x + w / 2), d(y + h) - 1)),
+          ]
+          for sx, sy, dx, dy, edge in sides:
+              start, n = span(at, sx, sy, dx, dy)
+              assert abs(n - width * scale) <= slack, (sx, sy, n, width * scale)
+              assert abs(start[0] - edge[0]) + abs(start[1] - edge[1]) <= slack, (start, edge)
+          row = d(y + h / 2)
+          inside = [at(d(x + width) + slack + i, row) for i in range(d(w - 2 * width) - 2 * slack)]
+          assert border not in inside, "the border inside the window"
+
+      with subtest("the zone's border: inside the window, the declared colour and width"):
+          x, y, w, h = view("foot")
+          framed(shot("frame"), x, y, w, h)
+
+      with subtest("the border stays in fullscreen"):
+          alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen enable'")
+          machine.sleep(2)
+          x, y, w, h = view("foot")
+          framed(shot("frame-fullscreen"), x, y, w, h)
+          alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen disable'")
+          machine.sleep(2)
+
+      # A fractional scale: the border is a stretched pixel, the same colour
+      # to its edges, and `width` logical pixels wide — give or take a device
+      # pixel where an edge falls between two.
+      with subtest("the border at a fractional scale, after the resize it brings"):
+          output = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_outputs -r"))[0]["name"]
+          alice(f"SWAYSOCK={swaysock} swaymsg output {output} scale 1.5")
+          machine.sleep(3)
+          x, y, w, h = view("foot")
+          framed(shot("frame-scale"), x, y, w, h, scale=1.5, slack=1)
+          alice(f"SWAYSOCK={swaysock} swaymsg output {output} scale 1")
+          machine.sleep(3)
+
+      # The switch (`vpn-zone frame hide`, for sharing the screen) is read
+      # when a program connects: a window opened after it has no border, one
+      # opened before keeps it — now half the screen wide, the border
+      # following the resize.
+      with subtest("hidden, a new window comes up without the border"):
+          alice("vpn-zone frame hide")
+          alice(
+              f"systemd-run --user --unit=vmbare --setenv=WAYLAND_DISPLAY={display} "
+              "vpn-zone run offline -- foot --app-id bare"
+          )
+          machine.wait_until_succeeds(
+              f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q '\"app_id\": *\"bare\"'",
+              timeout=60,
+          )
+          machine.sleep(2)
+          at = shot("frame-hidden")
+          x, y, w, h = view("bare")
+          assert at(x + 1, y + h // 2) != border, "a border though hidden"
+          assert at(x + w // 2, y + 1) != border, "a border though hidden"
+          x, y, w, h = view("foot")
+          framed(at, x, y, w, h)
+          alice("vpn-zone frame show")
+          alice("systemctl --user stop vmbare")
+          machine.wait_until_fails(
+              f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q '\"app_id\": *\"bare\"'",
+              timeout=30,
+          )
+          machine.sleep(2)
 
       # The key of programs.vpn-zones.desktop.windowMenu.key, pressed on the
       # compositor: the menu comes up by itself, floating by the window rule.

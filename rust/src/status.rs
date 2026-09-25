@@ -86,14 +86,22 @@ pub fn defaults(tools: &Tools) -> String {
     let (autostart, autostart_source) = setting(tools, "autostart", "ask");
     let (user_entries, user_entries_source) = setting(tools, "user-entries", "take-over");
     let (hermetic, hermetic_source) = crate::hermetic::default_setting(&tools.config);
+    // The zones' borders: whether the switch shows them (local only — it is
+    // flipped for a call and back, `crate::frame`), and their width.
+    let (_, frames_source) = setting(tools, crate::frame::SWITCH_SETTING, "shown");
+    let frames = !crate::frame::hidden(&tools.config);
+    let (frame_width, frame_width_source) = crate::frame::width(&tools.config);
     format!(
         "{{\"network\":{},\"container\":{},\"launcher_mode\":{},\"compositor_restriction\":{},\
-         \"wayland_proxy\":{},\"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{}}}",
+         \"wayland_proxy\":{},\"frames\":{},\"frame_width\":{},\"autostart_unassigned\":{},\
+         \"user_entries\":{},\"hermetic\":{}}}",
         sourced_str(&network, network_source),
         sourced_str(&container, container_source),
         sourced_str(&mode, mode_source),
         sourced((wayland == "on").to_string(), wayland_source),
         sourced((proxy.trim() != "off").to_string(), proxy_source),
+        sourced(frames.to_string(), frames_source),
+        sourced(frame_width.to_string(), frame_width_source),
         sourced_str(&autostart, autostart_source),
         sourced_str(&user_entries, user_entries_source),
         sourced(hermetic.to_string(), hermetic_source)
@@ -142,7 +150,7 @@ pub fn networks(tools: &Tools) -> String {
         // 2026-09, may still be in a configuration or in Nix.
         "{\"name\":\"unconfined\",\"kind\":\"unconfined\",\"aliases\":[\"direct\"],\"source\":\"default\",\"up\":true,\
          \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"system_zone\":null}"
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"system_zone\":null,\"frame_color\":null}"
             .to_owned(),
     ];
     let mut offline_listed = false;
@@ -217,24 +225,31 @@ pub fn networks(tools: &Tools) -> String {
             let (on, source) = crate::hermetic::host_files_writable(&dir, &tools.config, &name);
             sourced(on.to_string(), source)
         };
+        // The colour of the border around its programs' windows.
+        let frame_color = {
+            let (color, source) = crate::frame::zone_color(&tools.state, &tools.config, &name);
+            sourced_str(&color.hex(), source)
+        };
         let source = if kind == "offline" {
             "default"
         } else {
             "local"
         };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"system_zone\":{system_zone}}}",
+            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"system_zone\":{system_zone},\"frame_color\":{frame_color}}}",
             string(&name),
             dir.join(NO_ESCAPE).exists()
         ));
     }
     if !offline_listed {
-        items.push(
-            "{\"name\":\"offline\",\"kind\":\"offline\",\"aliases\":[],\"source\":\"default\",\"up\":false,\
+        let (color, source) = crate::frame::zone_color(&tools.state, &tools.config, "offline");
+        items.push(format!(
+            "{{\"name\":\"offline\",\"kind\":\"offline\",\"aliases\":[],\"source\":\"default\",\"up\":false,\
              \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"system_zone\":null}"
-                .to_owned(),
-        );
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"system_zone\":null,\
+             \"frame_color\":{}}}",
+            sourced_str(&color.hex(), source)
+        ));
     }
     array(items)
 }

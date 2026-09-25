@@ -678,6 +678,15 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             ];
             if !wayland_proxy_wanted(tools, &appbin) {
                 wrap.push("--no-proxy".into());
+            } else if zone != UNCONFINED {
+                // The zone's border around its windows (docs/WINDOW-FRAME.md
+                // §0а): the colour and width as they are now; the switch
+                // that hides it is read by the supervisor for each connection.
+                let frame = crate::frame::Frame::of_zone(&tools.state, &tools.config, &zone_name);
+                wrap.push("--frame".into());
+                wrap.push(frame.to_arg().into());
+                wrap.push("--frame-switch".into());
+                wrap.push(tools.config.clone().into());
             }
             wrap.push("--".into());
             wrap

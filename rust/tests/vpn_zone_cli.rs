@@ -324,9 +324,13 @@ fn a_launch_is_wrapped_in_the_compositor_restriction_by_default() {
     // Outermost, on the host, and named by the zone whose directory the
     // restricted socket goes into (LEAK-MODEL §13).
     assert!(
-        line.starts_with("зона nl, профиль основной: /nonexistent/vpn-zone-core wl-sandbox firefox --zone nl -- firefox"),
+        line.starts_with("зона nl, профиль основной: /nonexistent/vpn-zone-core wl-sandbox firefox --zone nl --frame "),
         "{line}"
     );
+    // With the zone's border (docs/WINDOW-FRAME.md §0а): its colour and
+    // width, and where the switch that hides it is.
+    assert!(line.contains(" --frame-switch "), "{line}");
+    assert!(line.trim_end().ends_with(" -- firefox"), "{line}");
 
     // Turned off by the setting the CLI itself writes — for unconfined
     // launches only: a zone has no unrestricted socket to hand out.
@@ -1561,4 +1565,99 @@ fn the_registry_keeps_its_three_field_shape() {
     let kept = fs::read_to_string(&reg).unwrap();
     assert_eq!(kept, format!("{} de sb:work\n", std::process::id()));
     assert!(Path::new(&home.state().join(".running/__main__/.lock")).is_file());
+}
+
+#[test]
+fn a_zone_gets_its_border_colour_width_and_switch() {
+    // docs/WINDOW-FRAME.md §0а, §11: the colour per zone and its width go to
+    // the proxy with the launch, from Nix over the local setting over the
+    // default; the switch is read by the supervisor, so only its directory.
+    let home = Home::new("frame");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+    let default = vpn_zone::frame::default_color("nl").hex();
+
+    let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+    assert!(
+        line.contains(&format!(
+            "wl-sandbox foot --zone nl --frame {}:4 --frame-switch {} -- foot",
+            &default[1..],
+            home.root.join("config").display()
+        )),
+        "{line}"
+    );
+    // No border for the host's own session: it is no zone.
+    let line = stdout(&home.run_with(&["run", "unconfined", "--", "foot"], &dry));
+    assert!(!line.contains("--frame"), "{line}");
+
+    let out = home.run(&["frame", "color", "nl", "#3366FF"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("#3366ff"), "{}", stdout(&out));
+    let out = home.run(&["frame", "width", "6"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+    assert!(line.contains("--frame 3366ff:6 "), "{line}");
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"frame_color\":{\"value\":\"#3366ff\",\"source\":\"local\"}"),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"frame_width\":{\"value\":6,\"source\":\"local\"}"),
+        "{json}"
+    );
+
+    // Nix wins, and the command does not pretend to change what Nix set.
+    let declared = home.root.join("config/declared");
+    fs::create_dir_all(&declared).unwrap();
+    fs::write(declared.join("frame-colors"), "nl #ff0000\n").unwrap();
+    fs::write(declared.join("frame-width"), "3").unwrap();
+    let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+    assert!(line.contains("--frame ff0000:3 "), "{line}");
+    let out = home.run(&["frame", "width", "8"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"frame_color\":{\"value\":\"#ff0000\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+
+    // Back to the name's colour.
+    fs::remove_file(declared.join("frame-colors")).unwrap();
+    let out = home.run(&["frame", "color", "nl", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains(&default), "{}", stdout(&out));
+
+    // The switch: a setting of its own, read when a program connects.
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"frames\":{\"value\":true,\"source\":\"default\"}"),
+        "{json}"
+    );
+    let out = home.run(&["frame", "hide"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        fs::read_to_string(home.root.join("config/frames")).unwrap(),
+        "hidden"
+    );
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"frames\":{\"value\":false,\"source\":\"local\"}"),
+        "{json}"
+    );
+    assert!(home.run(&["frame", "show"]).status.success());
+    assert!(!vpn_zone::frame::hidden(&home.root.join("config")));
+
+    // Nonsense is refused, and a zone that is not there too.
+    for bad in [
+        &["frame", "color", "nl", "blue"][..],
+        &["frame", "color", "nope", "#000000"],
+        &["frame", "width", "0"],
+        &["frame", "width", "33"],
+        &["frame", "sideways"],
+    ] {
+        assert!(!home.run(bad).status.success(), "{bad:?}");
+    }
 }
