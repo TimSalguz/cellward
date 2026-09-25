@@ -3574,6 +3574,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // status/doctor/watch tell the person it is left on the previous one.
     crate::build::record(&zone.dir);
     zone.ip(&["link", "set", "lo", "up"])?;
+    allow_ping(zone);
 
     // BEFORE the offline branch, and deliberately so: an "offline" zone that
     // still sees the host's resolver sockets is not offline at all. A program
@@ -3928,6 +3929,46 @@ fn configure_oc(zone: &Zone, plan: &openconnect::Plan) -> Result<(), String> {
 /// goes: a zone routes everything, or it is not a zone.
 fn default_into_tunnel(zone: &Zone) -> Result<(), String> {
     zone.ip(&["route", "replace", "default", "dev", TUN_IFACE])
+}
+
+/// Ping without raw sockets: the kernel's ICMP echo sockets, for the user's
+/// own groups in the zone (`net.ipv4.ping_group_range`, one per network
+/// namespace, and "nobody" — `1 0` — in a new one; it covers IPv6 too).
+/// Without it `ping` asks for CAP_NET_RAW, which a program in a zone does not
+/// have and must not get (the owner, 2026-09-25: "missing cap_net_raw").
+/// Nothing is opened by it: an echo socket sends echo requests the kernel
+/// builds itself, by this namespace's routes — into the tunnel like
+/// everything else here, or nowhere in an offline zone. Best effort: a
+/// kernel that refuses leaves ping as it was, and says so.
+fn allow_ping(zone: &Zone) {
+    let Some(range) = ping_range(&fs::read_to_string("/proc/self/gid_map").unwrap_or_default())
+    else {
+        return;
+    };
+    if let Err(e) = fs::write("/proc/sys/net/ipv4/ping_group_range", &range) {
+        eprintln!(
+            "zone {}: ping stays without echo sockets (ping_group_range {range}: {e})",
+            zone.name()
+        );
+    }
+}
+
+/// The user's own groups in the user namespace whose `gid_map` this is: the
+/// line mapped to itself (`100 100 1` — the zone's root is some subordinate
+/// id instead). As `lowest highest`: the kernel keeps both ends as the host's
+/// ids and takes a range only when those are in order as well, so a range
+/// over every line (`0 100`, the root being 100000 outside) is empty — the
+/// first try, found by the VM test.
+pub fn ping_range(gid_map: &str) -> Option<String> {
+    gid_map.lines().find_map(|line| {
+        let mut fields = line.split_whitespace().map(str::parse::<u64>);
+        let (Some(Ok(inside)), Some(Ok(outside)), Some(Ok(count))) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return None;
+        };
+        (inside == outside && count > 0).then(|| format!("{inside} {}", inside + count - 1))
+    })
 }
 
 /// --- IPv6: INTO THE TUNNEL OR NOWHERE AT ALL ---
@@ -4639,6 +4680,28 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The user's own groups, the line mapped to itself: a range over the
+    /// zone's root too would be empty to the kernel (100000 > 100 outside).
+    #[test]
+    fn ping_is_for_the_groups_of_the_zone() {
+        assert_eq!(
+            ping_range("         0     100000          1\n       100        100          1\n")
+                .as_deref(),
+            Some("100 100")
+        );
+        assert_eq!(
+            ping_range("0 100000 1\n100 100 3\n").as_deref(),
+            Some("100 102")
+        );
+        assert_eq!(
+            ping_range("0 1000 65536\n"),
+            None,
+            "nothing of the user's own"
+        );
+        assert_eq!(ping_range(""), None);
+        assert_eq!(ping_range("100 100 0\nbroken\n"), None);
+    }
 
     #[test]
     fn no_zone_gets_the_compositor_or_its_ipc() {

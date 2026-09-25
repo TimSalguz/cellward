@@ -38,6 +38,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   minute and not for 15 s after a "no"; a request past 64 KiB or with an
   app-id past 255 bytes is refused whole (it was cut and read); 32 requests at
   most are handled at once, and one that sends nothing is dropped after 5 s.
+- **`ping` works in a zone** (`rust/src/zone.rs` `allow_ping`, the owner,
+  2026-09-25: "missing cap_net_raw+p capability"). A new network namespace
+  lets nobody open the kernel's ICMP echo sockets (`net.ipv4.ping_group_range`
+  is `1 0`), so `ping` wanted raw sockets, which a program in a zone does not
+  have and must not get. The holder now opens echo sockets to the user's own
+  groups in the zone (the one line of the zone's `gid_map` mapped to
+  itself: a range over the zone's root as well is empty to the kernel). Nothing new leaves by it: the kernel builds the
+  echo requests, and they take the zone's routes — the tunnel, or nowhere in
+  an offline zone. Applies to a zone started after the update.
 - **A running terminal no longer takes every next one into its network**
   (`rust/src/picker.rs`, the owner, 2026-09-25). A click on a running
   program started it where it ran, with no question — right for a browser or
