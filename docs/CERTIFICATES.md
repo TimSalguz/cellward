@@ -4,7 +4,7 @@ Russian: [CERTIFICATES.ru.md](CERTIFICATES.ru.md) · Builds on
 [CONTAINERS.md](CONTAINERS.md) · Threat model: [LEAK-MODEL.md](LEAK-MODEL.md)
 
 **Status (2026-09-17): implemented for data containers and named sandboxes** —
-the CLI (`vpn-zone trust`), the bundle, the environment and the NSS databases,
+the CLI (`cellward trust`), the bundle, the environment and the NSS databases,
 with the tests of §6 in the smoke and VM tests. Not yet: the GUI dialog, the
 declarative option (with the container entity of CONTAINERS phase 1), Java.
 The facts in §2 were checked on current nixpkgs binaries; the items marked
@@ -69,7 +69,7 @@ Two conclusions shape the design:
 - A certificate belongs to a **container**, never to a zone, a program or the
   host. Declared ones come from `containers.<name>.trust.certificates` (a list
   of paths; a public CA certificate in the store is fine); local ones are
-  copied into the container's state on `vpn-zone trust add`.
+  copied into the container's state on `cellward trust add`.
 - On adding, the file is parsed and refused unless it is a single PEM or DER
   certificate with `basicConstraints CA:TRUE`. Stored by SHA-256 fingerprint:
   `…/trust/<sha256>.pem`. Parsing and fingerprints use `openssl x509` from the
@@ -169,10 +169,10 @@ manifest.
 CLI:
 
 ```
-vpn-zone trust add <container> <file.pem>     # asks for confirmation on a tty
-vpn-zone trust list [<container>] [--json]
-vpn-zone trust rm <container> <sha256-prefix>
-vpn-zone trust reset <container>               # all extra certificates
+cellward trust add <container> <file.pem>     # asks for confirmation on a tty
+cellward trust list [<container>] [--json]
+cellward trust rm <container> <sha256-prefix>
+cellward trust reset <container>               # all extra certificates
 ```
 
 GUI, adding (a file picker, then one dialog):
@@ -185,7 +185,7 @@ GUI, adding (a file picker, then one dialog):
 - confirmation by typing the container's name, like zone removal asks twice.
 
 Everywhere a container is shown: a ⚠ marker and "extra root certificate" in
-the picker rows, in `vpn-zone container list`, in `status --json`
+the picker rows, in `cellward container list`, in `status --json`
 (`trust.extra[]`) and in `doctor`. Reset is one menu entry: «Сбросить
 доверенные сертификаты».
 
@@ -243,6 +243,6 @@ host. In `tests/vm.nix`, on the machine VM:
 5. **No `~/.pki` on the host.** An overlay container with the CA on a home
    without `~/.pki`: the certificate lands in the container's upper layer and
    the host's home still has no database with it.
-6. **Reset.** After `vpn-zone trust reset A`, test 1 fails.
+6. **Reset.** After `cellward trust reset A`, test 1 fails.
 7. **Failure is a refusal.** A container naming a missing certificate file
    does not start.

@@ -5,7 +5,7 @@ English: [HERMETICITY.md](HERMETICITY.md) · Связанные документ
 [CONTAINERS.ru.md](CONTAINERS.ru.md) §6, ROADMAP M3 (герметизация, брокер, X11).
 
 **Статус: решено (владелец, 2026-09-17), реализация идёт** — решения в §7.
-`vpn-zone doctor` называет каждый канал ниже предупреждением, пока он не
+`cellward doctor` называет каждый канал ниже предупреждением, пока он не
 закрыт, и по пути — каждый unix-сокет, к которому программа зоны может
 подключиться и который не её собственный (`docs/LEAK-MODEL.md` §18).
 
@@ -43,7 +43,7 @@ English: [HERMETICITY.md](HERMETICITY.md) · Связанные документ
    который помощник зоны отдаёт PipeWire, и наша политика WirePlumber: свои
    потоки, выходы, микрофоны только при `yes`, никогда монитор и свои связи;
    без политики PipeWire нет вовсе; сырой `pipewire-0` хоста — только зоне,
-   объявленной менеджером звука, `vpn-zone audio-manager`; откуда WirePlumber
+   объявленной менеджером звука, `cellward audio-manager`; откуда WirePlumber
    и PipeWire берут скрипты и фрагменты в доме — `~/.config/pipewire`,
    `~/.config/wireplumber`, `~/.local/share/wireplumber`,
    `~/.local/state/wireplumber` — в зоне только для чтения и создаются
@@ -137,21 +137,21 @@ English: [HERMETICITY.md](HERMETICITY.md) · Связанные документ
   `/tmp/.X11-unix` в mount namespace зоны и никакого `DISPLAY` в запуске.
   Контейнер с разрешением `x11` получает свой `xwayland-satellite`. Дыры
   `x11 = "host"` нет. То же на зону, для зон без контейнеров:
-  `vpn-zone x11 <зона> on` или `zoneX11 = [ "<зона>" ]`.
+  `cellward x11 <зона> on` или `zoneX11 = [ "<зона>" ]`.
 - **B — системная шина: B2, суженный — сделано.** `xdg-dbus-proxy` на зону; `UPower`
   разрешён; `login1` — только `Inhibit` и чтение свойств, без списка сессий и
   управления питанием; `NetworkManager`, `hostname1`, `resolve1`, `machined`,
   `timedate1` запрещены.
 - **C — сессионная шина и брокер.** Сначала прототип за флагом зоны
   `hermetic`, доказанный «злым хостом» в VM — **прототип сделан**
-  (`vpn-zone hermetic <зона> on`); дальнейшее — ещё нет. Потом:
+  (`cellward hermetic <зона> on`); дальнейшее — ещё нет. Потом:
   1. `hermetic` включён по умолчанию; выключение — явное и на одну зону
      (зона, программы которой законно управляют `systemd --user`, например
      агенты, запускающие VM-проверки через `systemd-run --user`).
      **Сделано, и умолчание перевёрнуто (2026-09):**
      `hermetic.default` и `hermetic.exceptions` в модуле,
-     `vpn-zone hermetic --default on|off` и
-     `vpn-zone hermetic <зона> on|off|default` локально. Что важнее: зона из
+     `cellward hermetic --default on|off` и
+     `cellward hermetic <зона> on|off|default` локально. Что важнее: зона из
      `hermetic.exceptions` (обратное `hermetic.default`, который модуль требует
      вместе с ними), затем своя настройка зоны, затем `hermetic.default`, затем
      локальное умолчание, затем вкл. Открывает только `off`: пустой маркер

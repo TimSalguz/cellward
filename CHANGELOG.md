@@ -5,6 +5,61 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed (read before updating)
+- **The project is cellward now** (formerly vpn-zones; the owner's decision
+  of 2026-09-25). The flake is `github:TimSalguz/cellward`; the old URL
+  redirects. Nothing has to change at once — every old name below keeps
+  working — but the old ones warn, and they will go.
+- **Commands.** The command is `cellward`, with the short name `cw`;
+  `vpn-zone` stays as an alias for the transition — all three are one
+  wrapper in the profile (`cellward` with `cw` and `vpn-zone` linked to it).
+  The GUI command is `cellward-gui`, with `vpn-zone-gui` as its alias. Tab
+  completion (zsh, bash) answers to all three names. The help text and every
+  message that tells you to run something say `cellward …`; notifications
+  come from the app "cellward"; the launcher entries "Настройки VPN-зон" and
+  "Контейнеры VPN-зон" are "Настройки cellward" and "Контейнеры cellward".
+  The launcher entries `sync` writes and the picker's launches go through
+  `…/bin/cellward` (the manifest's `runner`) and are rewritten at the next
+  sync, which activation runs. The broker never offers "always" for
+  `cellward` or `cw`, as it never did for `vpn-zone` (they run any command),
+  and a PATH shim never takes any of the three names.
+- **Options.** Home-manager `programs.vpn-zones.*` is
+  `programs.cellward.*`; NixOS `services.vpn-zones.system.*` is
+  `services.cellward.system.*` and `services.vpn-zones.pipewirePolicy.enable`
+  is `services.cellward.pipewirePolicy.enable`. Every old option still works
+  through `lib.mkRenamedOptionModule`, one rename per option, with a warning
+  on use; `tests/harness.nix` (`oldNames`, in the eval job) checks that the
+  old names name every new option and give the same home and the same
+  system. Messages that say where a value was set name the new options.
+- **A single entry** (`module/entry.nix`): one import of
+  `nixosModules.default` and `services.cellward.enable = true;`. It loads at
+  boot the kernel modules a zone cannot load from its unprivileged user
+  namespace (`amneziawg` unless `services.cellward.system.amneziawg = false`,
+  `wireguard`, `tun`, `nf_tables`); turns the PipeWire policy on by default
+  when WirePlumber is on; with the home-manager NixOS module imported, adds
+  the home-manager module for every home-manager user
+  (`home-manager.sharedModules`) with `programs.cellward.enable` true by
+  default; and with `system.enable` and `system.egress.enable`, unless
+  `system.host.nix`/`host.time` are set, declares a plain zone `direct0` (a
+  default) and sends the Nix daemon and systemd-timesyncd through it. It
+  turns on neither the system tier nor the egress policy: those, their mode,
+  `host.dns`, the console, the switch and the emergency key stay explicit.
+  Checked by evaluation (`singleEntry`) and in the `vm-audio` VM test, which
+  now runs on it. The package's `pname` is `cellward`.
+- **What stays as it was**: the state and config directories
+  (`~/.local/state/vpn-zones`, `~/.config/vpn-zones` and its `declared/`,
+  `/etc/vpn-zones`, `/var/lib/vpn-zones`, `/run/vpn-zones`), the nftables
+  tables `vpnzones_*` and the kernel log prefix `vpn-zones-egress:`, the
+  systemd units (`vpn-zone@`, `vpn-zone-broker.socket`, `vpn-zone-system@`,
+  `vpn-zones-on`/`-off`, `vpn-zones-egress` …) and the commands named after
+  them (`vpn-zones-on`, `vpn-zones-off`, `vpn-zone-sys`, `vpn-zone-console`),
+  the internal binaries (`vpn-zone-core`, `vpn-zone-pick`, `vpn-zone-seccomp`,
+  `vpn-zone-window`, `vpn-zone-sync` …) and the crate's names, the
+  `VPN_ZONE_*` variables, the groups, the PipeWire and WirePlumber names,
+  the compositor snippets `vpn-zones.kdl`/`vpn-zones.conf`, the kernel
+  command line `vpnzones=off`, the `status --json` schema and fields, and the
+  section numbers of `docs/LEAK-MODEL.md`.
+
 ### Added
 - **How long a refused zone is not asked again is a setting** (the owner's
   request of 2026-09-25): `vpn-zone ask-again <term>|default`, Nix

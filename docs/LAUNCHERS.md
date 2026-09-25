@@ -27,7 +27,7 @@ are in `main`. §3.2 and §4 carry the owner's decisions of 2026-09-17.
    some launchers split `Exec` on spaces without honouring quotes.
 4. **Per-zone mode**: for every candidate (the user directory included) and
    every zone, `vpn-zone-<zone>-<name>.desktop` with `Name=… (<zone>)`,
-   `Exec=vpn-zone run <zone> -- <Exec without field codes>` and no
+   `Exec=cellward run <zone> -- <Exec without field codes>` and no
    `MimeType`. `both` does both.
 5. **Cleanup**: our files (marker present, not a symlink) that were not
    produced by this pass are removed. Foreign files and symlinks are never
@@ -35,7 +35,7 @@ are in `main`. §3.2 and §4 carry the owner's decisions of 2026-09-17.
    watches the directory).
 6. **Triggers**: home-manager activation, a timer (2 min after login, then
    every 30 min), a path unit on the three main source directories, and
-   `vpn-zone mode`/`rm`.
+   `cellward mode`/`rm`.
 
 ### 1.2 Launch chain
 
@@ -44,7 +44,7 @@ launcher → vpn-zone-pick --id K -- cmd
   memory: running instance (.running) → pin (.pinned/.pinnedprofile)
           → last choice (.last/.lastprofile) → defaults
   dialogs: network, then (on request or when pinned-but-free) container
-  → vpn-zone run <net> [--profile P | --tmp-profile [--join D]]
+  → cellward run <net> [--profile P | --tmp-profile [--join D]]
                        [--sandbox S | --fs-sandbox] -- cmd
       delegation out of a zone / lock → container → wrappers
       (wl-sandbox, fs-sandbox) → conflict warning → zone start
@@ -55,7 +55,7 @@ launcher → vpn-zone-pick --id K -- cmd
 
 | # | problem | effect | status |
 |---|---|---|---|
-| L1 | **"direct" skipped `vpn-zone run`**: the picker became the command | the chosen/pinned/default container or sandbox was dropped (whole `$HOME`), no Wayland restriction, no registry record, a locked zone's lock bypassed | **done** |
+| L1 | **"direct" skipped `cellward run`**: the picker became the command | the chosen/pinned/default container or sandbox was dropped (whole `$HOME`), no Wayland restriction, no registry record, a locked zone's lock bypassed | **done** |
 | L2 | `nsenter` does `chdir("/")` | a terminal started into a zone opens in `/` (§1) | **done** |
 | L3 | conflict key = launcher id **or** binary | two entries for one single-instance binary (Steam game and Steam, firefox and firefox-private) did not warn; link hand-over had the wrong text (§5) | **done** |
 | L4 | `VPN_ZONE_DELEGATED` stayed in the program's environment | the second link clicked in a program opened by delegation died in `nsenter` | **done** |
@@ -111,7 +111,7 @@ themselves the default handler.
 4. A path unit already watches the directory: when a program writes its entry
    again, the file no longer matches the stored hash, the new bytes replace
    the stored original and the entry is taken over again.
-5. `vpn-zone mode off`, removal of the program, or `interception.userEntries =
+5. `cellward mode off`, removal of the program, or `interception.userEntries =
    "leave"` put every original back byte for byte.
 
 | kind of entry | who writes it, and when | how it is taken over | cost and residual risk |
@@ -151,8 +151,8 @@ one entry maps to it, `.pinned`, `.pinnedprofile`, `.last`, `.lastprofile`,
 selectors naming it) move to the new key — never over something already there.
 If several entries shared it, nobody can tell whose memory it was: the choices
 are dropped and asked again; a shared sandbox home is data and stays. Keys
-declared in Nix (`containers.<name>.apps`) and given to `vpn-zone container
-assign` and `vpn-zone launch` go through the same function.
+declared in Nix (`containers.<name>.apps`) and given to `cellward container
+assign` and `cellward launch` go through the same function.
 
 ## 4. What becomes of launcher entries
 
@@ -171,12 +171,12 @@ program lives in a container with its network. Assessment, and the decision
 - **Per-container entries replace clones where they are wanted**: only for a
   program assigned to two or more containers ("Firefox — work", "Firefox —
   personal"), generated from assignments, never as a product.
-  `Exec=vpn-zone launch <id> --container <c>`; `MimeType` only on the program's
+  `Exec=cellward launch <id> --container <c>`; `MimeType` only on the program's
   main entry.
 
 Steps:
 
-1. **now**: `vpn-zone mode per-zone|both`, `vpn-zone sync` in those modes and
+1. **now**: `cellward mode per-zone|both`, `cellward sync` in those modes and
    the GUI settings say the mode is deprecated and why; nothing is removed;
 2. with the container model (phase 1): per-container entries; the GUI stops
    offering `per-zone`;

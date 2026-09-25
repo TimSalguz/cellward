@@ -1,4 +1,9 @@
-# vpn-zones
+# cellward
+
+*Прежнее имя — vpn-zones.* Команда — `cellward` (коротко `cw`; `vpn-zone`
+по-прежнему работает, как и `vpn-zone-gui` вместо `cellward-gui`), опции —
+`programs.cellward` и `services.cellward` (старые имена работают, с
+предупреждением), а `github:TimSalguz/vpn-zones` ведёт сюда.
 
 Read in English: [README.md](README.md) · План развития: [ROADMAP.md](ROADMAP.md)
 · Устройство: [архитектура](docs/ARCHITECTURE.ru.md), [модель утечек](docs/LEAK-MODEL.md),
@@ -36,7 +41,7 @@ VPN, ни своего резолвера, шина сеанса и `systemd --u
 значки трея, плееры и методы ввода проходят, запуск процесса вне зоны — нет.
 Программа, которая открывает что-то в другой сети (ссылку, другую программу),
 идёт через брокер: он спрашивает, в какой сети, и запоминает «Всегда» для
-программы, которой ты доверяешь. `vpn-zone hermetic <зона> off` возвращает зоне
+программы, которой ты доверяешь. `cellward hermetic <зона> off` возвращает зоне
 сеанс хоста.
 
 **Данные.** Пять режимов:
@@ -112,32 +117,74 @@ wayland-info | grep -i security_context   # протокол есть
 управление с клавиатуры, светлая или тёмная — как в системе); остальные диалоги
 — `kdialog`, его ставит сам модуль, так что KDE-сессия не нужна — нужен только
 сам бинарь. Нет окна — пикер спрашивает `kdialog`'ом. Чтобы про
-деградировавший слой говорил `vpn-zone doctor`, а не только stderr, — в
+деградировавший слой говорил `cellward doctor`, а не только stderr, — в
 планах.
 
 ## Установка
 
+В NixOS — один импорт и одна строка:
+
 ```nix
 {
-  inputs.vpn-zones.url = "github:TimSalguz/vpn-zones";
+  inputs.cellward.url = "github:TimSalguz/cellward";
 
-  # в home-manager
-  imports = [ inputs.vpn-zones.homeModules.default ];
-  programs.vpn-zones.enable = true;
+  # в конфигурации NixOS
+  imports = [ inputs.cellward.nixosModules.default ];
+  services.cellward.enable = true;
 }
 ```
 
+`services.cellward.enable` включает то, что зонам от системы нужно в любом
+случае, и ничего из того, что есть выбор:
+
+- модули ядра, которые зона сама из непривилегированного user namespace не
+  загрузит, — загружаются при старте: `amneziawg` (внешний, собирается под
+  текущее ядро; `services.cellward.system.amneziawg = false` его не ставит, и
+  тогда работают только конфиги без параметров обфускации, через ядерный
+  `wireguard`), `wireguard`, `tun` и `nf_tables`;
+- политику PipeWire для герметичных зон (`services.cellward.pipewirePolicy.enable`)
+  — по умолчанию, если включён WirePlumber;
+- если подключён модуль home-manager для NixOS — модуль home-manager каждому
+  пользователю home-manager (`home-manager.sharedModules`), с
+  `programs.cellward.enable` по умолчанию `true`; кому не нужно — `false`.
+  Подключить ещё и `homeModules.default` самому не мешает;
+- при системном уровне с политикой хоста (`system.enable`,
+  `system.egress.enable`), если `system.host.nix` / `system.host.time` не
+  заданы, — простую зону `direct0` (по умолчанию: своя `zones.direct0`
+  сильнее), через которую выходят демон Nix и systemd-timesyncd. `host.time` —
+  только при включённом timesyncd; `host.nix = null` оставляет демон в сети
+  хоста.
+
+Сам системный уровень, политика хоста и её режим, `host.dns`, пульт TTY, группа
+выключателя и аварийный ключ остаются явным выбором.
+
+Без NixOS или со standalone home-manager — как раньше:
+
+```nix
+{
+  inputs.cellward.url = "github:TimSalguz/cellward";
+
+  # в home-manager
+  imports = [ inputs.cellward.homeModules.default ];
+  programs.cellward.enable = true;
+}
+```
+
+До переименования опции назывались `programs.vpn-zones.*` и
+`services.vpn-zones.*`; старые имена работают и сейчас — через
+`lib.mkRenamedOptionModule`, с предупреждением при каждом использовании.
+
 После пересборки в лаунчере появятся пункты «Добавить VPN-зону», «Удалить
 VPN-зону», «Оборвать VPN-зону», «Создать контейнер», «Удалить профиль
-(контейнер)», «Контейнеры VPN-зон» (окно со всеми контейнерами, их сетью,
-программами и выданными каталогами), «Настройки VPN-зон» и «Сбросить сети
+(контейнер)», «Контейнеры cellward» (окно со всеми контейнерами, их сетью,
+программами и выданными каталогами), «Настройки cellward» и «Сбросить сети
 программ».
 
 То, что должно быть всегда, можно объявить, а не натыкать, — контейнеры, их сети
 и программы, умолчания:
 
 ```nix
-programs.vpn-zones = {
+programs.cellward = {
   enable = true;
   defaults.network = "offline";              # незнакомой программе — без интернета
   containers.work = {
@@ -150,20 +197,21 @@ programs.vpn-zones = {
 };
 ```
 
-`vpn-zone status --json` показывает каждое значение и откуда оно (Nix, задано на
+`cellward status --json` показывает каждое значение и откуда оно (Nix, задано на
 месте или умолчание).
 
 Звук в герметичной зоне идёт через фильтр pulse (PulseAudio) и через свой
 сокет PipeWire зоны, клиенты которого видят то, что им разрешает политика
 WirePlumber из этого проекта: свои потоки, выходы, куда играть, микрофон —
-только как скажет `vpn-zone microphone`; никогда то, что играет хост, и
-никогда чужой поток. Политика включается один раз:
+только как скажет `cellward microphone`; никогда то, что играет хост, и
+никогда чужой поток. `services.cellward.enable` включает политику вместе с
+WirePlumber; иначе она включается один раз:
 
 ```nix
-services.vpn-zones.pipewirePolicy.enable = true;  # NixOS: nixosModules.default
-programs.vpn-zones.pipewirePolicy = true;         # или home-manager без NixOS
-programs.vpn-zones.audioManager = [ "mixer" ];    # зона для pavucontrol/qpwgraph:
-                                                  # сырой PipeWire хоста, громко
+services.cellward.pipewirePolicy.enable = true;  # NixOS: nixosModules.default
+programs.cellward.pipewirePolicy = true;         # или home-manager без NixOS
+programs.cellward.audioManager = [ "mixer" ];    # зона для pavucontrol/qpwgraph:
+                                                 # сырой PipeWire хоста, громко
 ```
 
 Без политики у герметичной зоны PipeWire нет вовсе — только путь PulseAudio,
@@ -201,11 +249,11 @@ Args       = --no-dtls --os=linux-64  ; необязательно, только
 
 ```sh
 chmod 600 ~/.config/vpn-zones/secrets/work.pass   # обязательно, и это проверяется
-vpn-zone add work ~/work-vpn.conf
-vpn-zone up work && vpn-zone run work -- remmina
+cellward add work ~/work-vpn.conf
+cellward up work && cellward run work -- remmina
 ```
 
-Файл пароля остаётся там, куда его положили: `vpn-zone rm` удаляет зону вместе
+Файл пароля остаётся там, куда его положили: `cellward rm` удаляет зону вместе
 с её копией конфига, но никогда не трогает файлы вне каталога зоны. В отличие
 от приватного ключа WireGuard, который лежит внутри конфига и уходит вместе с
 зоной, этот файл остаётся на твоей совести.
@@ -308,46 +356,46 @@ DNS = 192.168.1.1
 Дальше просто запускай программы из лаунчера. Из терминала то же самое:
 
 ```sh
-vpn-zone add <зона> <файл.conf>                # зона из конфига AmneziaWG/WireGuard/OpenConnect
-vpn-zone add <зона> --system <системная зона>  # зона через туннель системной зоны
-vpn-zone list                                  # зоны и их состояние
-vpn-zone up <зона> / down <зона>
-vpn-zone check <зона>                          # жив ли туннель
-vpn-zone doctor [<зона>] [--json]              # что на деле закрыто — проверка изнутри зоны
-vpn-zone journal [--json] [<N>]                # запуски без ограничений и решения брокера
-vpn-zone kill <зона>                           # оборвать зону сейчас: программы убиты, зона опущена
-vpn-zone container grant sb:<имя> <каталог> [--for 2h]  # каталог своему дому, на время
-vpn-zone watch [--json]                        # живы ли туннели (зовёт таймер, уведомляет)
-vpn-zone status --bar                          # строка JSON для waybar и подобных баров
-vpn-zone focused [--json|--bar|--watch]        # зона и контейнер окна в фокусе (niri, sway)
-vpn-zone window-menu                           # его меню: закрепить сеть, перезапустить с выбором, закрыть, оборвать
-vpn-zone launch <id> [-- арг.]                 # ярлык через пикер (для биндов)
-vpn-zone run <зона> -- firefox                 # запустить в зоне
-vpn-zone run <зона> --profile work -- firefox  # + контейнер данных
-vpn-zone run <зона> --sandbox work -- firefox  # + именованная песочница
-vpn-zone run <зона> --fs-sandbox -- firefox    # + разовая песочница
-vpn-zone run <зона> --tmp-profile -- firefox   # одноразовый контейнер
+cellward add <зона> <файл.conf>                # зона из конфига AmneziaWG/WireGuard/OpenConnect
+cellward add <зона> --system <системная зона>  # зона через туннель системной зоны
+cellward list                                  # зоны и их состояние
+cellward up <зона> / down <зона>
+cellward check <зона>                          # жив ли туннель
+cellward doctor [<зона>] [--json]              # что на деле закрыто — проверка изнутри зоны
+cellward journal [--json] [<N>]                # запуски без ограничений и решения брокера
+cellward kill <зона>                           # оборвать зону сейчас: программы убиты, зона опущена
+cellward container grant sb:<имя> <каталог> [--for 2h]  # каталог своему дому, на время
+cellward watch [--json]                        # живы ли туннели (зовёт таймер, уведомляет)
+cellward status --bar                          # строка JSON для waybar и подобных баров
+cellward focused [--json|--bar|--watch]        # зона и контейнер окна в фокусе (niri, sway)
+cellward window-menu                           # его меню: закрепить сеть, перезапустить с выбором, закрыть, оборвать
+cellward launch <id> [-- арг.]                 # ярлык через пикер (для биндов)
+cellward run <зона> -- firefox                 # запустить в зоне
+cellward run <зона> --profile work -- firefox  # + контейнер данных
+cellward run <зона> --sandbox work -- firefox  # + именованная песочница
+cellward run <зона> --fs-sandbox -- firefox    # + разовая песочница
+cellward run <зона> --tmp-profile -- firefox   # одноразовый контейнер
 
-vpn-zone profile create|list|rm <имя>
-vpn-zone sandbox create|list|rm <имя>
-vpn-zone perms list|reset <программа|--all>    # выданные доступы к файлам
-vpn-zone lock|unlock <зона>                    # запретить выход в другие сети
-vpn-zone x11 <зона> on|off                     # свой X-сервер программам зоны
-vpn-zone hermetic <зона> on|off|default        # без systemd --user, шина через фильтр, брокер
-vpn-zone hermetic --default on|off             # для зон без своей настройки (вкл. с 2026-09)
-vpn-zone default-profile ask|main|own|<имя>
-vpn-zone mode picker|per-zone|both|off         # как ведут себя ярлыки (per-zone, both — устарели)
-vpn-zone default offline|unconfined|<зона>     # что пикер предлагает незнакомой программе
-vpn-zone pins / forget <программа|--all>       # закреплённые за сетями программы и снять закрепление
-vpn-zone container list|show|set|assign|merge  # контейнеры: сеть, программы, X11, объединение двух
-vpn-zone trust add|list|rm <контейнер> …       # корневой сертификат только для одного контейнера
+cellward profile create|list|rm <имя>
+cellward sandbox create|list|rm <имя>
+cellward perms list|reset <программа|--all>    # выданные доступы к файлам
+cellward lock|unlock <зона>                    # запретить выход в другие сети
+cellward x11 <зона> on|off                     # свой X-сервер программам зоны
+cellward hermetic <зона> on|off|default        # без systemd --user, шина через фильтр, брокер
+cellward hermetic --default on|off             # для зон без своей настройки (вкл. с 2026-09)
+cellward default-profile ask|main|own|<имя>
+cellward mode picker|per-zone|both|off         # как ведут себя ярлыки (per-zone, both — устарели)
+cellward default offline|unconfined|<зона>     # что пикер предлагает незнакомой программе
+cellward pins / forget <программа|--all>       # закреплённые за сетями программы и снять закрепление
+cellward container list|show|set|assign|merge  # контейнеры: сеть, программы, X11, объединение двух
+cellward trust add|list|rm <контейнер> …       # корневой сертификат только для одного контейнера
 ```
 
 **В какой зоне это окно.** Меню окна в фокусе — на клавишу композитора, его зону
 — в панель. С home-manager часть композитора пишет модуль:
 
 ```nix
-programs.vpn-zones.desktop = {
+programs.cellward.desktop = {
   windowMenu.key = "Mod+Shift+Z";   # запись niri; null — без клавиши
   floatWindows = true;              # окно запуска и меню плавающие (по умолчанию)
   niri.enable = true;               # ~/.config/niri/vpn-zones.kdl
@@ -363,7 +411,7 @@ programs.vpn-zones.desktop = {
 ```kdl
 // niri, config.kdl
 binds {
-    Mod+Shift+Z { spawn "vpn-zone" "window-menu"; }
+    Mod+Shift+Z { spawn "cellward" "window-menu"; }
 }
 // окно запуска и меню — плавающие, а не отдельной колонкой
 window-rule {
@@ -377,7 +425,7 @@ window-rule {
 
 ```jsonc
 // waybar: строка при каждой смене фокуса, класс по зоне — чтобы красить
-"custom/vpn-zone": { "exec": "vpn-zone focused --watch", "return-type": "json" }
+"custom/cellward": { "exec": "cellward focused --watch", "return-type": "json" }
 ```
 
 Сеть окна — сетевое пространство его собственного процесса (pid композитор
@@ -405,7 +453,7 @@ window-rule {
   системными пользователями держит в локальной сети — что должно дальше, идёт
   через зону;
 - **один VPN — одно подключение**: у пользовательской зоны может не быть своего
-  туннеля, она идёт через туннель системной (`vpn-zone add <имя> --system <зона>`);
+  туннеля, она идёт через туннель системной (`cellward add <имя> --system <зона>`);
 - **пульт в TTY** (`console`): вход в текстовой консоли попадает в меню, где сеть
   уже есть, — терминал в VPN-зоне, простая зона про запас, если VPN не поднялся;
 - **выключатель**: `vpn-zones-off` возвращает всё в сеть хоста без пересборки и
@@ -413,16 +461,18 @@ window-rule {
 
 ```nix
 # NixOS
-imports = [ inputs.vpn-zones.nixosModules.default ];
-services.vpn-zones.system = {
+imports = [ inputs.cellward.nixosModules.default ];
+services.cellward.enable = true;     # с политикой хоста: простая зона direct0 для nix и часов
+services.cellward.system = {
   enable = true;
   users = [ "alice" ];               # видят состояние зон и добавляют зоны на месте
-  zones.direct0.kind = "plain";      # «напрямую»
-  host.nix = "direct0";
-  host.time = "direct0";
   egress = { enable = true; mode = "audit"; };   # сперва наблюдать, потом enforce
 };
 ```
+
+То же без единой точки входа — и так же демон Nix или часы отправляются в
+другую зону — пишется явно: `zones.direct0.kind = "plain";` («напрямую»),
+`host.nix = "direct0";`, `host.time = "direct0";`.
 
 ```sh
 vpn-zone-sys <зона> -- <команда>          # консольная программа в системной зоне (users зоны)

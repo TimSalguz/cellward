@@ -5,7 +5,7 @@
 §6, ROADMAP M3 (hermeticity, broker, X11).
 
 **Status: decided (the owner, 2026-09-17), implementation in progress** — see
-§7 for the decisions. `vpn-zone doctor` reports every channel below as `warn`
+§7 for the decisions. `cellward doctor` reports every channel below as `warn`
 until it is closed, and names by path every unix socket a program of the zone
 can connect to that is not the zone's own (`docs/LEAK-MODEL.md` §18).
 
@@ -50,7 +50,7 @@ the zone gets it — not per launch):
    what its clients see: their own streams, the outputs, the microphones
    only on `yes`, never a monitor or a link of their own — without the
    policy no PipeWire at all; the host's raw `pipewire-0` only for a zone
-   declared an audio manager, `vpn-zone audio-manager`; where WirePlumber
+   declared an audio manager, `cellward audio-manager`; where WirePlumber
    and PipeWire load scripts and fragments from in the home —
    `~/.config/pipewire`, `~/.config/wireplumber`,
    `~/.local/share/wireplumber`, `~/.local/state/wireplumber` — read-only in
@@ -149,22 +149,22 @@ becomes a default, with the table above as the list of what the owner accepts.
   `/tmp/.X11-unix` in the zone's mount namespace and no `DISPLAY` in a launch.
   A container with the `x11` permission gets its own `xwayland-satellite`.
   There is no `x11 = "host"` hole. The same per zone, for zones without
-  containers: `vpn-zone x11 <zone> on` or `zoneX11 = [ "<zone>" ]`.
+  containers: `cellward x11 <zone> on` or `zoneX11 = [ "<zone>" ]`.
 - **B — the system bus: B2, narrowed — implemented.** `xdg-dbus-proxy` per zone; `UPower`
   allowed; `login1` only `Inhibit` and reading properties — no session list,
   no power management; `NetworkManager`, `hostname1`, `resolve1`, `machined`,
   `timedate1` denied.
 - **C — the session bus and the broker.** The prototype first, behind a
   per-zone flag `hermetic`, proven by an evil host in the VM — **the prototype
-  is implemented** (`vpn-zone hermetic <zone> on`); what follows is not yet.
+  is implemented** (`cellward hermetic <zone> on`); what follows is not yet.
   Then:
   1. `hermetic` becomes the default; switching it off is explicit and per
      zone (a zone whose programs legitimately drive `systemd --user`, such as
      one running agents that start VM checks with `systemd-run --user`).
      **Implemented, and the default flipped (2026-09):**
      `hermetic.default` and `hermetic.exceptions` in the module,
-     `vpn-zone hermetic --default on|off` and
-     `vpn-zone hermetic <zone> on|off|default` locally. What wins: a zone in
+     `cellward hermetic --default on|off` and
+     `cellward hermetic <zone> on|off|default` locally. What wins: a zone in
      `hermetic.exceptions` (the opposite of `hermetic.default`, which the
      module requires with it), then the zone's own setting, then
      `hermetic.default`, then the local default, then on. Only `off` opens

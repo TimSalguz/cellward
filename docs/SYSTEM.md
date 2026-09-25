@@ -20,6 +20,12 @@ What joins it: system services (`NetworkNamespacePath=`) and NixOS containers
 (`containers.<name>.networkNamespace`). A user's programs join it through `vpn-zone-sys`
 (§7) or through a user zone of their own on top of it (§7b).
 
+The module is `nixosModules.default`. Its single entry, `services.cellward.enable` (README,
+Installation), turns on what the user tier needs of the system — kernel modules, the
+PipeWire policy, the home-manager module for every user — but not this tier:
+`services.cellward.system.enable` does that, and stays an explicit choice. (The options were
+`services.vpn-zones.*`; the old names still work, with a warning.)
+
 Stages 1–3 carry WireGuard/AmneziaWG zones only. OpenConnect and host-interface configs are
 refused with a message; they need the uplink to be a namespace of its own and come later.
 
@@ -65,7 +71,7 @@ and the way a program goes out directly once the host has no network of its own 
 | `/etc/vpn-zones/system-zones` | from the module | declared zone names, one per line, for `status --json` |
 
 Members of the group `vpn-zones` can read the status; that is what makes
-`vpn-zone status --json` report a system zone's tunnel without root.
+`cellward status --json` report a system zone's tunnel without root.
 
 ## 2a. One VPN, added once
 
@@ -84,7 +90,7 @@ the same time, through one tunnel.
 
 `vpn-zone-sys --up <name>` starts a zone for one of its users; the TTY console uses it.
 
-**Who may add** (review): `services.vpn-zones.system.users` (the module writes them to
+**Who may add** (review): `services.cellward.system.users` (the module writes them to
 `/etc/vpn-zones/system-adders`), and nobody else — a zone's own `users` may use it, not add
 zones. A declared zone that the host's own services go through (`host.*`, `services`,
 `containers` — marked `carries`) never has its config replaced by a request: whoever sets its
@@ -144,7 +150,7 @@ good.
 
 ## 4a. Through one interface of the host
 
-`services.vpn-zones.system.zones.<zone>.uplink = "enp4s0";` — two providers, a modem next to
+`services.cellward.system.zones.<zone>.uplink = "enp4s0";` — two providers, a modem next to
 the wired network: each zone goes out by the interface it is given, and by nothing else.
 
 - **A tunnel zone gets an uplink of its own.** Without `uplink` the host's namespace is the
@@ -173,7 +179,7 @@ the wired network: each zone goes out by the interface it is given, and by nothi
 
 ## 5. Services in a system zone (stage 2)
 
-`services.vpn-zones.system.services.<unit> = "<zone>";` attaches the unit to the zone. The
+`services.cellward.system.services.<unit> = "<zone>";` attaches the unit to the zone. The
 unit's own definition is left alone: a systemd generator (`vpn-zones-generator`, a few lines
 of shell with absolute store paths, none of our binaries) links a drop-in
 `<unit>.service.d/50-vpn-zones.conf` into `/run` at boot and at every `daemon-reload`. The
@@ -208,7 +214,7 @@ with their zones.
 
 ## 6. NixOS containers in a system zone (stage 3)
 
-`services.vpn-zones.system.containers.<container> = "<zone>";` sets on
+`services.cellward.system.containers.<container> = "<zone>";` sets on
 `containers.<container>`:
 
 - the network: **not** `containers.<container>.networkNamespace`. nspawn joins a network
@@ -239,7 +245,7 @@ with their zones.
 ## 7. A user's program in a system zone (stage 4)
 
 `vpn-zone-sys <zone> [--] <command>`, for the users listed in
-`services.vpn-zones.system.zones.<zone>.users`. Console programs (the use the TTY console of
+`services.cellward.system.zones.<zone>.users`. Console programs (the use the TTY console of
 ARCHITECTURE §4 needs); graphical ones go through a user zone over the system zone (§7b),
 which has the session sealing user zones have.
 
@@ -294,7 +300,7 @@ off.
 Name = nl
 ```
 
-`vpn-zone add <zone> --system nl` writes that, and `vpn-zone add <zone> <file.conf>` writes it
+`cellward add <zone> --system nl` writes that, and `cellward add <zone> <file.conf>` writes it
 by itself when the file's key is already a system zone's the user may use (`VZK1`, below); a
 system zone they may not use is a refusal, never a second tunnel behind its back.
 
@@ -338,14 +344,14 @@ system zone they may not use is a refusal, never a second tunnel behind its back
   resolv.conf is written from them — the tunnel's, reached through the tunnel.
 - **Liveness.** pasta's interface up is the link; the tunnel behind it is the system zone's,
   whose holder mirrors `wg show` for the group `vpn-zones`: the user zone's status is that
-  file, so `vpn-zone check` and the picker read a handshake as for any WireGuard zone.
+  file, so `cellward check` and the picker read a handshake as for any WireGuard zone.
 - **Where a packet can go.** From the app namespace only to pasta (`awg0` is its only
   interface besides lo, and its filter allows nothing else). From pasta only where the
   system zone routes — its tunnel; the system zone's filter drops anything else. The tunnel
   stopping leaves the system zone with lo and the user zone with nothing (the VM test checks
   both the tunnel's address and the host's own). pasta's sockets are in the system zone's
   namespace, so the host's egress policy never sees them — and does not have to.
-- **The system zone made anew** — its namespace unit restarted, vpn-zones off and on — would
+- **The system zone made anew** — its namespace unit restarted, cellward off and on — would
   leave pasta in the old namespace, which has no tunnel. The service keeps the zone's two
   descriptors for as long as the connection lasts and looks every second: the system zone's
   namespace gone or another one, pasta is killed; a namespace there again with its way out
@@ -356,18 +362,18 @@ system zone they may not use is a refusal, never a second tunnel behind its back
 
 ## 7a. The TTY console
 
-`services.vpn-zones.system.console = { enable = true; zone = "nl"; fallback = "direct"; }` —
+`services.cellward.system.console = { enable = true; zone = "nl"; fallback = "direct"; }` —
 ARCHITECTURE §4: fell into a text console, logged in, and there is a network already, with
 nothing to type and nothing to know.
 
 ```
-  vpn-zones — консоль · alice
+  cellward — консоль · alice
     сеть: nl — туннель жив (tunnel alive)
     [Enter] терминал с интернетом (zone nl)
     [n]     Настройки и откат                ← console.admin, if set
     [p]     напрямую, без VPN (zone direct)  ← only when nl has no live tunnel
     [k]     аварийный ключ …                 ← the egress policy's key (§9)
-    [x]     выключить vpn-zones целиком …    ← the off switch (§9a)
+    [x]     выключить cellward целиком …     ← the off switch (§9a)
     [q]     обычная консоль, без сети
 ```
 
@@ -383,7 +389,7 @@ nothing to type and nothing to know.
 - **The keys.** Enter: a login shell in the zone through `vpn-zone-sys`, and back to the menu
   when it ends; `p`: the same in the plain `fallback` zone, offered when the zone has no live
   tunnel; `n`: the admin tool on the host; `k`: the emergency key; `x`: the off switch;
-  `q`: the ordinary shell of the host. With vpn-zones off the console does not show itself. The shell runs as a process of its own, not inside the console: the client's
+  `q`: the ordinary shell of the host. With cellward off the console does not show itself. The shell runs as a process of its own, not inside the console: the client's
   relay would leave a thread blocked on the terminal that would take the next key meant for
   the menu.
 - **It never locks anybody out.** Every failure ends in the host's ordinary shell, which under
@@ -391,7 +397,7 @@ nothing to type and nothing to know.
 
 ## 8. State for tools
 
-`vpn-zone status --json` gets a top-level `system_networks` array — additive, schema 1. A
+`cellward status --json` gets a top-level `system_networks` array — additive, schema 1. A
 separate array and not entries in `networks`: a tool that doesn't know the difference would
 offer a system zone as a network for a program container, which can't use it.
 
@@ -408,7 +414,7 @@ closed to them, so `up`, `tunnel_alive` and the counters are `null`.
 
 ## 9. The host without a network of its own (stage 5)
 
-`services.vpn-zones.system.egress = { enable = true; mode = "audit" | "enforce" | "strict"; }` —
+`services.cellward.system.egress = { enable = true; mode = "audit" | "enforce" | "strict"; }` —
 ARCHITECTURE §2, «страховка»: a user's program that runs outside every zone does not reach
 the network, however it was started.
 
@@ -460,7 +466,7 @@ the network, however it was started.
     a namespace the user maps on purpose with `newuidmap`. Narrowing it needs the zones'
     pasta under an owner no container uses (ROADMAP).
   - *Established flows stay.* `ct state established,related accept` comes first: a
-    connection opened while vpn-zones were off, during the emergency key's window or
+    connection opened while cellward was off, during the emergency key's window or
     before the policy loaded keeps flowing afterwards, and so does the reply side of a
     connection someone opened to a user's listener.
 - **Loaded on any nft and kernel.** The table is replaced with `add table` + `delete
@@ -478,27 +484,27 @@ way around it that does not need the broken part:
 | This package in a new generation | The console falls through to the ordinary shell; the previous generation in the boot menu |
 | The VPN, or the amneziawg module for a new kernel | The in-tree `wireguard` for configs without obfuscation; the plain zone, which needs no module |
 | The egress policy keeps the host offline, our binary broken | The emergency key deletes the table with `nft` alone and puts it back from the built file with `nft` alone; `vpnzones.egress=off` on the kernel command line (`e` in the boot menu) keeps the policy from loading, with no binary of ours involved. Our binary crashing never OPENS the host: it only adds allowances to a restriction `nft` loads by itself |
-| vpn-zones as a whole, with no network to rebuild without them | `vpn-zones-off` (below) |
+| cellward as a whole, with no network to rebuild without it | `vpn-zones-off` (below) |
 | Nix, the daemon | Not used at run time by zones, the console or the policy |
 | The store itself | The previous generation; nix_cm's rescue copy runs without `/nix/store` |
 
-**Off entirely, with no rebuild.** Taking vpn-zones out of the configuration needs a rebuild,
-and a rebuild may need the network vpn-zones is keeping from the host. `vpn-zones-off` turns
+**Off entirely, with no rebuild.** Taking cellward out of the configuration needs a rebuild,
+and a rebuild may need the network cellward is keeping from the host. `vpn-zones-off` turns
 it all off in place instead: it sets `/var/lib/vpn-zones/off`, deletes the egress table,
 reloads systemd (the generator no longer attaches services), restarts the attached services
 on the host's network, and stops the zones. Every zone unit and the policy have
 `ConditionPathExists=!/var/lib/vpn-zones/off`, so nothing comes up again, reboots included;
-the console does not show itself, and the helper (§7) answers "vpn-zones are off".
+the console does not show itself, and the helper (§7) answers "cellward is off".
 `vpn-zones-on` removes the flag, starts the policy and the `autoStart` zones, brings up the
 zones of the attached services that are running, reloads systemd and restarts those services
 into their zones. The order matters: after the reload a service is bound to its zone, and
 systemd stops a service bound to a zone that is not up; `try-restart` would not bring the
 zone up either, it pulls in no dependencies. Both are oneshot units run by systemd with
 coreutils, `nft` and `systemctl` — none of our binaries; the commands are wrappers around
-`systemctl start`, and polkit lets `services.vpn-zones.system.switchGroup` (`wheel` by
+`systemctl start`, and polkit lets `services.cellward.system.switchGroup` (`wheel` by
 default, `null` for root only) start exactly these two units: `off` with a password, at the machine too, `on` without one at the machine itself. The console
 has it as `[x]`. On the kernel command line, `vpnzones=off` does the same for one boot
-without touching the flag. The user tier has its own switch, `vpn-zone mode off`; user zones
+without touching the flag. The user tier has its own switch, `cellward mode off`; user zones
 do not depend on the system tier and keep working.
 
 A statically linked set of tools (`ip`, `awg`, `nft`, pasta) was weighed and left out: on
@@ -513,13 +519,18 @@ uid < 1000 and systemd's dynamic range — keep the local network only. Whatever
 system has to reach further goes through a zone, like everything else, and chooses which:
 
 ```nix
-services.vpn-zones.system = {
+services.cellward.system = {
   zones.direct0.kind = "plain";   # "directly": the host's network, through pasta
   host.nix = "direct0";           # or a VPN zone: downloads through the tunnel
   host.time = "direct0";          # or a VPN zone: nobody sees who asks for the time
   egress = { enable = true; mode = "strict"; };
 };
 ```
+
+With `services.cellward.enable = true` the first three lines are the default whenever
+`egress.enable` is on and `host.nix` / `host.time` are unset: a `zones.direct0` of your own
+wins, `host.time` is set only with timesyncd on, and `host.nix = null` keeps the daemon on the
+host's network.
 
 - **What "local" is.** `egress.localNetworks`: the private, link-local and multicast ranges
   of both families by default — the router, a printer, a resolver on the LAN, mDNS. They
@@ -570,7 +581,7 @@ services.vpn-zones.system = {
 
 ## 9c. The host's names through a zone
 
-`services.vpn-zones.system.host.dns = "<zone>"`: every name the host itself asks — resolved,
+`services.cellward.system.host.dns = "<zone>"`: every name the host itself asks — resolved,
 nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
 
 - **Why not resolved in the zone.** A namespace has no way into another, and that is the
@@ -637,7 +648,7 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
 - **Off.** Without the attaching drop-in the unit's own `ExecStart` runs, from the host's
   network: the router's resolvers as the host knows them (`--host-resolvers`), else a plain
   zone's own `dns`, else the public ones (`--fallback`). A VPN zone's own resolvers are not
-  used: they are inside its tunnel. Names keep working with vpn-zones off; the resolver
+  used: they are inside its tunnel. Names keep working with cellward off; the resolver
   settings stay as they are.
 - **A program outside the zones** still gets its names — through the zone now, not the
   host's network — and under `enforce`/`strict` still no connection.
@@ -714,19 +725,19 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
      tunnel and `p` gives a shell in the plain zone that reaches the LAN;
   11. the off switch, by a member of `wheel`: the flag is set, the policy's table is gone,
      `sz` is down, the attached service runs again in the host's namespace and alice reaches
-     the LAN directly; `vpn-zone-sys` answers that vpn-zones are off; a `daemon-reload` does
+     the LAN directly; `vpn-zone-sys` answers that cellward is off; a `daemon-reload` does
      not attach the service again; `vpn-zones-on` is refused to a user outside `wheel`, and
      for alice brings the policy, `sz` and the service in its namespace back;
 - **VM `tests/vm-bridge.nix`:** a user zone through a system zone (§7b), both tiers on one
   machine (the NixOS module and alice's home-manager module), the egress policy enforced:
-  `vpn-zone add --system` writes a config with no key; the zone's program reaches the
+  `cellward add --system` writes a config with no key; the zone's program reaches the
   tunnel's service and the server sees the system zone's tunnel address; `lo` and `awg0`
   only; the tunnel's resolver; the machine's own LAN address unreachable; pasta in the system
-  zone's namespace as alice, none as root; `vpn-zone check` from the system zone's
-  handshake; `vpn-zone add` with the system zone's key makes a zone through it; the tunnel
+  zone's namespace as alice, none as root; `cellward check` from the system zone's
+  handshake; `cellward add` with the system zone's key makes a zone through it; the tunnel
   stopped, nothing reachable, started again, reachable; the system zone's namespace made
   anew (told by a sysctl marker) and the user zone reaching the tunnel again with one pasta
-  of alice's in the new namespace; vpn-zones off, nothing reachable, on, reachable; the zone
+  of alice's in the new namespace; cellward off, nothing reachable, on, reachable; the zone
   down, nothing of alice's left in the system zone.
 - **VM `tests/vm-uplink.nix`:** zones through one interface (§4a), two networks under the
   strict policy: a tunnel zone through eth2 whose server sees it come from the machine's

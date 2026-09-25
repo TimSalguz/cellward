@@ -24,7 +24,7 @@ separate gateways.
 
 ```
 ┌──────────────────────────── HOST (the control room) ─────────────────────────────┐
-│  kernel, systemd, compositor, nix-daemon, the vpn-zones engine, a config tool    │
+│  kernel, systemd, compositor, nix-daemon, the cellward engine, a config tool     │
 │  no network of its own: only zone uplinks and allow-listed services go out       │
 │                                                                                  │
 │  GATEKEEPER ← launcher, compositor binds, links, D-Bus, autostart, terminal,     │
@@ -80,13 +80,13 @@ separate gateways.
 **Everything else is shared:** the config format and its parser (`config.rs`), resolving the
 endpoint in the host's network before configuring, the tunnel created outside and moved in,
 `lo` + `awg0` and nothing else inside, the same second-echelon ruleset, the same resolv.conf
-from `DNS =`, the same smoke assertion ("exactly two links"), one `vpn-zone status --json`.
+from `DNS =`, the same smoke assertion ("exactly two links"), one `cellward status --json`.
 
 **What can't be unified, and the person sees it:**
 - A service can't live in a user zone: that zone dies with the session.
 - A user's program can't enter a system zone without root: `setns` into a namespace owned
   by root needs privileges. A tiny broker is needed — enter the namespace, drop to the
-  user, run the ordinary vpn-zones launch with its sandbox. It is a new attack surface, so
+  user, run the ordinary cellward launch with its sandbox. It is a new attack surface, so
   it is minimal, comes only with the system module, and admits only those it was told to.
 
 The user tier doesn't depend on the system tier. Without the NixOS module everything stays
@@ -100,7 +100,7 @@ else.** That is intended:
 
 - administration keeps working: the shell doesn't download, nix-daemon does, and it is
   allow-listed. Rebuilds, rollbacks and garbage collection work from a TTY;
-- a network on a TTY is had the way it is had everywhere: `vpn-zone run <zone> -- bash`
+- a network on a TTY is had the way it is had everywhere: `cellward run <zone> -- bash`
   (the systemd user manager starts for a TTY login too, so user zones work there), or a
   system zone through the broker;
 - an emergency key: "open the host for 15 minutes", a unit that reverts on its own;
@@ -116,7 +116,7 @@ else.** That is intended:
 | How something starts | How it is caught | State |
 |---|---|---|
 | Launcher, links (`xdg-open`), D-Bus activation, autostart | intercepted entries, shadow services | **done** (M8) |
-| Compositor binds | `vpn-zone launch <id>` instead of the program | **mechanism done**, the bind is the person's |
+| Compositor binds | `cellward launch <id>` instead of the program | **mechanism done**, the bind is the person's |
 | A terminal | the terminal itself starts in a container with a network; what is typed inherits | **pieces exist** (`overlay` home), not put together |
 | A program typed in a terminal | PATH shims; a shell hook before the line runs | **shims done** (`pathShims.enable`), no hook |
 | A launch from a script, a file manager, another program | fanotify `FAN_OPEN_EXEC_PERM` as root: the exec waits for the daemon | **not yet**, last |
@@ -156,8 +156,8 @@ gatekeeper's exceptions are **packages in the store, not names**: anybody can pu
 
 ## 8. Who does what
 
-vpn-zones is the engine of both tiers: the code, the modules, the leak checks, one leak
-model. A configuration tool (nix_cm) is only a window: it reads `vpn-zone status --json` and
+cellward is the engine of both tiers: the code, the modules, the leak checks, one leak
+model. A configuration tool (nix_cm) is only a window: it reads `cellward status --json` and
 writes module options, as it already does for program containers. Hermeticity is checked in
 one place — here.
 

@@ -96,9 +96,9 @@ container = {
 
 - **I1. One network at a time; a change is explicit.** A container is launched
   into its current network only. Changing it is an action of its own —
-  «Сменить сеть контейнера…» in the picker and the GUI, `vpn-zone container
+  «Сменить сеть контейнера…» in the picker and the GUI, `cellward container
   set <c> network <net>` on the command line, the option in Nix — and never a
-  side effect of choosing where to run a program. `vpn-zone run <other>
+  side effect of choosing where to run a program. `cellward run <other>
   --profile <c>` is a refusal naming the way out, not a silent launch.
 - **I2. Running programs keep their network.** A process cannot be moved into
   another network (§7). While programs of a container run in network A, the
@@ -107,7 +107,7 @@ container = {
 - **I3. One container per program instance.** The registry records the
   selector; the conflict check also looks at the binary (done).
 - **I4. Every layer on every road.** Network, home, permissions, trust and the
-  compositor restriction are applied by one code path (`vpn-zone run` →
+  compositor restriction are applied by one code path (`cellward run` →
   `entry_argv` → `profile-run`), for every kind of network (done for zones,
   `unconfined` and `offline`).
 - **I5. Unknown means offline.** A program with no assignment starts with no
@@ -137,8 +137,8 @@ never possible: two ways out is a leak waiting for a routing mistake.
 
 ### 3.4 Merging two containers
 
-`vpn-zone container merge <from> <into> [--yes]` and the «Контейнеры VPN-зон»
-entry (`vpn-zone-gui containers`) — **implemented**: for programs that turned out to belong together (a browser and
+`cellward container merge <from> <into> [--yes]` and the «Контейнеры cellward»
+entry (`cellward-gui containers`) — **implemented**: for programs that turned out to belong together (a browser and
 a password manager).
 
 - only containers of one kind merge: two layers over the home (their overlay
@@ -176,7 +176,7 @@ The hints are a list in the crate, each entry naming the program and the
 paths; nothing is granted without the person's answer.
 
 **Path grants — implemented** (the hints and the first-launch offer are left):
-`vpn-zone container grant|revoke sb:<name> <dir>` and
+`cellward container grant|revoke sb:<name> <dir>` and
 `containers.<name>.permissions.paths` in Nix. The program sees the directory
 at its own path, read-write. Rules:
 
@@ -201,11 +201,11 @@ days; the GUI offers an hour, a day, a week) writes
 version reads as a relative path and refuses. A grant whose term is over is
 absent from every launch from that second on, whether or not anything has
 cleaned it up. For the programs already running a transient user timer runs
-`vpn-zone container expire` at the end of the term, and `revoke` does the same
+`cellward container expire` at the end of the term, and `revoke` does the same
 at once: the bind is detached (`umount2(MNT_DETACH)`) in every mount namespace
 of the sandbox's running programs, entered with `setns` as the owner of their
 user namespaces. A detach cannot take away what is already open — a file
-descriptor, a working directory inside; `vpn-zone kill` is the hard end. Every
+descriptor, a working directory inside; `cellward kill` is the hard end. Every
 grant, revoke and expiry is in the journal (`grant`, `revoke`,
 `grant-expired`), and `permissions.paths[].expires` in `status --json` is the
 end of the term (RFC 3339, `null` without one).
@@ -236,7 +236,7 @@ Resolution order for a launch of program `P`:
 
 1. a running instance of `P` (by launcher id): the same container — clicking a
    running program means "raise the window" ([GOTCHAS](GOTCHAS.md) §11);
-2. an assignment from Nix (`programs.vpn-zones.containers.<c>.apps`);
+2. an assignment from Nix (`programs.cellward.containers.<c>.apps`);
 3. a local assignment (made in the picker);
 4. `defaults.container`: `own` — a new private container named after the
    program, network `offline`, and one question: which network to give it
@@ -272,7 +272,7 @@ boundary is the container → outside direction (§6).
 | `xdg-open`, `gio open`, `kde-open`, "open with" | resolve to a `.desktop` → the shadow entry | unchanged | — |
 | D-Bus activation (`gapplication launch`, `DBusActivatable=true`) | the service file activates around the shadow | **done** (§5.3): shadow session service files in `$XDG_DATA_HOME/dbus-1/services/<id>.service` for intercepted ids only; never for portal or system names | 3 |
 | XDG autostart | runs uncontained | **done** (§5.2): assigned programs start in their container; **unassigned ones get the picker at login** (`ask`, since 2026-09-24) — or, with `offline` or no screen, start offline in a home of their own with a notification | 3 |
-| compositor key bindings | only if the binding calls `vpn-zone-pick` | **done** (§5.1): `vpn-zone launch <launcher-id>` reads the entry's `Exec` and goes through the picker | 3 |
+| compositor key bindings | only if the binding calls `vpn-zone-pick` | **done** (§5.1): `cellward launch <launcher-id>` reads the entry's `Exec` and goes through the picker | 3 |
 | shell | uncontained | **done**: opt-in PATH shims for assigned programs (`pathShims.enable`); never a boundary | 3 |
 | portal `OpenURI` from a host program | portal → handler entry → shadow → picker | unchanged | — |
 | portal `OpenURI` from a container | the origin is lost | broker (§6.2) | 4 |
@@ -283,12 +283,12 @@ boundary is the container → outside direction (§6).
 
 ### 5.1 The launch command for bindings
 
-`vpn-zone launch <launcher-id> [-- extra args]` — **implemented** — finds the
+`cellward launch <launcher-id> [-- extra args]` — **implemented** — finds the
 entry by id in the same source directories `sync` reads, takes its `Exec`
 (field codes filled from the extra arguments), and becomes the picker for it:
 
 ```kdl
-Mod+B { spawn "vpn-zone" "launch" "firefox"; }
+Mod+B { spawn "cellward" "launch" "firefox"; }
 ```
 
 - the entry is the program's own: an entry taken over in place is read from
@@ -314,7 +314,7 @@ The user's `~/.config/autostart/*.desktop` are taken over in place by the same
 pass and under the same rules as the user's launcher entries (regular files
 only, original bytes kept in `~/.local/state/vpn-zones/.adopted-autostart/`
 first, re-taken when the program rewrites its entry, given back by
-`autostart.unassigned = "as-is"` or `vpn-zone mode off`). The rewritten `Exec`
+`autostart.unassigned = "as-is"` or `cellward mode off`). The rewritten `Exec`
 is `vpn-zone-pick --autostart --id <key> -- <original command>`.
 
 - **The key** is the one the program's pins live under, not the file name:
@@ -438,13 +438,15 @@ needed first. **Open research item**, VM prototype before any promise.
 
 The options belong to the **home-manager** module (`homeModules.default`) and
 are set in the home configuration of the user they apply to; the NixOS module
-has none of them. Declared values are written into
-`~/.config/vpn-zones/declared/` of that user (read-only store links) and take
+has none of them (its `services.cellward.enable` only adds the home-manager module to
+every home-manager user, with `programs.cellward.enable` on by default). The options were
+`programs.vpn-zones.*`; the old names still work, with a warning. Declared values are
+written into `~/.config/vpn-zones/declared/` of that user (read-only store links) and take
 precedence over local state; the CLI and the GUI show them as "set in Nix" and
 refuse to change them.
 
 ```nix
-programs.vpn-zones = {
+programs.cellward = {
   enable = true;
 
   launcher.mode = "picker";              # picker | per-zone (deprecated) | both (deprecated) | off
@@ -481,7 +483,7 @@ programs.vpn-zones = {
 ```
 
 A zone through an interface of the host is a zone like the others, made from a
-`[HostInterface]` file with `vpn-zone add` — not an option. Named extra routes
+`[HostInterface]` file with `cellward add` — not an option. Named extra routes
 beside a network and filesystem presets (`downloads`, `documents`) are not
 there; `permissions.paths` is what a private home is given.
 
@@ -498,8 +500,8 @@ there; `permissions.paths` is what a private home is given.
 
 ## 9. Machine-readable state
 
-`vpn-zone status --json` prints everything; `vpn-zone container list --json`
-and `vpn-zone container show <name> --json` print subsets of the same schema.
+`cellward status --json` prints everything; `cellward container list --json`
+and `cellward container show <name> --json` print subsets of the same schema.
 
 - **`schema_version`** is in every document. Within a version changes are
   additive only; removing a field or changing its meaning is a new version and
@@ -621,8 +623,8 @@ would match too.
   The allow-list keeps it from being a channel to a host service: no socket
   directory (`/run`, `/tmp`) can be granted, so neither the unfiltered D-Bus
   nor the host's X11 or resolver becomes reachable through a grant.
-- **`vpn-zone launch`, shims, autostart, D-Bus shadows, taken-over entries.**
-  They only start the picker or `vpn-zone run`; no new socket, no new route.
+- **`cellward launch`, shims, autostart, D-Bus shadows, taken-over entries.**
+  They only start the picker or `cellward run`; no new socket, no new route.
   D-Bus shadows (done) close a path: activating a program by its bus name
   started it in the host's network, uncontained.
   Autostart (done) closes a path: a program that switched its own autostart on
@@ -639,9 +641,9 @@ would match too.
 | phase | content | proof |
 |---|---|---|
 | 0 | **done**: `direct` keeps its layers, working directory, conflict by id and binary, hidden handlers, Steam children | smoke; unit and scenario tests |
-| 1 | **done**: network binding with I1/I2 in `run` and the picker, `vpn-zone container list/show/set/assign/unassign`, `status --json` (`schema_version`, sources), home-manager options with `declared/`, clones deprecated, path grants (`container grant/revoke`, `permissions.paths`), merge (`container merge`). **Left**: `own` by default, hints (Wine prefix, Steam), container-first picker, GUI entries | CLI/picker scenario tests; VM: a declared container with its declared CA, refused elsewhere, reported as Nix |
+| 1 | **done**: network binding with I1/I2 in `run` and the picker, `cellward container list/show/set/assign/unassign`, `status --json` (`schema_version`, sources), home-manager options with `declared/`, clones deprecated, path grants (`container grant/revoke`, `permissions.paths`), merge (`container merge`). **Left**: `own` by default, hints (Wine prefix, Steam), container-first picker, GUI entries | CLI/picker scenario tests; VM: a declared container with its declared CA, refused elsewhere, reported as Nix |
 | 2 | trust layer ([CERTIFICATES.md](CERTIFICATES.md)) — **done** (GUI dialog left) | VM and smoke: synthetic CA trusted in one container only |
-| 3 | **done**: user-dir take-over, autostart take-over (§5.2). `vpn-zone launch` (§5.1), D-Bus shadows (§5.3). web apps as children, host-interface networks (§3.3). **Left**: PATH shims | VM: activation via `gdbus call` lands in the container; autostart of an unassigned program is offline |
+| 3 | **done**: user-dir take-over, autostart take-over (§5.2). `cellward launch` (§5.1), D-Bus shadows (§5.3). web apps as children, host-interface networks (§3.3). **Left**: PATH shims | VM: activation via `gdbus call` lands in the container; autostart of an unassigned program is offline |
 | 4 | runtime hermeticity, broker, X11 closure, extra routes | VM "evil host": a `systemd --user` counting `StartTransientUnit`, a portal logging callers, an HTTP beacon |
 
 ## 12. The owner's decisions (2026-09-17)
