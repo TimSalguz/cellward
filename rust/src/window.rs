@@ -20,6 +20,9 @@
 //! pin-container⇥0|1
 //! guard⇥<ms>                          (nothing starts before; optional)
 //! pins⇥0                              (no "always"; optional)
+//! asker⇥<net>                         (a zone asks: Enter starts only there)
+//! program⇥<text>                      (what the command runs, on the host)
+//! cmd⇥<word>                          (the zone's command, a word each)
 //! ```
 //!
 //! Flags, comma-separated: `selected`; `dead` (the tunnel does not answer);
@@ -68,6 +71,13 @@ pub struct Request {
     pub guard_ms: u64,
     /// No "always" in the window (`crate::picker` from a zone).
     pub no_pins: bool,
+    /// The network of the zone that asks: Enter starts only there, another
+    /// takes a click on the button that names it.
+    pub asker: Option<String>,
+    /// What the command's first word is on the host.
+    pub program: String,
+    /// The zone's command, one word each, shown apart from the notes.
+    pub command: Vec<String>,
 }
 
 /// The hotkey menu: entries to choose one of.
@@ -170,6 +180,15 @@ pub fn render(req: &Request) -> String {
     }
     if req.no_pins {
         out.push_str("pins\t0\n");
+    }
+    if let Some(asker) = &req.asker {
+        out.push_str(&format!("asker\t{}\n", clean(asker)));
+    }
+    if !req.program.is_empty() {
+        out.push_str(&format!("program\t{}\n", clean(&req.program)));
+    }
+    for word in &req.command {
+        out.push_str(&format!("cmd\t{}\n", clean(word)));
     }
     out
 }

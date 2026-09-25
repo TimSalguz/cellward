@@ -1151,15 +1151,13 @@ fn slow_window(home: &Home, reply: &str) -> bool {
     true
 }
 
-const FROM_ZONE_RUNNER: (&str, &str) =
-    ("VPN_ZONE_PICK_RUNNER", "/nix/store/x-cellward/bin/vpn-zone");
-
 #[test]
 fn a_choice_for_a_zone_is_the_window_only_and_comes_back_on_stdout() {
     // The broker asks the host's picker for a program in zone nl. The window
-    // says who asks and what, word by word; nothing starts, nothing is
-    // remembered — a pin of the name the zone chose starts nothing either:
-    // the window is shown on the asking zone, with no "always".
+    // says who asks and what, the command in a block of its own; nothing
+    // starts, nothing is remembered — a pin of the name the zone chose
+    // starts nothing either: the window is shown on the asking zone, with no
+    // "always".
     let home = Home::new("from-zone");
     home.zone("nl");
     home.zone("de");
@@ -1177,7 +1175,7 @@ fn a_choice_for_a_zone_is_the_window_only_and_comes_back_on_stdout() {
             "firefox",
             "https://example.org/a b",
         ],
-        &[FROM_ZONE_RUNNER],
+        &[],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(stdout(&out), "nl\0--\0firefox\0https://example.org/a b\0");
@@ -1188,10 +1186,24 @@ fn a_choice_for_a_zone_is_the_window_only_and_comes_back_on_stdout() {
     assert!(home.asked().is_empty());
     let told = home.read("window.in").unwrap();
     assert!(told.contains("title\tЗапрос из зоны «nl»\n"), "{told}");
-    assert!(told.contains("note\tfirefox\n"), "{told}");
-    assert!(told.contains("note\thttps://example.org/a b\n"), "{told}");
+    // The command is its own block, not notes the window writes itself.
+    assert!(
+        told.contains("cmd\tfirefox\ncmd\thttps://example.org/a b\n"),
+        "{told}"
+    );
+    assert!(!told.contains("note\t"), "{told}");
+    assert!(told.contains("program\t"), "{told}");
+    assert!(told.contains("asker\tnl\n"), "{told}");
     assert!(told.contains("net\tnl\tVPN: nl\tselected\n"), "{told}");
     assert!(told.contains("net\tde\tVPN: de\t\n"), "a pin chose: {told}");
+    // The host's network last, away from where a habit would click.
+    let nets: Vec<&str> = told.lines().filter(|l| l.starts_with("net\t")).collect();
+    assert!(
+        nets.last().unwrap().starts_with("net\tunconfined\t"),
+        "{nets:?}"
+    );
+    // No new container to name in a window that came up by itself.
+    assert!(!told.contains("\tnew\n"), "{told}");
     assert!(
         told.contains("pin-net\t0\n") && told.contains("pins\t0\n"),
         "{told}"
@@ -1219,7 +1231,7 @@ fn a_locked_zone_is_offered_only_itself() {
             "--",
             "firefox",
         ],
-        &[FROM_ZONE_RUNNER],
+        &[],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     let told = home.read("window.in").unwrap();
@@ -1228,7 +1240,7 @@ fn a_locked_zone_is_offered_only_itself() {
 }
 
 #[test]
-fn a_choice_for_a_zone_answered_at_once_or_without_our_binary_starts_nothing() {
+fn a_choice_for_a_zone_answered_at_once_starts_nothing() {
     // Answered sooner than a person could have read it: a key meant for
     // something else.
     let home = Home::new("from-zone-fast");
@@ -1236,19 +1248,51 @@ fn a_choice_for_a_zone_answered_at_once_or_without_our_binary_starts_nothing() {
     home.window("net\tnl\ncontainer\t\n", 0);
     let out = home.run(
         &["--from-zone", "nl", "--id", "firefox", "--", "firefox"],
-        &[FROM_ZONE_RUNNER],
+        &[],
     );
     assert!(!out.status.success());
     assert!(stdout(&out).is_empty(), "{}", stdout(&out));
-    // No binary of ours named by the broker: not asked at all.
-    let _ = fs::remove_file(home.path("window.in"));
+}
+
+#[test]
+fn a_container_named_like_a_command_is_no_container() {
+    // A program with the home can make `vpn-profiles/pinmain`; read as a
+    // menu command it would pin the program to the main home. It is not
+    // offered, and an answer naming it starts nothing.
+    let home = Home::new("from-zone-reserved");
+    home.zone("nl");
+    for name in ["pinmain", "unpinprof", "pin:x", "sb:x", "__fs__", "work"] {
+        fs::create_dir_all(home.path("profiles").join(name)).unwrap();
+    }
+    if !slow_window(&home, "net\tnl\ncontainer\tpinmain\n") {
+        return;
+    }
     let out = home.run(
         &["--from-zone", "nl", "--id", "firefox", "--", "firefox"],
-        &[("VPN_ZONE_PICK_RUNNER", "/home/x/.nix-profile/bin/vpn-zone")],
+        &[],
     );
     assert!(!out.status.success());
     assert!(stdout(&out).is_empty());
-    assert!(home.read("window.in").is_none(), "the window was shown");
+    let told = home.read("window.in").unwrap();
+    let containers: Vec<&str> = told
+        .lines()
+        .filter(|l| l.starts_with("container\t"))
+        .collect();
+    assert!(
+        containers
+            .iter()
+            .any(|l| l.starts_with("container\twork\t")),
+        "{told}"
+    );
+    for name in ["pinmain", "unpinprof", "pin:x", "sb:x"] {
+        assert!(
+            !containers
+                .iter()
+                .any(|l| l.starts_with(&format!("container\t{name}\t"))),
+            "{name} offered: {told}"
+        );
+    }
+    assert_eq!(home.read("state/.pinnedprofile/firefox"), None);
 }
 
 #[test]

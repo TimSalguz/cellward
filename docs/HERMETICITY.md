@@ -111,15 +111,22 @@ program in the zone and would make "always" a standing door. The name a launch g
 opens) sees none of the zones — the project's state is hidden from zones — and a window a
 zone draws is one its programs could draw too. So it asks the broker (`VZP1`, the app-id and
 the command), and the broker shows the launch window on the host (`vpn-zone-pick
---from-zone`): the asking zone in the title, the command word by word, the asking zone
-chosen, a locked zone offered only itself, no "always" (the zone picks which launcher's name
-the window carries). Nothing is decided without the window — a pin or a running copy only
-choose where it starts. It takes no key and starts nothing until the keyboard has been still
-for `dialog::TOO_FAST`: it takes the focus, and a person still typing elsewhere would pick a
-row with a digit and say yes with Enter. The answer comes back as `run`'s arguments; the
-broker checks it is the request's own command word for word (and, from a locked zone, that
-zone), that it did not come sooner than a person could read the window, and starts it. The
-window is the question: no second one. A container of the host's network (`unconfined` in
+--from-zone`): the asking zone in the title; the command in a block of its own, word by word
+and numbered, with the program as the host finds it (flagged when it is not from the store);
+the asking zone chosen and the host's network last; a locked zone offered only itself; no
+"always" and no new container (the zone picks which launcher's name the window carries).
+Nothing is decided without the window — a pin or a running copy only choose where it starts.
+The window takes nothing — no key, no click, no choice — until the person has been still for
+`dialog::TOO_FAST` with it focused: every key (a widget's too), every press and the focus
+coming back start that again, and so does a changed choice. Enter starts only in the asking
+zone; another network takes a click on the button that names it; digits choose nothing. The
+answer comes back as `run`'s arguments; the broker checks it is the request's own command
+word for word (and, from a locked zone, that zone), that it did not come sooner than a person
+could read the window, and starts it. The window is the question: no second one. A zone that
+keeps asking is asked at most four times a minute and not at all for 15 s after a "no"; a
+request is refused whole past 64 KiB or an app-id past 255 bytes; 32 requests at most are
+handled at once. (Review 2026-09-25, which also found the socket systemd passes the broker
+inherited by every program it started: it is close-on-exec now.) A container of the host's network (`unconfined` in
 `VPN_ZONE_CURRENT`) is no zone to the broker and keeps its own picker, as does a zone
 without a broker to ask.
 

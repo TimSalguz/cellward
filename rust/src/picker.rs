@@ -1267,10 +1267,11 @@ pub fn main() -> ExitCode {
     let reprofile = std::env::var(ENV_PROFILE).ok().filter(|v| !v.is_empty());
     std::env::remove_var(ENV_PROFILE);
 
-    let memory = read_memory(&tools, &key);
     if let Some(zone) = &args.from_zone {
+        let memory = read_memory_with(&tools, &key, false);
         return pick_for_zone(&tools, &key, &memory, &args.cmd, zone, args.locked);
     }
+    let memory = read_memory(&tools, &key);
     if args.autostart {
         if let Some(code) = autostart(&tools, &key, &label, &memory, &args.cmd) {
             return code;
@@ -1454,7 +1455,9 @@ const FROM_ZONE_GUARD: std::time::Duration = crate::dialog::TOO_FAST;
 /// notes what, word by word — not the launcher's name. Starting is off for
 /// its first moments ([`FROM_ZONE_GUARD`], in the window and checked here
 /// again): it takes the focus, and a key meant for something else must not
-/// answer it. A locked zone is offered only itself.
+/// answer it. A locked zone is offered only itself. What the window shows is
+/// [`zone_request`]; what it may answer is a container that exists, with no
+/// pin.
 fn pick_for_zone(
     tools: &Tools,
     key: &str,
@@ -1470,43 +1473,16 @@ fn pick_for_zone(
     if cmd.is_empty() {
         return refuse("нечего запускать");
     }
-    // New containers are made by our own binary from the store, which the
-    // broker names — not by the manifest's runner, a link in the profile a
-    // program with the home could point elsewhere.
-    let mut tools = tools.clone();
-    match std::env::var_os(ENV_PICK_RUNNER).map(std::path::PathBuf::from) {
-        Some(runner) if runner.starts_with("/nix/store/") => tools.runner = runner,
-        _ => return refuse("брокер не назвал своего бинаря — не спрашиваю"),
-    }
     if tools.window.as_os_str().is_empty() {
         return refuse("окна запуска нет");
     }
     let Some(shown) = crate::broker::shown_command(cmd) else {
         return refuse("команда слишком длинная, чтобы показать её целиком");
     };
-    let mut req = window_request(&tools, key, "", zone, memory);
-    req.title = match zone.strip_prefix("system:") {
-        Some(system) => format!("Запрос из системной зоны «{system}»"),
-        None => format!("Запрос из зоны «{zone}»"),
-    };
-    req.notes = std::iter::once("Программа оттуда просит запустить:".to_owned())
-        .chain(shown.lines().map(str::to_owned))
-        .collect();
-    for net in &mut req.nets {
-        net.selected = net.tag == zone;
-    }
-    if locked {
-        req.nets.retain(|n| n.tag == zone);
-        req.notes
-            .push("Зона заперта: запустить можно только в ней самой.".to_owned());
-    }
-    req.pin_net = false;
-    req.pin_container = false;
-    req.no_pins = true;
-    req.guard_ms = FROM_ZONE_GUARD.as_millis() as u64;
+    let req = zone_request(tools, key, memory, cmd, &shown, zone, locked);
 
     let asked = std::time::Instant::now();
-    let reply = match show_window(&tools, &req) {
+    let reply = match show_window(tools, &req) {
         Some(Some(reply)) => reply,
         Some(None) => return ExitCode::from(1),
         None => return refuse("окно запуска не открылось"),
@@ -1514,8 +1490,20 @@ fn pick_for_zone(
     if let Err(why) = crate::dialog::not_too_soon(asked) {
         return refuse(&why);
     }
+    // Only a container that exists and no pin: the window offers nothing
+    // else, and a row named like a command is refused all the same.
     let choice = window_container_choice(&reply.container, false);
-    let Some(container) = apply_profile_choice(&tools, key, choice, reply.name.clone()) else {
+    match &choice {
+        ProfileChoice::Main { pin: false }
+        | ProfileChoice::OwnSandbox { pin: false }
+        | ProfileChoice::Throwaway { pin: false }
+        | ProfileChoice::Sandbox { pin: false, .. }
+        | ProfileChoice::Profile { pin: false, .. }
+        | ProfileChoice::Tmp
+        | ProfileChoice::TmpJoin(_) => {}
+        _ => return refuse("окно ответило выбором, которого в запросе из зоны нет"),
+    }
+    let Some(container) = apply_profile_choice(tools, key, choice, None) else {
         return ExitCode::from(1);
     };
     let net = launch::network_name(&reply.net);
@@ -1534,8 +1522,71 @@ fn pick_for_zone(
     ExitCode::SUCCESS
 }
 
-/// Where the broker names its own binary for [`pick_for_zone`].
-pub const ENV_PICK_RUNNER: &str = "VPN_ZONE_PICK_RUNNER";
+/// What the window of [`pick_for_zone`] is asked: the zone's command in a
+/// block of its own and the program as the host finds it; the asking
+/// network chosen, and the only one Enter starts in (`offline` for a
+/// system zone's program); the host's network last, away from where a
+/// habit would click; no new container (a name typed into a window that
+/// came up by itself), no "always", no note of the memory of a name the
+/// zone chose; a sandbox named by its name, not "its own".
+fn zone_request(
+    tools: &Tools,
+    key: &str,
+    memory: &Memory,
+    cmd: &[OsString],
+    shown: &str,
+    zone: &str,
+    locked: bool,
+) -> window::Request {
+    let mut req = window_request(tools, key, "", zone, memory);
+    req.title = match zone.strip_prefix("system:") {
+        Some(system) => format!("Запрос из системной зоны «{system}»"),
+        None => format!("Запрос из зоны «{zone}»"),
+    };
+    req.notes.clear();
+    let asker = if req.nets.iter().any(|n| n.tag == zone) {
+        zone
+    } else {
+        "offline"
+    };
+    for net in &mut req.nets {
+        net.selected = net.tag == asker;
+    }
+    if locked {
+        req.nets.retain(|n| n.tag == zone);
+        req.notes
+            .push("Зона заперта: запустить можно только в ней самой.".to_owned());
+    }
+    if let Some(at) = req
+        .nets
+        .iter()
+        .position(|n| launch::is_unconfined_name(&n.tag))
+    {
+        let host = req.nets.remove(at);
+        req.nets.push(host);
+    }
+    req.containers.retain(|c| !c.new);
+    for c in &mut req.containers {
+        if c.tag == "__ownsb__" {
+            c.label = format!("🔒 Песочница «app-{key}»");
+        }
+    }
+    req.asker = Some(asker.to_owned());
+    req.command = shown.lines().map(str::to_owned).collect();
+    req.program = match crate::broker::program_of(cmd) {
+        Some(path) if crate::broker::may_remember(&path) => path.display().to_string(),
+        Some(path) => format!(
+            "⚠ {} — не из системы: этот файл может подменить программа, у которой есть дом",
+            crate::broker::shown_word(&path.display().to_string())
+        ),
+        None => "⚠ на хосте такой программы нет".to_owned(),
+    };
+    req.pin_net = false;
+    req.pin_container = false;
+    req.no_pins = true;
+    req.guard_ms = FROM_ZONE_GUARD.as_millis() as u64;
+    req
+}
 
 /// `autostart.unassigned`: the declared setting, then the local one; `ask` by
 /// default (owner, 2026-09-24 — `offline` before).
@@ -1626,6 +1677,13 @@ fn autostart(
 
 /// Read the three levels of memory, dropping the pins that have gone stale.
 fn read_memory(tools: &Tools, key: &str) -> Memory {
+    read_memory_with(tools, key, true)
+}
+
+/// [`read_memory`]; `tidy` false leaves every file as it is — for a window a
+/// zone's program asks for, under a launcher's name the zone chose: a pin
+/// is not dropped because the zone moved a container away for a moment.
+fn read_memory_with(tools: &Tools, key: &str, tidy: bool) -> Memory {
     let state = &tools.state;
     let pinned_path = state.join(".pinned").join(key);
     let mut pinned =
@@ -1633,7 +1691,9 @@ fn read_memory(tools: &Tools, key: &str) -> Memory {
     if !pin_is_valid(&pinned, |zone| {
         state.join(zone).join("config.conf").is_file()
     }) {
-        let _ = fs::remove_file(&pinned_path);
+        if tidy {
+            let _ = fs::remove_file(&pinned_path);
+        }
         pinned.clear();
     }
 
@@ -1645,7 +1705,9 @@ fn read_memory(tools: &Tools, key: &str) -> Memory {
         pinned_profile = declared;
     }
     if !profile_pin_is_valid(&pinned_profile, |name| tools.profiles.join(name).is_dir()) {
-        let _ = fs::remove_file(&profile_pin_path);
+        if tidy {
+            let _ = fs::remove_file(&profile_pin_path);
+        }
         pinned_profile.clear();
     }
 
@@ -1656,7 +1718,9 @@ fn read_memory(tools: &Tools, key: &str) -> Memory {
     let handover_path = state.join(HANDOVER).join(key);
     let mut hands_over = handover_path.is_file();
     if hands_over && running.len() > 1 {
-        let _ = fs::remove_file(&handover_path);
+        if tidy {
+            let _ = fs::remove_file(&handover_path);
+        }
         hands_over = false;
     }
     let mut memory = Memory {
@@ -1745,6 +1809,10 @@ fn menu_names(dir: &Path) -> Vec<String> {
         .filter(|path| path.is_dir())
         .filter_map(|path| path.file_name().map(|n| n.to_string_lossy().into_owned()))
         .filter(|name| !name.starts_with('-'))
+        // A directory named like a menu command (`pinmain`, `unpinprof`,
+        // `pin:x`, `sb:x`, `__fs__`…) would be read as that command: a
+        // program with the home can make one (review 2026-09-25).
+        .filter(|name| !reserved_name(name))
         .collect()
 }
 

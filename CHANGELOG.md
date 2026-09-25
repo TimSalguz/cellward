@@ -13,13 +13,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the broker (`VZP1`), and the broker shows the launch window on the host
   (`vpn-zone-pick --from-zone`, `rust/src/broker.rs` `handle_pick`): every
   zone, the asking one chosen, "Запрос из зоны «…»" in the title and the
-  command word by word; a locked zone is offered only itself. The window is
-  the question — no second one from the broker — and it is built not to be
-  answered by accident: it takes no key and starts nothing until the
-  keyboard has been still for 1.5 s (`guard` in the window's contract), has
-  no "always", and decides nothing without being shown, pins included. The
-  broker starts only the request's own command, word for word. A container
-  of the host's network, and a zone without a broker, keep their own picker.
+  command in a block of its own, word by word, with the program as the host
+  finds it (flagged when it is not from the store); a locked zone is offered
+  only itself. The window is the question — no second one from the broker —
+  and it is built not to be answered by accident (a review of it found three
+  ways and they are closed): it takes nothing — no key, no click, no choice —
+  until the person has been still for 1.5 s with it focused, and every key,
+  press, returning focus or changed choice starts that again; Enter starts
+  only in the asking zone, another network takes a click on the button that
+  names it, digits choose nothing, the host's network is listed last; no
+  "always", no new container, nothing decided without the window, pins
+  included. A container directory named like a menu command (`pinmain`,
+  `pin:x`…) is offered in no menu any more. The broker starts only the
+  request's own command, word for word. A container of the host's network,
+  and a zone without a broker, keep their own picker.
+
+### Security
+- **The broker's listening socket reached the programs it started** (found
+  in the review above): systemd passes it as fd 3, and it was not closed on
+  `exec` — a program a zone started into itself (no question for that) could
+  take other zones' requests, their commands and links, and answer them. It
+  is close-on-exec now, and `LISTEN_*` leave the broker's environment.
+- **The broker is harder to flood**: a zone is asked at most four times a
+  minute and not for 15 s after a "no"; a request past 64 KiB or with an
+  app-id past 255 bytes is refused whole (it was cut and read); 32 requests at
+  most are handled at once, and one that sends nothing is dropped after 5 s.
 - **A running terminal no longer takes every next one into its network**
   (`rust/src/picker.rs`, the owner, 2026-09-25). A click on a running
   program started it where it ran, with no question — right for a browser or

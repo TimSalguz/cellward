@@ -238,15 +238,40 @@ fn origin_of(state: &Path, stream: &UnixStream) -> Origin {
     classify(state, &netns, &userns)
 }
 
+/// The longest app-id a request may carry: a launcher's id, not a text —
+/// it goes into the journal, which a flood of long ones would rotate away.
+const MAX_APP_ID: usize = 255;
+
+/// How long a peer may take to send its request: a request is written at
+/// once, and a connection that sends nothing holds a thread.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn handle(tools: &Tools, mut stream: UnixStream) {
     // First, before the request is read: the peer may leave while it is.
     let origin = origin_of(&tools.state, &stream);
+    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let mut bytes = Vec::new();
     if (&mut stream)
-        .take(MAX_REQUEST)
+        .take(MAX_REQUEST + 1)
         .read_to_end(&mut bytes)
         .is_err()
     {
+        return;
+    }
+    // Longer than a request is: refused whole, never read in part.
+    let oversized = if bytes.len() as u64 > MAX_REQUEST {
+        Some("запрос длиннее 64 КиБ")
+    } else if decode_pick(&bytes)
+        .or_else(|| decode(&bytes))
+        .is_some_and(|(app_id, _)| app_id.len() > MAX_APP_ID)
+    {
+        Some("app-id длиннее 255 байт")
+    } else {
+        None
+    };
+    if let Some(why) = oversized {
+        eprintln!("broker: refused: {why}");
+        let _ = stream.write_all(format!("refused: {why}\n").as_bytes());
         return;
     }
     if let Some((app_id, cmd)) = decode_pick(&bytes) {
@@ -542,6 +567,7 @@ fn ask(
     let Ok(_asking) = ASKING.try_lock() else {
         return Err("уже открыт другой вопрос о запуске".to_owned());
     };
+    begin_asking(&origin.name())?;
     let network = if target == crate::launch::UNCONFINED {
         "без ограничений (сеть хоста, без VPN и без изоляции зоны)".to_owned()
     } else {
@@ -577,6 +603,7 @@ fn ask(
         ) {
             crate::dialog::not_too_soon(asked)
         } else {
+            answered_no(&origin.name());
             Err("человек отказал".to_owned())
         };
     };
@@ -601,7 +628,10 @@ fn ask(
             remember(tools, &line);
             Ok(())
         }
-        _ => Err("человек отказал".to_owned()),
+        _ => {
+            answered_no(&origin.name());
+            Err("человек отказал".to_owned())
+        }
     }
 }
 
@@ -609,6 +639,65 @@ fn ask(
 /// "yes" is got by accident. The next request while one is open is refused,
 /// not queued.
 static ASKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The questions put to the person lately: `(origin, when, refused)`.
+static ASKED: std::sync::Mutex<Vec<(String, std::time::Instant, bool)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// At most this many questions for one origin within [`ASK_WINDOW`]: a zone
+/// that asks again the moment it is answered takes the keyboard away from
+/// the session and makes a "yes" by accident likelier with every question.
+const ASKS_PER_WINDOW: usize = 4;
+const ASK_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// After the person said no (or closed the window), that origin is not asked
+/// again for this long.
+const AFTER_NO: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Whether `origin` may be asked now ([`ASKS_PER_WINDOW`], [`AFTER_NO`]).
+pub fn may_ask_now(
+    asked: &[(String, std::time::Instant, bool)],
+    origin: &str,
+    now: std::time::Instant,
+) -> Result<(), String> {
+    let recent: Vec<_> = asked
+        .iter()
+        .filter(|(o, at, _)| o == origin && now.duration_since(*at) < ASK_WINDOW)
+        .collect();
+    if recent.len() >= ASKS_PER_WINDOW {
+        return Err(format!(
+            "зона спрашивает слишком часто: не больше {ASKS_PER_WINDOW} вопросов в минуту"
+        ));
+    }
+    if recent
+        .iter()
+        .any(|(_, at, refused)| *refused && now.duration_since(*at) < AFTER_NO)
+    {
+        return Err("человек только что отказал этой зоне".to_owned());
+    }
+    Ok(())
+}
+
+/// [`may_ask_now`] against the record, and the question put on it.
+fn begin_asking(origin: &str) -> Result<(), String> {
+    let mut asked = ASKED
+        .lock()
+        .map_err(|_| "учёт вопросов сломан".to_owned())?;
+    let now = std::time::Instant::now();
+    asked.retain(|(_, at, _)| now.duration_since(*at) < ASK_WINDOW);
+    may_ask_now(&asked, origin, now)?;
+    asked.push((origin.to_owned(), now, false));
+    Ok(())
+}
+
+/// The last question put to `origin` was answered no.
+fn answered_no(origin: &str) {
+    if let Ok(mut asked) = ASKED.lock() {
+        if let Some(last) = asked.iter_mut().rev().find(|(o, _, _)| o == origin) {
+            last.1 = std::time::Instant::now();
+            last.2 = true;
+        }
+    }
+}
 
 /// Our own binary, from the store — never the manifest's runner, a link in
 /// the profile a program with the home could point elsewhere (review
@@ -647,7 +736,7 @@ fn handle_pick(tools: &Tools, origin: &Origin, app_id: &OsString, cmd: &[OsStrin
                 .to_owned()
         }
     };
-    let result = pick_and_check(&zone, locked, app_id, cmd);
+    let result = pick_and_check(&zone, locked, app_id, cmd, &origin.name());
     let (answer, target) = match result {
         Ok(argv) => {
             let target = argv
@@ -682,6 +771,7 @@ fn pick_and_check(
     locked: bool,
     app_id: &OsString,
     cmd: &[OsString],
+    origin: &str,
 ) -> Result<Vec<OsString>, String> {
     if cmd.is_empty() {
         return Err("нечего запускать".to_owned());
@@ -697,6 +787,7 @@ fn pick_and_check(
     let Ok(_asking) = ASKING.try_lock() else {
         return Err("уже открыт другой вопрос о запуске".to_owned());
     };
+    begin_asking(origin)?;
     let exe = own_binary()?;
     let picker = exe.with_file_name("vpn-zone-pick");
     let mut command = Command::new(&picker);
@@ -709,11 +800,13 @@ fn pick_and_check(
         .arg(app_id)
         .arg("--")
         .args(cmd)
-        .env(crate::picker::ENV_PICK_RUNNER, &exe)
         .env_remove(crate::launch::ENV_CURRENT)
         .env_remove(crate::launch::ENV_DELEGATED)
         .env_remove("VPN_ZONE_ASK")
         .env_remove("VPN_ZONE_PROFILE")
+        .env_remove("LISTEN_PID")
+        .env_remove("LISTEN_FDS")
+        .env_remove("LISTEN_FDNAMES")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -722,6 +815,7 @@ fn pick_and_check(
         .output()
         .map_err(|e| format!("не открыть окно запуска ({}): {e}", picker.display()))?;
     if !out.status.success() {
+        answered_no(origin);
         return Err("человек отказал".to_owned());
     }
     crate::dialog::not_too_soon(asked)?;
@@ -805,8 +899,17 @@ pub fn serve(tools: &Tools) -> u8 {
         &std::env::var("LISTEN_FDS").unwrap_or_default(),
         std::process::id(),
     );
+    // What systemd passed is ours, and no program the broker starts may
+    // inherit it: holding the listening socket, a program started into its own
+    // zone (no question for that) would take every other zone's requests —
+    // their commands and links — and answer them itself (review 2026-09-25).
+    for var in ["LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"] {
+        std::env::remove_var(var);
+    }
     if passed >= 1 {
         use std::os::fd::FromRawFd;
+        // SAFETY: fcntl on a descriptor number; harmless if it is not open.
+        unsafe { libc::fcntl(3, libc::F_SETFD, libc::FD_CLOEXEC) };
         // SAFETY: systemd passed this descriptor to us to own.
         let listener = unsafe { UnixListener::from_raw_fd(3) };
         eprintln!("broker: listening on the socket systemd passed");
@@ -831,10 +934,28 @@ pub fn serve(tools: &Tools) -> u8 {
     accept_forever(tools, &listener)
 }
 
+/// At most this many requests handled at once; the next is refused. A
+/// question holds its request for as long as it is open, so more than one is
+/// normal, but not a flood of connections that each hold a thread.
+const MAX_HANDLED: usize = 32;
+
 fn accept_forever(tools: &Tools, listener: &UnixListener) -> u8 {
-    for stream in listener.incoming().flatten() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static HANDLED: AtomicUsize = AtomicUsize::new(0);
+    for mut stream in listener.incoming().flatten() {
+        if HANDLED.fetch_add(1, Ordering::SeqCst) >= MAX_HANDLED {
+            HANDLED.fetch_sub(1, Ordering::SeqCst);
+            let _ = stream.write_all(b"refused: too many requests at once\n");
+            continue;
+        }
         let tools = tools.clone();
-        let _ = std::thread::Builder::new().spawn(move || handle(&tools, stream));
+        let spawned = std::thread::Builder::new().spawn(move || {
+            handle(&tools, stream);
+            HANDLED.fetch_sub(1, Ordering::SeqCst);
+        });
+        if spawned.is_err() {
+            HANDLED.fetch_sub(1, Ordering::SeqCst);
+        }
     }
     0
 }
@@ -971,6 +1092,46 @@ mod tests {
         assert_eq!(back, cmd);
         assert!(decode(&bytes).is_none());
         assert!(decode_pick(&encode(b"firefox", &cmd)).is_none());
+    }
+
+    /// A zone asking again and again is refused after a few, and right
+    /// after a "no" it is not asked at all for a while.
+    #[test]
+    fn a_zone_that_keeps_asking_is_not_asked() {
+        let now = std::time::Instant::now();
+        let past = |secs: u64, refused: bool| {
+            (
+                "nl".to_owned(),
+                now - std::time::Duration::from_secs(secs),
+                refused,
+            )
+        };
+        assert!(may_ask_now(&[], "nl", now).is_ok());
+        let three = [past(50, false), past(40, false), past(30, false)];
+        assert!(may_ask_now(&three, "nl", now).is_ok());
+        let four = [
+            past(50, false),
+            past(40, false),
+            past(30, false),
+            past(20, false),
+        ];
+        assert!(may_ask_now(&four, "nl", now).is_err());
+        assert!(
+            may_ask_now(&four, "de", now).is_ok(),
+            "another zone is its own"
+        );
+        let stale = [
+            past(70, false),
+            past(65, false),
+            past(61, false),
+            past(20, false),
+        ];
+        assert!(
+            may_ask_now(&stale, "nl", now).is_ok(),
+            "a minute ago is over"
+        );
+        assert!(may_ask_now(&[past(5, true)], "nl", now).is_err());
+        assert!(may_ask_now(&[past(20, true)], "nl", now).is_ok());
     }
 
     /// What the window chose is started only as asked: the same command word

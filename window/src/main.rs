@@ -11,12 +11,19 @@
 //! Keyboard: ←/→ or Tab switch the column, ↑/↓ or a digit choose in it, Space
 //! ticks "always" of that column, Enter starts, Esc closes.
 //!
-//! A window a program in a zone brought up (`guard`, `pins`) takes no key and
-//! starts nothing until the keyboard has been still for the guard's time — it
-//! takes the focus, and a person still typing into something else would pick
-//! a row with a digit and say yes with Enter — and has no "always": a program
-//! there picks which launcher's name the window carries, and "always" for
-//! that name would decide later launches from the menu. A container that is
+//! A window a program in a zone brought up (`guard`, `pins`, `asker`) takes
+//! nothing — no key, no click, no choice — until the person has been still
+//! for the guard's time with the window focused: it takes the focus when the
+//! program likes, and somebody still typing or clicking into something else
+//! must not pick a row and say yes. Every key and every press starts the
+//! guard again, captured by a widget or not, and so does the focus coming
+//! back. There, Enter starts only in the network that asks; another network
+//! takes a click on the button that names it, after the guard once more (a
+//! changed choice restarts it); digits choose nothing. And it has no
+//! "always": a program there picks which launcher's name the window carries,
+//! and "always" for that name would decide later launches from the menu.
+//! The command it asks to run is its own block, word by word and numbered,
+//! apart from the window's notes. A container that is
 //! open in another network (or belongs to one) cannot go with a different
 //! network: it is shown greyed out with the reason, and the choice skips it.
 
@@ -56,6 +63,13 @@ struct Request {
     guard: u64,
     /// `pins⇥0`: no "always" checkboxes, and none ticked.
     no_pins: bool,
+    /// `asker⇥<net>`: the network of the zone that asks — Enter starts only
+    /// there.
+    asker: Option<String>,
+    /// `program⇥<text>`: what the command's first word is on the host.
+    program: String,
+    /// `cmd⇥<word>`: the command, one word each.
+    command: Vec<String>,
 }
 
 fn parse_item(fields: &[&str]) -> Option<Item> {
@@ -103,6 +117,9 @@ fn parse_request(text: &str) -> Request {
             "pin-container" => req.pin_container = fields.get(1) == Some(&"1"),
             "guard" => req.guard = fields.get(1).and_then(|v| v.parse().ok()).unwrap_or(0),
             "pins" => req.no_pins = fields.get(1) == Some(&"0"),
+            "asker" => req.asker = fields.get(1).map(|v| v.to_string()),
+            "program" => req.program = fields.get(1).unwrap_or(&"").to_string(),
+            "cmd" => req.command.push(fields.get(1).unwrap_or(&"").to_string()),
             _ => {}
         }
     }
@@ -130,9 +147,14 @@ enum Msg {
     Name(String),
     Launch,
     Cancel,
-    Key(Key, keyboard::Modifiers),
-    /// The guard's time is over, if no key came since this count of them:
-    /// starting is possible.
+    /// A key, and whether a widget took it already.
+    Key(Key, keyboard::Modifiers, bool),
+    /// A mouse button pressed anywhere in the window.
+    Press,
+    /// The window got (`true`) or lost the focus.
+    Focus(bool),
+    /// The guard's time is over, if nothing came since this count of
+    /// holds: taking a choice is possible.
     Armed(u64),
 }
 
@@ -148,8 +170,8 @@ struct Window {
     name: String,
     /// False while the request's guard runs.
     armed: bool,
-    /// Keys pressed while the guard ran: each one starts it again.
-    held_keys: u64,
+    /// How many times the guard was started: only the last one arms.
+    holds: u64,
 }
 
 /// Why a container cannot go with this network, if it cannot.
@@ -184,7 +206,7 @@ impl Window {
             name: String::new(),
             entry: 0,
             armed: req.guard == 0,
-            held_keys: 0,
+            holds: 0,
             req,
         }
     }
@@ -271,7 +293,45 @@ impl Window {
         out
     }
 
+    fn guarded(&self) -> bool {
+        self.req.guard > 0
+    }
+
+    /// The guard, from the start: nothing is taken until it is over.
+    fn hold(&mut self) -> Task<Msg> {
+        self.armed = false;
+        self.holds += 1;
+        arm_after(self.req.guard, self.holds)
+    }
+
+    /// Whether Enter may start: anywhere in an ordinary window, only in the
+    /// asking network in a zone's.
+    fn enter_starts(&self) -> bool {
+        self.req
+            .asker
+            .as_deref()
+            .is_none_or(|a| a == self.net_tag())
+    }
+
     fn update(&mut self, msg: Msg) -> Task<Msg> {
+        // A guarded window takes no choice before the guard is over: the
+        // input is somebody's elsewhere, and the guard starts again.
+        if self.guarded() && !self.armed {
+            match msg {
+                Msg::Net(_)
+                | Msg::Container(_)
+                | Msg::PinNet(_)
+                | Msg::PinContainer(_)
+                | Msg::Name(_)
+                | Msg::Launch
+                | Msg::Action(_)
+                | Msg::Press => return self.hold(),
+                Msg::Key(ref key, _, _) if key.as_ref() != Key::Named(key::Named::Escape) => {
+                    return self.hold()
+                }
+                _ => {}
+            }
+        }
         match msg {
             Msg::Action(i) => {
                 if let Some((tag, _, _)) = self.req.actions.get(i) {
@@ -281,12 +341,20 @@ impl Window {
             }
             Msg::Net(i) => {
                 self.pane = Pane::Net;
+                let changed = self.net != i;
                 self.net = i;
+                if changed && self.guarded() {
+                    return self.hold();
+                }
             }
             Msg::Container(i) => {
                 self.pane = Pane::Container;
                 if self.container_ok(i) {
+                    let changed = self.container != i;
                     self.container = i;
+                    if changed && self.guarded() {
+                        return self.hold();
+                    }
                     if self.naming() {
                         return iced::widget::operation::focus(NAME_FIELD);
                     }
@@ -294,7 +362,17 @@ impl Window {
             }
             Msg::PinNet(v) => self.pin_net = v && !self.req.no_pins,
             Msg::PinContainer(v) => self.pin_container = v && !self.req.no_pins,
-            Msg::Armed(keys) => self.armed |= keys == self.held_keys,
+            Msg::Armed(holds) => self.armed |= holds == self.holds,
+            Msg::Press => {}
+            // Losing the focus disarms; getting it back starts the guard.
+            Msg::Focus(focused) if self.guarded() => {
+                if focused {
+                    return self.hold();
+                }
+                self.armed = false;
+                self.holds += 1;
+            }
+            Msg::Focus(_) => {}
             Msg::Name(name) => self.name = name,
             Msg::Launch => {
                 if self.naming() && self.name.trim().is_empty() {
@@ -306,18 +384,14 @@ impl Window {
                 }
             }
             Msg::Cancel => std::process::exit(1),
-            Msg::Key(key, modifiers) => return self.key(key, modifiers),
+            // A key a widget took (the name field) is the widget's.
+            Msg::Key(key, _, true) if key.as_ref() != Key::Named(key::Named::Escape) => {}
+            Msg::Key(key, modifiers, _) => return self.key(key, modifiers),
         }
         Task::none()
     }
 
     fn key(&mut self, key: Key, modifiers: keyboard::Modifiers) -> Task<Msg> {
-        // Guarded: a key is somebody typing elsewhere — nothing, and the
-        // guard from the start. Esc still closes.
-        if !self.armed && key.as_ref() != Key::Named(key::Named::Escape) {
-            self.held_keys += 1;
-            return arm_after(self.req.guard, self.held_keys);
-        }
         if self.menu() {
             let n = self.req.actions.len();
             match key.as_ref() {
@@ -341,9 +415,21 @@ impl Window {
             }
             return Task::none();
         }
+        let before = (self.net, self.container);
+        let task = self.key_choose(key, modifiers);
+        // A choice changed by the keyboard in a zone's window: the guard again.
+        if self.guarded() && (self.net, self.container) != before {
+            return self.hold();
+        }
+        task
+    }
+
+    fn key_choose(&mut self, key: Key, modifiers: keyboard::Modifiers) -> Task<Msg> {
         match key.as_ref() {
             Key::Named(key::Named::Escape) => return self.update(Msg::Cancel),
-            Key::Named(key::Named::Enter) => return self.update(Msg::Launch),
+            Key::Named(key::Named::Enter) if self.enter_starts() => {
+                return self.update(Msg::Launch)
+            }
             Key::Named(key::Named::ArrowLeft) => self.pane = Pane::Net,
             Key::Named(key::Named::ArrowRight) => self.pane = Pane::Container,
             Key::Named(key::Named::Tab) => {
@@ -358,7 +444,8 @@ impl Window {
                 Pane::Net => self.pin_net = !self.pin_net,
                 Pane::Container => self.pin_container = !self.pin_container,
             },
-            Key::Character(c) => {
+            // Digits choose nothing in a zone's window.
+            Key::Character(c) if self.req.asker.is_none() => {
                 if let Some(d) = c
                     .chars()
                     .next()
@@ -510,18 +597,22 @@ impl Window {
         for note in &self.req.notes {
             page = page.push(text(format!("ⓘ {note}")).size(14));
         }
+        if !self.req.command.is_empty() {
+            page = page.push(self.command_view());
+        }
         page = page.push(row![left, right].spacing(16).height(Length::Fill));
-        let launch = button(
-            text(if self.armed {
-                "Запустить  Enter"
-            } else {
-                "Секунду…"
-            })
-            .size(14),
-        )
-        .padding([6, 14])
-        .style(button::primary)
-        .on_press_maybe(self.ready().then_some(Msg::Launch));
+        let label = if !self.armed {
+            "Секунду…".to_owned()
+        } else if self.enter_starts() {
+            "Запустить  Enter".to_owned()
+        } else {
+            let net = self.req.nets.get(self.net).map_or("", |n| n.label.as_str());
+            format!("Запустить: {net}")
+        };
+        let launch = button(text(label).size(14))
+            .padding([6, 14])
+            .style(button::primary)
+            .on_press_maybe(self.ready().then_some(Msg::Launch));
         let cancel = button(text("Отмена  Esc").size(14))
             .padding([6, 14])
             .style(button::secondary)
@@ -534,9 +625,43 @@ impl Window {
         page.into()
     }
 
+    /// The command a zone's program asks to run: apart from the notes, the
+    /// program as the host finds it, then every word numbered, in a block of
+    /// its own height that scrolls — the lists and the buttons stay in view
+    /// however long it is, and a long word breaks instead of running off.
+    fn command_view(&self) -> Element<'_, Msg> {
+        let mut words = column![].spacing(2);
+        for (i, word) in self.req.command.iter().enumerate() {
+            words = words.push(
+                text(format!("{:>2}. {word}", i + 1))
+                    .size(13)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            );
+        }
+        let mut block = column![text("Команда").size(15)].spacing(4);
+        if !self.req.program.is_empty() {
+            block = block.push(
+                text(format!("Программа: {}", self.req.program))
+                    .size(13)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            );
+        }
+        block = block.push(scrollable(words).height(Length::Fixed(110.0)));
+        container(block)
+            .padding(8)
+            .width(Length::Fill)
+            .style(container::bordered_box)
+            .into()
+    }
+
     fn subscription(&self) -> Subscription<Msg> {
-        keyboard::listen().filter_map(|event| match event {
-            keyboard::Event::KeyPressed { key, modifiers, .. } => Some(Msg::Key(key, modifiers)),
+        iced::event::listen_with(|event, status, _window| match event {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => Some(
+                Msg::Key(key, modifiers, status == iced::event::Status::Captured),
+            ),
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Msg::Press),
+            iced::Event::Window(iced::window::Event::Focused) => Some(Msg::Focus(true)),
+            iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::Focus(false)),
             _ => None,
         })
     }
@@ -545,10 +670,10 @@ impl Window {
 /// `Msg::Armed(keys)` after `guard` milliseconds: a plain sleep on the
 /// executor's pool — no timer backend in this build, and the pool has threads
 /// to spare for it.
-fn arm_after(guard: u64, keys: u64) -> Task<Msg> {
+fn arm_after(guard: u64, holds: u64) -> Task<Msg> {
     let guard = std::time::Duration::from_millis(guard);
     Task::perform(async move { std::thread::sleep(guard) }, move |()| {
-        Msg::Armed(keys)
+        Msg::Armed(holds)
     })
 }
 
@@ -569,8 +694,10 @@ fn main() -> iced::Result {
     }
     let size = if req.mode == "menu" {
         iced::Size::new(520.0, 380.0)
-    } else {
+    } else if req.command.is_empty() {
         iced::Size::new(760.0, 460.0)
+    } else {
+        iced::Size::new(800.0, 640.0)
     };
     let title = if req.title.is_empty() {
         "Запуск".to_owned()
@@ -695,32 +822,96 @@ mod tests {
 
     /// A window a zone's program brought up: nothing starts during the guard,
     /// and there is no "always" to tick.
+    fn press(w: &mut Window, key: Key) {
+        let _ = w.update(Msg::Key(key, keyboard::Modifiers::default(), false));
+    }
+
+    fn arm(w: &mut Window) {
+        let _ = w.update(Msg::Armed(w.holds));
+    }
+
+    /// A window a zone's program brought up takes nothing until the guard is
+    /// over — no key, no click, no choice — and every one of them, captured
+    /// by a widget or not, and the focus coming back start it again. There is
+    /// no "always" to tick.
     #[test]
-    fn a_guarded_window_starts_nothing_at_first_and_has_no_always() {
+    fn a_guarded_window_takes_nothing_until_the_person_is_still() {
         let req = parse_request(&format!("{REQUEST}guard\t1500\npins\t0\n"));
         assert_eq!(req.guard, 1500);
         assert!(req.no_pins && !req.pin_net, "a pin sent along is dropped");
         let mut w = Window::new(req);
         assert!(!w.armed && !w.ready());
-        let _ = w.key(
-            Key::Named(key::Named::Space),
-            keyboard::Modifiers::default(),
-        );
-        let _ = w.update(Msg::PinContainer(true));
-        assert!(!w.pin_net && !w.pin_container);
-        // Somebody still typing: a digit picks nothing, Enter starts nothing,
+        // Somebody still typing or clicking: nothing is chosen or started,
         // and the guard that was running no longer arms the window.
-        let _ = w.key(Key::Character("1".into()), keyboard::Modifiers::default());
-        assert_eq!(w.net, 2, "a digit during the guard picked a row");
-        let _ = w.key(
-            Key::Named(key::Named::Enter),
-            keyboard::Modifiers::default(),
+        press(&mut w, Key::Character("1".into()));
+        let _ = w.update(Msg::Net(0));
+        let _ = w.update(Msg::Container(0));
+        let _ = w.update(Msg::Launch);
+        let _ = w.update(Msg::PinContainer(true));
+        assert_eq!(
+            (w.net, w.container),
+            (2, 1),
+            "a choice was taken during the guard"
         );
-        let _ = w.update(Msg::Armed(0));
-        assert!(!w.armed, "a key came after that guard began");
-        let _ = w.update(Msg::Armed(w.held_keys));
+        assert!(!w.pin_container);
+        let stale = w.holds;
+        let _ = w.update(Msg::Key(
+            Key::Character("x".into()),
+            keyboard::Modifiers::default(),
+            true,
+        ));
+        let _ = w.update(Msg::Armed(stale));
+        assert!(
+            !w.armed,
+            "a key a widget took did not start the guard again"
+        );
+        let stale = w.holds;
+        let _ = w.update(Msg::Press);
+        let _ = w.update(Msg::Armed(stale));
+        assert!(!w.armed, "a click did not start the guard again");
+        arm(&mut w);
         assert!(w.ready());
+        // The focus goes and comes back: disarmed, and the guard again.
+        let _ = w.update(Msg::Focus(false));
+        assert!(!w.armed);
+        let _ = w.update(Msg::Focus(true));
+        assert!(!w.armed);
+        arm(&mut w);
+        press(&mut w, Key::Named(key::Named::Space));
+        assert!(!w.pin_net && !w.pin_container);
         assert!(w.answer().ends_with("pin-net\t0\npin-container\t0\n"));
+    }
+
+    /// In a zone's window Enter starts only in the network that asks; digits
+    /// choose nothing; a choice changed by the keyboard or a click takes the
+    /// guard again before anything starts.
+    #[test]
+    fn in_a_zones_window_enter_starts_only_where_it_asks() {
+        let req = parse_request(&format!(
+            "{REQUEST}guard\t1500\npins\t0\nasker\tnl\nprogram\t/nix/store/x/bin/firefox\n\
+             cmd\tfirefox\ncmd\thttps://a\n"
+        ));
+        assert_eq!(req.asker.as_deref(), Some("nl"));
+        assert_eq!(req.command, ["firefox", "https://a"]);
+        let mut w = Window::new(req);
+        arm(&mut w);
+        assert_eq!(w.net_tag(), "nl");
+        press(&mut w, Key::Character("1".into()));
+        assert_eq!(w.net_tag(), "nl", "a digit chose a network");
+        // Up to another network: the guard again, and Enter does not start.
+        press(&mut w, Key::Named(key::Named::ArrowUp));
+        assert_eq!(w.net_tag(), "offline");
+        assert!(!w.armed);
+        arm(&mut w);
+        assert!(!w.enter_starts());
+        // A click on another row: the guard again as well.
+        let _ = w.update(Msg::Net(0));
+        assert!(!w.armed && w.net_tag() == "unconfined");
+        arm(&mut w);
+        assert!(w.ready(), "the button that names it starts");
+        let _ = w.update(Msg::Net(2));
+        arm(&mut w);
+        assert!(w.enter_starts());
     }
 
     #[test]
