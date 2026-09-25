@@ -1017,13 +1017,21 @@ in
             description = "vpn-zones: on again";
             serviceConfig = {
               Type = "oneshot";
-              ExecStart = [
-                "${pkgs.coreutils}/bin/rm -f ${offFlag}"
-                # Политика — первой: хост закрывается как можно раньше.
-                "-${systemctl} start vpn-zones-egress.service"
-              ]
-              ++ lib.optional (autoStarted != [ ]) "-${systemctl} start ${lib.concatStringsSep " " autoStarted}"
-              ++ [ "${reattach}" ];
+              # Политика — первой: хост закрывается как можно раньше. Не
+              # загрузилась — зоны всё равно возвращаются, но служба падает и
+              # говорит об этом: «включено» без политики — не «включено»
+              # (ревью 2026-09-25).
+              ExecStart = pkgs.writeShellScript "vpn-zones-on" ''
+                ${pkgs.coreutils}/bin/rm -f ${offFlag}
+                policy=0
+                ${systemctl} start vpn-zones-egress.service || policy=1
+                ${lib.optionalString (autoStarted != [ ]) "${systemctl} start ${lib.concatStringsSep " " autoStarted} || true"}
+                ${reattach} || true
+                if [ "$policy" != 0 ]; then
+                  echo "vpn-zones on, but the egress policy did not load — the host keeps its own network" >&2
+                  exit 1
+                fi
+              '';
             };
           };
           environment.systemPackages = [

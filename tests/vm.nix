@@ -148,6 +148,49 @@ let
     print(data)
   '';
 
+  # A notification daemon that only listens: owns the name on the host's
+  # session bus and writes whatever it is sent to argv[1], raw.
+  fakeNotifyd = pkgs.writeText "fake-notifyd.py" ''
+    import os, socket, struct, sys
+    def pad(b, n):
+        return b + b"\0" * ((-len(b)) % n)
+    def s(v):
+        e = v.encode()
+        return struct.pack("<I", len(e)) + e + b"\0"
+    def msg(serial, path, iface, member, dest, sig="", body=b""):
+        fields = b""
+        items = [(1, "o", path), (2, "s", iface), (3, "s", member), (6, "s", dest)]
+        if sig:
+            items.append((8, "g", sig))
+        for code, t, val in items:
+            fields = pad(fields, 8)
+            f = bytes([code, 1]) + t.encode() + b"\0"
+            if t == "g":
+                f += bytes([len(val)]) + val.encode() + b"\0"
+            else:
+                f += s(val)
+            fields += f
+        head = b"l" + bytes([1, 0, 1]) + struct.pack("<III", len(body), serial, len(fields))
+        return pad(head + fields, 8) + body
+    c = socket.socket(socket.AF_UNIX)
+    c.connect("/run/user/1000/bus")
+    c.sendall(b"\0AUTH EXTERNAL " + str(os.getuid()).encode().hex().encode() + b"\r\n")
+    assert c.recv(4096).startswith(b"OK")
+    bus = ("/org/freedesktop/DBus", "org.freedesktop.DBus")
+    c.sendall(
+        b"BEGIN\r\n"
+        + msg(1, bus[0], bus[1], "Hello", bus[1])
+        + msg(2, bus[0], bus[1], "RequestName", bus[1], "su",
+              pad(s("org.freedesktop.Notifications"), 4) + struct.pack("<I", 4))
+    )
+    with open(sys.argv[1], "ab", buffering=0) as out:
+        while True:
+            d = c.recv(65536)
+            if not d:
+                break
+            out.write(d)
+  '';
+
   # A CA and a server certificate made at build time, for the container that is
   # DECLARED to trust it (docs/CONTAINERS.md §8). Synthetic, and in the store of
   # this test only.
@@ -1475,6 +1518,25 @@ let
           lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
           at = lines.index("https://example.test/raw-begin")
           assert lines[at + 1] == zone_ns, f"{lines} (zone {zone_ns})"
+          # A notification from the zone reaches the host's daemon without
+          # what points anywhere: no link in the text, no icon by URL, no
+          # application to activate, no URLs among the hints.
+          alice("systemd-run --user --unit=fakenotifyd ${pkgs.python3}/bin/python3 ${fakeNotifyd} /home/alice/notify-got")
+          machine.wait_until_succeeds("grep -q . /home/alice/notify-got", timeout=30)
+          notify = (
+              "gdbus call --session --timeout 3 --dest org.freedesktop.Notifications "
+              "--object-path /org/freedesktop/Notifications --method org.freedesktop.Notifications.Notify "
+              "vmapp 0 https://evil.test/icon.png summary "
+              "'<a href=\"https://link.test\">clicktext</a> <b>boldtext</b>' '[]' "
+              "'{\"desktop-entry\": <\"firefox\">, \"urgency\": <byte 1>, \"x-kde-urls\": <[\"https://kde.test\"]>}' -1"
+          )
+          in_zone(hp, f"sh -c {shlex.quote(notify + ' || true')}")
+          machine.wait_until_succeeds("grep -q clicktext /home/alice/notify-got", timeout=30)
+          got = machine.succeed("tr -c '[:print:]' ' ' < /home/alice/notify-got")
+          assert "boldtext" in got and "urgency" in got, got
+          for gone in ["link.test", "evil.test", "desktop-entry", "firefox", "kde.test"]:
+              assert gone not in got, f"{gone} reached the daemon: {got}"
+          alice("systemctl --user stop fakenotifyd || true")
           # The zone's bus is still the zone's: names and calls go through.
           in_zone(hp, "busctl --user --timeout=5 call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ListNames")
           # But not the portals the portal would grant a "host application"

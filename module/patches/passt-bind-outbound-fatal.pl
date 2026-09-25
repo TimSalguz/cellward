@@ -34,9 +34,19 @@ $s =~ /\n\ttcp_bind_outbound\(c, conn, s([^;]*)\);\n/
     or die "passt patch: the call of tcp_bind_outbound not found\n";
 my ($args, $call_start, $call_end) = ($1, $-[0], $+[0]);
 my $after = substr($s, $call_end);
+# The place is the one it was when this was written: the connect() of the new
+# flow right after the call, its reset a few lines on, a `cancel:` to go to.
+# Another layout in a later release fails the build here rather than
+# resetting some other branch.
+$after =~ /\A\s*(?:\/\*.*?\*\/\s*)*if \(connect\(/s
+    or die "passt patch: the call is not followed by the flow's connect()\n";
 $after =~ /(tcp_rst\([^;]*\);)/
     or die "passt patch: no tcp_rst after the call\n";
 my $rst = $1;
+$-[0] < 1500
+    or die "passt patch: the first tcp_rst after the call is too far to be its own\n";
+$after =~ /\ncancel:/
+    or die "passt patch: no cancel label after the call\n";
 substr($s, $call_start, $call_end - $call_start) =
     "\n\t/* Bound to the outbound interface or not connected at all. */\n"
   . "\tif (tcp_bind_outbound(c, conn, s$args)) {\n\t\t$rst\n\t\tgoto cancel;\n\t}\n";

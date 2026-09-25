@@ -623,6 +623,50 @@ fn auth_line_is_begin(line: &[u8]) -> bool {
         .is_some_and(|rest| matches!(rest.first(), None | Some(b' ' | b'\t')))
 }
 
+/// A notification, as the host's daemon may have it from a zone
+/// (`dbus_wire::sanitized_notify`, `sanitized_portal_notification`): the
+/// message rewritten, an error for one the filter cannot read (refused, not
+/// passed on unread), `None` for anything else.
+fn notification(msg: &[u8], h: &Header) -> Option<Result<Vec<u8>, wire::WireError>> {
+    if h.kind != wire::METHOD_CALL {
+        return None;
+    }
+    let body = match (h.interface.as_deref(), h.member.as_deref()) {
+        (Some("org.freedesktop.Notifications"), Some("Notify")) => {
+            if h.unix_fds != 0 {
+                return Some(Err(wire::WireError("a notification with descriptors")));
+            }
+            wire::sanitized_notify(msg, h)
+        }
+        (Some("org.freedesktop.portal.Notification"), Some("AddNotification")) => {
+            wire::sanitized_portal_notification(msg, h)
+        }
+        _ => return None,
+    };
+    Some(body.map(|body| {
+        let mut fields = Vec::new();
+        if let Some(path) = h.path.as_deref() {
+            fields.push(Field::Path(path));
+        }
+        if let Some(interface) = h.interface.as_deref() {
+            fields.push(Field::Interface(interface));
+        }
+        if let Some(member) = h.member.as_deref() {
+            fields.push(Field::Member(member));
+        }
+        if let Some(destination) = h.destination.as_deref() {
+            fields.push(Field::Destination(destination));
+        }
+        if let Some(signature) = h.signature.as_deref() {
+            fields.push(Field::Signature(signature));
+        }
+        if h.unix_fds != 0 {
+            fields.push(Field::UnixFds(h.unix_fds));
+        }
+        wire::message(h.kind, h.flags, h.serial, &fields, &body)
+    }))
+}
+
 /// `upstream` as `/proc/self/fd/N/<name>`, N a descriptor of its directory
 /// kept for the life of the process.
 fn held_upstream(upstream: &Path) -> io::Result<PathBuf> {
@@ -679,7 +723,13 @@ fn client_to_bus(
                 }
                 None => {
                     let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
-                    send_all(up, &msg, &raw)?;
+                    match notification(&msg, &h) {
+                        // Passed on without what would point the host's daemon
+                        // at the network or at an application.
+                        Some(Ok(rewritten)) => send_all(up, &rewritten, &raw)?,
+                        Some(Err(e)) => deny(conn, ctx, &h, &format!("notification refused: {e}"))?,
+                        None => send_all(up, &msg, &raw)?,
+                    }
                 }
             }
         }
