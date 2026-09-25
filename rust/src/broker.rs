@@ -27,7 +27,8 @@
 //!
 //! **The process is held, not its number.** The peer is pinned when the
 //! connection is taken — the kernel's pidfd of the very process that connected
-//! (`SO_PEERPIDFD`, Linux 6.5; before that, one opened by its pid at once) —
+//! (`SO_PEERPIDFD`, Linux 6.5; before that, one opened by its pid at once;
+//! a peer the kernel says has exited is not opened by its number at all) —
 //! and its namespace is read only while that process is still alive, before
 //! and after the read. A pid that went to somebody else is never looked at.
 //!
@@ -37,7 +38,7 @@
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -184,36 +185,13 @@ fn classify(state: &Path, netns: &Path, userns: &Path) -> Origin {
     Origin::Unknown
 }
 
-/// The process on the other end, pinned: the kernel's pidfd of the very
-/// process that connected, or — on a kernel without `SO_PEERPIDFD` — one opened
-/// by its pid now.
-fn peer_pidfd(stream: &UnixStream, pid: i32) -> Option<OwnedFd> {
-    let mut fd: libc::c_int = -1;
-    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-    // SAFETY: a valid descriptor, a buffer of one int and its length.
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERPIDFD,
-            (&mut fd as *mut libc::c_int).cast(),
-            &mut len,
-        )
-    };
-    if rc == 0 && fd >= 0 {
-        // SAFETY: the kernel just gave us this descriptor to own.
-        return Some(unsafe { OwnedFd::from_raw_fd(fd) });
-    }
-    crate::sys::pidfd_open(pid)
-}
-
 /// Where the peer of `stream` is, looked at while it is certainly the process
 /// that connected.
 fn origin_of(state: &Path, stream: &UnixStream) -> Origin {
-    let Some(pid) = peer_pid(stream) else {
+    let Some(pid) = crate::sys::peer_pid(stream.as_raw_fd()) else {
         return Origin::Unknown;
     };
-    let Some(pidfd) = peer_pidfd(stream, pid) else {
+    let Some(pidfd) = crate::sys::peer_pidfd(stream.as_raw_fd(), pid) else {
         return Origin::Unknown;
     };
     let alive = || !crate::sys::pidfd_wait(&pidfd, std::time::Duration::ZERO);
@@ -230,27 +208,6 @@ fn origin_of(state: &Path, stream: &UnixStream) -> Origin {
         return Origin::Unknown;
     }
     classify(state, &netns, &userns)
-}
-
-/// The pid of the process on the other end of a Unix socket.
-fn peer_pid(stream: &UnixStream) -> Option<i32> {
-    let mut cred = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: a valid descriptor, a correctly sized buffer and its length.
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&mut cred as *mut libc::ucred).cast(),
-            &mut len,
-        )
-    };
-    (rc == 0 && cred.pid > 0).then_some(cred.pid)
 }
 
 fn handle(tools: &Tools, mut stream: UnixStream) {

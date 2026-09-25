@@ -49,7 +49,9 @@
 //! * [`desktop`] — the `.desktop` generator behind `vpn-zone sync`
 //!   (`docs/GOTCHAS.md` §10);
 //! * [`wl_sandbox`] — the restricted Wayland socket a program is put on
-//!   (`wp_security_context_v1`, `docs/GOTCHAS.md` §7);
+//!   (`wp_security_context_v1`, `docs/GOTCHAS.md` §7), and [`wl_proxy`], the
+//!   confined process that stands on that socket between the program and the
+//!   compositor (`docs/WINDOW-FRAME.md` §8);
 //! * [`trust`] — extra root certificates trusted by one container only: the
 //!   bundle bind, the environment and the NSS databases (`docs/CERTIFICATES.md`);
 //! * [`status`] — the machine-readable state (`vpn-zone status --json`), with
@@ -118,6 +120,7 @@ pub mod tools;
 pub mod trust;
 pub mod watch;
 pub mod window;
+pub mod wl_proxy;
 pub mod wl_sandbox;
 pub mod x11;
 pub mod zone;

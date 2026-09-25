@@ -87,5 +87,6 @@ fn bad_usage_is_reported() {
 
     let help = Command::new(BIN).arg("--help").output().unwrap();
     assert!(help.status.success());
-    assert!(String::from_utf8_lossy(&help.stdout).contains("wl-sandbox <app-id> -- cmd..."));
+    assert!(String::from_utf8_lossy(&help.stdout)
+        .contains("wl-sandbox <app-id> [--zone <zone>] [--no-proxy] -- cmd..."));
 }

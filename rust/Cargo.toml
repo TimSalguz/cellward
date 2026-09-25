@@ -64,3 +64,65 @@ wayland-client = "0.31"
 # `wp_security_context_v1` is a staging protocol, hence the feature; `client`
 # generates the client half only.
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# The Wayland proxy inside `wl-sandbox` (`crate::wl_proxy`,
+# `docs/WINDOW-FRAME.md` §3.2, §11): it keeps the two id spaces apart, knows the
+# signature of every message of the protocols below and drops the globals of
+# every other. Pinned EXACTLY: a new version may widen its baseline or change
+# its unsafe code, and that is a reviewed commit of its own, never a
+# `cargo update`. No default features: `logging` would copy the program's
+# messages into the journal whenever WL_PROXY_DEBUG is set. Pure Rust, no
+# native library: the derivation needs nothing new.
+#
+# The protocol list IS the policy: what is not compiled in is hidden from the
+# program, and a bind to it is refused (`wl_proxy::HIDDEN`, tested). Everything
+# an ordinary client uses is here. Left out on purpose: `drm_lease_v1` (a DRM
+# descriptor, §4.3), the protocols security-context exists to hide (data
+# control, screen and window capture, foreign toplevels, session lock, idle
+# notification, transient seats, workspaces, input methods and virtual
+# keyboards, the Xwayland-only ones, security-context itself) and every
+# compositor-private suite (wlr, hyprland, cosmic, river, weston, jay).
+wl-proxy = { version = "=0.1.4", default-features = false, features = [
+    "protocol-alpha_modifier_v1",
+    "protocol-color_management_v1",
+    "protocol-color_representation_v1",
+    "protocol-commit_timing_v1",
+    "protocol-content_type_v1",
+    "protocol-cursor_shape_v1",
+    "protocol-drm",
+    "protocol-ext_background_effect_v1",
+    "protocol-fifo_v1",
+    "protocol-fractional_scale_v1",
+    "protocol-idle_inhibit_unstable_v1",
+    "protocol-input_timestamps_unstable_v1",
+    "protocol-keyboard_shortcuts_inhibit_unstable_v1",
+    "protocol-linux_dmabuf_v1",
+    "protocol-linux_drm_syncobj_v1",
+    "protocol-org_kde_kwin_blur_v1",
+    "protocol-org_kde_kwin_server_decoration_palette_v1",
+    "protocol-org_kde_kwin_server_decoration_v1",
+    "protocol-org_kde_kwin_shadow_v1",
+    "protocol-pointer_constraints_unstable_v1",
+    "protocol-pointer_gestures_unstable_v1",
+    "protocol-pointer_warp_v1",
+    "protocol-presentation_time",
+    "protocol-relative_pointer_unstable_v1",
+    "protocol-single_pixel_buffer_v1",
+    "protocol-tablet_v2",
+    "protocol-tearing_control_v1",
+    "protocol-text_input_unstable_v1",
+    "protocol-text_input_unstable_v3",
+    "protocol-viewporter",
+    "protocol-wp_primary_selection_unstable_v1",
+    "protocol-xdg_activation_v1",
+    "protocol-xdg_decoration_unstable_v1",
+    "protocol-xdg_dialog_v1",
+    "protocol-xdg_foreign_unstable_v2",
+    "protocol-xdg_output_unstable_v1",
+    "protocol-xdg_session_management_v1",
+    "protocol-xdg_shell",
+    "protocol-xdg_system_bell_v1",
+    "protocol-xdg_toplevel_drag_v1",
+    "protocol-xdg_toplevel_icon_v1",
+    "protocol-xdg_toplevel_tag_v1",
+    "protocol-zwp_linux_explicit_synchronization_unstable_v1",
+] }

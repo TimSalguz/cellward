@@ -587,6 +587,178 @@ pub fn pidfd_wait(fd: &OwnedFd, timeout: std::time::Duration) -> bool {
     unsafe { libc::poll(&mut pfd, 1, ms) == 1 }
 }
 
+/// The pid of the process on the other end of a Unix socket (`SO_PEERCRED`):
+/// the one that called `connect`, as this process's pid namespace numbers it.
+pub fn peer_pid(sock: RawFd) -> Option<i32> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: a descriptor, a correctly sized buffer and its length.
+    let rc = unsafe {
+        libc::getsockopt(
+            sock,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    (rc == 0 && cred.pid > 0).then_some(cred.pid)
+}
+
+/// The process on the other end of a Unix socket, held: the kernel's pidfd of
+/// the very process that connected (`SO_PEERPIDFD`, Linux 6.5). Only a kernel
+/// that does not know the option (`ENOPROTOOPT`) gets one opened by `pid`, its
+/// [`peer_pid`], instead — a number that may have changed hands meanwhile, so a
+/// caller checks the process is alive after it has looked. Any other failure
+/// is `None`: `ESRCH` is the kernel saying the peer has exited, and opening
+/// its number then would hold whoever took it next (review 2026-09-25).
+pub fn peer_pidfd(sock: RawFd, pid: i32) -> Option<OwnedFd> {
+    let mut fd: libc::c_int = -1;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: a descriptor, a buffer of one int and its length.
+    let rc = unsafe {
+        libc::getsockopt(
+            sock,
+            libc::SOL_SOCKET,
+            libc::SO_PEERPIDFD,
+            (&mut fd as *mut libc::c_int).cast(),
+            &mut len,
+        )
+    };
+    if rc == 0 && fd >= 0 {
+        // SAFETY: the kernel just gave us this descriptor to own.
+        return Some(unsafe { OwnedFd::from_raw_fd(fd) });
+    }
+    if rc != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOPROTOOPT) {
+        return pidfd_open(pid);
+    }
+    None
+}
+
+/// The parent of a process, from `/proc/<pid>/status` (`PPid`: 0 for one
+/// whose parent is outside this pid namespace, and for pid 1).
+pub fn parent_of(pid: i32) -> Option<i32> {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("PPid:"))
+        .and_then(|v| v.trim().parse().ok())
+}
+
+/// The children of `pid`, by the `PPid` of every process.
+///
+/// A number read here stays the child's for as long as `pid` has not reaped
+/// it: a caller that is `pid` itself, and does not wait in between, may signal
+/// what it finds by number.
+pub fn children_of(pid: i32) -> Vec<i32> {
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|&child| parent_of(child) == Some(pid))
+        .collect()
+}
+
+/// The longest parent chain [`descends_from`] climbs. A process tree is not
+/// that deep; one that is was built to make somebody climb.
+const MAX_ANCESTRY: usize = 1024;
+
+/// Whether the process held by `pidfd` (numbered `pid`) is `ancestor` or below
+/// it: its chain of parents reaches `ancestor`.
+///
+/// Every step is read while both of its processes are held and alive, so that
+/// no number in the chain can have gone to somebody else in between. A parent
+/// number read from a live child is that child's parent's; the parent is held
+/// by a pidfd opened afterwards, and the child — still alive, still naming the
+/// same parent — proves that pidfd is of the right process: had the parent
+/// died before it was opened, the child would have been given another parent
+/// first, and its number freed only after that.
+pub fn descends_from(pid: i32, pidfd: &OwnedFd, ancestor: i32) -> bool {
+    let alive = |fd: &OwnedFd| !pidfd_wait(fd, std::time::Duration::ZERO);
+    let mut at = pid;
+    let mut held: Option<OwnedFd> = None;
+    for _ in 0..MAX_ANCESTRY {
+        let fd = held.as_ref().unwrap_or(pidfd);
+        if !alive(fd) {
+            return false;
+        }
+        if at == ancestor {
+            return true;
+        }
+        let Some(up) = parent_of(at).filter(|&up| up > 0) else {
+            return false;
+        };
+        let Some(up_fd) = pidfd_open(up) else {
+            return false;
+        };
+        // Read again with the parent held, and the child still alive: the
+        // number read first was the parent's, and this pidfd is of it.
+        if parent_of(at) != Some(up) || !alive(fd) {
+            return false;
+        }
+        at = up;
+        held = Some(up_fd);
+    }
+    false
+}
+
+#[cfg(test)]
+mod process_tree {
+    use super::*;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn a_child_descends_from_us_and_our_parent_and_an_orphan_do_not() {
+        let me = std::process::id() as i32;
+        let own = pidfd_open(me).unwrap();
+        assert!(descends_from(me, &own, me), "we are our own subtree");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let fd = pidfd_open(pid).unwrap();
+        assert!(descends_from(pid, &fd, me));
+        assert!(children_of(me).contains(&pid));
+        assert_eq!(parent_of(pid), Some(me));
+        // Upwards is not downwards.
+        let up = parent_of(me).unwrap();
+        if let Some(up_fd) = pidfd_open(up) {
+            assert!(!descends_from(up, &up_fd, me));
+        }
+        // An exited process is nobody's.
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!descends_from(pid, &fd, me));
+        // Started by a shell that has exited: given to another parent,
+        // no longer ours.
+        let out = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 >/dev/null 2>&1 </dev/null & echo $!"])
+            .output()
+            .unwrap();
+        let orphan: i32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+        let orphan_fd = pidfd_open(orphan).unwrap();
+        assert!(!descends_from(orphan, &orphan_fd, me));
+        assert!(pidfd_signal(&orphan_fd, libc::SIGKILL));
+    }
+
+    #[test]
+    fn the_peer_of_a_socket_is_the_process_that_made_it() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        let me = std::process::id() as i32;
+        let pid = peer_pid(a.as_raw_fd()).unwrap();
+        assert_eq!(pid, me);
+        let fd = peer_pidfd(a.as_raw_fd(), pid).unwrap();
+        assert!(descends_from(pid, &fd, me));
+    }
+}
+
 #[cfg(test)]
 mod process_identity {
     use super::*;

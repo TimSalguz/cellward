@@ -34,7 +34,9 @@ rustPlatform.buildRustPackage {
   # по проводному протоколу сам, на Rust. Ни линковки, ни dlopen — значит
   # нечему разъехаться с версией композитора и нечего добавлять в buildInputs.
   # Включит кто-нибудь client_system в rust/Cargo.toml — сюда придётся
-  # дописать wayland.
+  # дописать wayland. Посредник Wayland (крейт wl-proxy, rust/src/wl_proxy.rs)
+  # тоже чистый Rust: разбирает протокол сам, libwayland ему не нужна — его
+  # крейты приходят через Cargo.lock, как и остальные.
   nativeBuildInputs = [ pkg-config ];
   buildInputs = [ libseccomp ];
   # Тесты гоняет CI (job rust). Здесь они выключены сознательно: selftest

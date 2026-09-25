@@ -1307,6 +1307,88 @@ let
           assert "zwlr_screencopy_manager_v1" not in zone, zone
           assert "zwp_virtual_keyboard_manager_v1" not in zone, zone
           assert "SWAY-REFUSED" in zone, zone
+
+          # The Wayland proxy of wl-sandbox (docs/WINDOW-FRAME.md §8): through
+          # it and straight on the restricted socket (--no-proxy), a client
+          # sees the same globals, minus the ones the proxy hides by policy
+          # (rust/src/wl_proxy.rs, HIDDEN; the protocols it is not built with)
+          # and nothing added. wayland-info binds every global it sees, so each
+          # one is also taken through the proxy once.
+          def interfaces(out):
+              return set(re.findall(r"interface: '([^']+)'", out))
+          direct = interfaces(alice(
+              f"WAYLAND_DISPLAY={display} vpn-zone-core wl-sandbox probe --no-proxy -- wayland-info"
+          ))
+          proxied = interfaces(alice(
+              f"WAYLAND_DISPLAY={display} vpn-zone-core wl-sandbox probe -- wayland-info"
+          ))
+          policy_hidden = {
+              "wp_drm_lease_device_v1", "ext_data_control_manager_v1",
+              "zwlr_data_control_manager_v1", "ext_foreign_toplevel_list_v1",
+              "zwlr_foreign_toplevel_manager_v1", "ext_image_copy_capture_manager_v1",
+              "ext_output_image_capture_source_manager_v1",
+              "ext_foreign_toplevel_image_capture_source_manager_v1",
+              "zwlr_screencopy_manager_v1", "zwlr_export_dmabuf_manager_v1",
+              "ext_session_lock_manager_v1", "ext_idle_notifier_v1",
+              "ext_transient_seat_manager_v1", "ext_workspace_manager_v1",
+              "zwp_input_method_manager_v2", "zwp_input_method_v1", "zwp_input_panel_v1",
+              "zwp_virtual_keyboard_manager_v1", "zwlr_virtual_pointer_manager_v1",
+              "xwayland_shell_v1", "zwp_xwayland_keyboard_grab_manager_v1",
+              "wp_security_context_manager_v1", "zwp_fullscreen_shell_v1",
+              "zwlr_layer_shell_v1", "zwlr_output_manager_v1",
+              "zwlr_output_power_manager_v1", "zwlr_gamma_control_manager_v1",
+              "zwlr_input_inhibit_manager_v1", "zxdg_exporter_v1", "zxdg_importer_v1",
+              "gtk_shell1", "wl_eglstream_display", "mutter_x11_interop",
+          }
+          print(f"restricted: {sorted(direct)}")
+          print(f"hidden by the proxy: {sorted(direct - proxied)}")
+          assert "wl_compositor" in proxied and "xdg_wm_base" in proxied, proxied
+          assert proxied <= direct, f"the proxy added {proxied - direct}"
+          assert direct - proxied <= policy_hidden, f"hidden, not by policy: {(direct - proxied) - policy_hidden}"
+
+          # While a program runs: the proxy is confined, and the security
+          # context's listener is in a directory no zone has.
+          alice(
+              f"systemd-run --user --unit=vmwlhold --setenv=WAYLAND_DISPLAY={display} "
+              "vpn-zone run vmsmoke -- sleep 300"
+          )
+          machine.wait_until_succeeds("pgrep -x vz-wl-proxy", timeout=30)
+          proxy_pid = machine.succeed("pgrep -x vz-wl-proxy | head -1").strip()
+          status = machine.succeed(f"cat /proc/{proxy_pid}/status")
+          assert re.search(r"^Seccomp:\s+2$", status, re.M), status
+          assert re.search(r"^NoNewPrivs:\s+1$", status, re.M), status
+          # Not dumpable: its descriptors are root's to look at.
+          alice(f"sh -c '! ls /proc/{proxy_pid}/fd'")
+          up = alice("ls /run/user/1000/vpn-zones/wl-up")
+          assert up.strip(), "no security-context listener in wl-up"
+          zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
+          in_zone(zp, "test ! -e /run/user/1000/vpn-zones/wl-up")
+          in_zone(zp, "sh -c 'ls /run/user/1000/vpn-zones/wayland/vmsmoke | grep -q wl-sandbox-'")
+          # The zone's directory of sockets is read-only in the zone: a
+          # program cannot take another launch's socket's place, nor put one
+          # of its own there (review 2026-09-25).
+          wl_dir = "/run/user/1000/vpn-zones/wayland/vmsmoke"
+          sock = in_zone(zp, f"sh -c 'ls {wl_dir} | grep wl-sandbox- | head -1'").strip()
+          assert sock, "no socket of the launch"
+          in_zone(zp, f"sh -c '! rm -f {wl_dir}/{sock}'")
+          in_zone(zp, f"sh -c '! touch {wl_dir}/x'")
+          in_zone(zp, f"test -S {wl_dir}/{sock}")
+          # A process of the zone that is not of this launch — entered by
+          # hand, not below its supervisor — is not passed on by its proxy:
+          # its window would carry the launch's pid (review 2026-09-25).
+          foreign = in_zone(
+              zp,
+              f"sh -c 'WAYLAND_DISPLAY=vpn-zones/wayland/vmsmoke/{sock} wayland-info 2>&1; true'",
+          )
+          assert "wl_compositor" not in foreign, foreign
+          # The launch's own processes are: a child of the held program.
+          alice("systemctl --user stop vmwlhold.service")
+          machine.wait_until_fails("pgrep -x vz-wl-proxy", timeout=30)
+          own = alice(
+              f"WAYLAND_DISPLAY={display} vpn-zone run vmsmoke -- sh -c 'sh -c wayland-info'"
+          )
+          assert "wl_compositor" in own, own
+          machine.wait_until_fails("pgrep -x vz-wl-proxy", timeout=30)
           alice("vpn-zone down vmsmoke")
 
           alice("systemctl --user stop vmsway.service")

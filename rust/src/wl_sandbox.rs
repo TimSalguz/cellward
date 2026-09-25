@@ -24,7 +24,7 @@
 //! wrong, so every such path prints a warning to stderr first — that is what
 //! [`run_plain`] is, the shared "it did not work out" exit of this module.
 //!
-//! Usage: `vpn-zone-core wl-sandbox <app-id> [--zone <zone>] -- <command> [args…]`.
+//! Usage: `vpn-zone-core wl-sandbox <app-id> [--zone <zone>] [--no-proxy] -- <command> [args…]`.
 //!
 //! **Where it runs.** On the host, before the launch enters its zone
 //! (`docs/LEAK-MODEL.md` §13): a zone does not have the compositor's own
@@ -34,6 +34,19 @@
 //! directory of this kind the zone's holder binds into that zone (and only
 //! into that one: a program of another zone cannot replace the socket), and
 //! `WAYLAND_DISPLAY` becomes that path relative to the runtime directory.
+//!
+//! **Who listens there.** A proxy of ours ([`crate::wl_proxy`], a confined
+//! process of its own): the compositor listens on a socket in a private
+//! directory outside every zone, and the proxy passes each connection of the
+//! program on to it — the same globals minus the hidden ones, nothing added.
+//! It is the base the window frame is built on (`docs/WINDOW-FRAME.md` §8).
+//! When the proxy cannot start, the compositor listens on the zone's path
+//! itself, as it did before there was a proxy (with a warning), and when that
+//! cannot be registered either the program is not started at all — never
+//! unrestricted once the compositor has shown it speaks the protocol;
+//! `--no-proxy` asks for the compositor on the zone's path from the start.
+//! The program is never given more than the restricted socket either way: a
+//! proxy that dies takes its display along.
 //!
 //! This was a C program (`module/wl-sandbox.c`) until it moved here; there is
 //! no C in this project any more. Two things changed with the move:
@@ -52,13 +65,13 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::wl_registry;
-use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle};
+use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, QueueHandle};
 use wayland_protocols::wp::security_context::v1::client::{
     wp_security_context_manager_v1::WpSecurityContextManagerV1,
     wp_security_context_v1::WpSecurityContextV1,
@@ -66,6 +79,7 @@ use wayland_protocols::wp::security_context::v1::client::{
 
 use crate::profile::{exec_command, exit_code_of, EXIT_NOT_STARTED};
 use crate::sys;
+use crate::wl_proxy;
 
 /// Sandbox engine name reported to the compositor. It is what a compositor
 /// shows when it names the sandbox a window came from, so it names the project,
@@ -88,6 +102,10 @@ pub struct Args {
     pub app_id: String,
     /// The zone the launch goes into, which names the socket's directory.
     pub zone: String,
+    /// Put [`crate::wl_proxy`] between the program and the compositor. Off
+    /// (`--no-proxy`): the compositor listens on the zone's path itself — for
+    /// a program the proxy breaks, and for the test that compares the two.
+    pub proxy: bool,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
 }
@@ -125,7 +143,7 @@ impl fmt::Display for ArgError {
 impl std::error::Error for ArgError {}
 
 impl Args {
-    /// Parse `<app-id> [--zone <zone>] -- cmd...`.
+    /// Parse `<app-id> [--zone <zone>] [--no-proxy] -- cmd...`.
     ///
     /// The command keeps its `OsString`s: an argument can be a file name handed
     /// over by the launcher through a `%U` field code, and those are bytes, not
@@ -143,9 +161,12 @@ impl Args {
         }
         let mut positional = Vec::new();
         let mut zone = NO_ZONE.to_owned();
+        let mut proxy = true;
         let mut words = argv[..split].iter();
         while let Some(word) = words.next() {
-            if word == "--zone" {
+            if word == "--no-proxy" {
+                proxy = false;
+            } else if word == "--zone" {
                 let name = words.next().ok_or(ArgError::BadZone)?.to_string_lossy();
                 if !valid_zone_dir(&name) {
                     return Err(ArgError::BadZone);
@@ -165,6 +186,7 @@ impl Args {
         Ok(Self {
             app_id: app_id.to_string_lossy().into_owned(),
             zone,
+            proxy,
             cmd,
         })
     }
@@ -225,6 +247,73 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
 delegate_noop!(State: WpSecurityContextManagerV1);
 delegate_noop!(State: WpSecurityContextV1);
 
+/// The compositor, reached through the UNRESTRICTED connection, with the
+/// security-context manager bound: everything a registration takes. It lives
+/// only until [`Compositor::register`], which closes it.
+struct Compositor {
+    conn: Connection,
+    queue: EventQueue<State>,
+    manager: WpSecurityContextManagerV1,
+}
+
+impl Compositor {
+    /// Connect and find the manager. The error says what went wrong, not what
+    /// comes of it: that is the caller's to say.
+    fn connect() -> Result<Self, String> {
+        // `connect_to_env` follows libwayland: WAYLAND_SOCKET (an inherited
+        // descriptor, which it takes over and unsets) first, then
+        // WAYLAND_DISPLAY inside XDG_RUNTIME_DIR, absolute paths included. The
+        // one difference is that an unset WAYLAND_DISPLAY is "no compositor"
+        // here, where libwayland would still try `wayland-0` — a session that
+        // leaves the variable unset ends up unrestricted with a warning
+        // instead of sandboxed silently.
+        let conn = Connection::connect_to_env()
+            .map_err(|e| format!("no connection to the compositor ({e})"))?;
+        let (globals, queue) = registry_queue_init::<State>(&conn)
+            .map_err(|e| format!("cannot read the compositor's globals ({e})"))?;
+        let manager = globals
+            .bind(&queue.handle(), 1..=1, ())
+            .map_err(|e| format!("the compositor does not support security-context ({e})"))?;
+        Ok(Self {
+            conn,
+            queue,
+            manager,
+        })
+    }
+
+    /// Hand `listener` to the compositor as a sandbox socket, switched off by
+    /// closing the other end of `close_read`. Consumes the connection.
+    fn register(
+        mut self,
+        listener: BorrowedFd<'_>,
+        close_read: BorrowedFd<'_>,
+        app_id: &str,
+    ) -> Result<(), String> {
+        let qh = self.queue.handle();
+        let ctx: WpSecurityContextV1 = self.manager.create_listener(listener, close_read, &qh, ());
+        ctx.set_sandbox_engine(SANDBOX_ENGINE.to_owned());
+        ctx.set_app_id(app_id.to_owned());
+        ctx.set_instance_id(std::process::id().to_string());
+        ctx.commit();
+        if let Err(e) = self.queue.roundtrip(&mut State) {
+            // A compositor that refuses the context (nesting one sandbox
+            // inside another is a protocol error) must not cost the user the
+            // program: the socket we built is dropped and the program starts
+            // as it would have without us.
+            return Err(format!("the compositor refused the security context ({e})"));
+        }
+        ctx.destroy();
+        let _ = self.conn.flush();
+        // The connection goes here, before any fork, exactly as
+        // `wl_display_disconnect` did: an UNRESTRICTED compositor connection
+        // inherited by the sandboxed program (or the proxy) would be an open
+        // back door, findable through /proc/self/fd even though WAYLAND_SOCKET
+        // no longer names it. Both the queue and the connection hold the
+        // backend; `self` is both, and it is dropped on return.
+        Ok(())
+    }
+}
+
 /// Register a sandboxed socket with the compositor, then run the program on it.
 ///
 /// Returns the program's exit code, or falls back to [`run_plain`] (which never
@@ -235,37 +324,13 @@ pub fn run(args: Args) -> u8 {
         eprintln!("wl-sandbox: no XDG_RUNTIME_DIR — running unrestricted");
         return run_plain(&args.cmd);
     };
+    let runtime_dir = PathBuf::from(runtime_dir);
 
-    // `connect_to_env` follows libwayland: WAYLAND_SOCKET (an inherited
-    // descriptor, which it takes over and unsets) first, then WAYLAND_DISPLAY
-    // inside XDG_RUNTIME_DIR, absolute paths included. The one difference is
-    // that an unset WAYLAND_DISPLAY is "no compositor" here, where libwayland
-    // would still try `wayland-0` — a session that leaves the variable unset
-    // ends up unrestricted with a warning instead of sandboxed silently.
-    let conn = match Connection::connect_to_env() {
-        Ok(conn) => conn,
-        Err(e) => {
-            eprintln!("wl-sandbox: no connection to the compositor ({e}) — running unrestricted");
-            return run_plain(&args.cmd);
-        }
-    };
-
-    let (globals, mut queue) = match registry_queue_init::<State>(&conn) {
-        Ok(pair) => pair,
-        Err(e) => {
+    let compositor = match Compositor::connect() {
+        Ok(compositor) => compositor,
+        Err(why) => {
             eprintln!(
-                "wl-sandbox: cannot read the compositor's globals ({e}) — running unrestricted"
-            );
-            return run_plain(&args.cmd);
-        }
-    };
-    let qh = queue.handle();
-    let manager: WpSecurityContextManagerV1 = match globals.bind(&qh, 1..=1, ()) {
-        Ok(manager) => manager,
-        Err(e) => {
-            eprintln!(
-                "wl-sandbox: the compositor does not support security-context ({e}) — \
-                 running {} unrestricted",
+                "wl-sandbox: {why} — running {} unrestricted",
                 args.cmd[0].to_string_lossy()
             );
             return run_plain(&args.cmd);
@@ -275,7 +340,7 @@ pub fn run(args: Args) -> u8 {
     // A socket of this program's own, named by pid so that two runs of one
     // program do not fight over a single path, in the directory of its zone.
     let sock_name = socket_display(&args.zone, std::process::id());
-    let sock_path = PathBuf::from(runtime_dir).join(&sock_name);
+    let sock_path = runtime_dir.join(&sock_name);
     if let Some(dir) = sock_path.parent() {
         use std::os::unix::fs::DirBuilderExt;
         if let Err(e) = fs::DirBuilder::new()
@@ -307,6 +372,29 @@ pub fn run(args: Args) -> u8 {
         }
     };
 
+    // With the proxy the compositor listens in a private directory instead,
+    // and the zone's path is the proxy's. Not there: the first rung of the
+    // fallback ladder — the compositor on the zone's path, as before.
+    let upstream = if args.proxy {
+        match wl_proxy::Upstream::bind(&runtime_dir, std::process::id()) {
+            Ok(upstream) => Some(upstream),
+            Err(e) => {
+                eprintln!(
+                    "wl-sandbox: cannot create the proxy's socket ({e}) — the compositor listens \
+                     for the program itself"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let forget_upstream = |upstream: &Option<wl_proxy::Upstream>| {
+        if let Some(up) = upstream {
+            let _ = fs::remove_file(&up.path);
+        }
+    };
+
     // close_fd is the "switch". The compositor stops accepting connections on
     // the socket once this end of the pipe is closed; we hold it open for as
     // long as the program runs and let go after it exits.
@@ -315,45 +403,76 @@ pub fn run(args: Args) -> u8 {
         Err(e) => {
             eprintln!("wl-sandbox: cannot create the close-fd pipe ({e}) — running unrestricted");
             let _ = fs::remove_file(&sock_path);
+            forget_upstream(&upstream);
             return run_plain(&args.cmd);
         }
     };
 
-    let ctx: WpSecurityContextV1 =
-        manager.create_listener(listener.as_fd(), close_read.as_fd(), &qh, ());
-    ctx.set_sandbox_engine(SANDBOX_ENGINE.to_owned());
-    ctx.set_app_id(args.app_id);
-    ctx.set_instance_id(std::process::id().to_string());
-    ctx.commit();
-    let mut state = State;
-    if let Err(e) = queue.roundtrip(&mut state) {
-        // A compositor that refuses the context (nesting one sandbox inside
-        // another is a protocol error) must not cost the user the program: the
-        // socket we built is dropped and the program starts as it would have
-        // without us.
-        eprintln!(
-            "wl-sandbox: the compositor refused the security context ({e}) — running unrestricted"
-        );
+    let target = upstream
+        .as_ref()
+        .map_or(listener.as_fd(), |up| up.listener.as_fd());
+    if let Err(why) = compositor.register(target, close_read.as_fd(), &args.app_id) {
+        eprintln!("wl-sandbox: {why} — running unrestricted");
         drop(close_write);
         let _ = fs::remove_file(&sock_path);
+        forget_upstream(&upstream);
         return run_plain(&args.cmd);
     }
-
     // Our copies of the handed-over descriptors are not needed any more: the
     // compositor has its own. `close_write` is the exception — that is the
     // switch, and it stays.
-    //
-    // The connection goes too, and before the fork, exactly as
-    // `wl_display_disconnect` did: an UNRESTRICTED compositor connection
-    // inherited by the sandboxed program would be an open back door, findable
-    // through /proc/self/fd even though WAYLAND_SOCKET no longer names it.
-    // Both the queue and the connection hold the backend, so both must go.
-    ctx.destroy();
-    let _ = conn.flush();
-    drop(listener);
     drop(close_read);
-    drop(queue);
-    drop(conn);
+
+    let mut close_write = close_write;
+    let mut proxy = None;
+    if let Some(up) = upstream {
+        drop(up.listener);
+        match wl_proxy::start(&listener, &up.path) {
+            Ok(started) => proxy = Some((started, up.path)),
+            Err(e) => {
+                // The second rung: the proxy did not start. The context made
+                // for it is switched off, and the zone's path is registered
+                // itself — exactly what happened before there was a proxy.
+                // Should that fail, the program is NOT run unrestricted, as
+                // the other fallbacks do: the compositor has just taken a
+                // security context, so it speaks the protocol and a failure
+                // now is no older compositor — and our first connection has
+                // used up a WAYLAND_SOCKET, so without WAYLAND_DISPLAY the
+                // program's libwayland would go looking for `wayland-0`
+                // (review 2026-09-25).
+                eprintln!(
+                    "wl-sandbox: the Wayland proxy did not start ({e}) — the compositor listens \
+                     for the program itself"
+                );
+                drop(close_write);
+                let _ = fs::remove_file(&up.path);
+                let registered = sys::pipe()
+                    .map_err(|e| format!("cannot create the close-fd pipe ({e})"))
+                    .and_then(|(close_read, switch)| {
+                        Compositor::connect()?.register(
+                            listener.as_fd(),
+                            close_read.as_fd(),
+                            &args.app_id,
+                        )?;
+                        Ok(switch)
+                    });
+                match registered {
+                    Ok(switch) => close_write = switch,
+                    Err(why) => {
+                        eprintln!(
+                            "wl-sandbox: {why} — the Wayland sandbox could not be set up a second \
+                             time; {} is not started",
+                            args.cmd[0].to_string_lossy()
+                        );
+                        let _ = fs::remove_file(&sock_path);
+                        return EXIT_NOT_STARTED;
+                    }
+                }
+            }
+        }
+    }
+    // The compositor, or the proxy, has its own copy of the zone's socket.
+    drop(listener);
 
     let previous_display = std::env::var_os("WAYLAND_DISPLAY");
     std::env::set_var("WAYLAND_DISPLAY", sock_name);
@@ -362,6 +481,9 @@ pub fn run(args: Args) -> u8 {
     // This is a security invariant of the project, not a tidiness measure.
     std::env::remove_var("WAYLAND_SOCKET");
 
+    if let Some((proxy, _)) = &mut proxy {
+        proxy.take_over();
+    }
     // NOT exec: after the program exits somebody has to close the switch and
     // unlink the socket, so it is started as a child.
     // SAFETY: single-threaded at this point, so the child may allocate and
@@ -371,6 +493,10 @@ pub fn run(args: Args) -> u8 {
         // The switch belongs to the parent. O_CLOEXEC would close this copy at
         // execve anyway; doing it here covers the case where the exec fails.
         drop(close_write);
+        // The signals the supervisor took over are the program's again.
+        if let Some((proxy, _)) = &proxy {
+            proxy.in_program_child();
+        }
         let e = exec_command(&args.cmd);
         eprintln!(
             "wl-sandbox: cannot start {}: {e}",
@@ -396,22 +522,38 @@ pub fn run(args: Args) -> u8 {
         }
         drop(close_write);
         let _ = fs::remove_file(&sock_path);
+        if let Some((proxy, path)) = proxy {
+            proxy.kill();
+            let _ = fs::remove_file(path);
+        }
         return run_plain(&args.cmd);
     }
 
-    let mut status: libc::c_int = 0;
-    loop {
-        // SAFETY: `status` is a valid pointer for the duration of the call.
-        let r = unsafe { libc::waitpid(pid, &mut status, 0) };
-        if r == -1 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-            continue;
+    let status = match proxy {
+        // The proxy outlives the program while a connection is open (a
+        // terminal's child keeps its window); the switch and the sockets go
+        // when the program does, as without it.
+        Some((proxy, upstream_path)) => proxy.supervise(pid, move || {
+            drop(close_write);
+            let _ = fs::remove_file(&sock_path);
+            let _ = fs::remove_file(upstream_path);
+        }),
+        None => {
+            let mut status: libc::c_int = 0;
+            loop {
+                // SAFETY: `status` is a valid pointer for the duration of the call.
+                let r = unsafe { libc::waitpid(pid, &mut status, 0) };
+                if r == -1 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+            // The socket dies together with the program.
+            drop(close_write);
+            let _ = fs::remove_file(sock_path);
+            status
         }
-        break;
-    }
-
-    // The socket dies together with the program.
-    drop(close_write);
-    let _ = fs::remove_file(sock_path);
+    };
     exit_code_of(status)
 }
 
@@ -479,6 +621,16 @@ mod tests {
         assert_eq!(a.app_id, "firefox");
         let a = Args::parse(&argv(&["firefox", "--", "firefox"])).unwrap();
         assert_eq!(a.zone, NO_ZONE);
+        assert!(a.proxy, "the proxy is the default");
+        let a = Args::parse(&argv(&["firefox", "--no-proxy", "--zone", "nl", "--", "x"])).unwrap();
+        assert_eq!(
+            (a.proxy, a.zone.as_str(), a.app_id.as_str()),
+            (false, "nl", "firefox")
+        );
+        // After the separator it is the program's own argument.
+        let a = Args::parse(&argv(&["firefox", "--", "x", "--no-proxy"])).unwrap();
+        assert!(a.proxy);
+        assert_eq!(a.cmd, argv(&["x", "--no-proxy"]));
         for bad in [
             &["firefox", "--zone", "--", "x"][..],
             &["firefox", "--zone", "../x", "--", "x"],
