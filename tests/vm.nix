@@ -1520,15 +1520,17 @@ let
           assert lines[at + 1] == zone_ns, f"{lines} (zone {zone_ns})"
           # A notification from the zone reaches the host's daemon without
           # what points anywhere: no link in the text, no icon by URL, no
-          # application to activate, no URLs among the hints.
+          # application to activate, no URLs among the hints. The types said
+          # out loud: the daemon here does not introspect, and a call that is
+          # not Notify's signature is refused by the filter.
           alice("systemd-run --user --unit=fakenotifyd ${pkgs.python3}/bin/python3 ${fakeNotifyd} /home/alice/notify-got")
           machine.wait_until_succeeds("grep -q . /home/alice/notify-got", timeout=30)
           notify = (
               "gdbus call --session --timeout 3 --dest org.freedesktop.Notifications "
               "--object-path /org/freedesktop/Notifications --method org.freedesktop.Notifications.Notify "
-              "vmapp 0 https://evil.test/icon.png summary "
-              "'<a href=\"https://link.test\">clicktext</a> <b>boldtext</b>' '[]' "
-              "'{\"desktop-entry\": <\"firefox\">, \"urgency\": <byte 1>, \"x-kde-urls\": <[\"https://kde.test\"]>}' 5000"
+              "vmapp 'uint32 0' https://evil.test/icon.png summary "
+              "'<a href=\"https://link.test\">clicktext</a> <b>boldtext</b>' '@as []' "
+              "'{\"desktop-entry\": <\"firefox\">, \"urgency\": <byte 1>, \"x-kde-urls\": <[\"https://kde.test\"]>}' 'int32 5000'"
           )
           in_zone(hp, f"sh -c {shlex.quote(notify + ' || true')}")
           machine.wait_until_succeeds("grep -q clicktext /home/alice/notify-got", timeout=30)
