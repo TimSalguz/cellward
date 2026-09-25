@@ -3931,8 +3931,8 @@ fn default_into_tunnel(zone: &Zone) -> Result<(), String> {
     zone.ip(&["route", "replace", "default", "dev", TUN_IFACE])
 }
 
-/// Ping without raw sockets: the kernel's ICMP echo sockets, for the groups
-/// of the zone's user namespace (`net.ipv4.ping_group_range`, one per network
+/// Ping without raw sockets: the kernel's ICMP echo sockets, for the user's
+/// own groups in the zone (`net.ipv4.ping_group_range`, one per network
 /// namespace, and "nobody" — `1 0` — in a new one; it covers IPv6 too).
 /// Without it `ping` asks for CAP_NET_RAW, which a program in a zone does not
 /// have and must not get (the owner, 2026-09-25: "missing cap_net_raw").
@@ -3953,30 +3953,22 @@ fn allow_ping(zone: &Zone) {
     }
 }
 
-/// The groups mapped into the user namespace whose `gid_map` this is, as
-/// `lowest highest`: the kernel takes a range whose two ends are mapped
-/// there, and the groups between them that are not are nobody's anyway.
+/// The user's own groups in the user namespace whose `gid_map` this is: the
+/// line mapped to itself (`100 100 1` — the zone's root is some subordinate
+/// id instead). As `lowest highest`: the kernel keeps both ends as the host's
+/// ids and takes a range only when those are in order as well, so a range
+/// over every line (`0 100`, the root being 100000 outside) is empty — the
+/// first try, found by the VM test.
 pub fn ping_range(gid_map: &str) -> Option<String> {
-    let mut range: Option<(u64, u64)> = None;
-    for line in gid_map.lines() {
-        let mut fields = line.split_whitespace();
-        let (Some(inside), Some(_), Some(count)) = (fields.next(), fields.next(), fields.next())
+    gid_map.lines().find_map(|line| {
+        let mut fields = line.split_whitespace().map(str::parse::<u64>);
+        let (Some(Ok(inside)), Some(Ok(outside)), Some(Ok(count))) =
+            (fields.next(), fields.next(), fields.next())
         else {
-            continue;
+            return None;
         };
-        let (Ok(inside), Ok(count)) = (inside.parse::<u64>(), count.parse::<u64>()) else {
-            continue;
-        };
-        if count == 0 {
-            continue;
-        }
-        let last = inside + count - 1;
-        range = Some(match range {
-            Some((lo, hi)) => (lo.min(inside), hi.max(last)),
-            None => (inside, last),
-        });
-    }
-    range.map(|(lo, hi)| format!("{lo} {hi}"))
+        (inside == outside && count > 0).then(|| format!("{inside} {}", inside + count - 1))
+    })
 }
 
 /// --- IPv6: INTO THE TUNNEL OR NOWHERE AT ALL ---
@@ -4689,17 +4681,26 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    /// The zone's own groups, as the kernel takes them: both ends mapped.
+    /// The user's own groups, the line mapped to itself: a range over the
+    /// zone's root too would be empty to the kernel (100000 > 100 outside).
     #[test]
     fn ping_is_for_the_groups_of_the_zone() {
         assert_eq!(
             ping_range("         0     100000          1\n       100        100          1\n")
                 .as_deref(),
-            Some("0 100")
+            Some("100 100")
         );
-        assert_eq!(ping_range("0 1000 65536\n").as_deref(), Some("0 65535"));
+        assert_eq!(
+            ping_range("0 100000 1\n100 100 3\n").as_deref(),
+            Some("100 102")
+        );
+        assert_eq!(
+            ping_range("0 1000 65536\n"),
+            None,
+            "nothing of the user's own"
+        );
         assert_eq!(ping_range(""), None);
-        assert_eq!(ping_range("0 1000 0\nbroken\n"), None);
+        assert_eq!(ping_range("100 100 0\nbroken\n"), None);
     }
 
     #[test]
