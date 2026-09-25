@@ -753,6 +753,23 @@ in
       description = "Программы (по имени бинаря или id ярлыка), которые запускаются без посредника, если он с ними не работает. Им остаётся ограниченный сокет security-context.";
     };
 
+    frame.colors = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.strMatching "#[0-9a-fA-F]{6}");
+      default = { };
+      example = {
+        work = "#3366ff";
+        offline = "#808080";
+      };
+      description = "Цвет рамки, которую посредник Wayland рисует вокруг окон программ зоны (docs/WINDOW-FRAME.md §0а): имя зоны → #rrggbb. Зона без цвета здесь и без своего (vpn-zone frame color <зона> #rrggbb) получает цвет из своего имени — один и тот же на любой машине. Сами зоны в Nix не описываются: здесь только имена. Действует для программ, запущенных после смены.";
+    };
+
+    frame.width = lib.mkOption {
+      type = lib.types.nullOr (lib.types.ints.between 1 32);
+      default = null;
+      example = 6;
+      description = "Толщина рамки окон программ зон, логические пиксели. null — не задавать из Nix (тогда vpn-zone frame width, иначе 4: целое число пикселей при масштабах 1,25/1,5/1,75/2). Рамка лежит внутри окна: программе достаётся размер меньше на две толщины. Спрятать рамки на время показа экрана — vpn-zone frame hide (переключатель только локальный: его щёлкают туда и обратно).";
+    };
+
     compositorRestriction.enable = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
@@ -835,6 +852,10 @@ in
       {
         assertion = lib.all (z: z != "" && !(lib.hasInfix "\n" z)) cfg.hermetic.exceptions;
         message = "programs.vpn-zones.hermetic.exceptions: имя зоны — непустое и без переводов строки";
+      }
+      {
+        assertion = lib.all (z: builtins.match "[^[:space:]]+" z != null) (lib.attrNames cfg.frame.colors);
+        message = "programs.vpn-zones.frame.colors: имя зоны — непустое и без пробелов";
       }
       {
         assertion = lib.all (z: z != "" && !(lib.hasInfix "\n" z)) (cfg.nixDaemon ++ cfg.hostFilesWritable);
@@ -928,6 +949,14 @@ in
     (lib.mkIf (cfg.waylandProxy.exceptions != [ ]) {
       ".config/vpn-zones/declared/wayland-no-proxy".text =
         lib.concatStringsSep "\n" cfg.waylandProxy.exceptions + "\n";
+    })
+    (lib.mkIf (cfg.frame.colors != { }) {
+      ".config/vpn-zones/declared/frame-colors".text = lib.concatStrings (
+        lib.mapAttrsToList (zone: color: "${zone} ${color}\n") cfg.frame.colors
+      );
+    })
+    (lib.mkIf (cfg.frame.width != null) {
+      ".config/vpn-zones/declared/frame-width".text = toString cfg.frame.width;
     })
     (lib.mkIf (cfg.compositorRestriction.enable != null) {
       ".config/vpn-zones/declared/wayland-sandbox".text = if cfg.compositorRestriction.enable then "on" else "off";

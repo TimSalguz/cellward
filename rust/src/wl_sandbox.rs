@@ -24,7 +24,8 @@
 //! wrong, so every such path prints a warning to stderr first — that is what
 //! [`run_plain`] is, the shared "it did not work out" exit of this module.
 //!
-//! Usage: `vpn-zone-core wl-sandbox <app-id> [--zone <zone>] [--no-proxy] -- <command> [args…]`.
+//! Usage: `vpn-zone-core wl-sandbox <app-id> [--zone <zone>] [--no-proxy]
+//! [--frame <rrggbb>:<width> --frame-switch <settings dir>] -- <command> [args…]`.
 //!
 //! **Where it runs.** On the host, before the launch enters its zone
 //! (`docs/LEAK-MODEL.md` §13): a zone does not have the compositor's own
@@ -39,7 +40,10 @@
 //! process of its own): the compositor listens on a socket in a private
 //! directory outside every zone, and the proxy passes each connection of the
 //! program on to it — the same globals minus the hidden ones, nothing added.
-//! It is the base the window frame is built on (`docs/WINDOW-FRAME.md` §8).
+//! It is the base the window frame is built on (`docs/WINDOW-FRAME.md` §8),
+//! and with `--frame` it draws the zone's border around the program's
+//! windows (`crate::wl_frame`); `--frame-switch` names the directory whose
+//! `frames` setting hides it, read for every connection (`crate::frame`).
 //! When the proxy cannot start, the compositor listens on the zone's path
 //! itself, as it did before there was a proxy (with a warning), and when that
 //! cannot be registered either the program is not started at all — never
@@ -106,6 +110,10 @@ pub struct Args {
     /// (`--no-proxy`): the compositor listens on the zone's path itself — for
     /// a program the proxy breaks, and for the test that compares the two.
     pub proxy: bool,
+    /// The zone's border the proxy draws (`--frame <rrggbb>:<width>`), and
+    /// the settings directory with the switch that hides it
+    /// (`--frame-switch`; without one, nothing hides it).
+    pub frame: Option<(crate::frame::Frame, PathBuf)>,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
 }
@@ -126,6 +134,9 @@ pub enum ArgError {
     /// `--zone` without a name, or with one that is not a single path
     /// component.
     BadZone,
+    /// `--frame` without `<rrggbb>:<width>`, or `--frame-switch` without a
+    /// directory.
+    BadFrame,
 }
 
 impl fmt::Display for ArgError {
@@ -136,6 +147,10 @@ impl fmt::Display for ArgError {
             Self::EmptyCommand => write!(f, "nothing to run after `--`"),
             Self::TooManyArguments => write!(f, "only <app-id> may precede `--`"),
             Self::BadZone => write!(f, "--zone needs a zone name"),
+            Self::BadFrame => write!(
+                f,
+                "--frame needs <rrggbb>:<width>, --frame-switch a directory"
+            ),
         }
     }
 }
@@ -143,7 +158,8 @@ impl fmt::Display for ArgError {
 impl std::error::Error for ArgError {}
 
 impl Args {
-    /// Parse `<app-id> [--zone <zone>] [--no-proxy] -- cmd...`.
+    /// Parse `<app-id> [--zone <zone>] [--no-proxy] [--frame <rrggbb>:<w>]
+    /// [--frame-switch <dir>] -- cmd...`.
     ///
     /// The command keeps its `OsString`s: an argument can be a file name handed
     /// over by the launcher through a `%U` field code, and those are bytes, not
@@ -162,10 +178,21 @@ impl Args {
         let mut positional = Vec::new();
         let mut zone = NO_ZONE.to_owned();
         let mut proxy = true;
+        let mut frame = None;
+        let mut switch = None;
         let mut words = argv[..split].iter();
         while let Some(word) = words.next() {
             if word == "--no-proxy" {
                 proxy = false;
+            } else if word == "--frame" {
+                let value = words.next().ok_or(ArgError::BadFrame)?.to_string_lossy();
+                frame = Some(crate::frame::Frame::parse_arg(&value).ok_or(ArgError::BadFrame)?);
+            } else if word == "--frame-switch" {
+                let dir = words
+                    .next()
+                    .filter(|d| !d.is_empty())
+                    .ok_or(ArgError::BadFrame)?;
+                switch = Some(PathBuf::from(dir));
             } else if word == "--zone" {
                 let name = words.next().ok_or(ArgError::BadZone)?.to_string_lossy();
                 if !valid_zone_dir(&name) {
@@ -183,10 +210,14 @@ impl Args {
         if app_id.is_empty() {
             return Err(ArgError::MissingAppId);
         }
+        // Without a switch nothing can hide the border: an empty path is a
+        // directory with no settings in it.
+        let frame = frame.map(|f| (f, switch.unwrap_or_default()));
         Ok(Self {
             app_id: app_id.to_string_lossy().into_owned(),
             zone,
             proxy,
+            frame,
             cmd,
         })
     }
@@ -427,7 +458,7 @@ pub fn run(args: Args) -> u8 {
     let mut proxy = None;
     if let Some(up) = upstream {
         drop(up.listener);
-        match wl_proxy::start(&listener, &up.path) {
+        match wl_proxy::start(&listener, &up.path, args.frame.clone()) {
             Ok(started) => proxy = Some((started, up.path)),
             Err(e) => {
                 // The second rung: the proxy did not start. The context made
@@ -638,6 +669,48 @@ mod tests {
             &["firefox", "--zone", "", "--", "x"],
         ] {
             assert_eq!(Args::parse(&argv(bad)), Err(ArgError::BadZone), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_frame_is_a_colour_and_a_width_and_its_switch_a_directory() {
+        use crate::frame::{Frame, Rgb};
+        let a = Args::parse(&argv(&["foot", "--zone", "nl", "--", "foot"])).unwrap();
+        assert_eq!(a.frame, None, "no border unless asked");
+        let a = Args::parse(&argv(&[
+            "foot",
+            "--frame",
+            "ff0080:6",
+            "--frame-switch",
+            "/home/u/.config/vpn-zones",
+            "--",
+            "foot",
+        ]))
+        .unwrap();
+        let (frame, switch) = a.frame.unwrap();
+        assert_eq!(
+            frame,
+            Frame {
+                color: Rgb(255, 0, 128),
+                width: 6
+            }
+        );
+        assert_eq!(switch, PathBuf::from("/home/u/.config/vpn-zones"));
+        for bad in [
+            &["foot", "--frame", "--", "x"][..],
+            &["foot", "--frame", "red:4", "--", "x"],
+            &["foot", "--frame", "ff0080:0", "--", "x"],
+            &[
+                "foot",
+                "--frame",
+                "ff0080:4",
+                "--frame-switch",
+                "",
+                "--",
+                "x",
+            ],
+        ] {
+            assert_eq!(Args::parse(&argv(bad)), Err(ArgError::BadFrame), "{bad:?}");
         }
     }
 }
