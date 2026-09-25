@@ -163,10 +163,52 @@ pub fn zone_pid(state: &Path, name: &OsStr) -> Option<i32> {
     // The holder notes when it started: a stopped zone leaves its number
     // behind, and once that number is reused a live process is not the zone.
     // Entering it would put a program into somebody else's namespaces. No
-    // note, no zone: a holder from before the note is restarted once, rather
-    // than trusted by a number that may have outlived it (review 2026-09-25).
-    let stamp = read_setting(&dir.join("zone.start"))?;
+    // note, no zone — unless the number is a holder from before the note,
+    // still in its zone's unit; a bare number that may have outlived its zone
+    // is not trusted (review 2026-09-25).
+    let stamp = match read_setting(&dir.join("zone.start")) {
+        Some(stamp) => stamp,
+        None => adopt_old_holder(&dir, name, pid)?,
+    };
     (crate::sys::process_stamp(pid).as_deref() == Some(stamp.trim())).then_some(pid)
+}
+
+/// A holder of a build from before `zone.start`, which an update left
+/// running (`X-SwitchMethod=keep-old`, `module/default.nix`): without this it
+/// read as down, and nothing could be launched into the zone until it was
+/// restarted. Its number is taken only while the process sits in the zone's
+/// own unit, `vpn-zone@<name>.service` — a unit's control group goes when
+/// the unit stops, and only systemd, or the user from the host (who could
+/// write the note as well), puts a process in it — and the start time is
+/// read before and after that look, so the look was at this very process
+/// and not at one that took the number meanwhile. Then the note is written
+/// for it, as a holder of this build writes it itself.
+fn adopt_old_holder(dir: &Path, name: &OsStr, pid: i32) -> Option<String> {
+    let before = crate::sys::process_stamp(pid)?;
+    let cgroup = fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    if !in_zone_unit(&cgroup, name.to_str()?) {
+        return None;
+    }
+    let after = crate::sys::process_stamp(pid)?;
+    if after != before {
+        return None;
+    }
+    // Where it can be written: from inside a zone the state is out of reach,
+    // and the next look from the host writes it.
+    let tmp = dir.join("zone.start.tmp");
+    let _ = fs::write(&tmp, format!("{before}\n"))
+        .and_then(|()| fs::rename(&tmp, dir.join("zone.start")));
+    Some(before)
+}
+
+/// Whether `/proc/<pid>/cgroup` puts the process in the unit of zone `name`
+/// (its own control group, or one below it).
+pub fn in_zone_unit(cgroup: &str, name: &str) -> bool {
+    let unit = format!("/vpn-zone@{name}.service");
+    cgroup
+        .lines()
+        .filter_map(|l| l.strip_prefix("0::"))
+        .any(|path| path.ends_with(&unit) || path.contains(&format!("{unit}/")))
 }
 
 /// Wait for the zone to come up, ten seconds at most: the `ready` marker AND
@@ -2961,6 +3003,26 @@ fn run_sync(tools: &Tools) -> u8 {
 mod tests {
     use super::*;
 
+    /// An old holder is taken only in its own zone's unit.
+    #[test]
+    fn an_old_holder_is_known_by_its_zones_unit() {
+        let own = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/\
+                   app-vpn\\x2dzone.slice/vpn-zone@nix-zone-desktop.service\n";
+        assert!(in_zone_unit(own, "nix-zone-desktop"));
+        assert!(!in_zone_unit(own, "nix-zone"));
+        assert!(!in_zone_unit(own, "desktop"));
+        let below = "0::/user.slice/user@1000.service/app.slice/vpn-zone@nl.service/sub\n";
+        assert!(in_zone_unit(below, "nl"));
+        // Another unit, a terminal of the user's: not the zone.
+        let other = "0::/user.slice/user@1000.service/app.slice/app-Alacritty@x.service\n";
+        assert!(!in_zone_unit(other, "nl"));
+        // A unit named after the zone by someone else is no zone of ours.
+        let lookalike = "0::/user.slice/user@1000.service/app.slice/evil-vpn-zone@nl.service\n";
+        assert!(!in_zone_unit(lookalike, "nl"));
+        // cgroup v1 lines are not read.
+        assert!(!in_zone_unit("1:name=systemd:/vpn-zone@nl.service\n", "nl"));
+    }
+
     /// A handshake line is "alive" unless watch found THIS run of the tunnel
     /// dead; a verdict from before the zone's start is not read.
     #[test]
@@ -2994,9 +3056,10 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let me = std::process::id() as i32;
         fs::write(dir.join("zone.pid"), format!("{me}\n")).unwrap();
-        // No note of the holder's start: not a zone (restarted once after
-        // the update).
+        // No note of the holder's start, and the test runs in no zone's
+        // unit: not a zone, and no note is written for it.
         assert_eq!(zone_pid(&state, OsStr::new("nl")), None);
+        assert!(!dir.join("zone.start").exists());
         let stamp = crate::sys::process_stamp(me).unwrap();
         fs::write(dir.join("zone.start"), format!("{stamp}\n")).unwrap();
         assert_eq!(zone_pid(&state, OsStr::new("nl")), Some(me));

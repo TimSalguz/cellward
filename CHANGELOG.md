@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **Nothing could be launched into a zone that an update left running**
+  (`rust/src/cli.rs` `zone_pid`, found on the owner's machine 2026-09-25). An
+  update keeps running zones (`X-SwitchMethod=keep-old`, below), but a holder
+  from before `zone.start` has no note of its start time, and a zone without
+  the note read as down — the frame stayed, and every launch into it failed
+  until the zone was restarted. Such a holder is now taken when its process
+  sits in the zone's own unit, `vpn-zone@<name>.service` (read from
+  `/proc/<pid>/cgroup`, with the start time read before and after, so the
+  look was at that very process), and the note is written for it. A number
+  outside the unit is still not a zone.
+
 ### Changed
 - **The single entry is `programs.cellward.enable`** (NixOS), the same name as
   in home-manager (the owner's call of 2026-09-25): in NixOS, `programs.*` is
