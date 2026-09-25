@@ -304,6 +304,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **A screen cast from a zone asks every time** (`rust/src/dbus_wire.rs`
+  `sanitized_screencast_sources`, LEAK-MODEL §20). The screen cast portal
+  lets a program ask for its choice to be remembered (`persist_mode`); the
+  next cast with the token it got back starts WITHOUT the portal's dialog,
+  and niri shows nothing while a cast runs. The portal took a zone's program
+  for a host application, so the remembered choice was not even tied to the
+  zone. The session bus filter now passes `SelectSources` on with the options
+  of an allow-list only (`handle_token`, `types`, `multiple`, `cursor_mode`):
+  no `persist_mode`, no `restore_token`, nothing a later portal adds. A
+  selection it cannot read is refused. Like Android, which asks before every
+  screen capture.
 - **The zone's helpers run in the host's user namespace, out of the zone's
   reach through `/proc`** (`rust/src/zone.rs` `Helpers`, LEAK-MODEL §16;
   review 2026-09-25). The holder started the system bus proxy, a hermetic

@@ -539,6 +539,40 @@ pub fn sanitized_portal_notification(msg: &[u8], h: &Header) -> Result<Vec<u8>> 
     Ok(w.buf)
 }
 
+/// The options of `ScreenCast.SelectSources` passed on: what to show and how.
+/// Not `persist_mode` and `restore_token` — and nothing a later portal adds.
+pub const SCREENCAST_OPTIONS: &[&str] = &["handle_token", "types", "multiple", "cursor_mode"];
+
+/// The screen cast portal's `SelectSources(o session, a{sv})` that asks every
+/// time. A remembered choice (`persist_mode`) comes back as a token, and with
+/// it the portal starts the next cast WITHOUT its dialog: the program could
+/// show the screen again whenever it likes, and in niri nothing says so. The
+/// portal keeps the choice for "host applications" — which a zone's program
+/// is to it (`bus_filter::PORTAL_ALLOWED`) — so the person could not even
+/// tell which zone it was given to.
+pub fn sanitized_screencast_sources(msg: &[u8], h: &Header) -> Result<Vec<u8>> {
+    if h.signature.as_deref() != Some("oa{sv}") || !h.little {
+        return Err(WireError("not a screen cast selection the filter reads"));
+    }
+    let mut r = Reader {
+        buf: msg,
+        pos: h.body_offset,
+        little: true,
+    };
+    let mut w = Writer { buf: Vec::new() };
+    w.string(&r.string()?);
+    filtered_options(
+        &mut r,
+        &mut w,
+        &|key| SCREENCAST_OPTIONS.contains(&key),
+        &[],
+    )?;
+    if r.pos != msg.len() {
+        return Err(WireError("more after the screen cast selection"));
+    }
+    Ok(w.buf)
+}
+
 // --- WRITING ------------------------------------------------------------------
 
 /// A little-endian message under construction.
@@ -990,6 +1024,73 @@ mod tests {
             sig = &sig[used..];
         }
         assert_eq!(r.pos, b.len());
+    }
+
+    /// A screen cast's choice of sources reaches the portal without what
+    /// would have it remembered, and without an option nobody has read.
+    #[test]
+    fn a_screen_cast_is_not_remembered() {
+        let session = "/org/freedesktop/portal/desktop/session/1_42/s";
+        let mut w = Writer { buf: Vec::new() };
+        w.string(session);
+        w.u32(0);
+        let at = w.buf.len() - 4;
+        w.align(8);
+        let start = w.buf.len();
+        for (key, sig, value) in [
+            ("handle_token", "s", Some("t1")),
+            ("persist_mode", "u", None),
+            ("types", "u", None),
+            ("restore_token", "s", Some("0b2c…")),
+            ("multiple", "b", None),
+            ("cursor_mode", "u", None),
+            ("later_option", "s", Some("x")),
+        ] {
+            w.align(8);
+            w.string(key);
+            w.signature(sig);
+            match value {
+                Some(v) => w.string(v),
+                None => w.u32(2),
+            }
+        }
+        let len = (w.buf.len() - start) as u32;
+        w.buf[at..at + 4].copy_from_slice(&len.to_le_bytes());
+        let fields = [
+            Field::Path("/org/freedesktop/portal/desktop"),
+            Field::Interface("org.freedesktop.portal.ScreenCast"),
+            Field::Member("SelectSources"),
+            Field::Destination("org.freedesktop.portal.Desktop"),
+            Field::Signature("oa{sv}"),
+        ];
+        let msg = message(METHOD_CALL, 0, 9, &fields, &w.buf);
+        let h = parse_header(&msg).unwrap();
+        let body = sanitized_screencast_sources(&msg, &h).unwrap();
+        let out = message(METHOD_CALL, 0, 9, &fields, &body);
+        let h2 = parse_header(&out).unwrap();
+        let mut r = Reader {
+            buf: &out,
+            pos: h2.body_offset,
+            little: true,
+        };
+        assert_eq!(r.string().unwrap(), session);
+        let len = r.u32().unwrap() as usize;
+        r.align(8).unwrap();
+        let end = r.pos + len;
+        let mut keys = Vec::new();
+        while r.pos < end {
+            r.align(8).unwrap();
+            let key = r.string().unwrap();
+            let sig = r.signature().unwrap();
+            r.skip(sig.as_bytes(), 0).unwrap();
+            keys.push(key);
+        }
+        assert_eq!(r.pos, out.len());
+        assert_eq!(keys, ["handle_token", "types", "multiple", "cursor_mode"]);
+        // Not read, not passed on: another signature is refused.
+        let mut odd = h.clone();
+        odd.signature = Some("oa{ss}".to_owned());
+        assert!(sanitized_screencast_sources(&msg, &odd).is_err());
     }
 
     #[test]

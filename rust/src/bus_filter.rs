@@ -623,11 +623,13 @@ fn auth_line_is_begin(line: &[u8]) -> bool {
         .is_some_and(|rest| matches!(rest.first(), None | Some(b' ' | b'\t')))
 }
 
-/// A notification, as the host's daemon may have it from a zone
-/// (`dbus_wire::sanitized_notify`, `sanitized_portal_notification`): the
-/// message rewritten, an error for one the filter cannot read (refused, not
-/// passed on unread), `None` for anything else.
-fn notification(msg: &[u8], h: &Header) -> Option<Result<Vec<u8>, wire::WireError>> {
+/// A call the host may have from a zone only rewritten: a notification
+/// (`dbus_wire::sanitized_notify`, `sanitized_portal_notification`) and a
+/// screen cast's choice of sources, which is not remembered
+/// (`sanitized_screencast_sources`). The message rewritten, an error for one
+/// the filter cannot read (refused, not passed on unread), `None` for
+/// anything else.
+fn rewritten(msg: &[u8], h: &Header) -> Option<Result<Vec<u8>, wire::WireError>> {
     if h.kind != wire::METHOD_CALL {
         return None;
     }
@@ -640,6 +642,9 @@ fn notification(msg: &[u8], h: &Header) -> Option<Result<Vec<u8>, wire::WireErro
         }
         (Some("org.freedesktop.portal.Notification"), Some("AddNotification")) => {
             wire::sanitized_portal_notification(msg, h)
+        }
+        (Some("org.freedesktop.portal.ScreenCast"), Some("SelectSources")) => {
+            wire::sanitized_screencast_sources(msg, h)
         }
         _ => return None,
     };
@@ -723,11 +728,12 @@ fn client_to_bus(
                 }
                 None => {
                     let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
-                    match notification(&msg, &h) {
+                    match rewritten(&msg, &h) {
                         // Passed on without what would point the host's daemon
-                        // at the network or at an application.
-                        Some(Ok(rewritten)) => send_all(up, &rewritten, &raw)?,
-                        Some(Err(e)) => deny(conn, ctx, &h, &format!("notification refused: {e}"))?,
+                        // at the network or at an application, or have the
+                        // screen shown again without a question.
+                        Some(Ok(message)) => send_all(up, &message, &raw)?,
+                        Some(Err(e)) => deny(conn, ctx, &h, &format!("call refused: {e}"))?,
                         None => send_all(up, &msg, &raw)?,
                     }
                 }
