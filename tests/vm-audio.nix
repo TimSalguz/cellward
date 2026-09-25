@@ -276,10 +276,15 @@ let
               "sh -c 'timeout 5 pw-record --raw --target vm-mic -P node.name=vz-mic - | wc -c'"
           )
           assert int(out.strip()) > 10000, f"nothing recorded with the microphone on: {out}"
-          # A duplex device is a sink to WirePlumber: its capture ports are
-          # its monitor — what the host plays there — microphone or not.
+          # A duplex device is a sink to WirePlumber: what a capture of it
+          # gets is its monitor — what the host plays there — microphone or
+          # not. (A plain capture aimed at it is no capture of it: WirePlumber
+          # takes it for a sink, and the stream goes to the default source —
+          # the microphone, rightly recorded on "yes".)
           out = zone(
-              "sh -c 'timeout 5 pw-record --raw --target vm-duplex -P node.name=vz-duplex - | wc -c'"
+              "sh -c 'timeout 5 pw-record --raw --target vm-duplex "
+              "-P stream.capture.sink=true -P node.dont-fallback=true "
+              "-P node.name=vz-duplex - | wc -c'"
           )
           assert out.strip() == "0", f"the zone recorded a duplex device's monitor: {out}"
           # Taken back while recording: the link goes at once.
