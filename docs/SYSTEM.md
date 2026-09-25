@@ -20,7 +20,7 @@ What joins it: system services (`NetworkNamespacePath=`) and NixOS containers
 (`containers.<name>.networkNamespace`). A user's programs join it through `vpn-zone-sys`
 (§7) or through a user zone of their own on top of it (§7b).
 
-The module is `nixosModules.default`. Its single entry, `services.cellward.enable` (README,
+The module is `nixosModules.default`. Its single entry, `programs.cellward.enable` (README,
 Installation), turns on what the user tier needs of the system — kernel modules, the
 PipeWire policy, the home-manager module for every user — but not this tier:
 `services.cellward.system.enable` does that, and stays an explicit choice. (The options were
@@ -527,7 +527,7 @@ services.cellward.system = {
 };
 ```
 
-With `services.cellward.enable = true` the first three lines are the default whenever
+With `programs.cellward.enable = true` the first three lines are the default whenever
 `egress.enable` is on and `host.nix` / `host.time` are unset: a `zones.direct0` of your own
 wins, `host.time` is set only with timesyncd on, and `host.nix = null` keeps the daemon on the
 host's network.

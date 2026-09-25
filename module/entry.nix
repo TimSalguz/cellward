@@ -1,4 +1,4 @@
-# ЕДИНЫЙ ВХОД cellward: services.cellward.enable (README, «Установка»).
+# ЕДИНЫЙ ВХОД cellward: programs.cellward.enable (README, «Установка»).
 #
 # Один импорт (nixosModules.default) и одна строка — и на машине есть то, что
 # cellward нужно в любом случае. Осознанный выбор остаётся явным: системный
@@ -26,13 +26,26 @@
 
 let
   top = config.services.cellward;
+  # The entry is `programs.cellward.enable`, as in home-manager: in NixOS,
+  # `programs.*` is where a tool that also sets up the system lives
+  # (programs.firejail, programs.wireshark); `services.*` is for daemons —
+  # the system tier and the PipeWire policy stay there.
+  on = config.programs.cellward.enable;
   cfg = top.system;
   # The plain zone the Nix daemon and the clock go out through when the
   # egress policy is on and they have no zone of their own.
   directZone = "direct0";
 in
 {
-  options.services.cellward.enable = lib.mkEnableOption ''
+  # The name the entry had first (2026-09-25): still read, with a warning.
+  imports = [
+    (lib.mkRenamedOptionModule
+      [ "services" "cellward" "enable" ]
+      [ "programs" "cellward" "enable" ]
+    )
+  ];
+
+  options.programs.cellward.enable = lib.mkEnableOption ''
     cellward on this machine in one line: the kernel modules a zone cannot
     load from its unprivileged user namespace (`amneziawg` unless
     `system.amneziawg = false`, `wireguard`, `tun`, `nf_tables`); the
@@ -45,7 +58,7 @@ in
     the egress policy'';
 
   config = lib.mkMerge [
-    (lib.mkIf top.enable {
+    (lib.mkIf on {
       # amneziawg is loaded by the system tier itself when that is on
       # (module/nixos.nix): one entry in the list, not two.
       boot.extraModulePackages = lib.mkIf (cfg.amneziawg && !cfg.enable) [
@@ -78,7 +91,7 @@ in
     # `./.` is the path the flake's homeModules.default names: importing it
     # by hand as well is the same module, taken once.
     (lib.optionalAttrs (options ? home-manager) {
-      home-manager.sharedModules = lib.mkIf top.enable [
+      home-manager.sharedModules = lib.mkIf on [
         ./.
         { programs.cellward.enable = lib.mkDefault true; }
       ];

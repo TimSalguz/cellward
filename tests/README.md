@@ -15,7 +15,7 @@
     `services.vpn-zones`, до переименования в cellward) называют все опции
     новых и дают тот же дом и ту же систему, с предупреждением
     (`nix-instantiate --eval --strict … -A oldNames`, ответ `true`);
-  - `singleEntry` — единый вход `services.cellward.enable` на вычисленной
+  - `singleEntry` — единый вход `programs.cellward.enable` на вычисленной
     машине NixOS: модули ядра, политика PipeWire при WirePlumber, модуль
     home-manager каждому пользователю home-manager, `direct0` для демона Nix
     и часов при политике хоста — и что явные `host.nix`/`host.time` и
@@ -164,7 +164,7 @@
    ядерный модуль `amneziawg` (он собирается здесь же, против ядра VM).
 6. **vm-audio** — `tests/vm-audio.nix`: настоящие PipeWire и WirePlumber
    пользователя в VM с политикой из модуля NixOS — её включает единый вход
-   `services.cellward.enable` (он же ставит модуль home-manager и грузит
+   `programs.cellward.enable` (он же ставит модуль home-manager и грузит
    модули ядра зоны), нулевые выход и микрофон; из
    offline-зоны (герметичной) — свой контекст безопасности вместо сырого
    `pipewire-0` (и после перезапуска PipeWire), свои потоки и выход видны,

@@ -130,11 +130,11 @@ wayland-info | grep -i security_context   # протокол есть
 
   # в конфигурации NixOS
   imports = [ inputs.cellward.nixosModules.default ];
-  services.cellward.enable = true;
+  programs.cellward.enable = true;
 }
 ```
 
-`services.cellward.enable` включает то, что зонам от системы нужно в любом
+`programs.cellward.enable` включает то, что зонам от системы нужно в любом
 случае, и ничего из того, что есть выбор:
 
 - модули ядра, которые зона сама из непривилегированного user namespace не
@@ -204,7 +204,7 @@ programs.cellward = {
 сокет PipeWire зоны, клиенты которого видят то, что им разрешает политика
 WirePlumber из этого проекта: свои потоки, выходы, куда играть, микрофон —
 только как скажет `cellward microphone`; никогда то, что играет хост, и
-никогда чужой поток. `services.cellward.enable` включает политику вместе с
+никогда чужой поток. `programs.cellward.enable` включает политику вместе с
 WirePlumber; иначе она включается один раз:
 
 ```nix
@@ -482,7 +482,7 @@ window-rule {
 ```nix
 # NixOS
 imports = [ inputs.cellward.nixosModules.default ];
-services.cellward.enable = true;     # с политикой хоста: простая зона direct0 для nix и часов
+programs.cellward.enable = true;     # с политикой хоста: простая зона direct0 для nix и часов
 services.cellward.system = {
   enable = true;
   users = [ "alice" ];               # видят состояние зон и добавляют зоны на месте

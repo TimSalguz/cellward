@@ -242,18 +242,16 @@ let
   systemNew = systemTier "cellward";
   systemOld = systemTier "vpn-zones";
 
-  # The single entry, services.cellward.enable: with the system tier and its
+  # The single entry, programs.cellward.enable: with the system tier and its
   # egress policy (and the home-manager module imported by hand as well —
   # the same module, taken once), with the defaults it sets overridden, and
   # alone.
   entry = nixos [
     {
-      services.cellward = {
+      programs.cellward.enable = true;
+      services.cellward.system = {
         enable = true;
-        system = {
-          enable = true;
-          egress.enable = true;
-        };
+        egress.enable = true;
       };
       services.pipewire.enable = true;
       home-manager.users.alice.imports = [ ../module ];
@@ -266,19 +264,19 @@ let
   ];
   entryOverridden = nixos [
     {
-      services.cellward = {
+      programs.cellward.enable = true;
+      services.cellward.system = {
         enable = true;
-        system = {
-          enable = true;
-          egress.enable = true;
-          host.nix = null;
-          host.time = null;
-          amneziawg = false;
-        };
+        egress.enable = true;
+        host.nix = null;
+        host.time = null;
+        amneziawg = false;
       };
     }
   ];
-  entryAlone = nixos [ { services.cellward.enable = true; } ];
+  entryAlone = nixos [ { programs.cellward.enable = true; } ];
+  # The name the entry had first: the same machine, with a warning.
+  entryOldName = nixos [ { services.cellward.enable = true; } ];
 
   # `true`, or a failure that says what went wrong.
   expect = what: ok: if ok then true else throw "tests/harness.nix: ${what}";
@@ -406,6 +404,10 @@ in
       (toplevel entry)
       (toplevel entryOverridden)
       (toplevel entryAlone)
+      (expect "the entry's first name, services.cellward.enable, is not the same machine with a warning" (
+        entryOldName.config.system.build.toplevel.drvPath == entryAlone.config.system.build.toplevel.drvPath
+        && warnsOf "services.cellward.enable" entryOldName.config
+      ))
     ];
 
   # The window menu's key and our windows' rule as the compositors read them:

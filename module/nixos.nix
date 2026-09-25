@@ -1,5 +1,5 @@
 # СИСТЕМНЫЙ УРОВЕНЬ cellward (прежнее имя — vpn-zones; ROADMAP M10, docs/SYSTEM.md,
-# docs/ARCHITECTURE.ru.md). Единый вход services.cellward.enable — в ./entry.nix.
+# docs/ARCHITECTURE.ru.md). Единый вход programs.cellward.enable — в ./entry.nix.
 #
 # Та же зона, что у пользовательского уровня, — namespace, где есть только lo и
 # туннель, — но держит её systemd с загрузки, а не сеанс. К ней подключаются
@@ -323,7 +323,7 @@ in
   # системных зон не зависит — нужна пользовательскому уровню.
   imports = [
     ./wireplumber/nixos.nix
-    # The single entry, services.cellward.enable.
+    # The single entry, programs.cellward.enable.
     ./entry.nix
   ]
   ++ map (
@@ -553,7 +553,7 @@ in
       default = true;
       description = ''
         Load the out-of-tree amneziawg kernel module (built for the running
-        kernel), with `enable` or with the single entry `services.cellward.enable`
+        kernel), with `enable` or with the single entry `programs.cellward.enable`
         — the user tier's zones need it too. Without it only configs with no
         obfuscation parameters work, through the in-tree wireguard module.
       '';

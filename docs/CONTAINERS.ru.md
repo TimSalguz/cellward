@@ -431,7 +431,7 @@ bwrap; оверлеи — когда появится брокер.
 
 Опции принадлежат **home-manager**-модулю (`homeModules.default`) и задаются в
 домашней конфигурации того пользователя, к которому относятся; в NixOS-модуле
-их нет (его `services.cellward.enable` только добавляет home-manager-модуль каждому
+их нет (его `programs.cellward.enable` только добавляет home-manager-модуль каждому
 пользователю home-manager, с `programs.cellward.enable` по умолчанию). Прежде опции
 назывались `programs.vpn-zones.*`; старые имена работают, с предупреждением.
 Декларативные значения пишутся в `~/.config/vpn-zones/declared/` этого

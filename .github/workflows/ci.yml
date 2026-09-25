@@ -18,7 +18,7 @@ jobs:
   # вычисления module/default.nix. Ничего не собирает (только instantiate).
   # Плюс две проверки вычислением: прежние имена опций (programs.vpn-zones,
   # services.vpn-zones) дают то же самое с предупреждением и называют все
-  # опции новых, и единый вход services.cellward.enable включает своё.
+  # опции новых, и единый вход programs.cellward.enable включает своё.
   eval:
     name: eval (nix-instantiate)
     runs-on: ubuntu-24.04

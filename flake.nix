@@ -4,7 +4,7 @@
   outputs = { self }: {
     homeModules.default = ./module;
     homeManagerModules.default = ./module; # старое имя, для совместимости
-    # Модуль NixOS: единый вход services.cellward.enable (module/entry.nix —
+    # Модуль NixOS: единый вход programs.cellward.enable (module/entry.nix —
     # модули ядра, политика PipeWire, модуль home-manager всем пользователям
     # home-manager) и системный уровень services.cellward.system (M10,
     # docs/SYSTEM.md): зоны с загрузки для служб и NixOS-контейнеров.

@@ -1,7 +1,7 @@
 # A hermetic zone's PipeWire (docs/LEAK-MODEL.md §20, rust/src/pw_context.rs,
 # module/wireplumber/policy.lua): a real PipeWire and WirePlumber for the user
 # in the VM, with the policy of the NixOS module — switched on by its single
-# entry, services.cellward.enable, as a machine does it —, a sink and a
+# entry, programs.cellward.enable, as a machine does it —, a sink and a
 # microphone that are null devices (the VM has no sound card), and the
 # offline zone — hermetic by default, and needing nothing but a user
 # namespace.
@@ -93,7 +93,7 @@ let
         # on: the policy under test comes on by itself with WirePlumber, the
         # home-manager module for alice by itself too, and the kernel modules
         # of a zone are loaded at boot.
-        services.cellward.enable = true;
+        programs.cellward.enable = true;
         # The policy's own log lines, for a failure to be read.
         systemd.user.services.wireplumber.environment.WIREPLUMBER_DEBUG = "2,s-vpn-zones:4";
         home-manager.useGlobalPkgs = true;

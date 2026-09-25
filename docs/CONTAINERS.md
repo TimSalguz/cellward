@@ -438,7 +438,7 @@ needed first. **Open research item**, VM prototype before any promise.
 
 The options belong to the **home-manager** module (`homeModules.default`) and
 are set in the home configuration of the user they apply to; the NixOS module
-has none of them (its `services.cellward.enable` only adds the home-manager module to
+has none of them (its `programs.cellward.enable` only adds the home-manager module to
 every home-manager user, with `programs.cellward.enable` on by default). The options were
 `programs.vpn-zones.*`; the old names still work, with a warning. Declared values are
 written into `~/.config/vpn-zones/declared/` of that user (read-only store links) and take

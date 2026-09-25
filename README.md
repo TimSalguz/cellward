@@ -135,11 +135,11 @@ On NixOS — one import and one line:
 
   # in the NixOS configuration
   imports = [ inputs.cellward.nixosModules.default ];
-  services.cellward.enable = true;
+  programs.cellward.enable = true;
 }
 ```
 
-`services.cellward.enable` turns on what the zones need of the system anyway,
+`programs.cellward.enable` turns on what the zones need of the system anyway,
 and nothing that is a choice:
 
 - the kernel modules a zone cannot load itself from an unprivileged user
@@ -208,7 +208,7 @@ Sound in a hermetic zone goes through the sound filter (PulseAudio) and through
 a PipeWire socket of the zone's own, whose clients see what a WirePlumber
 policy of this project lets them: their own streams, the outputs to play to,
 the microphone only as `cellward microphone` says — never what the host plays,
-never another program's stream. `services.cellward.enable` switches the policy
+never another program's stream. `programs.cellward.enable` switches the policy
 on with WirePlumber; otherwise it is switched on once:
 
 ```nix
@@ -492,7 +492,7 @@ has no session:
 ```nix
 # NixOS
 imports = [ inputs.cellward.nixosModules.default ];
-services.cellward.enable = true;     # with egress on: a plain zone direct0 for nix and time
+programs.cellward.enable = true;     # with egress on: a plain zone direct0 for nix and time
 services.cellward.system = {
   enable = true;
   users = [ "alice" ];               # may see the zones' state and add zones on the spot

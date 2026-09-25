@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **The single entry is `programs.cellward.enable`** (NixOS), the same name as
+  in home-manager (the owner's call of 2026-09-25): in NixOS, `programs.*` is
+  where a tool that also sets up the system lives (`programs.firejail`,
+  `programs.wireshark`); `services.*` is for daemons — the system tier
+  (`services.cellward.system.*`) and the PipeWire policy
+  (`services.cellward.pipewirePolicy.enable`) stay there. The first name,
+  `services.cellward.enable`, still works, with a warning (checked in
+  `tests/harness.nix` `singleEntry`: the same machine, and the warning).
+
+### Changed
 - **An update no longer cuts running zones off the network**
   (`module/default.nix`, `module/nixos.nix`, `tests/harness.nix`
   `keepOnSwitch`). home-manager's sd-switch restarted a zone whose unit had
@@ -46,7 +56,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   old names name every new option and give the same home and the same
   system. Messages that say where a value was set name the new options.
 - **A single entry** (`module/entry.nix`): one import of
-  `nixosModules.default` and `services.cellward.enable = true;`. It loads at
+  `nixosModules.default` and `programs.cellward.enable = true;`. It loads at
   boot the kernel modules a zone cannot load from its unprivileged user
   namespace (`amneziawg` unless `services.cellward.system.amneziawg = false`,
   `wireguard`, `tun`, `nf_tables`); turns the PipeWire policy on by default

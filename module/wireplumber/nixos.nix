@@ -3,7 +3,7 @@
 # пользовательскому уровню. Для home-manager без NixOS то же самое —
 # programs.cellward.pipewirePolicy (те же имена файлов, включённые оба не
 # дублируются). Прежнее имя опции, services.vpn-zones.pipewirePolicy.enable,
-# работает с предупреждением. Единый вход services.cellward.enable включает
+# работает с предупреждением. Единый вход programs.cellward.enable включает
 # политику по умолчанию там, где работает WirePlumber (../entry.nix).
 #
 # Скрипт — через services.pipewire.wireplumber.extraScripts. Фрагмент
