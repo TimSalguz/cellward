@@ -20,10 +20,16 @@
 //!   of the zone, a host resolver in reach, the host's `nsswitch.conf`;
 //! * `skip` — could not be checked, and says why.
 //!
+//! The unix sockets a program of the zone can connect to are listed one by one
+//! (`crate::sockets`): a `sockets` summary with the zone's own, and a `socket`
+//! line for every other one — `warn`, or `fail` where the project promises it
+//! out of reach.
+//!
 //! The probe prints one line per check, `id<TAB>level<TAB>detail`: a stable,
 //! trivial format across a namespace boundary, where the two sides may even be
 //! different builds for a moment after an update.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -355,8 +361,54 @@ fn reachable(path: &Path) -> bool {
 
 // --- THE PROBE (inside a zone) -------------------------------------------------
 
+/// What the doctor tells the probe about the zone, after the uid:
+/// `--hermetic`, `--nix-daemon` (what the zone is to be — its setting, read
+/// the way the holder reads it) and `--host-devs=<maj:min>,…` (the host's own
+/// mounts, so that the probe can tell a filesystem only the zone has,
+/// `crate::sockets::own_devs`). Anything else is ignored: the two sides may be
+/// different builds for a moment after an update.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProbeArgs {
+    pub uid: u32,
+    pub hermetic: bool,
+    pub nix_daemon: bool,
+    /// `None` when the doctor did not say (an older one, or the probe run by
+    /// hand): then nothing is the zone's own by its device.
+    pub host_devs: Option<HashSet<crate::sockets::Dev>>,
+}
+
+impl ProbeArgs {
+    pub fn parse(args: &[OsString]) -> Option<Self> {
+        let uid = args.first()?.to_str()?.parse::<u32>().ok()?;
+        let mut parsed = Self {
+            uid,
+            ..Self::default()
+        };
+        for arg in &args[1..] {
+            let Some(arg) = arg.to_str() else {
+                continue;
+            };
+            match arg {
+                "--hermetic" => parsed.hermetic = true,
+                "--nix-daemon" => parsed.nix_daemon = true,
+                _ => {
+                    if let Some(list) = arg.strip_prefix("--host-devs=") {
+                        // One unreadable entry and the list is not the
+                        // host's: better none than a wrong one.
+                        let devs: Option<HashSet<_>> =
+                            list.split(',').map(crate::sockets::parse_dev).collect();
+                        parsed.host_devs = devs.filter(|d| !d.is_empty());
+                    }
+                }
+            }
+        }
+        Some(parsed)
+    }
+}
+
 /// Every check a program in this namespace can answer.
-pub fn probe(uid: u32) -> Vec<Check> {
+pub fn probe(args: &ProbeArgs, groups_shed: bool) -> Vec<Check> {
+    let uid = args.uid;
     let read = |path: &str| fs::read_to_string(path).ok();
     let mut checks = Vec::new();
     match read("/proc/net/dev") {
@@ -415,14 +467,25 @@ pub fn probe(uid: u32) -> Vec<Check> {
         }
         checks.push(open_channel_check(id, what, reachable(&path)));
     }
-    checks.push(listed_channel_check(
-        "tmp-sockets",
-        &tmp_sockets(&TMP_DIRS.map(Path::new)),
-        "сокеты во временных каталогах — где /tmp общий с хостом, это сокеты хоста и \
-         других зон: сервер tmux (`run-shell` — команда на хосте, в его сети), IPC \
-         клиентов VPN (§15); у герметичной зоны /tmp свой",
-    ));
-    let (raw, ipc) = compositor_entries(Path::new(&format!("/run/user/{uid}")));
+    // Every unix socket a program here may connect to (`crate::sockets`):
+    // the zone's own named in the summary, anything else line by line.
+    let runtime = PathBuf::from(format!("/run/user/{uid}"));
+    let home = crate::profile::home_dir();
+    let walk = crate::sockets::walk(
+        &crate::sockets::places(home.as_deref()),
+        &crate::sockets::known(&runtime),
+        &crate::sockets::slow_points(&mountinfo),
+        crate::sockets::LIMITS,
+    );
+    let context = crate::sockets::Context {
+        own_devs: crate::sockets::own_devs(&mountinfo, &runtime, args.host_devs.as_ref()),
+        runtime: runtime.clone(),
+        hermetic: args.hermetic,
+        nix_daemon: args.nix_daemon,
+        mountinfo: mountinfo.clone(),
+    };
+    checks.extend(crate::sockets::checks(&walk, &context, groups_shed));
+    let (raw, ipc) = compositor_entries(&runtime);
     checks.push(listed_channel_check(
         "wayland-raw",
         &raw,
@@ -440,38 +503,6 @@ pub fn probe(uid: u32) -> Vec<Check> {
 /// The temporary directories a zone may share with the host
 /// (`docs/LEAK-MODEL.md` §15).
 pub const TMP_DIRS: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
-
-/// Unix sockets in these directories and one level below them — where tmux
-/// (`/tmp/tmux-<uid>/default`), JACK and single-instance programs keep theirs
-/// —, as paths. X11's directory is left to its own check.
-pub fn tmp_sockets(dirs: &[&Path]) -> Vec<String> {
-    let mut found = Vec::new();
-    for dir in dirs {
-        for sub in sockets_in(dir, &mut found) {
-            sockets_in(&sub, &mut found);
-        }
-    }
-    found.sort();
-    found
-}
-
-/// The sockets directly in `dir` into `found`; the directories next to them
-/// (not X11's) returned.
-fn sockets_in(dir: &Path, found: &mut Vec<String>) -> Vec<PathBuf> {
-    use std::os::unix::fs::FileTypeExt;
-    let mut below = Vec::new();
-    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        if kind.is_socket() {
-            found.push(entry.path().to_string_lossy().into_owned());
-        } else if kind.is_dir() && entry.file_name() != ".X11-unix" {
-            below.push(entry.path());
-        }
-    }
-    below
-}
 
 /// The compositor's own sockets and its IPC in a runtime directory, as
 /// `(raw, ipc)` names.
@@ -545,20 +576,115 @@ pub fn system_bus_check(mountinfo: &str, reachable: bool, what: &str) -> Check {
     }
 }
 
-/// `vpn-zone-core doctor-probe <uid>`.
+/// `vpn-zone-core doctor-probe <uid> [--hermetic] [--nix-daemon]
+/// [--host-devs=…]` ([`ProbeArgs`]).
 pub fn probe_main(args: &[OsString]) -> u8 {
-    let Some(uid) = args
-        .first()
-        .and_then(|a| a.to_str())
-        .and_then(|a| a.parse::<u32>().ok())
-    else {
+    let Some(args) = ProbeArgs::parse(args) else {
         eprintln!("vpn-zone-core doctor-probe: need <uid>");
         return 2;
     };
-    for check in probe(uid) {
+    let groups_shed = match as_a_program() {
+        Ok(shed) => shed,
+        Err(e) => {
+            // A probe with more rights than a program would call reachable
+            // what is not: it does not answer at all (the doctor fails).
+            eprintln!("vpn-zone-core doctor-probe: {e}");
+            return 1;
+        }
+    };
+    for check in probe(&args, groups_shed) {
         println!("{}", check.line());
     }
     0
+}
+
+/// Become what a program of the zone is before looking: the user's own group
+/// and no other, as `profile-run` leaves a launch (the session's groups open
+/// doors — docker's, libvirt's — that a zone's programs do not have), and no
+/// capability at all. The doctor enters with `nsenter --keep-caps`, as a
+/// launch does, so that the groups can go here; entered without (an older
+/// doctor, or by hand on the host) they cannot, and the answer is whether the
+/// groups are the program's anyway. Capabilities are dropped either way, and a
+/// probe that cannot drop them does not run.
+fn as_a_program() -> Result<bool, String> {
+    #[repr(C)]
+    struct Header {
+        version: u32,
+        pid: libc::c_int,
+    }
+    #[repr(C)]
+    struct Data {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+    const VERSION_3: u32 = 0x2008_0522;
+    // SAFETY: getgid(2) takes no arguments and cannot fail.
+    let gid = unsafe { libc::getgid() };
+    // SAFETY: a list of one gid and its length. Failing is an answer, read
+    // back below.
+    let _ = unsafe { libc::setgroups(1, &gid) };
+    let mut header = Header {
+        version: VERSION_3,
+        pid: 0,
+    };
+    let data = [
+        Data {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
+        Data {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
+    ];
+    // SAFETY: capset(2) with a version-3 header and its two data structs;
+    // lowering every set is always allowed.
+    if unsafe { libc::syscall(libc::SYS_capset, &mut header as *mut Header, data.as_ptr()) } != 0 {
+        return Err(format!(
+            "cannot drop capabilities: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: prctl with constants. Nothing ambient survives the capset; this
+    // says so to a kernel that keeps the set apart.
+    unsafe {
+        libc::prctl(
+            libc::PR_CAP_AMBIENT,
+            libc::PR_CAP_AMBIENT_CLEAR_ALL,
+            0,
+            0,
+            0,
+        );
+    }
+    // SAFETY: with a zero size getgroups(2) only counts.
+    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    let mut groups: Vec<libc::gid_t> = vec![0; usize::try_from(count).unwrap_or(0)];
+    // SAFETY: a buffer of exactly `count` gids.
+    let count = unsafe { libc::getgroups(count.max(0), groups.as_mut_ptr()) };
+    groups.truncate(usize::try_from(count).unwrap_or(0));
+    Ok(groups.iter().all(|g| *g == gid))
+}
+
+/// The devices of the mounts in this (the host's) namespace, for the probe
+/// (`--host-devs`). `None` when the table cannot be read: a wrong list would
+/// make the host's own filesystems look like the zone's.
+fn host_devs() -> Option<String> {
+    let text = fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let mut devs: Vec<crate::sockets::Dev> = crate::sockets::mounts(&text)
+        .into_iter()
+        .map(|m| m.dev)
+        .collect();
+    devs.sort_unstable();
+    devs.dedup();
+    (!devs.is_empty()).then(|| {
+        devs.iter()
+            .map(|(major, minor)| format!("{major}:{minor}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    })
 }
 
 // --- THE HOST SIDE -------------------------------------------------------------
@@ -759,13 +885,37 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     let dir = tools.state.join(name);
     let offline = dir.join("offline").exists();
     let mut checks = Vec::new();
+    // What the zone is to be, read as its holder reads it: the probe judges
+    // the host's bus and the Nix daemon by it.
+    let (hermetic, _) = crate::hermetic::zone_setting(&dir, &tools.config, name);
+    let (nix_daemon, _) = crate::hermetic::nix_daemon(&dir, &tools.config, name);
+    let mut probe_args = vec![uid.to_string()];
+    if hermetic {
+        probe_args.push("--hermetic".to_owned());
+    }
+    if nix_daemon {
+        probe_args.push("--nix-daemon".to_owned());
+    }
+    if let Some(devs) = host_devs() {
+        probe_args.push(format!("--host-devs={devs}"));
+    }
+    // `--keep-caps`, as a launch enters: the probe sheds the session's groups
+    // in the zone's user namespace, as `profile-run` does, and then every
+    // capability (`as_a_program`).
     let output = Command::new(&tools.nsenter)
-        .args(["--preserve-credentials", "-U", "-n", "-m", "-t"])
+        .args([
+            "--preserve-credentials",
+            "--keep-caps",
+            "-U",
+            "-n",
+            "-m",
+            "-t",
+        ])
         .arg(pid.to_string())
         .arg("--")
         .arg(&tools.core)
         .arg("doctor-probe")
-        .arg(uid.to_string())
+        .args(&probe_args)
         .output();
     match output {
         Ok(out) if out.status.success() => {
@@ -1001,35 +1151,37 @@ mod tests {
     }
 
     #[test]
-    fn sockets_in_temporary_directories_are_found_two_levels_deep() {
-        use std::os::unix::net::UnixListener;
-        let dir = std::env::temp_dir().join(format!("vz-tmpsock-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        for sub in ["tmux-1000", ".X11-unix", "a/b"] {
-            fs::create_dir_all(dir.join(sub)).unwrap();
-        }
-        let _top = UnixListener::bind(dir.join("evil.sock")).unwrap();
-        let _tmux = UnixListener::bind(dir.join("tmux-1000/default")).unwrap();
-        let _x = UnixListener::bind(dir.join(".X11-unix/X0")).unwrap();
-        let _deep = UnixListener::bind(dir.join("a/b/too-deep")).unwrap();
-        fs::write(dir.join("plain"), "").unwrap();
-        let found = tmp_sockets(&[dir.as_path()]);
-        let d = dir.display();
-        assert_eq!(
-            found,
-            [format!("{d}/evil.sock"), format!("{d}/tmux-1000/default")]
-        );
-        assert!(tmp_sockets(&[Path::new("/nonexistent-vz")]).is_empty());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn the_system_bus_is_ok_when_filtered_or_closed() {
         let bound = "36 25 0:5 /x /run/dbus/system_bus_socket rw - tmpfs x rw\n";
         let closed = "36 25 0:5 / /run/dbus rw - tmpfs tmpfs rw\n";
         assert_eq!(system_bus_check(bound, true, "w").level, Level::Ok);
         assert_eq!(system_bus_check(closed, false, "w").level, Level::Ok);
         assert_eq!(system_bus_check("", true, "w").level, Level::Warn);
+    }
+
+    #[test]
+    fn the_probe_takes_what_the_doctor_says_and_ignores_the_rest() {
+        let args = |list: &[&str]| -> Vec<OsString> { list.iter().map(OsString::from).collect() };
+        assert_eq!(ProbeArgs::parse(&args(&[])), None);
+        assert_eq!(ProbeArgs::parse(&args(&["x"])), None);
+        let plain = ProbeArgs::parse(&args(&["1000"])).unwrap();
+        assert_eq!(plain.uid, 1000);
+        assert!(!plain.hermetic && !plain.nix_daemon && plain.host_devs.is_none());
+        let full = ProbeArgs::parse(&args(&[
+            "1000",
+            "--hermetic",
+            "--nix-daemon",
+            "--from-a-newer-doctor",
+            "--host-devs=0:25,259:2",
+        ]))
+        .unwrap();
+        assert!(full.hermetic && full.nix_daemon);
+        assert_eq!(full.host_devs, Some([(0, 25), (259, 2)].into()));
+        // A list that does not read is no list.
+        let broken = ProbeArgs::parse(&args(&["1000", "--host-devs=0:25,junk"])).unwrap();
+        assert_eq!(broken.host_devs, None);
+        let empty = ProbeArgs::parse(&args(&["1000", "--host-devs="])).unwrap();
+        assert_eq!(empty.host_devs, None);
     }
 
     #[test]

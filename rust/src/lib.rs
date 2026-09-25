@@ -65,6 +65,9 @@
 //! * [`sysrun`] — the other: `vpn-zone-sys`, a user's console program in a
 //!   system zone, entered by a per-launch service and run as the user
 //!   (M10 stage 4);
+//! * [`sockets`] — the unix sockets a zone can reach, walked from inside it by
+//!   `vpn-zone doctor` and told apart: the zone's own, the system's, a helper
+//!   outside (`docs/LEAK-MODEL.md` §15, §17);
 //! * [`sys`] — the handful of syscalls more than one of them needs.
 //!
 //! `profile` and `desktop` were Python scripts in `module/`, `wl_sandbox` was a
@@ -105,6 +108,7 @@ pub mod profile;
 pub mod pulse_filter;
 pub mod registry;
 pub mod seccomp;
+pub mod sockets;
 pub mod status;
 pub mod sys;
 pub mod sysrun;

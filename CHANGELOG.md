@@ -6,6 +6,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **`vpn-zone doctor` names every unix socket a zone can reach**
+  (`docs/LEAK-MODEL.md` §18, the invariant the third review round asked for).
+  A socket by path is a helper outside that acts for whoever connects — an ssh
+  master, a root daemon in `/run`, the Nix daemon, an editor's server — and the
+  zone's own network namespace cuts none of them. The probe walks, from inside
+  the zone, the home, `/run`, `/tmp`, `/var/tmp`, `/dev/shm`, `/var/lib` and
+  `/nix/var` with a program's rights (the session's groups shed, no
+  capabilities; the doctor now enters with `nsenter --keep-caps`, as a launch
+  does), never through a link, never opening a file, never into FUSE, network
+  filesystems or automount points, bounded in depth, entries and time — what
+  it did not see it says. The zone's own sockets (its bus and pulse filters,
+  `pipewire-0`, the broker, its Wayland sockets, its sandboxes', anything on a
+  filesystem only the zone has) and the journal's are counted in a `sockets`
+  summary; every other one is a `socket` line with its path at `warn`, and
+  what the project promises closed — the compositor, the system tier, the Nix
+  daemon of a zone not let, the host's session bus in a hermetic zone, the
+  unfiltered sound server, the host's X server, a resolver — at `fail`.
+  `tmp-sockets` is now the part of it in the temporary directories. What it
+  found at once: systemd's varlink services in `/run/systemd` (`hostnamed`,
+  `networkd`) answer every zone past the system bus filter; sshd on
+  `/run/ssh-unix-local/socket`. Both named, not closed yet. VM test: the evil
+  host's sockets in the home and in `/run` are named, one only the session's
+  group may open is not, a clean hermetic zone names nothing but systemd's
+  own services.
 - **The window menu's key and our windows' rule, written by the module**
   (`programs.vpn-zones.desktop`): `windowMenu.key` in niri's notation,
   `floatWindows` (the launch window and the menu float, by the app id

@@ -1408,6 +1408,91 @@ let
           alice("systemctl --user stop vmsbsleep eviltmp evilabs || true")
           alice("tmux kill-server || true")
 
+      # The sockets a zone can reach, as an inventory (LEAK-MODEL §15, §17):
+      # `doctor` walks, from inside the zone and with a program's rights, the
+      # places a socket is reached at, and names every one that is not the
+      # zone's own. The evil host plants a listener in the home (an ssh master
+      # would be there), one in /run for everybody (a root daemon's), and one
+      # in /run that only the session's group may open — which the zone's
+      # programs, left with the user's own group, cannot.
+      with subtest("doctor: every socket a zone can reach is named, the zone's own are not"):
+          def named(out):
+              """{path: level} of the doctor's `socket` lines for vmherm."""
+              zone = next(z for z in json.loads(out)["zones"] if z["name"] == "vmherm")
+              return {
+                  c["detail"].split(" — ", 1)[0]: c["level"]
+                  for c in zone["checks"]
+                  if c["id"] == "socket"
+              }
+
+          machine.succeed(
+              "systemd-run --unit=evilrun socat "
+              "UNIX-LISTEN:/run/vzevil-run.sock,mode=666,fork OPEN:/dev/null"
+          )
+          machine.succeed(
+              "systemd-run --unit=evilgroup socat "
+              "UNIX-LISTEN:/run/vzevil-group.sock,mode=660,group=vzdoor,fork OPEN:/dev/null"
+          )
+          alice("mkdir -p ~/.ssh")
+          alice(
+              "systemd-run --user --unit=evilhome socat "
+              "UNIX-LISTEN:/home/alice/.ssh/vzevil-master,fork OPEN:/dev/null"
+          )
+          machine.wait_until_succeeds(
+              "test -S /run/vzevil-run.sock && test -S /run/vzevil-group.sock "
+              "&& test -S /home/alice/.ssh/vzevil-master"
+          )
+          # The session opens all three, a program of the zone the first two:
+          # otherwise the rest proves nothing.
+          alice("socat -T2 - UNIX-CONNECT:/run/vzevil-group.sock </dev/null")
+          in_zone(hp, "socat -T2 - UNIX-CONNECT:/run/vzevil-run.sock </dev/null")
+          in_zone(hp, "socat -T2 - UNIX-CONNECT:/home/alice/.ssh/vzevil-master </dev/null")
+          alice(
+              "vpn-zone run vmherm -- sh -c "
+              "'! socat -T2 - UNIX-CONNECT:/run/vzevil-group.sock </dev/null'"
+          )
+          out = alice("vpn-zone doctor vmherm --json")
+          found = named(out)
+          print(f"sockets in reach of vmherm: {found}")
+          assert found.get("/run/vzevil-run.sock") == "warn", found
+          assert found.get("/home/alice/.ssh/vzevil-master") == "warn", found
+          assert "/run/vzevil-group.sock" not in found, found
+          # The zone's own are not named: they are counted in the summary.
+          for own in [
+              "/run/user/1000/bus",
+              "/run/user/1000/vpn-zones/broker",
+              "/run/dbus/system_bus_socket",
+          ]:
+              assert own not in found, (own, found)
+          zone = next(z for z in json.loads(out)["zones"] if z["name"] == "vmherm")
+          summary = next(c for c in zone["checks"] if c["id"] == "sockets")
+          assert summary["level"] == "warn", summary
+          for label in ["брокер", "фильтр сессионной шины"]:
+              assert label in summary["detail"], summary
+          # The probe in the host's own namespace names them all — the group
+          # one too (the session's groups cannot be shed out there) — and the
+          # Nix daemon, which no zone here is let reach, as a failure.
+          host = alice(f"{core} doctor-probe 1000")
+          for path in ["/run/vzevil-run.sock", "/run/vzevil-group.sock"]:
+              assert f"socket\twarn\t{path} — " in host, (path, host)
+          assert "socket\tfail\t/nix/var/nix/daemon-socket/socket — " in host, host
+
+          # A clean zone: nothing of the session, nothing of the home, no
+          # daemon. What is left are the system manager's own services
+          # (varlink in /run/systemd), which no zone closes yet
+          # (LEAK-MODEL §17) — named, and nothing else.
+          machine.succeed("systemctl stop evilrun evilgroup")
+          alice("systemctl --user stop evilhome")
+          machine.succeed(
+              "rm -f /run/vzevil-run.sock /run/vzevil-group.sock /home/alice/.ssh/vzevil-master"
+          )
+          out = alice("vpn-zone doctor vmherm --json")
+          found = named(out)
+          print(f"sockets in reach of a clean vmherm: {found}")
+          unexpected = {p: l for p, l in found.items() if not p.startswith("/run/systemd/")}
+          assert not unexpected, found
+          assert all(level == "warn" for level in found.values()), found
+
       # LEAK-MODEL §2: a sandboxed program (it sees /.flatpak-info) opens a link
       # through the portal's OpenURI. The sandbox's bus filter answers the call
       # itself and hands the link to xdg-open IN THE ZONE — never to the host's
