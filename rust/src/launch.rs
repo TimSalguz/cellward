@@ -687,6 +687,20 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         // Cleaned (`appbin` is the variable's value, sanitized): it becomes a
         // directory of the sandbox's permissions and the portals' app id.
         let fsid = appbin.clone();
+        // Asked here, on the host: in the zone the answers are read-only.
+        if env_nonempty(ENV_DRYRUN).is_none() {
+            let named = match &selection.sandbox {
+                Sandbox::Named(name) => Some(name.to_string_lossy().into_owned()),
+                _ => None,
+            };
+            crate::fs_sandbox::settle_permissions(
+                &tools.home,
+                &fsid.to_string_lossy(),
+                named.as_deref(),
+                label.as_deref(),
+                &tools.kdialog,
+            );
+        }
         let mut wrapped: Vec<OsString> = vec![
             tools.core.clone().into(),
             "fs-sandbox".into(),

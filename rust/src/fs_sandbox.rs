@@ -1172,6 +1172,50 @@ fn start_bus_filter(
     (Some(child), None)
 }
 
+/// Where a program's answers are kept, and a named sandbox's home: a named
+/// sandbox keeps them per sandbox, not per program — its home is shared, so a
+/// second program would otherwise be asked all over again about the very same
+/// directory.
+fn perm_paths(home: &Path, app_id: &str, sandbox: Option<&str>) -> (PathBuf, Option<PathBuf>) {
+    match sandbox {
+        Some(name) => {
+            let dir = home.join(SANDBOX_SUBDIR).join(name);
+            (dir.join("perms"), Some(dir.join("home")))
+        }
+        None => (home.join(PERM_SUBDIR).join(app_id), None),
+    }
+}
+
+/// Ask a program's permissions once and remember them — on the host, before
+/// the launch enters its zone, where the answers are read-only. Nothing to do
+/// when they are known.
+pub fn settle_permissions(
+    home: &Path,
+    app_id: &str,
+    sandbox: Option<&str>,
+    label: Option<&str>,
+    kdialog: &Path,
+) {
+    let (perm_file, _) = perm_paths(home, app_id, sandbox);
+    if perm_file.is_file() {
+        return;
+    }
+    if let Some(dir) = perm_file.parent() {
+        if let Err(e) = fs::create_dir_all(dir) {
+            eprintln!("fs-sandbox: cannot create {}: {e}", dir.display());
+            return;
+        }
+    }
+    let perms = if has_graphics() {
+        ask_permissions(kdialog, label.unwrap_or(app_id))
+    } else {
+        Perms::default()
+    };
+    if let Err(e) = fs::write(&perm_file, perms.render()) {
+        eprintln!("fs-sandbox: cannot write {}: {e}", perm_file.display());
+    }
+}
+
 /// Everything `fs-sandbox` does, from the permissions to the exit code.
 pub fn run(args: Args) -> u8 {
     let Some(home) = home_dir() else {
@@ -1185,22 +1229,17 @@ pub fn run(args: Args) -> u8 {
     // portal file exchange". A NAMED sandbox keeps them per sandbox, not per
     // program: its home is shared, so a second program would otherwise be asked
     // all over again about the very same directory.
-    let perm_dir = home.join(PERM_SUBDIR);
-    if let Err(e) = fs::create_dir_all(&perm_dir) {
-        eprintln!("fs-sandbox: cannot create {}: {e}", perm_dir.display());
-        return EXIT_NOT_STARTED;
-    }
-    let (perm_file, sandbox_home) = match &args.sandbox {
-        Some(name) => {
-            let dir = home.join(SANDBOX_SUBDIR).join(name);
-            if let Err(e) = fs::create_dir_all(dir.join("home")) {
-                eprintln!("fs-sandbox: cannot create {}: {e}", dir.display());
-                return EXIT_NOT_STARTED;
-            }
-            (dir.join("perms"), Some(dir.join("home")))
+    // Asked and remembered on the host, before the launch entered its zone
+    // (`settle_permissions`): in a zone the store of answers is read-only
+    // (`zone::hide_project_state`), so that no program answers for itself.
+    // Here it is read — and asked, not remembered, only when that failed.
+    let (perm_file, sandbox_home) = perm_paths(&home, &args.app_id, args.sandbox.as_deref());
+    if let Some(dir) = &sandbox_home {
+        if let Err(e) = fs::create_dir_all(dir) {
+            eprintln!("fs-sandbox: cannot create {}: {e}", dir.display());
+            return EXIT_NOT_STARTED;
         }
-        None => (perm_dir.join(&args.app_id), None),
-    };
+    }
 
     if !perm_file.is_file() {
         let perms = if has_graphics() {
