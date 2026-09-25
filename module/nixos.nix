@@ -296,9 +296,11 @@ in
       type = lib.types.nullOr lib.types.str;
       default = "wheel";
       description = ''
-        Members may run `vpn-zones-off` and `vpn-zones-on` without a password at
-        the machine itself — a process in a local, active login session's own
-        scope — and with their password from anywhere else (ssh, cron, a unit):
+        Members may run `vpn-zones-off` with their password — at the machine
+        too: a line a zone's program slips into the shell's startup would
+        otherwise switch the protection off at the next login — and
+        `vpn-zones-on` without one at the machine itself (a process in a local,
+        active login session's own scope), with it from anywhere else:
         vpn-zones off entirely — zones, the egress policy, services back on the
         host's network — with no rebuild and no network, until turned on again.
         This turns polkit on. `null`: root only.
@@ -454,7 +456,7 @@ in
         group = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = "wheel";
-          description = "Members may start and stop `vpn-zones-egress-open.service` — without a password at the machine itself (a process in a local, active login session's own scope, the TTY included), with their password from anywhere else. This turns polkit on. `null`: root only.";
+          description = "Members may start `vpn-zones-egress-open.service` with their password (at the machine too), and stop it — which only closes the host again — without one at the machine itself (a process in a local, active login session's own scope, the TTY included). This turns polkit on. `null`: root only.";
         };
       };
     };
@@ -1050,13 +1052,18 @@ in
                   ["vpn-zones-off.service", "vpn-zones-on.service"].indexOf(action.lookup("unit")) >= 0 &&
                   action.lookup("verb") == "start" &&
                   subject.isInGroup("${cfg.switchGroup}")) {
-                // Without a password from the person at the machine — the
-                // session in front, local and active, AND the asking process
-                // really in that session's scope: polkit takes a process
-                // outside any session (a unit the user's manager started, for
-                // a zone's program with the session bus) for the user's
-                // display session (review 2026-09-25). From anywhere else —
-                // ssh, cron, such a unit — with a password.
+                // Off — with a password, at the machine too (owner,
+                // 2026-09-25): a zone's program able to write the home puts a
+                // line into the shell's startup, and the next login at the
+                // seat switches the protection off by itself. On — without
+                // one from the person at the machine: the session in front,
+                // local and active, AND the asking process really in that
+                // session's scope (polkit takes a process outside any session
+                // for the user's display session, review 2026-09-25). From
+                // anywhere else, a password either way.
+                if (action.lookup("unit") == "vpn-zones-off.service") {
+                  return polkit.Result.AUTH_SELF_KEEP;
+                }
                 return (subject.local && subject.active && inSessionScope(subject.pid))
                   ? polkit.Result.YES
                   : polkit.Result.AUTH_SELF_KEEP;
@@ -1236,8 +1243,13 @@ in
                   action.lookup("unit") == "vpn-zones-egress-open.service" &&
                   (action.lookup("verb") == "start" || action.lookup("verb") == "stop") &&
                   subject.isInGroup("${e.emergency.group}")) {
-                // As the switch above: no password at the machine itself (the
-                // TTY rescue path included), a password from anywhere else.
+                // Turned — with a password, at the machine too, as the
+                // switch's "off" above; the TTY console asks for it. Turned
+                // back, which only closes the host again: without one at the
+                // machine itself.
+                if (action.lookup("verb") == "start") {
+                  return polkit.Result.AUTH_SELF_KEEP;
+                }
                 return (subject.local && subject.active && inSessionScopeKey(subject.pid))
                   ? polkit.Result.YES
                   : polkit.Result.AUTH_SELF_KEEP;

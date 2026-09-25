@@ -421,7 +421,7 @@ services.vpn-zones.system = {
 ```sh
 vpn-zone-sys <zone> -- <command>          # a console program in a system zone (the zone's users)
 vpn-zone-sys --add <zone> <file.conf>     # a system zone on the spot (system.users)
-vpn-zones-off / vpn-zones-on              # everything off and back on (wheel, no password)
+vpn-zones-off / vpn-zones-on              # everything off (wheel, password) and back on
 systemctl start vpn-zones-egress-open     # lift the egress policy for 15 minutes (wheel)
 ```
 

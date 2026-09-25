@@ -411,7 +411,7 @@ services.vpn-zones.system = {
 ```sh
 vpn-zone-sys <зона> -- <команда>          # консольная программа в системной зоне (users зоны)
 vpn-zone-sys --add <зона> <файл.conf>     # системная зона на месте (system.users)
-vpn-zones-off / vpn-zones-on              # всё выключить и включить обратно (wheel, без пароля)
+vpn-zones-off / vpn-zones-on              # всё выключить (wheel, пароль) и включить обратно
 systemctl start vpn-zones-egress-open     # снять политику хоста на 15 минут (wheel)
 ```
 

@@ -1311,6 +1311,15 @@ let
           for path in [".local/state/vpn-zones/.running/x", ".config/vpn-zones/x", ".local/share/vpn-zones/x"]:
               in_zone(hp, f"sh -c '! touch /home/alice/{path}'")
           alice("touch ~/.config/vpn-zones/from-host && rm ~/.config/vpn-zones/from-host")
+          # The host's Nix daemon out of reach (review 2026-09-25): it fetches
+          # in the host's network whatever a derivation names.
+          machine.succeed("test -S /nix/var/nix/daemon-socket/socket")
+          in_zone(hp, "test ! -e /nix/var/nix/daemon-socket/socket")
+          # What the host runs from the home, read-only in a hermetic zone
+          # (owner, 2026-09-25); the host itself writes there as before.
+          for path in [".config/autostart/x.desktop", ".local/share/applications/x.desktop", ".config/systemd/x"]:
+              in_zone(hp, f"sh -c '! touch /home/alice/{path}'")
+          alice("touch ~/.config/autostart/from-host && rm ~/.config/autostart/from-host")
           # A program started in the zone has the user's own group only: the
           # session's groups open doors (libvirt, docker, /dev/input).
           alice("cat /var/lib/vzdoor/door")

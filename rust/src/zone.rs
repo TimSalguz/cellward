@@ -573,6 +573,11 @@ struct Zone {
     /// when the zone comes up, so the bus proxy and the sealed runtime
     /// directory cannot disagree about it.
     hermetic: bool,
+    /// The host's Nix daemon in reach (`hermetic::nix_daemon`); off by default.
+    nix_daemon: bool,
+    /// What the host runs from the home left writable in a hermetic zone
+    /// (`hermetic::host_files_writable`); read-only by default.
+    host_files_writable: bool,
 }
 
 impl Zone {
@@ -640,17 +645,19 @@ pub fn run(args: Args) -> u8 {
         return 1;
     };
     let dir = home.join(STATE_SUBDIR).join(&args.name);
-    let (hermetic, _) = crate::hermetic::zone_setting(
-        &dir,
-        &home.join(CONFIG_SUBDIR),
-        &args.name.to_string_lossy(),
-    );
+    let config = home.join(CONFIG_SUBDIR);
+    let label = args.name.to_string_lossy().into_owned();
+    let (hermetic, _) = crate::hermetic::zone_setting(&dir, &config, &label);
+    let (nix_daemon, _) = crate::hermetic::nix_daemon(&dir, &config, &label);
+    let (host_files_writable, _) = crate::hermetic::host_files_writable(&dir, &config, &label);
     let zone = Zone {
         dir,
         home,
         name: args.name,
         tools: args.tools,
         hermetic,
+        nix_daemon,
+        host_files_writable,
     };
 
     // A directory is a zone if it has a config or the offline marker; anything
@@ -683,6 +690,21 @@ pub fn run(args: Args) -> u8 {
     }
     for dir in READ_ONLY_IN_ZONES {
         let _ = fs::create_dir_all(zone.home.join(dir));
+    }
+    // The session's own entry points, when the zone is to have them
+    // read-only: a directory that is not there cannot be, and a program would
+    // make it (`protect_host_files`).
+    if zone.hermetic && !zone.host_files_writable {
+        for dir in ENTRY_POINTS {
+            let path = zone.home.join(dir);
+            if fs::symlink_metadata(&path).is_err() {
+                use std::os::unix::fs::DirBuilderExt;
+                let _ = fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(&path);
+            }
+        }
     }
 
     let ids = match Ids::current() {
@@ -2521,6 +2543,155 @@ fn hide_system_tier(zone: &Zone) -> Result<(), String> {
     Ok(())
 }
 
+/// The Nix daemon out of reach (review 2026-09-25, third round): it builds
+/// and fetches in the host's network, and a fixed-output derivation fetches
+/// whatever address a program names — from any zone, an offline one too.
+/// A zone that needs it is let (`vpn-zone nix-daemon <zone> on`, or
+/// `programs.vpn-zones.nixDaemon` in Nix). Fatal when it cannot be hidden.
+fn hide_nix_daemon(zone: &Zone) -> Result<(), String> {
+    let dir = Path::new(NIX_DAEMON_DIR);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    sys::mount(OsStr::new("tmpfs"), dir, "tmpfs", 0, "mode=0755,size=16k").map_err(|e| {
+        format!(
+            "cannot hide {}: {e} — programs in the zone would have the host's Nix daemon fetch \
+             for them",
+            dir.display()
+        )
+    })?;
+    println!("zone {}: the Nix daemon hidden", zone.name());
+    Ok(())
+}
+
+/// Where the Nix daemon listens.
+const NIX_DAEMON_DIR: &str = "/nix/var/nix/daemon-socket";
+
+/// The session's own entry points below the home: created when missing before
+/// a hermetic zone comes up (`run`), so that they can be read-only in it.
+const ENTRY_POINTS: [&str; 8] = [
+    ".config/autostart",
+    ".config/systemd",
+    ".config/environment.d",
+    ".config/user-tmpfiles.d",
+    ".local/share/applications",
+    ".local/share/dbus-1",
+    ".local/share/systemd",
+    ".local/share/user-tmpfiles.d",
+];
+
+/// What the host runs from the home besides [`ENTRY_POINTS`], read-only in a
+/// hermetic zone where it exists: the compositors' and the shells' configs,
+/// tools that run what their config names, browsers' native-messaging hosts —
+/// not a program's own data (a browser's profile is not here).
+const HOST_RUNS_IN_ZONES: &[&str] = &[
+    ".local/share/flatpak/exports",
+    ".local/bin",
+    ".local/state/nix",
+    ".local/state/home-manager",
+    ".config/plasma-workspace",
+    ".config/niri",
+    ".config/sway",
+    ".config/hypr",
+    ".config/river",
+    ".config/labwc",
+    ".config/i3",
+    ".config/uwsm",
+    ".config/fish",
+    ".config/zsh",
+    ".config/nushell",
+    ".config/xonsh",
+    ".config/home-manager",
+    ".config/nixpkgs",
+    ".config/nix",
+    ".config/direnv",
+    ".local/share/direnv",
+    ".config/pipewire",
+    ".config/wireplumber",
+    ".config/xdg-desktop-portal",
+    ".config/git",
+    ".ssh",
+    ".gnupg",
+    ".docker",
+    ".config/containers",
+    ".mozilla/native-messaging-hosts",
+    ".config/chromium/NativeMessagingHosts",
+    ".config/google-chrome/NativeMessagingHosts",
+    ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts",
+    ".config/vivaldi/NativeMessagingHosts",
+    ".local/share/kio/servicemenus",
+    ".local/share/kservices5",
+    ".local/share/kservices6",
+    ".local/share/nautilus/scripts",
+    ".local/share/nemo/actions",
+    ".profile",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_logout",
+    ".zshenv",
+    ".zshrc",
+    ".zprofile",
+    ".zlogin",
+    ".zlogout",
+    ".login",
+    ".cshrc",
+    ".tcshrc",
+    ".xprofile",
+    ".xsession",
+    ".xsessionrc",
+    ".xinitrc",
+    ".pam_environment",
+    ".inputrc",
+];
+
+/// What the host runs from the home, read-only in a hermetic zone (owner,
+/// 2026-09-25; `docs/LEAK-MODEL.md` §9): without a sandbox a program has the
+/// home, and a line in `~/.bashrc`, an entry in `~/.config/autostart`, a
+/// launcher in `~/.local/share/applications` is code the host starts later —
+/// outside the zone, around its tunnel. A zone that has to write there is let
+/// (`vpn-zone host-files <zone> writable`, or
+/// `programs.vpn-zones.hostFilesWritable` in Nix).
+///
+/// A symlink cannot be covered — a mount follows it, and the link itself
+/// stays a name in a directory the program can write: home-manager's
+/// dotfiles in the home itself (`~/.zshrc` → the store) are left as they are,
+/// and said so. A directory home-manager fills with links is covered whole.
+/// Fatal when a real one cannot be made read-only.
+fn protect_host_files(zone: &Zone) -> Result<(), String> {
+    let mut covered = 0;
+    let mut links = Vec::new();
+    for entry in ENTRY_POINTS.iter().chain(HOST_RUNS_IN_ZONES) {
+        let path = zone.home.join(entry);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => links.push(*entry),
+            Ok(_) => {
+                sys::mount(
+                    path.as_os_str(),
+                    &path,
+                    "",
+                    libc::MS_BIND | libc::MS_REC,
+                    "",
+                )
+                .and_then(|()| sys::remount_read_only(&path))
+                .map_err(|e| format!("cannot make {} read-only: {e}", path.display()))?;
+                covered += 1;
+            }
+            Err(_) => {}
+        }
+    }
+    println!(
+        "zone {}: {covered} of the host's startup places read-only{}",
+        zone.name(),
+        if links.is_empty() {
+            String::new()
+        } else {
+            format!("; links, which a mount cannot cover: {}", links.join(", "))
+        }
+    );
+    Ok(())
+}
+
 /// The project's own state out of the zone's reach (review 2026-09-25,
 /// third round). `~/.local/state/vpn-zones` holds what the host trusts about
 /// zones — which namespace is which zone (`zone.pid`, `zone.start`), which is
@@ -2554,6 +2725,8 @@ fn hide_project_state(zone: &Zone) -> Result<Zone, String> {
         home: zone.home.clone(),
         tools: zone.tools.clone(),
         hermetic: zone.hermetic,
+        nix_daemon: zone.nix_daemon,
+        host_files_writable: zone.host_files_writable,
     })
 }
 
@@ -2984,6 +3157,12 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         _ => None,
     };
     hide_system_tier(zone)?;
+    if !zone.nix_daemon {
+        hide_nix_daemon(zone)?;
+    }
+    if zone.hermetic && !zone.host_files_writable {
+        protect_host_files(zone)?;
+    }
     // The project's own state, last among the covers: from here on the zone's
     // directory is reached through a descriptor.
     let zone = &hide_project_state(zone)?;

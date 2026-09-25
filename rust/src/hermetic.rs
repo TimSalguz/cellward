@@ -74,6 +74,64 @@ pub fn zone_setting(zone_dir: &Path, config: &Path, zone: &str) -> (bool, Source
     }
 }
 
+/// Whether a zone's programs reach the host's Nix daemon: a marker in the
+/// zone's directory (`on`/`off`, `vpn-zone nix-daemon`), or the zone named in
+/// `declared/nix-daemon` (Nix, `programs.vpn-zones.nixDaemon`). Off by default
+/// (review 2026-09-25, third round): the daemon builds and fetches in the
+/// host's network — a fixed-output derivation fetches any address a program
+/// in any zone names, offline included.
+pub const NIX_DAEMON: &str = "nix-daemon";
+
+/// Whether a hermetic zone's programs may write what the host runs from the
+/// home (autostart, units, launcher entries, shells' and compositors'
+/// configs): a marker in the zone's directory (`writable`/`read-only`,
+/// `vpn-zone host-files`), or the zone named in `declared/host-files-writable`
+/// (Nix, `programs.vpn-zones.hostFilesWritable`). Read-only by default (owner,
+/// 2026-09-25).
+pub const HOST_FILES: &str = "host-files";
+/// The zones Nix lets write the host's files, one name per line.
+pub const DECLARED_HOST_FILES_WRITABLE: &str = "host-files-writable";
+
+/// A per-zone switch that is off unless something turns it on: Nix names the
+/// zone in `declared/<list>`, or the zone's marker says `on_word`.
+fn allowance(
+    zone_dir: &Path,
+    config: &Path,
+    zone: &str,
+    list: &str,
+    marker: &str,
+    on_word: &str,
+) -> (bool, Source) {
+    let declared = std::fs::read_to_string(config.join(DECLARED_DIR).join(list))
+        .is_ok_and(|text| text.lines().map(str::trim).any(|line| line == zone));
+    if declared {
+        return (true, Source::Nix);
+    }
+    match read_setting(&zone_dir.join(marker)) {
+        Some(text) if text.trim() == on_word => (true, Source::Local),
+        Some(text) if !text.trim().is_empty() => (false, Source::Local),
+        _ => (false, Source::Default),
+    }
+}
+
+/// Whether the zone in `zone_dir` reaches the Nix daemon: `(on, source)`.
+pub fn nix_daemon(zone_dir: &Path, config: &Path, zone: &str) -> (bool, Source) {
+    allowance(zone_dir, config, zone, NIX_DAEMON, NIX_DAEMON, "on")
+}
+
+/// Whether the zone in `zone_dir` may write the host's files: `(writable,
+/// source)`. Only a hermetic zone makes them read-only at all.
+pub fn host_files_writable(zone_dir: &Path, config: &Path, zone: &str) -> (bool, Source) {
+    allowance(
+        zone_dir,
+        config,
+        zone,
+        DECLARED_HOST_FILES_WRITABLE,
+        HOST_FILES,
+        "writable",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,6 +167,46 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.base);
         }
+    }
+
+    /// Off unless Nix names the zone or its marker turns it on; anything else
+    /// in the marker keeps it off.
+    #[test]
+    fn allowances_are_off_unless_given() {
+        let d = Dirs::new("allow");
+        assert_eq!(
+            nix_daemon(&d.zone(), &d.config(), "nl"),
+            (false, Source::Default)
+        );
+        d.write("zone/nix-daemon", "on\n");
+        assert_eq!(
+            nix_daemon(&d.zone(), &d.config(), "nl"),
+            (true, Source::Local)
+        );
+        d.write("zone/nix-daemon", "yes");
+        assert_eq!(
+            nix_daemon(&d.zone(), &d.config(), "nl"),
+            (false, Source::Local)
+        );
+        d.write("config/declared/nix-daemon", "de\nnl\n");
+        assert_eq!(
+            nix_daemon(&d.zone(), &d.config(), "nl"),
+            (true, Source::Nix)
+        );
+        assert_eq!(
+            host_files_writable(&d.zone(), &d.config(), "nl"),
+            (false, Source::Default)
+        );
+        d.write("zone/host-files", "writable");
+        assert_eq!(
+            host_files_writable(&d.zone(), &d.config(), "nl"),
+            (true, Source::Local)
+        );
+        d.write("zone/host-files", "read-only");
+        assert_eq!(
+            host_files_writable(&d.zone(), &d.config(), "nl"),
+            (false, Source::Local)
+        );
     }
 
     #[test]

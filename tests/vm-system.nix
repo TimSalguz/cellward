@@ -451,7 +451,7 @@ let
           # alice is in wheel, but `su` is no local, active session: from
           # here — as from ssh, cron or a zone's command with the system bus —
           # the key wants her password, and there is nobody to type it. At the
-          # seat itself it turns without one (the TTY console subtest below).
+          # seat it wants it too, and she types it (the TTY console subtest).
           machine.fail(as_user("alice", "systemctl start vpn-zones-egress-open"))
           machine.fail(direct("alice"))
           # carol is not in the group: no key for her at all.
@@ -618,6 +618,21 @@ let
                   raise Exception("the console's menu did not come up")
               time.sleep(0.5)
 
+      # polkit's agent in systemctl asks on the terminal, its prompt the last
+      # line on the screen; within a few minutes of an answer it does not ask
+      # again, and `done` says the command has finished.
+      def tty_password(done, timeout=60):
+          end = time.monotonic() + timeout
+          while machine.execute(done)[0] != 0:
+              lines = [l.strip() for l in machine.get_tty_text("1").splitlines() if l.strip()]
+              if lines and lines[-1].startswith("Password"):
+                  machine.send_chars("alice-console\n")
+                  time.sleep(2)
+              if time.monotonic() > end:
+                  print(machine.get_tty_text("1"))
+                  raise Exception("neither a password prompt nor the command's end")
+              time.sleep(0.5)
+
       with subtest("the TTY console: log in, and there is a network already"):
           tty_login()
           machine.wait_until_tty_matches("1", "tunnel alive")
@@ -640,10 +655,11 @@ let
           machine.wait_until_succeeds("grep -q host-exit= /tmp/console-host", timeout=30)
           out = machine.succeed("cat /tmp/console-host")
           assert "peer=" not in out and "host-exit=0" not in out, out
-          # The emergency key, turned at the seat: a local, active session —
-          # no password — and the host is open, then closed again.
+          # The emergency key, turned at the seat: with the password there
+          # too (owner, 2026-09-25) — the host is open, then closed again,
+          # which needs none.
           tty_run("systemctl start vpn-zones-egress-open; echo key=$? > /tmp/console-key")
-          machine.wait_until_succeeds("grep -q key= /tmp/console-key", timeout=30)
+          tty_password("grep -q key= /tmp/console-key")
           out = machine.succeed("cat /tmp/console-key")
           assert "key=0" in out, out
           out = machine.succeed(as_user("alice", f"socat -T10 - TCP:{server_ip}:8090"))
@@ -680,7 +696,7 @@ let
           # Services are attached by the generator, in /run — not in their units.
           machine.succeed("systemctl cat probe | grep -q NetworkNamespacePath")
           host_ns = machine.succeed("readlink /proc/1/ns/net").strip()
-          # alice is in wheel: at the seat the switch needs no password —
+          # alice is in wheel: at the seat the switch takes her password —
           # logged in on tty1, the console's host shell ("q").
           tty_login()
           machine.wait_until_tty_matches("1", r"\[Enter\].*zone sz")
@@ -690,7 +706,7 @@ let
           # the shell that asked is gone before it could say anything.
           tty_run("vpn-zones-off > /home/alice/seat-off.log 2>&1; echo rc=$? >> /home/alice/seat-off.log")
           try:
-              machine.wait_until_succeeds("test -e /var/lib/vpn-zones/off", timeout=60)
+              tty_password("test -e /var/lib/vpn-zones/off")
           except Exception:
               # What the seat saw: a password prompt, an error, or nothing.
               print(machine.get_tty_text("1"))

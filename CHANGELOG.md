@@ -67,6 +67,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `~/.config/vpn-zones` and `~/.local/share/vpn-zones` are read-only there.
   System-zone commands get the same cover. **Zones up before the update have
   to be restarted.**
+- **The Nix daemon is out of a zone's reach, unless the zone is let**
+  (`vpn-zone nix-daemon <zone> on`, or `programs.vpn-zones.nixDaemon`): it
+  builds and fetches in the host's network, and a fixed-output derivation
+  fetches any address a program names — from any zone, an offline one too.
+  **A zone where `nix-shell` or `nix build` is used has to be let before it
+  is restarted.**
+- **In a hermetic zone, what the host runs from the home is read-only**
+  (owner, 2026-09-25): autostart, user units, launcher entries, D-Bus
+  services, the shells' and compositors' configs, `~/.ssh`, browsers'
+  native-messaging hosts. The session's entry points are created when missing,
+  so that there is something to cover. A zone that has to write there is let
+  (`vpn-zone host-files <zone> writable`, `programs.vpn-zones.hostFilesWritable`).
+  home-manager's links in the home itself cannot be covered by a mount — the
+  sandbox is what protects those.
+- **`vpn-zones-off` and turning the emergency key take a password at the
+  machine too** (owner, 2026-09-25): a line a zone's program slips into the
+  shell's startup would otherwise switch the protection off at the next login
+  on the seat. Turning it back on, and the key back, need none there.
 - **The bus filter reads the end of the authentication as the proxy does.**
   It took only an exact `BEGIN\r\n`; xdg-dbus-proxy (like dbus-daemon) also
   takes `BEGIN` followed by a blank and anything. After such a line the proxy
