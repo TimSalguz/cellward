@@ -108,6 +108,10 @@ const PERM_SUBDIR: &str = ".config/vpn-zones/fs-perms";
 /// Where a NAMED sandbox keeps its home and its (shared) permissions.
 /// `vpn-zone sandbox list/create/rm` is the other end of this contract.
 const SANDBOX_SUBDIR: &str = ".local/state/vpn-sandboxes";
+/// A named sandbox's policy — its permissions among it — below the home
+/// (`container::policy_dir`): not next to its home, which every zone's home
+/// layer writes through.
+const SANDBOX_POLICY_SUBDIR: &str = ".config/vpn-zones/containers/sandboxes";
 /// The one file passed in from `~/.config`, read-only.
 const MIMEAPPS: &str = ".config/mimeapps.list";
 
@@ -1195,10 +1199,10 @@ fn start_bus_filter(
 /// directory.
 fn perm_paths(home: &Path, app_id: &str, sandbox: Option<&str>) -> (PathBuf, Option<PathBuf>) {
     match sandbox {
-        Some(name) => {
-            let dir = home.join(SANDBOX_SUBDIR).join(name);
-            (dir.join("perms"), Some(dir.join("home")))
-        }
+        Some(name) => (
+            home.join(SANDBOX_POLICY_SUBDIR).join(name).join("perms"),
+            Some(home.join(SANDBOX_SUBDIR).join(name).join("home")),
+        ),
         None => (home.join(PERM_SUBDIR).join(app_id), None),
     }
 }
@@ -1213,6 +1217,7 @@ pub fn settle_permissions(
     label: Option<&str>,
     kdialog: &Path,
 ) {
+    crate::container::migrate_policy_of_home(home);
     let (perm_file, _) = perm_paths(home, app_id, sandbox);
     if perm_file.is_file() {
         return;

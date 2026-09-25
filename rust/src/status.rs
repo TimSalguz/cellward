@@ -439,7 +439,7 @@ pub fn container(tools: &Tools, c: &Container) -> String {
     let permissions = match c.home {
         Home::Overlay => "null".to_owned(),
         Home::Private => {
-            let file = c.dir.join("perms");
+            let file = c.policy.join("perms");
             let (perms, source) = match fs::read_to_string(&file) {
                 Ok(text) => (Perms::parse(&text), Source::Local),
                 Err(_) => (Perms::default(), Source::Default),

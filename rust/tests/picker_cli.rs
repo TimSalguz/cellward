@@ -779,7 +779,10 @@ fn a_container_bound_to_a_network_starts_there_without_a_question() {
     home.zone("nl");
     home.zone("de");
     home.profile("work");
-    home.write("profiles/work/container.conf", "network = nl\n");
+    home.write(
+        "config/containers/profiles/work/container.conf",
+        "network = nl\n",
+    );
     home.write("state/.pinnedprofile/firefox", "work");
     // A stale network pin elsewhere loses: the network is the container's.
     home.write("state/.pinned/firefox", "de");
@@ -938,7 +941,11 @@ fn an_unassigned_autostart_starts_offline_in_its_own_home_without_a_dialog() {
         ]
     );
     // The file access dialog of a new home is answered in advance: nothing.
-    assert_eq!(home.read("sandboxes/app-tg/perms").as_deref(), Some(""));
+    assert_eq!(
+        home.read("config/containers/sandboxes/app-tg/perms")
+            .as_deref(),
+        Some("")
+    );
     // Nothing is remembered.
     assert_eq!(home.read("state/.last/tg").as_deref(), Some("nl"));
     assert_eq!(home.read("state/.lastprofile/tg"), None);
@@ -1000,7 +1007,10 @@ fn an_assigned_autostart_starts_where_it_was_put_and_says_nothing() {
     assert_eq!(home.read("notify.log"), None);
 
     // A container bound to a network takes it along, over the pin.
-    home.write("profiles/work/container.conf", "network = direct\n");
+    home.write(
+        "config/containers/profiles/work/container.conf",
+        "network = direct\n",
+    );
     let _ = fs::remove_file(home.path("runner.log"));
     let out = home.run(
         &["--autostart", "--id", "tg", "--", "telegram"],

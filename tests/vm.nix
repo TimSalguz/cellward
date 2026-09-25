@@ -1019,8 +1019,8 @@ let
           )
           lines = [l for l in out.strip().splitlines() if ": " in l]
           assert len(lines) == 1 and ": lo:" in lines[0], f"autostart not offline: {out}"
-          alice("test -f /home/alice/.local/state/vpn-sandboxes/app-vmauto/perms")
-          alice("test ! -s /home/alice/.local/state/vpn-sandboxes/app-vmauto/perms")
+          alice("test -f /home/alice/.config/vpn-zones/containers/sandboxes/app-vmauto/perms")
+          alice("test ! -s /home/alice/.config/vpn-zones/containers/sandboxes/app-vmauto/perms")
           alice("test -d /home/alice/.local/state/vpn-sandboxes/app-vmauto/home")
           # Nothing remembered: autostart is not a choice.
           alice(f"test ! -e {STATE}/.pinned/vmauto && test ! -e {STATE}/.last/vmauto")

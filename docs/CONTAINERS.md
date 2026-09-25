@@ -49,9 +49,9 @@ Consequences, in order of importance:
 | zone | `~/.local/state/vpn-zones/<zone>/` + `vpn-zone@<zone>` | network (app-ns: `lo` + tunnel only); WireGuard, AmneziaWG or OpenConnect |
 | `unconfined` | nothing | nothing (host network) |
 | `offline` | a zone with a marker, created on demand | everything network, incl. host resolvers |
-| overlay container ("profile") | `~/.local/state/vpn-profiles/<name>/` | XDG dirs (`.config`, `.local/share`, `.cache`, `.mozilla`, `.pki`) |
+| overlay container ("profile") | `~/.local/state/vpn-profiles/<name>/` (data), `~/.config/vpn-zones/containers/profiles/<name>/` (policy) | XDG dirs (`.config`, `.local/share`, `.cache`, `.mozilla`, `.pki`) |
 | throwaway container | `~/.local/state/vpn-zones/.throwaway/vpn-profile-*` | same, erased after the last tenant |
-| named sandbox | `~/.local/state/vpn-sandboxes/<name>/{home,perms}` | whole home, bus, runtime dir, seccomp, X11 |
+| named sandbox | `~/.local/state/vpn-sandboxes/<name>/home` (data), `~/.config/vpn-zones/containers/sandboxes/<name>/` (policy: `perms`, `paths`, `container.conf`, `trust/`) | whole home, bus, runtime dir, seccomp, X11 |
 | per-app sandbox | a named sandbox called `app-<key>` | same |
 | throwaway sandbox | tmpfs | same, erased on exit |
 | compositor restriction | `wl-sandbox`, on by default | screen capture, input emulation, background clipboard |

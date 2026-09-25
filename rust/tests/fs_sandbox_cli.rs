@@ -137,7 +137,17 @@ fn a_named_sandbox_keeps_its_permissions_and_home_together() {
     assert!(out.status.success());
     let sb = home.dir.join(".local/state/vpn-sandboxes/work");
     assert!(sb.join("home").is_dir(), "the sandbox has no home");
-    assert!(sb.join("perms").is_file(), "the permissions are not shared");
+    // The permissions with the sandbox's policy, not next to its home: that is
+    // written through every zone's home layer (docs/HOME-LAYER.md).
+    let policy = home.dir.join(".config/vpn-zones/containers/sandboxes/work");
+    assert!(
+        policy.join("perms").is_file(),
+        "the permissions are not shared"
+    );
+    assert!(
+        !sb.join("perms").exists(),
+        "the permissions next to the home"
+    );
     // …and NOT under the per-application directory, or a second program in the
     // same sandbox would be asked about the very same home all over again.
     assert!(!home.perms("testapp").exists());

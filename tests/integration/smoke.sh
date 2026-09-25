@@ -621,6 +621,8 @@ echo "ok: выданный каталог работает, ключи зон н
 step "Песочница ФС: истёкший срок забирает каталог и у запущенной программы"
 LIVE="$HOME/smoke-live"
 LIVEHOME="$HOME/.local/state/vpn-sandboxes/smokelive"
+# Its policy (grants, permissions) lives apart from its home (docs/HOME-LAYER.md).
+LIVEPOLICY="$HOME/.config/vpn-zones/containers/sandboxes/smokelive"
 rm -rf "$LIVE" "$LIVEHOME"
 mkdir -p "$LIVE" && : > "$LIVE/probe"
 # Store-путь: /tmp внутри песочницы свой, ссылка из $WORK туда не ведёт.
@@ -654,7 +656,7 @@ done
   || fail "запущенная песочница не видит выданный каталог: $(cat "$WORK/live.err")"
 mkdir -p "$STATE/.running/__main__"
 printf '%s unconfined sb:smokelive\n' "$LIVEPID" > "$STATE/.running/__main__/smoke-live"
-printf 'until=1 %s\n' "$LIVE" > "$LIVEHOME/paths"
+printf 'until=1 %s\n' "$LIVE" > "$LIVEPOLICY/paths"
 "$VPN_ZONE" container expire || fail "expire не отмонтировал каталог у запущенной программы"
 live=""
 for _ in $(seq 50); do
@@ -665,7 +667,7 @@ done
 [ "$live" = GONE ] \
   || fail "после истечения срока запущенная программа всё ещё видит каталог; где смонтирован: $(grep -l smoke-live /proc/[0-9]*/mountinfo 2>/dev/null | while read -r f; do echo "$f: $(grep smoke-live "$f")"; done)"
 [ -e "$LIVE/probe" ] || fail "отмонтирование задело сам каталог на хосте"
-[ ! -s "$LIVEHOME/paths" ] || fail "истёкшая выдача осталась в файле: $(cat "$LIVEHOME/paths")"
+[ ! -s "$LIVEPOLICY/paths" ] || fail "истёкшая выдача осталась в файле: $(cat "$LIVEPOLICY/paths")"
 "$VPN_ZONE" journal --json | grep -q '"event":"grant-expired","container":"sb:smokelive".*"detached":"1"' \
   || fail "истечение не записано в журнал: $("$VPN_ZONE" journal --json)"
 kill "$LIVEPID" 2>/dev/null || true
@@ -757,7 +759,7 @@ step "Доверенный сертификат: добавляю в $CA_PROFILE
 "$VPN_ZONE" profile create "$CA_PROFILE" >/dev/null
 "$VPN_ZONE" profile create "$NOCA_PROFILE" >/dev/null
 "$VPN_ZONE" trust add "$CA_PROFILE" "$CADIR/ca.pem" --yes || fail "trust add не принял УЦ"
-ls "$PROFILES/$CA_PROFILE/trust/"*.pem >/dev/null 2>&1 || fail "сертификат не сохранился в контейнере"
+ls "$HOME/.config/vpn-zones/containers/profiles/$CA_PROFILE/trust/"*.pem >/dev/null 2>&1 || fail "сертификат не сохранился в контейнере"
 if "$VPN_ZONE" trust add "$CA_PROFILE" "$CADIR/srv.pem" --yes 2>/dev/null; then
   fail "серверный (не УЦ) сертификат принят как корень доверия"
 fi

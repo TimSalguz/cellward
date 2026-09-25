@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Security
+- **A container's policy is apart from its data** (review 2026-09-25, P1):
+  `container.conf`, `paths`, `perms` and `trust/` moved from
+  `~/.local/state/vpn-{profiles,sandboxes}/<name>/` to
+  `~/.config/vpn-zones/containers/{profiles,sandboxes}/<name>/`. Container
+  storage is the containers' data, which their programs write, and a program
+  in a zone could bind a container to the host's network (`network =
+  unconfined`) or grant it a directory, and the next launch from the menu
+  obeyed; the config dir is read-only in zones. The files move once, on the host, at the first
+  look after the update (`.migrated` marks it): a file put next to a
+  container's data after that is nobody's. Removing a container removes its
+  policy too.
+
 ### Fixed
 - **The launch window opens faster, most of all under load**
   (`window/package.nix`, the owner, 2026-09-26: Firefox took long to open

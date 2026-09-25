@@ -1658,7 +1658,12 @@ fn autostart(
     // a dialog — the one thing an autostart must not do. It gets the closed
     // answer instead, the one given when there is no screen to ask on.
     if !plan.container.sandbox.is_empty() {
-        let dir = tools.sandboxes.join(&plan.container.sandbox);
+        crate::container::migrate_policy(tools);
+        let dir = crate::container::policy_dir(
+            tools,
+            crate::container::Home::Private,
+            &plan.container.sandbox,
+        );
         let perms = dir.join("perms");
         if !perms.exists()
             && fs::create_dir_all(&dir)
