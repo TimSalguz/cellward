@@ -29,12 +29,16 @@
 //! trivial format across a namespace boundary, where the two sides may even be
 //! different builds for a moment after an update.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::io::{self, Read};
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::cli::{visible_entries, zone_pid};
 use crate::status::string as json_string;
@@ -348,33 +352,35 @@ pub fn open_channel_check(id: &str, what: &str, open: bool) -> Check {
 }
 
 /// Is there a socket or anything else at this path (an X11 directory counts
-/// only with a socket in it)?
-fn reachable(path: &Path) -> bool {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() => fs::read_dir(path)
-            .map(|entries| entries.flatten().next().is_some())
-            .unwrap_or(false),
-        Ok(_) => true,
-        Err(_) => false,
-    }
+/// only with an entry in it)? Reached one component at a time, never through
+/// a link a program may have made and never into a network or FUSE
+/// filesystem (`crate::sockets::present_at`): in a hermetic zone
+/// `systemd/` is absent and a program may put a link there — into the
+/// document portal's FUSE mount, whose server it has stopped.
+fn reachable(path: &Path, slow: &crate::sockets::Slow) -> bool {
+    crate::sockets::present_at(path.as_os_str().as_bytes(), slow)
 }
 
 // --- THE PROBE (inside a zone) -------------------------------------------------
 
 /// What the doctor tells the probe about the zone, after the uid:
-/// `--hermetic`, `--nix-daemon` (what the zone is to be — its setting, read
-/// the way the holder reads it) and `--host-devs=<maj:min>,…` (the host's own
-/// mounts, so that the probe can tell a filesystem only the zone has,
-/// `crate::sockets::own_devs`). Anything else is ignored: the two sides may be
-/// different builds for a moment after an update.
+/// `--zone=<name>`, `--hermetic`, `--nix-daemon` (what the zone is to be — its
+/// setting, read the way the holder reads it), `--host-devs=<maj:min>,…` (the
+/// host's own mounts, so that the probe can tell a filesystem only the zone
+/// has, `crate::sockets::own_devs`) and `--closed=<kind:maj:min:ino>,…` (the
+/// host's sockets promised out of the zone's reach, by identity,
+/// `crate::sockets::parse_closed`). Anything else is ignored: the two sides
+/// may be different builds for a moment after an update.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProbeArgs {
     pub uid: u32,
+    pub zone: Option<String>,
     pub hermetic: bool,
     pub nix_daemon: bool,
     /// `None` when the doctor did not say (an older one, or the probe run by
     /// hand): then nothing is the zone's own by its device.
     pub host_devs: Option<HashSet<crate::sockets::Dev>>,
+    pub closed: HashMap<(crate::sockets::Dev, u64), crate::sockets::HostSocket>,
 }
 
 impl ProbeArgs {
@@ -392,6 +398,14 @@ impl ProbeArgs {
                 "--hermetic" => parsed.hermetic = true,
                 "--nix-daemon" => parsed.nix_daemon = true,
                 _ => {
+                    if let Some(name) = arg.strip_prefix("--zone=") {
+                        // A name, never a path: compared with one component.
+                        parsed.zone = Some(name.to_owned())
+                            .filter(|n| !n.is_empty() && !n.contains('/') && n != "." && n != "..");
+                    }
+                    if let Some(list) = arg.strip_prefix("--closed=") {
+                        parsed.closed = crate::sockets::parse_closed(list);
+                    }
                     if let Some(list) = arg.strip_prefix("--host-devs=") {
                         // One unreadable entry and the list is not the
                         // host's: better none than a wrong one.
@@ -434,26 +448,38 @@ pub fn probe(args: &ProbeArgs, groups_shed: bool) -> Vec<Check> {
     }
     checks.push(nsswitch_check(read("/etc/nsswitch.conf").as_deref()));
     checks.push(resolv_check(read("/etc/resolv.conf").as_deref()));
+    let mountinfo = read("/proc/self/mountinfo").unwrap_or_default();
+    let slow = crate::sockets::Slow::new(&mountinfo);
     let present: Vec<&str> = RESOLVER_SOCKETS
         .iter()
         .copied()
-        .filter(|p| fs::symlink_metadata(p).is_ok())
+        .filter(|p| reachable(Path::new(p), &slow))
         .collect();
     checks.push(resolver_sockets_check(&present));
-    let mountinfo = read("/proc/self/mountinfo").unwrap_or_default();
     for (id, path, what) in open_channels(uid) {
         if id == "system-bus" {
-            checks.push(system_bus_check(&mountinfo, reachable(&path), what));
+            checks.push(system_bus_check(&mountinfo, reachable(&path, &slow), what));
             continue;
         }
         // A bus bound into a zone is the filtered one only when what is bound
-        // is the zone's proxy: an ordinary zone's sealed runtime binds the
-        // host's own bus back, and that is as open as ever.
-        if id == "session-bus" && crate::zone::bus_is_zones_filter(&mountinfo, &path) {
+        // is the zone's filter: an ordinary zone's sealed runtime binds the
+        // host's own bus back, and that is as open as ever. The proxy alone,
+        // from a zone brought up before the filter, hands the portal's links
+        // to the host (§2).
+        if id == "session-bus" && crate::zone::bus_is_zones_bus_filter(&mountinfo, &path) {
             checks.push(Check::new(
                 "session-bus",
                 Level::Ok,
                 "фильтруется (герметичная зона): порталы, уведомления, трей, MPRIS, методы ввода",
+            ));
+            continue;
+        }
+        if id == "session-bus" && crate::zone::bus_is_zones_filter(&mountinfo, &path) {
+            checks.push(Check::new(
+                "session-bus",
+                Level::Warn,
+                "прокси без фильтра (зона поднята старой версией): ссылки портала уходят хосту \
+                 (§2) — перезапусти зону",
             ));
             continue;
         }
@@ -465,24 +491,26 @@ pub fn probe(args: &ProbeArgs, groups_shed: bool) -> Vec<Check> {
             ));
             continue;
         }
-        checks.push(open_channel_check(id, what, reachable(&path)));
+        checks.push(open_channel_check(id, what, reachable(&path, &slow)));
     }
     // Every unix socket a program here may connect to (`crate::sockets`):
     // the zone's own named in the summary, anything else line by line.
     let runtime = PathBuf::from(format!("/run/user/{uid}"));
     let home = crate::profile::home_dir();
     let walk = crate::sockets::walk(
-        &crate::sockets::places(home.as_deref()),
+        &crate::sockets::places(&runtime, home.as_deref()),
         &crate::sockets::known(&runtime),
-        &crate::sockets::slow_points(&mountinfo),
+        &slow,
         crate::sockets::LIMITS,
     );
     let context = crate::sockets::Context {
         own_devs: crate::sockets::own_devs(&mountinfo, &runtime, args.host_devs.as_ref()),
         runtime: runtime.clone(),
+        zone: args.zone.clone(),
         hermetic: args.hermetic,
         nix_daemon: args.nix_daemon,
         mountinfo: mountinfo.clone(),
+        closed: args.closed.clone(),
     };
     checks.extend(crate::sockets::checks(&walk, &context, groups_shed));
     let (raw, ipc) = compositor_entries(&runtime);
@@ -505,19 +533,22 @@ pub fn probe(args: &ProbeArgs, groups_shed: bool) -> Vec<Check> {
 pub const TMP_DIRS: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
 
 /// The compositor's own sockets and its IPC in a runtime directory, as
-/// `(raw, ipc)` names.
+/// `(raw, ipc)` names, shown as `crate::sockets::shown` shows a path: the
+/// zone's runtime directory is the zone's, and a program names what it makes
+/// there — an escape sequence for the owner's terminal included.
 pub fn compositor_entries(runtime: &Path) -> (Vec<String>, Vec<String>) {
     let mut raw = Vec::new();
     let mut ipc = Vec::new();
     for entry in fs::read_dir(runtime).into_iter().flatten().flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let bytes = entry.file_name().as_bytes().to_vec();
+        let name = String::from_utf8_lossy(&bytes);
         if name.ends_with(".lock") || !crate::zone::compositor_private(&name) {
             continue;
         }
         if name.starts_with("wayland-") {
-            raw.push(name);
+            raw.push(crate::sockets::shown(&bytes));
         } else {
-            ipc.push(name);
+            ipc.push(crate::sockets::shown(&bytes));
         }
     }
     raw.sort();
@@ -525,16 +556,24 @@ pub fn compositor_entries(runtime: &Path) -> (Vec<String>, Vec<String>) {
     (raw, ipc)
 }
 
+/// How many names a listed channel names; the rest are counted.
+const LISTED_MAX: usize = 20;
+
 /// A channel found by name: `warn` naming what is there, `ok` when nothing is.
 pub fn listed_channel_check(id: &str, found: &[String], what: &str) -> Check {
     if found.is_empty() {
         Check::new(id, Level::Ok, "не виден")
     } else {
-        Check::new(
-            id,
-            Level::Warn,
-            format!("открыт ({}) — {what}", found.join(", ")),
-        )
+        let mut names = found
+            .iter()
+            .take(LISTED_MAX)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if found.len() > LISTED_MAX {
+            names.push_str(&format!(" и ещё {}", found.len() - LISTED_MAX));
+        }
+        Check::new(id, Level::Warn, format!("открыт ({names}) — {what}"))
     }
 }
 
@@ -606,7 +645,27 @@ pub fn probe_main(args: &[OsString]) -> u8 {
 /// doctor, or by hand on the host) they cannot, and the answer is whether the
 /// groups are the program's anyway. Capabilities are dropped either way, and a
 /// probe that cannot drop them does not run.
+///
+/// And first of all, not dumpable. Without capabilities the probe is, to the
+/// kernel, an ordinary process of the zone — the same user in the same user
+/// namespace, dumpable after an exec with `euid == uid` — which every program
+/// there may read by the ptrace rules (`PTRACE_MODE_READ`, which Yama leaves
+/// alone): `/proc/<probe>/environ` with the terminal's environment of whoever
+/// ran `vpn-zone doctor`, and `/proc/<probe>/fd/1`, the pipe to the doctor,
+/// opened for writing to put lines of its own ahead of the probe's. Not
+/// dumpable, its `/proc` is the zone's root's and reading it takes
+/// `CAP_SYS_PTRACE` in the zone's namespace, which no program there has (as
+/// `bus_filter::run`). Set while the probe still holds its capabilities, so
+/// that there is no moment it is readable; lowering capabilities does not
+/// make a process dumpable again.
 fn as_a_program() -> Result<bool, String> {
+    // SAFETY: prctl with these arguments takes no pointers.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(format!(
+            "cannot stop being dumpable: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
     #[repr(C)]
     struct Header {
         version: u32,
@@ -665,6 +724,12 @@ fn as_a_program() -> Result<bool, String> {
     // SAFETY: a buffer of exactly `count` gids.
     let count = unsafe { libc::getgroups(count.max(0), groups.as_mut_ptr()) };
     groups.truncate(usize::try_from(count).unwrap_or(0));
+    // Read back: a credential change that reset it would leave the probe
+    // readable, and then it does not look at all.
+    // SAFETY: prctl with these arguments takes no pointers.
+    if unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err("still dumpable after dropping rights".to_owned());
+    }
     Ok(groups.iter().all(|g| *g == gid))
 }
 
@@ -685,6 +750,248 @@ fn host_devs() -> Option<String> {
             .collect::<Vec<_>>()
             .join(",")
     })
+}
+
+/// The host's sockets the zone is promised out of reach of, by identity, for
+/// the probe (`--closed=`, `crate::sockets::parse_closed`): the same socket
+/// under another name — a hard link into a directory the zone reaches — is
+/// still that socket. What is closed depends on what the zone is to be, as the
+/// probe's own reading by path does.
+fn closed_identities(uid: u32, hermetic: bool, nix_daemon: bool) -> String {
+    use crate::sockets::HostSocket as Host;
+    let runtime = PathBuf::from(format!("/run/user/{uid}"));
+    let mut named: Vec<(Host, PathBuf)> = RESOLVER_SOCKETS
+        .iter()
+        .map(|p| (Host::Resolver, PathBuf::from(p)))
+        .collect();
+    named.push((Host::SystemTier, PathBuf::from(crate::sysrun::SOCKET)));
+    if !nix_daemon {
+        named.push((
+            Host::NixDaemon,
+            Path::new(crate::zone::NIX_DAEMON_DIR).join("socket"),
+        ));
+    }
+    named.push((Host::Pulse, runtime.join("pulse/native")));
+    if hermetic {
+        named.push((Host::SessionBus, runtime.join("bus")));
+        named.push((Host::SystemdUser, runtime.join("systemd/private")));
+    }
+    for entry in fs::read_dir(&runtime).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if crate::zone::compositor_private(&name) {
+            named.push((Host::Compositor, entry.path()));
+        } else if name.starts_with("pipewire-") && name.ends_with("-manager") {
+            named.push((Host::PipewireManager, entry.path()));
+        }
+    }
+    for entry in fs::read_dir(crate::x11::X11_DIR)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        named.push((Host::X11, entry.path()));
+    }
+    named
+        .iter()
+        .filter_map(|(kind, path)| {
+            let meta = fs::symlink_metadata(path).ok()?;
+            meta.file_type().is_socket().then(|| {
+                format!(
+                    "{}:{}:{}:{}",
+                    kind.tag(),
+                    libc::major(meta.dev()),
+                    libc::minor(meta.dev()),
+                    meta.ino()
+                )
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// How long the doctor waits for the probe: the walk takes at most
+/// `sockets::LIMITS.deadline` per place, and the rest is quick. A program of
+/// the zone can stop the probe (`kill -STOP`: same user; signals are open,
+/// LEAK-MODEL §16) — then the doctor stops waiting and says so, rather than
+/// hang or take silence for "nothing".
+pub const PROBE_DEADLINE: Duration = Duration::from_secs(30);
+/// How much of the probe's answer the doctor reads. A report of the zone's
+/// sockets is a few kilobytes; a program that makes sockets by the hundred
+/// thousand must not make the doctor hold a gigabyte.
+pub const PROBE_OUTPUT_MAX: usize = 4 * 1024 * 1024;
+/// And of its errors.
+const PROBE_STDERR_MAX: usize = 64 * 1024;
+
+/// What [`run_bounded`] got.
+#[derive(Debug, Default)]
+pub struct Bounded {
+    pub success: bool,
+    /// Killed at the deadline.
+    pub timed_out: bool,
+    /// Killed for answering more than it may.
+    pub overflow: bool,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Run `command` for at most `deadline`, reading at most `max` bytes of its
+/// standard output; past either it is killed, and says so.
+pub fn run_bounded(command: &mut Command, deadline: Duration, max: usize) -> io::Result<Bounded> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let started = Instant::now();
+    let mut out = Bounded::default();
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let mut buf = vec![0u8; 64 * 1024];
+    'read: while stdout.is_some() || stderr.is_some() {
+        let left = deadline.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            out.timed_out = true;
+            break;
+        }
+        let mut fds: Vec<libc::pollfd> = [
+            stdout.as_ref().map(AsRawFd::as_raw_fd),
+            stderr.as_ref().map(AsRawFd::as_raw_fd),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+        let ms = libc::c_int::try_from(left.as_millis().max(1)).unwrap_or(libc::c_int::MAX);
+        // SAFETY: a valid array of pollfd and its length.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms) };
+        if ready < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+        for pfd in fds.iter().filter(|p| p.revents != 0) {
+            let is_out = stdout.as_ref().map(AsRawFd::as_raw_fd) == Some(pfd.fd);
+            let n = if is_out {
+                stdout.as_mut().map(|s| s.read(&mut buf))
+            } else {
+                stderr.as_mut().map(|s| s.read(&mut buf))
+            };
+            match n {
+                Some(Ok(0)) | Some(Err(_)) | None => {
+                    if is_out {
+                        stdout = None;
+                    } else {
+                        stderr = None;
+                    }
+                }
+                Some(Ok(n)) if is_out => {
+                    out.stdout.extend_from_slice(&buf[..n]);
+                    if out.stdout.len() > max {
+                        out.overflow = true;
+                        break 'read;
+                    }
+                }
+                Some(Ok(n)) => {
+                    // Read on past the cap, so that the child never blocks on
+                    // a full pipe; kept only up to it.
+                    let room = PROBE_STDERR_MAX.saturating_sub(out.stderr.len());
+                    out.stderr.extend_from_slice(&buf[..n.min(room)]);
+                }
+            }
+        }
+    }
+    if !out.timed_out && !out.overflow {
+        // Both pipes closed: the child is done, or about to be.
+        loop {
+            if let Some(status) = child.try_wait()? {
+                out.success = status.success();
+                return Ok(out);
+            }
+            if started.elapsed() >= deadline {
+                out.timed_out = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(out)
+}
+
+/// A check the probe prints once, printed more than once: somebody else
+/// wrote into its answer, or it is broken. Either way the answer is not
+/// taken at its word (`socket` lines are many by design).
+fn repeated_check(parsed: &[Check]) -> Option<Check> {
+    let mut seen = HashSet::new();
+    let mut repeated: Vec<&str> = parsed
+        .iter()
+        .filter(|c| c.id != "socket" && !seen.insert(c.id.as_str()))
+        .map(|c| c.id.as_str())
+        .collect();
+    repeated.sort_unstable();
+    repeated.dedup();
+    (!repeated.is_empty()).then(|| {
+        Check::new(
+            "probe",
+            Level::Fail,
+            format!(
+                "в ответе пробы не один раз: {} — ответ подделан или испорчен",
+                repeated.join(", ")
+            ),
+        )
+    })
+}
+
+/// `fs.protected_hardlinks`: with it on, a hard link to a socket (not a
+/// regular file) takes being its owner, so a promised-closed socket of root's
+/// cannot reappear under a name of the zone's choosing — the Nix daemon's in
+/// `/nix/var/nix/profiles/per-user/<user>`, the user's own and not covered in
+/// any zone. The same holds `zone::hide_nix_daemon`, which covers only the
+/// daemon's directory.
+pub fn hardlinks_check(value: Option<&str>) -> Check {
+    match value.map(str::trim) {
+        Some("1") => Check::new("hardlinks", Level::Ok, "fs.protected_hardlinks = 1"),
+        Some(other) => Check::new(
+            "hardlinks",
+            Level::Warn,
+            format!(
+                "fs.protected_hardlinks = {other}: программа зоны может сделать жёсткую ссылку \
+                 на закрытый ей сокет root (Nix-демон) в каталог, который она видит; доктор \
+                 ищет такие по идентичности, но только там, куда доходит обход — \
+                 sysctl fs.protected_hardlinks=1"
+            ),
+        ),
+        None => Check::new(
+            "hardlinks",
+            Level::Skip,
+            "/proc/sys/fs/protected_hardlinks не читается",
+        ),
+    }
+}
+
+/// A text for the owner's terminal: every control character written out.
+/// What the probe says, and even the ids it says it for, come from inside a
+/// zone — a name a program chose included —, and an escape sequence must not
+/// reach the terminal to hide the lines before it or set the clipboard.
+pub fn printable(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if crate::sockets::unseen_char(c) {
+            out.push_str(&c.escape_unicode().to_string());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 // --- THE HOST SIDE -------------------------------------------------------------
@@ -820,6 +1127,9 @@ pub fn system_checks(tools: &Tools, uid: u32) -> Vec<Check> {
         read("/proc/sys/kernel/apparmor_restrict_unprivileged_userns").as_deref(),
     ));
     checks.push(newuidmap_check());
+    checks.push(hardlinks_check(
+        read("/proc/sys/fs/protected_hardlinks").as_deref(),
+    ));
     let user = std::env::var("USER").unwrap_or_default();
     for (id, file) in [("subuid", "/etc/subuid"), ("subgid", "/etc/subgid")] {
         checks.push(match read(file) {
@@ -889,7 +1199,7 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     // the host's bus and the Nix daemon by it.
     let (hermetic, _) = crate::hermetic::zone_setting(&dir, &tools.config, name);
     let (nix_daemon, _) = crate::hermetic::nix_daemon(&dir, &tools.config, name);
-    let mut probe_args = vec![uid.to_string()];
+    let mut probe_args = vec![uid.to_string(), format!("--zone={name}")];
     if hermetic {
         probe_args.push("--hermetic".to_owned());
     }
@@ -899,10 +1209,19 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     if let Some(devs) = host_devs() {
         probe_args.push(format!("--host-devs={devs}"));
     }
+    let closed = closed_identities(uid, hermetic, nix_daemon);
+    if !closed.is_empty() {
+        probe_args.push(format!("--closed={closed}"));
+    }
     // `--keep-caps`, as a launch enters: the probe sheds the session's groups
     // in the zone's user namespace, as `profile-run` does, and then every
-    // capability (`as_a_program`).
-    let output = Command::new(&tools.nsenter)
+    // capability (`as_a_program`). The environment is not passed: the probe
+    // runs among the zone's programs, and the terminal this command was
+    // started from may hold anything — the home is all it needs.
+    let mut command = Command::new(&tools.nsenter);
+    command
+        .env_clear()
+        .env("HOME", &tools.home)
         .args([
             "--preserve-credentials",
             "--keep-caps",
@@ -915,10 +1234,26 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
         .arg("--")
         .arg(&tools.core)
         .arg("doctor-probe")
-        .args(&probe_args)
-        .output();
-    match output {
-        Ok(out) if out.status.success() => {
+        .args(&probe_args);
+    match run_bounded(&mut command, PROBE_DEADLINE, PROBE_OUTPUT_MAX) {
+        Ok(out) if out.timed_out => checks.push(Check::new(
+            "probe",
+            Level::Fail,
+            format!(
+                "проба в зоне не ответила за {} с — остановлена (программа зоны может \
+                 остановить её сигналом; проверка не пройдена)",
+                PROBE_DEADLINE.as_secs()
+            ),
+        )),
+        Ok(out) if out.overflow => checks.push(Check::new(
+            "probe",
+            Level::Fail,
+            format!(
+                "проба в зоне ответила больше {} МБ — остановлена, ответ не принят",
+                PROBE_OUTPUT_MAX / (1024 * 1024)
+            ),
+        )),
+        Ok(out) if out.success => {
             let text = String::from_utf8_lossy(&out.stdout);
             let parsed: Vec<Check> = text.lines().filter_map(Check::parse_line).collect();
             if parsed.is_empty() {
@@ -928,6 +1263,7 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
                     "проба в зоне ничего не ответила",
                 ));
             }
+            checks.extend(repeated_check(&parsed));
             checks.extend(parsed);
         }
         Ok(out) => checks.push(Check::new(
@@ -1035,15 +1371,21 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
             zones_json.join(",")
         );
     } else {
+        // Nothing that came from a zone reaches the terminal as it is.
         let print = |checks: &[Check]| {
             for check in checks {
-                println!("  {} {:<14} {}", check.level.mark(), check.id, check.detail);
+                println!(
+                    "  {} {:<14} {}",
+                    check.level.mark(),
+                    printable(&check.id),
+                    printable(&check.detail)
+                );
             }
         };
         println!("система:");
         print(&system);
         for (name, _, checks) in &zones {
-            println!("зона {name}:");
+            println!("зона {}:", printable(name));
             print(checks);
         }
         match worst {
@@ -1182,6 +1524,120 @@ mod tests {
         assert_eq!(broken.host_devs, None);
         let empty = ProbeArgs::parse(&args(&["1000", "--host-devs="])).unwrap();
         assert_eq!(empty.host_devs, None);
+        let named = ProbeArgs::parse(&args(&[
+            "1000",
+            "--zone=nl",
+            "--closed=nix-daemon:0:25:7,from-a-newer-doctor:0:1:2",
+        ]))
+        .unwrap();
+        assert_eq!(named.zone.as_deref(), Some("nl"));
+        assert_eq!(named.closed.len(), 1);
+        // A zone's name is one component, never a path.
+        for bad in ["--zone=", "--zone=a/b", "--zone=.."] {
+            assert_eq!(ProbeArgs::parse(&args(&["1000", bad])).unwrap().zone, None);
+        }
+    }
+
+    #[test]
+    fn the_probe_is_not_readable_by_the_zones_programs() {
+        // In a child: the test harness is one process for every test.
+        // SAFETY: fork(2); the child only makes system calls and exits.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let code = match as_a_program() {
+                // SAFETY: prctl with these arguments takes no pointers.
+                Ok(_) => unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) },
+                Err(_) => 7,
+            };
+            // SAFETY: _exit(2) in the forked child, nothing to unwind.
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        // SAFETY: waitpid(2) on our own child with a status to fill.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "still dumpable (1) or failed (7)"
+        );
+    }
+
+    #[test]
+    fn the_doctor_does_not_wait_for_ever_nor_read_without_end() {
+        let quick = run_bounded(
+            Command::new("sh").args(["-c", "echo out; echo err >&2"]),
+            Duration::from_secs(10),
+            1024,
+        )
+        .unwrap();
+        assert!(quick.success && !quick.timed_out && !quick.overflow);
+        assert_eq!(quick.stdout, b"out\n");
+        assert_eq!(quick.stderr, b"err\n");
+        let started = Instant::now();
+        let stopped = run_bounded(
+            Command::new("sleep").arg("30"),
+            Duration::from_millis(200),
+            1024,
+        )
+        .unwrap();
+        assert!(stopped.timed_out && !stopped.success);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let flood = run_bounded(
+            Command::new("sh").args(["-c", "while :; do echo xxxxxxxxxxxxxxxx; done"]),
+            Duration::from_secs(10),
+            4096,
+        )
+        .unwrap();
+        assert!(flood.overflow && !flood.success);
+        assert!(flood.stdout.len() <= 4096 + 64 * 1024);
+    }
+
+    #[test]
+    fn an_answer_that_says_a_check_twice_is_not_taken() {
+        let once = [
+            Check::new("sockets", Level::Ok, "x"),
+            Check::new("socket", Level::Warn, "a"),
+            Check::new("socket", Level::Warn, "b"),
+        ];
+        assert_eq!(repeated_check(&once), None);
+        let forged = [
+            Check::new("sockets", Level::Ok, "чужих сокетов в досягаемости нет"),
+            Check::new("links", Level::Ok, "x"),
+            Check::new("sockets", Level::Fail, "y"),
+        ];
+        let check = repeated_check(&forged).unwrap();
+        assert_eq!(check.level, Level::Fail);
+        assert!(check.detail.contains("sockets"), "{}", check.detail);
+    }
+
+    #[test]
+    fn nothing_from_a_zone_reaches_the_terminal_as_it_is() {
+        let dir = std::env::temp_dir().join(format!("vz-doctor-esc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("wayland-\u{1b}[3A\u{1b}[J\u{7}"), "").unwrap();
+        fs::write(dir.join("niri.\u{1b}]52;c;ZWNobwo=\u{7}.sock"), "").unwrap();
+        let (raw, ipc) = compositor_entries(&dir);
+        assert_eq!((raw.len(), ipc.len()), (1, 1));
+        for name in raw.iter().chain(&ipc) {
+            assert!(!name.chars().any(char::is_control), "{name:?}");
+        }
+        let check = listed_channel_check("wayland-raw", &raw, "w");
+        assert!(!check.line().chars().any(|c| c.is_control() && c != '\t'));
+        // And at the terminal, whatever the probe said.
+        let shown = printable("ok \u{1b}]52;c;x\u{7} \u{9b}2J \u{202e}txt");
+        assert!(!shown.chars().any(crate::sockets::unseen_char), "{shown}");
+        assert!(shown.starts_with("ok \\u{1b}]52;c;x\\u{7}"), "{shown}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hard_links_to_root_sockets_are_warned_of() {
+        assert_eq!(hardlinks_check(Some("1\n")).level, Level::Ok);
+        assert_eq!(hardlinks_check(Some("0\n")).level, Level::Warn);
+        assert_eq!(hardlinks_check(None).level, Level::Skip);
     }
 
     #[test]

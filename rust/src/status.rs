@@ -41,7 +41,10 @@ pub fn string(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            // DEL and C1 too: valid JSON either way, but `--json` is read in
+            // terminals as well, and U+009B is an escape sequence's start
+            // in some of them (a name from a zone may carry one).
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
     }
@@ -611,6 +614,7 @@ mod tests {
         assert_eq!(string("a\"b\\c"), "\"a\\\"b\\\\c\"");
         assert_eq!(string("line\nnext\ttab"), "\"line\\nnext\\ttab\"");
         assert_eq!(string("\u{1}"), "\"\\u0001\"");
+        assert_eq!(string("\u{7f}\u{9b}"), "\"\\u007f\\u009b\"");
         assert_eq!(string("Огненный лис"), "\"Огненный лис\"");
     }
 

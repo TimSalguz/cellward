@@ -241,6 +241,14 @@ pub fn bus_is_zones_filter(mountinfo: &str, socket: &Path) -> bool {
             .any(|name| root.ends_with(&format!("/{name}")))
     })
 }
+/// The same, and nothing older: the zone's bus FILTER bound over the socket.
+/// The proxy alone would hand the portal's links to the host (LEAK-MODEL §2),
+/// which is what `seal_runtime` refuses to bind; the socket inventory holds a
+/// hermetic zone to this (`crate::sockets`).
+pub fn bus_is_zones_bus_filter(mountinfo: &str, socket: &Path) -> bool {
+    crate::doctor::mount_root_at(mountinfo, &socket.to_string_lossy())
+        .is_some_and(|root| root.ends_with(&format!("/{SESSION_BUS_FILTER}")))
+}
 /// Is the sound server's socket at `socket` the zone's filter bound over it
 /// (`seal_runtime`)? Read from the mount table, as [`bus_is_zones_filter`].
 pub fn pulse_is_zones_filter(mountinfo: &str, socket: &Path) -> bool {

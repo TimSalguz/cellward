@@ -1416,9 +1416,14 @@ let
       # in /run that only the session's group may open — which the zone's
       # programs, left with the user's own group, cannot.
       with subtest("doctor: every socket a zone can reach is named, the zone's own are not"):
-          def named(out):
-              """{path: level} of the doctor's `socket` lines for vmherm."""
-              zone = next(z for z in json.loads(out)["zones"] if z["name"] == "vmherm")
+          def named(out, name="vmherm"):
+              """{path: level} of the doctor's `socket` lines for a zone. The
+              summary is there exactly once: a second one would be somebody
+              else's line in the probe's answer."""
+              zone = next(z for z in json.loads(out)["zones"] if z["name"] == name)
+              summaries = [c for c in zone["checks"] if c["id"] == "sockets"]
+              assert len(summaries) == 1, zone["checks"]
+              assert not any(c["id"] == "probe" for c in zone["checks"]), zone["checks"]
               return {
                   c["detail"].split(" — ", 1)[0]: c["level"]
                   for c in zone["checks"]
@@ -1497,6 +1502,37 @@ let
           }
           assert not unexpected, found
           assert all(level == "warn" for level in found.values()), found
+
+          # An ordinary zone: the host's runtime directory is bound in entry
+          # by entry, and what the host has there is the host's — named,
+          # never counted as the zone's own. And a promise broken inside the
+          # zone, not only in the host's namespace: the Nix daemon let, then
+          # taken away without a restart — still in reach, so a failure.
+          alice("mkdir -p /run/user/1000/vzbound")
+          alice(
+              "systemd-run --user --unit=evilbound socat "
+              "UNIX-LISTEN:/run/user/1000/vzbound/evil.sock,fork OPEN:/dev/null"
+          )
+          machine.wait_until_succeeds("test -S /run/user/1000/vzbound/evil.sock")
+          alice("vpn-zone nix-daemon vmsmoke on")
+          alice("vpn-zone up vmsmoke")
+          sp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
+          in_zone(sp, "socat -T2 - UNIX-CONNECT:/run/user/1000/vzbound/evil.sock </dev/null")
+          in_zone(sp, "test -S /nix/var/nix/daemon-socket/socket")
+          out = alice("vpn-zone doctor vmsmoke --json")
+          found = named(out, "vmsmoke")
+          print(f"sockets in reach of vmsmoke: {found}")
+          assert found.get("/run/user/1000/vzbound/evil.sock") == "warn", found
+          assert found.get("/nix/var/nix/daemon-socket/socket") == "warn", found
+          alice("vpn-zone nix-daemon vmsmoke off")
+          out = alice("vpn-zone doctor vmsmoke --json || true")
+          found = named(out, "vmsmoke")
+          assert found.get("/nix/var/nix/daemon-socket/socket") == "fail", found
+          assert '"worst":"fail"' in out, out
+          alice("vpn-zone nix-daemon vmsmoke default")
+          alice("vpn-zone down vmsmoke")
+          alice("systemctl --user stop evilbound")
+          alice("rm -rf /run/user/1000/vzbound")
 
       # LEAK-MODEL §2: a sandboxed program (it sees /.flatpak-info) opens a link
       # through the portal's OpenURI. The sandbox's bus filter answers the call
