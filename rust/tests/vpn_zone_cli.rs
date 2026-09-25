@@ -723,7 +723,7 @@ fn a_trusted_certificate_needs_a_real_container_and_one_certificate() {
         "{}",
         stderr(&out)
     );
-    assert!(!home.root.join("profiles/work/trust").exists());
+    assert!(!home.root.join("config/containers/profiles/work/trust").exists());
 }
 
 #[test]
@@ -733,7 +733,10 @@ fn trusted_certificates_are_listed_and_removed_by_fingerprint() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("нет ни у одного"), "{}", stdout(&out));
 
-    let trust = home.root.join("profiles/work/trust");
+    // The container is its data directory; its certificates are with its
+    // policy.
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+    let trust = home.root.join("config/containers/profiles/work/trust");
     fs::create_dir_all(&trust).unwrap();
     let a = format!("0f1e{}", "a".repeat(60));
     let b = format!("0f1f{}", "b".repeat(60));

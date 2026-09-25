@@ -1794,8 +1794,9 @@ fn trust(tools: &Tools, args: &[OsString]) -> u8 {
 struct TrustTarget {
     /// As the user named it: a profile name, or `sb:<sandbox>`.
     shown: String,
-    /// The container's own directory; the certificates live in `trust/` there.
-    dir: PathBuf,
+    /// The container's policy directory (`container::policy_dir`); the
+    /// certificates live in `trust/` there.
+    policy: PathBuf,
     /// A named sandbox's home on disk: its NSS databases can be brought in line
     /// right away, from here. `None` for a data container, whose databases sit
     /// under an overlay and are only touched from inside a launch.
@@ -1804,7 +1805,7 @@ struct TrustTarget {
 
 impl TrustTarget {
     fn trust_dir(&self) -> PathBuf {
-        self.dir.join(crate::trust::DIR)
+        self.policy.join(crate::trust::DIR)
     }
 }
 
@@ -1812,6 +1813,7 @@ impl TrustTarget {
 /// profile is neither: its NSS databases are the host's, and a certificate
 /// there would be the host's too.
 fn trust_target(tools: &Tools, name: &OsStr) -> Result<TrustTarget, String> {
+    crate::container::migrate_policy(tools);
     let text = name.to_string_lossy().into_owned();
     if let Some(sandbox) = text.strip_prefix("sb:") {
         if !safe_name(OsStr::new(sandbox)) {
@@ -1825,8 +1827,8 @@ fn trust_target(tools: &Tools, name: &OsStr) -> Result<TrustTarget, String> {
         }
         return Ok(TrustTarget {
             home: Some(dir.join("home")),
+            policy: crate::container::policy_dir(tools, crate::container::Home::Private, sandbox),
             shown: text,
-            dir,
         });
     }
     if !safe_name(name) || text == registry::MAIN {
@@ -1841,8 +1843,8 @@ fn trust_target(tools: &Tools, name: &OsStr) -> Result<TrustTarget, String> {
         ));
     }
     Ok(TrustTarget {
+        policy: crate::container::policy_dir(tools, crate::container::Home::Overlay, &text),
         shown: text,
-        dir,
         home: None,
     })
 }
@@ -2015,8 +2017,12 @@ fn trust_list(tools: &Tools, args: &[OsString]) -> u8 {
                     .to_string_lossy()
                     .into_owned();
                 TrustTarget {
+                    policy: crate::container::policy_dir(
+                        tools,
+                        crate::container::Home::Overlay,
+                        &name,
+                    ),
                     shown: name,
-                    dir,
                     home: None,
                 }
             });
@@ -2027,9 +2033,13 @@ fn trust_list(tools: &Tools, args: &[OsString]) -> u8 {
                     .to_string_lossy()
                     .into_owned();
                 TrustTarget {
+                    policy: crate::container::policy_dir(
+                        tools,
+                        crate::container::Home::Private,
+                        &name,
+                    ),
                     shown: format!("sb:{name}"),
                     home: Some(dir.join("home")),
-                    dir,
                 }
             });
             profiles
