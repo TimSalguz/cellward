@@ -221,6 +221,18 @@ pub fn refused(h: &Header) -> Option<String> {
         Some(i) if i.starts_with("org.freedesktop.portal.") && !PORTAL_ALLOWED.contains(&i) => {
             Some(format!("{i} is not for programs of a zone"))
         }
+        // The portal's host registry (`org.freedesktop.host.portal.Registry`,
+        // xdg-desktop-portal 1.19+): an unsandboxed caller names itself with
+        // any application id, once, before its first portal call. The portal
+        // takes a zone's program for such a caller, so it could name itself
+        // after a host program — its dialogs and notifications would say that
+        // program asked, and the permissions the portal keeps for that id would
+        // be its. By interface, not by destination: a unique name reaches the
+        // same object. Anything else of the host's `org.freedesktop.host.`
+        // tree goes the same way.
+        Some(i) if i.starts_with("org.freedesktop.host.") => {
+            Some(format!("{i} is not for programs of a zone"))
+        }
         _ => None,
     }
 }
@@ -1271,8 +1283,12 @@ mod tests {
             "org.freedesktop.portal.Realtime",
             "org.freedesktop.portal.Documents",
             "org.freedesktop.portal.SomethingNew",
+            "org.freedesktop.host.portal.Registry",
+            "org.freedesktop.host.SomethingNew",
         ] {
             assert!(on(Some(bad), PORTAL).is_some(), "{bad}");
+            // Not by the portal's well-known name either.
+            assert!(on(Some(bad), ":1.42").is_some(), "{bad} by a unique name");
         }
         for good in [
             "org.freedesktop.portal.FileChooser",

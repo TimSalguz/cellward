@@ -325,6 +325,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **A zone's program cannot name itself to the portal**
+  (`rust/src/bus_filter.rs` `refused`, LEAK-MODEL §23). xdg-desktop-portal
+  1.19+ has `org.freedesktop.host.portal.Registry`: an unsandboxed caller
+  registers any application id, once, before its first portal call. The
+  portal takes a zone's (and a sandbox's) program for such a caller, and the
+  filter refused only the `org.freedesktop.portal.` tree, so the program
+  could register as a host application: the portal's dialogs (file chooser,
+  screen cast) and notifications would name that application, and the
+  permissions the portal keeps for its id would apply. With a registered id
+  the Background portal also writes an autostart entry with the caller's
+  command on the host — closed already, the filter answers
+  `RequestBackground` itself. The whole `org.freedesktop.host.` tree is now
+  refused, by interface, so a unique name does not get round it either.
 - **A "yes" sooner than a question can be read is a stray key**
   (`rust/src/dialog.rs` `TOO_FAST`, LEAK-MODEL §22). The questions a zone's
   program brings up — the microphone, a launch in another network through
