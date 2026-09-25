@@ -73,6 +73,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   fetches any address a program names — from any zone, an offline one too.
   **A zone where `nix-shell` or `nix build` is used has to be let before it
   is restarted.**
+- **`vpn-zone status --json`** names, for each zone, `nix_daemon` and
+  `host_files_writable` with their source, as `hermetic` and `x11`.
 - **In a hermetic zone, what the host runs from the home is read-only**
   (owner, 2026-09-25): autostart, user units, launcher entries, D-Bus
   services, the shells' and compositors' configs, `~/.ssh`, browsers'

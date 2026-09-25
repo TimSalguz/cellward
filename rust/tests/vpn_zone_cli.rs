@@ -1466,14 +1466,27 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     assert!(stdout(&out).contains("перезапуска"), "{}", stdout(&out));
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
-        json.contains("\"hermetic\":{\"value\":true,\"source\":\"local\"},\"system_zone\":null}"),
+        json.contains("\"hermetic\":{\"value\":true,\"source\":\"local\"},\"nix_daemon\":"),
         "{json}"
     );
+    // What the zone is let besides: a marker each, and its JSON.
+    let out = home.run(&["nix-daemon", "nl", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = home.run(&["host-files", "nl", "writable"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"nix_daemon\":{\"value\":true,\"source\":\"local\"},\"host_files_writable\":{\"value\":true,\"source\":\"local\"}"),
+        "{json}"
+    );
+    assert!(!home.run(&["nix-daemon", "nl", "yes"]).status.success());
+    assert!(home.run(&["nix-daemon", "nl", "default"]).status.success());
+    assert!(home.run(&["host-files", "nl", "default"]).status.success());
     let out = home.run(&["hermetic", "nl", "off"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
-        json.contains("\"hermetic\":{\"value\":false,\"source\":\"local\"},\"system_zone\":null}"),
+        json.contains("\"hermetic\":{\"value\":false,\"source\":\"local\"},\"nix_daemon\":"),
         "{json}"
     );
     assert!(
@@ -1510,7 +1523,7 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     );
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
-        json.contains("\"hermetic\":{\"value\":false,\"source\":\"nix\"},\"system_zone\":null}"),
+        json.contains("\"hermetic\":{\"value\":false,\"source\":\"nix\"},\"nix_daemon\":"),
         "{json}"
     );
     fs::remove_file(home.root.join("config/declared/hermetic-default")).unwrap();
