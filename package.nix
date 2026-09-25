@@ -7,6 +7,7 @@
   rustPlatform,
   pkg-config,
   libseccomp,
+  dejavu_fonts,
 }:
 
 rustPlatform.buildRustPackage {
@@ -39,6 +40,12 @@ rustPlatform.buildRustPackage {
   # крейты приходят через Cargo.lock, как и остальные.
   nativeBuildInputs = [ pkg-config ];
   buildInputs = [ libseccomp ];
+  # Шрифт подписи в рамке окна (rust/src/wl_title.rs): путь в store вшивается
+  # в бинарь при сборке (option_env!), посредник читает этот файл и больше
+  # ничего — ни fontconfig, ни поиска шрифтов в системе во время работы. Путь в
+  # бинаре — ссылка, так что шрифт едет в замыкании пакета. minimal — один
+  # DejaVu Sans (~0,7 МБ): латиница и кириллица для «зона · контейнер».
+  VPN_ZONE_FRAME_FONT = "${dejavu_fonts.minimal}/share/fonts/truetype/DejaVuSans.ttf";
   # Тесты гоняет CI (job rust). Здесь они выключены сознательно: selftest
   # грузит seccomp-фильтр в собственный процесс, а что разрешает песочница
   # сборки nix — зависит от демона; ломать этим пересборку системы нельзя.

@@ -25,7 +25,8 @@
 //! [`run_plain`] is, the shared "it did not work out" exit of this module.
 //!
 //! Usage: `vpn-zone-core wl-sandbox <app-id> [--zone <zone>] [--no-proxy]
-//! [--frame <rrggbb>:<width> --frame-switch <settings dir>] -- <command> [args…]`.
+//! [--frame <rrggbb>:<width>:<always|hover|off> --frame-title <text>
+//! --frame-switch <settings dir>] -- <command> [args…]`.
 //!
 //! **Where it runs.** On the host, before the launch enters its zone
 //! (`docs/LEAK-MODEL.md` §13): a zone does not have the compositor's own
@@ -110,10 +111,12 @@ pub struct Args {
     /// (`--no-proxy`): the compositor listens on the zone's path itself — for
     /// a program the proxy breaks, and for the test that compares the two.
     pub proxy: bool,
-    /// The zone's border the proxy draws (`--frame <rrggbb>:<width>`), and
-    /// the settings directory with the switch that hides it
-    /// (`--frame-switch`; without one, nothing hides it).
-    pub frame: Option<(crate::frame::Frame, PathBuf)>,
+    /// The zone's frame the proxy draws (`--frame <rrggbb>:<width>:<title
+    /// mode>`), the title strip's text (`--frame-title`, cleaned again here:
+    /// no control or bidi characters, bounded) and the settings directory
+    /// with the switch that hides it (`--frame-switch`; without one, nothing
+    /// hides it).
+    pub frame: Option<crate::frame::Setup>,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
 }
@@ -134,8 +137,8 @@ pub enum ArgError {
     /// `--zone` without a name, or with one that is not a single path
     /// component.
     BadZone,
-    /// `--frame` without `<rrggbb>:<width>`, or `--frame-switch` without a
-    /// directory.
+    /// `--frame` without `<rrggbb>:<width>[:<mode>]`, `--frame-title`
+    /// without a text, or `--frame-switch` without a directory.
     BadFrame,
 }
 
@@ -149,7 +152,8 @@ impl fmt::Display for ArgError {
             Self::BadZone => write!(f, "--zone needs a zone name"),
             Self::BadFrame => write!(
                 f,
-                "--frame needs <rrggbb>:<width>, --frame-switch a directory"
+                "--frame needs <rrggbb>:<width>[:always|hover|off], --frame-title a text, \
+                 --frame-switch a directory"
             ),
         }
     }
@@ -158,8 +162,9 @@ impl fmt::Display for ArgError {
 impl std::error::Error for ArgError {}
 
 impl Args {
-    /// Parse `<app-id> [--zone <zone>] [--no-proxy] [--frame <rrggbb>:<w>]
-    /// [--frame-switch <dir>] -- cmd...`.
+    /// Parse `<app-id> [--zone <zone>] [--no-proxy] [--frame
+    /// <rrggbb>:<w>[:<mode>]] [--frame-title <text>] [--frame-switch <dir>]
+    /// -- cmd...`.
     ///
     /// The command keeps its `OsString`s: an argument can be a file name handed
     /// over by the launcher through a `%U` field code, and those are bytes, not
@@ -179,6 +184,7 @@ impl Args {
         let mut zone = NO_ZONE.to_owned();
         let mut proxy = true;
         let mut frame = None;
+        let mut title = String::new();
         let mut switch = None;
         let mut words = argv[..split].iter();
         while let Some(word) = words.next() {
@@ -187,6 +193,9 @@ impl Args {
             } else if word == "--frame" {
                 let value = words.next().ok_or(ArgError::BadFrame)?.to_string_lossy();
                 frame = Some(crate::frame::Frame::parse_arg(&value).ok_or(ArgError::BadFrame)?);
+            } else if word == "--frame-title" {
+                let text = words.next().ok_or(ArgError::BadFrame)?.to_string_lossy();
+                title = crate::frame::clean_title(&text);
             } else if word == "--frame-switch" {
                 let dir = words
                     .next()
@@ -212,7 +221,11 @@ impl Args {
         }
         // Without a switch nothing can hide the border: an empty path is a
         // directory with no settings in it.
-        let frame = frame.map(|f| (f, switch.unwrap_or_default()));
+        let frame = frame.map(|frame| crate::frame::Setup {
+            frame,
+            title,
+            switch: switch.unwrap_or_default(),
+        });
         Ok(Self {
             app_id: app_id.to_string_lossy().into_owned(),
             zone,
@@ -673,33 +686,42 @@ mod tests {
     }
 
     #[test]
-    fn the_frame_is_a_colour_and_a_width_and_its_switch_a_directory() {
-        use crate::frame::{Frame, Rgb};
+    fn the_frame_is_a_colour_a_width_a_title_and_its_switch_a_directory() {
+        use crate::frame::{Frame, Rgb, TitleMode};
         let a = Args::parse(&argv(&["foot", "--zone", "nl", "--", "foot"])).unwrap();
         assert_eq!(a.frame, None, "no border unless asked");
         let a = Args::parse(&argv(&[
             "foot",
             "--frame",
-            "ff0080:6",
+            "ff0080:6:hover",
+            "--frame-title",
+            "nl\u{202E} · банк\n",
             "--frame-switch",
             "/home/u/.config/vpn-zones",
             "--",
             "foot",
         ]))
         .unwrap();
-        let (frame, switch) = a.frame.unwrap();
+        let setup = a.frame.unwrap();
         assert_eq!(
-            frame,
+            setup.frame,
             Frame {
                 color: Rgb(255, 0, 128),
-                width: 6
+                width: 6,
+                title: TitleMode::Hover,
             }
         );
-        assert_eq!(switch, PathBuf::from("/home/u/.config/vpn-zones"));
+        assert_eq!(setup.title, "nl · банк", "cleaned again on the way in");
+        assert_eq!(setup.switch, PathBuf::from("/home/u/.config/vpn-zones"));
+        // Without a title, a strip without text.
+        let a = Args::parse(&argv(&["foot", "--frame", "ff0080:6", "--", "x"])).unwrap();
+        assert_eq!(a.frame.unwrap().title, "");
         for bad in [
             &["foot", "--frame", "--", "x"][..],
             &["foot", "--frame", "red:4", "--", "x"],
             &["foot", "--frame", "ff0080:0", "--", "x"],
+            &["foot", "--frame", "ff0080:4:maybe", "--", "x"],
+            &["foot", "--frame", "ff0080:4", "--frame-title", "--", "x"],
             &[
                 "foot",
                 "--frame",

@@ -1,12 +1,14 @@
-//! The zone border's settings (`docs/WINDOW-FRAME.md` §0а, §11): its colour
-//! per zone, its width, and the switch that hides every border — for sharing
-//! the screen, where the owner wants windows without it.
+//! The zone frame's settings (`docs/WINDOW-FRAME.md` §0а, §11): the border's
+//! colour per zone and its width, the title strip's mode (always, on hover,
+//! off) and its text, and the switch that hides every frame — for sharing the
+//! screen, where the owner wants windows without it.
 //!
-//! What draws it is the Wayland proxy (`crate::wl_frame`); what is read here
-//! is handed to it on the command line of `wl-sandbox` (`--frame`), except the
-//! switch, which the supervisor reads again for every connection
-//! (`--frame-switch`): a window opened after `vpn-zone frame hide` comes up
-//! without a border even in a program started before.
+//! What draws it is the Wayland proxy (`crate::wl_frame`, the text
+//! `crate::wl_title`); what is read here is handed to it on the command line
+//! of `wl-sandbox` (`--frame`, `--frame-title`), except the switch, which the
+//! supervisor reads again for every connection (`--frame-switch`): a window
+//! opened after `vpn-zone frame hide` comes up without a frame even in a
+//! program started before.
 //!
 //! Where a setting comes from, as for the others: Nix (`declared/`) over the
 //! local one, the local one over the default. The switch has no Nix option —
@@ -19,7 +21,7 @@
 //! zones' state is hidden (`docs/LEAK-MODEL.md` §17) —, so a program cannot
 //! turn its border off or paint it another zone's colour.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cli::{read_setting, DECLARED_DIR};
 use crate::container::Source;
@@ -32,6 +34,14 @@ pub const DECLARED_COLORS: &str = "frame-colors";
 pub const WIDTH_SETTING: &str = "frame-width";
 /// The switch, a setting file of the config directory: `hidden` or `shown`.
 pub const SWITCH_SETTING: &str = "frames";
+
+/// The title strip's mode, a setting file of the config directory: `always`,
+/// `hover` or `off`.
+pub const TITLE_SETTING: &str = "frame-title";
+
+/// The most characters of one part of the title — the zone's name, the
+/// container's — that are drawn; a longer one is cut, with an ellipsis.
+pub const MAX_TITLE_PART: usize = 40;
 
 /// Four logical pixels: a whole number of pixels at the usual scales (5 at
 /// 1.25, 6 at 1.5, 7 at 1.75, 8 at 2), so the border meets the window
@@ -154,37 +164,152 @@ pub fn hidden(config: &Path) -> bool {
     value.is_some_and(|v| v.trim() == "hidden")
 }
 
-/// What `wl-sandbox --frame` carries: the colour and the width, `rrggbb:w`.
+/// Where the title strip is (`docs/WINDOW-FRAME.md` §0а: the border is
+/// always there, the title may hide).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleMode {
+    /// Along the top, inside the window: the program is told a size less
+    /// the strip, as it is told one less the border.
+    Always,
+    /// Over the top of the program's content, only while the pointer is at
+    /// the window's top edge or on the strip: it takes no room.
+    Hover,
+    /// No strip; the border alone.
+    Off,
+}
+
+/// The owner's choice (§0а): the strip is there unless asked otherwise.
+pub const DEFAULT_TITLE: TitleMode = TitleMode::Always;
+
+impl TitleMode {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "always" => Some(Self::Always),
+            "hover" => Some(Self::Hover),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::Hover => "hover",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// The title strip's mode and where it comes from. A value that is not a
+/// mode is skipped, as if it were not there.
+pub fn title_mode(config: &Path) -> (TitleMode, Source) {
+    let file = |path: &Path| read_setting(path).as_deref().and_then(TitleMode::parse);
+    if let Some(mode) = file(&config.join(DECLARED_DIR).join(TITLE_SETTING)) {
+        return (mode, Source::Nix);
+    }
+    if let Some(mode) = file(&config.join(TITLE_SETTING)) {
+        return (mode, Source::Local);
+    }
+    (DEFAULT_TITLE, Source::Default)
+}
+
+/// Whether a character may be drawn in the title: not a control character,
+/// and nothing that reorders or hides text (`crate::focus::reorders` — a
+/// bidi override would make one zone's name read as another's).
+fn drawable(c: &char) -> bool {
+    !c.is_control() && !crate::focus::reorders(*c)
+}
+
+/// A name for the title strip, fit to be drawn: only [`drawable`]
+/// characters, no space at the ends, at most [`MAX_TITLE_PART`] characters
+/// (a longer one is cut and ends in `…`).
+pub fn title_part(name: &str) -> String {
+    let clean: String = name.chars().filter(drawable).collect();
+    let text = clean.trim();
+    if text.chars().count() <= MAX_TITLE_PART {
+        return text.to_owned();
+    }
+    let cut: String = text.chars().take(MAX_TITLE_PART - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// The title strip's text: `<zone> · <container>`, each part cleaned by
+/// [`title_part`].
+pub fn title_text(zone: &str, container: &str) -> String {
+    format!("{} · {}", title_part(zone), title_part(container))
+}
+
+/// What came on a command line (`wl-sandbox --frame-title`), cleaned again
+/// by the same rules, for the whole: two parts and the dot between.
+pub fn clean_title(text: &str) -> String {
+    let clean: String = text
+        .chars()
+        .filter(drawable)
+        .take(2 * MAX_TITLE_PART + 3)
+        .collect();
+    clean.trim().to_owned()
+}
+
+/// What `wl-sandbox --frame` carries: the colour, the width and the title's
+/// mode, `rrggbb:w:mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Frame {
     pub color: Rgb,
     pub width: i32,
+    pub title: TitleMode,
 }
 
 impl Frame {
-    /// The zone's border as the settings have it now.
+    /// The zone's frame as the settings have it now.
     pub fn of_zone(state: &Path, config: &Path, zone: &str) -> Self {
         Self {
             color: zone_color(state, config, zone).0,
             width: width(config).0,
+            title: title_mode(config).0,
         }
     }
 
     pub fn to_arg(self) -> String {
-        format!("{}:{}", &self.color.hex()[1..], self.width)
+        format!(
+            "{}:{}:{}",
+            &self.color.hex()[1..],
+            self.width,
+            self.title.as_str()
+        )
     }
 
+    /// `rrggbb:w:mode`; `rrggbb:w` has the default mode.
     pub fn parse_arg(text: &str) -> Option<Self> {
-        let (color, width) = text.split_once(':')?;
-        let width: i32 = width.parse().ok()?;
+        let mut parts = text.split(':');
+        let color = Rgb::parse(parts.next()?)?;
+        let width: i32 = parts.next()?.parse().ok()?;
         if !(1..=MAX_WIDTH).contains(&width) {
             return None;
         }
+        let title = match parts.next() {
+            None => DEFAULT_TITLE,
+            Some(mode) => TitleMode::parse(mode)?,
+        };
+        if parts.next().is_some() {
+            return None;
+        }
         Some(Self {
-            color: Rgb::parse(color)?,
+            color,
             width,
+            title,
         })
     }
+}
+
+/// Everything the proxy draws a launch's frame with, as `wl-sandbox` is told
+/// it: the frame, the title's text (`--frame-title`, cleaned again on the
+/// way in) and the directory of the switch that hides every frame
+/// (`--frame-switch`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setup {
+    pub frame: Frame,
+    pub title: String,
+    pub switch: PathBuf,
 }
 
 #[cfg(test)]
@@ -303,9 +428,18 @@ mod tests {
         let f = Frame {
             color: Rgb(1, 2, 255),
             width: 6,
+            title: TitleMode::Hover,
         };
-        assert_eq!(f.to_arg(), "0102ff:6");
+        assert_eq!(f.to_arg(), "0102ff:6:hover");
         assert_eq!(Frame::parse_arg(&f.to_arg()), Some(f));
+        assert_eq!(
+            Frame::parse_arg("0102ff:6"),
+            Some(Frame {
+                title: DEFAULT_TITLE,
+                ..f
+            }),
+            "without a mode, the default one"
+        );
         for bad in [
             "0102ff",
             "0102ff:0",
@@ -313,8 +447,55 @@ mod tests {
             "zz02ff:4",
             ":4",
             "0102ff:x",
+            "0102ff:4:sometimes",
+            "0102ff:4:off:more",
+            "0102ff:4:",
         ] {
             assert_eq!(Frame::parse_arg(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_title_mode_is_nix_then_local_then_always() {
+        let (state, config) = dirs("title");
+        assert_eq!(title_mode(&config), (TitleMode::Always, Source::Default));
+        fs::write(config.join(TITLE_SETTING), "hover\n").unwrap();
+        assert_eq!(title_mode(&config), (TitleMode::Hover, Source::Local));
+        fs::write(config.join(DECLARED_DIR).join(TITLE_SETTING), "off").unwrap();
+        assert_eq!(title_mode(&config), (TitleMode::Off, Source::Nix));
+        fs::write(config.join(DECLARED_DIR).join(TITLE_SETTING), "never").unwrap();
+        assert_eq!(
+            title_mode(&config),
+            (TitleMode::Hover, Source::Local),
+            "not a mode: as if it were not there"
+        );
+        let _ = fs::remove_dir_all(state.parent().unwrap());
+    }
+
+    /// The title is there to be read and believed at a glance: what a name
+    /// could hide or turn around is not drawn, and nothing is endless.
+    #[test]
+    fn the_title_text_is_two_clean_bounded_parts() {
+        assert_eq!(title_text("nl", "основной"), "nl · основной");
+        // Control characters and bidi overrides go: "\u{202E}ln" reads
+        // backwards, a line break would start a line of its own.
+        assert_eq!(
+            title_text("n\u{202E}l\n", "\u{200B}bank\u{2066}"),
+            "nl · bank"
+        );
+        assert_eq!(title_part("  work  "), "work");
+        assert_eq!(title_part("\u{7}\u{1b}[31m"), "[31m");
+        // Bounded, and cut where a character ends, never inside one.
+        let part = title_part(&"й".repeat(100));
+        assert_eq!(part.chars().count(), MAX_TITLE_PART);
+        assert!(part.ends_with('…'), "{part}");
+        let exact = "x".repeat(MAX_TITLE_PART);
+        assert_eq!(title_part(&exact), exact, "not cut when it fits");
+        // What came on the command line is cleaned again, and bounded.
+        assert_eq!(clean_title(" nl\u{202E} · a\r"), "nl · a");
+        assert_eq!(
+            clean_title(&"z".repeat(1000)).chars().count(),
+            2 * MAX_TITLE_PART + 3
+        );
     }
 }

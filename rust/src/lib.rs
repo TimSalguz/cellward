@@ -51,7 +51,8 @@
 //! * [`wl_sandbox`] — the restricted Wayland socket a program is put on
 //!   (`wp_security_context_v1`, `docs/GOTCHAS.md` §7), and [`wl_proxy`], the
 //!   confined process that stands on that socket between the program and the
-//!   compositor (`docs/WINDOW-FRAME.md` §8);
+//!   compositor (`docs/WINDOW-FRAME.md` §8) and draws the zone's frame
+//!   ([`wl_frame`], its title's text [`wl_title`]);
 //! * [`trust`] — extra root certificates trusted by one container only: the
 //!   bundle bind, the environment and the NSS databases (`docs/CERTIFICATES.md`);
 //! * [`status`] — the machine-readable state (`vpn-zone status --json`), with
@@ -124,5 +125,6 @@ pub mod window;
 pub mod wl_frame;
 pub mod wl_proxy;
 pub mod wl_sandbox;
+pub mod wl_title;
 pub mod x11;
 pub mod zone;
