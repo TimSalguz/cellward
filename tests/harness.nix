@@ -108,6 +108,11 @@ let
             exceptions = [ "agents" ];
           };
           compositorRestriction.enable = true;
+          microphone = {
+            calls = "yes";
+            offline = "no";
+            agents = "ask";
+          };
           desktop = {
             windowMenu.key = "Mod+Shift+Z";
             niri = {

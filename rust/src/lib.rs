@@ -105,6 +105,7 @@ pub mod journal;
 pub mod json;
 pub mod kill;
 pub mod launch;
+pub mod microphone;
 pub mod openconnect;
 pub mod picker;
 pub mod profile;

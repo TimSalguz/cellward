@@ -722,6 +722,22 @@ in
       description = "Герметичные зоны (по имени), программы которых могут писать туда, что хост потом исполняет из дома: автозапуск, юниты, ярлыки, конфиги оболочек и композитора, ~/.ssh. По умолчанию в герметичной зоне это только для чтения: иначе программа без песочницы подложит хосту код в обход зоны. Точечные файлы, которые home-manager делает ссылками в корне дома (~/.zshrc → store), монтированием не закрыть — их защищает песочница. Без пересборки — vpn-zone host-files <зона> writable. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
+    microphone = lib.mkOption {
+      type = lib.types.attrsOf (
+        lib.types.enum [
+          "yes"
+          "no"
+          "ask"
+        ]
+      );
+      default = { };
+      example = {
+        calls = "yes";
+        offline = "no";
+      };
+      description = "Может ли программа зоны записывать микрофон (как разрешения в телефоне): имя зоны → yes (без вопроса), no (никогда) или ask — при первой записи программы зоны на хосте спрашивают: разрешить один раз, всегда или отказать. Зона без значения здесь и без своего (vpn-zone microphone <зона> yes|no|ask) — ask; без графической сессии или без ответа за 25 с — отказ. «Всегда» — всей зоне, любой её программе: пишет yes в настройку зоны; для зоны, заданной здесь, его не предлагают. После отказа зону 3 минуты не спрашивают. Действует сразу, без перезапуска зоны. Звук, который играет хост (мониторы выходов), зоне не записать никогда. Только путь PulseAudio: сырой pipewire-0 этим не закрыт (ROADMAP §17), а в негерметичной зоне — и systemd --user хоста. Сами зоны в Nix не описываются: здесь только имена.";
+    };
+
     hermetic.default = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
@@ -865,6 +881,10 @@ in
         message = "programs.vpn-zones.frame.colors: имя зоны — непустое и без пробелов";
       }
       {
+        assertion = lib.all (z: builtins.match "[^[:space:]]+" z != null) (lib.attrNames cfg.microphone);
+        message = "programs.vpn-zones.microphone: имя зоны — непустое и без пробелов";
+      }
+      {
         assertion = lib.all (z: z != "" && !(lib.hasInfix "\n" z)) (cfg.nixDaemon ++ cfg.hostFilesWritable ++ cfg.camera);
         message = "programs.vpn-zones.nixDaemon / hostFilesWritable: имя зоны — непустое и без переводов строки";
       }
@@ -965,6 +985,11 @@ in
         lib.mapAttrsToList (zone: color: "${zone} ${color}\n") cfg.frame.colors
       );
     })
+    (lib.mkIf (cfg.microphone != { }) {
+      ".config/vpn-zones/declared/microphone".text = lib.concatStrings (
+        lib.mapAttrsToList (zone: value: "${zone} ${value}\n") cfg.microphone
+      );
+    })
     (lib.mkIf (cfg.frame.width != null) {
       ".config/vpn-zones/declared/frame-width".text = toString cfg.frame.width;
     })
@@ -1053,7 +1078,11 @@ in
         + " --openconnect ${openconnect} --dbus-proxy ${dbusProxy}/bin/xdg-dbus-proxy"
         # Чем фильтр шины герметичной зоны просит брокера открыть ссылку
         # программы — в той же зоне (LEAK-MODEL §2).
-        + " --opener ${vpn-zone-opener} %i";
+        + " --opener ${vpn-zone-opener}"
+        # Чем фильтр звука зоны спрашивает, дать ли программе микрофон
+        # (rust/src/microphone.rs): спрашивает в окружении юнита — есть ли в
+        # нём WAYLAND_DISPLAY/DISPLAY, есть ли кого спросить.
+        + " --kdialog ${kdialog} %i";
       Restart = "no";
       # KillMode=control-group по умолчанию: гасим зону — гаснет и pasta, и всё,
       # что в зоне работало, теряет сеть. Это и есть kill switch.

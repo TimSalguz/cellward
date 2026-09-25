@@ -10,8 +10,9 @@
 //! `/.flatpak-info` is a client on the host to it. And a client may record
 //! the monitor of any output: everything the host plays.
 //!
-//! **What.** A filter in front of the socket, started by the zone's holder on
-//! the host and bound into the zone as `pulse/native`. It reads the protocol's
+//! **What.** A filter in front of the socket, started by the zone's unit on
+//! the host — in the host's user namespace, out of the zone's reach through
+//! `/proc` (`zone::Helpers`) — and bound into the zone as `pulse/native`. It reads the protocol's
 //! frames — a 20-byte descriptor (length, channel, offset, flags; big-endian)
 //! and a payload — and passes on only what an ordinary program needs:
 //!
@@ -68,14 +69,27 @@
 //! the relink and the server's word through; a stream the filter checked is
 //! pinned to a real source, so only a device change on the host moves it. A
 //! microphone and the default source (the zone can no longer change the
-//! default) stay allowed — the default only while it is not a monitor.
+//! default) stay recordable — the default only while it is not a monitor,
+//! and either only as the zone's microphone setting allows (below).
+//!
+//! **The microphone** (owner, 2026-09-25; `crate::microphone`): a record
+//! stream that is not refused above goes on only as the zone's setting says,
+//! read when the stream is asked for — `yes` passes it, `no` answers it
+//! `ERROR`/`ACCESS`, `ask` holds that one request (`Up::Ask`) while the person
+//! on the host is asked, and passes or refuses it by the answer. A held
+//! request is not forwarded; the connection's other commands go on meanwhile,
+//! and the server, which pairs its replies by tag, answers the held one when
+//! it gets it, whenever that is. The program's name in the question is what
+//! its own properties say (`application.name`, of the stream or the client),
+//! shown as its word; the zone is the one this filter was started for.
 //!
 //! Descriptors (a sound server's shared memory) travel with the frame they
 //! came with: on a Unix stream socket a read never runs across the start of a
 //! message that carries some, so the frame that begins where such a read
 //! began is theirs.
 //!
-//! Usage: `vpn-zone-core pulse-filter --listen <socket> --upstream <socket>`.
+//! Usage: `vpn-zone-core pulse-filter --listen <socket> --upstream <socket>
+//! --zone <name> --zone-dir <dir> --config <dir> --kdialog <program>`.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
@@ -90,6 +104,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use crate::microphone::{Policy, Verdict};
 use crate::sys;
 
 /// The descriptor in front of every frame.
@@ -324,27 +339,58 @@ const MAX_CONNECTIONS: u32 = 128;
 pub struct Args {
     pub listen: PathBuf,
     pub upstream: PathBuf,
+    /// The zone this filter serves: the one a microphone question names.
+    pub zone: String,
+    /// Its state directory, where its microphone marker is.
+    pub zone_dir: PathBuf,
+    /// `~/.config/vpn-zones`, where `declared/microphone` is.
+    pub config: PathBuf,
+    /// What asks the person.
+    pub kdialog: PathBuf,
 }
 
 impl Args {
+    /// Every flag is required: a filter that did not know its zone could not
+    /// read its microphone setting, and would have to refuse every record
+    /// stream anyway.
     pub fn parse(args: &[OsString]) -> Result<Self, String> {
         let mut listen = None;
         let mut upstream = None;
+        let mut zone = None;
+        let mut zone_dir = None;
+        let mut config = None;
+        let mut kdialog = None;
         let mut it = args.iter();
         while let Some(flag) = it.next() {
             let value = it
                 .next()
-                .map(PathBuf::from)
                 .ok_or_else(|| format!("{} needs a value", flag.to_string_lossy()))?;
+            let path = PathBuf::from(value);
             match flag.to_str() {
-                Some("--listen") => listen = Some(value),
-                Some("--upstream") => upstream = Some(value),
+                Some("--listen") => listen = Some(path),
+                Some("--upstream") => upstream = Some(path),
+                Some("--zone") => {
+                    zone = Some(
+                        value
+                            .to_str()
+                            .filter(|z| !z.is_empty())
+                            .ok_or("--zone is not a zone's name")?
+                            .to_owned(),
+                    )
+                }
+                Some("--zone-dir") => zone_dir = Some(path),
+                Some("--config") => config = Some(path),
+                Some("--kdialog") => kdialog = Some(path),
                 _ => return Err(format!("unknown flag {}", flag.to_string_lossy())),
             }
         }
         Ok(Self {
             listen: listen.ok_or("--listen is required")?,
             upstream: upstream.ok_or("--upstream is required")?,
+            zone: zone.ok_or("--zone is required")?,
+            zone_dir: zone_dir.ok_or("--zone-dir is required")?,
+            config: config.ok_or("--config is required")?,
+            kdialog: kdialog.ok_or("--kdialog is required")?,
         })
     }
 }
@@ -678,6 +724,31 @@ fn str_at(items: &[Item], i: usize) -> Option<Option<&[u8]>> {
     }
 }
 
+/// The value of `key` in a property list of `payload`, as text without its
+/// NUL: an entry is `t` key NUL, `L` length, `x` length, the bytes (`props`).
+fn property_text(
+    payload: &[u8],
+    entries: &[(Vec<u8>, Range<usize>)],
+    key: &[u8],
+) -> Option<String> {
+    let (k, span) = entries.iter().find(|(k, _)| k == key)?;
+    let start = span.start + 1 + k.len() + 1 + 5 + 5;
+    let bytes = payload.get(start..span.end)?;
+    let bytes = bytes.split(|b| *b == 0).next().unwrap_or_default();
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// The program's name in the first property list among `values`: what it
+/// calls itself, or its binary's name.
+fn program_name(payload: &[u8], values: &[Item]) -> Option<String> {
+    values.iter().find_map(|item| match &item.value {
+        Value::Props(entries) => [&b"application.name"[..], b"application.process.binary"]
+            .iter()
+            .find_map(|key| property_text(payload, entries, key).filter(|n| !n.trim().is_empty())),
+        _ => None,
+    })
+}
+
 /// The frame with every key `property_allowed` does not keep cut out of its
 /// top-level property lists, and the keys that went; the frame itself when
 /// none did.
@@ -797,6 +868,15 @@ enum Up {
     Forward(Vec<u8>),
     /// Answered `ERROR`/`ACCESS` for this tag, and why.
     Refuse(u32, String),
+    /// A record stream the person is asked about (`crate::microphone`): held
+    /// — its properties cut — until the answer, then forwarded or refused.
+    /// The zone's one open question is this one (`Policy::decide`).
+    Ask {
+        tag: u32,
+        frame: Vec<u8>,
+        program: String,
+        remember: bool,
+    },
     /// The connection ends.
     Close(String),
 }
@@ -825,6 +905,15 @@ struct Session {
     streams: HashMap<(Kind, u32), u32>,
     /// A cut has been logged on this connection.
     told_cut: bool,
+    /// The zone's microphone setting and its question
+    /// (`crate::microphone`); by default one that never records.
+    mic: Arc<Policy>,
+    /// What the program calls itself (`SET_CLIENT_NAME`,
+    /// `UPDATE_CLIENT_PROPLIST`): its word, for the question only.
+    client_name: Option<String>,
+    /// The person refused a record stream of this connection: its retries
+    /// are refused without asking again.
+    mic_denied: bool,
 }
 
 impl Session {
@@ -876,7 +965,11 @@ impl Session {
         let Some(items) = parse(&frame[DESCRIPTOR..]) else {
             return Up::Refuse(tag, format!("{name} (unreadable)"));
         };
+        let payload = &frame[DESCRIPTOR..];
         let values = &items[2..];
+        // A record stream the person is asked about: its program, and whether
+        // "always" may be offered.
+        let mut ask = None;
         match rule {
             Rule::Refuse => return Up::Refuse(tag, name.to_owned()),
             Rule::Auth => {
@@ -889,7 +982,16 @@ impl Session {
                 self.authed = true;
                 return Up::Forward(frame.to_vec());
             }
-            Rule::Pass => {}
+            Rule::Pass => {
+                if matches!(
+                    command,
+                    COMMAND_SET_CLIENT_NAME | COMMAND_UPDATE_CLIENT_PROPLIST
+                ) {
+                    if let Some(program) = program_name(payload, values) {
+                        self.client_name = Some(program);
+                    }
+                }
+            }
             Rule::Create(kind) => {
                 if self.creating.contains_key(&tag)
                     || self.creating.len() >= MAX_STREAMS
@@ -901,8 +1003,30 @@ impl Session {
                     if let Some(why) = record_refused(values) {
                         return Up::Refuse(tag, format!("{name}: {why}"));
                     }
+                    // Not a monitor: a microphone, by the zone's setting.
+                    // `record_refused` has checked that values[16] are the
+                    // stream's properties.
+                    if self.mic_denied {
+                        return Up::Refuse(
+                            tag,
+                            format!("{name}: the person refused this connection the microphone"),
+                        );
+                    }
+                    let program = program_name(payload, &values[16..17])
+                        .or_else(|| self.client_name.clone())
+                        .unwrap_or_default();
+                    match self.mic.decide(&program) {
+                        Verdict::Allow => {}
+                        Verdict::Refuse(why) => {
+                            return Up::Refuse(tag, format!("{name}: microphone: {why}"))
+                        }
+                        Verdict::Ask { remember } => ask = Some((program, remember)),
+                    }
                 }
-                self.creating.insert(tag, kind);
+                // A held stream is not being created until it is let go.
+                if ask.is_none() {
+                    self.creating.insert(tag, kind);
+                }
             }
             Rule::Delete(kind) => {
                 let Some(channel) = u32_at(values, 0) else {
@@ -933,6 +1057,14 @@ impl Session {
                 "pulse-filter: properties cut from {name}: {}",
                 keys.join(", ")
             );
+        }
+        if let Some((program, remember)) = ask {
+            return Up::Ask {
+                tag,
+                frame,
+                program,
+                remember,
+            };
         }
         Up::Forward(frame)
     }
@@ -1124,9 +1256,9 @@ fn lock(session: &Mutex<Session>) -> std::sync::MutexGuard<'_, Session> {
 /// The zone's frames to the server; what is refused is answered to the zone.
 fn pump_up(
     client: &UnixStream,
-    to_server: &Out,
-    to_client: &Out,
-    session: &Mutex<Session>,
+    to_server: &Arc<Out>,
+    to_client: &Arc<Out>,
+    session: &Arc<Mutex<Session>>,
 ) -> io::Result<()> {
     let mut frames = Frames::new(client);
     while let Some((frame, carried)) = frames.next()? {
@@ -1142,8 +1274,84 @@ fn pump_up(
                 eprintln!("pulse-filter: {what} refused");
                 to_client.send(&error_frame(tag), &[])?;
             }
+            Up::Ask {
+                tag,
+                frame,
+                program,
+                remember,
+            } => ask(
+                AskedStream {
+                    tag,
+                    frame,
+                    carried,
+                    program,
+                    remember,
+                },
+                to_server,
+                to_client,
+                session,
+            )?,
             Up::Close(why) => return Err(io::Error::other(why)),
         }
+    }
+    Ok(())
+}
+
+/// A record stream held for the person's answer, with what it came with.
+struct AskedStream {
+    tag: u32,
+    frame: Vec<u8>,
+    carried: Vec<OwnedFd>,
+    program: String,
+    remember: bool,
+}
+
+/// Ask about a held record stream on a thread of its own — the connection's
+/// other commands go on meanwhile — and forward it or answer it `ERROR` by
+/// the answer.
+fn ask(
+    held: AskedStream,
+    to_server: &Arc<Out>,
+    to_client: &Arc<Out>,
+    session: &Arc<Mutex<Session>>,
+) -> io::Result<()> {
+    let mic = Arc::clone(&lock(session).mic);
+    let tag = held.tag;
+    let spawned = {
+        let (to_server, to_client, session, mic) = (
+            Arc::clone(to_server),
+            Arc::clone(to_client),
+            Arc::clone(session),
+            Arc::clone(&mic),
+        );
+        thread::Builder::new().spawn(move || {
+            // The connection's state by the answer, while the zone's question
+            // is still open: a request of this connection that comes in
+            // meanwhile is refused as "a question is open", and one after it
+            // finds the deny standing — none gets a question of its own.
+            let allowed = mic.ask(&held.program, held.remember, |allowed| {
+                let mut s = lock(&session);
+                if allowed {
+                    s.creating.insert(held.tag, Kind::Record);
+                } else {
+                    s.mic_denied = true;
+                }
+                allowed
+            });
+            // The connection may be gone by now: then these sends fail, and
+            // there is nobody to tell.
+            if allowed {
+                let raw: Vec<RawFd> = held.carried.iter().map(AsRawFd::as_raw_fd).collect();
+                let _ = to_server.send(&held.frame, &raw);
+            } else {
+                let _ = to_client.send(&error_frame(held.tag), &[]);
+            }
+        })
+    };
+    if let Err(e) = spawned {
+        mic.abandon();
+        eprintln!("pulse-filter: CREATE_RECORD_STREAM refused: cannot ask ({e})");
+        to_client.send(&error_frame(tag), &[])?;
     }
     Ok(())
 }
@@ -1169,17 +1377,20 @@ fn pump_down(server: &UnixStream, to_client: &Out, session: &Mutex<Session>) -> 
     Ok(())
 }
 
-fn serve(client: UnixStream, upstream: &PathBuf) -> io::Result<()> {
+fn serve(client: UnixStream, upstream: &PathBuf, mic: Arc<Policy>) -> io::Result<()> {
     let server = UnixStream::connect(upstream)?;
-    let session = Arc::new(Mutex::new(Session::default()));
+    let session = Arc::new(Mutex::new(Session {
+        mic,
+        ..Session::default()
+    }));
     let to_client = Arc::new(Out {
         sock: client.try_clone()?,
         lock: Mutex::new(()),
     });
-    let to_server = Out {
+    let to_server = Arc::new(Out {
         sock: server.try_clone()?,
         lock: Mutex::new(()),
-    };
+    });
     let down = {
         let to_client = Arc::clone(&to_client);
         let session = Arc::clone(&session);
@@ -1209,10 +1420,20 @@ fn report(e: &io::Error) {
     }
 }
 
-/// Serve until the holder that started us goes.
+/// Serve until the zone's unit that started us goes.
 pub fn run(args: &Args) -> u8 {
     // SAFETY: prctl with these arguments takes no pointers.
     unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) };
+    // Nobody of the same uid may read this process through /proc/<pid>/:
+    // its `root` is the host's file system, `pulse/native` unfiltered and
+    // the zone's microphone setting in it, and its `fd` hold both. The zone
+    // starts it in the host's user namespace (`zone::Helpers`), which a
+    // zone's programs cannot read anyway; not dumpable, it stays out of reach
+    // wherever it is started from (`bus_filter::run` does the same). What it
+    // starts — kdialog — is dumpable again after exec, and is safe only by
+    // where this process lives.
+    // SAFETY: prctl with these arguments takes no pointers.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
     let _ = fs::remove_file(&args.listen);
     let listener = match UnixListener::bind(&args.listen) {
         Ok(l) => l,
@@ -1225,6 +1446,21 @@ pub fn run(args: &Args) -> u8 {
         }
     };
     let _ = fs::set_permissions(&args.listen, fs::Permissions::from_mode(0o600));
+    // The zone is this filter's, fixed here; the setting is read for every
+    // record stream.
+    let mic = Arc::new(Policy::new(
+        &args.zone,
+        args.zone_dir.clone(),
+        args.config.clone(),
+        args.kdialog.clone(),
+    ));
+    if !mic.has_display() {
+        eprintln!(
+            "pulse-filter: zone {}: no graphical session (WAYLAND_DISPLAY, DISPLAY) — a microphone \
+             set to \"ask\" is refused, there is nobody to ask",
+            mic.zone()
+        );
+    }
     let connections = Arc::new(AtomicU32::new(0));
     for client in listener.incoming() {
         let Ok(client) = client else {
@@ -1237,8 +1473,9 @@ pub fn run(args: &Args) -> u8 {
         connections.fetch_add(1, Ordering::SeqCst);
         let upstream = args.upstream.clone();
         let connections = Arc::clone(&connections);
+        let mic = Arc::clone(&mic);
         thread::spawn(move || {
-            if let Err(e) = serve(client, &upstream) {
+            if let Err(e) = serve(client, &upstream, mic) {
                 report(&e);
             }
             connections.fetch_sub(1, Ordering::SeqCst);
@@ -1250,6 +1487,7 @@ pub fn run(args: &Args) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::microphone::Setting;
 
     /// A packet's values, written as the client library writes them.
     #[derive(Clone)]
@@ -1390,8 +1628,17 @@ mod tests {
         )
     }
 
+    /// After AUTH, in a zone whose microphone is let.
     fn authed() -> Session {
-        let mut s = Session::default();
+        with_mic(Setting::Yes, false)
+    }
+
+    /// After AUTH, with this microphone setting and a display or none.
+    fn with_mic(setting: Setting, display: bool) -> Session {
+        let mut s = Session {
+            mic: Arc::new(Policy::fixed(setting, display)),
+            ..Session::default()
+        };
         assert!(matches!(s.up(&auth(0)), Up::Forward(_)));
         s
     }
@@ -1914,8 +2161,9 @@ mod tests {
         let server = UnixListener::bind(&upstream).unwrap();
         let (client, filter_side) = UnixStream::pair().unwrap();
         let path = upstream.clone();
+        let mic = Arc::new(Policy::fixed(Setting::Yes, false));
         thread::spawn(move || {
-            let _ = serve(filter_side, &path);
+            let _ = serve(filter_side, &path, mic);
         });
         let (mut seen, _) = server.accept().unwrap();
         let mut c = client;
@@ -1957,6 +2205,178 @@ mod tests {
         let mut rest = Vec::new();
         let _ = c.read_to_end(&mut rest);
         assert!(rest.is_empty(), "{} bytes reached the program", rest.len());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The microphone by the zone's setting: no refuses, yes passes, ask
+    /// holds the request — and a monitor stays refused whatever it says.
+    #[test]
+    fn a_microphone_goes_by_the_zones_setting() {
+        let none: &[(&str, &str)] = &[];
+        let mut s = with_mic(Setting::No, true);
+        let why = refused(s.up(&record(1, INVALID, None, none, INVALID)));
+        assert!(why.contains("microphone"), "{why}");
+        assert!(s.creating.is_empty());
+        // A monitor is refused as one, before the setting is looked at.
+        let mut s = with_mic(Setting::Yes, true);
+        let why = refused(s.up(&record(1, INVALID, Some("x.monitor"), none, INVALID)));
+        assert!(why.contains("a monitor"), "{why}");
+        assert!(matches!(
+            s.up(&record(2, INVALID, None, none, INVALID)),
+            Up::Forward(_)
+        ));
+        assert_eq!(s.creating.len(), 1);
+        // Ask, with nobody to ask: refused.
+        let mut s = with_mic(Setting::Ask, false);
+        let why = refused(s.up(&record(1, INVALID, None, none, INVALID)));
+        assert!(why.contains("графической"), "{why}");
+        // Ask: held — not being created — under the program's own name, the
+        // stream's over the client's.
+        let mut s = with_mic(Setting::Ask, true);
+        let client = packet(
+            COMMAND_SET_CLIENT_NAME,
+            1,
+            &[V::P(&[("application.name", "Client")])],
+        );
+        assert!(matches!(s.up(&client), Up::Forward(_)));
+        let sneaky: &[(&str, &str)] = &[("target.object", "x")];
+        match s.up(&record(2, INVALID, None, sneaky, INVALID)) {
+            Up::Ask {
+                tag,
+                frame,
+                program,
+                remember,
+            } => {
+                assert_eq!((tag, program.as_str(), remember), (2, "Client", true));
+                // Held with its properties cut, as it would have gone on.
+                assert_eq!(frame, record(2, INVALID, None, none, INVALID));
+            }
+            other => panic!("not held: {other:?}"),
+        }
+        assert!(s.creating.is_empty());
+        // One question at a time for the zone.
+        let why = refused(s.up(&record(3, INVALID, None, none, INVALID)));
+        assert!(why.contains("уже открыт"), "{why}");
+        s.mic.abandon();
+        let named: &[(&str, &str)] = &[("application.name", "Stream")];
+        assert!(matches!(
+            s.up(&record(4, INVALID, None, named, INVALID)),
+            Up::Ask { program, .. } if program == "Stream"
+        ));
+        s.mic.abandon();
+        // Refused by the person once: the connection is not asked again.
+        s.mic_denied = true;
+        let why = refused(s.up(&record(5, INVALID, None, none, INVALID)));
+        assert!(why.contains("refused this connection"), "{why}");
+    }
+
+    /// "Ask" for real: the record stream waits for the answer while the
+    /// connection's other commands reach the server; allowed once, it goes
+    /// on — that stream only; refused, it is answered ERROR and the
+    /// connection is not asked again.
+    #[test]
+    fn a_record_stream_waits_for_the_answer_and_the_rest_goes_on() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+        let dir = std::env::temp_dir().join(format!("vz-pulse-ask-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("state/nl")).unwrap();
+        fs::create_dir_all(dir.join("config")).unwrap();
+        // A kdialog that writes down its question and answers what `go` says.
+        let kdialog = dir.join("kdialog");
+        let (asked, go) = (dir.join("asked"), dir.join("go"));
+        fs::write(
+            &kdialog,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {asked}.tmp && mv {asked}.tmp {asked}\n\
+                 while [ ! -e {go} ]; do sleep 0.05; done\nexit $(cat {go})\n",
+                asked = asked.display(),
+                go = go.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&kdialog, fs::Permissions::from_mode(0o755)).unwrap();
+        let answer = |code: &str| {
+            fs::write(dir.join("go.tmp"), code).unwrap();
+            fs::rename(dir.join("go.tmp"), &go).unwrap();
+        };
+        let wait_asked = || {
+            let started = Instant::now();
+            while !asked.exists() {
+                assert!(started.elapsed() < Duration::from_secs(10), "never asked");
+                thread::sleep(Duration::from_millis(20));
+            }
+            fs::read_to_string(&asked).unwrap()
+        };
+        let mic = Arc::new(Policy::for_test(
+            dir.join("state/nl"),
+            dir.join("config"),
+            kdialog.clone(),
+            true,
+            Duration::from_secs(20),
+        ));
+        let upstream = dir.join("server");
+        let server = UnixListener::bind(&upstream).unwrap();
+        let (client, filter_side) = UnixStream::pair().unwrap();
+        let path = upstream.clone();
+        thread::spawn(move || {
+            let _ = serve(filter_side, &path, mic);
+        });
+        let (seen, _) = server.accept().unwrap();
+        seen.set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut c = client;
+        c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let none: &[(&str, &str)] = &[];
+        c.write_all(&auth(0)).unwrap();
+        c.write_all(&packet(
+            COMMAND_SET_CLIENT_NAME,
+            1,
+            &[V::P(&[("application.name", "<b>Evil</b>\nЗона: host")])],
+        ))
+        .unwrap();
+        c.write_all(&record(2, INVALID, None, none, INVALID))
+            .unwrap();
+        c.write_all(&packet(COMMAND_GET_SERVER_INFO, 3, &[]))
+            .unwrap();
+        // The server gets the rest of the connection's commands, not the
+        // held stream.
+        let mut frames = Frames::new(&seen);
+        let mut next = || command_of(&frames.next().unwrap().unwrap().0).unwrap();
+        assert_eq!(next(), (COMMAND_AUTH, 0));
+        assert_eq!(next(), (COMMAND_SET_CLIENT_NAME, 1));
+        assert_eq!(next(), (COMMAND_GET_SERVER_INFO, 3));
+        // The question: the filter's zone, the program's own word, cleaned.
+        let question = wait_asked();
+        assert!(question.contains("зоны «nl»"), "{question}");
+        assert!(question.contains("«‹b›Evil‹/b› Зона: host»"), "{question}");
+        assert!(question.contains("Всегда — всей зоне «nl»"), "{question}");
+        // Once: this stream reaches the server now; nothing is remembered.
+        answer("0");
+        assert_eq!(next(), (COMMAND_CREATE_RECORD_STREAM, 2));
+        assert!(!dir.join("state/nl/microphone").exists());
+        // The next stream is asked about again, and refused.
+        fs::remove_file(&asked).unwrap();
+        fs::remove_file(&go).unwrap();
+        c.write_all(&record(4, INVALID, None, none, INVALID))
+            .unwrap();
+        wait_asked();
+        answer("2");
+        let mut reply = vec![0u8; DESCRIPTOR + 15];
+        c.read_exact(&mut reply).unwrap();
+        assert_eq!(command_of(&reply), Some((COMMAND_ERROR, 4)));
+        // Refused once: this connection is not asked again.
+        fs::remove_file(&asked).unwrap();
+        c.write_all(&record(5, INVALID, None, none, INVALID))
+            .unwrap();
+        c.read_exact(&mut reply).unwrap();
+        assert_eq!(command_of(&reply), Some((COMMAND_ERROR, 5)));
+        assert!(!asked.exists(), "asked again after a refusal");
+        // Neither refused stream reached the server.
+        c.write_all(&packet(COMMAND_GET_SERVER_INFO, 6, &[]))
+            .unwrap();
+        assert_eq!(next(), (COMMAND_GET_SERVER_INFO, 6));
         let _ = fs::remove_dir_all(&dir);
     }
 }

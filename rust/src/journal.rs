@@ -19,7 +19,10 @@
 //! * `kill` — `zone`, `killed` (how many), `programs`, `down` (`yes`, `no`);
 //! * `grant` — `container`, `path`, `until` (empty for no term);
 //! * `revoke`, `grant-expired` — `container`, `path`, `detached` (mount
-//!   namespaces of running programs it was taken out of), `failed`.
+//!   namespaces of running programs it was taken out of), `failed`;
+//! * `microphone` — `zone`, `program` (its own word), `decision` (`allowed`,
+//!   `refused`), `why`: a question about the microphone and its answer, or a
+//!   refusal because there was nobody to ask (`crate::microphone`).
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -203,6 +206,15 @@ fn human(fields: &[(String, String)]) -> String {
                 get("app")
             )
         }
+        "microphone" => format!(
+            "микрофон: зона «{}», программа «{}» — {}",
+            get("zone"),
+            get("program"),
+            match get("decision") {
+                "allowed" => get("why").to_owned(),
+                _ => format!("отказано: {}", get("why")),
+            }
+        ),
         "grant" => format!(
             "выдан каталог {} контейнеру {}{}",
             get("path"),
