@@ -361,6 +361,184 @@ pub fn body_string(msg: &[u8], h: &Header) -> Result<String> {
     .string()
 }
 
+// --- NOTIFICATIONS -------------------------------------------------------------
+
+/// The hints a notification keeps on its way to the host's daemon: how it
+/// looks and sounds, nothing it can be told to fetch, open or start. Dropped
+/// among others: `desktop-entry` (a click activates that application on the
+/// host), `x-kde-urls` (links the daemon opens), `sound-file` (a path the host
+/// plays). `image-path` stays when it is a path or a `file://` URI.
+const NOTIFY_HINTS: [&str; 11] = [
+    "urgency",
+    "category",
+    "transient",
+    "resident",
+    "image-data",
+    "image_data",
+    "icon_data",
+    "suppress-sound",
+    "sound-name",
+    "action-icons",
+    "x-kde-display-appname",
+];
+
+/// A path, or a URI of a local file: nothing the host would fetch.
+fn local(uri: &str) -> bool {
+    !uri.contains("://") || uri.starts_with("file://")
+}
+
+/// Notification markup without what points anywhere: `b`, `i` and `u` stay,
+/// every other tag goes (its text stays) — `<a href>` a click opens on the
+/// host, `<img src>` a daemon may fetch.
+pub fn plain_markup(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('>') else {
+            out.push_str("&lt;");
+            rest = after;
+            continue;
+        };
+        let tag = &after[..close];
+        if matches!(tag, "b" | "/b" | "i" | "/i" | "u" | "/u") {
+            out.push('<');
+            out.push_str(tag);
+            out.push('>');
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One `a{sv}` read entry by entry: each kept as it was — its bytes, which
+/// start 8-aligned wherever they land — or dropped, or (`image-path`)
+/// rewritten.
+fn filtered_options(
+    r: &mut Reader<'_>,
+    w: &mut Writer,
+    keep: &dyn Fn(&str) -> bool,
+    path_keys: &[&str],
+) -> Result<()> {
+    let len = r.u32()? as usize;
+    r.align(8)?;
+    let end = r
+        .pos
+        .checked_add(len)
+        .filter(|&e| e <= r.buf.len())
+        .ok_or(WireError("options run past the end"))?;
+    w.u32(0);
+    let len_at = w.buf.len() - 4;
+    w.align(8);
+    let start = w.buf.len();
+    while r.pos < end {
+        r.align(8)?;
+        let entry = r.pos;
+        let key = r.string()?;
+        let vsig = r.signature()?;
+        if path_keys.contains(&key.as_str()) && vsig == "s" {
+            let value = r.string()?;
+            if local(&value) {
+                w.align(8);
+                w.string(&key);
+                w.signature("s");
+                w.string(&value);
+            }
+            continue;
+        }
+        if r.skip(vsig.as_bytes(), 0)? != vsig.len() {
+            return Err(WireError("option holds more than one type"));
+        }
+        if keep(&key) {
+            w.align(8);
+            w.buf.extend_from_slice(&r.buf[entry..r.pos]);
+        }
+    }
+    let len = (w.buf.len() - start) as u32;
+    w.buf[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
+    Ok(())
+}
+
+/// `org.freedesktop.Notifications.Notify` as the host's daemon may have it
+/// from a zone (review 2026-09-25, third round): it runs on the host, and a
+/// link in the text, an icon by URL or a hint that names an application is
+/// the host's network or a host launch — past the door OpenURI is. The new
+/// body, little-endian; a big-endian message is refused by the caller.
+pub fn sanitized_notify(msg: &[u8], h: &Header) -> Result<Vec<u8>> {
+    if h.signature.as_deref() != Some(body::NOTIFY_SIGNATURE) || !h.little {
+        return Err(WireError("not a notification the filter reads"));
+    }
+    let mut r = Reader {
+        buf: msg,
+        pos: h.body_offset,
+        little: true,
+    };
+    let mut w = Writer { buf: Vec::new() };
+    let app = r.string()?;
+    let replaces = r.u32()?;
+    let icon = r.string()?;
+    let summary = r.string()?;
+    let text = r.string()?;
+    w.string(&app);
+    w.u32(replaces);
+    w.string(if local(&icon) { &icon } else { "" });
+    w.string(&summary);
+    w.string(&plain_markup(&text));
+    // The actions: their keys go back to the program, which acts on them.
+    let len = r.u32()? as usize;
+    let end = r
+        .pos
+        .checked_add(len)
+        .filter(|&e| e <= msg.len())
+        .ok_or(WireError("actions run past the end"))?;
+    let mut actions = Vec::new();
+    while r.pos < end {
+        actions.push(r.string()?);
+    }
+    w.u32(0);
+    let len_at = w.buf.len() - 4;
+    let start = w.buf.len();
+    for action in &actions {
+        w.string(action);
+    }
+    let len = (w.buf.len() - start) as u32;
+    w.buf[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
+    filtered_options(
+        &mut r,
+        &mut w,
+        &|key| NOTIFY_HINTS.contains(&key),
+        &["image-path", "image_path"],
+    )?;
+    let timeout = r.u32()?;
+    w.u32(timeout);
+    if r.pos != msg.len() {
+        return Err(WireError("more after the notification"));
+    }
+    Ok(w.buf)
+}
+
+/// The notification portal's `AddNotification(s id, a{sv})` without
+/// `markup-body`, whose links the host's daemon would open.
+pub fn sanitized_portal_notification(msg: &[u8], h: &Header) -> Result<Vec<u8>> {
+    if h.signature.as_deref() != Some("sa{sv}") || !h.little {
+        return Err(WireError("not a notification the filter reads"));
+    }
+    let mut r = Reader {
+        buf: msg,
+        pos: h.body_offset,
+        little: true,
+    };
+    let mut w = Writer { buf: Vec::new() };
+    w.string(&r.string()?);
+    filtered_options(&mut r, &mut w, &|key| key != "markup-body", &[])?;
+    if r.pos != msg.len() {
+        return Err(WireError("more after the notification"));
+    }
+    Ok(w.buf)
+}
+
 // --- WRITING ------------------------------------------------------------------
 
 /// A little-endian message under construction.
@@ -415,6 +593,7 @@ pub enum Field<'a> {
     Destination(&'a str),
     Sender(&'a str),
     Signature(&'a str),
+    UnixFds(u32),
 }
 
 /// A complete message: header with `fields`, then `body` (already marshalled
@@ -435,6 +614,7 @@ pub fn message(kind: u8, flags: u8, serial: u32, fields: &[Field<'_>], body: &[u
             Field::Destination(v) => w.field_str(FIELD_DESTINATION, "s", v),
             Field::Sender(v) => w.field_str(FIELD_SENDER, "s", v),
             Field::Signature(v) => w.field_str(FIELD_SIGNATURE, "g", v),
+            Field::UnixFds(v) => w.field_u32(FIELD_UNIX_FDS, *v),
         }
     }
     let fields_len = (w.buf.len() - 16) as u32;
@@ -540,6 +720,134 @@ pub mod body {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A notification as a program in a zone might send it, with everything
+    /// that points the host's daemon at the network or at an application.
+    fn hostile_notify() -> Vec<u8> {
+        let mut w = Writer { buf: Vec::new() };
+        w.string("app");
+        w.u32(7);
+        w.string("https://evil.test/icon.png");
+        w.string("summary");
+        w.string(
+            "<a href=\"https://x.test\">click</a> <b>bold</b><img src=\"http://y.test\"/> 1 < 2",
+        );
+        // actions
+        w.u32(0);
+        let at = w.buf.len();
+        for a in ["default", "Open"] {
+            w.string(a);
+        }
+        let len = (w.buf.len() - at) as u32;
+        w.buf[at - 4..at].copy_from_slice(&len.to_le_bytes());
+        // hints
+        w.u32(0);
+        let len_at = w.buf.len() - 4;
+        w.align(8);
+        let start = w.buf.len();
+        for (key, value) in [
+            ("desktop-entry", "firefox"),
+            ("image-path", "https://evil.test/i.png"),
+            ("image_path", "/tmp/a.png"),
+            ("sound-file", "/tmp/s.oga"),
+        ] {
+            w.align(8);
+            w.string(key);
+            w.signature("s");
+            w.string(value);
+        }
+        w.align(8);
+        w.string("urgency");
+        w.signature("y");
+        w.buf.push(2);
+        w.align(8);
+        w.string("x-kde-urls");
+        w.signature("as");
+        w.u32(0);
+        let at = w.buf.len();
+        w.string("https://z.test");
+        let n = (w.buf.len() - at) as u32;
+        w.buf[at - 4..at].copy_from_slice(&n.to_le_bytes());
+        let len = (w.buf.len() - start) as u32;
+        w.buf[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
+        w.u32(u32::MAX);
+        message(
+            METHOD_CALL,
+            0,
+            5,
+            &[
+                Field::Path("/org/freedesktop/Notifications"),
+                Field::Interface("org.freedesktop.Notifications"),
+                Field::Member("Notify"),
+                Field::Destination("org.freedesktop.Notifications"),
+                Field::Signature(body::NOTIFY_SIGNATURE),
+            ],
+            &w.buf,
+        )
+    }
+
+    /// What reaches the daemon: the text without links and images, no icon by
+    /// URL, the hints of the allow-list and a local image path — and a
+    /// message the bus can read.
+    #[test]
+    fn a_notification_loses_what_points_anywhere() {
+        let msg = hostile_notify();
+        let h = parse_header(&msg).unwrap();
+        let body = sanitized_notify(&msg, &h).unwrap();
+        let out = message(
+            METHOD_CALL,
+            0,
+            5,
+            &[Field::Signature(body::NOTIFY_SIGNATURE)],
+            &body,
+        );
+        let h2 = parse_header(&out).unwrap();
+        let mut r = Reader {
+            buf: &out,
+            pos: h2.body_offset,
+            little: true,
+        };
+        assert_eq!(r.string().unwrap(), "app");
+        assert_eq!(r.u32().unwrap(), 7);
+        assert_eq!(r.string().unwrap(), "");
+        assert_eq!(r.string().unwrap(), "summary");
+        assert_eq!(r.string().unwrap(), "click <b>bold</b> 1 &lt; 2");
+        let len = r.u32().unwrap() as usize;
+        let end = r.pos + len;
+        let mut actions = Vec::new();
+        while r.pos < end {
+            actions.push(r.string().unwrap());
+        }
+        assert_eq!(actions, ["default", "Open"]);
+        let len = r.u32().unwrap() as usize;
+        r.align(8).unwrap();
+        let end = r.pos + len;
+        let mut keys = Vec::new();
+        while r.pos < end {
+            r.align(8).unwrap();
+            let key = r.string().unwrap();
+            let sig = r.signature().unwrap();
+            if key == "image_path" {
+                assert_eq!(r.string().unwrap(), "/tmp/a.png");
+            } else {
+                r.skip(sig.as_bytes(), 0).unwrap();
+            }
+            keys.push(key);
+        }
+        assert_eq!(keys, ["image_path", "urgency"]);
+        assert_eq!(r.u32().unwrap(), u32::MAX);
+        assert_eq!(r.pos, out.len());
+    }
+
+    #[test]
+    fn markup_keeps_bold_italic_underline_only() {
+        assert_eq!(
+            plain_markup("<i>a</i><u>b</u><span color='x'>c</span>"),
+            "<i>a</i><u>b</u>c"
+        );
+        assert_eq!(plain_markup("a <A HREF=x>b</A>"), "a b");
+        assert_eq!(plain_markup("no tag < here"), "no tag &lt; here");
+    }
 
     /// An OpenURI call the way GLib writes it: parent window, URI, options with
     /// a handle token and a boolean next to it.

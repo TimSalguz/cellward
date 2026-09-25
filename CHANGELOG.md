@@ -115,6 +115,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   "always" is not offered for a command with options; the question shows every
   word on its own line, without text-reordering characters, and a command too
   long to show whole is refused rather than cut.
+- **Notifications from a zone reach the host's daemon without what points
+  anywhere.** The daemon runs on the host: a link in the text is opened there,
+  an icon or an image by URL may be fetched there, `desktop-entry` activates
+  that application on a click — past the door OpenURI is. The bus filter
+  rewrites `Notify`: only `b`, `i`, `u` stay in the text, an icon by URL is
+  dropped, the hints keep an allow-list (urgency, category, image data, a
+  local image path, sound name …); the portal's `AddNotification` loses
+  `markup-body`. VM test with a daemon that records what it gets.
+- **`vpn-zones-on` fails when the egress policy does not load** — zones come
+  back all the same, but "on" without the policy is not said to be on.
+- The passt edit checks where it lands (the flow's `connect()` right after,
+  its reset close by, a `cancel:`), so a reshuffled release fails the build
+  instead of resetting another branch.
 - **The sound filter closes a connection whose server offers a shared ring
   buffer** (`ENABLE_SRBCHANNEL`): after it, commands would travel past the
   filter. pipewire-pulse never offers one; a PulseAudio server would, and then
