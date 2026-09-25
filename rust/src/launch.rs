@@ -669,14 +669,18 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             } else {
                 zone_name.clone()
             };
-            vec![
+            let mut wrap: Vec<OsString> = vec![
                 tools.core.clone().into(),
                 "wl-sandbox".into(),
                 app,
                 "--zone".into(),
                 dir.into(),
-                "--".into(),
-            ]
+            ];
+            if !wayland_proxy_wanted(tools, &appbin) {
+                wrap.push("--no-proxy".into());
+            }
+            wrap.push("--".into());
+            wrap
         });
 
     if selection.sandbox != Sandbox::None {
@@ -1434,6 +1438,35 @@ fn wayland_sandbox_wanted(tools: &Tools, appbin: &OsStr) -> bool {
     restrict_compositor(mode.as_deref(), appbin, allowlist.as_deref())
 }
 
+/// Whether the Wayland proxy stands between this program and the compositor
+/// (`crate::wl_proxy`): on unless switched off — for all programs
+/// (`vpn-zone wayland-proxy off`, `programs.vpn-zones.waylandProxy.enable`)
+/// or for this one (`~/.config/vpn-zones/wayland-no-proxy`, one program per
+/// line, and its declared twin). Off, the compositor listens on the zone's
+/// path itself, as before there was a proxy: still the restricted socket.
+fn wayland_proxy_wanted(tools: &Tools, appbin: &OsStr) -> bool {
+    let mode = cli::setting(tools, "wayland-proxy").map(|(value, _)| value);
+    let lists = [
+        tools.config.join("wayland-no-proxy"),
+        tools
+            .config
+            .join(cli::DECLARED_DIR)
+            .join("wayland-no-proxy"),
+    ];
+    let listed = appbin.to_str().is_some_and(|name| {
+        lists.iter().any(|path| {
+            std::fs::read_to_string(path)
+                .is_ok_and(|text| text.lines().map(str::trim).any(|line| line == name))
+        })
+    });
+    proxy_wanted(mode.as_deref(), listed)
+}
+
+/// The decision itself: no setting means on, and only `off` switches it off.
+pub fn proxy_wanted(mode: Option<&str>, listed: bool) -> bool {
+    mode.map(str::trim) != Some("off") && !listed
+}
+
 /// The decision itself, without the filesystem.
 ///
 /// **No setting file means ON.** That is the default the project promises, and
@@ -1466,6 +1499,17 @@ pub fn restrict_compositor(mode: Option<&str>, appbin: &OsStr, allowlist: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The proxy is on unless said off, for all or for one program.
+    #[test]
+    fn the_wayland_proxy_is_on_unless_said_off() {
+        assert!(proxy_wanted(None, false));
+        assert!(proxy_wanted(Some("on"), false));
+        assert!(proxy_wanted(Some("whatever"), false));
+        assert!(!proxy_wanted(Some("off"), false));
+        assert!(!proxy_wanted(Some("off\n"), false));
+        assert!(!proxy_wanted(None, true));
+    }
 
     /// Throwaway containers live below the state directory, not in /tmp: a
     /// hermetic zone's /tmp is its own (`docs/LEAK-MODEL.md` §15). One from

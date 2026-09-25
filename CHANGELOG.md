@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The Wayland proxy can be switched off**, for every program (`vpn-zone
+  wayland-proxy off`, `programs.vpn-zones.waylandProxy.enable = false`) or for
+  one it breaks (`~/.config/vpn-zones/wayland-no-proxy`,
+  `waylandProxy.exceptions`): the compositor then listens for the program
+  itself, as before — still the restricted socket.
 - **A Wayland proxy between a program and the compositor** (`wl-sandbox`,
   `rust/src/wl_proxy.rs`; `docs/WINDOW-FRAME.md` §8, stage 1 of the window
   frame — nothing is drawn yet). The compositor's sandbox socket

@@ -740,6 +740,19 @@ in
       description = "Раз в минуту проверять, живы ли туннели поднятых зон (`vpn-zone watch`), и присылать уведомление, когда туннель перестал отвечать и когда снова заработал.";
     };
 
+    waylandProxy.enable = lib.mkOption {
+      type = lib.types.nullOr lib.types.bool;
+      default = null;
+      description = "Посредник Wayland между программами и композитором (rust/src/wl_proxy.rs): программа видит только свои окна и протоколы из белого списка. null — не задавать из Nix (тогда vpn-zone wayland-proxy, иначе вкл.). false — композитор слушает для программ сам, как раньше; ограничения security-context остаются.";
+    };
+
+    waylandProxy.exceptions = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "someprogram" ];
+      description = "Программы (по имени бинаря или id ярлыка), которые запускаются без посредника, если он с ними не работает. Им остаётся ограниченный сокет security-context.";
+    };
+
     compositorRestriction.enable = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
@@ -908,6 +921,13 @@ in
     })
     (lib.mkIf (cfg.interception.userEntries != null) {
       ".config/vpn-zones/declared/user-entries".text = cfg.interception.userEntries;
+    })
+    (lib.mkIf (cfg.waylandProxy.enable != null) {
+      ".config/vpn-zones/declared/wayland-proxy".text = if cfg.waylandProxy.enable then "on" else "off";
+    })
+    (lib.mkIf (cfg.waylandProxy.exceptions != [ ]) {
+      ".config/vpn-zones/declared/wayland-no-proxy".text =
+        lib.concatStringsSep "\n" cfg.waylandProxy.exceptions + "\n";
     })
     (lib.mkIf (cfg.compositorRestriction.enable != null) {
       ".config/vpn-zones/declared/wayland-sandbox".text = if cfg.compositorRestriction.enable then "on" else "off";

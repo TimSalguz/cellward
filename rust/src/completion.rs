@@ -91,6 +91,7 @@ const VERBS: &[&str] = &[
     "isolate",
     "reset-profile",
     "wayland-sandbox",
+    "wayland-proxy",
     "check",
     "hermetic",
     "x11",
