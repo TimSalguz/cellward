@@ -75,6 +75,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   section numbers of `docs/LEAK-MODEL.md`.
 
 ### Added
+- **A screen cast switch per zone** (`rust/src/screencast.rs`,
+  `rust/src/bus_filter.rs` `screencast_verdict`, LEAK-MODEL §21,
+  PERMISSIONS §3д): `cellward screencast <zone> yes|no|ask|default` (with
+  completion), Nix `programs.cellward.screencast.<zone> = "yes"|"no"|"ask"`
+  (renamed from `programs.vpn-zones.screencast` like every option, written
+  to `declared/screencast`), and `"screencast":{"value","source"}` for every
+  zone in `cellward status --json` (`null` for `unconfined`). The
+  microphone's rules: the zone's marker, Nix over it, `ask` without either;
+  a value that is none of the three, or a file that cannot be read, is `no`.
+  A hermetic zone's session bus filter reads it for every call, so it
+  applies at once, to running programs too — through descriptors of the
+  zone's, config and state directories it opens before its socket appears,
+  since the zone covers the project's state right after (the filter's new
+  `--zone`, `--zone-dir`, `--config`). `ask`, the default, is what every
+  zone had: the portal's dialog every time, `SelectSources` without
+  `persist_mode` and `restore_token`. `no` refuses every call of
+  `org.freedesktop.portal.ScreenCast` with the portal's own
+  `org.freedesktop.portal.Error.NotAllowed` and "трансляция экрана выключена
+  для зоны «…»", a line in the zone's unit journal each time and a
+  `screencast` event in `cellward journal` at most once per 10 s. `yes`
+  passes `persist_mode` and `restore_token` as well, so a remembered choice
+  works — only on a connection the portal knows as the zone (the entry
+  above), and only while the call goes to the portal that took the id: by
+  its unique name, or by the well-known one while that portal still owns it
+  (asked on a short connection of the filter's own). Anywhere else `yes` is
+  `ask`: a choice is never kept for the nameless host application every
+  zone shares, nor by a portal restarted since. Not in force where no zone
+  filter reads it: a zone that is not hermetic talks to the portal
+  directly, and in a file sandbox `yes` is `ask` (its own filter does not
+  see the zone's state; a hermetic zone's filter behind it holds `no`) —
+  `cellward screencast` says so.
+- **The portal knows the zone** (`rust/src/bus_filter.rs` `register`,
+  `rust/src/desktop.rs` `zone_app_id`, LEAK-MODEL §23). Each zone has an
+  application id of its own, `cellward.zone.<id>` — the zone's name with
+  every character but `[A-Za-z0-9_]` turned into `_` and a `_` before a
+  leading digit, plus an FNV-1a hash when the name changed on the way, so
+  that `work-vpn` and `work_vpn` never share one. The bus filter registers
+  each program connection under it with the portal's host registry
+  (`org.freedesktop.host.portal.Registry.Register`, xdg-desktop-portal
+  1.19+): the program's Hello goes up as it is; once the bus has answered
+  it, the filter sends its own `Register` on that connection, under a
+  reserved serial below xdg-dbus-proxy's `MAX_CLIENT_SERIAL`, and holds
+  everything the program sent after the Hello — in order, with its
+  descriptors — until the portal answers, for 2 s at most. The answer never
+  reaches the program, and the program's own `Register` stays refused. The
+  portal's dialogs then name the zone ("cellward · <zone>") and what the
+  portal remembers is kept under the zone, not under the nameless host
+  application every zone shared. It only helps: nothing is let because of
+  it. No answer or an error (an older portal, no entry) leaves the
+  connection as it was, said once in the zone's unit journal. The zone's
+  holder writes the entry the portal needs,
+  `~/.local/share/applications/cellward.zone.<id>.desktop` (`NoDisplay`, a
+  harmless `Exec` of `cellward status <zone>` by the profile's path — GLib
+  takes an entry only when it finds its program — marked
+  `X-VPNZone=portal`), as the zone comes up; sync keeps it while the zone
+  exists, whatever the launcher mode, and `cellward rm` takes it. The
+  holder has a new flag, `--runner`, which the unit passes. A hermetic
+  zone's session bus filter registers every connection of the zone,
+  sandboxed ones included; the filter of a file sandbox (`--fs-sandbox`)
+  in a zone that is not hermetic registers its own — `fs-sandbox` is told
+  the zone (`--zone`) by the launch, and `bus-filter` takes the id as
+  `--portal-app`.
 - **How long a refused zone is not asked again is a setting** (the owner's
   request of 2026-09-25): `vpn-zone ask-again <term>|default`, Nix
   `programs.vpn-zones.askAgainAfter`, `ask_again` in the defaults of

@@ -34,6 +34,13 @@
 //! them in the zone needs the file brought along, which is the next step.
 //! Better nothing than the host.
 //!
+//! **Who the program is to the portal** (LEAK-MODEL §23): with
+//! `--portal-app`, each connection is registered with the portal as the zone
+//! before anything of the program's passes (`register`). **The screen cast
+//! switch** (`crate::screencast`): with `--zone`, each call of the ScreenCast
+//! portal is judged by the zone's switch as it is at that call
+//! (`screencast_verdict`).
+//!
 //! Every byte comes from the sandboxed program, so the parsing is
 //! `crate::dbus_wire`'s, bounds-checked throughout; a message that does not
 //! parse ends the connection. The filter dies with the sandbox launcher
@@ -49,7 +56,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -64,6 +71,25 @@ const BACKGROUND: &str = "org.freedesktop.portal.Background";
 const NETWORK_MONITOR: &str = "org.freedesktop.portal.NetworkMonitor";
 const PROXY_RESOLVER: &str = "org.freedesktop.portal.ProxyResolver";
 const REQUEST: &str = "org.freedesktop.portal.Request";
+/// The portal's registry of host programs, and where it lives: the portal's
+/// own object.
+const REGISTRY: &str = "org.freedesktop.host.portal.Registry";
+const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+/// The serial of the filter's own `Register` on a program's connection.
+/// Serials are per connection and a program counts its own from 1: this one
+/// it would have to pick on purpose, and nothing of the program's is in
+/// flight while ours is (`register`). Not higher: xdg-dbus-proxy keeps the
+/// serials above [`MAX_CLIENT_SERIAL`] for messages of its own and closes a
+/// connection whose client uses one.
+pub const REGISTER_SERIAL: u32 = 0xFFFE_FF00;
+/// xdg-dbus-proxy's `MAX_CLIENT_SERIAL` (flatpak-proxy.c): 2^32 − 1 − 65 536.
+pub const MAX_CLIENT_SERIAL: u32 = u32::MAX - 65_536;
+/// How long a connection's first calls are held for the bus's answer to its
+/// Hello, and then for the portal's answer to our `Register`. Past that the
+/// connection goes on without an id of the zone's — the way it went before
+/// the registry, and on a portal older than it.
+const HELLO_WAIT: Duration = Duration::from_secs(2);
+const REGISTER_WAIT: Duration = Duration::from_secs(2);
 /// `Response` codes: done, and "the interaction ended some other way".
 const RESPONSE_OK: u32 = 0;
 const RESPONSE_OTHER: u32 = 2;
@@ -85,7 +111,8 @@ const FILE_NOTICE: &str = "Программа из контейнера попр
      его из файлового менеджера или из самой программы.";
 
 /// `vpn-zone-core bus-filter --listen <socket> --upstream <socket> --opener <program>
-/// [--via-broker <zone>]`.
+/// [--via-broker <zone>] [--portal-app <app-id>]
+/// [--zone <zone> --zone-dir <dir> --config <dir>]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub listen: PathBuf,
@@ -97,11 +124,34 @@ pub struct Args {
     /// broker starts without a question (it knows the zone by the network
     /// namespace of the one asking), and from there the usual door.
     pub via_broker: Option<String>,
+    /// `--portal-app`: the application id each connection is registered with
+    /// at the portal's host registry before anything of the program's passes
+    /// (`desktop::zone_app_id`, LEAK-MODEL §23). Only the filter right in
+    /// front of the bus proxy is given one: the `Register` of a sandbox's
+    /// filter in front of a hermetic zone's own would be refused by that one,
+    /// as the program's is (`refused`) — and that one has already registered
+    /// the connection.
+    pub portal_app: Option<String>,
+    /// `--zone`, `--zone-dir`, `--config`, all three or none: the zone whose
+    /// screen cast switch the filter reads for every call of the portal's
+    /// ScreenCast (`crate::screencast`), its state directory and
+    /// `~/.config/vpn-zones`. None: every cast asks, as before the switch.
+    pub zone: Option<ZoneArgs>,
+}
+
+/// The zone a filter reads the screen cast switch of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZoneArgs {
+    pub name: String,
+    pub dir: PathBuf,
+    pub config: PathBuf,
 }
 
 impl Args {
     pub fn parse(argv: &[OsString]) -> Result<Self, String> {
         let (mut listen, mut upstream, mut opener, mut via_broker) = (None, None, None, None);
+        let mut portal_app = None;
+        let (mut zone, mut zone_dir, mut config) = (None, None, None);
         let mut it = argv.iter();
         while let Some(flag) = it.next() {
             let value = it
@@ -113,16 +163,55 @@ impl Args {
                 Some("--upstream") => upstream = Some(value),
                 Some("--opener") => opener = Some(value),
                 Some("--via-broker") => via_broker = Some(value.to_string_lossy().into_owned()),
+                Some("--portal-app") => {
+                    let id = value
+                        .to_str()
+                        .filter(|id| is_app_id(id))
+                        .ok_or("--portal-app is not an application id")?;
+                    portal_app = Some(id.to_owned());
+                }
+                Some("--zone") => {
+                    zone = Some(
+                        value
+                            .to_str()
+                            .filter(|z| !z.is_empty())
+                            .ok_or("--zone is not a zone's name")?
+                            .to_owned(),
+                    )
+                }
+                Some("--zone-dir") => zone_dir = Some(value),
+                Some("--config") => config = Some(value),
                 _ => return Err(format!("unknown argument {}", flag.to_string_lossy())),
             }
         }
+        let zone = match (zone, zone_dir, config) {
+            (Some(name), Some(dir), Some(config)) => Some(ZoneArgs { name, dir, config }),
+            (None, None, None) => None,
+            _ => return Err("--zone, --zone-dir and --config go together".to_owned()),
+        };
         Ok(Self {
             listen: listen.ok_or("--listen is required")?,
             upstream: upstream.ok_or("--upstream is required")?,
             opener: opener.ok_or("--opener is required")?,
             via_broker,
+            portal_app,
+            zone,
         })
     }
+}
+
+/// An application id as GLib takes one (`g_application_id_is_valid`): at
+/// most 255 bytes, two elements or more, each of `[A-Za-z0-9_-]`, none empty
+/// or starting with a digit.
+pub fn is_app_id(id: &str) -> bool {
+    id.len() <= 255
+        && id.split('.').count() >= 2
+        && id.split('.').all(|e| {
+            !e.is_empty()
+                && !e.starts_with(|c: char| c.is_ascii_digit())
+                && e.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
 }
 
 /// What the filter answers itself.
@@ -280,6 +369,12 @@ fn answer_value(conn: &Conn, ctx: &Ctx, h: &Header, which: Door) -> io::Result<(
 /// sent to. Nothing when no reply is expected.
 fn deny(conn: &Conn, ctx: &Ctx, h: &Header, why: &str) -> io::Result<()> {
     eprintln!("bus-filter: refused — {why}");
+    error_reply(conn, ctx, h, "org.freedesktop.DBus.Error.AccessDenied", why)
+}
+
+/// The error `name` with the text `why` for a call, from where it was sent
+/// to. Nothing when no reply is expected.
+fn error_reply(conn: &Conn, ctx: &Ctx, h: &Header, name: &str, why: &str) -> io::Result<()> {
     if h.flags & wire::NO_REPLY_EXPECTED != 0 {
         return Ok(());
     }
@@ -290,7 +385,7 @@ fn deny(conn: &Conn, ctx: &Ctx, h: &Header, why: &str) -> io::Result<()> {
         .clone();
     let from = h.destination.clone().unwrap_or_else(|| PORTAL.to_owned());
     let mut fields = vec![
-        Field::ErrorName("org.freedesktop.DBus.Error.AccessDenied"),
+        Field::ErrorName(name),
         Field::ReplySerial(h.serial),
         Field::Sender(&from),
     ];
@@ -306,6 +401,70 @@ fn deny(conn: &Conn, ctx: &Ctx, h: &Header, why: &str) -> io::Result<()> {
         &body::string(&format!("{}: {why}", crate::dialog::APP)),
     );
     conn.send(&reply, &[])
+}
+
+/// The portal's own error for "not allowed".
+const NOT_ALLOWED: &str = "org.freedesktop.portal.Error.NotAllowed";
+
+/// What becomes of a call as the zone's screen cast switch has it
+/// (`crate::screencast`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Cast {
+    /// As before the switch: `SelectSources` without a remembered choice,
+    /// everything else as it is.
+    Pass,
+    /// `SelectSources` with the choice it may remember (`yes`, on a
+    /// connection the portal knows as the zone).
+    Remember,
+    /// Refused (`no`), and the text for the program.
+    Refuse(String),
+}
+
+/// The switch for one call, read now: a change applies to the next call.
+/// Only calls on the ScreenCast interface — one without an interface is
+/// refused already (`refused`) — and only with a zone to read the switch of.
+fn screencast_verdict(conn: &Conn, ctx: &Ctx, h: &Header) -> Cast {
+    use crate::screencast::{Setting, INTERFACE};
+    if h.kind != wire::METHOD_CALL || h.interface.as_deref() != Some(INTERFACE) {
+        return Cast::Pass;
+    }
+    let Some(policy) = &ctx.screencast else {
+        return Cast::Pass;
+    };
+    let (setting, source) = policy.setting();
+    match setting {
+        Setting::No => Cast::Refuse(policy.refused(source)),
+        Setting::Ask => Cast::Pass,
+        // Only the selection carries a choice to remember.
+        Setting::Yes if h.member.as_deref() != Some("SelectSources") => Cast::Pass,
+        Setting::Yes if identified(conn, ctx, h) => Cast::Remember,
+        Setting::Yes => {
+            if !ctx.told_unremembered.swap(true, Ordering::SeqCst) {
+                eprintln!(
+                    "bus-filter: zone {}: screen cast yes is ask on a connection the portal does \
+                     not know as the zone — no choice is kept for a nameless host application; \
+                     said once",
+                    policy.zone()
+                );
+            }
+            Cast::Pass
+        }
+    }
+}
+
+/// Whether a call goes to the portal that knows this connection as the zone
+/// (`register`): by that portal's unique name, or by the well-known one while
+/// that portal still owns it — one started since knows the connection by no
+/// name, and would keep the choice for the nameless host application.
+fn identified(conn: &Conn, ctx: &Ctx, h: &Header) -> bool {
+    let Some(portal) = conn.portal() else {
+        return false;
+    };
+    match h.destination.as_deref() {
+        Some(to) if to == portal => true,
+        Some(PORTAL) => portal_owner(&ctx.upstream).is_some_and(|owner| owner == portal),
+        _ => false,
+    }
 }
 
 /// Whether a link may be handed to the opener, and why not.
@@ -367,6 +526,19 @@ struct Ctx {
     upstream: PathBuf,
     opener: PathBuf,
     via_broker: Option<String>,
+    /// `--portal-app`.
+    portal_app: Option<String>,
+    /// [`HELLO_WAIT`] and [`REGISTER_WAIT`]; shorter in tests.
+    hello_wait: Duration,
+    register_wait: Duration,
+    /// Why a connection has no id of the zone's has been said: once per
+    /// filter, not once per connection — an old portal would say it for
+    /// every program.
+    told_register: AtomicBool,
+    /// The zone's screen cast switch, its directories held (`--zone`).
+    screencast: Option<crate::screencast::Policy>,
+    /// That `yes` was `ask` for want of an id has been said, once.
+    told_unremembered: AtomicBool,
     opens: Mutex<VecDeque<Instant>>,
     last_notice: Mutex<Option<Instant>>,
     serial: AtomicU32,
@@ -374,6 +546,36 @@ struct Ctx {
 }
 
 impl Ctx {
+    fn new(upstream: PathBuf, args: &Args, screencast: Option<crate::screencast::Policy>) -> Self {
+        Self {
+            upstream,
+            opener: args.opener.clone(),
+            via_broker: args.via_broker.clone(),
+            portal_app: args.portal_app.clone(),
+            hello_wait: HELLO_WAIT,
+            register_wait: REGISTER_WAIT,
+            told_register: AtomicBool::new(false),
+            screencast,
+            told_unremembered: AtomicBool::new(false),
+            opens: Mutex::new(VecDeque::new()),
+            last_notice: Mutex::new(None),
+            serial: AtomicU32::new(1),
+            connections: AtomicU32::new(0),
+        }
+    }
+
+    /// A connection goes on with no id of the zone's: said on stderr (the
+    /// zone's unit journal), the first time only.
+    fn unregistered(&self, why: &str) {
+        if !self.told_register.swap(true, Ordering::SeqCst) {
+            eprintln!(
+                "bus-filter: the portal does not know a connection as {} ({why}) — its program \
+                 is a nameless host application to the portal, as before its registry; said once",
+                self.portal_app.as_deref().unwrap_or("?")
+            );
+        }
+    }
+
     fn serial(&self) -> u32 {
         // Our own serials, far from where a bus starts counting; never 0.
         self.serial.fetch_add(1, Ordering::Relaxed) | 0x4000_0000
@@ -403,13 +605,247 @@ struct Conn {
     write: Mutex<()>,
     unique: Mutex<Option<String>>,
     began: AtomicBool,
+    /// Who the connection is to the portal, and how far that got: the two
+    /// directions meet here — one sends and waits, the other sees the
+    /// answers go by.
+    registry: Mutex<Registration>,
+    settled: Condvar,
 }
 
 impl Conn {
+    fn new(client: UnixStream) -> Self {
+        Self {
+            client,
+            write: Mutex::new(()),
+            unique: Mutex::new(None),
+            began: AtomicBool::new(false),
+            registry: Mutex::new(Registration::default()),
+            settled: Condvar::new(),
+        }
+    }
+
     fn send(&self, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
         let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
         send_all(self.client.as_raw_fd(), bytes, fds)
     }
+
+    fn registration(&self) -> MutexGuard<'_, Registration> {
+        self.registry.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Wait at most `wait` while `waiting` says so of the stage.
+    fn wait_while(&self, wait: Duration, waiting: impl Fn(&Stage) -> bool) {
+        let deadline = Instant::now() + wait;
+        let mut reg = self.registration();
+        while waiting(&reg.stage) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            reg = match self.settled.wait_timeout(reg, left) {
+                Ok((guard, _)) => guard,
+                Err(e) => e.into_inner().0,
+            };
+        }
+    }
+
+    /// A reply from the bus as the registration sees it: the answer to the
+    /// program's Hello moves it on; the answer to our `Register` settles it
+    /// and is the filter's — `true`: swallowed, never the program's, however
+    /// late it comes.
+    fn answered(&self, ctx: &Ctx, msg: &[u8], h: &Header) -> bool {
+        if !matches!(h.kind, wire::METHOD_RETURN | wire::ERROR) {
+            return false;
+        }
+        let Some(serial) = h.reply_serial else {
+            return false;
+        };
+        let mut reg = self.registration();
+        if reg.outstanding == Some(serial) {
+            reg.outstanding = None;
+            // In time only while ours is the one waited for: after the wait
+            // gave up, the program's calls went on as a nameless host
+            // application's, and a late "yes" does not make it the zone.
+            if reg.stage != Stage::Register(serial) {
+                return true;
+            }
+            reg.stage = Stage::Done;
+            let refusal = match (h.kind, h.sender.as_deref()) {
+                (wire::METHOD_RETURN, Some(portal)) => {
+                    reg.portal = Some(portal.to_owned());
+                    None
+                }
+                (wire::METHOD_RETURN, None) => Some("an answer from nobody".to_owned()),
+                _ => Some(format!(
+                    "{}: {}",
+                    h.error_name.as_deref().unwrap_or("an error"),
+                    wire::body_string(msg, h).unwrap_or_default()
+                )),
+            };
+            self.settled.notify_all();
+            drop(reg);
+            if let Some(why) = refusal {
+                ctx.unregistered(&format!("the portal said {why}"));
+            }
+            return true;
+        }
+        if reg.stage == Stage::Hello(serial) {
+            reg.stage = Stage::Welcomed(h.kind == wire::METHOD_RETURN);
+            self.settled.notify_all();
+        }
+        false
+    }
+
+    /// The bus side is gone: nobody is to wait for its answers.
+    fn bus_gone(&self) {
+        let mut reg = self.registration();
+        if matches!(reg.stage, Stage::Hello(_) | Stage::Register(_)) {
+            reg.stage = Stage::Closed;
+        }
+        self.settled.notify_all();
+    }
+
+    /// The portal that took the zone's id for this connection, if one did.
+    fn portal(&self) -> Option<String> {
+        self.registration().portal.clone()
+    }
+}
+
+/// How far a connection's registration got.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum Stage {
+    /// Nothing asked: no `--portal-app`, or before the program's Hello.
+    #[default]
+    Idle,
+    /// The program's Hello is on its way up; its serial.
+    Hello(u32),
+    /// The bus answered it — with a name (`true`) or an error.
+    Welcomed(bool),
+    /// Our `Register` is on its way; its serial.
+    Register(u32),
+    /// Settled, whichever way.
+    Done,
+    /// The bus side went away.
+    Closed,
+}
+
+#[derive(Debug, Default)]
+struct Registration {
+    stage: Stage,
+    /// Our `Register` whose answer is still to come — swallowed whenever it
+    /// does.
+    outstanding: Option<u32>,
+    /// The portal (its unique name) that took the zone's id for this
+    /// connection; `None`: the connection has no id of the zone's.
+    portal: Option<String>,
+}
+
+/// The serial of our `Register` on a connection whose Hello had `hello`: the
+/// reserved one, or next to it should the program have picked that for its
+/// Hello — the only call of the program's that is up while ours is.
+fn register_serial(hello: u32) -> u32 {
+    if hello == REGISTER_SERIAL {
+        REGISTER_SERIAL - 1
+    } else {
+        REGISTER_SERIAL
+    }
+}
+
+/// The program's first call, if the bus takes it for Hello: to the bus
+/// itself, on its interface or on none.
+fn is_hello(h: &Header) -> bool {
+    h.kind == wire::METHOD_CALL
+        && h.member.as_deref() == Some("Hello")
+        && h.destination.as_deref() == Some("org.freedesktop.DBus")
+        && h.interface
+            .as_deref()
+            .is_none_or(|i| i == "org.freedesktop.DBus")
+}
+
+/// Who the connection is to the portal (LEAK-MODEL §23): with the program's
+/// Hello gone up, our own `Register(<portal_app>, {})` — once the bus has
+/// answered the Hello, so that the connection has its name — on the
+/// program's connection, and the program's next messages held, in order and
+/// with their descriptors, until the portal answers. They are held simply by
+/// not being read: this is the only reader of the program's side.
+///
+/// The portal takes an id only before the first call it sees from a
+/// connection ("Registered too late") and only once, so ours goes first, and
+/// nothing of the program's passes until the portal has settled it: a call
+/// handled beside a `Register` still in the portal's hands could make the
+/// connection a nameless one after all. The program cannot answer for us
+/// either: its own `Register` is refused (`refused`), and the answer to ours
+/// never reaches it (`Conn::answered`).
+///
+/// No answer in time, an error (an older portal, no entry for the id): the
+/// connection goes on without an id of the zone's — what it had before —
+/// said once. Refusing its portal calls instead would break every program on
+/// an older portal, and the id only ever narrows what the portal does
+/// (`screencast yes` needs it; nothing is let because of it).
+fn register(conn: &Conn, ctx: &Ctx, up: RawFd, hello: &Header) -> io::Result<()> {
+    let Some(app) = ctx.portal_app.as_deref() else {
+        return Ok(());
+    };
+    conn.wait_while(ctx.hello_wait, |s| matches!(s, Stage::Hello(_)));
+    let welcomed = {
+        let mut reg = conn.registration();
+        let stage = reg.stage.clone();
+        if stage != Stage::Welcomed(true) && stage != Stage::Closed {
+            reg.stage = Stage::Done;
+        }
+        stage
+    };
+    match welcomed {
+        Stage::Welcomed(true) => {}
+        // Going anyway.
+        Stage::Closed => return Ok(()),
+        Stage::Welcomed(false) => {
+            ctx.unregistered("the bus refused the program's Hello");
+            return Ok(());
+        }
+        _ => {
+            ctx.unregistered("no answer to the program's Hello");
+            return Ok(());
+        }
+    }
+    let serial = register_serial(hello.serial);
+    {
+        let mut reg = conn.registration();
+        reg.stage = Stage::Register(serial);
+        reg.outstanding = Some(serial);
+    }
+    let call = wire::message(
+        wire::METHOD_CALL,
+        0,
+        serial,
+        &[
+            Field::Path(PORTAL_PATH),
+            Field::Interface(REGISTRY),
+            Field::Member("Register"),
+            Field::Destination(PORTAL),
+            Field::Signature("sa{sv}"),
+        ],
+        &body::register(app),
+    );
+    send_all(up, &call, &[])?;
+    conn.wait_while(ctx.register_wait, |s| *s == Stage::Register(serial));
+    // Settled here or by the answer, under the one lock: an answer after
+    // this is late, and changes nothing.
+    let timed_out = {
+        let mut reg = conn.registration();
+        let waiting = reg.stage == Stage::Register(serial);
+        if waiting {
+            reg.stage = Stage::Done;
+        }
+        waiting
+    };
+    if timed_out {
+        ctx.unregistered(&format!(
+            "no answer in {} ms",
+            ctx.register_wait.as_millis()
+        ));
+    }
+    Ok(())
 }
 
 /// All of `data`, the descriptors with its first byte.
@@ -447,6 +883,13 @@ pub fn run(args: &Args) -> u8 {
             return 1;
         }
     };
+    // The zone's directories for its screen cast switch, held before the
+    // socket appears: the holder waits for the socket and then covers the
+    // project's state in this very mount namespace.
+    let screencast = args
+        .zone
+        .as_ref()
+        .map(|z| crate::screencast::Policy::hold(&z.name, &z.dir, &z.config));
     let _ = fs::remove_file(&args.listen);
     let listener = match UnixListener::bind(&args.listen) {
         Ok(l) => l,
@@ -459,15 +902,7 @@ pub fn run(args: &Args) -> u8 {
         }
     };
     let _ = fs::set_permissions(&args.listen, fs::Permissions::from_mode(0o600));
-    let ctx = Arc::new(Ctx {
-        upstream,
-        opener: args.opener.clone(),
-        via_broker: args.via_broker.clone(),
-        opens: Mutex::new(VecDeque::new()),
-        last_notice: Mutex::new(None),
-        serial: AtomicU32::new(1),
-        connections: AtomicU32::new(0),
-    });
+    let ctx = Arc::new(Ctx::new(upstream, args, screencast));
     for client in listener.incoming() {
         let Ok(client) = client else {
             continue;
@@ -499,23 +934,24 @@ pub fn run(args: &Args) -> u8 {
 }
 
 fn serve(client: UnixStream, ctx: &Arc<Ctx>) -> io::Result<()> {
+    let conn = Arc::new(Conn::new(client.try_clone()?));
+    serve_conn(client, &conn, ctx)
+}
+
+fn serve_conn(client: UnixStream, conn: &Arc<Conn>, ctx: &Arc<Ctx>) -> io::Result<()> {
     let upstream = UnixStream::connect(&ctx.upstream)?;
-    let conn = Arc::new(Conn {
-        client: client.try_clone()?,
-        write: Mutex::new(()),
-        unique: Mutex::new(None),
-        began: AtomicBool::new(false),
-    });
     let down = {
-        let conn = Arc::clone(&conn);
+        let conn = Arc::clone(conn);
+        let ctx = Arc::clone(ctx);
         let upstream = upstream.try_clone()?;
         thread::spawn(move || {
-            let _ = bus_to_client(&upstream, &conn);
+            let _ = bus_to_client(&upstream, &conn, &ctx);
+            conn.bus_gone();
             let _ = conn.client.shutdown(std::net::Shutdown::Both);
             let _ = upstream.shutdown(std::net::Shutdown::Both);
         })
     };
-    let result = client_to_bus(&client, &upstream, &conn, ctx);
+    let result = client_to_bus(&client, &upstream, conn, ctx);
     let _ = client.shutdown(std::net::Shutdown::Both);
     let _ = upstream.shutdown(std::net::Shutdown::Both);
     let _ = down.join();
@@ -637,11 +1073,11 @@ fn auth_line_is_begin(line: &[u8]) -> bool {
 
 /// A call the host may have from a zone only rewritten: a notification
 /// (`dbus_wire::sanitized_notify`, `sanitized_portal_notification`) and a
-/// screen cast's choice of sources, which is not remembered
-/// (`sanitized_screencast_sources`). The message rewritten, an error for one
-/// the filter cannot read (refused, not passed on unread), `None` for
-/// anything else.
-fn rewritten(msg: &[u8], h: &Header) -> Option<Result<Vec<u8>, wire::WireError>> {
+/// screen cast's choice of sources, which is not remembered unless
+/// `remember` (`sanitized_screencast_sources`, `screencast_verdict`). The
+/// message rewritten, an error for one the filter cannot read (refused, not
+/// passed on unread), `None` for anything else.
+fn rewritten(msg: &[u8], h: &Header, remember: bool) -> Option<Result<Vec<u8>, wire::WireError>> {
     if h.kind != wire::METHOD_CALL {
         return None;
     }
@@ -656,7 +1092,7 @@ fn rewritten(msg: &[u8], h: &Header) -> Option<Result<Vec<u8>, wire::WireError>>
             wire::sanitized_portal_notification(msg, h)
         }
         (Some("org.freedesktop.portal.ScreenCast"), Some("SelectSources")) => {
-            wire::sanitized_screencast_sources(msg, h)
+            wire::sanitized_screencast_sources(msg, h, remember)
         }
         _ => return None,
     };
@@ -710,6 +1146,7 @@ fn client_to_bus(
     let mut auth = Auth::default();
     let mut pending: Vec<u8> = Vec::new();
     let up = upstream.as_raw_fd();
+    let mut first = true;
     while let Some(n) = read_chunk(client.as_raw_fd(), &mut buf, &mut fds)? {
         let mut data = &buf[..n];
         if !conn.began.load(Ordering::SeqCst) {
@@ -730,6 +1167,21 @@ fn client_to_bus(
         pending.extend_from_slice(data);
         while let Some((msg, h)) = next_message(&mut pending)? {
             let carried = take_fds(&mut fds, h.unix_fds)?;
+            // The program's Hello, as it is — and the connection is the
+            // zone's before anything else of the program's goes up
+            // (`register`). Only the first message: the bus takes no other
+            // for a Hello. One that wants no answer gives nothing to wait for.
+            if std::mem::take(&mut first)
+                && ctx.portal_app.is_some()
+                && is_hello(&h)
+                && h.flags & wire::NO_REPLY_EXPECTED == 0
+            {
+                conn.registration().stage = Stage::Hello(h.serial);
+                let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
+                send_all(up, &msg, &raw)?;
+                register(conn, ctx, up, &h)?;
+                continue;
+            }
             match door(&h) {
                 // The descriptors of an answered call are dropped — closed.
                 Some(which @ (Door::Network | Door::Proxy)) => answer_value(conn, ctx, &h, which)?,
@@ -738,24 +1190,30 @@ fn client_to_bus(
                 None if refused(&h).is_some() => {
                     deny(conn, ctx, &h, &refused(&h).unwrap_or_default())?
                 }
-                None => {
-                    let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
-                    match rewritten(&msg, &h) {
-                        // Passed on without what would point the host's daemon
-                        // at the network or at an application, or have the
-                        // screen shown again without a question.
-                        Some(Ok(message)) => send_all(up, &message, &raw)?,
-                        Some(Err(e)) => deny(conn, ctx, &h, &format!("call refused: {e}"))?,
-                        None => send_all(up, &msg, &raw)?,
+                // The zone's screen cast switch (`crate::screencast`): `no`
+                // refuses the call — and closes its descriptors.
+                None => match screencast_verdict(conn, ctx, &h) {
+                    Cast::Refuse(why) => error_reply(conn, ctx, &h, NOT_ALLOWED, &why)?,
+                    cast => {
+                        let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
+                        match rewritten(&msg, &h, cast == Cast::Remember) {
+                            // Passed on without what would point the host's
+                            // daemon at the network or at an application, or
+                            // have the screen shown again without a question
+                            // where the switch does not say so.
+                            Some(Ok(message)) => send_all(up, &message, &raw)?,
+                            Some(Err(e)) => deny(conn, ctx, &h, &format!("call refused: {e}"))?,
+                            None => send_all(up, &msg, &raw)?,
+                        }
                     }
-                }
+                },
             }
         }
     }
     Ok(())
 }
 
-fn bus_to_client(upstream: &UnixStream, conn: &Conn) -> io::Result<()> {
+fn bus_to_client(upstream: &UnixStream, conn: &Conn, ctx: &Ctx) -> io::Result<()> {
     let mut buf = vec![0u8; READ_CHUNK];
     let mut fds: VecDeque<OwnedFd> = VecDeque::new();
     let mut text: Vec<u8> = Vec::new();
@@ -798,6 +1256,11 @@ fn bus_to_client(upstream: &UnixStream, conn: &Conn) -> io::Result<()> {
                 }
             }
             let carried = take_fds(&mut fds, h.unix_fds)?;
+            // The answer to our own `Register` is ours: the program never
+            // sees it (and its descriptors, if any, are closed).
+            if conn.answered(ctx, &msg, &h) {
+                continue;
+            }
             let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
             conn.send(&msg, &raw)?;
         }
@@ -1249,15 +1712,7 @@ mod tests {
 
     #[test]
     fn at_most_so_many_links_a_minute() {
-        let ctx = Ctx {
-            upstream: PathBuf::new(),
-            opener: PathBuf::new(),
-            via_broker: None,
-            opens: Mutex::new(VecDeque::new()),
-            last_notice: Mutex::new(None),
-            serial: AtomicU32::new(1),
-            connections: AtomicU32::new(0),
-        };
+        let ctx = Ctx::for_test(PathBuf::new(), None);
         for _ in 0..MAX_OPENS_PER_MINUTE {
             assert!(ctx.may_open());
         }
@@ -1340,5 +1795,795 @@ mod tests {
         let st = body::network_status(true, false, 4);
         let len = u32::from_le_bytes(st[..4].try_into().unwrap()) as usize;
         assert_eq!(st.len(), 8 + len);
+    }
+
+    // --- WHO THE CONNECTION IS TO THE PORTAL --------------------------------
+
+    impl Ctx {
+        fn for_test(upstream: PathBuf, portal_app: Option<&str>) -> Self {
+            let args = Args {
+                listen: PathBuf::new(),
+                upstream: upstream.clone(),
+                opener: PathBuf::new(),
+                via_broker: None,
+                portal_app: portal_app.map(str::to_owned),
+                zone: None,
+            };
+            Self {
+                // Generous: a busy runner must not make a test of the
+                // answered case a test of the timeout.
+                hello_wait: Duration::from_secs(10),
+                register_wait: Duration::from_secs(10),
+                ..Self::new(upstream, &args, None)
+            }
+        }
+    }
+
+    /// A stand-in for what is behind the filter — xdg-dbus-proxy and the bus
+    /// in the real chain: a socket the filter connects to, read and answered
+    /// by the test.
+    struct Stand {
+        dir: PathBuf,
+        listener: UnixListener,
+    }
+
+    impl Stand {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("vpn-zone-bus-filter-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let listener = UnixListener::bind(dir.join("bus")).unwrap();
+            Self { dir, listener }
+        }
+
+        fn socket(&self) -> PathBuf {
+            self.dir.join("bus")
+        }
+
+        /// The filter's connection upstream.
+        fn accept(&self) -> End {
+            End::new(self.listener.accept().unwrap().0)
+        }
+    }
+
+    impl Drop for Stand {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// One end of a connection, read line by line or message by message,
+    /// with the descriptors that came along.
+    struct End {
+        stream: UnixStream,
+        pending: Vec<u8>,
+        fds: VecDeque<OwnedFd>,
+    }
+
+    impl End {
+        const PATIENCE: Duration = Duration::from_secs(10);
+
+        fn new(stream: UnixStream) -> Self {
+            stream.set_read_timeout(Some(Self::PATIENCE)).unwrap();
+            Self {
+                stream,
+                pending: Vec::new(),
+                fds: VecDeque::new(),
+            }
+        }
+
+        fn send(&self, bytes: &[u8], fds: &[RawFd]) {
+            sys::send_with_fds(self.stream.as_raw_fd(), bytes, fds).unwrap();
+        }
+
+        /// More bytes; `false` when none came in time (or at the end).
+        fn more(&mut self) -> bool {
+            let mut buf = [0u8; 4096];
+            match sys::recv_into_with_fds(self.stream.as_raw_fd(), &mut buf, 16) {
+                Ok((0, _, _)) => false,
+                Ok((n, fds, _)) => {
+                    self.pending.extend_from_slice(&buf[..n]);
+                    self.fds.extend(fds);
+                    true
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => false,
+                Err(e) => panic!("{e}"),
+            }
+        }
+
+        /// The next line, `\r\n` included.
+        fn line(&mut self) -> Vec<u8> {
+            loop {
+                if let Some(end) = self.pending.windows(2).position(|w| w == b"\r\n") {
+                    return self.pending.drain(..end + 2).collect();
+                }
+                assert!(self.more(), "no line came");
+            }
+        }
+
+        /// The next message, and the descriptors it carries.
+        fn message(&mut self) -> (Vec<u8>, Header, Vec<OwnedFd>) {
+            loop {
+                if let Some(len) = wire::message_len(&self.pending).unwrap() {
+                    if self.pending.len() >= len {
+                        let msg: Vec<u8> = self.pending.drain(..len).collect();
+                        let h = wire::parse_header(&msg).unwrap();
+                        let fds = self.fds.drain(..h.unix_fds as usize).collect();
+                        return (msg, h, fds);
+                    }
+                }
+                assert!(self.more(), "no message came");
+            }
+        }
+
+        /// Nothing comes for `quiet`.
+        fn quiet(&mut self, quiet: Duration) -> bool {
+            if !self.pending.is_empty() {
+                return false;
+            }
+            self.stream.set_read_timeout(Some(quiet)).unwrap();
+            let came = self.more() && !self.pending.is_empty();
+            self.stream.set_read_timeout(Some(Self::PATIENCE)).unwrap();
+            !came
+        }
+    }
+
+    /// A method call from the program.
+    fn method(serial: u32, dest: &str, iface: &str, member: &str, fds: u32) -> Vec<u8> {
+        let mut fields = vec![
+            Field::Path("/org/freedesktop/portal/desktop"),
+            Field::Interface(iface),
+            Field::Member(member),
+            Field::Destination(dest),
+        ];
+        if fds != 0 {
+            fields.push(Field::Signature("h"));
+            fields.push(Field::UnixFds(fds));
+        }
+        let body = if fds != 0 { body::uint(0) } else { Vec::new() };
+        wire::message(wire::METHOD_CALL, 0, serial, &fields, &body)
+    }
+
+    fn hello(serial: u32) -> Vec<u8> {
+        wire::message(
+            wire::METHOD_CALL,
+            0,
+            serial,
+            &[
+                Field::Path("/org/freedesktop/DBus"),
+                Field::Interface("org.freedesktop.DBus"),
+                Field::Member("Hello"),
+                Field::Destination("org.freedesktop.DBus"),
+            ],
+            &[],
+        )
+    }
+
+    /// A reply from the bus side to the program's connection, `:1.42`.
+    fn reply_to(serial: u32, from: &str) -> Vec<u8> {
+        wire::message(
+            wire::METHOD_RETURN,
+            wire::NO_REPLY_EXPECTED,
+            7000 + serial % 1000,
+            &[
+                Field::ReplySerial(serial),
+                Field::Destination(":1.42"),
+                Field::Sender(from),
+                Field::Signature("s"),
+            ],
+            &body::string(":1.42"),
+        )
+    }
+
+    fn error_to(serial: u32, name: &str, text: &str) -> Vec<u8> {
+        wire::message(
+            wire::ERROR,
+            wire::NO_REPLY_EXPECTED,
+            8000,
+            &[
+                Field::ErrorName(name),
+                Field::ReplySerial(serial),
+                Field::Destination(":1.42"),
+                Field::Sender(":1.7"),
+                Field::Signature("s"),
+            ],
+            &body::string(text),
+        )
+    }
+
+    /// What a program writes first, the way sd-bus pipelines it: the
+    /// authentication, its Hello and `calls` in one go.
+    const AUTH: &[u8] = b"\0AUTH EXTERNAL 31303030\r\nNEGOTIATE_UNIX_FD\r\nBEGIN\r\n";
+
+    /// A filter serving one program's connection to the stand-in bus: the
+    /// program's end, the bus's end, and the connection's own state.
+    struct Served {
+        program: End,
+        bus: End,
+        conn: Arc<Conn>,
+        ctx: Arc<Ctx>,
+        serving: Option<thread::JoinHandle<()>>,
+        stand: Stand,
+    }
+
+    impl Served {
+        fn start(tag: &str, portal_app: Option<&str>, ctx: impl FnOnce(Ctx) -> Ctx) -> Self {
+            let stand = Stand::new(tag);
+            let ctx = Arc::new(ctx(Ctx::for_test(stand.socket(), portal_app)));
+            let (program, filter) = UnixStream::pair().unwrap();
+            let conn = Arc::new(Conn::new(filter.try_clone().unwrap()));
+            let serving = {
+                let (conn, ctx) = (Arc::clone(&conn), Arc::clone(&ctx));
+                thread::spawn(move || {
+                    let _ = serve_conn(filter, &conn, &ctx);
+                })
+            };
+            let bus = stand.accept();
+            Self {
+                program: End::new(program),
+                bus,
+                conn,
+                ctx,
+                serving: Some(serving),
+                stand,
+            }
+        }
+
+        /// The authentication through, both ways.
+        fn authenticated(&mut self) {
+            assert_eq!(self.bus.line(), b"\0AUTH EXTERNAL 31303030\r\n");
+            assert_eq!(self.bus.line(), b"NEGOTIATE_UNIX_FD\r\n");
+            assert_eq!(self.bus.line(), b"BEGIN\r\n");
+            self.bus
+                .send(b"OK 0123456789abcdef\r\nAGREE_UNIX_FD\r\n", &[]);
+            assert_eq!(self.program.line(), b"OK 0123456789abcdef\r\n");
+            assert_eq!(self.program.line(), b"AGREE_UNIX_FD\r\n");
+        }
+
+        fn portal(&self) -> Option<String> {
+            self.conn.registration().portal.clone()
+        }
+    }
+
+    impl Drop for Served {
+        fn drop(&mut self) {
+            let _ = self.program.stream.shutdown(std::net::Shutdown::Both);
+            let _ = self.bus.stream.shutdown(std::net::Shutdown::Both);
+            if let Some(serving) = self.serving.take() {
+                let _ = serving.join();
+            }
+        }
+    }
+
+    const SETTINGS: &str = "org.freedesktop.portal.Settings";
+    const HELD: Duration = Duration::from_millis(300);
+
+    /// Our `Register` as the bus side sees it: the zone's id, to the portal,
+    /// on the program's own connection under the reserved serial.
+    fn assert_register(msg: &[u8], h: &Header, serial: u32) {
+        assert_eq!(h.kind, wire::METHOD_CALL);
+        assert_eq!(h.serial, serial);
+        assert_eq!(h.flags & wire::NO_REPLY_EXPECTED, 0);
+        assert_eq!(h.interface.as_deref(), Some(REGISTRY));
+        assert_eq!(h.member.as_deref(), Some("Register"));
+        assert_eq!(h.destination.as_deref(), Some(PORTAL));
+        assert_eq!(h.path.as_deref(), Some(PORTAL_PATH));
+        assert_eq!(h.signature.as_deref(), Some("sa{sv}"));
+        assert_eq!(h.unix_fds, 0);
+        assert_eq!(&msg[h.body_offset..], body::register("cellward.zone.nl"));
+    }
+
+    /// The connection is the zone's before its first call: the program's
+    /// Hello goes up at once, its pipelined calls wait — in order, with
+    /// their descriptors — while ours asks the portal, and the portal's
+    /// answer to ours never reaches the program.
+    #[test]
+    fn the_connection_is_the_zones_before_its_first_call() {
+        let mut s = Served::start("register", Some("cellward.zone.nl"), |c| c);
+        // A descriptor with the first call: a socket, checked to be the same
+        // one at the other end.
+        let (kept, passed) = UnixStream::pair().unwrap();
+        let mut first = AUTH.to_vec();
+        first.extend(hello(1));
+        first.extend(method(2, PORTAL, SETTINGS, "ReadAll", 1));
+        first.extend(method(3, PORTAL, SETTINGS, "Read", 0));
+        s.program.send(&first, &[passed.as_raw_fd()]);
+        drop(passed);
+        s.authenticated();
+
+        let (_, h, _) = s.bus.message();
+        assert_eq!((h.member.as_deref(), h.serial), (Some("Hello"), 1));
+        // Held until the bus has named the connection.
+        assert!(
+            s.bus.quiet(HELD),
+            "a call went up before the Hello's answer"
+        );
+        s.bus.send(&reply_to(1, "org.freedesktop.DBus"), &[]);
+
+        let (msg, h, _) = s.bus.message();
+        assert_register(&msg, &h, REGISTER_SERIAL);
+        // And held until the portal answers ours.
+        assert!(
+            s.bus.quiet(HELD),
+            "a call went up before the portal's answer"
+        );
+        s.bus.send(&reply_to(REGISTER_SERIAL, ":1.7"), &[]);
+
+        let (_, h, fds) = s.bus.message();
+        assert_eq!((h.member.as_deref(), h.serial), (Some("ReadAll"), 2));
+        assert_eq!(fds.len(), 1);
+        let mut through = UnixStream::from(fds.into_iter().next().unwrap());
+        (&kept).write_all(b"x").unwrap();
+        let mut byte = [0u8; 1];
+        io::Read::read_exact(&mut through, &mut byte).unwrap();
+        assert_eq!(&byte, b"x");
+        let (_, h, _) = s.bus.message();
+        assert_eq!((h.member.as_deref(), h.serial), (Some("Read"), 3));
+        assert_eq!(s.portal().as_deref(), Some(":1.7"));
+
+        // The program: its Hello answered, and the next thing it gets is the
+        // answer to its own call — ours was swallowed.
+        s.bus.send(&reply_to(2, ":1.7"), &[]);
+        let (_, h, _) = s.program.message();
+        assert_eq!(h.reply_serial, Some(1));
+        let (_, h, _) = s.program.message();
+        assert_eq!(h.reply_serial, Some(2));
+        assert!(s.program.quiet(HELD));
+        assert!(!s.ctx.told_register.load(Ordering::SeqCst));
+    }
+
+    /// Refused by the portal (no entry for the id, an older portal): said
+    /// once, swallowed, and the connection goes on as it did before — no id
+    /// of the zone's, nothing of the program's lost.
+    #[test]
+    fn a_refused_registration_leaves_the_connection_as_it_was() {
+        let mut s = Served::start("refused", Some("cellward.zone.nl"), |c| c);
+        let mut first = AUTH.to_vec();
+        first.extend(hello(1));
+        first.extend(method(2, PORTAL, SETTINGS, "Read", 0));
+        s.program.send(&first, &[]);
+        s.authenticated();
+        let _ = s.bus.message();
+        s.bus.send(&reply_to(1, "org.freedesktop.DBus"), &[]);
+        let (msg, h, _) = s.bus.message();
+        assert_register(&msg, &h, REGISTER_SERIAL);
+        s.bus.send(
+            &error_to(
+                REGISTER_SERIAL,
+                "org.freedesktop.portal.Error.Failed",
+                "Could not register app ID: App info not found for 'cellward.zone.nl'",
+            ),
+            &[],
+        );
+        let (_, h, _) = s.bus.message();
+        assert_eq!(h.serial, 2);
+        assert_eq!(s.portal(), None);
+        assert!(s.ctx.told_register.load(Ordering::SeqCst));
+        s.bus.send(&reply_to(2, ":1.7"), &[]);
+        let (_, h, _) = s.program.message();
+        assert_eq!(h.reply_serial, Some(1));
+        let (_, h, _) = s.program.message();
+        assert_eq!((h.kind, h.reply_serial), (wire::METHOD_RETURN, Some(2)));
+    }
+
+    /// No answer in time: the held calls go on without an id, and the late
+    /// answer — a "yes" among them — neither reaches the program nor makes
+    /// the connection the zone's.
+    #[test]
+    fn a_late_answer_is_swallowed_and_changes_nothing() {
+        let mut s = Served::start("late", Some("cellward.zone.nl"), |c| Ctx {
+            register_wait: Duration::from_millis(200),
+            ..c
+        });
+        let mut first = AUTH.to_vec();
+        first.extend(hello(1));
+        first.extend(method(2, PORTAL, SETTINGS, "Read", 0));
+        s.program.send(&first, &[]);
+        s.authenticated();
+        let _ = s.bus.message();
+        s.bus.send(&reply_to(1, "org.freedesktop.DBus"), &[]);
+        let (msg, h, _) = s.bus.message();
+        assert_register(&msg, &h, REGISTER_SERIAL);
+        // Nothing from the portal: the call goes on after the wait.
+        let (_, h, _) = s.bus.message();
+        assert_eq!(h.serial, 2);
+        assert!(s.ctx.told_register.load(Ordering::SeqCst));
+        s.bus.send(&reply_to(REGISTER_SERIAL, ":1.7"), &[]);
+        s.bus.send(&reply_to(2, ":1.7"), &[]);
+        let (_, h, _) = s.program.message();
+        assert_eq!(h.reply_serial, Some(1));
+        let (_, h, _) = s.program.message();
+        assert_eq!(h.reply_serial, Some(2));
+        assert!(s.program.quiet(HELD));
+        assert_eq!(s.portal(), None);
+    }
+
+    /// The program cannot name itself or answer for us: its own `Register`,
+    /// pipelined right behind its Hello, waits behind ours and is refused;
+    /// a Hello under our serial moves ours aside.
+    #[test]
+    fn the_programs_own_register_is_refused_after_ours() {
+        let mut s = Served::start("theirs", Some("cellward.zone.nl"), |c| c);
+        let mut first = AUTH.to_vec();
+        first.extend(hello(REGISTER_SERIAL));
+        // No body needed: refused by its interface.
+        first.extend(method(5, PORTAL, REGISTRY, "Register", 0));
+        first.extend(method(6, PORTAL, SETTINGS, "Read", 0));
+        s.program.send(&first, &[]);
+        s.authenticated();
+        let (_, h, _) = s.bus.message();
+        assert_eq!(h.serial, REGISTER_SERIAL);
+        s.bus
+            .send(&reply_to(REGISTER_SERIAL, "org.freedesktop.DBus"), &[]);
+        let (msg, h, _) = s.bus.message();
+        assert_register(&msg, &h, REGISTER_SERIAL - 1);
+        assert!(s.bus.quiet(HELD));
+        s.bus.send(&reply_to(REGISTER_SERIAL - 1, ":1.7"), &[]);
+        // Only the program's harmless call went up; its Register was
+        // answered by the filter.
+        let (_, h, _) = s.bus.message();
+        assert_eq!((h.member.as_deref(), h.serial), (Some("Read"), 6));
+        assert!(s.bus.quiet(HELD));
+        let (_, h, _) = s.program.message();
+        assert_eq!(h.reply_serial, Some(REGISTER_SERIAL));
+        let (_, h, _) = s.program.message();
+        assert_eq!((h.kind, h.reply_serial), (wire::ERROR, Some(5)));
+        assert_eq!(
+            h.error_name.as_deref(),
+            Some("org.freedesktop.DBus.Error.AccessDenied")
+        );
+        assert_eq!(s.portal().as_deref(), Some(":1.7"));
+    }
+
+    /// Without `--portal-app` nothing is held and nothing added: the calls
+    /// go up behind the Hello at once, as they always did.
+    #[test]
+    fn without_an_id_nothing_is_held() {
+        let mut s = Served::start("none", None, |c| c);
+        let mut first = AUTH.to_vec();
+        first.extend(hello(1));
+        first.extend(method(2, PORTAL, SETTINGS, "Read", 0));
+        s.program.send(&first, &[]);
+        s.authenticated();
+        let (_, h, _) = s.bus.message();
+        assert_eq!(h.serial, 1);
+        let (_, h, _) = s.bus.message();
+        assert_eq!(h.serial, 2);
+        assert!(s.bus.quiet(HELD));
+        assert_eq!(s.portal(), None);
+    }
+
+    /// The serial of ours passes xdg-dbus-proxy, which closes a connection
+    /// whose client uses one of its own, and is never the Hello's.
+    #[test]
+    fn the_reserved_serial_is_one_the_proxy_takes() {
+        assert_eq!(MAX_CLIENT_SERIAL, 0xFFFE_FFFF);
+        for hello in [
+            1,
+            2,
+            REGISTER_SERIAL - 1,
+            REGISTER_SERIAL,
+            MAX_CLIENT_SERIAL,
+        ] {
+            let ours = register_serial(hello);
+            assert_ne!(ours, hello);
+            assert_ne!(ours, 0);
+            assert!(ours <= MAX_CLIENT_SERIAL, "{ours:#x}");
+        }
+    }
+
+    #[test]
+    fn an_app_id_is_checked_and_passed() {
+        for good in [
+            "cellward.zone.nl",
+            "cellward.zone._1x_0a1b2c3d",
+            "org.example.App-1",
+        ] {
+            assert!(is_app_id(good), "{good}");
+        }
+        for bad in [
+            "",
+            "nl",
+            "cellward..nl",
+            "cellward.zone.1x",
+            "cellward.zone.a b",
+            "cellward.zone.зона",
+            &format!("cellward.zone.{}", "a".repeat(250)),
+        ] {
+            assert!(!is_app_id(bad), "{bad}");
+        }
+        let args = |extra: &[&str]| {
+            let mut argv: Vec<OsString> = ["--listen", "/l", "--upstream", "/u", "--opener", "/o"]
+                .iter()
+                .map(OsString::from)
+                .collect();
+            argv.extend(extra.iter().map(OsString::from));
+            Args::parse(&argv)
+        };
+        assert_eq!(args(&[]).unwrap().portal_app, None);
+        assert_eq!(
+            args(&["--portal-app", "cellward.zone.nl"])
+                .unwrap()
+                .portal_app
+                .as_deref(),
+            Some("cellward.zone.nl")
+        );
+        assert!(args(&["--portal-app", "not an id"]).is_err());
+        assert!(args(&["--portal-app"]).is_err());
+        // The zone of the screen cast switch: all three, or none.
+        let zone = args(&["--zone", "nl", "--zone-dir", "/s/nl", "--config", "/c"]).unwrap();
+        assert_eq!(
+            zone.zone,
+            Some(ZoneArgs {
+                name: "nl".to_owned(),
+                dir: PathBuf::from("/s/nl"),
+                config: PathBuf::from("/c"),
+            })
+        );
+        assert!(args(&["--zone", "nl"]).is_err());
+        assert!(args(&["--zone-dir", "/s/nl", "--config", "/c"]).is_err());
+        assert!(args(&["--zone", "", "--zone-dir", "/s/nl", "--config", "/c"]).is_err());
+    }
+
+    // --- THE SCREEN CAST SWITCH ----------------------------------------------
+
+    const SCREENCAST: &str = crate::screencast::INTERFACE;
+
+    /// A zone's state and config directories, and its switch held on them.
+    struct ZoneDirs {
+        base: PathBuf,
+    }
+
+    impl ZoneDirs {
+        fn new(tag: &str) -> Self {
+            let base = std::env::temp_dir().join(format!(
+                "vpn-zone-bus-filter-cast-{tag}-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&base);
+            fs::create_dir_all(base.join("state/nl")).unwrap();
+            fs::create_dir_all(base.join("config/declared")).unwrap();
+            Self { base }
+        }
+
+        fn policy(&self) -> crate::screencast::Policy {
+            crate::screencast::Policy::hold(
+                "nl",
+                &self.base.join("state/nl"),
+                &self.base.join("config"),
+            )
+        }
+
+        fn write(&self, path: &str, text: &str) {
+            fs::write(self.base.join(path), text).unwrap();
+        }
+
+        fn journal(&self) -> String {
+            fs::read_to_string(self.base.join("state").join(crate::journal::FILE))
+                .unwrap_or_default()
+        }
+    }
+
+    impl Drop for ZoneDirs {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    /// `SelectSources(o, a{sv})` the way a program asking to be remembered
+    /// sends it: a token, a remembered choice, a restore token, the types.
+    fn select_sources(serial: u32, dest: &str) -> Vec<u8> {
+        fn pad(b: &mut Vec<u8>, n: usize) {
+            b.resize(b.len().next_multiple_of(n), 0);
+        }
+        fn string(b: &mut Vec<u8>, s: &str) {
+            pad(b, 4);
+            b.extend((s.len() as u32).to_le_bytes());
+            b.extend(s.as_bytes());
+            b.push(0);
+        }
+        fn entry(b: &mut Vec<u8>, key: &str, sig: &str) {
+            pad(b, 8);
+            string(b, key);
+            b.push(sig.len() as u8);
+            b.extend(sig.as_bytes());
+            b.push(0);
+        }
+        let mut b = Vec::new();
+        string(&mut b, "/org/freedesktop/portal/desktop/session/1_42/s");
+        pad(&mut b, 4);
+        let len_at = b.len();
+        b.extend([0; 4]);
+        pad(&mut b, 8);
+        let start = b.len();
+        entry(&mut b, "handle_token", "s");
+        string(&mut b, "t1");
+        entry(&mut b, "persist_mode", "u");
+        pad(&mut b, 4);
+        b.extend(2u32.to_le_bytes());
+        entry(&mut b, "restore_token", "s");
+        string(&mut b, "remembered");
+        entry(&mut b, "types", "u");
+        pad(&mut b, 4);
+        b.extend(1u32.to_le_bytes());
+        let len = (b.len() - start) as u32;
+        b[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
+        wire::message(
+            wire::METHOD_CALL,
+            0,
+            serial,
+            &[
+                Field::Path(PORTAL_PATH),
+                Field::Interface(SCREENCAST),
+                Field::Member("SelectSources"),
+                Field::Destination(dest),
+                Field::Signature("oa{sv}"),
+            ],
+            &b,
+        )
+    }
+
+    /// Whether a message the bus got asks for the choice to be remembered.
+    fn remembers(msg: &[u8]) -> (bool, bool) {
+        let has = |word: &[u8]| msg.windows(word.len()).any(|w| w == word);
+        (has(b"persist_mode"), has(b"restore_token"))
+    }
+
+    impl Served {
+        /// The program's connection up and — with an id — registered, the
+        /// portal `:1.7` answering; the program has its Hello's answer.
+        fn registered(&mut self) {
+            let mut first = AUTH.to_vec();
+            first.extend(hello(1));
+            self.program.send(&first, &[]);
+            self.authenticated();
+            let _ = self.bus.message();
+            self.bus.send(&reply_to(1, "org.freedesktop.DBus"), &[]);
+            if self.ctx.portal_app.is_some() {
+                let (msg, h, _) = self.bus.message();
+                assert_register(&msg, &h, REGISTER_SERIAL);
+                self.bus.send(&reply_to(REGISTER_SERIAL, ":1.7"), &[]);
+            }
+            let (_, h, _) = self.program.message();
+            assert_eq!(h.reply_serial, Some(1));
+        }
+
+        /// A call of the program's, and what the bus got of it.
+        fn through(&mut self, msg: &[u8]) -> Vec<u8> {
+            self.program.send(msg, &[]);
+            self.bus.message().0
+        }
+    }
+
+    /// The filter's own short connection (`portal_owner`), answered by the
+    /// stand-in: the portal's name is owned by `owner`.
+    fn answer_owner(stand: &Stand, owner: &str) {
+        let mut own = stand.accept();
+        assert!(own.line().starts_with(b"\0AUTH EXTERNAL "));
+        own.send(b"OK 0123456789abcdef\r\n", &[]);
+        assert_eq!(own.line(), b"BEGIN\r\n");
+        let (_, h, _) = own.message();
+        assert_eq!(h.member.as_deref(), Some("Hello"));
+        own.send(&reply_to(h.serial, "org.freedesktop.DBus"), &[]);
+        let (msg, h, _) = own.message();
+        assert_eq!(h.member.as_deref(), Some("GetNameOwner"));
+        assert_eq!(wire::body_string(&msg, &h).unwrap(), PORTAL);
+        own.send(
+            &wire::message(
+                wire::METHOD_RETURN,
+                wire::NO_REPLY_EXPECTED,
+                9,
+                &[Field::ReplySerial(h.serial), Field::Signature("s")],
+                &body::string(owner),
+            ),
+            &[],
+        );
+    }
+
+    /// The switch as it is at each call: `ask` strips the remembered
+    /// choice, `yes` on the zone's own connection keeps it, `no` refuses
+    /// every call of the interface with the portal's own error — the
+    /// program told why, the journal told, the bus told nothing — and Nix
+    /// over the zone's own word, at once.
+    #[test]
+    fn the_screen_cast_switch_is_read_for_every_call() {
+        let d = ZoneDirs::new("switch");
+        let policy = d.policy();
+        let mut s = Served::start("cast", Some("cellward.zone.nl"), |c| Ctx {
+            screencast: Some(policy),
+            ..c
+        });
+        s.registered();
+        // ask, the default.
+        let got = s.through(&select_sources(10, ":1.7"));
+        assert_eq!(remembers(&got), (false, false));
+        // yes: remembered, the token passed.
+        d.write("state/nl/screencast", "yes");
+        let got = s.through(&select_sources(11, ":1.7"));
+        assert_eq!(remembers(&got), (true, true));
+        // Other calls of the interface pass as they are.
+        let got = s.through(&method(12, ":1.7", SCREENCAST, "CreateSession", 0));
+        assert_eq!(wire::parse_header(&got).unwrap().serial, 12);
+        // no: refused, whatever the call.
+        d.write("state/nl/screencast", "no");
+        for (serial, member) in [(13, "CreateSession"), (14, "Start")] {
+            s.program
+                .send(&method(serial, PORTAL, SCREENCAST, member, 0), &[]);
+            let (msg, h, _) = s.program.message();
+            assert_eq!((h.kind, h.reply_serial), (wire::ERROR, Some(serial)));
+            assert_eq!(h.error_name.as_deref(), Some(NOT_ALLOWED));
+            let text = wire::body_string(&msg, &h).unwrap();
+            assert!(
+                text.contains("трансляция экрана выключена для зоны «nl»"),
+                "{text}"
+            );
+        }
+        s.program.send(&select_sources(15, ":1.7"), &[]);
+        let (_, h, _) = s.program.message();
+        assert_eq!((h.kind, h.reply_serial), (wire::ERROR, Some(15)));
+        assert!(s.bus.quiet(HELD), "a refused call went up");
+        // Once in the journal for the three: at most a line per ten seconds.
+        assert_eq!(d.journal().matches("\"event\":\"screencast\"").count(), 1);
+        // Nix over the zone's own word, at once.
+        d.write("config/declared/screencast", "nl ask\n");
+        let got = s.through(&select_sources(16, ":1.7"));
+        assert_eq!(remembers(&got), (false, false));
+        d.write("config/declared/screencast", "nl no\n");
+        s.program.send(&select_sources(17, ":1.7"), &[]);
+        let (msg, h, _) = s.program.message();
+        assert_eq!(h.reply_serial, Some(17));
+        assert!(wire::body_string(&msg, &h)
+            .unwrap()
+            .ends_with("(задано в Nix)"));
+    }
+
+    /// `yes` remembers only for the zone: not on a connection the portal
+    /// does not know as it, not for another name, not for a portal started
+    /// since the one that took the id — and for the one that did, by its
+    /// well-known name.
+    #[test]
+    fn yes_is_ask_where_the_portal_does_not_know_the_zone() {
+        let d = ZoneDirs::new("unknown");
+        d.write("state/nl/screencast", "yes");
+        // No id at all.
+        let policy = d.policy();
+        let mut s = Served::start("cast-anon", None, |c| Ctx {
+            screencast: Some(policy),
+            ..c
+        });
+        s.registered();
+        let got = s.through(&select_sources(10, PORTAL));
+        assert_eq!(remembers(&got), (false, false));
+        drop(s);
+
+        let policy = d.policy();
+        let mut s = Served::start("cast-known", Some("cellward.zone.nl"), |c| Ctx {
+            screencast: Some(policy),
+            ..c
+        });
+        s.registered();
+        // Another name than the portal that took the id.
+        let got = s.through(&select_sources(10, ":1.99"));
+        assert_eq!(remembers(&got), (false, false));
+        // By the well-known name: the portal that took it still owns it.
+        s.program.send(&select_sources(11, PORTAL), &[]);
+        answer_owner(&s.stand, ":1.7");
+        assert_eq!(remembers(&s.bus.message().0), (true, true));
+        // A portal started since: it knows the connection by no name.
+        s.program.send(&select_sources(12, PORTAL), &[]);
+        answer_owner(&s.stand, ":1.8");
+        assert_eq!(remembers(&s.bus.message().0), (false, false));
+        assert!(s.ctx.told_unremembered.load(Ordering::SeqCst));
+    }
+
+    /// Without a zone to read (a sandbox's own filter, an unconfined one),
+    /// every cast asks, as before the switch.
+    #[test]
+    fn without_a_zone_every_cast_asks() {
+        let mut s = Served::start("cast-none", Some("cellward.zone.nl"), |c| c);
+        s.registered();
+        let got = s.through(&select_sources(10, ":1.7"));
+        assert_eq!(remembers(&got), (false, false));
     }
 }

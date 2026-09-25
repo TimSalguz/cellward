@@ -113,7 +113,23 @@ impl Setting {
 
 /// The zone's setting and where it comes from.
 pub fn setting(zone_dir: &Path, config: &Path, zone: &str) -> (Setting, Source) {
-    match std::fs::read_to_string(config.join(DECLARED_DIR).join(DECLARED)) {
+    zone_switch(Some(zone_dir), config, zone, MARKER, DECLARED)
+}
+
+/// A zone's `yes|no|ask` switch by the microphone's rules — the screen
+/// cast's too (`crate::screencast`): the zone's `marker` in its state
+/// directory, `declared/<declared>` (`<zone> <value>` per line) over it, `ask`
+/// without either; a value that is none of the three, or a file that is there
+/// and cannot be read, is `no`. No `zone_dir`: it could not be reached, which
+/// is a marker that cannot be read.
+pub fn zone_switch(
+    zone_dir: Option<&Path>,
+    config: &Path,
+    zone: &str,
+    marker: &str,
+    declared: &str,
+) -> (Setting, Source) {
+    match std::fs::read_to_string(config.join(DECLARED_DIR).join(declared)) {
         Ok(text) => {
             let declared = text.lines().find_map(|line| {
                 let (name, value) = line.trim().split_once(char::is_whitespace)?;
@@ -127,7 +143,10 @@ pub fn setting(zone_dir: &Path, config: &Path, zone: &str) -> (Setting, Source) 
         // Nix may have said "no" for this zone in a file that cannot be read.
         Err(_) => return (Setting::No, Source::Nix),
     }
-    match std::fs::read_to_string(zone_dir.join(MARKER)) {
+    let Some(zone_dir) = zone_dir else {
+        return (Setting::No, Source::Local);
+    };
+    match std::fs::read_to_string(zone_dir.join(marker)) {
         Ok(text) if text.trim().is_empty() => (Setting::Ask, Source::Default),
         Ok(text) => (Setting::parse(&text).unwrap_or(Setting::No), Source::Local),
         Err(e) if e.kind() == ErrorKind::NotFound => (Setting::Ask, Source::Default),

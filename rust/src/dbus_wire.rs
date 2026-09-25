@@ -96,6 +96,8 @@ pub struct Header {
     pub path: Option<String>,
     pub interface: Option<String>,
     pub member: Option<String>,
+    /// An `ERROR`'s name.
+    pub error_name: Option<String>,
     pub reply_serial: Option<u32>,
     pub destination: Option<String>,
     pub sender: Option<String>,
@@ -140,6 +142,7 @@ pub fn parse_header(msg: &[u8]) -> Result<Header> {
             (FIELD_PATH, "o") => h.path = Some(r.string()?),
             (FIELD_INTERFACE, "s") => h.interface = Some(r.string()?),
             (FIELD_MEMBER, "s") => h.member = Some(r.string()?),
+            (FIELD_ERROR_NAME, "s") => h.error_name = Some(r.string()?),
             (FIELD_DESTINATION, "s") => h.destination = Some(r.string()?),
             (FIELD_SENDER, "s") => h.sender = Some(r.string()?),
             (FIELD_SIGNATURE, "g") => h.signature = Some(r.signature()?),
@@ -543,14 +546,27 @@ pub fn sanitized_portal_notification(msg: &[u8], h: &Header) -> Result<Vec<u8>> 
 /// Not `persist_mode` and `restore_token` — and nothing a later portal adds.
 pub const SCREENCAST_OPTIONS: &[&str] = &["handle_token", "types", "multiple", "cursor_mode"];
 
-/// The screen cast portal's `SelectSources(o session, a{sv})` that asks every
-/// time. A remembered choice (`persist_mode`) comes back as a token, and with
-/// it the portal starts the next cast WITHOUT its dialog: the program could
-/// show the screen again whenever it likes, and in niri nothing says so. The
-/// portal keeps the choice for "host applications" — which a zone's program
-/// is to it (`bus_filter::PORTAL_ALLOWED`) — so the person could not even
-/// tell which zone it was given to.
-pub fn sanitized_screencast_sources(msg: &[u8], h: &Header) -> Result<Vec<u8>> {
+/// What a remembered choice adds to them: the zone's `screencast yes`, on a
+/// connection the portal knows by the zone's own id
+/// (`bus_filter::screencast_verdict`).
+pub const SCREENCAST_REMEMBERED: &[&str] = &["persist_mode", "restore_token"];
+
+/// The screen cast portal's `SelectSources(o session, a{sv})` as it may go on.
+///
+/// Asking every time (`remember` false — the zone's `ask`, and `yes` without
+/// an id of the zone's): a remembered choice (`persist_mode`) comes back as a
+/// token, and with it the portal starts the next cast WITHOUT its dialog —
+/// the program could show the screen again whenever it likes, and in niri
+/// nothing says so. The portal keeps the choice under the caller's
+/// application id, and a zone's program without one is a nameless "host
+/// application" to it, the one every zone shares
+/// (`bus_filter::PORTAL_ALLOWED`): the person could not even tell which zone
+/// it was given to.
+///
+/// `remember` (`yes`, and the connection registered as the zone — LEAK-MODEL
+/// §23): `persist_mode` and `restore_token` pass as well, and the choice is
+/// kept under the zone's own id. Anything on neither list goes either way.
+pub fn sanitized_screencast_sources(msg: &[u8], h: &Header, remember: bool) -> Result<Vec<u8>> {
     if h.signature.as_deref() != Some("oa{sv}") || !h.little {
         return Err(WireError("not a screen cast selection the filter reads"));
     }
@@ -564,7 +580,9 @@ pub fn sanitized_screencast_sources(msg: &[u8], h: &Header) -> Result<Vec<u8>> {
     filtered_options(
         &mut r,
         &mut w,
-        &|key| SCREENCAST_OPTIONS.contains(&key),
+        &|key| {
+            SCREENCAST_OPTIONS.contains(&key) || (remember && SCREENCAST_REMEMBERED.contains(&key))
+        },
         &[],
     )?;
     if r.pos != msg.len() {
@@ -691,7 +709,17 @@ pub mod body {
         w.buf
     }
 
-    /// A portal's `Response`: `(u response, a{sv} results)` with no results.
+    /// `org.freedesktop.host.portal.Registry.Register`'s `(s app_id, a{sv}
+    /// options)`, with no options.
+    pub fn register(app_id: &str) -> Vec<u8> {
+        let mut w = Writer { buf: Vec::new() };
+        w.string(app_id);
+        w.u32(0);
+        // An empty array is still padded to its elements' alignment.
+        w.align(8);
+        w.buf
+    }
+
     /// A boolean (`b`).
     pub fn boolean(v: bool) -> Vec<u8> {
         let mut w = Writer { buf: Vec::new() };
@@ -741,6 +769,7 @@ pub mod body {
         w.buf
     }
 
+    /// A portal's `Response`: `(u response, a{sv} results)` with no results.
     pub fn response(code: u32) -> Vec<u8> {
         let mut w = Writer { buf: Vec::new() };
         w.u32(code);
@@ -1065,32 +1094,56 @@ mod tests {
         ];
         let msg = message(METHOD_CALL, 0, 9, &fields, &w.buf);
         let h = parse_header(&msg).unwrap();
-        let body = sanitized_screencast_sources(&msg, &h).unwrap();
-        let out = message(METHOD_CALL, 0, 9, &fields, &body);
-        let h2 = parse_header(&out).unwrap();
-        let mut r = Reader {
-            buf: &out,
-            pos: h2.body_offset,
-            little: true,
-        };
-        assert_eq!(r.string().unwrap(), session);
-        let len = r.u32().unwrap() as usize;
-        r.align(8).unwrap();
-        let end = r.pos + len;
-        let mut keys = Vec::new();
-        while r.pos < end {
+        let keys = |remember: bool| {
+            let body = sanitized_screencast_sources(&msg, &h, remember).unwrap();
+            let out = message(METHOD_CALL, 0, 9, &fields, &body);
+            let h2 = parse_header(&out).unwrap();
+            let mut r = Reader {
+                buf: &out,
+                pos: h2.body_offset,
+                little: true,
+            };
+            assert_eq!(r.string().unwrap(), session);
+            let len = r.u32().unwrap() as usize;
             r.align(8).unwrap();
-            let key = r.string().unwrap();
-            let sig = r.signature().unwrap();
-            r.skip(sig.as_bytes(), 0).unwrap();
-            keys.push(key);
-        }
-        assert_eq!(r.pos, out.len());
-        assert_eq!(keys, ["handle_token", "types", "multiple", "cursor_mode"]);
+            let end = r.pos + len;
+            let mut keys = Vec::new();
+            while r.pos < end {
+                r.align(8).unwrap();
+                let key = r.string().unwrap();
+                let sig = r.signature().unwrap();
+                if key == "restore_token" {
+                    assert_eq!(r.string().unwrap(), "0b2c…");
+                } else {
+                    r.skip(sig.as_bytes(), 0).unwrap();
+                }
+                keys.push(key);
+            }
+            assert_eq!(r.pos, out.len());
+            keys
+        };
+        assert_eq!(
+            keys(false),
+            ["handle_token", "types", "multiple", "cursor_mode"]
+        );
+        // Remembered (`screencast yes` under the zone's own id): the choice
+        // and its token pass as well — and still nothing nobody has read.
+        assert_eq!(
+            keys(true),
+            [
+                "handle_token",
+                "persist_mode",
+                "types",
+                "restore_token",
+                "multiple",
+                "cursor_mode"
+            ]
+        );
         // Not read, not passed on: another signature is refused.
         let mut odd = h.clone();
         odd.signature = Some("oa{ss}".to_owned());
-        assert!(sanitized_screencast_sources(&msg, &odd).is_err());
+        assert!(sanitized_screencast_sources(&msg, &odd, false).is_err());
+        assert!(sanitized_screencast_sources(&msg, &odd, true).is_err());
     }
 
     #[test]

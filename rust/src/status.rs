@@ -156,7 +156,7 @@ pub fn networks(tools: &Tools) -> String {
         // 2026-09, may still be in a configuration or in Nix.
         "{\"name\":\"unconfined\",\"kind\":\"unconfined\",\"aliases\":[\"direct\"],\"source\":\"default\",\"up\":true,\
          \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\"microphone\":null,\"audio_manager\":null,\"system_zone\":null,\"frame_color\":null}"
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\"microphone\":null,\"screencast\":null,\"audio_manager\":null,\"system_zone\":null,\"frame_color\":null}"
             .to_owned(),
     ];
     let mut offline_listed = false;
@@ -241,6 +241,13 @@ pub fn networks(tools: &Tools) -> String {
             let (setting, source) = crate::microphone::setting(&dir, &tools.config, &name);
             sourced_str(setting.as_str(), source)
         };
+        // Whether its programs cast the screen, and may have the choice
+        // remembered: in force at once (the zone's bus filter reads it for
+        // every call of the screen cast portal).
+        let screencast = {
+            let (setting, source) = crate::screencast::setting(&dir, &tools.config, &name);
+            sourced_str(setting.as_str(), source)
+        };
         // Whether a hermetic zone gets the host's raw PipeWire socket instead
         // of the restricted one (`crate::pw_context`); from its next start.
         let audio_manager = {
@@ -258,7 +265,7 @@ pub fn networks(tools: &Tools) -> String {
             "local"
         };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"camera\":{camera},\"microphone\":{microphone},\"audio_manager\":{audio_manager},\"system_zone\":{system_zone},\"frame_color\":{frame_color}}}",
+            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"camera\":{camera},\"microphone\":{microphone},\"screencast\":{screencast},\"audio_manager\":{audio_manager},\"system_zone\":{system_zone},\"frame_color\":{frame_color}}}",
             string(&name),
             dir.join(NO_ESCAPE).exists()
         ));
@@ -269,12 +276,15 @@ pub fn networks(tools: &Tools) -> String {
         // declared before that.
         let (mic, mic_source) =
             crate::microphone::setting(&tools.state.join("offline"), &tools.config, "offline");
+        let (cast, cast_source) =
+            crate::screencast::setting(&tools.state.join("offline"), &tools.config, "offline");
         items.push(format!(
             "{{\"name\":\"offline\",\"kind\":\"offline\",\"aliases\":[],\"source\":\"default\",\"up\":false,\
              \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
              \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\
-             \"microphone\":{},\"audio_manager\":null,\"system_zone\":null,\"frame_color\":{}}}",
+             \"microphone\":{},\"screencast\":{},\"audio_manager\":null,\"system_zone\":null,\"frame_color\":{}}}",
             sourced_str(mic.as_str(), mic_source),
+            sourced_str(cast.as_str(), cast_source),
             sourced_str(&color.hex(), source)
         ));
     }

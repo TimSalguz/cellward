@@ -22,7 +22,10 @@
 //!   namespaces of running programs it was taken out of), `failed`;
 //! * `microphone` — `zone`, `program` (its own word), `decision` (`allowed`,
 //!   `refused`), `why`: a question about the microphone and its answer, or a
-//!   refusal because there was nobody to ask (`crate::microphone`).
+//!   refusal because there was nobody to ask (`crate::microphone`);
+//! * `screencast` — `zone`, `decision` (`refused`), `why`: a call of the
+//!   screen cast portal refused by the zone's switch (`crate::screencast`),
+//!   at most one line per 10 s.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -215,6 +218,11 @@ fn human(fields: &[(String, String)]) -> String {
                 _ => format!("отказано: {}", get("why")),
             }
         ),
+        "screencast" => format!(
+            "трансляция экрана: зона «{}» — отказано: {}",
+            get("zone"),
+            get("why")
+        ),
         "grant" => format!(
             "выдан каталог {} контейнеру {}{}",
             get("path"),
@@ -337,6 +345,22 @@ mod tests {
         assert!(parse("{\"time\":1}").is_none());
         assert!(parse("{\"a\":\"b\"} junk").is_none());
         assert_eq!(parse("{}"), Some(Vec::new()));
+    }
+
+    /// A refused screen cast reads as the zone and why.
+    #[test]
+    fn a_refused_screen_cast_reads_for_a_person() {
+        let l = line(
+            "2026-09-25T10:00:00Z",
+            "screencast",
+            &[
+                ("zone", "nl"),
+                ("decision", "refused"),
+                ("why", "выключена настройкой зоны"),
+            ],
+        );
+        assert!(human(&parse(&l).unwrap())
+            .ends_with("трансляция экрана: зона «nl» — отказано: выключена настройкой зоны"));
     }
 
     #[test]

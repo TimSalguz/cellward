@@ -79,7 +79,8 @@
 //!
 //! Usage:
 //! `vpn-zone-core fs-sandbox [--bwrap P] [--dbus-proxy P] [--kdialog P]
-//! [--xwayland P] <app-id> [--name <sandbox>] [--label <text>] -- <command…>`.
+//! [--xwayland P] <app-id> [--name <sandbox>] [--label <text>] [--zone <zone>]
+//! -- <command…>`.
 //!
 //! The tool paths are flags because Nix substitutes them: part of this runs
 //! inside namespaces where `PATH` can be anything, the same reason the zone
@@ -249,6 +250,10 @@ pub struct Args {
     /// `--x11 on`: the container's own `x11` permission (`vpn-zone container
     /// set … x11 on`, or Nix), on top of whatever the dialog answered.
     pub x11: bool,
+    /// `--zone <zone>`: the zone the launch runs in, none for an unconfined
+    /// one. Its programs are the zone to the portal
+    /// (`desktop::zone_app_id`, LEAK-MODEL §23).
+    pub zone: Option<String>,
     pub tools: Tools,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
@@ -313,6 +318,7 @@ impl Args {
         let mut label: Option<String> = None;
         let mut bind_paths: Vec<PathBuf> = Vec::new();
         let mut x11 = false;
+        let mut zone: Option<String> = None;
         let mut app_id: Option<OsString> = None;
         let mut rest = argv[..split].iter();
         while let Some(arg) = rest.next() {
@@ -350,6 +356,10 @@ impl Args {
                     }
                 }
                 "--x11" => x11 = value == "on",
+                // Like `--name`: an empty one is none.
+                "--zone" => {
+                    zone = Some(value.to_string_lossy().into_owned()).filter(|z| !z.is_empty())
+                }
                 _ => return Err(ArgError::UnknownFlag(flag)),
             }
         }
@@ -366,6 +376,7 @@ impl Args {
             label,
             bind_paths,
             x11,
+            zone,
             tools,
             cmd,
         })
@@ -1126,11 +1137,13 @@ fn start_bus_proxy(tool: &Path, socket: &Path, runtime: &Path) -> (Option<Child>
 }
 
 /// Start `bus-filter` in front of the proxy's socket and wait for its own.
-/// `None` means no bus for the program.
+/// `None` means no bus for the program. `portal_app`: the id it registers
+/// each connection with at the portal (`bus_filter::register`).
 fn start_bus_filter(
     upstream: &Path,
     socket: &Path,
     opener: &Path,
+    portal_app: Option<&str>,
 ) -> (Option<Child>, Option<PathBuf>) {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
@@ -1141,18 +1154,19 @@ fn start_bus_filter(
             return (None, None);
         }
     };
-    let mut child = match Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .arg("bus-filter")
         .arg("--listen")
         .arg(socket)
         .arg("--upstream")
         .arg(upstream)
         .arg("--opener")
-        .arg(opener)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .spawn()
-    {
+        .arg(opener);
+    if let Some(app) = portal_app {
+        command.arg("--portal-app").arg(app);
+    }
+    let mut child = match command.stdin(Stdio::null()).stdout(Stdio::null()).spawn() {
         Ok(child) => child,
         Err(e) => {
             eprintln!(
@@ -1315,13 +1329,27 @@ pub fn run(args: Args) -> u8 {
     // before the filter either). The filter goes straight onto the zone's bus,
     // and the zone's rules — a superset of a sandbox's: input methods, media
     // keys, the screensaver inhibitor on top — are the ones in force.
+    //
+    // Who the program is to the portal (LEAK-MODEL §23): its zone, registered
+    // on each connection by the one filter right in front of the proxy. On a
+    // hermetic zone's own bus filter that is the zone's, which registers the
+    // very connection this filter makes up; a second `Register` from here it
+    // would refuse as it refuses the program's. In front of our own proxy —
+    // or of a zone's bare proxy, from before its filter — it is this one.
     let socket = cleanup.dir.join("bus");
     let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
     let zones_filter = runtime.join("bus");
+    let portal_app = args.zone.as_deref().map(crate::desktop::zone_app_id);
     let bus_proxy = if private && crate::zone::bus_is_zones_filter(&mountinfo, &zones_filter) {
+        let registers = !crate::zone::bus_is_zones_bus_filter(&mountinfo, &zones_filter);
         match socket_at(zones_filter) {
             Some(upstream) => {
-                let (filter, at) = start_bus_filter(&upstream, &socket, &args.tools.opener);
+                let (filter, at) = start_bus_filter(
+                    &upstream,
+                    &socket,
+                    &args.tools.opener,
+                    portal_app.as_deref().filter(|_| registers),
+                );
                 cleanup.filter = filter;
                 at
             }
@@ -1336,7 +1364,12 @@ pub fn run(args: Args) -> u8 {
         cleanup.proxy = proxy;
         match filtered {
             Some(upstream) => {
-                let (filter, at) = start_bus_filter(&upstream, &socket, &args.tools.opener);
+                let (filter, at) = start_bus_filter(
+                    &upstream,
+                    &socket,
+                    &args.tools.opener,
+                    portal_app.as_deref(),
+                );
                 cleanup.filter = filter;
                 at
             }
@@ -1708,6 +1741,18 @@ mod tests {
         assert_eq!(a.label.as_deref(), Some("Телеграм"));
         let a = Args::parse(&argv(&["app", "--label", "", "--", "prog"])).unwrap();
         assert_eq!(a.label, None);
+    }
+
+    /// The zone the launch runs in, for the portal; none for an unconfined
+    /// launch, and an empty one is none.
+    #[test]
+    fn the_zone_is_kept_and_an_empty_one_is_none() {
+        let a = Args::parse(&argv(&["app", "--zone", "nl", "--", "prog"])).unwrap();
+        assert_eq!(a.zone.as_deref(), Some("nl"));
+        let a = Args::parse(&argv(&["--zone", "", "app", "--", "prog"])).unwrap();
+        assert_eq!(a.zone, None);
+        let a = Args::parse(&argv(&["app", "--", "prog"])).unwrap();
+        assert_eq!(a.zone, None);
     }
 
     #[test]

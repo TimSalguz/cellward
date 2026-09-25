@@ -114,6 +114,7 @@ pub mod profile;
 pub mod pulse_filter;
 pub mod pw_context;
 pub mod registry;
+pub mod screencast;
 pub mod seccomp;
 pub mod sockets;
 pub mod status;
