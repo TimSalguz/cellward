@@ -40,7 +40,8 @@ the zone gets it — not per launch):
    its confined proxy (`docs/WINDOW-FRAME.md` §8), which passes on only the
    launch's own processes — the compositor's own sandbox socket is in
    `vpn-zones/wl-up/`, which no zone has. A hermetic zone gets
-   bound back PipeWire, PulseAudio,
+   bound back PipeWire, PulseAudio (the `pulse-filter` socket: an allow-list
+   of commands, no recording of a monitor — `docs/LEAK-MODEL.md` §17),
    and two sockets of ours: a **filtered session bus** (`xdg-dbus-proxy`) and
    the **broker**. `systemd/private` is not bound back.
 2. **tmpfs over `/tmp/.X11-unix`** and `DISPLAY` unset in the launch
