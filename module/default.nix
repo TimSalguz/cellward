@@ -793,6 +793,19 @@ in
       description = "Толщина рамки окон программ зон, логические пиксели. null — не задавать из Nix (тогда vpn-zone frame width, иначе 4: целое число пикселей при масштабах 1,25/1,5/1,75/2). Рамка лежит внутри окна: программе достаётся размер меньше на две толщины. Спрятать рамки на время показа экрана — vpn-zone frame hide (переключатель только локальный: его щёлкают туда и обратно).";
     };
 
+    frame.title = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "always"
+          "hover"
+          "off"
+        ]
+      );
+      default = null;
+      example = "hover";
+      description = "Полоса заголовка «зона · контейнер» цвета зоны вдоль верха окон программ зон (docs/WINDOW-FRAME.md §0а). always — всегда, внутри окна: программе достаётся высота меньше на полосу; hover — поверх верха содержимого, выезжает, когда указатель у верхнего края окна, места не занимает; off — только обводка. В fullscreen полосы нет в любом режиме. null — не задавать из Nix (тогда vpn-zone frame title, иначе always). Действует для программ, запущенных после смены.";
+    };
+
     compositorRestriction.enable = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
@@ -992,6 +1005,9 @@ in
     })
     (lib.mkIf (cfg.frame.width != null) {
       ".config/vpn-zones/declared/frame-width".text = toString cfg.frame.width;
+    })
+    (lib.mkIf (cfg.frame.title != null) {
+      ".config/vpn-zones/declared/frame-title".text = cfg.frame.title;
     })
     (lib.mkIf (cfg.compositorRestriction.enable != null) {
       ".config/vpn-zones/declared/wayland-sandbox".text = if cfg.compositorRestriction.enable then "on" else "off";

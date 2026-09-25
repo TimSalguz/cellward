@@ -2277,7 +2277,6 @@ mod tests {
     #[test]
     fn a_record_stream_waits_for_the_answer_and_the_rest_goes_on() {
         use std::io::{Read, Write};
-        use std::os::unix::fs::PermissionsExt;
         use std::time::{Duration, Instant};
         let dir = std::env::temp_dir().join(format!("vz-pulse-ask-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -2286,17 +2285,15 @@ mod tests {
         // A kdialog that writes down its question and answers what `go` says.
         let kdialog = dir.join("kdialog");
         let (asked, go) = (dir.join("asked"), dir.join("go"));
-        fs::write(
+        crate::dialog::test_program(
             &kdialog,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > {asked}.tmp && mv {asked}.tmp {asked}\n\
                  while [ ! -e {go} ]; do sleep 0.05; done\nexit $(cat {go})\n",
                 asked = asked.display(),
                 go = go.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&kdialog, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let answer = |code: &str| {
             fs::write(dir.join("go.tmp"), code).unwrap();
             fs::rename(dir.join("go.tmp"), &go).unwrap();

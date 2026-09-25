@@ -199,8 +199,11 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             "isolate" if pos == 2 => strs(&mut out, &["overlay", "off"]),
             "mode" if pos == 2 => strs(&mut out, &["picker", "per-zone", "both", "off"]),
             "wayland-sandbox" if pos == 2 => strs(&mut out, &["on", "off"]),
-            "frame" if pos == 2 => strs(&mut out, &["show", "hide", "width", "color"]),
+            "frame" if pos == 2 => strs(&mut out, &["show", "hide", "width", "title", "color"]),
             "frame" if pos == 3 && word(2) == "width" => strs(&mut out, &["default"]),
+            "frame" if pos == 3 && word(2) == "title" => {
+                strs(&mut out, &["always", "hover", "off", "default"])
+            }
             "frame" if pos == 3 && word(2) == "color" => owned(&mut out, &snap.zones),
             "frame" if pos == 4 && word(2) == "color" => strs(&mut out, &["default"]),
             "default" if pos == 2 => {

@@ -91,10 +91,12 @@ pub fn defaults(tools: &Tools) -> String {
     let (_, frames_source) = setting(tools, crate::frame::SWITCH_SETTING, "shown");
     let frames = !crate::frame::hidden(&tools.config);
     let (frame_width, frame_width_source) = crate::frame::width(&tools.config);
+    // And their title strip: always, hover or off (`crate::frame::title_mode`).
+    let (frame_title, frame_title_source) = crate::frame::title_mode(&tools.config);
     format!(
         "{{\"network\":{},\"container\":{},\"launcher_mode\":{},\"compositor_restriction\":{},\
-         \"wayland_proxy\":{},\"frames\":{},\"frame_width\":{},\"autostart_unassigned\":{},\
-         \"user_entries\":{},\"hermetic\":{}}}",
+         \"wayland_proxy\":{},\"frames\":{},\"frame_width\":{},\"frame_title\":{},\
+         \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{}}}",
         sourced_str(&network, network_source),
         sourced_str(&container, container_source),
         sourced_str(&mode, mode_source),
@@ -102,6 +104,7 @@ pub fn defaults(tools: &Tools) -> String {
         sourced((proxy.trim() != "off").to_string(), proxy_source),
         sourced(frames.to_string(), frames_source),
         sourced(frame_width.to_string(), frame_width_source),
+        sourced_str(frame_title.as_str(), frame_title_source),
         sourced_str(&autostart, autostart_source),
         sourced_str(&user_entries, user_entries_source),
         sourced(hermetic.to_string(), hermetic_source)

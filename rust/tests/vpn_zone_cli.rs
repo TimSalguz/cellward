@@ -1628,12 +1628,20 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
     let default = vpn_zone::frame::default_color("nl").hex();
 
     let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+    // The title strip: always by default, the zone and the container as the
+    // launch knows it.
     assert!(
         line.contains(&format!(
-            "wl-sandbox foot --zone nl --frame {}:4 --frame-switch {} -- foot",
+            "wl-sandbox foot --zone nl --frame {}:4:always --frame-title nl · основной \
+             --frame-switch {} -- foot",
             &default[1..],
             home.root.join("config").display()
         )),
+        "{line}"
+    );
+    let line = stdout(&home.run_with(&["run", "nl", "--fs-sandbox", "--", "foot"], &dry));
+    assert!(
+        line.contains("--frame-title nl · разовая песочница "),
         "{line}"
     );
     // No border for the host's own session: it is no zone.
@@ -1645,9 +1653,15 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
     assert!(stdout(&out).contains("#3366ff"), "{}", stdout(&out));
     let out = home.run(&["frame", "width", "6"]);
     assert!(out.status.success(), "{}", stderr(&out));
+    let out = home.run(&["frame", "title", "hover"]);
+    assert!(out.status.success(), "{}", stderr(&out));
     let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
-    assert!(line.contains("--frame 3366ff:6 "), "{line}");
+    assert!(line.contains("--frame 3366ff:6:hover "), "{line}");
     let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"frame_title\":{\"value\":\"hover\",\"source\":\"local\"}"),
+        "{json}"
+    );
     assert!(
         json.contains("\"frame_color\":{\"value\":\"#3366ff\",\"source\":\"local\"}"),
         "{json}"
@@ -1662,14 +1676,29 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
     fs::create_dir_all(&declared).unwrap();
     fs::write(declared.join("frame-colors"), "nl #ff0000\n").unwrap();
     fs::write(declared.join("frame-width"), "3").unwrap();
+    fs::write(declared.join("frame-title"), "off").unwrap();
     let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
-    assert!(line.contains("--frame ff0000:3 "), "{line}");
-    let out = home.run(&["frame", "width", "8"]);
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
+    assert!(line.contains("--frame ff0000:3:off "), "{line}");
+    for change in [&["frame", "width", "8"][..], &["frame", "title", "default"]] {
+        let out = home.run(change);
+        assert!(!out.status.success(), "{change:?}");
+        assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
+    }
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
         json.contains("\"frame_color\":{\"value\":\"#ff0000\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"frame_title\":{\"value\":\"off\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    fs::remove_file(declared.join("frame-title")).unwrap();
+    let out = home.run(&["frame", "title", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"frame_title\":{\"value\":\"always\",\"source\":\"default\"}"),
         "{json}"
     );
 
@@ -1705,6 +1734,8 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
         &["frame", "color", "nope", "#000000"],
         &["frame", "width", "0"],
         &["frame", "width", "33"],
+        &["frame", "title", "sometimes"],
+        &["frame", "title"],
         &["frame", "sideways"],
     ] {
         assert!(!home.run(bad).status.success(), "{bad:?}");

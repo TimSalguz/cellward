@@ -288,5 +288,8 @@ in
       pkg-config
       libseccomp
     ];
+    # The font of the window title (rust/src/wl_title.rs), as package.nix
+    # builds it in: the tests draw the text with it.
+    VPN_ZONE_FRAME_FONT = "${pkgs.dejavu_fonts.minimal}/share/fonts/truetype/DejaVuSans.ttf";
   };
 }

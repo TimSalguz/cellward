@@ -511,7 +511,6 @@ impl Policy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     struct Dirs {
         base: PathBuf,
@@ -541,8 +540,7 @@ mod tests {
         /// A kdialog that answers with `script` (a shell body).
         fn kdialog(&self, name: &str, script: &str) -> PathBuf {
             let path = self.base.join(name);
-            std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::dialog::test_program(&path, &format!("#!/bin/sh\n{script}\n"));
             path
         }
         fn policy(&self, kdialog: PathBuf, display: bool, timeout: Duration) -> Policy {

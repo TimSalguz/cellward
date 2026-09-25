@@ -182,13 +182,18 @@ let
           # Closed: nothing done — foot is still there.
           machine.succeed("pgrep -x foot")
 
-      # The zone's border (docs/WINDOW-FRAME.md §0а, rust/src/wl_frame.rs),
+      # The zone's frame (docs/WINDOW-FRAME.md §0а, rust/src/wl_frame.rs),
       # seen on the screen: the proxy draws it INSIDE the window geometry —
       # sway clips a tiled window to it —, in the colour and width the module
-      # declared, and what is inside is foot's own, the window's size less the
-      # border on every side: foot was told that size and drew it.
+      # declared, with the title strip (rust/src/wl_title.rs) under the top
+      # border; and what is inside is foot's own, the window's size less the
+      # frame: foot was told that size and drew it.
       border = (255, 0, 255)
       width = 6
+      # The title strip's height (wl_title::HEIGHT), and the colour of its
+      # text on magenta: near-black, the one that stands out more.
+      title = 20
+      ink = (0x14, 0x14, 0x14)
 
       def view(app_id):
           """Where sway shows a window's contents, in logical pixels."""
@@ -231,47 +236,86 @@ let
               ahead += 1
           return (x - back * dx, y - back * dy), back + ahead + 1
 
-      def framed(at, x, y, w, h, scale=1, slack=0):
-          """The border on all four sides of the view (x, y, w, h), `width`
-          wide at `scale`, starting at the view's edge, and not a pixel of it
-          across the middle: that is foot's, (w - 2 width) wide."""
+      def framed(at, x, y, w, h, scale=1, slack=0, top=width):
+          """The frame on all four sides of the view (x, y, w, h) at `scale`,
+          starting at the view's edge: `width` wide at the sides and the
+          bottom, `top` at the top (the border and the title strip under it,
+          measured right of the title's text), and not a pixel of it across
+          the middle: that is foot's, (w - 2 width) wide."""
           d = lambda v: int(round(v * scale))
           b = width / 2
           sides = [
-              (d(x + b), d(y + h / 2), 1, 0, (d(x), d(y + h / 2))),
-              (d(x + w - b), d(y + h / 2), -1, 0, (d(x + w) - 1, d(y + h / 2))),
-              (d(x + w / 2), d(y + b), 0, 1, (d(x + w / 2), d(y))),
-              (d(x + w / 2), d(y + h - b), 0, -1, (d(x + w / 2), d(y + h) - 1)),
+              (d(x + b), d(y + h / 2), 1, 0, (d(x), d(y + h / 2)), width),
+              (d(x + w - b), d(y + h / 2), -1, 0, (d(x + w) - 1, d(y + h / 2)), width),
+              (d(x + w * 3 / 4), d(y + top / 2), 0, 1, (d(x + w * 3 / 4), d(y)), top),
+              (d(x + w / 2), d(y + h - b), 0, -1, (d(x + w / 2), d(y + h) - 1), width),
           ]
-          for sx, sy, dx, dy, edge in sides:
+          for sx, sy, dx, dy, edge, want in sides:
               start, n = span(at, sx, sy, dx, dy)
-              assert abs(n - width * scale) <= slack, (sx, sy, n, width * scale)
+              assert abs(n - want * scale) <= slack, (sx, sy, n, want * scale)
               assert abs(start[0] - edge[0]) + abs(start[1] - edge[1]) <= slack, (start, edge)
-          row = d(y + h / 2)
+          row = d(y + top + (h - top - width) / 2)
           inside = [at(d(x + width) + slack + i, row) for i in range(d(w - 2 * width) - 2 * slack)]
           assert border not in inside, "the border inside the window"
 
-      with subtest("the zone's border: inside the window, the declared colour and width"):
-          x, y, w, h = view("foot")
-          framed(shot("frame"), x, y, w, h)
+      def lettering(at, x, y, w, scale=1):
+          """The pixels of the title strip that are not the zone's colour:
+          its text. The strip is under the top border, between the sides."""
+          d = lambda v: int(round(v * scale))
+          rows = range(d(y + width), d(y + width + title))
+          cols = range(d(x + width), d(x + w - width))
+          return [(c, r) for r in rows for c in cols if at(c, r) != border]
 
-      with subtest("the border stays in fullscreen"):
+      def titled(at, x, y, w, scale=1):
+          """The zone's name in the strip: text there, at the left after the
+          pad, and nowhere else; and crisp — drawn at this scale, not
+          blurred up from another: a fifth of its pixels or more at least
+          three quarters ink (the line drawn at 1 and 1.5 has 26% and 41%;
+          drawn at 1 and stretched to 1.5 bilinearly, 6%). On magenta the
+          ink's share of a pixel is in its red: 255 - 235 × share."""
+          text = lettering(at, x, y, w, scale)
+          assert len(text) > 100 * scale * scale, f"no text in the title strip: {len(text)}"
+          strong = sum(1 for c, r in text if at(c, r)[0] <= 255 - 0.75 * (255 - ink[0]))
+          assert strong >= 0.2 * len(text), f"the text is not crisp: {strong} of {len(text)}"
+          left = min(c for c, _ in text)
+          pad = round((x + width + 8) * scale)
+          # The first glyph's own side bearing: 2 pixels at 1.
+          assert pad - 1 <= left <= pad + 4 * scale, (left, pad)
+          assert max(c for c, _ in text) < round((x + w / 2) * scale), "text across the strip"
+
+      with subtest("the zone's border and title: inside the window, the declared colour and width"):
+          x, y, w, h = view("foot")
+          at = shot("frame")
+          # The top is the border and the title strip, both the zone's
+          # colour; foot's content starts under them: it asked for the size
+          # it was told, the window's less the frame, and drew exactly that.
+          framed(at, x, y, w, h, top=width + title)
+          titled(at, x, y, w)
+
+      # Fullscreen: the border stays, the title strip goes, and foot gets its
+      # room.
+      with subtest("in fullscreen the border stays, the title goes"):
           alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen enable'")
           machine.sleep(2)
           x, y, w, h = view("foot")
           framed(shot("frame-fullscreen"), x, y, w, h)
           alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen disable'")
           machine.sleep(2)
+          x, y, w, h = view("foot")
+          framed(shot("frame-fullscreen-back"), x, y, w, h, top=width + title)
 
       # A fractional scale: the border is a stretched pixel, the same colour
       # to its edges, and `width` logical pixels wide — give or take a device
-      # pixel where an edge falls between two.
-      with subtest("the border at a fractional scale, after the resize it brings"):
+      # pixel where an edge falls between two. The text is drawn anew at 1.5
+      # (wp_fractional_scale_v1): its strokes have pixels of the ink itself.
+      with subtest("the frame at a fractional scale, after the resize it brings"):
           output = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_outputs -r"))[0]["name"]
           alice(f"SWAYSOCK={swaysock} swaymsg output {output} scale 1.5")
           machine.sleep(3)
           x, y, w, h = view("foot")
-          framed(shot("frame-scale"), x, y, w, h, scale=1.5, slack=1)
+          at = shot("frame-scale")
+          framed(at, x, y, w, h, scale=1.5, slack=1, top=width + title)
+          titled(at, x, y, w, scale=1.5)
           alice(f"SWAYSOCK={swaysock} swaymsg output {output} scale 1")
           machine.sleep(3)
 
@@ -295,11 +339,43 @@ let
           assert at(x + 1, y + h // 2) != border, "a border though hidden"
           assert at(x + w // 2, y + 1) != border, "a border though hidden"
           x, y, w, h = view("foot")
-          framed(at, x, y, w, h)
+          framed(at, x, y, w, h, top=width + title)
+          titled(at, x, y, w)
           alice("vpn-zone frame show")
           alice("systemctl --user stop vmbare")
           machine.wait_until_fails(
               f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q '\"app_id\": *\"bare\"'",
+              timeout=30,
+          )
+          machine.sleep(2)
+
+      # `vpn-zone frame title hover` (read at launch): the strip takes no
+      # room and is not there until the pointer comes to the window's top
+      # edge — which this seat, with no pointer device at all, never does
+      # (the coming out is the proxy's unit test). The status names it.
+      with subtest("a hover title takes no room and is not shown by itself"):
+          alice("vpn-zone frame title hover")
+          out = alice("vpn-zone status --json")
+          assert '"frame_title":{"value":"hover","source":"local"}' in out, out
+          alice(
+              f"systemd-run --user --unit=vmhover --setenv=WAYLAND_DISPLAY={display} "
+              "vpn-zone run offline -- foot --app-id hover"
+          )
+          machine.wait_until_succeeds(
+              f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q '\"app_id\": *\"hover\"'",
+              timeout=60,
+          )
+          machine.sleep(2)
+          at = shot("frame-hover")
+          x, y, w, h = view("hover")
+          framed(at, x, y, w, h)
+          # The older window keeps its strip: the mode is its launch's.
+          x, y, w, h = view("foot")
+          framed(at, x, y, w, h, top=width + title)
+          alice("vpn-zone frame title default")
+          alice("systemctl --user stop vmhover")
+          machine.wait_until_fails(
+              f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q '\"app_id\": *\"hover\"'",
               timeout=30,
           )
           machine.sleep(2)

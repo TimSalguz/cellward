@@ -519,6 +519,7 @@ and `vpn-zone container show <name> --json` print subsets of the same schema.
     "wayland_proxy": { "value": true, "source": "default" },
     "frames": { "value": true, "source": "default" },
     "frame_width": { "value": 4, "source": "default" },
+    "frame_title": { "value": "always", "source": "default" },
     "autostart_unassigned": { "value": "ask", "source": "default" },
     "user_entries": { "value": "take-over", "source": "default" },
     "hermetic": { "value": true, "source": "default" }

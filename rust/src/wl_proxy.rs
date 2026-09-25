@@ -93,6 +93,13 @@
 //! (`crate::frame::hidden`) at that moment. Nothing is added to what the
 //! program sees; what the proxy binds for the border is on a registry of its
 //! own.
+//!
+//! **The title strip** (`crate::wl_title`): `<zone> · <container>` on the
+//! zone's colour along the top. The supervisor reads the font — a file the
+//! Nix package names by store path — before the fork; the proxy lays the
+//! line out and makes the memfd its pixels go to before the filter, and
+//! writes them there (`pwrite`, the only call the title added to the filter)
+//! at whatever scale the compositor asks for.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -113,9 +120,10 @@ use wl_proxy::protocols::wayland::wl_registry::{WlRegistry, WlRegistryHandler};
 use wl_proxy::protocols::ObjectInterface;
 use wl_proxy::state::{State, StateHandler};
 
-use crate::frame::{Frame, Rgb};
+use crate::frame::{Frame, Rgb, Setup, TitleMode};
 use crate::sys;
-use crate::wl_frame::Frames;
+use crate::wl_frame::{Frames, MAX_FRAMED};
+use crate::wl_title::{Prepared, Text};
 
 /// The proxy's process name (`/proc/<pid>/comm`, 15 bytes at most).
 pub const PROCESS_NAME: &str = "vz-wl-proxy";
@@ -365,9 +373,9 @@ impl Signals {
 /// about. Returns once the proxy has confined itself; on any failure nothing
 /// is left running and the caller falls back.
 ///
-/// `frame`: the zone's border, and the directory of the settings with the
-/// switch that hides it (`crate::frame::hidden`), read again for every
-/// connection.
+/// `frame`: the zone's frame and title, and the directory of the settings
+/// with the switch that hides it (`crate::frame::hidden`), read again for
+/// every connection.
 ///
 /// Called with the compositor's (unrestricted) connection already closed: the
 /// child inherits nothing of it. It closes every descriptor it did not ask for
@@ -375,10 +383,19 @@ impl Signals {
 pub fn start(
     zone_listener: &UnixListener,
     upstream: &Path,
-    frame: Option<(Frame, PathBuf)>,
+    frame: Option<Setup>,
 ) -> Result<Proxy, String> {
     let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
     let listener = zone_listener.try_clone().map_err(|e| format!("dup: {e}"))?;
+    // The font, read here: the proxy opens nothing. Only when there is a
+    // title to draw.
+    let drawing = frame.as_ref().map(|setup| Drawing {
+        frame: setup.frame,
+        font: (setup.frame.title != TitleMode::Off && !setup.title.is_empty())
+            .then(read_font)
+            .flatten(),
+        title: setup.title.clone(),
+    });
     // SAFETY: getpid takes nothing and cannot fail.
     let supervisor = unsafe { libc::getpid() };
     // SAFETY: single-threaded here (wl-sandbox has no threads), so the child
@@ -391,9 +408,8 @@ pub fn start(
         drop(ours);
         // A panic ends the proxy here: unwinding further would run the
         // supervisor's code (`wl_sandbox::run`) in this child.
-        let border = frame.as_ref().map(|(f, _)| *f);
         let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            child(listener, theirs, supervisor, border)
+            child(listener, theirs, supervisor, drawing)
         }))
         .unwrap_or(101);
         // _exit: the parent's atexit handlers and buffers are not ours.
@@ -409,7 +425,7 @@ pub fn start(
         upstream: upstream.to_path_buf(),
         adopting: false,
         signals: None,
-        frame: frame.map(|(_, settings)| settings),
+        frame: frame.map(|setup| setup.switch),
     };
     match proxy.await_ready() {
         Ok(()) => Ok(proxy),
@@ -741,15 +757,43 @@ fn describe(status: libc::c_int) -> String {
 
 // --- THE PROXY'S SIDE -------------------------------------------------------
 
+/// What the forked proxy is given to draw with: the frame, the title's text
+/// and the font's bytes (read by the supervisor: none when the title is off
+/// or the font cannot be read).
+struct Drawing {
+    frame: Frame,
+    title: String,
+    font: Option<Vec<u8>>,
+}
+
+/// The font the package was built with (`crate::wl_title::FONT`), read whole.
+/// `None`, said once, when there is none: the title strip goes without its
+/// text — the zone's colour is still there.
+fn read_font() -> Option<Vec<u8>> {
+    let read = || -> Result<Vec<u8>, String> {
+        let path = crate::wl_title::FONT.ok_or("the build names no font")?;
+        let size = fs::metadata(path)
+            .map_err(|e| format!("{path}: {e}"))?
+            .len();
+        if size > crate::wl_title::MAX_FONT_BYTES {
+            return Err(format!("{path}: {size} bytes"));
+        }
+        fs::read(path).map_err(|e| format!("{path}: {e}"))
+    };
+    read()
+        .map_err(|e| eprintln!("wl-sandbox: no font for the window title ({e}) — the title strip goes without its text"))
+        .ok()
+}
+
 /// The forked proxy: confine, report ready, serve.
 fn child(
     listener: UnixListener,
     channel: UnixStream,
     supervisor: libc::pid_t,
-    frame: Option<Frame>,
+    drawing: Option<Drawing>,
 ) -> libc::c_int {
-    let pixel = match confine(&listener, &channel, supervisor, frame.map(|f| f.color)) {
-        Ok(pixel) => pixel,
+    let border = match confine(&listener, &channel, supervisor, drawing) {
+        Ok(border) => border,
         Err(e) => {
             eprintln!("wl-sandbox: the Wayland proxy cannot confine itself: {e}");
             return 1;
@@ -758,18 +802,63 @@ fn child(
     if sys::send_with_fds(channel.as_raw_fd(), &[READY], &[]).is_err() {
         return 1;
     }
-    let border = frame.zip(pixel).map(|(f, pixel)| Border {
-        width: f.width,
-        pixel: Rc::new(pixel),
-    });
     serve(listener, channel, border)
 }
 
-/// The zone's border as the proxy draws it: the width, and the colour's one
-/// pixel ([`pixel`]).
-struct Border {
-    width: i32,
-    pixel: Rc<OwnedFd>,
+/// The zone's frame as the proxy draws it: the border's width and the
+/// colour's one pixel ([`pixel`]); the title's mode and, when there is a font
+/// to draw it with, its text ([`title_memfd`]).
+pub(crate) struct Border {
+    pub width: i32,
+    pub pixel: Rc<OwnedFd>,
+    pub title: TitleMode,
+    pub text: Option<Rc<Text>>,
+}
+
+/// Everything of the frame that has to be made before the filter: the
+/// pixel, and the title's line and memfd. `None` when the pixel cannot be
+/// made (no frame then, and it is said); a title that cannot be made is a
+/// strip without its text.
+fn prepare_border(drawing: Drawing) -> Option<Border> {
+    let pixel = match pixel(drawing.frame.color) {
+        Ok(fd) => fd,
+        Err(e) => {
+            eprintln!("wl-sandbox: cannot make the border's colour ({e}) — windows go without it");
+            return None;
+        }
+    };
+    let text = drawing
+        .font
+        .filter(|_| drawing.frame.title != TitleMode::Off)
+        .and_then(|font| Prepared::new(font, &drawing.title))
+        .and_then(|prepared| match title_memfd(prepared.memfd_size()) {
+            Ok((memfd, writer)) => Some(Rc::new(Text::new(
+                prepared,
+                drawing.frame.color,
+                memfd,
+                writer,
+            ))),
+            Err(e) => {
+                eprintln!("wl-sandbox: cannot make the title's memory ({e}) — no text in it");
+                None
+            }
+        });
+    Some(Border {
+        width: drawing.frame.width,
+        pixel: Rc::new(pixel),
+        title: drawing.frame.title,
+        text,
+    })
+}
+
+/// The title's pixels for the compositor (`crate::wl_title`): a memfd of
+/// `size` bytes, sealed against shrinking and growing like [`pixel`]'s, and a
+/// second descriptor of it the proxy writes with (`pwrite` — the filter has
+/// no `fcntl(F_DUPFD)` to make one later). Never mapped here.
+fn title_memfd(size: usize) -> io::Result<(OwnedFd, OwnedFd)> {
+    let fd = sealed_memfd(c"vz-title", &[], size)?;
+    let writer = fd.try_clone()?;
+    Ok((fd, writer))
 }
 
 /// The border's colour for the compositor: a 3×3 square of XRGB8888 pixels
@@ -781,26 +870,32 @@ struct Border {
 /// compositor ever has it. Made before the filter is loaded — the filter has
 /// no `memfd_create` — and never mapped here: written with `write`.
 fn pixel(color: Rgb) -> io::Result<OwnedFd> {
+    let bytes = color
+        .xrgb8888()
+        .repeat((crate::wl_frame::PIXEL_BYTES / 4) as usize);
+    sealed_memfd(c"vz-frame", &bytes, bytes.len())
+}
+
+/// A memfd of `size` bytes beginning with `bytes`, sealed as [`pixel`] says.
+fn sealed_memfd(name: &std::ffi::CStr, bytes: &[u8], size: usize) -> io::Result<OwnedFd> {
     // SAFETY: memfd_create reads a NUL-terminated name that outlives the
     // call; the descriptor it returns is owned by nobody else.
-    let fd = unsafe {
-        libc::memfd_create(
-            c"vz-frame".as_ptr(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        )
-    };
+    let fd =
+        unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: just returned, ours alone.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let bytes = color
-        .xrgb8888()
-        .repeat((crate::wl_frame::PIXEL_BYTES / 4) as usize);
-    // SAFETY: writes the bytes of a live vector to a descriptor we own.
+    // SAFETY: writes the bytes of a live slice to a descriptor we own.
     let n = unsafe { libc::write(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
     if n != bytes.len() as isize {
         return Err(io::Error::other("short write"));
+    }
+    let size = libc::off_t::try_from(size).map_err(|_| io::Error::other("too big"))?;
+    // SAFETY: ftruncate with no pointer, on a descriptor we own.
+    if unsafe { libc::ftruncate(fd.as_raw_fd(), size) } != 0 {
+        return Err(io::Error::last_os_error());
     }
     let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
     // SAFETY: fcntl with an int argument on a descriptor we own.
@@ -813,16 +908,16 @@ fn pixel(color: Rgb) -> io::Result<OwnedFd> {
 /// Everything that makes the process what [`filter`] assumes, in an order
 /// that leaves it no moment to be anything else: a name, not dumpable, dying
 /// with its supervisor, no descriptor but its own and the standard three, the
-/// limits, the border's pixel, the filter.
+/// limits, the frame's pixel and title ([`prepare_border`]), the filter.
 ///
-/// The pixel is the only thing that may fail without failing the proxy: the
+/// The frame is the only thing that may fail without failing the proxy: the
 /// program is then served as in stage 1, without a border, and it is said.
 fn confine(
     listener: &UnixListener,
     channel: &UnixStream,
     supervisor: libc::pid_t,
-    color: Option<Rgb>,
-) -> Result<Option<OwnedFd>, String> {
+    drawing: Option<Drawing>,
+) -> Result<Option<Border>, String> {
     let name = std::ffi::CString::new(PROCESS_NAME).map_err(|e| e.to_string())?;
     // SAFETY: PR_SET_NAME reads a NUL-terminated string that outlives the call.
     unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr(), 0, 0, 0) };
@@ -852,17 +947,11 @@ fn confine(
         .map_err(|e| format!("O_NONBLOCK: {e}"))?;
     limit(libc::RLIMIT_NOFILE, MAX_FDS)?;
     limit(libc::RLIMIT_DATA, MAX_DATA)?;
-    let pixel = color.and_then(|color| match pixel(color) {
-        Ok(fd) => Some(fd),
-        Err(e) => {
-            eprintln!("wl-sandbox: cannot make the border's colour ({e}) — windows go without it");
-            None
-        }
-    });
-    filter(ScmpAction::KillProcess)
+    let border = drawing.and_then(prepare_border);
+    filter(ScmpAction::KillProcess, title_writer(border.as_ref()))
         .and_then(|f| f.load())
         .map_err(|e| format!("seccomp: {e}"))?;
-    Ok(pixel)
+    Ok(border)
 }
 
 /// Close every descriptor but `keep`. `close_range(2)`: one call per gap,
@@ -922,9 +1011,20 @@ fn limit(resource: libc::__rlimit_resource_t, max: libc::rlim_t) -> Result<(), S
 /// each wl-proxy State polls its own epoll), the eventfd and pipe a State
 /// makes, memory (anonymous and never executable), futex, the clock and
 /// random numbers the runtime reads, and leaving. `ioctl` only for
-/// `TIOCOUTQ`. Not there: open*, socket, connect, bind, exec*, clone/fork,
-/// ptrace, kill, prctl, setrlimit, mount, anything with a path.
-pub fn filter(default: ScmpAction) -> Result<ScmpFilterContext, libseccomp::error::SeccompError> {
+/// `TIOCOUTQ`. `pwrite64` for the title's pixels (`crate::wl_title`), and
+/// only to `title` — the descriptor they are written with, made before the
+/// filter (none: no `pwrite64` at all). Not to any descriptor (review
+/// 2026-09-25): `write` only goes forward from where a file is, and there is
+/// no `lseek`, but `pwrite64` rewrites any offset — of the border's pixel
+/// memfd (its colour, for every window of the launch; a `write` there would
+/// have to grow it, which its seal refuses), of a file the owner sent
+/// stdout or stderr to. Not there: open*, socket, connect, bind, exec*,
+/// clone/fork, ptrace, kill, prctl, setrlimit, mount, memfd_create,
+/// ftruncate, lseek, anything with a path.
+pub fn filter(
+    default: ScmpAction,
+    title: Option<RawFd>,
+) -> Result<ScmpFilterContext, libseccomp::error::SeccompError> {
     let mut ctx = ScmpFilterContext::new(default)?;
     ctx.set_ctl_nnp(true)?;
     // A foreign architecture's table (int 0x80 on x86_64) is not in the
@@ -1006,7 +1106,25 @@ pub fn filter(default: ScmpAction) -> Result<ScmpFilterContext, libseccomp::erro
             libc::TIOCOUTQ,
         )],
     )?;
+    // Masked to 32 bits, like the descriptor above: an `int`.
+    if let Some(Ok(fd)) = title.map(u64::try_from) {
+        ctx.add_rule_conditional(
+            ScmpAction::Allow,
+            ScmpSyscall::from_name("pwrite64")?,
+            &[ScmpArgCompare::new(
+                0,
+                ScmpCompareOp::MaskedEqual(0xffff_ffff),
+                fd,
+            )],
+        )?;
+    }
     Ok(ctx)
+}
+
+/// The descriptor the title's pixels are written with, when the frame has a
+/// title with text: the one [`filter`] lets `pwrite64` write to.
+fn title_writer(border: Option<&Border>) -> Option<RawFd> {
+    border.and_then(|b| b.text.as_ref()).map(|t| t.writer())
 }
 
 /// Serve until the supervisor has said the program is gone and the last
@@ -1177,6 +1295,8 @@ struct Conn {
     socket: Rc<OwnedFd>,
     /// Set by the handlers: the client is gone or refused.
     closing: Rc<Cell<bool>>,
+    /// The zone's frame on it, when drawn: its windows are counted.
+    frames: Option<Rc<Frames>>,
     /// Its requests are not being read: it is not reading its events.
     stopped: bool,
     dispatches: u32,
@@ -1213,17 +1333,17 @@ impl Conn {
         // Before any request of the program is read: the border's own
         // registry goes upstream first, so that its answer is in before the
         // compositor's first configure of any window (`crate::wl_frame`).
-        let frames =
-            border.map(|b| Frames::install(&client, b.width, b.pixel.clone(), warned.clone()));
+        let frames = border.map(|b| Frames::install(&client, b, warned.clone()));
         client.display().set_handler(Display {
             closing: closing.clone(),
-            frames,
+            frames: frames.clone(),
         });
         Ok(Self {
             state,
             client,
             socket,
             closing,
+            frames,
             stopped: false,
             dispatches: 0,
             scratch: Vec::new(),
@@ -1252,6 +1372,20 @@ impl Conn {
         } else if self.stopped && queued <= OUTQ_LOW {
             self.stopped = false;
             self.client.set_suspended(false);
+        }
+        // The frame's own objects upstream are not in the program's table,
+        // and a program makes ~20 of them per 3 of its own (a toplevel's
+        // strips, title and text, `crate::wl_frame::Framed`): counted as
+        // windows, at every dispatch — a Cell read, and one dispatch frames
+        // at most ~170 new windows (48 bytes of requests each).
+        if self
+            .frames
+            .as_ref()
+            .is_some_and(|f| f.framed() > MAX_FRAMED)
+        {
+            refuse(&self.client, &self.closing, NO_MEMORY, "too many windows");
+            let _ = self.state.before_poll();
+            return;
         }
         if self.dispatches.is_multiple_of(COUNT_OBJECTS_EVERY) {
             self.scratch.clear();
@@ -1546,7 +1680,7 @@ mod tests {
     fn the_filter_builds_and_its_default_is_kill() {
         let path = std::env::temp_dir().join(format!("vz-wl-proxy-bpf-{}", std::process::id()));
         let file = fs::File::create(&path).unwrap();
-        filter(ScmpAction::KillProcess)
+        filter(ScmpAction::KillProcess, Some(3))
             .unwrap()
             .export_bpf(&file)
             .unwrap();
@@ -1707,9 +1841,25 @@ mod tests {
             Self::with_border(tag, None)
         }
 
-        /// The proxy with the zone's border: `(width, colour)`. The pixel is
-        /// made in the proxy's thread before its filter, as `confine` does.
+        /// The proxy with the zone's border and no title: `(width, colour)`.
         fn with_border(tag: &str, border: Option<(i32, Rgb)>) -> Self {
+            Self::with_drawing(
+                tag,
+                border.map(|(width, color)| Drawing {
+                    frame: Frame {
+                        color,
+                        width,
+                        title: TitleMode::Off,
+                    },
+                    title: String::new(),
+                    font: None,
+                }),
+            )
+        }
+
+        /// The proxy with a frame. What the frame needs is made in the
+        /// proxy's thread before its filter, as `confine` does.
+        fn with_drawing(tag: &str, drawing: Option<Drawing>) -> Self {
             let dir =
                 std::env::temp_dir().join(format!("vz-wl-proxy-test-{tag}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
@@ -1719,14 +1869,14 @@ mod tests {
             listener.set_nonblocking(true).unwrap();
             let (ours, theirs) = UnixStream::pair().unwrap();
             let proxy = std::thread::spawn(move || {
-                let border = border.map(|(width, color)| Border {
-                    width,
-                    pixel: Rc::new(pixel(color).unwrap()),
-                });
-                filter(ScmpAction::Errno(libc::EPERM))
-                    .unwrap()
-                    .load()
-                    .unwrap();
+                let border = drawing.map(|d| prepare_border(d).unwrap());
+                filter(
+                    ScmpAction::Errno(libc::EPERM),
+                    title_writer(border.as_ref()),
+                )
+                .unwrap()
+                .load()
+                .unwrap();
                 serve(listener, theirs, border)
             });
             let (binds_tx, binds) = mpsc::channel();
@@ -1953,7 +2103,15 @@ mod tests {
         sys::send_with_fds(channel.as_raw_fd(), &[UPSTREAM], &[up.as_raw_fd()]).unwrap();
         drop(up);
         drop(compositor);
-        request(&mut client, 1, 0, &2u32.to_ne_bytes());
+        // The proxy may have closed the client already — it is closing it —,
+        // and a write to a closed socket is EPIPE: what is checked is only
+        // that nothing comes back (on a loaded runner the close came first,
+        // and the unwrap of this write failed the test).
+        let mut sync = Vec::new();
+        event(&mut sync, 1, 0, |a| {
+            a.extend_from_slice(&2u32.to_ne_bytes())
+        });
+        let _ = client.write_all(&sync);
         assert!(drain(&mut client).is_empty());
         assert_eq!(rig.finish(), 0);
     }
@@ -2347,6 +2505,7 @@ mod tests {
                     ("xdg_wm_base", 2) => new(args[0], "xdg_surface"),
                     ("xdg_surface", 1) => new(args[0], "xdg_toplevel"),
                     ("wl_seat", 0) => new(args[0], "wl_pointer"),
+                    ("wp_fractional_scale_manager_v1", 1) => new(args[0], "wp_fractional_scale_v1"),
                     _ => {}
                 }
                 let _ = log.send(Msg {
@@ -2699,6 +2858,473 @@ mod tests {
         assert_eq!(rig.finish(), 0);
     }
 
+    /// Every toplevel makes the proxy make a frame of its own objects
+    /// upstream, which the cap on the program's objects does not count: a
+    /// program that makes toplevel after toplevel (each committed once,
+    /// without a buffer — legal) is refused past [`MAX_FRAMED`] of them,
+    /// with `no_memory`, like one with too many objects.
+    #[test]
+    fn a_program_with_too_many_framed_windows_is_refused() {
+        let rig = Rig::with_border("many", Some((4, Rgb(0xff, 0, 0x80))));
+        let (mut client, _compositor, _log) = rig.connect_framed(UPSTREAM, FRAME_GLOBALS);
+        a_window(&mut client);
+        let windows = u32::try_from(MAX_FRAMED).unwrap() + 400;
+        'writing: for chunk in (0..windows).collect::<Vec<_>>().chunks(64) {
+            let mut out = Vec::new();
+            for &k in chunk {
+                let surface = 100 + 3 * k;
+                let (xdg, toplevel) = (surface + 1, surface + 2);
+                event(&mut out, 4, 0, |a| {
+                    a.extend_from_slice(&surface.to_ne_bytes())
+                });
+                event(&mut out, 5, 2, |a| {
+                    a.extend_from_slice(&xdg.to_ne_bytes());
+                    a.extend_from_slice(&surface.to_ne_bytes());
+                });
+                event(&mut out, xdg, 1, |a| {
+                    a.extend_from_slice(&toplevel.to_ne_bytes())
+                });
+                event(&mut out, surface, 6, |_| {});
+            }
+            // Refused already: the rest is not read.
+            if client.write_all(&out).is_err() {
+                break 'writing;
+            }
+        }
+        let events = events_until(&mut client, |o, op, _| o == 1 && op == 0);
+        let error = &events.last().unwrap().2;
+        assert_eq!(error[1], NO_MEMORY, "{error:?}");
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    // --- the title strip (crate::wl_title) ----------------------------------
+
+    const TITLE_GLOBALS: &[(&str, u32)] = &[
+        ("wl_compositor", 6),
+        ("wl_subcompositor", 1),
+        ("wl_shm", 1),
+        ("wp_viewporter", 1),
+        ("xdg_wm_base", 6),
+        ("wl_seat", 7),
+        ("wp_fractional_scale_manager_v1", 1),
+    ];
+
+    /// The package's font, when the build names one (the CI's shell does):
+    /// without it the strip goes without text, which is checked too.
+    fn test_font() -> Option<Vec<u8>> {
+        let font = crate::wl_title::FONT.and_then(|path| fs::read(path).ok());
+        if font.is_none() {
+            eprintln!("VPN_ZONE_FRAME_FONT is not set at build time — the title without text");
+        }
+        font
+    }
+
+    fn titled(mode: TitleMode, font: Option<Vec<u8>>) -> Drawing {
+        Drawing {
+            frame: Frame {
+                color: Rgb(0xff, 0, 0x80),
+                width: 4,
+                title: mode,
+            },
+            title: "nl · основной".to_owned(),
+            font,
+        }
+    }
+
+    fn signed(ws: &[u32]) -> Vec<i32> {
+        ws.iter().map(|&w| w as i32).collect()
+    }
+
+    /// The title strip on the wire: the geometry grown by the border and
+    /// the strip, the program told what is left, a strip of the colour
+    /// under the top border and the text on it, all before the program's
+    /// commit; the text drawn again at a new fractional scale and shown at
+    /// once; input on the title and its text dropped, and the title raised
+    /// above a new subsurface of the program; in fullscreen, no strip and no
+    /// room for it — but out again as soon as the compositor ends
+    /// fullscreen, acked or not.
+    #[test]
+    fn the_title_strip_takes_its_room_and_hides_in_fullscreen() {
+        let font = test_font();
+        let with_text = font.is_some();
+        let rig = Rig::with_drawing("title", Some(titled(TitleMode::Always, font)));
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, TITLE_GLOBALS);
+        a_window(&mut client);
+        let mut got = log_until(&log, |m| m.iface == "xdg_wm_base" && m.opcode == 2);
+        let (xdg, root) = (got.last().unwrap().args[0], got.last().unwrap().args[1]);
+        got.extend(log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        }));
+        let find = |got: &[Msg], iface: &str, opcode: u32| -> Vec<Msg> {
+            got.iter()
+                .filter(|m| m.iface == iface && m.opcode == opcode)
+                .cloned()
+                .collect()
+        };
+        // The program's 300×200 at (10, 20): 4 on every side, 20 more on top.
+        let geometry = find(&got, "xdg_surface", 3);
+        assert_eq!(signed(&geometry[0].args), [6, -4, 308, 228], "{got:#?}");
+        assert_eq!(find(&got, "xdg_toplevel", 8)[0].args, [108, 78]);
+        // Four strips and the title on the program's surface; the text on
+        // the title.
+        let subs = find(&got, "wl_subcompositor", 1);
+        let on_root: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == root).collect();
+        assert_eq!(on_root.len(), 5, "{subs:?}");
+        let (title_sub, title) = (on_root[4].args[0], on_root[4].args[1]);
+        let text = subs
+            .iter()
+            .find(|m| m.args[2] == title)
+            .map(|m| (m.args[0], m.args[1]));
+        assert_eq!(text.is_some(), with_text, "{subs:?}");
+        // Where each is: the strips around the title and the program, the
+        // title under the top border, the program's width, 20 high.
+        let places: Vec<(u32, Vec<i32>)> = find(&got, "wl_subsurface", 1)
+            .iter()
+            .map(|m| (m.object, signed(&m.args)))
+            .collect();
+        let at = |sub: u32| {
+            places
+                .iter()
+                .find(|(o, _)| *o == sub)
+                .map(|(_, a)| a.clone())
+        };
+        let strips: Vec<Vec<i32>> = on_root[..4]
+            .iter()
+            .map(|m| at(m.args[0]).unwrap())
+            .collect();
+        assert_eq!(
+            strips,
+            [vec![6, -4], vec![6, 220], vec![6, 0], vec![310, 0]]
+        );
+        assert_eq!(at(title_sub), Some(vec![10, 0]));
+        // The title shows the colour: the border's buffer, stretched.
+        let attached: Vec<&Msg> = got
+            .iter()
+            .filter(|m| m.iface == "wl_surface" && m.opcode == 1 && m.object == title)
+            .collect();
+        assert_eq!(attached.len(), 1, "{got:#?}");
+        let pixel = find(&got, "wl_shm_pool", 0)[0].args[0];
+        assert_eq!(attached[0].args[0], pixel, "not the colour");
+        let commits: Vec<u32> = find(&got, "wl_surface", 6)
+            .iter()
+            .map(|m| m.object)
+            .collect();
+        assert_eq!(
+            *commits.last().unwrap(),
+            root,
+            "the program's commit is the last"
+        );
+        assert!(commits.contains(&title), "the title not committed");
+        if let Some((text_sub, text)) = text {
+            // Its own pool of the title's memfd, a buffer of the line at
+            // scale 1, 20 high, shown whole after the pad.
+            let pools = find(&got, "wl_shm", 0);
+            assert_eq!(pools.len(), 2, "{pools:?}");
+            let buffers = find(&got, "wl_shm_pool", 0);
+            let line = buffers.last().unwrap();
+            let (width, height) = (line.args[2] as i32, line.args[3] as i32);
+            assert_eq!(height, 20);
+            assert!((40..292).contains(&width), "{width}");
+            assert_eq!(at(text_sub), Some(vec![8, 0]));
+            let view = |got: &[Msg], opcode: u32| -> Vec<Vec<i32>> {
+                got.iter()
+                    .filter(|m| m.iface == "wp_viewport" && m.opcode == opcode)
+                    .map(|m| signed(&m.args))
+                    .collect()
+            };
+            assert!(
+                view(&got, 2).contains(&vec![width, 20]),
+                "{:?}",
+                view(&got, 2)
+            );
+            assert!(commits.contains(&text), "the text not committed");
+
+            // A fractional scale for the text: drawn again, 1.5 times the
+            // pixels, and shown without waiting for the program.
+            let fraction = find(&got, "wp_fractional_scale_manager_v1", 1)[0].args[0];
+            let mut out = Vec::new();
+            event(&mut out, fraction, 0, |a| {
+                a.extend_from_slice(&180u32.to_ne_bytes())
+            });
+            compositor.write_all(&out).unwrap();
+            let got = log_until(&log, |m| {
+                m.iface == "wl_subsurface" && m.opcode == 4 && m.object == title_sub
+            });
+            let buffer = find(&got, "wl_shm_pool", 0);
+            assert_eq!(buffer.len(), 1, "{got:#?}");
+            assert_eq!(
+                (buffer[0].args[2] as i32, buffer[0].args[3] as i32),
+                (crate::wl_title::device(width, 180), 30)
+            );
+            let order: Vec<(String, u32, u32)> = got
+                .iter()
+                .filter(|m| m.object == title_sub || m.object == title || m.object == text)
+                .map(|m| (m.iface.clone(), m.opcode, m.object))
+                .collect();
+            let text_commit = order
+                .iter()
+                .position(|o| *o == ("wl_surface".into(), 6, text));
+            let desync = order
+                .iter()
+                .position(|o| *o == ("wl_subsurface".into(), 5, title_sub));
+            let commit = order
+                .iter()
+                .position(|o| *o == ("wl_surface".into(), 6, title));
+            assert!(
+                text_commit < desync && desync < commit && commit.is_some(),
+                "not shown at once: {order:?}"
+            );
+            // Still 300 logical pixels wide, the same text.
+            assert!(view(&got, 2).contains(&vec![width, 20]), "{got:#?}");
+        }
+
+        // Input on the title or on its text is not the program's: the
+        // pointer enters each, clicks, leaves, and the program hears nothing
+        // until the pointer is on its own surface.
+        request(&mut client, 6, 0, &10u32.to_ne_bytes());
+        let pointer = log_until(&log, |m| m.iface == "wl_seat" && m.opcode == 0)
+            .last()
+            .unwrap()
+            .args[0];
+        let fixed = |v: i32| v * 256;
+        let mut out = Vec::new();
+        let own = [Some((11, title)), text.map(|(_, text)| (21, text))];
+        for (serial, surface) in own.into_iter().flatten() {
+            event(&mut out, pointer, 0, |a| {
+                a.extend_from_slice(&words(&[serial, surface as i32, fixed(3), fixed(1)]))
+            });
+            event(&mut out, pointer, 5, |_| {});
+            event(&mut out, pointer, 2, |a| {
+                a.extend_from_slice(&words(&[1, fixed(5), fixed(2)]))
+            });
+            event(&mut out, pointer, 3, |a| {
+                a.extend_from_slice(&words(&[serial + 1, 2, 0x110, 1]))
+            });
+            event(&mut out, pointer, 5, |_| {});
+            event(&mut out, pointer, 1, |a| {
+                a.extend_from_slice(&words(&[serial + 2, surface as i32]))
+            });
+        }
+        event(&mut out, pointer, 0, |a| {
+            a.extend_from_slice(&words(&[30, root as i32, fixed(7), fixed(40)]))
+        });
+        event(&mut out, pointer, 5, |_| {});
+        compositor.write_all(&out).unwrap();
+        let events = events_until(&mut client, |o, op, _| o == 10 && op == 5);
+        let pointer_events: Vec<(u32, Vec<u32>)> = events
+            .into_iter()
+            .filter(|(o, _, _)| *o == 10)
+            .map(|(_, op, args)| (op, args))
+            .collect();
+        assert_eq!(
+            pointer_events,
+            [(0, vec![30, 7, 7 * 256, 40 * 256]), (5, vec![])],
+            "the program saw input on the title"
+        );
+
+        // A new subsurface of the program goes on top of its surface's
+        // stack: the title is put back above it with the strips (§5.9).
+        request(&mut client, 2, 0, &bind_args(2, "wl_subcompositor", 1, 11));
+        request(&mut client, 4, 0, &12u32.to_ne_bytes());
+        request(&mut client, 11, 1, &words(&[13, 12, 7]));
+        let child = log_until(&log, |m| m.iface == "wl_subcompositor" && m.opcode == 1)
+            .last()
+            .unwrap()
+            .args[1];
+        let raised: HashSet<u32> = (0..5)
+            .map(|_| {
+                log_until(&log, |m| {
+                    m.iface == "wl_subsurface" && m.opcode == 2 && m.args[0] == child
+                })
+                .last()
+                .unwrap()
+                .object
+            })
+            .collect();
+        let frame_subs: HashSet<u32> = on_root.iter().map(|m| m.args[0]).collect();
+        assert!(raised.contains(&title_sub), "the title not raised");
+        assert_eq!(raised, frame_subs);
+
+        // Fullscreen: the program is told the output less the border only,
+        // and once it acks and commits, the geometry has no room for the
+        // strip and the strip is gone.
+        let toplevel = find(&got, "xdg_surface", 1)[0].args[0];
+        let mut out = Vec::new();
+        event(&mut out, toplevel, 0, |a| {
+            a.extend_from_slice(&words(&[800, 600, 4, 2]))
+        });
+        event(&mut out, xdg, 0, |a| {
+            a.extend_from_slice(&5u32.to_ne_bytes())
+        });
+        compositor.write_all(&out).unwrap();
+        let events = events_until(&mut client, |o, op, _| o == 8 && op == 0);
+        let configure = events
+            .iter()
+            .find(|(o, op, _)| *o == 9 && *op == 0)
+            .unwrap();
+        assert_eq!(configure.2[..2], [792, 592]);
+        request(&mut client, 8, 4, &5u32.to_ne_bytes());
+        request(&mut client, 8, 3, &words(&[0, 0, 792, 592]));
+        request(&mut client, 7, 6, &[]);
+        let got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        let geometry: Vec<Vec<i32>> = got
+            .iter()
+            .filter(|m| m.iface == "xdg_surface" && m.opcode == 3)
+            .map(|m| signed(&m.args))
+            .collect();
+        assert_eq!(geometry, [vec![-4, -4, 800, 600]]);
+        let hidden = got.iter().any(|m| {
+            m.iface == "wl_surface" && m.opcode == 1 && m.object == title && m.args[0] == 0
+        });
+        assert!(hidden, "the title still shown in fullscreen: {got:#?}");
+        // Hidden over the top of the content, where it can come out.
+        let title_at = |got: &[Msg]| -> Vec<Vec<i32>> {
+            got.iter()
+                .filter(|m| m.iface == "wl_subsurface" && m.opcode == 1 && m.object == title_sub)
+                .map(|m| signed(&m.args))
+                .collect()
+        };
+        assert_eq!(title_at(&got), [vec![0, 0]]);
+
+        // The compositor ends fullscreen and the program never acks that
+        // (review 2026-09-25): the strip comes out at once, without the
+        // program's commit, over the content it still draws fullscreen...
+        let mut out = Vec::new();
+        event(&mut out, toplevel, 0, |a| {
+            a.extend_from_slice(&words(&[800, 600, 0]))
+        });
+        event(&mut out, xdg, 0, |a| {
+            a.extend_from_slice(&6u32.to_ne_bytes())
+        });
+        compositor.write_all(&out).unwrap();
+        let got = log_until(&log, |m| {
+            m.iface == "wl_subsurface" && m.opcode == 4 && m.object == title_sub
+        });
+        let shown = got.iter().any(|m| {
+            m.iface == "wl_surface" && m.opcode == 1 && m.object == title && m.args[0] == pixel
+        });
+        assert!(shown, "the title not out when fullscreen ended: {got:#?}");
+        let events = events_until(&mut client, |o, op, _| o == 8 && op == 0);
+        let configure = events
+            .iter()
+            .find(|(o, op, _)| *o == 9 && *op == 0)
+            .unwrap();
+        assert_eq!(configure.2[..2], [792, 572]);
+        // ...and stays out while the program commits without the ack.
+        request(&mut client, 7, 6, &[]);
+        let got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        assert!(
+            !got.iter()
+                .any(|m| m.iface == "wl_surface" && m.opcode == 1 && m.object == title),
+            "the title hidden by an un-acked fullscreen: {got:#?}"
+        );
+        // Acked: the room for it again, and the strip in it.
+        request(&mut client, 8, 4, &6u32.to_ne_bytes());
+        request(&mut client, 8, 3, &words(&[0, 0, 792, 572]));
+        request(&mut client, 7, 6, &[]);
+        let got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        let geometry: Vec<Vec<i32>> = got
+            .iter()
+            .filter(|m| m.iface == "xdg_surface" && m.opcode == 3)
+            .map(|m| signed(&m.args))
+            .collect();
+        assert_eq!(geometry, [vec![-4, -24, 800, 600]]);
+        assert_eq!(title_at(&got), [vec![0, -20]]);
+        assert!(
+            !got.iter()
+                .any(|m| m.iface == "wl_surface" && m.opcode == 1 && m.object == title),
+            "{got:#?}"
+        );
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    /// Hover: the strip takes no room and is not shown until the pointer is
+    /// at the top of the window; it goes when the pointer goes down.
+    #[test]
+    fn a_hover_title_comes_out_at_the_top_edge_and_goes() {
+        let rig = Rig::with_drawing("hover", Some(titled(TitleMode::Hover, test_font())));
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, TITLE_GLOBALS);
+        a_window(&mut client);
+        let mut got = log_until(&log, |m| m.iface == "xdg_wm_base" && m.opcode == 2);
+        let root = got.last().unwrap().args[1];
+        got.extend(log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        }));
+        let geometry: Vec<Vec<i32>> = got
+            .iter()
+            .filter(|m| m.iface == "xdg_surface" && m.opcode == 3)
+            .map(|m| signed(&m.args))
+            .collect();
+        assert_eq!(
+            geometry,
+            [vec![6, 16, 308, 208]],
+            "room taken for a hover title"
+        );
+        let subs: Vec<&Msg> = got
+            .iter()
+            .filter(|m| m.iface == "wl_subcompositor" && m.opcode == 1 && m.args[2] == root)
+            .collect();
+        assert_eq!(subs.len(), 5, "{subs:?}");
+        let (title_sub, title) = (subs[4].args[0], subs[4].args[1]);
+        let place = got
+            .iter()
+            .find(|m| m.iface == "wl_subsurface" && m.opcode == 1 && m.object == title_sub)
+            .map(|m| signed(&m.args));
+        assert_eq!(place, Some(vec![10, 20]), "over the top of the content");
+        assert!(
+            !got.iter()
+                .any(|m| m.iface == "wl_surface" && m.opcode == 1 && m.object == title),
+            "shown before the pointer came"
+        );
+        // The pointer comes to the window's top edge: out, at once.
+        request(&mut client, 6, 0, &10u32.to_ne_bytes());
+        let pointer = log_until(&log, |m| m.iface == "wl_seat" && m.opcode == 0)
+            .last()
+            .unwrap()
+            .args[0];
+        let fixed = |v: i32| v * 256;
+        let mut out = Vec::new();
+        event(&mut out, pointer, 0, |a| {
+            a.extend_from_slice(&words(&[11, root as i32, fixed(50), fixed(20)]))
+        });
+        event(&mut out, pointer, 5, |_| {});
+        compositor.write_all(&out).unwrap();
+        let got = log_until(&log, |m| {
+            m.iface == "wl_subsurface" && m.opcode == 4 && m.object == title_sub
+        });
+        let shown = got.iter().any(|m| {
+            m.iface == "wl_surface" && m.opcode == 1 && m.object == title && m.args[0] != 0
+        });
+        assert!(shown, "{got:#?}");
+        // The program still got its enter: the strip was not there yet.
+        let events = events_until(&mut client, |o, op, _| o == 10 && op == 5);
+        assert!(events.iter().any(|(o, op, _)| *o == 10 && *op == 0));
+        // Down into the content: in again.
+        let mut out = Vec::new();
+        event(&mut out, pointer, 2, |a| {
+            a.extend_from_slice(&words(&[1, fixed(50), fixed(120)]))
+        });
+        event(&mut out, pointer, 5, |_| {});
+        compositor.write_all(&out).unwrap();
+        let got = log_until(&log, |m| {
+            m.iface == "wl_subsurface" && m.opcode == 4 && m.object == title_sub
+        });
+        let hidden = got.iter().any(|m| {
+            m.iface == "wl_surface" && m.opcode == 1 && m.object == title && m.args[0] == 0
+        });
+        assert!(hidden, "{got:#?}");
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
     #[test]
     fn the_border_pixel_is_sealed_and_says_the_colour() {
         let fd = pixel(Rgb(0x12, 0x34, 0x56)).unwrap();
@@ -2723,19 +3349,27 @@ mod tests {
 
     #[test]
     fn the_filter_refuses_what_the_proxy_must_not_do() {
+        let log = std::env::temp_dir().join(format!("vz-wl-proxy-pwrite-{}", std::process::id()));
+        let file = fs::File::create(&log).unwrap();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let (a, _b) = UnixStream::pair().unwrap();
-            filter(ScmpAction::Errno(libc::EPERM))
+            let (memfd, writer) = title_memfd(64).unwrap();
+            let colour = pixel(Rgb(0xff, 0, 0x80)).unwrap();
+            filter(ScmpAction::Errno(libc::EPERM), Some(writer.as_raw_fd()))
                 .unwrap()
                 .load()
                 .unwrap();
             let eperm = |r: libc::c_long| {
                 r == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
             };
+            let pwrite = |fd: RawFd| {
+                // SAFETY: reads a live 4-byte buffer (when allowed at all).
+                eperm(unsafe { libc::pwrite(fd, [0u8; 4].as_ptr().cast(), 4, 0) } as _)
+            };
             // SAFETY: every call below either fails under the filter or acts
             // on memory/descriptors of this thread only.
-            let results = unsafe {
+            let mut results = unsafe {
                 vec![
                     (
                         "socket",
@@ -2776,17 +3410,43 @@ mod tests {
                         eperm(libc::ioctl(0, libc::FIONREAD, &mut 0i32) as _),
                     ),
                     ("kill", eperm(libc::kill(1, 0) as _)),
+                    // The title's memory is made before the filter: none
+                    // after it, and none resized.
+                    (
+                        "memfd_create",
+                        eperm(libc::memfd_create(c"x".as_ptr(), libc::MFD_CLOEXEC) as _),
+                    ),
+                    ("ftruncate", eperm(libc::ftruncate(a.as_raw_fd(), 0) as _)),
+                    (
+                        "lseek",
+                        eperm(libc::lseek(file.as_raw_fd(), 0, libc::SEEK_SET) as _),
+                    ),
                 ]
             };
+            // `pwrite64` to the title's writer only: not over the border's
+            // colour, not over what a file holds already (stderr sent to
+            // one), not through the title's other descriptor.
+            results.extend([
+                ("pwrite64 to the colour", pwrite(colour.as_raw_fd())),
+                ("pwrite64 to a file", pwrite(file.as_raw_fd())),
+                ("pwrite64 to the title's pool", pwrite(memfd.as_raw_fd())),
+            ]);
             // And what it needs still works.
             let v: Vec<u8> = vec![1; 1 << 20];
-            let fine = v.len() == 1 << 20 && outq(a.as_raw_fd()) == 0;
+            // The title's pixels are written into the memory made before.
+            let title = {
+                use std::os::unix::fs::FileExt;
+                fs::File::from(writer).write_all_at(&[7; 8], 56).is_ok()
+            };
+            let fine = v.len() == 1 << 20 && outq(a.as_raw_fd()) == 0 && title;
             tx.send((results, fine)).unwrap();
         });
-        let (results, fine) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let got = rx.recv_timeout(Duration::from_secs(10));
+        let _ = fs::remove_file(&log);
+        let (results, fine) = got.unwrap();
         for (what, refused) in results {
             assert!(refused, "{what} was allowed");
         }
-        assert!(fine, "memory or TIOCOUTQ was refused");
+        assert!(fine, "memory, TIOCOUTQ or the title's pwrite was refused");
     }
 }

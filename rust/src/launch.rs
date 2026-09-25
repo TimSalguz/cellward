@@ -679,12 +679,24 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             if !wayland_proxy_wanted(tools, &appbin) {
                 wrap.push("--no-proxy".into());
             } else if zone != UNCONFINED {
-                // The zone's border around its windows (docs/WINDOW-FRAME.md
-                // §0а): the colour and width as they are now; the switch
-                // that hides it is read by the supervisor for each connection.
+                // The zone's frame around its windows (docs/WINDOW-FRAME.md
+                // §0а): the colour, width and title mode as they are now, and
+                // the title's text — the zone and the container as this
+                // launch knows them; the switch that hides it is read by the
+                // supervisor for each connection.
                 let frame = crate::frame::Frame::of_zone(&tools.state, &tools.config, &zone_name);
                 wrap.push("--frame".into());
                 wrap.push(frame.to_arg().into());
+                let selector = selector_of(&selection.sandbox, &container.profile);
+                let shown = if container.ephemeral && selection.sandbox == Sandbox::None {
+                    // Its name is a random directory's: what it IS is what
+                    // the owner needs to read.
+                    "временный".to_owned()
+                } else {
+                    crate::picker::container_label(&selector.to_string_lossy())
+                };
+                wrap.push("--frame-title".into());
+                wrap.push(crate::frame::title_text(&zone_name, &shown).into());
                 wrap.push("--frame-switch".into());
                 wrap.push(tools.config.clone().into());
             }
@@ -881,15 +893,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     }
 
     // --- 6. INTO THE REGISTRY AND INTO THE ZONE ---
-    let selector: OsString = match &selection.sandbox {
-        Sandbox::Named(name) => {
-            let mut s = OsString::from("sb:");
-            s.push(name);
-            s
-        }
-        Sandbox::Throwaway => OsString::from("__fs__"),
-        Sandbox::None => container.profile.clone(),
-    };
+    let selector = selector_of(&selection.sandbox, &container.profile);
     match registry::lock(&regdir) {
         Ok(_guard) => {
             for file in std::iter::once(&reg).chain(binreg.as_ref()) {
@@ -1329,6 +1333,21 @@ fn delegate(tools: &Tools, argv: &[OsString]) -> u8 {
     let e = exec_command(&exec);
     eprintln!("не удалось запустить {}: {e}", tools.systemd_run.display());
     EXIT_NOT_STARTED
+}
+
+/// What was chosen for the container, as the registry records it (the third
+/// field): `sb:<name>` for a named sandbox, `__fs__` for a throwaway one,
+/// the container's name otherwise (empty for the main profile).
+fn selector_of(sandbox: &Sandbox, profile: &OsStr) -> OsString {
+    match sandbox {
+        Sandbox::Named(name) => {
+            let mut s = OsString::from("sb:");
+            s.push(name);
+            s
+        }
+        Sandbox::Throwaway => OsString::from("__fs__"),
+        Sandbox::None => profile.to_owned(),
+    }
 }
 
 /// A container as the rest of `run` needs it.

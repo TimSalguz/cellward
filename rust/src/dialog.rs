@@ -150,3 +150,27 @@ pub fn notify(notify_send: &Path, urgency: Option<&str>, timeout: &str, title: &
     cmd.arg("-t").arg(timeout).arg("--").arg(title).arg(body);
     let _ = cmd.status();
 }
+
+/// A test's stand-in program at `path`, written by a child process.
+///
+/// Written from this process, the file would be open for writing while
+/// another test's thread forks: that child holds the descriptor until its
+/// `exec`, and running the stand-in then fails with "Text file busy" — a
+/// dialog that "could not be started", at random. A pipe is all this process
+/// holds here.
+#[cfg(test)]
+pub(crate) fn test_program(path: &Path, script: &str) {
+    use std::io::Write;
+    let mut sh = Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    sh.stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    assert!(sh.wait().unwrap().success(), "{}", path.display());
+}

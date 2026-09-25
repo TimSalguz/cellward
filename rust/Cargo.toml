@@ -64,6 +64,16 @@ wayland-client = "0.31"
 # `wp_security_context_v1` is a staging protocol, hence the feature; `client`
 # generates the client half only.
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# The zone's name in the title strip (`crate::wl_title`, `docs/WINDOW-FRAME.md`
+# §5.10): glyph outlines of a font the Nix package names by store path
+# (`package.nix`; no fontconfig, no lookup at run time), rasterized in the
+# proxy. Pure Rust. Its `unsafe` is the rasterizer's SIMD dispatch (the same
+# safe code compiled for AVX2/SSE4.2) and `owned_ttf_parser`'s self-reference;
+# the parser under it (ttf-parser) forbids unsafe code. What it reads is ours
+# — the font, the zone's and the container's names —, never the program's.
+# Pinned EXACTLY, like wl-proxy: a new version is a reviewed commit. No
+# default features: variable fonts are not needed for one static face.
+ab_glyph = { version = "=0.2.32", default-features = false, features = ["std"] }
 # The Wayland proxy inside `wl-sandbox` (`crate::wl_proxy`,
 # `docs/WINDOW-FRAME.md` §3.2, §11): it keeps the two id spaces apart, knows the
 # signature of every message of the protocols below and drops the globals of
