@@ -115,6 +115,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   "always" is not offered for a command with options; the question shows every
   word on its own line, without text-reordering characters, and a command too
   long to show whole is refused rather than cut.
+- **Input methods by their portals only.** A zone's bus let programs talk
+  to `org.fcitx.Fcitx5`, fcitx5's whole controller: `Configure` starts a
+  program on the host, `OpenX11Connection("host:0")` has the host's fcitx5
+  open a TCP connection anywhere, and `SetConfig` switches on cloud pinyin,
+  which fetches from the host's network. IBus runs nothing for a client, but
+  its private bus is a socket by path in `~/.cache/ibus`, past the bus rules.
+  Now only `org.freedesktop.portal.IBus` and `org.freedesktop.portal.Fcitx`
+  (sandboxes get them too), `~/.cache/ibus` and `~/.config/ibus` are hidden in
+  a zone, and its programs get `IBUS_USE_PORTAL=1` — typing goes as in
+  Flatpak.
 - **Notifications from a zone reach the host's daemon without what points
   anywhere.** The daemon runs on the host: a link in the text is opened there,
   an icon or an image by URL may be fetched there, `desktop-entry` activates

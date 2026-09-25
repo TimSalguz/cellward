@@ -326,7 +326,15 @@ pub const PORTALS: [&str; 2] = [
     "--talk=org.freedesktop.portal.Documents",
 ];
 
-pub const SESSION_BUS_RULES: [&str; 12] = [
+/// Input methods by their portals only (review 2026-09-25, third round):
+/// `org.fcitx.Fcitx5` is fcitx5's whole controller — `Configure` starts a
+/// program on the host, `OpenX11Connection("host:0")` has the host's fcitx5
+/// open a TCP connection anywhere, `SetAddonsState` and `SetConfig` switch on
+/// cloud pinyin, which fetches from the host's network — and when fcitx5
+/// stands in for IBus, `org.freedesktop.IBus` is the same. The portals expose
+/// `CreateInputContext` and contexts guarded by their owner; typing works
+/// through them as it does in Flatpak.
+pub const SESSION_BUS_RULES: [&str; 10] = [
     "--filter",
     PORTALS[0],
     PORTALS[1],
@@ -334,9 +342,7 @@ pub const SESSION_BUS_RULES: [&str; 12] = [
     "--talk=org.kde.StatusNotifierWatcher",
     TRAY_ITEM_NAMES,
     "--own=org.mpris.MediaPlayer2.*",
-    "--talk=org.freedesktop.IBus",
     "--talk=org.freedesktop.portal.IBus",
-    "--talk=org.fcitx.Fcitx5",
     "--talk=org.freedesktop.portal.Fcitx",
     "--talk=org.freedesktop.ScreenSaver",
 ];
@@ -2578,6 +2584,46 @@ fn hide_nix_daemon(zone: &Zone) -> Result<(), String> {
 /// Where the Nix daemon listens.
 const NIX_DAEMON_DIR: &str = "/nix/var/nix/daemon-socket";
 
+/// IBus's private bus out of reach (review 2026-09-25, third round): it
+/// listens on a socket by path in `$XDG_CACHE_HOME/ibus` and writes its
+/// address to `~/.config/ibus/bus`, both in the home a program has — past
+/// the session bus's rules, which the network namespace does not cut for a
+/// socket by path. A tmpfs over both; programs take the IBus portal
+/// (`IBUS_USE_PORTAL`, set by the launch). Fatal when it cannot be done.
+fn hide_input_methods(zone: &Zone) -> Result<(), String> {
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| zone.home.join(".cache"));
+    let mut places = vec![
+        zone.home.join(".cache/ibus"),
+        zone.home.join(".config/ibus"),
+    ];
+    if cache.join("ibus") != places[0] {
+        places.push(cache.join("ibus"));
+    }
+    for dir in places {
+        if !dir.is_dir() || fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) {
+            continue;
+        }
+        sys::mount(
+            OsStr::new("tmpfs"),
+            &dir,
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            "mode=0700,size=16k",
+        )
+        .map_err(|e| {
+            format!(
+                "cannot hide {}: {e} — IBus's private bus would be in reach",
+                dir.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// The session's own entry points below the home: created when missing before
 /// a hermetic zone comes up (`run`), so that they can be read-only in it.
 const ENTRY_POINTS: [&str; 8] = [
@@ -3171,6 +3217,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     if !zone.nix_daemon {
         hide_nix_daemon(zone)?;
     }
+    hide_input_methods(zone)?;
     if zone.hermetic && !zone.host_files_writable {
         protect_host_files(zone)?;
     }

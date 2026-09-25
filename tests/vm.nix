@@ -1327,6 +1327,13 @@ let
           assert zone["host_files_writable"] == {"value": False, "source": "default"}, zone
           assert out["defaults"]["hermetic"] == {"value": False, "source": "nix"}, out["defaults"]
           alice("sh -c '! vpn-zone hermetic vmherm off'")
+          # IBus's private bus, where ibus-daemon puts it: a socket by path in
+          # the home, which the network namespace does not cut.
+          alice(
+              "mkdir -p ~/.cache/ibus ~/.config/ibus/bus && systemd-run --user --unit=fakeibus "
+              "socat UNIX-LISTEN:/home/alice/.cache/ibus/dbus-vmtest,fork OPEN:/dev/null"
+          )
+          machine.wait_until_succeeds("test -S /home/alice/.cache/ibus/dbus-vmtest")
           # The broker is socket-activated, and every zone wants its socket:
           # no race with the session (red on main and in CI before).
           alice("vpn-zone up vmherm")
@@ -1367,6 +1374,12 @@ let
           for path in [".config/autostart/x.desktop", ".local/share/applications/x.desktop", ".config/systemd/x"]:
               in_zone(hp, f"sh -c '! touch /home/alice/{path}'")
           alice("touch ~/.config/autostart/from-host && rm ~/.config/autostart/from-host")
+          # Input methods by their portals only: IBus's private bus is hidden,
+          # and programs are told to take the portal.
+          in_zone(hp, "test ! -e /home/alice/.cache/ibus/dbus-vmtest")
+          alice("vpn-zone run vmherm -- sh -c 'echo ibus=$IBUS_USE_PORTAL > /home/alice/zone-ibus'")
+          machine.succeed("grep -qx ibus=1 /home/alice/zone-ibus")
+          alice("systemctl --user stop fakeibus || true")
           # A program started in the zone has the user's own group only: the
           # session's groups open doors (libvirt, docker, /dev/input).
           alice("cat /var/lib/vzdoor/door")
