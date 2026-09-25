@@ -1674,6 +1674,9 @@ fn seal_mounts(launch: &Launch) -> Result<(), String> {
     )
     .map_err(|e| format!("cannot make the mount tree private: {e}"))?;
 
+    // The system's own services under /run, as in a user zone
+    // (`zone::seal_run`) — before the resolvers, which are below it.
+    zone::seal_run()?;
     // The host's resolvers first: on NixOS /etc/resolv.conf is a chain of links
     // ending INSIDE one of them (see zone.rs, where it bit first).
     for group in zone::RESOLVER_DIRS {
