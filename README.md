@@ -157,6 +157,22 @@ programs.vpn-zones = {
 `vpn-zone status --json` shows every value with where it came from (Nix, set
 locally, or the default).
 
+Sound in a hermetic zone goes through the sound filter (PulseAudio) and through
+a PipeWire socket of the zone's own, whose clients see what a WirePlumber
+policy of this project lets them: their own streams, the outputs to play to,
+the microphone only as `vpn-zone microphone` says — never what the host plays,
+never another program's stream. The policy is switched on once:
+
+```nix
+services.vpn-zones.pipewirePolicy.enable = true;  # NixOS: nixosModules.default
+programs.vpn-zones.pipewirePolicy = true;         # or home-manager without NixOS
+programs.vpn-zones.audioManager = [ "mixer" ];    # a zone for pavucontrol/qpwgraph:
+                                                  # the host's raw PipeWire, said loudly
+```
+
+Without the policy a hermetic zone has no PipeWire at all — the PulseAudio path
+only, which most programs use (`docs/LEAK-MODEL.md` §20).
+
 ## How to use it
 
 Create a zone: the **"Add VPN zone"** entry → pick a `.conf` → give it a name.

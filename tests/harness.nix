@@ -113,6 +113,8 @@ let
             offline = "no";
             agents = "ask";
           };
+          audioManager = [ "mixer" ];
+          pipewirePolicy = true;
           desktop = {
             windowMenu.key = "Mod+Shift+Z";
             niri = {

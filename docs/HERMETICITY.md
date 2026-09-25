@@ -45,11 +45,16 @@ the zone gets it — not per launch):
    new global; its colour, width and the switch that hides it are in
    `~/.config/vpn-zones` and the zones' state, which a zone cannot write. A
    hermetic zone gets
-   bound back PipeWire, PulseAudio (the `pulse-filter` socket: an allow-list
-   of commands, no recording of a monitor, the microphone only by the zone's
-   permission — `yes`, `no` or `ask`, the default, a question on the host;
-   a switch of the PulseAudio path only, raw `pipewire-0` records around it;
-   `docs/LEAK-MODEL.md` §17),
+   PipeWire as a restricted socket of its own (a security context the
+   zone's helper hands to PipeWire, a WirePlumber policy of ours deciding
+   what its clients see: their own streams, the outputs, the microphones
+   only on `yes`, never a monitor or a link of their own — without the
+   policy no PipeWire at all; the host's raw `pipewire-0` only for a zone
+   declared an audio manager, `vpn-zone audio-manager`;
+   `docs/LEAK-MODEL.md` §20), PulseAudio (the `pulse-filter` socket: an
+   allow-list of commands, no recording of a monitor, the microphone only by
+   the zone's permission — `yes`, `no` or `ask`, the default, a question on
+   the host; `docs/LEAK-MODEL.md` §17),
    and two sockets of ours: a **filtered session bus** (`xdg-dbus-proxy`) and
    the **broker**. `systemd/private` is not bound back. The proxies and the
    sound filter run in the host's user namespace, not the zone's: a

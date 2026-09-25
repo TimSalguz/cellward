@@ -264,6 +264,14 @@ fn main() -> ExitCode {
                 ExitCode::from(EXIT_USAGE)
             }
         },
+        Some("pipewire-context") => match vpn_zone::pw_context::Args::parse(&args[1..]) {
+            Ok(parsed) => ExitCode::from(vpn_zone::pw_context::run(&parsed)),
+            Err(e) => {
+                eprintln!("vpn-zone-core pipewire-context: {e}");
+                eprint!("{USAGE}");
+                ExitCode::from(EXIT_USAGE)
+            }
+        },
         Some("bus-filter") => match bus_filter::Args::parse(&args[1..]) {
             Ok(parsed) => ExitCode::from(bus_filter::run(&parsed)),
             Err(e) => {

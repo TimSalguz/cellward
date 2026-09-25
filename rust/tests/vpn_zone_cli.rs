@@ -1504,11 +1504,61 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     let out = home.run(&["microphone", "nl", "no"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("недоступен"), "{}", stdout(&out));
-    // Said for what it is: pulse's switch, pipewire-0 goes around it; the
-    // zone is hermetic here, so systemd --user is not named.
+    // Said for what it is: the switch of pulse and of the zone's restricted
+    // PipeWire; the zone is hermetic here and no audio manager, so nothing
+    // goes around it — neither the raw pipewire-0 nor systemd --user.
     assert!(stdout(&out).contains("(pulse)"), "{}", stdout(&out));
-    assert!(stdout(&out).contains("pipewire-0"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("PipeWire зоны"), "{}", stdout(&out));
+    assert!(!stdout(&out).contains("pipewire-0"), "{}", stdout(&out));
     assert!(!stdout(&out).contains("systemd --user"), "{}", stdout(&out));
+    // An audio manager: the raw socket, said loudly, and named as what goes
+    // around the microphone's switch; in status with its source.
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"audio_manager\":{\"value\":false,\"source\":\"default\"}"),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"microphone\":null,\"audio_manager\":null,"),
+        "{json}"
+    );
+    let out = home.run(&["audio-manager", "nl", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("ВНИМАНИЕ"), "{}", stdout(&out));
+    assert_eq!(
+        fs::read_to_string(home.state().join("nl/audio-manager")).unwrap(),
+        "on"
+    );
+    let out = home.run(&["microphone", "nl", "no"]);
+    assert!(
+        stdout(&out).contains("сырой pipewire-0"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        stdout(&out).contains("audio-manager nl off"),
+        "{}",
+        stdout(&out)
+    );
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"audio_manager\":{\"value\":true,\"source\":\"local\"}"),
+        "{json}"
+    );
+    assert!(!home.run(&["audio-manager", "nl", "yes"]).status.success());
+    fs::create_dir_all(home.root.join("config/declared")).unwrap();
+    fs::write(home.root.join("config/declared/audio-manager"), "nl\n").unwrap();
+    assert!(home
+        .run(&["audio-manager", "nl", "default"])
+        .status
+        .success());
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"audio_manager\":{\"value\":true,\"source\":\"nix\"}"),
+        "{json}"
+    );
+    fs::remove_file(home.root.join("config/declared/audio-manager")).unwrap();
+    assert!(!home.state().join("nl/audio-manager").exists());
     assert_eq!(
         fs::read_to_string(home.state().join("nl/microphone")).unwrap(),
         "no"

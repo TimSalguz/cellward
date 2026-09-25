@@ -23,9 +23,11 @@
 //! zone cannot reach the host's file system through their `/proc/<pid>/root`.
 //! What this does NOT hold: a zone that is not hermetic keeps the host's
 //! `systemd --user`, and through it runs anything on the host — a recorder,
-//! or a write to the marker; and the raw `pipewire-0` records past the sound
-//! filter in every zone (LEAK-MODEL §17, ROADMAP §17). The switch is the
-//! PulseAudio path's.
+//! or a write to the marker; and the raw `pipewire-0` of an ordinary zone
+//! and of an audio manager records past it (LEAK-MODEL §20). The switch is
+//! the PulseAudio path's, and a hermetic zone's restricted PipeWire's
+//! (`crate::pw_context` publishes it for WirePlumber's policy: `yes` or not —
+//! `ask` is `no` there, nothing can hold a native stream for a question yet).
 //!
 //! **Which wins**: Nix over the zone's marker, the marker over the default
 //! (`ask`). A value that is none of the three, or a file that is there but

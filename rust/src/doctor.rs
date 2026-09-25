@@ -364,7 +364,8 @@ fn reachable(path: &Path, slow: &crate::sockets::Slow) -> bool {
 // --- THE PROBE (inside a zone) -------------------------------------------------
 
 /// What the doctor tells the probe about the zone, after the uid:
-/// `--zone=<name>`, `--hermetic`, `--nix-daemon` (what the zone is to be — its
+/// `--zone=<name>`, `--hermetic`, `--nix-daemon`, `--audio-manager` (what the
+/// zone is to be — its
 /// setting, read the way the holder reads it), `--host-devs=<maj:min>,…` (the
 /// host's own mounts, so that the probe can tell a filesystem only the zone
 /// has, `crate::sockets::own_devs`) and `--closed=<kind:maj:min:ino>,…` (the
@@ -377,6 +378,7 @@ pub struct ProbeArgs {
     pub zone: Option<String>,
     pub hermetic: bool,
     pub nix_daemon: bool,
+    pub audio_manager: bool,
     /// `None` when the doctor did not say (an older one, or the probe run by
     /// hand): then nothing is the zone's own by its device.
     pub host_devs: Option<HashSet<crate::sockets::Dev>>,
@@ -397,6 +399,7 @@ impl ProbeArgs {
             match arg {
                 "--hermetic" => parsed.hermetic = true,
                 "--nix-daemon" => parsed.nix_daemon = true,
+                "--audio-manager" => parsed.audio_manager = true,
                 _ => {
                     if let Some(name) = arg.strip_prefix("--zone=") {
                         // A name, never a path: compared with one component.
@@ -509,6 +512,7 @@ pub fn probe(args: &ProbeArgs, groups_shed: bool) -> Vec<Check> {
         zone: args.zone.clone(),
         hermetic: args.hermetic,
         nix_daemon: args.nix_daemon,
+        audio_manager: args.audio_manager,
         mountinfo: mountinfo.clone(),
         closed: args.closed.clone(),
     };
@@ -616,7 +620,7 @@ pub fn system_bus_check(mountinfo: &str, reachable: bool, what: &str) -> Check {
 }
 
 /// `vpn-zone-core doctor-probe <uid> [--hermetic] [--nix-daemon]
-/// [--host-devs=…]` ([`ProbeArgs`]).
+/// [--audio-manager] [--host-devs=…]` ([`ProbeArgs`]).
 pub fn probe_main(args: &[OsString]) -> u8 {
     let Some(args) = ProbeArgs::parse(args) else {
         eprintln!("vpn-zone-core doctor-probe: need <uid>");
@@ -757,7 +761,7 @@ fn host_devs() -> Option<String> {
 /// under another name — a hard link into a directory the zone reaches — is
 /// still that socket. What is closed depends on what the zone is to be, as the
 /// probe's own reading by path does.
-fn closed_identities(uid: u32, hermetic: bool, nix_daemon: bool) -> String {
+fn closed_identities(uid: u32, hermetic: bool, nix_daemon: bool, audio_manager: bool) -> String {
     use crate::sockets::HostSocket as Host;
     let runtime = PathBuf::from(format!("/run/user/{uid}"));
     let mut named: Vec<(Host, PathBuf)> = RESOLVER_SOCKETS
@@ -775,6 +779,9 @@ fn closed_identities(uid: u32, hermetic: bool, nix_daemon: bool) -> String {
     if hermetic {
         named.push((Host::SessionBus, runtime.join("bus")));
         named.push((Host::SystemdUser, runtime.join("systemd/private")));
+        if !audio_manager {
+            named.push((Host::Pipewire, runtime.join("pipewire-0")));
+        }
     }
     for entry in fs::read_dir(&runtime).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -1199,6 +1206,7 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     // the host's bus and the Nix daemon by it.
     let (hermetic, _) = crate::hermetic::zone_setting(&dir, &tools.config, name);
     let (nix_daemon, _) = crate::hermetic::nix_daemon(&dir, &tools.config, name);
+    let (audio_manager, _) = crate::hermetic::audio_manager(&dir, &tools.config, name);
     let mut probe_args = vec![uid.to_string(), format!("--zone={name}")];
     if hermetic {
         probe_args.push("--hermetic".to_owned());
@@ -1206,10 +1214,13 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     if nix_daemon {
         probe_args.push("--nix-daemon".to_owned());
     }
+    if audio_manager {
+        probe_args.push("--audio-manager".to_owned());
+    }
     if let Some(devs) = host_devs() {
         probe_args.push(format!("--host-devs={devs}"));
     }
-    let closed = closed_identities(uid, hermetic, nix_daemon);
+    let closed = closed_identities(uid, hermetic, nix_daemon, audio_manager);
     if !closed.is_empty() {
         probe_args.push(format!("--closed={closed}"));
     }
@@ -1280,6 +1291,11 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
             format!("не запустить {}: {e}", tools.nsenter.display()),
         )),
     }
+    if let Some(check) =
+        pipewire_check(hermetic, audio_manager, crate::pw_context::read_state(&dir))
+    {
+        checks.push(check);
+    }
     if !offline {
         checks.push(match fs::read_to_string(dir.join("status")) {
             Ok(mirror) => match crate::cli::alive_line(&dir, &mirror) {
@@ -1298,6 +1314,56 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
         });
     }
     (true, checks)
+}
+
+/// A hermetic zone's PipeWire (`crate::pw_context`): restricted through
+/// WirePlumber's policy, closed without it, or — an audio manager — the
+/// host's raw socket, said loudly. `None` for an ordinary zone: its raw
+/// socket is named among the sockets, beside its `systemd --user`.
+pub fn pipewire_check(
+    hermetic: bool,
+    audio_manager: bool,
+    state: Option<crate::pw_context::State>,
+) -> Option<Check> {
+    use crate::pw_context::State;
+    if !hermetic {
+        return None;
+    }
+    Some(if audio_manager {
+        Check::new(
+            "pipewire",
+            Level::Warn,
+            "МЕНЕДЖЕР ЗВУКА: зоне отдан PipeWire хоста без ограничений — всё, что играет \
+             хост, микрофон мимо настройки microphone, чужие потоки и связи \
+             (vpn-zone audio-manager <зона> off)",
+        )
+    } else {
+        match state {
+            Some(State::Active) => Check::new(
+                "pipewire",
+                Level::Ok,
+                "ограниченный: политика WirePlumber vpn-zones действует",
+            ),
+            Some(State::NoPolicy) => Check::new(
+                "pipewire",
+                Level::Warn,
+                "политики WirePlumber vpn-zones нет — PipeWire зоне закрыт, звук только \
+                 через pulse (services.vpn-zones.pipewirePolicy или \
+                 programs.vpn-zones.pipewirePolicy)",
+            ),
+            Some(State::NoPipewire) => Check::new(
+                "pipewire",
+                Level::Warn,
+                "PipeWire хоста недоступен — зоне закрыт, звук только через pulse",
+            ),
+            None => Check::new(
+                "pipewire",
+                Level::Warn,
+                "помощника PipeWire нет (зона поднята старой версией или он умер) — \
+                 перезапусти зону",
+            ),
+        }
+    })
 }
 
 /// The names of every zone on disk, `offline` included.
@@ -1501,6 +1567,27 @@ mod tests {
         assert_eq!(system_bus_check("", true, "w").level, Level::Warn);
     }
 
+    /// A hermetic zone's PipeWire in the doctor: ok only with the policy in
+    /// force; an audio manager said loudly; nothing for an ordinary zone
+    /// (its raw socket is among the sockets).
+    #[test]
+    fn a_hermetic_zones_pipewire_is_ok_only_through_the_policy() {
+        use crate::pw_context::State;
+        assert!(pipewire_check(false, false, None).is_none());
+        assert!(pipewire_check(false, true, Some(State::Active)).is_none());
+        let level = |c: Option<Check>| c.map(|c| c.level);
+        assert_eq!(
+            level(pipewire_check(true, false, Some(State::Active))),
+            Some(Level::Ok)
+        );
+        for state in [None, Some(State::NoPolicy), Some(State::NoPipewire)] {
+            assert_eq!(level(pipewire_check(true, false, state)), Some(Level::Warn));
+        }
+        let loud = pipewire_check(true, true, Some(State::Active)).unwrap();
+        assert_eq!(loud.level, Level::Warn);
+        assert!(loud.detail.contains("МЕНЕДЖЕР ЗВУКА"), "{}", loud.detail);
+    }
+
     #[test]
     fn the_probe_takes_what_the_doctor_says_and_ignores_the_rest() {
         let args = |list: &[&str]| -> Vec<OsString> { list.iter().map(OsString::from).collect() };
@@ -1508,16 +1595,22 @@ mod tests {
         assert_eq!(ProbeArgs::parse(&args(&["x"])), None);
         let plain = ProbeArgs::parse(&args(&["1000"])).unwrap();
         assert_eq!(plain.uid, 1000);
-        assert!(!plain.hermetic && !plain.nix_daemon && plain.host_devs.is_none());
+        assert!(
+            !plain.hermetic
+                && !plain.nix_daemon
+                && !plain.audio_manager
+                && plain.host_devs.is_none()
+        );
         let full = ProbeArgs::parse(&args(&[
             "1000",
             "--hermetic",
             "--nix-daemon",
+            "--audio-manager",
             "--from-a-newer-doctor",
             "--host-devs=0:25,259:2",
         ]))
         .unwrap();
-        assert!(full.hermetic && full.nix_daemon);
+        assert!(full.hermetic && full.nix_daemon && full.audio_manager);
         assert_eq!(full.host_devs, Some([(0, 25), (259, 2)].into()));
         // A list that does not read is no list.
         let broken = ProbeArgs::parse(&args(&["1000", "--host-devs=0:25,junk"])).unwrap();
