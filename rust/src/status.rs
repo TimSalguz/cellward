@@ -150,7 +150,7 @@ pub fn networks(tools: &Tools) -> String {
         // 2026-09, may still be in a configuration or in Nix.
         "{\"name\":\"unconfined\",\"kind\":\"unconfined\",\"aliases\":[\"direct\"],\"source\":\"default\",\"up\":true,\
          \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"system_zone\":null,\"frame_color\":null}"
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\"system_zone\":null,\"frame_color\":null}"
             .to_owned(),
     ];
     let mut offline_listed = false;
@@ -225,6 +225,10 @@ pub fn networks(tools: &Tools) -> String {
             let (on, source) = crate::hermetic::host_files_writable(&dir, &tools.config, &name);
             sourced(on.to_string(), source)
         };
+        let camera = {
+            let (on, source) = crate::hermetic::camera(&dir, &tools.config, &name);
+            sourced(on.to_string(), source)
+        };
         // The colour of the border around its programs' windows.
         let frame_color = {
             let (color, source) = crate::frame::zone_color(&tools.state, &tools.config, &name);
@@ -236,7 +240,7 @@ pub fn networks(tools: &Tools) -> String {
             "local"
         };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"system_zone\":{system_zone},\"frame_color\":{frame_color}}}",
+            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"camera\":{camera},\"system_zone\":{system_zone},\"frame_color\":{frame_color}}}",
             string(&name),
             dir.join(NO_ESCAPE).exists()
         ));
@@ -246,7 +250,7 @@ pub fn networks(tools: &Tools) -> String {
         items.push(format!(
             "{{\"name\":\"offline\",\"kind\":\"offline\",\"aliases\":[],\"source\":\"default\",\"up\":false,\
              \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"system_zone\":null,\
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\"system_zone\":null,\
              \"frame_color\":{}}}",
             sourced_str(&color.hex(), source)
         ));

@@ -114,6 +114,19 @@ fn allowance(
     }
 }
 
+/// Whether a zone's programs reach the host's cameras as devices
+/// (`/dev/video*`, `/dev/media*`): a marker in the zone's directory
+/// (`on`/`off`, `vpn-zone camera`), or the zone named in `declared/camera`
+/// (Nix, `programs.vpn-zones.camera`). Off by default (review 2026-09-25):
+/// the session's ACL on them is the user's, and a program in a zone is the
+/// user — it filmed without a question.
+pub const CAMERA: &str = "camera";
+
+/// Whether the zone in `zone_dir` reaches the cameras: `(on, source)`.
+pub fn camera(zone_dir: &Path, config: &Path, zone: &str) -> (bool, Source) {
+    allowance(zone_dir, config, zone, CAMERA, CAMERA, "on")
+}
+
 /// Whether the zone in `zone_dir` reaches the Nix daemon: `(on, source)`.
 pub fn nix_daemon(zone_dir: &Path, config: &Path, zone: &str) -> (bool, Source) {
     allowance(zone_dir, config, zone, NIX_DAEMON, NIX_DAEMON, "on")

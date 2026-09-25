@@ -598,6 +598,8 @@ struct Zone {
     /// What the host runs from the home left writable in a hermetic zone
     /// (`hermetic::host_files_writable`); read-only by default.
     host_files_writable: bool,
+    /// The host's cameras as devices (`hermetic::camera`); off by default.
+    camera: bool,
 }
 
 impl Zone {
@@ -670,6 +672,7 @@ pub fn run(args: Args) -> u8 {
     let (hermetic, _) = crate::hermetic::zone_setting(&dir, &config, &label);
     let (nix_daemon, _) = crate::hermetic::nix_daemon(&dir, &config, &label);
     let (host_files_writable, _) = crate::hermetic::host_files_writable(&dir, &config, &label);
+    let (camera, _) = crate::hermetic::camera(&dir, &config, &label);
     let zone = Zone {
         dir,
         home,
@@ -678,6 +681,7 @@ pub fn run(args: Args) -> u8 {
         hermetic,
         nix_daemon,
         host_files_writable,
+        camera,
     };
 
     // A directory is a zone if it has a config or the offline marker; anything
@@ -2539,6 +2543,101 @@ fn private_tmp(zone: &Zone) -> Result<(), String> {
 /// What [`private_tmp`] covers.
 const PRIVATE_TMP: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
 
+/// Sound and camera devices out of the zone's reach (review 2026-09-25):
+/// logind gives the session's user an ACL on `/dev/snd/*` and `/dev/video*`,
+/// and a program in a zone is that user — it opened the microphone's
+/// capture device directly, past PipeWire and past any permission. A tmpfs
+/// over `/dev/snd` (sound goes through the zone's pulse and PipeWire
+/// sockets) and over `/dev/v4l`; `/dev/null` over every `video*` and `media*`
+/// node — now and, by a watcher, when a camera is plugged in later — unless
+/// the zone is let at the cameras (`vpn-zone camera <zone> on`). Fatal: a
+/// zone that cannot hide them records without asking.
+fn hide_capture_devices(zone: &Zone) -> Result<(), String> {
+    let mut dirs = vec!["/dev/snd"];
+    if !zone.camera {
+        dirs.push("/dev/v4l");
+    }
+    for dir in dirs {
+        let dir = Path::new(dir);
+        if !dir.is_dir() {
+            continue;
+        }
+        sys::mount(
+            OsStr::new("tmpfs"),
+            dir,
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NOEXEC,
+            "mode=0755,size=16k",
+        )
+        .map_err(|e| {
+            format!(
+                "cannot hide {}: {e} — programs in the zone would open it directly",
+                dir.display()
+            )
+        })?;
+    }
+    if zone.camera {
+        println!("zone {}: sound devices hidden, cameras let", zone.name());
+        return Ok(());
+    }
+    // The watch first, the listing second: nothing plugged in between is lost.
+    let watch = sys::Inotify::watch(Path::new("/dev")).ok();
+    for entry in fs::read_dir("/dev").into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_capture_node(&name) {
+            cover_node(&Path::new("/dev").join(&name))?;
+        }
+    }
+    match watch {
+        Some(watch) => {
+            let name = zone.name().into_owned();
+            thread::spawn(move || loop {
+                let names = match watch.names() {
+                    Ok(names) => names,
+                    Err(e) => {
+                        eprintln!("zone {name}: the device watch ended ({e})");
+                        return;
+                    }
+                };
+                for entry in names.into_iter().filter(|n| is_capture_node(n)) {
+                    if let Err(e) = cover_node(&Path::new("/dev").join(&entry)) {
+                        eprintln!("zone {name}: {e}");
+                    }
+                }
+            });
+        }
+        None => {
+            return Err(
+                "no watch on /dev — a camera plugged in later would be in reach".to_owned(),
+            );
+        }
+    }
+    println!("zone {}: sound and camera devices hidden", zone.name());
+    Ok(())
+}
+
+/// A camera's nodes: `video<N>`, `media<N>`.
+fn is_capture_node(name: &str) -> bool {
+    ["video", "media"].iter().any(|prefix| {
+        name.strip_prefix(prefix)
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// `/dev/null` over a device node, unless it is not one (anything else is
+/// left alone) or is covered already.
+fn cover_node(node: &Path) -> Result<(), String> {
+    use std::os::unix::fs::FileTypeExt;
+    let Ok(meta) = fs::symlink_metadata(node) else {
+        return Ok(());
+    };
+    if !meta.file_type().is_char_device() {
+        return Ok(());
+    }
+    sys::mount(OsStr::new("/dev/null"), node, "", libc::MS_BIND, "")
+        .map_err(|e| format!("cannot cover {}: {e}", node.display()))
+}
+
 /// A tmpfs over `/tmp/.X11-unix` in the zone's mount namespace
 /// (`docs/HERMETICITY.md` §7, A). Created first when the host has none, so
 /// that an X server started in the zone never puts its socket into the shared
@@ -2866,6 +2965,7 @@ fn hide_project_state(zone: &Zone) -> Result<Zone, String> {
         hermetic: zone.hermetic,
         nix_daemon: zone.nix_daemon,
         host_files_writable: zone.host_files_writable,
+        camera: zone.camera,
     })
 }
 
@@ -3287,6 +3387,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // is not. A container with the x11 permission runs its own satellite, and
     // its socket lands in here.
     hide_x11(zone)?;
+    hide_capture_devices(zone)?;
     // The system tier's directory, with its root service's socket: a helper
     // outside that acts for whoever asks. A zone through a system zone keeps
     // that zone's status, through a descriptor opened before it goes.
@@ -4344,6 +4445,13 @@ mod tests {
         // zone gets the filter's in its place (`pulse_filter`).
         assert!(!runtime_entry_kept("pulse", true));
         assert!(!runtime_entry_kept("pulse", false));
+        // A camera's nodes, and nothing that merely starts like one.
+        assert!(is_capture_node("video0") && is_capture_node("media12"));
+        assert!(
+            !is_capture_node("video")
+                && !is_capture_node("videox")
+                && !is_capture_node("vhost-net")
+        );
         // PipeWire's unrestricted socket, for the session manager: no zone.
         assert!(!runtime_entry_kept("pipewire-0-manager", false));
         assert!(!runtime_entry_kept("pipewire-0-manager", true));
