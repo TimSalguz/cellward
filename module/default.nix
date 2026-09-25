@@ -454,6 +454,23 @@ let
   # CLI/GUI то, что задано здесь, — вместо того чтобы молча не сработать.
   # Машиночитаемый ответ, откуда какое значение, — `vpn-zone status --json`.
   cfg = config.programs.vpn-zones;
+  # A term as `vpn-zone ask-again` takes it (`30s`, `3m`, `1h`, `1d`) in
+  # seconds; bounds as in rust/src/grants.rs (ASK_AGAIN_MIN, ASK_AGAIN_MAX).
+  termSeconds =
+    t:
+    let
+      m = builtins.match "([1-9][0-9]{0,5})([smhd])" t;
+    in
+    lib.toInt (builtins.elemAt m 0)
+    * {
+      s = 1;
+      m = 60;
+      h = 3600;
+      d = 86400;
+    }.${builtins.elemAt m 1};
+  askAgainTerm = lib.types.addCheck (lib.types.strMatching "[1-9][0-9]{0,5}[smhd]") (
+    t: termSeconds t >= 30 && termSeconds t <= 86400
+  );
 
   # Имя контейнера попадает в путь, в имя файла и в имя деривации.
   # Не `__…` и не слова, которые меню используют как свои метки: контейнер с
@@ -735,7 +752,14 @@ in
         calls = "yes";
         offline = "no";
       };
-      description = "Может ли программа зоны записывать микрофон (как разрешения в телефоне): имя зоны → yes (без вопроса), no (никогда) или ask — при первой записи программы зоны на хосте спрашивают: разрешить один раз, всегда или отказать. Зона без значения здесь и без своего (vpn-zone microphone <зона> yes|no|ask) — ask; без графической сессии или без ответа за 25 с — отказ. «Всегда» — всей зоне, любой её программе: пишет yes в настройку зоны; для зоны, заданной здесь, его не предлагают. После отказа зону 3 минуты не спрашивают. Действует сразу, без перезапуска зоны. Звук, который играет хост (мониторы выходов), зоне не записать никогда. Только путь PulseAudio: сырой pipewire-0 этим не закрыт (ROADMAP §17), а в негерметичной зоне — и systemd --user хоста. Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Может ли программа зоны записывать микрофон (как разрешения в телефоне): имя зоны → yes (без вопроса), no (никогда) или ask — при первой записи программы зоны на хосте спрашивают: разрешить один раз, всегда или отказать. Зона без значения здесь и без своего (vpn-zone microphone <зона> yes|no|ask) — ask; без графической сессии или без ответа за 25 с — отказ. «Всегда» — всей зоне, любой её программе: пишет yes в настройку зоны; для зоны, заданной здесь, его не предлагают. После отказа зону не спрашивают askAgainAfter (по умолчанию 3 минуты). Действует сразу, без перезапуска зоны. Звук, который играет хост (мониторы выходов), зоне не записать никогда. Только путь PulseAudio: сырой pipewire-0 этим не закрыт (ROADMAP §17), а в негерметичной зоне — и systemd --user хоста. Сами зоны в Nix не описываются: здесь только имена.";
+    };
+
+    askAgainAfter = lib.mkOption {
+      type = lib.types.nullOr askAgainTerm;
+      default = null;
+      example = "10m";
+      description = "Через сколько после отказа снова спросить о разрешении (сейчас — микрофон): до того запросы программ зоны отказаны без вопроса, чтобы программа, которая переподключается после каждого «нет», не держала диалог открытым в ожидании случайного Enter. Срок — число и единица: 30s…1d (45s, 3m, 1h). null — не задавать из Nix (тогда vpn-zone ask-again <срок>, иначе 3m). Действует сразу, без перезапуска зон.";
     };
 
     hermetic.default = lib.mkOption {
@@ -1002,6 +1026,9 @@ in
       ".config/vpn-zones/declared/microphone".text = lib.concatStrings (
         lib.mapAttrsToList (zone: value: "${zone} ${value}\n") cfg.microphone
       );
+    })
+    (lib.mkIf (cfg.askAgainAfter != null) {
+      ".config/vpn-zones/declared/ask-again".text = cfg.askAgainAfter;
     })
     (lib.mkIf (cfg.frame.width != null) {
       ".config/vpn-zones/declared/frame-width".text = toString cfg.frame.width;

@@ -39,8 +39,9 @@
 //! question at a time per zone: a request while one is open is refused, not
 //! queued — a stream of questions is how a "yes" is got by accident (the
 //! broker's rule). A person's "deny" stands for that connection: the
-//! program's retries on it are refused without asking again; and for
-//! [`AFTER_DENY`] no program of the zone is asked at all, so that one that
+//! program's retries on it are refused without asking again; and for a
+//! pause (`vpn-zone ask-again`, [`AFTER_DENY`] unless set) no program of the
+//! zone is asked at all, so that one that
 //! reconnects after every refusal cannot keep a dialog waiting for a stray
 //! Enter. "Always" is the ZONE's: the button and the text say so, since the
 //! program's name in the question is only its own word.
@@ -70,7 +71,7 @@ pub const TIMEOUT: Duration = Duration::from_secs(25);
 /// After a refusal of the person's — or a question nobody answered — the
 /// zone is not asked again for this long: its requests are refused without
 /// a dialog.
-pub const AFTER_DENY: Duration = Duration::from_secs(180);
+pub const AFTER_DENY: Duration = Duration::from_secs(crate::grants::ASK_AGAIN_DEFAULT);
 /// At most one line in `vpn-zone journal` per this long for refusals nobody
 /// was asked about: a program asking in a loop must not wash the journal's
 /// history out (it rotates at a megabyte). stderr gets every one.
@@ -248,7 +249,9 @@ pub struct Policy {
     asking: AtomicBool,
     /// No question before then: the person refused, or did not answer.
     quiet_until: Mutex<Option<Instant>>,
-    after_deny: Duration,
+    /// The pause after a refusal; `None` — as the setting says at the time
+    /// (`crate::grants::ask_again`).
+    after_deny: Option<Duration>,
     /// The last journal line for a refusal nobody was asked about.
     last_told: Mutex<Option<Instant>>,
 }
@@ -274,7 +277,7 @@ impl Policy {
             journal,
             asking: AtomicBool::new(false),
             quiet_until: Mutex::new(None),
-            after_deny: AFTER_DENY,
+            after_deny: None,
             last_told: Mutex::new(None),
         }
     }
@@ -291,7 +294,7 @@ impl Policy {
             journal: None,
             asking: AtomicBool::new(false),
             quiet_until: Mutex::new(None),
-            after_deny: AFTER_DENY,
+            after_deny: Some(AFTER_DENY),
             last_told: Mutex::new(None),
         }
     }
@@ -324,8 +327,8 @@ impl Policy {
             }
             Verdict::Ask { .. } if self.quiet() => {
                 let why = format!(
-                    "человек недавно отказал — зону не спрашивают {} мин",
-                    self.after_deny.as_secs().div_ceil(60)
+                    "человек недавно отказал — зону спросят снова через {}",
+                    self.quiet_left()
                 );
                 self.tell(program, false, &why, false);
                 return Verdict::Refuse(why);
@@ -344,6 +347,29 @@ impl Policy {
             _ => {}
         }
         verdict
+    }
+
+    /// The pause after a refusal, as it is set now.
+    fn pause(&self) -> Duration {
+        match (&self.after_deny, &self.files) {
+            (Some(fixed), _) => *fixed,
+            (None, Some((_, config))) => Duration::from_secs(crate::grants::ask_again(config).0),
+            (None, None) => AFTER_DENY,
+        }
+    }
+
+    /// What is left of the quiet, for a person: `2 мин`, `40 с`.
+    fn quiet_left(&self) -> String {
+        let until = *self.quiet_until.lock().unwrap_or_else(|e| e.into_inner());
+        let left = until.map_or(0, |u| {
+            let d = u.saturating_duration_since(Instant::now());
+            d.as_secs() + u64::from(d.subsec_nanos() > 0)
+        });
+        if left >= 60 {
+            format!("{} мин", left.div_ceil(60))
+        } else {
+            format!("{left} с")
+        }
     }
 
     /// Within the quiet after a refusal.
@@ -433,7 +459,7 @@ impl Policy {
             }
             Answer::Deny(why) => {
                 *self.quiet_until.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some(Instant::now() + self.after_deny);
+                    Some(Instant::now() + self.pause());
                 self.tell(program, false, why, true);
                 false
             }
@@ -503,7 +529,7 @@ impl Policy {
 
     /// The quiet after a refusal, shortened (or none).
     pub(crate) fn with_after_deny(mut self, after_deny: Duration) -> Self {
-        self.after_deny = after_deny;
+        self.after_deny = Some(after_deny);
         self
     }
 }
@@ -748,6 +774,36 @@ mod tests {
         assert!(!p.ask("app", true, |a| a));
         assert_eq!(p.decide("app"), Verdict::Ask { remember: true });
         p.abandon();
+    }
+
+    /// The pause after a refusal is the setting's, Nix's first — read when
+    /// the person refuses, so a change applies without a restart. A file
+    /// that holds no pause within the bounds is passed over, never taken for
+    /// no pause at all.
+    #[test]
+    fn the_pause_after_a_refusal_is_the_setting() {
+        let d = Dirs::new("pause");
+        let p = d.policy(d.kdialog("deny", "exit 2"), true, TIMEOUT);
+        assert_eq!(p.pause(), AFTER_DENY);
+        d.write("config/ask-again", "10m");
+        assert_eq!(p.pause(), Duration::from_secs(600));
+        d.write("config/declared/ask-again", "1h\n");
+        assert_eq!(p.pause(), Duration::from_secs(3_600));
+        for bad in ["5s", "0m", "2d", "", "soon"] {
+            d.write("config/declared/ask-again", bad);
+            assert_eq!(p.pause(), Duration::from_secs(600), "{bad:?}");
+        }
+        d.write("config/ask-again", "1s");
+        assert_eq!(p.pause(), AFTER_DENY);
+        d.write("config/ask-again", "45s");
+        assert!(!p.ask("app", true, |a| a));
+        let Verdict::Refuse(why) = p.decide("app") else {
+            panic!("asked again right after a refusal");
+        };
+        assert!(
+            why.contains("через 45 с") || why.contains("через 44 с"),
+            "{why}"
+        );
     }
 
     /// What an answer means for the connection is settled while the zone's

@@ -100,6 +100,7 @@ const VERBS: &[&str] = &[
     "host-files",
     "camera",
     "microphone",
+    "ask-again",
     "doctor",
     "watch",
     "journal",
@@ -188,6 +189,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             "host-files" if pos == 3 => strs(&mut out, &["read-only", "writable", "default"]),
             "camera" if pos == 3 => strs(&mut out, &["on", "off", "default"]),
             "microphone" if pos == 3 => strs(&mut out, &["yes", "no", "ask", "default"]),
+            "ask-again" if pos == 2 => strs(&mut out, &["1m", "3m", "10m", "1h", "default"]),
             "hermetic" if pos == 3 => match word(2) {
                 "--default" => strs(&mut out, &["on", "off"]),
                 _ => strs(&mut out, &["on", "off", "default"]),

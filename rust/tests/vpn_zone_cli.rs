@@ -1532,6 +1532,32 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     fs::remove_file(home.root.join("config/declared/microphone")).unwrap();
     assert!(home.run(&["microphone", "nl", "default"]).status.success());
     assert!(!home.state().join("nl/microphone").exists());
+    // The pause after a refusal: a term within 30s…1d, Nix over it.
+    let out = home.run(&["ask-again", "10m"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("через 10m"), "{}", stdout(&out));
+    let out = home.run(&["ask-again", "600s"]);
+    assert!(stdout(&out).contains("через 10m"), "{}", stdout(&out));
+    for bad in ["5s", "2d", "0m", "soon"] {
+        assert!(!home.run(&["ask-again", bad]).status.success(), "{bad}");
+    }
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"ask_again\":{\"value\":\"10m\",\"source\":\"local\"}"),
+        "{json}"
+    );
+    fs::write(home.root.join("config/declared/ask-again"), "1h").unwrap();
+    let out = home.run(&["ask-again", "default"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"ask_again\":{\"value\":\"1h\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    fs::remove_file(home.root.join("config/declared/ask-again")).unwrap();
+    assert!(home.run(&["ask-again", "default"]).status.success());
+    assert!(!home.root.join("config/ask-again").exists());
     let out = home.run(&["hermetic", "nl", "off"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let json = stdout(&home.run(&["status", "--json"]));
@@ -1540,7 +1566,10 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
         "{json}"
     );
     assert!(
-        json.contains("\"hermetic\":{\"value\":true,\"source\":\"default\"}}"),
+        json.contains(
+            "\"hermetic\":{\"value\":true,\"source\":\"default\"},\
+             \"ask_again\":{\"value\":\"3m\",\"source\":\"default\"}}"
+        ),
         "{json}"
     );
     // A zone that is not hermetic: its "no" is said to be no boundary
@@ -1557,7 +1586,7 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     assert!(out.status.success(), "{}", stderr(&out));
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
-        json.contains("\"user_entries\":{\"value\":\"take-over\",\"source\":\"default\"},\"hermetic\":{\"value\":true,\"source\":\"local\"}}"),
+        json.contains("\"user_entries\":{\"value\":\"take-over\",\"source\":\"default\"},\"hermetic\":{\"value\":true,\"source\":\"local\"},\"ask_again\":"),
         "{json}"
     );
     // Declared in Nix: the default refuses the CLI, and an exception inverts it.

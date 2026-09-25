@@ -30,6 +30,58 @@ use crate::tools::Tools;
 /// should say so.
 const MAX_TERM: u64 = 366 * 86_400;
 
+/// How long a refused permission is not asked about again
+/// (`vpn-zone ask-again`): a setting file below the config directory, and
+/// below `declared/` from Nix (`askAgainAfter`), which wins.
+pub const ASK_AGAIN_SETTING: &str = "ask-again";
+/// The pause when nothing sets it: three minutes.
+pub const ASK_AGAIN_DEFAULT: u64 = 180;
+/// The shortest pause: longer than one question waits for its answer
+/// (`microphone::TIMEOUT`) — a shorter one would let a program that
+/// reconnects after every "no" keep a dialog up all the time, waiting for a
+/// stray Enter.
+pub const ASK_AGAIN_MIN: u64 = 30;
+/// The longest: a day. Longer is "no", and the zone's switch says that.
+pub const ASK_AGAIN_MAX: u64 = 86_400;
+
+/// A pause as `vpn-zone ask-again` takes it: a term within the bounds.
+pub fn ask_again_term(text: &str) -> Option<u64> {
+    parse_term(text.trim()).filter(|secs| (ASK_AGAIN_MIN..=ASK_AGAIN_MAX).contains(secs))
+}
+
+/// The pause after a refusal, and where it comes from: Nix, the local
+/// setting, or the default. A file that does not hold a pause within the
+/// bounds is passed over — never read as no pause.
+pub fn ask_again(config: &Path) -> (u64, crate::container::Source) {
+    use crate::container::Source;
+    let declared = config
+        .join(crate::cli::DECLARED_DIR)
+        .join(ASK_AGAIN_SETTING);
+    for (path, source) in [
+        (declared, Source::Nix),
+        (config.join(ASK_AGAIN_SETTING), Source::Local),
+    ] {
+        if let Some(secs) = fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| ask_again_term(&t))
+        {
+            return (secs, source);
+        }
+    }
+    (ASK_AGAIN_DEFAULT, Source::Default)
+}
+
+/// Seconds as the shortest term that says them: 180 → `3m`, 90 → `90s`.
+pub fn term_text(secs: u64) -> String {
+    match secs {
+        0 => "0s".to_owned(),
+        s if s % 86_400 == 0 => format!("{}d", s / 86_400),
+        s if s % 3_600 == 0 => format!("{}h", s / 3_600),
+        s if s % 60 == 0 => format!("{}m", s / 60),
+        s => format!("{s}s"),
+    }
+}
+
 /// `30s`, `15m`, `2h`, `7d` in seconds.
 pub fn parse_term(text: &str) -> Option<u64> {
     let unit = match text.chars().last()? {

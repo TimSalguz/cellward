@@ -93,10 +93,12 @@ pub fn defaults(tools: &Tools) -> String {
     let (frame_width, frame_width_source) = crate::frame::width(&tools.config);
     // And their title strip: always, hover or off (`crate::frame::title_mode`).
     let (frame_title, frame_title_source) = crate::frame::title_mode(&tools.config);
+    // How long a refused permission is not asked about again.
+    let (ask_again, ask_again_source) = crate::grants::ask_again(&tools.config);
     format!(
         "{{\"network\":{},\"container\":{},\"launcher_mode\":{},\"compositor_restriction\":{},\
          \"wayland_proxy\":{},\"frames\":{},\"frame_width\":{},\"frame_title\":{},\
-         \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{}}}",
+         \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{},\"ask_again\":{}}}",
         sourced_str(&network, network_source),
         sourced_str(&container, container_source),
         sourced_str(&mode, mode_source),
@@ -107,7 +109,8 @@ pub fn defaults(tools: &Tools) -> String {
         sourced_str(frame_title.as_str(), frame_title_source),
         sourced_str(&autostart, autostart_source),
         sourced_str(&user_entries, user_entries_source),
-        sourced(hermetic.to_string(), hermetic_source)
+        sourced(hermetic.to_string(), hermetic_source),
+        sourced_str(&crate::grants::term_text(ask_again), ask_again_source)
     )
 }
 

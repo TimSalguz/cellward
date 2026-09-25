@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **How long a refused zone is not asked again is a setting** (the owner's
+  request of 2026-09-25): `vpn-zone ask-again <term>|default`, Nix
+  `programs.vpn-zones.askAgainAfter`, `ask_again` in the defaults of
+  `status --json`. A term from `30s` to `1d`, `3m` unless set; read when the
+  person refuses, so it applies without restarting a zone. The shortest is
+  longer than a question waits for its answer: a shorter pause would let a
+  program that reconnects after every "no" keep a dialog up for a stray
+  Enter. A file with a term out of bounds is passed over, never read as no
+  pause. The microphone's question uses it now; the other permissions will
+  (`docs/PERMISSIONS.md` §3е).
 - **The microphone by permission** (`rust/src/microphone.rs`,
   `rust/src/pulse_filter.rs`, LEAK-MODEL §17; the owner's decision of
   2026-09-25). A program in a zone records the microphone only as the zone's

@@ -113,6 +113,7 @@ let
             offline = "no";
             agents = "ask";
           };
+          askAgainAfter = "10m";
           desktop = {
             windowMenu.key = "Mod+Shift+Z";
             niri = {
