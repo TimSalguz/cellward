@@ -936,6 +936,10 @@ fn what_nix_declares_is_shown_as_such_and_not_changed_here() {
         "{json}"
     );
     assert!(
+        json.contains("\"wayland_proxy\":{\"value\":true,\"source\":\"default\"}"),
+        "{json}"
+    );
+    assert!(
         json.contains("\"container\":{\"value\":\"sb:dev\",\"source\":\"nix\"}"),
         "{json}"
     );

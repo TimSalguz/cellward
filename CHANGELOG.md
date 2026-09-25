@@ -39,6 +39,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   group may open is not, a clean hermetic zone names nothing but systemd's
   and dhcpcd's services; in an ordinary zone a socket in a bound runtime
   entry is named, and the Nix daemon taken away without a restart fails.
+- **`vpn-zone status --json`** says in `defaults` whether the Wayland proxy is
+  on (`wayland_proxy`), with its source, as `compositor_restriction`.
 - **The Wayland proxy can be switched off**, for every program (`vpn-zone
   wayland-proxy off`, `programs.vpn-zones.waylandProxy.enable = false`) or for
   one it breaks (`~/.config/vpn-zones/wayland-no-proxy`,
