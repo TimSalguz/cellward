@@ -36,7 +36,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::fs::File;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::FileExt;
 use std::rc::Rc;
 
@@ -298,6 +298,12 @@ impl Text {
             ),
             clock: Cell::new(0),
         }
+    }
+
+    /// The descriptor the pixels are written with: the only one the proxy's
+    /// filter lets `pwrite64` write to (`wl_proxy::filter`).
+    pub fn writer(&self) -> RawFd {
+        self.file.as_raw_fd()
     }
 
     /// The line's width, logical pixels.

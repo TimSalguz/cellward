@@ -42,7 +42,13 @@
 //! fullscreen is answered less the border only. Which state a commit is of
 //! is the configure the program acked last — kept by serial from the
 //! compositor's configure to the program's `ack_configure`, so the geometry
-//! and the strip laid before a commit match the size the program drew.
+//! and the strip laid before a commit match the size the program drew. But
+//! whether the strip SHOWS is not the program's alone: it is hidden only
+//! while the compositor's latest configure says fullscreen too. A program
+//! that acks the fullscreen configure and never the one that ends it is
+//! shown out of fullscreen by the compositor all the same; its strip then
+//! comes out at once, over the top of its content (its commits have no room
+//! for it), until it acks ([`Window::title_wanted`]).
 //!
 //! **Hover** (§0а). In mode `hover` the strip takes no room: it lies over the
 //! top of the program's content, hidden, and comes out while the pointer is
@@ -407,7 +413,39 @@ pub(crate) struct Frames {
     scale: Cell<u32>,
     /// Whether "cannot draw" has been said: once per proxy.
     warned: Rc<Cell<bool>>,
+    /// Windows of this connection with a frame now ([`Framed`]).
+    framed: Rc<Cell<usize>>,
 }
+
+/// One framed window's share of [`Frames::framed`], given back when its frame
+/// goes (or with the connection).
+///
+/// A frame is the proxy's own objects upstream — four strips of three, the
+/// title and its text of about eight — which the program's table does not
+/// hold, so `wl_proxy`'s cap on the program's objects does not count them:
+/// three objects of the program (a surface, its xdg_surface, a toplevel)
+/// and a commit without a buffer make about twenty in the compositor
+/// (review 2026-09-25). `wl_proxy` counts these at every dispatch and ends
+/// a connection with too many ([`MAX_FRAMED`]).
+struct Framed(Rc<Cell<usize>>);
+
+impl Framed {
+    fn new(count: &Rc<Cell<usize>>) -> Self {
+        count.set(count.get().saturating_add(1));
+        Self(count.clone())
+    }
+}
+
+impl Drop for Framed {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
+}
+
+/// Framed windows one connection may have at once: a program shows a few,
+/// a big one a few dozen. Past this it is refused like one with too many
+/// objects — never served without a frame.
+pub(crate) const MAX_FRAMED: usize = 4096;
 
 #[derive(Default)]
 struct Own {
@@ -459,6 +497,12 @@ fn programs(surface: &Rc<WlSurface>) -> bool {
 }
 
 impl Frames {
+    /// Windows of this connection with a frame now: `wl_proxy` refuses the
+    /// connection past [`MAX_FRAMED`].
+    pub(crate) fn framed(&self) -> usize {
+        self.framed.get()
+    }
+
     /// Start the frame on a new connection, before any request of the
     /// program is read: a registry of the proxy's own and a sync after it,
     /// whose answer says the globals are all in.
@@ -475,6 +519,7 @@ impl Frames {
             own: RefCell::default(),
             scale: Cell::new(crate::wl_title::MIN_SCALE),
             warned,
+            framed: Rc::default(),
         });
         let display = client.display();
         let registry = display.new_send_get_registry();
@@ -1049,11 +1094,14 @@ struct Window {
     sent_max: Option<(i32, i32)>,
     strips: Option<Vec<Strip>>,
     title: Option<TitleParts>,
+    /// Counted among the connection's framed windows while it has strips.
+    counted: Option<Framed>,
     /// Fullscreen, as of the configure the program acked last: its next
     /// commit is of that state, and so is the frame laid before it (the
-    /// title strip hides in fullscreen, §5.7). The configure the compositor
-    /// is sending says `next_fullscreen`, and those not acked yet are kept
-    /// by serial.
+    /// title strip takes no room in fullscreen, §5.7). The configure the
+    /// compositor sent last says `next_fullscreen` — the strip hides only
+    /// while both say it ([`Self::title_wanted`]) —, and those not acked yet
+    /// are kept by serial.
     fullscreen: bool,
     next_fullscreen: bool,
     configures: VecDeque<(u32, bool)>,
@@ -1085,6 +1133,7 @@ impl Window {
             sent_max: None,
             strips: None,
             title: None,
+            counted: None,
             fullscreen: false,
             next_fullscreen: false,
             configures: VecDeque::new(),
@@ -1172,6 +1221,9 @@ impl Window {
         }
         if self.strips.is_none() {
             self.strips = f.make_strips(root, top, &self.me);
+            if self.strips.is_some() {
+                self.counted = Some(Framed::new(&f.framed));
+            }
             self.laid = None;
         }
         let area = self
@@ -1183,9 +1235,18 @@ impl Window {
         if area.w <= 0 || area.h <= 0 {
             return;
         }
-        let over = self.mode == TitleMode::Hover && !self.fullscreen;
+        // Where the title goes: in its room when the insets keep one, else
+        // over the top of the content — in mode `hover`, and in `always`
+        // while the program's state is fullscreen: laid there hidden, so
+        // that it can come out at once when the compositor takes the window
+        // out of fullscreen before the program acks that
+        // ([`Self::title_wanted`]).
+        let over = self.mode != TitleMode::Off;
         let strip = title_strip(area, i, over);
         if self.laid == Some((area, i, strip)) {
+            // Nothing moves; whether the strip shows may still change (the
+            // program acked fullscreen, or its end).
+            self.show_title(false);
             return;
         }
         for (s, r) in strips.iter().zip(self::strips(area, i)) {
@@ -1197,6 +1258,43 @@ impl Window {
         self.lay_title(f, root, top, strip);
     }
 
+    /// Whether the title strip shows now: it is laid somewhere; in mode
+    /// `hover` the pointer wants it; and fullscreen hides it only while BOTH
+    /// the configure the program acked last and the one the compositor sent
+    /// last say fullscreen (review 2026-09-25). The program decides when it
+    /// acks: a hostile one acks the fullscreen configure and never the one
+    /// that ends it, keeps committing (xdg-shell allows that), and the
+    /// compositor shows the window in its normal place anyway (sway, after
+    /// its transaction's timeout) — with the ack alone deciding, the strip
+    /// would stay hidden for the window's life, and the program would draw
+    /// another zone's in its place. Fail-closed: the compositor's word
+    /// brings it out, over the top of the content (it has no room: the
+    /// program's commits are still of the fullscreen size).
+    fn title_wanted(&self) -> bool {
+        let placed = self.laid.is_some_and(|(_, _, strip)| strip.is_some());
+        let fullscreen = self.fullscreen && self.next_fullscreen;
+        placed && !fullscreen && (self.mode == TitleMode::Always || self.hover)
+    }
+
+    /// Show or hide the title strip as [`Self::title_wanted`] says: `now`
+    /// (the pointer, the compositor's configure — the program may not
+    /// commit for a long while), or with the program's commit that comes
+    /// next.
+    fn show_title(&mut self, now: bool) {
+        let want = self.title_wanted();
+        let Some(t) = &mut self.title else {
+            return;
+        };
+        if t.shown != want {
+            t.show(want);
+            if now {
+                t.apply_now();
+            } else {
+                t.surface.send_commit();
+            }
+        }
+    }
+
     /// The title strip at `strip` (or none), before the program's commit.
     fn lay_title(
         &mut self,
@@ -1206,18 +1304,13 @@ impl Window {
         strip: Option<Rect>,
     ) {
         let Some(r) = strip else {
-            if let Some(t) = &mut self.title {
-                if t.shown {
-                    t.show(false);
-                    t.surface.send_commit();
-                }
-            }
+            self.show_title(false);
             return;
         };
         if self.title.is_none() {
             self.title = f.make_title(root, top, &self.me);
         }
-        let want = self.mode == TitleMode::Always || self.hover;
+        let want = self.title_wanted();
         let Some(t) = &mut self.title else {
             return;
         };
@@ -1271,15 +1364,16 @@ impl Window {
             return;
         }
         self.hover = on;
-        let placed = self.laid.is_some_and(|(_, _, strip)| strip.is_some());
-        let Some(t) = &mut self.title else {
-            return;
-        };
-        let want = on && placed;
-        if t.shown != want {
-            t.show(want);
-            t.apply_now();
-        }
+        self.show_title(true);
+    }
+
+    /// The compositor's configure says fullscreen or not: the strip comes
+    /// out (or goes) now when that changes what [`Self::title_wanted`]
+    /// says — a program that stops committing must not keep it hidden
+    /// either.
+    fn configured(&mut self, fullscreen: bool) {
+        self.next_fullscreen = fullscreen;
+        self.show_title(true);
     }
 
     /// Put the strips and the title on top of the root's stack again, above
@@ -1305,6 +1399,7 @@ impl Window {
         if let Some(t) = self.title.take() {
             t.destroy();
         }
+        self.counted = None;
         self.laid = None;
     }
 }
@@ -1812,7 +1907,7 @@ impl XdgToplevelHandler for Toplevel {
     fn handle_configure(&mut self, slf: &Rc<XdgToplevel>, width: i32, height: i32, states: &[u8]) {
         let fullscreen = has_state(states, FULLSCREEN);
         if let Ok(mut window) = self.window.try_borrow_mut() {
-            window.next_fullscreen = fullscreen;
+            window.configured(fullscreen);
         }
         let i = self.insets(fullscreen);
         slf.send_configure(

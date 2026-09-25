@@ -23,7 +23,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   edge or on the strip (seen on the program's own `wl_pointer`), in when it
   goes below; `off` — the border alone. In fullscreen the strip goes and so
   does its room: which state a commit is of is the configure the program
-  acked last, kept by serial. The text is rasterized at the scale the
+  acked last, kept by serial. Whether it shows is not the program's alone:
+  it is hidden only while the compositor's latest configure says fullscreen
+  too, so a program that acks the fullscreen configure and never the one
+  ending it gets the strip back, over the top of its content, the moment
+  the compositor takes it out of fullscreen. The text is rasterized at the scale the
   compositor prefers for it — `wp_fractional_scale_v1` where it is offered
   to the restricted client (bound on the proxy's own registry, never shown
   to the program), else `preferred_buffer_scale` — into a buffer of exactly
@@ -36,7 +40,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   pinned `=0.2.32`, no default features. The pixels live in one memfd per
   launch, made and sealed before the proxy's filter, in four regions of one
   scale each, a region redrawn only when no buffer of it is held by the
-  compositor; the filter gains `pwrite64` only. Without a font the strip goes
+  compositor; the filter gains `pwrite64` only, and only to the title's
+  writer descriptor (not the border's colour memfd, not a file stdout or
+  stderr goes to). A connection with more than 4096 framed windows is
+  refused with `no_memory`: each makes ~20 objects of the proxy's own
+  upstream, which the cap on the program's objects does not count. Without a font the strip goes
   without text. Settings: `programs.vpn-zones.frame.title =
   "always"|"hover"|"off"`, `vpn-zone frame title always|hover|off|default`;
   `vpn-zone status --json` shows `frame_title` in `defaults` with its
@@ -49,7 +57,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   readable contrast on every default colour), the memfd's regions; the
   proxy between a client and a fake compositor — room for the strip,
   strip and text laid before the program's commit, a new buffer at 1.5
-  shown at once, fullscreen and back, hover out at the top edge and in
+  shown at once, fullscreen and back, out at once when fullscreen ends
+  un-acked, input on the title and its text dropped, the title raised above
+  a new subsurface of the program, too many windows refused, `pwrite64` to
+  any other descriptor refused, hover out at the top edge and in
   below. VM (`tests/vm-window.nix`): the strip and its text on the
   screenshot above foot's content, gone in fullscreen, crisp at 1.5 (a fifth
   of its pixels or more at least three quarters ink: 41% drawn at 1.5, 6%
