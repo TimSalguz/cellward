@@ -762,6 +762,12 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             wrapped.push("--x11".into());
             wrapped.push("on".into());
         }
+        // The network it runs in: to the portal its programs are the zone
+        // (LEAK-MODEL §23). None for an unconfined launch — the host's own.
+        if zone != UNCONFINED {
+            wrapped.push("--zone".into());
+            wrapped.push(zone.clone());
+        }
         wrapped.push("--".into());
         wrapped.extend(cmd);
         cmd = wrapped;

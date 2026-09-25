@@ -1221,7 +1221,12 @@ in
         # Чем фильтр звука зоны спрашивает, дать ли программе микрофон
         # (rust/src/microphone.rs): спрашивает в окружении юнита — есть ли в
         # нём WAYLAND_DISPLAY/DISPLAY, есть ли кого спросить.
-        + " --kdialog ${kdialog} %i";
+        + " --kdialog ${kdialog}"
+        # Exec ярлыка зоны для портала (~/.local/share/applications/
+        # cellward.zone.<зона>.desktop, rust/src/desktop.rs): GLib берёт ярлык,
+        # только если найдёт его программу, а PATH портала может её не знать.
+        # Профильный путь, как runner манифеста: не протухает при пересборке.
+        + " --runner ${config.home.profileDirectory}/bin/cellward %i";
       Restart = "no";
       # KillMode=control-group по умолчанию: гасим зону — гаснет и pasta, и всё,
       # что в зоне работало, теряет сеть. Это и есть kill switch.

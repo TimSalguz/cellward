@@ -96,6 +96,8 @@ pub struct Header {
     pub path: Option<String>,
     pub interface: Option<String>,
     pub member: Option<String>,
+    /// An `ERROR`'s name.
+    pub error_name: Option<String>,
     pub reply_serial: Option<u32>,
     pub destination: Option<String>,
     pub sender: Option<String>,
@@ -140,6 +142,7 @@ pub fn parse_header(msg: &[u8]) -> Result<Header> {
             (FIELD_PATH, "o") => h.path = Some(r.string()?),
             (FIELD_INTERFACE, "s") => h.interface = Some(r.string()?),
             (FIELD_MEMBER, "s") => h.member = Some(r.string()?),
+            (FIELD_ERROR_NAME, "s") => h.error_name = Some(r.string()?),
             (FIELD_DESTINATION, "s") => h.destination = Some(r.string()?),
             (FIELD_SENDER, "s") => h.sender = Some(r.string()?),
             (FIELD_SIGNATURE, "g") => h.signature = Some(r.signature()?),
@@ -691,7 +694,17 @@ pub mod body {
         w.buf
     }
 
-    /// A portal's `Response`: `(u response, a{sv} results)` with no results.
+    /// `org.freedesktop.host.portal.Registry.Register`'s `(s app_id, a{sv}
+    /// options)`, with no options.
+    pub fn register(app_id: &str) -> Vec<u8> {
+        let mut w = Writer { buf: Vec::new() };
+        w.string(app_id);
+        w.u32(0);
+        // An empty array is still padded to its elements' alignment.
+        w.align(8);
+        w.buf
+    }
+
     /// A boolean (`b`).
     pub fn boolean(v: bool) -> Vec<u8> {
         let mut w = Writer { buf: Vec::new() };
@@ -741,6 +754,7 @@ pub mod body {
         w.buf
     }
 
+    /// A portal's `Response`: `(u response, a{sv} results)` with no results.
     pub fn response(code: u32) -> Vec<u8> {
         let mut w = Writer { buf: Vec::new() };
         w.u32(code);

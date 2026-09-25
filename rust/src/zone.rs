@@ -505,6 +505,10 @@ pub struct Tools {
     /// What the sound filter asks the person with when a program of the
     /// zone would record the microphone (`crate::microphone`).
     pub kdialog: PathBuf,
+    /// The command line's path in the profile (the manifest's `runner`): the
+    /// `Exec` of the zone's entry for the portal (`desktop::render_zone_entry`),
+    /// which GLib loads only when it finds the program it names.
+    pub runner: PathBuf,
 }
 
 impl Default for Tools {
@@ -521,6 +525,7 @@ impl Default for Tools {
             dbus_proxy: PathBuf::from("xdg-dbus-proxy"),
             opener: PathBuf::from("xdg-open"),
             kdialog: PathBuf::from("kdialog"),
+            runner: PathBuf::from("cellward"),
         }
     }
 }
@@ -561,7 +566,8 @@ impl std::error::Error for ArgError {}
 
 impl Args {
     /// Parse `[--ip P] [--awg P] [--wg P] [--pasta P] [--nft P]
-    /// [--openconnect P] [--dbus-proxy P] [--opener P] [--kdialog P] <name>`.
+    /// [--openconnect P] [--dbus-proxy P] [--opener P] [--kdialog P]
+    /// [--runner P] <name>`.
     ///
     /// Only `--`-prefixed words are flags, so a zone name is free to start with
     /// a single dash. The order does not matter, but the unit puts the tool
@@ -590,6 +596,7 @@ impl Args {
                 "--dbus-proxy" => &mut tools.dbus_proxy,
                 "--opener" => &mut tools.opener,
                 "--kdialog" => &mut tools.kdialog,
+                "--runner" => &mut tools.runner,
                 _ => return Err(ArgError::UnknownFlag(flag)),
             };
             let value = rest
@@ -744,6 +751,21 @@ pub fn run(args: Args) -> u8 {
     }
     for dir in READ_ONLY_IN_ZONES {
         let _ = fs::create_dir_all(zone.home.join(dir));
+    }
+    // The zone's entry for the portal (`desktop::zone_app_id`, LEAK-MODEL
+    // §23), here on the host and before the zone has a program: the portal
+    // takes the id a bus filter registers only with `<id>.desktop` there to
+    // be found — else the zone's programs stay a nameless host application to
+    // it. For every zone: a sandbox in a zone that is not hermetic registers
+    // too (`fs_sandbox`). Sync keeps it while the zone is there.
+    match crate::desktop::write_zone_entry(&zone.home, &label, &zone.tools.runner.to_string_lossy())
+    {
+        Ok(_) => {}
+        Err(e) => eprintln!(
+            "zone {}: no entry for the portal ({e}) — the portal will not know its programs \
+             by the zone's name",
+            zone.name()
+        ),
     }
     // The session's own entry points, when the zone is to have them
     // read-only: a directory that is not there cannot be, and a program would
@@ -2236,6 +2258,11 @@ fn start_session_filter(zone: &Zone) {
         .arg(&zone.tools.opener)
         .arg("--via-broker")
         .arg(&*zone.name())
+        // Who each program's connection is to the portal (LEAK-MODEL §23):
+        // the zone, registered by the filter before the program's first call
+        // passes; the entry that names it was written as the zone came up.
+        .arg("--portal-app")
+        .arg(crate::desktop::zone_app_id(&zone.name()))
         // Where the broker's socket is: the zone's runtime directory, once it
         // is sealed a moment from now.
         .env("XDG_RUNTIME_DIR", host_runtime_dir(zone))
@@ -4700,10 +4727,13 @@ mod tests {
             "/n/xdg-open",
             "--kdialog",
             "/n/kdialog",
+            "--runner",
+            "/p/bin/cellward",
             "nl",
         ]))
         .unwrap();
         assert_eq!(parsed.tools.kdialog, PathBuf::from("/n/kdialog"));
+        assert_eq!(parsed.tools.runner, PathBuf::from("/p/bin/cellward"));
         assert_eq!(parsed.name, OsString::from("nl"));
         assert_eq!(parsed.tools.ip, PathBuf::from("/n/ip"));
         assert_eq!(parsed.tools.awg, PathBuf::from("/n/awg"));

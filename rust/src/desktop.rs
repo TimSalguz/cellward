@@ -405,12 +405,183 @@ pub fn stable_key(raw: &str) -> String {
     if kept == raw {
         return kept;
     }
+    format!("{kept}-{:08x}", fnv1a(raw))
+}
+
+/// 32-bit FNV-1a: what a name that had to be changed keeps of what it was.
+fn fnv1a(raw: &str) -> u32 {
     let mut hash: u32 = 0x811c_9dc5;
     for byte in raw.bytes() {
         hash ^= u32::from(byte);
         hash = hash.wrapping_mul(0x0100_0193);
     }
-    format!("{kept}-{hash:08x}")
+    hash
+}
+
+// --- THE ZONE'S NAME FOR THE PORTAL ------------------------------------------
+
+/// The first elements of every zone's application id.
+pub const ZONE_APP_PREFIX: &str = "cellward.zone.";
+/// The marker value of a zone's entry for the portal: `X-VPNZone=portal`.
+const PORTAL_ENTRY: &str = "portal";
+/// What the entry is drawn with in the portal's dialogs: the module's own
+/// launcher entries have it too.
+const ZONE_ICON: &str = "network-vpn";
+/// The longest application id D-Bus and GLib take.
+const MAX_APP_ID: usize = 255;
+
+/// The application id a zone's programs have for the portal (LEAK-MODEL §23):
+/// `cellward.zone.<id>`, which the zone's bus filter registers for each of
+/// their connections with the portal's host registry before any call of
+/// theirs passes (`crate::bus_filter`).
+///
+/// `<id>` is the zone's name with every character but `[A-Za-z0-9_]` turned
+/// into `_`, and a `_` in front of a leading digit — one element of an
+/// application id. A name that changed on the way (`work-vpn`, `1st`) gets
+/// the first eight hex digits of its FNV-1a hash appended, as a launcher key
+/// does (`stable_key`): `work-vpn` and `work_vpn` are two zones, and one id
+/// for both would give the portal one application for two zones — one
+/// permission store, one remembered screen cast, one name in its dialogs, and
+/// one entry file the two would overwrite and `rm` of either would take. A
+/// name that is too long is cut, and hashed for the same reason.
+pub fn zone_app_id(zone: &str) -> String {
+    let mut id: String = zone
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if id.is_empty() || id.starts_with(|c: char| c.is_ascii_digit()) {
+        id.insert(0, '_');
+    }
+    let room = MAX_APP_ID - ZONE_APP_PREFIX.len();
+    if id != zone || id.len() > room {
+        // All ASCII by now: cutting at a byte is cutting at a character.
+        id.truncate(room - 9);
+        id = format!("{id}_{:08x}", fnv1a(zone));
+    }
+    format!("{ZONE_APP_PREFIX}{id}")
+}
+
+/// The file of a zone's entry for the portal, in the applications directory:
+/// the portal finds an application by `<id>.desktop` and nothing else.
+pub fn zone_entry_file(zone: &str) -> String {
+    format!("{}.desktop", zone_app_id(zone))
+}
+
+/// A string value of a desktop entry: the specification's escapes, so that a
+/// name can neither end the line nor start a key of its own.
+fn desktop_value(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (i, c) in text.chars().enumerate() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            ' ' if i == 0 => out.push_str("\\s"),
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// One argument of an `Exec` line, quoted the specification's way when it
+/// has to be (a reserved character in it), a `%` doubled so that it is no
+/// field code. The line then goes through [`desktop_value`] like any string.
+fn exec_argument(arg: &str) -> String {
+    let arg = arg.replace('%', "%%");
+    let reserved = |c: char| c.is_whitespace() || "\"'\\><~|&;$*?#()`".contains(c);
+    if !arg.is_empty() && !arg.chars().any(reserved) {
+        return arg;
+    }
+    let mut out = String::from("\"");
+    for c in arg.chars() {
+        if matches!(c, '"' | '`' | '$' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// A zone's entry for the portal: what its dialogs name the zone's programs
+/// by. Never shown in a menu (`NoDisplay`), never started — but GLib loads an
+/// entry only when its `Exec` names a program it can find, so the command is
+/// a real one and harmless: `cellward status <zone>`, by the profile's path
+/// (`runner`), which the portal's own `PATH` need not have. Ours by the
+/// marker: sync neither takes it over nor clones it, and keeps it while the
+/// zone exists (`sync_from`).
+pub fn render_zone_entry(zone: &str, runner: &str) -> String {
+    let exec = format!("{} status {}", exec_argument(runner), exec_argument(zone));
+    format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name={}\n\
+         Comment={}\n\
+         Exec={}\n\
+         Icon={ZONE_ICON}\n\
+         NoDisplay=true\n\
+         {MARK}={PORTAL_ENTRY}\n",
+        desktop_value(&format!("cellward · {zone}")),
+        desktop_value(&format!("Программы зоны «{zone}»")),
+        desktop_value(&exec),
+    )
+}
+
+/// Write a zone's entry for the portal into `home`'s applications directory
+/// when it is not there as it should be. Whether it was written; an error
+/// for a place taken by a file that is not ours, which stays as it is.
+pub fn write_zone_entry(home: &Path, zone: &str, runner: &str) -> std::io::Result<bool> {
+    let dir = home.join(".local/share/applications");
+    fs::create_dir_all(&dir)?;
+    let target = dir.join(zone_entry_file(zone));
+    if occupied(&target) && !ours(&target) {
+        return Err(std::io::Error::other(format!(
+            "{} is not ours",
+            target.display()
+        )));
+    }
+    let text = render_zone_entry(zone, runner);
+    if fs::read(&target).is_ok_and(|existing| existing == text.as_bytes()) {
+        return Ok(false);
+    }
+    write_atomically(&target, text.as_bytes()).map(|()| true)
+}
+
+/// Take a zone's entry for the portal away, if it is ours.
+pub fn remove_zone_entry(home: &Path, zone: &str) {
+    let target = home
+        .join(".local/share/applications")
+        .join(zone_entry_file(zone));
+    if ours(&target) {
+        let _ = fs::remove_file(target);
+    }
+}
+
+/// The zones whose entries for the portal sync keeps: every zone directory,
+/// the offline zone's included — its programs register as well.
+fn portal_zones(state_dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(state_dir) else {
+        return Vec::new();
+    };
+    let mut zones: Vec<String> = entries
+        .flatten()
+        .filter(|e| {
+            let path = e.path();
+            !e.file_name().as_encoded_bytes().starts_with(b".")
+                && (path.join("config.conf").is_file() || path.join("offline").exists())
+        })
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    zones.sort();
+    zones
 }
 
 /// A key without spaces or quotes, so that `Exec` parses for anybody.
@@ -1883,7 +2054,12 @@ fn sync_from(
         }
     }
 
-    let removed = cleanup(&out_dir, &wanted, &adopted_dir);
+    // Each zone's entry for the portal (`zone_app_id`): the zone's holder
+    // writes it as the zone comes up; kept while the zone is there, in every
+    // mode — it is no launcher entry — and taken with the zone.
+    let mut kept = wanted.clone();
+    kept.extend(portal_zones(state_dir).iter().map(|z| zone_entry_file(z)));
+    let removed = cleanup(&out_dir, &kept, &adopted_dir);
     let dbus_removed = cleanup_dbus(&dbus_dir, &dbus_wanted);
     // Where a shim looks for the real program: the search path of this pass,
     // and the profiles, which a unit's PATH may not have.
@@ -3339,5 +3515,160 @@ Name=not carried over
         for name in names {
             assert!(!shims.join(name).exists(), "{name}");
         }
+    }
+
+    // --- THE ZONE'S NAME FOR THE PORTAL -------------------------------------
+
+    /// One element of an application id: `[A-Za-z0-9_]`, no leading digit;
+    /// a name that changed on the way keeps a hash of what it was, so that
+    /// two zones never share one id.
+    #[test]
+    fn a_zones_app_id_is_one_valid_element_and_its_own() {
+        assert_eq!(zone_app_id("nl"), "cellward.zone.nl");
+        assert_eq!(zone_app_id("Work_2"), "cellward.zone.Work_2");
+        assert_eq!(zone_app_id("_1x"), "cellward.zone._1x");
+        let dash = zone_app_id("work-vpn");
+        let under = zone_app_id("work_vpn");
+        assert_eq!(under, "cellward.zone.work_vpn");
+        assert!(dash.starts_with("cellward.zone.work_vpn_"), "{dash}");
+        assert_ne!(dash, under);
+        let digit = zone_app_id("1x");
+        assert!(digit.starts_with("cellward.zone._1x_"), "{digit}");
+        assert_ne!(digit, zone_app_id("_1x"));
+        // Stable: the holder, sync and `rm` derive the same file name.
+        assert_eq!(zone_app_id("work-vpn"), dash);
+        for zone in [
+            "nl",
+            "work-vpn",
+            "1x",
+            "зона",
+            "a b",
+            "",
+            "x.y",
+            &"z".repeat(400),
+            &"-".repeat(400),
+        ] {
+            let id = zone_app_id(zone);
+            let element = id.strip_prefix(ZONE_APP_PREFIX).unwrap();
+            assert!(id.len() <= MAX_APP_ID, "{zone:?}: {}", id.len());
+            assert!(!element.is_empty(), "{zone:?}");
+            assert!(
+                element
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+                "{zone:?}: {id}"
+            );
+            assert!(!element.starts_with(|c: char| c.is_ascii_digit()), "{id}");
+            assert_eq!(zone_entry_file(zone), format!("{id}.desktop"));
+        }
+        // Cut to fit, and still two ids for two long names.
+        assert_ne!(
+            zone_app_id(&format!("{}a", "z".repeat(300))),
+            zone_app_id(&format!("{}b", "z".repeat(300)))
+        );
+    }
+
+    /// A string value as GLib's key file reads it back.
+    fn unescaped(value: &str) -> String {
+        let mut out = String::new();
+        let mut chars = value.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('s') => out.push(' '),
+                Some(other) => out.push(other),
+                None => {}
+            }
+        }
+        out
+    }
+
+    /// The entry names the zone and starts nothing it should not: an odd
+    /// name cannot end a line, add a key or split the command, and the
+    /// command reads back as `<runner> status <zone>`.
+    #[test]
+    fn a_zones_entry_is_escaped_and_starts_only_its_status() {
+        let text = render_zone_entry("nl", "/home/u/.nix-profile/bin/cellward");
+        assert_eq!(
+            text,
+            "[Desktop Entry]\nType=Application\nName=cellward · nl\n\
+             Comment=Программы зоны «nl»\n\
+             Exec=/home/u/.nix-profile/bin/cellward status nl\nIcon=network-vpn\n\
+             NoDisplay=true\nX-VPNZone=portal\n"
+        );
+        let groups = parse_desktop(&text);
+        assert_eq!(groups.len(), 1);
+        let entry = desktop_entry(&groups).unwrap();
+        // Ours: sync neither intercepts, clones nor takes it over.
+        assert!(!is_candidate(&zone_entry_file("nl"), Some(entry)));
+        assert!(!is_hidden_handler(&zone_entry_file("nl"), Some(entry)));
+        assert!(!is_hidden_user_entry(&zone_entry_file("nl"), Some(entry)));
+
+        let odd = " a\"b$c`d\\e\nExec=evil %u\tf";
+        let runner = "/home/John Doe/bin/cellward";
+        let text = render_zone_entry(odd, runner);
+        assert_eq!(text.lines().count(), 8, "{text}");
+        let groups = parse_desktop(&text);
+        let entry = desktop_entry(&groups).unwrap();
+        assert_eq!(entry.entries().count(), 7, "{text}");
+        assert_eq!(
+            unescaped(entry.get("Name").unwrap()),
+            format!("cellward · {odd}")
+        );
+        let exec = unescaped(entry.get("Exec").unwrap());
+        let words: Vec<String> = exec_words(&exec)
+            .into_iter()
+            .map(|w| w.replace("%%", "%"))
+            .collect();
+        assert_eq!(words, [runner, "status", odd]);
+        // No field code left for a launcher to fill.
+        assert!(!exec.replace("%%", "").contains('%'), "{exec}");
+    }
+
+    /// The holder writes it, sync keeps it while the zone is there — in every
+    /// mode — and takes it with the zone; a file of somebody else's under the
+    /// name is left as it is.
+    #[test]
+    fn a_zones_entry_lives_as_long_as_the_zone() {
+        let d = Desk::new("portal");
+        fs::create_dir_all(d.state.join("nl")).unwrap();
+        fs::write(d.state.join("nl/config.conf"), "[Interface]\n").unwrap();
+        fs::create_dir_all(d.state.join("offline")).unwrap();
+        fs::write(d.state.join("offline/offline"), "").unwrap();
+        for zone in ["nl", "offline", "gone"] {
+            assert!(write_zone_entry(&d.home, zone, "/bin/cellward").unwrap());
+        }
+        // Unchanged: not written again (a path unit watches the directory).
+        assert!(!write_zone_entry(&d.home, "nl", "/bin/cellward").unwrap());
+        for mode in ["picker", "off", "per-zone"] {
+            d.setting("mode", mode);
+            d.sync();
+            let nl = d.read(&zone_entry_file("nl"));
+            assert_eq!(nl, render_zone_entry("nl", "/bin/cellward"), "{mode}");
+            assert!(d.apps.join(zone_entry_file("offline")).exists(), "{mode}");
+            assert!(!d.apps.join(zone_entry_file("gone")).exists(), "{mode}");
+            // Not taken for a program: no clone, no picker entry of it.
+            assert!(
+                !d.apps
+                    .join(format!("{PREFIX}nl-{}", zone_entry_file("nl")))
+                    .exists(),
+                "{mode}"
+            );
+        }
+        // `rm`: the entry goes with the zone.
+        remove_zone_entry(&d.home, "nl");
+        assert!(!d.apps.join(zone_entry_file("nl")).exists());
+        // Somebody else's file under the name: neither overwritten nor taken.
+        let theirs = d.apps.join(zone_entry_file("nl"));
+        fs::write(&theirs, "[Desktop Entry]\nType=Application\nExec=x\n").unwrap();
+        assert!(write_zone_entry(&d.home, "nl", "/bin/cellward").is_err());
+        remove_zone_entry(&d.home, "nl");
+        assert!(theirs.exists());
     }
 }

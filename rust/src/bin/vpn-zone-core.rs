@@ -123,7 +123,7 @@ Usage:
 
   vpn-zone-core fs-sandbox [--bwrap P] [--dbus-proxy P] [--kdialog P]
                            [--xwayland P] [--opener P]
-                           <app-id> [--name <sandbox>] -- cmd...
+                           <app-id> [--name <sandbox>] [--zone <zone>] -- cmd...
         Run the command in a bwrap sandbox where $HOME is gone: a tmpfs takes
         its place and only what the user allowed sticks out, everything else
         goes through the portals (/.flatpak-info). The session bus is filtered
@@ -135,13 +135,17 @@ Usage:
         asked once with kdialog and remembered in
         ~/.config/vpn-zones/fs-perms/<app-id>; with --name they belong to the
         named sandbox and its persistent home instead. Tool paths are
-        substituted by Nix and default to a PATH lookup.
+        substituted by Nix and default to a PATH lookup. --zone: the zone the
+        launch runs in; its programs are that zone to the portal.
 
   vpn-zone-core bus-filter --listen S --upstream S --opener P
+                           [--via-broker <zone>] [--portal-app <app-id>]
         Internal: the sandbox's session bus in front of xdg-dbus-proxy. The
         portal's OpenURI is answered here and the link handed to the opener in
         the zone; OpenFile, OpenDirectory, ComposeEmail and file: links are
         answered as cancelled; everything else is passed on as it is.
+        --portal-app: each connection is registered with the portal's host
+        registry under this id before the program's first call passes.
 
   vpn-zone-core fs-sandbox-x11 [--xwayland P] <:display> -- cmd...
         Internal: what fs-sandbox runs INSIDE the sandbox when the x11

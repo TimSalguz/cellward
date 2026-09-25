@@ -1241,6 +1241,10 @@ fn remove(tools: &Tools, args: &[OsString]) -> u8 {
         eprintln!("не удалить {}: {e}", dir.display());
         return 1;
     }
+    // Its entry for the portal (`desktop::zone_app_id`): a new zone of the
+    // same name gets its own. Sync below would take it too; this does not
+    // wait for sync to work.
+    crate::desktop::remove_zone_entry(&tools.home, &name_text);
     // Pins that pointed at this zone go with it: otherwise the program stays
     // bound to a network that no longer exists and fails silently on every
     // launch. (`docs/GOTCHAS.md` §11)
