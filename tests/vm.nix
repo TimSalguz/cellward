@@ -394,6 +394,13 @@ let
           # The microphone declared for one zone: Nix's word over the zone's
           # own, asserted in the hermetic subtest.
           programs.cellward.microphone.vmherm = "no";
+          # A zone's home is a layer over the real one (docs/HOME-LAYER.md):
+          # what the tests' zones write for the host to read goes through a
+          # path shared the way an owner declares it.
+          programs.cellward.home.shared = {
+            vmherm = [ "vmprobe" ];
+            vmsmoke = [ "vmprobe" ];
+          };
           # A container declared in Nix: bound to direct, trusting a CA made
           # at build time. What the module writes, the runtime obeys and the
           # CLI refuses to change is asserted below.
@@ -563,6 +570,10 @@ let
       machine.wait_for_unit("user@1000.service")
 
       with subtest("module delivered: CLI in PATH, template unit installed"):
+          # The directory the tests' zones share with the host (home.shared
+          # above): it has to exist before they come up.
+          alice("mkdir -p ~/vmprobe")
+          assert alice("cat ~/.config/vpn-zones/declared/home-shared/vmherm").strip() == "vmprobe"
           # cellward, its short name and its old one: the same program.
           for name in ["cellward", "cw", "vpn-zone", "cellward-gui", "vpn-zone-gui"]:
               alice(f"command -v {name}")
@@ -1786,19 +1797,19 @@ let
           # Input methods by their portals only: IBus's private bus is hidden,
           # and programs are told to take the portal.
           in_zone(hp, "test ! -e /home/alice/.cache/ibus/dbus-vmtest")
-          alice("cellward run vmherm -- sh -c 'echo ibus=$IBUS_USE_PORTAL > /home/alice/zone-ibus'")
-          machine.succeed("grep -qx ibus=1 /home/alice/zone-ibus")
+          alice("cellward run vmherm -- sh -c 'echo ibus=$IBUS_USE_PORTAL > /home/alice/vmprobe/zone-ibus'")
+          machine.succeed("grep -qx ibus=1 /home/alice/vmprobe/zone-ibus")
           alice("systemctl --user stop fakeibus || true")
           # A program started in the zone has the user's own group only: the
           # session's groups open doors (libvirt, docker, /dev/input).
           alice("cat /var/lib/vzdoor/door")
-          alice("cellward run vmherm -- sh -c 'id -G > /home/alice/zone-groups; cat /var/lib/vzdoor/door > /home/alice/zone-door 2>&1; true'")
-          groups = machine.succeed("cat /home/alice/zone-groups").split()
+          alice("cellward run vmherm -- sh -c 'id -G > /home/alice/vmprobe/zone-groups; cat /var/lib/vzdoor/door > /home/alice/vmprobe/zone-door 2>&1; true'")
+          groups = machine.succeed("cat /home/alice/vmprobe/zone-groups").split()
           assert groups == ["100"], groups
-          machine.fail("grep -q open /home/alice/zone-door")
+          machine.fail("grep -q open /home/alice/vmprobe/zone-door")
           # In the home: the zone's /tmp is its own (LEAK-MODEL §15).
-          in_zone(hp, "env VPN_ZONE_CURRENT=vmherm cellward run vmherm -- touch /home/alice/brokered-same")
-          machine.wait_until_succeeds("test -e /home/alice/brokered-same", timeout=30)
+          in_zone(hp, "env VPN_ZONE_CURRENT=vmherm cellward run vmherm -- touch /home/alice/vmprobe/brokered-same")
+          machine.wait_until_succeeds("test -e /home/alice/vmprobe/brokered-same", timeout=30)
           in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm cellward run direct -- touch /tmp/brokered-escape'")
           machine.sleep(3)
           machine.fail("test -e /tmp/brokered-escape")
@@ -2008,8 +2019,8 @@ let
       with subtest("sandbox: a link through the portal opens in the zone, a file: link not at all"):
           alice("mkdir -p ~/.local/share/vmurl ~/.local/share/applications ~/.config")
           alice(
-              "printf '#!/bin/sh\\necho \"$1\" >> /home/alice/opened-urls\\n"
-              "readlink /proc/self/ns/net >> /home/alice/opened-urls\\n' "
+              "printf '#!/bin/sh\\necho \"$1\" >> /home/alice/vmprobe/opened-urls\\n"
+              "readlink /proc/self/ns/net >> /home/alice/vmprobe/opened-urls\\n' "
               "> ~/.local/share/vmurl/record && chmod 755 ~/.local/share/vmurl/record"
           )
           alice(
@@ -2035,15 +2046,15 @@ let
           )
           out = alice(f"WAYLAND_DISPLAY=wayland-vmtest cellward run vmherm --fs-sandbox -- {portal} ''' 'https://example.test/from-sandbox' '@a{{sv}} {{}}'")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
-          machine.wait_until_succeeds("grep -q from-sandbox /home/alice/opened-urls", timeout=30)
+          machine.wait_until_succeeds("grep -q from-sandbox /home/alice/vmprobe/opened-urls", timeout=30)
           zone_ns = machine.succeed(f"readlink /proc/{hp}/ns/net").strip()
           host_ns = machine.succeed("readlink /proc/1/ns/net").strip()
-          opened = machine.succeed("cat /home/alice/opened-urls")
+          opened = machine.succeed("cat /home/alice/vmprobe/opened-urls")
           assert zone_ns in opened and host_ns not in opened, f"{opened} (zone {zone_ns})"
           out = alice(f"WAYLAND_DISPLAY=wayland-vmtest cellward run vmherm --fs-sandbox -- {portal} ''' 'file:///etc/hostname' '@a{{sv}} {{}}'")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
           machine.sleep(2)
-          machine.fail("grep -q hostname /home/alice/opened-urls")
+          machine.fail("grep -q hostname /home/alice/vmprobe/opened-urls")
           # WITHOUT a sandbox (libportal, GTK4 with portals): the hermetic
           # zone's own bus filter answers, and asks the broker to open the link
           # in this very zone — no question for the same zone. The broker runs
@@ -2053,8 +2064,8 @@ let
           alice("systemctl --user stop vpn-zone-broker.service || true")
           out = in_zone(hp, f"{portal} ''' 'https://example.test/from-zone' '@a{{sv}} {{}}'")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
-          machine.wait_until_succeeds("grep -q from-zone /home/alice/opened-urls", timeout=30)
-          lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
+          machine.wait_until_succeeds("grep -q from-zone /home/alice/vmprobe/opened-urls", timeout=30)
+          lines = machine.succeed("cat /home/alice/vmprobe/opened-urls").splitlines()
           at = lines.index("https://example.test/from-zone")
           assert lines[at + 1] == zone_ns, f"{lines} (zone {zone_ns})"
           # The same call after an authentication ended with more on the
@@ -2062,8 +2073,8 @@ let
           # so too, answers, and the link opens in the zone.
           out = in_zone(hp, "${pkgs.python3}/bin/python3 ${rawBegin} https://example.test/raw-begin")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
-          machine.wait_until_succeeds("grep -q raw-begin /home/alice/opened-urls", timeout=30)
-          lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
+          machine.wait_until_succeeds("grep -q raw-begin /home/alice/vmprobe/opened-urls", timeout=30)
+          lines = machine.succeed("cat /home/alice/vmprobe/opened-urls").splitlines()
           at = lines.index("https://example.test/raw-begin")
           assert lines[at + 1] == zone_ns, f"{lines} (zone {zone_ns})"
           # A notification from the zone reaches the host's daemon without
@@ -2116,10 +2127,10 @@ let
           # filter in front of it — the link opens in THAT zone.
           out = alice(f"WAYLAND_DISPLAY=wayland-vmtest cellward run vmsmoke --fs-sandbox -- {portal} ''' 'https://example.test/from-ordinary' '@a{{sv}} {{}}'")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
-          machine.wait_until_succeeds("grep -q from-ordinary /home/alice/opened-urls", timeout=30)
+          machine.wait_until_succeeds("grep -q from-ordinary /home/alice/vmprobe/opened-urls", timeout=30)
           sp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
           smoke_ns = machine.succeed(f"readlink /proc/{sp}/ns/net").strip()
-          lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
+          lines = machine.succeed("cat /home/alice/vmprobe/opened-urls").splitlines()
           at = lines.index("https://example.test/from-ordinary")
           assert lines[at + 1] == smoke_ns, f"{lines} (zone {smoke_ns})"
           alice("cellward down vmsmoke")
