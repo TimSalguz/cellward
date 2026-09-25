@@ -142,12 +142,16 @@ local function link_allowed (stream, target, playback)
   return class ~= nil and SOURCES [class] == true and microphone (sz.zone)
 end
 
-local nodes_om = ObjectManager { Interest { type = "node" } }
-local ports_om = ObjectManager { Interest { type = "port" } }
-local links_om = ObjectManager { Interest { type = "link" } }
-local factories_om = ObjectManager { Interest { type = "factory" } }
-local metadata_om = ObjectManager { Interest { type = "metadata" } }
-local clients_om = ObjectManager { Interest { type = "client" } }
+-- Globals of the script, not locals: a local nothing refers to once the
+-- chunk has run is collected, and an object manager collected sends no more
+-- events — new clients would be left held by the daemon for ever (seen in
+-- the VM test: the clients present at load were seen, none after).
+nodes_om = ObjectManager { Interest { type = "node" } }
+ports_om = ObjectManager { Interest { type = "port" } }
+links_om = ObjectManager { Interest { type = "link" } }
+factories_om = ObjectManager { Interest { type = "factory" } }
+metadata_om = ObjectManager { Interest { type = "metadata" } }
+clients_om = ObjectManager { Interest { type = "client" } }
 
 local function node_by_id (id)
   id = id and tonumber (id)
@@ -421,7 +425,7 @@ links_om:activate ()
 factories_om:activate ()
 metadata_om:activate ()
 
-local impl_metadata = ImplMetadata (METADATA)
+impl_metadata = ImplMetadata (METADATA)
 impl_metadata:activate (Features.ALL, function (m, e)
   if e then
     log:warning ("cannot make the vpn-zones metadata: " .. tostring (e))
