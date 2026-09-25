@@ -1476,7 +1476,7 @@ fn pick_for_zone(
     if tools.window.as_os_str().is_empty() {
         return refuse("окна запуска нет");
     }
-    let Some(shown) = crate::broker::shown_command(cmd) else {
+    let Some(shown) = crate::broker::shown_words(cmd) else {
         return refuse("команда слишком длинная, чтобы показать её целиком");
     };
     let req = zone_request(tools, key, memory, cmd, &shown, zone, locked);
@@ -1534,7 +1534,7 @@ fn zone_request(
     key: &str,
     memory: &Memory,
     cmd: &[OsString],
-    shown: &str,
+    shown: &[String],
     zone: &str,
     locked: bool,
 ) -> window::Request {
@@ -1572,14 +1572,20 @@ fn zone_request(
         }
     }
     req.asker = Some(asker.to_owned());
-    req.command = shown.lines().map(str::to_owned).collect();
-    req.program = match crate::broker::program_of(cmd) {
-        Some(path) if crate::broker::may_remember(&path) => path.display().to_string(),
-        Some(path) => format!(
-            "⚠ {} — не из системы: этот файл может подменить программа, у которой есть дом",
-            crate::broker::shown_word(&path.display().to_string())
-        ),
-        None => "⚠ на хосте такой программы нет".to_owned(),
+    req.command = shown.to_vec();
+    // The broker hands the program over found already (an absolute path):
+    // what is shown is what runs.
+    let path = Path::new(&cmd[0]);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let shown_path = crate::broker::shown_word(&path.display().to_string());
+    req.program = if crate::broker::runs_anything(name) {
+        format!("⚠ {shown_path} — запускает любую команду: смотри, что идёт следом")
+    } else if crate::broker::may_remember(path) {
+        shown_path
+    } else {
+        format!(
+            "⚠ {shown_path} — не из системы: этот файл может подменить программа, у которой есть дом"
+        )
     };
     req.pin_net = false;
     req.pin_container = false;

@@ -246,18 +246,75 @@ const MAX_APP_ID: usize = 255;
 /// once, and a connection that sends nothing holds a thread.
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// At most this many requests of one origin handled at once: a zone that
+/// holds connections open must not lock the others out of the door.
+const MAX_PER_ORIGIN: usize = 4;
+
+/// Requests being handled, by origin.
+static HANDLING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// A request of `origin` being handled, for as long as this lives.
+struct OriginSlot(String);
+
+impl OriginSlot {
+    fn take(origin: &str) -> Option<Self> {
+        let mut handling = HANDLING.lock().ok()?;
+        if handling.iter().filter(|o| *o == origin).count() >= MAX_PER_ORIGIN {
+            return None;
+        }
+        handling.push(origin.to_owned());
+        Some(Self(origin.to_owned()))
+    }
+}
+
+impl Drop for OriginSlot {
+    fn drop(&mut self) {
+        if let Ok(mut handling) = HANDLING.lock() {
+            if let Some(at) = handling.iter().position(|o| *o == self.0) {
+                handling.swap_remove(at);
+            }
+        }
+    }
+}
+
+/// The request, read whole by a deadline — not per read: a peer that sends a
+/// byte now and then must not hold a thread for days. `None`: it did not
+/// come by then, or broke off. One byte past `MAX_REQUEST` is read, so that a
+/// request too long is told from one exactly as long.
+fn read_request(stream: &mut UnixStream) -> Option<Vec<u8>> {
+    let deadline = std::time::Instant::now() + READ_TIMEOUT;
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let left = deadline.checked_duration_since(std::time::Instant::now())?;
+        if left.is_zero() {
+            return None;
+        }
+        stream.set_read_timeout(Some(left)).ok()?;
+        match stream.read(&mut buf) {
+            Ok(0) => return Some(bytes),
+            Ok(n) => {
+                bytes.extend_from_slice(&buf[..n]);
+                if bytes.len() as u64 > MAX_REQUEST {
+                    return Some(bytes);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+}
+
 fn handle(tools: &Tools, mut stream: UnixStream) {
     // First, before the request is read: the peer may leave while it is.
     let origin = origin_of(&tools.state, &stream);
-    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
-    let mut bytes = Vec::new();
-    if (&mut stream)
-        .take(MAX_REQUEST + 1)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
+    let Some(_slot) = OriginSlot::take(&origin.name()) else {
+        let _ = stream.write_all(b"refused: too many requests of this zone at once\n");
         return;
-    }
+    };
+    let Some(bytes) = read_request(&mut stream) else {
+        return;
+    };
     // Longer than a request is: refused whole, never read in part.
     let oversized = if bytes.len() as u64 > MAX_REQUEST {
         Some("запрос длиннее 64 КиБ")
@@ -314,7 +371,9 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                     // record: which zone asked, for what, and what came of it.
                     let why = answer.strip_prefix("refused: ").unwrap_or("");
                     let decision = if answer == "ok" { "started" } else { "refused" };
-                    if let Err(e) = crate::journal::append(
+                    if !may_journal(&origin.name()) {
+                        eprintln!("broker: journal: too many lines of this zone — {decision}");
+                    } else if let Err(e) = crate::journal::append(
                         &tools.state,
                         "broker",
                         &[
@@ -378,7 +437,7 @@ pub fn may_remember(program: &Path) -> bool {
 }
 
 /// Shells, interpreters and wrappers that run a command given to them.
-fn runs_anything(name: &str) -> bool {
+pub fn runs_anything(name: &str) -> bool {
     const EXACT: &[&str] = &[
         "sh",
         "bash",
@@ -454,23 +513,31 @@ const SHOWN_WORD: usize = 300;
 /// 2026-09-25, third round: a cut at 600 characters could leave an option
 /// behind the "…").
 pub fn shown_command(cmd: &[OsString]) -> Option<String> {
+    shown_words(cmd).map(|words| words.join("\n"))
+}
+
+/// [`shown_command`] a word each — an empty word too, said so, since it is
+/// an argument all the same.
+pub fn shown_words(cmd: &[OsString]) -> Option<Vec<String>> {
     if cmd.len() > SHOWN_WORDS {
         return None;
     }
-    let words: Vec<String> = cmd
-        .iter()
-        .map(|word| {
-            let clean = shown_word(&word.to_string_lossy());
-            let n = clean.chars().count();
-            if n > SHOWN_WORD {
-                let head: String = clean.chars().take(SHOWN_WORD).collect();
-                format!("{head}… (ещё {} симв.)", n - SHOWN_WORD)
-            } else {
-                clean
-            }
-        })
-        .collect();
-    Some(words.join("\n"))
+    Some(
+        cmd.iter()
+            .map(|word| {
+                let clean = shown_word(&word.to_string_lossy());
+                let n = clean.chars().count();
+                if n == 0 {
+                    "(пустой аргумент)".to_owned()
+                } else if n > SHOWN_WORD {
+                    let head: String = clean.chars().take(SHOWN_WORD).collect();
+                    format!("{head}… (ещё {} симв.)", n - SHOWN_WORD)
+                } else {
+                    clean
+                }
+            })
+            .collect(),
+    )
 }
 
 /// One word a program chose, fit for a dialog's text: no control characters
@@ -592,7 +659,7 @@ fn ask(
     let asked = std::time::Instant::now();
     // "Always" only where it can be kept safely (`may_remember`).
     let Some(line) = line else {
-        return if crate::dialog::confirm(
+        return if crate::dialog::choose_within(
             &tools.kdialog,
             [
                 "--title",
@@ -600,14 +667,16 @@ fn ask(
                 "--warningcontinuecancel",
                 question.as_str(),
             ],
-        ) {
+            WINDOW_TIMEOUT,
+        ) == Some(0)
+        {
             crate::dialog::not_too_soon(asked)
         } else {
             answered_no(&origin.name());
             Err("человек отказал".to_owned())
         };
     };
-    match crate::dialog::choose3(
+    match crate::dialog::choose_within(
         &tools.kdialog,
         [
             "--title",
@@ -621,6 +690,7 @@ fn ask(
             "--warningyesnocancel",
             question.as_str(),
         ],
+        WINDOW_TIMEOUT,
     ) {
         Some(0) => crate::dialog::not_too_soon(asked),
         Some(1) => {
@@ -635,10 +705,37 @@ fn ask(
     }
 }
 
+/// How long a question waits for its answer: past it the window or dialog
+/// is closed, and the request refused.
+const WINDOW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// One question at a time, a window or a dialog: a stream of them is how a
 /// "yes" is got by accident. The next request while one is open is refused,
 /// not queued.
 static ASKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Lines each origin put into the journal lately.
+static JOURNALED: std::sync::Mutex<Vec<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// At most this many journal lines of one origin a minute: the journal is
+/// the record of crossings, and a zone's stream of cheap requests must not
+/// rotate it away. What is over is said on stderr only.
+const JOURNAL_PER_MINUTE: usize = 30;
+
+/// Whether `origin` may write one more journal line now.
+fn may_journal(origin: &str) -> bool {
+    let Ok(mut lines) = JOURNALED.lock() else {
+        return false;
+    };
+    let now = std::time::Instant::now();
+    lines.retain(|(_, at)| now.duration_since(*at) < ASK_WINDOW);
+    if lines.iter().filter(|(o, _)| o == origin).count() >= JOURNAL_PER_MINUTE {
+        return false;
+    }
+    lines.push((origin.to_owned(), now));
+    true
+}
 
 /// The questions put to the person lately: `(origin, when, refused)`.
 static ASKED: std::sync::Mutex<Vec<(String, std::time::Instant, bool)>> =
@@ -749,7 +846,9 @@ fn handle_pick(tools: &Tools, origin: &Origin, app_id: &OsString, cmd: &[OsStrin
     };
     let why = answer.strip_prefix("refused: ").unwrap_or("");
     let decision = if answer == "ok" { "started" } else { "refused" };
-    if let Err(e) = crate::journal::append(
+    if !may_journal(&origin.name()) {
+        eprintln!("broker: journal: too many lines of this zone — {decision}");
+    } else if let Err(e) = crate::journal::append(
         &tools.state,
         "broker",
         &[
@@ -784,6 +883,19 @@ fn pick_and_check(
     if !crate::launch::has_display() {
         return Err("спросить некого (нет графической сессии)".to_owned());
     }
+    // The program as the host finds it, once: what the window shows is what
+    // runs — `run` finds nothing again by PATH, where a link in the home
+    // could have been pointed elsewhere while the window was open.
+    let program = program_of(cmd).ok_or_else(|| {
+        format!(
+            "программы «{}» на хосте нет",
+            shown_word(&cmd[0].to_string_lossy())
+        )
+    })?;
+    let cmd: Vec<OsString> = std::iter::once(program.into_os_string())
+        .chain(cmd[1..].iter().cloned())
+        .collect();
+    let cmd = cmd.as_slice();
     let Ok(_asking) = ASKING.try_lock() else {
         return Err("уже открыт другой вопрос о запуске".to_owned());
     };
@@ -811,16 +923,35 @@ fn pick_and_check(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let asked = std::time::Instant::now();
-    let out = command
-        .output()
+    let mut child = command
+        .spawn()
         .map_err(|e| format!("не открыть окно запуска ({}): {e}", picker.display()))?;
-    if !out.status.success() {
+    // An answer by a deadline: a window left open would keep every other
+    // zone's question out.
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if asked.elapsed() < WINDOW_TIMEOUT => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                answered_no(origin);
+                return Err("на окно не ответили".to_owned());
+            }
+        }
+    };
+    if !status.success() {
         answered_no(origin);
         return Err("человек отказал".to_owned());
     }
     crate::dialog::not_too_soon(asked)?;
-    let mut argv: Vec<OsString> = out
-        .stdout
+    let mut stdout = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_end(&mut stdout);
+    }
+    let mut argv: Vec<OsString> = stdout
         .split(|b| *b == 0)
         .map(|w| OsString::from_vec(w.to_vec()))
         .collect();
@@ -937,7 +1068,7 @@ pub fn serve(tools: &Tools) -> u8 {
 /// At most this many requests handled at once; the next is refused. A
 /// question holds its request for as long as it is open, so more than one is
 /// normal, but not a flood of connections that each hold a thread.
-const MAX_HANDLED: usize = 32;
+const MAX_HANDLED: usize = 64;
 
 fn accept_forever(tools: &Tools, listener: &UnixListener) -> u8 {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -948,14 +1079,21 @@ fn accept_forever(tools: &Tools, listener: &UnixListener) -> u8 {
             let _ = stream.write_all(b"refused: too many requests at once\n");
             continue;
         }
-        let tools = tools.clone();
-        let spawned = std::thread::Builder::new().spawn(move || {
-            handle(&tools, stream);
-            HANDLED.fetch_sub(1, Ordering::SeqCst);
-        });
-        if spawned.is_err() {
-            HANDLED.fetch_sub(1, Ordering::SeqCst);
+        /// Gives the slot back however the handler ends.
+        struct Handled;
+        impl Drop for Handled {
+            fn drop(&mut self) {
+                HANDLED.fetch_sub(1, Ordering::SeqCst);
+            }
         }
+        let slot = Handled;
+        let tools = tools.clone();
+        // The slot moves into the thread; a thread that could not start
+        // drops it with the closure.
+        let _ = std::thread::Builder::new().spawn(move || {
+            let _slot = slot;
+            handle(&tools, stream);
+        });
     }
     0
 }
@@ -1092,6 +1230,38 @@ mod tests {
         assert_eq!(back, cmd);
         assert!(decode(&bytes).is_none());
         assert!(decode_pick(&encode(b"firefox", &cmd)).is_none());
+    }
+
+    /// An empty argument is shown as one: `["x", ""]` runs two words.
+    #[test]
+    fn every_word_is_shown_an_empty_one_too() {
+        let cmd: Vec<OsString> = ["x", ""].iter().map(OsString::from).collect();
+        assert_eq!(shown_words(&cmd).unwrap(), ["x", "(пустой аргумент)"]);
+    }
+
+    /// One zone holds at most a few requests at once, and the others are
+    /// not held up by it; a slot is given back when its request ends.
+    #[test]
+    fn one_zone_cannot_hold_the_door_for_all() {
+        let origin = "test-slots-zone";
+        let slots: Vec<_> = (0..MAX_PER_ORIGIN)
+            .map(|_| OriginSlot::take(origin).expect("a slot"))
+            .collect();
+        assert!(OriginSlot::take(origin).is_none());
+        assert!(OriginSlot::take("test-slots-other").is_some());
+        drop(slots);
+        assert!(OriginSlot::take(origin).is_some());
+    }
+
+    /// The journal takes so many lines of one zone a minute, and no more.
+    #[test]
+    fn a_zone_cannot_rotate_the_journal_away() {
+        let origin = "test-journal-zone";
+        for _ in 0..JOURNAL_PER_MINUTE {
+            assert!(may_journal(origin));
+        }
+        assert!(!may_journal(origin));
+        assert!(may_journal("test-journal-other"));
     }
 
     /// A zone asking again and again is refused after a few, and right

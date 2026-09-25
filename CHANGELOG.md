@@ -79,9 +79,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   take other zones' requests, their commands and links, and answer them. It
   is close-on-exec now, and `LISTEN_*` leave the broker's environment.
 - **The broker is harder to flood**: a zone is asked at most four times a
-  minute and not for 15 s after a "no"; a request past 64 KiB or with an
-  app-id past 255 bytes is refused whole (it was cut and read); 32 requests at
-  most are handled at once, and one that sends nothing is dropped after 5 s.
+  minute and not for 15 s after a "no"; a question not answered in two
+  minutes is closed (one left open kept every other zone's out); a request
+  past 64 KiB or with an app-id past 255 bytes is refused whole (it was cut
+  and read) and must arrive whole within 5 s; one zone holds at most four
+  requests at once (64 in all), and writes at most 30 journal lines a minute —
+  a stream of cheap requests no longer rotates the record of crossings away.
+- **What the zone's window shows is what runs**: the broker finds the
+  program once, before the window, and starts that absolute path; `run`
+  looked it up again by PATH, where a link in the home could be repointed
+  while the window was open. A shell or interpreter is flagged as running any
+  command; an empty argument is shown as one.
 
 ### Changed
 - **The single entry is `programs.cellward.enable`** (NixOS), the same name as
