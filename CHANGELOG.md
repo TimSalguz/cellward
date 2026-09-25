@@ -143,6 +143,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closed variant, and so does a login with no screen to ask on.
 
 ### Security
+- **The sound filter passes an allow-list, and a zone no longer records what
+  the host plays** (`rust/src/pulse_filter.rs`, LEAK-MODEL §17). It refused
+  four commands and passed the rest: a zone could set the default output,
+  move another program's stream, change a device's volume, a card's profile
+  or port, suspend a device, reach the extensions — and record the monitor of
+  any output. Now only what an ordinary program needs passes: the handshake
+  (once, protocol 13 or newer, before anything else), playing and recording,
+  the control of its own streams, reading about devices, events, the sample
+  cache; the volume, mute and info of a stream by its index only for a
+  stream the connection made (the filter pairs replies with requests by tag,
+  so every tag has to be above the last, as libpulse counts them); anything
+  else — a command added to the
+  protocol later included — is answered `ERROR`/`ACCESS` and never reaches
+  the server. Property lists keep only PulseAudio's descriptive keys
+  (`application.*`, `window.*`, `event.*`, `media.name` and its kin):
+  pipewire-pulse copies them into the node, where `target.object`,
+  `stream.capture.sink` or `media.class` chose what a stream records.
+  Recording a monitor — by its name, by an index or a name that reads as
+  one (`"0x10"`), by `direct_on_input` — is refused before the server sees
+  it; after that the server's own word decides: the reply to a new record
+  stream and every move name the source it is linked to, and a monitor there
+  (a default source that is one, a fallback, a restored target) ends the
+  connection before the reply or any sound reaches the program. A microphone
+  and the default source stay allowed. VM test: a module load and a
+  monitor's recording are answered by the filter and never reach the server,
+  a playback stream reaches it without its target, a record stream the
+  server links to a monitor loses the connection with nothing heard. Raw
+  `pipewire-0` still records a monitor (ROADMAP §17).
 - **`vpn-zone doctor`'s probe is no longer open to the zone it checks.**
   Without capabilities it was an ordinary, dumpable process of the zone: a
   program there could read its `/proc/<pid>/environ` — the environment of the

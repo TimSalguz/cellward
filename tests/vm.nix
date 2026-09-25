@@ -48,10 +48,40 @@ let
     overlays = [ ];
   };
 
+  # The native protocol's values, as libpulse writes them: a tag byte, then
+  # the value (rust/src/pulse_filter.rs `parse`).
+  pulseWire = ''
+    import struct
+    INVALID = 0xFFFFFFFF
+    def L(n):
+        return b"L" + struct.pack(">I", n)
+    def S(s):
+        return b"N" if s is None else b"t" + s.encode() + b"\0"
+    def B(b):
+        return b"1" if b else b"0"
+    def P(props):
+        out = b"P"
+        for key, value in props:
+            v = value.encode() + b"\0"
+            out += S(key) + L(len(v)) + b"x" + struct.pack(">I", len(v)) + v
+        return out + b"N"
+    SPEC = b"a" + bytes([3, 2]) + struct.pack(">I", 48000)
+    MAP = b"m" + bytes([2, 1, 2])
+    CVOL = b"v" + bytes([1]) + struct.pack(">I", 0x10000)
+    def frame(*values, channel=INVALID):
+        payload = b"".join(values)
+        return struct.pack(">IIIII", len(payload), channel, 0, 0, 0) + payload
+  '';
+
   # A stand-in for the sound server's control socket: it records the command
-  # of every frame that reaches it, one number per line.
-  fakePulse = pkgs.writeText "fake-pulse.py" ''
-    import os, socket, struct, threading
+  # of every frame that reaches it, one per line — a record stream with the
+  # word "monitor" if it asked for one, a playback stream with "target" if its
+  # properties still name one. A record stream it answers the way a server
+  # that linked it to a monitor would, and sends it the host's sound.
+  fakePulse = pkgs.writeText "fake-pulse.py" (
+    pulseWire
+    + ''
+    import os, socket, threading
     path = "/run/user/1000/pulse/native"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
@@ -72,29 +102,79 @@ let
                 length = struct.unpack(">I", buf[:4])[0]
                 if len(buf) < 20 + length:
                     break
-                frame, buf = buf[:20 + length], buf[20 + length:]
-                command = struct.unpack(">I", frame[21:25])[0]
+                f, buf = buf[:20 + length], buf[20 + length:]
+                command, tag = struct.unpack(">I", f[21:25])[0], struct.unpack(">I", f[26:30])[0]
+                line = str(command)
+                if command == 5:
+                    line += " monitor" if b"monitor" in f else " default"
+                if command == 3:
+                    line += " target" if b"target.object" in f else " clean"
                 with open("/tmp/pulse-seen", "a") as log:
-                    log.write(f"{command}\n")
+                    log.write(line + "\n")
+                if command == 5:
+                    c.sendall(
+                        frame(L(2), L(tag), L(0), L(9), L(4096), L(1024), SPEC, MAP,
+                              L(3), S("alsa_output.pci.analog-stereo.monitor"), B(False),
+                              b"U" + bytes(8))
+                        + frame(b"HOST-SOUND", channel=0)
+                    )
     while True:
         c, _ = server.accept()
         threading.Thread(target=client, args=(c,), daemon=True).start()
-  '';
-  # A client in a zone: LOAD_MODULE, then GET_SERVER_INFO; prints the command
-  # of the answer to the first.
-  pulseClient = pkgs.writeText "pulse-client.py" ''
-    import socket, struct, time
-    def frame(command, tag):
-        payload = b"L" + struct.pack(">I", command) + b"L" + struct.pack(">I", tag)
-        return struct.pack(">IIIII", len(payload), 0xFFFFFFFF, 0, 0, 0) + payload
+  ''
+  );
+  # A client in a zone. First connection: AUTH, LOAD_MODULE and a record
+  # stream on a monitor (prints the command of each answer), then a playback
+  # stream whose properties name a target, and GET_SERVER_INFO. Second: a
+  # record stream on the default source, which the stand-in links to a
+  # monitor — prints what reached it before the connection ended.
+  pulseClient = pkgs.writeText "pulse-client.py" (
+    pulseWire
+    + ''
+    import socket, time
+    def auth(tag):
+        return frame(L(8), L(tag), L(0x80000000 | 35), b"x" + struct.pack(">I", 256) + bytes(256))
+    def record(tag, source):
+        return frame(
+            L(5), L(tag), SPEC, MAP, L(INVALID), S(source), L(INVALID), B(False), L(INVALID),
+            *[B(False)] * 7, B(False), B(True), P([("application.name", "zone")]), L(INVALID),
+            B(False), B(False), B(False), b"B\0", CVOL, *[B(False)] * 5,
+        )
+    def playback(tag):
+        props = P([("application.name", "zone"), ("target.object", "alsa_output.pci.analog-stereo")])
+        return frame(L(3), L(tag), SPEC, MAP, L(INVALID), S(None), props)
+    def answer(s):
+        got = b""
+        while len(got) < 35:
+            got += s.recv(35 - len(got))
+        return struct.unpack(">I", got[21:25])[0]
     s = socket.socket(socket.AF_UNIX)
     s.connect("/run/user/1000/pulse/native")
-    s.sendall(frame(51, 1))
-    answer = s.recv(64)
-    print("reply", struct.unpack(">I", answer[21:25])[0])
-    s.sendall(frame(20, 2))
+    s.sendall(auth(0))
+    s.sendall(frame(L(51), L(1), S("module-tunnel-sink")))
+    print("reply-load", answer(s))
+    s.sendall(record(2, "alsa_output.pci.analog-stereo.monitor"))
+    print("reply-monitor", answer(s))
+    s.sendall(playback(3))
+    s.sendall(frame(L(20), L(4)))
     time.sleep(1)
-  '';
+    t = socket.socket(socket.AF_UNIX)
+    t.connect("/run/user/1000/pulse/native")
+    t.settimeout(10)
+    t.sendall(auth(0))
+    t.sendall(record(1, None))
+    heard = b""
+    try:
+        while True:
+            data = t.recv(65536)
+            if not data:
+                break
+            heard += data
+        print("conn2 closed", len(heard))
+    except socket.timeout:
+        print("conn2 open", len(heard))
+  ''
+  );
 
   # A raw session-bus client: ends the authentication the way dbus-daemon and
   # xdg-dbus-proxy allow and the bus filter used to miss ("BEGIN" and more on
@@ -1266,16 +1346,27 @@ let
       # The sound server's control socket reaches a zone through the filter
       # (rust/src/pulse_filter.rs): a zone plays and records, it does not make
       # the host's sound server load a module that connects out, in the host's
-      # network (review 2026-09-25). A stand-in server records what reaches it.
-      with subtest("pulse: a zone cannot load a module into the host's sound server"):
+      # network, and does not record what the host plays (review 2026-09-25).
+      # A stand-in server records what reaches it.
+      with subtest("pulse: a zone cannot load a module or record a monitor"):
           alice("systemd-run --user --unit=fakepulse ${pkgs.python3}/bin/python3 ${fakePulse}")
           machine.wait_until_succeeds("test -S /run/user/1000/pulse/native")
           alice("vpn-zone up vmsmoke")
           zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
           out = in_zone(zp, "${pkgs.python3}/bin/python3 ${pulseClient}")
-          assert "reply 0" in out, f"LOAD_MODULE was not answered with ERROR: {out}"
+          # Refused commands are answered ERROR by the filter…
+          assert "reply-load 0" in out, f"LOAD_MODULE was not answered with ERROR: {out}"
+          assert "reply-monitor 0" in out, f"a monitor's recording was not refused: {out}"
+          # …and never reach the server; playback does, without its target.
           machine.wait_until_succeeds("grep -qx 20 /tmp/pulse-seen", timeout=15)
+          machine.succeed("grep -qx '3 clean' /tmp/pulse-seen")
+          machine.fail("grep -qx '3 target' /tmp/pulse-seen")
           machine.fail("grep -qx 51 /tmp/pulse-seen")
+          machine.fail("grep -qx '5 monitor' /tmp/pulse-seen")
+          # The default source reaches the server; linked to a monitor, the
+          # connection ends before its reply or its sound reach the zone.
+          machine.succeed("grep -qx '5 default' /tmp/pulse-seen")
+          assert "conn2 closed 0" in out, f"a monitor's sound reached the zone: {out}"
           alice("vpn-zone down vmsmoke")
           alice("systemctl --user stop fakepulse.service")
 
