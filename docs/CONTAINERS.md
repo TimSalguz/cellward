@@ -92,6 +92,16 @@ container = {
 - **The main home is not a container.** "No container" stays available (host
   tools, terminals that run `sudo`), is shown as such, and cannot hold trust.
 
+> **Superseded (the owner, 2026-09-26; [PERMISSIONS.md](PERMISSIONS.md)
+> §11.7).** The main home becomes a kind of home, `home = main`, of any named
+> container, and "no container" the built-in container `main`; `home` is
+> `private | layer | main` (`overlay` read as `layer`) — one name is one
+> container, whatever its home, with one data directory
+> (`~/.local/state/vpn-profiles/<name>/`) and one policy directory
+> (`~/.config/vpn-zones/containers/<name>/`). The throwaway kinds are one-off
+> launches, not containers. `network = ask` is only "not chosen yet" (§11.8
+> there). A container of the main home still cannot hold trust.
+
 ### 3.2 Invariants
 
 - **I1. One network at a time; a change is explicit.** A container is launched

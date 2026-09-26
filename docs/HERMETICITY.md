@@ -89,7 +89,8 @@ by what those programs use the bus for:
 Each row can be allowed back per container (`permissions.dbus`, like
 Flatpak's `finish-args`) — except `systemd1`, which is the escape itself.
 
-**The broker** replaces the delegation: one socket per zone, one verb —
+**The broker** replaces the delegation: one socket per zone (the target:
+one per container launch, [PERMISSIONS.md](PERMISSIONS.md) §11.9), one verb —
 "open this" (a URI, a file passed by descriptor, a launcher id). The host side
 knows which zone asked, and answers:
 
