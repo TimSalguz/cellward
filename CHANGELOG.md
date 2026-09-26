@@ -85,7 +85,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   covers off in its own mount namespace (`profile-run --camera`), and a
   sandbox binds the camera nodes into its own `/dev` (`fs-sandbox --camera
   on`). The zone's `/dev` is a shared mount, each launch a slave of it: a
-  camera plugged in later is covered in every launch, let or not. The
+  camera plugged in later is covered in every launch not let the cameras; a
+  launch let them parts its `/dev` from the zone's and sees it at once. The
   zone's camera setting applies from the next launch on: no restart of the
   zone (and `camera` is no longer in `restart_needed`).
 

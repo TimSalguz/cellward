@@ -1870,22 +1870,33 @@ let
           out = alice(f"cellward run vmherm --container vmcam -- {stat7}").strip()
           assert out == "1:3", f"the zone's yes overrode a container's no: {out}"
           alice("cellward camera vmherm default")
-          # A camera plugged in while a program let the cameras runs: covered
-          # there too — the zone's /dev is shared, each launch a slave of it.
+          # A camera plugged in while programs run: at once in the one let
+          # the cameras (its /dev parted from the zone's), covered in the one
+          # not let them (a slave of the zone's shared /dev, where the
+          # zone's watcher covers it).
           alice("cellward container set vmcam camera on")
-          upper = "/home/alice/.local/state/vpn-profiles/vmcam/home/upper"
-          alice(
-              "systemd-run --user --unit=camwait cellward run vmherm --container vmcam -- "
-              "sh -c 'touch /home/alice/cam-waiting; "
-              "while ! test -e /dev/video9; do sleep 0.2; done; sleep 2; "
-              "stat -c %t:%T /dev/video9 /dev/video7 > /home/alice/cam9'"
-          )
-          machine.wait_until_succeeds(f"test -e {upper}/cam-waiting", timeout=60)
+          uppers = {
+              c: f"/home/alice/.local/state/vpn-profiles/{c}/home/upper"
+              for c in ("vmcam", "vmlayer")
+          }
+          for c in uppers:
+              alice(
+                  f"systemd-run --user --unit=camwait-{c} cellward run vmherm --container {c} -- "
+                  "sh -c 'touch /home/alice/cam-waiting; "
+                  "while ! test -e /dev/video9; do sleep 0.2; done; sleep 2; "
+                  "stat -c %t:%T /dev/video9 /dev/video7 > /home/alice/cam9'"
+              )
+          for upper in uppers.values():
+              machine.wait_until_succeeds(f"test -e {upper}/cam-waiting", timeout=60)
           machine.succeed("mknod -m 600 /dev/video9 c 81 9 && chown alice /dev/video9")
-          machine.wait_until_succeeds(f"test -s {upper}/cam9", timeout=30)
-          seen = machine.succeed(f"cat {upper}/cam9").split()
-          assert seen == ["1:3", "51:7"], f"a camera plugged in later: {seen}"
-          alice("systemctl --user stop camwait.service || true")
+          for upper in uppers.values():
+              machine.wait_until_succeeds(f"test -s {upper}/cam9", timeout=30)
+          seen = machine.succeed(f"cat {uppers['vmcam']}/cam9").split()
+          assert seen == ["51:9", "51:7"], f"a camera plugged in later, let: {seen}"
+          seen = machine.succeed(f"cat {uppers['vmlayer']}/cam9").split()
+          assert seen == ["1:3", "1:3"], f"a camera plugged in later, not let: {seen}"
+          for c in uppers:
+              alice(f"systemctl --user stop camwait-{c}.service || true")
           alice("cellward container rm vmcam")
           machine.succeed("rm -f /dev/video7 /dev/video8 /dev/video9 /dev/snd/pcmC9D0c")
           # Input methods by their portals only: IBus's private bus is hidden,
