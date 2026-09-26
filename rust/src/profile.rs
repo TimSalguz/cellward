@@ -531,20 +531,11 @@ pub const ENV_EXPECT_NETNS: &str = "VPN_ZONE_EXPECT_NETNS";
 /// Let this launch reach the host's cameras. The zone covers them in its mount
 /// namespace (`zone::hide_devices`); this one is a slave copy of it
 /// (`launch::entry_argv`), where the covers are taken off — here, and nowhere
-/// else. `/dev` here is made private first: the covers the zone's watcher puts
-/// over a camera plugged in later reach every other launch, not this one, and
-/// its programs see the new camera at once (its node is on the host's
-/// devtmpfs, which this `/dev` is too). The zone mounts nothing else below
-/// `/dev` after it came up; its runtime directory is a mount of its own.
+/// else. It stays a slave: every other device the zone covers later — a
+/// security key, a serial adapter plugged in while this runs — is covered here
+/// too, and so is a camera plugged in later (restart the program for it; the
+/// zone's holder uncovering a device in the launches it is let is to come).
 fn uncover_capture() -> Result<(), String> {
-    crate::sys::mount(
-        OsStr::new("none"),
-        Path::new("/dev"),
-        "",
-        libc::MS_PRIVATE,
-        "",
-    )
-    .map_err(|e| format!("cannot part /dev from the zone's: {e}"))?;
     let off = |path: &Path| {
         let Ok(target) = CString::new(path.as_os_str().as_bytes()) else {
             return;

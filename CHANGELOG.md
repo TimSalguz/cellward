@@ -85,8 +85,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   covers off in its own mount namespace (`profile-run --camera`), and a
   sandbox binds the camera nodes into its own `/dev` (`fs-sandbox --camera
   on`). The zone's `/dev` is a shared mount, each launch a slave of it: a
-  camera plugged in later is covered in every launch not let the cameras; a
-  launch let them parts its `/dev` from the zone's and sees it at once. Not
+  camera plugged in later is covered in every launch, a launch let the
+  cameras included (restart the program for it): parting its `/dev` from
+  the zone's would let a security key or a serial adapter plugged in later
+  reach it uncovered. Not
   a wall between the programs of one zone: while such a launch runs,
   another program of the zone outside a sandbox reaches its `/dev` through
   `/proc/<pid>/root` (hidden processes per launch are to come). The

@@ -1878,10 +1878,10 @@ let
           out = alice(f"cellward run vmherm --container vmcam -- {stat7}").strip()
           assert out == "1:3", f"the zone's yes overrode a container's no: {out}"
           alice("cellward camera vmherm default")
-          # A camera plugged in while programs run: at once in the one let
-          # the cameras (its /dev parted from the zone's), covered in the one
-          # not let them (a slave of the zone's shared /dev, where the
-          # zone's watcher covers it).
+          # A camera plugged in while programs run: covered in both — the one
+          # let the cameras too stays a slave of the zone's shared /dev, or a
+          # security key plugged in later would reach it uncovered (restart
+          # the program for a new camera).
           alice("cellward container set vmcam camera on")
           uppers = {
               c: f"/home/alice/.local/state/vpn-profiles/{c}/home/upper"
@@ -1900,7 +1900,7 @@ let
           for upper in uppers.values():
               machine.wait_until_succeeds(f"test -s {upper}/cam9", timeout=30)
           seen = machine.succeed(f"cat {uppers['vmcam']}/cam9").split()
-          assert seen == ["51:9", "51:7"], f"a camera plugged in later, let: {seen}"
+          assert seen == ["1:3", "51:7"], f"a camera plugged in later, let: {seen}"
           seen = machine.succeed(f"cat {uppers['vmlayer']}/cam9").split()
           assert seen == ["1:3", "1:3"], f"a camera plugged in later, not let: {seen}"
           for c in uppers:
