@@ -2898,7 +2898,7 @@ fn hide_devices(zone: &Zone) -> Result<(), String> {
                 sys::DirEvent::Appeared(path) if hidden_path(&path) => covered(&path),
                 // A device gone: wherever a sandbox still has it bound, /dev/null
                 // over the bind before another device can take its number.
-                sys::DirEvent::Gone(path) if hidden_path(&path) => revoke_everywhere(&path),
+                sys::DirEvent::Gone(path) if hidden_path(&path) => revoke_everywhere(&name, &path),
                 sys::DirEvent::Overflow => {
                     for node in hidden_nodes() {
                         covered(&node);
@@ -2972,7 +2972,7 @@ fn hidden_path(path: &Path) -> bool {
 /// its inode opens whatever device gets that number next, a keyboard plugged
 /// in after a security key. The zone's own namespace, and every launch's
 /// copy of it, lose the entry with the device.
-fn revoke_everywhere(path: &Path) {
+fn revoke_everywhere(zone: &str, path: &Path) {
     let (Ok(target), Ok(null)) = (
         std::ffi::CString::new(path.as_os_str().as_bytes()),
         std::ffi::CString::new("/dev/null"),
@@ -2982,6 +2982,7 @@ fn revoke_everywhere(path: &Path) {
     let own = |ns: &str| fs::read_link(format!("/proc/self/ns/{ns}")).ok();
     let (own_net, own_mnt) = (own("net"), own("mnt"));
     let mut seen: Vec<PathBuf> = Vec::new();
+    let (mut covered, mut failed) = (0, Vec::new());
     for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
         let Some(pid) = entry
             .file_name()
@@ -3032,7 +3033,27 @@ fn revoke_everywhere(path: &Path) {
             let mut status = 0;
             // SAFETY: waiting for our own child.
             unsafe { libc::waitpid(child, &mut status, 0) };
+            match libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status)) {
+                Some(0) => covered += 1,
+                Some(1) => failed.push(format!("{pid}: cannot enter")),
+                Some(_) => failed.push(format!("{pid}: cannot cover")),
+                None => failed.push(format!("{pid}: killed")),
+            }
+        } else {
+            failed.push(format!("{pid}: cannot fork"));
         }
+    }
+    if failed.is_empty() {
+        println!(
+            "zone {zone}: {} gone — looked at in {covered} other mount namespace(s)",
+            path.display()
+        );
+    } else {
+        eprintln!(
+            "zone {zone}: {} gone — covered in {covered} mount namespace(s), not in: {}",
+            path.display(),
+            failed.join(", ")
+        );
     }
 }
 
