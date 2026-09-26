@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **A container's windows have a frame colour of its own**
+  (`programs.cellward.containers.<name>.frameColor`, `cellward container
+  set <c> color <#rrggbb>|default`, `containers[].frame_color` in
+  `status --json`; `docs/PERMISSIONS.md` §11.10 — the owner, 2026-09-26:
+  the colour moves from zones to containers too). A container with none is
+  framed in its network's colour, as before.
+
 ### Changed
 - **The broker knows which container asks** (`broker::container_of`;
   `docs/PERMISSIONS.md` §11.9). It knew the zone only, and passed without a

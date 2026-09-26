@@ -238,6 +238,9 @@ pub struct Container {
     /// An X server of its own in a zone (`docs/HERMETICITY.md` §7, A): the
     /// host's is never reachable from a zone.
     pub x11: Sourced<bool>,
+    /// The colour of its windows' frame (`#rrggbb`); none of its own is the
+    /// zone's (`docs/PERMISSIONS.md` §11.10).
+    pub frame_color: Option<Sourced<String>>,
     /// The container's data directory ([`data_dir`]). May not exist yet — and
     /// a container of the main home has none it uses.
     pub dir: PathBuf,
@@ -1516,12 +1519,32 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
             source: Source::Default,
         });
 
+    let color = |conf: &[(String, String)]| {
+        values(conf, "frame_color")
+            .last()
+            .and_then(crate::frame::Rgb::parse)
+            .map(|c| c.hex())
+    };
+    let frame_color = declared_conf
+        .and_then(color)
+        .map(|value| Sourced {
+            value,
+            source: Source::Nix,
+        })
+        .or_else(|| {
+            color(&local).map(|value| Sourced {
+                value,
+                source: Source::Local,
+            })
+        });
+
     Some(Container {
         name: name.to_owned(),
         home,
         home_source,
         network,
         apps,
+        frame_color,
         declared_trust,
         paths,
         expires,
@@ -2192,6 +2215,35 @@ pub fn set_x11(tools: &Tools, selector: &str, on: bool) -> Result<(), String> {
     )
 }
 
+/// Give a container a frame colour of its own (`None`: none — the zone's),
+/// locally.
+pub fn set_frame_color(tools: &Tools, selector: &str, color: Option<&str>) -> Result<(), String> {
+    let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    if container
+        .frame_color
+        .as_ref()
+        .is_some_and(|c| c.source == Source::Nix)
+    {
+        return Err(format!(
+            "цвет рамки контейнера {selector} задан в Nix — меняется там"
+        ));
+    }
+    let value = match color {
+        Some(text) => Some(
+            crate::frame::Rgb::parse(text)
+                .ok_or_else(|| format!("«{text}» — не цвет: нужен #rrggbb"))?
+                .hex(),
+        ),
+        None => None,
+    };
+    write_key(
+        &container.policy.join(FILE),
+        "frame_color",
+        value.as_deref(),
+        true,
+    )
+}
+
 /// Change the kind of a container's home, locally. Refused when the kind is
 /// declared in Nix, and while its programs run: their home would change under
 /// them. The data of the old kind go aside at the next launch
@@ -2753,6 +2805,30 @@ mod tests {
         Tools::from_entries(Path::new("/m.json"), &entries).unwrap()
     }
 
+    /// A container's own frame colour: set, refused when it is no colour,
+    /// taken back to the zone's (`docs/PERMISSIONS.md` §11.10).
+    #[test]
+    fn a_container_has_a_frame_colour_of_its_own() {
+        let t = Tmp::new("colour");
+        let tools = tools_in(&t.0);
+        fs::create_dir_all(tools.config.join(POLICY_DIR)).unwrap();
+        fs::write(tools.config.join(POLICY_DIR).join(LAYOUT_MARK), LAYOUT).unwrap();
+        fs::write(tools.config.join(POLICY_DIR).join(PINS_MOVED), "").unwrap();
+        create(&tools, "work", Home::Private).unwrap();
+        assert_eq!(load(&tools, "work").unwrap().frame_color, None);
+        set_frame_color(&tools, "work", Some("#D94C4C")).unwrap();
+        assert_eq!(
+            load(&tools, "work").unwrap().frame_color,
+            Some(Sourced {
+                value: "#d94c4c".into(),
+                source: Source::Local
+            })
+        );
+        assert!(set_frame_color(&tools, "work", Some("red")).is_err());
+        set_frame_color(&tools, "work", None).unwrap();
+        assert_eq!(load(&tools, "work").unwrap().frame_color, None);
+    }
+
     /// The network a program was pinned to becomes its container's
     /// (`docs/PERMISSIONS.md` §11.8), once.
     #[test]
@@ -2968,6 +3044,7 @@ mod tests {
                 value: false,
                 source: Source::Default,
             },
+            frame_color: None,
             dir: PathBuf::from("/s/work"),
             policy: PathBuf::from("/c/containers/work"),
         }

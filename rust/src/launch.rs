@@ -721,7 +721,16 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 // the title's text — the zone and the container as this
                 // launch knows them; the switch that hides it is read by the
                 // supervisor for each connection.
-                let frame = crate::frame::Frame::of_zone(&tools.state, &tools.config, &zone_name);
+                // The container's colour, the zone's when it has none.
+                let color = container_name(&selection)
+                    .and_then(|name| crate::container::load(tools, &name))
+                    .and_then(|c| c.frame_color.map(|c| c.value));
+                let frame = crate::frame::Frame::of_launch(
+                    &tools.state,
+                    &tools.config,
+                    &zone_name,
+                    color.as_deref(),
+                );
                 wrap.push("--frame".into());
                 wrap.push(frame.to_arg().into());
                 let selector = selector_of(&selection, &container.profile);

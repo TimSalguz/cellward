@@ -475,10 +475,15 @@ pub fn container(tools: &Tools, c: &Container) -> String {
     } else {
         "full"
     };
+    // Its own colour, or none: the zone's is the network's (`networks[]`).
+    let frame_color = match &c.frame_color {
+        Some(color) => sourced_str(&color.value, color.source),
+        None => sourced("null".to_owned(), Source::Default),
+    };
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
          \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{}}}",
+         \"x11\":{},\"frame_color\":{frame_color}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),

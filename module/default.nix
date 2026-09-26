@@ -552,6 +552,7 @@ let
       ++ lib.optional (c.trust.certificates != [ ]) "trust = ${trustDir name c.trust.certificates}"
       ++ map (path: "path = ${path}") c.permissions.paths
       ++ lib.optional c.permissions.x11 "x11 = true"
+      ++ lib.optional (c.frameColor != null) "frame_color = ${c.frameColor}"
     )
     + "\n";
 
@@ -587,6 +588,12 @@ let
         default = [ ];
         example = [ "firefox" ];
         description = "Программы (id ярлыков, имя .desktop без расширения), которые запускаются в этом контейнере без вопроса.";
+      };
+      frameColor = lib.mkOption {
+        type = lib.types.nullOr (lib.types.strMatching "#[0-9a-fA-F]{6}");
+        default = null;
+        example = "#d94c4c";
+        description = "Цвет рамки окон программ контейнера (#rrggbb). null — цвет его сети (programs.cellward.frame.colors), а у неё — из имени.";
       };
       permissions.x11 = lib.mkOption {
         type = lib.types.bool;

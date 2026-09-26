@@ -269,6 +269,16 @@ impl Frame {
         }
     }
 
+    /// A launch's frame: the colour of its container, when it has one of its
+    /// own (`docs/PERMISSIONS.md` §11.10) — else the zone's.
+    pub fn of_launch(state: &Path, config: &Path, zone: &str, container: Option<&str>) -> Self {
+        let mut frame = Self::of_zone(state, config, zone);
+        if let Some(color) = container.and_then(Rgb::parse) {
+            frame.color = color;
+        }
+        frame
+    }
+
     pub fn to_arg(self) -> String {
         format!(
             "{}:{}:{}",
@@ -496,6 +506,23 @@ mod tests {
         assert_eq!(
             clean_title(&"z".repeat(1000)).chars().count(),
             2 * MAX_TITLE_PART + 3
+        );
+    }
+
+    /// A launch's frame is its container's colour when it has one, the
+    /// zone's otherwise.
+    #[test]
+    fn a_launch_is_framed_in_its_containers_colour() {
+        let dir = std::env::temp_dir().join(format!("vz-frame-launch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let zone = Frame::of_zone(&dir, &dir, "nl");
+        let own = Frame::of_launch(&dir, &dir, "nl", Some("#102030"));
+        assert_eq!(own.color, Rgb(0x10, 0x20, 0x30));
+        assert_eq!(own.width, zone.width);
+        assert_eq!(Frame::of_launch(&dir, &dir, "nl", None).color, zone.color);
+        assert_eq!(
+            Frame::of_launch(&dir, &dir, "nl", Some("nope")).color,
+            zone.color
         );
     }
 }
