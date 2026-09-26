@@ -1607,7 +1607,7 @@ let
               f"-U -n -m -t {zp} -- ${pkgs.python3}/bin/python3 ${pulseMic}"
           )
           kd = machine.wait_until_succeeds(
-              "pgrep -u alice -f -- 'bin/vpn-zone-windo[w]'", timeout=30
+              "pgrep -u alice -x vpn-zone-window", timeout=30
           ).split()[0]
           ns = machine.succeed(f"readlink /proc/{kd}/ns/user").strip()
           assert ns == host_ns, f"the question's window is in {ns}, not the host's {host_ns}"

@@ -94,7 +94,7 @@
 //!
 //! Usage: `vpn-zone-core pulse-filter --listen <socket> --upstream <socket>
 //! --zone <name> --zone-dir <dir> --config <dir> --profiles <dir> --kdialog
-//! <program>`.
+//! <program> [--window <program>]`.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
@@ -355,9 +355,10 @@ pub struct Args {
     /// `~/.local/state/vpn-profiles`: the containers' data, by which a
     /// container is known to be one (`crate::origin`).
     pub profiles: PathBuf,
-    /// What asks the person: the launch window (`--window`, optional:
-    /// guarded, `crate::window::question`), else kdialog.
+    /// What asks the person where there is no window.
     pub kdialog: PathBuf,
+    /// The launch window (`--window`, optional), which asks first: guarded,
+    /// `crate::window::question`.
     pub window: PathBuf,
 }
 
@@ -1474,7 +1475,7 @@ pub fn run(args: &Args) -> u8 {
     // starts it in the host's user namespace (`zone::Helpers`), which a
     // zone's programs cannot read anyway; not dumpable, it stays out of reach
     // wherever it is started from (`bus_filter::run` does the same). What it
-    // starts — kdialog — is dumpable again after exec, and is safe only by
+    // starts — the question's window, or kdialog — is dumpable again after exec, and is safe only by
     // where this process lives.
     // SAFETY: prctl with these arguments takes no pointers.
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };

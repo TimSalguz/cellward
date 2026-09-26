@@ -49,7 +49,11 @@ struct Item {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Request {
     /// `menu`: the hotkey menu of a running program — entries, one of which
-    /// is chosen. Anything else: the launch window.
+    /// is chosen; with a `guard` it is a question (the broker's, the
+    /// microphone's): nothing is taken until the person has been still with
+    /// it focused, Enter gives the highlighted entry, any other key starts
+    /// the guard again, digits choose nothing. Anything else: the launch
+    /// window.
     mode: String,
     /// The menu's entries: `(tag, label, danger)`.
     actions: Vec<(String, String, bool)>,
@@ -184,6 +188,10 @@ struct Window {
     armed: bool,
     /// How many times the guard was started: only the last one arms.
     holds: u64,
+    /// The window has the keyboard's focus: a guarded window arms only
+    /// then — its guard is counted from when the person can see it, and a
+    /// window that never gets the focus never takes a choice.
+    focused: bool,
 }
 
 /// Why a container cannot go with this network, if it cannot.
@@ -220,6 +228,7 @@ impl Window {
             entry: 0,
             armed: req.guard == 0,
             holds: 0,
+            focused: false,
             req,
         }
     }
@@ -379,17 +388,20 @@ impl Window {
             Msg::PinNet(v) => self.pin_net = v && !self.req.no_pins,
             Msg::PinContainer(v) => self.pin_container = v && !self.req.no_pins,
             Msg::Rule(v) => self.rule = v && self.req.rule.is_some(),
-            Msg::Armed(holds) => self.armed |= holds == self.holds,
+            // Armed by the last guard started, and only with the focus.
+            Msg::Armed(holds) => self.armed |= holds == self.holds && self.focused,
             Msg::Press => {}
-            // Losing the focus disarms; getting it back starts the guard.
+            // Losing the focus disarms; getting it starts the guard — the
+            // first time too: nothing counts from the window's start.
             Msg::Focus(focused) if self.guarded() => {
+                self.focused = focused;
                 if focused {
                     return self.hold();
                 }
                 self.armed = false;
                 self.holds += 1;
             }
-            Msg::Focus(_) => {}
+            Msg::Focus(focused) => self.focused = focused,
             Msg::Name(name) => self.name = name,
             Msg::Launch => {
                 if self.naming() && self.name.trim().is_empty() {
@@ -409,6 +421,26 @@ impl Window {
     }
 
     fn key(&mut self, key: Key, modifiers: keyboard::Modifiers) -> Task<Msg> {
+        if self.menu() && self.guarded() {
+            // A question: Enter gives the highlighted answer, Esc refuses;
+            // any other key — typing meant for something else, or a move of
+            // the highlight — starts the guard again, so no key typed on can
+            // pick an answer. Digits choose nothing.
+            let n = self.req.actions.len();
+            return match key.as_ref() {
+                Key::Named(key::Named::Escape) => self.update(Msg::Cancel),
+                Key::Named(key::Named::Enter) => self.update(Msg::Action(self.entry)),
+                Key::Named(key::Named::ArrowUp) if n > 0 => {
+                    self.entry = (self.entry + n - 1) % n;
+                    self.hold()
+                }
+                Key::Named(key::Named::ArrowDown) if n > 0 => {
+                    self.entry = (self.entry + 1) % n;
+                    self.hold()
+                }
+                _ => self.hold(),
+            };
+        }
         if self.menu() {
             let n = self.req.actions.len();
             match key.as_ref() {
@@ -433,9 +465,11 @@ impl Window {
             return Task::none();
         }
         let before = (self.net, self.container);
+        let typing = matches!(key.as_ref(), Key::Character(_));
         let task = self.key_choose(key, modifiers);
-        // A choice changed by the keyboard in a zone's window: the guard again.
-        if self.guarded() && (self.net, self.container) != before {
+        // A choice changed by the keyboard in a zone's window, or typing
+        // meant for something else: the guard again.
+        if self.guarded() && ((self.net, self.container) != before || typing) {
             return self.hold();
         }
         task
@@ -533,13 +567,28 @@ impl Window {
             .into()
     }
 
-    /// The hotkey menu: the program, what is known of it, the entries.
+    /// The hotkey menu, or a question (guarded): the title, what is known
+    /// (in a block that scrolls and breaks any word, so that nothing of it is
+    /// cut off out of sight), the command apart where there is one, and the
+    /// entries — always in view.
     fn view_menu(&self) -> Element<'_, Msg> {
         let mut page = column![text(&self.req.title).size(20)]
             .spacing(10)
             .padding(16);
+        let mut notes = column![].spacing(4);
         for note in &self.req.notes {
-            page = page.push(text(note.as_str()).size(14));
+            notes = notes.push(
+                text(note.as_str())
+                    .size(14)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            );
+        }
+        page = page.push(scrollable(notes).height(Length::Fill));
+        if !self.req.command.is_empty() {
+            page = page.push(self.command_view());
+        }
+        if !self.armed {
+            page = page.push(text("Секунду…").size(13));
         }
         let mut list = column![].spacing(4);
         for (i, (_, label, danger)) in self.req.actions.iter().enumerate() {
@@ -687,15 +736,28 @@ impl Window {
     }
 }
 
-/// `Msg::Armed(keys)` after `guard` milliseconds: a plain sleep on the
-/// executor's pool — no timer backend in this build, and the pool has threads
-/// to spare for it.
+/// `Msg::Armed(holds)` after `guard` milliseconds: slept on a thread of its
+/// own, awaited on the executor — never on the executor's pool, which also
+/// carries the input events: a sleep there would hold keys typed during the
+/// guard until after it, and they would count as typed when armed.
 fn arm_after(guard: u64, holds: u64) -> Task<Msg> {
     let guard = std::time::Duration::from_millis(guard);
-    Task::perform(async move { std::thread::sleep(guard) }, move |()| {
-        Msg::Armed(holds)
-    })
+    Task::perform(
+        async move {
+            let (done, over) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                std::thread::sleep(guard);
+                let _ = done.send(());
+            });
+            let _ = over.await;
+        },
+        move |()| Msg::Armed(holds),
+    )
 }
+
+/// The exit status of a window that could not be shown at all: the caller
+/// asks another way (kdialog) — not a "no".
+const EXIT_NOT_SHOWN: i32 = 3;
 
 fn main() -> iced::Result {
     // The fonts of this window: a short list of its own (package.nix), not
@@ -719,8 +781,10 @@ fn main() -> iced::Result {
     if empty {
         std::process::exit(1);
     }
-    let size = if req.mode == "menu" {
-        iced::Size::new(520.0, 380.0)
+    let size = if req.mode == "menu" && req.command.is_empty() {
+        iced::Size::new(560.0, 420.0)
+    } else if req.mode == "menu" {
+        iced::Size::new(640.0, 600.0)
     } else if req.command.is_empty() {
         iced::Size::new(760.0, 460.0)
     } else {
@@ -739,13 +803,9 @@ fn main() -> iced::Result {
                 .ok()
                 .and_then(|mut r| r.take())
                 .unwrap_or_default();
-            let window = Window::new(req);
-            let arm = if window.armed {
-                Task::none()
-            } else {
-                arm_after(window.req.guard, 0)
-            };
-            (window, arm)
+            // A guarded window arms from its focus, not from its start
+            // (`Msg::Focus`).
+            (Window::new(req), Task::none())
         },
         Window::update,
         Window::view,
@@ -767,6 +827,10 @@ fn main() -> iced::Result {
         ..iced::window::Settings::default()
     })
     .run()
+    .map_err(|e| {
+        eprintln!("vpn-zone-window: {e}");
+        std::process::exit(EXIT_NOT_SHOWN)
+    })
 }
 
 #[cfg(test)]
