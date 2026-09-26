@@ -203,9 +203,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             "nix-daemon" if pos == 3 => strs(&mut out, &["on", "off", "default"]),
             "host-files" if pos == 3 => strs(&mut out, &["read-only", "writable", "default"]),
             "camera" | "audio-manager" if pos == 3 => strs(&mut out, &["on", "off", "default"]),
-            "microphone" | "screencast" if pos == 3 => {
-                strs(&mut out, &["yes", "no", "ask", "default"])
-            }
+            "microphone" | "screencast" if pos == 3 => strs(&mut out, &["ask", "yes", "no"]),
             "ask-again" if pos == 2 => strs(&mut out, &["1m", "3m", "10m", "1h", "default"]),
             "hermetic" if pos == 3 => match word(2) {
                 "--default" => strs(&mut out, &["on", "off"]),
@@ -284,7 +282,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 strs(&mut out, &["default"])
             }
             "container" if pos == 5 && word(2) == "set" && word(4) == "microphone" => {
-                strs(&mut out, &["yes", "no", "ask", "default"])
+                strs(&mut out, &["zone", "yes", "no", "ask"])
             }
             "container" if pos == 5 && word(2) == "set" && word(4) == "home" => {
                 strs(&mut out, &["private", "layer", "main"])
@@ -468,7 +466,7 @@ mod tests {
         );
         assert_eq!(
             complete(&["cellward", "screencast", "nl", ""], 4),
-            ["yes", "no", "ask", "default"]
+            ["ask", "yes", "no"]
         );
         assert_eq!(complete(&["cellward", "screencast", ""], 3), ["nl", "ru"]);
         assert_eq!(

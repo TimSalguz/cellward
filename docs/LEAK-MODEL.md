@@ -1405,7 +1405,7 @@ NixOS, нулевые выход и микрофон; из offline-зоны: `pi
   Фильтр пропускает `SelectSources` только с опциями из списка
   (`dbus_wire::SCREENCAST_OPTIONS`); выбор, который он не прочёл, отказан.
 - **Выключатель на зону** (2026-09-25, `crate::screencast`):
-  `cellward screencast <зона> yes|no|ask|default`, Nix
+  `cellward screencast <зона> ask (по умолчанию)|yes|no`, Nix
   `programs.cellward.screencast.<зона>`, поле `screencast` в
   `status --json`. Устроен как у микрофона: метка зоны в её каталоге
   состояния, над ней `declared/screencast` из Nix, без обеих — `ask`;

@@ -1541,7 +1541,7 @@ let
           assert "mic heard" in mic(), "the zone's own program lost the zone's yes"
           alice("cellward microphone vmsmoke default")
           # None of its own: the container is the zone's again.
-          alice("cellward container set vmmicyes microphone default")
+          alice("cellward container set vmmicyes microphone zone")
           out = mic_in("vmmicyes")
           assert "mic refused" in out, f"a container with no setting of its own was let: {out}"
           alice("cellward container rm vmmicyes")

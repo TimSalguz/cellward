@@ -222,7 +222,7 @@ Without the policy a hermetic zone has no PipeWire at all — the PulseAudio pat
 only, which most programs use (`docs/LEAK-MODEL.md` §20).
 
 A screen cast goes through the portal only, and has a switch per zone too:
-`cellward screencast <zone> yes|no|ask|default`. `ask` (the default) is the
+`cellward screencast <zone> ask (default)|yes|no`. `ask` is the
 portal's dialog every time, `no` refuses, `yes` lets the choice be remembered
 when the portal knows the zone by name: the bus filter names each connection of
 the zone to the portal (`cellward.zone.<zone>`), and its dialogs say
