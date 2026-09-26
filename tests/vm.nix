@@ -1915,16 +1915,17 @@ let
           # zone's runtime directory is shared, a container's copy of it a
           # slave (rust/src/zone.rs `seal_runtime`).
           machine.fail("test -e /run/user/1000/doc")
+          upper = "/home/alice/.local/state/vpn-profiles/vmlayer/home/upper"
           alice(
               "systemd-run --user --unit=vmdocwait cellward run vmherm --container vmlayer -- "
-              "sh -c 'for i in $(seq 90); do if test -e /run/user/1000/doc/propagated; "
+              "sh -c 'touch /home/alice/doc-waiting; for i in $(seq 90); do "
+              "if test -e /run/user/1000/doc/propagated; "
               "then touch /home/alice/doc-seen; exit 0; fi; sleep 1; done'"
           )
-          machine.sleep(3)
+          # Its namespace copied before the directory appears, not after.
+          machine.wait_until_succeeds(f"test -e {upper}/doc-waiting", timeout=60)
           alice("mkdir /run/user/1000/doc && touch /run/user/1000/doc/propagated")
-          machine.wait_until_succeeds(
-              "test -e /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/doc-seen", timeout=60
-          )
+          machine.wait_until_succeeds(f"test -e {upper}/doc-seen", timeout=60)
           alice("rm -rf /run/user/1000/doc")
           alice(
               "cellward run vmherm --container vmmainh -- "

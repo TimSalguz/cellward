@@ -247,8 +247,10 @@ pub fn containers_in(places: Places, zone: &str) -> Vec<String> {
     out
 }
 
-/// Note a launch of `container` into `zone` ([`LAUNCHED`]), once: the
-/// list does not grow with every launch.
+/// Note a launch of `container` into `zone` ([`LAUNCHED`]) — not again when
+/// it is listed already, so the list does not grow with every launch (two
+/// first launches at once may both add it: [`containers_in`] reads each
+/// name once).
 pub fn note_launched(state: &Path, zone: &str, container: &str) -> std::io::Result<()> {
     use std::io::Write;
     let path = state.join(zone).join(LAUNCHED);

@@ -3,9 +3,10 @@
 //!
 //! This is `vpn-zone run --profile` seen from the inside. The bash side has
 //! already entered the zone's user+net namespace (`nsenter --preserve-credentials
-//! --keep-caps`) and a private mount namespace of its own (`unshare --mount`);
-//! everything that happens here happens in that namespace and is invisible to
-//! the rest of the system. Three steps:
+//! --keep-caps`) and a mount namespace of its own (`unshare --mount`, a slave
+//! of the zone's: what the zone binds into its runtime directory later still
+//! comes in); everything that happens here happens in that namespace and is
+//! invisible to the rest of the system. Three steps:
 //!
 //!  1. stack the profile over the home: the lower layer is the real home
 //!     (read-only in effect), the upper layer lives in the profile directory.

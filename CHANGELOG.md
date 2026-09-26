@@ -42,10 +42,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   already running** (`zone::seal_runtime`, `launch::entry_argv`): the
   zone's `/run/user/<uid>` is a shared mount, and a container's launch takes
   a slave copy of the zone's mount namespace (`--propagation slave`, was
-  `private`). The document portal's directory when it is first used, and
-  PipeWire and the session bus after the host restarts them, used to stay
-  out of reach of programs of a container started before; nothing a
-  container mounts goes back to the zone.
+  `private`). A socket or directory the host creates after the zone came up
+  — in an ordinary zone PipeWire and the session bus after the host
+  restarts them — used to stay out of reach of programs of a container
+  started before; nothing a container mounts goes back to the zone. (A
+  mount the host makes later on such a directory, as the document portal's
+  FUSE, still does not reach the zone at all.)
 
 ### Changed
 - **The microphone for a program whose container is not known** (a

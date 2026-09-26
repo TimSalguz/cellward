@@ -235,8 +235,11 @@ vpn-zone-core wl-sandbox <program> --zone <zone> --     on the host: the restric
                                                      (a slave of the zone's shared /run/user/<uid>)
       └─ vpn-zone-core profile-run --cwd <dir> …     (done)
            1. home layer: overlay slots, or binds for permissions.paths
-           2. runtime hermeticity (§6, phase 4): tmpfs over /run/user/<uid>,
-              sockets back by name; tmpfs over /tmp/.X11-unix
+           2. runtime hermeticity (§6, phase 4 — not done): tmpfs over
+              /run/user/<uid>, sockets back by name; tmpfs over /tmp/.X11-unix.
+              A cover here would hide what the zone binds into its runtime
+              later (the shared mount a launch is a slave of): it has to
+              carry that through, or not cover the runtime directory
            3. trust layer: bundle binds, NSS databases (CERTIFICATES.md)
            4. chdir <dir> → $HOME → /                (done)
            5. drop ambient capabilities

@@ -2532,10 +2532,13 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
     .map_err(|e| format!("cannot close {}: {e}", runtime.display()))?;
     // Shared, in the zone's otherwise private tree: a container's launch
     // takes a copy of the zone's mount namespace as a slave (`launch::
-    // entry_argv`), and what the watcher below binds here later — the
-    // document portal's directory when it is first used, PipeWire and the
-    // bus after the host restarts them — reaches its programs too. Slave:
-    // nothing a container mounts comes back.
+    // entry_argv`), and what the watcher below binds here later — a socket
+    // or a directory the host creates after the zone came up; in an ordinary
+    // zone PipeWire and the bus after the host restarts them — reaches its
+    // programs too. Slave: nothing a container mounts comes back. (A mount
+    // the host makes later on such a directory — the document portal's FUSE
+    // — does not come along, into the zone or its containers: the zone's
+    // tree is private from the host's.)
     sys::mount(OsStr::new("none"), &runtime, "", libc::MS_SHARED, "")
         .map_err(|e| format!("cannot share {}: {e}", runtime.display()))?;
 

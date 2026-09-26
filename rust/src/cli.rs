@@ -1681,8 +1681,8 @@ fn container_remove(tools: &Tools, name: &OsStr) -> u8 {
             Ok(lock) => lock,
             Err(e) => {
                 eprintln!(
-                    "не занять {}: {e} — данные контейнера {} удалены, настройки нет: повтори \
-                     cellward container rm {}",
+                    "не занять {}: {e} — данные контейнера {} удалены, настройки не удалены: \
+                     повтори cellward container rm {}",
                     root.display(),
                     c.name,
                     c.name
