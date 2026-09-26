@@ -1810,6 +1810,15 @@ let
           # In the home: the zone's /tmp is its own (LEAK-MODEL §15).
           in_zone(hp, "env VPN_ZONE_CURRENT=vmherm cellward run vmherm -- touch /home/alice/brokered-same")
           machine.wait_until_succeeds("test -e /home/alice/brokered-same", timeout=30)
+          # From a container the same request is a crossing — out of its
+          # layer into the real home: asked about, and with nobody to ask,
+          # refused (review 2026-09-26).
+          alice(
+              "cellward run vmherm --profile vmlayer -- "
+              "sh -c '! cellward run vmherm -- touch /home/alice/from-container'"
+          )
+          machine.sleep(3)
+          machine.fail("test -e /home/alice/from-container")
           in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm cellward run direct -- touch /tmp/brokered-escape'")
           machine.sleep(3)
           machine.fail("test -e /tmp/brokered-escape")

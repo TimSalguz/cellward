@@ -152,8 +152,10 @@ pub enum Decision {
     Refuse(String),
 }
 
-/// The policy, from where the request comes from and the network it asks for.
-pub fn decide(origin: &Origin, origin_locked: bool, target: &str) -> Decision {
+/// The policy, from where the request comes from, the network it asks for,
+/// and whether the launch keeps the asker's identity — a program of the zone
+/// with no container, asking for none (`same_identity`).
+pub fn decide(origin: &Origin, origin_locked: bool, target: &str, same_identity: bool) -> Decision {
     match origin {
         // The host never needs the broker — a launch outside a zone, or from
         // a zone with `systemd --user`, goes without it — so a request that
@@ -165,8 +167,15 @@ pub fn decide(origin: &Origin, origin_locked: bool, target: &str) -> Decision {
         ),
         // The same zone — never the host's network under that name, whatever
         // took itself for a zone called so (review 2026-09-25, third round).
-        Origin::Zone(zone) if zone == target && !crate::launch::is_unconfined_name(target) => {
+        Origin::Zone(zone)
+            if zone == target && !crate::launch::is_unconfined_name(target) && same_identity =>
+        {
             Decision::Start
+        }
+        // The same zone, another identity: a person says yes — also in a
+        // locked zone, which bars other networks, not other containers.
+        Origin::Zone(zone) if zone == target && !crate::launch::is_unconfined_name(target) => {
+            Decision::Ask
         }
         Origin::Zone(zone) if origin_locked => Decision::Refuse(format!(
             "зона «{zone}» заперта: запуск в другой сети ({target}) запрещён"
@@ -215,27 +224,43 @@ fn classify(state: &Path, netns: &Path, userns: &Path) -> Origin {
 
 /// Where the peer of `stream` is, looked at while it is certainly the process
 /// that connected.
-fn origin_of(state: &Path, stream: &UnixStream) -> Origin {
+fn origin_of(state: &Path, stream: &UnixStream) -> (Origin, Option<PathBuf>) {
+    let unknown = (Origin::Unknown, None);
     let Some(pid) = crate::sys::peer_pid(stream.as_raw_fd()) else {
-        return Origin::Unknown;
+        return unknown;
     };
     let Some(pidfd) = crate::sys::peer_pidfd(stream.as_raw_fd(), pid) else {
-        return Origin::Unknown;
+        return unknown;
     };
     let alive = || !crate::sys::pidfd_wait(&pidfd, std::time::Duration::ZERO);
     if !alive() {
-        return Origin::Unknown;
+        return unknown;
     }
     let read = |ns: &str| std::fs::read_link(format!("/proc/{pid}/ns/{ns}"));
-    let (Ok(netns), Ok(userns)) = (read("net"), read("user")) else {
-        return Origin::Unknown;
+    let (Ok(netns), Ok(userns), Ok(mntns)) = (read("net"), read("user"), read("mnt")) else {
+        return unknown;
     };
     // Still alive after the read: the number was not reused in between, and
     // the namespace read is the peer's own.
     if !alive() {
-        return Origin::Unknown;
+        return unknown;
     }
-    classify(state, &netns, &userns)
+    (classify(state, &netns, &userns), Some(mntns))
+}
+
+/// Whether the peer is a program of the zone with no container: it is in the
+/// zone's own mount namespace. A launch into a container takes a mount
+/// namespace of its own (`profile-run`), and a program there cannot leave it
+/// — `setns` wants capabilities it does not have — so a program of a
+/// container is never taken for one of the zone's own.
+fn in_zones_own_mounts(state: &Path, zone: &str, peer_mnt: Option<&Path>) -> bool {
+    let Some(peer_mnt) = peer_mnt else {
+        return false;
+    };
+    let Some(pid) = zone_pid(state, std::ffi::OsStr::new(zone)) else {
+        return false;
+    };
+    std::fs::read_link(format!("/proc/{pid}/ns/mnt")).is_ok_and(|own| own == peer_mnt)
 }
 
 /// The longest app-id a request may carry: a launcher's id, not a text —
@@ -307,7 +332,7 @@ fn read_request(stream: &mut UnixStream) -> Option<Vec<u8>> {
 
 fn handle(tools: &Tools, mut stream: UnixStream) {
     // First, before the request is read: the peer may leave while it is.
-    let origin = origin_of(&tools.state, &stream);
+    let (origin, peer_mnt) = origin_of(&tools.state, &stream);
     let Some(_slot) = OriginSlot::take(&origin.name()) else {
         let _ = stream.write_all(b"refused: too many requests of this zone at once\n");
         return;
@@ -352,7 +377,20 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                             .exists(),
                         _ => false,
                     };
-                    let allowed = match decide(&origin, locked, &target) {
+                    // Without a question only where nothing is crossed: a
+                    // program of the zone with no container asking for a
+                    // launch with no container, in the same zone. From a
+                    // container, or into one, is a crossing: out of a layer
+                    // or a sandbox into the real home, or into another
+                    // container's data (review 2026-09-26).
+                    let same_identity = match &origin {
+                        Origin::Zone(zone) => {
+                            selection_selector(&selection).is_empty()
+                                && in_zones_own_mounts(&tools.state, zone, peer_mnt.as_deref())
+                        }
+                        _ => false,
+                    };
+                    let allowed = match decide(&origin, locked, &target, same_identity) {
                         Decision::Start => Ok(()),
                         Decision::Refuse(why) => Err(why),
                         Decision::Ask => ask(
@@ -1358,36 +1396,39 @@ mod tests {
     #[test]
     fn only_the_host_and_the_same_zone_start_without_a_person() {
         let nl = Origin::Zone("nl".to_owned());
-        assert_eq!(decide(&nl, false, "nl"), Decision::Start);
+        assert_eq!(decide(&nl, false, "nl", true), Decision::Start);
+        // From a container, or into one: a crossing, asked about.
+        assert_eq!(decide(&nl, false, "nl", false), Decision::Ask);
+        assert_eq!(decide(&nl, true, "nl", false), Decision::Ask);
         // A zone that calls itself the host's network is not let through as
         // "the same zone".
         let fake = Origin::Zone("unconfined".to_owned());
-        assert_eq!(decide(&fake, false, "unconfined"), Decision::Ask);
+        assert_eq!(decide(&fake, false, "unconfined", true), Decision::Ask);
         let fake = Origin::Zone("direct".to_owned());
-        assert_eq!(decide(&fake, false, "direct"), Decision::Ask);
-        assert_eq!(decide(&nl, false, "de"), Decision::Ask);
-        assert_eq!(decide(&nl, false, "unconfined"), Decision::Ask);
+        assert_eq!(decide(&fake, false, "direct", true), Decision::Ask);
+        assert_eq!(decide(&nl, false, "de", true), Decision::Ask);
+        assert_eq!(decide(&nl, false, "unconfined", true), Decision::Ask);
         assert!(matches!(
-            decide(&nl, true, "unconfined"),
+            decide(&nl, true, "unconfined", true),
             Decision::Refuse(_)
         ));
-        assert_eq!(decide(&nl, true, "nl"), Decision::Start);
+        assert_eq!(decide(&nl, true, "nl", true), Decision::Start);
         // The host never needs the broker: a request that looks like it is refused.
         assert!(matches!(
-            decide(&Origin::Host, false, "unconfined"),
+            decide(&Origin::Host, false, "unconfined", true),
             Decision::Refuse(_)
         ));
         // A system zone is never "the same zone" as a user zone of its name.
         let system = Origin::SystemZone("nl".to_owned());
-        assert_eq!(decide(&system, false, "nl"), Decision::Ask);
+        assert_eq!(decide(&system, false, "nl", true), Decision::Ask);
         assert_eq!(system.name(), "system:nl");
         // Not the host and not a zone — or gone before it was looked at: no.
         assert!(matches!(
-            decide(&Origin::Unknown, false, "unconfined"),
+            decide(&Origin::Unknown, false, "unconfined", true),
             Decision::Refuse(_)
         ));
         assert!(matches!(
-            decide(&Origin::Unknown, false, "nl"),
+            decide(&Origin::Unknown, false, "nl", true),
             Decision::Refuse(_)
         ));
     }
@@ -1399,7 +1440,7 @@ mod tests {
         let state = std::env::temp_dir().join(format!("vz-broker-{}", std::process::id()));
         // Ourselves, alive, in our own namespace: the host.
         let (a, b) = UnixStream::pair().unwrap();
-        assert_eq!(origin_of(&state, &a), Origin::Host);
+        assert_eq!(origin_of(&state, &a).0, Origin::Host);
         drop((a, b));
         // A child that connects and exits before the broker looks.
         let dir = std::env::temp_dir().join(format!("vz-broker-sock-{}", std::process::id()));
@@ -1431,7 +1472,7 @@ mod tests {
         // SAFETY: waiting for our own child.
         unsafe { libc::waitpid(child, &mut status, 0) };
         let (stream, _) = listener.accept().unwrap();
-        assert_eq!(origin_of(&state, &stream), Origin::Unknown);
+        assert_eq!(origin_of(&state, &stream).0, Origin::Unknown);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

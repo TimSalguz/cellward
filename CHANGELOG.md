@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Security
+- **A program of a container no longer crosses into another identity of its
+  zone without a question** (`rust/src/broker.rs`; review 2026-09-26). The
+  broker let any program of a zone launch into that same zone unasked — in
+  the main home (out of a layer or a sandbox, into the real home) or in
+  another container (its data). It now tells a program of the zone's own
+  from one of a container by the mount namespace (a container's launch has
+  its own, which a program there cannot leave): only a program with no
+  container, asking for none, in the same zone, goes on without a question —
+  a link opened by the zone's bus filter, a launch from a terminal of the
+  zone. Everything else is asked, a locked zone included.
 - **A zone no longer sees the containers' data** (`zone::hide_container_storage`,
   `profile-run --storage`; review 2026-09-26). Every program of a zone read
   and wrote every container's storage — a browser profile, a sandbox's home,
