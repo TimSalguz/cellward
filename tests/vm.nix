@@ -1771,11 +1771,12 @@ let
           )
           # And what else the session's ACL opens (audit 2026-09-26): a raw
           # HID node (a security key, a controller), a gamepad, a USB device.
+          # Numbers no device of the VM has: its own USB tablet is 189:1.
           machine.succeed(
               "mknod -m 600 /dev/hidraw9 c 240 9 && chown alice /dev/hidraw9 && "
               "mkdir -p /dev/input /dev/bus/usb/009 && "
               "mknod -m 600 /dev/input/js9 c 13 9 && chown alice /dev/input/js9 && "
-              "mknod -m 600 /dev/bus/usb/009/001 c 189 1 && chown alice /dev/bus/usb/009/001"
+              "mknod -m 600 /dev/bus/usb/009/001 c 189 1024 && chown alice /dev/bus/usb/009/001"
           )
           # The broker is socket-activated, and every zone wants its socket:
           # no race with the session (red on main and in CI before).
@@ -1931,7 +1932,7 @@ let
           machine.succeed(
               "printf 'E:ID_SECURITY_TOKEN=1\\nE:ID_VENDOR_ID=1050\\nE:ID_MODEL_ID=0407\\n' "
               "> /run/udev/data/c240:9 && "
-              "printf 'E:ID_VENDOR_ID=18d1\\nE:ID_MODEL_ID=4ee7\\n' > /run/udev/data/c189:1 && "
+              "printf 'E:ID_VENDOR_ID=18d1\\nE:ID_MODEL_ID=4ee7\\n' > /run/udev/data/c189:1024 && "
               "mknod -m 600 /dev/ttyUSB9 c 188 9 && chown alice /dev/ttyUSB9"
           )
           machine.wait_until_succeeds(
@@ -1948,7 +1949,7 @@ let
           assert [d["value"] for d in shown["devices"]] == ["security-keys", "serial", "usb:18d1:4ee7"], shown
           look = "stat -c %t:%T /dev/hidraw9 /dev/ttyUSB9 /dev/bus/usb/009/001; ls -A /dev/bus/usb"
           seen = alice(f"cellward run vmherm --container vmdev -- sh -c '{look}'").split()
-          assert seen == ["f0:9", "bc:9", "bd:1", "009"], f"given devices: {seen}"
+          assert seen == ["f0:9", "bc:9", "bd:400", "009"], f"given devices: {seen}"
           seen = alice(
               "cellward run vmherm --container vmlayer -- "
               "sh -c 'stat -c %t:%T /dev/hidraw9 /dev/ttyUSB9; ls -A /dev/bus/usb'"
@@ -1960,7 +1961,7 @@ let
           alice("cellward container rm vmdev")
           machine.succeed(
               "rm -f /dev/hidraw8 /dev/hidraw9 /dev/input/js9 /dev/bus/usb/009/001 /dev/ttyUSB9 "
-              "/run/udev/data/c240:9 /run/udev/data/c189:1 && "
+              "/run/udev/data/c240:9 /run/udev/data/c189:1024 && "
               "rmdir /dev/bus/usb/009 || true"
           )
           # Input methods by their portals only: IBus's private bus is hidden,
