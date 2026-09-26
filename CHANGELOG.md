@@ -29,9 +29,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   daemon's registry (the pid the daemon read from the kernel, and a serial
   no other client has), tells whose program it is the same way, and
   publishes a key per client (`vpn-zones.microphone.client.<serial>`,
-  with `vpn-zones.microphone-by-client.<zone>` = yes); the WirePlumber
-  policy decides by it, holding a new client until its key comes (3 s at
-  most, then without one). The zone's key stays for a policy of before: the
+  with `vpn-zones.microphone-by-client.<zone>` = the serial of the
+  helper's own client); the WirePlumber policy decides by it while that
+  client is there, holding a new client until its key comes — it asks
+  (`vpn-zones.microphone.pending.<serial>` = the zone), and the helper
+  answers every request of its zone, a client it cannot tell the
+  container of by an unknown one's setting. No clock decides: the key lets
+  a client go, and the helper's client gone lets the zone's key decide. The zone's key stays for a policy of before: the
   strictest of the zone and of every container launched into it since it
   came up. The
   nearest launch in a program's ancestry decides, a throwaway one too; a

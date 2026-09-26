@@ -63,6 +63,9 @@ local MIC_PREFIX = "vpn-zones.microphone."
 -- and the zone's marker that the helper publishes them.
 local CLIENT_MIC_PREFIX = "vpn-zones.microphone.client."
 local BY_CLIENT_PREFIX = "vpn-zones.microphone-by-client."
+-- The policy's request for a client's own key, `<serial>` = its zone: the
+-- helper answers every one of its zone's.
+local PENDING_PREFIX = "vpn-zones.microphone.pending."
 -- A zone's clients and nodes at most (the pulse filter's MAX_CONNECTIONS is
 -- 128 too): the daemon accepts the zone's connections itself, and every one
 -- is a client in the host's daemon and a finalize() here, every node an
@@ -104,9 +107,28 @@ local function serial_of (client)
   return prop (client, "object.serial") or gprop (client, "object.serial")
 end
 
--- Does the helper of `zone` publish each client's own key?
+-- The serial of a client going away, while the signal of it is handled:
+-- not taken for one that is there.
+local leaving = nil
+
+-- Does the helper of `zone` publish each client's own key? Its marker is the
+-- serial of its own client, and it does while that client is there. A
+-- helper of before said only "yes": it cannot be followed, so the zone's
+-- key decides.
 local function by_client (zone)
-  return metadata ~= nil and metadata:find (0, BY_CLIENT_PREFIX .. zone) == "yes"
+  if metadata == nil then
+    return false
+  end
+  local serial = metadata:find (0, BY_CLIENT_PREFIX .. zone)
+  if serial == nil or serial == "yes" or serial == leaving then
+    return false
+  end
+  for client in clients_om:iterate () do
+    if serial_of (client) == serial then
+      return true
+    end
+  end
+  return false
 end
 
 -- Has the helper published this client's own key yet?
@@ -128,12 +150,26 @@ local function microphone (z)
 end
 
 -- A zone's client whose own key has not come yet is held (the daemon holds a
--- client with no R on the core) until it comes, and at most this long —
--- then let go with none, i.e. with no microphone: a program that looks at
+-- client with no R on the core) until it comes — asked for, and the helper
+-- answers every client of its zone — or until the helper is gone (its own
+-- client removed): then let go by the zone's key. No clock: a loaded machine
+-- only makes it wait longer, never decide otherwise; a program that looks at
 -- the graph as soon as it connects sees what its container may.
-local KEY_WAIT_MS = 3000
 -- bound id -> the zone client waiting for its key
 local waiting = {}
+
+-- Ask the helper for `z`'s own key, or stop asking.
+local function ask (z)
+  if metadata ~= nil and z.serial ~= nil then
+    metadata:set (0, PENDING_PREFIX .. z.serial, "Spa:String", z.zone)
+  end
+end
+
+local function unask (z)
+  if metadata ~= nil and z.serial ~= nil then
+    metadata:set (0, PENDING_PREFIX .. z.serial, nil, nil)
+  end
+end
 
 local SINKS = { ["Audio/Sink"] = true, ["Audio/Duplex"] = true }
 -- Not Audio/Duplex: WirePlumber makes a duplex node an input whose output
@@ -320,6 +356,19 @@ local function regrant_sources (zone)
   end
 end
 
+-- The clients of `zone` waiting for their keys let go where they may be now:
+-- the key came, or the zone has no helper to answer any more.
+local function resolve (zone)
+  local helped = by_client (zone)
+  for id, z in pairs (waiting) do
+    if z.zone == zone and (not helped or has_key (z)) then
+      waiting [id] = nil
+      unask (z)
+      finalize (z)
+    end
+  end
+end
+
 clients_om:connect ("object-added", function (_, client)
   local engine = prop (client, "pipewire.sec.engine")
   log:info (client, string.format ("client %d added (engine %s)",
@@ -346,25 +395,21 @@ clients_om:connect ("object-added", function (_, client)
   local z = { zone = zone, client = client, serial = serial_of (client) }
   local id = client ["bound-id"]
   zones [id] = z
-  if by_client (zone) and not has_key (z) then
+  if by_client (zone) and not has_key (z) and z.serial ~= nil then
     waiting [id] = z
-    Core.timeout_add (KEY_WAIT_MS, function ()
-      if waiting [id] == z then
-        waiting [id] = nil
-        log:notice (client, string.format (
-            "zone %s: no microphone key for client %d in time — without one", zone, id))
-        finalize (z)
-      end
-      return false
-    end)
+    ask (z)
     return
   end
   finalize (z)
 end)
 
 clients_om:connect ("object-removed", function (_, client)
-  zones [client ["bound-id"]] = nil
-  waiting [client ["bound-id"]] = nil
+  local id = client ["bound-id"]
+  if waiting [id] ~= nil then
+    unask (waiting [id])
+  end
+  zones [id] = nil
+  waiting [id] = nil
 end)
 
 -- A zone's node that may not be: no permission left on it, and destroyed.
@@ -610,6 +655,46 @@ SimpleEventHook {
 -- Is the access rule of 90-vpn-zones.conf in force: does a zone's client get
 -- no default permission from the config's rules? Without it WirePlumber 0.5.14
 -- would give it read and execute on everything.
+-- A helper's own client come or gone: the clients of the zones it helps by
+-- their own keys, or by the zone's again; the waiting ones let go where they
+-- may be. (Here, below the links' checks: those are the ones called.)
+local function helper_changed (client, gone)
+  local serial = serial_of (client)
+  if metadata == nil or serial == nil then
+    return
+  end
+  local helped = {}
+  for _, z in pairs (zones) do
+    if helped [z.zone] == nil then
+      helped [z.zone] = metadata:find (0, BY_CLIENT_PREFIX .. z.zone) == serial
+    end
+  end
+  local any = false
+  if gone then
+    leaving = serial
+  end
+  for zone, yes in pairs (helped) do
+    if yes then
+      any = true
+      regrant_sources (zone)
+      resolve (zone)
+    end
+  end
+  leaving = nil
+  if any then
+    check_all_links ()
+    rescan_linking ()
+  end
+end
+
+clients_om:connect ("object-added", function (_, client)
+  helper_changed (client, false)
+end)
+
+clients_om:connect ("object-removed", function (_, client)
+  helper_changed (client, true)
+end)
+
 local function access_rule_in_force ()
   local rules = Conf.get_section_as_json ("access.rules")
   if rules == nil then
@@ -645,7 +730,10 @@ impl_metadata:activate (Features.ALL, function (m, e)
     if subject ~= 0 or key == nil then
       return
     end
-    if key:sub (1, #CLIENT_MIC_PREFIX) == CLIENT_MIC_PREFIX then
+    if key:sub (1, #PENDING_PREFIX) == PENDING_PREFIX then
+      -- Our own request.
+      return
+    elseif key:sub (1, #CLIENT_MIC_PREFIX) == CLIENT_MIC_PREFIX then
       local serial = key:sub (#CLIENT_MIC_PREFIX + 1)
       local regranted = false
       for id, z in pairs (zones) do
@@ -654,6 +742,7 @@ impl_metadata:activate (Features.ALL, function (m, e)
             -- Its key came: let it go, with what the key says. It has no
             -- node yet, nothing to link or unlink.
             waiting [id] = nil
+            unask (z)
             finalize (z)
           else
             regrant_client (z)
@@ -668,7 +757,9 @@ impl_metadata:activate (Features.ALL, function (m, e)
         return
       end
     elseif key:sub (1, #BY_CLIENT_PREFIX) == BY_CLIENT_PREFIX then
-      regrant_sources (key:sub (#BY_CLIENT_PREFIX + 1))
+      local zone = key:sub (#BY_CLIENT_PREFIX + 1)
+      regrant_sources (zone)
+      resolve (zone)
     elseif key:sub (1, #MIC_PREFIX) == MIC_PREFIX then
       regrant_sources (key:sub (#MIC_PREFIX + 1))
     else

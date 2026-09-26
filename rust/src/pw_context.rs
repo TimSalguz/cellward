@@ -65,10 +65,14 @@
 //! of one zone the microphone is a setting, not a wall; the sound filter has
 //! the kernel's pidfd, `SO_PEERPIDFD`, and no such gap). Its
 //! setting is published as [`CLIENT_MICROPHONE_KEY`]`<serial>` = `yes` or
-//! `no`, removed with the client; [`BY_CLIENT_KEY`]`<zone>` = `yes` tells the
-//! policy that this helper does so, and the policy then decides by a
-//! client's own key alone — holding a new client (no R on the core) until
-//! its key comes, a few seconds at most, then letting it go with none. For
+//! `no`, removed with the client; [`BY_CLIENT_KEY`]`<zone>` = the serial of
+//! this helper's own client tells the policy that this helper does so, and
+//! the policy then decides by a client's own key alone — holding a new
+//! client (no R on the core) until its key comes, and asking for it
+//! ([`PENDING_KEY`]`<serial>` = the zone): the helper answers every such
+//! request of its zone, a client it cannot tell the container of by the
+//! setting of an unknown one. No clock: a client is let go by its key, or by
+//! the zone's when this helper's client is gone. For
 //! a policy of before, the zone's key [`MICROPHONE_KEY`]`<zone>` stays: the
 //! strictest of the zone and of every container launched into it since it
 //! came up. All of them are published as soon as the metadata is bound,
@@ -126,9 +130,16 @@ pub const MICROPHONE_KEY: &str = "vpn-zones.microphone.";
 /// container of the program that connected (`crate::origin`). A serial is
 /// never another client's, as a bound id may be.
 pub const CLIENT_MICROPHONE_KEY: &str = "vpn-zones.microphone.client.";
-/// `<prefix><zone>` = `yes`: this helper publishes each client's own — the
-/// policy then decides by it, and a client with none has no microphone.
+/// `<prefix><zone>` = the `object.serial` of this helper's own client: it
+/// publishes each client's own — the policy then decides by it, for as long
+/// as that client is there. (`yes`, a helper of before, is followed by
+/// nobody: the zone's key decides.)
 pub const BY_CLIENT_KEY: &str = "vpn-zones.microphone-by-client.";
+/// `<prefix><serial>` = the zone: the policy waits for this client's own key.
+pub const PENDING_KEY: &str = "vpn-zones.microphone.pending.";
+/// The clients of the daemon a helper remembers the number of, to answer a
+/// request for one of them.
+const MAX_SEEN: usize = 4096;
 /// The zone's clients a helper keeps track of at most: the policy lets a
 /// zone have 128 (`MAX_CLIENTS` in the policy); one past this has no key,
 /// and so no microphone.
@@ -847,6 +858,12 @@ struct Session<'a> {
     by_client_published: bool,
     /// The zone's clients the daemon has, by their global id.
     clients: HashMap<u32, ClientMic>,
+    /// This helper's own client's serial, once the daemon has shown it.
+    own_serial: Option<String>,
+    /// Every client of the daemon seen: its serial and pid, by global id.
+    seen: HashMap<u32, (String, Option<i32>)>,
+    /// Serials the policy asks for whose client is not seen yet.
+    pending: std::collections::HashSet<String>,
 }
 
 /// A client of the zone, as this helper knows it.
@@ -939,31 +956,40 @@ impl<'a> Session<'a> {
                     // At once, not on the next tick: whatever the metadata
                     // holds for this zone was left by an earlier run.
                     self.publish(false)?;
-                } else if kind == TYPE_CLIENT && self.clients.len() < MAX_CLIENTS {
+                } else if kind == TYPE_CLIENT {
                     // The program that connected, as the daemon knows it (its
-                    // credentials, not its word); ours only if it is a
-                    // process of this zone.
+                    // credentials, not its word); ours if it is a process of
+                    // this zone, or if the policy asks for it — the policy
+                    // knows a client of the zone by its socket.
                     let pid = props
                         .get("pipewire.sec.pid")
                         .and_then(|p| p.parse::<i32>().ok());
-                    let serial = props.get("object.serial").filter(|s| !s.is_empty());
-                    if let (Some(pid), Some(serial)) = (pid, serial) {
-                        if let Some(who) = self.mic.client(pid) {
-                            let serial = serial.clone();
-                            self.clients.insert(
-                                id,
-                                ClientMic {
-                                    serial,
-                                    who,
-                                    published: None,
-                                },
-                            );
-                            self.publish(false)?;
-                        }
+                    let Some(serial) = props
+                        .get("object.serial")
+                        .filter(|s| !s.is_empty())
+                        .cloned()
+                    else {
+                        return Ok(());
+                    };
+                    // This helper's own connection: the marker's value.
+                    if pid == Some(std::process::id() as i32) && self.own_serial.is_none() {
+                        self.own_serial = Some(serial.clone());
+                        self.by_client_published = false;
+                        self.publish(false)?;
+                    }
+                    if self.seen.len() < MAX_SEEN {
+                        self.seen.insert(id, (serial.clone(), pid));
+                    }
+                    let asked = self.pending.remove(&serial);
+                    match pid.and_then(|pid| self.mic.client(pid)) {
+                        Some(who) => self.track(id, serial, who)?,
+                        None if asked => self.track(id, serial, crate::origin::Who::Unknown)?,
+                        None => {}
                     }
                 }
             }
             Event::GlobalRemove { id } => {
+                self.seen.remove(&id);
                 if Some(id) == self.metadata {
                     self.metadata = None;
                     self.metadata_proxy = None;
@@ -1007,9 +1033,48 @@ impl<'a> Session<'a> {
                 key: Some(key),
                 value,
             } if key == self.by_client_key() => {
-                if value.as_deref() != Some("yes") {
+                if self.own_serial.is_some() && value != self.own_serial {
                     self.by_client_published = false;
                     self.publish(false)?;
+                }
+            }
+            // The policy waits for a client's own key: answered for every
+            // client of this zone — one not told the container of is an
+            // unknown one's.
+            Event::Property {
+                subject: 0,
+                key: Some(key),
+                value,
+            } if key.starts_with(PENDING_KEY) => {
+                let serial = key[PENDING_KEY.len()..].to_owned();
+                if value.as_deref() != Some(self.zone) {
+                    self.pending.remove(&serial);
+                } else if self.clients.values().any(|c| c.serial == serial) {
+                    // Its key goes again: the policy asks because it has none.
+                    for client in self.clients.values_mut() {
+                        if client.serial == serial {
+                            client.published = None;
+                        }
+                    }
+                    self.publish(false)?;
+                } else {
+                    let known = self
+                        .seen
+                        .iter()
+                        .find(|(_, (s, _))| *s == serial)
+                        .map(|(&id, &(_, pid))| (id, pid));
+                    match known {
+                        Some((id, pid)) => {
+                            let who = pid
+                                .and_then(|pid| self.mic.client(pid))
+                                .unwrap_or(crate::origin::Who::Unknown);
+                            self.track(id, serial, who)?;
+                        }
+                        // Its global not seen yet: answered when it is.
+                        None => {
+                            self.pending.insert(serial);
+                        }
+                    }
                 }
             }
             Event::Property {
@@ -1027,6 +1092,7 @@ impl<'a> Session<'a> {
             }
             Event::Property { key: None, .. } => {
                 self.policy = None;
+                self.pending.clear();
                 self.forget_published();
                 self.publish(false)?;
             }
@@ -1093,6 +1159,23 @@ impl<'a> Session<'a> {
         format!("{MICROPHONE_KEY}{}", self.zone)
     }
 
+    /// A client of the zone kept track of — its key published, with `who`'s
+    /// setting — within [`MAX_CLIENTS`].
+    fn track(&mut self, id: u32, serial: String, who: crate::origin::Who) -> io::Result<()> {
+        if self.clients.len() >= MAX_CLIENTS {
+            return Ok(());
+        }
+        self.clients.insert(
+            id,
+            ClientMic {
+                serial,
+                who,
+                published: None,
+            },
+        );
+        self.publish(false)
+    }
+
     /// The zone's marker that its clients have keys of their own.
     fn by_client_key(&self) -> String {
         format!("{BY_CLIENT_KEY}{}", self.zone)
@@ -1121,10 +1204,14 @@ impl<'a> Session<'a> {
             self.send(request::set_property(proxy, &key, Some(value)), &[])?;
             self.mic_published = Some(value);
         }
-        if always || !self.by_client_published {
-            let key = self.by_client_key();
-            self.send(request::set_property(proxy, &key, Some("yes")), &[])?;
-            self.by_client_published = true;
+        // The marker once this helper's own client is known: what the
+        // policy follows it by.
+        if let Some(serial) = self.own_serial.clone() {
+            if always || !self.by_client_published {
+                let key = self.by_client_key();
+                self.send(request::set_property(proxy, &key, Some(&serial)), &[])?;
+                self.by_client_published = true;
+            }
         }
         let mut read: Vec<(crate::origin::Who, &'static str)> = Vec::new();
         let mut ids: Vec<u32> = self.clients.keys().copied().collect();
@@ -1223,6 +1310,9 @@ fn serve(
         mic_published: None,
         by_client_published: false,
         clients: HashMap::new(),
+        own_serial: None,
+        seen: HashMap::new(),
+        pending: Default::default(),
     };
     s.start()?;
     report(s.state());
@@ -1845,6 +1935,16 @@ mod tests {
         let (m, _) = d.next();
         assert_eq!((m.id, m.opcode), (CORE, CORE_GET_REGISTRY));
 
+        // This helper's own client: the marker is its serial.
+        let own = std::process::id().to_string();
+        d.global(
+            29,
+            TYPE_CLIENT,
+            &[
+                ("pipewire.sec.pid", own.as_str()),
+                ("object.serial", "6999"),
+            ],
+        );
         // A metadata object of another name is not bound.
         d.global(30, TYPE_METADATA, &[("metadata.name", "default")]);
         d.global(31, TYPE_SECURITY_CONTEXT, &[]);
@@ -1855,11 +1955,11 @@ mod tests {
         assert_eq!(v.members().unwrap()[0], Value::Int(32));
         assert_eq!(v.members().unwrap()[3], Value::Int(3));
         // The microphone ("ask" is "no" here), at once, and the marker that
-        // the clients have keys of their own.
+        // the clients have keys of their own: this helper's client.
         let (m, _) = d.next();
         assert_mic(&m, "no");
         let (m, _) = d.next();
-        assert_key(&m, "vpn-zones.microphone-by-client.nl", Some("yes"));
+        assert_key(&m, "vpn-zones.microphone-by-client.nl", Some("6999"));
         // A value an earlier run left (the metadata keeps it for as long as
         // WirePlumber runs) is put right at once; the helper's own value
         // coming back changes nothing.
@@ -1891,7 +1991,7 @@ mod tests {
         let (m, _) = d.next();
         assert_mic(&m, "no");
         let (m, _) = d.next();
-        assert_key(&m, "vpn-zones.microphone-by-client.nl", Some("yes"));
+        assert_key(&m, "vpn-zones.microphone-by-client.nl", Some("6999"));
         let (m, _) = d.next();
         assert_eq!((m.id, m.opcode), (REGISTRY, REGISTRY_BIND));
         let (v, _) = pod::decode(&m.body).unwrap();
@@ -2030,6 +2130,15 @@ mod tests {
         for _ in 0..3 {
             d.next();
         }
+        let own = std::process::id().to_string();
+        d.global(
+            39,
+            TYPE_CLIENT,
+            &[
+                ("pipewire.sec.pid", own.as_str()),
+                ("object.serial", "7000"),
+            ],
+        );
         // A client before the metadata: its key waits for it.
         d.global(
             40,
@@ -2042,7 +2151,7 @@ mod tests {
         let (m, _) = d.next();
         assert_mic(&m, "no");
         let (m, _) = d.next();
-        assert_key(&m, "vpn-zones.microphone-by-client.nl", Some("yes"));
+        assert_key(&m, "vpn-zones.microphone-by-client.nl", Some("7000"));
         let (m, _) = d.next();
         assert_key(&m, "vpn-zones.microphone.client.7001", Some("yes"));
         d.global(
@@ -2070,6 +2179,39 @@ mod tests {
         d.property(3, "vpn-zones.microphone.client.7002", Some("yes"));
         let (m, _) = d.next();
         assert_key(&m, "vpn-zones.microphone.client.7002", Some("no"));
+        // And for the marker.
+        d.property(3, "vpn-zones.microphone-by-client.nl", Some("yes"));
+        let (m, _) = d.next();
+        assert_key(&m, "vpn-zones.microphone-by-client.nl", Some("7000"));
+        // The policy asks for a client of the zone this helper cannot tell
+        // the container of: an unknown one's setting ("ask": no).
+        d.property(3, "vpn-zones.microphone.pending.7003", Some("nl"));
+        let (m, _) = d.next();
+        assert_key(&m, "vpn-zones.microphone.client.7003", Some("no"));
+        // Asked before its global comes: answered when it does.
+        d.property(3, "vpn-zones.microphone.pending.7010", Some("nl"));
+        d.global(
+            45,
+            TYPE_CLIENT,
+            &[("pipewire.sec.pid", "400"), ("object.serial", "7010")],
+        );
+        let (m, _) = d.next();
+        assert_key(&m, "vpn-zones.microphone.client.7010", Some("no"));
+        // Another zone's request is not this helper's: nothing — the pong
+        // is the next message.
+        d.property(3, "vpn-zones.microphone.pending.7012", Some("other"));
+        d.global(
+            46,
+            TYPE_CLIENT,
+            &[("pipewire.sec.pid", "500"), ("object.serial", "7012")],
+        );
+        d.send(
+            CORE,
+            CORE_PING,
+            &Value::Struct(vec![Value::Int(0), Value::Int(10)]),
+        );
+        let (m, _) = d.next();
+        assert_eq!((m.id, m.opcode), (CORE, CORE_PONG));
         // Gone: its key with it.
         d.send(
             REGISTRY,

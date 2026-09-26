@@ -385,6 +385,8 @@ let
           else:
               raise Exception(f"a client's key outlived it: {meta}")
           assert "vpn-zones.microphone-by-client.offline" in meta, meta
+          # Nor any request for a key: each went with its answer.
+          assert "vpn-zones.microphone.pending." not in meta, meta
           alice("cellward microphone offline yes")
           alice("cellward container set vmpwmic microphone no")
           out = in_container(record.format("vz-cno"))
