@@ -111,8 +111,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   own entry, never a bind — checking each once more by number, vendor,
   product and serial. A sandbox binds them into its own `/dev`; a bind
   outlives the device and would open whatever takes its number next, so the
-  zone's holder, seeing a device go, puts `/dev/null` over its path in every
-  other mount namespace of the zone's programs. A launch with no container
+  zone's holder, seeing a device go, takes the bind away and puts
+  `/dev/null` in its place in every other mount namespace of the zone's
+  programs; and when another device gets the number of one gone, it kills
+  every program of the zone that still holds the old node — a descriptor
+  (`O_PATH` too), a bind of its own — unless it is the same device back
+  (the kernel's word in sysfs: a gamepad back after its battery died is
+  not killed for). This runs in a thread of its own, each look into a
+  namespace bounded (2 s), so a namespace a program made cannot stall the
+  covering of new devices. A launch with no container
   gets none; a device plugged in later is seen after the program restarts.
   `games` never gives a HID device that also types or points (a combo
   receiver), and takes Bluetooth gamepads through `uhid`. Dangerous: `serial`
@@ -169,9 +176,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   2026-09-26, from inside a zone; LEAK-MODEL §19): `/dev/uinput` — a
   program of a zone made a virtual keyboard and typed into any window of
   the host —, `/dev/rfkill` (the host's radios off), `/dev/i2c-*`, the
-  consoles `/dev/tty<N>`, `/dev/hidraw*`, `/dev/ttyUSB*`, `/dev/ttyACM*` are
-  covered with `/dev/null` in every zone, those plugged in later too, and
-  `/dev/input` and `/dev/bus/usb` are hidden whole. Security keys (FIDO),
+  consoles `/dev/tty<N>`, `/dev/hidraw*`, `/dev/ttyUSB*`, `/dev/ttyACM*`,
+  optical drives (`/dev/sr*`, `/dev/sg*`), FireWire (`/dev/fw*`) are
+  covered with `/dev/null` in every zone, those plugged in later too, as are
+  video capture's other nodes (`v4l-subdev*`, `v4l-touch*`, `radio*`,
+  `vbi*`, `swradio*` — with the camera setting) and TV tuners (`/dev/dvb`,
+  under a tmpfs, like `/dev/snd` — now also when it appears after the zone
+  is up); `/dev/input` and `/dev/bus/usb` are hidden whole. Left open:
+  the GPU (`/dev/dri`) and `/dev/udmabuf`. Security keys (FIDO),
   gamepads, phones and serial adapters no longer work in a zone until they
   can be given to a container on purpose (device sets: to come).
 - **The bus filter records a portal's refusal of the zone's id before the

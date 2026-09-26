@@ -71,11 +71,11 @@ impl Grant {
         let mut parts = word.strip_prefix("usb:")?.splitn(3, ':');
         let vendor = hex4(parts.next()?)?;
         let product = hex4(parts.next()?)?;
+        // Only a serial a pass can carry (`serial_word`): one it could not
+        // would be checked by the number and the maker alone.
         let serial = match parts.next() {
             None => None,
-            Some(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic()) => {
-                Some(s.to_owned())
-            }
+            Some(s) if serial_word(s) => Some(s.to_owned()),
             Some(_) => return None,
         };
         Some(Self::Usb {
@@ -235,7 +235,7 @@ fn serial_word(serial: &str) -> bool {
 }
 
 /// Whether `path` is of the kinds a grant gives: `hidraw<N>`, `ttyUSB<N>`,
-/// `ttyACM<N>`, a camera's `video<N>`/`media<N>`, `input/event<N>`,
+/// `ttyACM<N>`, `input/event<N>`,
 /// `input/js<N>`, `bus/usb/<bus>/<device>` — all below `/dev`.
 pub fn grantable_path(path: &Path) -> bool {
     let numbered = |name: &str, prefixes: &[&str]| {
@@ -253,7 +253,7 @@ pub fn grantable_path(path: &Path) -> bool {
         return false;
     }
     match parts.as_slice() {
-        [name] => numbered(name, &["hidraw", "ttyUSB", "ttyACM", "video", "media"]),
+        [name] => numbered(name, &["hidraw", "ttyUSB", "ttyACM"]),
         ["input", name] => numbered(name, &["event", "js"]),
         ["bus", "usb", bus, device] => digits(bus) && digits(device),
         _ => false,
@@ -412,9 +412,11 @@ pub fn connected(nodes: &[Node]) -> Vec<Connected> {
                     Grant::Usb {
                         vendor,
                         product,
+                        // A serial a grant cannot carry is left out: the
+                        // device is named by its maker and model alone.
                         serial: node
                             .prop("ID_SERIAL_SHORT")
-                            .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic()))
+                            .filter(|s| serial_word(s))
                             .map(str::to_owned),
                     }
                     .word(),
@@ -664,6 +666,9 @@ mod tests {
             "usb:1050:04g7",
             "usb:1050:0407:",
             "usb:1050:0407:a b",
+            // Not a serial a pass carries.
+            "usb:1050:0407:a:b",
+            "usb:1050:0407:a=b",
         ] {
             assert_eq!(Grant::parse(bad), None, "{bad:?}");
         }

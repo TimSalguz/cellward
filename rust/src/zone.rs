@@ -2826,26 +2826,10 @@ fn hide_devices(zone: &Zone) -> Result<(), String> {
     share_mount(Path::new("/dev")).map_err(|e| {
         format!("cannot share /dev: {e} — a device plugged in later would be in reach")
     })?;
-    // Whole under a tmpfs: sound goes through the zone's filters, and the
-    // cameras' links are no camera.
-    for dir in ["/dev/snd", "/dev/v4l"] {
-        let dir = Path::new(dir);
-        if !dir.is_dir() {
-            continue;
-        }
-        sys::mount(
-            OsStr::new("tmpfs"),
-            dir,
-            "tmpfs",
-            libc::MS_NOSUID | libc::MS_NOEXEC,
-            "mode=0755,size=16k",
-        )
-        .map_err(|e| {
-            format!(
-                "cannot hide {}: {e} — programs in the zone would open it directly",
-                dir.display()
-            )
-        })?;
+    // Whole under a tmpfs: sound goes through the zone's filters, the
+    // cameras' links are no camera, a TV tuner is a camera too.
+    for dir in HIDDEN_DIRS {
+        hide_dir(Path::new(dir))?;
     }
     // Every other node one by one, never a directory rebuilt of binds: a
     // node a launch is given (`profile::give_devices`) is then the device's
@@ -2857,7 +2841,8 @@ fn hide_devices(zone: &Zone) -> Result<(), String> {
     };
     let watch = sys::DirWatch::new().map_err(no_watch)?;
     watch.add(Path::new("/dev")).map_err(no_watch)?;
-    for dir in [Path::new("/dev/input"), Path::new("/dev/bus/usb")] {
+    for dir in WATCHED_DIRS {
+        let dir = Path::new(dir);
         if dir.is_dir() {
             watch.add(dir).map_err(no_watch)?;
         }
@@ -2865,46 +2850,39 @@ fn hide_devices(zone: &Zone) -> Result<(), String> {
     for bus in usb_buses() {
         watch.add(&bus).map_err(no_watch)?;
     }
+    // Each node as it is before its cover: what a reference to it holds
+    // (`device_guard`), for when it is gone.
+    let mut known: std::collections::HashMap<PathBuf, crate::device_guard::Seen> =
+        Default::default();
     for node in hidden_nodes() {
+        if let Some(seen) = crate::device_guard::seen(&node) {
+            known.insert(node.clone(), seen);
+        }
         cover_node(&node)?;
     }
     let name = zone.name().into_owned();
-    thread::spawn(move || loop {
-        let events = match watch.events() {
-            Ok(events) => events,
-            Err(e) => {
-                eprintln!("zone {name}: the device watch ended ({e})");
-                return;
-            }
+    let guard = crate::device_guard::start(name.clone());
+    thread::spawn(move || {
+        let mut watcher = DeviceWatch {
+            name,
+            watch,
+            known,
+            guard,
         };
-        for event in events {
-            let covered = |path: &Path| {
-                if let Err(e) = cover_node(path) {
-                    eprintln!("zone {name}: {e}");
-                }
-            };
-            match event {
-                sys::DirEvent::Appeared(path)
-                    if path.parent() == Some(Path::new("/dev/bus/usb")) =>
-                {
-                    // A new bus: watched too, and what is on it covered.
-                    if let Err(e) = watch.add(&path) {
-                        eprintln!("zone {name}: no watch on {} ({e})", path.display());
-                    }
-                    for node in char_nodes(&path) {
-                        covered(&node);
+        loop {
+            match watcher.watch.events() {
+                Ok(events) => {
+                    for event in events {
+                        watcher.handle(event);
                     }
                 }
-                sys::DirEvent::Appeared(path) if hidden_path(&path) => covered(&path),
-                // A device gone: wherever a sandbox still has it bound, /dev/null
-                // over the bind before another device can take its number.
-                sys::DirEvent::Gone(path) if hidden_path(&path) => revoke_everywhere(&name, &path),
-                sys::DirEvent::Overflow => {
-                    for node in hidden_nodes() {
-                        covered(&node);
-                    }
+                Err(e) => {
+                    // Not given up: what happened meanwhile is looked at as
+                    // after an overflow.
+                    eprintln!("zone {}: the device watch failed ({e})", watcher.name);
+                    thread::sleep(Duration::from_secs(1));
+                    watcher.handle(sys::DirEvent::Overflow);
                 }
-                _ => {}
             }
         }
     });
@@ -2913,6 +2891,173 @@ fn hide_devices(zone: &Zone) -> Result<(), String> {
         zone.name()
     );
     Ok(())
+}
+
+/// Directories of `/dev` hidden whole, under a tmpfs.
+const HIDDEN_DIRS: [&str; 3] = ["/dev/snd", "/dev/v4l", "/dev/dvb"];
+
+/// Directories of `/dev` watched besides `/dev` itself, where they are.
+const WATCHED_DIRS: [&str; 3] = ["/dev/input", "/dev/bus", "/dev/bus/usb"];
+
+/// A tmpfs over `dir` of `/dev`, where it is.
+fn hide_dir(dir: &Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    sys::mount(
+        OsStr::new("tmpfs"),
+        dir,
+        "tmpfs",
+        libc::MS_NOSUID | libc::MS_NOEXEC,
+        "mode=0755,size=16k",
+    )
+    .map_err(|e| {
+        format!(
+            "cannot hide {}: {e} — programs in the zone would open it directly",
+            dir.display()
+        )
+    })
+}
+
+/// The watch over `/dev` a zone keeps for as long as it is up.
+struct DeviceWatch {
+    name: String,
+    watch: sys::DirWatch,
+    /// Each node covered, as it was before its cover.
+    known: std::collections::HashMap<PathBuf, crate::device_guard::Seen>,
+    /// The worker that looks into the zone's programs.
+    guard: std::sync::mpsc::Sender<crate::device_guard::Job>,
+}
+
+impl DeviceWatch {
+    fn handle(&mut self, event: sys::DirEvent) {
+        match event {
+            sys::DirEvent::Appeared(path) if path.parent() == Some(Path::new("/dev")) => {
+                let one_of = |dirs: &[&str]| dirs.iter().any(|d| Path::new(d) == path);
+                if one_of(&HIDDEN_DIRS) {
+                    // A sound card, a camera, a tuner plugged into a machine
+                    // that had none.
+                    if let Err(e) = hide_dir(&path) {
+                        eprintln!("zone {}: {e}", self.name);
+                    }
+                } else if one_of(&WATCHED_DIRS) {
+                    self.watch_dir(&path);
+                } else if hidden_path(&path) {
+                    self.cover(&path);
+                }
+            }
+            sys::DirEvent::Appeared(path) if WATCHED_DIRS.iter().any(|d| Path::new(d) == path) => {
+                self.watch_dir(&path);
+            }
+            sys::DirEvent::Appeared(path) if path.parent() == Some(Path::new("/dev/bus/usb")) => {
+                // A new bus: watched too, and what is on it covered.
+                self.watch_dir(&path);
+            }
+            sys::DirEvent::Appeared(path) if hidden_path(&path) => self.cover(&path),
+            // A device gone: wherever a sandbox still has it bound, /dev/null
+            // over the bind; whoever still holds it, killed if another device
+            // gets its number.
+            sys::DirEvent::Gone(path) if hidden_path(&path) => {
+                let seen = self.known.remove(&path);
+                let _ = self.guard.send(crate::device_guard::Job::Gone(path, seen));
+            }
+            sys::DirEvent::Overflow => self.rescan(),
+            _ => {}
+        }
+    }
+
+    /// A directory that may hold nodes: watched, then what is in it covered
+    /// — in that order, so nothing that appears in between is lost.
+    fn watch_dir(&mut self, dir: &Path) {
+        if let Err(e) = self.watch.add(dir) {
+            eprintln!("zone {}: no watch on {} ({e})", self.name, dir.display());
+        }
+        if dir == Path::new("/dev/bus") {
+            let usb = Path::new("/dev/bus/usb");
+            if usb.is_dir() {
+                self.watch_dir(usb);
+            }
+            return;
+        }
+        if dir == Path::new("/dev/bus/usb") {
+            for bus in usb_buses() {
+                self.watch_dir(&bus);
+            }
+            return;
+        }
+        for node in char_nodes(dir) {
+            self.cover(&node);
+        }
+    }
+
+    /// `/dev/null` over a node; what it was, told to the worker.
+    fn cover(&mut self, path: &Path) {
+        let seen = crate::device_guard::seen(path);
+        if let Err(e) = cover_node(path) {
+            eprintln!("zone {}: {e}", self.name);
+        }
+        if let Some(seen) = seen {
+            self.known.insert(path.to_path_buf(), seen.clone());
+            let job = crate::device_guard::Job::Appeared(path.to_path_buf(), seen);
+            let _ = self.guard.send(job);
+        }
+    }
+
+    /// What happened is not known: a node covered before and not there any
+    /// more is gone, a node not covered is new.
+    fn rescan(&mut self) {
+        let gone: Vec<PathBuf> = self
+            .known
+            .keys()
+            .filter(|path| {
+                // Ours still: `/dev/null` there. Anything else — nothing, or
+                // a node not covered — is another entry by now.
+                crate::devices::char_device(path) != Some((1, 3))
+            })
+            .cloned()
+            .collect();
+        for path in gone {
+            let seen = self.known.remove(&path);
+            let _ = self.guard.send(crate::device_guard::Job::Gone(path, seen));
+        }
+        for dir in HIDDEN_DIRS {
+            // Hidden again only where our tmpfs is not on it already.
+            let dir = Path::new(dir);
+            if dir.is_dir() && !is_tmpfs(dir) {
+                if let Err(e) = hide_dir(dir) {
+                    eprintln!("zone {}: {e}", self.name);
+                }
+            }
+        }
+        for dir in WATCHED_DIRS {
+            let dir = Path::new(dir);
+            if dir.is_dir() {
+                if let Err(e) = self.watch.add(dir) {
+                    eprintln!("zone {}: no watch on {} ({e})", self.name, dir.display());
+                }
+            }
+        }
+        for bus in usb_buses() {
+            if let Err(e) = self.watch.add(&bus) {
+                eprintln!("zone {}: no watch on {} ({e})", self.name, bus.display());
+            }
+        }
+        for node in hidden_nodes() {
+            self.cover(&node);
+        }
+    }
+}
+
+/// Whether `dir` is a tmpfs's root.
+fn is_tmpfs(dir: &Path) -> bool {
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: statfs into a zeroed struct, the path NUL-terminated.
+    unsafe {
+        let mut st: libc::statfs = std::mem::zeroed();
+        libc::statfs(c.as_ptr(), &mut st) == 0 && st.f_type == libc::TMPFS_MAGIC as _
+    }
 }
 
 /// The bus directories of `/dev/bus/usb`.
@@ -2966,111 +3111,6 @@ fn hidden_path(path: &Path) -> bool {
         || parent.parent() == Some(Path::new("/dev/bus/usb"))
 }
 
-/// `/dev/null` over `path` in every mount namespace of the zone's programs
-/// but its own where `path` still is: a sandbox binds the nodes it is given
-/// (`fs-sandbox --device`, `--camera`), and a bind outlives the device —
-/// its inode opens whatever device gets that number next, a keyboard plugged
-/// in after a security key. The zone's own namespace, and every launch's
-/// copy of it, lose the entry with the device.
-///
-/// Nothing mounts over such a bind: its dentry is the gone node's, unlinked,
-/// and the kernel refuses a mount on an unlinked dentry (ENOENT). So the bind
-/// is taken away first, and `/dev/null` goes over what it stood on — the
-/// sandbox's empty placeholder.
-fn revoke_everywhere(zone: &str, path: &Path) {
-    let (Ok(target), Ok(null)) = (
-        std::ffi::CString::new(path.as_os_str().as_bytes()),
-        std::ffi::CString::new("/dev/null"),
-    ) else {
-        return;
-    };
-    let own = |ns: &str| fs::read_link(format!("/proc/self/ns/{ns}")).ok();
-    let (own_net, own_mnt) = (own("net"), own("mnt"));
-    let mut seen: Vec<PathBuf> = Vec::new();
-    let (mut covered, mut failed) = (0, Vec::new());
-    let null_dev = libc::makedev(1, 3);
-    for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|p| p.parse::<i32>().ok())
-        else {
-            continue;
-        };
-        let ns = |ns: &str| fs::read_link(format!("/proc/{pid}/ns/{ns}")).ok();
-        if ns("net") != own_net {
-            continue;
-        }
-        let Some(mnt) = ns("mnt") else {
-            continue;
-        };
-        if Some(&mnt) == own_mnt.as_ref() || seen.contains(&mnt) {
-            continue;
-        }
-        seen.push(mnt);
-        let Ok(handle) = File::open(format!("/proc/{pid}/ns/mnt")) else {
-            continue;
-        };
-        // SAFETY: after fork the child makes only async-signal-safe calls on
-        // what was made before it — a descriptor and two C strings — and
-        // leaves with _exit.
-        let child = unsafe { libc::fork() };
-        if child == 0 {
-            unsafe {
-                if libc::setns(handle.as_raw_fd(), libc::CLONE_NEWNS) != 0 {
-                    libc::_exit(1);
-                }
-                let mut st: libc::stat = std::mem::zeroed();
-                for _ in 0..4 {
-                    if libc::lstat(target.as_ptr(), &mut st) != 0 {
-                        libc::_exit(0);
-                    }
-                    if st.st_mode & libc::S_IFMT == libc::S_IFCHR && st.st_rdev == null_dev {
-                        libc::_exit(0);
-                    }
-                    let (fstype, data) = (std::ptr::null(), std::ptr::null());
-                    let bind = libc::MS_BIND;
-                    if libc::mount(null.as_ptr(), target.as_ptr(), fstype, bind, data) == 0 {
-                        libc::_exit(3);
-                    }
-                    if libc::umount2(target.as_ptr(), libc::MNT_DETACH) != 0 {
-                        libc::_exit(2);
-                    }
-                }
-                libc::_exit(2);
-            }
-        }
-        if child > 0 {
-            let mut status = 0;
-            // SAFETY: waiting for our own child.
-            unsafe { libc::waitpid(child, &mut status, 0) };
-            match libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status)) {
-                Some(0) => {}
-                Some(3) => covered += 1,
-                Some(1) => failed.push(format!("{pid}: cannot enter")),
-                Some(_) => failed.push(format!("{pid}: cannot cover")),
-                None => failed.push(format!("{pid}: killed")),
-            }
-        } else {
-            failed.push(format!("{pid}: cannot fork"));
-        }
-    }
-    if failed.is_empty() {
-        if covered > 0 {
-            println!(
-                "zone {zone}: {} gone — its bind covered in {covered} sandbox(es)",
-                path.display()
-            );
-        }
-    } else {
-        eprintln!(
-            "zone {zone}: {} gone — covered in {covered} mount namespace(s), not in: {}",
-            path.display(),
-            failed.join(", ")
-        );
-    }
-}
-
 /// `dir` a shared mount in this (otherwise private) mount namespace: a bind
 /// of itself first where it is no mount of its own.
 fn share_mount(dir: &Path) -> io::Result<()> {
@@ -3090,14 +3130,28 @@ pub(crate) fn is_hidden_node(name: &str) -> bool {
     };
     is_capture_node(name)
         || matches!(name, "uinput" | "rfkill")
-        || ["hidraw", "i2c-", "tty", "ttyUSB", "ttyACM"]
+        // Raw HID, I²C, consoles, serial adapters; optical drives (`sr`, and
+        // their SCSI generic `sg`), FireWire.
+        || ["hidraw", "i2c-", "tty", "ttyUSB", "ttyACM", "sr", "sg", "fw"]
             .iter()
             .any(|prefix| numbered(prefix))
 }
 
-/// A camera's nodes: `video<N>`, `media<N>`.
+/// The nodes of video capture — what the camera setting gives: a camera's
+/// `video<N>`, `media<N>`, its sensor's `v4l-subdev<N>`; `v4l-touch<N>`
+/// (a touch panel's raw frames), `radio<N>`, `vbi<N>`, `swradio<N>`.
 pub(crate) fn is_capture_node(name: &str) -> bool {
-    ["video", "media"].iter().any(|prefix| {
+    [
+        "video",
+        "media",
+        "v4l-subdev",
+        "v4l-touch",
+        "radio",
+        "vbi",
+        "swradio",
+    ]
+    .iter()
+    .any(|prefix| {
         name.strip_prefix(prefix)
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
     })
@@ -5063,6 +5117,9 @@ mod tests {
         assert!(!runtime_entry_kept("pulse", false, false));
         // A camera's nodes, and nothing that merely starts like one.
         assert!(is_capture_node("video0") && is_capture_node("media12"));
+        for capture in ["v4l-subdev3", "v4l-touch0", "radio1", "vbi0", "swradio2"] {
+            assert!(is_capture_node(capture), "{capture}");
+        }
         assert!(
             !is_capture_node("video")
                 && !is_capture_node("videox")
@@ -5071,12 +5128,26 @@ mod tests {
         // What the session's ACL opens besides, and not the terminal a
         // program has, nor the GPU, nor what everyone opens anyway.
         for hidden in [
-            "video3", "uinput", "rfkill", "i2c-5", "tty1", "tty63", "hidraw0", "ttyUSB0", "ttyACM2",
+            "video3",
+            "uinput",
+            "rfkill",
+            "i2c-5",
+            "tty1",
+            "tty63",
+            "hidraw0",
+            "ttyUSB0",
+            "ttyACM2",
+            "sr0",
+            "sg4",
+            "fw1",
+            "vbi0",
+            "v4l-subdev0",
         ] {
             assert!(is_hidden_node(hidden), "{hidden}");
         }
         for kept in [
-            "tty", "ttyS0", "null", "dri", "nvidia0", "hidraw", "i2c-", "uinputx", "fuse",
+            "tty", "ttyS0", "null", "dri", "nvidia0", "hidraw", "i2c-", "uinputx", "fuse", "sda",
+            "sda1", "fwx", "udmabuf",
         ] {
             assert!(!is_hidden_node(kept), "{kept}");
         }

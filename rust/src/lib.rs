@@ -93,6 +93,7 @@ pub mod console;
 pub mod container;
 pub mod dbus_wire;
 pub mod desktop;
+pub mod device_guard;
 pub mod devices;
 pub mod dialog;
 pub mod dnsfwd;

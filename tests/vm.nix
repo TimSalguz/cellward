@@ -1971,17 +1971,39 @@ let
           alice("cellward container create vmsbdev")
           alice("cellward container devices vmsbdev add security-keys")
           sbhome = "/home/alice/.local/state/vpn-profiles/vmsbdev/home"
+          # A program of it holds the node by an O_PATH descriptor — which
+          # would reopen whatever device gets the number next: when another
+          # device does, the holder kills it (device_guard), and nothing else.
+          # (No quote of its own: it runs inside the sandbox's `sh -c '…'`.)
+          holder = (
+              "${pkgs.python3}/bin/python3 -c "
+              "\"import os,sys,time; fd=os.open(sys.argv[1], os.O_PATH); "
+              "os.close(os.open(sys.argv[2], os.O_CREAT|os.O_WRONLY)); time.sleep(600)\" "
+              "/dev/hidraw9 $HOME/sb-held"
+          )
           alice(
               "systemd-run --user --unit=sbwait cellward run vmherm --container vmsbdev -- "
               "sh -c 'test \"$(stat -c %t:%T /dev/hidraw9)\" = f0:9 && touch $HOME/sb-given; "
+              f"{holder} & "
               "while [ \"$(stat -c %t:%T /dev/hidraw9 2>/dev/null)\" = f0:9 ]; do sleep 0.2; done; "
-              "stat -c %t:%T /dev/hidraw9 > $HOME/sb-after'"
+              "stat -c %t:%T /dev/hidraw9 > $HOME/sb-after; wait $!; echo $? > $HOME/sb-killed; "
+              "sleep 600'"
           )
-          machine.wait_until_succeeds(f"test -e {sbhome}/sb-given", timeout=60)
+          machine.wait_until_succeeds(f"test -e {sbhome}/sb-given -a -e {sbhome}/sb-held", timeout=60)
           machine.succeed("rm -f /dev/hidraw9")
           machine.wait_until_succeeds(f"test -s {sbhome}/sb-after", timeout=30)
           out = machine.succeed(f"cat {sbhome}/sb-after").strip()
           assert out == "1:3", f"a gone device's bind in a sandbox: {out}"
+          # Still alive: the number is nobody's yet.
+          machine.fail(f"test -e {sbhome}/sb-killed")
+          # Another device at the key's number — one the kernel knows nothing
+          # of, so not the same device.
+          machine.succeed("mknod -m 600 /dev/hidraw9 c 240 9 && chown alice /dev/hidraw9")
+          machine.wait_until_succeeds(f"test -s {sbhome}/sb-killed", timeout=30)
+          out = machine.succeed(f"cat {sbhome}/sb-killed").strip()
+          assert out == "137", f"the holder of a gone node, its number given again: {out}"
+          # The sandbox's shell, which held nothing, lives on.
+          alice("systemctl --user is-active sbwait.service")
           alice("systemctl --user stop sbwait.service || true")
           alice("cellward container rm vmsbdev")
           machine.succeed(

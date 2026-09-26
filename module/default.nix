@@ -618,7 +618,7 @@ let
       };
       permissions.devices = lib.mkOption {
         type = lib.types.listOf (
-          lib.types.strMatching "games|security-keys|phone|serial|usb:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}(:[!-~]+)?"
+          lib.types.strMatching "games|security-keys|phone|serial|usb:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}(:[!-9;<>-~]{1,128})?"
         );
         default = [ ];
         example = [
