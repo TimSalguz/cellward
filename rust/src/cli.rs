@@ -2279,12 +2279,14 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                         match on {
                             Some(true) => println!(
                                 "программам контейнера {selector} видны камеры хоста — снимать \
-                                 они могут без вопроса (программам, запущенным после этого; Nix \
-                                 зоны важнее)"
+                                 они могут без вопроса (программам, запущенным после этого)"
                             ),
+                            // The zone in Nix's camera list lets them all:
+                            // Nix over a local word (`container::camera_for`).
                             Some(false) => println!(
                                 "камеры хоста программам контейнера {selector} не видны \
-                                 (запущенным после этого)"
+                                 (запущенным после этого; если зона в programs.cellward.camera \
+                                 в Nix — видны: Nix зоны важнее)"
                             ),
                             None => println!("у контейнера {selector} снова камера как у его зоны"),
                         }

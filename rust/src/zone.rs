@@ -2804,7 +2804,10 @@ const PRIVATE_TMP: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
 /// whatever the zone's camera setting: a launch the cameras are let takes
 /// the covers off in its own mount namespace (`profile::uncover_capture`),
 /// by its container's setting or, with none, the zone's (`container::
-/// camera_for`), and nobody else sees them. `/dev` is a shared mount here,
+/// camera_for`). Not a wall between the programs of one zone: another of
+/// its programs, outside a sandbox, reaches that launch's `/dev` through
+/// `/proc/<pid>/root` while it runs (one user namespace, no pid namespace
+/// per launch — hidden processes are to come, `docs/PERMISSIONS.md` §11.11). `/dev` is a shared mount here,
 /// as the runtime directory is: every launch is a slave copy, and a camera
 /// plugged in later is covered in each — let or not: plug it in first.
 /// Fatal: a zone that cannot hide them records without asking.

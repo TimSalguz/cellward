@@ -662,14 +662,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     );
     let mut cmd = selection.cmd.clone();
 
-    // --- X11 (docs/HERMETICITY.md §7, A) ---
-    // The host's X server is out of reach in a zone. A container with the x11
-    // permission gets a satellite of its own, started INSIDE wl-sandbox (the
-    // wrapping below goes around this one), so it speaks to the compositor
-    // through the restricted socket like the program does. A sandbox starts
-    // its own satellite and is told about the permission instead.
-    // Or the zone itself has x11: for someone who runs zones without
-    // containers, Steam in a zone must open all the same.
+    // --- THE CAMERAS ---
     // The host's cameras for this launch (`docs/PERMISSIONS.md` §11.10): the
     // zone covers them for all its programs, and a launch they are let takes
     // the covers off in its own mount namespace (`profile::uncover_capture`)
@@ -681,6 +674,15 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             None => crate::hermetic::camera(&zone_dir, &tools.config, &zone_name).0,
         }
     };
+
+    // --- X11 (docs/HERMETICITY.md §7, A) ---
+    // The host's X server is out of reach in a zone. A container with the x11
+    // permission gets a satellite of its own, started INSIDE wl-sandbox (the
+    // wrapping below goes around this one), so it speaks to the compositor
+    // through the restricted socket like the program does. A sandbox starts
+    // its own satellite and is told about the permission instead.
+    // Or the zone itself has x11: for someone who runs zones without
+    // containers, Steam in a zone must open all the same.
     let container_x11 = container_name(&selection)
         .and_then(|name| crate::container::load(tools, &name))
         .is_some_and(|c| c.x11.value)

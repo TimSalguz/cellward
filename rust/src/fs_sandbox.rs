@@ -867,15 +867,6 @@ pub fn pick_display(seed: u64) -> String {
     format!(":{}", DISPLAY_BASE + seed % DISPLAY_SPAN)
 }
 
-/// `/dev/dri` and every `/dev/nvidia*` node, in that order.
-///
-/// One `/dev/dri` is not enough on NVIDIA: without the `/dev/nvidia*` nodes EGL
-/// inside the sandbox fails with "failed to create dri2 screen" and Electron
-/// hangs on its splash screen (measured on Discord).
-///
-/// The directory is a parameter so that a test can hand over one it built.
-/// Sorted by bytes: `read_dir` has no order of its own, and a stable list is
-/// what makes the argument list comparable.
 /// The cameras' nodes under `dev`: `v4l/` (their links by id and path) and
 /// every `video<N>`, `media<N>` — for a launch let the cameras, whose own
 /// mount namespace has the zone's covers off (`profile::uncover_capture`).
@@ -896,6 +887,15 @@ pub fn capture_nodes(dev: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// `/dev/dri` and every `/dev/nvidia*` node, in that order.
+///
+/// One `/dev/dri` is not enough on NVIDIA: without the `/dev/nvidia*` nodes EGL
+/// inside the sandbox fails with "failed to create dri2 screen" and Electron
+/// hangs on its splash screen (measured on Discord).
+///
+/// The directory is a parameter so that a test can hand over one it built.
+/// Sorted by bytes: `read_dir` has no order of its own, and a stable list is
+/// what makes the argument list comparable.
 pub fn dev_nodes(dev: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let dri = dev.join("dri");

@@ -200,13 +200,19 @@ pub fn restart_needed(zone_dir: &Path, config: &Path, zone: &str) -> Option<Vec<
             .find(|(k, _)| k.trim() == name)
             .map(|(_, v)| v.trim() == "true")
     };
-    Some(
-        start_settings(zone_dir, config, zone)
-            .into_iter()
-            .filter(|(name, now)| applied(name).is_some_and(|then| then != *now))
-            .map(|(name, _)| name)
-            .collect(),
-    )
+    let mut changed: Vec<&'static str> = start_settings(zone_dir, config, zone)
+        .into_iter()
+        .filter(|(name, now)| applied(name).is_some_and(|then| then != *now))
+        .map(|(name, _)| name)
+        .collect();
+    // A note that names the camera is a build's from before the camera was
+    // each launch's: that zone neither covers the cameras for all nor
+    // shares its /dev — a container's "off" does not hold there until it
+    // comes up again.
+    if applied("camera").is_some() {
+        changed.push("camera");
+    }
+    Some(changed)
 }
 
 #[cfg(test)]
@@ -383,6 +389,13 @@ mod tests {
         assert_eq!(
             restart_needed(&zone, &config, "nl"),
             Some(vec!["nix_daemon"])
+        );
+        // A note of a build from before, which named the camera: restart.
+        let text = std::fs::read_to_string(zone.join(APPLIED)).unwrap();
+        std::fs::write(zone.join(APPLIED), format!("{text}camera=false\n")).unwrap();
+        assert_eq!(
+            restart_needed(&zone, &config, "nl"),
+            Some(vec!["nix_daemon", "camera"])
         );
         let _ = std::fs::remove_dir_all(&base);
     }

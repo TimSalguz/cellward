@@ -14,8 +14,10 @@
 //! namespace is one of the zone's own programs, with no container. Every
 //! launch into a container takes a mount namespace of its own — a container
 //! of the main home too, with nothing mounted in it (`launch::Entry::
-//! own_mounts`) — and a program cannot leave it: `setns` wants capabilities
-//! it does not have. So one that left its launch (a daemon that forked
+//! own_mounts`), and a launch of the main profile let the cameras (`launch::
+//! Entry::camera`) — and a program cannot leave it: `setns` wants
+//! capabilities it does not have. (One that leaves such a main-profile launch
+//! is then unknown, not the zone's own: the safe way round.) So one that left its launch (a daemon that forked
 //! twice, a program whose launch is over) is never taken for the zone's own.
 //! (The wrapper around a launch — `wl-sandbox` — stays on the host: the
 //! namespace of a launch's recorded process is not its programs'.)

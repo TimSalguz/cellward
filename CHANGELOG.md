@@ -86,7 +86,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   sandbox binds the camera nodes into its own `/dev` (`fs-sandbox --camera
   on`). The zone's `/dev` is a shared mount, each launch a slave of it: a
   camera plugged in later is covered in every launch not let the cameras; a
-  launch let them parts its `/dev` from the zone's and sees it at once. The
+  launch let them parts its `/dev` from the zone's and sees it at once. Not
+  a wall between the programs of one zone: while such a launch runs,
+  another program of the zone outside a sandbox reaches its `/dev` through
+  `/proc/<pid>/root` (hidden processes per launch are to come). The
   zone's camera setting applies from the next launch on: no restart of the
   zone (and `camera` is no longer in `restart_needed`).
 
