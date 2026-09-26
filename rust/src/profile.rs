@@ -529,7 +529,7 @@ fn lossy(name: &OsStr) -> std::borrow::Cow<'_, str> {
 pub const ENV_EXPECT_NETNS: &str = "VPN_ZONE_EXPECT_NETNS";
 
 /// Let this launch reach the host's cameras. The zone covers them in its mount
-/// namespace (`zone::hide_capture_devices`); this one is a slave copy of it
+/// namespace (`zone::hide_devices`); this one is a slave copy of it
 /// (`launch::entry_argv`), where the covers are taken off — here, and nowhere
 /// else. `/dev` here is made private first: the covers the zone's watcher puts
 /// over a camera plugged in later reach every other launch, not this one, and

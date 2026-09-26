@@ -1769,6 +1769,14 @@ let
               "mkdir -p /dev/snd && mknod -m 600 /dev/snd/pcmC9D0c c 116 99 && "
               "chown alice /dev/snd/pcmC9D0c"
           )
+          # And what else the session's ACL opens (audit 2026-09-26): a raw
+          # HID node (a security key, a controller), a gamepad, a USB device.
+          machine.succeed(
+              "mknod -m 600 /dev/hidraw9 c 240 9 && chown alice /dev/hidraw9 && "
+              "mkdir -p /dev/input /dev/bus/usb/009 && "
+              "mknod -m 600 /dev/input/js9 c 13 9 && chown alice /dev/input/js9 && "
+              "mknod -m 600 /dev/bus/usb/009/001 c 189 1 && chown alice /dev/bus/usb/009/001"
+          )
           # The broker is socket-activated, and every zone wants its socket:
           # no race with the session (red on main and in CI before).
           alice("cellward up vmherm")
@@ -1899,6 +1907,26 @@ let
               alice(f"systemctl --user stop camwait-{c}.service || true")
           alice("cellward container rm vmcam")
           machine.succeed("rm -f /dev/video7 /dev/video8 /dev/video9 /dev/snd/pcmC9D0c")
+          # The rest the ACL opens: a raw HID node covered — and one plugged
+          # in later —, the input and USB directories empty, uinput and
+          # rfkill covered where the VM has them.
+          out = in_zone(hp, "stat -c %t:%T /dev/hidraw9").strip()
+          assert out == "1:3", f"a raw HID node is in reach: {out}"
+          machine.succeed("mknod -m 600 /dev/hidraw8 c 240 8 && chown alice /dev/hidraw8")
+          machine.wait_until_succeeds(
+              f"su -l alice -c \"nsenter --preserve-credentials -U -n -m -t {hp} -- stat -c %t:%T /dev/hidraw8\" | grep -qx 1:3",
+              timeout=30,
+          )
+          in_zone(hp, "sh -c 'test -z \"$(ls -A /dev/input)\" && test -z \"$(ls -A /dev/bus/usb)\"'")
+          for node in ("uinput", "rfkill"):
+              in_zone(
+                  hp,
+                  f"sh -c 'test ! -c /dev/{node} || test \"$(stat -c %t:%T /dev/{node})\" = 1:3'",
+              )
+          machine.succeed(
+              "rm -f /dev/hidraw8 /dev/hidraw9 /dev/input/js9 /dev/bus/usb/009/001 && "
+              "rmdir /dev/bus/usb/009 || true"
+          )
           # Input methods by their portals only: IBus's private bus is hidden,
           # and programs are told to take the portal.
           in_zone(hp, "test ! -e /home/alice/.cache/ibus/dbus-vmtest")

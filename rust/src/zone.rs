@@ -2811,11 +2811,22 @@ const PRIVATE_TMP: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
 /// as the runtime directory is: every launch is a slave copy, and a camera
 /// plugged in later is covered in each — let or not: plug it in first.
 /// Fatal: a zone that cannot hide them records without asking.
-fn hide_capture_devices(zone: &Zone) -> Result<(), String> {
+///
+/// And the rest logind gives the session's user an ACL on (the `uaccess`
+/// tag; audit 2026-09-26, from inside a zone): `uinput` — a program made a
+/// virtual keyboard and typed into any window of the host, past every
+/// restriction of the compositor —, `rfkill` (the host's radios off),
+/// `i2c-*` (monitors, lighting, EEPROMs on the boards), the consoles
+/// `tty<N>`, `hidraw*` (security keys, controllers), serial adapters
+/// (`ttyUSB*`, `ttyACM*`) — `/dev/null` over each, by the same watcher —,
+/// and `/dev/input` and `/dev/bus/usb` whole under a tmpfs: a zone's programs
+/// get their input from the compositor, and a device goes into a container
+/// on purpose, not by the ACL (`docs/PERMISSIONS.md` §11.10).
+fn hide_devices(zone: &Zone) -> Result<(), String> {
     share_mount(Path::new("/dev")).map_err(|e| {
         format!("cannot share /dev: {e} — a camera plugged in later would be in reach")
     })?;
-    for dir in ["/dev/snd", "/dev/v4l"] {
+    for dir in ["/dev/snd", "/dev/v4l", "/dev/input", "/dev/bus/usb"] {
         let dir = Path::new(dir);
         if !dir.is_dir() {
             continue;
@@ -2838,7 +2849,7 @@ fn hide_capture_devices(zone: &Zone) -> Result<(), String> {
     let watch = sys::Inotify::watch(Path::new("/dev")).ok();
     for entry in fs::read_dir("/dev").into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if is_capture_node(&name) {
+        if is_hidden_node(&name) {
             cover_node(&Path::new("/dev").join(&name))?;
         }
     }
@@ -2853,7 +2864,7 @@ fn hide_capture_devices(zone: &Zone) -> Result<(), String> {
                         return;
                     }
                 };
-                for entry in names.into_iter().filter(|n| is_capture_node(n)) {
+                for entry in names.into_iter().filter(|n| is_hidden_node(n)) {
                     if let Err(e) = cover_node(&Path::new("/dev").join(&entry)) {
                         eprintln!("zone {name}: {e}");
                     }
@@ -2862,11 +2873,15 @@ fn hide_capture_devices(zone: &Zone) -> Result<(), String> {
         }
         None => {
             return Err(
-                "no watch on /dev — a camera plugged in later would be in reach".to_owned(),
+                "no watch on /dev — a camera or a key plugged in later would be in reach"
+                    .to_owned(),
             );
         }
     }
-    println!("zone {}: sound and camera devices hidden", zone.name());
+    println!(
+        "zone {}: sound, camera, input and raw devices hidden",
+        zone.name()
+    );
     Ok(())
 }
 
@@ -2878,6 +2893,20 @@ fn share_mount(dir: &Path) -> io::Result<()> {
     }
     sys::mount(dir.as_os_str(), dir, "", libc::MS_BIND | libc::MS_REC, "")?;
     sys::mount(OsStr::new("none"), dir, "", libc::MS_SHARED, "")
+}
+
+/// A node of `/dev` no zone's program opens by the session's ACL: a camera's,
+/// and the rest of [`hide_devices`]' list.
+pub(crate) fn is_hidden_node(name: &str) -> bool {
+    let numbered = |prefix: &str| {
+        name.strip_prefix(prefix)
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    is_capture_node(name)
+        || matches!(name, "uinput" | "rfkill")
+        || ["hidraw", "i2c-", "tty", "ttyUSB", "ttyACM"]
+            .iter()
+            .any(|prefix| numbered(prefix))
 }
 
 /// A camera's nodes: `video<N>`, `media<N>`.
@@ -3712,7 +3741,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // is not. A container with the x11 permission runs its own satellite, and
     // its socket lands in here.
     hide_x11(zone)?;
-    hide_capture_devices(zone)?;
+    hide_devices(zone)?;
     // The system tier's directory, with its root service's socket: a helper
     // outside that acts for whoever asks. A zone through a system zone keeps
     // that zone's status, through a descriptor opened before it goes.
@@ -4846,6 +4875,18 @@ mod tests {
                 && !is_capture_node("videox")
                 && !is_capture_node("vhost-net")
         );
+        // What the session's ACL opens besides, and not the terminal a
+        // program has, nor the GPU, nor what everyone opens anyway.
+        for hidden in [
+            "video3", "uinput", "rfkill", "i2c-5", "tty1", "tty63", "hidraw0", "ttyUSB0", "ttyACM2",
+        ] {
+            assert!(is_hidden_node(hidden), "{hidden}");
+        }
+        for kept in [
+            "tty", "ttyS0", "null", "dri", "nvidia0", "hidraw", "i2c-", "uinputx", "fuse",
+        ] {
+            assert!(!is_hidden_node(kept), "{kept}");
+        }
         // PipeWire's unrestricted socket, for the session manager: no zone,
         // an audio manager neither.
         for raw in [false, true] {

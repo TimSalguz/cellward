@@ -140,6 +140,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A zone no longer reaches the devices the session's ACL opens** (audit
+  2026-09-26, from inside a zone; LEAK-MODEL §19): `/dev/uinput` — a
+  program of a zone made a virtual keyboard and typed into any window of
+  the host —, `/dev/rfkill` (the host's radios off), `/dev/i2c-*`, the
+  consoles `/dev/tty<N>`, `/dev/hidraw*`, `/dev/ttyUSB*`, `/dev/ttyACM*` are
+  covered with `/dev/null` in every zone, those plugged in later too, and
+  `/dev/input` and `/dev/bus/usb` are hidden whole. Security keys (FIDO),
+  gamepads, phones and serial adapters no longer work in a zone until they
+  can be given to a container on purpose (device sets: to come).
 - **The bus filter records a portal's refusal of the zone's id before the
   held calls go on** (`bus_filter::Conn::answered`): it was set after the
   wake-up, a race the test `a_refused_registration_leaves_the_connection_as_it_was`
