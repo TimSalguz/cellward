@@ -1575,9 +1575,22 @@ pub fn main() -> ExitCode {
                 NetChoice::ChooseContainer | NetChoice::Unpin => {
                     // The container is asked here and the network question is
                     // then asked again by a second pass of this same binary.
-                    let Some(container) =
-                        ask_profile(&tools, &key, &label, "__chooseprofile__", &memory)
-                    else {
+                    let Some(container) = ask_profile(
+                        &tools,
+                        &key,
+                        &label,
+                        "__chooseprofile__",
+                        // After "↺" the pin is gone: the menu does not
+                        // offer to drop it again.
+                        &Memory {
+                            pinned_profile: if choice == NetChoice::Unpin {
+                                String::new()
+                            } else {
+                                memory.pinned_profile.clone()
+                            },
+                            ..memory.clone()
+                        },
+                    ) else {
                         return ExitCode::SUCCESS;
                     };
                     let selector = container.selector();
@@ -2160,9 +2173,11 @@ fn apply_profile_choice(
             profile: format!("{TMPJOIN_PREFIX}{dir}"),
             ..Container::default()
         }),
+        // The pin goes, and the program's own container follows — not the
+        // main home with the whole of it.
         ProfileChoice::Unpin => {
             let _ = fs::remove_file(tools.state.join(".pinnedprofile").join(key));
-            Some(Container::default())
+            Some(Container::own_sandbox(key))
         }
         ProfileChoice::NewProfile => {
             let name = match new_name {

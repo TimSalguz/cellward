@@ -29,6 +29,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     asked every time, or is the global default, keeps the network as the
     last choice, where the question starts; a pin to a zone that is gone is
     dropped.
+  - A program nobody pinned that reaches the global default container has
+    its network asked even when that container is bound, at a click and at
+    login (offline): its network is nobody's choice for it. Where the
+    network asked is not the container's own, the launch is refused (I1) —
+    pin the program to the container, or choose its network.
   - The window menu (`window-menu`) pins or unpins the container's network;
     "↺ Спрашивать снова" drops the program's container pin; `cellward pins`
     lists the programs' containers and their networks; `status --json` gives
