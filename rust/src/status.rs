@@ -507,10 +507,17 @@ pub fn container(tools: &Tools, c: &Container) -> String {
         Some(m) => sourced(m.value.to_string(), m.source),
         None => sourced("null".to_owned(), Source::Default),
     };
+    // The devices it is given (`crate::devices`), each with where from.
+    let devices = array(
+        c.devices
+            .iter()
+            .map(|d| sourced_str(&d.value, d.source))
+            .collect(),
+    );
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
          \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera}}}",
+         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"devices\":{devices}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),

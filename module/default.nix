@@ -556,6 +556,7 @@ let
       ++ lib.optional (c.permissions.microphone != null) "microphone = ${c.permissions.microphone}"
       ++ lib.optional (c.permissions.screencast != null) "screencast = ${c.permissions.screencast}"
       ++ lib.optional (c.permissions.camera != null) "camera = ${lib.boolToString c.permissions.camera}"
+      ++ map (device: "device = ${device}") c.permissions.devices
     )
     + "\n";
 
@@ -614,6 +615,17 @@ let
         default = null;
         example = "ask";
         description = "Может ли программа контейнера записывать микрофон: yes (без вопроса), no (никогда) или ask — спросить при первой записи: один раз, всегда (этому контейнеру) или отказать. Контейнер знают по запуску, из которого вышла программа (docs/PERMISSIONS.md §11.10). null — как у его зоны (programs.cellward.microphone) или как задано локально (cellward container set <контейнер> microphone). Значение зоны из Nix важнее местной настройки контейнера, значение контейнера из Nix — важнее всего. Путь PulseAudio; ограниченный PipeWire герметичной зоны пока решает по зоне.";
+      };
+      permissions.devices = lib.mkOption {
+        type = lib.types.listOf (
+          lib.types.strMatching "games|security-keys|phone|serial|usb:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}(:[!-~]+)?"
+        );
+        default = [ ];
+        example = [
+          "security-keys"
+          "usb:1050:0407"
+        ];
+        description = "Устройства, которые зоны закрывают всем своим программам и которые выдаются этому контейнеру (docs/PERMISSIONS.md §11.12): наборы games (геймпады и их HID), security-keys (ключи FIDO), phone (adb, MTP), serial (ttyUSB, ttyACM) или одно устройство usb:<производитель>:<модель>[:<серийный>] — все его узлы; что подключено — cellward devices. Действует для программ, запущенных после изменения; устройство, подключённое позже, видно после перезапуска программы.";
       };
       permissions.camera = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;

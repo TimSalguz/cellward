@@ -595,7 +595,8 @@ and `cellward container show <name> --json` print subsets of the same schema.
       "frame_color": { "value": null, "source": "default" },
       "microphone": { "value": null, "source": "default" },
       "screencast": { "value": null, "source": "default" },
-      "camera": { "value": null, "source": "default" } }
+      "camera": { "value": null, "source": "default" },
+      "devices": [ { "value": "security-keys", "source": "local" } ] }
   ]
 }
 ```

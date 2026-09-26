@@ -1923,8 +1923,44 @@ let
                   hp,
                   f"sh -c 'test ! -c /dev/{node} || test \"$(stat -c %t:%T /dev/{node})\" = 1:3'",
               )
+          # Given to a container on purpose (docs/PERMISSIONS.md §11.12): a
+          # security key by its set, a serial adapter by its set, a USB
+          # device by what it is — udev's word on each planted here. Only
+          # the container given them sees them; /dev/bus/usb holds the given
+          # node alone.
           machine.succeed(
-              "rm -f /dev/hidraw8 /dev/hidraw9 /dev/input/js9 /dev/bus/usb/009/001 && "
+              "printf 'E:ID_SECURITY_TOKEN=1\\nE:ID_VENDOR_ID=1050\\nE:ID_MODEL_ID=0407\\n' "
+              "> /run/udev/data/c240:9 && "
+              "printf 'E:ID_VENDOR_ID=18d1\\nE:ID_MODEL_ID=4ee7\\n' > /run/udev/data/c189:1 && "
+              "mknod -m 600 /dev/ttyUSB9 c 188 9 && chown alice /dev/ttyUSB9"
+          )
+          machine.wait_until_succeeds(
+              f"su -l alice -c \"nsenter --preserve-credentials -U -n -m -t {hp} -- stat -c %t:%T /dev/ttyUSB9\" | grep -qx 1:3",
+              timeout=30,
+          )
+          devices_json = json.loads(alice("cellward devices --json"))["devices"]
+          key = next(d for d in devices_json if "/dev/hidraw9" in d["nodes"])
+          assert key["id"] == "usb:1050:0407" and key["sets"] == ["security-keys"], key
+          alice("cellward container create vmdev --home layer")
+          for grant in ("security-keys", "serial", "usb:18d1:4ee7"):
+              alice(f"cellward container devices vmdev add {grant}")
+          shown = json.loads(alice("cellward container show vmdev --json"))["container"]
+          assert [d["value"] for d in shown["devices"]] == ["security-keys", "serial", "usb:18d1:4ee7"], shown
+          look = "stat -c %t:%T /dev/hidraw9 /dev/ttyUSB9 /dev/bus/usb/009/001; ls -A /dev/bus/usb"
+          seen = alice(f"cellward run vmherm --container vmdev -- sh -c '{look}'").split()
+          assert seen == ["f0:9", "bc:9", "bd:1", "009"], f"given devices: {seen}"
+          seen = alice(
+              "cellward run vmherm --container vmlayer -- "
+              "sh -c 'stat -c %t:%T /dev/hidraw9 /dev/ttyUSB9; ls -A /dev/bus/usb'"
+          ).split()
+          assert seen == ["1:3", "1:3"], f"devices not given: {seen}"
+          alice("cellward container devices vmdev rm serial")
+          out = alice("cellward run vmherm --container vmdev -- stat -c %t:%T /dev/ttyUSB9").strip()
+          assert out == "1:3", f"a device taken back: {out}"
+          alice("cellward container rm vmdev")
+          machine.succeed(
+              "rm -f /dev/hidraw8 /dev/hidraw9 /dev/input/js9 /dev/bus/usb/009/001 /dev/ttyUSB9 "
+              "/run/udev/data/c240:9 /run/udev/data/c189:1 && "
               "rmdir /dev/bus/usb/009 || true"
           )
           # Input methods by their portals only: IBus's private bus is hidden,

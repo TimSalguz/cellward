@@ -683,6 +683,33 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // its own satellite and is told about the permission instead.
     // Or the zone itself has x11: for someone who runs zones without
     // containers, Steam in a zone must open all the same.
+    // The devices given to its container (`docs/PERMISSIONS.md` §11.12): the
+    // zone hides them all, and this launch takes the covers off the given
+    // ones in its own mount namespace (`profile-run --device`), checking each
+    // once more there. None for a launch with no container.
+    let devices: Vec<crate::devices::Pass> = match container_name(&selection) {
+        Some(name) if zone != UNCONFINED => {
+            let grants: Vec<crate::devices::Grant> = crate::container::load(tools, &name)
+                .map(|c| {
+                    c.devices
+                        .iter()
+                        .filter_map(|d| crate::devices::Grant::parse(&d.value))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if grants.is_empty() {
+                Vec::new()
+            } else {
+                let nodes = crate::devices::host_nodes();
+                crate::devices::granted(&nodes, &grants)
+                    .into_iter()
+                    .map(crate::devices::Node::pass)
+                    .collect()
+            }
+        }
+        _ => Vec::new(),
+    };
+    let device_args: Vec<String> = devices.iter().map(crate::devices::Pass::arg).collect();
     let container_x11 = container_name(&selection)
         .and_then(|name| crate::container::load(tools, &name))
         .is_some_and(|c| c.x11.value)
@@ -824,6 +851,11 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         if camera {
             wrapped.push("--camera".into());
             wrapped.push("on".into());
+        }
+        // And the devices its container is given.
+        for pass in &devices {
+            wrapped.push("--device".into());
+            wrapped.push(pass.path.clone().into());
         }
         // The network it runs in: to the portal its programs are the zone
         // (LEAK-MODEL §23). None for an unconfined launch — the host's own.
@@ -1109,6 +1141,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 (Sandbox::None, Container::MainNamed(_))
             ),
             camera,
+            devices: &device_args,
             storage: storage_dir.as_deref(),
         },
         cmd,
@@ -1211,6 +1244,9 @@ pub struct Entry<'a> {
     /// put over them are taken off in its own mount namespace
     /// (`profile-run --camera`).
     pub camera: bool,
+    /// The devices its container is given, as `profile-run --device` takes
+    /// them (`devices::Pass::arg`): uncovered in its own mount namespace.
+    pub devices: &'a [String],
 }
 
 /// The command line `run` finally `exec`s: the namespaces, the container, then
@@ -1265,7 +1301,7 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
             exec.extend(["-U".into(), "-n".into(), "-m".into(), "-t".into()]);
             exec.push(pid.to_string().into());
             exec.push("--".into());
-            if container || entry.own_mounts || entry.camera {
+            if container || entry.own_mounts || entry.camera || !entry.devices.is_empty() {
                 // A slave of the zone's: what the zone binds into its
                 // runtime directory later reaches this launch too (the one
                 // shared mount of the zone, `zone::seal_runtime`), and
@@ -1300,6 +1336,12 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
         exec.push(entry.cwd.into());
         if entry.camera && matches!(entry.network, Network::Zone(_)) {
             exec.push("--camera".into());
+        }
+        if matches!(entry.network, Network::Zone(_)) {
+            for device in entry.devices {
+                exec.push("--device".into());
+                exec.push(device.into());
+            }
         }
         if let Some(path) = entry.storage {
             exec.push("--storage".into());
@@ -2284,6 +2326,7 @@ mod tests {
             storage: None,
             own_mounts: false,
             camera: false,
+            devices: &[],
         }
     }
 

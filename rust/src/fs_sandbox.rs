@@ -257,6 +257,10 @@ pub struct Args {
     /// camera_for`) — their nodes are bound into the sandbox's own `/dev`,
     /// which has none otherwise.
     pub camera: bool,
+    /// `--device PATH`, repeated: a device its container is given
+    /// (`crate::devices`), already uncovered in the launch's namespace by
+    /// `profile-run`: bound into the sandbox's own `/dev`.
+    pub devices: Vec<PathBuf>,
     /// `--zone <zone>`: the zone the launch runs in, none for an unconfined
     /// one. Its programs are the zone to the portal
     /// (`desktop::zone_app_id`, LEAK-MODEL §23).
@@ -326,6 +330,7 @@ impl Args {
         let mut bind_paths: Vec<PathBuf> = Vec::new();
         let mut x11 = false;
         let mut camera = false;
+        let mut devices = Vec::new();
         let mut zone: Option<String> = None;
         let mut app_id: Option<OsString> = None;
         let mut rest = argv[..split].iter();
@@ -365,6 +370,15 @@ impl Args {
                 }
                 "--x11" => x11 = value == "on",
                 "--camera" => camera = value == "on",
+                // Only a node below /dev: nothing else is a device.
+                "--device" => {
+                    let path = PathBuf::from(value);
+                    if path.starts_with("/dev/")
+                        && !path.components().any(|c| c.as_os_str() == "..")
+                    {
+                        devices.push(path);
+                    }
+                }
                 // Like `--name`: an empty one is none.
                 "--zone" => {
                     zone = Some(value.to_string_lossy().into_owned()).filter(|z| !z.is_empty())
@@ -386,6 +400,7 @@ impl Args {
             bind_paths,
             x11,
             camera,
+            devices,
             zone,
             tools,
             cmd,
@@ -1512,6 +1527,7 @@ pub fn run(args: Args) -> u8 {
             if args.camera {
                 nodes.extend(capture_nodes(Path::new("/dev")));
             }
+            nodes.extend(args.devices.iter().cloned());
             nodes
         },
         // An absolute WAYLAND_DISPLAY is legal (libwayland accepts one) and is

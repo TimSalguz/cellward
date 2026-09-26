@@ -122,6 +122,7 @@ const VERBS: &[&str] = &[
     "profile",
     "trust",
     "container",
+    "devices",
     "help",
 ];
 
@@ -252,7 +253,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 &mut out,
                 &[
                     "list", "show", "create", "rm", "set", "assign", "unassign", "grant", "revoke",
-                    "merge",
+                    "merge", "devices",
                 ],
             ),
             "container" if pos == 4 && word(2) == "create" => strs(&mut out, &["--home"]),
@@ -263,7 +264,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 if pos == 3
                     && matches!(
                         word(2),
-                        "grant" | "revoke" | "merge" | "show" | "set" | "rm"
+                        "grant" | "revoke" | "merge" | "show" | "set" | "rm" | "devices"
                     ) =>
             {
                 owned(&mut out, &snap.containers)
@@ -285,6 +286,12 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                     "camera",
                 ],
             ),
+            "container" if pos == 4 && word(2) == "devices" => strs(&mut out, &["add", "rm"]),
+            "container" if pos == 5 && word(2) == "devices" => strs(
+                &mut out,
+                &["games", "security-keys", "phone", "serial", "usb:"],
+            ),
+            "devices" if pos == 2 => strs(&mut out, &["--json"]),
             "container" if pos == 5 && word(2) == "set" && word(4) == "camera" => {
                 strs(&mut out, &["default", "on", "off"])
             }

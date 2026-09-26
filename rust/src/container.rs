@@ -252,6 +252,9 @@ pub struct Container {
     /// Whether its programs reach the host's cameras; none of its own is the
     /// zone's setting.
     pub camera: Option<Sourced<bool>>,
+    /// The devices it is given (`crate::devices::Grant` words): declared
+    /// ones first, then the local ones.
+    pub devices: Vec<Sourced<String>>,
     /// The container's data directory ([`data_dir`]). May not exist yet — and
     /// a container of the main home has none it uses.
     pub dir: PathBuf,
@@ -1288,6 +1291,31 @@ fn move_policy_file(old: &Path, new: &Path) -> io::Result<()> {
 /// Set (`Some`) or drop (`None`) one key of a settings file, keeping the rest.
 /// With `replace` false an existing key is left as it is.
 pub fn write_key(path: &Path, key: &str, value: Option<&str>, replace: bool) -> Result<(), String> {
+    edit_conf(path, |conf| {
+        if !replace && conf.iter().any(|(k, _)| k == key) {
+            return false;
+        }
+        conf.retain(|(k, _)| k != key);
+        if let Some(value) = value {
+            conf.push((key.to_owned(), value.to_owned()));
+        }
+        true
+    })
+}
+
+/// Every value of `key` in a settings file set to `values` (one line each,
+/// in order), the rest kept — a list, as `device`.
+pub fn write_values(path: &Path, key: &str, values: &[String]) -> Result<(), String> {
+    edit_conf(path, |conf| {
+        conf.retain(|(k, _)| k != key);
+        conf.extend(values.iter().map(|v| (key.to_owned(), v.clone())));
+        true
+    })
+}
+
+/// A settings file read, changed by `change` (`false`: nothing to write),
+/// and written back — one writer at a time, through a temporary.
+fn edit_conf(path: &Path, change: impl FnOnce(&mut Conf) -> bool) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("{}: не файл в каталоге", path.display()))?;
@@ -1301,17 +1329,13 @@ pub fn write_key(path: &Path, key: &str, value: Option<&str>, replace: bool) -> 
         registry::lock(parent).map_err(|e| format!("не занять {}: {e}", parent.display()))?;
     // A file that is there and cannot be read is not rewritten: its other
     // settings would be lost with it.
-    let mut conf: Vec<(String, String)> = match fs::read_to_string(path) {
+    let mut conf: Conf = match fs::read_to_string(path) {
         Ok(text) => parse_conf(&text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(format!("не прочитать {}: {e}", path.display())),
     };
-    if !replace && conf.iter().any(|(k, _)| k == key) {
+    if !change(&mut conf) {
         return Ok(());
-    }
-    conf.retain(|(k, _)| k != key);
-    if let Some(value) = value {
-        conf.push((key.to_owned(), value.to_owned()));
     }
     let mut text = String::from(
         "# Локальные настройки контейнера cellward (docs/CONTAINERS.md).\n\
@@ -1659,6 +1683,23 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         .map(|(value, source)| Sourced { value, source });
     let camera =
         own_flag_in(&tools.config, name, "camera").map(|(value, source)| Sourced { value, source });
+    // Words that are no grant are left out: nothing is given by a typo.
+    let mut devices: Vec<Sourced<String>> = Vec::new();
+    let declared_devices: Vec<&str> = declared_conf
+        .map(|conf| values(conf, "device").collect())
+        .unwrap_or_default();
+    for (word, source) in declared_devices
+        .into_iter()
+        .map(|w| (w, Source::Nix))
+        .chain(values(&local, "device").map(|w| (w, Source::Local)))
+    {
+        if let Some(grant) = crate::devices::Grant::parse(word) {
+            let value = grant.word();
+            if !devices.iter().any(|d| d.value == value) {
+                devices.push(Sourced { value, source });
+            }
+        }
+    }
 
     Some(Container {
         name: name.to_owned(),
@@ -1670,6 +1711,7 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         microphone,
         screencast,
         camera,
+        devices,
         declared_trust,
         paths,
         expires,
@@ -2408,6 +2450,40 @@ pub fn set_camera(tools: &Tools, selector: &str, on: Option<bool>) -> Result<(),
         on.map(|on| if on { "true" } else { "false" }),
         true,
     )
+}
+
+/// Give a container a device, or take one back (`add` false), locally. A
+/// device Nix gave is taken back there.
+pub fn set_device(tools: &Tools, selector: &str, word: &str, add: bool) -> Result<(), String> {
+    let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    let grant = crate::devices::Grant::parse(word).ok_or_else(|| {
+        format!(
+            "«{word}» — не устройство: games, security-keys, phone, serial или \
+             usb:<производитель>:<модель>[:<серийный>]"
+        )
+    })?;
+    let word = grant.word();
+    if !add
+        && container
+            .devices
+            .iter()
+            .any(|d| d.value == word && d.source == Source::Nix)
+    {
+        return Err(format!(
+            "{word} выдано контейнеру {selector} в Nix — убирается там"
+        ));
+    }
+    let mut local: Vec<String> = container
+        .devices
+        .iter()
+        .filter(|d| d.source == Source::Local)
+        .map(|d| d.value.clone())
+        .collect();
+    local.retain(|d| *d != word);
+    if add {
+        local.push(word);
+    }
+    write_values(&container.policy.join(FILE), "device", &local)
 }
 
 /// A container's `yes|no|ask` switch `key`, locally; refused where Nix set
@@ -3240,6 +3316,7 @@ mod tests {
             microphone: None,
             screencast: None,
             camera: None,
+            devices: Vec::new(),
             dir: PathBuf::from("/s/work"),
             policy: PathBuf::from("/c/containers/work"),
         }

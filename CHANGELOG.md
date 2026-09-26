@@ -95,6 +95,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   zone's camera setting applies from the next launch on: no restart of the
   zone (and `camera` is no longer in `restart_needed`).
 
+- **Devices given to a container** (`docs/PERMISSIONS.md` §11.12):
+  `programs.cellward.containers.<name>.permissions.devices`, `cellward
+  container devices <c> [add|rm <device>]`, `containers[].devices` in
+  `status --json`, and `cellward devices [--json]` — what is plugged in,
+  each device once, with the name a grant gives it by and the sets it falls
+  into. A grant is a set — `games` (gamepads, physical, and their raw HID
+  nodes), `security-keys` (FIDO), `phone` (adb, MTP/PTP), `serial`
+  (`ttyUSB*`, `ttyACM*`) — or one device, `usb:<vendor>:<product>[:<serial>]`.
+  The launch lists the host's nodes by udev's word on them and hands the
+  given ones to `profile-run --device`, which takes the zone's covers off
+  them in the launch's own mount namespace — `/dev/input` and
+  `/dev/bus/usb` made again of them alone — checking each once more by its
+  number and udev's vendor and product; a sandbox binds them into its own
+  `/dev`. A launch with no container gets none. A device plugged in later is
+  seen after the program restarts.
+
 ### Changed
 - **The microphone for a program whose container is not known** (a
   throwaway sandbox, a temporary container, a daemon that left its
