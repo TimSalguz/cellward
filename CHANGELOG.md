@@ -38,6 +38,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   never taken for them — by the sound filter or the broker. Programs of a
   container of the main home started before this update still run in the
   zone's own namespace until they are started again.
+- **What a zone binds into its runtime directory later reaches containers
+  already running** (`zone::seal_runtime`, `launch::entry_argv`): the
+  zone's `/run/user/<uid>` is a shared mount, and a container's launch takes
+  a slave copy of the zone's mount namespace (`--propagation slave`, was
+  `private`). The document portal's directory when it is first used, and
+  PipeWire and the session bus after the host restarts them, used to stay
+  out of reach of programs of a container started before; nothing a
+  container mounts goes back to the zone.
 
 ### Changed
 - **The microphone for a program whose container is not known** (a

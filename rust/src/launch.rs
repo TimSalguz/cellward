@@ -1199,9 +1199,11 @@ pub struct Entry<'a> {
 ///   <pid>` — without `--keep-caps` CapEff is zeroed on entering the zone's
 ///   user namespace, and there is nothing left to mount a layer with
 ///   (`docs/GOTCHAS.md` §1) nor to shed the session's groups with
-///   (`profile::run`). A container then gets a private mount
-///   namespace of its own (`unshare --mount`), so its layers are seen by this
-///   launch only and not by the whole zone;
+///   (`profile::run`). A container then gets a mount namespace of its own
+///   (`unshare --mount`), so its layers are seen by this launch only and not
+///   by the whole zone — a slave of the zone's, which gets what the zone
+///   binds into its runtime directory later; a container of the main home
+///   too, with nothing mounted (`Entry::own_mounts`);
 /// * **`direct` with a container**: there is no zone to borrow a user namespace
 ///   from, so `unshare` makes one — `--map-current-user` maps the user onto
 ///   itself (the program keeps its uid and sees `$HOME` as usual) and
@@ -1241,11 +1243,15 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
             exec.push(pid.to_string().into());
             exec.push("--".into());
             if container || entry.own_mounts {
+                // A slave of the zone's: what the zone binds into its
+                // runtime directory later reaches this launch too (the one
+                // shared mount of the zone, `zone::seal_runtime`), and
+                // nothing this launch mounts goes back.
                 exec.push(entry.unshare.into());
                 exec.extend([
                     "--mount".into(),
                     "--propagation".into(),
-                    "private".into(),
+                    "slave".into(),
                     "--".into(),
                 ]);
             }
@@ -2310,7 +2316,7 @@ mod tests {
                 "/t/unshare",
                 "--mount",
                 "--propagation",
-                "private",
+                "slave",
                 "--",
                 "/t/core",
                 "profile-run",
@@ -2401,7 +2407,7 @@ mod tests {
                 "/t/unshare",
                 "--mount",
                 "--propagation",
-                "private",
+                "slave",
                 "--",
                 "/t/core",
                 "profile-run",

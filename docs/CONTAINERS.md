@@ -231,7 +231,8 @@ end of the term (RFC 3339, `null` without one).
 ```
 vpn-zone-core wl-sandbox <program> --zone <zone> --     on the host: the restricted Wayland socket (LEAK-MODEL §13)
 [nsenter -U -n -m -t <zone>]  or  [unshare -U --map-current-user --keep-caps]   (unconfined)
-  └─ unshare --mount --propagation private           when anything is mounted
+  └─ unshare --mount --propagation slave             into a zone: every container, the main home's too
+                                                     (a slave of the zone's shared /run/user/<uid>)
       └─ vpn-zone-core profile-run --cwd <dir> …     (done)
            1. home layer: overlay slots, or binds for permissions.paths
            2. runtime hermeticity (§6, phase 4): tmpfs over /run/user/<uid>,

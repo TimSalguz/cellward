@@ -247,14 +247,22 @@ pub fn containers_in(places: Places, zone: &str) -> Vec<String> {
     out
 }
 
-/// Note a launch of `container` into `zone` ([`LAUNCHED`]).
+/// Note a launch of `container` into `zone` ([`LAUNCHED`]), once: the
+/// list does not grow with every launch.
 pub fn note_launched(state: &Path, zone: &str, container: &str) -> std::io::Result<()> {
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
+    let path = state.join(zone).join(LAUNCHED);
+    let listed = std::fs::read_to_string(&path).unwrap_or_default();
+    if listed.lines().any(|line| line.trim() == container) {
+        return Ok(());
+    }
+    // One write, the name and its newline together: two launches at once
+    // (autostart) must not run their names into one line.
+    std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(state.join(zone).join(LAUNCHED))?;
-    writeln!(file, "{container}")
+        .open(path)?
+        .write_all(format!("{container}\n").as_bytes())
 }
 
 #[cfg(test)]

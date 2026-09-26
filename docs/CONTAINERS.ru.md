@@ -224,7 +224,8 @@ namespace. Отмонтирование не отнимает уже откры�
 ```
 vpn-zone-core wl-sandbox <программа> --zone <зона> --   на хосте: ограниченный сокет Wayland (LEAK-MODEL §13)
 [nsenter -U -n -m -t <зона>]  или  [unshare -U --map-current-user --keep-caps]   (unconfined)
-  └─ unshare --mount --propagation private           когда что-то монтируется
+  └─ unshare --mount --propagation slave             в зону: каждый контейнер, и основного дома
+                                                     (ведомое общего /run/user/<uid> зоны)
       └─ vpn-zone-core profile-run --cwd <каталог> …   (сделано)
            1. дом: слоты оверлея или бинды для разрешения.paths
            2. герметичность runtime (§6, этап 4): tmpfs поверх /run/user/<uid>,

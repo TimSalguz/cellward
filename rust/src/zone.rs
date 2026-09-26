@@ -2530,6 +2530,14 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
         &format!("mode=0700,uid={uid},gid={gid},size=16m"),
     )
     .map_err(|e| format!("cannot close {}: {e}", runtime.display()))?;
+    // Shared, in the zone's otherwise private tree: a container's launch
+    // takes a copy of the zone's mount namespace as a slave (`launch::
+    // entry_argv`), and what the watcher below binds here later — the
+    // document portal's directory when it is first used, PipeWire and the
+    // bus after the host restarts them — reaches its programs too. Slave:
+    // nothing a container mounts comes back.
+    sys::mount(OsStr::new("none"), &runtime, "", libc::MS_SHARED, "")
+        .map_err(|e| format!("cannot share {}: {e}", runtime.display()))?;
 
     let mut kept = Vec::new();
     for entry in fs::read_dir(&held).into_iter().flatten().flatten() {

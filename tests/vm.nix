@@ -1899,10 +1899,33 @@ let
           machine.sleep(3)
           machine.fail("test -e /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/other-into")
           machine.fail("test -e /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/main-into")
-          # A container of the main home runs in the zone's own mount
-          # namespace, and is its own container all the same: into itself
-          # without a question, into the zone's main profile asked.
+          # A container of the main home is its own container: into itself
+          # without a question, into the zone's main profile asked. It has
+          # a mount namespace of its own, with nothing mounted in it — the
+          # zone's own is its programs' with no container, and one that
+          # leaves this container's launch is not taken for them
+          # (rust/src/origin.rs).
           alice("cellward container create vmmainh --home main")
+          zone_ns = machine.succeed(f"readlink /proc/{hp}/ns/mnt").strip()
+          main_ns = alice("cellward run vmherm --container vmmainh -- readlink /proc/self/ns/mnt").strip()
+          assert main_ns.startswith("mnt:") and main_ns != zone_ns, (main_ns, zone_ns)
+          # What the zone binds into its runtime directory after a
+          # container's program started — the document portal's directory,
+          # which appears when first used — reaches that program too: the
+          # zone's runtime directory is shared, a container's copy of it a
+          # slave (rust/src/zone.rs `seal_runtime`).
+          machine.fail("test -e /run/user/1000/doc")
+          alice(
+              "systemd-run --user --unit=vmdocwait cellward run vmherm --container vmlayer -- "
+              "sh -c 'for i in $(seq 90); do if test -e /run/user/1000/doc/propagated; "
+              "then touch /home/alice/doc-seen; exit 0; fi; sleep 1; done'"
+          )
+          machine.sleep(3)
+          alice("mkdir /run/user/1000/doc && touch /run/user/1000/doc/propagated")
+          machine.wait_until_succeeds(
+              "test -e /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/doc-seen", timeout=60
+          )
+          alice("rm -rf /run/user/1000/doc")
           alice(
               "cellward run vmherm --container vmmainh -- "
               "cellward run vmherm --container vmmainh -- touch /home/alice/mainkind-same"

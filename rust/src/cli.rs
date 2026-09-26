@@ -1680,7 +1680,13 @@ fn container_remove(tools: &Tools, name: &OsStr) -> u8 {
         let _lock = match crate::registry::lock(&root) {
             Ok(lock) => lock,
             Err(e) => {
-                eprintln!("не занять {}: {e}", root.display());
+                eprintln!(
+                    "не занять {}: {e} — данные контейнера {} удалены, настройки нет: повтори \
+                     cellward container rm {}",
+                    root.display(),
+                    c.name,
+                    c.name
+                );
                 return 1;
             }
         };
