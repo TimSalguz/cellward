@@ -287,7 +287,26 @@ fn below(pid: i32, own: (u64, u64)) -> bool {
     let Ok(file) = File::open(format!("/proc/{pid}/ns/user")) else {
         return false;
     };
-    let mut fd: OwnedFd = file.into();
+    user_ns_below(file.into(), own)
+}
+
+/// Whether the mount namespace `mnt` belongs to a user namespace that is
+/// `own` or below it: one of the zone's programs made it, or the zone did.
+/// A process of the zone may sit in one that is not — the zone's first
+/// process, still in the host's — where nothing of a program's is bound.
+fn mounts_below(mnt: &File, own: (u64, u64)) -> bool {
+    // SAFETY: an ioctl on a namespace descriptor; a new one or -1.
+    let user = unsafe { libc::ioctl(mnt.as_raw_fd(), libc::NS_GET_USERNS) };
+    if user < 0 {
+        return false;
+    }
+    // SAFETY: the descriptor was just returned to us.
+    user_ns_below(unsafe { OwnedFd::from_raw_fd(user) }, own)
+}
+
+/// Whether the user namespace `fd` is `own` or below it: its parents walked
+/// up (`NS_GET_PARENT`), which ends where our view does.
+fn user_ns_below(mut fd: OwnedFd, own: (u64, u64)) -> bool {
     // The kernel nests user namespaces 32 deep at most.
     for _ in 0..40 {
         // SAFETY: fstat of a descriptor we hold, into a zeroed struct.
@@ -415,6 +434,9 @@ pub fn revoke_everywhere(zone: &str, path: &Path) {
         return;
     };
     let own_mnt = fs::read_link("/proc/self/ns/mnt").ok();
+    let Some(own_user) = ns_key(Path::new("/proc/self/ns/user")) else {
+        return;
+    };
     let mut seen: Vec<PathBuf> = Vec::new();
     let (mut covered, mut failed) = (0, Vec::new());
     let null_dev = libc::makedev(1, 3);
@@ -430,6 +452,9 @@ pub fn revoke_everywhere(zone: &str, path: &Path) {
         let Ok(handle) = File::open(format!("/proc/{pid}/ns/mnt")) else {
             continue;
         };
+        if !mounts_below(&handle, own_user) {
+            continue;
+        }
         // SAFETY: after fork the child makes only async-signal-safe calls on
         // what was made before it — a descriptor and two C strings — and
         // leaves with _exit.
@@ -717,6 +742,22 @@ mod tests {
     fn a_process_of_our_namespace_is_ours() {
         let own = ns_key(Path::new("/proc/self/ns/user")).unwrap();
         assert!(below(std::process::id() as i32, own));
+        // Our mount namespace is our user namespace's, or an ancestor's:
+        // below ours only if ours owns it.
+        let mnt = File::open("/proc/self/ns/mnt").unwrap();
+        // SAFETY: an ioctl on a namespace descriptor.
+        let owner = unsafe { libc::ioctl(mnt.as_raw_fd(), libc::NS_GET_USERNS) };
+        if owner >= 0 {
+            // SAFETY: the descriptor was just returned to us.
+            let owner = unsafe { OwnedFd::from_raw_fd(owner) };
+            // SAFETY: fstat of a descriptor we hold, into a zeroed struct.
+            let owner_key = unsafe {
+                let mut st: libc::stat = std::mem::zeroed();
+                libc::fstat(owner.as_raw_fd(), &mut st);
+                (st.st_dev, st.st_ino)
+            };
+            assert_eq!(mounts_below(&mnt, own), owner_key == own);
+        }
     }
 
     /// A descriptor on a node gone is found by its inode.
