@@ -43,8 +43,8 @@ use std::process::{Command, Stdio};
 
 use crate::sys;
 
-/// The directory inside a container's own directory (`vpn-profiles/<name>`,
-/// `vpn-sandboxes/<name>`) that holds its certificates, one
+/// The directory inside a container's policy directory
+/// (`containers/<name>`) that holds its certificates, one
 /// `<sha256>.pem` per certificate. Its existence is what switches the layer on
 /// — an empty one still cleans stale entries out of the NSS databases.
 pub const DIR: &str = "trust";

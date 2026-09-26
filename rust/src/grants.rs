@@ -1,7 +1,7 @@
 //! Granted directories with a term, and taking a grant away from programs that
 //! are already running (`docs/CONTAINERS.md` §3.5).
 //!
-//! `vpn-zone container grant sb:<name> <dir> --for 2h` writes the end of the
+//! `vpn-zone container grant <name> <dir> --for 2h` writes the end of the
 //! term next to the path. From that moment on a grant whose term is over is
 //! simply not there for any launch — `container::load` skips it — so nothing
 //! has to happen on time for a NEW launch to be refused it.
@@ -159,15 +159,20 @@ pub fn mounted_at(mountinfo: &str, dest: &Path) -> bool {
         .any(|point| unescape(point) == wanted)
 }
 
-/// The live pids of a sandbox's programs and all their descendants.
+/// The live pids of a container's programs and all their descendants. By
+/// its name, whichever way a record spells it: `sb:<name>` in a record from
+/// before one name per container.
 fn sandbox_processes(tools: &Tools, selector: &str) -> BTreeSet<i32> {
     let mut roots: Vec<i32> = Vec::new();
     let running = tools.state.join(".running");
+    let Some(name) = crate::container::canonical(tools, selector) else {
+        return BTreeSet::new();
+    };
     for dir in crate::registry::dirs(&running) {
         for (_, record) in
             crate::registry::live_records(&dir, &|pid| crate::registry::alive(&running, pid))
         {
-            if record.selector == selector {
+            if crate::container::canonical(tools, &record.selector).as_deref() == Some(&*name) {
                 roots.push(record.pid);
             }
         }

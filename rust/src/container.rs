@@ -1,16 +1,25 @@
-//! Containers as identities (`docs/CONTAINERS.md` §3).
+//! Containers as identities (`docs/CONTAINERS.md` §3, `docs/PERMISSIONS.md`
+//! §11.7).
 //!
 //! A container is a home, its permissions, its trusted certificates and ONE
-//! network at a time. The homes already exist — a data container
-//! (`vpn-profiles/<name>`, an overlay over the XDG directories) and a named
-//! sandbox (`vpn-sandboxes/<name>`, a home of its own) — and this module adds
-//! what makes them identities: the network a container is bound to, and the
-//! programs assigned to it.
+//! network at a time, under ONE name. The kind of its home is a property of
+//! it, not a part of the name:
+//!
+//! * `private` — a home of its own (`<data>/home`), what a "sandbox" was;
+//! * `layer` — a layer over the whole real home (`<data>/home/upper`), what a
+//!   "profile" was; `overlay` is read as it;
+//! * `main` — the real home itself: no data of its own, but a network,
+//!   programs and permissions of its own.
+//!
+//! Its data live in `~/.local/state/vpn-profiles/<name>/` whatever the kind —
+//! a historical name: every zone covers that directory, the ones started
+//! before this layout too, which a new directory they would not — and its
+//! policy in `~/.config/vpn-zones/containers/<name>/`, read-only in zones.
 //!
 //! **Where each value comes from is part of the value.** A setting can be
 //! declared in Nix (home-manager writes it under
 //! `~/.config/vpn-zones/declared/containers/`, read-only), set locally from the
-//! CLI or the GUI (`container.conf` in the container's own directory, the
+//! CLI or the GUI (`container.conf` in the container's policy directory, the
 //! picker's `.pinnedprofile`), or be the default. A declared value wins, and the
 //! local tools refuse to change it instead of failing on a read-only file —
 //! and a configuration tool reading `vpn-zone status --json` has to know which
@@ -32,18 +41,29 @@ use crate::tools::Tools;
 /// ([`policy_dir`]).
 pub const FILE: &str = "container.conf";
 /// Where a container's policy lives, below the config dir: its settings,
-/// grants, file permissions and trusted certificates — `profiles/<name>` or
-/// `sandboxes/<name>`. Not next to its data: container storage is written
-/// through every zone's home layer (`docs/HOME-LAYER.md`), and a program in a
-/// zone could otherwise bind a container to the host's network or grant it
-/// a directory (review 2026-09-25, P1). The config dir is read-only in zones.
+/// grants, file permissions and trusted certificates, `<name>/`. Not next to
+/// its data: a program with the data in reach could otherwise bind its
+/// container to the host's network or grant it a directory (review
+/// 2026-09-25, P1). The config dir is read-only in zones.
 pub const POLICY_DIR: &str = "containers";
-/// The mark that the policy files of this version's layout were moved there
-/// ([`migrate_policy`]): once, and never again.
-pub const POLICY_MIGRATED: &str = ".migrated";
+/// The mark that this version's layout is in place ([`migrate`]): the
+/// policy moved out of the data, the named sandboxes' data moved in with the
+/// rest, one name per container. Its content is the layout's number.
+pub const LAYOUT_MARK: &str = ".layout";
+const LAYOUT: &str = "2";
+/// The mark of the previous layout (policy per kind,
+/// `containers/{profiles,sandboxes}/<name>`): after it, files next to a
+/// container's data are nobody's policy.
+const LAYOUT_1_MARK: &str = ".migrated";
+/// Names the move to one name gave to what could not keep its own, one
+/// `<old selector>\t<new name>` a line: a stale `sb:work` still finds the
+/// sandbox that became `work-sb`.
+pub const RENAMED: &str = ".renamed";
 /// Where home-manager puts the declared containers, below the config dir.
 pub const DECLARED: &str = "declared/containers";
-/// The prefix of a named sandbox's selector.
+/// The prefix a named sandbox's selector had while a layer and a home of its
+/// own could share a name. Still read: in Nix, in stale memory, in the
+/// records of programs started before the move.
 pub const SANDBOX_PREFIX: &str = "sb:";
 /// The directories granted to a private home, one per line: the path, or
 /// `until=<unix seconds> <path>` for a grant with a term.
@@ -52,6 +72,10 @@ pub const PATHS_FILE: &str = "paths";
 /// so it can never start like this — and a version that does not know the
 /// prefix reads the line as a relative path, which fs-sandbox refuses.
 pub const UNTIL_PREFIX: &str = "until=";
+/// In a container's data directory: the kind of home its `home/` holds. A
+/// change of kind sets the other kind's data aside (`home.<kind>`) instead
+/// of reading one as the other ([`prepare_data`]).
+pub const DATA_KIND: &str = ".home-kind";
 
 /// Now, in seconds since the epoch.
 pub fn now() -> u64 {
@@ -103,17 +127,49 @@ pub struct Sourced<T> {
 /// What kind of home a container has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Home {
-    /// A layer over the XDG directories of the real home: `vpn-profiles`.
-    Overlay,
-    /// A home of its own: a named sandbox, `vpn-sandboxes`.
+    /// A home of its own: `<data>/home`.
     Private,
+    /// A layer over the whole real home: `<data>/home/upper`.
+    Layer,
+    /// The real home itself.
+    Main,
 }
 
 impl Home {
+    /// As `status --json` says it (schema 1: a layer is `overlay` there).
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Overlay => "overlay",
             Self::Private => "private",
+            Self::Layer => "overlay",
+            Self::Main => "main",
+        }
+    }
+
+    /// As the settings and Nix write it: `layer`, and `overlay` for it.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "private" => Some(Self::Private),
+            "layer" | "overlay" => Some(Self::Layer),
+            "main" => Some(Self::Main),
+            _ => None,
+        }
+    }
+
+    /// The word a setting is written with.
+    pub fn setting(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Layer => "layer",
+            Self::Main => "main",
+        }
+    }
+
+    /// For people.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Private => "свой дом",
+            Self::Layer => "слой над домом",
+            Self::Main => "основной дом",
         }
     }
 }
@@ -166,12 +222,14 @@ impl Network {
 pub struct Container {
     pub name: String,
     pub home: Home,
+    /// Where the kind of home was set.
+    pub home_source: Source,
     pub network: Sourced<Network>,
     pub apps: Vec<Sourced<String>>,
     /// Directories of trusted certificates declared in Nix: built by the module
     /// (one `<sha256>.pem` each, checked for CA:TRUE at build time), read-only.
     pub declared_trust: Vec<PathBuf>,
-    /// Directories of the real home granted to a private home
+    /// Directories of the real home granted to the container
     /// (`docs/CONTAINERS.md` §3.5): declared ones first. Only grants in force:
     /// one whose term is over is not here at all.
     pub paths: Vec<Sourced<PathBuf>>,
@@ -180,8 +238,8 @@ pub struct Container {
     /// An X server of its own in a zone (`docs/HERMETICITY.md` §7, A): the
     /// host's is never reachable from a zone.
     pub x11: Sourced<bool>,
-    /// The container's own directory. May not exist yet for a container that
-    /// is only declared.
+    /// The container's data directory ([`data_dir`]). May not exist yet — and
+    /// a container of the main home has none it uses.
     pub dir: PathBuf,
     /// Its policy: settings, grants, permissions, certificates
     /// ([`policy_dir`]).
@@ -189,37 +247,75 @@ pub struct Container {
 }
 
 impl Container {
-    /// The selector the registry, the pins and `vpn-zone run` use.
+    /// The selector the registry, the pins and `vpn-zone run` use: its name.
     pub fn selector(&self) -> String {
-        selector_of(self.home, &self.name)
+        self.name.clone()
     }
 
     pub fn trust_dir(&self) -> PathBuf {
         self.policy.join(crate::trust::DIR)
     }
-}
 
-/// `work` for a data container, `sb:work` for a named sandbox.
-pub fn selector_of(home: Home, name: &str) -> String {
-    match home {
-        Home::Overlay => name.to_owned(),
-        Home::Private => format!("{SANDBOX_PREFIX}{name}"),
+    /// The home the programs see, on disk: a private home's. `None` for a
+    /// layer (its home is an overlay, mounted per launch) and for the main
+    /// home (the real one).
+    pub fn private_home(&self) -> Option<PathBuf> {
+        (self.home == Home::Private).then(|| self.dir.join("home"))
     }
 }
 
-/// A selector back into its home and name. `None` for everything that is not a
-/// container: the main profile, a throwaway sandbox or container, an empty
-/// string.
-pub fn parse_selector(selector: &str) -> Option<(Home, &str)> {
-    let (home, name) = match selector.strip_prefix(SANDBOX_PREFIX) {
-        Some(name) => (Home::Private, name),
-        None => (Home::Overlay, selector),
-    };
-    let reserved = matches!(name, "" | "__main__" | "__fs__" | "__tmp__")
-        || name.starts_with("tmpjoin:")
-        || name.contains('/')
-        || name.starts_with(['-', '.']);
-    (!reserved).then_some((home, name))
+/// The names that are words of this project rather than containers: the
+/// picker's menu commands and settings (`main`, `ask`, `own`, `pinmain`,
+/// `unpinprof`, anything `__…`), and the directories of the previous policy
+/// layout.
+pub fn reserved_name(name: &str) -> bool {
+    name.starts_with("__")
+        || matches!(
+            name,
+            "pinmain" | "unpinprof" | "main" | "ask" | "own" | "profiles" | "sandboxes"
+        )
+}
+
+/// Can this be the name of a container? One file name, which no program can
+/// take for an option or a hidden file, and no word of ours ([`reserved_name`]).
+/// `:` is out: it separated the old sandbox prefix, and the picker's tags.
+/// Any script otherwise — `Работа` is a name.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.starts_with(['-', '.'])
+        && !name
+            .chars()
+            .any(|c| c == '/' || c == ':' || c.is_whitespace() || c.is_control())
+        && !reserved_name(name)
+}
+
+/// A selector back into a container's name. `None` for everything that is not
+/// a container: the main profile, a throwaway sandbox or container, an empty
+/// string. `sb:<name>` is read as `<name>` — what it became unless the move
+/// renamed it, which [`canonical`] knows.
+pub fn parse_selector(selector: &str) -> Option<&str> {
+    let name = selector.strip_prefix(SANDBOX_PREFIX).unwrap_or(selector);
+    valid_name(name).then_some(name)
+}
+
+/// A selector as the container's name now, the move's renames included:
+/// `sb:work` is `work-sb` when a layer took `work`.
+pub fn canonical(tools: &Tools, selector: &str) -> Option<String> {
+    canonical_in(&tools.config, selector)
+}
+
+/// [`canonical`], from the config dir alone.
+pub fn canonical_in(config: &Path, selector: &str) -> Option<String> {
+    let renamed = fs::read_to_string(config.join(POLICY_DIR).join(RENAMED)).unwrap_or_default();
+    for line in renamed.lines() {
+        if let Some((old, new)) = line.split_once('\t') {
+            if old == selector && valid_name(new) {
+                return Some(new.to_owned());
+            }
+        }
+    }
+    parse_selector(selector).map(str::to_owned)
 }
 
 /// `key = value` lines, in order. Comments (`#`) and lines without `=` are
@@ -240,103 +336,347 @@ fn values<'a>(conf: &'a [(String, String)], key: &'a str) -> impl Iterator<Item 
         .map(|(_, v)| v.as_str())
 }
 
-/// The file a declared container lives in: `overlay-<name>.conf` or
-/// `private-<name>.conf`.
-pub fn declared_file(tools: &Tools, home: Home, name: &str) -> PathBuf {
-    tools
-        .config
-        .join(DECLARED)
-        .join(format!("{}-{name}.conf", home.as_str()))
+/// The file a declared container lives in: `<name>.conf`, with its `home`.
+pub fn declared_file(tools: &Tools, name: &str) -> PathBuf {
+    tools.config.join(DECLARED).join(format!("{name}.conf"))
 }
 
-/// Where the policy of a container lives ([`POLICY_DIR`]).
-pub fn policy_dir(tools: &Tools, home: Home, name: &str) -> PathBuf {
-    policy_dir_in(&tools.config, home, name)
-}
+/// Settings as `key = value` pairs, in order.
+type Conf = Vec<(String, String)>;
 
-/// [`policy_dir`], from the config dir alone.
-pub fn policy_dir_in(config: &Path, home: Home, name: &str) -> PathBuf {
-    config
-        .join(POLICY_DIR)
-        .join(match home {
-            Home::Overlay => "profiles",
-            Home::Private => "sandboxes",
-        })
-        .join(name)
-}
-
-/// The files a container's policy is made of, as they were next to its data.
-const POLICY_FILES: [&str; 4] = [FILE, PATHS_FILE, "perms", crate::trust::DIR];
-
-/// Move the policy files of the old layout from each container's own
-/// directory into its policy directory — once, on the host, and marked done.
-/// Once, and not at every start: after the move a file there is nobody's
-/// business, and a program in a zone could put one next to a container's
-/// data, which a move at every start would then take for its policy. A
-/// file whose place is taken already stays where it was. In a zone nothing
-/// is moved: its config is read-only there, and its state not the host's.
-pub fn migrate_policy(tools: &Tools) {
-    if !crate::launch::in_zone() {
-        migrate_policy_in(&tools.config, &tools.profiles, &tools.sandboxes);
+/// A declared container: its settings, and the kind of its home. The files
+/// of the module before one name per container are read too:
+/// `overlay-<name>.conf` and `private-<name>.conf`, with the kind in the
+/// name and no `home` line — a file of the new kind always has one, which
+/// is how the two are told apart.
+fn read_declared(tools: &Tools, name: &str) -> Option<(Conf, Option<Home>)> {
+    if let Ok(text) = fs::read_to_string(declared_file(tools, name)) {
+        let conf = parse_conf(&text);
+        if let Some(home) = values(&conf, "home").last().and_then(Home::parse) {
+            return Some((conf, Some(home)));
+        }
     }
-}
-
-/// [`migrate_policy`] for a home, where no manifest is at hand
-/// (`fs_sandbox::settle_permissions`).
-pub fn migrate_policy_of_home(home: &Path) {
-    if !crate::launch::in_zone() {
-        migrate_policy_in(
-            &home.join(".config/vpn-zones"),
-            &home.join(".local/state/vpn-profiles"),
-            &home.join(".local/state/vpn-sandboxes"),
-        );
-    }
-}
-
-/// [`migrate_policy`], from the three directories alone, wherever it runs.
-pub fn migrate_policy_in(config: &Path, profiles: &Path, sandboxes: &Path) {
-    let mark = config.join(POLICY_DIR).join(POLICY_MIGRATED);
-    if mark.exists() {
-        return;
-    }
-    let mut failed = false;
-    for (storage, home) in [(profiles, Home::Overlay), (sandboxes, Home::Private)] {
-        let Ok(entries) = fs::read_dir(storage) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            // A container's own directory, never a link to one: a link there
-            // is somebody's, and its target no container's.
-            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-                continue;
-            }
-            let from = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let to = policy_dir_in(config, home, &name);
-            for file in POLICY_FILES {
-                let old = from.join(file);
-                let new = to.join(file);
-                if fs::symlink_metadata(&new).is_ok() {
-                    continue;
-                }
-                match move_policy_file(&old, &new) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        failed = true;
-                        eprintln!(
-                            "cellward: не перенести {} в {}: {e}",
-                            old.display(),
-                            new.display()
-                        );
-                    }
-                }
+    for (prefix, home) in [("overlay-", Home::Layer), ("private-", Home::Private)] {
+        let file = tools
+            .config
+            .join(DECLARED)
+            .join(format!("{prefix}{name}.conf"));
+        if let Ok(text) = fs::read_to_string(file) {
+            let conf = parse_conf(&text);
+            if values(&conf, "home").next().is_none() {
+                return Some((conf, Some(home)));
             }
         }
     }
+    None
+}
+
+/// Where the data of a container live, whatever its kind.
+pub fn data_dir(tools: &Tools, name: &str) -> PathBuf {
+    tools.profiles.join(name)
+}
+
+/// Where the policy of a container lives ([`POLICY_DIR`]).
+pub fn policy_dir(tools: &Tools, name: &str) -> PathBuf {
+    policy_dir_in(&tools.config, name)
+}
+
+/// [`policy_dir`], from the config dir alone.
+pub fn policy_dir_in(config: &Path, name: &str) -> PathBuf {
+    config.join(POLICY_DIR).join(name)
+}
+
+/// The files a container's policy is made of.
+const POLICY_FILES: [&str; 4] = [FILE, PATHS_FILE, "perms", crate::trust::DIR];
+
+/// What the move to this layout did, for the one who reads it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Moved {
+    /// `(old selector, new name)` for every container whose name changed.
+    pub renamed: Vec<(String, String)>,
+    /// Directories that are no container's name and were left where they are.
+    pub left: Vec<PathBuf>,
+    /// What went wrong: the move is tried again at the next look.
+    pub failed: Vec<String>,
+}
+
+/// Move everything into this version's layout — once, on the host, and
+/// marked done ([`LAYOUT_MARK`]). Once, and not at every start: after the
+/// move a file next to a container's data is nobody's business, and a
+/// program with the data in reach could put one there, which a move at every
+/// start would then take for its policy. In a zone nothing is moved: its
+/// config is read-only there, and its state not the host's.
+pub fn migrate(tools: &Tools) {
+    if crate::launch::in_zone() {
+        return;
+    }
+    let moved = migrate_in(
+        &tools.config,
+        &tools.profiles,
+        &tools.sandboxes,
+        &tools.state,
+    );
+    report_move(&moved);
+}
+
+/// [`migrate`] for a home, where no manifest is at hand
+/// (`fs_sandbox::settle_permissions`).
+pub fn migrate_home(home: &Path) {
+    if crate::launch::in_zone() {
+        return;
+    }
+    let moved = migrate_in(
+        &home.join(".config/vpn-zones"),
+        &home.join(".local/state/vpn-profiles"),
+        &home.join(".local/state/vpn-sandboxes"),
+        &home.join(".local/state/vpn-zones"),
+    );
+    report_move(&moved);
+}
+
+fn report_move(moved: &Moved) {
+    for (old, new) in &moved.renamed {
+        eprintln!("cellward: контейнер {old} теперь называется {new}");
+    }
+    for dir in &moved.left {
+        eprintln!(
+            "cellward: {} — не имя контейнера, оставлен на месте",
+            dir.display()
+        );
+    }
+    for why in &moved.failed {
+        eprintln!("cellward: {why}");
+    }
+}
+
+/// [`migrate`], from the directories alone, wherever it runs.
+///
+/// 1. The names: a layer (`profiles/<n>`) keeps its own; a home of its own
+///    (`sandboxes/<n>`) keeps it unless a layer has it, then `<n>-sb`; a
+///    name that became a word of ours gets `-2`. What cannot be a name at all
+///    stays where it is, and is said.
+/// 2. The policy into `containers/<name>/`: from the previous layout's
+///    `containers/{profiles,sandboxes}/<n>/`, or — only when that one never
+///    ran — from next to the data. Plain files only: a link stays where it
+///    is. A file already in place is kept. The kind of home is written into
+///    the settings, and next to the data ([`DATA_KIND`]).
+/// 3. The data of a home of its own into the one data directory: a rename,
+///    on one disk — a running program keeps what it has open.
+/// 4. The picker's memory and the default follow a renamed container; the
+///    renames are kept for the stale ones ([`RENAMED`]).
+pub fn migrate_in(config: &Path, profiles: &Path, sandboxes: &Path, state: &Path) -> Moved {
+    let root = config.join(POLICY_DIR);
+    let mut moved = Moved::default();
+    if fs::read_to_string(root.join(LAYOUT_MARK)).is_ok_and(|t| t.trim() == LAYOUT) {
+        return moved;
+    }
+    let policy_moved_before = root.join(LAYOUT_1_MARK).exists();
+
+    // Every container of the old layout: (kind, old name, where its data are,
+    // where the previous layout put its policy).
+    let mut old: Vec<(Home, String)> = Vec::new();
+    for (kind, data, sub) in [
+        (Home::Layer, profiles, "profiles"),
+        (Home::Private, sandboxes, "sandboxes"),
+    ] {
+        let mut names: Vec<String> = Vec::new();
+        for dir in [data.to_path_buf(), root.join(sub)] {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                // A container's own directory, never a link to one.
+                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') || names.contains(&name) {
+                    continue;
+                }
+                names.push(name);
+            }
+        }
+        names.sort();
+        old.extend(names.into_iter().map(|n| (kind, n)));
+    }
+    // An empty data directory with no policy is no container: home-manager
+    // makes one for every declared container before anything moves, and a
+    // sandbox of that name must not lose its name to it.
+    let hollow = |name: &str| {
+        fs::read_dir(profiles.join(name)).is_ok_and(|mut d| d.next().is_none())
+            && !root.join("profiles").join(name).exists()
+    };
+    let privates: Vec<String> = old
+        .iter()
+        .filter(|(kind, _)| *kind == Home::Private)
+        .map(|(_, n)| n.clone())
+        .collect();
+    old.retain(|(kind, name)| {
+        let drop = *kind == Home::Layer && privates.contains(name) && hollow(name);
+        if drop {
+            let _ = fs::remove_dir(profiles.join(name));
+        }
+        !drop
+    });
+
+    // The names that stay: every layer that has a good one. Then the rest
+    // find a free one around them.
+    let mut taken: Vec<String> = old
+        .iter()
+        .filter(|(kind, name)| *kind == Home::Layer && valid_name(name))
+        .map(|(_, name)| name.clone())
+        .collect();
+    let mut plan: Vec<(Home, String, String)> = Vec::new();
+    for (kind, name) in &old {
+        let data = match kind {
+            Home::Private => sandboxes.join(name),
+            _ => profiles.join(name),
+        };
+        if *kind == Home::Layer && valid_name(name) {
+            plan.push((*kind, name.clone(), name.clone()));
+            continue;
+        }
+        let (base, suffix) = if valid_name(name) {
+            (name.clone(), "-sb")
+        } else if reserved_name(name) && !name.starts_with("__") {
+            // A word of ours now (`main`, `ask`…): the name with a number.
+            (name.clone(), "-")
+        } else {
+            if data.is_dir() {
+                moved.left.push(data);
+            }
+            continue;
+        };
+        let mut new = base.clone();
+        let mut n = 1;
+        while !valid_name(&new)
+            || taken.contains(&new)
+            || (profiles.join(&new) != data && fs::symlink_metadata(profiles.join(&new)).is_ok())
+        {
+            n += 1;
+            new = match (suffix, n) {
+                ("-sb", 2) => format!("{base}-sb"),
+                ("-sb", _) => format!("{base}-sb{}", n - 1),
+                _ => format!("{base}-{n}"),
+            };
+        }
+        taken.push(new.clone());
+        plan.push((*kind, name.clone(), new));
+    }
+
+    for (kind, name, new) in &plan {
+        let (data, sub) = match kind {
+            Home::Private => (sandboxes.join(name), "sandboxes"),
+            _ => (profiles.join(name), "profiles"),
+        };
+        let target = policy_dir_in(config, new);
+        let sources: Vec<PathBuf> = if policy_moved_before {
+            vec![root.join(sub).join(name)]
+        } else {
+            vec![root.join(sub).join(name), data.clone()]
+        };
+        let failed_before = moved.failed.len();
+        for source in &sources {
+            for file in POLICY_FILES {
+                let from = source.join(file);
+                let to = target.join(file);
+                if fs::symlink_metadata(&to).is_ok() {
+                    continue;
+                }
+                if let Err(e) = move_policy_file(&from, &to) {
+                    moved.failed.push(format!(
+                        "не перенести {} в {}: {e}",
+                        from.display(),
+                        to.display()
+                    ));
+                }
+            }
+        }
+        // The kind, written: the shape of the data is no proof of it.
+        if let Err(e) = write_key(&target.join(FILE), "home", Some(kind.setting()), false) {
+            moved.failed.push(e);
+        }
+        // Its data stay where they are until its policy is in place: the
+        // next try must find the container as it was, not half of it moved.
+        if moved.failed.len() > failed_before {
+            continue;
+        }
+        let _ = fs::remove_dir(root.join(sub).join(name));
+
+        let into = profiles.join(new);
+        if data != into && data.is_dir() {
+            if fs::symlink_metadata(&into).is_ok() {
+                moved.failed.push(format!(
+                    "{} уже есть — данные {} остались на месте",
+                    into.display(),
+                    data.display()
+                ));
+                continue;
+            }
+            if let Err(e) = fs::create_dir_all(profiles).and_then(|()| fs::rename(&data, &into)) {
+                moved.failed.push(format!(
+                    "не перенести {} в {}: {e}",
+                    data.display(),
+                    into.display()
+                ));
+                continue;
+            }
+        }
+        if into.is_dir() && fs::symlink_metadata(into.join(DATA_KIND)).is_err() {
+            let _ = fs::write(into.join(DATA_KIND), kind.setting());
+        }
+        let old_selector = match kind {
+            Home::Private => format!("{SANDBOX_PREFIX}{name}"),
+            _ => name.clone(),
+        };
+        if old_selector != *new {
+            if *name != *new {
+                moved.renamed.push((old_selector.clone(), new.clone()));
+            }
+            follow_rename(config, state, &old_selector, new);
+        }
+    }
+    for sub in ["profiles", "sandboxes"] {
+        let _ = fs::remove_dir(root.join(sub));
+    }
+
     // Done only when everything went: a move that failed is tried again at
     // the next look, rather than a binding or a trust left behind in silence.
-    if !failed {
-        let _ = fs::create_dir_all(config.join(POLICY_DIR)).and_then(|()| fs::write(&mark, ""));
+    if moved.failed.is_empty() {
+        if let Err(e) =
+            fs::create_dir_all(&root).and_then(|()| fs::write(root.join(LAYOUT_MARK), LAYOUT))
+        {
+            moved
+                .failed
+                .push(format!("не записать {}: {e}", root.display()));
+        }
+    }
+    moved
+}
+
+/// A container renamed by the move: the picker's memory and the local
+/// default say its new name, and a sandbox's rename is kept for what cannot
+/// be rewritten — Nix, the records of programs running now. A word of ours
+/// that was a name (`main`) is not kept: as a word it means itself.
+fn follow_rename(config: &Path, state: &Path, old: &str, new: &str) {
+    for sub in [".pinnedprofile", ".lastprofile"] {
+        for file in visible_entries(&state.join(sub)) {
+            if read_setting(&file).as_deref() == Some(old) {
+                let _ = fs::write(&file, new);
+            }
+        }
+    }
+    if !reserved_name(old) {
+        let default = config.join("default-profile");
+        if read_setting(&default).as_deref() == Some(old) {
+            let _ = fs::write(&default, new);
+        }
+    }
+    if old.starts_with(SANDBOX_PREFIX) && parse_selector(old) != Some(new) {
+        let table = config.join(POLICY_DIR).join(RENAMED);
+        let mut text = fs::read_to_string(&table).unwrap_or_default();
+        text.push_str(&format!("{old}\t{new}\n"));
+        let _ = fs::create_dir_all(config.join(POLICY_DIR)).and_then(|()| fs::write(&table, text));
     }
 }
 
@@ -388,22 +728,97 @@ fn move_policy_file(old: &Path, new: &Path) -> io::Result<()> {
     fs::remove_dir_all(old)
 }
 
-fn home_dir_of(tools: &Tools, home: Home, name: &str) -> PathBuf {
-    match home {
-        Home::Overlay => tools.profiles.join(name),
-        Home::Private => tools.sandboxes.join(name),
+/// Set (`Some`) or drop (`None`) one key of a settings file, keeping the rest.
+/// With `replace` false an existing key is left as it is.
+pub fn write_key(path: &Path, key: &str, value: Option<&str>, replace: bool) -> Result<(), String> {
+    let mut conf: Vec<(String, String)> = fs::read_to_string(path)
+        .map(|t| parse_conf(&t))
+        .unwrap_or_default();
+    if !replace && conf.iter().any(|(k, _)| k == key) {
+        return Ok(());
     }
+    conf.retain(|(k, _)| k != key);
+    if let Some(value) = value {
+        conf.push((key.to_owned(), value.to_owned()));
+    }
+    let mut text = String::from(
+        "# Локальные настройки контейнера cellward (docs/CONTAINERS.md).\n\
+         # Пишет `cellward container`; значения из Nix лежат в ~/.config/vpn-zones/declared.\n",
+    );
+    for (k, v) in &conf {
+        text.push_str(&format!("{k} = {v}\n"));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("не создать {}: {e}", parent.display()))?;
+    }
+    fs::write(path, text).map_err(|e| format!("не записать {}: {e}", path.display()))
+}
+
+/// The kind of home the data of a container are in, when nothing says it:
+/// a layer has `home/upper`, a home of its own `home/`. A directory with
+/// neither — a layer never launched since the whole-home layer, with its old
+/// slots — is a layer; nothing at all is a home of its own, the standard.
+fn kind_of_data(dir: &Path) -> Home {
+    if let Some(kind) = fs::read_to_string(dir.join(DATA_KIND))
+        .ok()
+        .and_then(|t| Home::parse(&t))
+    {
+        return kind;
+    }
+    if dir.join("home/upper").is_dir() {
+        Home::Layer
+    } else if dir.join("home").is_dir() || !dir.is_dir() {
+        Home::Private
+    } else {
+        Home::Layer
+    }
+}
+
+/// Make a container's data the kind its settings say, before a launch: when
+/// the kind changed, the data of the old one go aside (`home.<old kind>`) and
+/// those of the new one, if they were set aside before, come back. Nothing is
+/// erased; what cannot be moved stops the launch.
+pub fn prepare_data(container: &Container) -> Result<(), String> {
+    if container.home == Home::Main {
+        return Ok(());
+    }
+    let dir = &container.dir;
+    fs::create_dir_all(dir).map_err(|e| format!("не создать {}: {e}", dir.display()))?;
+    let has = kind_of_data(dir);
+    let home = dir.join("home");
+    if has != container.home && fs::symlink_metadata(&home).is_ok() {
+        let aside = dir.join(format!("home.{}", has.setting()));
+        if fs::symlink_metadata(&aside).is_ok() {
+            return Err(format!(
+                "у контейнера {} сменился вид дома, а {} уже занят — разберись с ним вручную",
+                container.name,
+                aside.display()
+            ));
+        }
+        fs::rename(&home, &aside).map_err(|e| format!("не отложить {}: {e}", home.display()))?;
+    }
+    if has != container.home {
+        let back = dir.join(format!("home.{}", container.home.setting()));
+        if back.is_dir() && fs::symlink_metadata(&home).is_err() {
+            fs::rename(&back, &home).map_err(|e| format!("не вернуть {}: {e}", back.display()))?;
+        }
+    }
+    // A home of its own is its `home/`, there from the start.
+    if container.home == Home::Private {
+        fs::create_dir_all(&home).map_err(|e| format!("не создать {}: {e}", home.display()))?;
+    }
+    fs::write(dir.join(DATA_KIND), container.home.setting())
+        .map_err(|e| format!("не записать {}: {e}", dir.join(DATA_KIND).display()))
 }
 
 /// Read one container. `None` when it neither exists on disk nor is declared.
 pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
-    let (home, name) = parse_selector(selector)?;
-    migrate_policy(tools);
-    let dir = home_dir_of(tools, home, name);
-    let policy = policy_dir(tools, home, name);
-    let declared = fs::read_to_string(declared_file(tools, home, name))
-        .map(|t| parse_conf(&t))
-        .ok();
+    migrate(tools);
+    let name = canonical(tools, selector)?;
+    let name = name.as_str();
+    let dir = data_dir(tools, name);
+    let policy = policy_dir(tools, name);
+    let declared = read_declared(tools, name);
     // A container is its data, its policy or its declaration: a program with
     // its storage in reach removing the data directory must not make its
     // network binding disappear with it.
@@ -413,9 +828,17 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
     let local = fs::read_to_string(policy.join(FILE))
         .map(|t| parse_conf(&t))
         .unwrap_or_default();
+    let declared_conf = declared.as_ref().map(|(conf, _)| conf.as_slice());
 
-    let network = declared
-        .as_ref()
+    let (home, home_source) = match declared.as_ref().and_then(|(_, home)| *home) {
+        Some(home) => (home, Source::Nix),
+        None => match values(&local, "home").last().and_then(Home::parse) {
+            Some(home) => (home, Source::Local),
+            None => (kind_of_data(&dir), Source::Default),
+        },
+    };
+
+    let network = declared_conf
         .and_then(|conf| values(conf, "network").last().and_then(Network::parse))
         .map(|value| Sourced {
             value,
@@ -435,9 +858,8 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
             source: Source::Default,
         });
 
-    let selector = selector_of(home, name);
     let mut apps: Vec<Sourced<String>> = Vec::new();
-    if let Some(conf) = &declared {
+    if let Some(conf) = declared_conf {
         for app in values(conf, "app") {
             apps.push(Sourced {
                 // The key the picker remembers it under (`stable_key`).
@@ -451,9 +873,8 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
         let Some(key) = file.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             continue;
         };
-        if read_setting(&file).as_deref() == Some(selector.as_str())
-            && !apps.iter().any(|a| a.value == key)
-        {
+        let pinned = read_setting(&file).and_then(|s| canonical(tools, &s));
+        if pinned.as_deref() == Some(name) && !apps.iter().any(|a| a.value == key) {
             apps.push(Sourced {
                 value: key,
                 source: Source::Local,
@@ -461,13 +882,12 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
         }
     }
 
-    let declared_trust = declared
-        .as_ref()
+    let declared_trust = declared_conf
         .map(|conf| values(conf, "trust").map(PathBuf::from).collect())
         .unwrap_or_default();
 
     let mut paths: Vec<Sourced<PathBuf>> = Vec::new();
-    if let Some(conf) = &declared {
+    if let Some(conf) = declared_conf {
         for path in values(conf, "path") {
             paths.push(Sourced {
                 value: expand_home(&tools.home, path),
@@ -502,8 +922,7 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
             .last()
             .map(|v| matches!(v, "true" | "on" | "yes"))
     };
-    let x11 = declared
-        .as_deref()
+    let x11 = declared_conf
         .and_then(flag)
         .map(|value| Sourced {
             value,
@@ -523,6 +942,7 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
     Some(Container {
         name: name.to_owned(),
         home,
+        home_source,
         network,
         apps,
         declared_trust,
@@ -534,34 +954,21 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
     })
 }
 
-/// Every container: the data containers and named sandboxes on disk, and the
-/// declared ones that have no directory yet. Sorted by selector.
+/// Every container: the data and policy directories, and the declared ones
+/// that have neither yet. Sorted by name.
 pub fn load_all(tools: &Tools) -> Vec<Container> {
-    let mut selectors: Vec<String> = Vec::new();
-    for (dir, home) in [
-        (&tools.profiles, Home::Overlay),
-        (&tools.sandboxes, Home::Private),
-    ] {
+    migrate(tools);
+    let mut names: Vec<String> = Vec::new();
+    for dir in [&tools.profiles, &tools.config.join(POLICY_DIR)] {
         for entry in visible_entries(dir) {
             if entry.is_dir() {
-                let name = entry
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                selectors.push(selector_of(home, &name));
-            }
-        }
-    }
-    for (sub, home) in [("profiles", Home::Overlay), ("sandboxes", Home::Private)] {
-        for entry in visible_entries(&tools.config.join(POLICY_DIR).join(sub)) {
-            if entry.is_dir() {
-                let name = entry
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                selectors.push(selector_of(home, &name));
+                names.push(
+                    entry
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
             }
         }
     }
@@ -574,17 +981,22 @@ pub fn load_all(tools: &Tools) -> Vec<Container> {
         let Some(stem) = name.strip_suffix(".conf") else {
             continue;
         };
-        let parsed = stem
+        let conf = fs::read_to_string(&file)
+            .map(|t| parse_conf(&t))
+            .unwrap_or_default();
+        if values(&conf, "home").next().is_some() {
+            names.push(stem.to_owned());
+        } else if let Some(n) = stem
             .strip_prefix("overlay-")
-            .map(|n| (Home::Overlay, n))
-            .or_else(|| stem.strip_prefix("private-").map(|n| (Home::Private, n)));
-        if let Some((home, name)) = parsed {
-            selectors.push(selector_of(home, name));
+            .or_else(|| stem.strip_prefix("private-"))
+        {
+            names.push(n.to_owned());
         }
     }
-    selectors.sort();
-    selectors.dedup();
-    selectors.iter().filter_map(|s| load(tools, s)).collect()
+    names.retain(|n| valid_name(n));
+    names.sort();
+    names.dedup();
+    names.iter().filter_map(|n| load(tools, n)).collect()
 }
 
 /// `~/x` against the home; anything else as it is.
@@ -792,10 +1204,16 @@ pub fn set_path(
 ) -> Result<PathBuf, String> {
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
     let value = expand_home(&tools.home, path);
+    // The main home is the real one: there is nothing to grant it.
+    if grant && container.home == Home::Main {
+        return Err(format!(
+            "{selector} — основной дом: он и так настоящий, выдавать нечего"
+        ));
+    }
     // A layer sees the whole real home and writes its own layer: a grant is
     // a path of the home it writes through, into the real one. Outside the
     // home there is no layer — it is the real one anyway.
-    if grant && container.home == Home::Overlay && !lexical(&value).starts_with(&tools.home) {
+    if grant && container.home == Home::Layer && !lexical(&value).starts_with(&tools.home) {
         return Err(format!(
             "{selector} — слой над домом: вне дома ({}) слоя нет, там и так настоящее",
             value.display()
@@ -864,21 +1282,24 @@ pub fn set_path(
     Ok(value)
 }
 
-/// Take every grant whose term is over out of the paths files of the named
-/// sandboxes. Returns what was taken: `(selector, path)`.
+/// Take every grant whose term is over out of the paths files of the
+/// containers. Returns what was taken: `(name, path)`.
 pub fn expire_grants(tools: &Tools) -> Vec<(String, PathBuf)> {
     let now = now();
     let mut taken = Vec::new();
-    migrate_policy(tools);
-    let Ok(entries) = fs::read_dir(tools.config.join(POLICY_DIR).join("sandboxes")) else {
+    migrate(tools);
+    let Ok(entries) = fs::read_dir(tools.config.join(POLICY_DIR)) else {
         return taken;
     };
     for entry in entries.flatten() {
+        let selector = entry.file_name().to_string_lossy().into_owned();
+        if !valid_name(&selector) {
+            continue;
+        }
         let file = entry.path().join(PATHS_FILE);
         let Ok(text) = fs::read_to_string(&file) else {
             continue;
         };
-        let selector = selector_of(Home::Private, &entry.file_name().to_string_lossy());
         let mut kept = Vec::new();
         let mut changed = false;
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
@@ -923,7 +1344,8 @@ pub struct MergeReport {
 /// Merge `<from>` into `<into>` (`docs/CONTAINERS.md` §3.4).
 ///
 /// The rules, each for a reason: only containers of one kind (a layer and a
-/// home of its own do not merge into each other); nothing declared in Nix (the
+/// home of its own do not merge into each other, and the main home has no
+/// data of its own to merge); nothing declared in Nix (the
 /// module would put it back); nothing while either runs (files in use, and
 /// I2); a path `<into>` already has is never overwritten — the one from
 /// `<from>` goes to `.merged-from-<from>/`, because merging two browser
@@ -944,11 +1366,18 @@ pub fn merge(
     }
     if a.home != b.home {
         return Err(format!(
-            "{from} и {into} — разные виды дома (слой над домом и свой дом): такие не объединяются"
+            "{from} и {into} — разные виды дома ({} и {}): такие не объединяются",
+            a.home.label(),
+            b.home.label()
+        ));
+    }
+    if a.home == Home::Main {
+        return Err(format!(
+            "{from} и {into} — основной дом: своих данных у них нет, объединять нечего"
         ));
     }
     for c in [&a, &b] {
-        if declared_file(tools, c.home, &c.name).exists() {
+        if read_declared(tools, &c.name).is_some() {
             return Err(format!(
                 "{} объявлен в Nix — объединяй в конфигурации",
                 c.selector()
@@ -980,8 +1409,8 @@ pub fn merge(
 
     let mut report = MergeReport::default();
     let pairs: Vec<(PathBuf, PathBuf)> = match a.home {
-        Home::Private => vec![(a.dir.join("home"), b.dir.join("home"))],
-        Home::Overlay => fs::read_dir(&a.dir)
+        Home::Private | Home::Main => vec![(a.dir.join("home"), b.dir.join("home"))],
+        Home::Layer => fs::read_dir(&a.dir)
             .map(|entries| {
                 entries
                     .flatten()
@@ -1020,7 +1449,10 @@ pub fn merge(
     // choice so that it does not offer the emptied container first.
     for (sub, counts) in [(".pinnedprofile", true), (".lastprofile", false)] {
         for file in visible_entries(&tools.state.join(sub)) {
-            if read_setting(&file).as_deref() == Some(a.selector().as_str())
+            if read_setting(&file)
+                .and_then(|s| canonical(tools, &s))
+                .as_deref()
+                == Some(a.name.as_str())
                 && fs::write(&file, b.selector()).is_ok()
                 && counts
             {
@@ -1158,24 +1590,8 @@ pub fn set_network(tools: &Tools, selector: &str, network: &Network) -> Result<(
             ));
         }
     }
-    fs::create_dir_all(&container.policy)
-        .map_err(|e| format!("не создать {}: {e}", container.policy.display()))?;
-    let path = container.policy.join(FILE);
-    let mut conf: Vec<(String, String)> = fs::read_to_string(&path)
-        .map(|t| parse_conf(&t))
-        .unwrap_or_default();
-    conf.retain(|(k, _)| k != "network");
-    if *network != Network::Ask {
-        conf.push(("network".to_owned(), network.as_str().to_owned()));
-    }
-    let mut text = String::from(
-        "# Локальные настройки контейнера cellward (docs/CONTAINERS.md).\n\
-         # Пишет `cellward container`; значения из Nix лежат в ~/.config/vpn-zones/declared.\n",
-    );
-    for (k, v) in &conf {
-        text.push_str(&format!("{k} = {v}\n"));
-    }
-    fs::write(&path, text).map_err(|e| format!("не записать {}: {e}", path.display()))
+    let value = (*network != Network::Ask).then(|| network.as_str());
+    write_key(&container.policy.join(FILE), "network", value, true)
 }
 
 /// Give a container an X server of its own in zones, or take it away, locally.
@@ -1186,54 +1602,93 @@ pub fn set_x11(tools: &Tools, selector: &str, on: bool) -> Result<(), String> {
             "x11 контейнера {selector} задан в Nix — меняется там"
         ));
     }
-    fs::create_dir_all(&container.policy)
-        .map_err(|e| format!("не создать {}: {e}", container.policy.display()))?;
-    let path = container.policy.join(FILE);
-    let mut conf: Vec<(String, String)> = fs::read_to_string(&path)
-        .map(|t| parse_conf(&t))
-        .unwrap_or_default();
-    conf.retain(|(k, _)| k != "x11");
-    if on {
-        conf.push(("x11".to_owned(), "true".to_owned()));
+    write_key(
+        &container.policy.join(FILE),
+        "x11",
+        on.then_some("true"),
+        true,
+    )
+}
+
+/// Change the kind of a container's home, locally. Refused when the kind is
+/// declared in Nix, and while its programs run: their home would change under
+/// them. The data of the old kind go aside at the next launch
+/// ([`prepare_data`]), nothing is erased.
+pub fn set_home(tools: &Tools, selector: &str, home: Home) -> Result<(), String> {
+    let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    if container.home_source == Source::Nix {
+        return Err(format!(
+            "вид дома контейнера {selector} задан в Nix — меняется там"
+        ));
     }
-    let mut text = String::from(
-        "# Локальные настройки контейнера cellward (docs/CONTAINERS.md).\n\
-         # Пишет `cellward container`; значения из Nix лежат в ~/.config/vpn-zones/declared.\n",
-    );
-    for (k, v) in &conf {
-        text.push_str(&format!("{k} = {v}\n"));
+    if container.home == home {
+        return Ok(());
     }
-    fs::write(&path, text).map_err(|e| format!("не записать {}: {e}", path.display()))
+    if let Some(busy) = running_network(tools, &container) {
+        return Err(format!(
+            "программы контейнера {selector} работают (в сети {busy}) — закрой их, потом меняй дом"
+        ));
+    }
+    if home == Home::Main
+        && fs::read_dir(container.trust_dir()).is_ok_and(|mut d| d.next().is_some())
+    {
+        return Err(format!(
+            "у контейнера {selector} свои корневые сертификаты, а у основного дома их быть не может              (они легли бы в настоящий дом) — сначала cellward trust reset {selector}"
+        ));
+    }
+    write_key(
+        &container.policy.join(FILE),
+        "home",
+        Some(home.setting()),
+        true,
+    )?;
+    let mut changed = container;
+    changed.home = home;
+    prepare_data(&changed)
+}
+
+/// Make a container: its policy with the kind of its home, and its data
+/// directory. Refused for a name that cannot be one and for one that exists.
+pub fn create(tools: &Tools, name: &str, home: Home) -> Result<Container, String> {
+    if !valid_name(name) {
+        return Err(format!(
+            "«{name}» не может быть именем контейнера: нельзя / : пробелы, начало с - или ., \
+             и слова main, ask, own"
+        ));
+    }
+    if load(tools, name).is_some() {
+        return Err(format!("контейнер {name} уже есть"));
+    }
+    write_key(
+        &policy_dir(tools, name).join(FILE),
+        "home",
+        Some(home.setting()),
+        true,
+    )?;
+    let container = load(tools, name).ok_or_else(|| format!("контейнер {name} не создался"))?;
+    prepare_data(&container)?;
+    Ok(container)
 }
 
 /// The network the container's programs run in right now, if any: the first
 /// live registry record of any of its programs.
 ///
-/// A data container has a registry directory of its own. A named sandbox
-/// launches with no data container, so its records live under `__main__` and
-/// are told apart by the selector field.
+/// Every container has a registry directory of its own. A named sandbox
+/// started before it had one filed its records under `__main__`, told apart
+/// by the selector: those are read too, while they live.
 pub fn running_network(tools: &Tools, container: &Container) -> Option<String> {
     let running = tools.state.join(".running");
-    match container.home {
-        Home::Overlay => registry::live_zone(&running.join(&container.name), &|pid| {
-            registry::alive(&running, pid)
-        }),
-        Home::Private => registry::live_zone_of_selector(
-            &running.join(registry::MAIN),
-            &container.selector(),
-            &|pid| registry::alive(&running, pid),
-        ),
-    }
-}
-
-/// The container a launch uses, as a selector: a named sandbox wins (its home is
-/// what the program sees), otherwise a named data container.
-pub fn selector_of_launch(profile: Option<&str>, sandbox: Option<&str>) -> Option<String> {
-    match (sandbox, profile) {
-        (Some(sb), _) => Some(selector_of(Home::Private, sb)),
-        (None, Some(p)) => Some(selector_of(Home::Overlay, p)),
-        (None, None) => None,
-    }
+    let alive = |pid| registry::alive(&running, pid);
+    registry::live_zone(&running.join(&container.name), &alive).or_else(|| {
+        [
+            format!("{SANDBOX_PREFIX}{}", container.name),
+            container.name.clone(),
+        ]
+        .iter()
+        .find_map(|selector| {
+            registry::live_zone_of_selector(&running.join(registry::MAIN), selector, &alive)
+        })
+    })
 }
 
 /// Why a launch into `zone` may not use this container, or `None` when it may.
@@ -1255,6 +1710,11 @@ pub fn refusal(container: &Container, zone: &str, running: Option<&str>) -> Opti
              Одна личность — одна сеть: {how}"
         ));
     }
+    // The main home is one identity in every network anyway: there is
+    // nothing to keep apart (`docs/PERMISSIONS.md` §11.7).
+    if container.home == Home::Main {
+        return None;
+    }
     match running {
         Some(busy) if busy != zone => Some(format!(
             "программы контейнера «{selector}» уже работают в сети «{busy}», а запуск просит \
@@ -1271,12 +1731,11 @@ mod tests {
 
     #[test]
     fn selectors_name_containers_and_nothing_else() {
-        assert_eq!(parse_selector("work"), Some((Home::Overlay, "work")));
-        assert_eq!(parse_selector("sb:work"), Some((Home::Private, "work")));
-        assert_eq!(
-            parse_selector("sb:app-firefox"),
-            Some((Home::Private, "app-firefox"))
-        );
+        assert_eq!(parse_selector("work"), Some("work"));
+        assert_eq!(parse_selector("Работа"), Some("Работа"));
+        // The old prefix of a home of its own: the same name now.
+        assert_eq!(parse_selector("sb:work"), Some("work"));
+        assert_eq!(parse_selector("sb:app-firefox"), Some("app-firefox"));
         for not_one in [
             "",
             "__main__",
@@ -1285,12 +1744,33 @@ mod tests {
             "tmpjoin:/tmp/x",
             "sb:",
             "a/b",
+            "a b",
+            "a:b",
             "-x",
             ".x",
+            "main",
+            "ask",
+            "own",
+            "pinmain",
+            "profiles",
+            "sandboxes",
         ] {
             assert_eq!(parse_selector(not_one), None, "{not_one}");
         }
-        assert_eq!(selector_of(Home::Private, "work"), "sb:work");
+        assert!(Home::parse("overlay") == Some(Home::Layer));
+        assert_eq!(Home::Layer.as_str(), "overlay", "status schema 1");
+        assert_eq!(Home::Layer.setting(), "layer");
+    }
+
+    #[test]
+    fn a_renamed_sandbox_is_found_by_its_old_selector() {
+        let t = Tmp::new("renamed");
+        fs::create_dir_all(t.0.join(POLICY_DIR)).unwrap();
+        fs::write(t.0.join(POLICY_DIR).join(RENAMED), "sb:work\twork-sb\n").unwrap();
+        assert_eq!(canonical_in(&t.0, "sb:work").as_deref(), Some("work-sb"));
+        assert_eq!(canonical_in(&t.0, "work").as_deref(), Some("work"));
+        assert_eq!(canonical_in(&t.0, "sb:dev").as_deref(), Some("dev"));
+        assert_eq!(canonical_in(&t.0, "__main__"), None);
     }
 
     #[test]
@@ -1324,91 +1804,256 @@ mod tests {
         assert_eq!(values(&conf, "app").collect::<Vec<_>>(), ["firefox", "tg"]);
     }
 
-    /// The old layout's policy files move to the policy directory once, and
-    /// what a program in a zone puts next to a container's data afterwards is
-    /// no policy: the move is marked done and never runs again.
-    #[test]
-    fn the_policy_moves_once_and_not_again() {
-        let base = std::env::temp_dir().join(format!("vz-policy-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        let (config, profiles, sandboxes) = (
-            base.join("config"),
-            base.join("profiles"),
-            base.join("sandboxes"),
-        );
-        fs::create_dir_all(sandboxes.join("dev/trust")).unwrap();
-        fs::create_dir_all(profiles.join("work")).unwrap();
-        fs::write(sandboxes.join("dev/perms"), "downloads\n").unwrap();
-        fs::write(sandboxes.join("dev/paths"), "~/g\n").unwrap();
-        fs::write(sandboxes.join("dev/trust/a.pem"), "x").unwrap();
-        fs::write(profiles.join("work/container.conf"), "network = nl\n").unwrap();
-        // A place taken already keeps what is there.
-        let dev = policy_dir_in(&config, Home::Private, "dev");
-        fs::create_dir_all(&dev).unwrap();
-        fs::write(dev.join("paths"), "~/kept\n").unwrap();
+    struct Layout {
+        base: PathBuf,
+        config: PathBuf,
+        profiles: PathBuf,
+        sandboxes: PathBuf,
+        state: PathBuf,
+    }
 
-        migrate_policy_in(&config, &profiles, &sandboxes);
+    impl Layout {
+        fn new(tag: &str) -> Self {
+            let base = std::env::temp_dir().join(format!("vz-layout-{}-{tag}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            Self {
+                config: base.join("config"),
+                profiles: base.join("profiles"),
+                sandboxes: base.join("sandboxes"),
+                state: base.join("state"),
+                base,
+            }
+        }
+
+        fn migrate(&self) -> Moved {
+            migrate_in(&self.config, &self.profiles, &self.sandboxes, &self.state)
+        }
+    }
+
+    impl Drop for Layout {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    fn conf_of(config: &Path, name: &str) -> Vec<(String, String)> {
+        parse_conf(&fs::read_to_string(policy_dir_in(config, name).join(FILE)).unwrap_or_default())
+    }
+
+    /// One name, one data directory, one policy directory: the sandboxes'
+    /// data join the rest, the policy of both layouts before moves in, the
+    /// kind is written, and a name a layer has makes the sandbox `-sb`.
+    #[test]
+    fn the_layout_moves_to_one_name_per_container() {
+        let l = Layout::new("one");
+        // The previous layout: policy per kind.
+        let p1 = l.config.join(POLICY_DIR);
+        fs::create_dir_all(p1.join("sandboxes/dev/trust")).unwrap();
+        fs::create_dir_all(p1.join("profiles/work")).unwrap();
+        fs::write(p1.join(LAYOUT_1_MARK), "").unwrap();
+        fs::write(p1.join("sandboxes/dev/perms"), "downloads\n").unwrap();
+        fs::write(p1.join("sandboxes/dev/trust/a.pem"), "x").unwrap();
+        fs::write(p1.join("profiles/work/container.conf"), "network = nl\n").unwrap();
+        fs::create_dir_all(l.sandboxes.join("dev/home/.config")).unwrap();
+        fs::write(l.sandboxes.join("dev/home/.config/x"), "dev's").unwrap();
+        // What home-manager's activation makes for a declared container
+        // before anything moves: empty, and nobody's name.
+        fs::create_dir_all(l.profiles.join("dev")).unwrap();
+        fs::create_dir_all(l.profiles.join("work/home/upper")).unwrap();
+        // A sandbox with a layer's name.
+        fs::create_dir_all(l.sandboxes.join("work/home")).unwrap();
+        fs::write(l.sandboxes.join("work/home/f"), "the sandbox's").unwrap();
+        // After the previous move, a file next to the data is nobody's.
+        fs::write(
+            l.sandboxes.join("dev/container.conf"),
+            "network = unconfined\n",
+        )
+        .unwrap();
+        // Memory that names them.
+        fs::create_dir_all(l.state.join(".pinnedprofile")).unwrap();
+        fs::write(l.state.join(".pinnedprofile/tg"), "sb:work").unwrap();
+        fs::write(l.state.join(".pinnedprofile/ff"), "sb:dev").unwrap();
+        fs::write(l.state.join(".pinnedprofile/kate"), "work").unwrap();
+        fs::write(l.config.join("default-profile"), "sb:work").unwrap();
+
+        let moved = l.migrate();
+        assert!(moved.failed.is_empty(), "{moved:?}");
+        assert_eq!(
+            moved.renamed,
+            [("sb:work".to_owned(), "work-sb".to_owned())]
+        );
+
+        assert_eq!(
+            fs::read_to_string(l.profiles.join("dev/home/.config/x")).unwrap(),
+            "dev's"
+        );
+        assert_eq!(
+            fs::read_to_string(l.profiles.join("work-sb/home/f")).unwrap(),
+            "the sandbox's"
+        );
+        assert!(
+            l.profiles.join("work/home/upper").is_dir(),
+            "the layer stays"
+        );
+        assert!(!l.sandboxes.join("dev").exists());
+
+        let dev = policy_dir_in(&l.config, "dev");
         assert_eq!(
             fs::read_to_string(dev.join("perms")).unwrap(),
             "downloads\n"
         );
         assert!(dev.join("trust/a.pem").is_file());
-        assert_eq!(fs::read_to_string(dev.join("paths")).unwrap(), "~/kept\n");
-        assert!(!sandboxes.join("dev/perms").exists());
-        let work = policy_dir_in(&config, Home::Overlay, "work");
         assert_eq!(
-            fs::read_to_string(work.join(FILE)).unwrap(),
-            "network = nl\n"
+            conf_of(&l.config, "dev"),
+            [("home".to_owned(), "private".to_owned())]
+        );
+        assert_eq!(
+            conf_of(&l.config, "work"),
+            [
+                ("network".to_owned(), "nl".to_owned()),
+                ("home".to_owned(), "layer".to_owned())
+            ]
+        );
+        assert_eq!(conf_of(&l.config, "work-sb")[0].1, "private");
+        assert!(!p1.join("profiles").exists() && !p1.join("sandboxes").exists());
+
+        assert_eq!(
+            read_setting(&l.state.join(".pinnedprofile/tg")).unwrap(),
+            "work-sb"
+        );
+        assert_eq!(
+            read_setting(&l.state.join(".pinnedprofile/ff")).unwrap(),
+            "dev"
+        );
+        assert_eq!(
+            read_setting(&l.state.join(".pinnedprofile/kate")).unwrap(),
+            "work"
+        );
+        assert_eq!(
+            read_setting(&l.config.join("default-profile")).unwrap(),
+            "work-sb"
+        );
+        assert_eq!(
+            canonical_in(&l.config, "sb:work").as_deref(),
+            Some("work-sb")
         );
 
-        // Afterwards: a file next to the data is nobody's.
+        // Once: what appears next to the data afterwards is nobody's.
         fs::write(
-            sandboxes.join("dev/container.conf"),
+            l.profiles.join("dev/container.conf"),
             "network = unconfined\n",
         )
         .unwrap();
-        migrate_policy_in(&config, &profiles, &sandboxes);
-        assert!(!dev.join(FILE).exists(), "moved after the move was done");
-        let _ = fs::remove_dir_all(&base);
+        assert_eq!(l.migrate(), Moved::default());
+        assert_eq!(
+            conf_of(&l.config, "dev"),
+            [("home".to_owned(), "private".to_owned())]
+        );
     }
 
-    /// A link among the old files is no policy: it stays where it is, and
-    /// the move is not marked done while it does; a link to a container's
-    /// directory is no container.
+    /// Before the previous move ran, the policy is still next to the data,
+    /// and is taken from there — plain files only; a link is left, and the
+    /// move is not marked done while it is; a link to a directory is no
+    /// container; a name that cannot be one stays where it is.
     #[test]
-    fn the_policy_move_takes_no_link() {
-        let base = std::env::temp_dir().join(format!("vz-policy-link-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        let (config, profiles, sandboxes) = (
-            base.join("config"),
-            base.join("profiles"),
-            base.join("sandboxes"),
-        );
-        fs::create_dir_all(sandboxes.join("dev")).unwrap();
-        fs::create_dir_all(base.join("elsewhere")).unwrap();
-        fs::write(base.join("elsewhere/conf"), "network = unconfined\n").unwrap();
+    fn the_oldest_layout_moves_too_and_no_link_with_it() {
+        let l = Layout::new("oldest");
+        fs::create_dir_all(l.sandboxes.join("dev/home")).unwrap();
+        fs::write(l.sandboxes.join("dev/paths"), "~/g\n").unwrap();
+        fs::create_dir_all(l.profiles.join("----")).unwrap();
+        fs::create_dir_all(l.base.join("elsewhere")).unwrap();
+        fs::write(l.base.join("elsewhere/conf"), "network = unconfined\n").unwrap();
         std::os::unix::fs::symlink(
-            base.join("elsewhere/conf"),
-            sandboxes.join("dev").join(FILE),
+            l.base.join("elsewhere/conf"),
+            l.sandboxes.join("dev").join(FILE),
         )
         .unwrap();
-        std::os::unix::fs::symlink(base.join("elsewhere"), sandboxes.join("linked")).unwrap();
-        fs::write(base.join("elsewhere/perms"), "home\n").unwrap();
-        migrate_policy_in(&config, &profiles, &sandboxes);
-        let dev = policy_dir_in(&config, Home::Private, "dev");
+        std::os::unix::fs::symlink(l.base.join("elsewhere"), l.sandboxes.join("linked")).unwrap();
+
+        let moved = l.migrate();
+        assert_eq!(moved.left, [l.profiles.join("----")]);
+        assert!(!moved.failed.is_empty(), "the link is a failure");
+        let dev = policy_dir_in(&l.config, "dev");
+        assert_eq!(fs::read_to_string(dev.join(PATHS_FILE)).unwrap(), "~/g\n");
         assert!(
-            fs::symlink_metadata(dev.join(FILE)).is_err(),
+            !fs::symlink_metadata(dev.join(FILE)).is_ok_and(|m| m.file_type().is_symlink())
+                && !fs::read_to_string(dev.join(FILE))
+                    .unwrap()
+                    .contains("unconfined"),
             "a link was moved"
         );
-        assert!(!policy_dir_in(&config, Home::Private, "linked").exists());
-        assert!(!config.join(POLICY_DIR).join(POLICY_MIGRATED).exists());
-        let _ = fs::remove_dir_all(&base);
+        assert!(!policy_dir_in(&l.config, "linked").exists());
+        assert!(
+            l.sandboxes.join("dev/home").is_dir(),
+            "kept whole until its policy moved"
+        );
+        assert!(!l.config.join(POLICY_DIR).join(LAYOUT_MARK).exists());
+
+        // The link gone, the next look finishes.
+        fs::remove_file(l.sandboxes.join("dev").join(FILE)).unwrap();
+        let moved = l.migrate();
+        assert!(moved.failed.is_empty(), "{moved:?}");
+        assert!(l.profiles.join("dev/home").is_dir());
+        assert_eq!(conf_of(&l.config, "dev")[0].1, "private");
+        assert!(l.config.join(POLICY_DIR).join(LAYOUT_MARK).exists());
+    }
+
+    /// A change of the kind of home sets the other kind's data aside and
+    /// brings back what was set aside before: nothing erased, nothing read as
+    /// the other kind.
+    #[test]
+    fn a_new_kind_of_home_sets_the_old_one_aside() {
+        let t = Tmp::new("kind");
+        let mut c = container(Network::Ask, Source::Default);
+        c.dir = t.0.join("dev");
+        fs::create_dir_all(c.dir.join("home/.config")).unwrap();
+        fs::write(c.dir.join("home/.config/x"), "private").unwrap();
+        fs::write(c.dir.join(DATA_KIND), "private").unwrap();
+
+        c.home = Home::Layer;
+        prepare_data(&c).unwrap();
+        assert!(!c.dir.join("home").exists(), "a private home is no layer");
+        assert_eq!(
+            fs::read_to_string(c.dir.join("home.private/.config/x")).unwrap(),
+            "private"
+        );
+        fs::create_dir_all(c.dir.join("home/upper")).unwrap();
+
+        c.home = Home::Private;
+        prepare_data(&c).unwrap();
+        assert_eq!(
+            fs::read_to_string(c.dir.join("home/.config/x")).unwrap(),
+            "private"
+        );
+        assert!(c.dir.join("home.layer/upper").is_dir());
+        assert_eq!(
+            fs::read_to_string(c.dir.join(DATA_KIND)).unwrap(),
+            "private"
+        );
+
+        // The main home has no data to prepare.
+        c.home = Home::Main;
+        prepare_data(&c).unwrap();
+        assert!(c.dir.join("home/.config/x").is_file());
+    }
+
+    #[test]
+    fn the_kind_of_old_data_is_read_from_their_shape() {
+        let t = Tmp::new("shape");
+        fs::create_dir_all(t.0.join("layer/home/upper")).unwrap();
+        fs::create_dir_all(t.0.join("private/home")).unwrap();
+        fs::create_dir_all(t.0.join("old-layer/.config")).unwrap();
+        assert_eq!(kind_of_data(&t.0.join("layer")), Home::Layer);
+        assert_eq!(kind_of_data(&t.0.join("private")), Home::Private);
+        assert_eq!(kind_of_data(&t.0.join("old-layer")), Home::Layer);
+        assert_eq!(kind_of_data(&t.0.join("nothing")), Home::Private);
     }
 
     fn container(network: Network, source: Source) -> Container {
         Container {
             name: "work".into(),
             home: Home::Private,
+            home_source: Source::Local,
             network: Sourced {
                 value: network,
                 source,
@@ -1422,7 +2067,7 @@ mod tests {
                 source: Source::Default,
             },
             dir: PathBuf::from("/s/work"),
-            policy: PathBuf::from("/c/containers/sandboxes/work"),
+            policy: PathBuf::from("/c/containers/work"),
         }
     }
 
@@ -1436,7 +2081,7 @@ mod tests {
             "{why}"
         );
         assert!(
-            why.contains("cellward container set sb:work network unconfined"),
+            why.contains("cellward container set work network unconfined"),
             "{why}"
         );
         // Declared in Nix: the way out is the module, not the CLI.
@@ -1453,6 +2098,10 @@ mod tests {
         assert_eq!(refusal(&c, "nl", Some("nl")), None);
         let why = refusal(&c, "de", Some("nl")).unwrap();
         assert!(why.contains("двух сетях"), "{why}");
+        // The main home is one identity everywhere: nothing to keep apart.
+        let mut main = container(Network::Ask, Source::Default);
+        main.home = Home::Main;
+        assert_eq!(refusal(&main, "de", Some("nl")), None);
     }
 
     #[test]
@@ -1571,18 +2220,5 @@ mod tests {
         assert_eq!(fs::read_to_string(aside.join("clash/inner")).unwrap(), "x");
         assert_eq!(report.conflicts, 2);
         assert!(report.copied >= 4, "{report:?}");
-    }
-
-    #[test]
-    fn a_launch_uses_the_sandbox_over_the_data_container() {
-        assert_eq!(
-            selector_of_launch(Some("work"), Some("dev")).as_deref(),
-            Some("sb:dev")
-        );
-        assert_eq!(
-            selector_of_launch(Some("work"), None).as_deref(),
-            Some("work")
-        );
-        assert_eq!(selector_of_launch(None, None), None);
     }
 }

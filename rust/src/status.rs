@@ -363,20 +363,16 @@ pub fn system_networks() -> String {
 /// The live launches of a container: `{app, pid, network}`.
 fn running(tools: &Tools, c: &Container) -> String {
     let base = tools.state.join(".running");
-    let records = match c.home {
-        Home::Overlay => {
-            registry::live_records(&base.join(&c.name), &|pid| registry::alive(&base, pid))
-        }
-        Home::Private => {
-            let selector = c.selector();
-            registry::live_records(&base.join(registry::MAIN), &|pid| {
-                registry::alive(&base, pid)
-            })
+    let alive = |pid| registry::alive(&base, pid);
+    // Its own registry directory, and the launches of a named sandbox from
+    // before it had one — filed under `__main__`, told apart by the selector.
+    let legacy = format!("{}{}", container::SANDBOX_PREFIX, c.name);
+    let mut records = registry::live_records(&base.join(&c.name), &alive);
+    records.extend(
+        registry::live_records(&base.join(registry::MAIN), &alive)
             .into_iter()
-            .filter(|(_, r)| r.selector == selector)
-            .collect()
-        }
-    };
+            .filter(|(_, r)| r.selector == legacy),
+    );
     array(
         records
             .iter()
@@ -423,11 +419,7 @@ fn trust(tools: &Tools, c: &Container) -> String {
 }
 
 pub fn container(tools: &Tools, c: &Container) -> String {
-    let home_source = if c.dir.is_dir() {
-        Source::Local
-    } else {
-        Source::Nix
-    };
+    let home_source = c.home_source;
     let apps = array(
         c.apps
             .iter()
@@ -435,9 +427,10 @@ pub fn container(tools: &Tools, c: &Container) -> String {
             .collect(),
     );
     // A private home has permissions of its own; an overlay is the real home
-    // with its data split, and has none to speak of.
+    // with its data split, and has none to speak of; the main home is the
+    // real one.
     let permissions = match c.home {
-        Home::Overlay => "null".to_owned(),
+        Home::Layer | Home::Main => "null".to_owned(),
         Home::Private => {
             let file = c.policy.join("perms");
             let (perms, source) = match fs::read_to_string(&file) {

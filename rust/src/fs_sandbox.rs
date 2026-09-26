@@ -105,13 +105,12 @@ use crate::seccomp::{Filter, FilterOptions};
 /// Where the per-application permissions live, below `$HOME`. `vpn-zone perms`
 /// reads the very same files, so this path is a contract.
 const PERM_SUBDIR: &str = ".config/vpn-zones/fs-perms";
-/// Where a NAMED sandbox keeps its home and its (shared) permissions.
-/// `vpn-zone sandbox list/create/rm` is the other end of this contract.
-const SANDBOX_SUBDIR: &str = ".local/state/vpn-sandboxes";
-/// A named sandbox's policy — its permissions among it — below the home
-/// (`container::policy_dir`): not next to its home, which every zone's home
-/// layer writes through.
-const SANDBOX_POLICY_SUBDIR: &str = ".config/vpn-zones/containers/sandboxes";
+/// Where a container keeps its data — a home of its own at `<name>/home` —
+/// whatever its kind (`container::data_dir`; the name is historical).
+const SANDBOX_SUBDIR: &str = ".local/state/vpn-profiles";
+/// A container's policy — its permissions among it — below the home
+/// (`container::policy_dir`): not next to its data.
+const SANDBOX_POLICY_SUBDIR: &str = ".config/vpn-zones/containers";
 /// The one file passed in from `~/.config`, read-only.
 const MIMEAPPS: &str = ".config/mimeapps.list";
 
@@ -1217,7 +1216,7 @@ pub fn settle_permissions(
     label: Option<&str>,
     kdialog: &Path,
 ) {
-    crate::container::migrate_policy_of_home(home);
+    crate::container::migrate_home(home);
     let (perm_file, _) = perm_paths(home, app_id, sandbox);
     if perm_file.is_file() {
         return;
@@ -2164,16 +2163,14 @@ mod tests {
     #[test]
     fn a_named_sandbox_gets_its_own_persistent_home() {
         let mut l = layout();
-        l.sandbox_home = Some(PathBuf::from(
-            "/home/u/.local/state/vpn-sandboxes/work/home",
-        ));
+        l.sandbox_home = Some(PathBuf::from("/home/u/.local/state/vpn-profiles/work/home"));
         let got = strs(&bwrap_args(&l, &argv(&["prog"])));
         let start = got.iter().position(|a| a == "--bind").unwrap();
         assert_eq!(
             got[start..start + 3],
             [
                 "--bind",
-                "/home/u/.local/state/vpn-sandboxes/work/home",
+                "/home/u/.local/state/vpn-profiles/work/home",
                 "/home/u"
             ]
         );

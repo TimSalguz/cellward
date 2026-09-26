@@ -627,15 +627,18 @@ fn remember(tools: &Tools, line: &str) {
     }
 }
 
-/// The container a request asks for, as a selector (`sb:<name>`, `__fs__`,
-/// a profile, `__tmp__`, empty for the main one): shown in the question and
-/// part of what "always" remembers.
+/// The container a request asks for, as a selector (a container's name,
+/// `__fs__`, `__tmp__`, empty for the main one): shown in the question and
+/// part of what "always" remembers. As asked — the broker resolves nothing,
+/// and makes nothing, for a request before it is allowed.
 pub fn selection_selector(selection: &crate::launch::Selection) -> String {
     use crate::launch::{Container, Sandbox};
     match (&selection.sandbox, &selection.container) {
-        (Sandbox::Named(name), _) => format!("sb:{}", name.to_string_lossy()),
+        (Sandbox::Named(name), _) => name.to_string_lossy().into_owned(),
         (Sandbox::Throwaway, _) => "__fs__".to_owned(),
-        (Sandbox::None, Container::Named(name)) => name.to_string_lossy().into_owned(),
+        (Sandbox::None, Container::Named(name) | Container::MainNamed(name)) => {
+            name.to_string_lossy().into_owned()
+        }
         (Sandbox::None, Container::TmpNew | Container::TmpJoin(_)) => "__tmp__".to_owned(),
         (Sandbox::None, Container::Main) => String::new(),
     }
@@ -682,7 +685,7 @@ fn ask(
         Origin::SystemZone(zone) => format!("системной зоны «{zone}»"),
         other => format!("зоны «{}»", other.name()),
     };
-    let container = crate::picker::container_label(selector);
+    let container = crate::picker::container_label_in(tools, selector);
     let Some(shown) = shown_command(cmd) else {
         return Err(format!(
             "команда длиннее {SHOWN_WORDS} слов — целиком её не показать, а не целиком не спрашивают"

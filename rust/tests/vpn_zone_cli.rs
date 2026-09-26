@@ -460,7 +460,7 @@ fn a_missing_container_stops_the_launch_with_the_way_out() {
     );
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        stderr(&out).contains("профиля work нет — создай: cellward profile create work"),
+        stderr(&out).contains("контейнера work нет — создай: cellward container create work"),
         "{}",
         stderr(&out)
     );
@@ -510,25 +510,44 @@ fn containers_and_sandboxes_are_created_listed_and_removed() {
 
     assert_eq!(
         stdout(&home.run(&["profile", "list"])).trim(),
-        "профилей нет. Создать: cellward profile create <имя>"
+        "контейнеров вида «слой над домом» нет. Создать: cellward container create <имя> --home layer"
     );
     assert!(home.run(&["profile", "create", "work"]).status.success());
     assert!(home.root.join("profiles/work").is_dir());
-    assert!(stdout(&home.run(&["profile", "list"])).contains("work — свободен"));
+    assert!(stdout(&home.run(&["profile", "list"])).contains("work — слой над домом"));
 
     // A leading dash is refused: kdialog takes such an argument for an option
     // and closes without a word.
     let out = home.run(&["profile", "create", "-bad"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("в имени нельзя"), "{}", stderr(&out));
-    // Cyrillic, on the other hand, is fine.
+    assert!(
+        stderr(&out).contains("не может быть именем"),
+        "{}",
+        stderr(&out)
+    );
+    // Cyrillic, on the other hand, is fine — and one name is one container,
+    // whatever its home: the data in one directory, the kind in its settings.
     assert!(home.run(&["sandbox", "create", "личное"]).status.success());
-    assert!(home.root.join("sandboxes/личное/home").is_dir());
+    assert!(home.root.join("profiles/личное/home").is_dir());
+    let out = home.run(&["container", "create", "work", "--home", "private"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("уже есть"), "{}", stderr(&out));
+    assert!(home
+        .run(&["container", "create", "files", "--home", "main"])
+        .status
+        .success());
+    let list = stdout(&home.run(&["container", "list"]));
+    assert!(list.contains("основной дом"), "{list}");
+    assert!(list.contains("свой дом"), "{list}");
 
     assert!(home.run(&["profile", "rm", "work"]).status.success());
     assert!(!home.root.join("profiles/work").exists());
     let out = home.run(&["profile", "rm", "work"]);
     assert_eq!(out.status.code(), Some(1));
+    // The words from before are gone with a pointer to what does the job.
+    let out = home.run(&["isolate", "off"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("больше нет"), "{}", stderr(&out));
 }
 
 #[test]
@@ -698,7 +717,7 @@ fn a_trusted_certificate_needs_a_real_container_and_one_certificate() {
     let out = home.run(&["trust", "add", "sb:nope", pem.to_str().unwrap(), "--yes"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        stderr(&out).contains("песочницы nope нет"),
+        stderr(&out).contains("контейнера nope нет"),
         "{}",
         stderr(&out)
     );
@@ -723,10 +742,7 @@ fn a_trusted_certificate_needs_a_real_container_and_one_certificate() {
         "{}",
         stderr(&out)
     );
-    assert!(!home
-        .root
-        .join("config/containers/profiles/work/trust")
-        .exists());
+    assert!(!home.root.join("config/containers/work/trust").exists());
 }
 
 #[test]
@@ -739,7 +755,7 @@ fn trusted_certificates_are_listed_and_removed_by_fingerprint() {
     // The container is its data directory; its certificates are with its
     // policy.
     fs::create_dir_all(home.root.join("profiles/work")).unwrap();
-    let trust = home.root.join("config/containers/profiles/work/trust");
+    let trust = home.root.join("config/containers/work/trust");
     fs::create_dir_all(&trust).unwrap();
     let a = format!("0f1e{}", "a".repeat(60));
     let b = format!("0f1f{}", "b".repeat(60));
@@ -935,7 +951,8 @@ fn what_nix_declares_is_shown_as_such_and_not_changed_here() {
     assert!(out.status.success(), "{}", stderr(&out));
     let json = stdout(&out);
     assert!(json.starts_with("{\"schema_version\":1,"), "{json}");
-    assert!(json.contains("\"selector\":\"sb:dev\""), "{json}");
+    // One name per container: the old `sb:` of a sandbox is not written.
+    assert!(json.contains("\"selector\":\"dev\""), "{json}");
     assert!(
         json.contains("\"network\":{\"value\":\"offline\",\"source\":\"nix\"}"),
         "{json}"
@@ -956,7 +973,7 @@ fn what_nix_declares_is_shown_as_such_and_not_changed_here() {
         "{json}"
     );
     assert!(
-        json.contains("\"container\":{\"value\":\"sb:dev\",\"source\":\"nix\"}"),
+        json.contains("\"container\":{\"value\":\"dev\",\"source\":\"nix\"}"),
         "{json}"
     );
     assert!(
@@ -1046,7 +1063,7 @@ fn a_private_home_is_granted_directories_but_never_the_state() {
     let out = home.run(&["container", "grant", "sb:dev", "~/.wine", "--for", "2h"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains(" до 20"), "{}", stdout(&out));
-    let line = fs::read_to_string(home.root.join("config/containers/sandboxes/dev/paths")).unwrap();
+    let line = fs::read_to_string(home.root.join("config/containers/dev/paths")).unwrap();
     assert!(
         line.starts_with("until=") && line.trim_end().ends_with(&format!(" {r}/.wine")),
         "{line}"
@@ -1063,7 +1080,7 @@ fn a_private_home_is_granted_directories_but_never_the_state() {
     }
     // A term that is over is not granted to anything, before any cleanup.
     fs::write(
-        home.root.join("config/containers/sandboxes/dev/paths"),
+        home.root.join("config/containers/dev/paths"),
         format!("until=1 {r}/.wine\n{r}/games\n"),
     )
     .unwrap();
@@ -1079,7 +1096,7 @@ fn a_private_home_is_granted_directories_but_never_the_state() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("истёк"), "{}", stdout(&out));
     assert_eq!(
-        fs::read_to_string(home.root.join("config/containers/sandboxes/dev/paths")).unwrap(),
+        fs::read_to_string(home.root.join("config/containers/dev/paths")).unwrap(),
         format!("{r}/games\n")
     );
     let journal = stdout(&home.run(&["journal", "--json"]));
@@ -1180,7 +1197,7 @@ fn a_merge_keeps_what_the_target_has_and_moves_the_programs() {
     // put there in the old layout, and moved with the first look).
     assert!(home
         .root
-        .join("config/containers/profiles/work/trust")
+        .join("config/containers/work/trust")
         .join(format!("{sha}.pem"))
         .is_file());
     assert_eq!(fs::read_to_string(pins.join("firefox")).unwrap(), "work");
@@ -1188,7 +1205,7 @@ fn a_merge_keeps_what_the_target_has_and_moves_the_programs() {
     // The source stays until it is removed by hand.
     assert!(old.join("config/upper/app/settings").is_file());
     assert!(
-        stdout(&out).contains("cellward profile rm old"),
+        stdout(&out).contains("cellward container rm old"),
         "{}",
         stdout(&out)
     );

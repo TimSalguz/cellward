@@ -396,7 +396,8 @@ cellward check <zone>                          # is the tunnel alive
 cellward doctor [<zone>] [--json]              # what is really closed, checked inside the zone
 cellward journal [--json] [<N>]                # unconfined launches and the broker's decisions
 cellward kill <zone>                           # cut a zone off now: its programs killed, the zone down
-cellward container grant sb:<name> <dir> [--for 2h]  # a directory for a home of its own, for a while
+cellward container create <name> [--home private|layer|main]  # a container: its own home, a layer, or the real one
+cellward container grant <name> <dir> [--for 2h]  # a directory of the real home, for a while
 cellward watch [--json]                        # are the tunnels alive (a timer runs it and notifies)
 cellward status --bar                          # one JSON line for waybar and similar bars
 cellward focused [--json|--bar|--watch]        # the zone and container of the focused window (niri, sway)

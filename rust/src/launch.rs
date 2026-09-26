@@ -181,7 +181,13 @@ pub struct Selection {
 pub enum Container {
     /// No layers: `~/` as it is.
     Main,
+    /// A container with a layer over the home (`--profile`, `--container`).
+    /// Before [`resolve_selection`], any named container: its kind is not
+    /// known yet.
     Named(OsString),
+    /// A named container of the main home: `~/` as it is, under the
+    /// container's name, network and permissions.
+    MainNamed(OsString),
     /// `--tmp-profile`: a fresh layer in `/tmp`, erased when the last program
     /// living in it exits.
     TmpNew,
@@ -212,6 +218,7 @@ pub enum ArgError {
     MissingProfile,
     MissingJoinDir,
     MissingSandbox,
+    MissingContainer,
 }
 
 impl fmt::Display for ArgError {
@@ -221,6 +228,7 @@ impl fmt::Display for ArgError {
             Self::MissingProfile => write!(f, "нужно имя профиля"),
             Self::MissingJoinDir => write!(f, "нужен каталог временного контейнера"),
             Self::MissingSandbox => write!(f, "нужно имя песочницы"),
+            Self::MissingContainer => write!(f, "нужно имя контейнера"),
         }
     }
 }
@@ -228,8 +236,8 @@ impl fmt::Display for ArgError {
 impl std::error::Error for ArgError {}
 
 impl Selection {
-    /// Parse `<zone> [--profile P | -p P | --tmp-profile [--join DIR]]
-    /// [--fs-sandbox | --sandbox NAME] [--] cmd…`.
+    /// Parse `<zone> [--container C | --profile P | -p P | --tmp-profile
+    /// [--join DIR]] [--fs-sandbox | --sandbox NAME] [--] cmd…`.
     ///
     /// Positional, exactly as the shell version: the container flag may only
     /// come first and the sandbox flag second, and everything after the
@@ -250,6 +258,12 @@ impl Selection {
         let mut rest: Vec<OsString> = rest.cloned().collect();
 
         let container = match rest.first().map(OsString::as_os_str) {
+            Some(f) if f == "--container" => {
+                let name = rest.get(1).filter(|n| !n.is_empty()).cloned();
+                let name = name.ok_or(ArgError::MissingContainer)?;
+                rest.drain(..2.min(rest.len()));
+                Container::Named(name)
+            }
             Some(f) if f == "--profile" || f == "-p" => {
                 let name = rest.get(1).filter(|n| !n.is_empty()).cloned();
                 let name = name.ok_or(ArgError::MissingProfile)?;
@@ -312,7 +326,7 @@ impl Selection {
 pub fn strip_selection(argv: &[OsString]) -> Vec<OsString> {
     let mut rest: Vec<OsString> = argv.iter().skip(1).cloned().collect();
     match rest.first().map(OsString::as_os_str) {
-        Some(f) if f == "--profile" || f == "-p" => {
+        Some(f) if f == "--profile" || f == "-p" || f == "--container" => {
             rest.drain(..2.min(rest.len()));
         }
         Some(f) if f == "--tmp-profile" => {
@@ -559,6 +573,14 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             return 1;
         }
     };
+    // One launch, one container, whatever words named it.
+    let selection = match resolve_selection(tools, selection) {
+        Ok(selection) => selection,
+        Err(why) => {
+            refuse(tools, &why);
+            return 1;
+        }
+    };
     let zone = selection.zone.clone();
     let zone_name = zone.to_string_lossy().into_owned();
 
@@ -597,7 +619,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     }
 
     // --- 2. THE CONTAINER ---
-    let Some(container) = resolve_container(tools, &selection.container) else {
+    let Some(container) = resolve_container(tools, &selection) else {
         return 1;
     };
 
@@ -631,17 +653,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // wrapping below goes around this one), so it speaks to the compositor
     // through the restricted socket like the program does. A sandbox starts
     // its own satellite and is told about the permission instead.
-    let x11_selector = match &selection.sandbox {
-        Sandbox::Named(name) => Some(format!("sb:{}", name.to_string_lossy())),
-        Sandbox::Throwaway => None,
-        Sandbox::None => {
-            Some(container.profile.to_string_lossy().into_owned()).filter(|p| !p.is_empty())
-        }
-    };
     // Or the zone itself has x11: for someone who runs zones without
     // containers, Steam in a zone must open all the same.
-    let container_x11 = x11_selector
-        .and_then(|selector| crate::container::load(tools, &selector))
+    let container_x11 = container_name(&selection)
+        .and_then(|name| crate::container::load(tools, &name))
         .is_some_and(|c| c.x11.value)
         || (zone != UNCONFINED
             && crate::x11::zone_setting(&tools.state, &tools.config, &zone_name).0);
@@ -694,13 +709,13 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 let frame = crate::frame::Frame::of_zone(&tools.state, &tools.config, &zone_name);
                 wrap.push("--frame".into());
                 wrap.push(frame.to_arg().into());
-                let selector = selector_of(&selection.sandbox, &container.profile);
+                let selector = selector_of(&selection, &container.profile);
                 let shown = if container.ephemeral && selection.sandbox == Sandbox::None {
                     // Its name is a random directory's: what it IS is what
                     // the owner needs to read.
                     "временный".to_owned()
                 } else {
-                    crate::picker::container_label(&selector.to_string_lossy())
+                    crate::picker::container_label_in(tools, &selector.to_string_lossy())
                 };
                 wrap.push("--frame-title".into());
                 wrap.push(crate::frame::title_text(&zone_name, &shown).into());
@@ -753,8 +768,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             wrapped.push(name.clone());
             // Directories of the real home granted to this sandbox
             // (`docs/CONTAINERS.md` §3.5); fs-sandbox checks them once more.
-            let selector = format!("sb:{}", name.to_string_lossy());
-            if let Some(container) = crate::container::load(tools, &selector) {
+            if let Some(container) = crate::container::load(tools, &name.to_string_lossy()) {
                 for path in container.paths {
                     wrapped.push("--bind-path".into());
                     wrapped.push(path.value.into());
@@ -906,7 +920,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     }
 
     // --- 6. INTO THE REGISTRY AND INTO THE ZONE ---
-    let selector = selector_of(&selection.sandbox, &container.profile);
+    let selector = selector_of(&selection, &container.profile);
     match registry::lock(&regdir) {
         Ok(_guard) => {
             for file in std::iter::once(&reg).chain(binreg.as_ref()) {
@@ -1010,7 +1024,9 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // namespace. Made here first, on the host: a sandbox's before its first
     // launch, which the zone could not make.
     let storage_dir: Option<PathBuf> = match (&network, &selection.sandbox, &selection.container) {
-        (Network::Zone(_), Sandbox::Named(name), _) => Some(tools.sandboxes.join(name)),
+        (Network::Zone(_), Sandbox::Named(name), _) => {
+            Some(crate::container::data_dir(tools, &name.to_string_lossy()))
+        }
         (Network::Zone(_), Sandbox::None, Container::Named(_)) if !container.ephemeral => {
             Some(container.dir.clone())
         }
@@ -1248,18 +1264,83 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
 
 /// Why this launch may not use its container in `zone`, if it may not.
 fn identity_refusal(tools: &Tools, selection: &Selection, zone: &str) -> Option<String> {
-    let profile = match &selection.container {
-        Container::Named(name) => Some(name.to_string_lossy().into_owned()),
-        _ => None,
-    };
-    let sandbox = match &selection.sandbox {
-        Sandbox::Named(name) => Some(name.to_string_lossy().into_owned()),
-        _ => None,
-    };
-    let selector = crate::container::selector_of_launch(profile.as_deref(), sandbox.as_deref())?;
-    let container = crate::container::load(tools, &selector)?;
+    let container = crate::container::load(tools, &container_name(selection)?)?;
     let running = crate::container::running_network(tools, &container);
     crate::container::refusal(&container, zone, running.as_deref())
+}
+
+/// The name of the container a resolved launch runs in, whatever its home;
+/// `None` for the main profile, a throwaway one and a temporary one.
+pub fn container_name(selection: &Selection) -> Option<String> {
+    match (&selection.sandbox, &selection.container) {
+        (Sandbox::Named(name), _)
+        | (Sandbox::None, Container::Named(name) | Container::MainNamed(name)) => {
+            Some(name.to_string_lossy().into_owned())
+        }
+        _ => None,
+    }
+}
+
+/// One launch, one container (`docs/PERMISSIONS.md` §11.7): the name —
+/// `--container`, and the words from before, `--profile` and `--sandbox` —
+/// read as the container it is now, its kind of home deciding how it is
+/// mounted. A layer and a home of its own together, or a named container
+/// with a throwaway one, are two containers: refused. `--sandbox` makes a
+/// missing container, with a home of its own, as it always made a sandbox;
+/// the others refuse one that is not there.
+pub fn resolve_selection(tools: &Tools, selection: Selection) -> Result<Selection, String> {
+    let (asked, create) = match (&selection.container, &selection.sandbox) {
+        (Container::Main, Sandbox::None | Sandbox::Throwaway)
+        | (Container::TmpNew | Container::TmpJoin(_), Sandbox::None) => return Ok(selection),
+        (Container::Named(name), Sandbox::None) => (name.to_string_lossy().into_owned(), false),
+        (Container::Main, Sandbox::Named(name)) => {
+            // A stale `--sandbox work` is the sandbox that became `work-sb`.
+            let old = format!(
+                "{}{}",
+                crate::container::SANDBOX_PREFIX,
+                name.to_string_lossy()
+            );
+            let name = crate::container::canonical(tools, &old)
+                .unwrap_or_else(|| name.to_string_lossy().into_owned());
+            (name, true)
+        }
+        (Container::MainNamed(name), Sandbox::None) => (name.to_string_lossy().into_owned(), false),
+        _ => {
+            return Err(
+                "один запуск — один контейнер: слой (--profile, --tmp-profile) и песочница \
+                 (--sandbox, --fs-sandbox) вместе больше не собираются"
+                    .to_owned(),
+            )
+        }
+    };
+    let Some(name) = crate::container::canonical(tools, &asked) else {
+        return Err(format!("«{asked}» не может быть именем контейнера"));
+    };
+    let container = match crate::container::load(tools, &name) {
+        Some(container) => container,
+        None if create => crate::container::create(tools, &name, crate::container::Home::Private)?,
+        None => {
+            return Err(format!(
+                "контейнера {name} нет — создай: cellward container create {name}"
+            ))
+        }
+    };
+    // Its data as its kind says, the other kind's set aside: on the host,
+    // before anything is mounted from them.
+    if env_nonempty(ENV_DRYRUN).is_none() {
+        crate::container::prepare_data(&container)?;
+    }
+    let name = OsString::from(&container.name);
+    let (container_axis, sandbox) = match container.home {
+        crate::container::Home::Layer => (Container::Named(name), Sandbox::None),
+        crate::container::Home::Private => (Container::Main, Sandbox::Named(name)),
+        crate::container::Home::Main => (Container::MainNamed(name), Sandbox::None),
+    };
+    Ok(Selection {
+        container: container_axis,
+        sandbox,
+        ..selection
+    })
 }
 
 /// Is the process `pid` in our network namespace?
@@ -1297,12 +1378,14 @@ fn trust_of(
     selection: &Selection,
 ) -> (Option<PathBuf>, Option<PathBuf>, Vec<PathBuf>) {
     let (selector, nss_home) = match (&selection.sandbox, &selection.container) {
-        (Sandbox::Named(name), _) => (
-            format!("sb:{}", name.to_string_lossy()),
-            Some(tools.sandboxes.join(name).join("home")),
-        ),
+        (Sandbox::Named(name), _) => {
+            let name = name.to_string_lossy().into_owned();
+            let home = crate::container::data_dir(tools, &name).join("home");
+            (name, Some(home))
+        }
         (Sandbox::Throwaway, _) => return (None, None, Vec::new()),
         (Sandbox::None, Container::Named(name)) => (name.to_string_lossy().into_owned(), None),
+        // The main home's certificates are the host's: none of its own.
         (Sandbox::None, _) => return (None, None, Vec::new()),
     };
     let Some(container) = crate::container::load(tools, &selector) else {
@@ -1397,17 +1480,13 @@ fn delegate(tools: &Tools, argv: &[OsString]) -> u8 {
 }
 
 /// What was chosen for the container, as the registry records it (the third
-/// field): `sb:<name>` for a named sandbox, `__fs__` for a throwaway one,
-/// the container's name otherwise (empty for the main profile).
-fn selector_of(sandbox: &Sandbox, profile: &OsStr) -> OsString {
-    match sandbox {
-        Sandbox::Named(name) => {
-            let mut s = OsString::from("sb:");
-            s.push(name);
-            s
-        }
-        Sandbox::Throwaway => OsString::from("__fs__"),
-        Sandbox::None => profile.to_owned(),
+/// field): the container's name, `__fs__` for a throwaway sandbox, the
+/// temporary container's directory name, empty for the main profile.
+fn selector_of(selection: &Selection, profile: &OsStr) -> OsString {
+    match (&selection.sandbox, &selection.container) {
+        (Sandbox::Named(name), _) | (Sandbox::None, Container::MainNamed(name)) => name.clone(),
+        (Sandbox::Throwaway, _) => OsString::from("__fs__"),
+        (Sandbox::None, _) => profile.to_owned(),
     }
 }
 
@@ -1444,14 +1523,14 @@ pub fn throwaway_bases(state: &Path) -> [PathBuf; 2] {
 /// Turn the parsed container into directories, creating a throwaway one.
 ///
 /// `None` means the message has been printed and the launch is over.
-fn resolve_container(tools: &Tools, container: &Container) -> Option<ResolvedContainer> {
-    let (profile, dir, ephemeral) = match container {
-        Container::Main => (OsString::new(), PathBuf::new(), false),
+fn resolve_container(tools: &Tools, selection: &Selection) -> Option<ResolvedContainer> {
+    let (profile, dir, ephemeral) = match &selection.container {
+        Container::Main | Container::MainNamed(_) => (OsString::new(), PathBuf::new(), false),
         Container::Named(name) => {
-            let dir = tools.profiles.join(name);
+            let dir = crate::container::data_dir(tools, &name.to_string_lossy());
             if !dir.is_dir() {
                 let name = name.to_string_lossy();
-                eprintln!("профиля {name} нет — создай: cellward profile create {name}");
+                eprintln!("контейнера {name} нет — создай: cellward container create {name}");
                 return None;
             }
             (name.clone(), dir, false)
@@ -1499,10 +1578,12 @@ fn resolve_container(tools: &Tools, container: &Container) -> Option<ResolvedCon
             (basename(real.as_os_str()).to_owned(), real, true)
         }
     };
-    let key = if profile.is_empty() {
-        OsString::from(registry::MAIN)
-    } else {
-        profile.clone()
+    // Every named container has a registry directory of its own, whatever
+    // its home: what runs in it is found there (`docs/PERMISSIONS.md` §11.8).
+    let key = match container_name(selection) {
+        Some(name) => OsString::from(name),
+        None if profile.is_empty() => OsString::from(registry::MAIN),
+        None => profile.clone(),
     };
     Some(ResolvedContainer {
         profile,
@@ -1595,6 +1676,99 @@ pub fn restrict_compositor(mode: Option<&str>, appbin: &OsStr, allowlist: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A manifest whose home, state, containers and config are below `base`.
+    fn tools_in(base: &Path) -> Tools {
+        let entries: std::collections::BTreeMap<String, String> = Tools::keys()
+            .iter()
+            .map(|k| {
+                let dir = match *k {
+                    "home" => base.join("home"),
+                    "state" => base.join("state"),
+                    "profiles" => base.join("profiles"),
+                    "sandboxes" => base.join("sandboxes"),
+                    "config" => base.join("config"),
+                    other => PathBuf::from(format!("/p/{other}")),
+                };
+                ((*k).to_owned(), dir.to_string_lossy().into_owned())
+            })
+            .collect();
+        Tools::from_entries(Path::new("/m.json"), &entries).unwrap()
+    }
+
+    /// One launch, one container (`docs/PERMISSIONS.md` §11.7): the name,
+    /// whichever word carries it, is the container, and its home decides how
+    /// it is mounted; two containers at once are refused; `--sandbox` makes a
+    /// missing one with a home of its own, as it always made a sandbox.
+    #[test]
+    fn one_launch_is_one_container_by_its_name() {
+        use crate::container::{self, Home};
+        let base = std::env::temp_dir().join(format!("vz-one-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let tools = tools_in(&base);
+        container::create(&tools, "work", Home::Layer).unwrap();
+        container::create(&tools, "dev", Home::Private).unwrap();
+        container::create(&tools, "files", Home::Main).unwrap();
+        let resolve = |line: &[&str]| {
+            let argv: Vec<OsString> = line.iter().map(OsString::from).collect();
+            resolve_selection(&tools, Selection::parse(&argv).unwrap())
+                .map(|s| (s.container, s.sandbox))
+        };
+        let name = |n: &str| OsString::from(n);
+
+        assert_eq!(
+            resolve(&["nl", "--container", "work", "--", "x"]),
+            Ok((Container::Named(name("work")), Sandbox::None))
+        );
+        for flag in ["--container", "--profile"] {
+            assert_eq!(
+                resolve(&["nl", flag, "dev", "--", "x"]),
+                Ok((Container::Main, Sandbox::Named(name("dev")))),
+                "{flag}"
+            );
+        }
+        assert_eq!(
+            resolve(&["nl", "--sandbox", "work", "--", "x"]),
+            Ok((Container::Named(name("work")), Sandbox::None)),
+            "a name is one container, whatever word named it"
+        );
+        assert_eq!(
+            resolve(&["nl", "--container", "files", "--", "x"]),
+            Ok((Container::MainNamed(name("files")), Sandbox::None))
+        );
+        assert_eq!(
+            resolve(&["nl", "--sandbox", "new", "--", "x"]),
+            Ok((Container::Main, Sandbox::Named(name("new"))))
+        );
+        assert_eq!(
+            container::load(&tools, "new").map(|c| c.home),
+            Some(Home::Private)
+        );
+        assert!(resolve(&["nl", "--container", "gone", "--", "x"])
+            .unwrap_err()
+            .contains("нет"));
+        assert!(resolve(&["nl", "--container", "main", "--", "x"]).is_err());
+        for two in [
+            &["nl", "--profile", "work", "--sandbox", "dev", "--", "x"][..],
+            &["nl", "--profile", "work", "--fs-sandbox", "--", "x"],
+            &["nl", "--tmp-profile", "--fs-sandbox", "--", "x"],
+        ] {
+            assert!(
+                resolve(two).unwrap_err().contains("один контейнер"),
+                "{two:?}"
+            );
+        }
+        // Nothing named: nothing to resolve.
+        assert_eq!(
+            resolve(&["nl", "--fs-sandbox", "--", "x"]),
+            Ok((Container::Main, Sandbox::Throwaway))
+        );
+        assert_eq!(
+            resolve(&["nl", "--", "x"]),
+            Ok((Container::Main, Sandbox::None))
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
 
     /// The proxy is on unless said off, for all or for one program.
     #[test]

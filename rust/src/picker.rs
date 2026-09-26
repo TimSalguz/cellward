@@ -227,11 +227,26 @@ pub fn sanitize_name(raw: &str) -> String {
 
 /// A container name the menus use as a tag of their own: a profile called
 /// `pinmain` or `__fs__` would be read as that command, not as itself. Never
-/// created, by the picker or by `vpn-zone profile|sandbox create`.
+/// created, by the picker or by `cellward container create`.
 pub fn reserved_name(name: &str) -> bool {
-    name.starts_with("__")
-        || name.contains(':')
-        || matches!(name, "pinmain" | "unpinprof" | "main" | "ask" | "own")
+    name.contains(':') || crate::container::reserved_name(name)
+}
+
+/// A selector from memory as it is now: a container's name after the move to
+/// one name per container (`sb:work` → `work`, or `work-sb` when a layer had
+/// the name); the words of the menus and the settings as they are.
+fn canon(tools: &Tools, selector: &str) -> String {
+    match selector {
+        "" | MAIN | THROWAWAY | TMP | "ask" | "main" | "own" => selector.to_owned(),
+        s if s.starts_with(TMPJOIN_PREFIX) => s.to_owned(),
+        s => crate::container::canonical(tools, s).unwrap_or_else(|| s.to_owned()),
+    }
+}
+
+/// Is there a container by this name — its data, its policy or its
+/// declaration?
+fn container_exists(tools: &Tools, name: &str) -> bool {
+    crate::container::load(tools, name).is_some()
 }
 
 // --- THE STATE THE DECISION IS MADE FROM -------------------------------------
@@ -361,69 +376,81 @@ pub fn watch_handover(memory: &Memory, zone: &str, in_zone: bool) -> bool {
 }
 
 /// The container of a launch: exactly the three variables the shell carried
-/// (`profile`, `fssand`, `sandbox`).
-///
-/// They are not one enum because they are not exclusive: a named sandbox is
-/// also a filesystem sandbox, and a throwaway container can be combined with
-/// one.
+/// (`profile`, `fssand`, `sandbox`) — and now never two of them at once
+/// (`docs/PERMISSIONS.md` §11.7).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Container {
-    /// A container name, `__tmp__`, `tmpjoin:<dir>`, or empty for the main
+    /// A container that exists, by name, whatever its home — `run
+    /// --container`; `__tmp__` or `tmpjoin:<dir>`; empty for the main
     /// profile.
     pub profile: String,
-    /// `--fs-sandbox`.
+    /// `--fs-sandbox`, or with `sandbox` set a home of its own.
     pub fs_sandbox: bool,
-    /// `--sandbox <name>`, empty when there is none.
+    /// `--sandbox <name>`: a container made with a home of its own at its
+    /// first launch — the program's own, a new one, or one that is gone.
     pub sandbox: String,
 }
 
 impl Container {
     /// A stored selector turned back into a choice.
     ///
-    /// No existence check: this is the shape used for a selector that came from
-    /// the launch registry, from a pin or from `VPN_ZONE_PROFILE`, all of which
-    /// were validated when they were written. A container name that has been
-    /// deleted since reaches `vpn-zone run`, which says so in words.
-    pub fn from_selector(selector: &str) -> Self {
-        Self::resolve(selector, |_| true)
+    /// For a selector from the launch registry, a pin or `VPN_ZONE_PROFILE`,
+    /// all validated when they were written: a container that is not there
+    /// (any more) is made again with a home of its own — the program's own
+    /// home, never the whole real one.
+    pub fn from_selector(selector: &str, exists: impl Fn(&str) -> bool) -> Self {
+        Self::resolve(selector, &exists).unwrap_or_else(|| {
+            let name = selector
+                .strip_prefix(SANDBOX_PREFIX)
+                .unwrap_or(selector)
+                .to_owned();
+            Self {
+                fs_sandbox: true,
+                sandbox: name,
+                ..Self::default()
+            }
+        })
     }
 
-    /// The same, but a container name is only taken when it still exists —
-    /// what `.lastprofile` gets, since nothing revalidates it on the way in.
-    pub fn from_selector_checked(selector: &str, exists: impl Fn(&str) -> bool) -> Self {
-        Self::resolve(selector, exists)
+    /// The same, for what nothing revalidates on the way in — `.lastprofile`:
+    /// `None` for a container that is gone, and the caller decides.
+    pub fn from_selector_checked(selector: &str, exists: impl Fn(&str) -> bool) -> Option<Self> {
+        Self::resolve(selector, &exists)
     }
 
-    fn resolve(selector: &str, exists: impl Fn(&str) -> bool) -> Self {
+    fn resolve(selector: &str, exists: &impl Fn(&str) -> bool) -> Option<Self> {
         match selector {
-            "" | MAIN => Self::default(),
-            THROWAWAY => Self {
+            "" | MAIN => Some(Self::default()),
+            THROWAWAY => Some(Self {
                 fs_sandbox: true,
                 ..Self::default()
-            },
-            other => match other.strip_prefix(SANDBOX_PREFIX) {
-                Some(name) => Self {
-                    fs_sandbox: true,
-                    sandbox: name.to_owned(),
+            }),
+            TMP => Some(Self {
+                profile: TMP.to_owned(),
+                ..Self::default()
+            }),
+            other if other.starts_with(TMPJOIN_PREFIX) => Some(Self {
+                profile: other.to_owned(),
+                ..Self::default()
+            }),
+            other => {
+                let name = other.strip_prefix(SANDBOX_PREFIX).unwrap_or(other);
+                if name.is_empty() || !exists(name) {
+                    return None;
+                }
+                Some(Self {
+                    profile: name.to_owned(),
                     ..Self::default()
-                },
-                None if exists(other) => Self {
-                    profile: other.to_owned(),
-                    ..Self::default()
-                },
-                None => Self::default(),
-            },
+                })
+            }
         }
     }
 
-    /// What goes into `.lastprofile`: the CHOICE, not the `profile` variable.
-    ///
-    /// A sandbox leaves `profile` empty (it lives in a flag of its own), so
-    /// writing the variable "as it is" turned it into "main" and the choice
-    /// looked like it had not been saved. (`docs/GOTCHAS.md` §11)
+    /// What goes into `.lastprofile`: the CHOICE, a container's name
+    /// whatever flag carries it. (`docs/GOTCHAS.md` §11)
     pub fn selector(&self) -> String {
         if !self.sandbox.is_empty() {
-            return format!("{SANDBOX_PREFIX}{}", self.sandbox);
+            return self.sandbox.clone();
         }
         if self.fs_sandbox {
             return THROWAWAY.to_owned();
@@ -440,10 +467,15 @@ impl Container {
     fn own_sandbox(key: &str) -> Self {
         Self {
             fs_sandbox: true,
-            sandbox: format!("app-{key}"),
+            sandbox: own_name(key),
             ..Self::default()
         }
     }
+}
+
+/// The name of a program's own container, with a home of its own.
+pub fn own_name(key: &str) -> String {
+    format!("app-{key}")
 }
 
 /// The container when there is no dialog to ask it in, in priority order.
@@ -454,11 +486,14 @@ impl Container {
 ///    fresh choice arrives in the variable above, and testing for ASK here made
 ///    "↺ Спрашивать сеть снова" drop a pinned container into "main", because
 ///    `.lastprofile` is usually empty for somebody who pinned one;
-/// 3. `.lastprofile`, overlaid with the global `default-profile` setting.
+/// 3. the global `default-profile` setting when it is an answer (`main`,
+///    `own`, an existing container);
+/// 4. `.lastprofile`; one that is gone is the program's own container, not
+///    the whole real home.
 ///
-/// The overlay is deliberately partial, exactly as the shell was: `main` and a
-/// named default clear `profile` only, so a sandbox remembered in
-/// `.lastprofile` survives them.
+/// Whole containers, never a part of one laid over another: the shell's
+/// partial overlay (a default container with the sandbox remembered from
+/// the last time) made one launch of two containers.
 pub fn container_without_dialog(
     memory: &Memory,
     key: &str,
@@ -466,23 +501,25 @@ pub fn container_without_dialog(
     reprofile: Option<&str>,
 ) -> Container {
     if let Some(selector) = reprofile.filter(|s| !s.is_empty()) {
-        return Container::from_selector(selector);
+        return Container::from_selector(selector, &exists);
     }
     if !memory.pinned_profile.is_empty() {
-        return Container::from_selector(&memory.pinned_profile);
+        return Container::from_selector(&memory.pinned_profile, &exists);
     }
-    let mut container = Container::from_selector_checked(&memory.last_profile, &exists);
     match memory.default_profile.as_str() {
-        "main" => container.profile.clear(),
+        "main" => return Container::default(),
+        "own" => return Container::own_sandbox(key),
         "ask" => {}
-        "own" => container = Container::own_sandbox(key),
-        name => {
-            if exists(name) {
-                container.profile = name.to_owned();
+        name if exists(name) => {
+            return Container {
+                profile: name.to_owned(),
+                ..Container::default()
             }
         }
+        _ => {}
     }
-    container
+    Container::from_selector_checked(&memory.last_profile, &exists)
+        .unwrap_or_else(|| Container::own_sandbox(key))
 }
 
 /// Where a program started by XDG autostart goes, and what had to be guessed.
@@ -525,13 +562,16 @@ pub fn autostart_plan(
     if let Some(running) = &memory.running {
         return AutostartPlan {
             zone: running.zone.clone(),
-            container: Container::from_selector(&running.selector),
+            container: Container::from_selector(&running.selector, &exists),
             network_guessed: false,
             container_guessed: false,
         };
     }
     let (container, container_guessed) = if !memory.pinned_profile.is_empty() {
-        (Container::from_selector(&memory.pinned_profile), false)
+        (
+            Container::from_selector(&memory.pinned_profile, &exists),
+            false,
+        )
     } else {
         match memory.default_profile.as_str() {
             "main" => (Container::default(), false),
@@ -575,16 +615,17 @@ pub fn pin_is_valid(pinned: &str, zone_exists: impl Fn(&str) -> bool) -> bool {
 
 /// Is this container pin still worth honouring?
 ///
-/// `sb:<name>` is a SANDBOX, not a container: its home lives in
-/// `vpn-sandboxes` and is created on first use. It used to be checked as a
-/// container, no directory named `sb:name` was ever found among the profiles,
-/// and the pin was erased on the very next click — which meant "🔒 Своя
-/// песочница — всегда" and "Песочница «X» — всегда" did not work at all.
-/// (`docs/GOTCHAS.md` §11)
+/// A container that exists; and the program's own one even before its first
+/// launch, which makes it — it used to be checked as something that had to
+/// exist, and the pin was erased on the very next click: "🔒 Своя песочница
+/// — всегда" did not work at all. (`docs/GOTCHAS.md` §11)
 pub fn profile_pin_is_valid(pinned: &str, profile_exists: impl Fn(&str) -> bool) -> bool {
     match pinned {
         "" | MAIN | THROWAWAY => true,
-        other => other.starts_with(SANDBOX_PREFIX) || profile_exists(other),
+        other => {
+            let name = other.strip_prefix(SANDBOX_PREFIX).unwrap_or(other);
+            name.starts_with("app-") || profile_exists(name)
+        }
     }
 }
 
@@ -698,24 +739,47 @@ fn menu_zones(state: &Path) -> Vec<MenuZone> {
 /// A PINNED container outranks the last choice here, and that is a fix: without
 /// it the entry promised "сейчас: основной" while the program opened in the
 /// pinned one — the menu disagreed with what actually happened.
+///
+/// By the selector alone; [`container_label_in`] knows the kind of its home.
 pub fn container_label(selector: &str) -> String {
+    label_of(selector, None)
+}
+
+/// [`container_label`], with the kind of the container's home read.
+pub fn container_label_in(tools: &Tools, selector: &str) -> String {
+    let home = crate::container::load(tools, selector).map(|c| c.home);
+    label_of(selector, home)
+}
+
+fn label_of(selector: &str, home: Option<crate::container::Home>) -> String {
+    use crate::container::Home;
     match selector {
         "" | MAIN => "основной".to_owned(),
         THROWAWAY => "разовая песочница".to_owned(),
-        other => match other.strip_prefix(SANDBOX_PREFIX) {
-            Some(name) if name.starts_with("app-") => "своя песочница".to_owned(),
-            Some(name) => format!("песочница {name}"),
-            None => other.to_owned(),
-        },
+        other => {
+            let (name, home) = match other.strip_prefix(SANDBOX_PREFIX) {
+                Some(name) => (name, Some(Home::Private)),
+                None => (other, home),
+            };
+            match home {
+                Some(Home::Private) | None if name.starts_with("app-") => {
+                    "своя песочница".to_owned()
+                }
+                Some(Home::Private) => format!("песочница {name}"),
+                Some(Home::Main) => format!("основной {name}"),
+                Some(Home::Layer) | None => name.to_owned(),
+            }
+        }
     }
 }
 
-/// A container directory as the menu shows it: its name, and the zone it is
-/// open in (empty when it is free).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A container as the menu shows it: its name, and the zone it is open in
+/// (empty when it is free). `main`: a container of the main home.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProfileRow {
     pub name: String,
     pub busy_in: String,
+    pub main: bool,
 }
 
 /// A throwaway container that is already open: the directory to join, and the
@@ -761,15 +825,13 @@ pub fn profile_menu(
         row(THROWAWAY, "🔒 Разовая песочница: стирается при выходе"),
         row("pin:__fs__", "🔒 Разовая песочница — всегда"),
     ];
-    // Named sandboxes: the home is shared by everything started into the same
-    // one, so two programs can work together without seeing your files.
+    // Containers with a home of their own: shared by everything started into
+    // the same one, so two programs can work together without seeing your
+    // files.
     for name in sandboxes {
+        menu.push((name.clone(), format!("🔒 Песочница «{name}»")));
         menu.push((
-            format!("{SANDBOX_PREFIX}{name}"),
-            format!("🔒 Песочница «{name}»"),
-        ));
-        menu.push((
-            format!("pin:{SANDBOX_PREFIX}{name}"),
+            format!("pin:{name}"),
             format!("🔒 Песочница «{name}» — всегда"),
         ));
     }
@@ -777,15 +839,20 @@ pub fn profile_menu(
 
     for profile in profiles {
         let name = &profile.name;
-        if !profile.busy_in.is_empty() && profile.busy_in != current_zone {
+        let shown = if profile.main {
+            format!("⚠ Основной «{name}» (весь настоящий дом)")
+        } else {
+            name.clone()
+        };
+        if !profile.busy_in.is_empty() && profile.busy_in != current_zone && !profile.main {
             menu.push((
                 name.clone(),
-                format!("{name} — занят сетью {}", profile.busy_in),
+                format!("{shown} — занят сетью {}", profile.busy_in),
             ));
         } else {
-            menu.push((name.clone(), name.clone()));
+            menu.push((name.clone(), shown.clone()));
         }
-        menu.push((format!("pin:{name}"), format!("{name} — всегда")));
+        menu.push((format!("pin:{name}"), format!("{shown} — всегда")));
     }
 
     // Throwaway containers that are open right now — so a program can be put
@@ -853,7 +920,7 @@ pub fn window_containers(
         label: label.to_owned(),
         ..window::Item::default()
     };
-    let own = format!("{SANDBOX_PREFIX}app-{key}");
+    let own = own_name(key);
     let mut items = vec![
         item("", "Основной (общий с системой)"),
         item(
@@ -863,17 +930,20 @@ pub fn window_containers(
         item(THROWAWAY, "Разовая песочница — стирается при выходе"),
     ];
     for name in sandboxes {
-        if format!("{SANDBOX_PREFIX}{name}") == own {
+        if *name == own {
             continue;
         }
-        items.push(item(
-            &format!("{SANDBOX_PREFIX}{name}"),
-            &format!("Песочница «{name}»"),
-        ));
+        items.push(item(name, &format!("Песочница «{name}»")));
     }
     for profile in profiles {
-        let mut it = item(&profile.name, &format!("Профиль {}", profile.name));
-        it.busy = Some(profile.busy_in.clone()).filter(|z| !z.is_empty());
+        let label = if profile.main {
+            format!("Основной «{}» — весь настоящий дом", profile.name)
+        } else {
+            format!("Профиль {}", profile.name)
+        };
+        let mut it = item(&profile.name, &label);
+        // The main home is one identity in every network: never "busy".
+        it.busy = Some(profile.busy_in.clone()).filter(|z| !z.is_empty() && !profile.main);
         items.push(it);
     }
     for join in tmp_joins {
@@ -970,6 +1040,34 @@ fn ask_window(
     Some(Some((reply.net, container)))
 }
 
+/// The containers the menus offer: those with a home of their own, and the
+/// rest (a layer, the main home) with the network each is open in.
+fn container_rows(tools: &Tools) -> (Vec<String>, Vec<ProfileRow>) {
+    use crate::container::Home;
+    let running = tools.state.join(".running");
+    let mut sandboxes = Vec::new();
+    let mut profiles = Vec::new();
+    for c in crate::container::load_all(tools) {
+        // A name a menu takes for a command of its own is not shown.
+        if reserved_name(&c.name) {
+            continue;
+        }
+        if c.home == Home::Private {
+            sandboxes.push(c.name);
+            continue;
+        }
+        let busy_in = live_tenant(&running, &c.dir.join("inuse"))
+            .or_else(|| crate::container::running_network(tools, &c))
+            .unwrap_or_default();
+        profiles.push(ProfileRow {
+            main: c.home == Home::Main,
+            name: c.name,
+            busy_in,
+        });
+    }
+    (sandboxes, profiles)
+}
+
 /// What the launch window is asked: both columns as the memory has them.
 fn window_request(
     tools: &Tools,
@@ -979,17 +1077,7 @@ fn window_request(
     memory: &Memory,
 ) -> window::Request {
     let running = tools.state.join(".running");
-    let profiles: Vec<ProfileRow> = menu_names(&tools.profiles)
-        .into_iter()
-        .map(|name| {
-            let busy_in = live_tenant(&running, &tools.profiles.join(&name).join("inuse"))
-                .or_else(|| {
-                    registry::live_zone(&running.join(&name), &|pid| registry::alive(&running, pid))
-                })
-                .unwrap_or_default();
-            ProfileRow { name, busy_in }
-        })
-        .collect();
+    let (sandboxes, profiles) = container_rows(tools);
     // In force: the pin, then the global setting, then the running copy's,
     // then the last choice.
     let current = if !memory.pinned_profile.is_empty() {
@@ -1001,7 +1089,7 @@ fn window_request(
                 None => memory.last_profile.clone(),
             },
             "main" => String::new(),
-            "own" => format!("{SANDBOX_PREFIX}app-{key}"),
+            "own" => own_name(key),
             name => name.to_owned(),
         }
     };
@@ -1021,7 +1109,7 @@ fn window_request(
         ),
         containers: window_containers(
             key,
-            &menu_names(&tools.sandboxes),
+            &sandboxes,
             &profiles,
             &open_throwaways(&running),
             &current,
@@ -1183,7 +1271,7 @@ pub fn run_argv(
     } else if container.profile == TMP {
         argv.push("--tmp-profile".into());
     } else if !container.profile.is_empty() {
-        argv.push("--profile".into());
+        argv.push("--container".into());
         argv.push(container.profile.as_str().into());
     }
     if !container.sandbox.is_empty() {
@@ -1289,7 +1377,7 @@ pub fn main() -> ExitCode {
                 &tools,
                 &key,
                 &zone,
-                &Container::from_selector(&selector),
+                &Container::from_selector(&selector, |n| container_exists(&tools, n)),
                 &args.cmd,
             );
         }
@@ -1331,7 +1419,7 @@ pub fn main() -> ExitCode {
             let menu = net_menu(
                 &menu_zones(&tools.state),
                 &memory.pinned,
-                &container_label(current),
+                &container_label_in(&tools, current),
             );
 
             let answer = if launch::has_display() {
@@ -1425,11 +1513,10 @@ pub fn main() -> ExitCode {
         }
         container
     } else {
-        let profiles = tools.profiles.clone();
         container_without_dialog(
             &memory,
             &key,
-            |name| profiles.join(name).is_dir(),
+            |name| container_exists(&tools, name),
             reprofile.as_deref(),
         )
     };
@@ -1620,11 +1707,10 @@ fn autostart(
     memory: &Memory,
     cmd: &[OsString],
 ) -> Option<ExitCode> {
-    let profiles = tools.profiles.clone();
     let plan = autostart_plan(
         memory,
         key,
-        |name| profiles.join(name).is_dir(),
+        |name| container_exists(tools, name),
         |container| {
             crate::container::load(tools, &container.selector()).and_then(|c| {
                 match c.network.value {
@@ -1651,19 +1737,14 @@ fn autostart(
         lines.push(format!(
             "контейнер не выбран — запущена в своём доме ({}). Назначить: cellward container \
              assign {key} <контейнер>",
-            container_label(&plan.container.selector())
+            container_label_in(tools, &plan.container.selector())
         ));
     }
     // A home of its own that has never been started asks for file access in
     // a dialog — the one thing an autostart must not do. It gets the closed
     // answer instead, the one given when there is no screen to ask on.
     if !plan.container.sandbox.is_empty() {
-        crate::container::migrate_policy(tools);
-        let dir = crate::container::policy_dir(
-            tools,
-            crate::container::Home::Private,
-            &plan.container.sandbox,
-        );
+        let dir = crate::container::policy_dir(tools, &plan.container.sandbox);
         let perms = dir.join("perms");
         if !perms.exists()
             && fs::create_dir_all(&dir)
@@ -1709,20 +1790,26 @@ fn read_memory_with(tools: &Tools, key: &str, tidy: bool) -> Memory {
     }
 
     let profile_pin_path = state.join(".pinnedprofile").join(key);
-    let mut pinned_profile = read_setting(&profile_pin_path).unwrap_or_default();
+    let mut pinned_profile = canon(tools, &read_setting(&profile_pin_path).unwrap_or_default());
     // An assignment declared in Nix outranks the picker's own pin: it is the
     // configuration, the pin only a memory. (`docs/CONTAINERS.md` §4)
     if let Some(declared) = crate::container::declared_owner(tools, key) {
         pinned_profile = declared;
     }
-    if !profile_pin_is_valid(&pinned_profile, |name| tools.profiles.join(name).is_dir()) {
+    if !profile_pin_is_valid(&pinned_profile, |name| container_exists(tools, name)) {
         if tidy {
             let _ = fs::remove_file(&profile_pin_path);
         }
         pinned_profile.clear();
     }
 
-    let running = running_records(state, key);
+    let running: Vec<Running> = running_records(state, key)
+        .into_iter()
+        .map(|r| Running {
+            selector: canon(tools, &r.selector),
+            ..r
+        })
+        .collect();
     // Two copies alive at once: whatever handed over once, this program runs
     // side by side (two containers of one browser, or a wrong guess) — ask
     // again.
@@ -1743,19 +1830,21 @@ fn read_memory_with(tools: &Tools, key: &str, tidy: bool) -> Memory {
             &read_setting(&state.join(".last").join(key)).unwrap_or_default(),
         )
         .to_owned(),
-        last_profile: read_setting(&state.join(".lastprofile").join(key)).unwrap_or_default(),
+        last_profile: canon(
+            tools,
+            &read_setting(&state.join(".lastprofile").join(key)).unwrap_or_default(),
+        ),
         fallback: crate::cli::setting(tools, "default").map_or_else(
             || "offline".to_owned(),
             |(value, _)| crate::launch::network_name(&value).to_owned(),
         ),
         default_profile: crate::cli::setting(tools, "default-profile")
-            .map_or_else(|| "ask".to_owned(), |(value, _)| value),
+            .map_or_else(|| "ask".to_owned(), |(value, _)| canon(tools, &value)),
         ask: std::env::var_os(ENV_ASK).is_some_and(|v| !v.is_empty()),
         bound: String::new(),
     };
     // The container this launch would use without a dialog, and its network.
-    let profiles = tools.profiles.clone();
-    let would_use = container_without_dialog(&memory, key, |n| profiles.join(n).is_dir(), None);
+    let would_use = container_without_dialog(&memory, key, |n| container_exists(tools, n), None);
     if let Some(container) = crate::container::load(tools, &would_use.selector()) {
         if let crate::container::Network::Named(network) = container.network.value {
             memory.bound = network;
@@ -1807,26 +1896,6 @@ fn zone_names(state: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Names of the directories a menu may show: sorted, dot-files skipped, and
-/// nothing starting with a dash.
-///
-/// A name starting with `-` is taken by kdialog for an option and the dialog
-/// closes without a single word. Such names cannot be created any more, but a
-/// directory may have survived from an older version — it is simply not shown.
-/// (`docs/GOTCHAS.md` §11)
-fn menu_names(dir: &Path) -> Vec<String> {
-    visible_entries(dir)
-        .into_iter()
-        .filter(|path| path.is_dir())
-        .filter_map(|path| path.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .filter(|name| !name.starts_with('-'))
-        // A directory named like a menu command (`pinmain`, `unpinprof`,
-        // `pin:x`, `sb:x`, `__fs__`…) would be read as that command: a
-        // program with the home can make one (review 2026-09-25).
-        .filter(|name| !reserved_name(name))
-        .collect()
-}
-
 /// The second dialog: which container (or sandbox) to open the program in.
 ///
 /// `None` means the user cancelled and the launch is over. `current_zone` is
@@ -1846,7 +1915,7 @@ fn ask_profile(
         "main" => return Some(Container::default()),
         "own" => return Some(Container::own_sandbox(key)),
         name => {
-            if tools.profiles.join(name).is_dir() {
+            if container_exists(tools, name) {
                 return Some(Container {
                     profile: name.to_owned(),
                     ..Container::default()
@@ -1859,27 +1928,15 @@ fn ask_profile(
         // Same reason as the network dialog above: without a graphical session
         // kdialog dies and `|| exit 0` took that for a cancel, so a launch from
         // a terminal or from a unit ended in nothing at all. Take the last
-        // choice and let the program start.
-        let profiles = tools.profiles.clone();
-        return Some(Container::from_selector_checked(
-            &memory.last_profile,
-            |n| profiles.join(n).is_dir(),
-        ));
+        // choice and let the program start — its own home when that is gone.
+        return Some(
+            Container::from_selector_checked(&memory.last_profile, |n| container_exists(tools, n))
+                .unwrap_or_else(|| Container::own_sandbox(key)),
+        );
     }
 
-    let sandboxes = menu_names(&tools.sandboxes);
+    let (sandboxes, profiles) = container_rows(tools);
     let running = tools.state.join(".running");
-    let profiles: Vec<ProfileRow> = menu_names(&tools.profiles)
-        .into_iter()
-        .map(|name| {
-            let busy_in = live_tenant(&running, &tools.profiles.join(&name).join("inuse"))
-                .or_else(|| {
-                    registry::live_zone(&running.join(&name), &|pid| registry::alive(&running, pid))
-                })
-                .unwrap_or_default();
-            ProfileRow { name, busy_in }
-        })
-        .collect();
     let tmp_joins = open_throwaways(&running);
 
     let mut argv: Vec<OsString> = vec![
@@ -1924,7 +1981,7 @@ fn apply_profile_choice(
         }
         ProfileChoice::OwnSandbox { pin: want } => {
             if want {
-                pin(&format!("{SANDBOX_PREFIX}app-{key}"));
+                pin(&own_name(key));
             }
             Some(Container::own_sandbox(key))
         }
@@ -1937,15 +1994,15 @@ fn apply_profile_choice(
                 ..Container::default()
             })
         }
+        // `sb:<name>` of an older menu or window: the container by its name.
         ProfileChoice::Sandbox { name, pin: want } => {
+            let name = canon(tools, &format!("{SANDBOX_PREFIX}{name}"));
             if want {
-                pin(&format!("{SANDBOX_PREFIX}{name}"));
+                pin(&name);
             }
-            Some(Container {
-                fs_sandbox: true,
-                sandbox: name,
-                ..Container::default()
-            })
+            Some(Container::from_selector(&name, |n| {
+                container_exists(tools, n)
+            }))
         }
         ProfileChoice::NewSandbox => {
             let name = match new_name {
@@ -1967,16 +2024,14 @@ fn apply_profile_choice(
             // was asked for is a sandbox, so it is the program's own sandbox —
             // not the main profile with the whole home —, and said so.
             let name = sanitize_name(&name);
-            if !name.is_empty() {
-                create(tools, "sandbox", &name);
-            }
-            if name.is_empty() || !tools.sandboxes.join(&name).is_dir() {
+            let made = crate::container::create(tools, &name, crate::container::Home::Private);
+            if let Err(why) = made {
                 dialog::notify(
                     &tools.notify_send,
                     None,
                     "8000",
                     "Песочница не создана",
-                    "Программа запущена в своей песочнице — без дома системы.",
+                    &format!("{why}. Программа запущена в своей песочнице — без дома системы."),
                 );
                 return apply_profile_choice(
                     tools,
@@ -1986,8 +2041,7 @@ fn apply_profile_choice(
                 );
             }
             Some(Container {
-                fs_sandbox: true,
-                sandbox: name,
+                profile: name,
                 ..Container::default()
             })
         }
@@ -2022,12 +2076,9 @@ fn apply_profile_choice(
             let name = sanitize_name(&name);
             // The same trap as the sandbox above: without swallowing the error
             // the picker died after all the dialogs, and with a container that
-            // does not exist `vpn-zone run` would honestly refuse to start. A
-            // profile sees the whole home either way; the main one, said so.
-            if !name.is_empty() {
-                create(tools, "profile", &name);
-            }
-            if name.is_empty() || !tools.profiles.join(&name).is_dir() {
+            // does not exist `vpn-zone run` would honestly refuse to start.
+            let made = crate::container::create(tools, &name, crate::container::Home::Layer);
+            if let Err(why) = made {
                 // A container was asked for: the program's own sandbox, not the
                 // main profile with the whole home (review 2026-09-25).
                 dialog::notify(
@@ -2035,7 +2086,7 @@ fn apply_profile_choice(
                     None,
                     "8000",
                     "Профиль не создан",
-                    "Программа запущена в своей песочнице — без дома системы.",
+                    &format!("{why}. Программа запущена в своей песочнице — без дома системы."),
                 );
                 return apply_profile_choice(
                     tools,
@@ -2059,19 +2110,6 @@ fn apply_profile_choice(
             })
         }
     }
-}
-
-/// `vpn-zone <kind> create <name>`, failures and all output swallowed: the
-/// caller checks whether the directory appeared, which is the only answer that
-/// matters here.
-fn create(tools: &Tools, kind: &str, name: &str) {
-    let _ = Command::new(&tools.runner)
-        .arg(kind)
-        .arg("create")
-        .arg(name)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 }
 
 /// The zone named by the first live line of a container's `inuse` file.
@@ -2340,7 +2378,7 @@ mod tests {
         };
         let plan = autostart_plan(&memory, "tg", anything, unbound);
         assert_eq!(plan.zone, "offline");
-        assert_eq!(plan.container.selector(), "sb:app-tg");
+        assert_eq!(plan.container.selector(), "app-tg");
         assert!(plan.network_guessed && plan.container_guessed);
     }
 
@@ -2364,7 +2402,7 @@ mod tests {
         assert_eq!(autostart_plan(&memory, "tg", anything, bound).zone, "de");
 
         // The global container default is an answer, `ask` is not.
-        for (default, selector) in [("main", ""), ("own", "sb:app-tg"), ("work", "work")] {
+        for (default, selector) in [("main", ""), ("own", "app-tg"), ("work", "work")] {
             let memory = Memory {
                 default_profile: default.into(),
                 ..Memory::default()
@@ -2380,7 +2418,7 @@ mod tests {
             ..Memory::default()
         };
         let plan = autostart_plan(&memory, "tg", nothing, unbound);
-        assert_eq!(plan.container.selector(), "sb:app-tg");
+        assert_eq!(plan.container.selector(), "app-tg");
         assert!(plan.container_guessed);
 
         // Running already: where it runs.
@@ -2394,7 +2432,7 @@ mod tests {
         let plan = autostart_plan(&memory, "tg", anything, unbound);
         assert_eq!(
             (plan.zone.as_str(), plan.container.selector()),
-            ("nl", "sb:x".to_owned())
+            ("nl", "x".to_owned())
         );
     }
 
@@ -2696,44 +2734,50 @@ mod tests {
 
     #[test]
     fn a_selector_is_read_back_into_the_three_variables() {
-        assert_eq!(Container::from_selector(""), Container::default());
-        assert_eq!(Container::from_selector(MAIN), Container::default());
+        assert_eq!(Container::from_selector("", nothing), Container::default());
         assert_eq!(
-            Container::from_selector("__fs__"),
-            Container {
-                fs_sandbox: true,
-                ..Container::default()
-            }
-        );
-        assert_eq!(
-            Container::from_selector("sb:work"),
-            Container {
-                fs_sandbox: true,
-                sandbox: "work".to_owned(),
-                ..Container::default()
-            }
-        );
-        // A per-app sandbox is an ordinary named one under the covers.
-        assert_eq!(
-            Container::from_selector("sb:app-firefox").sandbox,
-            "app-firefox"
-        );
-        assert_eq!(
-            Container::from_selector("work"),
-            Container {
-                profile: "work".to_owned(),
-                ..Container::default()
-            }
-        );
-        // Checked: a container that has been deleted falls back to the main
-        // profile instead of a launch that cannot work.
-        assert_eq!(
-            Container::from_selector_checked("work", nothing),
+            Container::from_selector(MAIN, nothing),
             Container::default()
         );
         assert_eq!(
-            Container::from_selector_checked("work", anything).profile,
-            "work"
+            Container::from_selector("__fs__", nothing),
+            Container {
+                fs_sandbox: true,
+                ..Container::default()
+            }
+        );
+        // A container that exists, by its name, whatever its home — the old
+        // prefix of a sandbox read as the same name.
+        for selector in ["work", "sb:work"] {
+            assert_eq!(
+                Container::from_selector(selector, anything),
+                Container {
+                    profile: "work".to_owned(),
+                    ..Container::default()
+                },
+                "{selector}"
+            );
+        }
+        // One that is gone is made again with a home of its own: the
+        // program's own home, never the whole real one.
+        assert_eq!(
+            Container::from_selector("sb:app-firefox", nothing),
+            Container {
+                fs_sandbox: true,
+                sandbox: "app-firefox".to_owned(),
+                ..Container::default()
+            }
+        );
+        // Checked: a container that has been deleted is no answer, and the
+        // caller decides.
+        assert_eq!(Container::from_selector_checked("work", nothing), None);
+        assert_eq!(
+            Container::from_selector_checked("work", anything).map(|c| c.profile),
+            Some("work".to_owned())
+        );
+        assert_eq!(
+            Container::from_selector_checked(TMP, nothing).map(|c| c.profile),
+            Some(TMP.to_owned())
         );
     }
 
@@ -2744,7 +2788,7 @@ mod tests {
             sandbox: "work".to_owned(),
             ..Container::default()
         };
-        assert_eq!(sandbox.selector(), "sb:work");
+        assert_eq!(sandbox.selector(), "work");
         assert_eq!(
             Container {
                 fs_sandbox: true,
@@ -2762,8 +2806,16 @@ mod tests {
             .selector(),
             "work"
         );
-        // And it round-trips, which is what makes the re-exec faithful.
-        assert_eq!(Container::from_selector(&sandbox.selector()), sandbox);
+        // And it round-trips, which is what makes the re-exec faithful: once
+        // made, the container is found by its name.
+        assert_eq!(
+            Container::from_selector(&sandbox.selector(), anything).selector(),
+            "work"
+        );
+        assert_eq!(
+            Container::from_selector(&sandbox.selector(), nothing),
+            sandbox
+        );
         // One-off containers are never remembered.
         for profile in [TMP, "tmpjoin:/tmp/vpn-profile-abc"] {
             let c = Container {
@@ -2816,7 +2868,7 @@ mod tests {
     }
 
     #[test]
-    fn the_global_default_container_is_laid_over_the_last_choice() {
+    fn the_global_default_container_outranks_the_last_choice() {
         let mut m = memory();
         m.last_profile = "last".to_owned();
 
@@ -2848,23 +2900,29 @@ mod tests {
             container_without_dialog(&m, "k", |name| name == "last", None).profile,
             "last"
         );
+        // And a last choice that is gone is the program's own home, not the
+        // whole real one.
+        assert_eq!(
+            container_without_dialog(&m, "k", nothing, None).selector(),
+            "app-k"
+        );
     }
 
+    /// One launch, one container: a default is a whole container, never laid
+    /// over a part of the last choice — the shell's partial overlay made one
+    /// launch of a layer and a sandbox at once.
     #[test]
-    fn a_remembered_sandbox_survives_a_named_default_container() {
-        // The overlay is partial on purpose: `main` and a named default clear
-        // the container only, so the sandbox flags stay as they were.
+    fn a_default_container_is_whole() {
         let mut m = memory();
-        m.last_profile = "sb:work".to_owned();
+        m.last_profile = "work".to_owned();
         m.default_profile = "main".to_owned();
         assert_eq!(
             container_without_dialog(&m, "k", anything, None),
-            Container {
-                fs_sandbox: true,
-                sandbox: "work".to_owned(),
-                ..Container::default()
-            }
+            Container::default()
         );
+        m.default_profile = "other".to_owned();
+        let c = container_without_dialog(&m, "k", anything, None);
+        assert_eq!((c.profile.as_str(), c.sandbox.as_str()), ("other", ""));
     }
 
     #[test]
@@ -2877,11 +2935,13 @@ mod tests {
         assert!(pin_is_valid("nl", |z| z == "nl"));
         assert!(!pin_is_valid("nl", nothing));
 
-        // A pinned SANDBOX is not a container and must not be looked for among
-        // them: checking it as one erased the pin on the next click, and
-        // "🔒 Своя песочница — всегда" never worked at all.
-        assert!(profile_pin_is_valid("sb:work", nothing));
+        // The program's own container is valid before its first launch makes
+        // it: checking it as one that must exist erased the pin on the next
+        // click, and "🔒 Своя песочница — всегда" never worked at all.
+        assert!(profile_pin_is_valid("app-firefox", nothing));
         assert!(profile_pin_is_valid("sb:app-firefox", nothing));
+        assert!(profile_pin_is_valid("sb:work", |p| p == "work"));
+        assert!(!profile_pin_is_valid("sb:work", nothing));
         assert!(profile_pin_is_valid(THROWAWAY, nothing));
         assert!(profile_pin_is_valid(MAIN, nothing));
         assert!(profile_pin_is_valid("", nothing));
@@ -2965,6 +3025,12 @@ mod tests {
         assert_eq!(container_label("sb:app-firefox"), "своя песочница");
         assert_eq!(container_label("sb:work"), "песочница work");
         assert_eq!(container_label("work"), "work");
+        // A program's own container is one by its name, whatever the prefix.
+        assert_eq!(container_label("app-firefox"), "своя песочница");
+        use crate::container::Home;
+        assert_eq!(label_of("dev", Some(Home::Private)), "песочница dev");
+        assert_eq!(label_of("files", Some(Home::Main)), "основной files");
+        assert_eq!(label_of("work", Some(Home::Layer)), "work");
     }
 
     #[test]
@@ -2973,10 +3039,17 @@ mod tests {
             ProfileRow {
                 name: "work".to_owned(),
                 busy_in: "de".to_owned(),
+                main: false,
             },
             ProfileRow {
                 name: "личное".to_owned(),
                 busy_in: String::new(),
+                main: false,
+            },
+            ProfileRow {
+                name: "files".to_owned(),
+                busy_in: "de".to_owned(),
+                main: true,
             },
         ];
         let joins = vec![TmpJoinRow {
@@ -2993,19 +3066,27 @@ mod tests {
                 "pin:__ownsb__",
                 "__fs__",
                 "pin:__fs__",
-                "sb:общая",
-                "pin:sb:общая",
+                "общая",
+                "pin:общая",
                 "__newsb__",
                 "work",
                 "pin:work",
                 "личное",
                 "pin:личное",
+                "files",
+                "pin:files",
                 "tmpjoin:/tmp/vpn-profile-abc",
                 "__tmp__",
                 "__new__",
             ]
         );
-        assert_eq!(text_of(&menu, "sb:общая"), "🔒 Песочница «общая»");
+        assert_eq!(text_of(&menu, "общая"), "🔒 Песочница «общая»");
+        // The main home says what it is, and is never "busy": it is one
+        // identity in every network.
+        assert_eq!(
+            text_of(&menu, "files"),
+            "⚠ Основной «files» (весь настоящий дом)"
+        );
         assert_eq!(text_of(&menu, "work"), "work — занят сетью de");
         assert_eq!(text_of(&menu, "личное"), "личное");
         assert_eq!(
@@ -3016,7 +3097,7 @@ mod tests {
         let menu = profile_menu(&[], &profiles, &[], "", "de");
         assert_eq!(text_of(&menu, "work"), "work");
         // The way back out of a container pin, when there is one.
-        let menu = profile_menu(&[], &[], &[], "sb:work", "nl");
+        let menu = profile_menu(&[], &[], &[], "work", "nl");
         assert_eq!(text_of(&menu, "unpinprof"), "↺ Спрашивать контейнер снова");
     }
 
@@ -3120,7 +3201,7 @@ mod tests {
                 "/p/bin/vpn-zone",
                 "run",
                 "nl",
-                "--profile",
+                "--container",
                 "work",
                 "--",
                 "firefox",
@@ -3196,7 +3277,6 @@ mod tests {
                 "nl",
                 &Container {
                     profile: "tmpjoin:/tmp/vpn-profile-abc".to_owned(),
-                    fs_sandbox: true,
                     ..Container::default()
                 },
                 &cmd
@@ -3208,7 +3288,6 @@ mod tests {
                 "--tmp-profile",
                 "--join",
                 "/tmp/vpn-profile-abc",
-                "--fs-sandbox",
                 "--",
                 "firefox",
                 "%U"
@@ -3222,6 +3301,8 @@ mod tests {
         // line that comes out has to be understood by `vpn-zone run`.
         use crate::launch::{Sandbox, Selection};
         for tag in ["", "__fs__", "sb:work", "work", "__tmp__", "tmpjoin:/tmp/p"] {
+            // `sb:work` of an older window: here, before anything resolves
+            // it, the name as a sandbox.
             let container = match parse_profile_choice(tag) {
                 ProfileChoice::Main { .. } => Container::default(),
                 ProfileChoice::Throwaway { .. } => Container {

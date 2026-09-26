@@ -541,7 +541,12 @@ let
   renderContainer =
     name: c:
     lib.concatStringsSep "\n" (
-      [ "# Объявлено в Nix: programs.cellward.containers.${name}. Меняется там, не здесь." ]
+      [
+        "# Объявлено в Nix: programs.cellward.containers.${name}. Меняется там, не здесь."
+        # Вид дома — всегда: по строке home рантайм отличает этот файл от
+        # файлов прежнего вида (<вид>-<имя>.conf).
+        "home = ${homeKind c.home}"
+      ]
       ++ lib.optional (c.network != null) "network = ${c.network}"
       ++ map (app: "app = ${app}") c.apps
       ++ lib.optional (c.trust.certificates != [ ]) "trust = ${trustDir name c.trust.certificates}"
@@ -549,6 +554,9 @@ let
       ++ lib.optional c.permissions.x11 "x11 = true"
     )
     + "\n";
+
+  # overlay — прежнее слово для layer.
+  homeKind = home: if home == "overlay" then "layer" else home;
 
   allApps = lib.concatMap (c: c.apps) (lib.attrValues cfg.containers);
   duplicateApps = lib.filter (app: lib.count (x: x == app) allApps > 1) (lib.unique allApps);
@@ -558,10 +566,12 @@ let
       home = lib.mkOption {
         type = lib.types.enum [
           "private"
+          "layer"
           "overlay"
+          "main"
         ];
         default = "private";
-        description = "Дом контейнера: private — свой пустой дом (песочница), overlay — слой над XDG-каталогами настоящего дома.";
+        description = "Дом контейнера: private — свой пустой дом (песочница); layer — слой над всем настоящим домом: видно всё, пишется в слой контейнера (overlay — прежнее слово для него); main — сам настоящий дом, без разделения данных, но со своими сетью, программами и разрешениями (файловый менеджер, свой терминал). Смена вида дома не создаёт другого контейнера: данные прежнего вида откладываются рядом.";
       };
       network = lib.mkOption {
         # Имя зоны (латиница, цифры, _ и -, не с дефиса), ask, offline,
@@ -997,6 +1007,10 @@ in
       message = "programs.cellward.containers.${name}.permissions.paths: слою над домом выдаются только пути дома (~/…): вне дома слоя нет, там и так настоящее";
     }) cfg.containers
     ++ lib.mapAttrsToList (name: c: {
+      assertion = c.home != "main" || (c.permissions.paths == [ ] && c.trust.certificates == [ ]);
+      message = "programs.cellward.containers.${name}: основному дому (home = \"main\") выдавать нечего и своих сертификатов у него нет — он и так настоящий, а сертификат лёг бы в настоящий дом";
+    }) cfg.containers
+    ++ lib.mapAttrsToList (name: c: {
       assertion = lib.all (
         v: !(lib.hasInfix "\n" v) && (lib.hasPrefix "/" v || lib.hasPrefix "~/" v)
       ) c.permissions.paths && lib.all (v: !(lib.hasInfix "\n" v)) c.apps;
@@ -1162,24 +1176,22 @@ in
       ".config/vpn-zones/declared/wayland-sandbox".text = if cfg.compositorRestriction.enable then "on" else "off";
     })
     (lib.mapAttrs' (
-      name: c: lib.nameValuePair ".config/vpn-zones/declared/containers/${c.home}-${name}.conf" { text = renderContainer name c; }
+      name: c: lib.nameValuePair ".config/vpn-zones/declared/containers/${name}.conf" { text = renderContainer name c; }
     ) cfg.containers)
   ];
 
-  # Каталоги объявленных контейнеров: без них запуск в оверлее отказался бы
-  # («профиля нет — создай»), а слой доверия искал бы, куда положить бандл.
+  # Каталоги данных объявленных контейнеров: без них запуск в слое отказался
+  # бы («контейнера нет — создай»), а слой доверия искал бы, куда положить
+  # бандл. Один каталог на контейнер, какой бы ни был дом; его содержимое
+  # готовит запуск по виду дома (container::prepare_data). У основного дома
+  # своих данных нет.
   home.activation.vpnZoneContainers = lib.hm.dag.entryAfter [ "writeBoundary" ] (
     lib.concatStrings (
       lib.mapAttrsToList (
         name: c:
-        if c.home == "overlay" then
-          ''
-            $DRY_RUN_CMD mkdir -p ${lib.escapeShellArg "${profilesDir}/${name}"}
-          ''
-        else
-          ''
-            $DRY_RUN_CMD mkdir -p ${lib.escapeShellArg "${config.home.homeDirectory}/.local/state/vpn-sandboxes/${name}/home"}
-          ''
+        lib.optionalString (c.home != "main") ''
+          $DRY_RUN_CMD mkdir -p ${lib.escapeShellArg "${profilesDir}/${name}"}
+        ''
       ) cfg.containers
     )
   );

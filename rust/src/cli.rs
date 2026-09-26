@@ -46,7 +46,7 @@ pub const EXIT_TOOLS: u8 = 2;
 const READY_TRIES: u32 = 100;
 const READY_STEP: Duration = Duration::from_millis(100);
 
-const USAGE: &str = "cellward — сетевые зоны с VPN, без root\n(коротко — cw; прежнее имя vpn-zone тоже работает)\n\n  cellward add <имя> <файл.conf>   создать зону из конфига AmneziaWG/WireGuard\n                                   или OpenConnect (секция [OpenConnect])\n  cellward add <имя> --system <з.> зона через туннель системной зоны <з.>:\n                                   своего туннеля нет, один VPN — одно\n                                   подключение (конфиг с ключом системной\n                                   зоны становится такой зоной сам)\n  cellward up <имя>                поднять\n  cellward down <имя>              опустить\n  cellward list                    список зон и их состояние\n  cellward status <имя>            подробности (адрес, handshake)\n  cellward status --json           всё состояние машиночитаемо: зоны, контейнеры,\n                                   программы, откуда взято каждое значение\n  cellward status --bar            одна строка JSON для статус-бара (waybar):\n                                   поднятые зоны и живы ли их туннели\n  cellward run <имя> -- <кмд>      запустить программу внутри зоны\n  cellward launch <id> [-- <арг.>] запустить ярлык по id через пикер, как\n                                   щелчок по нему, — для биндов композитора\n  cellward rm <имя>                удалить зону вместе с ярлыками\n  cellward sync                    пересобрать .desktop-ярлыки\n  cellward mode <режим>            как ярлыки работают:\n                                     picker   — один ярлык, спрашивает сеть\n                                                при запуске (по умолчанию)\n                                     per-zone — отдельный ярлык на каждую зону\n                                                (устарел, будет убран)\n                                     both     — и то, и другое (устарел)\n                                     off      — не трогать ярлыки вовсе\n  cellward default <вариант>       что предлагать в пикере для незнакомой\n                                   программы: offline (по умолчанию),\n                                   unconfined (без ограничений: сеть хоста,\n                                   без VPN и изоляции зоны; прежнее имя —\n                                   direct) или имя зоны\n  cellward gc                      убрать зависшие держатели зон, осиротевшую\n                                   обвязку и мёртвые записи\n  cellward perms list|reset <прог.|--all>\n                                   какие доступы к файлам выданы программам\n                                   в песочнице; reset — спросить заново\n  cellward sandbox create|list|rm <имя>\n                                   именованные песочницы: свой дом, общий для\n                                   всех программ, запущенных в этой песочнице\n  cellward run <имя> --sandbox <п> -- <кмд>\n                                   запустить в именованной песочнице\n  cellward run <имя> --fs-sandbox -- <кмд>\n                                   запустить в песочнице файловой системы:\n                                   вместо $HOME — пустой каталог, наружу\n                                   видно только разрешённое, остальное — через\n                                   диалог выбора файла (порталы)\n  cellward run <имя> --tmp-profile -- <кмд>\n                                   запустить в одноразовом контейнере: слой\n                                   создаётся в /tmp и стирается по выходе\n  cellward default-profile <v>     контейнер по умолчанию для всех запусков:\n                                   ask (спрашивать), main (основной),\n                                   own (своя песочница у каждой программы)\n                                   или имя контейнера\n  cellward pins                    какие программы закреплены за сетями\n  cellward forget <прог.|--all>    снять закрепление (снова будет спрашивать)\n  cellward isolate <overlay|off>   свой слой профиля у зоны (overlay — по\n                                   умолчанию). Без него браузер откроет окно\n                                   в уже запущенном процессе, мимо VPN\n  cellward reset-profile <имя>     очистить слой профиля зоны\n  cellward wayland-proxy on|off    посредник между программами и\n                                   композитором (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-no-proxy)\n  cellward wayland-sandbox on|off  отбирать ли у программ захват экрана,\n                                   чтение буфера в фоне и эмуляцию ввода\n                                   (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-allow)\n  cellward frame show|hide         рамка цвета зоны вокруг окон её программ;\n                                   hide — спрятать у окон, открытых после\n                                   этого (для показа экрана)\n  cellward frame width <1–32>|default\n                                   толщина рамки, логические пиксели (4)\n  cellward frame color <зона> <#rrggbb>|default\n                                   цвет рамки зоны (по умолчанию — из имени)\n  cellward frame title always|hover|off|default\n                                   полоса заголовка «зона · контейнер» сверху:\n                                   всегда (по умолчанию), при наведении (поверх\n                                   окна, у верхнего края) или нет\n  cellward check <имя>             прошло ли рукопожатие (жив ли конфиг)\n  cellward watch [--json]          живы ли туннели поднятых зон; при смерти и\n                                   возвращении — уведомление (зовёт таймер)\n  cellward kill <зона>             оборвать зону сейчас: заморозить все её\n                                   программы, опустить зону, убить программы\n                                   (для удалённого доступа, который надо\n                                   прекратить немедленно)\n  cellward journal [--json] [<N>]  последние события: запуски без ограничений\n                                   (unconfined) и решения брокера\n  cellward focused [--json|--bar|--watch]\n                                   в какой сети и контейнере программа окна в\n                                   фокусе (niri, sway); --bar — строка для\n                                   статус-бара, --watch — такая строка при\n                                   каждой смене фокуса\n  cellward window-menu             меню программы окна в фокусе — для бинда\n                                   композитора: закрепить сеть, перезапустить\n                                   с выбором сети, закрыть, оборвать зону\n  cellward doctor [<зона>…] [--json]\n                                   что на деле закрыто: готовность системы и\n                                   проверки изнутри каждой поднятой зоны\n                                   (выходы, маршруты, резолверы, открытые\n                                   каналы); код 1 — есть нарушения\n  cellward hermetic <зона> on|off|default\n                                   герметичная зона: без systemd --user,\n                                   сессионная шина через фильтр, запуск\n                                   наружу через брокер; default — как\n                                   у всех зон\n  cellward hermetic --default on|off\n                                   герметичны ли зоны без своей настройки\n                                   (по умолчанию on, с 2026-09)\n  cellward x11 <зона> on|off       свой X-сервер программам зоны (X хоста в\n                                   зонах недоступен всегда)\n  cellward nix-daemon <зона> on|off|default\n                                   виден ли программам зоны Nix-демон хоста\n                                   (по умолчанию нет: он качает в сети хоста)\n  cellward camera <зона> on|off|default\n                                   видны ли программам зоны камеры хоста\n                                   (по умолчанию нет)\n  cellward audio-manager <зона> on|off|default\n                                   PipeWire хоста без ограничений в\n                                   герметичной зоне — для микшера\n                                   (pavucontrol, qpwgraph); по умолчанию\n                                   нет: свои потоки и выходы для звука\n  cellward microphone <зона> yes|no|ask|default\n                                   может ли программа зоны записывать\n                                   микрофон: ask (по умолчанию) — спросить\n                                   при первой записи: один раз, всегда,\n                                   отказать; действует сразу. Звук, который\n                                   играет хост, не записать никогда. Это\n                                   переключатель пути pulse: сырой\n                                   pipewire-0 и systemd --user\n                                   негерметичной зоны идут мимо\n  cellward screencast <зона> yes|no|ask|default\n                                   может ли программа зоны транслировать\n                                   экран через портал: ask (по умолчанию) —\n                                   портал спрашивает каждый раз; no — отказ;\n                                   yes — выбор можно запомнить, если портал\n                                   знает зону по имени. Действует сразу;\n                                   держит фильтр шины герметичной зоны\n  cellward ask-again <срок>|default\n                                   через сколько после отказа снова спросить\n                                   о разрешении (микрофон): 30s…1d, по\n                                   умолчанию 3m; до того запросы зоны\n                                   отказаны без вопроса\n  cellward host-files <зона> read-only|writable|default\n                                   может ли герметичная зона писать то, что\n                                   хост исполняет из дома (по умолчанию нет)\n  cellward lock|unlock <имя>       запретить/разрешить программам этой зоны\n                                   запускать что-либо в ДРУГИХ сетях\n                                   (по умолчанию разрешено; держится только\n                                   в герметичной зоне)\n  cellward trust add <контейнер> <сертификат> [--yes]\n                                   дополнительный корневой сертификат ТОЛЬКО\n                                   для программ этого контейнера (профиль или\n                                   sb:<песочница>): хост и другие контейнеры\n                                   ему не доверяют. Его владелец сможет читать\n                                   TLS-трафик программ контейнера\n  cellward trust list [<контейнер>] [--json]\n  cellward trust rm <контейнер> <начало sha256>\n  cellward trust reset <контейнер> убрать все дополнительные сертификаты\n  cellward container list|show [<контейнер>] [--json]\n                                   контейнеры (профиль или sb:<песочница>):\n                                   их сеть, программы, сертификаты\n  cellward container set <контейнер> network <сеть|ask>\n                                   привязать контейнер к сети: запуск в\n                                   другой сети будет отказом\n  cellward container set <контейнер> x11 on|off\n                                   свой X-сервер в зонах (X хоста в зонах\n                                   недоступен всегда)\n  cellward container assign <программа> <контейнер>\n  cellward container unassign <программа>\n  cellward container grant sb:<песочница> <каталог> [--for 2h]\n  cellward container revoke sb:<песочница> <каталог>\n                                   выдать песочнице каталог настоящего дома\n                                   или диска (/mnt, /media, /run/media, /srv):\n                                   префикс Wine, библиотеку Steam; --for —\n                                   на срок (30s, 15m, 2h, 7d), по истечении\n                                   и при revoke каталог отмонтируется и у\n                                   уже запущенных программ\n  cellward container merge <из> <в> [--yes]\n                                   объединить два контейнера одного вида:\n                                   совпавшее остаётся у <в>, версии из <из>\n                                   кладутся рядом; --yes — согласие принять\n                                   чужие корневые сертификаты\n";
+const USAGE: &str = "cellward — сетевые зоны с VPN, без root\n(коротко — cw; прежнее имя vpn-zone тоже работает)\n\n  cellward add <имя> <файл.conf>   создать зону из конфига AmneziaWG/WireGuard\n                                   или OpenConnect (секция [OpenConnect])\n  cellward add <имя> --system <з.> зона через туннель системной зоны <з.>:\n                                   своего туннеля нет, один VPN — одно\n                                   подключение (конфиг с ключом системной\n                                   зоны становится такой зоной сам)\n  cellward up <имя>                поднять\n  cellward down <имя>              опустить\n  cellward list                    список зон и их состояние\n  cellward status <имя>            подробности (адрес, handshake)\n  cellward status --json           всё состояние машиночитаемо: зоны, контейнеры,\n                                   программы, откуда взято каждое значение\n  cellward status --bar            одна строка JSON для статус-бара (waybar):\n                                   поднятые зоны и живы ли их туннели\n  cellward run <имя> -- <кмд>      запустить программу внутри зоны\n  cellward launch <id> [-- <арг.>] запустить ярлык по id через пикер, как\n                                   щелчок по нему, — для биндов композитора\n  cellward rm <имя>                удалить зону вместе с ярлыками\n  cellward sync                    пересобрать .desktop-ярлыки\n  cellward mode <режим>            как ярлыки работают:\n                                     picker   — один ярлык, спрашивает сеть\n                                                при запуске (по умолчанию)\n                                     per-zone — отдельный ярлык на каждую зону\n                                                (устарел, будет убран)\n                                     both     — и то, и другое (устарел)\n                                     off      — не трогать ярлыки вовсе\n  cellward default <вариант>       что предлагать в пикере для незнакомой\n                                   программы: offline (по умолчанию),\n                                   unconfined (без ограничений: сеть хоста,\n                                   без VPN и изоляции зоны; прежнее имя —\n                                   direct) или имя зоны\n  cellward gc                      убрать зависшие держатели зон, осиротевшую\n                                   обвязку и мёртвые записи\n  cellward perms list|reset <прог.|--all>\n                                   какие доступы к файлам выданы программам\n                                   в песочнице; reset — спросить заново\n  cellward container create <имя> [--home private|layer|main]\n                                   контейнер: свой дом (private, по умолчанию),\n                                   слой над настоящим домом (layer) или сам\n                                   настоящий дом (main) — со своими сетью,\n                                   программами и разрешениями\n  cellward container rm <имя>      удалить контейнер с его данными\n  cellward sandbox create|list|rm <имя>\n  cellward profile create|list|rm <имя>\n                                   прежние слова: контейнер со своим домом\n                                   (sandbox) или слоем (profile)\n  cellward run <имя> --container <к> -- <кмд>\n                                   запустить в контейнере (--sandbox и\n                                   --profile — прежние слова для того же)\n  cellward run <имя> --fs-sandbox -- <кмд>\n                                   запустить в песочнице файловой системы:\n                                   вместо $HOME — пустой каталог, наружу\n                                   видно только разрешённое, остальное — через\n                                   диалог выбора файла (порталы)\n  cellward run <имя> --tmp-profile -- <кмд>\n                                   запустить в одноразовом контейнере: слой\n                                   создаётся в /tmp и стирается по выходе\n  cellward default-profile <v>     контейнер по умолчанию для всех запусков:\n                                   ask (спрашивать), main (основной),\n                                   own (своя песочница у каждой программы)\n                                   или имя контейнера\n  cellward pins                    какие программы закреплены за сетями\n  cellward forget <прог.|--all>    снять закрепление (снова будет спрашивать)\n  cellward wayland-proxy on|off    посредник между программами и\n                                   композитором (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-no-proxy)\n  cellward wayland-sandbox on|off  отбирать ли у программ захват экрана,\n                                   чтение буфера в фоне и эмуляцию ввода\n                                   (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-allow)\n  cellward frame show|hide         рамка цвета зоны вокруг окон её программ;\n                                   hide — спрятать у окон, открытых после\n                                   этого (для показа экрана)\n  cellward frame width <1–32>|default\n                                   толщина рамки, логические пиксели (4)\n  cellward frame color <зона> <#rrggbb>|default\n                                   цвет рамки зоны (по умолчанию — из имени)\n  cellward frame title always|hover|off|default\n                                   полоса заголовка «зона · контейнер» сверху:\n                                   всегда (по умолчанию), при наведении (поверх\n                                   окна, у верхнего края) или нет\n  cellward check <имя>             прошло ли рукопожатие (жив ли конфиг)\n  cellward watch [--json]          живы ли туннели поднятых зон; при смерти и\n                                   возвращении — уведомление (зовёт таймер)\n  cellward kill <зона>             оборвать зону сейчас: заморозить все её\n                                   программы, опустить зону, убить программы\n                                   (для удалённого доступа, который надо\n                                   прекратить немедленно)\n  cellward journal [--json] [<N>]  последние события: запуски без ограничений\n                                   (unconfined) и решения брокера\n  cellward focused [--json|--bar|--watch]\n                                   в какой сети и контейнере программа окна в\n                                   фокусе (niri, sway); --bar — строка для\n                                   статус-бара, --watch — такая строка при\n                                   каждой смене фокуса\n  cellward window-menu             меню программы окна в фокусе — для бинда\n                                   композитора: закрепить сеть, перезапустить\n                                   с выбором сети, закрыть, оборвать зону\n  cellward doctor [<зона>…] [--json]\n                                   что на деле закрыто: готовность системы и\n                                   проверки изнутри каждой поднятой зоны\n                                   (выходы, маршруты, резолверы, открытые\n                                   каналы); код 1 — есть нарушения\n  cellward hermetic <зона> on|off|default\n                                   герметичная зона: без systemd --user,\n                                   сессионная шина через фильтр, запуск\n                                   наружу через брокер; default — как\n                                   у всех зон\n  cellward hermetic --default on|off\n                                   герметичны ли зоны без своей настройки\n                                   (по умолчанию on, с 2026-09)\n  cellward x11 <зона> on|off       свой X-сервер программам зоны (X хоста в\n                                   зонах недоступен всегда)\n  cellward nix-daemon <зона> on|off|default\n                                   виден ли программам зоны Nix-демон хоста\n                                   (по умолчанию нет: он качает в сети хоста)\n  cellward camera <зона> on|off|default\n                                   видны ли программам зоны камеры хоста\n                                   (по умолчанию нет)\n  cellward audio-manager <зона> on|off|default\n                                   PipeWire хоста без ограничений в\n                                   герметичной зоне — для микшера\n                                   (pavucontrol, qpwgraph); по умолчанию\n                                   нет: свои потоки и выходы для звука\n  cellward microphone <зона> yes|no|ask|default\n                                   может ли программа зоны записывать\n                                   микрофон: ask (по умолчанию) — спросить\n                                   при первой записи: один раз, всегда,\n                                   отказать; действует сразу. Звук, который\n                                   играет хост, не записать никогда. Это\n                                   переключатель пути pulse: сырой\n                                   pipewire-0 и systemd --user\n                                   негерметичной зоны идут мимо\n  cellward screencast <зона> yes|no|ask|default\n                                   может ли программа зоны транслировать\n                                   экран через портал: ask (по умолчанию) —\n                                   портал спрашивает каждый раз; no — отказ;\n                                   yes — выбор можно запомнить, если портал\n                                   знает зону по имени. Действует сразу;\n                                   держит фильтр шины герметичной зоны\n  cellward ask-again <срок>|default\n                                   через сколько после отказа снова спросить\n                                   о разрешении (микрофон): 30s…1d, по\n                                   умолчанию 3m; до того запросы зоны\n                                   отказаны без вопроса\n  cellward host-files <зона> read-only|writable|default\n                                   может ли герметичная зона писать то, что\n                                   хост исполняет из дома (по умолчанию нет)\n  cellward lock|unlock <имя>       запретить/разрешить программам этой зоны\n                                   запускать что-либо в ДРУГИХ сетях\n                                   (по умолчанию разрешено; держится только\n                                   в герметичной зоне)\n  cellward trust add <контейнер> <сертификат> [--yes]\n                                   дополнительный корневой сертификат ТОЛЬКО\n                                   для программ этого контейнера: хост и\n                                   другие контейнеры\n                                   ему не доверяют. Его владелец сможет читать\n                                   TLS-трафик программ контейнера\n  cellward trust list [<контейнер>] [--json]\n  cellward trust rm <контейнер> <начало sha256>\n  cellward trust reset <контейнер> убрать все дополнительные сертификаты\n  cellward container list|show [<контейнер>] [--json]\n                                   контейнеры: их дом, сеть, программы,\n                                   сертификаты\n  cellward container set <контейнер> network <сеть|ask>\n                                   привязать контейнер к сети: запуск в\n                                   другой сети будет отказом\n  cellward container set <контейнер> x11 on|off\n                                   свой X-сервер в зонах (X хоста в зонах\n                                   недоступен всегда)\n  cellward container set <контейнер> home private|layer|main\n                                   сменить вид дома; данные прежнего вида\n                                   откладываются рядом, ничего не стирается\n  cellward container assign <программа> <контейнер>\n  cellward container unassign <программа>\n  cellward container grant <контейнер> <каталог> [--for 2h]\n  cellward container revoke <контейнер> <каталог>\n                                   выдать контейнеру каталог настоящего дома\n                                   или диска (/mnt, /media, /run/media, /srv):\n                                   префикс Wine, библиотеку Steam; --for —\n                                   на срок (30s, 15m, 2h, 7d), по истечении\n                                   и при revoke каталог отмонтируется и у\n                                   уже запущенных программ\n  cellward container merge <из> <в> [--yes]\n                                   объединить два контейнера одного вида:\n                                   совпавшее остаётся у <в>, версии из <из>\n                                   кладутся рядом; --yes — согласие принять\n                                   чужие корневые сертификаты\n";
 
 /// Entry point of the `vpn-zone` binary.
 pub fn main() -> ExitCode {
@@ -117,8 +117,16 @@ pub fn main() -> ExitCode {
         b"wayland-sandbox" => wayland_sandbox(&tools, rest),
         b"wayland-proxy" => wayland_proxy(&tools, rest),
         b"frame" => frame(&tools, rest),
-        b"isolate" => isolate(&tools, rest),
-        b"reset-profile" => reset_profile(&tools, rest),
+        // Zones have had no layer of their own since the whole-home layer of
+        // a container (`docs/PERMISSIONS.md` §11.7): the two did nothing.
+        b"isolate" | b"reset-profile" => {
+            eprintln!(
+                "cellward {}: команды больше нет — слоёв у зон нет, слой есть у контейнера \
+                 (cellward container create <имя> --home layer; очистить — cellward container rm)",
+                verb.to_string_lossy()
+            );
+            1
+        }
         b"rm" => remove(&tools, rest),
         b"sync" => exec_sync(&tools),
         b"mode" => mode(&tools, rest),
@@ -307,23 +315,6 @@ fn write_setting(tools: &Tools, name: &str, value: &OsStr) -> Result<(), String>
     fs::create_dir_all(&tools.config).map_err(|e| format!("{}: {e}", tools.config.display()))?;
     let path = tools.config.join(name);
     fs::write(&path, value.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-/// A name that may become a directory next to other people's data.
-///
-/// Refuses exactly what is dangerous — a path separator, whitespace, a leading
-/// dash or dot — and nothing else. Cyrillic stays Cyrillic: the earlier rule was
-/// "latin only", the GUI sanitised a Russian name into a row of dashes, and
-/// kdialog takes an argument starting with `-` for an option and closes without
-/// a word. (`docs/GOTCHAS.md` §11)
-fn safe_name(name: &OsStr) -> bool {
-    let bytes = name.as_bytes();
-    !crate::picker::reserved_name(&name.to_string_lossy())
-        && !bytes.is_empty()
-        && !bytes.contains(&b'/')
-        && !bytes.contains(&b' ')
-        && !bytes.starts_with(b"-")
-        && !bytes.starts_with(b".")
 }
 
 /// A zone name, which is stricter still: it ends up in unit names and in
@@ -1310,30 +1301,6 @@ pub fn handshake_line(mirror: &str) -> Option<String> {
     None
 }
 
-fn reset_profile(tools: &Tools, args: &[OsString]) -> u8 {
-    let Some(name) = required(args, 0, "нужно имя зоны") else {
-        return 1;
-    };
-    let dir = tools.state.join(name);
-    if !dir.is_dir() {
-        eprintln!("зоны {} нет", name.to_string_lossy());
-        return 1;
-    }
-    if zone_pid(&tools.state, name).is_some() {
-        eprintln!(
-            "сначала опусти зону: cellward down {}",
-            name.to_string_lossy()
-        );
-        return 1;
-    }
-    let _ = crate::sys::remove_tree(&dir.join("overlay"));
-    println!(
-        "слой профиля зоны {} очищен (основной профиль не тронут)",
-        name.to_string_lossy()
-    );
-    0
-}
-
 fn remove(tools: &Tools, args: &[OsString]) -> u8 {
     let Some(name) = required(args, 0, "нужно имя") else {
         return 1;
@@ -1582,10 +1549,23 @@ fn perms(tools: &Tools, args: &[OsString]) -> u8 {
     }
 }
 
-/// Named sandboxes. NOT containers: a container is a layer over your home (you
-/// see everything, only the data is split), a sandbox has a home of its own and
-/// it is empty. Hence the separate directory.
+/// `sandbox create|list|rm`: the words from before one name per container
+/// (`docs/PERMISSIONS.md` §11.7) — `container` with a home of its own.
 fn sandbox(tools: &Tools, args: &[OsString]) -> u8 {
+    container_kind_alias(tools, args, crate::container::Home::Private, "sandbox")
+}
+
+/// `profile create|list|rm`: `container` with a layer over the home.
+fn profile(tools: &Tools, args: &[OsString]) -> u8 {
+    container_kind_alias(tools, args, crate::container::Home::Layer, "profile")
+}
+
+fn container_kind_alias(
+    tools: &Tools,
+    args: &[OsString],
+    home: crate::container::Home,
+    word: &str,
+) -> u8 {
     let sub = args
         .first()
         .cloned()
@@ -1593,178 +1573,119 @@ fn sandbox(tools: &Tools, args: &[OsString]) -> u8 {
     let rest: &[OsString] = args.get(1..).unwrap_or(&[]);
     match sub.as_bytes() {
         b"create" => {
-            let Some(name) = required(rest, 0, "нужно имя песочницы") else {
+            let Some(name) = required(rest, 0, "нужно имя контейнера") else {
                 return 1;
             };
-            if !safe_name(name) {
-                eprintln!("в имени нельзя: / пробел, и оно не должно начинаться с - или .");
-                return 1;
-            }
-            let home = tools.sandboxes.join(name).join("home");
-            if let Err(e) = fs::create_dir_all(&home) {
-                eprintln!("не создать {}: {e}", home.display());
-                return 1;
-            }
-            println!(
-                "песочница {} создана (свой пустой дом, доступ наружу спросится при запуске)",
-                name.to_string_lossy()
-            );
-            0
+            container_create(tools, name, home)
         }
         b"list" => {
-            let dirs: Vec<PathBuf> = visible_entries(&tools.sandboxes)
-                .into_iter()
-                .filter(|d| d.is_dir())
-                .collect();
-            if dirs.is_empty() {
-                println!("песочниц нет. Создать: cellward sandbox create <имя>");
+            let all = crate::container::load_all(tools);
+            let of_kind: Vec<_> = all.iter().filter(|c| c.home == home).collect();
+            if of_kind.is_empty() {
+                println!(
+                    "контейнеров вида «{}» нет. Создать: cellward container create <имя> --home {}",
+                    home.label(),
+                    home.setting()
+                );
                 return 0;
             }
-            for dir in dirs {
-                let name = dir
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                crate::container::migrate_policy(tools);
-                let policy = crate::container::policy_dir_in(
-                    &tools.config,
-                    crate::container::Home::Private,
-                    &name,
-                );
-                let perms = fs::read_to_string(policy.join("perms"))
-                    .unwrap_or_default()
-                    .replace('\n', " ");
-                let perms = if perms.is_empty() {
-                    "ничего"
-                } else {
-                    &perms
-                };
-                let size = human_size(tree_size(&dir));
-                match name.strip_prefix("app-") {
-                    Some(app) => {
-                        println!("{name} — своя песочница программы {app}, {size}, доступ: {perms}")
-                    }
-                    None => println!("{name} — {size}, доступ: {perms}"),
-                }
+            for c in of_kind {
+                println!("{}", container_line(tools, c));
             }
             0
         }
         b"rm" => {
-            let Some(name) = required(rest, 0, "нужно имя песочницы") else {
+            let Some(name) = required(rest, 0, "нужно имя контейнера") else {
                 return 1;
             };
-            let dir = tools.sandboxes.join(name);
-            if !dir.is_dir() {
-                eprintln!("песочницы {} нет", name.to_string_lossy());
-                return 1;
-            }
-            if let Err(e) = crate::sys::remove_tree(&dir) {
-                eprintln!("не удалить {}: {e}", dir.display());
-                return 1;
-            }
-            // Its policy with it: a sandbox made again under the name must
-            // not inherit the old one's grants and network.
-            let policy = crate::container::policy_dir_in(
-                &tools.config,
-                crate::container::Home::Private,
-                &name.to_string_lossy(),
-            );
-            let _ = crate::sys::remove_tree(&policy);
-            println!(
-                "песочница {} удалена вместе со своим домом",
-                name.to_string_lossy()
-            );
-            0
+            container_remove(tools, name)
         }
         _ => {
-            eprintln!("cellward sandbox create|list|rm <имя>");
+            eprintln!("cellward {word} create|list|rm <имя> (то же, что cellward container)");
             1
         }
     }
 }
 
-fn profile(tools: &Tools, args: &[OsString]) -> u8 {
-    let sub = args
-        .first()
-        .cloned()
-        .unwrap_or_else(|| OsString::from("list"));
-    let rest: &[OsString] = args.get(1..).unwrap_or(&[]);
-    match sub.as_bytes() {
-        b"create" => {
-            let Some(name) = required(rest, 0, "нужно имя профиля") else {
-                return 1;
-            };
-            if !safe_name(name) {
-                eprintln!("в имени нельзя: / пробел, и оно не должно начинаться с - или .");
-                return 1;
-            }
-            let dir = tools.profiles.join(name);
-            if let Err(e) = fs::create_dir_all(&dir) {
-                eprintln!("не создать {}: {e}", dir.display());
-                return 1;
-            }
-            println!(
-                "профиль {} создан (пустой слой поверх твоего ~/)",
-                name.to_string_lossy()
-            );
-            0
-        }
-        b"list" => {
-            let dirs: Vec<PathBuf> = visible_entries(&tools.profiles)
-                .into_iter()
-                .filter(|d| d.is_dir())
-                .collect();
-            if dirs.is_empty() {
-                println!("профилей нет. Создать: cellward profile create <имя>");
-                return 0;
-            }
-            let running = tools.state.join(".running");
-            for dir in dirs {
-                let name = dir
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                let size = human_size(tree_size(&dir));
-                // Who has it open, from the shared launch registry — the same
-                // one the network-conflict warning reads.
-                match registry::live_zone(&running.join(&name), &|pid| {
-                    registry::alive(&running, pid)
-                }) {
-                    Some(zone) => println!("{name} — открыт в сети {zone} ({size})"),
-                    None => println!("{name} — свободен ({size})"),
+/// `container create <name> [--home private|layer|main]`.
+fn container_create(tools: &Tools, name: &OsStr, home: crate::container::Home) -> u8 {
+    let name = name.to_string_lossy();
+    match crate::container::create(tools, &name, home) {
+        Ok(c) => {
+            let what = match c.home {
+                crate::container::Home::Private => {
+                    "свой пустой дом, доступ наружу спросится при запуске"
                 }
-            }
-            0
-        }
-        b"rm" => {
-            let Some(name) = required(rest, 0, "нужно имя профиля") else {
-                return 1;
+                crate::container::Home::Layer => "пустой слой поверх твоего ~/",
+                crate::container::Home::Main => {
+                    "основной дом: настоящий, со своими сетью и разрешениями"
+                }
             };
-            let dir = tools.profiles.join(name);
-            if !dir.is_dir() {
-                eprintln!("профиля {} нет", name.to_string_lossy());
-                return 1;
-            }
-            if let Err(e) = crate::sys::remove_tree(&dir) {
-                eprintln!("не удалить {}: {e}", dir.display());
-                return 1;
-            }
-            let policy = crate::container::policy_dir_in(
-                &tools.config,
-                crate::container::Home::Overlay,
-                &name.to_string_lossy(),
-            );
-            let _ = crate::sys::remove_tree(&policy);
-            println!("профиль {} удалён", name.to_string_lossy());
+            println!("контейнер {name} создан ({what})");
             0
         }
-        _ => {
-            eprintln!("cellward profile create|list|rm <имя>");
+        Err(e) => {
+            eprintln!("{e}");
             1
         }
     }
+}
+
+/// `container rm <name>`: its data and its local policy. A declared one stays
+/// declared — the module would make it again.
+fn container_remove(tools: &Tools, name: &OsStr) -> u8 {
+    let text = name.to_string_lossy();
+    let Some(c) = crate::container::load(tools, &text) else {
+        eprintln!("контейнера {text} нет");
+        return 1;
+    };
+    if let Some(busy) = crate::container::running_network(tools, &c) {
+        eprintln!(
+            "программы контейнера {} работают (в сети {busy}) — закрой их",
+            c.name
+        );
+        return 1;
+    }
+    for dir in [&c.dir, &c.policy] {
+        if fs::symlink_metadata(dir).is_ok() {
+            if let Err(e) = crate::sys::remove_tree(dir) {
+                eprintln!("не удалить {}: {e}", dir.display());
+                return 1;
+            }
+        }
+    }
+    let declared = crate::container::load(tools, &c.name).is_some();
+    if declared {
+        println!(
+            "данные и местные настройки контейнера {} удалены; он объявлен в Nix и останется",
+            c.name
+        );
+    } else if c.home == crate::container::Home::Main {
+        println!("контейнер {} удалён (настоящий дом не тронут)", c.name);
+    } else {
+        println!("контейнер {} удалён вместе со своими данными", c.name);
+    }
+    0
+}
+
+/// One line of a list: the name, the kind of home, the size, where it runs.
+fn container_line(tools: &Tools, c: &crate::container::Container) -> String {
+    let size = if c.home == crate::container::Home::Main {
+        String::new()
+    } else {
+        format!(", {}", human_size(tree_size(&c.dir)))
+    };
+    let own = c
+        .name
+        .strip_prefix("app-")
+        .filter(|_| c.home == crate::container::Home::Private)
+        .map(|app| format!(" программы {app}"))
+        .unwrap_or_default();
+    let busy = match crate::container::running_network(tools, c) {
+        Some(zone) => format!(" — открыт в сети {zone}"),
+        None => String::new(),
+    };
+    format!("{} — {}{own}{size}{busy}", c.name, c.home.label())
 }
 
 // --- TRUSTED CERTIFICATES ----------------------------------------------------
@@ -1792,7 +1713,7 @@ fn trust(tools: &Tools, args: &[OsString]) -> u8 {
 
 /// A container a certificate can belong to.
 struct TrustTarget {
-    /// As the user named it: a profile name, or `sb:<sandbox>`.
+    /// The container's name.
     shown: String,
     /// The container's policy directory (`container::policy_dir`); the
     /// certificates live in `trust/` there.
@@ -1809,43 +1730,32 @@ impl TrustTarget {
     }
 }
 
-/// `sb:<name>` is a named sandbox, anything else a data container. The main
-/// profile is neither: its NSS databases are the host's, and a certificate
+/// A container by name (`sb:<name>` read as it was). Not the main home, and
+/// no container of it: its NSS databases are the host's, and a certificate
 /// there would be the host's too.
 fn trust_target(tools: &Tools, name: &OsStr) -> Result<TrustTarget, String> {
-    crate::container::migrate_policy(tools);
     let text = name.to_string_lossy().into_owned();
-    if let Some(sandbox) = text.strip_prefix("sb:") {
-        if !safe_name(OsStr::new(sandbox)) {
-            return Err(format!("нет такой песочницы: {text}"));
-        }
-        let dir = tools.sandboxes.join(sandbox);
-        if !dir.is_dir() {
+    let Some(c) = crate::container::load(tools, &text) else {
+        if text.is_empty() || text == registry::MAIN || crate::container::reserved_name(&text) {
             return Err(format!(
-                "песочницы {sandbox} нет — создай: cellward sandbox create {sandbox}"
+                "«{text}» — не контейнер: основной профиль общий с хостом, и сертификат в нём был бы сертификатом хоста"
             ));
         }
-        return Ok(TrustTarget {
-            home: Some(dir.join("home")),
-            policy: crate::container::policy_dir(tools, crate::container::Home::Private, sandbox),
-            shown: text,
-        });
-    }
-    if !safe_name(name) || text == registry::MAIN {
+        let name = crate::container::canonical(tools, &text).unwrap_or(text);
         return Err(format!(
-            "«{text}» — не контейнер: основной профиль общий с хостом, и сертификат в нём был бы сертификатом хоста"
+            "контейнера {name} нет — создай: cellward container create {name}"
         ));
-    }
-    let dir = tools.profiles.join(name);
-    if !dir.is_dir() {
+    };
+    if c.home == crate::container::Home::Main {
         return Err(format!(
-            "контейнера {text} нет — создай: cellward profile create {text}"
+            "{} — основной дом: его базы сертификатов — хоста, и сертификат в них был бы сертификатом хоста",
+            c.name
         ));
     }
     Ok(TrustTarget {
-        policy: crate::container::policy_dir(tools, crate::container::Home::Overlay, &text),
-        shown: text,
-        home: None,
+        home: c.private_home(),
+        policy: c.policy.clone(),
+        shown: c.name,
     })
 }
 
@@ -2009,44 +1919,16 @@ fn trust_list(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             }
         },
-        None => {
-            let profiles = visible_entries(&tools.profiles).into_iter().map(|dir| {
-                let name = dir
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                TrustTarget {
-                    policy: crate::container::policy_dir(
-                        tools,
-                        crate::container::Home::Overlay,
-                        &name,
-                    ),
-                    shown: name,
-                    home: None,
-                }
-            });
-            let sandboxes = visible_entries(&tools.sandboxes).into_iter().map(|dir| {
-                let name = dir
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                TrustTarget {
-                    policy: crate::container::policy_dir(
-                        tools,
-                        crate::container::Home::Private,
-                        &name,
-                    ),
-                    shown: format!("sb:{name}"),
-                    home: Some(dir.join("home")),
-                }
-            });
-            profiles
-                .chain(sandboxes)
-                .filter(|t| t.trust_dir().is_dir())
-                .collect()
-        }
+        None => crate::container::load_all(tools)
+            .into_iter()
+            .filter(|c| c.home != crate::container::Home::Main)
+            .map(|c| TrustTarget {
+                home: c.private_home(),
+                policy: c.policy.clone(),
+                shown: c.name,
+            })
+            .filter(|t| t.trust_dir().is_dir())
+            .collect(),
     };
 
     let mut rows: Vec<(String, crate::trust::CertInfo)> = Vec::new();
@@ -2256,9 +2138,39 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
         .collect();
     match sub.as_bytes() {
         b"list" => container_list(tools, json),
+        b"create" => {
+            let Some(name) = words.first() else {
+                eprintln!("cellward container create <имя> [--home private|layer|main]");
+                return 1;
+            };
+            let home = match (words.get(1).map(String::as_str), words.get(2)) {
+                (None, _) => crate::container::Home::Private,
+                (Some("--home"), Some(kind)) if words.len() == 3 => {
+                    match crate::container::Home::parse(kind) {
+                        Some(home) => home,
+                        None => {
+                            eprintln!("--home: private, layer или main");
+                            return 1;
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("cellward container create <имя> [--home private|layer|main]");
+                    return 1;
+                }
+            };
+            container_create(tools, OsStr::new(name), home)
+        }
+        b"rm" => {
+            let Some(name) = words.first() else {
+                eprintln!("cellward container rm <имя>");
+                return 1;
+            };
+            container_remove(tools, OsStr::new(name))
+        }
         b"show" => {
             let Some(selector) = words.first() else {
-                eprintln!("нужен контейнер: имя профиля или sb:<песочница>");
+                eprintln!("нужно имя контейнера");
                 return 1;
             };
             let Some(c) = crate::container::load(tools, selector) else {
@@ -2280,9 +2192,32 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
             let (Some(selector), Some(key), Some(value)) =
                 (words.first(), words.get(1), words.get(2))
             else {
-                eprintln!("cellward container set <контейнер> network <сеть|ask> | x11 on|off");
+                eprintln!(
+                    "cellward container set <контейнер> network <сеть|ask> | x11 on|off | \
+                     home private|layer|main"
+                );
                 return 1;
             };
+            if key == "home" {
+                let Some(home) = crate::container::Home::parse(value) else {
+                    eprintln!("home: private, layer или main");
+                    return 1;
+                };
+                return match crate::container::set_home(tools, selector, home) {
+                    Ok(()) => {
+                        println!(
+                            "у контейнера {selector} теперь {}; данные прежнего вида отложены рядом \
+                             (home.<вид>) и вернутся, если вид сменить обратно",
+                            home.label()
+                        );
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
+                    }
+                };
+            }
             if key == "x11" {
                 let on = match value.as_str() {
                     "on" => true,
@@ -2311,7 +2246,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                 };
             }
             if key != "network" {
-                eprintln!("у контейнера меняются network и x11");
+                eprintln!("у контейнера меняются network, x11 и home");
                 return 1;
             }
             let Some(network) = crate::container::Network::parse(value) else {
@@ -2347,10 +2282,11 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                 eprintln!("cellward container assign <программа> <контейнер>");
                 return 1;
             };
-            if crate::container::load(tools, selector).is_none() {
+            let Some(target) = crate::container::load(tools, selector) else {
                 eprintln!("контейнера {selector} нет");
                 return 1;
-            }
+            };
+            let selector = &target.name;
             if let Some(owner) = crate::container::declared_owner(tools, app) {
                 if &owner != selector {
                     eprintln!("программа {app} назначена контейнеру {owner} в Nix — меняется там");
@@ -2389,8 +2325,8 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
         b"grant" | b"revoke" => {
             let grant = sub == "grant";
             const USAGE: &str =
-                "cellward container grant sb:<песочница> <каталог> [--for 30m|2h|7d]\n\
-                 cellward container revoke sb:<песочница> <каталог>";
+                "cellward container grant <контейнер> <каталог> [--for 30m|2h|7d]\n\
+                 cellward container revoke <контейнер> <каталог>";
             let (Some(selector), Some(path)) = (words.first(), words.get(1)) else {
                 eprintln!("{USAGE}");
                 return 1;
@@ -2501,7 +2437,9 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
             }
         }
         _ => {
-            eprintln!("cellward container list|show|set|assign|unassign|grant|revoke|merge …");
+            eprintln!(
+                "cellward container list|show|create|rm|set|assign|unassign|grant|revoke|merge …"
+            );
             1
         }
     }
@@ -2543,10 +2481,10 @@ fn print_merge(tools: &Tools, from: &str, into: &str, report: &crate::container:
         }
         eprintln!("  убрать: cellward trust rm {into} <начало sha256>");
     }
-    let remove = match from.strip_prefix(crate::container::SANDBOX_PREFIX) {
-        Some(name) => format!("cellward sandbox rm {name}"),
-        None => format!("cellward profile rm {from}"),
-    };
+    let remove = format!(
+        "cellward container rm {}",
+        crate::container::canonical(tools, from).unwrap_or_else(|| from.to_owned())
+    );
     println!("  {from} остался (без программ); удалить, когда проверишь результат: {remove}");
 }
 
@@ -2567,10 +2505,7 @@ fn source_word(source: crate::container::Source) -> &'static str {
 }
 
 fn print_container(tools: &Tools, c: &crate::container::Container) {
-    let home = match c.home {
-        crate::container::Home::Overlay => "слой над домом",
-        crate::container::Home::Private => "свой дом",
-    };
+    let home = format!("{} ({})", c.home.label(), source_word(c.home_source));
     let network = match &c.network.value {
         crate::container::Network::Ask => "спрашивать при запуске".to_owned(),
         crate::container::Network::Named(name) => name.clone(),
@@ -2611,7 +2546,9 @@ fn container_list(tools: &Tools, json: bool) -> u8 {
     }
     let all = crate::container::load_all(tools);
     if all.is_empty() {
-        println!("контейнеров нет. Создать: cellward profile create <имя> или cellward sandbox create <имя>");
+        println!(
+            "контейнеров нет. Создать: cellward container create <имя> [--home private|layer|main]"
+        );
         return 0;
     }
     for c in &all {
@@ -2845,29 +2782,6 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
             1
         }
     }
-}
-
-fn isolate(tools: &Tools, args: &[OsString]) -> u8 {
-    let Some(value) = required(args, 0, "overlay или off") else {
-        return 1;
-    };
-    if value != "overlay" && value != "off" {
-        eprintln!("только overlay или off");
-        return 1;
-    }
-    if let Err(e) = write_setting(tools, "isolate", value) {
-        eprintln!("не записать {e}");
-        return 1;
-    }
-    if value == "overlay" {
-        println!("зоны накладывают свой слой на ~/.config, ~/.local/share, ~/.cache,");
-        println!("~/.mozilla, ~/.pki — программа видит настройки, но пишет в слой зоны");
-    } else {
-        println!("зоны используют общий профиль. Учти: браузер тогда откроет окно");
-        println!("в уже запущенном процессе, и трафик пойдёт мимо VPN");
-    }
-    println!("поднятые зоны надо перезапустить, чтобы это применилось");
-    0
 }
 
 fn mode(tools: &Tools, args: &[OsString]) -> u8 {
@@ -3179,10 +3093,16 @@ peer: p
     #[test]
     fn names_that_would_break_a_dialog_or_a_path_are_refused() {
         for good in ["work", "личное", "a.b", "a_b", "a-b"] {
-            assert!(safe_name(OsStr::new(good)), "«{good}» должно быть можно");
+            assert!(
+                crate::container::valid_name(good),
+                "«{good}» должно быть можно"
+            );
         }
         for bad in ["", "a/b", "a b", "-a", ".a", "/"] {
-            assert!(!safe_name(OsStr::new(bad)), "«{bad}» должно быть нельзя");
+            assert!(
+                !crate::container::valid_name(bad),
+                "«{bad}» должно быть нельзя"
+            );
         }
         // Zone names end up in unit names: stricter still.
         for good in ["nl", "nl-2", "a_b"] {
@@ -3226,11 +3146,10 @@ peer: p
             "gc",
             "perms",
             "sandbox",
+            "profile",
             "default-profile",
             "pins",
             "forget",
-            "isolate",
-            "reset-profile",
             "wayland-sandbox",
             "check",
             "lock",

@@ -89,7 +89,9 @@ let
       machine.wait_for_unit("user@1000.service")
 
       # What the columns show: zones (a directory with a config is a zone to
-      # the picker), a named sandbox, a profile.
+      # the picker), a named sandbox, a profile. The sandbox where the layout
+      # before one name per container kept it: the picker's first look moves
+      # it in with the rest.
       state = "/home/alice/.local/state/vpn-zones"
       for zone in ["nl", "de", "work-vpn"]:
           alice(f"mkdir -p {state}/{zone} && printf '[Interface]\\n' > {state}/{zone}/config.conf")

@@ -135,11 +135,13 @@ fn a_named_sandbox_keeps_its_permissions_and_home_together() {
     let ok = home.script("bwrap-ok", "exit 0");
     let out = run(&home, &ok, &["testapp", "--name", "work", "--", "prog"]);
     assert!(out.status.success());
-    let sb = home.dir.join(".local/state/vpn-sandboxes/work");
+    // One data directory for every container, whatever its home
+    // (docs/PERMISSIONS.md §11.7).
+    let sb = home.dir.join(".local/state/vpn-profiles/work");
     assert!(sb.join("home").is_dir(), "the sandbox has no home");
-    // The permissions with the sandbox's policy, not next to its home: that is
-    // written through every zone's home layer (docs/HOME-LAYER.md).
-    let policy = home.dir.join(".config/vpn-zones/containers/sandboxes/work");
+    // The permissions with the container's policy, not next to its data: a
+    // program with the data in reach must not write its own.
+    let policy = home.dir.join(".config/vpn-zones/containers/work");
     assert!(
         policy.join("perms").is_file(),
         "the permissions are not shared"

@@ -1,11 +1,12 @@
 //! The launch registry: which program runs in which network, right now.
 //!
-//! One directory per container (`__main__` for "no container"), one file per
-//! program, one line per launch:
+//! One directory per container, whatever its home (`__main__` for "no
+//! container", and for a throwaway sandbox), one file per program, one line
+//! per launch:
 //!
 //! ```text
 //! ~/.local/state/vpn-zones/.running/<container>/<program>
-//!   1234 nl sb:work
+//!   1234 nl work
 //!   ^pid ^zone ^selector
 //! ```
 //!
@@ -21,12 +22,14 @@
 //! record stays true for as long as the program lives, and dead ones are swept
 //! lazily by the next launch. (`docs/GOTCHAS.md` §5)
 //!
-//! **The third field is what was CHOSEN**, not what was mounted: `sb:<name>` for
-//! a named sandbox, `__fs__` for a throwaway one, the container name otherwise,
-//! empty for the plain main profile. Without it a second click on a running
-//! program brought it back "bare": the network was read from the registry while
-//! the sandbox was lost, because a sandboxed launch has no container and always
-//! lands in `__main__`. (`docs/GOTCHAS.md` §5)
+//! **The third field is what was CHOSEN**, not what was mounted: the
+//! container's name, `__fs__` for a throwaway sandbox, empty for the plain
+//! main profile. Without it a second click on a running program brought it
+//! back "bare": the network was read from the registry while the sandbox was
+//! lost, because a sandboxed launch had no container of its own and landed in
+//! `__main__`. (`docs/GOTCHAS.md` §5) Records written before one name per
+//! container say `sb:<name>` for a named sandbox, under `__main__`; readers
+//! take them as the same container while they live.
 //!
 //! **Every rewrite is under `flock`.** Two launches of one program used to do
 //! read → rewrite → rename with no lock and lose each other's records, and `gc`
@@ -69,7 +72,8 @@ pub struct Record {
     /// Zone the program was started into. `unconfined` and `offline` are zones here
     /// like any other.
     pub zone: String,
-    /// What was chosen: `sb:<name>`, `__fs__`, a container name, or empty.
+    /// What was chosen: a container name, `__fs__`, or empty (`sb:<name>` in
+    /// records from before one name per container).
     pub selector: String,
 }
 

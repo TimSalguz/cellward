@@ -231,6 +231,9 @@ exit "$code""#,
             .env("VPNZ_PROFILES", self.path("profiles"))
             .env("VPNZ_SANDBOXES", self.path("sandboxes"))
             .env_remove("DISPLAY")
+            // In a zone nothing of the layout is moved: the test's home is
+            // the host's here, wherever it runs.
+            .env_remove("VPN_ZONE_CURRENT")
             .env_remove("VPN_ZONE_ASK")
             .env_remove("VPN_ZONE_PROFILE")
             .env_remove("VPN_ZONE_CURRENT")
@@ -369,7 +372,7 @@ fn a_pinned_network_with_a_free_container_asks_only_about_the_container() {
     );
     assert_eq!(
         home.launched()[0],
-        ["run", "nl", "--profile", "work", "--", "firefox", "%u"]
+        ["run", "nl", "--container", "work", "--", "firefox", "%u"]
     );
     assert_eq!(
         home.read("state/.lastprofile/firefox").as_deref(),
@@ -382,6 +385,9 @@ fn a_pinned_container_is_not_asked_about_at_all() {
     let home = Home::new("bothpinned");
     home.zone("nl");
     home.write("state/.pinned/firefox", "nl");
+    // A sandbox as the layout before one name per container kept it, and a
+    // pin as it was written then.
+    fs::create_dir_all(home.path("sandboxes/work/home")).unwrap();
     home.write("state/.pinnedprofile/firefox", "sb:work");
     // No answers at all: a dialog here would be a cancel and nothing would
     // start, which is exactly what must not happen.
@@ -390,13 +396,17 @@ fn a_pinned_container_is_not_asked_about_at_all() {
     assert!(home.asked().is_empty(), "{:?}", home.asked());
     assert_eq!(
         home.launched()[0],
-        ["run", "nl", "--sandbox", "work", "--", "firefox", "%u"]
+        ["run", "nl", "--container", "work", "--", "firefox", "%u"]
     );
-    // And the pin survives: it used to be erased by the validation that looked
-    // for a CONTAINER named `sb:work`.
+    // And the pin survives, by the container's one name now: it used to be
+    // erased by the validation that looked for a CONTAINER named `sb:work`.
     assert_eq!(
         home.read("state/.pinnedprofile/firefox").as_deref(),
-        Some("sb:work")
+        Some("work")
+    );
+    assert!(
+        home.path("profiles/work/home").is_dir(),
+        "the sandbox moved in"
     );
 }
 
@@ -701,7 +711,7 @@ fn a_container_chosen_for_unconfined_is_not_dropped() {
         [
             "run",
             "unconfined",
-            "--profile",
+            "--container",
             "work",
             "--",
             "firefox",
@@ -721,13 +731,16 @@ fn a_new_container_is_created_from_the_dialog_and_used() {
     assert!(out.status.success(), "{}", stderr(&out));
 
     let launched = home.launched();
-    // The creation goes through the CLI, and the launch uses the cleaned name.
-    assert_eq!(launched[0], ["profile", "create", "моё_имя"]);
+    // Made right here, a layer, and the launch uses the cleaned name.
     assert_eq!(
-        launched[1],
-        ["run", "nl", "--profile", "моё_имя", "--", "firefox", "%u"]
+        launched[0],
+        ["run", "nl", "--container", "моё_имя", "--", "firefox", "%u"]
     );
     assert!(home.path("profiles/моё_имя").is_dir());
+    assert!(home
+        .read("config/containers/моё_имя/container.conf")
+        .unwrap_or_default()
+        .contains("home = layer"));
 }
 
 #[test]
@@ -737,11 +750,12 @@ fn a_creation_that_fails_still_starts_the_program() {
     let home = Home::new("failed-create");
     home.zone("nl");
     home.answers(&["__chooseprofile__", "__newsb__", "новая", "nl"]);
-    // Every CLI call fails here, the final `run` included — so the picker's own
-    // exit code is the runner's. What matters is that it GOT there.
+    // Its settings cannot be written: a file where their directory goes.
+    home.write("config/containers/новая", "not a directory");
+    // The final `run` fails too — so the picker's own exit code is the
+    // runner's. What matters is that it GOT there.
     let _ = home.run(&pick("firefox"), &[("RUNNER_EXIT", "1")]);
     let launched = home.launched();
-    assert_eq!(launched[0], ["sandbox", "create", "новая"]);
     // The sandbox could not be made, but a sandbox was asked for: the
     // program's own, not the main profile with the whole home — and a launch.
     assert_eq!(
@@ -779,10 +793,7 @@ fn a_container_bound_to_a_network_starts_there_without_a_question() {
     home.zone("nl");
     home.zone("de");
     home.profile("work");
-    home.write(
-        "config/containers/profiles/work/container.conf",
-        "network = nl\n",
-    );
+    home.write("config/containers/work/container.conf", "network = nl\n");
     home.write("state/.pinnedprofile/firefox", "work");
     // A stale network pin elsewhere loses: the network is the container's.
     home.write("state/.pinned/firefox", "de");
@@ -791,7 +802,7 @@ fn a_container_bound_to_a_network_starts_there_without_a_question() {
     assert!(home.asked().is_empty(), "{:?}", home.asked());
     assert_eq!(
         home.launched()[0],
-        ["run", "nl", "--profile", "work", "--", "firefox", "%u"]
+        ["run", "nl", "--container", "work", "--", "firefox", "%u"]
     );
 }
 
@@ -942,8 +953,7 @@ fn an_unassigned_autostart_starts_offline_in_its_own_home_without_a_dialog() {
     );
     // The file access dialog of a new home is answered in advance: nothing.
     assert_eq!(
-        home.read("config/containers/sandboxes/app-tg/perms")
-            .as_deref(),
+        home.read("config/containers/app-tg/perms").as_deref(),
         Some("")
     );
     // Nothing is remembered.
@@ -1002,13 +1012,13 @@ fn an_assigned_autostart_starts_where_it_was_put_and_says_nothing() {
     assert!(home.asked().is_empty(), "{:?}", home.asked());
     assert_eq!(
         home.launched()[0],
-        ["run", "nl", "--profile", "work", "--", "telegram"]
+        ["run", "nl", "--container", "work", "--", "telegram"]
     );
     assert_eq!(home.read("notify.log"), None);
 
     // A container bound to a network takes it along, over the pin.
     home.write(
-        "config/containers/profiles/work/container.conf",
+        "config/containers/work/container.conf",
         "network = direct\n",
     );
     let _ = fs::remove_file(home.path("runner.log"));
@@ -1019,7 +1029,7 @@ fn an_assigned_autostart_starts_where_it_was_put_and_says_nothing() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         home.launched()[0],
-        ["run", "unconfined", "--profile", "work", "--", "telegram"]
+        ["run", "unconfined", "--container", "work", "--", "telegram"]
     );
 }
 
@@ -1110,20 +1120,19 @@ fn a_new_sandbox_is_named_in_the_window_and_pinned_by_its_checkbox() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(home.asked().is_empty(), "no inputbox: {:?}", home.asked());
     let launched = home.launched();
-    assert!(
-        launched
-            .iter()
-            .any(|l| l[..3] == ["sandbox", "create", "общая"]),
-        "{launched:?}"
-    );
+    // Made right here, with a home of its own.
+    assert!(home
+        .read("config/containers/общая/container.conf")
+        .unwrap_or_default()
+        .contains("home = private"));
     let run = launched.iter().find(|l| l[0] == "run").unwrap();
     assert!(
-        run.windows(2).any(|w| w == ["--sandbox", "общая"]),
+        run.windows(2).any(|w| w == ["--container", "общая"]),
         "{run:?}"
     );
     assert_eq!(
         home.read("state/.pinnedprofile/firefox").as_deref(),
-        Some("sb:общая")
+        Some("общая")
     );
     assert_eq!(
         home.read("state/.pinned/firefox"),

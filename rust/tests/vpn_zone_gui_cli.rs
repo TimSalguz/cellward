@@ -174,7 +174,10 @@ exit "${RUNNER_EXIT:-0}""#,
             .env("KDIALOG_ANSWERS", self.path("answers"))
             .env("KDIALOG_LOG", self.path("kdialog.log"))
             .env("RUNNER_LOG", self.path("runner.log"))
-            .env("NOTIFY_LOG", self.path("notify.log"));
+            .env("NOTIFY_LOG", self.path("notify.log"))
+            // In a zone nothing of the layout is moved: the test's home is
+            // the host's here, wherever it runs.
+            .env_remove("VPN_ZONE_CURRENT");
         for (key, value) in env {
             cmd.env(key, value);
         }
@@ -329,8 +332,8 @@ fn removing_containers_offers_all_of_them_at_once_only_when_there_are_several() 
     assert_eq!(
         home.ran(),
         vec![
-            vec!["profile", "rm", "work"],
-            vec!["profile", "rm", "личное"]
+            vec!["container", "rm", "work"],
+            vec!["container", "rm", "личное"]
         ]
     );
     assert!(said(&home.notified()[0], "Профили удалены"));
@@ -344,7 +347,7 @@ fn with_one_container_there_is_nothing_to_delete_all_of() {
     let out = home.run(&["profile-rm"], &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!said(&home.asked()[0], "__all__"));
-    assert_eq!(home.ran(), vec![vec!["profile", "rm", "work"]]);
+    assert_eq!(home.ran(), vec![vec!["container", "rm", "work"]]);
 }
 
 #[test]
@@ -551,18 +554,20 @@ echo "подтверди флагом --yes" >&2; exit 1"#,
 #[test]
 fn a_home_of_its_own_is_granted_a_directory_from_the_chooser() {
     let home = Home::new("containers-grant");
+    // A sandbox where the layout before one name per container kept it: the
+    // first look moves it in, and it is `dev` from then on.
     fs::create_dir_all(home.path("sandboxes/dev/home")).unwrap();
-    home.answers(&["sb:dev", "grant", "/mnt/games", "always"]);
+    home.answers(&["dev", "grant", "/mnt/games", "always"]);
     let out = home.run(&["containers"], &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         home.ran(),
-        vec![vec!["container", "grant", "sb:dev", "/mnt/games"]]
+        vec![vec!["container", "grant", "dev", "/mnt/games"]]
     );
     // With a term.
     let home = Home::new("containers-grant-term");
     fs::create_dir_all(home.path("sandboxes/dev/home")).unwrap();
-    home.answers(&["sb:dev", "grant", "/mnt/games", "1d"]);
+    home.answers(&["dev", "grant", "/mnt/games", "1d"]);
     let out = home.run(&["containers"], &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
@@ -570,16 +575,23 @@ fn a_home_of_its_own_is_granted_a_directory_from_the_chooser() {
         vec![vec![
             "container",
             "grant",
-            "sb:dev",
+            "dev",
             "/mnt/games",
             "--for",
             "1d"
         ]]
     );
-    // A layer over the home is offered no grant at all.
+    // A layer over the home is offered a grant — a path it writes through,
+    // into the real home; the main home, which is the real one, is not.
     let home = Home::new("containers-grant-overlay");
     fs::create_dir_all(home.path("profiles/work")).unwrap();
     home.answers(&["work", "CANCEL"]);
+    let _ = home.run(&["containers"], &[]);
+    let asked = home.asked();
+    assert!(said(&asked[1], "Выдать каталог"), "{asked:?}");
+    let home = Home::new("containers-grant-main");
+    home.write("config/containers/files/container.conf", "home = main\n");
+    home.answers(&["files", "CANCEL"]);
     let _ = home.run(&["containers"], &[]);
     let asked = home.asked();
     assert!(!said(&asked[1], "Выдать каталог"), "{asked:?}");

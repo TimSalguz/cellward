@@ -34,7 +34,6 @@ use std::process::{Command, ExitCode, Stdio};
 use crate::cli::{human_size, read_setting, tree_size, visible_entries, EXIT_TOOLS};
 use crate::dialog;
 use crate::picker::{sanitize_name, MAIN};
-use crate::registry;
 use crate::tools::Tools;
 
 const USAGE: &str = "\
@@ -489,24 +488,27 @@ fn profile_add(tools: &Tools) -> u8 {
 /// throw it away without touching the main environment — which stays untouched
 /// by construction, being the lower layer of the overlay.
 fn profile_rm(tools: &Tools) -> u8 {
-    let running = tools.state.join(".running");
-    let dirs: Vec<PathBuf> = visible_entries(&tools.profiles)
-        .into_iter()
-        .filter(|dir| dir.is_dir())
-        .collect();
-    let total = dirs.len();
+    // Every container, whatever its home — one name each (`docs/PERMISSIONS.md`
+    // §11.7); one of the main home loses its settings only.
+    let all = crate::container::load_all(tools);
+    let names: Vec<String> = all.iter().map(|c| c.name.clone()).collect();
+    let total = names.len();
 
-    let mut rows: Vec<(String, String)> = dirs
+    let mut rows: Vec<(String, String)> = all
         .iter()
-        .map(|dir| {
-            let name = name_of(dir);
-            let size = human_size(tree_size(dir));
-            match registry::live_zone(&running.join(&name), &|pid| registry::alive(&running, pid)) {
+        .map(|c| {
+            let name = &c.name;
+            let size = if c.home == crate::container::Home::Main {
+                "основной дом".to_owned()
+            } else {
+                format!("{}, {}", c.home.label(), human_size(tree_size(&c.dir)))
+            };
+            match crate::container::running_network(tools, c) {
                 Some(zone) => row(
-                    &name,
+                    name,
                     format!("{name} — {size}, сейчас открыт в сети {zone}"),
                 ),
-                None => row(&name, format!("{name} — {size}")),
+                None => row(name, format!("{name} — {size}")),
             }
         })
         .collect();
@@ -552,8 +554,8 @@ fn profile_rm(tools: &Tools) -> u8 {
     }
 
     if choice == "__all__" {
-        for dir in &dirs {
-            let _ = cli_quiet(tools, &["profile", "rm", &name_of(dir)]);
+        for name in &names {
+            let _ = cli_quiet(tools, &["container", "rm", name]);
         }
         dialog::notify(
             &tools.notify_send,
@@ -562,7 +564,7 @@ fn profile_rm(tools: &Tools) -> u8 {
             "Профили удалены",
             &format!("Снесены все {total} контейнеров данных."),
         );
-    } else if cli_quiet(tools, &["profile", "rm", &choice]) {
+    } else if cli_quiet(tools, &["container", "rm", &choice]) {
         dialog::notify(
             &tools.notify_send,
             None,
@@ -603,10 +605,7 @@ fn containers(tools: &Tools) -> u8 {
         return 0;
     }
     let describe = |c: &crate::container::Container| {
-        let home = match c.home {
-            Home::Overlay => "слой над домом",
-            Home::Private => "свой дом",
-        };
+        let home = c.home.label();
         let network = match &c.network.value {
             Network::Ask => "спрашивать".to_owned(),
             Network::Named(name) => name.clone(),
@@ -629,7 +628,7 @@ fn containers(tools: &Tools) -> u8 {
         row("network", "⇄ Сменить сеть…"),
         row("merge", "⊕ Объединить с другим контейнером…"),
     ];
-    if container.home == Home::Private {
+    if container.home != Home::Main {
         actions.push(row("grant", "📁 Выдать каталог…"));
         if !container.paths.is_empty() {
             actions.push(row("revoke", "✕ Забрать выданный каталог…"));
@@ -702,7 +701,7 @@ fn containers(tools: &Tools) -> u8 {
             };
             let warn = format!(
                 "Перенести «{selector}» в «{into}»?\n\nСовпавшие файлы останутся у «{into}», версии из «{selector}» лягут рядом, в .merged-from-{}. Программы «{selector}» перейдут в «{into}». Сам «{selector}» останется — удалишь, когда проверишь.",
-                selector.trim_start_matches(crate::container::SANDBOX_PREFIX)
+                selector
             );
             if !dialog::confirm(
                 &tools.kdialog,
@@ -871,12 +870,14 @@ fn settings(tools: &Tools) -> u8 {
                 row("main", "Всегда основной (общий с системой)"),
                 row("own", "У каждой программы своя постоянная песочница"),
             ];
-            for dir in visible_entries(&tools.profiles) {
-                if !dir.is_dir() {
+            for c in crate::container::load_all(tools) {
+                if crate::picker::reserved_name(&c.name) {
                     continue;
                 }
-                let name = name_of(&dir);
-                rows.push(row(&name, format!("Всегда «{name}»")));
+                rows.push(row(
+                    &c.name,
+                    format!("Всегда «{}» ({})", c.name, c.home.label()),
+                ));
             }
             let Some(value) = menu_with_default(
                 tools,

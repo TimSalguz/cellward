@@ -30,8 +30,8 @@ pub const FILES: &str = "__files__";
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub zones: Vec<String>,
-    pub profiles: Vec<String>,
-    pub sandboxes: Vec<String>,
+    /// Every container by its name, whatever its home.
+    pub containers: Vec<String>,
     /// Programs with a remembered permission set (`fs-perms/*`).
     pub perm_keys: Vec<String>,
     /// Programs pinned to a network (`.pinned/*`) — what `forget` takes.
@@ -60,8 +60,18 @@ impl Snapshot {
     pub fn gather(tools: &Tools) -> Self {
         Self {
             zones: Self::names(&tools.state),
-            profiles: Self::names(&tools.profiles),
-            sandboxes: Self::names(&tools.sandboxes),
+            containers: {
+                let mut names: Vec<String> = Self::names(&tools.profiles)
+                    .into_iter()
+                    .chain(Self::names(
+                        &tools.config.join(crate::container::POLICY_DIR),
+                    ))
+                    .filter(|n| crate::container::valid_name(n))
+                    .collect();
+                names.sort();
+                names.dedup();
+                names
+            },
             perm_keys: Self::names(&tools.config.join("fs-perms")),
             pinned: Self::names(&tools.state.join(".pinned")),
             apps: Self::names(&tools.state.join(".labels")),
@@ -89,8 +99,6 @@ const VERBS: &[&str] = &[
     "default-profile",
     "pins",
     "forget",
-    "isolate",
-    "reset-profile",
     "wayland-sandbox",
     "wayland-proxy",
     "frame",
@@ -135,7 +143,6 @@ const ZONE_VERBS: &[&str] = &[
     "rm",
     "lock",
     "unlock",
-    "reset-profile",
 ];
 
 /// What belongs at the cursor. Empty means "nothing to suggest" — bash then
@@ -170,12 +177,14 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                     return vec![FILES.to_string()];
                 }
                 match word(pos - 1) {
-                    "--profile" | "-p" => owned(&mut out, &snap.profiles),
-                    "--sandbox" => owned(&mut out, &snap.sandboxes),
+                    "--container" | "--profile" | "-p" | "--sandbox" => {
+                        owned(&mut out, &snap.containers)
+                    }
                     _ if pos == 2 => owned(&mut out, &snap.zones),
                     _ => strs(
                         &mut out,
                         &[
+                            "--container",
                             "--profile",
                             "--sandbox",
                             "--fs-sandbox",
@@ -205,7 +214,6 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 owned(&mut out, &snap.zones);
                 strs(&mut out, &["--json"]);
             }
-            "isolate" if pos == 2 => strs(&mut out, &["overlay", "off"]),
             "mode" if pos == 2 => strs(&mut out, &["picker", "per-zone", "both", "off"]),
             "wayland-sandbox" if pos == 2 => strs(&mut out, &["on", "off"]),
             "frame" if pos == 2 => strs(&mut out, &["show", "hide", "width", "title", "color"]),
@@ -221,7 +229,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             }
             "default-profile" if pos == 2 => {
                 strs(&mut out, &["ask", "main", "own"]);
-                owned(&mut out, &snap.profiles);
+                owned(&mut out, &snap.containers);
             }
             "forget" if pos == 2 => {
                 owned(&mut out, &snap.pinned);
@@ -232,53 +240,53 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 owned(&mut out, &snap.perm_keys);
                 strs(&mut out, &["--all"]);
             }
-            "sandbox" if pos == 2 => strs(&mut out, &["create", "list", "rm"]),
-            "sandbox" if pos == 3 && word(2) == "rm" => owned(&mut out, &snap.sandboxes),
-            "trust" if pos == 2 => strs(&mut out, &["add", "list", "rm", "reset"]),
-            // A certificate belongs to a data container or to a named sandbox,
-            // which is spelled `sb:<name>`.
-            "trust" if pos == 3 => {
-                owned(&mut out, &snap.profiles);
-                out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
+            "sandbox" | "profile" if pos == 2 => strs(&mut out, &["create", "list", "rm"]),
+            "sandbox" | "profile" if pos == 3 && word(2) == "rm" => {
+                owned(&mut out, &snap.containers)
             }
+            "trust" if pos == 2 => strs(&mut out, &["add", "list", "rm", "reset"]),
+            "trust" if pos == 3 => owned(&mut out, &snap.containers),
             "trust" if pos == 4 && word(2) == "add" => return vec![FILES.to_string()],
             "launch" if pos == 2 => owned(&mut out, &snap.apps),
             "container" if pos == 2 => strs(
                 &mut out,
                 &[
-                    "list", "show", "set", "assign", "unassign", "grant", "revoke", "merge",
+                    "list", "show", "create", "rm", "set", "assign", "unassign", "grant", "revoke",
+                    "merge",
                 ],
             ),
-            // Only a home of its own is granted directories.
-            "container" if pos == 3 && matches!(word(2), "grant" | "revoke") => {
-                out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
+            "container" if pos == 4 && word(2) == "create" => strs(&mut out, &["--home"]),
+            "container" if pos == 5 && word(2) == "create" => {
+                strs(&mut out, &["private", "layer", "main"])
+            }
+            "container"
+                if pos == 3
+                    && matches!(
+                        word(2),
+                        "grant" | "revoke" | "merge" | "show" | "set" | "rm"
+                    ) =>
+            {
+                owned(&mut out, &snap.containers)
             }
             "container" if pos == 4 && matches!(word(2), "grant" | "revoke") => {
                 return vec![FILES.to_string()]
             }
             "container" if pos == 5 && word(2) == "grant" => strs(&mut out, &["--for"]),
-            "container" if matches!(pos, 3 | 4) && word(2) == "merge" => {
-                owned(&mut out, &snap.profiles);
-                out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
+            "container" if pos == 4 && word(2) == "merge" => owned(&mut out, &snap.containers),
+            "container" if pos == 4 && word(2) == "set" => {
+                strs(&mut out, &["network", "x11", "home"])
             }
-            "container" if pos == 3 && matches!(word(2), "show" | "set") => {
-                owned(&mut out, &snap.profiles);
-                out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
-            }
-            "container" if pos == 4 && word(2) == "set" => strs(&mut out, &["network", "x11"]),
             "container" if pos == 5 && word(2) == "set" && word(4) == "x11" => {
                 strs(&mut out, &["on", "off"])
+            }
+            "container" if pos == 5 && word(2) == "set" && word(4) == "home" => {
+                strs(&mut out, &["private", "layer", "main"])
             }
             "container" if pos == 5 && word(2) == "set" => {
                 strs(&mut out, &["ask", "unconfined", "offline"]);
                 owned(&mut out, &snap.zones);
             }
-            "container" if pos == 4 && word(2) == "assign" => {
-                owned(&mut out, &snap.profiles);
-                out.extend(snap.sandboxes.iter().map(|s| format!("sb:{s}")));
-            }
-            "profile" if pos == 2 => strs(&mut out, &["create", "list", "rm"]),
-            "profile" if pos == 3 && word(2) == "rm" => owned(&mut out, &snap.profiles),
+            "container" if pos == 4 && word(2) == "assign" => owned(&mut out, &snap.containers),
             _ => {}
         }
     }
@@ -320,8 +328,7 @@ mod tests {
     fn snap() -> Snapshot {
         Snapshot {
             zones: vec!["nl".into(), "ru".into()],
-            profiles: vec!["work".into()],
-            sandboxes: vec!["dev".into()],
+            containers: vec!["dev".into(), "work".into()],
             perm_keys: vec!["telegram".into()],
             pinned: vec!["firefox".into()],
             apps: vec!["firefox".into(), "org.telegram.desktop".into()],
@@ -353,7 +360,7 @@ mod tests {
         for line in [
             &["", "de"][..],
             &["", "run", "nl", "--profile", ""],
-            &["", "container", "set", "sb:dev", "network", "o"],
+            &["", "container", "set", "dev", "network", "o"],
         ] {
             let expected = complete(&[&["vpn-zone"], &line[1..]].concat(), line.len());
             assert!(!expected.is_empty(), "{line:?}");
@@ -381,14 +388,17 @@ mod tests {
         let flags = complete(&["vpn-zone", "run", "nl", ""], 4);
         assert!(flags.contains(&"--profile".to_string()));
         assert_eq!(
-            complete(&["vpn-zone", "run", "nl", "--profile", ""], 5),
-            ["work"]
+            complete(&["vpn-zone", "run", "nl", "--container", ""], 5),
+            ["dev", "work"]
         );
-        assert_eq!(complete(&["vpn-zone", "run", "nl", "-p", ""], 5), ["work"]);
-        assert_eq!(
-            complete(&["vpn-zone", "run", "nl", "--sandbox", ""], 5),
-            ["dev"]
-        );
+        // The old words name the same containers.
+        for flag in ["--profile", "-p", "--sandbox"] {
+            assert_eq!(
+                complete(&["vpn-zone", "run", "nl", flag, ""], 5),
+                ["dev", "work"],
+                "{flag}"
+            );
+        }
         // After the `--` it is the program's command line: files, not ours.
         assert_eq!(
             complete(&["vpn-zone", "run", "nl", "--", "fire"], 5),
@@ -403,27 +413,38 @@ mod tests {
             complete(&["vpn-zone", "perms", "reset", ""], 4),
             ["telegram", "--all"]
         );
-        assert_eq!(complete(&["vpn-zone", "sandbox", "rm", ""], 4), ["dev"]);
-        assert_eq!(complete(&["vpn-zone", "profile", "rm", ""], 4), ["work"]);
+        assert_eq!(
+            complete(&["vpn-zone", "sandbox", "rm", ""], 4),
+            ["dev", "work"]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "profile", "rm", ""], 4),
+            ["dev", "work"]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "container", "create", "x", "--home", ""], 6),
+            ["private", "layer", "main"]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "container", "set", "work", "h"], 5),
+            ["home"]
+        );
         assert_eq!(complete(&["vpn-zone", "trust", "r"], 3), ["rm", "reset"]);
         assert_eq!(
             complete(&["vpn-zone", "trust", "add", ""], 4),
-            ["work", "sb:dev"]
+            ["dev", "work"]
         );
         assert_eq!(
             complete(&["vpn-zone", "trust", "add", "work", ""], 5),
             [FILES]
         );
         assert_eq!(
-            complete(
-                &["vpn-zone", "container", "set", "sb:dev", "network", "o"],
-                6
-            ),
+            complete(&["vpn-zone", "container", "set", "dev", "network", "o"], 6),
             ["offline"]
         );
         assert_eq!(
             complete(&["vpn-zone", "container", "assign", "firefox", ""], 5),
-            ["work", "sb:dev"]
+            ["dev", "work"]
         );
         assert_eq!(
             complete(&["vpn-zone", "container", "set", "work", "x11", ""], 6),
@@ -445,15 +466,15 @@ mod tests {
         assert_eq!(complete(&["cellward", "screencast", ""], 3), ["nl", "ru"]);
         assert_eq!(
             complete(&["vpn-zone", "container", "grant", ""], 4),
-            ["sb:dev"]
+            ["dev", "work"]
         );
         assert_eq!(
-            complete(&["vpn-zone", "container", "grant", "sb:dev", ""], 5),
+            complete(&["vpn-zone", "container", "grant", "dev", ""], 5),
             [FILES]
         );
         assert_eq!(
             complete(&["vpn-zone", "container", "merge", "work", ""], 5),
-            ["work", "sb:dev"]
+            ["dev", "work"]
         );
         assert_eq!(
             complete(&["vpn-zone", "forget", ""], 3),

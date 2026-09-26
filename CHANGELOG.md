@@ -5,6 +5,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed (read before updating)
+- **One name is one container; the kind of its home is a property of it**
+  (`rust/src/container.rs`, `launch::resolve_selection`; the owner's decision
+  of 2026-09-26, `docs/PERMISSIONS.md` §11.7). A layer over the home
+  ("profile", `work`) and a home of its own ("sandbox", `sb:work`) were two
+  containers, with their own directories, settings and commands, and the
+  main home was none at all. Now:
+  - `home = private | layer | main` in Nix and in the container's settings
+    (`overlay` is read as `layer`; `status --json` still says `overlay` —
+    schema 1). `main` is the real home under a container's name: no data of
+    its own, but a network, programs and — next — permissions of its own; one
+    network at a time is not checked for it (one identity everywhere), and it
+    holds no certificates. Changing the kind sets the old kind's data aside
+    (`home.<kind>`) and brings them back when it is changed back —
+    `cellward container set <c> home <kind>`.
+  - One data directory for every container, `~/.local/state/vpn-profiles/<name>/`
+    (a historical name: every zone covers it, the ones started before this
+    version too), one policy directory, `~/.config/vpn-zones/containers/<name>/`,
+    and a declared one in `declared/containers/<name>.conf`, with its `home`.
+  - **Moved once, on the host, at the first look**: the named sandboxes' data
+    from `vpn-sandboxes/` (a rename on one disk — running programs keep what
+    they have), the policy of both earlier layouts; `sb:<name>` in the
+    picker's memory and the default becomes the name. A sandbox with a
+    layer's name becomes `<name>-sb` (said, and a stale `sb:<name>` still
+    finds it); a name that cannot be one (a leading `-`) stays where it is,
+    and is said.
+  - `cellward container create <name> [--home private|layer|main]`,
+    `container rm`; `sandbox` and `profile` are the same command with their
+    kind as the default. `run --container <name>`; `--profile` and
+    `--sandbox` name the same container, whatever its kind (`--sandbox` makes
+    a missing one with a home of its own, as before).
+  - **One launch, one container**: a layer and a sandbox at once (`--profile
+    X --sandbox Y`, or with `--fs-sandbox`/`--tmp-profile`) is refused — the
+    picker built it from a default container laid over the sandbox of the
+    last choice; it now takes a default container whole, and a last choice
+    that is gone is the program's own container, never the main home. Every
+    container has its registry directory, `.running/<name>/`; records of
+    sandboxes started before (`sb:<name>` under `__main__`) are read while
+    they live.
+  - `cellward isolate` and `cellward reset-profile` are gone: zones have had
+    no layer of their own since the whole-home layer of a container; they did
+    nothing.
+
 ### Security
 - **A program of a container no longer crosses into another identity of its
   zone without a question** (`rust/src/broker.rs`; review 2026-09-26). The

@@ -854,8 +854,8 @@ let
       # layout is exercised (the CI smoke runs on Ubuntu, a plain file).
       CA = "/tmp/vmca"
 
-      def in_container(profile, net, cmd):
-          return alice(f"cellward run {net} --profile {profile} -- {cmd}")
+      def in_container(name, net, cmd):
+          return alice(f"cellward run {net} --container {name} -- {cmd}")
 
       # A layer container covers the whole home (docs/PERMISSIONS.md §11.3):
       # what it writes stays in its layer — a dotfile, a new file anywhere —
@@ -864,7 +864,7 @@ let
       # other containers' storage is not seen.
       with subtest("layer container: the whole home under its layer, grants in the real one"):
           alice("cellward profile create vmlayer")
-          alice("mkdir -p ~/vmshare ~/.local/state/vpn-sandboxes/other/home && echo secret > ~/.local/state/vpn-sandboxes/other/home/data")
+          alice("mkdir -p ~/vmshare ~/.local/state/vpn-profiles/other/home && echo secret > ~/.local/state/vpn-profiles/other/home/data")
           alice("cellward container grant vmlayer ~/vmshare")
           in_container("vmlayer", "direct", "sh -c 'echo layer > $HOME/layer-only && echo real > $HOME/vmshare/f'")
           machine.fail("test -e /home/alice/layer-only")
@@ -872,7 +872,30 @@ let
           machine.succeed("grep -q layer /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/layer-only")
           # The container sees what it wrote, and not another container's data.
           in_container("vmlayer", "direct", "grep -q layer $HOME/layer-only")
-          in_container("vmlayer", "direct", "sh -c '! cat $HOME/.local/state/vpn-sandboxes/other/home/data'")
+          in_container("vmlayer", "direct", "sh -c '! cat $HOME/.local/state/vpn-profiles/other/home/data'")
+
+      # One name, one container, the kind of home a property of it
+      # (docs/PERMISSIONS.md §11.7): the main home is the real one under a
+      # container's name; a change of kind sets the old kind's data aside and
+      # brings them back; one launch is one container.
+      with subtest("one name: the main home, a change of kind, one container a launch"):
+          alice("cellward container create vmmain --home main")
+          in_container("vmmain", "direct", "sh -c 'echo m > $HOME/main-probe'")
+          machine.succeed("grep -q m /home/alice/main-probe")
+          alice("cellward container create vmkind")
+          in_container("vmkind", "direct", "sh -c 'echo p > $HOME/kind-probe'")
+          machine.succeed("grep -q p /home/alice/.local/state/vpn-profiles/vmkind/home/kind-probe")
+          alice("cellward container set vmkind home layer")
+          machine.succeed("grep -q p /home/alice/.local/state/vpn-profiles/vmkind/home.private/kind-probe")
+          in_container("vmkind", "direct", "sh -c '! test -e $HOME/kind-probe && test -e $HOME/main-probe'")
+          alice("cellward container set vmkind home private")
+          in_container("vmkind", "direct", "grep -q p $HOME/kind-probe")
+          # The old words name the same container; two at once is a refusal.
+          alice("cellward run direct --sandbox vmkind -- sh -c 'grep -q p $HOME/kind-probe'")
+          alice("sh -c '! cellward run direct --profile vmlayer --sandbox vmkind -- true'")
+          alice("sh -c '! cellward container create main'")
+          out = alice("cellward container show vmmain")
+          assert "основной дом" in out, out
 
       with subtest("trust: a CA and a server certificate made on the fly"):
           alice(
@@ -1036,9 +1059,9 @@ let
           )
           lines = [l for l in out.strip().splitlines() if ": " in l]
           assert len(lines) == 1 and ": lo:" in lines[0], f"autostart not offline: {out}"
-          alice("test -f /home/alice/.config/vpn-zones/containers/sandboxes/app-vmauto/perms")
-          alice("test ! -s /home/alice/.config/vpn-zones/containers/sandboxes/app-vmauto/perms")
-          alice("test -d /home/alice/.local/state/vpn-sandboxes/app-vmauto/home")
+          alice("test -f /home/alice/.config/vpn-zones/containers/app-vmauto/perms")
+          alice("test ! -s /home/alice/.config/vpn-zones/containers/app-vmauto/perms")
+          alice("test -d /home/alice/.local/state/vpn-profiles/app-vmauto/home")
           # Nothing remembered: autostart is not a choice.
           alice(f"test ! -e {STATE}/.pinned/vmauto && test ! -e {STATE}/.last/vmauto")
           alice("cellward down offline || true")
@@ -1154,10 +1177,10 @@ let
       # directory back in its launch only (profile-run --storage).
       with subtest("zone: container storage covered, a container's own given back"):
           alice("cellward sandbox create vmsb")
-          in_zone(rzpid, "test ! -e /home/alice/.local/state/vpn-sandboxes/vmsb")
+          in_zone(rzpid, "test ! -e /home/alice/.local/state/vpn-profiles/vmsb")
           in_zone(rzpid, "test ! -e /home/alice/.local/state/vpn-profiles/vmlayer")
           alice("cellward run vmreal --sandbox vmsb -- sh -c 'echo sb > $HOME/sb-probe'")
-          machine.succeed("grep -q sb /home/alice/.local/state/vpn-sandboxes/vmsb/home/sb-probe")
+          machine.succeed("grep -q sb /home/alice/.local/state/vpn-profiles/vmsb/home/sb-probe")
           alice("cellward run vmreal --profile vmlayer -- sh -c 'echo zl > $HOME/zone-layer-probe'")
           machine.succeed("grep -q zl /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/zone-layer-probe")
           machine.fail("test -e /home/alice/zone-layer-probe")

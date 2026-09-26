@@ -49,9 +49,10 @@ Consequences, in order of importance:
 | zone | `~/.local/state/vpn-zones/<zone>/` + `vpn-zone@<zone>` | network (app-ns: `lo` + tunnel only); WireGuard, AmneziaWG or OpenConnect |
 | `unconfined` | nothing | nothing (host network) |
 | `offline` | a zone with a marker, created on demand | everything network, incl. host resolvers |
-| overlay container ("profile") | `~/.local/state/vpn-profiles/<name>/` (data), `~/.config/vpn-zones/containers/profiles/<name>/` (policy) | the whole home, under its layer (`<name>/home/upper`); a granted path (`container grant`) is written in the real home; mounts below the home read-only unless granted; other containers' storage not seen (`crate::home_layer`, 2026-09-26 — before, only `.config`, `.local/share`, `.cache`, `.mozilla`, `.pki` were layered, and the rest of the home was written through) |
+| layer container (`home = layer`, was "profile") | `~/.local/state/vpn-profiles/<name>/` (data), `~/.config/vpn-zones/containers/<name>/` (policy) | the whole home, under its layer (`<name>/home/upper`); a granted path (`container grant`) is written in the real home; mounts below the home read-only unless granted; other containers' storage not seen (`crate::home_layer`, 2026-09-26 — before, only `.config`, `.local/share`, `.cache`, `.mozilla`, `.pki` were layered, and the rest of the home was written through) |
 | throwaway container | `~/.local/state/vpn-zones/.throwaway/vpn-profile-*` | same, erased after the last tenant |
-| named sandbox | `~/.local/state/vpn-sandboxes/<name>/home` (data), `~/.config/vpn-zones/containers/sandboxes/<name>/` (policy: `perms`, `paths`, `container.conf`, `trust/`) | whole home, bus, runtime dir, seccomp, X11 |
+| container of a home of its own (`home = private`, was "named sandbox") | `~/.local/state/vpn-profiles/<name>/home` (data — the one data directory of every container, 2026-09-26; before, `vpn-sandboxes/<name>`), `~/.config/vpn-zones/containers/<name>/` (policy: `perms`, `paths`, `container.conf`, `trust/`) | whole home, bus, runtime dir, seccomp, X11 |
+| container of the main home (`home = main`) | its policy only | nothing of the home: a network, programs and permissions of its own under a name |
 | per-app sandbox | a named sandbox called `app-<key>` | same |
 | throwaway sandbox | tmpfs | same, erased on exit |
 | compositor restriction | `wl-sandbox`, on by default | screen capture, input emulation, background clipboard |
@@ -186,7 +187,7 @@ The hints are a list in the crate, each entry naming the program and the
 paths; nothing is granted without the person's answer.
 
 **Path grants — implemented** (the hints and the first-launch offer are left):
-`cellward container grant|revoke sb:<name> <dir>` and
+`cellward container grant|revoke <name> <dir>` and
 `containers.<name>.permissions.paths` in Nix. The program sees the directory
 at its own path, read-write. Rules:
 
@@ -560,7 +561,7 @@ and `cellward container show <name> --json` print subsets of the same schema.
       "interface": "enp4s0" }
   ],
   "containers": [
-    { "name": "work", "selector": "sb:work",
+    { "name": "work", "selector": "work",
       "home":    { "value": "private", "source": "nix" },
       "network": { "value": "nl",      "source": "local" },
       "routes":  { "value": [],        "source": "default" },
@@ -585,10 +586,13 @@ every key of version 1.
 **Keys to join on — part of the version 1 contract:**
 
 - a container is identified by its **`selector`**, never by `name`: a layer
-  over the home and a home of its own may share a name (`work` and `sb:work`
-  are two containers). Every reference to a container elsewhere in the
+  over the home and a home of its own could share a name (`work` and `sb:work`
+  were two containers). Every reference to a container elsewhere in the
   document — `apps[].container.value` — is a selector, and
-  `containers[].selector` is what it matches;
+  `containers[].selector` is what it matches. Since one name per container
+  (2026-09-26, [PERMISSIONS.md](PERMISSIONS.md) §11.7) the selector IS the
+  name — `sb:` is not written any more — and `home` has the value `main` for a
+  container of the real home (a layer is still `overlay`);
 - a network by `name`; `networks[].kind` is one of `unconfined`, `offline`,
   `wireguard`, `openconnect`, `host-interface`, `system-zone`, and `interface`
   is the host's interface for `host-interface` and `null` for every other kind

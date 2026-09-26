@@ -1543,7 +1543,17 @@ fn migrate_keys(state_dir: &Path, home: &Path, apps: &[App]) -> Vec<String> {
     let move_absent = |from: &Path, to: &Path| -> bool {
         occupied(from) && !occupied(to) && fs::rename(from, to).is_ok()
     };
-    let sandboxes = home.join(".local/state/vpn-sandboxes");
+    // The own container's data: in the one data directory, or where the
+    // layout before one name per container kept a sandbox; its policy, in
+    // either layout.
+    let data_roots = [
+        home.join(".local/state/vpn-profiles"),
+        home.join(".local/state/vpn-sandboxes"),
+    ];
+    let policy_roots = [
+        home.join(".config/vpn-zones/containers"),
+        home.join(".config/vpn-zones/containers/sandboxes"),
+    ];
     let perms = home.join(".config/vpn-zones/fs-perms");
     let mut log = Vec::new();
     for (old, news) in by_old {
@@ -1570,7 +1580,9 @@ fn migrate_keys(state_dir: &Path, home: &Path, apps: &[App]) -> Vec<String> {
         }
         let remembered = memory
             || occupied(&perms.join(&old))
-            || occupied(&sandboxes.join(format!("app-{old}")));
+            || data_roots
+                .iter()
+                .any(|root| occupied(&root.join(format!("app-{old}"))));
         let Some(new) = news.into_iter().next().filter(|_| remembered) else {
             continue;
         };
@@ -1581,19 +1593,28 @@ fn migrate_keys(state_dir: &Path, home: &Path, apps: &[App]) -> Vec<String> {
             );
         }
         move_absent(&perms.join(&old), &perms.join(&new));
-        if move_absent(
-            &sandboxes.join(format!("app-{old}")),
-            &sandboxes.join(format!("app-{new}")),
-        ) {
-            // A pinned or last-chosen own sandbox names the directory.
-            let (from, to) = (format!("sb:app-{old}"), format!("sb:app-{new}"));
+        let mut moved = false;
+        for root in data_roots.iter().chain(&policy_roots) {
+            moved |= move_absent(
+                &root.join(format!("app-{old}")),
+                &root.join(format!("app-{new}")),
+            );
+        }
+        if moved {
+            // A pinned or last-chosen own container names it, in either
+            // spelling.
+            let to = format!("app-{new}");
             for dir in [".pinnedprofile", ".lastprofile"] {
                 for file in fs::read_dir(state_dir.join(dir))
                     .into_iter()
                     .flatten()
                     .flatten()
                 {
-                    if fs::read_to_string(file.path()).is_ok_and(|v| v.trim() == from) {
+                    let named = fs::read_to_string(file.path()).is_ok_and(|v| {
+                        let v = v.trim();
+                        v == format!("sb:app-{old}") || v == format!("app-{old}")
+                    });
+                    if named {
                         let _ = fs::write(file.path(), &to);
                     }
                 }
@@ -3373,7 +3394,7 @@ Name=not carried over
         assert!(sandboxes.join(format!("app-{zen}/home")).is_dir());
         assert_eq!(
             fs::read_to_string(d.state.join(".pinnedprofile").join(&zen)).unwrap(),
-            format!("sb:app-{zen}")
+            format!("app-{zen}")
         );
         assert!(
             !d.state.join(".pinned/____").exists(),

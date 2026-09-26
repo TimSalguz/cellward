@@ -576,7 +576,7 @@ if [ -f /etc/machine-id ] && [ ! -L /etc/machine-id ]; then
   [ "$named1" = "$named2" ] || fail "machine-id именованной песочницы не постоянный"
   [ "$temp1" != "$host_id" ] && [ "$temp1" != "$temp2" ] \
     || fail "одноразовая песочница не получает новый machine-id"
-  rm -rf "$HOME/.local/state/vpn-sandboxes/smokeid"
+  rm -rf "$HOME/.local/state/vpn-profiles/smokeid"
   echo "ok: machine-id свой"
 else
   echo "skip: у раннера нет обычного /etc/machine-id"
@@ -611,7 +611,7 @@ if echo "$fsout" | grep -q '^LEAK-'; then
   fail "состояние vpn-zones выдано песочнице: $fsout"
 fi
 grep -q 'smoke-sneaky is not granted' "$WORK/grant.err" || fail "symlink в состояние не был отвергнут: $(cat "$WORK/grant.err")"
-rm -rf "$GRANTED" "$HOME/smoke-sneaky" "$KEYDIR/.smoke-grant-marker" "$HOME/.local/state/vpn-sandboxes/smokegrant"
+rm -rf "$GRANTED" "$HOME/smoke-sneaky" "$KEYDIR/.smoke-grant-marker" "$HOME/.local/state/vpn-profiles/smokegrant"
 echo "ok: выданный каталог работает, ключи зон не выдаются ни прямо, ни по ссылке"
 
 # Срок выдачи (rust/src/grants.rs): у программы, которая УЖЕ работает, каталог
@@ -620,9 +620,9 @@ echo "ok: выданный каталог работает, ключи зон н
 # `cellward run`, который пишет её сам.
 step "Песочница ФС: истёкший срок забирает каталог и у запущенной программы"
 LIVE="$HOME/smoke-live"
-LIVEHOME="$HOME/.local/state/vpn-sandboxes/smokelive"
+LIVEHOME="$HOME/.local/state/vpn-profiles/smokelive"
 # Its policy (grants, permissions) lives apart from its home (docs/HOME-LAYER.md).
-LIVEPOLICY="$HOME/.config/vpn-zones/containers/sandboxes/smokelive"
+LIVEPOLICY="$HOME/.config/vpn-zones/containers/smokelive"
 rm -rf "$LIVE" "$LIVEHOME"
 mkdir -p "$LIVE" && : > "$LIVE/probe"
 # Store-путь: /tmp внутри песочницы свой, ссылка из $WORK туда не ведёт.
@@ -655,6 +655,8 @@ done
 [ "$live" = SEEN ] \
   || fail "запущенная песочница не видит выданный каталог: $(cat "$WORK/live.err")"
 mkdir -p "$STATE/.running/__main__"
+# The record as a launch from before one name per container wrote it: under
+# `__main__`, `sb:<name>` — still the same container while it lives.
 printf '%s unconfined sb:smokelive\n' "$LIVEPID" > "$STATE/.running/__main__/smoke-live"
 printf 'until=1 %s\n' "$LIVE" > "$LIVEPOLICY/paths"
 "$VPN_ZONE" container expire || fail "expire не отмонтировал каталог у запущенной программы"
@@ -668,7 +670,7 @@ done
   || fail "после истечения срока запущенная программа всё ещё видит каталог; где смонтирован: $(grep -l smoke-live /proc/[0-9]*/mountinfo 2>/dev/null | while read -r f; do echo "$f: $(grep smoke-live "$f")"; done)"
 [ -e "$LIVE/probe" ] || fail "отмонтирование задело сам каталог на хосте"
 [ ! -s "$LIVEPOLICY/paths" ] || fail "истёкшая выдача осталась в файле: $(cat "$LIVEPOLICY/paths")"
-"$VPN_ZONE" journal --json | grep -q '"event":"grant-expired","container":"sb:smokelive".*"detached":"1"' \
+"$VPN_ZONE" journal --json | grep -q '"event":"grant-expired","container":"smokelive".*"detached":"1"' \
   || fail "истечение не записано в журнал: $("$VPN_ZONE" journal --json)"
 kill "$LIVEPID" 2>/dev/null || true
 wait "$LIVEPID" 2>/dev/null || true
@@ -759,7 +761,7 @@ step "Доверенный сертификат: добавляю в $CA_PROFILE
 "$VPN_ZONE" profile create "$CA_PROFILE" >/dev/null
 "$VPN_ZONE" profile create "$NOCA_PROFILE" >/dev/null
 "$VPN_ZONE" trust add "$CA_PROFILE" "$CADIR/ca.pem" --yes || fail "trust add не принял УЦ"
-ls "$HOME/.config/vpn-zones/containers/profiles/$CA_PROFILE/trust/"*.pem >/dev/null 2>&1 || fail "сертификат не сохранился в контейнере"
+ls "$HOME/.config/vpn-zones/containers/$CA_PROFILE/trust/"*.pem >/dev/null 2>&1 || fail "сертификат не сохранился в контейнере"
 if "$VPN_ZONE" trust add "$CA_PROFILE" "$CADIR/srv.pem" --yes 2>/dev/null; then
   fail "серверный (не УЦ) сертификат принят как корень доверия"
 fi

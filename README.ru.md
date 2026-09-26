@@ -387,7 +387,8 @@ cellward check <зона>                          # жив ли туннель
 cellward doctor [<зона>] [--json]              # что на деле закрыто — проверка изнутри зоны
 cellward journal [--json] [<N>]                # запуски без ограничений и решения брокера
 cellward kill <зона>                           # оборвать зону сейчас: программы убиты, зона опущена
-cellward container grant sb:<имя> <каталог> [--for 2h]  # каталог своему дому, на время
+cellward container create <имя> [--home private|layer|main]  # контейнер: свой дом, слой или настоящий дом
+cellward container grant <имя> <каталог> [--for 2h]  # каталог настоящего дома, на время
 cellward watch [--json]                        # живы ли туннели (зовёт таймер, уведомляет)
 cellward status --bar                          # строка JSON для waybar и подобных баров
 cellward focused [--json|--bar|--watch]        # зона и контейнер окна в фокусе (niri, sway)
