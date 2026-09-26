@@ -675,14 +675,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
     };
 
-    // --- X11 (docs/HERMETICITY.md §7, A) ---
-    // The host's X server is out of reach in a zone. A container with the x11
-    // permission gets a satellite of its own, started INSIDE wl-sandbox (the
-    // wrapping below goes around this one), so it speaks to the compositor
-    // through the restricted socket like the program does. A sandbox starts
-    // its own satellite and is told about the permission instead.
-    // Or the zone itself has x11: for someone who runs zones without
-    // containers, Steam in a zone must open all the same.
+    // --- THE DEVICES ---
     // The devices given to its container (`docs/PERMISSIONS.md` §11.12): the
     // zone hides them all, and this launch takes the covers off the given
     // ones in its own mount namespace (`profile-run --device`), checking each
@@ -710,6 +703,15 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         _ => Vec::new(),
     };
     let device_args: Vec<String> = devices.iter().map(crate::devices::Pass::arg).collect();
+
+    // --- X11 (docs/HERMETICITY.md §7, A) ---
+    // The host's X server is out of reach in a zone. A container with the x11
+    // permission gets a satellite of its own, started INSIDE wl-sandbox (the
+    // wrapping below goes around this one), so it speaks to the compositor
+    // through the restricted socket like the program does. A sandbox starts
+    // its own satellite and is told about the permission instead.
+    // Or the zone itself has x11: for someone who runs zones without
+    // containers, Steam in a zone must open all the same.
     let container_x11 = container_name(&selection)
         .and_then(|name| crate::container::load(tools, &name))
         .is_some_and(|c| c.x11.value)

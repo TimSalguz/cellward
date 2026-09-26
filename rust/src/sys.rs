@@ -195,6 +195,120 @@ impl Inotify {
     }
 }
 
+/// What happened in a directory a [`DirWatch`] watches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirEvent {
+    /// An entry appeared (created, or moved in).
+    Appeared(PathBuf),
+    /// An entry went (deleted, or moved out).
+    Gone(PathBuf),
+    /// The queue overflowed: what happened is not known.
+    Overflow,
+}
+
+/// An inotify watch on several directories, for what appears in them and
+/// what goes.
+pub struct DirWatch {
+    fd: OwnedFd,
+    dirs: std::sync::Mutex<std::collections::HashMap<i32, PathBuf>>,
+}
+
+impl DirWatch {
+    pub fn new() -> io::Result<Self> {
+        // SAFETY: inotify_init1 takes flags and returns a new descriptor or -1.
+        let raw = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            // SAFETY: the descriptor was just returned to us.
+            fd: unsafe { OwnedFd::from_raw_fd(raw) },
+            dirs: Default::default(),
+        })
+    }
+
+    /// Watch `dir` too.
+    pub fn add(&self, dir: &Path) -> io::Result<()> {
+        let path = cstring(dir.as_os_str().as_bytes())?;
+        // SAFETY: a valid inotify descriptor and a NUL-terminated path.
+        let wd = unsafe {
+            libc::inotify_add_watch(
+                std::os::fd::AsRawFd::as_raw_fd(&self.fd),
+                path.as_ptr(),
+                libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_DELETE | libc::IN_MOVED_FROM,
+            )
+        };
+        if wd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.dirs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(wd, dir.to_path_buf());
+        Ok(())
+    }
+
+    /// Block until something happens; what did.
+    pub fn events(&self) -> io::Result<Vec<DirEvent>> {
+        let mut buf = vec![0u8; 16 * 1024];
+        // SAFETY: a valid descriptor and a buffer of the length passed.
+        let n = unsafe {
+            libc::read(
+                std::os::fd::AsRawFd::as_raw_fd(&self.fd),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        if n < 0 {
+            let e = io::Error::last_os_error();
+            return if e.kind() == io::ErrorKind::Interrupted {
+                Ok(Vec::new())
+            } else {
+                Err(e)
+            };
+        }
+        let dirs = self.dirs.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(parse_dir_events(&buf[..n as usize])
+            .into_iter()
+            .filter_map(|(wd, mask, name)| {
+                if mask & libc::IN_Q_OVERFLOW != 0 {
+                    return Some(DirEvent::Overflow);
+                }
+                let path = dirs.get(&wd)?.join(name?);
+                if mask & (libc::IN_CREATE | libc::IN_MOVED_TO) != 0 {
+                    Some(DirEvent::Appeared(path))
+                } else if mask & (libc::IN_DELETE | libc::IN_MOVED_FROM) != 0 {
+                    Some(DirEvent::Gone(path))
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
+}
+
+/// `(watch, mask, name)` of each `struct inotify_event` in a buffer.
+pub fn parse_dir_events(mut buf: &[u8]) -> Vec<(i32, u32, Option<String>)> {
+    const HEADER: usize = 16;
+    let mut out = Vec::new();
+    while buf.len() >= HEADER {
+        let field =
+            |at: usize| u32::from_ne_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]);
+        let wd = field(0) as i32;
+        let mask = field(4);
+        let len = field(12) as usize;
+        if buf.len() < HEADER + len {
+            break;
+        }
+        let raw = &buf[HEADER..HEADER + len];
+        let raw = &raw[..raw.iter().position(|&b| b == 0).unwrap_or(raw.len())];
+        let name = (!raw.is_empty()).then(|| String::from_utf8_lossy(raw).into_owned());
+        out.push((wd, mask, name));
+        buf = &buf[HEADER + len..];
+    }
+    out
+}
+
 /// The names in a buffer of `struct inotify_event`s, and whether the queue
 /// overflowed.
 pub fn parse_inotify(mut buf: &[u8]) -> (Vec<String>, bool) {

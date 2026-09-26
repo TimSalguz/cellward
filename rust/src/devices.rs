@@ -130,11 +130,13 @@ impl Node {
     }
 
     /// A device of the machine, not one made through `uinput`: its sysfs
-    /// directory is below `devices/`, and not below `devices/virtual/`.
+    /// directory is below `devices/`, and not below `devices/virtual/input/`
+    /// — where `uinput` puts what anybody makes. A Bluetooth gamepad through
+    /// `uhid` (`devices/virtual/misc/uhid/`) is one: `/dev/uhid` is root's.
     fn physical(&self) -> bool {
         self.sys.as_ref().is_some_and(|p| {
             let p = p.to_string_lossy();
-            p.contains("/devices/") && !p.contains("/devices/virtual/")
+            p.contains("/devices/") && !p.contains("/devices/virtual/input/")
         })
     }
 
@@ -150,13 +152,17 @@ impl Node {
         fs::canonicalize(up).ok()
     }
 
+    /// A keyboard's or a mouse's input node: what types or points.
+    fn typing_input(&self) -> bool {
+        self.prop("ID_INPUT_KEYBOARD") == Some("1") || self.prop("ID_INPUT_MOUSE") == Some("1")
+    }
+
     /// A gamepad's input node.
     fn gamepad_input(&self) -> bool {
         let name = self.name();
         (name.starts_with("event") || name.starts_with("js"))
             && self.prop("ID_INPUT_JOYSTICK") == Some("1")
-            && self.prop("ID_INPUT_KEYBOARD") != Some("1")
-            && self.prop("ID_INPUT_MOUSE") != Some("1")
+            && !self.typing_input()
             && self.physical()
     }
 
@@ -170,12 +176,21 @@ impl Node {
     /// What `profile-run --device` checks this node by, once more, in the
     /// launch's namespace.
     pub fn pass(&self) -> Pass {
+        let word = |key: &str| {
+            self.prop(key)
+                .map(str::to_ascii_lowercase)
+                .filter(|v| hex4(v).is_some())
+        };
         Pass {
             path: self.path.clone(),
             major: self.major,
             minor: self.minor,
-            vendor: self.prop("ID_VENDOR_ID").map(str::to_owned),
-            product: self.prop("ID_MODEL_ID").map(str::to_owned),
+            vendor: word("ID_VENDOR_ID"),
+            product: word("ID_MODEL_ID"),
+            serial: self
+                .prop("ID_SERIAL_SHORT")
+                .filter(|s| serial_word(s))
+                .map(str::to_owned),
         }
     }
 }
@@ -210,8 +225,43 @@ pub fn udev_props(udev: &Path, major: u32, minor: u32) -> HashMap<String, String
         .collect()
 }
 
+/// A serial as a pass carries it: printable, and none of its separators.
+fn serial_word(serial: &str) -> bool {
+    !serial.is_empty()
+        && serial.len() <= 128
+        && serial
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && b != b':' && b != b'=')
+}
+
+/// Whether `path` is of the kinds a grant gives: `hidraw<N>`, `ttyUSB<N>`,
+/// `ttyACM<N>`, a camera's `video<N>`/`media<N>`, `input/event<N>`,
+/// `input/js<N>`, `bus/usb/<bus>/<device>` — all below `/dev`.
+pub fn grantable_path(path: &Path) -> bool {
+    let numbered = |name: &str, prefixes: &[&str]| {
+        prefixes.iter().any(|p| {
+            name.strip_prefix(p)
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+    };
+    let digits = |s: &str| s.len() == 3 && s.bytes().all(|b| b.is_ascii_digit());
+    let Ok(rest) = path.strip_prefix("/dev") else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.iter().filter_map(|c| c.to_str()).collect();
+    if parts.len() != rest.iter().count() {
+        return false;
+    }
+    match parts.as_slice() {
+        [name] => numbered(name, &["hidraw", "ttyUSB", "ttyACM", "video", "media"]),
+        ["input", name] => numbered(name, &["event", "js"]),
+        ["bus", "usb", bus, device] => digits(bus) && digits(device),
+        _ => false,
+    }
+}
+
 /// The character device a path is, by its number: `None` for anything else.
-fn char_device(path: &Path) -> Option<(u32, u32)> {
+pub fn char_device(path: &Path) -> Option<(u32, u32)> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let meta = fs::symlink_metadata(path).ok()?;
     if !meta.file_type().is_char_device() {
@@ -270,12 +320,20 @@ pub fn host_nodes() -> Vec<Node> {
 
 /// The nodes of `nodes` the grants give.
 pub fn granted<'a>(nodes: &'a [Node], grants: &[Grant]) -> Vec<&'a Node> {
-    // A gamepad's raw node: the one whose HID device has a gamepad's input.
+    // A gamepad's raw node: the one whose HID device has a gamepad's input
+    // — and no keyboard's or mouse's: a combo receiver's raw node carries
+    // the keys typed.
     let pads: HashSet<PathBuf> = if grants.contains(&Grant::Games) {
+        let typing: HashSet<PathBuf> = nodes
+            .iter()
+            .filter(|n| n.typing_input())
+            .filter_map(Node::hid)
+            .collect();
         nodes
             .iter()
             .filter(|n| n.gamepad_input())
             .filter_map(Node::hid)
+            .filter(|hid| !typing.contains(hid))
             .collect()
     } else {
         HashSet::new()
@@ -401,8 +459,8 @@ pub fn connected(nodes: &[Node]) -> Vec<Connected> {
 }
 
 /// A node as `profile-run --device` is handed it, and checks it by:
-/// `<path>=<major>:<minor>:<vendor>:<product>`, `-` for a vendor or product
-/// udev did not name.
+/// `<path>=<major>:<minor>:<vendor>:<product>[:<serial>]`, `-` for a vendor
+/// or product udev did not name — then the number alone is checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pass {
     pub path: PathBuf,
@@ -410,18 +468,24 @@ pub struct Pass {
     pub minor: u32,
     pub vendor: Option<String>,
     pub product: Option<String>,
+    pub serial: Option<String>,
 }
 
 impl Pass {
     pub fn arg(&self) -> String {
-        format!(
+        let mut arg = format!(
             "{}={}:{}:{}:{}",
             self.path.display(),
             self.major,
             self.minor,
             self.vendor.as_deref().unwrap_or("-"),
             self.product.as_deref().unwrap_or("-")
-        )
+        );
+        if let Some(serial) = &self.serial {
+            arg.push(':');
+            arg.push_str(serial);
+        }
+        arg
     }
 
     pub fn parse(arg: &str) -> Option<Self> {
@@ -435,19 +499,23 @@ impl Pass {
         };
         let vendor = word(parts.next())?;
         let product = word(parts.next())?;
+        let serial = match parts.next() {
+            None => None,
+            Some(s) if serial_word(s) => Some(s.to_owned()),
+            Some(_) => return None,
+        };
         if parts.next().is_some() {
             return None;
         }
+        // Only the kinds a grant covers.
         let path = PathBuf::from(path);
-        // Only below /dev, and only the kinds a grant covers.
-        let dev_node =
-            path.starts_with("/dev/") && !path.components().any(|c| c.as_os_str() == "..");
-        dev_node.then_some(Self {
+        grantable_path(&path).then_some(Self {
             path,
             major,
             minor,
             vendor,
             product,
+            serial,
         })
     }
 
@@ -461,7 +529,11 @@ impl Pass {
             None => true,
             Some(want) => props.get(key).map(|v| v.to_ascii_lowercase()).as_deref() == Some(want),
         };
-        same("ID_VENDOR_ID", &self.vendor) && same("ID_MODEL_ID", &self.product)
+        let serial = match &self.serial {
+            None => true,
+            Some(want) => props.get("ID_SERIAL_SHORT") == Some(want),
+        };
+        same("ID_VENDOR_ID", &self.vendor) && same("ID_MODEL_ID", &self.product) && serial
     }
 }
 
@@ -683,7 +755,41 @@ mod tests {
         );
         m.node("ttyACM2", 166, 2, &[], None);
 
-        assert_eq!(m.given(&[Grant::Games]), ["hidraw5", "input/event12"]);
+        // A combo receiver: a gamepad and a keyboard on one HID device —
+        // its gamepad input given, its raw node (the keys typed) not.
+        let combo = "pci/usb1/1-4/0003:046D:C52B.0009";
+        m.node(
+            "input/event20",
+            13,
+            84,
+            &[("ID_INPUT_JOYSTICK", "1")],
+            Some("combo/event20"),
+        );
+        m.sys_link("combo/event20/device", "combo/input40");
+        m.sys_link("combo/input40/device", combo);
+        m.node(
+            "input/event21",
+            13,
+            85,
+            &[("ID_INPUT_KEYBOARD", "1")],
+            Some("combo/event21"),
+        );
+        m.sys_link("combo/event21/device", "combo/input41");
+        m.sys_link("combo/input41/device", combo);
+        m.node("hidraw7", 244, 7, &[], Some("comboraw/hidraw7"));
+        m.sys_link("comboraw/hidraw7/device", combo);
+        // A Bluetooth LE gamepad, through uhid: not taken for uinput's.
+        m.node(
+            "input/event30",
+            13,
+            94,
+            &[("ID_INPUT_JOYSTICK", "1")],
+            Some("virtual/misc/uhid/0005:045E:0B13.000A/input/input50/event30"),
+        );
+        assert_eq!(
+            m.given(&[Grant::Games]),
+            ["hidraw5", "input/event12", "input/event20", "input/event30"]
+        );
         assert_eq!(m.given(&[Grant::SecurityKeys]), ["hidraw9"]);
         assert_eq!(m.given(&[Grant::Phone]), ["bus/usb/001/005"]);
         assert_eq!(m.given(&[Grant::Serial]), ["ttyACM2", "ttyUSB0"]);
@@ -730,6 +836,32 @@ mod tests {
         ] {
             assert_eq!(Pass::parse(bad), None, "{bad}");
         }
+        // Only the kinds a grant gives, and the serial checked too.
+        for bad in [
+            "/dev/uinput=10:223:-:-",
+            "/dev/input=13:0:-:-",
+            "/dev/snd/pcmC0D0c=116:1:-:-",
+            "/dev/bus/usb/1/2=189:1:-:-",
+            "/dev/hidraw9=244:9:1050:0407:a=b",
+        ] {
+            assert_eq!(Pass::parse(bad), None, "{bad}");
+        }
+        for good in [
+            "/dev/hidraw9=244:9:1050:0407:ABC",
+            "/dev/input/event12=13:76:-:-",
+            "/dev/bus/usb/001/005=189:4:18d1:4ee7",
+            "/dev/ttyACM0=166:0:-:-",
+        ] {
+            let pass = Pass::parse(good).unwrap_or_else(|| panic!("{good}"));
+            assert_eq!(pass.arg(), good);
+        }
+        let with_serial = Pass::parse("/dev/hidraw9=244:9:1050:0407:ABC").unwrap();
+        fs::write(
+            udev.join("c244:9"),
+            "E:ID_VENDOR_ID=1050\nE:ID_MODEL_ID=0407\nE:ID_SERIAL_SHORT=XYZ\n",
+        )
+        .unwrap();
+        assert!(!with_serial.still(&udev, 244, 9));
     }
 
     /// A device once, by the name a grant gives it, with the sets it falls

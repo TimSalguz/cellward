@@ -2818,15 +2818,17 @@ const PRIVATE_TMP: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
 /// restriction of the compositor —, `rfkill` (the host's radios off),
 /// `i2c-*` (monitors, lighting, EEPROMs on the boards), the consoles
 /// `tty<N>`, `hidraw*` (security keys, controllers), serial adapters
-/// (`ttyUSB*`, `ttyACM*`) — `/dev/null` over each, by the same watcher —,
-/// and `/dev/input` and `/dev/bus/usb` whole under a tmpfs: a zone's programs
-/// get their input from the compositor, and a device goes into a container
-/// on purpose, not by the ACL (`docs/PERMISSIONS.md` §11.10).
+/// (`ttyUSB*`, `ttyACM*`), every node of `/dev/input` and `/dev/bus/usb` —
+/// `/dev/null` over each, by the same watcher —: a zone's programs get their
+/// input from the compositor, and a device goes into a container on
+/// purpose, not by the ACL (`docs/PERMISSIONS.md` §11.12).
 fn hide_devices(zone: &Zone) -> Result<(), String> {
     share_mount(Path::new("/dev")).map_err(|e| {
-        format!("cannot share /dev: {e} — a camera plugged in later would be in reach")
+        format!("cannot share /dev: {e} — a device plugged in later would be in reach")
     })?;
-    for dir in ["/dev/snd", "/dev/v4l", "/dev/input", "/dev/bus/usb"] {
+    // Whole under a tmpfs: sound goes through the zone's filters, and the
+    // cameras' links are no camera.
+    for dir in ["/dev/snd", "/dev/v4l"] {
         let dir = Path::new(dir);
         if !dir.is_dir() {
             continue;
@@ -2845,44 +2847,193 @@ fn hide_devices(zone: &Zone) -> Result<(), String> {
             )
         })?;
     }
+    // Every other node one by one, never a directory rebuilt of binds: a
+    // node a launch is given (`profile::give_devices`) is then the device's
+    // own entry, gone when the device goes — a bind would keep its inode,
+    // which opens whatever device gets its number next.
     // The watch first, the listing second: nothing plugged in between is lost.
-    let watch = sys::Inotify::watch(Path::new("/dev")).ok();
-    for entry in fs::read_dir("/dev").into_iter().flatten().flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if is_hidden_node(&name) {
-            cover_node(&Path::new("/dev").join(&name))?;
+    let no_watch = |e: io::Error| {
+        format!("no watch on /dev ({e}) — a device plugged in later would be in reach")
+    };
+    let watch = sys::DirWatch::new().map_err(no_watch)?;
+    watch.add(Path::new("/dev")).map_err(no_watch)?;
+    for dir in [Path::new("/dev/input"), Path::new("/dev/bus/usb")] {
+        if dir.is_dir() {
+            watch.add(dir).map_err(no_watch)?;
         }
     }
-    match watch {
-        Some(watch) => {
-            let name = zone.name().into_owned();
-            thread::spawn(move || loop {
-                let names = match watch.names() {
-                    Ok(names) => names,
-                    Err(e) => {
-                        eprintln!("zone {name}: the device watch ended ({e})");
-                        return;
+    for bus in usb_buses() {
+        watch.add(&bus).map_err(no_watch)?;
+    }
+    for node in hidden_nodes() {
+        cover_node(&node)?;
+    }
+    let name = zone.name().into_owned();
+    thread::spawn(move || loop {
+        let events = match watch.events() {
+            Ok(events) => events,
+            Err(e) => {
+                eprintln!("zone {name}: the device watch ended ({e})");
+                return;
+            }
+        };
+        for event in events {
+            let covered = |path: &Path| {
+                if let Err(e) = cover_node(path) {
+                    eprintln!("zone {name}: {e}");
+                }
+            };
+            match event {
+                sys::DirEvent::Appeared(path)
+                    if path.parent() == Some(Path::new("/dev/bus/usb")) =>
+                {
+                    // A new bus: watched too, and what is on it covered.
+                    if let Err(e) = watch.add(&path) {
+                        eprintln!("zone {name}: no watch on {} ({e})", path.display());
                     }
-                };
-                for entry in names.into_iter().filter(|n| is_hidden_node(n)) {
-                    if let Err(e) = cover_node(&Path::new("/dev").join(&entry)) {
-                        eprintln!("zone {name}: {e}");
+                    for node in char_nodes(&path) {
+                        covered(&node);
                     }
                 }
-            });
+                sys::DirEvent::Appeared(path) if hidden_path(&path) => covered(&path),
+                // A device gone: wherever a sandbox still has it bound, /dev/null
+                // over the bind before another device can take its number.
+                sys::DirEvent::Gone(path) if hidden_path(&path) => revoke_everywhere(&path),
+                sys::DirEvent::Overflow => {
+                    for node in hidden_nodes() {
+                        covered(&node);
+                    }
+                }
+                _ => {}
+            }
         }
-        None => {
-            return Err(
-                "no watch on /dev — a camera or a key plugged in later would be in reach"
-                    .to_owned(),
-            );
-        }
-    }
+    });
     println!(
         "zone {}: sound, camera, input and raw devices hidden",
         zone.name()
     );
     Ok(())
+}
+
+/// The bus directories of `/dev/bus/usb`.
+fn usb_buses() -> Vec<PathBuf> {
+    fs::read_dir("/dev/bus/usb")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// The character devices directly in `dir`.
+fn char_nodes(dir: &Path) -> Vec<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_char_device()))
+        .map(|e| e.path())
+        .collect()
+}
+
+/// Every node the zone covers ([`hidden_path`]) that is there now.
+fn hidden_nodes() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = fs::read_dir("/dev")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| is_hidden_node(&e.file_name().to_string_lossy()))
+        .map(|e| e.path())
+        .collect();
+    out.extend(char_nodes(Path::new("/dev/input")));
+    for bus in usb_buses() {
+        out.extend(char_nodes(&bus));
+    }
+    out
+}
+
+/// Whether `path` is — or was — a node the zone covers: one of
+/// [`is_hidden_node`]'s in `/dev`, anything in `/dev/input`, anything on a bus
+/// of `/dev/bus/usb`.
+fn hidden_path(path: &Path) -> bool {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    (parent == Path::new("/dev") && is_hidden_node(&name.to_string_lossy()))
+        || parent == Path::new("/dev/input")
+        || parent.parent() == Some(Path::new("/dev/bus/usb"))
+}
+
+/// `/dev/null` over `path` in every mount namespace of the zone's programs
+/// but its own where `path` still is: a sandbox binds the nodes it is given
+/// (`fs-sandbox --device`, `--camera`), and a bind outlives the device —
+/// its inode opens whatever device gets that number next, a keyboard plugged
+/// in after a security key. The zone's own namespace, and every launch's
+/// copy of it, lose the entry with the device.
+fn revoke_everywhere(path: &Path) {
+    let (Ok(target), Ok(null)) = (
+        std::ffi::CString::new(path.as_os_str().as_bytes()),
+        std::ffi::CString::new("/dev/null"),
+    ) else {
+        return;
+    };
+    let own = |ns: &str| fs::read_link(format!("/proc/self/ns/{ns}")).ok();
+    let (own_net, own_mnt) = (own("net"), own("mnt"));
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|p| p.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let ns = |ns: &str| fs::read_link(format!("/proc/{pid}/ns/{ns}")).ok();
+        if ns("net") != own_net {
+            continue;
+        }
+        let Some(mnt) = ns("mnt") else {
+            continue;
+        };
+        if Some(&mnt) == own_mnt.as_ref() || seen.contains(&mnt) {
+            continue;
+        }
+        seen.push(mnt);
+        let Ok(handle) = File::open(format!("/proc/{pid}/ns/mnt")) else {
+            continue;
+        };
+        // SAFETY: after fork the child makes only async-signal-safe calls on
+        // what was made before it — a descriptor and two C strings — and
+        // leaves with _exit.
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            unsafe {
+                if libc::setns(handle.as_raw_fd(), libc::CLONE_NEWNS) != 0 {
+                    libc::_exit(1);
+                }
+                let mut st: libc::stat = std::mem::zeroed();
+                if libc::lstat(target.as_ptr(), &mut st) == 0
+                    && libc::mount(
+                        null.as_ptr(),
+                        target.as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_BIND,
+                        std::ptr::null(),
+                    ) != 0
+                {
+                    libc::_exit(2);
+                }
+                libc::_exit(0);
+            }
+        }
+        if child > 0 {
+            let mut status = 0;
+            // SAFETY: waiting for our own child.
+            unsafe { libc::waitpid(child, &mut status, 0) };
+        }
+    }
 }
 
 /// `dir` a shared mount in this (otherwise private) mount namespace: a bind
@@ -2926,6 +3077,13 @@ fn cover_node(node: &Path) -> Result<(), String> {
     };
     if !meta.file_type().is_char_device() {
         return Ok(());
+    }
+    // /dev/null already: covered.
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (libc::major(meta.rdev()), libc::minor(meta.rdev())) == (1, 3) {
+            return Ok(());
+        }
     }
     sys::mount(OsStr::new("/dev/null"), node, "", libc::MS_BIND, "")
         .map_err(|e| format!("cannot cover {}: {e}", node.display()))

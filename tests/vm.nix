@@ -1918,7 +1918,16 @@ let
               f"su -l alice -c \"nsenter --preserve-credentials -U -n -m -t {hp} -- stat -c %t:%T /dev/hidraw8\" | grep -qx 1:3",
               timeout=30,
           )
-          in_zone(hp, "sh -c 'test -z \"$(ls -A /dev/input)\" && test -z \"$(ls -A /dev/bus/usb)\"'")
+          # Input and USB nodes one by one: the planted gamepad and USB
+          # device covered, and one plugged in later.
+          for node in ("/dev/input/js9", "/dev/bus/usb/009/001"):
+              out = in_zone(hp, f"stat -c %t:%T {node}").strip()
+              assert out == "1:3", f"{node} is in reach: {out}"
+          machine.succeed("mknod -m 600 /dev/input/js8 c 13 8 && chown alice /dev/input/js8")
+          machine.wait_until_succeeds(
+              f"su -l alice -c \"nsenter --preserve-credentials -U -n -m -t {hp} -- stat -c %t:%T /dev/input/js8\" | grep -qx 1:3",
+              timeout=30,
+          )
           for node in ("uinput", "rfkill"):
               in_zone(
                   hp,
@@ -1947,20 +1956,36 @@ let
               alice(f"cellward container devices vmdev add {grant}")
           shown = json.loads(alice("cellward container show vmdev --json"))["container"]
           assert [d["value"] for d in shown["devices"]] == ["security-keys", "serial", "usb:18d1:4ee7"], shown
-          look = "stat -c %t:%T /dev/hidraw9 /dev/ttyUSB9 /dev/bus/usb/009/001; ls -A /dev/bus/usb"
-          seen = alice(f"cellward run vmherm --container vmdev -- sh -c '{look}'").split()
-          assert seen == ["f0:9", "bc:9", "bd:400", "009"], f"given devices: {seen}"
-          seen = alice(
-              "cellward run vmherm --container vmlayer -- "
-              "sh -c 'stat -c %t:%T /dev/hidraw9 /dev/ttyUSB9; ls -A /dev/bus/usb'"
-          ).split()
-          assert seen == ["1:3", "1:3"], f"devices not given: {seen}"
+          look = "stat -c %t:%T /dev/hidraw9 /dev/ttyUSB9 /dev/bus/usb/009/001 /dev/input/js9"
+          seen = alice(f"cellward run vmherm --container vmdev -- {look}").split()
+          assert seen == ["f0:9", "bc:9", "bd:400", "1:3"], f"given devices: {seen}"
+          seen = alice(f"cellward run vmherm --container vmlayer -- {look}").split()
+          assert seen == ["1:3"] * 4, f"devices not given: {seen}"
           alice("cellward container devices vmdev rm serial")
           out = alice("cellward run vmherm --container vmdev -- stat -c %t:%T /dev/ttyUSB9").strip()
           assert out == "1:3", f"a device taken back: {out}"
           alice("cellward container rm vmdev")
+          # A device gone while a sandbox has it bound: the zone's holder
+          # covers the bind there before another device can take its number
+          # (a bind keeps the node's inode; docs/PERMISSIONS.md §11.12).
+          alice("cellward container create vmsbdev")
+          alice("cellward container devices vmsbdev add security-keys")
+          sbhome = "/home/alice/.local/state/vpn-profiles/vmsbdev/home"
+          alice(
+              "systemd-run --user --unit=sbwait cellward run vmherm --container vmsbdev -- "
+              "sh -c 'test \"$(stat -c %t:%T /dev/hidraw9)\" = f0:9 && touch $HOME/sb-given; "
+              "while [ \"$(stat -c %t:%T /dev/hidraw9 2>/dev/null)\" = f0:9 ]; do sleep 0.2; done; "
+              "stat -c %t:%T /dev/hidraw9 > $HOME/sb-after'"
+          )
+          machine.wait_until_succeeds(f"test -e {sbhome}/sb-given", timeout=60)
+          machine.succeed("rm -f /dev/hidraw9")
+          machine.wait_until_succeeds(f"test -s {sbhome}/sb-after", timeout=30)
+          out = machine.succeed(f"cat {sbhome}/sb-after").strip()
+          assert out == "1:3", f"a gone device's bind in a sandbox: {out}"
+          alice("systemctl --user stop sbwait.service || true")
+          alice("cellward container rm vmsbdev")
           machine.succeed(
-              "rm -f /dev/hidraw8 /dev/hidraw9 /dev/input/js9 /dev/bus/usb/009/001 /dev/ttyUSB9 "
+              "rm -f /dev/hidraw8 /dev/hidraw9 /dev/input/js8 /dev/input/js9 /dev/bus/usb/009/001 /dev/ttyUSB9 "
               "/run/udev/data/c240:9 /run/udev/data/c189:1024 && "
               "rmdir /dev/bus/usb/009 || true"
           )

@@ -103,13 +103,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   into. A grant is a set — `games` (gamepads, physical, and their raw HID
   nodes), `security-keys` (FIDO), `phone` (adb, MTP/PTP), `serial`
   (`ttyUSB*`, `ttyACM*`) — or one device, `usb:<vendor>:<product>[:<serial>]`.
-  The launch lists the host's nodes by udev's word on them and hands the
-  given ones to `profile-run --device`, which takes the zone's covers off
-  them in the launch's own mount namespace — `/dev/input` and
-  `/dev/bus/usb` made again of them alone — checking each once more by its
-  number and udev's vendor and product; a sandbox binds them into its own
-  `/dev`. A launch with no container gets none. A device plugged in later is
-  seen after the program restarts.
+  The zone now covers every node one by one, `/dev/input` and
+  `/dev/bus/usb` included (was: those two under a tmpfs), a watcher those
+  plugged in later. The launch lists the host's nodes by udev's word on
+  them and hands the given ones to `profile-run --device`, which takes the
+  zone's covers off them in the launch's own mount namespace — the device's
+  own entry, never a bind — checking each once more by number, vendor,
+  product and serial. A sandbox binds them into its own `/dev`; a bind
+  outlives the device and would open whatever takes its number next, so the
+  zone's holder, seeing a device go, puts `/dev/null` over its path in every
+  other mount namespace of the zone's programs. A launch with no container
+  gets none; a device plugged in later is seen after the program restarts.
+  `games` never gives a HID device that also types or points (a combo
+  receiver), and takes Bluetooth gamepads through `uhid`. Dangerous: `serial`
+  and `usb:` for a board a program can reflash.
 
 ### Changed
 - **The microphone for a program whose container is not known** (a

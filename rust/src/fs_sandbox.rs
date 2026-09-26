@@ -370,12 +370,10 @@ impl Args {
                 }
                 "--x11" => x11 = value == "on",
                 "--camera" => camera = value == "on",
-                // Only a node below /dev: nothing else is a device.
+                // Only a node of the kinds a grant gives: nothing else.
                 "--device" => {
                     let path = PathBuf::from(value);
-                    if path.starts_with("/dev/")
-                        && !path.components().any(|c| c.as_os_str() == "..")
-                    {
+                    if crate::devices::grantable_path(&path) {
                         devices.push(path);
                     }
                 }

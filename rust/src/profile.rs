@@ -576,15 +576,6 @@ fn uncover_capture() -> Result<(), String> {
     Ok(())
 }
 
-/// A path's character device number: `None` for anything else, or nothing.
-fn char_number(path: &Path) -> Option<(u32, u32)> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    let meta = fs::symlink_metadata(path).ok()?;
-    meta.file_type()
-        .is_char_device()
-        .then(|| (libc::major(meta.rdev()), libc::minor(meta.rdev())))
-}
-
 /// Everything mounted at `path` off, in this namespace.
 fn umount_all(path: &Path) {
     let Ok(target) = CString::new(path.as_os_str().as_bytes()) else {
@@ -597,25 +588,19 @@ fn umount_all(path: &Path) {
 }
 
 /// Give this launch the devices its container is given (`docs/PERMISSIONS.md`
-/// §11.12). The zone covers them in its mount namespace (`zone::
-/// hide_devices`); this one is a slave copy, where a node of `/dev` itself
-/// has its cover taken off, and `/dev/input` and `/dev/bus/usb` — a tmpfs in
-/// the zone — are made again of the given nodes alone, bound from the real
-/// directory held for the moment. Each is checked here once more, by its
-/// number and by udev's vendor and product for it (`devices::Pass::still`):
-/// the number may have gone to another device since the launch listed them.
-/// A node that is no longer the one given is covered again, or left out.
+/// §11.12). The zone covers each node one by one in its mount namespace
+/// (`zone::hide_devices`); this one is a slave copy, where the covers come
+/// off the given ones — the device's own entry then, never a bind, so that it
+/// goes with the device and a node that comes later under its name is
+/// covered by the zone's watcher here too. Each is checked here once more by
+/// its number and udev's word on it (`devices::Pass::still`): the number may
+/// have gone to another device since the launch listed them. One that is not
+/// the one given is covered again.
 fn give_devices(passes: &[crate::devices::Pass]) -> Result<(), String> {
     let udev = Path::new("/run/udev/data");
-    let under = |dir: &str| -> Vec<&crate::devices::Pass> {
-        passes.iter().filter(|p| p.path.starts_with(dir)).collect()
-    };
-    for pass in passes
-        .iter()
-        .filter(|p| p.path.parent() == Some(Path::new("/dev")))
-    {
+    for pass in passes {
         umount_all(&pass.path);
-        match char_number(&pass.path) {
+        match crate::devices::char_device(&pass.path) {
             Some((major, minor)) if pass.still(udev, major, minor) => {}
             Some(_) => {
                 crate::sys::mount(OsStr::new("/dev/null"), &pass.path, "", libc::MS_BIND, "")
@@ -629,61 +614,7 @@ fn give_devices(passes: &[crate::devices::Pass]) -> Result<(), String> {
             None => {}
         }
     }
-    remake_dir(Path::new("/dev/input"), &under("/dev/input/"), udev)?;
-    remake_dir(Path::new("/dev/bus/usb"), &under("/dev/bus/usb/"), udev)
-}
-
-/// `dir` — under the zone's tmpfs — made again of `passes` alone.
-fn remake_dir(dir: &Path, passes: &[&crate::devices::Pass], udev: &Path) -> Result<(), String> {
-    if passes.is_empty() {
-        return Ok(());
-    }
-    let held = PathBuf::from(format!("/tmp/.cellward-devices-{}", std::process::id()));
-    let _ = fs::remove_dir(&held);
-    fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&held)
-        .map_err(|e| format!("cannot make {}: {e}", held.display()))?;
-    let result = (|| -> Result<(), String> {
-        umount_all(dir);
-        crate::sys::mount(dir.as_os_str(), &held, "", libc::MS_BIND, "")
-            .map_err(|e| format!("cannot hold {}: {e}", dir.display()))?;
-        crate::sys::mount(
-            OsStr::new("tmpfs"),
-            dir,
-            "tmpfs",
-            libc::MS_NOSUID | libc::MS_NOEXEC,
-            "mode=0755,size=64k",
-        )
-        .map_err(|e| format!("cannot cover {} again: {e}", dir.display()))?;
-        for pass in passes {
-            let Ok(rel) = pass.path.strip_prefix(dir) else {
-                continue;
-            };
-            let real = held.join(rel);
-            let given = |p: &Path| char_number(p).is_some_and(|(ma, mi)| pass.still(udev, ma, mi));
-            if !given(&real) {
-                continue;
-            }
-            if let Some(parent) = pass.path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("cannot make {}: {e}", parent.display()))?;
-            }
-            fs::File::create(&pass.path)
-                .map_err(|e| format!("cannot make {}: {e}", pass.path.display()))?;
-            crate::sys::mount(real.as_os_str(), &pass.path, "", libc::MS_BIND, "")
-                .map_err(|e| format!("cannot give {}: {e}", pass.path.display()))?;
-            // Once more after the bind: the number may have gone meanwhile.
-            if !given(&pass.path) {
-                umount_all(&pass.path);
-                let _ = fs::remove_file(&pass.path);
-            }
-        }
-        Ok(())
-    })();
-    umount_all(&held);
-    let _ = fs::remove_dir(&held);
-    result
+    Ok(())
 }
 
 pub fn run(args: Args) -> u8 {
