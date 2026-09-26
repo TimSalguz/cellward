@@ -401,7 +401,7 @@ step "cellward run smoke --profile $TEST_PROFILE — запись в слой п
 "$VPN_ZONE" run smoke --profile "$TEST_PROFILE" -- \
   sh -c 'echo marker > "$HOME/.config/vpn-smoke-marker"'
 
-UPPER="$PROFILES/$TEST_PROFILE/.config/upper/vpn-smoke-marker"
+UPPER="$PROFILES/$TEST_PROFILE/home/upper/.config/vpn-smoke-marker"
 [ -f "$UPPER" ] || fail "маркера нет в верхнем слое ($UPPER) — overlay профиля не наложился"
 [ ! -e "$MARKER" ] || fail "маркер попал в настоящий ~/.config — слой профиля не изолировал запись"
 echo "ok: запись ушла в слой профиля, настоящий ~/.config не тронут"
@@ -430,7 +430,7 @@ echo "ok: каталог сохранён, и это каталог внутри
 step "cellward run unconfined --profile $TEST_PROFILE — контейнер без зоны"
 "$VPN_ZONE" run unconfined --profile "$TEST_PROFILE" -- \
   sh -c 'echo marker > "$HOME/.config/vpn-smoke-direct-marker"'
-DIRECT_UPPER="$PROFILES/$TEST_PROFILE/.config/upper/vpn-smoke-direct-marker"
+DIRECT_UPPER="$PROFILES/$TEST_PROFILE/home/upper/.config/vpn-smoke-direct-marker"
 [ -f "$DIRECT_UPPER" ] || fail "маркера нет в верхнем слое ($DIRECT_UPPER) — контейнер в direct не наложился"
 [ ! -e "$DIRECT_MARKER" ] || fail "маркер попал в настоящий ~/.config — в direct контейнер потерян"
 nsout=$("$VPN_ZONE" run direct --profile "$TEST_PROFILE" -- \
@@ -799,7 +799,7 @@ step "Доверенный сертификат: база NSS — в слое к
 "$VPN_ZONE" run direct --profile "$CA_PROFILE" -- "$CERTUTIL" -L -d "sql:$HOME/.pki/nssdb" \
   > "$WORK/nss-in.txt" 2>&1 || fail "certutil внутри контейнера: $(cat "$WORK/nss-in.txt")"
 grep -q "vpn-zones " "$WORK/nss-in.txt" || fail "в базе NSS контейнера сертификата нет: $(cat "$WORK/nss-in.txt")"
-[ -f "$PROFILES/$CA_PROFILE/.pki/upper/nssdb/cert9.db" ] || fail "база NSS не легла в верхний слой контейнера"
+[ -f "$PROFILES/$CA_PROFILE/home/upper/.pki/nssdb/cert9.db" ] || fail "база NSS не легла в верхний слой контейнера"
 if [ -f "$HOME/.pki/nssdb/cert9.db" ] && "$CERTUTIL" -L -d "sql:$HOME/.pki/nssdb" 2>/dev/null | grep -q "vpn-zones "; then
   fail "сертификат попал в настоящую базу NSS хоста"
 fi

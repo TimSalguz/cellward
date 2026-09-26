@@ -1759,7 +1759,10 @@ let
           # no zone.pid to rewrite, no raw proxy behind the bus filter, no key;
           # the settings and the shims read-only; the host still writes.
           out = in_zone(hp, "ls -A /home/alice/.local/state/vpn-zones")
-          assert sorted(out.split()) == [".running", ".throwaway"], out
+          assert sorted(out.split()) == [".running", ".storage", ".throwaway"], out
+          # The real container storage, kept for the zone's launches: the
+          # zone's root's, and no program of the zone enters it.
+          in_zone(hp, "sh -c '! ls /home/alice/.local/state/vpn-zones/.storage'")
           for path in [".local/state/vpn-zones/.running/x", ".config/vpn-zones/x", ".local/share/vpn-zones/x"]:
               in_zone(hp, f"sh -c '! touch /home/alice/{path}'")
           alice("touch ~/.config/vpn-zones/from-host && rm ~/.config/vpn-zones/from-host")
