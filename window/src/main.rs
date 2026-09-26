@@ -917,7 +917,12 @@ mod tests {
         let _ = w.update(Msg::Key(key, keyboard::Modifiers::default(), false));
     }
 
+    /// The guard over with the window focused: focused first where it is
+    /// not — a guard arms only with the focus.
     fn arm(w: &mut Window) {
+        if !w.focused {
+            let _ = w.update(Msg::Focus(true));
+        }
         let _ = w.update(Msg::Armed(w.holds));
     }
 
@@ -932,6 +937,10 @@ mod tests {
         assert!(req.no_pins && !req.pin_net, "a pin sent along is dropped");
         let mut w = Window::new(req);
         assert!(!w.armed && !w.ready());
+        // Never focused: its guard over arms nothing — nothing counts from
+        // the window's start.
+        let _ = w.update(Msg::Armed(w.holds));
+        assert!(!w.armed, "armed without the focus");
         // Somebody still typing or clicking: nothing is chosen or started,
         // and the guard that was running no longer arms the window.
         press(&mut w, Key::Character("1".into()));
@@ -1009,8 +1018,12 @@ mod tests {
         let mut w = Window::new(req);
         arm(&mut w);
         assert_eq!(w.net_tag(), "nl");
+        // A digit — typing meant for something else — chooses nothing, and
+        // starts the guard again.
         press(&mut w, Key::Character("1".into()));
         assert_eq!(w.net_tag(), "nl", "a digit chose a network");
+        assert!(!w.armed, "typing did not start the guard again");
+        arm(&mut w);
         // Up to another network: the guard again, and Enter does not start.
         press(&mut w, Key::Named(key::Named::ArrowUp));
         assert_eq!(w.net_tag(), "offline");
@@ -1025,6 +1038,37 @@ mod tests {
         let _ = w.update(Msg::Net(2));
         arm(&mut w);
         assert!(w.enter_starts());
+    }
+
+    /// A question (a guarded menu): Enter gives the highlighted answer — the
+    /// safe one first — only once armed; digits choose nothing; a moved
+    /// highlight and any other key start the guard again.
+    #[test]
+    fn a_question_takes_no_answer_typed_on() {
+        let req = parse_request(
+            "mode\tmenu\ntitle\tЗапуск из зоны\nnote\tРазрешить?\n\
+             action\tdeny\tОтказать\t\naction\tallow\tРазрешить\t\n\
+             action\talways\tВсегда\t\nguard\t1500\n",
+        );
+        let mut w = Window::new(req);
+        assert!(w.menu() && w.guarded() && !w.armed);
+        arm(&mut w);
+        assert!(w.armed);
+        // "3⏎" typed on: the digit chooses nothing and starts the guard, and
+        // the Enter after it only starts it again.
+        press(&mut w, Key::Character("3".into()));
+        assert_eq!(w.entry, 0, "a digit chose an answer");
+        assert!(!w.armed);
+        arm(&mut w);
+        // A move of the highlight: the guard again, so a quick Enter after
+        // it takes nothing.
+        press(&mut w, Key::Named(key::Named::ArrowDown));
+        assert_eq!(w.entry, 1);
+        assert!(!w.armed, "a moved highlight did not start the guard again");
+        // A letter: the guard again too.
+        arm(&mut w);
+        press(&mut w, Key::Character("a".into()));
+        assert!(!w.armed);
     }
 
     #[test]
