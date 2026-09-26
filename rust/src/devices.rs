@@ -4,7 +4,7 @@
 //! it from the host.
 //!
 //! **What is given** — [`Grant`]: a set, one switch for a kind of device
-//! (`games`, `security-keys`, `phone`, `serial`), or one device by what it
+//! (`games`, `security-keys`, `phone`, `serial`, `vm`), or one device by what it
 //! is (`usb:<vendor>:<product>[:<serial>]`), which outlives a replug into
 //! another port and another number under `/dev`.
 //!
@@ -292,7 +292,7 @@ pub fn char_device(path: &Path) -> Option<(u32, u32)> {
 }
 
 /// The nodes a grant may cover under `places.dev`: raw HID nodes, serial
-/// adapters, input nodes and USB device nodes. `stat` tells a path's number
+/// adapters, input nodes, USB device nodes and [`VM_NODES`]. `stat` tells a path's number
 /// (the machine's in use; a test's own).
 pub fn scan(places: Places, stat: &dyn Fn(&Path) -> Option<(u32, u32)>) -> Vec<Node> {
     let dir = |d: &Path| -> Vec<PathBuf> {

@@ -2853,6 +2853,7 @@ fn hide_devices(zone: &Zone) -> Result<(), String> {
         name,
         watch,
         dev,
+        starting: true,
         known: Default::default(),
         guard: crate::device_guard::start(zone.name().into_owned()),
     };
@@ -2864,6 +2865,7 @@ fn hide_devices(zone: &Zone) -> Result<(), String> {
             failed.join("; ")
         ));
     }
+    watcher.starting = false;
     thread::spawn(move || loop {
         match watcher.watch.events() {
             Ok(events) => {
@@ -2964,9 +2966,10 @@ fn hide_dir(dir: &Path) -> Result<(), String> {
 struct DeviceWatch {
     name: String,
     watch: sys::DirWatch,
-    /// The devtmpfs's device: a directory of another file system below
-    /// `/dev` — `pts`, `shm`, our tmpfs — is not looked into.
+    /// The devtmpfs's device.
     dev: u64,
+    /// Still coming up: what fails now is fatal.
+    starting: bool,
     /// Each node covered that a program may have had ([`guarded_path`]), as
     /// it was before its cover.
     known: std::collections::HashMap<PathBuf, crate::device_guard::Seen>,
@@ -2980,9 +2983,12 @@ impl DeviceWatch {
             sys::DirEvent::Appeared(path) => {
                 if HIDDEN_DIRS.iter().any(|d| Path::new(d) == path) {
                     // A sound card, a camera, a tuner plugged into a machine
-                    // that had none.
+                    // that had none. Not hidden whole: its nodes one by one.
                     if let Err(e) = hide_dir(&path) {
                         eprintln!("zone {}: {e}", self.name);
+                        for e in self.watch_tree(&path) {
+                            eprintln!("zone {}: {e}", self.name);
+                        }
                     }
                     return;
                 }
@@ -3019,13 +3025,42 @@ impl DeviceWatch {
         let mut failed = Vec::new();
         let mut dirs = vec![dir.to_path_buf()];
         while let Some(dir) = dirs.pop() {
-            // Another file system's (`pts`, `shm`, a tmpfs of ours): not ours.
-            match fs::symlink_metadata(&dir) {
-                Ok(meta) if meta.dev() == self.dev => {}
-                _ => continue,
+            let Ok(meta) = fs::symlink_metadata(&dir) else {
+                continue;
+            };
+            // A mount of another file system below `/dev`: looked into but
+            // where no device can be opened (`nodev`: `shm`, `mqueue`,
+            // `hugepages`) and the terminals' (`pts`).
+            if meta.dev() != self.dev && !may_hold_devices(&dir) {
+                continue;
             }
             if let Err(e) = self.watch.add(&dir) {
-                failed.push(format!("no watch on {} ({e})", dir.display()));
+                match e.raw_os_error() {
+                    // Gone meanwhile.
+                    Some(libc::ENOENT) => continue,
+                    _ if dir == Path::new("/dev") => {
+                        failed.push(format!("no watch on /dev ({e})"));
+                        continue;
+                    }
+                    // Nothing left to watch with, at the start: say what
+                    // to raise rather than hide a directory the GPU may be in.
+                    Some(libc::ENOSPC) if self.starting => {
+                        failed.push(format!(
+                            "no watch on {} ({e}; raise fs.inotify.max_user_watches)",
+                            dir.display()
+                        ));
+                        continue;
+                    }
+                    // Not to be watched — unreadable to the zone, say —:
+                    // hidden whole.
+                    _ => {
+                        if let Err(hidden) = hide_dir(&dir) {
+                            failed
+                                .push(format!("no watch on {} ({e}), and {hidden}", dir.display()));
+                        }
+                        continue;
+                    }
+                }
             }
             for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
                 let path = entry.path();
@@ -3088,6 +3123,23 @@ impl DeviceWatch {
         for e in self.watch_tree(Path::new("/dev")) {
             eprintln!("zone {}: {e}", self.name);
         }
+    }
+}
+
+/// Whether a mount at `dir` below `/dev` may hold a device a program can
+/// open: not one mounted `nodev`, not the terminals' devpts.
+fn may_hold_devices(dir: &Path) -> bool {
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return true;
+    };
+    // SAFETY: statvfs and statfs into zeroed structs, the path NUL-terminated.
+    unsafe {
+        let mut vfs: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(c.as_ptr(), &mut vfs) == 0 && vfs.f_flag & libc::ST_NODEV != 0 {
+            return false;
+        }
+        let mut fs: libc::statfs = std::mem::zeroed();
+        !(libc::statfs(c.as_ptr(), &mut fs) == 0 && fs.f_type == libc::DEVPTS_SUPER_MAGIC as _)
     }
 }
 
@@ -3156,8 +3208,11 @@ fn cover_node(node: &Path) -> Result<(), String> {
             return Ok(());
         }
     }
-    sys::mount(OsStr::new("/dev/null"), node, "", libc::MS_BIND, "")
-        .map_err(|e| format!("cannot cover {}: {e}", node.display()))
+    match sys::mount(OsStr::new("/dev/null"), node, "", libc::MS_BIND, "") {
+        // Gone meanwhile: nothing to cover.
+        Err(e) if e.raw_os_error() == Some(libc::ENOENT) => Ok(()),
+        other => other.map_err(|e| format!("cannot cover {}: {e}", node.display())),
+    }
 }
 
 /// A tmpfs over `/tmp/.X11-unix` in the zone's mount namespace
