@@ -33,7 +33,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   obeyed; the config dir is read-only in zones. The files move once, on the host, at the first
   look after the update (`.migrated` marks it): a file put next to a
   container's data after that is nobody's. Removing a container removes its
-  policy too.
+  policy too. The move takes plain files only — a link, to anything, stays
+  where it is — copies across filesystems, and is not marked done while
+  anything failed; a container is its data, its policy or its declaration,
+  so removing the data directory does not unbind its network.
 
 ### Fixed
 - **The launch window opens faster, most of all under load**

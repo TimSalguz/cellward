@@ -299,34 +299,93 @@ pub fn migrate_policy_in(config: &Path, profiles: &Path, sandboxes: &Path) {
     if mark.exists() {
         return;
     }
+    let mut failed = false;
     for (storage, home) in [(profiles, Home::Overlay), (sandboxes, Home::Private)] {
         let Ok(entries) = fs::read_dir(storage) else {
             continue;
         };
         for entry in entries.flatten() {
-            let from = entry.path();
-            if !from.is_dir() {
+            // A container's own directory, never a link to one: a link there
+            // is somebody's, and its target no container's.
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
             }
+            let from = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             let to = policy_dir_in(config, home, &name);
             for file in POLICY_FILES {
                 let old = from.join(file);
                 let new = to.join(file);
-                if fs::symlink_metadata(&old).is_err() || fs::symlink_metadata(&new).is_ok() {
+                if fs::symlink_metadata(&new).is_ok() {
                     continue;
                 }
-                if let Err(e) = fs::create_dir_all(&to).and_then(|()| fs::rename(&old, &new)) {
-                    eprintln!(
-                        "cellward: не перенести {} в {}: {e}",
-                        old.display(),
-                        new.display()
-                    );
+                match move_policy_file(&old, &new) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        failed = true;
+                        eprintln!(
+                            "cellward: не перенести {} в {}: {e}",
+                            old.display(),
+                            new.display()
+                        );
+                    }
                 }
             }
         }
     }
-    let _ = fs::create_dir_all(config.join(POLICY_DIR)).and_then(|()| fs::write(&mark, ""));
+    // Done only when everything went: a move that failed is tried again at
+    // the next look, rather than a binding or a trust left behind in silence.
+    if !failed {
+        let _ = fs::create_dir_all(config.join(POLICY_DIR)).and_then(|()| fs::write(&mark, ""));
+    }
+}
+
+/// Move one policy file of the old layout, if it is one: a regular file, or
+/// `trust/` as a real directory of regular files. A link — to anything — is
+/// left where it is: moved, it would stay a link into wherever it points, and
+/// the policy would be read and written through it. Across filesystems (the
+/// config and the state on separate mounts) a copy, then the original gone.
+fn move_policy_file(old: &Path, new: &Path) -> io::Result<()> {
+    let Ok(meta) = fs::symlink_metadata(old) else {
+        return Ok(());
+    };
+    let files: Vec<PathBuf> = if meta.is_file() {
+        Vec::new()
+    } else if meta.is_dir() {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(old)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                return Err(io::Error::other(format!(
+                    "{} is not a plain file — left where it is",
+                    entry.path().display()
+                )));
+            }
+            files.push(entry.path());
+        }
+        files
+    } else {
+        return Err(io::Error::other("neither a plain file nor a directory"));
+    };
+    if let Some(parent) = new.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::rename(old, new) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.raw_os_error() != Some(libc::EXDEV) => return Err(e),
+        Err(_) => {}
+    }
+    if meta.is_file() {
+        fs::copy(old, new)?;
+        return fs::remove_file(old);
+    }
+    fs::create_dir_all(new)?;
+    for file in &files {
+        if let Some(name) = file.file_name() {
+            fs::copy(file, new.join(name))?;
+        }
+    }
+    fs::remove_dir_all(old)
 }
 
 fn home_dir_of(tools: &Tools, home: Home, name: &str) -> PathBuf {
@@ -345,7 +404,10 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
     let declared = fs::read_to_string(declared_file(tools, home, name))
         .map(|t| parse_conf(&t))
         .ok();
-    if !dir.is_dir() && declared.is_none() {
+    // A container is its data, its policy or its declaration: a program with
+    // its storage in reach removing the data directory must not make its
+    // network binding disappear with it.
+    if !dir.is_dir() && !policy.is_dir() && declared.is_none() {
         return None;
     }
     let local = fs::read_to_string(policy.join(FILE))
@@ -481,6 +543,18 @@ pub fn load_all(tools: &Tools) -> Vec<Container> {
         (&tools.sandboxes, Home::Private),
     ] {
         for entry in visible_entries(dir) {
+            if entry.is_dir() {
+                let name = entry
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                selectors.push(selector_of(home, &name));
+            }
+        }
+    }
+    for (sub, home) in [("profiles", Home::Overlay), ("sandboxes", Home::Private)] {
+        for entry in visible_entries(&tools.config.join(POLICY_DIR).join(sub)) {
             if entry.is_dir() {
                 let name = entry
                     .file_name()
@@ -1295,6 +1369,39 @@ mod tests {
         .unwrap();
         migrate_policy_in(&config, &profiles, &sandboxes);
         assert!(!dev.join(FILE).exists(), "moved after the move was done");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A link among the old files is no policy: it stays where it is, and
+    /// the move is not marked done while it does; a link to a container's
+    /// directory is no container.
+    #[test]
+    fn the_policy_move_takes_no_link() {
+        let base = std::env::temp_dir().join(format!("vz-policy-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (config, profiles, sandboxes) = (
+            base.join("config"),
+            base.join("profiles"),
+            base.join("sandboxes"),
+        );
+        fs::create_dir_all(sandboxes.join("dev")).unwrap();
+        fs::create_dir_all(base.join("elsewhere")).unwrap();
+        fs::write(base.join("elsewhere/conf"), "network = unconfined\n").unwrap();
+        std::os::unix::fs::symlink(
+            base.join("elsewhere/conf"),
+            sandboxes.join("dev").join(FILE),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(base.join("elsewhere"), sandboxes.join("linked")).unwrap();
+        fs::write(base.join("elsewhere/perms"), "home\n").unwrap();
+        migrate_policy_in(&config, &profiles, &sandboxes);
+        let dev = policy_dir_in(&config, Home::Private, "dev");
+        assert!(
+            fs::symlink_metadata(dev.join(FILE)).is_err(),
+            "a link was moved"
+        );
+        assert!(!policy_dir_in(&config, Home::Private, "linked").exists());
+        assert!(!config.join(POLICY_DIR).join(POLICY_MIGRATED).exists());
         let _ = fs::remove_dir_all(&base);
     }
 
