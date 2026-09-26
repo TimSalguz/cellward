@@ -24,11 +24,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   local one, `ask`; a local setting never overrides a declared one. The
   question names the container, and "always" writes `microphone = yes` into
   the container's settings, not the zone's; for a program with no container
-  it is still the zone's. The restricted PipeWire of a hermetic zone, which
-  decides for all the zone's clients at once, gives the microphone only
-  when the zone and every container launched into it since it came up say
-  yes (a daemon outlives its launch): after a container with "no" ran
-  there, that PipeWire has no microphone until the zone restarts. The
+  it is still the zone's. The restricted PipeWire of a hermetic zone decides
+  by the container of each client too: its helper sees every client in the
+  daemon's registry (the pid the daemon read from the kernel, and a serial
+  no other client has), tells whose program it is the same way, and
+  publishes a key per client (`vpn-zones.microphone.client.<serial>`,
+  with `vpn-zones.microphone-by-client.<zone>` = yes); the WirePlumber
+  policy decides by it, holding a new client until its key comes (3 s at
+  most, then without one). The zone's key stays for a policy of before: the
+  strictest of the zone and of every container launched into it since it
+  came up. The
   nearest launch in a program's ancestry decides, a throwaway one too; a
   number two launches' records claim is nobody's.
 - **A container of the main home takes a mount namespace of its own** in a

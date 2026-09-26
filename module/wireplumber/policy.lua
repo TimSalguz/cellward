@@ -26,9 +26,11 @@
 --  * capture sources of the host (Audio/Source, Audio/Source/Virtual — never
 --    Audio/Duplex: WirePlumber makes a duplex node an input with monitor
 --    ports, and capturing from it records what the host plays there): read
---    only, and only while the zone's microphone is "yes" (the helper
---    publishes it in the metadata object "vpn-zones"); revoked, the links
---    are broken here at once;
+--    only, and only while the client's microphone is "yes" (the helper
+--    publishes it in the metadata object "vpn-zones": for each client, by the
+--    container of the program that connected, once it says it does so for
+--    the zone — a client it has not described yet has none; from a helper
+--    that does not, the zone's); revoked, the links are broken here at once;
 --  * the metadata "default": read only (which sink is the default);
 --  * the "client-node" factory, read: a stream is a client node. Not the link
 --    factory, not the adapter or device factories: a zone links nothing
@@ -57,6 +59,10 @@ local METADATA = "vpn-zones"
 local POLICY_KEY = "vpn-zones.policy"
 local POLICY_VERSION = "1"
 local MIC_PREFIX = "vpn-zones.microphone."
+-- Each client's own (by its object.serial, which no other client ever has),
+-- and the zone's marker that the helper publishes them.
+local CLIENT_MIC_PREFIX = "vpn-zones.microphone.client."
+local BY_CLIENT_PREFIX = "vpn-zones.microphone-by-client."
 -- A zone's clients and nodes at most (the pulse filter's MAX_CONNECTIONS is
 -- 128 too): the daemon accepts the zone's connections itself, and every one
 -- is a client in the host's daemon and a finalize() here, every node an
@@ -65,7 +71,8 @@ local MIC_PREFIX = "vpn-zones.microphone."
 local MAX_CLIENTS = 128
 local MAX_NODES = 256
 
--- bound id of a zone's client -> { zone = <app-id>, client = <WpClient> }
+-- bound id of a zone's client -> { zone = <app-id>, client = <WpClient>,
+-- serial = <object.serial> }
 local zones = {}
 
 -- A property of a node, port, link or client: its info properties (what
@@ -92,13 +99,41 @@ end
 -- The "vpn-zones" metadata, once it is active.
 local metadata = nil
 
-local function microphone (zone)
+-- A client's serial, as its info or its global properties carry it.
+local function serial_of (client)
+  return prop (client, "object.serial") or gprop (client, "object.serial")
+end
+
+-- Does the helper of `zone` publish each client's own key?
+local function by_client (zone)
+  return metadata ~= nil and metadata:find (0, BY_CLIENT_PREFIX .. zone) == "yes"
+end
+
+-- Has the helper published this client's own key yet?
+local function has_key (z)
+  return metadata ~= nil and z.serial ~= nil
+      and metadata:find (0, CLIENT_MIC_PREFIX .. z.serial) ~= nil
+end
+
+-- May the zone's client `z` record: its own key where the helper publishes
+-- them for its zone — none yet is no —, else the zone's.
+local function microphone (z)
   if metadata == nil then
     return false
   end
-  local value = metadata:find (0, MIC_PREFIX .. zone)
-  return value == "yes"
+  if by_client (z.zone) then
+    return z.serial ~= nil and metadata:find (0, CLIENT_MIC_PREFIX .. z.serial) == "yes"
+  end
+  return metadata:find (0, MIC_PREFIX .. z.zone) == "yes"
 end
+
+-- A zone's client whose own key has not come yet is held (the daemon holds a
+-- client with no R on the core) until it comes, and at most this long —
+-- then let go with none, i.e. with no microphone: a program that looks at
+-- the graph as soon as it connects sees what its container may.
+local KEY_WAIT_MS = 3000
+-- bound id -> the zone client waiting for its key
+local waiting = {}
 
 local SINKS = { ["Audio/Sink"] = true, ["Audio/Duplex"] = true }
 -- Not Audio/Duplex: WirePlumber makes a duplex node an input whose output
@@ -144,7 +179,7 @@ local function node_permission (z, node)
   if class and SINKS [class] then
     return "r"
   end
-  if class and SOURCES [class] and microphone (z.zone) then
+  if class and SOURCES [class] and microphone (z) then
     return "r"
   end
   return "-"
@@ -194,7 +229,7 @@ local function link_allowed (stream, target, playback)
     return class ~= nil and SINKS [class] == true
   end
   -- A sink (or a duplex node) as a capture target is its monitor: never.
-  return class ~= nil and SOURCES [class] == true and microphone (sz.zone)
+  return class ~= nil and SOURCES [class] == true and microphone (sz)
 end
 
 -- Globals of the script, not locals: a local nothing refers to once the
@@ -261,21 +296,26 @@ local function finalize (z)
   log:info (z.client, string.format ("zone %s: client %d restricted", z.zone, id))
 end
 
--- The sources' permissions of every client of `zone` again (its microphone
+-- The sources' permissions of a zone's client again (its microphone
 -- changed): a revoked R breaks the links in the daemon at once.
+local function regrant_client (z)
+  local perms = {}
+  for node in nodes_om:iterate () do
+    local class = prop (node, "media.class")
+    if owner (node) == nil and class and SOURCES [class] then
+      perms [node ["bound-id"]] = node_permission (z, node)
+    end
+  end
+  if next (perms) ~= nil then
+    z.client:update_permissions (perms)
+  end
+end
+
+-- The same for every client of `zone`.
 local function regrant_sources (zone)
   for _, z in pairs (zones) do
     if z.zone == zone then
-      local perms = {}
-      for node in nodes_om:iterate () do
-        local class = prop (node, "media.class")
-        if owner (node) == nil and class and SOURCES [class] then
-          perms [node ["bound-id"]] = node_permission (z, node)
-        end
-      end
-      if next (perms) ~= nil then
-        z.client:update_permissions (perms)
-      end
+      regrant_client (z)
     end
   end
 end
@@ -303,13 +343,28 @@ clients_om:connect ("object-added", function (_, client)
     client:request_destroy ()
     return
   end
-  local z = { zone = zone, client = client }
-  zones [client ["bound-id"]] = z
+  local z = { zone = zone, client = client, serial = serial_of (client) }
+  local id = client ["bound-id"]
+  zones [id] = z
+  if by_client (zone) and not has_key (z) then
+    waiting [id] = z
+    Core.timeout_add (KEY_WAIT_MS, function ()
+      if waiting [id] == z then
+        waiting [id] = nil
+        log:notice (client, string.format (
+            "zone %s: no microphone key for client %d in time — without one", zone, id))
+        finalize (z)
+      end
+      return false
+    end)
+    return
+  end
   finalize (z)
 end)
 
 clients_om:connect ("object-removed", function (_, client)
   zones [client ["bound-id"]] = nil
+  waiting [client ["bound-id"]] = nil
 end)
 
 -- A zone's node that may not be: no permission left on it, and destroyed.
@@ -587,11 +642,31 @@ impl_metadata:activate (Features.ALL, function (m, e)
   end
   metadata = m
   m:connect ("changed", function (_, subject, key, _, _)
-    if subject == 0 and key ~= nil and key:sub (1, #MIC_PREFIX) == MIC_PREFIX then
-      regrant_sources (key:sub (#MIC_PREFIX + 1))
-      check_all_links ()
-      rescan_linking ()
+    if subject ~= 0 or key == nil then
+      return
     end
+    if key:sub (1, #CLIENT_MIC_PREFIX) == CLIENT_MIC_PREFIX then
+      local serial = key:sub (#CLIENT_MIC_PREFIX + 1)
+      for id, z in pairs (zones) do
+        if z.serial == serial then
+          if waiting [id] == z then
+            -- Its key came: let it go, with what the key says.
+            waiting [id] = nil
+            finalize (z)
+          else
+            regrant_client (z)
+          end
+        end
+      end
+    elseif key:sub (1, #BY_CLIENT_PREFIX) == BY_CLIENT_PREFIX then
+      regrant_sources (key:sub (#BY_CLIENT_PREFIX + 1))
+    elseif key:sub (1, #MIC_PREFIX) == MIC_PREFIX then
+      regrant_sources (key:sub (#MIC_PREFIX + 1))
+    else
+      return
+    end
+    check_all_links ()
+    rescan_linking ()
   end)
   if access_rule_in_force () then
     m:set (0, POLICY_KEY, "Spa:String", POLICY_VERSION)

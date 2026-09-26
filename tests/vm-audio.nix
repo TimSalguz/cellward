@@ -338,6 +338,36 @@ let
           out = alice(mic_key)
           assert "value:'no'" in out, out
 
+      with subtest("the microphone by the container of each client"):
+          # Each client of the zone gets a key of its own, by the container
+          # of the program that connected (rust/src/pw_context.rs,
+          # rust/src/origin.rs): a container's yes records while its zone
+          # says no, the zone's own programs do not, and a container's no
+          # stands against the zone's yes. A client is held until its key
+          # comes, so it sees at once what its container may.
+          alice("cellward microphone offline no")
+          alice("cellward container create vmpwmic --home layer")
+          alice("cellward container set vmpwmic microphone yes")
+          record = (
+              "sh -c 'timeout 5 pw-record --raw --target vm-mic -P node.name={} - | wc -c'"
+          )
+          in_container = lambda cmd: alice("cellward run offline --container vmpwmic -- " + cmd)
+          out = in_container(record.format("vz-cmic"))
+          assert int(out.strip()) > 10000, f"a container's yes did not record: {out}"
+          assert "vm-mic" in nodes(parse(in_container("timeout 20 pw-dump"))), \
+              "the container's first look at the graph had no microphone"
+          out = zone(record.format("vz-zmic"))
+          assert out.strip() == "0", f"the zone's own program recorded on the zone's no: {out}"
+          meta = alice("pw-metadata -n vpn-zones 0")
+          assert "vpn-zones.microphone-by-client.offline" in meta, meta
+          assert "vpn-zones.microphone.client." in meta, meta
+          alice("cellward microphone offline yes")
+          alice("cellward container set vmpwmic microphone no")
+          out = in_container(record.format("vz-cno"))
+          assert out.strip() == "0", f"the zone's yes overrode a container's no: {out}"
+          alice("cellward microphone offline no")
+          alice("cellward container rm vmpwmic")
+
       with subtest("a device the zone makes is destroyed and never the default"):
           alice(
               "systemd-run --user --unit=zonesink cellward run offline -- "
