@@ -2458,7 +2458,7 @@ pub fn set_device(tools: &Tools, selector: &str, word: &str, add: bool) -> Resul
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
     let grant = crate::devices::Grant::parse(word).ok_or_else(|| {
         format!(
-            "«{word}» — не устройство: games, security-keys, phone, serial или \
+            "«{word}» — не устройство: games, security-keys, phone, serial, vm или \
              usb:<производитель>:<модель>[:<серийный>]"
         )
     })?;

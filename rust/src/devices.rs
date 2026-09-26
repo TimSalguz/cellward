@@ -37,6 +37,9 @@ pub enum Grant {
     Phone,
     /// Serial adapters: `ttyUSB*`, `ttyACM*`.
     Serial,
+    /// Virtual machines: `/dev/kvm`, `vhost-net`, `vhost-vsock` and
+    /// `net/tun` (a VM's network through a tap of its own).
+    Vm,
     /// One USB device, every node of it: vendor and product (four lowercase
     /// hex digits each), and its serial where it has one.
     Usb {
@@ -47,12 +50,16 @@ pub enum Grant {
 }
 
 /// The sets, by their words.
-pub const SETS: [(&str, Grant); 4] = [
+pub const SETS: [(&str, Grant); 5] = [
     ("games", Grant::Games),
     ("security-keys", Grant::SecurityKeys),
     ("phone", Grant::Phone),
     ("serial", Grant::Serial),
+    ("vm", Grant::Vm),
 ];
+
+/// The nodes of [`Grant::Vm`], below `/dev`.
+const VM_NODES: [&str; 4] = ["kvm", "vhost-net", "vhost-vsock", "net/tun"];
 
 /// Four hex digits, lowercase — udev's `ID_VENDOR_ID`/`ID_MODEL_ID`.
 fn hex4(word: &str) -> Option<String> {
@@ -166,6 +173,15 @@ impl Node {
             && self.physical()
     }
 
+    /// One of [`VM_NODES`].
+    fn vm(&self) -> bool {
+        let parent = self.path.parent().and_then(Path::file_name);
+        match self.name().as_str() {
+            "tun" => parent.is_some_and(|p| p == "net"),
+            name => VM_NODES.contains(&name) && parent.is_some_and(|p| p == "dev"),
+        }
+    }
+
     fn usb_device(&self) -> bool {
         self.path
             .parent()
@@ -235,8 +251,8 @@ fn serial_word(serial: &str) -> bool {
 }
 
 /// Whether `path` is of the kinds a grant gives: `hidraw<N>`, `ttyUSB<N>`,
-/// `ttyACM<N>`, `input/event<N>`,
-/// `input/js<N>`, `bus/usb/<bus>/<device>` — all below `/dev`.
+/// `ttyACM<N>`, `input/event<N>`, `input/js<N>`, `bus/usb/<bus>/<device>`,
+/// and [`VM_NODES`] — all below `/dev`.
 pub fn grantable_path(path: &Path) -> bool {
     let numbered = |name: &str, prefixes: &[&str]| {
         prefixes.iter().any(|p| {
@@ -253,7 +269,11 @@ pub fn grantable_path(path: &Path) -> bool {
         return false;
     }
     match parts.as_slice() {
-        [name] => numbered(name, &["hidraw", "ttyUSB", "ttyACM"]),
+        [name] => {
+            numbered(name, &["hidraw", "ttyUSB", "ttyACM"])
+                || ["kvm", "vhost-net", "vhost-vsock"].contains(name)
+        }
+        ["net", "tun"] => true,
         ["input", name] => numbered(name, &["event", "js"]),
         ["bus", "usb", bus, device] => digits(bus) && digits(device),
         _ => false,
@@ -298,6 +318,12 @@ pub fn scan(places: Places, stat: &dyn Fn(&Path) -> Option<(u32, u32)>) -> Vec<N
     for bus in dir(&places.dev.join("bus/usb")) {
         paths.extend(dir(&bus));
     }
+    paths.extend(
+        VM_NODES
+            .iter()
+            .map(|n| places.dev.join(n))
+            .filter(|p| p.exists()),
+    );
     paths
         .into_iter()
         .filter_map(|path| {
@@ -361,6 +387,7 @@ pub fn granted<'a>(nodes: &'a [Node], grants: &[Grant]) -> Vec<&'a Node> {
                     }
                 }
                 Grant::Serial => name.starts_with("ttyUSB") || name.starts_with("ttyACM"),
+                Grant::Vm => node.vm(),
                 Grant::Usb {
                     vendor,
                     product,
@@ -649,6 +676,7 @@ mod tests {
             "security-keys",
             "phone",
             "serial",
+            "vm",
             "usb:1050:0407",
             "usb:046D:c08b:ABC-1",
         ] {
@@ -867,6 +895,33 @@ mod tests {
         )
         .unwrap();
         assert!(!with_serial.still(&udev, 244, 9));
+    }
+
+    /// `vm`: the four nodes a virtual machine needs, and nothing else.
+    #[test]
+    fn the_vm_set_is_kvm_vhost_and_tun() {
+        let m = Machine::new("vm");
+        fs::create_dir_all(m.base.join("dev/net")).unwrap();
+        m.node("kvm", 10, 232, &[], None);
+        m.node("vhost-net", 10, 238, &[], None);
+        m.node("vhost-vsock", 10, 241, &[], None);
+        m.node("net/tun", 10, 200, &[], None);
+        m.node("ttyUSB0", 188, 0, &[], None);
+        assert_eq!(
+            m.given(&[Grant::Vm]),
+            ["kvm", "vhost-net", "vhost-vsock", "net/tun"]
+        );
+        assert_eq!(m.given(&[Grant::Serial]), ["ttyUSB0"]);
+        for path in [
+            "/dev/kvm",
+            "/dev/vhost-net",
+            "/dev/vhost-vsock",
+            "/dev/net/tun",
+        ] {
+            assert!(grantable_path(Path::new(path)), "{path}");
+        }
+        assert!(!grantable_path(Path::new("/dev/tun")));
+        assert!(!grantable_path(Path::new("/dev/net/kvm")));
     }
 
     /// A device once, by the name a grant gives it, with the sets it falls

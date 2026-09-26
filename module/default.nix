@@ -618,14 +618,14 @@ let
       };
       permissions.devices = lib.mkOption {
         type = lib.types.listOf (
-          lib.types.strMatching "games|security-keys|phone|serial|usb:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}(:[!-9;<>-~]{1,128})?"
+          lib.types.strMatching "games|security-keys|phone|serial|vm|usb:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}(:[!-9;<>-~]{1,128})?"
         );
         default = [ ];
         example = [
           "security-keys"
           "usb:1050:0407"
         ];
-        description = "Устройства, которые зоны закрывают всем своим программам и которые выдаются этому контейнеру (docs/PERMISSIONS.md §11.12): наборы games (геймпады и их HID), security-keys (ключи FIDO), phone (adb, MTP), serial (ttyUSB, ttyACM) или одно устройство usb:<производитель>:<модель>[:<серийный>] — все его узлы; что подключено — cellward devices. Действует для программ, запущенных после изменения; устройство, подключённое позже, видно после перезапуска программы.";
+        description = "Устройства, которые зоны закрывают всем своим программам и которые выдаются этому контейнеру (docs/PERMISSIONS.md §11.12): наборы games (геймпады и их HID), security-keys (ключи FIDO), phone (adb, MTP), serial (ttyUSB, ttyACM), vm (kvm, vhost-net, vhost-vsock, net/tun — виртуальные машины) или одно устройство usb:<производитель>:<модель>[:<серийный>] — все его узлы; что подключено — cellward devices. Действует для программ, запущенных после изменения; устройство, подключённое позже, видно после перезапуска программы.";
       };
       permissions.camera = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;

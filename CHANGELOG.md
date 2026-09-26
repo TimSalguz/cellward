@@ -95,6 +95,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   zone's camera setting applies from the next launch on: no restart of the
   zone (and `camera` is no longer in `restart_needed`).
 
+- **A zone keeps only the basics and the GPU of `/dev`** — default-deny
+  (`docs/PERMISSIONS.md` §11.12, `docs/LEAK-MODEL.md` §19): every other
+  device node of the devtmpfs, character or block, is covered with
+  `/dev/null`, now and when it appears, in any directory, by no list of
+  names. A list of what to hide had missed what is open to everyone:
+  `/dev/kvm`, `/dev/vhost-net`, `/dev/vhost-vsock`, `/dev/net/tun`,
+  `/dev/vfio/vfio`, `/dev/kmsg`, `/dev/udmabuf`. Kept: `null`, `zero`,
+  `full`, `random`, `urandom`, `tty`, `ptmx`, `fuse`, `ntsync`, `dri/*`
+  and NVIDIA's `nvidia<N>`, `nvidiactl`, `nvidia-modeset`, `nvidia-uvm`,
+  `nvidia-uvm-tools`. A program that needs another node is given it by a
+  grant. The device set `vm` gives `kvm`, `vhost-net`, `vhost-vsock` and
+  `net/tun` (Nix `permissions.devices`, `cellward container devices`).
 - **Devices given to a container** (`docs/PERMISSIONS.md` §11.12):
   `programs.cellward.containers.<name>.permissions.devices`, `cellward
   container devices <c> [add|rm <device>]`, `containers[].devices` in
@@ -185,8 +197,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   video capture's other nodes (`v4l-subdev*`, `v4l-touch*`, `radio*`,
   `vbi*`, `swradio*` — with the camera setting) and TV tuners (`/dev/dvb`,
   under a tmpfs, like `/dev/snd` — now also when it appears after the zone
-  is up); `/dev/input` and `/dev/bus/usb` are hidden whole. Left open:
-  the GPU (`/dev/dri`) and `/dev/udmabuf`. Security keys (FIDO),
+  is up); `/dev/input` and `/dev/bus/usb` are hidden whole. Security keys (FIDO),
   gamepads, phones and serial adapters no longer work in a zone until they
   can be given to a container on purpose (device sets: to come).
 - **The bus filter records a portal's refusal of the zone's id before the

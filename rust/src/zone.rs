@@ -2812,16 +2812,20 @@ const PRIVATE_TMP: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
 /// plugged in later is covered in each — let or not: plug it in first.
 /// Fatal: a zone that cannot hide them records without asking.
 ///
-/// And the rest logind gives the session's user an ACL on (the `uaccess`
-/// tag; audit 2026-09-26, from inside a zone): `uinput` — a program made a
-/// virtual keyboard and typed into any window of the host, past every
-/// restriction of the compositor —, `rfkill` (the host's radios off),
-/// `i2c-*` (monitors, lighting, EEPROMs on the boards), the consoles
-/// `tty<N>`, `hidraw*` (security keys, controllers), serial adapters
-/// (`ttyUSB*`, `ttyACM*`), every node of `/dev/input` and `/dev/bus/usb` —
-/// `/dev/null` over each, by the same watcher —: a zone's programs get their
-/// input from the compositor, and a device goes into a container on
-/// purpose, not by the ACL (`docs/PERMISSIONS.md` §11.12).
+/// And everything else of `/dev` but a short list: default-deny (owner,
+/// 2026-09-26). What logind gives the session's user an ACL on (the
+/// `uaccess` tag; audit 2026-09-26, from inside a zone) showed why: `uinput`
+/// — a program made a virtual keyboard and typed into any window of the
+/// host, past every restriction of the compositor —, `rfkill`, `i2c-*`, the
+/// consoles, `hidraw*`, serial adapters, `/dev/input`, `/dev/bus/usb`; and
+/// what is open to everyone — `kvm`, `vhost-net`, `vhost-vsock`, `net/tun`,
+/// `vfio/vfio`, `kmsg` — turned up only when looked for. A list of what to
+/// hide misses what nobody thought of, a new kernel's device, a driver's; so
+/// a zone keeps [`allowed_node`]'s and covers every other device node of the
+/// devtmpfs, whatever its name: `/dev/null` over each, now and, by a watcher,
+/// when it appears. A zone's programs get their input from the compositor,
+/// and a device goes into a container on purpose, by a grant
+/// (`docs/PERMISSIONS.md` §11.12).
 fn hide_devices(zone: &Zone) -> Result<(), String> {
     share_mount(Path::new("/dev")).map_err(|e| {
         format!("cannot share /dev: {e} — a device plugged in later would be in reach")
@@ -2835,59 +2839,49 @@ fn hide_devices(zone: &Zone) -> Result<(), String> {
     // node a launch is given (`profile::give_devices`) is then the device's
     // own entry, gone when the device goes — a bind would keep its inode,
     // which opens whatever device gets its number next.
-    // The watch first, the listing second: nothing plugged in between is lost.
-    let no_watch = |e: io::Error| {
-        format!("no watch on /dev ({e}) — a device plugged in later would be in reach")
+    let dev = {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata("/dev")
+            .map_err(|e| format!("cannot read /dev: {e}"))?
+            .dev()
     };
-    let watch = sys::DirWatch::new().map_err(no_watch)?;
-    watch.add(Path::new("/dev")).map_err(no_watch)?;
-    for dir in WATCHED_DIRS {
-        let dir = Path::new(dir);
-        if dir.is_dir() {
-            watch.add(dir).map_err(no_watch)?;
-        }
-    }
-    for bus in usb_buses() {
-        watch.add(&bus).map_err(no_watch)?;
-    }
-    // Each node as it is before its cover: what a reference to it holds
-    // (`device_guard`), for when it is gone.
-    let mut known: std::collections::HashMap<PathBuf, crate::device_guard::Seen> =
-        Default::default();
-    for node in hidden_nodes() {
-        if let Some(seen) = crate::device_guard::seen(&node) {
-            known.insert(node.clone(), seen);
-        }
-        cover_node(&node)?;
-    }
+    let watch = sys::DirWatch::new().map_err(|e| {
+        format!("no watch on /dev ({e}) — a device plugged in later would be in reach")
+    })?;
     let name = zone.name().into_owned();
-    let guard = crate::device_guard::start(name.clone());
-    thread::spawn(move || {
-        let mut watcher = DeviceWatch {
-            name,
-            watch,
-            known,
-            guard,
-        };
-        loop {
-            match watcher.watch.events() {
-                Ok(events) => {
-                    for event in events {
-                        watcher.handle(event);
-                    }
+    let mut watcher = DeviceWatch {
+        name,
+        watch,
+        dev,
+        known: Default::default(),
+        guard: crate::device_guard::start(zone.name().into_owned()),
+    };
+    // Fatal here: a zone that cannot cover them leaves them in reach.
+    let failed = watcher.watch_tree(Path::new("/dev"));
+    if !failed.is_empty() {
+        return Err(format!(
+            "{} — a device would be in reach of the zone's programs",
+            failed.join("; ")
+        ));
+    }
+    thread::spawn(move || loop {
+        match watcher.watch.events() {
+            Ok(events) => {
+                for event in events {
+                    watcher.handle(event);
                 }
-                Err(e) => {
-                    // Not given up: what happened meanwhile is looked at as
-                    // after an overflow.
-                    eprintln!("zone {}: the device watch failed ({e})", watcher.name);
-                    thread::sleep(Duration::from_secs(1));
-                    watcher.handle(sys::DirEvent::Overflow);
-                }
+            }
+            Err(e) => {
+                // Not given up: what happened meanwhile is looked at as
+                // after an overflow.
+                eprintln!("zone {}: the device watch failed ({e})", watcher.name);
+                thread::sleep(Duration::from_secs(1));
+                watcher.handle(sys::DirEvent::Overflow);
             }
         }
     });
     println!(
-        "zone {}: sound, camera, input and raw devices hidden",
+        "zone {}: every device but the basics and the GPU hidden",
         zone.name()
     );
     Ok(())
@@ -2896,8 +2890,55 @@ fn hide_devices(zone: &Zone) -> Result<(), String> {
 /// Directories of `/dev` hidden whole, under a tmpfs.
 const HIDDEN_DIRS: [&str; 3] = ["/dev/snd", "/dev/v4l", "/dev/dvb"];
 
-/// Directories of `/dev` watched besides `/dev` itself, where they are.
-const WATCHED_DIRS: [&str; 3] = ["/dev/input", "/dev/bus", "/dev/bus/usb"];
+/// The nodes of `/dev` every program of a zone keeps: what any program
+/// takes for granted — `null`, `zero`, `full`, `random`, `urandom`, `tty`
+/// (its own terminal), `ptmx` —, `fuse` (an AppImage mounts itself),
+/// `ntsync` (Wine's and Proton's locks, nothing shared), and the GPU:
+/// `dri/*` and NVIDIA's `nvidia<N>`, `nvidiactl`, `nvidia-modeset`,
+/// `nvidia-uvm`, `nvidia-uvm-tools` — nothing draws without them. Anything
+/// else is covered; a container is given more by a grant.
+pub(crate) fn allowed_node(path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix("/dev") else {
+        return false;
+    };
+    let parts: Vec<&str> = rel.iter().map(|c| c.to_str().unwrap_or("")).collect();
+    match parts.as_slice() {
+        [name] => {
+            matches!(
+                *name,
+                "null"
+                    | "zero"
+                    | "full"
+                    | "random"
+                    | "urandom"
+                    | "tty"
+                    | "ptmx"
+                    | "fuse"
+                    | "ntsync"
+                    | "nvidiactl"
+                    | "nvidia-modeset"
+                    | "nvidia-uvm"
+                    | "nvidia-uvm-tools"
+            ) || name
+                .strip_prefix("nvidia")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        }
+        ["dri", name] => !name.is_empty(),
+        _ => false,
+    }
+}
+
+/// Whether a node at `path` may have been in a program's reach — given to a
+/// container (`devices::grantable_path`), or a camera's — and so is watched
+/// after it goes (`device_guard`). Every other node was covered in every
+/// namespace of the zone from the start.
+fn guarded_path(path: &Path) -> bool {
+    crate::devices::grantable_path(path)
+        || (path.parent() == Some(Path::new("/dev"))
+            && path
+                .file_name()
+                .is_some_and(|n| is_capture_node(&n.to_string_lossy())))
+}
 
 /// A tmpfs over `dir` of `/dev`, where it is.
 fn hide_dir(dir: &Path) -> Result<(), String> {
@@ -2923,7 +2964,11 @@ fn hide_dir(dir: &Path) -> Result<(), String> {
 struct DeviceWatch {
     name: String,
     watch: sys::DirWatch,
-    /// Each node covered, as it was before its cover.
+    /// The devtmpfs's device: a directory of another file system below
+    /// `/dev` — `pts`, `shm`, our tmpfs — is not looked into.
+    dev: u64,
+    /// Each node covered that a program may have had ([`guarded_path`]), as
+    /// it was before its cover.
     known: std::collections::HashMap<PathBuf, crate::device_guard::Seen>,
     /// The worker that looks into the zone's programs.
     guard: std::sync::mpsc::Sender<crate::device_guard::Job>,
@@ -2932,32 +2977,32 @@ struct DeviceWatch {
 impl DeviceWatch {
     fn handle(&mut self, event: sys::DirEvent) {
         match event {
-            sys::DirEvent::Appeared(path) if path.parent() == Some(Path::new("/dev")) => {
-                let one_of = |dirs: &[&str]| dirs.iter().any(|d| Path::new(d) == path);
-                if one_of(&HIDDEN_DIRS) {
+            sys::DirEvent::Appeared(path) => {
+                if HIDDEN_DIRS.iter().any(|d| Path::new(d) == path) {
                     // A sound card, a camera, a tuner plugged into a machine
                     // that had none.
                     if let Err(e) = hide_dir(&path) {
                         eprintln!("zone {}: {e}", self.name);
                     }
-                } else if one_of(&WATCHED_DIRS) {
-                    self.watch_dir(&path);
-                } else if hidden_path(&path) {
-                    self.cover(&path);
+                    return;
+                }
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    return;
+                };
+                if meta.is_dir() {
+                    for e in self.watch_tree(&path) {
+                        eprintln!("zone {}: {e}", self.name);
+                    }
+                } else if is_device(&meta) && !allowed_node(&path) {
+                    if let Err(e) = self.cover(&path) {
+                        eprintln!("zone {}: {e}", self.name);
+                    }
                 }
             }
-            sys::DirEvent::Appeared(path) if WATCHED_DIRS.iter().any(|d| Path::new(d) == path) => {
-                self.watch_dir(&path);
-            }
-            sys::DirEvent::Appeared(path) if path.parent() == Some(Path::new("/dev/bus/usb")) => {
-                // A new bus: watched too, and what is on it covered.
-                self.watch_dir(&path);
-            }
-            sys::DirEvent::Appeared(path) if hidden_path(&path) => self.cover(&path),
             // A device gone: wherever a sandbox still has it bound, /dev/null
             // over the bind; whoever still holds it, killed if another device
             // gets its number.
-            sys::DirEvent::Gone(path) if hidden_path(&path) => {
+            sys::DirEvent::Gone(path) if guarded_path(&path) => {
                 let seen = self.known.remove(&path);
                 let _ = self.guard.send(crate::device_guard::Job::Gone(path, seen));
             }
@@ -2966,41 +3011,52 @@ impl DeviceWatch {
         }
     }
 
-    /// A directory that may hold nodes: watched, then what is in it covered
-    /// — in that order, so nothing that appears in between is lost.
-    fn watch_dir(&mut self, dir: &Path) {
-        if let Err(e) = self.watch.add(dir) {
-            eprintln!("zone {}: no watch on {} ({e})", self.name, dir.display());
-        }
-        if dir == Path::new("/dev/bus") {
-            let usb = Path::new("/dev/bus/usb");
-            if usb.is_dir() {
-                self.watch_dir(usb);
+    /// `dir` of the devtmpfs and every directory below it watched — each
+    /// before it is listed, so nothing that appears meanwhile is lost — and
+    /// every device node in them not allowed covered. What failed.
+    fn watch_tree(&mut self, dir: &Path) -> Vec<String> {
+        use std::os::unix::fs::MetadataExt;
+        let mut failed = Vec::new();
+        let mut dirs = vec![dir.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            // Another file system's (`pts`, `shm`, a tmpfs of ours): not ours.
+            match fs::symlink_metadata(&dir) {
+                Ok(meta) if meta.dev() == self.dev => {}
+                _ => continue,
             }
-            return;
-        }
-        if dir == Path::new("/dev/bus/usb") {
-            for bus in usb_buses() {
-                self.watch_dir(&bus);
+            if let Err(e) = self.watch.add(&dir) {
+                failed.push(format!("no watch on {} ({e})", dir.display()));
             }
-            return;
+            for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    dirs.push(path);
+                } else if is_device(&meta) && !allowed_node(&path) {
+                    if let Err(e) = self.cover(&path) {
+                        failed.push(e);
+                    }
+                }
+            }
         }
-        for node in char_nodes(dir) {
-            self.cover(&node);
-        }
+        failed
     }
 
-    /// `/dev/null` over a node; what it was, told to the worker.
-    fn cover(&mut self, path: &Path) {
-        let seen = crate::device_guard::seen(path);
-        if let Err(e) = cover_node(path) {
-            eprintln!("zone {}: {e}", self.name);
-        }
+    /// `/dev/null` over a node; what it was, if a program may have had it,
+    /// told to the worker.
+    fn cover(&mut self, path: &Path) -> Result<(), String> {
+        let seen = guarded_path(path)
+            .then(|| crate::device_guard::seen(path))
+            .flatten();
+        let covered = cover_node(path);
         if let Some(seen) = seen {
             self.known.insert(path.to_path_buf(), seen.clone());
             let job = crate::device_guard::Job::Appeared(path.to_path_buf(), seen);
             let _ = self.guard.send(job);
         }
+        covered
     }
 
     /// What happened is not known: a node covered before and not there any
@@ -3029,23 +3085,17 @@ impl DeviceWatch {
                 }
             }
         }
-        for dir in WATCHED_DIRS {
-            let dir = Path::new(dir);
-            if dir.is_dir() {
-                if let Err(e) = self.watch.add(dir) {
-                    eprintln!("zone {}: no watch on {} ({e})", self.name, dir.display());
-                }
-            }
-        }
-        for bus in usb_buses() {
-            if let Err(e) = self.watch.add(&bus) {
-                eprintln!("zone {}: no watch on {} ({e})", self.name, bus.display());
-            }
-        }
-        for node in hidden_nodes() {
-            self.cover(&node);
+        for e in self.watch_tree(Path::new("/dev")) {
+            eprintln!("zone {}: {e}", self.name);
         }
     }
+}
+
+/// A device node, character or block.
+fn is_device(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    let kind = meta.file_type();
+    kind.is_char_device() || kind.is_block_device()
 }
 
 /// Whether `dir` is a tmpfs's root.
@@ -3060,57 +3110,6 @@ fn is_tmpfs(dir: &Path) -> bool {
     }
 }
 
-/// The bus directories of `/dev/bus/usb`.
-fn usb_buses() -> Vec<PathBuf> {
-    fs::read_dir("/dev/bus/usb")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect()
-}
-
-/// The character devices directly in `dir`.
-fn char_nodes(dir: &Path) -> Vec<PathBuf> {
-    use std::os::unix::fs::FileTypeExt;
-    fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_char_device()))
-        .map(|e| e.path())
-        .collect()
-}
-
-/// Every node the zone covers ([`hidden_path`]) that is there now.
-fn hidden_nodes() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = fs::read_dir("/dev")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| is_hidden_node(&e.file_name().to_string_lossy()))
-        .map(|e| e.path())
-        .collect();
-    out.extend(char_nodes(Path::new("/dev/input")));
-    for bus in usb_buses() {
-        out.extend(char_nodes(&bus));
-    }
-    out
-}
-
-/// Whether `path` is — or was — a node the zone covers: one of
-/// [`is_hidden_node`]'s in `/dev`, anything in `/dev/input`, anything on a bus
-/// of `/dev/bus/usb`.
-fn hidden_path(path: &Path) -> bool {
-    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-        return false;
-    };
-    (parent == Path::new("/dev") && is_hidden_node(&name.to_string_lossy()))
-        || parent == Path::new("/dev/input")
-        || parent.parent() == Some(Path::new("/dev/bus/usb"))
-}
-
 /// `dir` a shared mount in this (otherwise private) mount namespace: a bind
 /// of itself first where it is no mount of its own.
 fn share_mount(dir: &Path) -> io::Result<()> {
@@ -3119,22 +3118,6 @@ fn share_mount(dir: &Path) -> io::Result<()> {
     }
     sys::mount(dir.as_os_str(), dir, "", libc::MS_BIND | libc::MS_REC, "")?;
     sys::mount(OsStr::new("none"), dir, "", libc::MS_SHARED, "")
-}
-
-/// A node of `/dev` no zone's program opens by the session's ACL: a camera's,
-/// and the rest of [`hide_devices`]' list.
-pub(crate) fn is_hidden_node(name: &str) -> bool {
-    let numbered = |prefix: &str| {
-        name.strip_prefix(prefix)
-            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-    };
-    is_capture_node(name)
-        || matches!(name, "uinput" | "rfkill")
-        // Raw HID, I²C, consoles, serial adapters; optical drives (`sr`, and
-        // their SCSI generic `sg`), FireWire.
-        || ["hidraw", "i2c-", "tty", "ttyUSB", "ttyACM", "sr", "sg", "fw"]
-            .iter()
-            .any(|prefix| numbered(prefix))
 }
 
 /// The nodes of video capture — what the camera setting gives: a camera's
@@ -3160,11 +3143,10 @@ pub(crate) fn is_capture_node(name: &str) -> bool {
 /// `/dev/null` over a device node, unless it is not one (anything else is
 /// left alone) or is covered already.
 fn cover_node(node: &Path) -> Result<(), String> {
-    use std::os::unix::fs::FileTypeExt;
     let Ok(meta) = fs::symlink_metadata(node) else {
         return Ok(());
     };
-    if !meta.file_type().is_char_device() {
+    if !is_device(&meta) {
         return Ok(());
     }
     // /dev/null already: covered.
@@ -5125,31 +5107,63 @@ mod tests {
                 && !is_capture_node("videox")
                 && !is_capture_node("vhost-net")
         );
-        // What the session's ACL opens besides, and not the terminal a
-        // program has, nor the GPU, nor what everyone opens anyway.
-        for hidden in [
-            "video3",
-            "uinput",
-            "rfkill",
-            "i2c-5",
-            "tty1",
-            "tty63",
-            "hidraw0",
-            "ttyUSB0",
-            "ttyACM2",
-            "sr0",
-            "sg4",
-            "fw1",
-            "vbi0",
-            "v4l-subdev0",
-        ] {
-            assert!(is_hidden_node(hidden), "{hidden}");
-        }
+        // Default-deny: the basics and the GPU kept, whatever else there is
+        // covered — by no list of names, so a device nobody thought of too.
         for kept in [
-            "tty", "ttyS0", "null", "dri", "nvidia0", "hidraw", "i2c-", "uinputx", "fuse", "sda",
-            "sda1", "fwx", "udmabuf",
+            "/dev/null",
+            "/dev/zero",
+            "/dev/full",
+            "/dev/random",
+            "/dev/urandom",
+            "/dev/tty",
+            "/dev/ptmx",
+            "/dev/fuse",
+            "/dev/ntsync",
+            "/dev/dri/card1",
+            "/dev/dri/renderD128",
+            "/dev/nvidia0",
+            "/dev/nvidiactl",
+            "/dev/nvidia-modeset",
+            "/dev/nvidia-uvm",
         ] {
-            assert!(!is_hidden_node(kept), "{kept}");
+            assert!(allowed_node(Path::new(kept)), "{kept}");
+        }
+        for hidden in [
+            "/dev/kvm",
+            "/dev/vhost-net",
+            "/dev/vhost-vsock",
+            "/dev/net/tun",
+            "/dev/vfio/vfio",
+            "/dev/kmsg",
+            "/dev/uinput",
+            "/dev/udmabuf",
+            "/dev/tty1",
+            "/dev/console",
+            "/dev/hidraw0",
+            "/dev/input/event3",
+            "/dev/bus/usb/001/002",
+            "/dev/nvidia-caps/nvidia-cap2",
+            "/dev/nvidiax",
+            "/dev/snd/pcmC0D0c",
+            "/dev/sda",
+            "/dev/weird0",
+            "/dev/nullx",
+            "/devnull",
+            "/tmp/null",
+        ] {
+            assert!(!allowed_node(Path::new(hidden)), "{hidden}");
+        }
+        // Watched after they go: what a grant or the camera may have given.
+        for guarded in [
+            "/dev/hidraw3",
+            "/dev/video0",
+            "/dev/input/js0",
+            "/dev/bus/usb/001/002",
+        ] {
+            assert!(guarded_path(Path::new(guarded)), "{guarded}");
+        }
+        for not in ["/dev/tty1", "/dev/sda", "/dev/weird0"] {
+            assert!(!guarded_path(Path::new(not)), "{not}");
         }
         // PipeWire's unrestricted socket, for the session manager: no zone,
         // an audio manager neither.

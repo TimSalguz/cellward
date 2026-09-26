@@ -1933,6 +1933,17 @@ let
                   hp,
                   f"sh -c 'test ! -c /dev/{node} || test \"$(stat -c %t:%T /dev/{node})\" = 1:3'",
               )
+          # Default-deny: whatever is not the basics or the GPU is covered by
+          # no name — a node nobody listed, planted after the zone came up,
+          # and one open to everyone on the host from the start (net/tun) —;
+          # the basics stay what they are.
+          machine.succeed("mknod -m 666 /dev/weird9 c 240 20")
+          machine.wait_until_succeeds(
+              f"su -l alice -c \"nsenter --preserve-credentials -U -n -m -t {hp} -- stat -c %t:%T /dev/weird9\" | grep -qx 1:3",
+              timeout=30,
+          )
+          out = in_zone(hp, "stat -c %t:%T /dev/net/tun /dev/zero /dev/urandom /dev/tty").split()
+          assert out == ["1:3", "1:5", "1:9", "5:0"], f"default-deny: {out}"
           # Given to a container on purpose (docs/PERMISSIONS.md §11.12): a
           # security key by its set, a serial adapter by its set, a USB
           # device by what it is — udev's word on each planted here. Only
@@ -1964,6 +1975,10 @@ let
           alice("cellward container devices vmdev rm serial")
           out = alice("cellward run vmherm --container vmdev -- stat -c %t:%T /dev/ttyUSB9").strip()
           assert out == "1:3", f"a device taken back: {out}"
+          # The vm set: tun (and kvm, vhost where the VM has them).
+          alice("cellward container devices vmdev add vm")
+          out = alice("cellward run vmherm --container vmdev -- stat -c %t:%T /dev/net/tun").strip()
+          assert out == "a:c8", f"the vm set: {out}"
           alice("cellward container rm vmdev")
           # A device gone while a sandbox has it bound: the zone's holder
           # covers the bind there before another device can take its number
@@ -2007,7 +2022,7 @@ let
           alice("systemctl --user stop sbwait.service || true")
           alice("cellward container rm vmsbdev")
           machine.succeed(
-              "rm -f /dev/hidraw8 /dev/hidraw9 /dev/input/js8 /dev/input/js9 /dev/bus/usb/009/001 /dev/ttyUSB9 "
+              "rm -f /dev/hidraw8 /dev/hidraw9 /dev/input/js8 /dev/input/js9 /dev/bus/usb/009/001 /dev/ttyUSB9 /dev/weird9 "
               "/run/udev/data/c240:9 /run/udev/data/c189:1024 && "
               "rmdir /dev/bus/usb/009 || true"
           )

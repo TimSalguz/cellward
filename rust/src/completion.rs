@@ -289,7 +289,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             "container" if pos == 4 && word(2) == "devices" => strs(&mut out, &["add", "rm"]),
             "container" if pos == 5 && word(2) == "devices" => strs(
                 &mut out,
-                &["games", "security-keys", "phone", "serial", "usb:"],
+                &["games", "security-keys", "phone", "serial", "vm", "usb:"],
             ),
             "devices" if pos == 2 => strs(&mut out, &["--json"]),
             "container" if pos == 5 && word(2) == "set" && word(4) == "camera" => {
