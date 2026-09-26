@@ -249,6 +249,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A zone's words stay words** (a night's hunt, 2026-09-27). A request
+  for another network names it by a zone's name only: a network name with
+  a line break could have written a rule of its own into `broker-always`
+  (a forged "always allow"), and a rule line with a line break or tab in
+  any field is not written at all. The journal's human form shows the
+  zone's words with control and bidi characters as `·` — an escape
+  sequence a zone wrote into a line of its own no longer reaches the
+  terminal. The CLI's zone verbs (`up`, `down`, `status`, `lock`,
+  `unlock`, `hermetic`, `check`, `rm`) take a zone's name only — `rm .`
+  or `status ../x` named directories that are no zone's — and `forget`
+  takes a program's name as the picker keeps it, never a path.
 - **A hand-over is told by the program's windows, not by five seconds**
   (the owner, 2026-09-26/27: no fixed waits a slow or busy machine
   breaks). A launch into the network a running program is in used to count

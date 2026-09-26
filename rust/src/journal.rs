@@ -172,7 +172,33 @@ pub fn tail(state: &Path, count: usize) -> Vec<String> {
 }
 
 /// How an event reads for a person.
+/// A value as a terminal may show it: every control character (escapes,
+/// line breaks, C1), and the characters that turn text around or break a
+/// line where none is seen, as `·`.
+fn shown(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            let hidden = c.is_control()
+                || matches!(
+                    c,
+                    '\u{200e}' | '\u{200f}' | '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
+                );
+            if hidden {
+                '·'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 fn human(fields: &[(String, String)]) -> String {
+    // What a zone put into a line (an app-id, a network's name, a reason)
+    // is shown, never obeyed: no terminal control, no line of its own, no
+    // text turned around.
+    let fields: Vec<(String, String)> = fields.iter().map(|(k, v)| (k.clone(), shown(v))).collect();
     let get = |key: &str| {
         fields
             .iter()
@@ -316,6 +342,21 @@ pub fn run(tools: &crate::tools::Tools, args: &[std::ffi::OsString]) -> u8 {
 
 #[cfg(test)]
 mod tests {
+
+    /// What a zone put into a line is shown, never obeyed.
+    #[test]
+    fn a_zones_words_are_shown_not_obeyed_by_the_terminal() {
+        let fields = vec![
+            ("event".to_owned(), "broker".to_owned()),
+            ("origin".to_owned(), "nl".to_owned()),
+            ("target".to_owned(), "de\u{1b}[2J\nforged line".to_owned()),
+            ("app".to_owned(), "\u{202e}evil".to_owned()),
+            ("decision".to_owned(), "refused".to_owned()),
+        ];
+        let line = human(&fields);
+        assert!(!line.contains('\u{1b}') && !line.contains('\n') && !line.contains('\u{202e}'));
+        assert!(line.contains("de·[2J·forged line"), "{line}");
+    }
     use super::*;
 
     #[test]

@@ -400,6 +400,11 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
         Some((app_id, argv)) => {
             match crate::launch::Selection::parse(&argv) {
                 Err(e) => format!("refused: {e}"),
+                // The network asked for is a zone's name, or none: it goes
+                // into the question and into a rule of "always" as it is.
+                Ok(selection) if !crate::cli::safe_zone_name(&selection.zone) => {
+                    "refused: сеть — не имя зоны".to_owned()
+                }
                 Ok(selection) => {
                     let target = selection.zone.to_string_lossy().into_owned();
                     let locked = match &origin {
@@ -679,8 +684,22 @@ fn plain_arguments(cmd: &[OsString]) -> bool {
 }
 
 /// The line "always" writes, and looks for.
-pub fn always_line(origin: &str, target: &str, program: &Path) -> String {
-    format!("{origin}\t{target}\t{}", program.display())
+/// A rule of "always", one line: `None` for a field that would break it —
+/// a line break would make it several rules, a tab in the origin or the
+/// program another rule. (`target` is the network and, after a tab, the
+/// container: its tab is the rule's own.)
+pub fn always_line(origin: &str, target: &str, program: &Path) -> Option<String> {
+    let program = program.display().to_string();
+    let lines = |f: &str| f.contains(['\n', '\r']);
+    if lines(origin)
+        || lines(target)
+        || lines(&program)
+        || origin.contains('\t')
+        || program.contains('\t')
+    {
+        return None;
+    }
+    Some(format!("{origin}\t{target}\t{program}"))
 }
 
 fn remembered(tools: &Tools, line: &str) -> bool {
@@ -752,7 +771,7 @@ fn ask(
     };
     let line = program
         .as_ref()
-        .map(|p| always_line(label, &target_and_container, p));
+        .and_then(|p| always_line(label, &target_and_container, p));
     if line.as_ref().is_some_and(|l| remembered(tools, l)) {
         return Ok(());
     }
@@ -1682,8 +1701,21 @@ mod tests {
         assert!(!may_remember(Path::new("/home/u/.local/bin/zen")));
         assert!(!may_remember(Path::new("/tmp/zen")));
         assert_eq!(
-            always_line("nl", "unconfined", Path::new("/nix/store/abc-zen/bin/zen")),
-            "nl\tunconfined\t/nix/store/abc-zen/bin/zen"
+            always_line("nl", "unconfined", Path::new("/nix/store/abc-zen/bin/zen")).as_deref(),
+            Some("nl\tunconfined\t/nix/store/abc-zen/bin/zen")
+        );
+        // A field that would make it another rule, or several: none kept.
+        assert_eq!(
+            always_line(
+                "nl",
+                "de\nnl\tunconfined",
+                Path::new("/nix/store/abc-zen/bin/zen")
+            ),
+            None
+        );
+        assert_eq!(
+            always_line("nl\tx", "de", Path::new("/nix/store/abc-zen/bin/zen")),
+            None
         );
         // The program as the host resolves it: the directory's links followed,
         // the name kept.
