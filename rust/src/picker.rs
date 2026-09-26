@@ -595,7 +595,10 @@ pub fn autostart_plan(
             _ => (Container::own_sandbox(key), true),
         }
     };
-    let (zone, network_guessed) = match bound_of(&container) {
+    // The network of the global default container is not a choice for this
+    // program: nobody made one.
+    let via_default = memory.pinned_profile.is_empty() && is_default(memory, &container);
+    let (zone, network_guessed) = match bound_of(&container).filter(|_| !via_default) {
         Some(network) => (network, false),
         None => ("offline".to_owned(), true),
     };
@@ -1062,10 +1065,14 @@ fn ask_window(
 /// container nobody pinned this program to? Its network is shared by every
 /// program that goes there unasked, and is not bound from one of them.
 fn shared_default(memory: &Memory, container: &Container, reprofile: Option<&str>) -> bool {
-    reprofile.is_none()
-        && memory.pinned_profile.is_empty()
-        && !matches!(memory.default_profile.as_str(), "" | "ask" | "main" | "own")
-        && container.selector() == memory.default_profile
+    reprofile.is_none() && memory.pinned_profile.is_empty() && is_default(memory, container)
+}
+
+/// Is this container the named global default (`sb:` or not)?
+fn is_default(memory: &Memory, container: &Container) -> bool {
+    let default = memory.default_profile.as_str();
+    !matches!(default, "" | "ask" | "main" | "own")
+        && container.selector() == default.strip_prefix(SANDBOX_PREFIX).unwrap_or(default)
 }
 
 /// "Always" for a network (`docs/PERMISSIONS.md` §11.8): the network is
@@ -1555,9 +1562,17 @@ pub fn main() -> ExitCode {
                 default.clone()
             };
 
-            match parse_net_choice(&answer) {
+            let choice = parse_net_choice(&answer);
+            // "↺ Спрашивать снова": the program's container pin goes — the
+            // network is the container's — and the container is asked right
+            // away, as "⚙ Сменить контейнер" does. Not a pass that falls back
+            // to whatever the memory had, the main home with nothing.
+            if choice == NetChoice::Unpin {
+                let _ = fs::remove_file(tools.state.join(".pinnedprofile").join(&key));
+            }
+            match choice {
                 NetChoice::Nothing => return ExitCode::SUCCESS,
-                NetChoice::ChooseContainer => {
+                NetChoice::ChooseContainer | NetChoice::Unpin => {
                     // The container is asked here and the network question is
                     // then asked again by a second pass of this same binary.
                     let Some(container) =
@@ -1584,15 +1599,6 @@ pub fn main() -> ExitCode {
                         selector
                     };
                     return reexec(&tools, &key, &args.cmd, Some(&handover));
-                }
-                // The program's container, not a network: a container's
-                // network is its own.
-                NetChoice::Unpin => {
-                    // And the last choice with it: it names the same container,
-                    // and the next pass would take it again.
-                    let _ = fs::remove_file(tools.state.join(".pinnedprofile").join(&key));
-                    let _ = fs::remove_file(tools.state.join(".lastprofile").join(&key));
-                    return reexec(&tools, &key, &args.cmd, None);
                 }
                 NetChoice::Pin(zone) => {
                     chosen = Some(true);
@@ -1940,9 +1946,15 @@ fn read_memory_with(tools: &Tools, key: &str, tidy: bool) -> Memory {
     };
     // The container this launch would use without a dialog, and its network.
     let would_use = container_without_dialog(&memory, key, |n| container_exists(tools, n), None);
-    if let Some(container) = crate::container::load(tools, &would_use.selector()) {
-        if let crate::container::Network::Named(network) = container.network.value {
-            memory.bound = network;
+    // A program that reaches the global default container with nothing
+    // pinned is a program nobody chose a network for: its network is asked,
+    // the container's own preselected — never taken unasked, or every new
+    // program would go there (`docs/PERMISSIONS.md` §11.8).
+    if !(memory.pinned_profile.is_empty() && is_default(&memory, &would_use)) {
+        if let Some(container) = crate::container::load(tools, &would_use.selector()) {
+            if let crate::container::Network::Named(network) = container.network.value {
+                memory.bound = network;
+            }
         }
     }
     memory
@@ -2496,6 +2508,15 @@ mod tests {
         let plan = autostart_plan(&memory, "tg", anything, unbound);
         assert_eq!(plan.zone, "offline");
         assert!(plan.network_guessed && !plan.container_guessed);
+        // The global default container's network is nobody's choice for an
+        // unassigned program: offline at login, bound or not.
+        let by_default = Memory {
+            default_profile: "work".into(),
+            ..Memory::default()
+        };
+        let plan = autostart_plan(&by_default, "tg", anything, bound);
+        assert_eq!(plan.zone, "offline");
+        assert!(plan.network_guessed);
 
         // The global container default is an answer, `ask` is not.
         for (default, selector) in [("main", ""), ("own", "app-tg"), ("work", "work")] {

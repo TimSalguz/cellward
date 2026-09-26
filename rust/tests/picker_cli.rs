@@ -541,9 +541,10 @@ fn a_throwaway_container_survives_the_re_exec_although_it_is_never_remembered() 
 }
 
 /// "↺ Спрашивать снова" drops the program's container pin — the network is
-/// the container's, and the program's own is gone.
+/// the container's — and asks the container right away: never a pass that
+/// falls back to the main home because nothing is remembered.
 #[test]
-fn asking_again_drops_the_container_pin() {
+fn asking_again_drops_the_container_pin_and_asks_the_container() {
     let home = Home::new("unpin");
     home.zone("nl");
     home.write(
@@ -551,7 +552,8 @@ fn asking_again_drops_the_container_pin() {
         "home = main\nnetwork = nl\n",
     );
     home.write("state/.pinnedprofile/firefox", "main-nl");
-    home.answers(&["unpin", "offline"]);
+    home.write("state/.lastprofile/firefox", "main-nl");
+    home.answers(&["unpin", "__ownsb__", "offline"]);
 
     // VPN_ZONE_ASK is how the dialog is reached for a pinned program at all.
     let out = home.run(&pick("firefox"), &[("VPN_ZONE_ASK", "1")]);
@@ -560,16 +562,57 @@ fn asking_again_drops_the_container_pin() {
     assert!(!home.path("state/.pinnedprofile/firefox").exists());
     assert_eq!(
         home.launched()[0],
-        ["run", "offline", "--", "firefox", "%u"]
+        [
+            "run",
+            "offline",
+            "--sandbox",
+            "app-firefox",
+            "--",
+            "firefox",
+            "%u"
+        ]
     );
-    // The unpin entry offered the way out by name.
+    let asked = home.asked();
+    // The unpin entry offered the way out by name; then the container.
     assert!(
-        home.asked()[0]
+        asked[0]
             .iter()
             .any(|a| a == "↺ Спрашивать снова (программа закреплена за контейнером main-nl)"),
         "{:?}",
-        home.asked()[0]
+        asked[0]
     );
+    assert!(
+        asked[1].contains(&"Профиль для «firefox»".to_owned()),
+        "{:?}",
+        asked[1]
+    );
+}
+
+/// The global default container, bound to a network, is no answer for a
+/// program nobody pinned to it: the network is asked, the container's
+/// preselected.
+#[test]
+fn a_bound_default_container_does_not_answer_for_an_unpinned_program() {
+    let home = Home::new("bound-default");
+    home.zone("nl");
+    home.profile("work");
+    home.write("config/containers/work/container.conf", "network = nl\n");
+    home.write("config/default-profile", "work");
+    home.answers(&["nl"]);
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(home.asked().len(), 1, "{:?}", home.asked());
+    assert_eq!(
+        home.launched()[0],
+        ["run", "nl", "--container", "work", "--", "firefox", "%u"]
+    );
+    // Pinned to it: its network, no question.
+    let _ = fs::remove_file(home.path("runner.log"));
+    let _ = fs::remove_file(home.path("kdialog.log"));
+    home.write("state/.pinnedprofile/firefox", "work");
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.asked().is_empty(), "{:?}", home.asked());
 }
 
 #[test]
