@@ -23,7 +23,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   app-id from the request, and what a program's name relaxes (no Wayland
   proxy, no compositor restriction, by `wayland-no-proxy` and
   `wayland-allow`) is not relaxed for it: the requester chose the command,
-  and so the name. `?` is no longer allowed in a container's name.
+  and so the name. `?` is no longer allowed in a container's name. A
+  container of the main home — run in the zone's own mount namespace — is
+  told by its launch, not taken for the zone's own programs.
 
 ### Changed (read before updating)
 - **The network is the container's, not the program's** (`rust/src/picker.rs`,

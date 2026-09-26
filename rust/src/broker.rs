@@ -280,24 +280,20 @@ fn in_zones_own_mounts(state: &Path, zone: &str, peer_mnt: Option<&Path>) -> boo
 }
 
 /// The container of `zone` the peer is a program of (`docs/PERMISSIONS.md`
-/// §11.9): `Some("")` for the zone's own mount namespace — a program with no
-/// container —, `Some(name)` for a program of a named container, `None` when
-/// it is neither or nothing is known (a throwaway or temporary container, a
-/// daemon that left its launch's tree).
+/// §11.9): `Some(name)` for a program of a named container, `Some("")` for
+/// one of the main profile — a launch of it, or, with no launch known, a
+/// program in the zone's own mount namespace —, `None` when nothing is known
+/// (a throwaway or temporary container, a daemon that left its launch's tree
+/// into a namespace of its own). A container of the main home runs in the
+/// zone's own namespace too: it is told by its launch, not by the namespace.
 ///
-/// A program with no container is in the zone's own mount namespace; one of a
-/// container is not — its launch took one of its own (`profile-run`, bwrap),
-/// which a program cannot leave (`setns` wants capabilities it does not
-/// have). Which container: the one a launch of which, in that zone, the peer
+/// Which container: the one a launch of which, in that zone, the peer
 /// descends from — the launcher recorded in the registry, taken only with its
 /// start time on record and the same (`registry::launched`: a number that
 /// went to somebody else is nobody's launch), and the chain of parents read
 /// with each held (`sys::descends_from`).
 fn container_of(tools: &Tools, zone: &str, peer: Option<&Peer>) -> Option<String> {
     let peer = peer?;
-    if in_zones_own_mounts(&tools.state, zone, Some(&peer.mnt)) {
-        return Some(String::new());
-    }
     let running = tools.state.join(".running");
     let launched = |pid| crate::registry::launched(&running, pid);
     // The launches of that zone whose container is known, by their pid.
@@ -316,15 +312,16 @@ fn container_of(tools: &Tools, zone: &str, peer: Option<&Peer>) -> Option<String
             // so itself — a launch of one container writes its name in both
             // places; one from before one container per launch (a layer
             // with a sandbox over it, filed under the layer) is nobody's.
-            // Under `__main__`, a sandbox from before one name per container
-            // (`sb:<name>`), and nothing else: the main profile is the zone's
-            // own namespace, a throwaway sandbox nobody's.
+            // Under `__main__`, the main profile (an empty selector) and a
+            // sandbox from before one name per container (`sb:<name>`); a
+            // throwaway sandbox is nobody's.
             let name = if dir_name == crate::registry::MAIN {
                 match record
                     .selector
                     .strip_prefix(crate::container::SANDBOX_PREFIX)
                 {
                     Some(_) => crate::container::canonical(tools, &record.selector),
+                    None if record.selector.is_empty() => Some(String::new()),
                     None => None,
                 }
             } else {
@@ -336,12 +333,24 @@ fn container_of(tools: &Tools, zone: &str, peer: Option<&Peer>) -> Option<String
             }
         }
     }
-    // The nearest launch the peer descends from, its parents read once.
-    crate::sys::ancestors(peer.pid, &peer.pidfd)
+    // The nearest launch the peer descends from, its parents read once —
+    // before the zone's own namespace: a container of the main home runs in
+    // that very namespace, and is its own container all the same.
+    let found = crate::sys::ancestors(peer.pid, &peer.pidfd)
         .into_iter()
-        .find_map(|pid| launches.get(&pid).cloned())
+        .find_map(|pid| launches.get(&pid).cloned());
+    match found {
         // A container that is still one: not a name left by one removed.
-        .filter(|name| crate::container::load(tools, name).is_some())
+        Some(name) if name.is_empty() || crate::container::load(tools, &name).is_some() => {
+            Some(name)
+        }
+        Some(_) => None,
+        // Nothing the registry knows: the zone's own programs are the ones in
+        // its own namespace — a link opened by its bus filter, a terminal of
+        // the zone's own.
+        None if in_zones_own_mounts(&tools.state, zone, Some(&peer.mnt)) => Some(String::new()),
+        None => None,
+    }
 }
 
 /// How the journal and "always" name where a request came from: the zone,

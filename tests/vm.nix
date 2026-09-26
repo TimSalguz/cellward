@@ -1869,6 +1869,21 @@ let
           machine.sleep(3)
           machine.fail("test -e /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/other-into")
           machine.fail("test -e /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/main-into")
+          # A container of the main home runs in the zone's own mount
+          # namespace, and is its own container all the same: into itself
+          # without a question, into the zone's main profile asked.
+          alice("cellward container create vmmainh --home main")
+          alice(
+              "cellward run vmherm --container vmmainh -- "
+              "cellward run vmherm --container vmmainh -- touch /home/alice/mainkind-same"
+          )
+          machine.wait_until_succeeds("test -e /home/alice/mainkind-same", timeout=30)
+          alice(
+              "cellward run vmherm --container vmmainh -- "
+              "sh -c '! cellward run vmherm -- touch /home/alice/mainkind-to-main'"
+          )
+          machine.sleep(3)
+          machine.fail("test -e /home/alice/mainkind-to-main")
           in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm cellward run direct -- touch /tmp/brokered-escape'")
           machine.sleep(3)
           machine.fail("test -e /tmp/brokered-escape")
@@ -1893,6 +1908,8 @@ let
           assert '"origin":"vmherm/vmlayer","target":"vmherm","app":"","decision":"started"' in out, out
           assert '"origin":"vmherm/vmlayer","target":"vmherm","app":"","decision":"refused"' in out, out
           assert '"origin":"vmherm/vmlayer2","target":"vmherm","app":"","decision":"refused"' in out, out
+          assert '"origin":"vmherm/vmmainh","target":"vmherm","app":"","decision":"started"' in out, out
+          assert '"origin":"vmherm/vmmainh","target":"vmherm","app":"","decision":"refused"' in out, out
           assert '"target":"unconfined","app":"","decision":"refused"' in out, out
           out = alice("cellward doctor vmherm --json")
           assert '{"id":"session-bus","level":"ok"' in out, out
