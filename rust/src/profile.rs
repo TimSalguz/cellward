@@ -426,7 +426,9 @@ fn own_group_only() -> io::Result<()> {
     Ok(())
 }
 
-/// Drop the ambient capability set before handing control to the program.
+/// Drop the ambient capability set before handing control to the program —
+/// and the inheritable one: `nsenter --keep-caps` fills both, and a binary
+/// with inheritable file capabilities would get them back in the zone.
 ///
 /// Errors are ignored deliberately: on a kernel without ambient capabilities
 /// (< 4.3) `prctl` answers EINVAL, and there is nothing to clear there anyway.
@@ -434,6 +436,44 @@ fn clear_ambient_capabilities() {
     // SAFETY: prctl with these two constants takes no pointers.
     unsafe {
         libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
+    }
+    clear_inheritable_capabilities();
+}
+
+/// `capget`/`capset`'s header and one of its two data words
+/// (`_LINUX_CAPABILITY_VERSION_3`).
+#[repr(C)]
+struct CapHeader {
+    version: u32,
+    pid: libc::c_int,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CapData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+/// The inheritable set emptied; the effective and permitted ones left as
+/// they are (a throwaway container is cleaned up after its program).
+fn clear_inheritable_capabilities() {
+    let mut header = CapHeader {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let mut data = [CapData::default(); 2];
+    // SAFETY: capget/capset with a version 3 header and two data words, as
+    // the kernel's ABI has them.
+    unsafe {
+        if libc::syscall(libc::SYS_capget, &mut header, data.as_mut_ptr()) != 0 {
+            return;
+        }
+        for word in &mut data {
+            word.inheritable = 0;
+        }
+        libc::syscall(libc::SYS_capset, &mut header, data.as_ptr());
     }
 }
 
@@ -570,11 +610,9 @@ fn give_capture() -> Result<(), String> {
         .flatten()
     {
         let name = entry.file_name();
-        if crate::zone::is_capture_node(&name.to_string_lossy())
-            && crate::devices::char_device(&entry.path()).is_some()
-        {
+        if crate::zone::is_capture_node(&name.to_string_lossy()) {
             let to = Path::new("/dev").join(&name);
-            crate::zone::give_node(&entry.path(), &to)
+            crate::zone::give_node(&entry.path(), &to, &|_, _| true)
                 .map_err(|e| format!("cannot give {}: {e}", to.display()))?;
         }
     }
@@ -593,22 +631,65 @@ fn give_capture() -> Result<(), String> {
 fn give_devices(passes: &[crate::devices::Pass]) {
     let udev = Path::new("/run/udev/data");
     let host = Path::new(crate::zone::DEVTMPFS);
+    let unwatched = crate::zone::unwatched();
     for pass in passes {
         let Ok(rel) = pass.path.strip_prefix("/dev") else {
             continue;
         };
         let from = host.join(rel);
-        match crate::devices::char_device(&from) {
-            Some((major, minor)) if pass.still(udev, major, minor) => {
-                if let Err(e) = crate::zone::give_node(&from, &pass.path) {
-                    eprintln!("profile-run: {} not given: {e}", pass.path.display());
-                }
-            }
-            Some(_) => eprintln!(
+        // Where the zone's watch does not look, nothing is given: a device
+        // gone there would stay bound.
+        if unwatched.iter().any(|dir| from.starts_with(dir)) {
+            eprintln!(
+                "profile-run: {} not given — the zone does not watch where it is",
+                pass.path.display()
+            );
+            continue;
+        }
+        let checked = |major, minor| pass.still(udev, major, minor);
+        match crate::zone::give_node(&from, &pass.path, &checked) {
+            Ok(true) => {}
+            Ok(false) => eprintln!(
                 "profile-run: {} is another device now — not given",
                 pass.path.display()
             ),
-            None => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!("profile-run: {} not given: {e}", pass.path.display()),
+        }
+    }
+}
+
+/// While it lives, what this process makes is the zone root's from the
+/// start (`setfsuid`/`setfsgid` 0 — `profile-run` has the zone's
+/// capabilities): made as the user, a directory of the zone's `/dev` would
+/// be the programs' to change until it was handed over.
+struct AsZoneRoot {
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+}
+
+impl AsZoneRoot {
+    /// `None` where it could not be.
+    fn enter() -> Option<Self> {
+        // SAFETY: get*id(2) cannot fail; setfs*id(2) take ids and return the
+        // previous ones — asked with -1, the current one, unchanged.
+        unsafe {
+            let (uid, gid) = (libc::getuid(), libc::getgid());
+            libc::setfsgid(0);
+            libc::setfsuid(0);
+            let now = (libc::setfsuid(u32::MAX), libc::setfsgid(u32::MAX));
+            let guard = Self { uid, gid };
+            (now == (0, 0)).then_some(guard)
+        }
+    }
+}
+
+impl Drop for AsZoneRoot {
+    fn drop(&mut self) {
+        // SAFETY: back to the ids this process has.
+        unsafe {
+            libc::setfsuid(self.uid);
+            libc::setfsgid(self.gid);
         }
     }
 }
@@ -649,15 +730,22 @@ pub fn run(args: Args) -> u8 {
             return EXIT_NOT_STARTED;
         }
     }
-    // The cameras, where this launch is let them: never fatal — a camera
-    // not given is one the program does not get.
-    if args.camera {
-        if let Err(e) = give_capture() {
-            eprintln!("profile-run: the cameras are not given: {e}");
+    // The cameras, where this launch is let them, and the devices its
+    // container is given: never fatal — what is not given, the program
+    // does not get.
+    if args.camera || !args.devices.is_empty() {
+        match AsZoneRoot::enter() {
+            Some(_root) => {
+                if args.camera {
+                    if let Err(e) = give_capture() {
+                        eprintln!("profile-run: the cameras are not given: {e}");
+                    }
+                }
+                give_devices(&args.devices);
+            }
+            None => eprintln!("profile-run: cannot act as the zone's root — no device given"),
         }
     }
-    // The devices its container is given.
-    give_devices(&args.devices);
     let mounted = if args.profile_dir.as_os_str().is_empty() {
         Vec::new()
     } else {

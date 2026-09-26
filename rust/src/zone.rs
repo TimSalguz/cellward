@@ -2801,6 +2801,21 @@ const PRIVATE_TMP: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
 /// launch the nodes it is let from it.
 pub const DEVTMPFS: &str = "/dev/.cellward/devtmpfs";
 
+/// The directories of the devtmpfs the zone's watch could not watch, a line
+/// each: `profile-run` gives nothing below them — a device gone there would
+/// stay bound. Beside [`DEVTMPFS`], out of the programs' reach too.
+const UNWATCHED: &str = "/dev/.cellward/unwatched";
+
+/// [`UNWATCHED`]'s directories.
+pub(crate) fn unwatched() -> Vec<PathBuf> {
+    fs::read_to_string(UNWATCHED)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
 /// A `/dev` of the zone's own: a tmpfs with the basics and the GPU
 /// ([`allowed_node`]) bound in from the devtmpfs, the terminals of its own,
 /// and nothing else (owner, 2026-09-26: default-deny).
@@ -2920,11 +2935,10 @@ fn own_dev(zone: &Zone) -> Result<(), String> {
                 let _ = std::os::unix::fs::symlink(target, &to);
             }
         } else if is_device(&meta) && allowed_node(&to) {
-            give_node(&from, &to).map_err(|e| fail(&format!("cannot give {}", to.display()), e))?;
+            give_node(&from, &to, &|_, _| true)
+                .map_err(|e| fail(&format!("cannot give {}", to.display()), e))?;
         } else if meta.is_dir() && name == "dri" {
-            fs::create_dir(&to)
-                .and_then(|()| sys::mount(from.as_os_str(), &to, "", libc::MS_BIND, ""))
-                .map_err(|e| fail("cannot give /dev/dri", e))?;
+            give_dri().map_err(|e| fail("cannot give /dev/dri", e))?;
         }
     }
     for (name, target) in [
@@ -2955,14 +2969,18 @@ fn own_dev(zone: &Zone) -> Result<(), String> {
         watch,
         dev: host_id,
         known: Default::default(),
+        unwatched: Default::default(),
         guard: crate::device_guard::start(zone.name().into_owned()),
     };
-    if let Some(e) = watcher
-        .watch_tree(host)
-        .into_iter()
-        .find(|e| e.starts_with("/dev:"))
-    {
-        return Err(format!("{e} — a device given and gone would stay given"));
+    // Fatal here: a directory not watched is one where a device given and
+    // gone would stay given (out of watches: raise
+    // fs.inotify.max_user_watches).
+    let failed = watcher.watch_tree(host);
+    if !failed.is_empty() {
+        return Err(format!(
+            "{} — a device given and gone would stay given",
+            failed.join("; ")
+        ));
     }
     thread::spawn(move || loop {
         match watcher.watch.events() {
@@ -2988,37 +3006,114 @@ fn own_dev(zone: &Zone) -> Result<(), String> {
 }
 
 /// `from`, a node of the devtmpfs, bound at `to` of a `/dev` of the zone's
-/// onto an empty stand-in of the zone's root (made where there is none, with
-/// the directories above it): nobody but it may remove the stand-in or
-/// put another file there.
-pub(crate) fn give_node(from: &Path, to: &Path) -> io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    // Each directory missing above it made, and made the root's, one by one
-    // from the top.
-    let missing: Vec<&Path> = to
+/// onto an empty stand-in of the zone's root, if `check` takes its number —
+/// `false` when it is not given. The node is opened once and checked, and
+/// what was opened is what is bound (`sys::clone_file`); one unlinked by the
+/// time it is bound is taken off again — the zone's watch may have missed
+/// its stand-in. The stand-in and every directory above it that is missing
+/// are made the zone root's (`profile-run` makes them with its fsuid 0 —
+/// [`crate::profile`]), with their modes set, not the umask's; one there
+/// already must be the root's and what it should be — nothing a program put.
+pub(crate) fn give_node(
+    from: &Path,
+    to: &Path,
+    check: &dyn Fn(u32, u32) -> bool,
+) -> io::Result<bool> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    let node: OwnedFd = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(from)?
+        .into();
+    let meta = File::from(node.try_clone()?).metadata()?;
+    let rdev = meta.rdev();
+    if !is_device(&meta) || !check(libc::major(rdev), libc::minor(rdev)) {
+        return Ok(false);
+    }
+    let foreign = || io::Error::new(io::ErrorKind::PermissionDenied, "not the zone's");
+    let roots = |p: &Path, dir: bool| {
+        fs::symlink_metadata(p).is_ok_and(|m| {
+            m.uid() == 0
+                && if dir {
+                    m.is_dir()
+                } else {
+                    m.file_type().is_file()
+                }
+        })
+    };
+    // The directories between `/dev` and it, from the top: each the root's,
+    // made where missing.
+    let mut dirs: Vec<&Path> = to
         .ancestors()
         .skip(1)
-        .take_while(|dir| fs::symlink_metadata(dir).is_err())
+        .take_while(|dir| *dir != Path::new("/dev"))
         .collect();
-    for dir in missing.into_iter().rev() {
-        fs::DirBuilder::new().mode(0o755).create(dir)?;
-        owned_by_root(dir)?;
+    dirs.reverse();
+    for dir in dirs {
+        match fs::create_dir(dir) {
+            Ok(()) => {
+                owned_by_root(dir)?;
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        if !roots(dir, true) {
+            return Err(foreign());
+        }
     }
-    if fs::symlink_metadata(to).is_err() {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o000)
-            .open(to)?;
-        owned_by_root(to)?;
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o000)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(to)
+    {
+        Ok(_) => owned_by_root(to)?,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
     }
-    sys::mount(from.as_os_str(), to, "", libc::MS_BIND, "")
+    // A stand-in, or a node bound here already (an allowed one, a device
+    // given twice): anything else — a link, a directory — is not ours.
+    let bound_already = fs::symlink_metadata(to).is_ok_and(|m| is_device(&m));
+    if !roots(to, false) && !bound_already {
+        return Err(foreign());
+    }
+    sys::attach_tree(&sys::clone_file(&node)?, to)?;
+    if File::from(node.try_clone()?).metadata()?.nlink() == 0 {
+        if let Ok(c) = std::ffi::CString::new(to.as_os_str().as_bytes()) {
+            // SAFETY: a NUL-terminated path and constant flags.
+            unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH | libc::UMOUNT_NOFOLLOW) };
+        }
+        return Ok(false);
+    }
+    Ok(true)
 }
 
-/// `path` the zone root's: what `profile-run` makes — as the user, with the
-/// zone's capabilities — would be the programs' to change otherwise.
+/// `path` the zone root's, where it is not already.
 fn owned_by_root(path: &Path) -> io::Result<()> {
     std::os::unix::fs::lchown(path, Some(0), Some(0))
+}
+
+/// `/dev/dri` of the devtmpfs bound at the zone's own — again, where it was
+/// there before: the directory of a driver loaded again, of a GPU plugged
+/// in, is another directory, and a bind of the old one shows it empty.
+fn give_dri() -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let (from, to) = (Path::new(DEVTMPFS).join("dri"), Path::new("/dev/dri"));
+    if let Ok(c) = std::ffi::CString::new(to.as_os_str().as_bytes()) {
+        // SAFETY: a NUL-terminated path and constant flags; until nothing is
+        // mounted there.
+        while unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH | libc::UMOUNT_NOFOLLOW) } == 0 {}
+    }
+    if !from.is_dir() {
+        return Ok(());
+    }
+    if fs::symlink_metadata(to).is_err() {
+        fs::create_dir(to)?;
+        fs::set_permissions(to, fs::Permissions::from_mode(0o755))?;
+    }
+    sys::mount(from.as_os_str(), to, "", libc::MS_BIND, "")
 }
 
 /// The nodes of `/dev` every program of a zone keeps: what any program
@@ -3080,6 +3175,8 @@ struct DeviceWatch {
     /// Each node a program may have had ([`guarded_path`]), by its path in
     /// the zone's `/dev`, as it was.
     known: std::collections::HashMap<PathBuf, crate::device_guard::Seen>,
+    /// The directories of the devtmpfs not watched ([`UNWATCHED`]).
+    unwatched: std::collections::BTreeSet<PathBuf>,
     /// The worker that looks into the zone's programs.
     guard: std::sync::mpsc::Sender<crate::device_guard::Job>,
 }
@@ -3102,6 +3199,13 @@ impl DeviceWatch {
                     for e in self.watch_tree(&host) {
                         eprintln!("zone {}: {e}", self.name);
                     }
+                    // The GPU's directory made again (a driver loaded, a
+                    // GPU plugged in): the zone's bind shows the old one.
+                    if host == Path::new(DEVTMPFS).join("dri") {
+                        if let Err(e) = give_dri() {
+                            eprintln!("zone {}: cannot give /dev/dri: {e}", self.name);
+                        }
+                    }
                 } else if is_device(&meta) {
                     self.appeared(&host);
                 }
@@ -3123,7 +3227,7 @@ impl DeviceWatch {
         };
         let root_level = path.parent() == Some(Path::new("/dev"));
         if root_level && allowed_node(&path) && fs::symlink_metadata(&path).is_err() {
-            if let Err(e) = give_node(host, &path) {
+            if let Err(e) = give_node(host, &path, &|_, _| true) {
                 eprintln!("zone {}: cannot give {}: {e}", self.name, path.display());
             }
         }
@@ -3141,6 +3245,12 @@ impl DeviceWatch {
     /// every bind on it away in every namespace; one a program may have had,
     /// told to the worker.
     fn gone(&mut self, path: PathBuf) {
+        if path == Path::new("/dev/dri") {
+            if let Err(e) = give_dri() {
+                eprintln!("zone {}: cannot take /dev/dri back: {e}", self.name);
+            }
+            return;
+        }
         let Ok(meta) = fs::symlink_metadata(&path) else {
             return self.follow_gone(path);
         };
@@ -3187,15 +3297,12 @@ impl DeviceWatch {
             }
             if let Err(e) = self.watch.add(&dir) {
                 if e.raw_os_error() != Some(libc::ENOENT) {
-                    let top = if dir == Path::new(DEVTMPFS) {
-                        "/dev: "
-                    } else {
-                        ""
-                    };
-                    failed.push(format!("{top}no watch on {} ({e})", dir.display()));
+                    failed.push(format!("no watch on {} ({e})", dir.display()));
+                    self.unwatched.insert(dir);
                 }
                 continue;
             }
+            self.unwatched.remove(&dir);
             for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
                 let path = entry.path();
                 let Ok(meta) = fs::symlink_metadata(&path) else {
@@ -3206,6 +3313,16 @@ impl DeviceWatch {
                 } else if is_device(&meta) {
                     self.appeared(&path);
                 }
+            }
+        }
+        let list: String = self
+            .unwatched
+            .iter()
+            .map(|d| format!("{}\n", d.display()))
+            .collect();
+        if fs::read_to_string(UNWATCHED).unwrap_or_default() != list {
+            if let Err(e) = fs::write(UNWATCHED, list) {
+                failed.push(format!("cannot note what is not watched: {e}"));
             }
         }
         failed

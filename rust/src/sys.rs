@@ -84,6 +84,25 @@ pub fn clone_tree(path: &Path) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
 
+/// A detached bind of the one file `fd` names (`open_tree(fd, "",
+/// OPEN_TREE_CLONE | AT_EMPTY_PATH)`): of what was opened and checked, not
+/// of whatever a path names by the time it is bound.
+pub fn clone_file(fd: &OwnedFd) -> io::Result<OwnedFd> {
+    use std::os::fd::AsRawFd;
+    const OPEN_TREE_CLONE: libc::c_uint = 1;
+    const AT_EMPTY_PATH: libc::c_uint = 0x1000;
+    let empty = cstring(b"")?;
+    let flags = OPEN_TREE_CLONE | AT_EMPTY_PATH | libc::O_CLOEXEC as libc::c_uint;
+    // SAFETY: open_tree(2) on a descriptor we hold, an empty NUL-terminated
+    // path; a new descriptor or -1.
+    let tree = unsafe { libc::syscall(libc::SYS_open_tree, fd.as_raw_fd(), empty.as_ptr(), flags) };
+    if tree < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the descriptor was just returned to us.
+    Ok(unsafe { OwnedFd::from_raw_fd(tree as i32) })
+}
+
 /// Attach a tree from [`clone_tree`] at `target` (`move_mount(2)`).
 pub fn attach_tree(tree: &OwnedFd, target: &Path) -> io::Result<()> {
     use std::os::fd::AsRawFd;

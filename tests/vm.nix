@@ -1931,8 +1931,38 @@ let
           assert out == ["none"] * len(hidden), f"default-deny: {dict(zip(hidden, out))}"
           out = in_zone(hp, nodes("/dev/null", "/dev/zero", "/dev/urandom", "/dev/tty")).split()
           assert out == ["1:3", "1:5", "1:9", "5:0"], f"the basics: {out}"
-          # The devtmpfs the zone keeps is out of its programs' reach.
-          in_zone(hp, "sh -c '! ls /dev/.cellward/devtmpfs'")
+          # The devtmpfs the zone keeps: there for the zone's root, out of
+          # its programs' reach — and of the root of a user namespace one
+          # makes.
+          in_zone_root(hp, "test -c /dev/.cellward/devtmpfs/null")
+          in_zone(hp, "sh -c 'test -d /dev/.cellward && ! ls /dev/.cellward'")
+          in_zone(hp, "unshare -Ur sh -c 'test -d /dev/.cellward && ! ls /dev/.cellward'")
+          # What the zone's own /dev is for: a program that made a mount
+          # namespace of its own, private, does not see a device plugged in
+          # after it did (covers on a shared devtmpfs did not reach it).
+          alice(
+              f"systemd-run --user --unit=nswait nsenter --preserve-credentials -U -n -m -t {hp} -- "
+              "unshare -Urm --propagation private sh -c 'touch /tmp/ns-ready; "
+              "while ! test -e /tmp/ns-go; do sleep 0.2; done; "
+              "if [ -e /dev/hidraw6 ]; then echo there; else echo none; fi > /tmp/ns-result'"
+          )
+          in_zone_q = lambda cmd: "su -l alice -c " + shlex.quote(
+              f"nsenter --preserve-credentials -U -n -m -t {hp} -- {cmd}"
+          )
+          machine.wait_until_succeeds(in_zone_q("test -e /tmp/ns-ready"), timeout=30)
+          machine.succeed("mknod -m 600 /dev/hidraw6 c 240 6 && chown alice /dev/hidraw6")
+          in_zone(hp, "touch /tmp/ns-go")
+          machine.wait_until_succeeds(in_zone_q("test -s /tmp/ns-result"), timeout=30)
+          out = in_zone(hp, "cat /tmp/ns-result").strip()
+          assert out == "none", f"a device plugged in later, in a program's own namespace: {out}"
+          # A GPU node loaded after the zone came up is given to it, and
+          # taken back when it goes.
+          machine.succeed("mknod -m 666 /dev/nvidia7 c 195 7")
+          machine.wait_until_succeeds(in_zone_q("test -c /dev/nvidia7"), timeout=30)
+          out = in_zone(hp, nodes("/dev/nvidia7")).strip()
+          assert out == "c3:7", f"a late GPU node: {out}"
+          machine.succeed("rm -f /dev/nvidia7")
+          machine.wait_until_succeeds(in_zone_q("test ! -e /dev/nvidia7"), timeout=30)
           # Terminals of its own: none of the host's — alice's own there —,
           # and one opened in the zone is named.
           machine.succeed("systemd-run --unit=hostpty su -l alice -c \"script -qfc 'sleep 600' /dev/null\"")
@@ -1975,6 +2005,22 @@ let
           alice("cellward container devices vmdev add vm")
           out = alice(f"cellward run vmherm --container vmdev -- {nodes('/dev/net/tun')}").strip()
           assert out == "a:c8", f"the vm set: {out}"
+          # A device given to a launch without a sandbox goes with the device:
+          # the zone unlinks the stand-in under its bind.
+          machine.succeed(
+              "printf 'E:ID_SECURITY_TOKEN=1\\nE:ID_VENDOR_ID=1050\\nE:ID_MODEL_ID=0407\\n' "
+              "> /run/udev/data/c240:8"
+          )
+          gone_upper = "/home/alice/.local/state/vpn-profiles/vmdev/home/upper"
+          alice(
+              "systemd-run --user --unit=gonewait cellward run vmherm --container vmdev -- "
+              "sh -c 'test -c /dev/hidraw8 && touch /home/alice/gone-given; "
+              "while [ -c /dev/hidraw8 ]; do sleep 0.2; done; touch /home/alice/gone-after; sleep 600'"
+          )
+          machine.wait_until_succeeds(f"test -e {gone_upper}/gone-given", timeout=60)
+          machine.succeed("rm -f /dev/hidraw8")
+          machine.wait_until_succeeds(f"test -e {gone_upper}/gone-after", timeout=30)
+          alice("systemctl --user stop gonewait.service || true")
           alice("cellward container rm vmdev")
           # A device gone while a sandbox has it bound: the zone's holder
           # covers the bind there before another device can take its number
@@ -2018,8 +2064,8 @@ let
           alice("systemctl --user stop sbwait.service || true")
           alice("cellward container rm vmsbdev")
           machine.succeed(
-              "rm -f /dev/hidraw8 /dev/hidraw9 /dev/input/js8 /dev/input/js9 /dev/bus/usb/009/001 /dev/ttyUSB9 /dev/weird9 "
-              "/run/udev/data/c240:9 /run/udev/data/c189:1024 && "
+              "rm -f /dev/hidraw6 /dev/hidraw8 /dev/hidraw9 /dev/input/js8 /dev/input/js9 /dev/bus/usb/009/001 /dev/ttyUSB9 /dev/weird9 "
+              "/run/udev/data/c240:8 /run/udev/data/c240:9 /run/udev/data/c189:1024 && "
               "rmdir /dev/bus/usb/009 || true"
           )
           # Input methods by their portals only: IBus's private bus is hidden,

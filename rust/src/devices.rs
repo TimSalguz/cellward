@@ -1,5 +1,5 @@
 //! Devices a container is given (`docs/PERMISSIONS.md` §11.12): what a zone
-//! hides from all its programs (`zone::hide_devices`) goes into a container
+//! keeps out of its `/dev` (`zone::own_dev`) goes into a container
 //! only on purpose — like a USB device into a virtual machine, without taking
 //! it from the host.
 //!

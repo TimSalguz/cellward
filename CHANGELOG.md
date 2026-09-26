@@ -110,9 +110,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   stand-in in its own mount namespace; when the device goes the zone
   unlinks the stand-in, and the kernel takes every bind on it away.
 - **A zone keeps only the basics and the GPU of `/dev`** — default-deny
-  (`docs/PERMISSIONS.md` §11.12, `docs/LEAK-MODEL.md` §19): every other
-  device node of the devtmpfs, character or block, is covered with
-  `/dev/null`, now and when it appears, in any directory, by no list of
+  (`docs/PERMISSIONS.md` §11.12, `docs/LEAK-MODEL.md` §19): no other
+  device node is in the zone's `/dev` (the entry above), by no list of
   names. A list of what to hide had missed what is open to everyone:
   `/dev/kvm`, `/dev/vhost-net`, `/dev/vhost-vsock`, `/dev/net/tun`,
   `/dev/vfio/vfio`, `/dev/kmsg`, `/dev/udmabuf`. Kept: `null`, `zero`,
@@ -206,14 +205,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   program of a zone made a virtual keyboard and typed into any window of
   the host —, `/dev/rfkill` (the host's radios off), `/dev/i2c-*`, the
   consoles `/dev/tty<N>`, `/dev/hidraw*`, `/dev/ttyUSB*`, `/dev/ttyACM*`,
-  optical drives (`/dev/sr*`, `/dev/sg*`), FireWire (`/dev/fw*`) are
-  covered with `/dev/null` in every zone, those plugged in later too, as are
-  video capture's other nodes (`v4l-subdev*`, `v4l-touch*`, `radio*`,
-  `vbi*`, `swradio*` — with the camera setting) and TV tuners (`/dev/dvb`,
-  under a tmpfs, like `/dev/snd` — now also when it appears after the zone
-  is up); `/dev/input` and `/dev/bus/usb` are hidden whole. Security keys (FIDO),
-  gamepads, phones and serial adapters no longer work in a zone until they
-  can be given to a container on purpose (device sets: to come).
+  optical drives (`/dev/sr*`, `/dev/sg*`), FireWire (`/dev/fw*`), video
+  capture's other nodes (`v4l-subdev*`, `v4l-touch*`, `radio*`, `vbi*`,
+  `swradio*` — given with the camera setting), TV tuners (`/dev/dvb`),
+  `/dev/input`, `/dev/bus/usb` are out of every zone's reach — those
+  plugged in later too (the zone's own `/dev`, above). Security keys
+  (FIDO), gamepads, phones and serial adapters work in a zone only given
+  to a container on purpose (device sets, above).
 - **The bus filter records a portal's refusal of the zone's id before the
   held calls go on** (`bus_filter::Conn::answered`): it was set after the
   wake-up, a race the test `a_refused_registration_leaves_the_connection_as_it_was`

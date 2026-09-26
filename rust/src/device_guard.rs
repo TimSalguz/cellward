@@ -22,8 +22,8 @@
 //!
 //! The zone's programs are the processes of its user namespace and of those
 //! below it ([`zone_processes`]), whatever network namespace they made. It
-//! all runs in a thread of its own ([`start`]), apart from the watch, which
-//! covers a device plugged in at once. No clock decides anything: a look
+//! all runs in a thread of its own ([`start`]), apart from the zone's watch,
+//! which nothing here holds up. No clock decides anything: a look
 //! into a namespace is waited for by nobody but the one who reports it —
 //! a namespace a program made may stall it for good (a FUSE mount over its
 //! `/dev`), a loaded machine may make it slow — and it is ended only by the
