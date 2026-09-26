@@ -1149,6 +1149,19 @@ let
       # module present `ip link add awg0 type amneziawg` succeeds and `awg`
       # configures the interface. (The fallback to the in-tree wireguard
       # module lives in the CI smoke test — its runner has no amneziawg.)
+      # Container storage is covered in a zone: a program there sees no
+      # container's data; a container launched into the zone gets its own
+      # directory back in its launch only (profile-run --storage).
+      with subtest("zone: container storage covered, a container's own given back"):
+          alice("cellward sandbox create vmsb")
+          in_zone(rzpid, "test ! -e /home/alice/.local/state/vpn-sandboxes/vmsb")
+          in_zone(rzpid, "test ! -e /home/alice/.local/state/vpn-profiles/vmlayer")
+          alice("cellward run vmreal --sandbox vmsb -- sh -c 'echo sb > $HOME/sb-probe'")
+          machine.succeed("grep -q sb /home/alice/.local/state/vpn-sandboxes/vmsb/home/sb-probe")
+          alice("cellward run vmreal --profile vmlayer -- sh -c 'echo zl > $HOME/zone-layer-probe'")
+          machine.succeed("grep -q zl /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/zone-layer-probe")
+          machine.fail("test -e /home/alice/zone-layer-probe")
+
       with subtest("the tunnel is a real amneziawg link, not the wireguard fallback"):
           out = in_zone(rzpid, "ip -d link show awg0")
           assert "amneziawg" in out, f"awg0 is not an amneziawg link:\n{out}"

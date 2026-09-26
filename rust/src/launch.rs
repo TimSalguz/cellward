@@ -1005,6 +1005,27 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
         _ => Vec::new(),
     };
+    // Into a zone, the container's storage from a descriptor opened here: the
+    // zone covers container storage (`zone::hide_container_storage`). Not
+    // closed on exec — `profile-run` takes it, gives the directory back in
+    // the launch's own mount namespace, and closes it before the program.
+    let storage_dir: Option<PathBuf> = match (&network, &selection.sandbox, &selection.container) {
+        (Network::Zone(_), Sandbox::Named(name), _) => Some(tools.sandboxes.join(name)),
+        (Network::Zone(_), Sandbox::None, Container::Named(_)) if !container.ephemeral => {
+            Some(container.dir.clone())
+        }
+        _ => None,
+    };
+    let storage_fd = match &storage_dir {
+        Some(dir) => match open_storage(dir) {
+            Ok(fd) => Some(fd),
+            Err(e) => {
+                eprintln!("не открыть хранилище контейнера {}: {e}", dir.display());
+                return EXIT_NOT_STARTED;
+            }
+        },
+        None => None,
+    };
     let exec = entry_argv(
         &Entry {
             nsenter: &tools.nsenter,
@@ -1021,6 +1042,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             trust_extra: &trust_extra,
             certutil: &tools.certutil,
             shares: &shares,
+            storage: storage_fd.zip(storage_dir.as_deref()),
         },
         cmd,
     );
@@ -1107,6 +1129,11 @@ pub struct Entry<'a> {
     /// Paths of the real home granted to a layer container
     /// (`container grant`): written through its layer (`--share`).
     pub shares: &'a [PathBuf],
+    /// The container's storage directory, for a launch into a zone, and the
+    /// descriptor the host opened on it: the zone covers container storage,
+    /// and `profile-run --storage` gives this one directory back in the
+    /// launch's own mount namespace.
+    pub storage: Option<(i32, &'a Path)>,
 }
 
 /// The command line `run` finally `exec`s: the namespaces, the container, then
@@ -1144,7 +1171,8 @@ pub struct Entry<'a> {
 pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
     // Something has to be mounted for this launch: a container's layer, or
     // the trust layer's bundle.
-    let container = !entry.dir.as_os_str().is_empty() || entry.trust.is_some();
+    let container =
+        !entry.dir.as_os_str().is_empty() || entry.trust.is_some() || entry.storage.is_some();
     let mut exec: Vec<OsString> = Vec::new();
     // Does the program end up in a mount namespace other than ours?
     let entered = container || matches!(entry.network, Network::Zone(_));
@@ -1187,6 +1215,11 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
         exec.push("profile-run".into());
         exec.push("--cwd".into());
         exec.push(entry.cwd.into());
+        if let Some((fd, path)) = entry.storage {
+            exec.push("--storage".into());
+            exec.push(format!("{fd}").into());
+            exec.push(path.into());
+        }
         if let Some(trust) = entry.trust {
             exec.push("--trust".into());
             exec.push(trust.into());
@@ -1216,6 +1249,28 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
     }
     exec.extend(cmd);
     exec
+}
+
+/// A container's storage directory, opened for a launch into a zone: made if
+/// it is not there yet (a sandbox's before its first launch), never through a
+/// link, and left open across `exec` for `profile-run --storage`.
+fn open_storage(dir: &Path) -> std::io::Result<i32> {
+    use std::os::unix::ffi::OsStrExt;
+    fs::create_dir_all(dir)?;
+    let c = std::ffi::CString::new(dir.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::other("a NUL in the path"))?;
+    // SAFETY: a NUL-terminated path and constant flags; no O_CLOEXEC on
+    // purpose.
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(fd)
 }
 
 /// Why this launch may not use its container in `zone`, if it may not.
@@ -1933,7 +1988,25 @@ mod tests {
             trust_extra: &[],
             certutil: Path::new("/t/certutil"),
             shares: &[],
+            storage: None,
         }
+    }
+
+    /// A sandbox into a zone: the zone covers container storage, and the
+    /// launch gets its own directory back — in a mount namespace of its own,
+    /// never in the zone's, where every other program would see it.
+    #[test]
+    fn a_containers_storage_comes_back_in_its_own_namespace() {
+        let mut e = entry(Network::Zone(42), Path::new(""), false);
+        e.storage = Some((7, Path::new("/home/u/.local/state/vpn-sandboxes/work")));
+        let line = entry_argv(&e, argv(&["firefox"]));
+        let at = |w: &str| line.iter().position(|a| a == w).unwrap();
+        assert!(at("/t/unshare") < at("profile-run"), "{line:?}");
+        let s = at("--storage");
+        assert_eq!(
+            line[s + 1..s + 3],
+            argv(&["7", "/home/u/.local/state/vpn-sandboxes/work"])[..]
+        );
     }
 
     #[test]

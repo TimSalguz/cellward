@@ -752,6 +752,12 @@ pub fn run(args: Args) -> u8 {
     for dir in READ_ONLY_IN_ZONES {
         let _ = fs::create_dir_all(zone.home.join(dir));
     }
+    // Container storage, covered in the zone (`hide_container_storage`): it
+    // has to exist to be covered — a directory a program of the zone made
+    // there afterwards would be one the host takes for a container.
+    for dir in crate::home_layer::STORAGE {
+        let _ = fs::create_dir_all(zone.home.join(dir));
+    }
     // The zone's entry for the portal (`desktop::zone_app_id`, LEAK-MODEL
     // §23), here on the host and before the zone has a program: the portal
     // takes the id a bus filter registers only with `<id>.desktop` there to
@@ -3153,6 +3159,31 @@ fn protect_host_files(zone: &Zone) -> Result<(), String> {
     Ok(())
 }
 
+/// The containers' storage out of the zone's reach (review 2026-09-26): each
+/// container's data is its own — a browser profile, a sandbox's home — and a
+/// program of the zone read every one of them, and wrote them, code they run
+/// included. A tmpfs over both directories; a launch of a container into the
+/// zone gets its own directory back, in its own mount namespace, from a
+/// descriptor the host opened (`profile-run --storage`). Fatal: a zone that
+/// cannot do it would show every container's data.
+fn hide_container_storage(zone: &Zone) -> Result<(), String> {
+    for dir in crate::home_layer::STORAGE {
+        let dir = zone.home.join(dir);
+        if !dir.is_dir() {
+            continue;
+        }
+        sys::mount(
+            OsStr::new("tmpfs"),
+            &dir,
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            "mode=0755,size=64k",
+        )
+        .map_err(|e| format!("cannot hide {}: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
 /// The project's own state out of the zone's reach (review 2026-09-25,
 /// third round). `~/.local/state/vpn-zones` holds what the host trusts about
 /// zones — which namespace is which zone (`zone.pid`, `zone.start`), which is
@@ -3638,6 +3669,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     }
     // The project's own state, last among the covers: from here on the zone's
     // directory is reached through a descriptor.
+    hide_container_storage(zone)?;
     let zone = &hide_project_state(zone)?;
 
     let Some(ZoneLinks {
