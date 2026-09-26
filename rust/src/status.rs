@@ -499,8 +499,8 @@ pub fn containers(tools: &Tools) -> String {
     )
 }
 
-/// Every program the picker knows about: labelled, pinned to a network, or
-/// assigned to a container — by the picker or in Nix.
+/// Every program the picker knows about: labelled, or assigned to a
+/// container — by the picker or in Nix. Its `network` is its container's.
 pub fn apps(tools: &Tools) -> String {
     let names = |sub: &str| -> Vec<String> {
         visible_entries(&tools.state.join(sub))
@@ -510,7 +510,6 @@ pub fn apps(tools: &Tools) -> String {
     };
     let all = container::load_all(tools);
     let mut ids: Vec<String> = names(".labels");
-    ids.extend(names(".pinned"));
     ids.extend(names(".pinnedprofile"));
     for c in &all {
         ids.extend(c.apps.iter().map(|a| a.value.clone()));
@@ -530,12 +529,16 @@ pub fn apps(tools: &Tools) -> String {
                         .map(|a| sourced_str(&c.selector(), a.source))
                 });
                 let assigned = assigned.unwrap_or_else(|| sourced("null".to_owned(), Source::Default));
-                let network = match read_setting(&tools.state.join(".pinned").join(id)) {
-                    Some(net) if !net.is_empty() => {
-                        sourced_str(crate::launch::network_name(&net), Source::Local)
-                    }
-                    _ => sourced("null".to_owned(), Source::Default),
-                };
+                // The network is the container's (`docs/PERMISSIONS.md`
+                // §11.8): the one the program's container is bound to.
+                let network = all
+                    .iter()
+                    .find(|c| c.apps.iter().any(|a| &a.value == id))
+                    .and_then(|c| match &c.network.value {
+                        container::Network::Named(n) => Some(sourced_str(n, c.network.source)),
+                        container::Network::Ask => None,
+                    })
+                    .unwrap_or_else(|| sourced("null".to_owned(), Source::Default));
                 format!(
                     "{{\"id\":{},\"label\":{label},\"container\":{assigned},\"network\":{network}}}",
                     string(id)

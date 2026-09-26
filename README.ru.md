@@ -410,7 +410,7 @@ cellward hermetic --default on|off             # для зон без своей
 cellward default-profile ask|main|own|<имя>
 cellward mode picker|per-zone|both|off         # как ведут себя ярлыки (per-zone, both — устарели)
 cellward default offline|unconfined|<зона>     # что пикер предлагает незнакомой программе
-cellward pins / forget <программа|--all>       # закреплённые за сетями программы и снять закрепление
+cellward pins / forget <программа|--all>       # закреплённые за контейнерами программы (сеть — у контейнера) и снять закрепление
 cellward container list|show|set|assign|merge  # контейнеры: сеть, программы, X11, объединение двух
 cellward trust add|list|rm <контейнер> …       # корневой сертификат только для одного контейнера
 ```

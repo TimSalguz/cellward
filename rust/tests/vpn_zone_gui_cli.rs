@@ -410,10 +410,7 @@ fn the_reset_dialog_shows_program_names_and_not_shortcut_ids() {
     let out = home.run(&["forget"], &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
-        said(
-            &home.asked()[0],
-            "AyuGram Desktop — сеть: nl, контейнер: основной"
-        ),
+        said(&home.asked()[0], "AyuGram Desktop — контейнер: основной"),
         "{:?}",
         home.asked()[0]
     );

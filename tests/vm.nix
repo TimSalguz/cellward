@@ -1015,9 +1015,12 @@ let
       # and the link list below would say so.
       with subtest("D-Bus activation: the shadow service starts the program through the picker"):
           APP = "org.vpnzones.VmActivatable"
-          alice(f"mkdir -p {STATE}/.pinned {STATE}/.pinnedprofile")
-          alice(f"printf offline > {STATE}/.pinned/{APP}")
-          alice(f"printf __main__ > {STATE}/.pinnedprofile/{APP}")
+          # The network is a container's (docs/PERMISSIONS.md §11.8): the
+          # main home's container bound to offline.
+          alice("cellward container create vmmainoff --home main")
+          alice("cellward container set vmmainoff network offline")
+          alice(f"mkdir -p {STATE}/.pinnedprofile")
+          alice(f"printf vmmainoff > {STATE}/.pinnedprofile/{APP}")
           machine.succeed("rm -f /tmp/vmactivated")
           alice("cellward sync")
           out = alice(f"cat /home/alice/.local/share/dbus-1/services/{APP}.service")

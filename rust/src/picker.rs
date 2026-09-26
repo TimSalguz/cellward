@@ -6,28 +6,30 @@
 //! script of the project, and every branch of it is here because something went
 //! wrong without it.
 //!
-//! **Three levels of memory, strongest first** (`docs/GOTCHAS.md` §11):
+//! **The network is the container's** (`docs/PERMISSIONS.md` §11.8): a
+//! container bound to a network is started there with no question; one with
+//! no network yet — and the main home, and a throwaway one — has it asked,
+//! and the answer binds a named container. A program has no network of its
+//! own any more: "always" in the main home moves it to the container of the
+//! main home bound to that network (`main-<network>`), and the programs'
+//! network pins of before (`.pinned/<program>`) became their containers'
+//! networks at the first look (`container::migrate_pins`).
 //!
-//!  1. a PIN (`.pinned/<program>`) — no dialog at all, the program goes
-//!     straight into the network it names. Set from the menu ("Всегда: …"),
-//!     cleared from the same menu ("Спрашивать снова"), by the reset shortcut
-//!     or by `vpn-zone forget`;
-//!  2. the LAST CHOICE (`.last/<program>`) — the dialog is shown with that
-//!     entry already selected;
+//! **What the question starts on** (`docs/GOTCHAS.md` §11):
+//!
+//!  1. where the program runs, when it does;
+//!  2. the LAST CHOICE (`.last/<program>`);
 //!  3. the GLOBAL DEFAULT (`~/.config/vpn-zones/default`, `offline` unless set).
 //!     That is the "an unknown program gets no internet" policy: until a
 //!     network is picked explicitly, the one without any is offered.
 //!
-//! The network and the container are pinned SEPARATELY (`.pinned` and
-//! `.pinnedprofile`): they are independent axes, and the dialog is shown only
-//! for the one that is not pinned. With the network pinned and the container
-//! free there is no first dialog to reach "change container" from, so the
-//! container gets a window of its own — that is what makes "always this
-//! network, container chosen every time" possible.
+//! The container is the program's pin (`.pinnedprofile/<program>`), the
+//! global default, or the last choice; "↺ Спрашивать снова" drops the pin.
 //!
 //! Two environment variables drive the second pass:
 //!
-//! * `VPN_ZONE_ASK=1` forces the dialog for a pinned program;
+//! * `VPN_ZONE_ASK=1` forces the dialog for a program whose container is
+//!   bound;
 //! * `VPN_ZONE_PROFILE` is how the picker hands ITSELF the container that was
 //!   just chosen in "⚙ Сменить контейнер" — it re-execs itself with both set.
 //!   It is read once and removed from the environment immediately, or it would
@@ -291,8 +293,6 @@ pub struct Memory {
     /// copy already running ([`HANDOVER`]) — a click on it while it runs
     /// raises that copy's window, with no question.
     pub hands_over: bool,
-    /// `.pinned/<key>`, empty when the network is not pinned.
-    pub pinned: String,
     /// `.pinnedprofile/<key>`, empty when the container is not pinned.
     pub pinned_profile: String,
     /// `.last/<key>`.
@@ -322,10 +322,9 @@ pub enum NetStep {
     /// terminal: every window its own process) is asked, with the network it
     /// runs in chosen. (`docs/GOTCHAS.md` §11)
     Running { zone: String, selector: String },
-    /// The network is pinned. `ask_container` is the case of a pinned network
-    /// and a free container: the "change container" entry lives in the network
-    /// dialog that is not being shown, so the container gets its own window.
-    Pinned { zone: String, ask_container: bool },
+    /// The container this launch uses without a question is bound to a
+    /// network: that is where it goes (`docs/PERMISSIONS.md` §11.8).
+    Bound { zone: String },
     /// Show the network dialog, with this entry selected.
     Ask { default: String },
 }
@@ -339,23 +338,15 @@ pub fn net_step(memory: &Memory) -> NetStep {
                 selector: running.selector.clone(),
             };
         }
-        // A container bound to a network answers the network question itself,
-        // and more firmly than a network pin: the network is part of the
-        // container's identity, and asking would only offer the way to break
-        // it (`docs/CONTAINERS.md` I1). The container itself is the one the pin
-        // or the default chose, so there is nothing left to ask.
+        // A container bound to a network answers the network question itself:
+        // the network is part of the container's identity, and asking would
+        // only offer the way to break it (`docs/CONTAINERS.md` I1). The
+        // container itself is the one the pin or the default chose, so there
+        // is nothing left to ask. The network is the container's and never a
+        // program's: a program's pin is gone (`docs/PERMISSIONS.md` §11.8).
         if !memory.bound.is_empty() {
-            return NetStep::Pinned {
+            return NetStep::Bound {
                 zone: memory.bound.clone(),
-                ask_container: false,
-            };
-        }
-        if !memory.pinned.is_empty() {
-            return NetStep::Pinned {
-                zone: memory.pinned.clone(),
-                // A container pinned separately, or set globally, is an answer
-                // already — only "ask" leaves a question to ask.
-                ask_container: memory.pinned_profile.is_empty() && memory.default_profile == "ask",
             };
         }
     }
@@ -568,8 +559,8 @@ pub struct AutostartPlan {
 /// * the container: the pinned or assigned one; otherwise the global default
 ///   when it is an answer (`main`, `own`, an existing container); otherwise —
 ///   `ask` — a home of its own;
-/// * the network: the one that container is bound to; otherwise the pin;
-///   otherwise `offline`. Not the last choice and not the global default: those
+/// * the network: the one that container is bound to; otherwise `offline`.
+///   Not the last choice and not the global default: those
 ///   are what a dialog preselects, not a consent to go online unasked.
 ///
 /// `bound_of` is the network a container is bound to, if any.
@@ -604,7 +595,6 @@ pub fn autostart_plan(
     };
     let (zone, network_guessed) = match bound_of(&container) {
         Some(network) => (network, false),
-        None if !memory.pinned.is_empty() => (memory.pinned.clone(), false),
         None => ("offline".to_owned(), true),
     };
     AutostartPlan {
@@ -703,7 +693,7 @@ pub fn net_menu(zones: &[MenuZone], pinned: &str, current_container: &str) -> Ve
     if !pinned.is_empty() {
         menu.push(row(
             "unpin",
-            format!("↺ Спрашивать сеть снова (закреплено: {pinned})"),
+            format!("↺ Спрашивать снова (программа закреплена за контейнером {pinned})"),
         ));
     }
     menu
@@ -796,6 +786,9 @@ pub struct ProfileRow {
     pub name: String,
     pub busy_in: String,
     pub main: bool,
+    /// The network the container is bound to, empty when it has none yet:
+    /// the window does not offer it with another.
+    pub bound: String,
 }
 
 /// A throwaway container that is already open: the directory to join, and the
@@ -926,7 +919,7 @@ pub fn window_nets(zones: &[MenuZone], selected: &str) -> Vec<window::Item> {
 /// `current` is the selector in force (pinned, set, or the last one).
 pub fn window_containers(
     key: &str,
-    sandboxes: &[String],
+    sandboxes: &[ProfileRow],
     profiles: &[ProfileRow],
     tmp_joins: &[TmpJoinRow],
     current: &str,
@@ -945,11 +938,19 @@ pub fn window_containers(
         ),
         item(THROWAWAY, "Разовая песочница — стирается при выходе"),
     ];
-    for name in sandboxes {
-        if *name == own {
+    for row in sandboxes {
+        if row.name == own {
+            // The program's own: the row above — with its network, when it
+            // has one.
+            if let Some(it) = items.iter_mut().find(|i| i.tag == "__ownsb__") {
+                it.bound = Some(row.bound.clone()).filter(|z| !z.is_empty());
+            }
             continue;
         }
-        items.push(item(name, &format!("Песочница «{name}»")));
+        let mut it = item(&row.name, &format!("Песочница «{}»", row.name));
+        it.busy = Some(row.busy_in.clone()).filter(|z| !z.is_empty());
+        it.bound = Some(row.bound.clone()).filter(|z| !z.is_empty());
+        items.push(it);
     }
     for profile in profiles {
         let label = if profile.main {
@@ -960,6 +961,7 @@ pub fn window_containers(
         let mut it = item(&profile.name, &label);
         // The main home is one identity in every network: never "busy".
         it.busy = Some(profile.busy_in.clone()).filter(|z| !z.is_empty() && !profile.main);
+        it.bound = Some(profile.bound.clone()).filter(|z| !z.is_empty());
         items.push(it);
     }
     for join in tmp_joins {
@@ -1032,11 +1034,6 @@ fn ask_window(
         None => return Some(None),
     };
 
-    if reply.pin_net {
-        remember(&tools.state, ".pinned", key, &reply.net);
-    } else if !memory.pinned.is_empty() {
-        let _ = fs::remove_file(tools.state.join(".pinned").join(key));
-    }
     remember(&tools.state, ".last", key, &reply.net);
 
     if !reply.pin_container && !memory.pinned_profile.is_empty() {
@@ -1054,13 +1051,80 @@ fn ask_window(
     if !container.is_throwaway_container() {
         remember(&tools.state, ".lastprofile", key, &selector);
     }
+    let container = settle_network(tools, key, container, &reply.net, reply.pin_net);
     Some(Some((reply.net, container)))
+}
+
+/// The network a launch goes to, made the container's
+/// (`docs/PERMISSIONS.md` §11.8): a named container with no network yet
+/// takes the one chosen for it — the question was its, and its identity
+/// goes to one network; a container bound already keeps its own (`run`
+/// refuses another). The main home keeps the choice for this launch — or,
+/// "always", the program moves to a container of the main home bound to
+/// it, `main-<network>`. A throwaway one keeps nothing. Returns the
+/// container to launch.
+fn settle_network(
+    tools: &Tools,
+    key: &str,
+    container: Container,
+    net: &str,
+    always: bool,
+) -> Container {
+    use crate::container::{Home, Network, Source};
+    if container.is_throwaway_container() || (container.fs_sandbox && container.sandbox.is_empty())
+    {
+        return container;
+    }
+    let name = container.selector();
+    if name.is_empty() {
+        if !always {
+            return container;
+        }
+        return match crate::container::main_for_network(tools, net) {
+            Ok(name) => {
+                remember(&tools.state, ".pinnedprofile", key, &name);
+                remember(&tools.state, ".lastprofile", key, &name);
+                Container {
+                    profile: name,
+                    ..Container::default()
+                }
+            }
+            Err(why) => {
+                eprintln!("vpn-zone-pick: {why}");
+                container
+            }
+        };
+    }
+    let name = match name.strip_prefix(SANDBOX_PREFIX) {
+        Some(bare) => {
+            crate::container::sandbox_name(tools, bare).unwrap_or_else(|| bare.to_owned())
+        }
+        None => name,
+    };
+    let network = Network::Named(launch::network_name(net).to_owned());
+    let bound = match crate::container::load(tools, &name) {
+        Some(c) if c.network.value == Network::Ask && c.network.source != Source::Nix => {
+            crate::container::set_network(tools, &c.name, &network)
+        }
+        Some(_) => Ok(()),
+        // The program's own, or a new one, made at its first launch: made now,
+        // with its network.
+        None if !container.sandbox.is_empty() => {
+            crate::container::create(tools, &name, Home::Private)
+                .and_then(|c| crate::container::set_network(tools, &c.name, &network))
+        }
+        None => Ok(()),
+    };
+    if let Err(why) = bound {
+        eprintln!("vpn-zone-pick: сеть контейнера {name}: {why}");
+    }
+    container
 }
 
 /// The containers the menus offer: those with a home of their own, and the
 /// rest (a layer, the main home) with the network each is open in.
-fn container_rows(tools: &Tools) -> (Vec<String>, Vec<ProfileRow>) {
-    use crate::container::Home;
+fn container_rows(tools: &Tools) -> (Vec<ProfileRow>, Vec<ProfileRow>) {
+    use crate::container::{Home, Network};
     let running = tools.state.join(".running");
     let mut sandboxes = Vec::new();
     let mut profiles = Vec::new();
@@ -1069,18 +1133,24 @@ fn container_rows(tools: &Tools) -> (Vec<String>, Vec<ProfileRow>) {
         if reserved_name(&c.name) {
             continue;
         }
-        if c.home == Home::Private {
-            sandboxes.push(c.name);
-            continue;
-        }
+        let bound = match &c.network.value {
+            Network::Named(net) => net.clone(),
+            Network::Ask => String::new(),
+        };
         let busy_in = live_tenant(&running, &c.dir.join("inuse"))
             .or_else(|| crate::container::running_network(tools, &c))
             .unwrap_or_default();
-        profiles.push(ProfileRow {
+        let row = ProfileRow {
             main: c.home == Home::Main,
-            name: c.name,
+            name: c.name.clone(),
             busy_in,
-        });
+            bound,
+        };
+        if c.home == Home::Private {
+            sandboxes.push(row);
+        } else {
+            profiles.push(row);
+        }
     }
     (sandboxes, profiles)
 }
@@ -1113,17 +1183,7 @@ fn window_request(
     let mut req = window::Request {
         title: format!("Запуск: {label}"),
         notes: Vec::new(),
-        // "Always" ticked for a pinned network starts on THAT network: on the
-        // remembered one instead, Enter would re-pin the program there
-        // (review 2026-09-25).
-        nets: window_nets(
-            &menu_zones(&tools.state),
-            if memory.pinned.is_empty() {
-                default_net
-            } else {
-                memory.pinned.as_str()
-            },
-        ),
+        nets: window_nets(&menu_zones(&tools.state), default_net),
         containers: window_containers(
             key,
             &sandboxes,
@@ -1131,7 +1191,9 @@ fn window_request(
             &open_throwaways(&running),
             &current,
         ),
-        pin_net: !memory.pinned.is_empty(),
+        // "Always" for the network is for the main home only: a container's
+        // network is its own once chosen.
+        pin_net: false,
         pin_container: !memory.pinned_profile.is_empty(),
         ..window::Request::default()
     };
@@ -1322,13 +1384,7 @@ pub fn main() -> ExitCode {
             return ExitCode::from(EXIT_TOOLS);
         }
     };
-    for dir in [
-        ".last",
-        ".lastprofile",
-        ".pinned",
-        ".pinnedprofile",
-        ".labels",
-    ] {
+    for dir in [".last", ".lastprofile", ".pinnedprofile", ".labels"] {
         let _ = fs::create_dir_all(tools.state.join(dir));
     }
     let _ = fs::create_dir_all(&tools.config);
@@ -1385,8 +1441,10 @@ pub fn main() -> ExitCode {
         // the same picker a click shows, with its "always".
         eprintln!("vpn-zone-pick: автозапуск «{label}»: для неё ничего не выбрано — спрашиваю");
     }
-    let mut asksolo = false;
     let zone_choice: String;
+    // The network was chosen here, "always" or not: made the container's
+    // once the container is known (`settle_network`).
+    let mut chosen: Option<bool> = None;
 
     match net_step(&memory) {
         NetStep::Running { zone, selector } => {
@@ -1398,13 +1456,7 @@ pub fn main() -> ExitCode {
                 &args.cmd,
             );
         }
-        NetStep::Pinned {
-            zone,
-            ask_container,
-        } => {
-            zone_choice = zone;
-            asksolo = ask_container;
-        }
+        NetStep::Bound { zone } => zone_choice = zone,
         NetStep::Ask { default } => {
             // The row the question starts on: the remembered one while it is
             // still offered, else `offline` — never whatever comes first, which
@@ -1435,7 +1487,7 @@ pub fn main() -> ExitCode {
             };
             let menu = net_menu(
                 &menu_zones(&tools.state),
-                &memory.pinned,
+                &memory.pinned_profile,
                 &container_label_in(&tools, current),
             );
 
@@ -1494,48 +1546,36 @@ pub fn main() -> ExitCode {
                     };
                     return reexec(&tools, &key, &args.cmd, Some(&handover));
                 }
+                // The program's container, not a network: a container's
+                // network is its own.
                 NetChoice::Unpin => {
-                    let _ = fs::remove_file(tools.state.join(".pinned").join(&key));
+                    let _ = fs::remove_file(tools.state.join(".pinnedprofile").join(&key));
                     return reexec(&tools, &key, &args.cmd, None);
                 }
                 NetChoice::Pin(zone) => {
-                    remember(&tools.state, ".pinned", &key, &zone);
+                    chosen = Some(true);
                     zone_choice = zone;
                 }
-                NetChoice::Zone(zone) => zone_choice = zone,
+                NetChoice::Zone(zone) => {
+                    chosen = Some(false);
+                    zone_choice = zone;
+                }
             }
             remember(&tools.state, ".last", &key, &zone_choice);
         }
     }
 
-    // The second question — the container. It is not asked when one is pinned
-    // separately or set globally (`vpn-zone default-profile`).
-    let container = if asksolo {
-        // The network is pinned and the container is asked: the same window,
-        // the pinned network chosen and its checkbox ticked.
-        if launch::has_display() {
-            match ask_window(&tools, &key, &label, &zone_choice, &memory) {
-                Some(Some((zone, container))) => {
-                    return launch_asked(&tools, &key, &zone, &container, &args.cmd, &memory)
-                }
-                Some(None) => return ExitCode::SUCCESS,
-                None => {}
-            }
-        }
-        let Some(container) = ask_profile(&tools, &key, &label, &zone_choice, &memory) else {
-            return ExitCode::SUCCESS;
-        };
-        if !container.is_throwaway_container() {
-            remember(&tools.state, ".lastprofile", &key, &container.selector());
-        }
-        container
-    } else {
-        container_without_dialog(
-            &memory,
-            &key,
-            |name| container_exists(&tools, name),
-            reprofile.as_deref(),
-        )
+    // The container: the one pinned, set globally, or remembered — the
+    // network question above was about it.
+    let container = container_without_dialog(
+        &memory,
+        &key,
+        |name| container_exists(&tools, name),
+        reprofile.as_deref(),
+    );
+    let container = match chosen {
+        Some(always) => settle_network(&tools, &key, container, &zone_choice, always),
+        None => container,
     };
 
     launch_asked(&tools, &key, &zone_choice, &container, &args.cmd, &memory)
@@ -1794,20 +1834,11 @@ fn read_memory(tools: &Tools, key: &str) -> Memory {
 /// is not dropped because the zone moved a container away for a moment.
 fn read_memory_with(tools: &Tools, key: &str, tidy: bool) -> Memory {
     // The memory as the layout of one name per container has it: the move
-    // rewrites the pins it renames, before they are read.
+    // rewrites the pins it renames, and makes the programs' network pins
+    // their containers' networks (`container::migrate_pins`), before they
+    // are read.
     crate::container::migrate(tools);
     let state = &tools.state;
-    let pinned_path = state.join(".pinned").join(key);
-    let mut pinned =
-        crate::launch::network_name(&read_setting(&pinned_path).unwrap_or_default()).to_owned();
-    if !pin_is_valid(&pinned, |zone| {
-        state.join(zone).join("config.conf").is_file()
-    }) {
-        if tidy {
-            let _ = fs::remove_file(&pinned_path);
-        }
-        pinned.clear();
-    }
 
     let profile_pin_path = state.join(".pinnedprofile").join(key);
     let mut pinned_profile = canon(tools, &read_setting(&profile_pin_path).unwrap_or_default());
@@ -1844,7 +1875,6 @@ fn read_memory_with(tools: &Tools, key: &str, tidy: bool) -> Memory {
     let mut memory = Memory {
         running: running.into_iter().next(),
         hands_over,
-        pinned,
         pinned_profile,
         last: crate::launch::network_name(
             &read_setting(&state.join(".last").join(key)).unwrap_or_default(),
@@ -1955,6 +1985,7 @@ fn ask_profile(
     }
 
     let (sandboxes, profiles) = container_rows(tools);
+    let sandboxes: Vec<String> = sandboxes.into_iter().map(|r| r.name).collect();
     let running = tools.state.join(".running");
     let tmp_joins = open_throwaways(&running);
 
@@ -2404,21 +2435,22 @@ mod tests {
     #[test]
     fn what_was_chosen_for_a_program_is_honoured_at_login() {
         let memory = Memory {
-            pinned: "nl".into(),
             pinned_profile: "work".into(),
             default_profile: "ask".into(),
             ..Memory::default()
         };
-        let plan = autostart_plan(&memory, "tg", anything, unbound);
+        // The container's network: the program's own is gone.
+        let bound = |c: &Container| (c.selector() == "work").then(|| "de".to_owned());
+        let plan = autostart_plan(&memory, "tg", anything, bound);
         assert_eq!(
             (plan.zone.as_str(), plan.container.selector()),
-            ("nl", "work".to_owned())
+            ("de", "work".to_owned())
         );
         assert!(!plan.network_guessed && !plan.container_guessed);
-
-        // A bound container's network beats the pin, as in a click.
-        let bound = |c: &Container| (c.selector() == "work").then(|| "de".to_owned());
-        assert_eq!(autostart_plan(&memory, "tg", anything, bound).zone, "de");
+        // A container with no network yet: offline, and said.
+        let plan = autostart_plan(&memory, "tg", anything, unbound);
+        assert_eq!(plan.zone, "offline");
+        assert!(plan.network_guessed && !plan.container_guessed);
 
         // The global container default is an answer, `ask` is not.
         for (default, selector) in [("main", ""), ("own", "app-tg"), ("work", "work")] {
@@ -2581,9 +2613,9 @@ mod tests {
             selector: "sb:work".to_owned(),
         });
         m.hands_over = true;
-        // Even a pin does not get a say: the window is going to be raised by the
-        // process that is already up.
-        m.pinned = "de".to_owned();
+        // Even a bound container does not get a say: the window is going to be
+        // raised by the process that is already up.
+        m.bound = "de".to_owned();
         assert_eq!(
             net_step(&m),
             NetStep::Running {
@@ -2603,7 +2635,8 @@ mod tests {
 
     /// A terminal opened in a zone left every next one in that zone with no
     /// question (owner, 2026-09-25): a program not known to hand over is
-    /// asked, with the network it runs in chosen — and its pin still holds.
+    /// asked, with the network it runs in chosen — and a bound container's
+    /// network still holds.
     #[test]
     fn a_running_program_not_known_to_hand_over_is_asked() {
         let mut m = memory();
@@ -2629,12 +2662,11 @@ mod tests {
                 default: "unconfined".to_owned()
             }
         );
-        m.pinned = "de".to_owned();
+        m.bound = "de".to_owned();
         assert_eq!(
             net_step(&m),
-            NetStep::Pinned {
-                zone: "de".to_owned(),
-                ask_container: true
+            NetStep::Bound {
+                zone: "de".to_owned()
             }
         );
     }
@@ -2668,13 +2700,12 @@ mod tests {
     fn a_container_bound_to_a_network_answers_the_network_question() {
         let mut m = memory();
         m.bound = "nl".to_owned();
-        // Stronger than a network pin: the network is the container's.
-        m.pinned = "de".to_owned();
+        // The last choice is only where a question would start.
+        m.last = "de".to_owned();
         assert_eq!(
             net_step(&m),
-            NetStep::Pinned {
-                zone: "nl".to_owned(),
-                ask_container: false
+            NetStep::Bound {
+                zone: "nl".to_owned()
             }
         );
         // A running instance that hands over still wins: its window is
@@ -2687,43 +2718,30 @@ mod tests {
         assert!(matches!(net_step(&m), NetStep::Running { .. }));
         // One that does not: the container's network, no question.
         m.hands_over = false;
-        assert!(matches!(net_step(&m), NetStep::Pinned { .. }));
+        assert!(matches!(net_step(&m), NetStep::Bound { .. }));
         // And VPN_ZONE_ASK still opens the dialog.
         m.running = None;
         m.ask = true;
         assert!(matches!(net_step(&m), NetStep::Ask { .. }));
     }
 
+    /// A container not bound to a network yet — and the main home, and a
+    /// throwaway one — have it asked (`docs/PERMISSIONS.md` §11.8): a
+    /// program has no network of its own to skip the question with.
     #[test]
-    fn a_pinned_network_asks_about_the_container_only_when_it_is_free() {
+    fn a_container_with_no_network_has_it_asked() {
         let mut m = memory();
-        m.pinned = "nl".to_owned();
-        assert_eq!(
-            net_step(&m),
-            NetStep::Pinned {
-                zone: "nl".to_owned(),
-                ask_container: true
-            }
-        );
-        // Pinned separately: nothing left to ask.
-        m.pinned_profile = "work".to_owned();
-        assert!(matches!(
-            net_step(&m),
-            NetStep::Pinned {
-                ask_container: false,
-                ..
-            }
-        ));
-        // Set globally: same.
-        m.pinned_profile.clear();
-        m.default_profile = "main".to_owned();
-        assert!(matches!(
-            net_step(&m),
-            NetStep::Pinned {
-                ask_container: false,
-                ..
-            }
-        ));
+        m.last = "nl".to_owned();
+        for pinned in ["work", "", THROWAWAY] {
+            m.pinned_profile = pinned.to_owned();
+            assert_eq!(
+                net_step(&m),
+                NetStep::Ask {
+                    default: "nl".to_owned()
+                },
+                "{pinned}"
+            );
+        }
     }
 
     #[test]
@@ -3004,11 +3022,12 @@ mod tests {
             text_of(&menu, "__chooseprofile__"),
             "⚙ Сменить контейнер (сейчас: основной)…"
         );
-        // The way back out of a pin is only offered when there is one.
-        let menu = net_menu(&[], "nl", "основной");
+        // The way back out of a pin is only offered when there is one — of
+        // the program's container: the network is the container's.
+        let menu = net_menu(&[], "work", "work");
         assert_eq!(
             text_of(&menu, "unpin"),
-            "↺ Спрашивать сеть снова (закреплено: nl)"
+            "↺ Спрашивать снова (программа закреплена за контейнером work)"
         );
         // A host interface is not called a VPN, and a dead tunnel says so.
         let menu = net_menu(
@@ -3066,16 +3085,19 @@ mod tests {
                 name: "work".to_owned(),
                 busy_in: "de".to_owned(),
                 main: false,
+                bound: String::new(),
             },
             ProfileRow {
                 name: "личное".to_owned(),
                 busy_in: String::new(),
                 main: false,
+                bound: String::new(),
             },
             ProfileRow {
                 name: "files".to_owned(),
                 busy_in: "de".to_owned(),
                 main: true,
+                bound: String::new(),
             },
         ];
         let joins = vec![TmpJoinRow {
@@ -3391,6 +3413,25 @@ mod tests {
         assert!(window_nets(&zones, "de")
             .iter()
             .any(|i| i.selected && i.tag == "de"));
+        // A container's network goes with its row: the window does not
+        // offer it with another.
+        let row = |name: &str, bound: &str| ProfileRow {
+            name: name.to_owned(),
+            bound: bound.to_owned(),
+            ..ProfileRow::default()
+        };
+        let items = window_containers(
+            "firefox",
+            &[row("app-firefox", "nl"), row("dev", "de")],
+            &[row("work", "")],
+            &[],
+            "",
+        );
+        let bound_of = |tag: &str| items.iter().find(|i| i.tag == tag).unwrap().bound.clone();
+        assert_eq!(bound_of("__ownsb__").as_deref(), Some("nl"));
+        assert_eq!(bound_of("dev").as_deref(), Some("de"));
+        assert_eq!(bound_of("work"), None);
+
         let containers = window_containers("firefox", &[], &[], &[], "sb:removed");
         let chosen: Vec<&str> = containers
             .iter()

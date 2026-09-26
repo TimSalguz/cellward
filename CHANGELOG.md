@@ -6,6 +6,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed (read before updating)
+- **The network is the container's, not the program's** (`rust/src/picker.rs`,
+  `container::migrate_pins`, `focus::Pin`; `docs/PERMISSIONS.md` §11.8).
+  A program pinned to a network (`.pinned/<program>`) while its container
+  had another or none was one identity in two networks, or two containers'
+  programs arguing over one. Now:
+  - A container bound to a network starts there without a question; one with
+    no network yet has it asked at its first launch, and the answer binds it.
+    The launch window does not offer a container with a network other than
+    its own.
+  - "Always" for the main home moves the program to the container of the
+    main home bound to that network, `main-<network>`; the main home itself
+    still asks at every launch.
+  - **Moved once, at the first look:** a program's network pin becomes its
+    container's network, when the container has none and its programs agree
+    (where they do not, it stays asked, and is said); a program of the main
+    home goes to `main-<network>`; a program whose container is asked every
+    time keeps the network as the last choice, where the question starts.
+  - The window menu (`window-menu`) pins or unpins the container's network;
+    "↺ Спрашивать снова" drops the program's container pin; `cellward pins`
+    lists the programs' containers and their networks; `status --json` gives
+    `apps[].network` as the container's.
+
 - **One name is one container; the kind of its home is a property of it**
   (`rust/src/container.rs`, `launch::resolve_selection`; the owner's decision
   of 2026-09-26, `docs/PERMISSIONS.md` §11.7). A layer over the home

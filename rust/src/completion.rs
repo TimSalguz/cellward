@@ -34,7 +34,8 @@ pub struct Snapshot {
     pub containers: Vec<String>,
     /// Programs with a remembered permission set (`fs-perms/*`).
     pub perm_keys: Vec<String>,
-    /// Programs pinned to a network (`.pinned/*`) — what `forget` takes.
+    /// Programs pinned to a container (`.pinnedprofile/*`) — what `forget`
+    /// takes.
     pub pinned: Vec<String>,
     /// Launcher ids the picker knows by name (`.labels/*`) — what `launch`
     /// takes.
@@ -73,7 +74,7 @@ impl Snapshot {
                 names
             },
             perm_keys: Self::names(&tools.config.join("fs-perms")),
-            pinned: Self::names(&tools.state.join(".pinned")),
+            pinned: Self::names(&tools.state.join(".pinnedprofile")),
             apps: Self::names(&tools.state.join(".labels")),
         }
     }

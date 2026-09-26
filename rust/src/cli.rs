@@ -2864,32 +2864,37 @@ fn default_network(tools: &Tools, args: &[OsString]) -> u8 {
 
 // --- PINS --------------------------------------------------------------------
 
+/// `pins`: which program runs in which container without a question, and
+/// the network that container is bound to — a network is a container's, not
+/// a program's (`docs/PERMISSIONS.md` §11.8).
 fn pins(tools: &Tools) -> u8 {
     let mut found = false;
-    for (sub, network) in [(".pinned", true), (".pinnedprofile", false)] {
-        for file in visible_entries(&tools.state.join(sub)) {
-            if !file.is_file() {
-                continue;
-            }
-            let key = file.file_name().unwrap_or_default();
-            // The label, not the key: the key is a shortcut id
-            // (com.ayugram.desktop) and tells the user nothing.
-            // (`docs/GOTCHAS.md` §10)
-            let label = read_setting(&tools.state.join(".labels").join(key))
-                .unwrap_or_else(|| key.to_string_lossy().into_owned());
-            let value = read_setting(&file).unwrap_or_default();
-            if network {
-                println!("{label}: сеть → {}", launch::network_name(&value));
-            } else {
-                let value = if value == "__main__" {
-                    "основной".to_owned()
-                } else {
-                    value
-                };
-                println!("{label}: контейнер → {value}");
-            }
-            found = true;
+    for file in visible_entries(&tools.state.join(".pinnedprofile")) {
+        if !file.is_file() {
+            continue;
         }
+        let key = file.file_name().unwrap_or_default();
+        // The label, not the key: the key is a shortcut id
+        // (com.ayugram.desktop) and tells the user nothing.
+        // (`docs/GOTCHAS.md` §10)
+        let label = read_setting(&tools.state.join(".labels").join(key))
+            .unwrap_or_else(|| key.to_string_lossy().into_owned());
+        let value = read_setting(&file).unwrap_or_default();
+        let shown = match value.as_str() {
+            "__main__" | "" => "основной, сеть спрашивается при запуске".to_owned(),
+            "__fs__" => "разовая песочница, сеть спрашивается при запуске".to_owned(),
+            selector => match crate::container::load(tools, selector) {
+                Some(c) => match &c.network.value {
+                    crate::container::Network::Named(n) => format!("{} (сеть {n})", c.name),
+                    crate::container::Network::Ask => {
+                        format!("{} (сеть не выбрана — спросится)", c.name)
+                    }
+                },
+                None => format!("{selector} (его нет)"),
+            },
+        };
+        println!("{label}: контейнер → {shown}");
+        found = true;
     }
     if !found {
         println!("закреплённых программ нет — пикер спрашивает каждый раз");
@@ -2898,6 +2903,8 @@ fn pins(tools: &Tools) -> u8 {
 }
 
 fn forget(tools: &Tools, args: &[OsString]) -> u8 {
+    // `.pinned` is where a program's network was pinned before it became its
+    // container's: a stale one goes too.
     const SUBDIRS: [&str; 4] = [".pinned", ".last", ".lastprofile", ".pinnedprofile"];
     let Some(what) = required(args, 0, "имя программы или --all") else {
         return 1;

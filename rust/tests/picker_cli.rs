@@ -338,52 +338,94 @@ fn a_program_nobody_has_run_before_is_asked_about_and_started() {
     assert_eq!(home.read("state/.last/firefox").as_deref(), Some("nl"));
 }
 
+/// "Always" in the main home: the network is a container's, never a
+/// program's (docs/PERMISSIONS.md §11.8) — the program moves to the
+/// container of the main home bound to that network, and the next launch
+/// goes there without a question.
 #[test]
-fn choosing_always_writes_the_pin_the_next_launch_obeys() {
+fn choosing_always_in_the_main_home_moves_the_program_to_its_container() {
     let home = Home::new("pin");
     home.zone("nl");
     home.answers(&["pin:nl"]);
     let out = home.run(&pick("firefox"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(home.read("state/.pinned/firefox").as_deref(), Some("nl"));
-    assert_eq!(home.launched()[0][1], "nl");
+    let line = ["run", "nl", "--container", "main-nl", "--", "firefox", "%u"];
+    assert_eq!(home.launched()[0], line);
+    assert_eq!(
+        home.read("state/.pinnedprofile/firefox").as_deref(),
+        Some("main-nl")
+    );
+    let conf = home
+        .read("config/containers/main-nl/container.conf")
+        .unwrap_or_default();
+    assert!(
+        conf.contains("home = main") && conf.contains("network = nl"),
+        "{conf}"
+    );
+    assert_eq!(home.read("state/.pinned/firefox"), None);
+
+    let _ = fs::remove_file(home.path("runner.log"));
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.asked().len() == 1, "asked again: {:?}", home.asked());
+    assert_eq!(home.launched()[0], line);
 }
 
+/// A container with no network yet has it asked, once: the choice is the
+/// container's from then on, and the next launch asks nothing.
 #[test]
-fn a_pinned_network_with_a_free_container_asks_only_about_the_container() {
-    // The "always this network, container chosen every time" case: the entry
-    // that leads to the container lives in the network dialog, which is not
-    // being shown, so the container gets a window of its own.
-    let home = Home::new("asksolo");
+fn a_container_with_no_network_is_asked_once() {
+    let home = Home::new("first-network");
     home.zone("nl");
     home.profile("work");
-    home.write("state/.pinned/firefox", "nl");
-    home.answers(&["work"]);
+    home.write("state/.pinnedprofile/firefox", "work");
+    home.answers(&["nl"]);
 
     let out = home.run(&pick("firefox"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(home.asked().len(), 1, "{:?}", home.asked());
+    let line = ["run", "nl", "--container", "work", "--", "firefox", "%u"];
+    assert_eq!(home.launched()[0], line);
+    assert!(home
+        .read("config/containers/work/container.conf")
+        .unwrap_or_default()
+        .contains("network = nl"));
 
-    let asked = home.asked();
-    assert_eq!(asked.len(), 1, "{asked:?}");
-    assert!(
-        asked[0].contains(&"Профиль для «firefox»".to_owned()),
-        "{:?}",
-        asked[0]
-    );
+    let _ = fs::remove_file(home.path("runner.log"));
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(home.asked().len(), 1, "asked again: {:?}", home.asked());
+    assert_eq!(home.launched()[0], line);
+}
+
+/// A program's network pin from before the network was the container's
+/// becomes the container's network at the first look (container::migrate_pins).
+#[test]
+fn a_network_pin_from_before_becomes_the_containers() {
+    let home = Home::new("pins-moved");
+    home.zone("nl");
+    home.profile("work");
+    home.write("state/.pinned/firefox", "nl");
+    home.write("state/.pinnedprofile/firefox", "work");
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.asked().is_empty(), "{:?}", home.asked());
     assert_eq!(
         home.launched()[0],
         ["run", "nl", "--container", "work", "--", "firefox", "%u"]
     );
-    assert_eq!(
-        home.read("state/.lastprofile/firefox").as_deref(),
-        Some("work")
-    );
+    assert_eq!(home.read("state/.pinned/firefox"), None);
+    assert!(home
+        .read("config/containers/work/container.conf")
+        .unwrap_or_default()
+        .contains("network = nl"));
 }
 
 #[test]
 fn a_pinned_container_is_not_asked_about_at_all() {
     let home = Home::new("bothpinned");
     home.zone("nl");
+    // A network pin from before becomes the sandbox's network.
     home.write("state/.pinned/firefox", "nl");
     // A sandbox as the layout before one name per container kept it, and a
     // pin as it was written then.
@@ -451,25 +493,24 @@ fn a_throwaway_container_survives_the_re_exec_although_it_is_never_remembered() 
     assert_eq!(home.read("state/.lastprofile/firefox"), None);
 }
 
+/// "↺ Спрашивать снова" drops the program's container pin — the network is
+/// the container's, and the program's own is gone.
 #[test]
-fn asking_the_network_again_drops_the_pin_and_keeps_the_pinned_container() {
+fn asking_again_drops_the_container_pin() {
     let home = Home::new("unpin");
     home.zone("nl");
-    home.write("state/.pinned/firefox", "nl");
-    home.write("state/.pinnedprofile/firefox", "__main__");
+    home.write(
+        "config/containers/main-nl/container.conf",
+        "home = main\nnetwork = nl\n",
+    );
+    home.write("state/.pinnedprofile/firefox", "main-nl");
     home.answers(&["unpin", "offline"]);
 
-    // VPN_ZONE_ASK is how the dialog is reached for a pinned program at all —
-    // and after "↺ Спрашивать сеть снова" the pinned CONTAINER must still be
-    // honoured, which is the bug this covers.
+    // VPN_ZONE_ASK is how the dialog is reached for a pinned program at all.
     let out = home.run(&pick("firefox"), &[("VPN_ZONE_ASK", "1")]);
     assert!(out.status.success(), "{}", stderr(&out));
 
-    assert!(!home.path("state/.pinned/firefox").exists());
-    assert_eq!(
-        home.read("state/.pinnedprofile/firefox").as_deref(),
-        Some("__main__")
-    );
+    assert!(!home.path("state/.pinnedprofile/firefox").exists());
     assert_eq!(
         home.launched()[0],
         ["run", "offline", "--", "firefox", "%u"]
@@ -478,7 +519,7 @@ fn asking_the_network_again_drops_the_pin_and_keeps_the_pinned_container() {
     assert!(
         home.asked()[0]
             .iter()
-            .any(|a| a == "↺ Спрашивать сеть снова (закреплено: nl)"),
+            .any(|a| a == "↺ Спрашивать снова (программа закреплена за контейнером main-nl)"),
         "{:?}",
         home.asked()[0]
     );
@@ -887,12 +928,12 @@ fn every_shape_of_memory_ends_in_a_launch_or_in_a_cancel() {
             true,
         ),
         (
-            "pinned+lastprofile",
+            "old pin+lastprofile",
             &[
                 ("state/.pinned/firefox", "nl"),
                 ("state/.lastprofile/firefox", "__fs__"),
             ],
-            &[EMPTY],
+            &["nl"],
             true,
         ),
         ("cancelled", &[], &[CANCEL], false),
@@ -979,7 +1020,11 @@ fn an_unassigned_autostart_asks_and_remembers_always() {
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!home.asked().is_empty(), "the picker asked");
-    assert_eq!(home.read("state/.pinned/tg").as_deref(), Some("nl"));
+    // "Always" in the main home: the container of the main home in nl.
+    assert_eq!(
+        home.read("state/.pinnedprofile/tg").as_deref(),
+        Some("main-nl")
+    );
     assert_eq!(home.launched()[0][1], "nl");
 }
 
@@ -1075,7 +1120,13 @@ fn the_launch_window_asks_both_questions_at_once() {
             .any(|w| w == ["--sandbox", "app-firefox"]),
         "{launched:?}"
     );
-    assert_eq!(home.read("state/.pinned/firefox").as_deref(), Some("nl"));
+    // The program's own container is made with the network chosen: the
+    // network is the container's.
+    assert!(home
+        .read("config/containers/app-firefox/container.conf")
+        .unwrap_or_default()
+        .contains("network = nl"));
+    assert_eq!(home.read("state/.pinned/firefox"), None);
     assert_eq!(home.read("state/.last/firefox").as_deref(), Some("nl"));
     assert_eq!(home.read("state/.pinnedprofile/firefox"), None);
 }
@@ -1180,7 +1231,7 @@ fn a_choice_for_a_zone_is_the_window_only_and_comes_back_on_stdout() {
     let home = Home::new("from-zone");
     home.zone("nl");
     home.zone("de");
-    home.write("state/.pinned/firefox", "de\n");
+    home.write("state/.last/firefox", "de\n");
     if !slow_window(&home, "net\tnl\ncontainer\t\n") {
         return;
     }
@@ -1214,7 +1265,10 @@ fn a_choice_for_a_zone_is_the_window_only_and_comes_back_on_stdout() {
     assert!(told.contains("program\t"), "{told}");
     assert!(told.contains("asker\tnl\n"), "{told}");
     assert!(told.contains("net\tnl\tVPN: nl\tselected\n"), "{told}");
-    assert!(told.contains("net\tde\tVPN: de\t\n"), "a pin chose: {told}");
+    assert!(
+        told.contains("net\tde\tVPN: de\t\n"),
+        "the memory chose: {told}"
+    );
     // The host's network last, away from where a habit would click.
     let nets: Vec<&str> = told.lines().filter(|l| l.starts_with("net\t")).collect();
     assert!(
@@ -1228,8 +1282,7 @@ fn a_choice_for_a_zone_is_the_window_only_and_comes_back_on_stdout() {
         "{told}"
     );
     assert!(told.contains("guard\t1500\n"), "{told}");
-    assert_eq!(home.read("state/.last/firefox"), None);
-    assert_eq!(home.read("state/.pinned/firefox").as_deref(), Some("de\n"));
+    assert_eq!(home.read("state/.last/firefox").as_deref(), Some("de\n"));
 }
 
 #[test]

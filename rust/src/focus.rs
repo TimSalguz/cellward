@@ -579,30 +579,76 @@ fn watch(tools: &Tools) -> u8 {
     0
 }
 
+/// What "always" is for the program of a window: the network is its
+/// container's, never the program's (`docs/PERMISSIONS.md` §11.8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pin {
+    /// A container with no network yet: bind it to the one it runs in.
+    Bind(String),
+    /// A container bound here (not in Nix): unbind it, and its network is
+    /// asked at its next launch.
+    Unbind { container: String, network: String },
+    /// The main home: the program moves to the container of the main home
+    /// bound to the network it runs in (`main-<network>`).
+    Main,
+    /// Nothing to pin: a throwaway container, a network declared in Nix, a
+    /// launch not known.
+    Nothing,
+}
+
+/// [`Pin`] for a launch.
+pub fn pin_of(tools: &Tools, launch: &Launch) -> Pin {
+    use crate::container::{Network, Source};
+    match launch.selector.as_deref() {
+        Some("") => Pin::Main,
+        Some(selector) => match crate::container::load(tools, selector) {
+            Some(c) => match (&c.network.value, c.network.source) {
+                (_, Source::Nix) => Pin::Nothing,
+                (Network::Ask, _) => Pin::Bind(c.name),
+                (Network::Named(network), _) => Pin::Unbind {
+                    network: network.clone(),
+                    container: c.name,
+                },
+            },
+            None => Pin::Nothing,
+        },
+        None => Pin::Nothing,
+    }
+}
+
 /// The entries of the hotkey menu for the program of a window: `(tag, label,
-/// danger)`. `pinned` is the network the program is pinned to, if any.
+/// danger)`.
 pub fn menu_entries(
     label: &str,
     launch: Option<&Launch>,
-    pinned: Option<&str>,
+    pin: &Pin,
 ) -> Vec<(String, String, bool)> {
     let mut out = Vec::new();
     let entry = |tag: &str, text: String, danger: bool| (tag.to_owned(), text, danger);
     if let Some(l) = launch.filter(|l| l.program.is_some()) {
-        match pinned {
-            Some(zone) => out.push(entry(
+        match pin {
+            Pin::Unbind { container, network } => out.push(entry(
                 "unpin",
                 format!(
-                    "Спрашивать сеть при запуске «{label}» (сейчас всегда {})",
-                    in_net(zone)
+                    "Спрашивать сеть контейнера «{container}» при запуске (сейчас всегда {})",
+                    in_net(network)
                 ),
                 false,
             )),
-            None => out.push(entry(
+            Pin::Bind(container) => out.push(entry(
                 "pin",
-                format!("Всегда запускать «{label}» {}", in_net(&l.zone)),
+                format!("Контейнер «{container}» — всегда {}", in_net(&l.zone)),
                 false,
             )),
+            Pin::Main => out.push(entry(
+                "pin",
+                format!(
+                    "Всегда запускать «{label}» в основном доме {}",
+                    in_net(&l.zone)
+                ),
+                false,
+            )),
+            Pin::Nothing => {}
         }
         out.push(entry(
             "restart",
@@ -691,13 +737,11 @@ pub fn menu(tools: &Tools) -> u8 {
     let launch = launch_of(&tools.state, &tools.core, window.pid);
     let program = launch.as_ref().and_then(|l| l.program.clone());
     let label = window_name(&tools.state, &window, launch.as_ref());
-    let pinned = program
-        .as_deref()
-        .and_then(|p| crate::cli::read_setting(&tools.state.join(".pinned").join(p)));
+    let pin = launch.as_ref().map_or(Pin::Nothing, |l| pin_of(tools, l));
     let menu = crate::window::Menu {
         title: label.clone(),
         notes: vec![describe(&tools.state, &window, launch.as_ref())],
-        actions: menu_entries(&label, launch.as_ref(), pinned.as_deref()),
+        actions: menu_entries(&label, launch.as_ref(), &pin),
     };
     let Some(choice) = ask_menu(tools, &menu) else {
         return 0;
@@ -715,17 +759,45 @@ pub fn menu(tools: &Tools) -> u8 {
     };
     match choice.as_str() {
         "pin" => {
-            if let (Some(p), Some(l)) = (&program, &launch) {
-                let dir = tools.state.join(".pinned");
-                let _ = fs::create_dir_all(&dir);
-                let _ = fs::write(dir.join(p), &l.zone);
-                notify(&label, &format!("Теперь всегда {}", in_net(&l.zone)));
+            let (Some(p), Some(l)) = (&program, &launch) else {
+                return 0;
+            };
+            let network = crate::container::Network::Named(l.zone.clone());
+            let done = match &pin {
+                Pin::Bind(container) => crate::container::set_network(tools, container, &network)
+                    .map(|()| format!("Контейнер «{container}» теперь всегда {}", in_net(&l.zone))),
+                Pin::Main => crate::container::main_for_network(tools, &l.zone).and_then(|name| {
+                    let dir = tools.state.join(".pinnedprofile");
+                    fs::create_dir_all(&dir)
+                        .and_then(|()| fs::write(dir.join(p), &name))
+                        .map_err(|e| e.to_string())
+                        .map(|()| {
+                            format!(
+                                "Теперь в контейнере «{name}»: основной дом, всегда {}",
+                                in_net(&l.zone)
+                            )
+                        })
+                }),
+                _ => return 0,
+            };
+            match done {
+                Ok(text) => notify(&label, &text),
+                Err(e) => notify(&label, &e),
             }
         }
         "unpin" => {
-            if let Some(p) = &program {
-                let _ = fs::remove_file(tools.state.join(".pinned").join(p));
-                notify(&label, "Сеть будет спрошена при следующем запуске");
+            if let Pin::Unbind { container, .. } = &pin {
+                match crate::container::set_network(
+                    tools,
+                    container,
+                    &crate::container::Network::Ask,
+                ) {
+                    Ok(()) => notify(
+                        &label,
+                        &format!("Сеть контейнера «{container}» спросится при следующем запуске"),
+                    ),
+                    Err(e) => notify(&label, &e),
+                }
             }
         }
         "close" => {
@@ -829,20 +901,42 @@ mod tests {
         let tags =
             |e: Vec<(String, String, bool)>| e.into_iter().map(|(t, _, _)| t).collect::<Vec<_>>();
         assert_eq!(
-            tags(menu_entries("Лис", Some(&launch), None)),
+            tags(menu_entries("Лис", Some(&launch), &Pin::Main)),
             ["pin", "restart", "close", "kill-zone"]
         );
         assert_eq!(
-            tags(menu_entries("Лис", Some(&launch), Some("nl"))),
+            tags(menu_entries(
+                "Лис",
+                Some(&launch),
+                &Pin::Bind("work".into())
+            )),
+            ["pin", "restart", "close", "kill-zone"]
+        );
+        let unbind = Pin::Unbind {
+            container: "work".into(),
+            network: "nl".into(),
+        };
+        let entries = menu_entries("Лис", Some(&launch), &unbind);
+        assert_eq!(
+            tags(entries.clone()),
             ["unpin", "restart", "close", "kill-zone"]
+        );
+        assert!(entries[0].1.contains("«work»"), "{entries:?}");
+        // A throwaway container, a network from Nix: nothing to pin.
+        assert_eq!(
+            tags(menu_entries("Лис", Some(&launch), &Pin::Nothing)),
+            ["restart", "close", "kill-zone"]
         );
         let host = Launch {
             zone: crate::launch::UNCONFINED.to_owned(),
             ..Launch::default()
         };
-        assert_eq!(tags(menu_entries("x", Some(&host), None)), ["close"]);
-        assert_eq!(tags(menu_entries("x", None, None)), ["close"]);
-        let entries = menu_entries("Лис", Some(&launch), None);
+        assert_eq!(
+            tags(menu_entries("x", Some(&host), &Pin::Nothing)),
+            ["close"]
+        );
+        assert_eq!(tags(menu_entries("x", None, &Pin::Nothing)), ["close"]);
+        let entries = menu_entries("Лис", Some(&launch), &Pin::Main);
         assert!(entries[3].2, "cutting a zone off is marked as dangerous");
         assert!(entries[3].1.contains("nl"));
     }

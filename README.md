@@ -419,7 +419,7 @@ cellward hermetic --default on|off             # for zones without a setting of 
 cellward default-profile ask|main|own|<name>
 cellward mode picker|per-zone|both|off         # how launcher entries behave (per-zone, both: deprecated)
 cellward default offline|unconfined|<zone>     # what the picker offers an unknown program
-cellward pins / forget <program|--all>         # programs pinned to a network, and unpinning
+cellward pins / forget <program|--all>         # programs pinned to a container (the network is the container's), and unpinning
 cellward container list|show|set|assign|merge  # containers: network, programs, X11, merging two
 cellward trust add|list|rm <container> …       # a root certificate for one container only
 ```

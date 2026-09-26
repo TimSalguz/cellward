@@ -1035,21 +1035,26 @@ fn forget(tools: &Tools) -> u8 {
         // (com.ayugram.desktop) and tells nobody what it is about. The label is
         // written by the picker itself, in `.labels`. (`docs/GOTCHAS.md` §10)
         let label = label_of(&tools.state, key);
-        let net = read_setting(&pins.join(key)).unwrap_or_else(|| "—".to_owned());
-        let mut container = read_setting(&profile_pins.join(key)).unwrap_or_else(|| "—".to_owned());
-        if container == MAIN {
-            container = "основной".to_owned();
-        }
-        rows.push(row(
-            key,
-            format!("{label} — сеть: {net}, контейнер: {container}"),
-        ));
+        // The network is the container's (`docs/PERMISSIONS.md` §11.8).
+        let selector = read_setting(&profile_pins.join(key)).unwrap_or_default();
+        let shown = match selector.as_str() {
+            "" => "—".to_owned(),
+            MAIN => "основной".to_owned(),
+            other => match crate::container::load(tools, other) {
+                Some(c) => match &c.network.value {
+                    crate::container::Network::Named(n) => format!("{} (сеть {n})", c.name),
+                    crate::container::Network::Ask => c.name.clone(),
+                },
+                None => other.to_owned(),
+            },
+        };
+        rows.push(row(key, format!("{label} — контейнер: {shown}")));
     }
 
     let Some(choice) = menu(
         tools,
-        "Сбросить сеть по умолчанию",
-        "У какой программы забыть выбранную сеть?",
+        "Сбросить выбор",
+        "У какой программы забыть выбранный контейнер? Сеть — у контейнера, она останется",
         &rows,
     ) else {
         return 0;
@@ -1062,7 +1067,7 @@ fn forget(tools: &Tools) -> u8 {
             None,
             "5000",
             "Сброшено",
-            "Сеть снова спрашивается для всех программ.",
+            "Контейнер и сеть снова спрашиваются для всех программ.",
         );
     } else {
         let label = label_of(&tools.state, &choice);
@@ -1072,7 +1077,7 @@ fn forget(tools: &Tools) -> u8 {
             None,
             "5000",
             "Сброшено",
-            &format!("Для «{label}» сеть снова будет спрашиваться."),
+            &format!("Для «{label}» контейнер снова будет спрашиваться."),
         );
     }
     0
