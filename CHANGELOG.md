@@ -289,10 +289,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   stray key — on a loaded machine the dialog shows later, and a stray Enter
   a moment after it appeared counted. They are now the launch window's
   guarded menu (`window::question`): nothing is taken until the person has
-  been still for 1.5 s with the question in view, and every key, press or
-  return of the focus starts that again. The safe answer is first — Enter
-  refuses. kdialog, with the old check, only where there is no window.
-  The sound filter gets the window with `--window` from the zone's unit.
+  been still for 1.5 s with the question in view — counted from the
+  window's focus, not its start —, and every key but Enter and Esc, every
+  press and every return of the focus starts that again; digits choose
+  nothing, and moving the highlight restarts the guard. The safe answer is
+  first — Enter refuses. A command is shown apart, word by word, in a block
+  that scrolls; nothing of a question is cut off out of sight. kdialog,
+  with the old check, only where there is no window (or it cannot be
+  shown). The sound filter gets the window with `--window` from the zone's
+  unit. The launch window's own guard (a zone's launch) now also arms only
+  from its focus, and its timer no longer sleeps on the thread pool that
+  delivers the input — keys typed during the guard could arrive after it
+  and count.
 - **The network of a zone is waited for until pasta says it is done**
   (the owner, 2026-09-26: no fixed waits a slow or busy machine breaks).
   Every pasta that configures a namespace — a zone through a host

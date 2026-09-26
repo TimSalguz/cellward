@@ -720,11 +720,14 @@ const SAY_CLOSING_AFTER: std::time::Duration = std::time::Duration::from_secs(2)
 
 /// A program asked to close for a restart that has not closed yet: the
 /// person decides, while it goes on closing (it may be asking whether to
-/// save). Enter — the default — cancels the restart, which is always safe;
-/// "close now" kills it, and what is unsaved is lost: pressed sooner than
-/// [`crate::dialog::TOO_FAST`] after the question it is taken for a key
-/// meant for something else, and the question comes again; Esc (or closing
-/// the question) waits for it, and the restart follows. The program closing
+/// save). Asked in the launch window as a guarded question
+/// (`crate::window`): nothing is taken until the person has been still with
+/// it in view; kdialog only where there is no window — there a "close now"
+/// sooner than [`crate::dialog::TOO_FAST`] after its start is taken for a
+/// stray key, and the question comes again. Enter — the default — cancels
+/// the restart, which is always safe; "close now" kills it, and what is
+/// unsaved is lost; Esc (or closing the question) waits for it, and the
+/// restart follows. The program closing
 /// meanwhile answers the question: it goes. `true`: it closed, and the
 /// restart goes on — its launch window asks, and can be closed.
 fn closed_after_all(tools: &Tools, label: &str, program: &OwnedFd) -> bool {
@@ -752,6 +755,7 @@ fn closed_after_all(tools: &Tools, label: &str, program: &OwnedFd) -> bool {
             ("kill".to_owned(), "Закрыть сразу".to_owned(), true),
         ],
         guard_ms: crate::dialog::TOO_FAST.as_millis() as u64,
+        ..Default::default()
     };
     loop {
         let asked = std::time::Instant::now();
@@ -865,7 +869,7 @@ pub fn menu(tools: &Tools) -> u8 {
         title: label.clone(),
         notes: vec![describe(&tools.state, &window, launch.as_ref())],
         actions: menu_entries(&label, launch.as_ref(), &pin),
-        guard_ms: 0,
+        ..Default::default()
     };
     let Some(choice) = ask_menu(tools, &menu) else {
         return 0;

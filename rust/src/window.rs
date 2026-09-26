@@ -45,7 +45,11 @@
 //! The same window is the hotkey menu of a running program
 //! (`crate::focus`): `mode⇥menu`, a title, notes, and one
 //! `action⇥<tag>⇥<label>⇥<flags>` per entry (`danger` for one that breaks
-//! something); the answer is `action⇥<tag>`.
+//! something); the answer is `action⇥<tag>`. With `guard⇥<ms>` the menu is a
+//! question ([`question`]): the answers are the entries, the safe one first,
+//! a command it is about goes as `program⇥`/`cmd⇥`, and the window takes
+//! nothing until the person has been still for the guard with it focused.
+//! Exit status 3: it could not be shown at all.
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -99,6 +103,11 @@ pub struct Menu {
     /// A guarded menu (`guard⇥<ms>`): nothing is taken until the person has
     /// been still this long with the window focused — a question.
     pub guard_ms: u64,
+    /// A command the question is about, one word each, shown apart as the
+    /// launch window shows one (`cmd⇥`), with what its first word is on the
+    /// host (`program⇥`).
+    pub command: Vec<String>,
+    pub program: String,
 }
 
 /// The menu as the window reads it.
@@ -114,6 +123,12 @@ pub fn render_menu(menu: &Menu) -> String {
             clean(label),
             if *danger { "danger" } else { "" }
         ));
+    }
+    if !menu.program.is_empty() {
+        out.push_str(&format!("program\t{}\n", clean(&menu.program)));
+    }
+    for word in &menu.command {
+        out.push_str(&format!("cmd\t{}\n", clean(word)));
     }
     if menu.guard_ms > 0 {
         out.push_str(&format!("guard\t{}\n", menu.guard_ms));
@@ -133,11 +148,20 @@ pub fn spawn_menu(window: &Path, menu: &Menu) -> Option<Child> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    // From a thread of its own: a window that does not read would otherwise
+    // hold this — and the deadline would never start.
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = std::io::Write::write_all(&mut stdin, render_menu(menu).as_bytes());
+        let request = render_menu(menu);
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut stdin, request.as_bytes());
+        });
     }
     Some(child)
 }
+
+/// The exit status of a window that could not be shown at all (its
+/// `EXIT_NOT_SHOWN`): the caller asks another way.
+const EXIT_NOT_SHOWN: i32 = 3;
 
 /// The tag a menu window that has ended chose; `None`: closed, Esc.
 pub fn menu_answer(child: Child) -> Option<String> {
@@ -173,9 +197,13 @@ pub fn question(
     window: &Path,
     title: &str,
     text: &str,
+    command: Option<(&str, &[String])>,
     answers: &[(&str, &str, bool)],
     deadline: Option<std::time::Duration>,
 ) -> Asked {
+    let (program, command) = command.map_or((String::new(), Vec::new()), |(program, words)| {
+        (program.to_owned(), words.to_vec())
+    });
     let menu = Menu {
         title: title.to_owned(),
         notes: text.lines().map(str::to_owned).collect(),
@@ -184,6 +212,8 @@ pub fn question(
             .map(|(tag, label, danger)| ((*tag).to_owned(), (*label).to_owned(), *danger))
             .collect(),
         guard_ms: crate::dialog::TOO_FAST.as_millis() as u64,
+        command,
+        program,
     };
     let Some(mut child) = spawn_menu(window, &menu) else {
         return Asked::NotShown;
@@ -214,9 +244,11 @@ pub fn question(
         return Asked::NoAnswer;
     };
     // Ended by a signal — killed, or it never got to show itself: no answer,
-    // as a question not answered in time.
-    if out.status.code().is_none() {
-        return Asked::NoAnswer;
+    // as a question not answered in time. Not shown at all: asked another way.
+    match out.status.code() {
+        None => return Asked::NoAnswer,
+        Some(EXIT_NOT_SHOWN) => return Asked::NotShown,
+        Some(_) => {}
     }
     match parse_menu_reply(&String::from_utf8_lossy(&out.stdout)) {
         Some(tag) if out.status.success() && answers.iter().any(|(t, _, _)| *t == tag) => {
@@ -404,7 +436,7 @@ mod tests {
                 ("close".to_owned(), "Закрыть".to_owned(), false),
                 ("kill-zone".to_owned(), "Оборвать сеть nl".to_owned(), true),
             ],
-            guard_ms: 0,
+            ..Default::default()
         };
         assert_eq!(
             render_menu(&menu),
@@ -430,7 +462,7 @@ mod tests {
         let answers = [("deny", "Отказать", false), ("allow", "Разрешить", false)];
         let ask = |script: &str, deadline| {
             crate::dialog::test_program(&window, &format!("#!/bin/sh\n{script}\n"));
-            question(&window, "Запуск", "строка\nещё", &answers, deadline)
+            question(&window, "Запуск", "строка\nещё", None, &answers, deadline)
         };
         let seen = dir.join("request");
         let script = format!("cat > '{}'; printf 'action\\tallow\\n'", seen.display());
@@ -458,7 +490,7 @@ mod tests {
         // Killed, or never shown: no answer either.
         assert_eq!(ask("cat >/dev/null; kill -9 $$", None), Asked::NoAnswer);
         assert_eq!(
-            question(Path::new(""), "t", "q", &answers, None),
+            question(Path::new(""), "t", "q", None, &answers, None),
             Asked::NotShown
         );
         let _ = std::fs::remove_dir_all(&dir);

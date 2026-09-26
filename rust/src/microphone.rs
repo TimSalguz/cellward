@@ -621,8 +621,14 @@ impl Policy {
             if remember {
                 answers.push(("always", always.as_str(), false));
             }
-            match crate::window::question(&self.window, &title, &text, &answers, Some(self.timeout))
-            {
+            match crate::window::question(
+                &self.window,
+                &title,
+                &text,
+                None,
+                &answers,
+                Some(self.timeout),
+            ) {
                 crate::window::Asked::NotShown => None,
                 crate::window::Asked::Chose(tag) => Some(match (tag.as_str(), remember) {
                     ("once", _) => Some(0),

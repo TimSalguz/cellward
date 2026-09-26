@@ -832,10 +832,18 @@ fn ask(
     } else {
         &[("deny", "Отказать", false), ("allow", "Разрешить", false)]
     };
+    // In the window the command is a block of its own, word by word and
+    // numbered, never cut off out of sight (`window::Menu::command`).
+    let words = shown_words(cmd).unwrap_or_default();
+    let asking = format!(
+        "Программа из {asker} просит запустить в {network}, контейнер: {container}. Команда — \
+         ниже, по словам.\n\nРазрешить?"
+    );
     match crate::window::question(
         &tools.window,
         "Запуск из зоны",
-        &question,
+        &asking,
+        Some(("", &words)),
         answers,
         question_timeout(tools),
     ) {
