@@ -559,8 +559,28 @@ fn plan_move(
         .collect();
     let declared_other =
         |name: &str| declared_home_in(config, name).is_some_and(|h| h != Home::Private);
+    // And every sandbox that can keep its own name keeps it: a rename never
+    // lands on the name of a sandbox that stays — a stale `sb:<name>` then
+    // means one container only.
+    let keepers: Vec<String> = privates
+        .iter()
+        .filter(|name| {
+            valid_name(name)
+                && !taken.iter().any(|t| t == *name)
+                && !declared_other(name)
+                && (fs::symlink_metadata(profiles.join(name)).is_err()
+                    || hollow(name)
+                    || yields(Home::Layer, name))
+        })
+        .cloned()
+        .collect();
+    taken.extend(keepers.iter().cloned());
     let mut plan: Vec<(Home, String, String)> = Vec::new();
     for (kind, name) in &old {
+        if *kind == Home::Private && keepers.contains(name) {
+            plan.push((*kind, name.clone(), name.clone()));
+            continue;
+        }
         let data = match kind {
             Home::Private => sandboxes.join(name),
             _ => profiles.join(name),
@@ -573,8 +593,7 @@ fn plan_move(
             (name.clone(), "-layer")
         } else if valid_name(name) {
             (name.clone(), "-sb")
-        } else if reserved_name(name) && valid_name(&format!("x{name}")) && !name.starts_with("__")
-        {
+        } else if reserved_name(name) && valid_name(&format!("{name}-2")) {
             // A word of ours now (`main`, `ask`…): the name with a number.
             // Not a reserved beginning (`vpn-profile-…`): no number makes
             // that a name.
@@ -595,7 +614,6 @@ fn plan_move(
                     || hollow_target(new)
                     // The layer that gives the name up moves out first.
                     || (*kind == Home::Private && new == name && yields(Home::Layer, new)))
-                && !(*kind == Home::Private && yields(Home::Layer, new) && new != name)
         };
         let mut new = if suffix == "-layer" {
             format!("{base}-layer")
@@ -791,6 +809,18 @@ pub fn migrate_in(config: &Path, profiles: &Path, sandboxes: &Path, state: &Path
         } else {
             vec![root.join(sub).join(name), data.clone()]
         };
+        // A layer that changes its name waits for its programs: their records
+        // are under the old name, and while they live the new one would not
+        // see them run (one network at a time, `container rm`).
+        if *kind == Home::Layer && name != new {
+            let running = state.join(".running");
+            if registry::any_live(&running.join(name), &|pid| registry::alive(&running, pid)) {
+                moved.failed.push(format!(
+                    "программы контейнера {name} работают — он станет {new}, когда они закроются"
+                ));
+                continue;
+            }
+        }
         let failed_before = moved.failed.len();
         for source in &sources {
             for file in POLICY_FILES {
@@ -2395,6 +2425,31 @@ mod tests {
             fs::read_to_string(l.profiles.join("keep").join(DATA_KIND)).unwrap(),
             "private"
         );
+    }
+
+    /// A rename never lands on the name of a sandbox that keeps its own:
+    /// with a layer `a` and sandboxes `a` and `a-sb`, the sandbox `a` is
+    /// `a-sb2`, and a stale `sb:a-sb` still means `a-sb`.
+    #[test]
+    fn a_rename_never_takes_a_kept_name() {
+        let l = Layout::new("kept");
+        fs::create_dir_all(l.profiles.join("a/home/upper")).unwrap();
+        fs::create_dir_all(l.sandboxes.join("a/home")).unwrap();
+        fs::write(l.sandboxes.join("a/home/f"), "a").unwrap();
+        fs::create_dir_all(l.sandboxes.join("a-sb/home")).unwrap();
+        fs::write(l.sandboxes.join("a-sb/home/f"), "a-sb").unwrap();
+        let moved = l.migrate();
+        assert!(moved.failed.is_empty(), "{moved:?}");
+        assert_eq!(
+            fs::read_to_string(l.profiles.join("a-sb/home/f")).unwrap(),
+            "a-sb"
+        );
+        assert_eq!(
+            fs::read_to_string(l.profiles.join("a-sb2/home/f")).unwrap(),
+            "a"
+        );
+        assert_eq!(canonical_in(&l.config, "sb:a").as_deref(), Some("a-sb2"));
+        assert_eq!(canonical_in(&l.config, "sb:a-sb").as_deref(), Some("a-sb"));
     }
 
     /// A kind of home written into a file next to a container's data, where

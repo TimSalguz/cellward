@@ -1815,17 +1815,14 @@ mod tests {
                 "{two:?}"
             );
         }
-        // A sandbox of that very name wins over a rename of the move, and a
-        // renamed one is renamed once: `sb:a` → `a-sb`, never `a-sb-sb`.
+        // A sandbox of that very name is itself; one the move renamed (a
+        // layer had the name) is found by its old one.
         container::create(&tools, "a-sb", Home::Private).unwrap();
-        fs::write(
-            base.join("config/containers/.renamed"),
-            "sb:a\ta-sb\nsb:a-sb\ta-sb-sb\n",
-        )
-        .unwrap();
+        container::create(&tools, "a-sb2", Home::Private).unwrap();
+        fs::write(base.join("config/containers/.renamed"), "sb:a\ta-sb2\n").unwrap();
         assert_eq!(
             resolve(&["nl", "--sandbox", "a", "--", "x"]),
-            Ok((Container::Main, Sandbox::Named(name("a-sb"))))
+            Ok((Container::Main, Sandbox::Named(name("a-sb2"))))
         );
         assert_eq!(
             resolve(&["nl", "--sandbox", "a-sb", "--", "x"]),
