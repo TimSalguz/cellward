@@ -374,7 +374,7 @@ mod tests {
         assert!(complete(&["vpn-zone", ""], 2).contains(&"up".to_string()));
         assert_eq!(
             complete(&["vpn-zone", "de"], 2),
-            ["default", "default-profile"]
+            ["default", "default-profile", "devices"]
         );
         // The hidden verb stays hidden.
         assert!(!complete(&["vpn-zone", "_"], 2)
