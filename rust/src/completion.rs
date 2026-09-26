@@ -200,14 +200,15 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             v if ZONE_VERBS.contains(&v) && pos == 2 => owned(&mut out, &snap.zones),
             "add" if pos == 3 => return vec![FILES.to_string()],
             "x11" if pos == 3 => strs(&mut out, &["on", "off"]),
-            "nix-daemon" if pos == 3 => strs(&mut out, &["on", "off", "default"]),
-            "host-files" if pos == 3 => strs(&mut out, &["read-only", "writable", "default"]),
-            "camera" | "audio-manager" if pos == 3 => strs(&mut out, &["on", "off", "default"]),
+            // The default first; `default` only where it follows something.
+            "nix-daemon" if pos == 3 => strs(&mut out, &["off", "on"]),
+            "host-files" if pos == 3 => strs(&mut out, &["read-only", "writable"]),
+            "camera" | "audio-manager" if pos == 3 => strs(&mut out, &["off", "on"]),
             "microphone" | "screencast" if pos == 3 => strs(&mut out, &["ask", "yes", "no"]),
-            "ask-again" if pos == 2 => strs(&mut out, &["1m", "3m", "10m", "1h", "default"]),
+            "ask-again" if pos == 2 => strs(&mut out, &["3m", "1m", "10m", "1h"]),
             "hermetic" if pos == 3 => match word(2) {
                 "--default" => strs(&mut out, &["on", "off"]),
-                _ => strs(&mut out, &["on", "off", "default"]),
+                _ => strs(&mut out, &["default", "on", "off"]),
             },
             "doctor" => {
                 owned(&mut out, &snap.zones);
@@ -216,9 +217,9 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             "mode" if pos == 2 => strs(&mut out, &["picker", "per-zone", "both", "off"]),
             "wayland-sandbox" if pos == 2 => strs(&mut out, &["on", "off"]),
             "frame" if pos == 2 => strs(&mut out, &["show", "hide", "width", "title", "color"]),
-            "frame" if pos == 3 && word(2) == "width" => strs(&mut out, &["default"]),
+            "frame" if pos == 3 && word(2) == "width" => strs(&mut out, &["4"]),
             "frame" if pos == 3 && word(2) == "title" => {
-                strs(&mut out, &["always", "hover", "off", "default"])
+                strs(&mut out, &["always", "hover", "off"])
             }
             "frame" if pos == 3 && word(2) == "color" => owned(&mut out, &snap.zones),
             "frame" if pos == 4 && word(2) == "color" => strs(&mut out, &["default"]),
@@ -282,7 +283,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 strs(&mut out, &["default"])
             }
             "container" if pos == 5 && word(2) == "set" && word(4) == "microphone" => {
-                strs(&mut out, &["zone", "yes", "no", "ask"])
+                strs(&mut out, &["default", "yes", "no", "ask"])
             }
             "container" if pos == 5 && word(2) == "set" && word(4) == "home" => {
                 strs(&mut out, &["private", "layer", "main"])

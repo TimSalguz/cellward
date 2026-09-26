@@ -941,7 +941,7 @@ configure программе → её `ack_configure` с нашим серийн
   .<зона> = "#rrggbb"` (Nix) → `cellward frame color <зона> #rrggbb|default`
   (файл `frame-color` в каталоге зоны) → цвет из имени зоны (FNV-1a → оттенок,
   насыщенность 0,65, яркость 0,85: один и тот же на любой машине). Толщина:
-  `frame.width` → `cellward frame width <1–32>|default` → 4. Обе читает
+  `frame.width` → `cellward frame width <1–32>` → 4 (по умолчанию). Обе читает
   запуск и передаёт `wl-sandbox --frame <rrggbb>:<толщина>`. Выключатель
   «спрятать рамки» для показа экрана — `cellward frame hide|show` (настройка
   `frames`, только локальная: её щёлкают туда и обратно, объявленную в Nix
@@ -1008,7 +1008,7 @@ configure программе → её `ack_configure` с нашим серийн
   посредника. Своего указателя пока нет (этап 3), поэтому у программы без
   указателя полоса при наведении не выезжает. `off` — только обводка.
   Настройка: `programs.cellward.frame.title = "always"|"hover"|"off"` (Nix)
-  → `cellward frame title always|hover|off|default` (файл `frame-title`) →
+  → `cellward frame title always (по умолчанию)|hover|off` (файл `frame-title`) →
   `always`; читается при запуске и уходит в `--frame <rrggbb>:<толщина>:<режим>`,
   текст — `--frame-title`. `cellward status --json`: `frame_title` в
   `defaults`, с источником.

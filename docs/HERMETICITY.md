@@ -192,8 +192,8 @@ becomes a default, with the table above as the list of what the owner accepts.
      one running agents that start VM checks with `systemd-run --user`).
      **Implemented, and the default flipped (2026-09):**
      `hermetic.default` and `hermetic.exceptions` in the module,
-     `cellward hermetic --default on|off` and
-     `cellward hermetic <zone> on|off|default` locally. What wins: a zone in
+     `cellward hermetic --default on (default)|off` and
+     `cellward hermetic <zone> default (as all zones)|on|off` locally. What wins: a zone in
      `hermetic.exceptions` (the opposite of `hermetic.default`, which the
      module requires with it), then the zone's own setting, then
      `hermetic.default`, then the local default, then on. Only `off` opens

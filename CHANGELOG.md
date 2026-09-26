@@ -8,14 +8,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Added
 - **A container's windows have a frame colour of its own**
   (`programs.cellward.containers.<name>.frameColor`, `cellward container
-  set <c> color <#rrggbb>|default`, `containers[].frame_color` in
+  set <c> color default|<#rrggbb>`, `containers[].frame_color` in
   `status --json`; `docs/PERMISSIONS.md` §11.10 — the owner, 2026-09-26:
   the colour moves from zones to containers too). A container with none is
   framed in its network's colour, as before.
 - **A container's microphone setting of its own** (`programs.cellward.
   containers.<name>.permissions.microphone`, `cellward container set <c>
-  microphone zone|yes|no|ask` — `zone`, the default, is the zone's
-  setting —, `containers[].microphone` in `status
+  microphone default|yes|no|ask` — `default`, none of its own, is the
+  zone's setting —, `containers[].microphone` in `status
   --json`; `docs/PERMISSIONS.md` §11.10). The sound filter now knows which
   container a program that connects is of — the same way the broker does,
   by the launch it descends from (`rust/src/origin.rs`) — and decides its
@@ -57,10 +57,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   not get the zone's "yes" its container may have been refused. With no
   graphical session that is a refusal. The journal's `microphone` events
   carry a `container` field: the name, `""` for none, `"?"` for not known.
-- **The CLI marks the default instead of offering a `default` word**
-  where the default is one of the values (the owner, 2026-09-26):
-  `cellward microphone|screencast <zone> ask (по умолчанию)|yes|no`.
-  `default` is still taken there, and no longer shown or completed.
+- **The CLI says what the default is** (the owner, 2026-09-26). Where the
+  default is one of the values, the value is marked and `default` is no
+  longer shown or completed (still taken): `camera|nix-daemon|audio-manager
+  <zone> off (по умолчанию)|on`, `host-files <zone> read-only (по
+  умолчанию)|writable`, `microphone|screencast <zone> ask (по
+  умолчанию)|yes|no`, `frame title always (по умолчанию)|hover|off`,
+  `frame width <1–32> (по умолчанию 4)`, `ask-again <term> (по умолчанию
+  3m)`. Where `default` follows something, it stays a word and says what:
+  `hermetic <zone> default (как у всех зон)|on|off`, `frame color <zone>
+  default (из имени зоны)|<#rrggbb>`, `container set <c> color default
+  (цвет сети)|<#rrggbb>`, `container set <c> microphone default (как у
+  зоны)|yes|no|ask`. Completion offers the default first.
 - **Container settings are written through a temporary file**, one writer
   at a time (a lock file in the directory), and a settings file that is there
   but cannot be read is no longer rewritten with its other keys lost.

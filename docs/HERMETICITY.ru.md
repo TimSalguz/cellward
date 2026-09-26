@@ -179,8 +179,8 @@ Enter запускает только в спросившей зоне; друг
      агенты, запускающие VM-проверки через `systemd-run --user`).
      **Сделано, и умолчание перевёрнуто (2026-09):**
      `hermetic.default` и `hermetic.exceptions` в модуле,
-     `cellward hermetic --default on|off` и
-     `cellward hermetic <зона> on|off|default` локально. Что важнее: зона из
+     `cellward hermetic --default on (по умолчанию)|off` и
+     `cellward hermetic <зона> default (как у всех зон)|on|off` локально. Что важнее: зона из
      `hermetic.exceptions` (обратное `hermetic.default`, который модуль требует
      вместе с ними), затем своя настройка зоны, затем `hermetic.default`, затем
      локальное умолчание, затем вкл. Открывает только `off`: пустой маркер
