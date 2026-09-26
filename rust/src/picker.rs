@@ -351,9 +351,11 @@ pub fn net_step(memory: &Memory) -> NetStep {
         }
     }
     NetStep::Ask {
-        // Running already: where it runs is what Enter keeps.
+        // Running already: where it runs is what Enter keeps; then the
+        // container's own network (asked anyway with VPN_ZONE_ASK).
         default: match &memory.running {
             Some(running) => crate::launch::network_name(&running.zone).to_owned(),
+            None if !memory.bound.is_empty() => memory.bound.clone(),
             None if memory.last.is_empty() => memory.fallback.clone(),
             None => memory.last.clone(),
         },
@@ -1051,17 +1053,30 @@ fn ask_window(
     if !container.is_throwaway_container() {
         remember(&tools.state, ".lastprofile", key, &selector);
     }
-    let container = settle_network(tools, key, container, &reply.net, reply.pin_net);
+    let shared = !reply.pin_container && shared_default(memory, &container, None);
+    let container = settle_network(tools, key, container, &reply.net, reply.pin_net, shared);
     Some(Some((reply.net, container)))
 }
 
-/// The network a launch goes to, made the container's
-/// (`docs/PERMISSIONS.md` §11.8): a named container with no network yet
-/// takes the one chosen for it — the question was its, and its identity
-/// goes to one network; a container bound already keeps its own (`run`
-/// refuses another). The main home keeps the choice for this launch — or,
-/// "always", the program moves to a container of the main home bound to
-/// it, `main-<network>`. A throwaway one keeps nothing. Returns the
+/// Is this container the program's by the global default alone — a named
+/// container nobody pinned this program to? Its network is shared by every
+/// program that goes there unasked, and is not bound from one of them.
+fn shared_default(memory: &Memory, container: &Container, reprofile: Option<&str>) -> bool {
+    reprofile.is_none()
+        && memory.pinned_profile.is_empty()
+        && !matches!(memory.default_profile.as_str(), "" | "ask" | "main" | "own")
+        && container.selector() == memory.default_profile
+}
+
+/// "Always" for a network (`docs/PERMISSIONS.md` §11.8): the network is
+/// made the container's — a named container with no network yet is bound to
+/// it, the program's own one is made with it, and in the main home the
+/// program moves to the container of the main home bound to it,
+/// `main-<network>`. Without "always" nothing is bound: a binding is an
+/// action of its own, never a side effect of one launch (I1). A throwaway
+/// container keeps nothing, and a container that is the program's only by
+/// the global default is not bound from it (`shared_default`). A sandbox
+/// asked for by name is bound only when it is a home of its own. Returns the
 /// container to launch.
 fn settle_network(
     tools: &Tools,
@@ -1069,17 +1084,17 @@ fn settle_network(
     container: Container,
     net: &str,
     always: bool,
+    shared: bool,
 ) -> Container {
     use crate::container::{Home, Network, Source};
-    if container.is_throwaway_container() || (container.fs_sandbox && container.sandbox.is_empty())
+    if !always
+        || container.is_throwaway_container()
+        || (container.fs_sandbox && container.sandbox.is_empty())
     {
         return container;
     }
-    let name = container.selector();
-    if name.is_empty() {
-        if !always {
-            return container;
-        }
+    let network = Network::Named(launch::network_name(net).to_owned());
+    if container.profile.is_empty() && container.sandbox.is_empty() {
         return match crate::container::main_for_network(tools, net) {
             Ok(name) => {
                 remember(&tools.state, ".pinnedprofile", key, &name);
@@ -1095,24 +1110,41 @@ fn settle_network(
             }
         };
     }
-    let name = match name.strip_prefix(SANDBOX_PREFIX) {
-        Some(bare) => {
-            crate::container::sandbox_name(tools, bare).unwrap_or_else(|| bare.to_owned())
-        }
-        None => name,
+    if shared {
+        let name = container.selector();
+        dialog::notify(
+            &tools.notify_send,
+            None,
+            "8000",
+            "Сеть не закреплена",
+            &format!(
+                "«{name}» — контейнер по умолчанию для всех программ: его сеть меняется в его \
+                 настройках (cellward container set {name} network …), не одним запуском."
+            ),
+        );
+        return container;
+    }
+    let (name, private_only) = if container.sandbox.is_empty() {
+        (container.profile.clone(), false)
+    } else {
+        (
+            crate::container::sandbox_name(tools, &container.sandbox)
+                .unwrap_or_else(|| container.sandbox.clone()),
+            true,
+        )
     };
-    let network = Network::Named(launch::network_name(net).to_owned());
     let bound = match crate::container::load(tools, &name) {
+        // `run --sandbox` refuses a layer or the main home by that name: its
+        // network is not touched either.
+        Some(c) if private_only && c.home != Home::Private => Ok(()),
         Some(c) if c.network.value == Network::Ask && c.network.source != Source::Nix => {
             crate::container::set_network(tools, &c.name, &network)
         }
         Some(_) => Ok(()),
         // The program's own, or a new one, made at its first launch: made now,
         // with its network.
-        None if !container.sandbox.is_empty() => {
-            crate::container::create(tools, &name, Home::Private)
-                .and_then(|c| crate::container::set_network(tools, &c.name, &network))
-        }
+        None if private_only => crate::container::create(tools, &name, Home::Private)
+            .and_then(|c| crate::container::set_network(tools, &c.name, &network)),
         None => Ok(()),
     };
     if let Err(why) = bound {
@@ -1485,9 +1517,16 @@ pub fn main() -> ExitCode {
             } else {
                 &memory.pinned_profile
             };
+            // "↺" only for a pin of the picker's own: one declared in Nix is
+            // not undone here.
+            let local_pin = tools.state.join(".pinnedprofile").join(&key).is_file();
             let menu = net_menu(
                 &menu_zones(&tools.state),
-                &memory.pinned_profile,
+                if local_pin {
+                    &memory.pinned_profile
+                } else {
+                    ""
+                },
                 &container_label_in(&tools, current),
             );
 
@@ -1549,7 +1588,10 @@ pub fn main() -> ExitCode {
                 // The program's container, not a network: a container's
                 // network is its own.
                 NetChoice::Unpin => {
+                    // And the last choice with it: it names the same container,
+                    // and the next pass would take it again.
                     let _ = fs::remove_file(tools.state.join(".pinnedprofile").join(&key));
+                    let _ = fs::remove_file(tools.state.join(".lastprofile").join(&key));
                     return reexec(&tools, &key, &args.cmd, None);
                 }
                 NetChoice::Pin(zone) => {
@@ -1574,7 +1616,10 @@ pub fn main() -> ExitCode {
         reprofile.as_deref(),
     );
     let container = match chosen {
-        Some(always) => settle_network(&tools, &key, container, &zone_choice, always),
+        Some(always) => {
+            let shared = shared_default(&memory, &container, reprofile.as_deref());
+            settle_network(&tools, &key, container, &zone_choice, always, shared)
+        }
         None => container,
     };
 

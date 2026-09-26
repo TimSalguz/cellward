@@ -479,17 +479,35 @@ fn main_container_name(tools: &Tools, network: &str) -> Option<String> {
 
 /// The container of the main home bound to `network`, made when there is
 /// none (`main-<network>`): where a program of the main home goes when its
-/// network is chosen "always" (`docs/PERMISSIONS.md` §11.8).
+/// network is chosen "always" (`docs/PERMISSIONS.md` §11.8). Its settings are
+/// written in one go: never a container of the main home with no network.
 pub fn main_for_network(tools: &Tools, network: &str) -> Result<String, String> {
     let network = crate::launch::network_name(network);
     let name = main_container_name(tools, network)
         .ok_or_else(|| format!("нет имени для контейнера основного дома в сети {network}"))?;
     if load_quiet(tools, &name).is_none() {
         let file = policy_dir(tools, &name).join(FILE);
-        write_key(&file, "home", Some(Home::Main.setting()), true)?;
-        write_key(&file, "network", Some(network), true)?;
+        let text = format!(
+            "# Локальные настройки контейнера cellward (docs/CONTAINERS.md).\n\
+             # Пишет `cellward container`; значения из Nix лежат в ~/.config/vpn-zones/declared.\n\
+             home = {}\nnetwork = {network}\n",
+            Home::Main.setting()
+        );
+        fs::create_dir_all(policy_dir(tools, &name))
+            .and_then(|()| write_atomically(&file, &text))
+            .map_err(|e| format!("не записать {}: {e}", file.display()))?;
     }
     Ok(name)
+}
+
+/// Is `network` one a launch can go to: `offline`, the host's, or a zone
+/// that still has its config?
+pub fn network_exists(tools: &Tools, network: &str) -> bool {
+    network == crate::launch::OFFLINE
+        || crate::launch::is_unconfined_name(network)
+        || (!network.is_empty()
+            && !network.contains('/')
+            && tools.state.join(network).join("config.conf").is_file())
 }
 
 /// The network pinned to a program (`.pinned/<program>`) becomes the network
@@ -497,17 +515,22 @@ pub fn main_for_network(tools: &Tools, network: &str) -> Result<String, String> 
 /// once, on the host, after the layout is in place, and marked done
 /// ([`PINS_MOVED`]).
 ///
-/// * A named container with no network yet takes it — when its programs
-///   agree; where they do not, it stays "ask" and the pins are said.
-/// * A container bound already, or declared in Nix, keeps its network: it
-///   won over the pin before too.
+/// * A named container the program is pinned to (or its own, `app-<key>`)
+///   with no network yet takes it — when every program of the container
+///   agrees: one without a pin was asked every time, and does not agree.
+///   Where they do not, or the container runs in another network right now,
+///   it stays "ask", and the pins are said.
+/// * A container reached only through the global default is nobody's
+///   choice for this program: binding it would send every new program into
+///   that network unasked. It is left alone, as is one bound already or
+///   declared in Nix.
 /// * A program of the main home goes to a container of the main home bound
-///   to that network, `main-<network>`: it starts where it did, with a place
-///   for permissions of its own now.
-/// * A program whose container is asked at every launch, or a throwaway one,
-///   keeps its network as the last choice: the question starts on it.
+///   to that network, `main-<network>`.
+/// * Otherwise the network is the last choice, where the question starts.
+/// * A pin to a zone that is gone is dropped.
 ///
-/// Returns what it did, for the one who reads it.
+/// Each pin is taken away once handled; one that failed is tried again at
+/// the next look. Returns what it did, for the one who reads it.
 pub fn migrate_pins(tools: &Tools) -> Vec<String> {
     let root = tools.config.join(POLICY_DIR);
     let mark = root.join(PINS_MOVED);
@@ -524,7 +547,7 @@ pub fn migrate_pins(tools: &Tools) -> Vec<String> {
     let mut said = Vec::new();
     let default = crate::cli::setting(tools, "default-profile")
         .map(|(v, _)| v)
-        .unwrap_or_else(|| "ask".to_owned());
+        .unwrap_or_default();
     let all = load_all_quiet(tools);
     let owner_of = |key: &str| -> Owner {
         if let Some(c) = all.iter().find(|c| {
@@ -536,26 +559,29 @@ pub fn migrate_pins(tools: &Tools) -> Vec<String> {
         }
         let pinned =
             read_setting(&tools.state.join(".pinnedprofile").join(key)).unwrap_or_default();
-        let chosen = if pinned.is_empty() {
-            default.as_str()
-        } else {
-            pinned.as_str()
-        };
-        match chosen {
-            "" | "__main__" | "main" => Owner::Main,
-            "__fs__" => Owner::Throwaway,
-            "ask" => Owner::Free,
+        if !pinned.is_empty() {
+            return match pinned.as_str() {
+                "__main__" => Owner::Main,
+                "__fs__" => Owner::Throwaway,
+                other => canonical(tools, other).map_or(Owner::Free, Owner::Named),
+            };
+        }
+        // Nothing pinned: the default says where it goes — but only `main`
+        // and the program's own container are the program's; a named default
+        // is shared, and nobody chose its network by pinning one program.
+        match default.as_str() {
+            "main" => Owner::Main,
             "own" => Owner::Named(format!("app-{key}")),
-            other => match canonical(tools, other) {
-                Some(name) => Owner::Named(name),
-                None => Owner::Free,
-            },
+            _ => Owner::Free,
         }
     };
 
     let _ = fs::create_dir_all(tools.state.join(".last"));
     let _ = fs::create_dir_all(tools.state.join(".pinnedprofile"));
-    let mut proposals: std::collections::BTreeMap<String, Vec<(String, String)>> =
+    let as_last = |key: &str, net: &str| {
+        let _ = fs::write(tools.state.join(".last").join(key), net);
+    };
+    let mut proposals: std::collections::BTreeMap<String, Vec<(PathBuf, String, String)>> =
         std::collections::BTreeMap::new();
     let mut failed = false;
     let pins: Vec<PathBuf> = visible_entries(&pins_dir)
@@ -569,7 +595,9 @@ pub fn migrate_pins(tools: &Tools) -> Vec<String> {
             .to_string_lossy()
             .into_owned();
         let net = crate::launch::network_name(&read_setting(file).unwrap_or_default()).to_owned();
-        if net.is_empty() {
+        if !network_exists(tools, &net) {
+            said.push(format!("{key}: сети {net} больше нет — закрепление снято"));
+            let _ = fs::remove_file(file);
             continue;
         }
         let owner = match owner_of(&key) {
@@ -583,30 +611,32 @@ pub fn migrate_pins(tools: &Tools) -> Vec<String> {
             owner => owner,
         };
         match owner {
-            Owner::Named(name) => proposals.entry(name).or_default().push((key, net)),
+            Owner::Named(name) => proposals
+                .entry(name)
+                .or_default()
+                .push((file.clone(), key, net)),
             Owner::Main => match main_for_network(tools, &net) {
-                Ok(name) => {
-                    let written = fs::write(tools.state.join(".pinnedprofile").join(&key), &name)
-                        .map_err(|e| e.to_string());
-                    match written {
-                        Ok(()) => said.push(format!(
-                            "{key}: сеть {net} закреплена за программой в основном доме — теперь \
-                             она в контейнере {name} (основной дом, сеть {net})"
-                        )),
-                        Err(e) => {
-                            failed = true;
-                            said.push(format!("{key}: не перенести закрепление сети {net}: {e}"));
-                        }
+                Ok(name) => match fs::write(tools.state.join(".pinnedprofile").join(&key), &name) {
+                    Ok(()) => {
+                        let _ = fs::remove_file(file);
+                        said.push(format!(
+                            "{key}: сеть {net} была закреплена за программой в основном \
+                                 доме — теперь она в контейнере {name} (основной дом, сеть {net})"
+                        ));
                     }
-                }
+                    Err(e) => {
+                        failed = true;
+                        said.push(format!("{key}: не перенести закрепление сети {net}: {e}"));
+                    }
+                },
                 Err(why) => {
                     failed = true;
                     said.push(format!("{key}: {why}"));
                 }
             },
             Owner::Throwaway | Owner::Free => {
-                let _ = fs::create_dir_all(tools.state.join(".last"));
-                let _ = fs::write(tools.state.join(".last").join(&key), &net);
+                as_last(&key, &net);
+                let _ = fs::remove_file(file);
                 said.push(format!(
                     "{key}: контейнер выбирается при запуске — сеть {net} больше не закреплена, \
                      окно начнёт с неё"
@@ -615,47 +645,60 @@ pub fn migrate_pins(tools: &Tools) -> Vec<String> {
         }
     }
     for (name, wanted) in &proposals {
-        let mut nets: Vec<&str> = wanted.iter().map(|(_, n)| n.as_str()).collect();
-        nets.sort();
-        nets.dedup();
         let container = load_quiet(tools, name);
         let settable = container
             .as_ref()
             .is_none_or(|c| c.network.source != Source::Nix && c.network.value == Network::Ask);
-        if !settable {
-            continue;
-        }
-        if nets.len() > 1 {
-            for (key, net) in wanted {
-                let _ = fs::write(tools.state.join(".last").join(key), net);
+        let mut nets: Vec<&str> = wanted.iter().map(|(_, _, n)| n.as_str()).collect();
+        nets.sort();
+        nets.dedup();
+        // Every program of the container has a say: one without a pin was
+        // asked every time.
+        let silent = container.as_ref().is_some_and(|c| {
+            c.apps
+                .iter()
+                .any(|a| !wanted.iter().any(|(_, key, _)| *key == a.value))
+        });
+        let busy = container
+            .as_ref()
+            .and_then(|c| running_network(tools, c))
+            .filter(|busy| nets.len() != 1 || busy != nets[0]);
+        let bind = settable && nets.len() == 1 && !silent && busy.is_none();
+        if !bind {
+            for (file, key, net) in wanted {
+                as_last(key, net);
+                let _ = fs::remove_file(file);
             }
-            said.push(format!(
-                "контейнер {name}: его программы были закреплены за разными сетями ({}) — сеть \
-                 контейнера не выбрана, спросится при запуске",
-                nets.join(", ")
-            ));
+            if settable {
+                let why = match busy {
+                    Some(busy) => format!("его программы сейчас работают в сети {busy}"),
+                    None if nets.len() > 1 => format!(
+                        "его программы были закреплены за разными сетями ({})",
+                        nets.join(", ")
+                    ),
+                    None => "не все его программы были закреплены за сетью".to_owned(),
+                };
+                said.push(format!(
+                    "контейнер {name}: {why} — сеть контейнера не выбрана, спросится при запуске"
+                ));
+            }
             continue;
         }
         // The program's own container that was never launched: made now, a
         // home of its own, as its first launch would have made it.
+        let file = policy_dir(tools, name).join(FILE);
         let made = match container {
-            Some(_) => Ok(()),
-            None => write_key(
-                &policy_dir(tools, name).join(FILE),
-                "home",
-                Some(Home::Private.setting()),
-                true,
-            ),
+            Some(_) => write_key(&file, "network", Some(nets[0]), true),
+            None => write_key(&file, "home", Some(Home::Private.setting()), true)
+                .and_then(|()| write_key(&file, "network", Some(nets[0]), true)),
         };
-        match made.and_then(|()| {
-            write_key(
-                &policy_dir(tools, name).join(FILE),
-                "network",
-                Some(nets[0]),
-                true,
-            )
-        }) {
-            Ok(()) => said.push(format!("контейнер {name} теперь в сети {}", nets[0])),
+        match made {
+            Ok(()) => {
+                for (file, _, _) in wanted {
+                    let _ = fs::remove_file(file);
+                }
+                said.push(format!("контейнер {name} теперь в сети {}", nets[0]));
+            }
             Err(e) => {
                 failed = true;
                 said.push(format!("контейнер {name}: не записать сеть: {e}"));
@@ -663,9 +706,6 @@ pub fn migrate_pins(tools: &Tools) -> Vec<String> {
         }
     }
     if !failed {
-        for file in &pins {
-            let _ = fs::remove_file(file);
-        }
         let _ = fs::write(&mark, "");
     }
     said
@@ -2730,10 +2770,25 @@ mod tests {
             )
             .unwrap();
         }
+        write_key(
+            &policy_dir(&tools, "shared").join(FILE),
+            "home",
+            Some("layer"),
+            true,
+        )
+        .unwrap();
         let state = &tools.state;
         for dir in [".pinned", ".pinnedprofile"] {
             fs::create_dir_all(state.join(dir)).unwrap();
         }
+        for zone in ["nl", "de"] {
+            fs::create_dir_all(state.join(zone)).unwrap();
+            fs::write(state.join(zone).join("config.conf"), "").unwrap();
+        }
+        // A named default is shared: nobody chose its network by pinning one
+        // program.
+        fs::create_dir_all(&tools.config).unwrap();
+        fs::write(tools.config.join("default-profile"), "work").unwrap();
         let pin = |key: &str, net: &str, container: Option<&str>| {
             fs::write(state.join(".pinned").join(key), net).unwrap();
             if let Some(c) = container {
@@ -2747,6 +2802,12 @@ mod tests {
         pin("e", "nl", None);
         pin("f", "de", Some("app-f"));
         pin("g", "nl", Some("gone"));
+        // A program of `shared` with no pin was asked every time: no
+        // agreement.
+        pin("j", "nl", Some("shared"));
+        fs::write(state.join(".pinnedprofile/k"), "shared").unwrap();
+        // A zone that is gone.
+        pin("x", "gone-zone", None);
 
         let said = migrate_pins(&tools);
         assert!(!said.is_empty());
@@ -2759,6 +2820,11 @@ mod tests {
             load(&tools, "gone").is_none(),
             "a container that is gone stays gone"
         );
+        assert_eq!(net("shared"), Some(Network::Ask), "k never agreed");
+        assert!(
+            read_setting(&state.join(".last/x")).is_none(),
+            "a gone zone is no choice"
+        );
         let main = load(&tools, "main-offline").unwrap();
         assert_eq!(
             (main.home, main.network.value),
@@ -2768,7 +2834,13 @@ mod tests {
             read_setting(&state.join(".pinnedprofile/d")).as_deref(),
             Some("main-offline")
         );
-        for (key, last) in [("b", "nl"), ("c", "de"), ("e", "nl"), ("g", "nl")] {
+        for (key, last) in [
+            ("b", "nl"),
+            ("c", "de"),
+            ("e", "nl"),
+            ("g", "nl"),
+            ("j", "nl"),
+        ] {
             assert_eq!(
                 read_setting(&state.join(".last").join(key)).as_deref(),
                 Some(last),

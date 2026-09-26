@@ -371,15 +371,25 @@ fn choosing_always_in_the_main_home_moves_the_program_to_its_container() {
     assert_eq!(home.launched()[0], line);
 }
 
-/// A container with no network yet has it asked, once: the choice is the
-/// container's from then on, and the next launch asks nothing.
+/// A container with no network yet has it asked; "always" makes the choice
+/// the container's, and the next launch asks nothing. Without "always"
+/// nothing is bound: a binding is not a side effect of one launch.
 #[test]
-fn a_container_with_no_network_is_asked_once() {
+fn a_container_with_no_network_is_bound_by_always_only() {
     let home = Home::new("first-network");
     home.zone("nl");
     home.profile("work");
     home.write("state/.pinnedprofile/firefox", "work");
     home.answers(&["nl"]);
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!home
+        .read("config/containers/work/container.conf")
+        .unwrap_or_default()
+        .contains("network"));
+    let _ = fs::remove_file(home.path("runner.log"));
+    let _ = fs::remove_file(home.path("kdialog.log"));
+    home.answers(&["pin:nl"]);
 
     let out = home.run(&pick("firefox"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -396,6 +406,43 @@ fn a_container_with_no_network_is_asked_once() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(home.asked().len(), 1, "asked again: {:?}", home.asked());
     assert_eq!(home.launched()[0], line);
+}
+
+/// The global default container is every unassigned program's: "always"
+/// from one of them does not bind it — every new program would go into that
+/// network unasked.
+#[test]
+fn the_default_container_is_not_bound_from_one_program() {
+    let home = Home::new("shared-default");
+    home.zone("nl");
+    home.profile("work");
+    home.write("config/default-profile", "work");
+    home.answers(&["pin:unconfined"]);
+    let out = home.run(&pick("telegram"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        home.launched()[0],
+        [
+            "run",
+            "unconfined",
+            "--container",
+            "work",
+            "--",
+            "firefox",
+            "%u"
+        ]
+    );
+    assert!(!home
+        .read("config/containers/work/container.conf")
+        .unwrap_or_default()
+        .contains("network"));
+    // A new program is still asked.
+    let _ = fs::remove_file(home.path("runner.log"));
+    let _ = fs::remove_file(home.path("kdialog.log"));
+    home.answers(&["nl"]);
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!home.asked().is_empty());
 }
 
 /// A program's network pin from before the network was the container's

@@ -12,17 +12,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   had another or none was one identity in two networks, or two containers'
   programs arguing over one. Now:
   - A container bound to a network starts there without a question; one with
-    no network yet has it asked at its first launch, and the answer binds it.
-    The launch window does not offer a container with a network other than
-    its own.
+    no network yet has it asked, and "always" binds it — without "always"
+    nothing is bound (a binding is an action of its own, I1). The global
+    default container is never bound from one program's launch: every new
+    program would go into that network unasked. The launch window does not
+    offer a container with a network other than its own. Removing a zone
+    unbinds the containers bound to it here.
   - "Always" for the main home moves the program to the container of the
     main home bound to that network, `main-<network>`; the main home itself
     still asks at every launch.
   - **Moved once, at the first look:** a program's network pin becomes its
-    container's network, when the container has none and its programs agree
-    (where they do not, it stays asked, and is said); a program of the main
-    home goes to `main-<network>`; a program whose container is asked every
-    time keeps the network as the last choice, where the question starts.
+    container's network (the container it is pinned to, or its own), when
+    the container has none, every program of it agrees and it does not run
+    in another network now (else it stays asked, and is said); a program of
+    the main home goes to `main-<network>`; a program whose container is
+    asked every time, or is the global default, keeps the network as the
+    last choice, where the question starts; a pin to a zone that is gone is
+    dropped.
   - The window menu (`window-menu`) pins or unpins the container's network;
     "↺ Спрашивать снова" drops the program's container pin; `cellward pins`
     lists the programs' containers and their networks; `status --json` gives

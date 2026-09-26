@@ -1342,6 +1342,22 @@ fn remove(tools: &Tools, args: &[OsString]) -> u8 {
             }
         }
     }
+    // The containers bound to it here: a new zone of the same name (another
+    // provider) must not take them in unasked. One declared in Nix stays as
+    // declared, and does not start elsewhere (I6).
+    for c in crate::container::load_all(tools) {
+        let bound_here = c.network.source == crate::container::Source::Local
+            && c.network.value == crate::container::Network::Named(name_text.to_string());
+        if bound_here {
+            match crate::container::set_network(tools, &c.name, &crate::container::Network::Ask) {
+                Ok(()) => println!(
+                    "контейнер {} больше не привязан к сети: {} удалена",
+                    c.name, name_text
+                ),
+                Err(e) => eprintln!("контейнер {}: {e}", c.name),
+            }
+        }
+    }
     // And the picker's default, if it was this zone, and the broker's
     // "always" answers from or into it: a new zone of the same name must not
     // inherit them.
@@ -2499,9 +2515,7 @@ fn print_merge(tools: &Tools, from: &str, into: &str, report: &crate::container:
 /// Is there a network by this name: `unconfined` (or `direct`), `offline`, or
 /// a zone?
 fn network_exists(tools: &Tools, name: &str) -> bool {
-    name == launch::OFFLINE
-        || launch::is_unconfined_name(name)
-        || tools.state.join(name).join("config.conf").is_file()
+    crate::container::network_exists(tools, name)
 }
 
 fn source_word(source: crate::container::Source) -> &'static str {
