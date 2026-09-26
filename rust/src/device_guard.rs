@@ -22,10 +22,14 @@
 //!
 //! The zone's programs are the processes of its user namespace and of those
 //! below it ([`zone_processes`]), whatever network namespace they made. It
-//! all runs in a thread of its own ([`start`]): a namespace a program made
-//! may stall a look into it (a FUSE mount over its `/dev`), and a device
-//! plugged in is covered by the watch at once, whatever this is doing. A look
-//! that stalls is killed after [`LOOK_DEADLINE`].
+//! all runs in a thread of its own ([`start`]), apart from the watch, which
+//! covers a device plugged in at once. No clock decides anything: a look
+//! into a namespace is waited for by nobody but the one who reports it —
+//! a namespace a program made may stall it for good (a FUSE mount over its
+//! `/dev`), a loaded machine may make it slow — and it is ended only by the
+//! next look for the same node. What the sweep decides by is what is there
+//! when the number is given again: a bind still there opens the new device,
+//! and then its namespace's programs go, however slow the look was.
 //!
 //! What this does not hold: a descriptor passed out of the zone (to a
 //! program of another zone that takes it); one in flight in a socket at the
@@ -36,11 +40,7 @@ use std::fs::{self, File};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
-
-/// How long a look into one mount namespace may take.
-pub const LOOK_DEADLINE: Duration = Duration::from_secs(2);
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 
 /// A node as the holder saw it while it was there.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +167,7 @@ pub fn start(zone: String) -> mpsc::Sender<Job> {
         let mut worker = Worker {
             zone,
             gone: Vec::new(),
+            looks: Arc::default(),
         };
         for job in rx {
             match job {
@@ -183,11 +184,37 @@ struct Worker {
     /// The nodes gone that a program of the zone may still hold: each until
     /// its number is given again.
     gone: Vec<(PathBuf, Seen)>,
+    /// The looks into the zone's mount namespaces still running.
+    looks: Looks,
+}
+
+/// The looks still running, by the node they are for: each held by a pidfd,
+/// so that ending it never hits another process that got its number.
+type Looks = Arc<Mutex<Running>>;
+type Running = std::collections::HashMap<PathBuf, Vec<Arc<OwnedFd>>>;
+
+fn locked(looks: &Looks) -> MutexGuard<'_, Running> {
+    looks.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Worker {
     fn gone(&mut self, path: PathBuf, seen: Option<Seen>) {
-        revoke_everywhere(&self.zone, &path);
+        // A look for this node from before, still running: stuck in a
+        // namespace a program made. This one replaces it.
+        for older in locked(&self.looks).remove(&path).unwrap_or_default() {
+            crate::sys::pidfd_signal(&older, libc::SIGKILL);
+        }
+        let (looks, failed) = revoke_everywhere(&path);
+        if looks.is_empty() {
+            report(&self.zone, &path, 0, &failed);
+        } else {
+            locked(&self.looks).insert(
+                path.clone(),
+                looks.iter().filter_map(|l| l.pidfd.clone()).collect(),
+            );
+            let (zone, at, all) = (self.zone.clone(), path.clone(), Arc::clone(&self.looks));
+            std::thread::spawn(move || wait_looks(&zone, &at, looks, failed, &all));
+        }
         if let Some(seen) = seen {
             self.gone.push((path, seen));
         }
@@ -414,6 +441,16 @@ pub fn bound_in(table: &str, dev: u64, rel: &Path) -> bool {
     })
 }
 
+/// A look into one mount namespace, running.
+struct Look {
+    /// A process of that namespace, for the log.
+    of: i32,
+    /// The looking process, ours.
+    child: i32,
+    /// It, held: `None` where it could not be — then no later look ends it.
+    pidfd: Option<Arc<OwnedFd>>,
+}
+
 /// `/dev/null` over `path` in every mount namespace of the zone's programs
 /// but this one's, where `path` still is: a sandbox binds the nodes it is
 /// given (`fs-sandbox --device`, `--camera`), and a bind outlives the
@@ -426,19 +463,22 @@ pub fn bound_in(table: &str, dev: u64, rel: &Path) -> bool {
 /// sandbox's empty placeholder. Only a device node is acted on, or what our
 /// own taking-away bared: a link or a directory a program put at that path is
 /// left alone, and never followed.
-pub fn revoke_everywhere(zone: &str, path: &Path) {
+///
+/// Started, not waited for: the looks running, and what could not be
+/// started.
+fn revoke_everywhere(path: &Path) -> (Vec<Look>, Vec<String>) {
     let (Ok(target), Ok(null)) = (
         CString::new(path.as_os_str().as_bytes()),
         CString::new("/dev/null"),
     ) else {
-        return;
+        return (Vec::new(), Vec::new());
     };
     let own_mnt = fs::read_link("/proc/self/ns/mnt").ok();
     let Some(own_user) = ns_key(Path::new("/proc/self/ns/user")) else {
-        return;
+        return (Vec::new(), Vec::new());
     };
     let mut seen: Vec<PathBuf> = Vec::new();
-    let (mut covered, mut failed) = (0, Vec::new());
+    let (mut looks, mut failed) = (Vec::new(), Vec::new());
     let null_dev = libc::makedev(1, 3);
     for proc in zone_processes() {
         let Some(mnt) = proc.mnt else {
@@ -495,17 +535,62 @@ pub fn revoke_everywhere(zone: &str, path: &Path) {
             failed.push(format!("{pid}: cannot fork"));
             continue;
         }
-        match reap(child, LOOK_DEADLINE) {
-            Some(status) if libc::WIFEXITED(status) => match libc::WEXITSTATUS(status) {
+        // Held before anything can reap it: a pidfd of a child not waited
+        // for is that child's.
+        looks.push(Look {
+            of: pid,
+            child,
+            pidfd: crate::sys::pidfd_open(child).map(Arc::new),
+        });
+    }
+    (looks, failed)
+}
+
+/// Wait for each look of `path`, as long as it takes, then say how it went.
+fn wait_looks(zone: &str, path: &Path, looks: Vec<Look>, mut failed: Vec<String>, all: &Looks) {
+    let mut covered = 0;
+    for look in &looks {
+        let mut status = 0;
+        let got = loop {
+            // SAFETY: waiting for our own child.
+            let got = unsafe { libc::waitpid(look.child, &mut status, 0) };
+            if got >= 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                break got;
+            }
+        };
+        let of = look.of;
+        if got != look.child {
+            failed.push(format!("{of}: lost"));
+        } else if libc::WIFEXITED(status) {
+            match libc::WEXITSTATUS(status) {
                 0 => {}
                 3 => covered += 1,
-                1 => failed.push(format!("{pid}: cannot enter")),
-                _ => failed.push(format!("{pid}: cannot cover")),
-            },
-            Some(_) => failed.push(format!("{pid}: killed")),
-            None => failed.push(format!("{pid}: stalled")),
+                1 => failed.push(format!("{of}: cannot enter")),
+                _ => failed.push(format!("{of}: cannot cover")),
+            }
+        } else {
+            failed.push(format!("{of}: stuck until the next look"));
         }
     }
+    // Done: no longer running — unless a newer look took the node's place.
+    {
+        let mut running = locked(all);
+        let ours = running.get(path).is_some_and(|fds| {
+            fds.iter().all(|fd| {
+                looks
+                    .iter()
+                    .any(|l| l.pidfd.as_ref().is_some_and(|p| Arc::ptr_eq(fd, p)))
+            })
+        });
+        if ours {
+            running.remove(path);
+        }
+    }
+    report(zone, path, covered, &failed);
+}
+
+fn report(zone: &str, path: &Path, covered: usize, failed: &[String]) {
     if !failed.is_empty() {
         eprintln!(
             "zone {zone}: {} gone — covered in {covered} mount namespace(s), not in: {} \
@@ -518,34 +603,6 @@ pub fn revoke_everywhere(zone: &str, path: &Path) {
             "zone {zone}: {} gone — its bind covered in {covered} sandbox(es)",
             path.display()
         );
-    }
-}
-
-/// The status of `child` once it is done, within `deadline`; killed after
-/// it, and `None` if even that does not end it within a second more.
-fn reap(child: i32, deadline: Duration) -> Option<i32> {
-    let started = Instant::now();
-    let mut killed = false;
-    loop {
-        let mut status = 0;
-        // SAFETY: waiting for our own child, without blocking.
-        let got = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
-        if got == child {
-            return Some(status);
-        }
-        if got < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-            return None;
-        }
-        let waited = started.elapsed();
-        if !killed && waited > deadline {
-            // SAFETY: our own child.
-            unsafe { libc::kill(child, libc::SIGKILL) };
-            killed = true;
-        }
-        if waited > deadline + Duration::from_secs(1) {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(2));
     }
 }
 

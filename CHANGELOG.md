@@ -117,9 +117,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   every program of the zone that still holds the old node — a descriptor
   (`O_PATH` too), a bind of its own — unless it is the same device back
   (the kernel's word in sysfs: a gamepad back after its battery died is
-  not killed for). This runs in a thread of its own, each look into a
-  namespace bounded (2 s), so a namespace a program made cannot stall the
-  covering of new devices. A launch with no container
+  not killed for). This runs in a thread of its own and no clock decides
+  anything: a look into a namespace is started, not waited for (a thread
+  that only reports waits for it, however long — a loaded machine, a FUSE
+  mount a program put over its `/dev`), and only the next look for the
+  same node ends one; the sweep decides by what is there when the number
+  is given again. A launch with no container
   gets none; a device plugged in later is seen after the program restarts.
   `games` never gives a HID device that also types or points (a combo
   receiver), and takes Bluetooth gamepads through `uhid`. Dangerous: `serial`
