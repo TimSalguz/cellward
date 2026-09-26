@@ -3744,9 +3744,15 @@ fn hide_container_storage(zone: &Zone) -> Result<(), String> {
         .mode(0o700)
         .create(&kept)
         .map_err(|e| format!("cannot create {}: {e}", kept.display()))?;
+    // The throwaway containers' too: given back to the zone by
+    // `hide_project_state` (`ZONE_KEEPS`), and from there into the keep —
+    // each launch gets its own back (`profile-run --storage`), no program
+    // sees another's (review 2026-09-27: every zone read every zone's).
     for (dir, kind) in crate::home_layer::STORAGE
         .iter()
-        .zip(["profiles", "sandboxes"])
+        .copied()
+        .chain([crate::home_layer::THROWAWAY_STORAGE])
+        .zip(["profiles", "sandboxes", "throwaway"])
     {
         let dir = zone.home.join(dir);
         if !dir.is_dir() {

@@ -1130,6 +1130,21 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         (Network::Zone(_), Sandbox::None, Container::Named(_)) if !container.ephemeral => {
             Some(container.dir.clone())
         }
+        // A throwaway one's too — the zone covers them all, and gives back
+        // only this launch's (`home_layer::THROWAWAY_STORAGE`). By its path
+        // below the state directory as the zone knows it; one left in /tmp
+        // from before the move is no zone's to keep.
+        (Network::Zone(_), Sandbox::None, Container::TmpNew | Container::TmpJoin(_)) => {
+            let base = tools.state.join(THROWAWAY_DIR);
+            let in_base = fs::canonicalize(&base)
+                .is_ok_and(|b| container.dir.parent() == Some(b.as_path()))
+                || container.dir.parent() == Some(base.as_path());
+            container
+                .dir
+                .file_name()
+                .filter(|_| in_base)
+                .map(|name| base.join(name))
+        }
         _ => None,
     };
     if let Some(dir) = &storage_dir {

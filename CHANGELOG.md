@@ -239,6 +239,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A throwaway container is its launch's alone** (bug hunt 2026-09-27):
+  every zone had every zone's throwaway containers (`--tmp-profile`)
+  bound back writable — a program of one zone could read another zone's
+  throwaway browser profile, or plant files in it. A zone now keeps them as
+  it keeps the other container storage (`.storage/throwaway`, the zone's
+  root's, 0700) under a cover, and a launch gets back only its own
+  (`profile-run --storage`).
 - **A hand-over is told by the program's windows, not by five seconds**
   (the owner, 2026-09-26/27: no fixed waits a slow or busy machine
   breaks). A launch into the network a running program is in used to count
