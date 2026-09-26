@@ -73,7 +73,8 @@
 //! the ones [`request`] builds and [`event`] reads.
 //!
 //! Usage: `vpn-zone-core pipewire-context --listen <socket> --upstream
-//! <pipewire-0> --zone <name> --zone-dir <dir> --config <dir> --instance <pid>`.
+//! <pipewire-0> --zone <name> --zone-dir <dir> --config <dir> --profiles <dir>
+//! --instance <pid>`.
 
 use std::collections::HashMap;
 use std::ffi::OsString;

@@ -1665,16 +1665,29 @@ fn container_remove(tools: &Tools, name: &OsStr) -> u8 {
         );
         return 1;
     }
+    // The data first — it may take a while —, then the policy under the lock
+    // the sound filter writes "always" under (`microphone::Policy::
+    // remember`): an answer does not bring back a container removed
+    // meanwhile.
+    if fs::symlink_metadata(&c.dir).is_ok() {
+        if let Err(e) = crate::sys::remove_tree(&c.dir) {
+            eprintln!("не удалить {}: {e}", c.dir.display());
+            return 1;
+        }
+    }
     {
-        // The lock the sound filter writes "always" under
-        // (`microphone::Policy::remember`): not back into what goes here.
-        let _lock = crate::registry::lock(&tools.config.join(crate::container::POLICY_DIR)).ok();
-        for dir in [&c.dir, &c.policy] {
-            if fs::symlink_metadata(dir).is_ok() {
-                if let Err(e) = crate::sys::remove_tree(dir) {
-                    eprintln!("не удалить {}: {e}", dir.display());
-                    return 1;
-                }
+        let root = tools.config.join(crate::container::POLICY_DIR);
+        let _lock = match crate::registry::lock(&root) {
+            Ok(lock) => lock,
+            Err(e) => {
+                eprintln!("не занять {}: {e}", root.display());
+                return 1;
+            }
+        };
+        if fs::symlink_metadata(&c.policy).is_ok() {
+            if let Err(e) = crate::sys::remove_tree(&c.policy) {
+                eprintln!("не удалить {}: {e}", c.policy.display());
+                return 1;
             }
         }
     }

@@ -963,6 +963,14 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
         Err(e) => eprintln!("реестр запусков {}: {e}", regdir.display()),
     }
+    // The containers launched into a zone since it came up: what decides for
+    // all its programs at once counts theirs after the launch is over — a
+    // daemon outlives it (`origin::LAUNCHED`).
+    if let (Network::Zone(_), Some(name)) = (network, container_name(&selection)) {
+        if let Err(e) = crate::origin::note_launched(&tools.state, &zone_name, &name) {
+            eprintln!("учёт контейнеров зоны {zone_name}: {e}");
+        }
+    }
     // Nothing of a zone around this one: on the record, with who and what.
     if network == Network::Unconfined {
         let program = selection
@@ -1078,6 +1086,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             trust_extra: &trust_extra,
             certutil: &tools.certutil,
             shares: &shares,
+            own_mounts: matches!(
+                (&selection.sandbox, &selection.container),
+                (Sandbox::None, Container::MainNamed(_))
+            ),
             storage: storage_dir.as_deref(),
         },
         cmd,
@@ -1170,6 +1182,12 @@ pub struct Entry<'a> {
     /// directory back in the launch's own mount namespace, from the zone's
     /// keep (`home_layer::KEPT_STORAGE`).
     pub storage: Option<&'a Path>,
+    /// A mount namespace of its own in a zone even with nothing to mount: a
+    /// container of the main home. Its programs are told from the zone's own
+    /// by it — one that leaves its launch (a daemon that forked twice) is
+    /// then not taken for a program of the zone with no container, whose
+    /// settings are not its container's (`crate::origin`).
+    pub own_mounts: bool,
 }
 
 /// The command line `run` finally `exec`s: the namespaces, the container, then
@@ -1222,7 +1240,7 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
             exec.extend(["-U".into(), "-n".into(), "-m".into(), "-t".into()]);
             exec.push(pid.to_string().into());
             exec.push("--".into());
-            if container {
+            if container || entry.own_mounts {
                 exec.push(entry.unshare.into());
                 exec.extend([
                     "--mount".into(),
@@ -2232,7 +2250,26 @@ mod tests {
             certutil: Path::new("/t/certutil"),
             shares: &[],
             storage: None,
+            own_mounts: false,
         }
+    }
+
+    /// A container of the main home into a zone: nothing to mount, and a
+    /// mount namespace of its own all the same — the zone's own is its
+    /// programs' with no container (`crate::origin`). Outside a zone it
+    /// takes none: there is no zone's own to be told from.
+    #[test]
+    fn a_container_of_the_main_home_takes_a_mount_namespace_in_a_zone() {
+        let mut e = entry(Network::Zone(42), Path::new(""), false);
+        e.own_mounts = true;
+        let line = entry_argv(&e, argv(&["dolphin"]));
+        let at = |w: &str| line.iter().position(|a| a == w).unwrap();
+        assert!(at("/t/nsenter") < at("/t/unshare"), "{line:?}");
+        assert!(at("/t/unshare") < at("profile-run"), "{line:?}");
+        assert_eq!(line[at("/t/unshare") + 1], "--mount");
+        let mut e = entry(Network::Unconfined, Path::new(""), false);
+        e.own_mounts = true;
+        assert_eq!(entry_argv(&e, argv(&["dolphin"])), argv(&["dolphin"]));
     }
 
     /// A sandbox into a zone: the zone covers container storage, and the

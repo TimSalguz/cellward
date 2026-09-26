@@ -1282,25 +1282,17 @@ fn move_policy_file(old: &Path, new: &Path) -> io::Result<()> {
 /// Set (`Some`) or drop (`None`) one key of a settings file, keeping the rest.
 /// With `replace` false an existing key is left as it is.
 pub fn write_key(path: &Path, key: &str, value: Option<&str>, replace: bool) -> Result<(), String> {
-    use std::os::fd::AsRawFd;
     let parent = path
         .parent()
         .ok_or_else(|| format!("{}: не файл в каталоге", path.display()))?;
     fs::create_dir_all(parent).map_err(|e| format!("не создать {}: {e}", parent.display()))?;
-    // One writer at a time: the directory held while its file is read,
-    // changed and replaced — the command line and the sound filter's
+    // One writer at a time: the directory's lock held while its file is
+    // read, changed and replaced — the command line and the sound filter's
     // "always" write the same file, and one must not drop the other's key.
-    let dir =
-        fs::File::open(parent).map_err(|e| format!("не открыть {}: {e}", parent.display()))?;
-    // SAFETY: a valid open descriptor; LOCK_EX blocks until the lock is ours,
-    // and closing `dir` at the end of the function releases it.
-    if unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(format!(
-            "не занять {}: {}",
-            parent.display(),
-            std::io::Error::last_os_error()
-        ));
-    }
+    // A lock file, not the directory: `flock` of a directory opened for
+    // reading fails on NFS.
+    let lock =
+        registry::lock(parent).map_err(|e| format!("не занять {}: {e}", parent.display()))?;
     // A file that is there and cannot be read is not rewritten: its other
     // settings would be lost with it.
     let mut conf: Vec<(String, String)> = match fs::read_to_string(path) {
@@ -1334,7 +1326,7 @@ pub fn write_key(path: &Path, key: &str, value: Option<&str>, replace: bool) -> 
             let _ = fs::remove_file(&tmp);
             format!("не записать {}: {e}", path.display())
         });
-    drop(dir);
+    drop(lock);
     written
 }
 

@@ -704,6 +704,9 @@ pub fn run(args: Args) -> u8 {
     let dir = home.join(STATE_SUBDIR).join(&args.name);
     let config = home.join(CONFIG_SUBDIR);
     let label = args.name.to_string_lossy().into_owned();
+    // A new zone: no container has been launched into it yet — the programs
+    // of the last one's are not in this one (`origin::LAUNCHED`).
+    let _ = fs::remove_file(dir.join(crate::origin::LAUNCHED));
     let (hermetic, _) = crate::hermetic::zone_setting(&dir, &config, &label);
     let (nix_daemon, _) = crate::hermetic::nix_daemon(&dir, &config, &label);
     let (host_files_writable, _) = crate::hermetic::host_files_writable(&dir, &config, &label);

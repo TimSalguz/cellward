@@ -244,11 +244,7 @@ fn origin_of(state: &Path, stream: &UnixStream) -> (Origin, Option<Peer>) {
 /// nothing is known (a throwaway or temporary container, a daemon that left
 /// its launch's tree into a namespace of its own).
 fn container_of(tools: &Tools, zone: &str, peer: Option<&Peer>) -> Option<String> {
-    // A program in the zone's own namespace while a container of the main
-    // home runs there is taken for the zone's own: otherwise every link the
-    // zone opens would be asked about while it runs.
-    let places = crate::origin::Places::of(tools);
-    match crate::origin::of_peer(places, zone, peer?, crate::origin::Who::Main) {
+    match crate::origin::of_peer(crate::origin::Places::of(tools), zone, peer?) {
         crate::origin::Who::Main => Some(String::new()),
         crate::origin::Who::Container(name) => Some(name),
         crate::origin::Who::Unknown => None,

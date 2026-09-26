@@ -26,12 +26,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the container's settings, not the zone's; for a program with no container
   it is still the zone's. The restricted PipeWire of a hermetic zone, which
   decides for all the zone's clients at once, gives the microphone only
-  when the zone and every container with a program running in it say yes.
-  A program that left its launch (a daemon that forked twice) is known by
-  its mount namespace: the one a live launch made for its container is
-  that container's; the zone's own is the zone's, except — for the
-  microphone — while a container of the main home runs there. The nearest
-  launch in a program's ancestry decides, a throwaway one too.
+  when the zone and every container launched into it since it came up say
+  yes (a daemon outlives its launch): after a container with "no" ran
+  there, that PipeWire has no microphone until the zone restarts. The
+  nearest launch in a program's ancestry decides, a throwaway one too; a
+  number two launches' records claim is nobody's.
+- **A container of the main home takes a mount namespace of its own** in a
+  zone, with nothing mounted in it (`launch::Entry::own_mounts`): the
+  zone's own namespace is then only its programs with no container, and
+  one that leaves a container's launch (a daemon that forked twice) is
+  never taken for them — by the sound filter or the broker. Programs of a
+  container of the main home started before this update still run in the
+  zone's own namespace until they are started again.
 
 ### Changed
 - **The microphone for a program whose container is not known** (a
@@ -46,7 +52,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `cellward microphone|screencast <zone> ask (по умолчанию)|yes|no`.
   `default` is still taken there, and no longer shown or completed.
 - **Container settings are written through a temporary file**, one writer
-  at a time (the directory is locked), and a settings file that is there
+  at a time (a lock file in the directory), and a settings file that is there
   but cannot be read is no longer rewritten with its other keys lost.
   `container rm` and the sound filter's "always" share a lock: an answer
   does not bring back a container removed meanwhile.

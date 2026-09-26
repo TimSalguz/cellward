@@ -10,22 +10,21 @@
 //! The nearest launch decides, whoever's it is. Nothing a program says about
 //! itself counts.
 //!
-//! **With no launch in its ancestry** — a daemon that forked twice, a
-//! program whose launch is over — by its mount namespace, which a program
-//! cannot leave (`setns` wants capabilities it does not have). A launch into
-//! a container with a home of its own or a layer takes a namespace of its
-//! own: a process in the namespace of a live launch is that launch's. A
-//! process in the zone's own namespace is one of the zone's own programs,
-//! with no container — unless a container of the main home, which runs in
-//! that very namespace, has a launch running in the zone: then it may be
-//! one that left that container, and the caller says what it is taken for
-//! ([`of_peer`]'s `ambiguous`).
+//! **With no launch in its ancestry**, a process in the zone's own mount
+//! namespace is one of the zone's own programs, with no container. Every
+//! launch into a container takes a mount namespace of its own — a container
+//! of the main home too, with nothing mounted in it (`launch::Entry::
+//! own_mounts`) — and a program cannot leave it: `setns` wants capabilities
+//! it does not have. So one that left its launch (a daemon that forked
+//! twice, a program whose launch is over) is never taken for the zone's own.
+//! (The wrapper around a launch — `wl-sandbox` — stays on the host: the
+//! namespace of a launch's recorded process is not its programs'.)
 //!
 //! **Unknown** is everything else: a throwaway or temporary container (they
 //! have no name to keep a setting under), a name no container has any more,
-//! a namespace no live launch has. It is never taken for another container,
-//! nor for the zone's own programs: what decides by the container treats it
-//! as the least known — no "always".
+//! a program that left its launch, a number two launches claim. It is never
+//! taken for another container, nor for the zone's own programs: what
+//! decides by the container treats it as the least known — no "always".
 //!
 //! What this does NOT hold: the containers of one zone share its user
 //! namespace, its `/tmp` and its abstract sockets — a program of one may get
@@ -112,6 +111,13 @@ impl Peer {
     }
 }
 
+/// Below a zone's state directory: the containers launched into the zone
+/// since it came up, a name a line (`launch::run` adds, the holder clears
+/// it when the zone comes up). Their programs may still be there when the
+/// launch is over — for what decides for the whole zone at once
+/// ([`containers_in`]). Out of the zones' reach, as the zone's directory is.
+pub const LAUNCHED: &str = "launched-containers";
+
 /// The zone's own mount namespace: the one its holder is in.
 fn zones_own_mounts(state: &Path, zone: &str) -> Option<PathBuf> {
     let pid = crate::cli::zone_pid(state, std::ffi::OsStr::new(zone))?;
@@ -124,7 +130,7 @@ struct Launch {
     pid: i32,
     /// Whose: a container's name, `""` for the main profile, `None` for
     /// nobody's (a throwaway or temporary container, a record from before
-    /// one container per launch).
+    /// one container per launch, a number two launches claim).
     owner: Option<String>,
 }
 
@@ -133,7 +139,7 @@ struct Launch {
 fn launches(places: Places, zone: &str) -> Vec<Launch> {
     let running = places.state.join(".running");
     let launched = |pid| crate::registry::launched(&running, pid);
-    let mut out = Vec::new();
+    let mut out: Vec<Launch> = Vec::new();
     for dir in crate::registry::dirs(&running) {
         let dir_name = dir
             .file_name()
@@ -164,10 +170,17 @@ fn launches(places: Places, zone: &str) -> Vec<Launch> {
                 Some(dir_name.clone())
                     .filter(|n| crate::container::valid_name(n) && record.selector == *n)
             };
-            out.push(Launch {
-                pid: record.pid,
-                owner,
-            });
+            // The start notes are per number, not per record: a stale record
+            // of one container whose number a launch of another took reads
+            // as live too. A number two owners claim is nobody's.
+            match out.iter_mut().find(|l| l.pid == record.pid) {
+                Some(seen) if seen.owner != owner => seen.owner = None,
+                Some(_) => {}
+                None => out.push(Launch {
+                    pid: record.pid,
+                    owner,
+                }),
+            }
         }
     }
     out
@@ -185,78 +198,63 @@ fn owner_of(places: Places, owner: Option<&str>) -> Who {
     }
 }
 
-/// The mount namespace of a process — the launch's own process: `None` if
-/// it cannot be read, or the number is no longer that launch's.
-fn mounts_of(running: &Path, pid: i32) -> Option<PathBuf> {
-    let mnt = std::fs::read_link(format!("/proc/{pid}/ns/mnt")).ok()?;
-    crate::registry::launched(running, pid).then_some(mnt)
-}
-
 /// Whose program the peer is, in `zone`.
-///
-/// `ambiguous`: what a peer in the zone's own namespace with no launch in
-/// its ancestry is while a container of the main home has a launch running
-/// in that zone — it may be a program of the zone's own, or one that left
-/// that container's launch (a container of the main home has no mount
-/// namespace of its own yet: `docs/PERMISSIONS.md` §11.11, 8). What decides
-/// something a program must not get by leaving its container says
-/// [`Who::Unknown`]; the broker, whose question for it would be every link
-/// the zone opens, says [`Who::Main`].
-pub fn of_peer(places: Places, zone: &str, peer: &Peer, ambiguous: Who) -> Who {
+pub fn of_peer(places: Places, zone: &str, peer: &Peer) -> Who {
     let live = launches(places, zone);
     // The nearest launch the peer descends from, its parents read once —
-    // before the zone's own namespace: a container of the main home runs in
-    // that very namespace, and is its own container all the same. The
-    // nearest decides, nobody's too: a throwaway sandbox started under a
-    // container's program is not that container.
+    // before the zone's own namespace: a program of the main profile runs in
+    // that very namespace. The nearest decides, nobody's too: a throwaway
+    // sandbox started under a container's program is not that container.
     let nearest = crate::sys::ancestors(peer.pid, &peer.pidfd)
         .into_iter()
         .find_map(|pid| live.iter().find(|l| l.pid == pid));
     if let Some(launch) = nearest {
         return owner_of(places, launch.owner.as_deref());
     }
-    // No launch in its ancestry: it left one — a daemon that forked twice, a
-    // program whose launch is over — or never had one. By its mount
-    // namespace, which a program cannot leave (`setns` wants capabilities it
-    // does not have).
-    let running = places.state.join(".running");
+    // Nothing the registry knows: the zone's own programs are the ones in
+    // its own namespace — a link opened by its bus filter, a terminal of the
+    // zone's own — read again now: still the peer's, still that one.
     let own = zones_own_mounts(places.state, zone);
-    if own.as_deref() == Some(peer.mnt.as_path()) {
-        // The zone's own programs are the ones in its own namespace — a
-        // link opened by its bus filter, a terminal of the zone's own; but
-        // so are those of a container of the main home.
-        let main_home_running = live.iter().any(|l| {
-            l.owner.as_deref().is_some_and(|o| !o.is_empty()) && mounts_of(&running, l.pid) == own
-        });
-        return if main_home_running {
-            ambiguous
-        } else {
-            Who::Main
-        };
-    }
-    // A namespace a launch made for its container: that launch's.
-    let mut owners = live
-        .iter()
-        .filter(|l| mounts_of(&running, l.pid).as_deref() == Some(peer.mnt.as_path()))
-        .map(|l| owner_of(places, l.owner.as_deref()));
-    match (owners.next(), owners.next()) {
-        (Some(who), None) => who,
-        _ => Who::Unknown,
+    let still = peer.ns("mnt");
+    if own.is_some() && own == still && still.as_deref() == Some(peer.mnt.as_path()) {
+        Who::Main
+    } else {
+        Who::Unknown
     }
 }
 
-/// Whose programs run in `zone` now, as [`of_peer`] names them: the owner
-/// of every live launch into it, each once. The zone's own programs, which
-/// need no launch, are not in it.
-pub fn running(places: Places, zone: &str) -> Vec<Who> {
-    let mut out: Vec<Who> = Vec::new();
+/// The containers whose programs may be in `zone` now: every one with a live
+/// launch into it, and every one launched into it since it came up
+/// ([`LAUNCHED`]) — a daemon may outlive its launch. For what decides for
+/// all the zone's programs at once, and so must be as strict as the
+/// strictest of them.
+pub fn containers_in(places: Places, zone: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |name: &str| {
+        if crate::container::valid_name(name) && !out.iter().any(|n| n == name) {
+            out.push(name.to_owned());
+        }
+    };
     for launch in launches(places, zone) {
-        let who = owner_of(places, launch.owner.as_deref());
-        if !out.contains(&who) {
-            out.push(who);
+        if let Some(name) = launch.owner.as_deref() {
+            add(name);
         }
     }
+    let file = places.state.join(zone).join(LAUNCHED);
+    for line in std::fs::read_to_string(file).unwrap_or_default().lines() {
+        add(line.trim());
+    }
     out
+}
+
+/// Note a launch of `container` into `zone` ([`LAUNCHED`]).
+pub fn note_launched(state: &Path, zone: &str, container: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state.join(zone).join(LAUNCHED))?;
+    writeln!(file, "{container}")
 }
 
 #[cfg(test)]
@@ -316,7 +314,6 @@ mod tests {
             },
             zone,
             peer,
-            Who::Unknown,
         )
     }
 
@@ -413,48 +410,66 @@ mod tests {
         assert_eq!(who(&d, "nl", &peer), Who::Unknown);
     }
 
-    /// No launch in its ancestry: a process in the namespace of a live launch
-    /// is that launch's; in the zone's own, the zone's — unless a container
-    /// of the main home runs there, when it is what the caller says.
+    /// No launch in its ancestry: in the zone's own namespace, the zone's;
+    /// anywhere else — a namespace a launch made for its container, which
+    /// the program left — not known.
     #[test]
-    fn a_process_that_left_its_launch_is_known_by_its_namespace() {
+    fn a_process_that_left_its_launch_is_not_known() {
         let d = Dirs::new("namespace");
         let peer = me();
         fs::create_dir_all(d.0.join("profiles/work")).unwrap();
-        // A launch of `work` we do not descend from, in our namespace.
+        // A launch of `work` we do not descend from.
         let launch = Sleeper::new();
         d.launch("work", launch.pid(), "nl", "work");
-        assert_eq!(who(&d, "nl", &peer), Who::Container("work".into()));
-        // Two launches in it: not known whose.
-        let other = Sleeper::new();
-        d.launch(crate::registry::MAIN, other.pid(), "nl", "__fs__");
         assert_eq!(who(&d, "nl", &peer), Who::Unknown);
-
         // Our namespace is the zone's own: its holder is in it.
-        let d = Dirs::new("namespace-own");
-        let holder = Sleeper::new();
         let zone = d.0.join("state/nl");
         fs::create_dir_all(&zone).unwrap();
+        let holder = Sleeper::new();
         fs::write(zone.join("zone.pid"), holder.pid().to_string()).unwrap();
         let stamp = crate::sys::process_stamp(holder.pid()).unwrap();
         fs::write(zone.join("zone.start"), stamp).unwrap();
         assert_eq!(who(&d, "nl", &peer), Who::Main);
-        // A container of the main home runs in it: ambiguous.
-        fs::create_dir_all(d.0.join("profiles/main-nl")).unwrap();
-        let main_home = Sleeper::new();
-        d.launch("main-nl", main_home.pid(), "nl", "main-nl");
+        // A peer read in another namespace than it is in now is not.
+        let moved = Peer {
+            mnt: PathBuf::from("mnt:[1]"),
+            ..me()
+        };
+        assert_eq!(who(&d, "nl", &moved), Who::Unknown);
+    }
+
+    /// One number, two launches' records: nobody's.
+    #[test]
+    fn a_number_two_launches_claim_is_nobodys() {
+        let d = Dirs::new("claimed");
+        let peer = me();
+        fs::create_dir_all(d.0.join("profiles/work")).unwrap();
+        fs::create_dir_all(d.0.join("profiles/other")).unwrap();
+        d.launch("work", peer.pid, "nl", "work");
+        assert_eq!(who(&d, "nl", &peer), Who::Container("work".into()));
+        d.launch("other", peer.pid, "nl", "other");
         assert_eq!(who(&d, "nl", &peer), Who::Unknown);
+    }
+
+    /// What may be in a zone: the live launches' containers and those
+    /// launched into it since it came up.
+    #[test]
+    fn the_containers_in_a_zone_are_the_running_and_the_launched() {
+        let d = Dirs::new("containers-in");
+        let launch = Sleeper::new();
+        d.launch("work", launch.pid(), "nl", "work");
+        fs::create_dir_all(d.0.join("state/nl")).unwrap();
+        note_launched(&d.0.join("state"), "nl", "gone").unwrap();
+        note_launched(&d.0.join("state"), "nl", "work").unwrap();
         let (state, config, profiles) = d.places();
         let places = Places {
             state: &state,
             config: &config,
             profiles: &profiles,
         };
-        assert_eq!(of_peer(places, "nl", &peer, Who::Main), Who::Main);
-        // What runs in the zone.
-        assert_eq!(
-            running(places, "nl"),
-            vec![Who::Container("main-nl".into())]
-        );
+        let mut found = containers_in(places, "nl");
+        found.sort();
+        assert_eq!(found, ["gone", "work"]);
+        assert!(containers_in(places, "de").is_empty());
     }
 }

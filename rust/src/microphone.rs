@@ -212,11 +212,13 @@ fn strictness(setting: Setting) -> u8 {
 }
 
 /// The strictest setting among the programs of `zone` now: the zone's own
-/// programs' (always there to be), and that of the owner of every live
-/// launch into the zone ([`setting_for`]). For a path that decides for the
-/// whole zone at once — the restricted PipeWire (`crate::pw_context`) —
-/// until it knows its clients' containers: a container's "no" is not passed
-/// there by its zone's "yes" either.
+/// programs' (always there to be), and that of every container whose
+/// programs may be in the zone (`origin::containers_in`: a live launch, or
+/// one since the zone came up — a daemon outlives its launch). A throwaway
+/// container has no setting of its own: the zone's is its. For a path that
+/// decides for the whole zone at once — the restricted PipeWire
+/// (`crate::pw_context`) — until it knows its clients' containers: a
+/// container's "no" is not passed there by its zone's "yes" either.
 pub fn strictest_running(zone_dir: &Path, config: &Path, profiles: &Path, zone: &str) -> Setting {
     let mut strictest = setting(zone_dir, config, zone).0;
     let Some(state) = zone_dir.parent() else {
@@ -227,8 +229,8 @@ pub fn strictest_running(zone_dir: &Path, config: &Path, profiles: &Path, zone: 
         config,
         profiles,
     };
-    for who in crate::origin::running(places, zone) {
-        let own = setting_for(zone_dir, config, zone, &who).0;
+    for name in crate::origin::containers_in(places, zone) {
+        let own = setting_for(zone_dir, config, zone, &Who::Container(name)).0;
         if strictness(own) > strictness(strictest) {
             strictest = own;
         }
@@ -1273,5 +1275,34 @@ mod tests {
         let q = question("nl", &Who::Container("<b>x</b>".into()), "zoom", false);
         assert!(q.contains("«‹b›x‹/b›»"), "{q}");
         assert_eq!(always_label("nl", &Who::Main), "Всегда — всей зоне «nl»");
+    }
+
+    /// For the whole zone at once: the zone's own setting, made stricter by
+    /// every container launched into the zone since it came up.
+    #[test]
+    fn the_whole_zone_is_as_strict_as_its_strictest_container() {
+        let d = Dirs::new("strictest");
+        let strictest =
+            || strictest_running(&d.zone(), &d.config(), &d.base.join("profiles"), "nl");
+        d.write("state/nl/microphone", "yes");
+        assert_eq!(strictest(), Setting::Yes);
+        std::fs::create_dir_all(d.config().join("containers/quiet")).unwrap();
+        d.write(
+            "config/containers/quiet/container.conf",
+            "microphone = no\n",
+        );
+        // Not in the zone: not counted.
+        assert_eq!(strictest(), Setting::Yes);
+        crate::origin::note_launched(&d.base.join("state"), "nl", "quiet").unwrap();
+        assert_eq!(strictest(), Setting::No);
+        // A container with none of its own is the zone's.
+        crate::origin::note_launched(&d.base.join("state"), "nl", "plain").unwrap();
+        d.write(
+            "config/containers/quiet/container.conf",
+            "microphone = yes\n",
+        );
+        assert_eq!(strictest(), Setting::Yes);
+        d.write("state/nl/microphone", "ask");
+        assert_eq!(strictest(), Setting::Ask);
     }
 }
