@@ -1516,6 +1516,36 @@ let
           machine.succeed("grep -qx '5 default' /tmp/pulse-seen")
           assert "conn2 closed 0" in out, f"a monitor's sound reached the zone: {out}"
           alice("cellward microphone vmsmoke default")
+          # The microphone by container (docs/PERMISSIONS.md §11.10): the
+          # filter knows a program's container by the launch it descends
+          # from and decides by that container's own setting — two
+          # containers of one zone, two answers — while the zone's own
+          # programs keep the zone's.
+          alice("cellward container create vmmicyes --home layer")
+          alice("cellward container create vmmicno --home layer")
+          alice("cellward container set vmmicyes microphone yes")
+          alice("cellward container set vmmicno microphone no")
+          shown = json.loads(alice("cellward container show vmmicyes --json"))["container"]
+          assert shown["microphone"] == {"value": "yes", "source": "local"}, shown
+          mic_in = lambda c: in_container(c, "vmsmoke", "${pkgs.python3}/bin/python3 ${pulseMic}")
+          out = mic_in("vmmicyes")
+          assert "mic heard" in out, f"a container's own yes did not let the microphone through: {out}"
+          out = mic_in("vmmicno")
+          assert "mic refused" in out, f"a container's own no was not refused: {out}"
+          out = mic()
+          assert "mic refused" in out, f"the zone's own program got a container's yes: {out}"
+          # The zone says yes: the container's own no still stands.
+          alice("cellward microphone vmsmoke yes")
+          out = mic_in("vmmicno")
+          assert "mic refused" in out, f"the zone's yes overrode a container's no: {out}"
+          assert "mic heard" in mic(), "the zone's own program lost the zone's yes"
+          alice("cellward microphone vmsmoke default")
+          # None of its own: the container is the zone's again.
+          alice("cellward container set vmmicyes microphone default")
+          out = mic_in("vmmicyes")
+          assert "mic refused" in out, f"a container with no setting of its own was let: {out}"
+          alice("cellward container rm vmmicyes")
+          alice("cellward container rm vmmicno")
           # The setting is out of the zone's reach, and so are the helpers
           # the zone's unit starts (review 2026-09-25): the marker by its path
           # is under the zone's cover, and /proc/<pid>/root of the sound

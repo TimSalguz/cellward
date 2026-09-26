@@ -553,6 +553,7 @@ let
       ++ map (path: "path = ${path}") c.permissions.paths
       ++ lib.optional c.permissions.x11 "x11 = true"
       ++ lib.optional (c.frameColor != null) "frame_color = ${c.frameColor}"
+      ++ lib.optional (c.permissions.microphone != null) "microphone = ${c.permissions.microphone}"
     )
     + "\n";
 
@@ -599,6 +600,18 @@ let
         type = lib.types.bool;
         default = false;
         description = "Свой X-сервер (xwayland-satellite) для программ контейнера в зонах. X-сервер хоста из зон недоступен всегда: он показывает каждому клиенту окна, ввод и буфер обмена всех остальных. См. docs/HERMETICITY.ru.md §7.";
+      };
+      permissions.microphone = lib.mkOption {
+        type = lib.types.nullOr (
+          lib.types.enum [
+            "yes"
+            "no"
+            "ask"
+          ]
+        );
+        default = null;
+        example = "ask";
+        description = "Может ли программа контейнера записывать микрофон: yes (без вопроса), no (никогда) или ask — спросить при первой записи: один раз, всегда (этому контейнеру) или отказать. Контейнер знают по запуску, из которого вышла программа (docs/PERMISSIONS.md §11.10). null — как у его зоны (programs.cellward.microphone) или как задано локально (cellward container set <контейнер> microphone). Значение зоны из Nix важнее местной настройки контейнера, значение контейнера из Nix — важнее всего. Путь PulseAudio; ограниченный PipeWire герметичной зоны пока решает по зоне.";
       };
       permissions.paths = lib.mkOption {
         type = lib.types.listOf lib.types.str;

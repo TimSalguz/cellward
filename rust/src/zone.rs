@@ -2094,9 +2094,10 @@ fn start_proxy(
 /// The sound filter (`pulse_filter`), on the host — from the unit's own
 /// process, in the host's user namespace (`Helpers`) — as the user: listening
 /// in the zone's directory, passing on to the host's `pulse/native`. `None` when
-/// the host has no sound server there. It is told the zone and where its
-/// microphone setting is (`crate::microphone`): it reads it for every record
-/// stream, and asks with kdialog in the environment it inherits — the unit's,
+/// the host has no sound server there. It is told the zone, where its
+/// microphone setting is (`crate::microphone`) and where the containers are,
+/// whose own settings come first (`crate::origin`): it reads them for every
+/// record stream, and asks with kdialog in the environment it inherits — the unit's,
 /// whose `WAYLAND_DISPLAY`/`DISPLAY` say whether there is anyone to ask.
 fn start_pulse_filter(zone: &Zone) -> Option<Child> {
     let upstream = host_runtime_dir(zone).join("pulse").join("native");
@@ -2123,6 +2124,8 @@ fn start_pulse_filter(zone: &Zone) -> Option<Child> {
         .arg(&zone.dir)
         .arg("--config")
         .arg(zone.home.join(CONFIG_SUBDIR))
+        .arg("--profiles")
+        .arg(zone.home.join(crate::container::PROFILES_SUBDIR))
         .arg("--kdialog")
         .arg(&zone.tools.kdialog)
         .stdin(Stdio::null())

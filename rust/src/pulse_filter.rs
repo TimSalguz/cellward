@@ -73,15 +73,19 @@
 //! and either only as the zone's microphone setting allows (below).
 //!
 //! **The microphone** (owner, 2026-09-25; `crate::microphone`): a record
-//! stream that is not refused above goes on only as the zone's setting says,
-//! read when the stream is asked for — `yes` passes it, `no` answers it
+//! stream that is not refused above goes on only as the setting of the
+//! program's container says (the zone's for a program with none, or with no
+//! setting of its own — `docs/PERMISSIONS.md` §11.10), read when the stream
+//! is asked for. Whose program is on the other end is looked at once, when
+//! it connects, by the launch it descends from (`crate::origin`) — `yes` passes it, `no` answers it
 //! `ERROR`/`ACCESS`, `ask` holds that one request (`Up::Ask`) while the person
 //! on the host is asked, and passes or refuses it by the answer. A held
 //! request is not forwarded; the connection's other commands go on meanwhile,
 //! and the server, which pairs its replies by tag, answers the held one when
 //! it gets it, whenever that is. The program's name in the question is what
 //! its own properties say (`application.name`, of the stream or the client),
-//! shown as its word; the zone is the one this filter was started for.
+//! shown as its word; the zone is the one this filter was started for, the
+//! container the one its launch was for.
 //!
 //! Descriptors (a sound server's shared memory) travel with the frame they
 //! came with: on a Unix stream socket a read never runs across the start of a
@@ -89,7 +93,8 @@
 //! began is theirs.
 //!
 //! Usage: `vpn-zone-core pulse-filter --listen <socket> --upstream <socket>
-//! --zone <name> --zone-dir <dir> --config <dir> --kdialog <program>`.
+//! --zone <name> --zone-dir <dir> --config <dir> --profiles <dir> --kdialog
+//! <program>`.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
@@ -105,6 +110,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::microphone::{Policy, Verdict};
+use crate::origin::Who;
 use crate::sys;
 
 /// The descriptor in front of every frame.
@@ -343,8 +349,12 @@ pub struct Args {
     pub zone: String,
     /// Its state directory, where its microphone marker is.
     pub zone_dir: PathBuf,
-    /// `~/.config/vpn-zones`, where `declared/microphone` is.
+    /// `~/.config/vpn-zones`, where `declared/microphone` is, and the
+    /// containers' own settings.
     pub config: PathBuf,
+    /// `~/.local/state/vpn-profiles`: the containers' data, by which a
+    /// container is known to be one (`crate::origin`).
+    pub profiles: PathBuf,
     /// What asks the person.
     pub kdialog: PathBuf,
 }
@@ -359,6 +369,7 @@ impl Args {
         let mut zone = None;
         let mut zone_dir = None;
         let mut config = None;
+        let mut profiles = None;
         let mut kdialog = None;
         let mut it = args.iter();
         while let Some(flag) = it.next() {
@@ -380,6 +391,7 @@ impl Args {
                 }
                 Some("--zone-dir") => zone_dir = Some(path),
                 Some("--config") => config = Some(path),
+                Some("--profiles") => profiles = Some(path),
                 Some("--kdialog") => kdialog = Some(path),
                 _ => return Err(format!("unknown flag {}", flag.to_string_lossy())),
             }
@@ -390,6 +402,7 @@ impl Args {
             zone: zone.ok_or("--zone is required")?,
             zone_dir: zone_dir.ok_or("--zone-dir is required")?,
             config: config.ok_or("--config is required")?,
+            profiles: profiles.ok_or("--profiles is required")?,
             kdialog: kdialog.ok_or("--kdialog is required")?,
         })
     }
@@ -908,6 +921,9 @@ struct Session {
     /// The zone's microphone setting and its question
     /// (`crate::microphone`); by default one that never records.
     mic: Arc<Policy>,
+    /// Whose program is on the other end (`crate::origin`), looked at when
+    /// it connected: the microphone is decided by its container.
+    who: Who,
     /// What the program calls itself (`SET_CLIENT_NAME`,
     /// `UPDATE_CLIENT_PROPLIST`): its word, for the question only.
     client_name: Option<String>,
@@ -1003,7 +1019,8 @@ impl Session {
                     if let Some(why) = record_refused(values) {
                         return Up::Refuse(tag, format!("{name}: {why}"));
                     }
-                    // Not a monitor: a microphone, by the zone's setting.
+                    // Not a monitor: a microphone, by the setting of the
+                    // program's container.
                     // `record_refused` has checked that values[16] are the
                     // stream's properties.
                     if self.mic_denied {
@@ -1015,7 +1032,7 @@ impl Session {
                     let program = program_name(payload, &values[16..17])
                         .or_else(|| self.client_name.clone())
                         .unwrap_or_default();
-                    match self.mic.decide(&program) {
+                    match self.mic.decide(&program, &self.who) {
                         Verdict::Allow => {}
                         Verdict::Refuse(why) => {
                             return Up::Refuse(tag, format!("{name}: microphone: {why}"))
@@ -1315,7 +1332,10 @@ fn ask(
     to_client: &Arc<Out>,
     session: &Arc<Mutex<Session>>,
 ) -> io::Result<()> {
-    let mic = Arc::clone(&lock(session).mic);
+    let (mic, who) = {
+        let s = lock(session);
+        (Arc::clone(&s.mic), s.who.clone())
+    };
     let tag = held.tag;
     let spawned = {
         let (to_server, to_client, session, mic) = (
@@ -1329,7 +1349,7 @@ fn ask(
             // is still open: a request of this connection that comes in
             // meanwhile is refused as "a question is open", and one after it
             // finds the deny standing — none gets a question of its own.
-            let allowed = mic.ask(&held.program, held.remember, |allowed| {
+            let allowed = mic.ask(&held.program, &who, held.remember, |allowed| {
                 let mut s = lock(&session);
                 if allowed {
                     s.creating.insert(held.tag, Kind::Record);
@@ -1377,10 +1397,29 @@ fn pump_down(server: &UnixStream, to_client: &Out, session: &Mutex<Session>) -> 
     Ok(())
 }
 
-fn serve(client: UnixStream, upstream: &PathBuf, mic: Arc<Policy>) -> io::Result<()> {
+/// Whose program the peer of `client` is (`crate::origin`), looked at
+/// while it is certainly the process that connected. Unknown when it cannot
+/// be looked at.
+fn who_is(client: &UnixStream, args: &Args) -> Who {
+    let Some(state) = args.zone_dir.parent() else {
+        return Who::Unknown;
+    };
+    let Some(peer) = crate::origin::Peer::of(client.as_raw_fd()) else {
+        return Who::Unknown;
+    };
+    let places = crate::origin::Places {
+        state,
+        config: &args.config,
+        profiles: &args.profiles,
+    };
+    crate::origin::of_peer(places, &args.zone, &peer)
+}
+
+fn serve(client: UnixStream, upstream: &PathBuf, mic: Arc<Policy>, who: Who) -> io::Result<()> {
     let server = UnixStream::connect(upstream)?;
     let session = Arc::new(Mutex::new(Session {
         mic,
+        who,
         ..Session::default()
     }));
     let to_client = Arc::new(Out {
@@ -1452,6 +1491,7 @@ pub fn run(args: &Args) -> u8 {
         &args.zone,
         args.zone_dir.clone(),
         args.config.clone(),
+        args.profiles.clone(),
         args.kdialog.clone(),
     ));
     if !mic.has_display() {
@@ -1462,6 +1502,7 @@ pub fn run(args: &Args) -> u8 {
         );
     }
     let connections = Arc::new(AtomicU32::new(0));
+    let shared = Arc::new(args.clone());
     for client in listener.incoming() {
         let Ok(client) = client else {
             continue;
@@ -1471,11 +1512,13 @@ pub fn run(args: &Args) -> u8 {
             continue;
         }
         connections.fetch_add(1, Ordering::SeqCst);
-        let upstream = args.upstream.clone();
+        let args = Arc::clone(&shared);
         let connections = Arc::clone(&connections);
         let mic = Arc::clone(&mic);
         thread::spawn(move || {
-            if let Err(e) = serve(client, &upstream, mic) {
+            // On the connection's own thread: the registry is read for it.
+            let who = who_is(&client, &args);
+            if let Err(e) = serve(client, &args.upstream, mic, who) {
                 report(&e);
             }
             connections.fetch_sub(1, Ordering::SeqCst);
@@ -1637,6 +1680,7 @@ mod tests {
     fn with_mic(setting: Setting, display: bool) -> Session {
         let mut s = Session {
             mic: Arc::new(Policy::fixed(setting, display)),
+            who: Who::Main,
             ..Session::default()
         };
         assert!(matches!(s.up(&auth(0)), Up::Forward(_)));
@@ -2163,7 +2207,7 @@ mod tests {
         let path = upstream.clone();
         let mic = Arc::new(Policy::fixed(Setting::Yes, false));
         thread::spawn(move || {
-            let _ = serve(filter_side, &path, mic);
+            let _ = serve(filter_side, &path, mic, Who::Main);
         });
         let (mut seen, _) = server.accept().unwrap();
         let mut c = client;
@@ -2309,6 +2353,7 @@ mod tests {
         let mic = Arc::new(Policy::for_test(
             dir.join("state/nl"),
             dir.join("config"),
+            dir.join("profiles"),
             kdialog.clone(),
             true,
             Duration::from_secs(20),
@@ -2318,7 +2363,7 @@ mod tests {
         let (client, filter_side) = UnixStream::pair().unwrap();
         let path = upstream.clone();
         thread::spawn(move || {
-            let _ = serve(filter_side, &path, mic);
+            let _ = serve(filter_side, &path, mic, Who::Main);
         });
         let (seen, _) = server.accept().unwrap();
         seen.set_read_timeout(Some(Duration::from_secs(10)))

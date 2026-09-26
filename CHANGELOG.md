@@ -12,8 +12,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `status --json`; `docs/PERMISSIONS.md` §11.10 — the owner, 2026-09-26:
   the colour moves from zones to containers too). A container with none is
   framed in its network's colour, as before.
+- **A container's microphone setting of its own** (`programs.cellward.
+  containers.<name>.permissions.microphone`, `cellward container set <c>
+  microphone yes|no|ask|default`, `containers[].microphone` in `status
+  --json`; `docs/PERMISSIONS.md` §11.10). The sound filter now knows which
+  container a program that connects is of — the same way the broker does,
+  by the launch it descends from (`rust/src/origin.rs`) — and decides its
+  record streams by that container's setting. Which word wins: Nix's for
+  the container, Nix's for the zone, the container's local one, the zone's
+  local one, `ask`; a local setting never overrides a declared one. The
+  question names the container, and "always" writes `microphone = yes` into
+  the container's settings, not the zone's; for a program with no container
+  it is still the zone's. The PipeWire path of a hermetic zone still
+  decides by the zone.
 
 ### Changed
+- **The microphone for a program whose container is not known** (a
+  throwaway sandbox, a temporary container, a daemon that left its
+  launch's tree) is asked about even where the zone says `yes`, and is
+  never offered "always": a program that left its container's launch must
+  not get the zone's "yes" its container may have been refused. With no
+  graphical session that is a refusal. The journal's `microphone` events
+  carry a `container` field: the name, `""` for none, `"?"` for not known.
+- **Container settings are written through a temporary file**, and a
+  settings file that is there but cannot be read is no longer rewritten
+  with its other keys lost.
 - **The broker knows which container asks** (`broker::container_of`;
   `docs/PERMISSIONS.md` §11.9). It knew the zone only, and passed without a
   question just the zone's own programs (no container) asking for none. Now

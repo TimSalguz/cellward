@@ -480,10 +480,15 @@ pub fn container(tools: &Tools, c: &Container) -> String {
         Some(color) => sourced_str(&color.value, color.source),
         None => sourced("null".to_owned(), Source::Default),
     };
+    // Its own microphone setting, or none: the zone's (`networks[]`).
+    let microphone = match &c.microphone {
+        Some(m) => sourced_str(m.value.as_str(), m.source),
+        None => sourced("null".to_owned(), Source::Default),
+    };
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
          \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{},\"frame_color\":{frame_color}}}",
+         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),

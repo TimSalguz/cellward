@@ -59,6 +59,8 @@ const LAYOUT_1_MARK: &str = ".migrated";
 /// `<old selector>\t<new name>` a line: a stale `sb:work` still finds the
 /// sandbox that became `work-sb`.
 pub const RENAMED: &str = ".renamed";
+/// Where the containers' data live, below the home ([`Tools::profiles`]).
+pub const PROFILES_SUBDIR: &str = ".local/state/vpn-profiles";
 /// Where home-manager puts the declared containers, below the config dir.
 pub const DECLARED: &str = "declared/containers";
 /// The prefix a named sandbox's selector had while a layer and a home of its
@@ -241,6 +243,9 @@ pub struct Container {
     /// The colour of its windows' frame (`#rrggbb`); none of its own is the
     /// zone's (`docs/PERMISSIONS.md` §11.10).
     pub frame_color: Option<Sourced<String>>,
+    /// Whether its programs record the microphone (`crate::microphone`);
+    /// none of its own is the zone's setting.
+    pub microphone: Option<Sourced<crate::microphone::Setting>>,
     /// The container's data directory ([`data_dir`]). May not exist yet — and
     /// a container of the main home has none it uses.
     pub dir: PathBuf,
@@ -359,7 +364,12 @@ fn values<'a>(conf: &'a [(String, String)], key: &'a str) -> impl Iterator<Item 
 
 /// The file a declared container lives in: `<name>.conf`, with its `home`.
 pub fn declared_file(tools: &Tools, name: &str) -> PathBuf {
-    tools.config.join(DECLARED).join(format!("{name}.conf"))
+    declared_file_in(&tools.config, name)
+}
+
+/// [`declared_file`], from the config dir alone.
+pub fn declared_file_in(config: &Path, name: &str) -> PathBuf {
+    config.join(DECLARED).join(format!("{name}.conf"))
 }
 
 /// Settings as `key = value` pairs, in order.
@@ -371,17 +381,19 @@ type Conf = Vec<(String, String)>;
 /// name and no `home` line — a file of the new kind always has one, which
 /// is how the two are told apart.
 fn read_declared(tools: &Tools, name: &str) -> Option<(Conf, Option<Home>)> {
-    if let Ok(text) = fs::read_to_string(declared_file(tools, name)) {
+    read_declared_in(&tools.config, name)
+}
+
+/// [`read_declared`], from the config dir alone.
+fn read_declared_in(config: &Path, name: &str) -> Option<(Conf, Option<Home>)> {
+    if let Ok(text) = fs::read_to_string(declared_file_in(config, name)) {
         let conf = parse_conf(&text);
         if let Some(home) = values(&conf, "home").last().and_then(Home::parse) {
             return Some((conf, Some(home)));
         }
     }
     for (prefix, home) in [("overlay-", Home::Layer), ("private-", Home::Private)] {
-        let file = tools
-            .config
-            .join(DECLARED)
-            .join(format!("{prefix}{name}.conf"));
+        let file = config.join(DECLARED).join(format!("{prefix}{name}.conf"));
         if let Ok(text) = fs::read_to_string(file) {
             let conf = parse_conf(&text);
             if values(&conf, "home").next().is_none() {
@@ -723,7 +735,7 @@ pub fn migrate_home(home: &Path) {
     }
     let moved = migrate_in(
         &home.join(".config/vpn-zones"),
-        &home.join(".local/state/vpn-profiles"),
+        &home.join(PROFILES_SUBDIR),
         &home.join(".local/state/vpn-sandboxes"),
         &home.join(".local/state/vpn-zones"),
     );
@@ -1270,9 +1282,13 @@ fn move_policy_file(old: &Path, new: &Path) -> io::Result<()> {
 /// Set (`Some`) or drop (`None`) one key of a settings file, keeping the rest.
 /// With `replace` false an existing key is left as it is.
 pub fn write_key(path: &Path, key: &str, value: Option<&str>, replace: bool) -> Result<(), String> {
-    let mut conf: Vec<(String, String)> = fs::read_to_string(path)
-        .map(|t| parse_conf(&t))
-        .unwrap_or_default();
+    // A file that is there and cannot be read is not rewritten: its other
+    // settings would be lost with it.
+    let mut conf: Vec<(String, String)> = match fs::read_to_string(path) {
+        Ok(text) => parse_conf(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(format!("не прочитать {}: {e}", path.display())),
+    };
     if !replace && conf.iter().any(|(k, _)| k == key) {
         return Ok(());
     }
@@ -1290,7 +1306,18 @@ pub fn write_key(path: &Path, key: &str, value: Option<&str>, replace: bool) -> 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("не создать {}: {e}", parent.display()))?;
     }
-    fs::write(path, text).map_err(|e| format!("не записать {}: {e}", path.display()))
+    // Through a temporary: the zone's helpers read these files while the
+    // command line and the sound filter's "always" write them, and half a
+    // file is a setting nobody made.
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.new", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    fs::write(&tmp, text)
+        .and_then(|()| fs::rename(&tmp, path))
+        .map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            format!("не записать {}: {e}", path.display())
+        })
 }
 
 /// The kind of home the data of a container are in, when nothing says it:
@@ -1384,6 +1411,52 @@ pub fn prepare_data(container: &Container) -> Result<(), String> {
     }
     fs::write(dir.join(DATA_KIND), container.home.setting())
         .map_err(|e| format!("не записать {}: {e}", dir.join(DATA_KIND).display()))
+}
+
+/// Whether the container `name` is one: its data, its policy or its
+/// declaration is there ([`load`]'s rule) — from the directories alone, for
+/// the zone's helpers, which have no manifest. No move, no renames: `name`
+/// is a name already.
+pub fn exists_in(config: &Path, profiles: &Path, name: &str) -> bool {
+    valid_name(name)
+        && (profiles.join(name).is_dir()
+            || policy_dir_in(config, name).is_dir()
+            || read_declared_in(config, name).is_some())
+}
+
+/// A container's own value of `key` and where it is from: Nix's
+/// declaration, else its local settings; `None` without either. For the
+/// zone's helpers (the config dir alone). `Err(source)`: a file that is
+/// there and cannot be read — what it says is not known, and a caller that
+/// must be safe takes the strictest value.
+pub fn own_value_in(
+    config: &Path,
+    name: &str,
+    key: &str,
+) -> Result<Option<(String, Source)>, Source> {
+    let declared = declared_file_in(config, name);
+    match fs::read_to_string(&declared) {
+        Ok(text) => {
+            let conf = parse_conf(&text);
+            // A file of this kind always has its `home`; `<name>.conf`
+            // without one is the old module's file of another container
+            // (`overlay-<x>.conf` of `x`), not this one's.
+            if values(&conf, "home").next().is_some() {
+                if let Some(value) = values(&conf, key).last() {
+                    return Ok(Some((value.to_owned(), Source::Nix)));
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(Source::Nix),
+    }
+    match fs::read_to_string(policy_dir_in(config, name).join(FILE)) {
+        Ok(text) => Ok(values(&parse_conf(&text), key)
+            .last()
+            .map(|value| (value.to_owned(), Source::Local))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(Source::Local),
+    }
 }
 
 /// Read one container. `None` when it neither exists on disk nor is declared.
@@ -1538,6 +1611,25 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
             })
         });
 
+    // A word that is none of the three is "no" (`microphone::Setting`).
+    let microphone_of = |conf: &[(String, String)]| {
+        values(conf, "microphone").last().map(|word| {
+            crate::microphone::Setting::parse(word).unwrap_or(crate::microphone::Setting::No)
+        })
+    };
+    let microphone = declared_conf
+        .and_then(microphone_of)
+        .map(|value| Sourced {
+            value,
+            source: Source::Nix,
+        })
+        .or_else(|| {
+            microphone_of(&local).map(|value| Sourced {
+                value,
+                source: Source::Local,
+            })
+        });
+
     Some(Container {
         name: name.to_owned(),
         home,
@@ -1545,6 +1637,7 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         network,
         apps,
         frame_color,
+        microphone,
         declared_trust,
         paths,
         expires,
@@ -2244,6 +2337,31 @@ pub fn set_frame_color(tools: &Tools, selector: &str, color: Option<&str>) -> Re
     )
 }
 
+/// Give a container a microphone setting of its own (`None`: none — the
+/// zone's), locally.
+pub fn set_microphone(
+    tools: &Tools,
+    selector: &str,
+    setting: Option<crate::microphone::Setting>,
+) -> Result<(), String> {
+    let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    if container
+        .microphone
+        .as_ref()
+        .is_some_and(|m| m.source == Source::Nix)
+    {
+        return Err(format!(
+            "микрофон контейнера {selector} задан в Nix — меняется там"
+        ));
+    }
+    write_key(
+        &container.policy.join(FILE),
+        "microphone",
+        setting.map(crate::microphone::Setting::as_str),
+        true,
+    )
+}
+
 /// Change the kind of a container's home, locally. Refused when the kind is
 /// declared in Nix, and while its programs run: their home would change under
 /// them. The data of the old kind go aside at the next launch
@@ -2274,7 +2392,8 @@ pub fn set_home(tools: &Tools, selector: &str, home: Home) -> Result<(), String>
         && fs::read_dir(container.trust_dir()).is_ok_and(|mut d| d.next().is_some())
     {
         return Err(format!(
-            "у контейнера {selector} свои корневые сертификаты, а у основного дома их быть не может              (они легли бы в настоящий дом) — сначала cellward trust reset {selector}"
+            "у контейнера {selector} свои корневые сертификаты, а у основного дома их быть не может \
+             (они легли бы в настоящий дом) — сначала cellward trust reset {selector}"
         ));
     }
     write_key(
@@ -3045,6 +3164,7 @@ mod tests {
                 source: Source::Default,
             },
             frame_color: None,
+            microphone: None,
             dir: PathBuf::from("/s/work"),
             policy: PathBuf::from("/c/containers/work"),
         }

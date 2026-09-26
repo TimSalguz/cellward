@@ -53,6 +53,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::cli::{visible_entries, zone_pid};
+use crate::origin::Peer;
 use crate::tools::Tools;
 
 /// The magic that starts a request.
@@ -223,133 +224,30 @@ fn classify(state: &Path, netns: &Path, userns: &Path) -> Origin {
     Origin::Unknown
 }
 
-/// The peer of a connection as the kernel knows it: its number, held by a
-/// pidfd, and its mount namespace.
-struct Peer {
-    pid: i32,
-    pidfd: std::os::fd::OwnedFd,
-    mnt: PathBuf,
-}
-
 /// Where the peer of `stream` is, looked at while it is certainly the process
 /// that connected.
 fn origin_of(state: &Path, stream: &UnixStream) -> (Origin, Option<Peer>) {
     let unknown = (Origin::Unknown, None);
-    let Some(pid) = crate::sys::peer_pid(stream.as_raw_fd()) else {
+    let Some(peer) = Peer::of(stream.as_raw_fd()) else {
         return unknown;
     };
-    let Some(pidfd) = crate::sys::peer_pidfd(stream.as_raw_fd(), pid) else {
+    // Read while it lives (`Peer::ns`): the namespaces are the peer's own.
+    let (Some(netns), Some(userns)) = (peer.ns("net"), peer.ns("user")) else {
         return unknown;
     };
-    let alive = || !crate::sys::pidfd_wait(&pidfd, std::time::Duration::ZERO);
-    if !alive() {
-        return unknown;
-    }
-    let read = |ns: &str| std::fs::read_link(format!("/proc/{pid}/ns/{ns}"));
-    let (Ok(netns), Ok(userns), Ok(mntns)) = (read("net"), read("user"), read("mnt")) else {
-        return unknown;
-    };
-    // Still alive after the read: the number was not reused in between, and
-    // the namespace read is the peer's own.
-    if !alive() {
-        return unknown;
-    }
-    (
-        classify(state, &netns, &userns),
-        Some(Peer {
-            pid,
-            pidfd,
-            mnt: mntns,
-        }),
-    )
-}
-
-/// Whether the peer is a program of the zone with no container: it is in the
-/// zone's own mount namespace. A launch into a container takes a mount
-/// namespace of its own (`profile-run`), and a program there cannot leave it
-/// — `setns` wants capabilities it does not have — so a program of a
-/// container is never taken for one of the zone's own.
-fn in_zones_own_mounts(state: &Path, zone: &str, peer_mnt: Option<&Path>) -> bool {
-    let Some(peer_mnt) = peer_mnt else {
-        return false;
-    };
-    let Some(pid) = zone_pid(state, std::ffi::OsStr::new(zone)) else {
-        return false;
-    };
-    std::fs::read_link(format!("/proc/{pid}/ns/mnt")).is_ok_and(|own| own == peer_mnt)
+    (classify(state, &netns, &userns), Some(peer))
 }
 
 /// The container of `zone` the peer is a program of (`docs/PERMISSIONS.md`
-/// §11.9): `Some(name)` for a program of a named container, `Some("")` for
-/// one of the main profile — a launch of it, or, with no launch known, a
-/// program in the zone's own mount namespace —, `None` when nothing is known
-/// (a throwaway or temporary container, a daemon that left its launch's tree
-/// into a namespace of its own). A container of the main home runs in the
-/// zone's own namespace too: it is told by its launch, not by the namespace.
-///
-/// Which container: the one a launch of which, in that zone, the peer
-/// descends from — the launcher recorded in the registry, taken only with its
-/// start time on record and the same (`registry::launched`: a number that
-/// went to somebody else is nobody's launch), and the chain of parents read
-/// with each held (`sys::descends_from`).
+/// §11.9, `crate::origin`): `Some(name)` for a program of a named container,
+/// `Some("")` for one of the zone's own or of the main profile, `None` when
+/// nothing is known (a throwaway or temporary container, a daemon that left
+/// its launch's tree into a namespace of its own).
 fn container_of(tools: &Tools, zone: &str, peer: Option<&Peer>) -> Option<String> {
-    let peer = peer?;
-    let running = tools.state.join(".running");
-    let launched = |pid| crate::registry::launched(&running, pid);
-    // The launches of that zone whose container is known, by their pid.
-    let mut launches: std::collections::BTreeMap<i32, String> = Default::default();
-    for dir in crate::registry::dirs(&running) {
-        let dir_name = dir
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        for (_, record) in crate::registry::live_records(&dir, &launched) {
-            if record.zone != zone {
-                continue;
-            }
-            // Whose launch: the directory's container when the record says
-            // so itself — a launch of one container writes its name in both
-            // places; one from before one container per launch (a layer
-            // with a sandbox over it, filed under the layer) is nobody's.
-            // Under `__main__`, the main profile (an empty selector) and a
-            // sandbox from before one name per container (`sb:<name>`); a
-            // throwaway sandbox is nobody's.
-            let name = if dir_name == crate::registry::MAIN {
-                match record
-                    .selector
-                    .strip_prefix(crate::container::SANDBOX_PREFIX)
-                {
-                    Some(_) => crate::container::canonical(tools, &record.selector),
-                    None if record.selector.is_empty() => Some(String::new()),
-                    None => None,
-                }
-            } else {
-                Some(dir_name.clone())
-                    .filter(|n| crate::container::valid_name(n) && record.selector == *n)
-            };
-            if let Some(name) = name {
-                launches.insert(record.pid, name);
-            }
-        }
-    }
-    // The nearest launch the peer descends from, its parents read once —
-    // before the zone's own namespace: a container of the main home runs in
-    // that very namespace, and is its own container all the same.
-    let found = crate::sys::ancestors(peer.pid, &peer.pidfd)
-        .into_iter()
-        .find_map(|pid| launches.get(&pid).cloned());
-    match found {
-        // A container that is still one: not a name left by one removed.
-        Some(name) if name.is_empty() || crate::container::load(tools, &name).is_some() => {
-            Some(name)
-        }
-        Some(_) => None,
-        // Nothing the registry knows: the zone's own programs are the ones in
-        // its own namespace — a link opened by its bus filter, a terminal of
-        // the zone's own.
-        None if in_zones_own_mounts(&tools.state, zone, Some(&peer.mnt)) => Some(String::new()),
-        None => None,
+    match crate::origin::of_peer(crate::origin::Places::of(tools), zone, peer?) {
+        crate::origin::Who::Main => Some(String::new()),
+        crate::origin::Who::Container(name) => Some(name),
+        crate::origin::Who::Unknown => None,
     }
 }
 

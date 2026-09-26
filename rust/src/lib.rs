@@ -111,6 +111,7 @@ pub mod kill;
 pub mod launch;
 pub mod microphone;
 pub mod openconnect;
+pub mod origin;
 pub mod picker;
 pub mod profile;
 pub mod pulse_filter;

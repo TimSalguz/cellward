@@ -581,7 +581,8 @@ and `cellward container show <name> --json` print subsets of the same schema.
                    "not_after": "2030-01-01T00:00:00Z", "source": "nix" } ],
       "running": [ { "app": "firefox", "pid": 1234, "network": "nl" } ],
       "x11": { "value": false, "source": "default" },
-      "frame_color": { "value": null, "source": "default" } }
+      "frame_color": { "value": null, "source": "default" },
+      "microphone": { "value": null, "source": "default" } }
   ]
 }
 ```
