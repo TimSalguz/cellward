@@ -647,16 +647,25 @@ impl_metadata:activate (Features.ALL, function (m, e)
     end
     if key:sub (1, #CLIENT_MIC_PREFIX) == CLIENT_MIC_PREFIX then
       local serial = key:sub (#CLIENT_MIC_PREFIX + 1)
+      local regranted = false
       for id, z in pairs (zones) do
         if z.serial == serial then
           if waiting [id] == z then
-            -- Its key came: let it go, with what the key says.
+            -- Its key came: let it go, with what the key says. It has no
+            -- node yet, nothing to link or unlink.
             waiting [id] = nil
             finalize (z)
           else
             regrant_client (z)
+            regranted = true
           end
         end
+      end
+      -- The links looked at again only where a client's grant changed: not
+      -- for a key of a client gone, nor for one just let go — a zone that
+      -- connects in a loop does not make the whole graph looked at each time.
+      if not regranted then
+        return
       end
     elseif key:sub (1, #BY_CLIENT_PREFIX) == BY_CLIENT_PREFIX then
       regrant_sources (key:sub (#BY_CLIENT_PREFIX + 1))

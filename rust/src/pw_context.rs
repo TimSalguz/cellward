@@ -57,7 +57,13 @@
 //! (`pipewire.sec.pid`) and a serial no other client ever has
 //! (`object.serial`); a client whose process is in the zone's network
 //! namespace is the zone's, and whose program it is is looked at once, by the
-//! launch it descends from (`crate::origin`, as the sound filter does). Its
+//! launch it descends from (`crate::origin`, as the sound filter does). The
+//! pid is the daemon's word, not a pidfd: the daemon registers a client at
+//! its first properties, when the program chooses — one that connected from
+//! a child that has since exited could, in principle, have its number taken
+//! by a process of another container of the zone first (between containers
+//! of one zone the microphone is a setting, not a wall; the sound filter has
+//! the kernel's pidfd, `SO_PEERPIDFD`, and no such gap). Its
 //! setting is published as [`CLIENT_MICROPHONE_KEY`]`<serial>` = `yes` or
 //! `no`, removed with the client; [`BY_CLIENT_KEY`]`<zone>` = `yes` tells the
 //! policy that this helper does so, and the policy then decides by a
@@ -753,11 +759,10 @@ pub trait MicSource {
     fn setting_for(&self, who: &crate::origin::Who) -> Setting;
 }
 
-/// The zone's setting, made stricter by every container with a program
-/// running in the zone (`crate::microphone::strictest_running`): this path
-/// decides for all the zone's clients at once, and does not know their
-/// containers yet — a container's "no" must not be passed by its zone's
-/// "yes" here either.
+/// The zone's microphone for this helper: for the whole zone the strictest
+/// of it and of every container launched into it (`crate::microphone::
+/// strictest_running`) — what a policy that knows only the zone decides by
+/// —, and for each client by the container of the process that connected.
 pub struct ZoneMic {
     pub zone: String,
     pub zone_dir: PathBuf,
@@ -790,8 +795,8 @@ impl MicSource for ZoneMic {
         };
         // A process of this zone: in its network namespace, read while the
         // number is still that process's.
-        let in_zone = net(pid).is_some() && net(pid) == net(holder);
-        if !in_zone || !peer.alive() {
+        let own = net(pid)?;
+        if Some(own) != net(holder) || !peer.alive() {
             return None;
         }
         let places = crate::origin::Places {

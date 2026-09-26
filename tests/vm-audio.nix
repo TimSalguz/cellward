@@ -358,10 +358,33 @@ let
               "the container's first look at the graph had no microphone"
           out = zone(record.format("vz-zmic"))
           assert out.strip() == "0", f"the zone's own program recorded on the zone's no: {out}"
+          # While a recorder of the container lives, its own key says yes.
+          alice(
+              "systemd-run --user --unit=cmicrec cellward run offline --container vmpwmic -- "
+              "sh -c 'pw-record --raw --target vm-mic -P node.name=vz-crec - > /dev/null'"
+          )
+          for _ in range(60):
+              if linked(host_dump(), "vm-mic", "vz-crec"):
+                  break
+              machine.sleep(1)
+          else:
+              logs()
+              raise Exception("the container's recording was never linked")
           meta = alice("pw-metadata -n vpn-zones 0")
-          assert "vpn-zones.microphone-by-client.offline" in meta, meta
+          assert any(
+              "vpn-zones.microphone.client." in line and "value:'yes'" in line
+              for line in meta.splitlines()
+          ), meta
+          alice("systemctl --user stop cmicrec.service || true")
           # A client's key goes with it: nothing is left of those above.
-          assert "vpn-zones.microphone.client." not in meta, meta
+          for _ in range(30):
+              meta = alice("pw-metadata -n vpn-zones 0")
+              if "vpn-zones.microphone.client." not in meta:
+                  break
+              machine.sleep(1)
+          else:
+              raise Exception(f"a client's key outlived it: {meta}")
+          assert "vpn-zones.microphone-by-client.offline" in meta, meta
           alice("cellward microphone offline yes")
           alice("cellward container set vmpwmic microphone no")
           out = in_container(record.format("vz-cno"))
