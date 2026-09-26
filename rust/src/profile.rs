@@ -92,10 +92,11 @@ pub struct Args {
     pub nss_home: Option<PathBuf>,
     /// `--certutil PATH`, from the manifest.
     pub certutil: Option<PathBuf>,
-    /// `--storage FD PATH`: the container's storage directory, which the zone
-    /// covers, from a descriptor the host opened — given back at `PATH` in
-    /// this launch's mount namespace only, before anything else.
-    pub storage: Option<(i32, PathBuf)>,
+    /// `--storage PATH`: the container's storage directory, which the zone
+    /// covers — given back at `PATH` from the zone's keep
+    /// (`home_layer::KEPT_STORAGE`), in this launch's mount namespace only,
+    /// before anything else.
+    pub storage: Option<PathBuf>,
     /// `--share PATH`, repeated: a path of the real home granted to the
     /// container (`container grant`) — written through the layer, into the
     /// real home. Checked again here, as written and as resolved.
@@ -157,14 +158,11 @@ impl Args {
         let mut storage = None;
         while let Some(flag) = positional.first() {
             if flag == "--storage" {
-                let fd = positional
+                storage = positional
                     .get(1)
-                    .and_then(|v| v.to_str())
-                    .and_then(|v| v.parse::<i32>().ok());
-                if let (Some(fd), Some(path)) = (fd, positional.get(2).filter(|v| !v.is_empty())) {
-                    storage = Some((fd, PathBuf::from(path)));
-                }
-                positional = positional.get(3..).unwrap_or(&[]);
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from);
+                positional = positional.get(2..).unwrap_or(&[]);
                 continue;
             }
             if flag == "--trust-extra" || flag == "--share" {
@@ -243,29 +241,24 @@ pub fn home_dir() -> Option<PathBuf> {
 }
 
 /// Give the container's storage directory back at `path` (below one of the
-/// storage directories the zone covers, `home_layer::STORAGE`), from `fd`,
-/// which the host opened on it, and close `fd`: the program never holds it.
-fn give_storage_back(fd: i32, path: &Path) -> Result<(), String> {
+/// storage directories the zone covers, `home_layer::STORAGE`), from the
+/// zone's keep. Outside a zone there is no keep, and nothing covered: the
+/// path is the real one already.
+fn give_storage_back(path: &Path) -> Result<(), String> {
     let home = home_dir().ok_or("no $HOME")?;
-    let below_storage = crate::home_layer::STORAGE.iter().any(|s| {
-        let root = home.join(s);
-        path.parent() == Some(root.as_path())
-    });
-    if !below_storage || path.file_name().is_none() {
-        return Err(format!("{} is no container's storage", path.display()));
+    let kept = crate::home_layer::kept_storage_of(&home, path)
+        .ok_or_else(|| format!("{} is no container's storage", path.display()))?;
+    if !home.join(crate::home_layer::KEPT_STORAGE).is_dir() {
+        return Ok(());
     }
-    let from = PathBuf::from(format!("/proc/self/fd/{fd}"));
-    if !fs::metadata(&from).is_ok_and(|m| m.is_dir()) {
-        return Err(format!("descriptor {fd} is no directory"));
+    if !fs::symlink_metadata(&kept).is_ok_and(|m| m.is_dir()) {
+        return Err(format!("the zone keeps no {}", kept.display()));
     }
     if fs::symlink_metadata(path).is_err() {
         fs::create_dir(path).map_err(|e| format!("cannot make {}: {e}", path.display()))?;
     }
-    crate::sys::mount(from.as_os_str(), path, "", libc::MS_BIND | libc::MS_REC, "")
-        .map_err(|e| format!("cannot give {} back: {e}", path.display()))?;
-    // SAFETY: a descriptor handed to this process to take.
-    unsafe { libc::close(fd) };
-    Ok(())
+    crate::sys::mount(kept.as_os_str(), path, "", libc::MS_BIND | libc::MS_REC, "")
+        .map_err(|e| format!("cannot give {} back: {e}", path.display()))
 }
 
 /// Put the whole home under the profile's layer (`crate::home_layer`): the
@@ -553,8 +546,8 @@ pub fn run(args: Args) -> u8 {
     }
     // The container's own storage first: the zone covers all of it, and the
     // layer and the sandbox below need this one directory where it was.
-    if let Some((fd, path)) = &args.storage {
-        if let Err(e) = give_storage_back(*fd, path) {
+    if let Some(path) = &args.storage {
+        if let Err(e) = give_storage_back(path) {
             eprintln!("profile-run: {e} — the program is not started");
             return EXIT_NOT_STARTED;
         }
@@ -791,7 +784,6 @@ mod tests {
     fn the_storage_and_the_shares_come_before_the_positionals() {
         let a = Args::parse(&argv(&[
             "--storage",
-            "7",
             "/home/u/.local/state/vpn-profiles/w",
             "--share",
             "/home/u/Projects",
@@ -807,7 +799,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             a.storage,
-            Some((7, PathBuf::from("/home/u/.local/state/vpn-profiles/w")))
+            Some(PathBuf::from("/home/u/.local/state/vpn-profiles/w"))
         );
         assert_eq!(
             a.share,
@@ -820,9 +812,6 @@ mod tests {
             a.profile_dir,
             PathBuf::from("/home/u/.local/state/vpn-profiles/w")
         );
-        // A descriptor that is no number is no storage.
-        let a = Args::parse(&argv(&["--storage", "x", "/p", "/d", "nl", "--", "prog"])).unwrap();
-        assert_eq!(a.storage, None);
     }
 
     #[test]

@@ -9,10 +9,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - **A zone no longer sees the containers' data** (`zone::hide_container_storage`,
   `profile-run --storage`; review 2026-09-26). Every program of a zone read
   and wrote every container's storage — a browser profile, a sandbox's home,
-  code they run included. A zone now covers both storage directories, and a
-  container launched into it gets its own directory back, in the launch's
-  own mount namespace only, from a descriptor the host opened (never through
-  a link) and closed before the program starts.
+  code they run included. A zone now covers both storage directories, keeping
+  the real ones inside its own hidden state, in a directory only the zone's
+  root enters; a container launched into it gets its own directory back from
+  there, in the launch's own mount namespace only, while `profile-run` still
+  has the capabilities of its setup.
 - **A layer container covers the whole home** (`rust/src/home_layer.rs`,
   `profile::mount_profile`; the owner, 2026-09-26, `docs/PERMISSIONS.md`
   §11.3). A data container ("profile") layered only `.config`,

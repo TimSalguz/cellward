@@ -3162,16 +3162,33 @@ fn protect_host_files(zone: &Zone) -> Result<(), String> {
 /// The containers' storage out of the zone's reach (review 2026-09-26): each
 /// container's data is its own — a browser profile, a sandbox's home — and a
 /// program of the zone read every one of them, and wrote them, code they run
-/// included. A tmpfs over both directories; a launch of a container into the
-/// zone gets its own directory back, in its own mount namespace, from a
-/// descriptor the host opened (`profile-run --storage`). Fatal: a zone that
-/// cannot do it would show every container's data.
+/// included. The real storage is kept in [`crate::home_layer::KEPT_STORAGE`]
+/// — inside the project's state, whose tmpfs is the zone's own, a directory
+/// 0700 of the zone's root that no program of the zone enters — and both
+/// storage directories are covered with a tmpfs. A container launched into
+/// the zone gets its own directory back from there, in its own mount
+/// namespace (`profile-run --storage`). After [`hide_project_state`], whose
+/// tmpfs this lives in. Fatal: a zone that cannot do it would show every
+/// container's data.
 fn hide_container_storage(zone: &Zone) -> Result<(), String> {
-    for dir in crate::home_layer::STORAGE {
+    use std::os::unix::fs::DirBuilderExt;
+    let kept = zone.home.join(crate::home_layer::KEPT_STORAGE);
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&kept)
+        .map_err(|e| format!("cannot create {}: {e}", kept.display()))?;
+    for (dir, kind) in crate::home_layer::STORAGE
+        .iter()
+        .zip(["profiles", "sandboxes"])
+    {
         let dir = zone.home.join(dir);
         if !dir.is_dir() {
             continue;
         }
+        let keep = kept.join(kind);
+        fs::create_dir(&keep).map_err(|e| format!("cannot create {}: {e}", keep.display()))?;
+        sys::mount(dir.as_os_str(), &keep, "", libc::MS_BIND | libc::MS_REC, "")
+            .map_err(|e| format!("cannot keep {}: {e}", dir.display()))?;
         sys::mount(
             OsStr::new("tmpfs"),
             &dir,
@@ -3669,8 +3686,8 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     }
     // The project's own state, last among the covers: from here on the zone's
     // directory is reached through a descriptor.
-    hide_container_storage(zone)?;
     let zone = &hide_project_state(zone)?;
+    hide_container_storage(zone)?;
 
     let Some(ZoneLinks {
         backend,

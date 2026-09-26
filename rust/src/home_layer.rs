@@ -51,6 +51,28 @@ pub fn keeps_flags(rel: &Path, granted: &[PathBuf]) -> bool {
     PROJECT.iter().any(|p| rel.starts_with(p)) || granted.iter().any(|g| rel.starts_with(g))
 }
 
+/// Where a zone keeps the real container storage for its launches, below the
+/// home: inside the project's state, which the zone covers with a tmpfs of
+/// its own — a directory there, 0700 and the zone's root's, which a program
+/// of the zone cannot enter, and `profile-run` (with the capabilities of its
+/// setup, before the program) can. `profiles` and `sandboxes` in it.
+pub const KEPT_STORAGE: &str = ".local/state/vpn-zones/.storage";
+
+/// The kept copy of a storage root's entry, from its path below the home:
+/// `.local/state/vpn-sandboxes/work` → `<KEPT_STORAGE>/sandboxes/work`.
+pub fn kept_storage_of(home: &Path, path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    let parent = path.parent()?;
+    let kind = if parent == home.join(STORAGE[0]) {
+        "profiles"
+    } else if parent == home.join(STORAGE[1]) {
+        "sandboxes"
+    } else {
+        return None;
+    };
+    Some(home.join(KEPT_STORAGE).join(kind).join(name))
+}
+
 /// The layer's directories in a container's directory: `(upper, work)`.
 pub fn layer_dirs(container_dir: &Path) -> (PathBuf, PathBuf) {
     let base = container_dir.join(LAYER_DIR);
@@ -324,5 +346,35 @@ mod flags_tests {
         assert!(keeps_flags(Path::new("Games/deep"), &granted));
         assert!(!keeps_flags(Path::new(".ssh"), &granted));
         assert!(!keeps_flags(Path::new("Media"), &granted));
+    }
+}
+
+#[cfg(test)]
+mod kept_tests {
+    use super::*;
+
+    #[test]
+    fn a_containers_storage_is_found_in_the_zones_keep() {
+        let home = Path::new("/home/u");
+        assert_eq!(
+            kept_storage_of(home, Path::new("/home/u/.local/state/vpn-sandboxes/work")),
+            Some(PathBuf::from(
+                "/home/u/.local/state/vpn-zones/.storage/sandboxes/work"
+            ))
+        );
+        assert_eq!(
+            kept_storage_of(home, Path::new("/home/u/.local/state/vpn-profiles/w")),
+            Some(PathBuf::from(
+                "/home/u/.local/state/vpn-zones/.storage/profiles/w"
+            ))
+        );
+        assert_eq!(
+            kept_storage_of(home, Path::new("/home/u/elsewhere/w")),
+            None
+        );
+        assert_eq!(
+            kept_storage_of(home, Path::new("/home/u/.local/state/vpn-sandboxes/a/b")),
+            None
+        );
     }
 }
