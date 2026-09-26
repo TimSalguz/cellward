@@ -682,11 +682,15 @@ impl Conn {
                     wire::body_string(msg, h).unwrap_or_default()
                 )),
             };
-            self.settled.notify_all();
-            drop(reg);
+            // Said before the held calls go on — under the lock the waiting
+            // side reads the stage with: once they are on the bus, the
+            // refusal is on record (the flag was set after the wake-up, and
+            // a caller could see the calls before it).
             if let Some(why) = refusal {
                 ctx.unregistered(&format!("the portal said {why}"));
             }
+            self.settled.notify_all();
+            drop(reg);
             return true;
         }
         if reg.stage == Stage::Hello(serial) {

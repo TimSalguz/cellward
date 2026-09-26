@@ -85,6 +85,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   container of the main home — run in the zone's own mount namespace — is
   told by its launch, not taken for the zone's own programs.
 
+### Fixed
+- **The bus filter records a portal's refusal of the zone's id before the
+  held calls go on** (`bus_filter::Conn::answered`): it was set after the
+  wake-up, a race the test `a_refused_registration_leaves_the_connection_as_it_was`
+  lost now and then under load.
+
 ### Changed (read before updating)
 - **The network is the container's, not the program's** (`rust/src/picker.rs`,
   `container::migrate_pins`, `focus::Pin`; `docs/PERMISSIONS.md` §11.8).
