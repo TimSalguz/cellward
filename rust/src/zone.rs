@@ -2972,6 +2972,11 @@ fn hidden_path(path: &Path) -> bool {
 /// its inode opens whatever device gets that number next, a keyboard plugged
 /// in after a security key. The zone's own namespace, and every launch's
 /// copy of it, lose the entry with the device.
+///
+/// Nothing mounts over such a bind: its dentry is the gone node's, unlinked,
+/// and the kernel refuses a mount on an unlinked dentry (ENOENT). So the bind
+/// is taken away first, and `/dev/null` goes over what it stood on — the
+/// sandbox's empty placeholder.
 fn revoke_everywhere(zone: &str, path: &Path) {
     let (Ok(target), Ok(null)) = (
         std::ffi::CString::new(path.as_os_str().as_bytes()),
@@ -2983,6 +2988,7 @@ fn revoke_everywhere(zone: &str, path: &Path) {
     let (own_net, own_mnt) = (own("net"), own("mnt"));
     let mut seen: Vec<PathBuf> = Vec::new();
     let (mut covered, mut failed) = (0, Vec::new());
+    let null_dev = libc::makedev(1, 3);
     for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
         let Some(pid) = entry
             .file_name()
@@ -3015,18 +3021,23 @@ fn revoke_everywhere(zone: &str, path: &Path) {
                     libc::_exit(1);
                 }
                 let mut st: libc::stat = std::mem::zeroed();
-                if libc::lstat(target.as_ptr(), &mut st) == 0
-                    && libc::mount(
-                        null.as_ptr(),
-                        target.as_ptr(),
-                        std::ptr::null(),
-                        libc::MS_BIND,
-                        std::ptr::null(),
-                    ) != 0
-                {
-                    libc::_exit(2);
+                for _ in 0..4 {
+                    if libc::lstat(target.as_ptr(), &mut st) != 0 {
+                        libc::_exit(0);
+                    }
+                    if st.st_mode & libc::S_IFMT == libc::S_IFCHR && st.st_rdev == null_dev {
+                        libc::_exit(0);
+                    }
+                    let (fstype, data) = (std::ptr::null(), std::ptr::null());
+                    let bind = libc::MS_BIND;
+                    if libc::mount(null.as_ptr(), target.as_ptr(), fstype, bind, data) == 0 {
+                        libc::_exit(3);
+                    }
+                    if libc::umount2(target.as_ptr(), libc::MNT_DETACH) != 0 {
+                        libc::_exit(2);
+                    }
                 }
-                libc::_exit(0);
+                libc::_exit(2);
             }
         }
         if child > 0 {
@@ -3034,7 +3045,8 @@ fn revoke_everywhere(zone: &str, path: &Path) {
             // SAFETY: waiting for our own child.
             unsafe { libc::waitpid(child, &mut status, 0) };
             match libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status)) {
-                Some(0) => covered += 1,
+                Some(0) => {}
+                Some(3) => covered += 1,
                 Some(1) => failed.push(format!("{pid}: cannot enter")),
                 Some(_) => failed.push(format!("{pid}: cannot cover")),
                 None => failed.push(format!("{pid}: killed")),
@@ -3044,10 +3056,12 @@ fn revoke_everywhere(zone: &str, path: &Path) {
         }
     }
     if failed.is_empty() {
-        println!(
-            "zone {zone}: {} gone — looked at in {covered} other mount namespace(s)",
-            path.display()
-        );
+        if covered > 0 {
+            println!(
+                "zone {zone}: {} gone — its bind covered in {covered} sandbox(es)",
+                path.display()
+            );
+        }
     } else {
         eprintln!(
             "zone {zone}: {} gone — covered in {covered} mount namespace(s), not in: {}",
