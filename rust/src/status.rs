@@ -503,10 +503,14 @@ pub fn container(tools: &Tools, c: &Container) -> String {
         Some(m) => sourced_str(m.value.as_str(), m.source),
         None => sourced("null".to_owned(), Source::Default),
     };
+    let camera = match &c.camera {
+        Some(m) => sourced(m.value.to_string(), m.source),
+        None => sourced("null".to_owned(), Source::Default),
+    };
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
          \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast}}}",
+         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),

@@ -670,6 +670,17 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // its own satellite and is told about the permission instead.
     // Or the zone itself has x11: for someone who runs zones without
     // containers, Steam in a zone must open all the same.
+    // The host's cameras for this launch (`docs/PERMISSIONS.md` §11.10): the
+    // zone covers them for all its programs, and a launch they are let takes
+    // the covers off in its own mount namespace (`profile::uncover_capture`)
+    // — by its container's setting, the zone's for a launch with none.
+    let camera = zone != UNCONFINED && {
+        let zone_dir = tools.state.join(&zone_name);
+        match container_name(&selection) {
+            Some(name) => crate::container::camera_for(&zone_dir, &tools.config, &zone_name, &name),
+            None => crate::hermetic::camera(&zone_dir, &tools.config, &zone_name).0,
+        }
+    };
     let container_x11 = container_name(&selection)
         .and_then(|name| crate::container::load(tools, &name))
         .is_some_and(|c| c.x11.value)
@@ -805,6 +816,11 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
         if container_x11 {
             wrapped.push("--x11".into());
+            wrapped.push("on".into());
+        }
+        // The cameras into its own /dev, where they are let.
+        if camera {
+            wrapped.push("--camera".into());
             wrapped.push("on".into());
         }
         // The network it runs in: to the portal its programs are the zone
@@ -1090,6 +1106,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 (&selection.sandbox, &selection.container),
                 (Sandbox::None, Container::MainNamed(_))
             ),
+            camera,
             storage: storage_dir.as_deref(),
         },
         cmd,
@@ -1188,6 +1205,10 @@ pub struct Entry<'a> {
     /// then not taken for a program of the zone with no container, whose
     /// settings are not its container's (`crate::origin`).
     pub own_mounts: bool,
+    /// The host's cameras let this launch in a zone: the covers the zone
+    /// put over them are taken off in its own mount namespace
+    /// (`profile-run --camera`).
+    pub camera: bool,
 }
 
 /// The command line `run` finally `exec`s: the namespaces, the container, then
@@ -1242,7 +1263,7 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
             exec.extend(["-U".into(), "-n".into(), "-m".into(), "-t".into()]);
             exec.push(pid.to_string().into());
             exec.push("--".into());
-            if container || entry.own_mounts {
+            if container || entry.own_mounts || entry.camera {
                 // A slave of the zone's: what the zone binds into its
                 // runtime directory later reaches this launch too (the one
                 // shared mount of the zone, `zone::seal_runtime`), and
@@ -1275,6 +1296,9 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
         exec.push("profile-run".into());
         exec.push("--cwd".into());
         exec.push(entry.cwd.into());
+        if entry.camera && matches!(entry.network, Network::Zone(_)) {
+            exec.push("--camera".into());
+        }
         if let Some(path) = entry.storage {
             exec.push("--storage".into());
             exec.push(path.into());
@@ -2257,6 +2281,7 @@ mod tests {
             shares: &[],
             storage: None,
             own_mounts: false,
+            camera: false,
         }
     }
 
@@ -2496,5 +2521,21 @@ mod tests {
         ] {
             assert_eq!(registry_key(OsStr::new(raw)), OsString::from(key), "{raw}");
         }
+    }
+
+    /// Cameras let a launch into a zone: a mount namespace of its own, and
+    /// `profile-run --camera` takes the zone's covers off there. Outside a
+    /// zone there are none to take off.
+    #[test]
+    fn a_launch_let_the_cameras_uncovers_them_in_its_own_namespace() {
+        let mut e = entry(Network::Zone(42), Path::new(""), false);
+        e.camera = true;
+        let line = entry_argv(&e, argv(&["cheese"]));
+        let at = |w: &str| line.iter().position(|a| a == w).unwrap();
+        assert!(at("/t/unshare") < at("profile-run"), "{line:?}");
+        assert!(at("profile-run") < at("--camera"), "{line:?}");
+        let mut e = entry(Network::Unconfined, Path::new(""), false);
+        e.camera = true;
+        assert_eq!(entry_argv(&e, argv(&["cheese"])), argv(&["cheese"]));
     }
 }

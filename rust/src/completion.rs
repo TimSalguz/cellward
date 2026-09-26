@@ -282,8 +282,12 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                     "color",
                     "microphone",
                     "screencast",
+                    "camera",
                 ],
             ),
+            "container" if pos == 5 && word(2) == "set" && word(4) == "camera" => {
+                strs(&mut out, &["default", "on", "off"])
+            }
             "container" if pos == 5 && word(2) == "set" && word(4) == "x11" => {
                 strs(&mut out, &["on", "off"])
             }

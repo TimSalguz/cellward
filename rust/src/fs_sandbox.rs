@@ -253,6 +253,10 @@ pub struct Args {
     /// `--x11 on`: the container's own `x11` permission (`vpn-zone container
     /// set … x11 on`, or Nix), on top of whatever the dialog answered.
     pub x11: bool,
+    /// `--camera on`: the host's cameras let this launch (`container::
+    /// camera_for`) — their nodes are bound into the sandbox's own `/dev`,
+    /// which has none otherwise.
+    pub camera: bool,
     /// `--zone <zone>`: the zone the launch runs in, none for an unconfined
     /// one. Its programs are the zone to the portal
     /// (`desktop::zone_app_id`, LEAK-MODEL §23).
@@ -321,6 +325,7 @@ impl Args {
         let mut label: Option<String> = None;
         let mut bind_paths: Vec<PathBuf> = Vec::new();
         let mut x11 = false;
+        let mut camera = false;
         let mut zone: Option<String> = None;
         let mut app_id: Option<OsString> = None;
         let mut rest = argv[..split].iter();
@@ -359,6 +364,7 @@ impl Args {
                     }
                 }
                 "--x11" => x11 = value == "on",
+                "--camera" => camera = value == "on",
                 // Like `--name`: an empty one is none.
                 "--zone" => {
                     zone = Some(value.to_string_lossy().into_owned()).filter(|z| !z.is_empty())
@@ -379,6 +385,7 @@ impl Args {
             label,
             bind_paths,
             x11,
+            camera,
             zone,
             tools,
             cmd,
@@ -869,6 +876,26 @@ pub fn pick_display(seed: u64) -> String {
 /// The directory is a parameter so that a test can hand over one it built.
 /// Sorted by bytes: `read_dir` has no order of its own, and a stable list is
 /// what makes the argument list comparable.
+/// The cameras' nodes under `dev`: `v4l/` (their links by id and path) and
+/// every `video<N>`, `media<N>` — for a launch let the cameras, whose own
+/// mount namespace has the zone's covers off (`profile::uncover_capture`).
+pub fn capture_nodes(dev: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = match fs::read_dir(dev) {
+        Ok(entries) => entries
+            .flatten()
+            .filter(|e| crate::zone::is_capture_node(&e.file_name().to_string_lossy()))
+            .map(|e| e.path())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    out.sort();
+    let v4l = dev.join("v4l");
+    if v4l.is_dir() {
+        out.insert(0, v4l);
+    }
+    out
+}
+
 pub fn dev_nodes(dev: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let dri = dev.join("dri");
@@ -1480,7 +1507,13 @@ pub fn run(args: Args) -> u8 {
         mimeapps: home.join(MIMEAPPS).is_file().then(|| home.join(MIMEAPPS)),
         appearance: look,
         resolv: resolv_file(),
-        dev_nodes: dev_nodes(Path::new("/dev")),
+        dev_nodes: {
+            let mut nodes = dev_nodes(Path::new("/dev"));
+            if args.camera {
+                nodes.extend(capture_nodes(Path::new("/dev")));
+            }
+            nodes
+        },
         // An absolute WAYLAND_DISPLAY is legal (libwayland accepts one) and is
         // then bound at its own path; the shell glued it onto the runtime
         // directory and silently lost it.
@@ -2391,5 +2424,24 @@ mod tests {
             X11Args::parse(&argv(&[":1", ":2", "--", "wine"])),
             Err(ArgError::ExtraArguments)
         );
+    }
+
+    /// A camera's nodes, for a launch let them: the directory of links
+    /// first, then every `video<N>` and `media<N>` — nothing else.
+    #[test]
+    fn the_cameras_nodes_are_v4l_then_video_and_media() {
+        let dir = std::env::temp_dir().join(format!("vpn-zone-cam-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("v4l")).unwrap();
+        for name in ["video0", "media1", "videox", "video", "null", "snd"] {
+            fs::write(dir.join(name), "").unwrap();
+        }
+        let got: Vec<String> = capture_nodes(&dir)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(got, ["v4l", "media1", "video0"]);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(capture_nodes(Path::new("/nonexistent/vpn-zone/dev")).is_empty());
     }
 }

@@ -630,8 +630,6 @@ struct Zone {
     /// What the host runs from the home left writable in a hermetic zone
     /// (`hermetic::host_files_writable`); read-only by default.
     host_files_writable: bool,
-    /// The host's cameras as devices (`hermetic::camera`); off by default.
-    camera: bool,
     /// The host's raw PipeWire socket in a hermetic zone
     /// (`hermetic::audio_manager`); off by default: the restricted one.
     audio_manager: bool,
@@ -710,7 +708,6 @@ pub fn run(args: Args) -> u8 {
     let (hermetic, _) = crate::hermetic::zone_setting(&dir, &config, &label);
     let (nix_daemon, _) = crate::hermetic::nix_daemon(&dir, &config, &label);
     let (host_files_writable, _) = crate::hermetic::host_files_writable(&dir, &config, &label);
-    let (camera, _) = crate::hermetic::camera(&dir, &config, &label);
     let (audio_manager, _) = crate::hermetic::audio_manager(&dir, &config, &label);
     let zone = Zone {
         dir,
@@ -720,7 +717,6 @@ pub fn run(args: Args) -> u8 {
         hermetic,
         nix_daemon,
         host_files_writable,
-        camera,
         audio_manager,
     };
 
@@ -753,7 +749,6 @@ pub fn run(args: Args) -> u8 {
             ("hermetic", zone.hermetic),
             ("nix_daemon", zone.nix_daemon),
             ("host_files_writable", zone.host_files_writable),
-            ("camera", zone.camera),
             ("audio_manager", zone.audio_manager),
         ],
     ) {
@@ -2805,15 +2800,19 @@ const PRIVATE_TMP: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
 /// capture device directly, past PipeWire and past any permission. A tmpfs
 /// over `/dev/snd` (sound goes through the zone's pulse and PipeWire
 /// sockets) and over `/dev/v4l`; `/dev/null` over every `video*` and `media*`
-/// node — now and, by a watcher, when a camera is plugged in later — unless
-/// the zone is let at the cameras (`vpn-zone camera <zone> on`). Fatal: a
-/// zone that cannot hide them records without asking.
+/// node — now and, by a watcher, when a camera is plugged in later —,
+/// whatever the zone's camera setting: a launch the cameras are let takes
+/// the covers off in its own mount namespace (`profile::uncover_capture`),
+/// by its container's setting or, with none, the zone's (`container::
+/// camera_for`), and nobody else sees them. `/dev` is a shared mount here,
+/// as the runtime directory is: every launch is a slave copy, and a camera
+/// plugged in later is covered in each — let or not: plug it in first.
+/// Fatal: a zone that cannot hide them records without asking.
 fn hide_capture_devices(zone: &Zone) -> Result<(), String> {
-    let mut dirs = vec!["/dev/snd"];
-    if !zone.camera {
-        dirs.push("/dev/v4l");
-    }
-    for dir in dirs {
+    share_mount(Path::new("/dev")).map_err(|e| {
+        format!("cannot share /dev: {e} — a camera plugged in later would be in reach")
+    })?;
+    for dir in ["/dev/snd", "/dev/v4l"] {
         let dir = Path::new(dir);
         if !dir.is_dir() {
             continue;
@@ -2831,10 +2830,6 @@ fn hide_capture_devices(zone: &Zone) -> Result<(), String> {
                 dir.display()
             )
         })?;
-    }
-    if zone.camera {
-        println!("zone {}: sound devices hidden, cameras let", zone.name());
-        return Ok(());
     }
     // The watch first, the listing second: nothing plugged in between is lost.
     let watch = sys::Inotify::watch(Path::new("/dev")).ok();
@@ -2872,8 +2867,18 @@ fn hide_capture_devices(zone: &Zone) -> Result<(), String> {
     Ok(())
 }
 
+/// `dir` a shared mount in this (otherwise private) mount namespace: a bind
+/// of itself first where it is no mount of its own.
+fn share_mount(dir: &Path) -> io::Result<()> {
+    if sys::mount(OsStr::new("none"), dir, "", libc::MS_SHARED, "").is_ok() {
+        return Ok(());
+    }
+    sys::mount(dir.as_os_str(), dir, "", libc::MS_BIND | libc::MS_REC, "")?;
+    sys::mount(OsStr::new("none"), dir, "", libc::MS_SHARED, "")
+}
+
 /// A camera's nodes: `video<N>`, `media<N>`.
-fn is_capture_node(name: &str) -> bool {
+pub(crate) fn is_capture_node(name: &str) -> bool {
     ["video", "media"].iter().any(|prefix| {
         name.strip_prefix(prefix)
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
@@ -3278,7 +3283,6 @@ fn hide_project_state(zone: &Zone) -> Result<Zone, String> {
         hermetic: zone.hermetic,
         nix_daemon: zone.nix_daemon,
         host_files_writable: zone.host_files_writable,
-        camera: zone.camera,
         audio_manager: zone.audio_manager,
     })
 }

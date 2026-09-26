@@ -555,6 +555,7 @@ let
       ++ lib.optional (c.frameColor != null) "frame_color = ${c.frameColor}"
       ++ lib.optional (c.permissions.microphone != null) "microphone = ${c.permissions.microphone}"
       ++ lib.optional (c.permissions.screencast != null) "screencast = ${c.permissions.screencast}"
+      ++ lib.optional (c.permissions.camera != null) "camera = ${lib.boolToString c.permissions.camera}"
     )
     + "\n";
 
@@ -613,6 +614,12 @@ let
         default = null;
         example = "ask";
         description = "Может ли программа контейнера записывать микрофон: yes (без вопроса), no (никогда) или ask — спросить при первой записи: один раз, всегда (этому контейнеру) или отказать. Контейнер знают по запуску, из которого вышла программа (docs/PERMISSIONS.md §11.10). null — как у его зоны (programs.cellward.microphone) или как задано локально (cellward container set <контейнер> microphone). Значение зоны из Nix важнее местной настройки контейнера, значение контейнера из Nix — важнее всего. Путь PulseAudio; ограниченный PipeWire герметичной зоны пока решает по зоне.";
+      };
+      permissions.camera = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        example = true;
+        description = "Видны ли программам контейнера камеры хоста (/dev/video*, /dev/media*): зона закрывает их всем своим программам, а запуск, которому они разрешены, открывает их в своём пространстве монтирования. null — как у его зоны (programs.cellward.camera) или как задано локально (cellward container set <контейнер> camera). Значение зоны из Nix важнее местной настройки контейнера, значение контейнера из Nix — важнее всего. Действует для программ, запущенных после изменения; камера, подключённая позже, закрыта и у них — подключите её до запуска.";
       };
       permissions.screencast = lib.mkOption {
         type = lib.types.nullOr (
@@ -841,7 +848,7 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "calls" ];
-      description = "Зоны (по имени), программам которых видны камеры хоста (/dev/video*). По умолчанию ни одной: у сеанса на камеры есть право, и программа зоны — тот же пользователь, она снимала бы без вопроса. Без пересборки — cellward camera <зона> on (действует после перезапуска зоны). Звуковые устройства (/dev/snd) зонам не видны никогда: звук — через фильтр pulse и PipeWire. Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Зоны (по имени), программам которых видны камеры хоста (/dev/video*) — тем, у чьего контейнера нет своей настройки камеры (containers.<имя>.permissions.camera). По умолчанию ни одной: у сеанса на камеры есть право, и программа зоны — тот же пользователь, она снимала бы без вопроса. Зона закрывает камеры всем своим программам, запуск, которому они разрешены, открывает их в своём пространстве монтирования. Без пересборки — cellward camera <зона> on (для программ, запущенных после этого; перезапуск зоны не нужен). Звуковые устройства (/dev/snd) зонам не видны никогда: звук — через фильтр pulse и PipeWire. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     audioManager = lib.mkOption {

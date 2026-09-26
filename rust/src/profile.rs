@@ -98,6 +98,10 @@ pub struct Args {
     /// (`home_layer::KEPT_STORAGE`), in this launch's mount namespace only,
     /// before anything else.
     pub storage: Option<PathBuf>,
+    /// `--camera`: the host's cameras let this launch — the covers the zone
+    /// put over them are taken off in this mount namespace
+    /// ([`uncover_capture`]).
+    pub camera: bool,
     /// `--share PATH`, repeated: a path of the real home granted to the
     /// container (`container grant`) — written through the layer, into the
     /// real home. Checked again here, as written and as resolved.
@@ -157,7 +161,13 @@ impl Args {
         let mut trust_extra = Vec::new();
         let mut share = Vec::new();
         let mut storage = None;
+        let mut camera = false;
         while let Some(flag) = positional.first() {
+            if flag == "--camera" {
+                camera = true;
+                positional = &positional[1..];
+                continue;
+            }
             if flag == "--storage" {
                 storage = positional
                     .get(1)
@@ -209,6 +219,7 @@ impl Args {
             nss_home,
             certutil,
             storage,
+            camera,
             share,
             trust_extra,
             cmd,
@@ -517,6 +528,34 @@ fn lossy(name: &OsStr) -> std::borrow::Cow<'_, str> {
 /// `nsenter` (`net:[…]`). Set, it must be the one this process is in.
 pub const ENV_EXPECT_NETNS: &str = "VPN_ZONE_EXPECT_NETNS";
 
+/// Let this launch reach the host's cameras. The zone covers them in its mount
+/// namespace (`zone::hide_capture_devices`); this one is a slave copy of it
+/// (`launch::entry_argv`), where the covers are taken off — here, and nowhere
+/// else. A camera plugged in later is covered again by the zone's watcher, and
+/// the cover reaches this namespace too: plug it in first.
+fn uncover_capture() -> Result<(), String> {
+    let off = |path: &Path| {
+        let Ok(target) = CString::new(path.as_os_str().as_bytes()) else {
+            return;
+        };
+        // SAFETY: a NUL-terminated path and constant flags. Until nothing is
+        // mounted there any more: a node covered twice has two covers.
+        while unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH | libc::UMOUNT_NOFOLLOW) }
+            == 0
+        {}
+    };
+    off(Path::new("/dev/v4l"));
+    for entry in fs::read_dir("/dev")
+        .map_err(|e| format!("cannot read /dev: {e}"))?
+        .flatten()
+    {
+        if crate::zone::is_capture_node(&entry.file_name().to_string_lossy()) {
+            off(&entry.path());
+        }
+    }
+    Ok(())
+}
+
 pub fn run(args: Args) -> u8 {
     // The zone entered is the zone checked: `nsenter` finds it by a number,
     // later, in a child of wl-sandbox, and a number can change hands in
@@ -551,6 +590,13 @@ pub fn run(args: Args) -> u8 {
         if let Err(e) = give_storage_back(path) {
             eprintln!("profile-run: {e} — the program is not started");
             return EXIT_NOT_STARTED;
+        }
+    }
+    // The cameras, where this launch is let them: never fatal — a camera
+    // that stays covered is one the program does not get.
+    if args.camera {
+        if let Err(e) = uncover_capture() {
+            eprintln!("profile-run: the cameras stay covered: {e}");
         }
     }
     let mounted = if args.profile_dir.as_os_str().is_empty() {

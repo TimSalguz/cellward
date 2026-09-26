@@ -523,7 +523,7 @@ programs.cellward = {
   `up`, `handshake_age_s`) — простые значения.
 - **`networks[].restart_needed`**: у поднятой зоны — имена настроек, которые
   она берёт при подъёме (`hermetic`, `nix_daemon`, `host_files_writable`,
-  `camera`, `audio_manager`), у которых значение сейчас не то, с каким она
+  `audio_manager`), у которых значение сейчас не то, с каким она
   поднялась: они вступят в силу после `cellward down <зона> && cellward up
   <зона>`; `[]` — всё действует; `null` — зона не поднята или поднята
   сборкой до этой записи (`build: "previous"`).
@@ -560,7 +560,7 @@ programs.cellward = {
       "screencast":          { "value": "ask", "source": "default" },
       "audio_manager":       { "value": false, "source": "default" },
       "frame_color":         { "value": "#4cacd9", "source": "default" },
-      "build": "current", "restart_needed": ["camera"] },
+      "build": "current", "restart_needed": ["nix_daemon"] },
     { "name": "lan", "kind": "host-interface", "aliases": [], "source": "local",
       "up": false, "locked": false, "tunnel_alive": null,
       "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,
@@ -584,7 +584,8 @@ programs.cellward = {
       "x11": { "value": false, "source": "default" },
       "frame_color": { "value": null, "source": "default" },
       "microphone": { "value": null, "source": "default" },
-      "screencast": { "value": null, "source": "default" } }
+      "screencast": { "value": null, "source": "default" },
+      "camera": { "value": null, "source": "default" } }
   ]
 }
 ```

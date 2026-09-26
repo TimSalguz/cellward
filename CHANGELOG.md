@@ -56,7 +56,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - **`networks[].restart_needed` in `status --json`**: for a zone that is
   up, the settings it takes when it comes up (`hermetic`, `nix_daemon`,
-  `host_files_writable`, `camera`, `audio_manager`) whose value changed
+  `host_files_writable`, `audio_manager`) whose value changed
   since it came up — in force after a restart; `[]` when all are in force,
   `null` when down or not known. The holder notes what it came up with
   (`zone.settings`, `hermetic::APPLIED`) before the zone is up.
@@ -75,6 +75,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `/proc` is out of a helper's reach (a sandbox's own bus filter is not
   dumpable) is known by its launch alone (`origin::Peer::mnt` optional),
   never taken for one of the zone's own without its namespace read.
+
+- **A container's camera setting of its own** (`programs.cellward.
+  containers.<name>.permissions.camera`, `cellward container set <c> camera
+  default|on|off`, `containers[].camera` in `status --json`;
+  `docs/PERMISSIONS.md` §11.10). A zone now covers the host's cameras for
+  all its programs, whatever its own setting; a launch the cameras are let —
+  by its container's setting, the zone's for a launch with none — takes the
+  covers off in its own mount namespace (`profile-run --camera`), and a
+  sandbox binds the camera nodes into its own `/dev` (`fs-sandbox --camera
+  on`). The zone's `/dev` is a shared mount, each launch a slave of it: a
+  camera plugged in later is covered in every launch, let or not. The
+  zone's camera setting applies from the next launch on: no restart of the
+  zone (and `camera` is no longer in `restart_needed`).
 
 ### Changed
 - **The microphone for a program whose container is not known** (a

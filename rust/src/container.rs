@@ -249,6 +249,9 @@ pub struct Container {
     /// Whether its programs cast the screen through the portal
     /// (`crate::screencast`); none of its own is the zone's setting.
     pub screencast: Option<Sourced<crate::microphone::Setting>>,
+    /// Whether its programs reach the host's cameras; none of its own is the
+    /// zone's setting.
+    pub camera: Option<Sourced<bool>>,
     /// The container's data directory ([`data_dir`]). May not exist yet — and
     /// a container of the main home has none it uses.
     pub dir: PathBuf,
@@ -1472,6 +1475,30 @@ pub fn own_value_in(
     }
 }
 
+/// A container's own on/off `key` and where it is from ([`own_value_in`]):
+/// `true`/`on` is on, anything else off — and a file that cannot be read is
+/// off, where it is.
+pub fn own_flag_in(config: &Path, name: &str, key: &str) -> Option<(bool, Source)> {
+    match own_value_in(config, name, key) {
+        Ok(own) => own.map(|(word, source)| (matches!(word.as_str(), "true" | "on"), source)),
+        Err(source) => Some((false, source)),
+    }
+}
+
+/// Whether a launch of the container `name` into the zone in `zone_dir`
+/// reaches the host's cameras (`docs/PERMISSIONS.md` §11.10): Nix's word for
+/// the container, then Nix's for the zone — a local word never overrides a
+/// declared one —, then the container's own, then the zone's.
+pub fn camera_for(zone_dir: &Path, config: &Path, zone: &str, name: &str) -> bool {
+    let zone_setting = crate::hermetic::camera(zone_dir, config, zone);
+    match own_flag_in(config, name, "camera") {
+        Some((on, Source::Nix)) => on,
+        _ if zone_setting.1 == Source::Nix => zone_setting.0,
+        Some((on, _)) => on,
+        None => zone_setting.0,
+    }
+}
+
 /// Read one container. `None` when it neither exists on disk nor is declared.
 pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
     migrate(tools);
@@ -1630,6 +1657,8 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         .map(|(value, source)| Sourced { value, source });
     let screencast = crate::microphone::container_switch(&tools.config, name, "screencast")
         .map(|(value, source)| Sourced { value, source });
+    let camera =
+        own_flag_in(&tools.config, name, "camera").map(|(value, source)| Sourced { value, source });
 
     Some(Container {
         name: name.to_owned(),
@@ -1640,6 +1669,7 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         frame_color,
         microphone,
         screencast,
+        camera,
         declared_trust,
         paths,
         expires,
@@ -2357,6 +2387,27 @@ pub fn set_screencast(
     setting: Option<crate::microphone::Setting>,
 ) -> Result<(), String> {
     set_switch(tools, selector, "screencast", "трансляция экрана", setting)
+}
+
+/// Let a container's programs reach the host's cameras, or not (`None`: as
+/// its zone), locally.
+pub fn set_camera(tools: &Tools, selector: &str, on: Option<bool>) -> Result<(), String> {
+    let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    if container
+        .camera
+        .as_ref()
+        .is_some_and(|c| c.source == Source::Nix)
+    {
+        return Err(format!(
+            "камера контейнера {selector} задана в Nix — меняется там"
+        ));
+    }
+    write_key(
+        &container.policy.join(FILE),
+        "camera",
+        on.map(|on| if on { "true" } else { "false" }),
+        true,
+    )
 }
 
 /// A container's `yes|no|ask` switch `key`, locally; refused where Nix set
@@ -3188,6 +3239,7 @@ mod tests {
             frame_color: None,
             microphone: None,
             screencast: None,
+            camera: None,
             dir: PathBuf::from("/s/work"),
             policy: PathBuf::from("/c/containers/work"),
         }
@@ -3342,5 +3394,39 @@ mod tests {
         assert_eq!(fs::read_to_string(aside.join("clash/inner")).unwrap(), "x");
         assert_eq!(report.conflicts, 2);
         assert!(report.copied >= 4, "{report:?}");
+    }
+
+    /// The camera of a launch: the container's own word, the zone's where
+    /// it has none, Nix's over either's local one.
+    #[test]
+    fn a_containers_camera_is_its_own_and_nix_is_not_overridden() {
+        let base = std::env::temp_dir().join(format!("vz-camera-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let zone = base.join("state/nl");
+        let config = base.join("config");
+        fs::create_dir_all(&zone).unwrap();
+        fs::create_dir_all(config.join("containers/work")).unwrap();
+        fs::create_dir_all(config.join("declared/containers")).unwrap();
+        let conf = config.join("containers/work/container.conf");
+        assert!(!camera_for(&zone, &config, "nl", "work"));
+        fs::write(zone.join(crate::hermetic::CAMERA), "on").unwrap();
+        assert!(camera_for(&zone, &config, "nl", "work"));
+        fs::write(&conf, "camera = false\n").unwrap();
+        assert!(!camera_for(&zone, &config, "nl", "work"));
+        fs::write(zone.join(crate::hermetic::CAMERA), "off").unwrap();
+        fs::write(&conf, "camera = true\n").unwrap();
+        assert!(camera_for(&zone, &config, "nl", "work"));
+        // Nix's word for the zone over the container's local one.
+        fs::write(config.join("declared/camera"), "nl\n").unwrap();
+        fs::write(&conf, "camera = false\n").unwrap();
+        assert!(camera_for(&zone, &config, "nl", "work"));
+        // Nix's for the container over everything.
+        fs::write(
+            config.join("declared/containers/work.conf"),
+            "home = private\ncamera = false\n",
+        )
+        .unwrap();
+        assert!(!camera_for(&zone, &config, "nl", "work"));
+        let _ = fs::remove_dir_all(&base);
     }
 }

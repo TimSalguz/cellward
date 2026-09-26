@@ -533,7 +533,7 @@ and `cellward container show <name> --json` print subsets of the same schema.
   plain values.
 - **`networks[].restart_needed`**: for a zone that is up, the names of the
   settings it takes when it comes up (`hermetic`, `nix_daemon`,
-  `host_files_writable`, `camera`, `audio_manager`) whose value now differs
+  `host_files_writable`, `audio_manager`) whose value now differs
   from the one it came up with — in force after `cellward down <zone> &&
   cellward up <zone>`; `[]` when all are in force; `null` when the zone is
   down, or was started by a build from before the note (`build: "previous"`).
@@ -570,7 +570,7 @@ and `cellward container show <name> --json` print subsets of the same schema.
       "screencast":          { "value": "ask", "source": "default" },
       "audio_manager":       { "value": false, "source": "default" },
       "frame_color":         { "value": "#4cacd9", "source": "default" },
-      "build": "current", "restart_needed": ["camera"] },
+      "build": "current", "restart_needed": ["nix_daemon"] },
     { "name": "lan", "kind": "host-interface", "aliases": [], "source": "local",
       "up": false, "locked": false, "tunnel_alive": null,
       "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,
@@ -594,7 +594,8 @@ and `cellward container show <name> --json` print subsets of the same schema.
       "x11": { "value": false, "source": "default" },
       "frame_color": { "value": null, "source": "default" },
       "microphone": { "value": null, "source": "default" },
-      "screencast": { "value": null, "source": "default" } }
+      "screencast": { "value": null, "source": "default" },
+      "camera": { "value": null, "source": "default" } }
   ]
 }
 ```

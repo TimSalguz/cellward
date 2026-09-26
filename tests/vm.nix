@@ -1849,7 +1849,45 @@ let
               f"su -l alice -c \"nsenter --preserve-credentials -U -n -m -t {hp} -- stat -c %t:%T /dev/video8\" | grep -qx 1:3",
               timeout=30,
           )
-          machine.succeed("rm -f /dev/video7 /dev/video8 /dev/snd/pcmC9D0c")
+          # The cameras by container (docs/PERMISSIONS.md §11.10): the zone
+          # covers them for all its programs; a launch they are let takes the
+          # covers off in its own mount namespace — by its container's
+          # setting, the zone's for a launch with none — from the next launch
+          # on, without a restart of the zone.
+          stat7 = "stat -c %t:%T /dev/video7"
+          alice("cellward container create vmcam --home layer")
+          alice("cellward container set vmcam camera on")
+          out = alice(f"cellward run vmherm --container vmcam -- {stat7}").strip()
+          assert out == "51:7", f"a container let the cameras does not reach them: {out}"
+          out = alice(f"cellward run vmherm --container vmlayer -- {stat7}").strip()
+          assert out == "1:3", f"a container not let the cameras reaches them: {out}"
+          out = alice(f"cellward run vmherm -- {stat7}").strip()
+          assert out == "1:3", f"the zone's own program reached a camera on the zone's no: {out}"
+          alice("cellward camera vmherm on")
+          out = alice(f"cellward run vmherm -- {stat7}").strip()
+          assert out == "51:7", f"the zone's yes did not reach its next launch: {out}"
+          alice("cellward container set vmcam camera off")
+          out = alice(f"cellward run vmherm --container vmcam -- {stat7}").strip()
+          assert out == "1:3", f"the zone's yes overrode a container's no: {out}"
+          alice("cellward camera vmherm default")
+          # A camera plugged in while a program let the cameras runs: covered
+          # there too — the zone's /dev is shared, each launch a slave of it.
+          alice("cellward container set vmcam camera on")
+          upper = "/home/alice/.local/state/vpn-profiles/vmcam/home/upper"
+          alice(
+              "systemd-run --user --unit=camwait cellward run vmherm --container vmcam -- "
+              "sh -c 'touch /home/alice/cam-waiting; "
+              "while ! test -e /dev/video9; do sleep 0.2; done; sleep 2; "
+              "stat -c %t:%T /dev/video9 /dev/video7 > /home/alice/cam9'"
+          )
+          machine.wait_until_succeeds(f"test -e {upper}/cam-waiting", timeout=60)
+          machine.succeed("mknod -m 600 /dev/video9 c 81 9 && chown alice /dev/video9")
+          machine.wait_until_succeeds(f"test -s {upper}/cam9", timeout=30)
+          seen = machine.succeed(f"cat {upper}/cam9").split()
+          assert seen == ["1:3", "51:7"], f"a camera plugged in later: {seen}"
+          alice("systemctl --user stop camwait.service || true")
+          alice("cellward container rm vmcam")
+          machine.succeed("rm -f /dev/video7 /dev/video8 /dev/video9 /dev/snd/pcmC9D0c")
           # Input methods by their portals only: IBus's private bus is hidden,
           # and programs are told to take the portal.
           in_zone(hp, "test ! -e /home/alice/.cache/ibus/dbus-vmtest")

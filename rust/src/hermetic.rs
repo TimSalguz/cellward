@@ -169,7 +169,7 @@ pub const APPLIED: &str = "zone.settings";
 
 /// The settings a zone takes when it comes up, by their names in
 /// `status --json`.
-pub fn start_settings(zone_dir: &Path, config: &Path, zone: &str) -> [(&'static str, bool); 5] {
+pub fn start_settings(zone_dir: &Path, config: &Path, zone: &str) -> [(&'static str, bool); 4] {
     [
         ("hermetic", zone_setting(zone_dir, config, zone).0),
         ("nix_daemon", nix_daemon(zone_dir, config, zone).0),
@@ -177,7 +177,6 @@ pub fn start_settings(zone_dir: &Path, config: &Path, zone: &str) -> [(&'static 
             "host_files_writable",
             host_files_writable(zone_dir, config, zone).0,
         ),
-        ("camera", camera(zone_dir, config, zone).0),
         ("audio_manager", audio_manager(zone_dir, config, zone).0),
     ]
 }
@@ -374,8 +373,17 @@ mod tests {
         let now = start_settings(&zone, &config, "nl");
         note_applied(&zone, &now).unwrap();
         assert_eq!(restart_needed(&zone, &config, "nl"), Some(vec![]));
+        std::fs::write(zone.join(NIX_DAEMON), "on").unwrap();
+        assert_eq!(
+            restart_needed(&zone, &config, "nl"),
+            Some(vec!["nix_daemon"])
+        );
+        // The camera is taken by each launch: no restart for it.
         std::fs::write(zone.join(CAMERA), "on").unwrap();
-        assert_eq!(restart_needed(&zone, &config, "nl"), Some(vec!["camera"]));
+        assert_eq!(
+            restart_needed(&zone, &config, "nl"),
+            Some(vec!["nix_daemon"])
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }
