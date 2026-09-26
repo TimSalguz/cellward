@@ -1845,6 +1845,19 @@ let
           )
           machine.sleep(3)
           machine.fail("test -e /home/alice/from-container")
+          # From a container into that very container: nothing is crossed, and
+          # nothing asked (docs/PERMISSIONS.md §11.9) — the broker knows the
+          # container by the launch the program descends from. What it writes
+          # stays in the container's layer.
+          alice(
+              "cellward run vmherm --container vmlayer -- "
+              "cellward run vmherm --container vmlayer -- touch /home/alice/same-container"
+          )
+          machine.wait_until_succeeds(
+              "test -e /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/same-container",
+              timeout=30,
+          )
+          machine.fail("test -e /home/alice/same-container")
           in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm cellward run direct -- touch /tmp/brokered-escape'")
           machine.sleep(3)
           machine.fail("test -e /tmp/brokered-escape")
@@ -1866,6 +1879,7 @@ let
           # Both decisions are on the record, the escape under the new name.
           out = alice("cellward journal --json")
           assert '"event":"broker","origin":"vmherm","target":"vmherm"' in out, out
+          assert '"origin":"vmherm/vmlayer","target":"vmherm"' in out, out
           assert '"target":"unconfined","app":"","decision":"refused"' in out, out
           out = alice("cellward doctor vmherm --json")
           assert '{"id":"session-bus","level":"ok"' in out, out

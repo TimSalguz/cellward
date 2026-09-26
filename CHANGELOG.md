@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- **The broker knows which container asks** (`broker::container_of`;
+  `docs/PERMISSIONS.md` §11.9). It knew the zone only, and passed without a
+  question just the zone's own programs (no container) asking for none. Now
+  a program of a container asking for a launch in that same container, in
+  the same zone, goes on without a question too — a browser of a container
+  opening a window of itself. The container is known by the launch the
+  program descends from: the launcher in the registry, taken only with its
+  start time on record and the same, and the chain of parents read with
+  each held — a program cannot make itself another's. "Always" and the
+  journal name the origin as `zone/container`; the question says which
+  container asks. A daemon that left its launch's tree is not known, and
+  is asked about.
+
 ### Changed (read before updating)
 - **The network is the container's, not the program's** (`rust/src/picker.rs`,
   `container::migrate_pins`, `focus::Pin`; `docs/PERMISSIONS.md` §11.8).
