@@ -169,6 +169,21 @@ fn required<'a>(args: &'a [OsString], idx: usize, message: &str) -> Option<&'a O
     }
 }
 
+/// A zone's name, as `required` takes an argument — and only a name: one
+/// that could name another directory (`.`, `..`, a path, a leading dash) is
+/// no zone's, and never reaches a path.
+fn required_zone<'a>(args: &'a [OsString], idx: usize, message: &str) -> Option<&'a OsString> {
+    let name = required(args, idx, message)?;
+    if !safe_zone_name(name) {
+        eprintln!(
+            "«{}» — не имя зоны: буквы, цифры, «_» и «-», не с «-»",
+            name.to_string_lossy()
+        );
+        return None;
+    }
+    Some(name)
+}
+
 /// Pid of a zone's APP namespace, if it is up.
 ///
 /// `zone.pid` names the namespace programs run in — the one `nsenter` targets.
@@ -373,7 +388,7 @@ fn write_setting(tools: &Tools, name: &str, value: &OsStr) -> Result<(), String>
 
 /// A zone name, which is stricter still: it ends up in unit names and in
 /// generated `.desktop` files.
-fn safe_zone_name(name: &OsStr) -> bool {
+pub(crate) fn safe_zone_name(name: &OsStr) -> bool {
     // Not from a dash: a zone name is an argument to kdialog and systemctl.
     !name.as_bytes().is_empty()
         && !name.as_bytes().starts_with(b"-")
@@ -656,7 +671,7 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
 }
 
 fn up(tools: &Tools, args: &[OsString]) -> u8 {
-    let Some(name) = required(args, 0, "нужно имя") else {
+    let Some(name) = required_zone(args, 0, "нужно имя") else {
         return 1;
     };
     // Returns when the zone is ready or its start failed (`started_up`).
@@ -676,7 +691,7 @@ fn up(tools: &Tools, args: &[OsString]) -> u8 {
 }
 
 fn down(tools: &Tools, args: &[OsString]) -> u8 {
-    let Some(name) = required(args, 0, "нужно имя") else {
+    let Some(name) = required_zone(args, 0, "нужно имя") else {
         return 1;
     };
     let code = systemctl(tools, "stop", name);
@@ -716,7 +731,7 @@ fn status(tools: &Tools, args: &[OsString]) -> u8 {
         println!("{}", crate::status::bar(tools));
         return 0;
     }
-    let Some(name) = required(args, 0, "нужно имя") else {
+    let Some(name) = required_zone(args, 0, "нужно имя") else {
         return 1;
     };
     let Some(pid) = zone_pid(&tools.state, name) else {
@@ -751,7 +766,7 @@ fn status(tools: &Tools, args: &[OsString]) -> u8 {
 }
 
 fn set_lock(tools: &Tools, args: &[OsString], locked: bool) -> u8 {
-    let Some(name) = required(args, 0, "нужно имя зоны") else {
+    let Some(name) = required_zone(args, 0, "нужно имя зоны") else {
         return 1;
     };
     let dir = tools.state.join(name);
@@ -825,7 +840,7 @@ fn zone_hermetic(tools: &Tools, args: &[OsString]) -> u8 {
         return 0;
     }
     let dir = tools.state.join(name);
-    if !dir.is_dir() {
+    if !safe_zone_name(name) || !dir.is_dir() {
         eprintln!("зоны {} нет", name.to_string_lossy());
         return 1;
     }
@@ -1340,7 +1355,7 @@ fn zone_x11(tools: &Tools, args: &[OsString]) -> u8 {
 /// handshake. The exit codes are part of the contract: 0 alive, 1 no handshake,
 /// 2 zone down, 3 state unknown.
 fn check(tools: &Tools, args: &[OsString]) -> u8 {
-    let Some(name) = required(args, 0, "нужно имя") else {
+    let Some(name) = required_zone(args, 0, "нужно имя") else {
         return 1;
     };
     let name_text = name.to_string_lossy();
@@ -1438,7 +1453,7 @@ pub fn handshake_line(mirror: &str) -> Option<String> {
 }
 
 fn remove(tools: &Tools, args: &[OsString]) -> u8 {
-    let Some(name) = required(args, 0, "нужно имя") else {
+    let Some(name) = required_zone(args, 0, "нужно имя") else {
         return 1;
     };
     let name_text = name.to_string_lossy();
@@ -3398,8 +3413,10 @@ fn forget(tools: &Tools, args: &[OsString]) -> u8 {
         }
         println!("сброшено для всех программ");
     } else {
+        // The name as the picker keeps it: never a path of its own.
+        let key = crate::desktop::stable_key(&what.to_string_lossy());
         for sub in SUBDIRS {
-            let _ = fs::remove_file(tools.state.join(sub).join(what));
+            let _ = fs::remove_file(tools.state.join(sub).join(&key));
         }
         println!("сброшено для {}", what.to_string_lossy());
     }
