@@ -20,7 +20,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   sandbox, a record of a launch from before one container per launch are
   not known: `zone/?`, asked about, with no "always" — never taken for the
   zone's own programs. A launch that goes on without a question takes no
-  app-id from the request.
+  app-id from the request, and what a program's name relaxes (no Wayland
+  proxy, no compositor restriction, by `wayland-no-proxy` and
+  `wayland-allow`) is not relaxed for it: the requester chose the command,
+  and so the name. `?` is no longer allowed in a container's name.
 
 ### Changed (read before updating)
 - **The network is the container's, not the program's** (`rust/src/picker.rs`,

@@ -543,7 +543,7 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                         app_id.clone()
                     };
                     let answer = match &allowed {
-                        Ok(()) => start(&started_id, &argv),
+                        Ok(()) => start(&started_id, &argv, same_identity),
                         Err(why) => format!("refused: {why}"),
                     };
                     // Every crossing the broker decides, either way, on the
@@ -1049,7 +1049,7 @@ fn handle_pick(tools: &Tools, origin: &Origin, app_id: &OsString, cmd: &[OsStrin
                 .first()
                 .map(|z| z.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            (start(app_id, &argv), target)
+            (start(app_id, &argv, false), target)
         }
         Err(why) => (format!("refused: {why}"), String::new()),
     };
@@ -1193,7 +1193,9 @@ pub fn check_pick(
     Ok(())
 }
 
-fn start(app_id: &OsString, argv: &[OsString]) -> String {
+/// `unasked`: started without a question — the program's name relaxes
+/// nothing (`launch::ENV_UNASKED`).
+fn start(app_id: &OsString, argv: &[OsString], unasked: bool) -> String {
     // Our own binary, from the store — not the manifest's runner, a profile
     // path: in a standalone home-manager that is `~/.nix-profile`, a link a
     // program with the home could point elsewhere, and the broker would run
@@ -1214,6 +1216,11 @@ fn start(app_id: &OsString, argv: &[OsString]) -> String {
         .stderr(Stdio::null());
     if !app_id.is_empty() {
         command.env(crate::launch::ENV_APPID, app_id);
+    }
+    if unasked {
+        command.env(crate::launch::ENV_UNASKED, "1");
+    } else {
+        command.env_remove(crate::launch::ENV_UNASKED);
     }
     match command.spawn() {
         Ok(mut child) => {

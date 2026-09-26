@@ -63,6 +63,11 @@ pub const ENV_APPID: &str = "VPN_ZONE_APPID";
 const ENV_FROM: &str = "VPN_ZONE_FROM";
 /// Print the resulting command and start nothing.
 pub const ENV_DRYRUN: &str = "VPN_ZONE_DRYRUN";
+/// On a launch the broker started without a question (the same container
+/// asking for itself): what the program's name would relax — no Wayland
+/// proxy, no compositor restriction — is not relaxed. The requester chose
+/// the command's first word, and so the name the lists are read by.
+pub const ENV_UNASKED: &str = "VPN_ZONE_UNASKED";
 
 /// Environment variables that name a compositor's IPC socket — a way to have
 /// the compositor spawn a process on the host. Dropped from launches into a
@@ -539,6 +544,8 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // registry: a launch asked for from inside a zone is marked so.
     let from_zone = env_nonempty(ENV_DELEGATED).is_some();
     std::env::remove_var(ENV_DELEGATED);
+    let unasked = env_nonempty(ENV_UNASKED).is_some();
+    std::env::remove_var(ENV_UNASKED);
     let asked_from = env_nonempty(ENV_FROM).filter(|_| from_zone);
     std::env::remove_var(ENV_FROM);
     // A locked zone's own launches stay in it (`run_locked`), which the zone
@@ -688,7 +695,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // `wayland-sandbox off` are for unconfined launches only, where the
     // compositor's own socket is there anyway.
     let compositor_wrap: Option<Vec<OsString>> =
-        (zone != UNCONFINED || wayland_sandbox_wanted(tools, &appbin)).then(|| {
+        (zone != UNCONFINED || wayland_sandbox_wanted(tools, &appbin, unasked)).then(|| {
             let app = if appbin.is_empty() {
                 OsString::from("shell")
             } else {
@@ -706,7 +713,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 "--zone".into(),
                 dir.into(),
             ];
-            if !wayland_proxy_wanted(tools, &appbin) {
+            if !wayland_proxy_wanted(tools, &appbin, unasked) {
                 wrap.push("--no-proxy".into());
             } else if zone != UNCONFINED {
                 // The zone's frame around its windows (docs/WINDOW-FRAME.md
@@ -1652,9 +1659,12 @@ fn mkdtemp(template: &str) -> std::io::Result<PathBuf> {
 
 /// Should this program be put on a restricted Wayland socket? Reads the two
 /// files the answer depends on and asks [`restrict_compositor`].
-fn wayland_sandbox_wanted(tools: &Tools, appbin: &OsStr) -> bool {
+/// `unasked` ([`ENV_UNASKED`]): the list by program is not read.
+fn wayland_sandbox_wanted(tools: &Tools, appbin: &OsStr, unasked: bool) -> bool {
     let mode = cli::setting(tools, "wayland-sandbox").map(|(value, _)| value);
-    let allowlist = std::fs::read_to_string(tools.config.join("wayland-allow")).ok();
+    let allowlist = std::fs::read_to_string(tools.config.join("wayland-allow"))
+        .ok()
+        .filter(|_| !unasked);
     restrict_compositor(mode.as_deref(), appbin, allowlist.as_deref())
 }
 
@@ -1664,7 +1674,8 @@ fn wayland_sandbox_wanted(tools: &Tools, appbin: &OsStr) -> bool {
 /// or for this one (`~/.config/vpn-zones/wayland-no-proxy`, one program per
 /// line, and its declared twin). Off, the compositor listens on the zone's
 /// path itself, as before there was a proxy: still the restricted socket.
-fn wayland_proxy_wanted(tools: &Tools, appbin: &OsStr) -> bool {
+/// `unasked` ([`ENV_UNASKED`]): the lists by program are not read.
+fn wayland_proxy_wanted(tools: &Tools, appbin: &OsStr, unasked: bool) -> bool {
     let mode = cli::setting(tools, "wayland-proxy").map(|(value, _)| value);
     let lists = [
         tools.config.join("wayland-no-proxy"),
@@ -1673,12 +1684,13 @@ fn wayland_proxy_wanted(tools: &Tools, appbin: &OsStr) -> bool {
             .join(cli::DECLARED_DIR)
             .join("wayland-no-proxy"),
     ];
-    let listed = appbin.to_str().is_some_and(|name| {
-        lists.iter().any(|path| {
-            std::fs::read_to_string(path)
-                .is_ok_and(|text| text.lines().map(str::trim).any(|line| line == name))
-        })
-    });
+    let listed = !unasked
+        && appbin.to_str().is_some_and(|name| {
+            lists.iter().any(|path| {
+                std::fs::read_to_string(path)
+                    .is_ok_and(|text| text.lines().map(str::trim).any(|line| line == name))
+            })
+        });
     proxy_wanted(mode.as_deref(), listed)
 }
 

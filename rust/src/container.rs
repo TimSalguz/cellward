@@ -283,7 +283,8 @@ pub fn reserved_name(name: &str) -> bool {
 
 /// Can this be the name of a container? One file name, which no program can
 /// take for an option or a hidden file, and no word of ours ([`reserved_name`]).
-/// `:` is out: it separated the old sandbox prefix, and the picker's tags.
+/// `:` is out: it separated the old sandbox prefix, and the picker's tags;
+/// `?` too: the broker names an origin it does not know `zone/?`.
 /// Any script otherwise — `Работа` is a name.
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
@@ -291,7 +292,7 @@ pub fn valid_name(name: &str) -> bool {
         && !name.starts_with(['-', '.'])
         && !name
             .chars()
-            .any(|c| c == '/' || c == ':' || c.is_whitespace() || c.is_control())
+            .any(|c| c == '/' || c == ':' || c == '?' || c.is_whitespace() || c.is_control())
         && !reserved_name(name)
 }
 
@@ -2350,6 +2351,7 @@ mod tests {
             "a/b",
             "a b",
             "a:b",
+            "?",
             "-x",
             ".x",
             "main",
