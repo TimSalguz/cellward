@@ -1858,6 +1858,17 @@ let
               timeout=30,
           )
           machine.fail("test -e /home/alice/same-container")
+          # Into that container from another one, or from the zone's own:
+          # crossings — asked about, and with nobody to ask, refused.
+          alice("cellward container create vmlayer2 --home layer")
+          alice(
+              "cellward run vmherm --container vmlayer2 -- "
+              "sh -c '! cellward run vmherm --container vmlayer -- touch /home/alice/other-into'"
+          )
+          in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm cellward run vmherm --container vmlayer -- touch /home/alice/main-into'")
+          machine.sleep(3)
+          machine.fail("test -e /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/other-into")
+          machine.fail("test -e /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/main-into")
           in_zone(hp, "sh -c '! env VPN_ZONE_CURRENT=vmherm cellward run direct -- touch /tmp/brokered-escape'")
           machine.sleep(3)
           machine.fail("test -e /tmp/brokered-escape")
@@ -1879,7 +1890,9 @@ let
           # Both decisions are on the record, the escape under the new name.
           out = alice("cellward journal --json")
           assert '"event":"broker","origin":"vmherm","target":"vmherm"' in out, out
-          assert '"origin":"vmherm/vmlayer","target":"vmherm"' in out, out
+          assert '"origin":"vmherm/vmlayer","target":"vmherm","app":"","decision":"started"' in out, out
+          assert '"origin":"vmherm/vmlayer","target":"vmherm","app":"","decision":"refused"' in out, out
+          assert '"origin":"vmherm/vmlayer2","target":"vmherm","app":"","decision":"refused"' in out, out
           assert '"target":"unconfined","app":"","decision":"refused"' in out, out
           out = alice("cellward doctor vmherm --json")
           assert '{"id":"session-bus","level":"ok"' in out, out

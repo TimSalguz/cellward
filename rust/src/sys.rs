@@ -748,6 +748,37 @@ pub fn descends_from(pid: i32, pidfd: &OwnedFd, ancestor: i32) -> bool {
     false
 }
 
+/// The process held by `pidfd` (numbered `pid`) and its parents, nearest
+/// first, each step read the way [`descends_from`] reads it — a parent held
+/// by a pidfd, and the child still alive and still naming it — so that no
+/// number in the list went to somebody else while it was read. Ends where a
+/// step cannot be read so, at the top, or at [`MAX_ANCESTRY`].
+pub fn ancestors(pid: i32, pidfd: &OwnedFd) -> Vec<i32> {
+    let alive = |fd: &OwnedFd| !pidfd_wait(fd, std::time::Duration::ZERO);
+    let mut out = Vec::new();
+    let mut at = pid;
+    let mut held: Option<OwnedFd> = None;
+    for _ in 0..MAX_ANCESTRY {
+        let fd = held.as_ref().unwrap_or(pidfd);
+        if !alive(fd) {
+            break;
+        }
+        out.push(at);
+        let Some(up) = parent_of(at).filter(|&up| up > 0) else {
+            break;
+        };
+        let Some(up_fd) = pidfd_open(up) else {
+            break;
+        };
+        if parent_of(at) != Some(up) || !alive(fd) {
+            break;
+        }
+        at = up;
+        held = Some(up_fd);
+    }
+    out
+}
+
 #[cfg(test)]
 mod process_tree {
     use super::*;
@@ -759,6 +790,9 @@ mod process_tree {
         let me = std::process::id() as i32;
         let own = pidfd_open(me).unwrap();
         assert!(descends_from(me, &own, me), "we are our own subtree");
+        let up = ancestors(me, &own);
+        assert_eq!(up.first(), Some(&me));
+        assert_eq!(up.get(1).copied(), parent_of(me));
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()

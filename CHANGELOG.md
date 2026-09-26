@@ -16,8 +16,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   start time on record and the same, and the chain of parents read with
   each held — a program cannot make itself another's. "Always" and the
   journal name the origin as `zone/container`; the question says which
-  container asks. A daemon that left its launch's tree is not known, and
-  is asked about.
+  container asks. A daemon that left its launch's tree, a throwaway
+  sandbox, a record of a launch from before one container per launch are
+  not known: `zone/?`, asked about, with no "always" — never taken for the
+  zone's own programs. A launch that goes on without a question takes no
+  app-id from the request.
 
 ### Changed (read before updating)
 - **The network is the container's, not the program's** (`rust/src/picker.rs`,

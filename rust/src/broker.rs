@@ -153,8 +153,9 @@ pub enum Decision {
 }
 
 /// The policy, from where the request comes from, the network it asks for,
-/// and whether the launch keeps the asker's identity — a program of the zone
-/// with no container, asking for none (`same_identity`).
+/// and whether the launch keeps the asker's identity — a program of a
+/// container asking for that very container, or of the zone's own with no
+/// container asking for none (`same_identity`, [`container_of`]).
 pub fn decide(origin: &Origin, origin_locked: bool, target: &str, same_identity: bool) -> Decision {
     match origin {
         // The host never needs the broker — a launch outside a zone, or from
@@ -222,8 +223,6 @@ fn classify(state: &Path, netns: &Path, userns: &Path) -> Origin {
     Origin::Unknown
 }
 
-/// Where the peer of `stream` is, looked at while it is certainly the process
-/// that connected.
 /// The peer of a connection as the kernel knows it: its number, held by a
 /// pidfd, and its mount namespace.
 struct Peer {
@@ -232,6 +231,8 @@ struct Peer {
     mnt: PathBuf,
 }
 
+/// Where the peer of `stream` is, looked at while it is certainly the process
+/// that connected.
 fn origin_of(state: &Path, stream: &UnixStream) -> (Origin, Option<Peer>) {
     let unknown = (Origin::Unknown, None);
     let Some(pid) = crate::sys::peer_pid(stream.as_raw_fd()) else {
@@ -299,6 +300,8 @@ fn container_of(tools: &Tools, zone: &str, peer: Option<&Peer>) -> Option<String
     }
     let running = tools.state.join(".running");
     let launched = |pid| crate::registry::launched(&running, pid);
+    // The launches of that zone whose container is known, by their pid.
+    let mut launches: std::collections::BTreeMap<i32, String> = Default::default();
     for dir in crate::registry::dirs(&running) {
         let dir_name = dir
             .file_name()
@@ -309,10 +312,13 @@ fn container_of(tools: &Tools, zone: &str, peer: Option<&Peer>) -> Option<String
             if record.zone != zone {
                 continue;
             }
-            // Whose launch: the directory's container; under `__main__` a
-            // sandbox from before one name per container (`sb:<name>`), and
-            // nothing else — the main profile is the zone's own namespace,
-            // a throwaway sandbox nobody's.
+            // Whose launch: the directory's container when the record says
+            // so itself — a launch of one container writes its name in both
+            // places; one from before one container per launch (a layer
+            // with a sandbox over it, filed under the layer) is nobody's.
+            // Under `__main__`, a sandbox from before one name per container
+            // (`sb:<name>`), and nothing else: the main profile is the zone's
+            // own namespace, a throwaway sandbox nobody's.
             let name = if dir_name == crate::registry::MAIN {
                 match record
                     .selector
@@ -322,26 +328,39 @@ fn container_of(tools: &Tools, zone: &str, peer: Option<&Peer>) -> Option<String
                     None => None,
                 }
             } else {
-                Some(dir_name.clone()).filter(|n| crate::container::valid_name(n))
+                Some(dir_name.clone())
+                    .filter(|n| crate::container::valid_name(n) && record.selector == *n)
             };
-            let Some(name) = name else {
-                continue;
-            };
-            if crate::sys::descends_from(peer.pid, &peer.pidfd, record.pid) {
-                return Some(name);
+            if let Some(name) = name {
+                launches.insert(record.pid, name);
             }
         }
     }
-    None
+    // The nearest launch the peer descends from, its parents read once.
+    crate::sys::ancestors(peer.pid, &peer.pidfd)
+        .into_iter()
+        .find_map(|pid| launches.get(&pid).cloned())
+        // A container that is still one: not a name left by one removed.
+        .filter(|name| crate::container::load(tools, name).is_some())
 }
 
 /// How the journal and "always" name where a request came from: the zone,
-/// and the container in it when there is one (`nl/work`).
+/// and the container in it when there is one (`nl/work`); `nl/?` for a
+/// program of the zone whose container is not known — a throwaway one, a
+/// daemon that left its launch —, which must not pass for the zone's own.
 fn origin_label(origin: &Origin, container: Option<&str>) -> String {
     match (origin, container) {
         (Origin::Zone(zone), Some(c)) if !c.is_empty() => format!("{zone}/{c}"),
+        (Origin::Zone(_), Some(_)) => origin.name(),
+        (Origin::Zone(zone), None) => format!("{zone}/?"),
         _ => origin.name(),
     }
+}
+
+/// Is this origin known well enough for "always": a zone's own programs,
+/// a container's — not a program whose container is not known.
+fn may_always(label: &str) -> bool {
+    !label.ends_with("/?")
 }
 
 /// The longest app-id a request may carry: a launcher's id, not a text —
@@ -469,17 +488,23 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                         Origin::Zone(zone) => container_of(tools, zone, peer.as_ref()),
                         _ => None,
                     };
-                    let asked_container =
-                        match crate::launch::resolve_selection(tools, selection.clone()) {
-                            Ok(resolved) => match crate::launch::container_name(&resolved) {
-                                Some(name) => Some(name),
-                                None if selection_selector(&resolved).is_empty() => {
-                                    Some(String::new())
-                                }
-                                None => None,
-                            },
-                            Err(_) => None,
-                        };
+                    // The container asked for as `run` will resolve it,
+                    // making nothing — only where it can make a difference:
+                    // a known container of a zone asking in that zone.
+                    let resolved = match &origin {
+                        Origin::Zone(zone) if *zone == target => {
+                            Some(crate::launch::resolve_selection(tools, selection.clone()))
+                        }
+                        _ => None,
+                    };
+                    let asked_container = match &resolved {
+                        Some(Ok(resolved)) => match crate::launch::container_name(resolved) {
+                            Some(name) => Some(name),
+                            None if selection_selector(resolved).is_empty() => Some(String::new()),
+                            None => None,
+                        },
+                        _ => None,
+                    };
                     let same_identity =
                         origin_container.is_some() && origin_container == asked_container;
                     let label = origin_label(&origin, origin_container.as_deref());
@@ -492,7 +517,11 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                         // its kind of home: resolved here the way `run` will,
                         // making nothing (`launch::resolve_selection`).
                         Decision::Ask => {
-                            match crate::launch::resolve_selection(tools, selection.clone()) {
+                            let resolved = match resolved {
+                                Some(resolved) => resolved,
+                                None => crate::launch::resolve_selection(tools, selection.clone()),
+                            };
+                            match resolved {
                                 Err(why) => Err(why),
                                 Ok(resolved) => ask(
                                     tools,
@@ -505,8 +534,16 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                             }
                         }
                     };
+                    // A launch that goes on without a question takes no word of
+                    // the requester's about what it is: the policies kept by a
+                    // program's id (the proxy, the frame) are the command's.
+                    let started_id = if same_identity {
+                        OsString::new()
+                    } else {
+                        app_id.clone()
+                    };
                     let answer = match &allowed {
-                        Ok(()) => start(&app_id, &argv),
+                        Ok(()) => start(&started_id, &argv),
                         Err(why) => format!("refused: {why}"),
                     };
                     // Every crossing the broker decides, either way, on the
@@ -773,7 +810,8 @@ fn ask(
     // same container, the very same program from the store.
     let program = program_of(cmd)
         .filter(|p| may_remember(p))
-        .filter(|_| plain_arguments(cmd));
+        .filter(|_| plain_arguments(cmd))
+        .filter(|_| may_always(label));
     let target_and_container = if selector.is_empty() {
         target.to_owned()
     } else {
@@ -802,6 +840,7 @@ fn ask(
     let asker = match origin {
         Origin::SystemZone(zone) => format!("системной зоны «{zone}»"),
         Origin::Zone(zone) => match label.split_once('/') {
+            Some((_, "?")) => format!("зоны «{zone}», контейнер не опознан"),
             Some((_, container)) => format!(
                 "контейнера «{}» (сеть «{zone}»)",
                 crate::picker::container_label_in(tools, container)
@@ -1647,7 +1686,10 @@ mod tests {
         let nl = Origin::Zone("nl".into());
         assert_eq!(origin_label(&nl, Some("work")), "nl/work");
         assert_eq!(origin_label(&nl, Some("")), "nl");
-        assert_eq!(origin_label(&nl, None), "nl");
+        // Not known: never taken for the zone's own, and no "always" for it.
+        assert_eq!(origin_label(&nl, None), "nl/?");
+        assert!(!may_always("nl/?"));
+        assert!(may_always("nl") && may_always("nl/work"));
         assert_eq!(
             origin_label(&Origin::SystemZone("nl".into()), Some("work")),
             "system:nl"
