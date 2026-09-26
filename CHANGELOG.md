@@ -71,7 +71,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   every ScreenCast call by that container's switch, by the microphone's
   rule; a refusal names the container. A container's `yes` keeps no choice
   yet: the portal knows every connection of the zone by the zone's name,
-  and a choice kept under it would be every container's.
+  and a choice kept under it would be every container's. A process whose
+  `/proc` is out of a helper's reach (a sandbox's own bus filter is not
+  dumpable) is known by its launch alone (`origin::Peer::mnt` optional),
+  never taken for one of the zone's own without its namespace read.
 
 ### Changed
 - **The microphone for a program whose container is not known** (a

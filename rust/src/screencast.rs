@@ -129,9 +129,17 @@ impl Policy {
                 .parent()
                 .and_then(|state| crate::sys::open_dir(state).ok())
                 .map(|fd| PathBuf::from(format!("/proc/self/fd/{}", fd.into_raw_fd()))),
-            profiles: profiles
-                .and_then(|dir| crate::sys::open_dir(dir).ok())
-                .map(|fd| PathBuf::from(format!("/proc/self/fd/{}", fd.into_raw_fd()))),
+            profiles: profiles.and_then(|dir| match crate::sys::open_dir(dir) {
+                Ok(fd) => Some(PathBuf::from(format!("/proc/self/fd/{}", fd.into_raw_fd()))),
+                Err(e) => {
+                    eprintln!(
+                        "bus-filter: zone {zone}: cannot open {} ({e}) — a container is known \
+                         by its settings or its declaration alone",
+                        dir.display()
+                    );
+                    None
+                }
+            }),
             last_told: Mutex::new(None),
         }
     }

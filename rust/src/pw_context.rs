@@ -786,13 +786,8 @@ impl MicSource for ZoneMic {
         }
         let state = self.zone_dir.parent()?;
         let holder = crate::cli::zone_pid(state, std::ffi::OsStr::new(&self.zone))?;
-        let pidfd = crate::sys::pidfd_open(pid)?;
         let net = |p: i32| fs::read_link(format!("/proc/{p}/ns/net")).ok();
-        let peer = crate::origin::Peer {
-            pid,
-            pidfd,
-            mnt: fs::read_link(format!("/proc/{pid}/ns/mnt")).ok()?,
-        };
+        let peer = crate::origin::Peer::of_pid(pid)?;
         // A process of this zone: in its network namespace, read while the
         // number is still that process's.
         let own = net(pid)?;

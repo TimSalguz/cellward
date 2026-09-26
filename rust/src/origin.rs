@@ -71,30 +71,48 @@ impl<'a> Places<'a> {
 }
 
 /// The peer of a connection as the kernel knows it: its number, held by a
-/// pidfd, and its mount namespace.
+/// pidfd, and its mount namespace when it could be read.
 #[derive(Debug)]
 pub struct Peer {
     pub pid: i32,
     pub pidfd: OwnedFd,
-    pub mnt: PathBuf,
+    /// `None` when its `/proc` is out of reach — a process that made itself
+    /// not dumpable (a sandbox's bus filter) is, to a helper without
+    /// capabilities: then it is known by its launch alone, never taken for
+    /// one of the zone's own.
+    pub mnt: Option<PathBuf>,
 }
 
 impl Peer {
     /// The process on the other end of the socket `sock`, looked at while it
     /// is certainly the process that connected. `None` when it is gone, or
-    /// cannot be looked at.
+    /// cannot be held.
     pub fn of(sock: RawFd) -> Option<Self> {
         let pid = crate::sys::peer_pid(sock)?;
         let pidfd = crate::sys::peer_pidfd(sock, pid)?;
+        Self::held(pid, pidfd)
+    }
+
+    /// The process `pid`, held by a pidfd opened now: for a number the
+    /// daemon of a protocol read from the kernel (PipeWire's
+    /// `pipewire.sec.pid`), not a connection of ours. `None` when it is gone.
+    pub fn of_pid(pid: i32) -> Option<Self> {
+        if pid <= 0 {
+            return None;
+        }
+        Self::held(pid, crate::sys::pidfd_open(pid)?)
+    }
+
+    fn held(pid: i32, pidfd: OwnedFd) -> Option<Self> {
         let peer = Self {
             pid,
             pidfd,
-            mnt: PathBuf::new(),
+            mnt: None,
         };
         if !peer.alive() {
             return None;
         }
-        let mnt = peer.ns("mnt")?;
+        let mnt = peer.ns("mnt");
         Some(Self { mnt, ..peer })
     }
 
@@ -223,10 +241,7 @@ pub fn of_peer_in(places: Places, zone: &str, peer: &Peer, own_mnt: Option<&Path
     // its own namespace — a link opened by its bus filter, a terminal of the
     // zone's own — read again now: still the peer's, still that one.
     let still = peer.ns("mnt");
-    if own_mnt.is_some()
-        && own_mnt == still.as_deref()
-        && still.as_deref() == Some(peer.mnt.as_path())
-    {
+    if own_mnt.is_some() && own_mnt == still.as_deref() && still == peer.mnt {
         Who::Main
     } else {
         Who::Unknown
@@ -320,7 +335,7 @@ mod tests {
         Peer {
             pid,
             pidfd: crate::sys::pidfd_open(pid).unwrap(),
-            mnt: fs::read_link("/proc/self/ns/mnt").unwrap(),
+            mnt: Some(fs::read_link("/proc/self/ns/mnt").unwrap()),
         }
     }
 
@@ -452,7 +467,7 @@ mod tests {
         assert_eq!(who(&d, "nl", &peer), Who::Main);
         // A peer read in another namespace than it is in now is not.
         let moved = Peer {
-            mnt: PathBuf::from("mnt:[1]"),
+            mnt: Some(PathBuf::from("mnt:[1]")),
             ..me()
         };
         assert_eq!(who(&d, "nl", &moved), Who::Unknown);
@@ -491,5 +506,31 @@ mod tests {
         found.sort();
         assert_eq!(found, ["gone", "work"]);
         assert!(containers_in(places, "de").is_empty());
+    }
+
+    /// A process whose namespace could not be read (not dumpable, to a
+    /// helper without capabilities) is known by its launch all the same —
+    /// and never taken for one of the zone's own without it.
+    #[test]
+    fn a_process_whose_namespace_is_out_of_reach_is_known_by_its_launch() {
+        let d = Dirs::new("unreadable");
+        let blind = Peer { mnt: None, ..me() };
+        let own = fs::read_link("/proc/self/ns/mnt").unwrap();
+        let (state, config, profiles) = d.places();
+        let places = Places {
+            state: &state,
+            config: &config,
+            profiles: &profiles,
+        };
+        // In the zone's own namespace, but not known to be: not the zone's.
+        assert_eq!(of_peer_in(places, "nl", &blind, Some(&own)), Who::Unknown);
+        assert_eq!(of_peer_in(places, "nl", &me(), Some(&own)), Who::Main);
+        fs::create_dir_all(d.0.join("profiles/work")).unwrap();
+        let parent = crate::sys::parent_of(blind.pid).unwrap();
+        d.launch("work", parent, "nl", "work");
+        assert_eq!(
+            of_peer_in(places, "nl", &blind, Some(&own)),
+            Who::Container("work".into())
+        );
     }
 }
