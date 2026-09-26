@@ -717,12 +717,16 @@ pub fn set_path(
     until: Option<u64>,
 ) -> Result<PathBuf, String> {
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
-    if container.home != Home::Private {
+    let value = expand_home(&tools.home, path);
+    // A layer sees the whole real home and writes its own layer: a grant is
+    // a path of the home it writes through, into the real one. Outside the
+    // home there is no layer — it is the real one anyway.
+    if grant && container.home == Home::Overlay && !lexical(&value).starts_with(&tools.home) {
         return Err(format!(
-            "{selector} — слой над домом: ему и так виден весь настоящий дом, выдавать нечего"
+            "{selector} — слой над домом: вне дома ({}) слоя нет, там и так настоящее",
+            value.display()
         ));
     }
-    let value = expand_home(&tools.home, path);
     if grant {
         // As written and as resolved: fs-sandbox checks both
         // again at every launch, this is only the early, readable refusal.

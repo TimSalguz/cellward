@@ -222,6 +222,47 @@ pub fn parse_inotify(mut buf: &[u8]) -> (Vec<String>, bool) {
     (names, overflow)
 }
 
+/// Make the mount at `path` and every mount below it read-only
+/// (`mount_setattr(AT_RECURSIVE, MOUNT_ATTR_RDONLY)`, Linux 5.12). On an older
+/// kernel only the mount at `path` itself.
+pub fn read_only_tree(path: &Path) -> io::Result<()> {
+    #[repr(C)]
+    struct MountAttr {
+        attr_set: u64,
+        attr_clr: u64,
+        propagation: u64,
+        userns_fd: u64,
+    }
+    const MOUNT_ATTR_RDONLY: u64 = 0x1;
+    const AT_RECURSIVE: libc::c_uint = 0x8000;
+    let c = cstring(path.as_os_str().as_bytes())?;
+    let attr = MountAttr {
+        attr_set: MOUNT_ATTR_RDONLY,
+        attr_clr: 0,
+        propagation: 0,
+        userns_fd: 0,
+    };
+    // SAFETY: a NUL-terminated path, a struct of the size given.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_mount_setattr,
+            libc::AT_FDCWD,
+            c.as_ptr(),
+            AT_RECURSIVE,
+            &attr as *const MountAttr,
+            std::mem::size_of::<MountAttr>(),
+        )
+    };
+    if rc == 0 {
+        return Ok(());
+    }
+    let e = io::Error::last_os_error();
+    if e.raw_os_error() == Some(libc::ENOSYS) {
+        return remount_read_only(path);
+    }
+    Err(e)
+}
+
 fn cstring(bytes: &[u8]) -> io::Result<CString> {
     CString::new(bytes)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument contains a NUL byte"))

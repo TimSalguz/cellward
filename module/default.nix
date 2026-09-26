@@ -590,7 +590,7 @@ let
           "~/.wine"
           "/mnt/games/SteamLibrary"
         ];
-        description = "Только для home = \"private\": каталоги настоящего дома (~/…) или дисков (/mnt, /media, /run/media, /srv), которые программы контейнера видят и меняют. Состояние cellward, весь дом и остальные места (/run, /tmp, /etc…) не выдаются — это стены песочницы; такой путь пропускается при запуске с предупреждением. То, что программы положат сюда, видно вне контейнера.";
+        description = "Пути настоящего дома (~/…) или дисков (/mnt, /media, /run/media, /srv), которые программы контейнера меняют в настоящем: своему дому (home = \"private\") они видны только так, слою над домом (home = \"overlay\") — видны и так, но пишутся мимо слоя, в настоящий дом (только ~/…). Состояние cellward, весь дом, места, откуда хост что-то запускает (автозапуск, .bashrc, ~/.local/bin…), и остальные места (/run, /tmp, /etc…) не выдаются; такой путь пропускается при запуске с предупреждением. То, что программы положат сюда, видно вне контейнера.";
       };
       trust = {
         certificates = lib.mkOption {
@@ -993,8 +993,8 @@ in
       message = "programs.cellward.containers.${name}.trust: дополнительный корневой сертификат позволяет его владельцу читать TLS-трафик программ контейнера — подтверди это: trust.acknowledgeRisk = true";
     }) cfg.containers
     ++ lib.mapAttrsToList (name: c: {
-      assertion = c.permissions.paths == [ ] || c.home == "private";
-      message = "programs.cellward.containers.${name}.permissions.paths: каталоги выдаются только своему дому (home = \"private\") — слою над домом и так виден весь настоящий дом";
+      assertion = c.home == "private" || lib.all (v: lib.hasPrefix "~/" v) c.permissions.paths;
+      message = "programs.cellward.containers.${name}.permissions.paths: слою над домом выдаются только пути дома (~/…): вне дома слоя нет, там и так настоящее";
     }) cfg.containers
     ++ lib.mapAttrsToList (name: c: {
       assertion = lib.all (

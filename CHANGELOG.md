@@ -6,6 +6,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Security
+- **A layer container covers the whole home** (`rust/src/home_layer.rs`,
+  `profile::mount_profile`; the owner, 2026-09-26, `docs/PERMISSIONS.md`
+  §11.3). A data container ("profile") layered only `.config`,
+  `.local/share`, `.cache`, `.mozilla` and `.pki`: everything else — a line
+  in `~/.bashrc`, an autostart entry, a git hook, a project — its programs
+  wrote into the real home, where the host runs it later. Now the whole home
+  is under the container's layer (`vpn-profiles/<name>/home/upper`; the old
+  slots move into it at the first launch, the data stays). Given back over
+  it: what was mounted below the home (the zone's covers keep their flags;
+  another disk, or a bind of `~/.ssh` from elsewhere, is read-only unless
+  granted), and the paths granted to the container — `container grant` now
+  works for a layer too (below the home: a path it writes through, into the
+  real one), checked again at every launch as written and as resolved, with
+  the places the host runs things from never grantable. The other
+  containers' storage is covered: one container's layer is no window into
+  another's data. A layer that cannot be set up does not start the program —
+  it never falls back to the real home.
 - **A container's policy is apart from its data** (review 2026-09-25, P1):
   `container.conf`, `paths`, `perms` and `trust/` moved from
   `~/.local/state/vpn-{profiles,sandboxes}/<name>/` to

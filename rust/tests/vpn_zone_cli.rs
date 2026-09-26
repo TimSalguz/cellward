@@ -723,7 +723,10 @@ fn a_trusted_certificate_needs_a_real_container_and_one_certificate() {
         "{}",
         stderr(&out)
     );
-    assert!(!home.root.join("config/containers/profiles/work/trust").exists());
+    assert!(!home
+        .root
+        .join("config/containers/profiles/work/trust")
+        .exists());
 }
 
 #[test]
@@ -1015,8 +1018,11 @@ fn a_private_home_is_granted_directories_but_never_the_state() {
             stderr(&out)
         );
     }
-    // A layer over the home sees the whole real home already.
+    // A layer over the home: a grant is a path of the home it writes
+    // through, into the real one; outside the home there is no layer.
     let out = home.run(&["container", "grant", "work", "~/.wine"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = home.run(&["container", "grant", "work", "/mnt/games"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("слой над домом"), "{}", stderr(&out));
 

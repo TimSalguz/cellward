@@ -857,6 +857,23 @@ let
       def in_container(profile, net, cmd):
           return alice(f"cellward run {net} --profile {profile} -- {cmd}")
 
+      # A layer container covers the whole home (docs/PERMISSIONS.md §11.3):
+      # what it writes stays in its layer — a dotfile, a new file anywhere —
+      # a granted path is written in the real home, a mount below the home
+      # is read-only unless granted, the project's state stays hidden and the
+      # other containers' storage is not seen.
+      with subtest("layer container: the whole home under its layer, grants in the real one"):
+          alice("cellward profile create vmlayer")
+          alice("mkdir -p ~/vmshare ~/.local/state/vpn-sandboxes/other/home && echo secret > ~/.local/state/vpn-sandboxes/other/home/data")
+          alice("cellward container grant vmlayer ~/vmshare")
+          in_container("vmlayer", "direct", "sh -c 'echo layer > $HOME/layer-only && echo real > $HOME/vmshare/f'")
+          machine.fail("test -e /home/alice/layer-only")
+          machine.succeed("grep -q real /home/alice/vmshare/f")
+          machine.succeed("grep -q layer /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/layer-only")
+          # The container sees what it wrote, and not another container's data.
+          in_container("vmlayer", "direct", "grep -q layer $HOME/layer-only")
+          in_container("vmlayer", "direct", "sh -c '! cat $HOME/.local/state/vpn-sandboxes/other/home/data'")
+
       with subtest("trust: a CA and a server certificate made on the fly"):
           alice(
               f"mkdir -p {CA} && cd {CA} && "

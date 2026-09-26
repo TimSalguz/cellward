@@ -996,6 +996,15 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         cmd
     };
     let (trust, nss_home, trust_extra) = trust_of(tools, &selection);
+    // A layer container's grants: the paths it writes into the real home.
+    let shares: Vec<PathBuf> = match (&selection.sandbox, &selection.container) {
+        (Sandbox::None, Container::Named(name)) => {
+            crate::container::load(tools, &name.to_string_lossy())
+                .map(|c| c.paths.into_iter().map(|p| p.value).collect())
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
     let exec = entry_argv(
         &Entry {
             nsenter: &tools.nsenter,
@@ -1011,6 +1020,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             nss_home: nss_home.as_deref(),
             trust_extra: &trust_extra,
             certutil: &tools.certutil,
+            shares: &shares,
         },
         cmd,
     );
@@ -1094,6 +1104,9 @@ pub struct Entry<'a> {
     /// Directories of certificates declared in Nix, besides `trust`.
     pub trust_extra: &'a [PathBuf],
     pub certutil: &'a Path,
+    /// Paths of the real home granted to a layer container
+    /// (`container grant`): written through its layer (`--share`).
+    pub shares: &'a [PathBuf],
 }
 
 /// The command line `run` finally `exec`s: the namespaces, the container, then
@@ -1186,6 +1199,13 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
             for extra in entry.trust_extra {
                 exec.push("--trust-extra".into());
                 exec.push(extra.into());
+            }
+        }
+        // Only with a layer: the main profile has the real home anyway.
+        if !entry.dir.as_os_str().is_empty() {
+            for share in entry.shares {
+                exec.push("--share".into());
+                exec.push(share.into());
             }
         }
         exec.push(entry.dir.into());
@@ -1912,6 +1932,7 @@ mod tests {
             nss_home: None,
             trust_extra: &[],
             certutil: Path::new("/t/certutil"),
+            shares: &[],
         }
     }
 

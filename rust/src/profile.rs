@@ -1,5 +1,5 @@
-//! Data containers ("profiles"): an overlayfs layer over the XDG directories,
-//! put in place for one program run.
+//! Data containers ("profiles"): an overlayfs layer over the whole home, put
+//! in place for one program run (`crate::home_layer`).
 //!
 //! This is `vpn-zone run --profile` seen from the inside. The bash side has
 //! already entered the zone's user+net namespace (`nsenter --preserve-credentials
@@ -7,10 +7,10 @@
 //! everything that happens here happens in that namespace and is invisible to
 //! the rest of the system. Three steps:
 //!
-//!  1. stack the profile over the XDG directories: the lower layer is the real
-//!     `~/.config` and friends (read-only in effect), the upper layer lives in
-//!     the profile directory. The program sees its settings, but everything it
-//!     writes lands in the profile;
+//!  1. stack the profile over the home: the lower layer is the real home
+//!     (read-only in effect), the upper layer lives in the profile directory.
+//!     The program sees the home, but everything it writes lands in the
+//!     profile — only what is granted (`--share`) reaches the real home;
 //!  2. drop the capabilities that were needed for step 1;
 //!  3. start the program — and, for a throwaway container, outlive it and take
 //!     the directory away afterwards.
@@ -35,19 +35,12 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
-/// The XDG directories that make up a "profile".
-///
-/// Documents, Downloads and the rest of `$HOME` are shared on purpose: this
-/// separates profiles, it is not a sandbox — that is what
-/// [`crate::fs_sandbox`] is for. (`docs/GOTCHAS.md` §5)
+/// The directories a profile's layer used to cover one by one ("slots"),
+/// before it covered the whole home: moved into the whole-home layer at the
+/// first launch (`home_layer::migrate_slots`). Documents, `~/.bashrc` and the
+/// rest of the home were written through then — the hole the whole-home layer
+/// closes (owner, 2026-09-26; `docs/PERMISSIONS.md` §11.3).
 pub const SUBDIRS: [&str; 5] = [".config", ".local/share", ".cache", ".mozilla", ".pki"];
-
-/// The slots a container with trusted certificates must have stacked even when
-/// the host has no such directory: they hold the NSS databases. An overlay slot
-/// is only stacked where the lower directory exists, and without one `certutil`
-/// would write `~/.pki/nssdb` into the REAL home — the host's Chromium would
-/// trust the certificate from then on. (`docs/CERTIFICATES.md` §3.4)
-const TRUST_SLOTS: [&str; 2] = [".pki", ".mozilla"];
 
 /// `PR_CAP_AMBIENT` / `PR_CAP_AMBIENT_CLEAR_ALL` from `linux/prctl.h`.
 ///
@@ -99,6 +92,10 @@ pub struct Args {
     pub nss_home: Option<PathBuf>,
     /// `--certutil PATH`, from the manifest.
     pub certutil: Option<PathBuf>,
+    /// `--share PATH`, repeated: a path of the real home granted to the
+    /// container (`container grant`) — written through the layer, into the
+    /// real home. Checked again here, as written and as resolved.
+    pub share: Vec<PathBuf>,
     /// `--trust-extra DIR`, repeated: certificate directories declared in Nix,
     /// besides the container's own.
     pub trust_extra: Vec<PathBuf>,
@@ -152,10 +149,15 @@ impl Args {
         let mut positional = &argv[..split];
         let (mut cwd, mut trust, mut nss_home, mut certutil) = (None, None, None, None);
         let mut trust_extra = Vec::new();
+        let mut share = Vec::new();
         while let Some(flag) = positional.first() {
-            if flag == "--trust-extra" {
-                if let Some(dir) = positional.get(1).filter(|v| !v.is_empty()) {
-                    trust_extra.push(PathBuf::from(dir));
+            if flag == "--trust-extra" || flag == "--share" {
+                if let Some(value) = positional.get(1).filter(|v| !v.is_empty()) {
+                    if flag == "--share" {
+                        share.push(PathBuf::from(value));
+                    } else {
+                        trust_extra.push(PathBuf::from(value));
+                    }
                 }
                 positional = positional.get(2..).unwrap_or(&[]);
                 continue;
@@ -191,6 +193,7 @@ impl Args {
             trust,
             nss_home,
             certutil,
+            share,
             trust_extra,
             cmd,
         })
@@ -222,68 +225,93 @@ pub fn home_dir() -> Option<PathBuf> {
     }
 }
 
-/// `mount -t overlay overlay -o lowerdir=…,upperdir=…,workdir=…,userxattr`,
-/// as a syscall.
+/// Put the whole home under the profile's layer (`crate::home_layer`): the
+/// old slots moved into it first, then the overlay, then back over it what
+/// was mounted below the home (the zone's covers keep their flags, anything
+/// else is read-only unless granted), the granted paths, and the other
+/// containers' storage covered. Returns the directories that are the
+/// container's own — the home, for the trust layer's NSS databases.
 ///
-/// `userxattr` is what makes this work without root: the kernel then keeps its
-/// overlay metadata in the `user.*` xattr namespace, which an unprivileged
-/// mount inside a user namespace is allowed to write.
-fn mount_overlay(lower: &Path, upper: &Path, work: &Path, target: &Path) -> io::Result<()> {
-    let opts = format!(
-        "lowerdir={},upperdir={},workdir={},userxattr",
-        lower.display(),
-        upper.display(),
-        work.display()
+/// Every step but a grant is fatal, and the program is not started: a layer
+/// container that ran with the real home, or with the zone's covers gone
+/// under its layer (the project's state, every zone's key in it), would be a
+/// hole nobody sees. A grant that cannot be given back leaves that path in
+/// the layer, and says so.
+fn mount_profile(profile_dir: &Path, shares: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    use crate::home_layer::{give_back, keeps_flags, layer_dirs, relative_share, STORAGE};
+    let home = home_dir().ok_or("no $HOME")?;
+    crate::home_layer::migrate_slots(profile_dir);
+    let (upper, work) = layer_dirs(profile_dir);
+    for dir in [&upper, &work] {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| format!("cannot prepare {}: {e}", dir.display()))?;
+    }
+    let options = crate::home_layer::overlay_options(&home, &upper, &work).ok_or_else(|| {
+        format!(
+            "the home's path {} has a comma, a colon or a backslash — overlayfs cannot be told it",
+            home.display()
+        )
+    })?;
+    let below = crate::home_layer::submounts(
+        &fs::read_to_string("/proc/self/mountinfo").unwrap_or_default(),
+        &home,
     );
-    // Source and filesystem type are both the literal "overlay" — the source
-    // of an overlay mount is a name, not a device.
-    crate::sys::mount(OsStr::new("overlay"), target, "overlay", 0, &opts)
-}
-
-/// Stack the profile over every XDG directory that exists, and over the ones
-/// in `ensure` whether they existed or not (created empty, 0700, first).
-/// Returns the directories a layer was really stacked over.
-///
-/// A single failing layer is a warning, never fatal: losing `.pki` must not
-/// stop the browser from starting, and the ones that did mount still separate
-/// the data they cover. What depends on a layer being there — the trust layer
-/// writing NSS databases — asks the returned list, not this function's hopes.
-fn mount_profile(profile_dir: &Path, ensure: &[&str]) -> Vec<PathBuf> {
-    let mut mounted = Vec::new();
-    let Some(home) = home_dir() else {
-        eprintln!("profile: no $HOME — running without the container layer");
-        return mounted;
-    };
-    for sub in SUBDIRS {
-        let lower = home.join(sub);
-        if !lower.is_dir() {
-            if !ensure.contains(&sub) {
-                continue;
-            }
-            if let Err(e) = fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&lower)
-            {
-                eprintln!("profile: cannot create {}: {e}", lower.display());
-                continue;
-            }
-        }
-        let slot = profile_dir.join(slot_name(sub));
-        let upper = slot.join("upper");
-        let work = slot.join("work");
-        if let Err(e) = fs::create_dir_all(&upper).and_then(|()| fs::create_dir_all(&work)) {
-            eprintln!("profile: cannot prepare {}: {e}", slot.display());
-            continue;
-        }
-        // The mount target is the lower directory itself: the program keeps
-        // using the paths it always used.
-        match mount_overlay(&lower, &upper, &work, &lower) {
-            Ok(()) => mounted.push(lower),
-            Err(e) => eprintln!("profile: overlay on {}: {e}", lower.display()),
+    // The grants, checked again: the file is the host's, but a link along a
+    // path may have changed since it was written. As written and as
+    // resolved, and relative to the home they resolve in.
+    let real_home = fs::canonicalize(&home).unwrap_or_else(|_| home.clone());
+    let mut granted: Vec<PathBuf> = Vec::new();
+    for share in shares {
+        let resolved = fs::canonicalize(share).unwrap_or_else(|_| share.clone());
+        let why = crate::container::forbidden_path(&home, share)
+            .or_else(|| crate::container::forbidden_path(&real_home, &resolved));
+        match (why, relative_share(&real_home, &resolved)) {
+            (Some(why), _) => eprintln!("profile: {} is not given: {why}", share.display()),
+            (None, Some(rel)) => granted.push(rel),
+            // Outside the home: not under the layer, the real one anyway.
+            (None, None) => {}
         }
     }
-    mounted
+    let real =
+        crate::sys::open_dir(&home).map_err(|e| format!("cannot open {}: {e}", home.display()))?;
+    crate::sys::mount(
+        OsStr::new("overlay"),
+        &home,
+        "overlay",
+        libc::MS_NOSUID | libc::MS_NODEV,
+        &options,
+    )
+    .map_err(|e| format!("overlayfs refused the home: {e}"))?;
+    for rel in &below {
+        give_back(&real, &home, rel)?;
+        if !keeps_flags(rel, &granted) {
+            crate::sys::read_only_tree(&home.join(rel))
+                .map_err(|e| format!("cannot make {} read-only: {e}", rel.display()))?;
+        }
+    }
+    for rel in &granted {
+        if let Err(e) = give_back(&real, &home, rel) {
+            eprintln!("profile: {} stays in the layer: {e}", rel.display());
+        }
+    }
+    for storage in STORAGE {
+        let dir = home.join(storage);
+        if !dir.is_dir() {
+            continue;
+        }
+        crate::sys::mount(
+            OsStr::new("tmpfs"),
+            &dir,
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            "mode=0700,size=16k",
+        )
+        .map_err(|e| format!("cannot cover {}: {e}", dir.display()))?;
+    }
+    Ok(vec![home])
 }
 
 /// Where to try to start the program, in order: the caller's directory, the
@@ -480,15 +508,16 @@ pub fn run(args: Args) -> u8 {
             return EXIT_NOT_STARTED;
         }
     }
-    let ensure: &[&str] = if args.trust.is_some() {
-        &TRUST_SLOTS
-    } else {
-        &[]
-    };
     let mounted = if args.profile_dir.as_os_str().is_empty() {
         Vec::new()
     } else {
-        mount_profile(&args.profile_dir, ensure)
+        match mount_profile(&args.profile_dir, &args.share) {
+            Ok(mounted) => mounted,
+            Err(e) => {
+                eprintln!("profile-run: no layer ({e}) — the program is not started");
+                return EXIT_NOT_STARTED;
+            }
+        }
     };
 
     // The trust layer: after the home layer (its NSS databases live there) and
@@ -496,7 +525,7 @@ pub fn run(args: Args) -> u8 {
     if let Some(dir) = &args.trust {
         let home = args.nss_home.clone().or_else(home_dir).unwrap_or_default();
         // What is provably the container's own: a named sandbox's home, or the
-        // overlay slots this launch has just stacked. Nothing else.
+        // home under this launch's layer. Nothing else.
         let private = match &args.nss_home {
             Some(sandbox_home) => vec![sandbox_home.clone()],
             None => mounted,
