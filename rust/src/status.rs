@@ -493,15 +493,20 @@ pub fn container(tools: &Tools, c: &Container) -> String {
         Some(color) => sourced_str(&color.value, color.source),
         None => sourced("null".to_owned(), Source::Default),
     };
-    // Its own microphone setting, or none: the zone's (`networks[]`).
+    // Its own microphone and screen cast settings, or none: the zone's
+    // (`networks[]`).
     let microphone = match &c.microphone {
+        Some(m) => sourced_str(m.value.as_str(), m.source),
+        None => sourced("null".to_owned(), Source::Default),
+    };
+    let screencast = match &c.screencast {
         Some(m) => sourced_str(m.value.as_str(), m.source),
         None => sourced("null".to_owned(), Source::Default),
     };
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
          \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone}}}",
+         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),

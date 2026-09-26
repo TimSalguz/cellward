@@ -26,6 +26,16 @@
 //! through them. One that could not be held is a file that cannot be read:
 //! `no`.
 //!
+//! **By container** (owner, 2026-09-26; `docs/PERMISSIONS.md` §11.10): a
+//! program of a container casts as the container's own setting says
+//! (`screencast =` in its settings), by the microphone's rule
+//! (`microphone::by_container`); the filter knows the container of each
+//! connection by the launch its program descends from (`crate::origin`),
+//! looked at once, when it connects. A container's `yes` keeps no choice yet:
+//! the portal would keep it under the zone's name, which every program of the
+//! zone is registered as — for all its containers; until a container has a
+//! name of its own with the portal, its `yes` is `ask`.
+//!
 //! **Where the setting lives**, as the microphone's (`crate::microphone`):
 //! the zone's marker `screencast` in its state directory, hidden from zones
 //! (LEAK-MODEL §17), and `declared/screencast` below `~/.config/vpn-zones`
@@ -45,6 +55,7 @@ use std::time::{Duration, Instant};
 
 use crate::container::Source;
 pub use crate::microphone::Setting;
+use crate::origin::Who;
 
 /// The zone's marker, in its state directory: `yes`, `no` or `ask`.
 pub const MARKER: &str = "screencast";
@@ -62,10 +73,17 @@ pub fn setting(zone_dir: &Path, config: &Path, zone: &str) -> (Setting, Source) 
 }
 
 /// What a refused call is told, and the journal says: why.
-pub fn refusal(zone: &str, source: Source) -> String {
+pub fn refusal(zone: &str, who: &Who, source: Source) -> String {
+    let whose = match who {
+        Who::Container(name) => format!(
+            "контейнера «{}» (зона «{zone}»)",
+            crate::broker::shown_word(name)
+        ),
+        _ => format!("зоны «{zone}»"),
+    };
     match source {
-        Source::Nix => format!("трансляция экрана выключена для зоны «{zone}» (задано в Nix)"),
-        _ => format!("трансляция экрана выключена для зоны «{zone}»"),
+        Source::Nix => format!("трансляция экрана выключена для {whose} (задано в Nix)"),
+        _ => format!("трансляция экрана выключена для {whose}"),
     }
 }
 
@@ -78,7 +96,11 @@ pub struct Policy {
     /// for one that could not be opened.
     zone_dir: Option<PathBuf>,
     config: Option<PathBuf>,
+    /// The state directory: the journal, the registry of launches.
     journal: Option<PathBuf>,
+    /// The containers' data (`~/.local/state/vpn-profiles`), which the zone
+    /// covers too: whether a container is still one.
+    profiles: Option<PathBuf>,
     /// The last journal line.
     last_told: Mutex<Option<Instant>>,
 }
@@ -87,7 +109,7 @@ impl Policy {
     /// Hold the zone's directories now, before the zone covers them. The
     /// descriptors stay open for the life of the process: the filter is not
     /// dumpable, so nobody else in the zone reaches them through `/proc`.
-    pub fn hold(zone: &str, zone_dir: &Path, config: &Path) -> Self {
+    pub fn hold(zone: &str, zone_dir: &Path, config: &Path, profiles: Option<&Path>) -> Self {
         let held = |dir: &Path| match crate::sys::open_dir(dir) {
             Ok(fd) => Some(PathBuf::from(format!("/proc/self/fd/{}", fd.into_raw_fd()))),
             Err(e) => {
@@ -106,6 +128,9 @@ impl Policy {
             journal: zone_dir
                 .parent()
                 .and_then(|state| crate::sys::open_dir(state).ok())
+                .map(|fd| PathBuf::from(format!("/proc/self/fd/{}", fd.into_raw_fd()))),
+            profiles: profiles
+                .and_then(|dir| crate::sys::open_dir(dir).ok())
                 .map(|fd| PathBuf::from(format!("/proc/self/fd/{}", fd.into_raw_fd()))),
             last_told: Mutex::new(None),
         }
@@ -130,11 +155,42 @@ impl Policy {
         )
     }
 
+    /// Whose program the peer of a connection is (`crate::origin`), read
+    /// through what was held. The filter lives in the zone's own mount
+    /// namespace: its own is the zone's.
+    pub fn who(&self, peer: &crate::origin::Peer) -> Who {
+        let (Some(state), Some(config)) = (&self.journal, &self.config) else {
+            return Who::Unknown;
+        };
+        // No data directory held: a container is known by its policy or
+        // its declaration alone.
+        let places = crate::origin::Places {
+            state,
+            config,
+            profiles: self
+                .profiles
+                .as_deref()
+                .unwrap_or(Path::new("/nonexistent")),
+        };
+        let own = std::fs::read_link("/proc/self/ns/mnt").ok();
+        crate::origin::of_peer_in(places, &self.zone, peer, own.as_deref())
+    }
+
+    /// The switch for a program of `who` now, and where it comes from
+    /// (`microphone::by_container`).
+    pub fn setting_for(&self, who: &Who) -> (Setting, Source) {
+        let zone = self.setting();
+        match &self.config {
+            Some(config) => crate::microphone::by_container(zone, config, "screencast", who),
+            None => zone,
+        }
+    }
+
     /// A call refused by `no`: said on stderr (the zone's unit journal) and
     /// in `cellward journal`, there at most one line per [`QUIET`]. The text
     /// for the program.
-    pub fn refused(&self, source: Source) -> String {
-        let why = refusal(&self.zone, source);
+    pub fn refused(&self, who: &Who, source: Source) -> String {
+        let why = refusal(&self.zone, who, source);
         eprintln!("bus-filter: zone {}: screen cast refused: {why}", self.zone);
         let Some(state) = &self.journal else {
             return why;
@@ -146,15 +202,22 @@ impl Policy {
             }
             *last = Some(Instant::now());
         }
-        let short = match source {
-            Source::Nix => "выключена в Nix",
+        let short = match (source, who) {
+            (Source::Nix, _) => "выключена в Nix",
+            (_, Who::Container(_)) => "выключена настройкой контейнера",
             _ => "выключена настройкой зоны",
+        };
+        let container = match who {
+            Who::Main => String::new(),
+            Who::Container(name) => name.clone(),
+            Who::Unknown => "?".to_owned(),
         };
         if let Err(e) = crate::journal::append(
             state,
             "screencast",
             &[
                 ("zone", self.zone.as_str()),
+                ("container", container.as_str()),
                 ("decision", "refused"),
                 ("why", short),
             ],
@@ -186,7 +249,12 @@ mod tests {
             std::fs::write(self.base.join(path), text).unwrap();
         }
         fn policy(&self) -> Policy {
-            Policy::hold("nl", &self.base.join("state/nl"), &self.base.join("config"))
+            Policy::hold(
+                "nl",
+                &self.base.join("state/nl"),
+                &self.base.join("config"),
+                None,
+            )
         }
     }
 
@@ -234,11 +302,21 @@ mod tests {
         d.write("state/moved/screencast", "yes");
         assert_eq!(p.setting(), (Setting::Yes, Source::Local));
         // What it could not hold is a file that cannot be read: no.
-        let lost = Policy::hold("nl", &d.base.join("state/none"), &d.base.join("config"));
+        let lost = Policy::hold(
+            "nl",
+            &d.base.join("state/none"),
+            &d.base.join("config"),
+            None,
+        );
         assert_eq!(lost.setting(), (Setting::No, Source::Local));
         d.write("config/declared/screencast", "nl yes\n");
         assert_eq!(lost.setting(), (Setting::Yes, Source::Nix));
-        let blind = Policy::hold("nl", &d.base.join("state/moved"), &d.base.join("nowhere"));
+        let blind = Policy::hold(
+            "nl",
+            &d.base.join("state/moved"),
+            &d.base.join("nowhere"),
+            None,
+        );
         assert_eq!(blind.setting(), (Setting::No, Source::Nix));
     }
 
@@ -247,17 +325,42 @@ mod tests {
     fn a_refusal_is_in_the_journal_once_in_a_while() {
         let d = Dirs::new("journal");
         let p = d.policy();
-        let why = p.refused(Source::Local);
+        let why = p.refused(&Who::Main, Source::Local);
         assert_eq!(why, "трансляция экрана выключена для зоны «nl»");
-        assert!(p.refused(Source::Nix).ends_with("(задано в Nix)"));
+        assert!(p
+            .refused(&Who::Main, Source::Nix)
+            .ends_with("(задано в Nix)"));
         let journal =
             std::fs::read_to_string(d.base.join("state").join(crate::journal::FILE)).unwrap();
         assert_eq!(journal.matches("\"event\":\"screencast\"").count(), 1);
         assert!(
             journal.contains(
-                "\"zone\":\"nl\",\"decision\":\"refused\",\"why\":\"выключена настройкой зоны\""
+                "\"zone\":\"nl\",\"container\":\"\",\"decision\":\"refused\",\"why\":\"выключена настройкой зоны\""
             ),
             "{journal}"
+        );
+    }
+
+    /// A container's own switch: the microphone's rule under the screen
+    /// cast's key; a refusal names the container.
+    #[test]
+    fn a_container_has_its_own_switch() {
+        let d = Dirs::new("container");
+        let p = d.policy();
+        let work = Who::Container("work".into());
+        d.write("state/nl/screencast", "yes");
+        assert_eq!(p.setting_for(&work), (Setting::Yes, Source::Local));
+        std::fs::create_dir_all(d.base.join("config/containers/work")).unwrap();
+        d.write("config/containers/work/container.conf", "screencast = no\n");
+        assert_eq!(p.setting_for(&work), (Setting::No, Source::Local));
+        assert_eq!(p.setting_for(&Who::Main), (Setting::Yes, Source::Local));
+        assert_eq!(p.setting_for(&Who::Unknown), (Setting::Ask, Source::Local));
+        // The microphone's key is not the screen cast's.
+        d.write("config/containers/work/container.conf", "microphone = no\n");
+        assert_eq!(p.setting_for(&work), (Setting::Yes, Source::Local));
+        assert_eq!(
+            p.refused(&work, Source::Local),
+            "трансляция экрана выключена для контейнера «work» (зона «nl»)"
         );
     }
 }

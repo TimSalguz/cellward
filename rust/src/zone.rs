@@ -2306,6 +2306,10 @@ fn start_session_filter(zone: &Zone) {
         .arg(&zone.dir)
         .arg("--config")
         .arg(zone.home.join(CONFIG_SUBDIR))
+        // The containers' data, held before the zone covers it too: a
+        // program's container is read for each connection (`crate::origin`).
+        .arg("--profiles")
+        .arg(zone.home.join(crate::container::PROFILES_SUBDIR))
         // Where the broker's socket is: the zone's runtime directory, once it
         // is sealed a moment from now.
         .env("XDG_RUNTIME_DIR", host_runtime_dir(zone))

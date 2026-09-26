@@ -273,16 +273,28 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             }
             "container" if pos == 5 && word(2) == "grant" => strs(&mut out, &["--for"]),
             "container" if pos == 4 && word(2) == "merge" => owned(&mut out, &snap.containers),
-            "container" if pos == 4 && word(2) == "set" => {
-                strs(&mut out, &["network", "x11", "home", "color", "microphone"])
-            }
+            "container" if pos == 4 && word(2) == "set" => strs(
+                &mut out,
+                &[
+                    "network",
+                    "x11",
+                    "home",
+                    "color",
+                    "microphone",
+                    "screencast",
+                ],
+            ),
             "container" if pos == 5 && word(2) == "set" && word(4) == "x11" => {
                 strs(&mut out, &["on", "off"])
             }
             "container" if pos == 5 && word(2) == "set" && word(4) == "color" => {
                 strs(&mut out, &["default"])
             }
-            "container" if pos == 5 && word(2) == "set" && word(4) == "microphone" => {
+            "container"
+                if pos == 5
+                    && word(2) == "set"
+                    && matches!(word(4), "microphone" | "screencast") =>
+            {
                 strs(&mut out, &["default", "yes", "no", "ask"])
             }
             "container" if pos == 5 && word(2) == "set" && word(4) == "home" => {

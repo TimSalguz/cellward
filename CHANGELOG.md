@@ -61,6 +61,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `null` when down or not known. The holder notes what it came up with
   (`zone.settings`, `hermetic::APPLIED`) before the zone is up.
 
+- **A container's screen cast setting of its own** (`programs.cellward.
+  containers.<name>.permissions.screencast`, `cellward container set <c>
+  screencast default|yes|no|ask`, `containers[].screencast` in `status
+  --json`; `docs/PERMISSIONS.md` §11.10). The hermetic zone's bus filter
+  knows the container of each connection — as the sound filter does, the
+  zone's own mount namespace being its own, the registry and the settings
+  read through descriptors held before the zone covers them — and judges
+  every ScreenCast call by that container's switch, by the microphone's
+  rule; a refusal names the container. A container's `yes` keeps no choice
+  yet: the portal knows every connection of the zone by the zone's name,
+  and a choice kept under it would be every container's.
+
 ### Changed
 - **The microphone for a program whose container is not known** (a
   throwaway sandbox, a temporary container, a daemon that left its

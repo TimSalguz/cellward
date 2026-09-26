@@ -246,6 +246,9 @@ pub struct Container {
     /// Whether its programs record the microphone (`crate::microphone`);
     /// none of its own is the zone's setting.
     pub microphone: Option<Sourced<crate::microphone::Setting>>,
+    /// Whether its programs cast the screen through the portal
+    /// (`crate::screencast`); none of its own is the zone's setting.
+    pub screencast: Option<Sourced<crate::microphone::Setting>>,
     /// The container's data directory ([`data_dir`]). May not exist yet — and
     /// a container of the main home has none it uses.
     pub dir: PathBuf,
@@ -1625,6 +1628,8 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
     // what is shown is what decides.
     let microphone = crate::microphone::container_setting(&tools.config, name)
         .map(|(value, source)| Sourced { value, source });
+    let screencast = crate::microphone::container_switch(&tools.config, name, "screencast")
+        .map(|(value, source)| Sourced { value, source });
 
     Some(Container {
         name: name.to_owned(),
@@ -1634,6 +1639,7 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         apps,
         frame_color,
         microphone,
+        screencast,
         declared_trust,
         paths,
         expires,
@@ -2340,19 +2346,39 @@ pub fn set_microphone(
     selector: &str,
     setting: Option<crate::microphone::Setting>,
 ) -> Result<(), String> {
+    set_switch(tools, selector, "microphone", "микрофон", setting)
+}
+
+/// Give a container a screen cast setting of its own (`None`: none — the
+/// zone's), locally.
+pub fn set_screencast(
+    tools: &Tools,
+    selector: &str,
+    setting: Option<crate::microphone::Setting>,
+) -> Result<(), String> {
+    set_switch(tools, selector, "screencast", "трансляция экрана", setting)
+}
+
+/// A container's `yes|no|ask` switch `key`, locally; refused where Nix set
+/// it. `said`: its name for a person.
+fn set_switch(
+    tools: &Tools,
+    selector: &str,
+    key: &str,
+    said: &str,
+    setting: Option<crate::microphone::Setting>,
+) -> Result<(), String> {
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
-    if container
-        .microphone
-        .as_ref()
-        .is_some_and(|m| m.source == Source::Nix)
+    if crate::microphone::container_switch(&tools.config, &container.name, key)
+        .is_some_and(|(_, source)| source == Source::Nix)
     {
         return Err(format!(
-            "микрофон контейнера {selector} задан в Nix — меняется там"
+            "{said} контейнера {selector}: задано в Nix — меняется там"
         ));
     }
     write_key(
         &container.policy.join(FILE),
-        "microphone",
+        key,
         setting.map(crate::microphone::Setting::as_str),
         true,
     )
@@ -3161,6 +3187,7 @@ mod tests {
             },
             frame_color: None,
             microphone: None,
+            screencast: None,
             dir: PathBuf::from("/s/work"),
             policy: PathBuf::from("/c/containers/work"),
         }

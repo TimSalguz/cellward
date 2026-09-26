@@ -593,7 +593,8 @@ and `cellward container show <name> --json` print subsets of the same schema.
       "running": [ { "app": "firefox", "pid": 1234, "network": "nl" } ],
       "x11": { "value": false, "source": "default" },
       "frame_color": { "value": null, "source": "default" },
-      "microphone": { "value": null, "source": "default" } }
+      "microphone": { "value": null, "source": "default" },
+      "screencast": { "value": null, "source": "default" } }
   ]
 }
 ```

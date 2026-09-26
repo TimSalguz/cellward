@@ -38,8 +38,9 @@
 //! `--portal-app`, each connection is registered with the portal as the zone
 //! before anything of the program's passes (`register`). **The screen cast
 //! switch** (`crate::screencast`): with `--zone`, each call of the ScreenCast
-//! portal is judged by the zone's switch as it is at that call
-//! (`screencast_verdict`).
+//! portal is judged by the switch of the connection's container as it is at
+//! that call (`screencast_verdict`) — whose program connected is looked at
+//! once, when it connects (`crate::origin`).
 //!
 //! Every byte comes from the sandboxed program, so the parsing is
 //! `crate::dbus_wire`'s, bounds-checked throughout; a message that does not
@@ -136,6 +137,8 @@ pub struct Args {
     /// screen cast switch the filter reads for every call of the portal's
     /// ScreenCast (`crate::screencast`), its state directory and
     /// `~/.config/vpn-zones`. None: every cast asks, as before the switch.
+    /// With it, `--profiles`: the containers' data, by which a container is
+    /// known to be one (`crate::origin`).
     pub zone: Option<ZoneArgs>,
 }
 
@@ -145,13 +148,14 @@ pub struct ZoneArgs {
     pub name: String,
     pub dir: PathBuf,
     pub config: PathBuf,
+    pub profiles: Option<PathBuf>,
 }
 
 impl Args {
     pub fn parse(argv: &[OsString]) -> Result<Self, String> {
         let (mut listen, mut upstream, mut opener, mut via_broker) = (None, None, None, None);
         let mut portal_app = None;
-        let (mut zone, mut zone_dir, mut config) = (None, None, None);
+        let (mut zone, mut zone_dir, mut config, mut profiles) = (None, None, None, None);
         let mut it = argv.iter();
         while let Some(flag) = it.next() {
             let value = it
@@ -181,13 +185,24 @@ impl Args {
                 }
                 Some("--zone-dir") => zone_dir = Some(value),
                 Some("--config") => config = Some(value),
+                Some("--profiles") => profiles = Some(value),
                 _ => return Err(format!("unknown argument {}", flag.to_string_lossy())),
             }
         }
         let zone = match (zone, zone_dir, config) {
-            (Some(name), Some(dir), Some(config)) => Some(ZoneArgs { name, dir, config }),
-            (None, None, None) => None,
-            _ => return Err("--zone, --zone-dir and --config go together".to_owned()),
+            (Some(name), Some(dir), Some(config)) => Some(ZoneArgs {
+                name,
+                dir,
+                config,
+                profiles,
+            }),
+            (None, None, None) if profiles.is_none() => None,
+            _ => {
+                return Err(
+                    "--zone, --zone-dir and --config go together (and --profiles with them)"
+                        .to_owned(),
+                )
+            }
         };
         Ok(Self {
             listen: listen.ok_or("--listen is required")?,
@@ -431,12 +446,16 @@ fn screencast_verdict(conn: &Conn, ctx: &Ctx, h: &Header) -> Cast {
     let Some(policy) = &ctx.screencast else {
         return Cast::Pass;
     };
-    let (setting, source) = policy.setting();
+    let (setting, source) = policy.setting_for(&conn.who);
     match setting {
-        Setting::No => Cast::Refuse(policy.refused(source)),
+        Setting::No => Cast::Refuse(policy.refused(&conn.who, source)),
         Setting::Ask => Cast::Pass,
         // Only the selection carries a choice to remember.
         Setting::Yes if h.member.as_deref() != Some("SelectSources") => Cast::Pass,
+        // The portal knows the connection as the zone: a choice kept there
+        // would be every container's of the zone. A container's `yes` keeps
+        // none until it has a name of its own with the portal.
+        Setting::Yes if conn.who != crate::origin::Who::Main => Cast::Pass,
         Setting::Yes if identified(conn, ctx, h) => Cast::Remember,
         Setting::Yes => {
             if !ctx.told_unremembered.swap(true, Ordering::SeqCst) {
@@ -610,11 +629,16 @@ struct Conn {
     /// answers go by.
     registry: Mutex<Registration>,
     settled: Condvar,
+    /// Whose program is on the other end (`crate::origin`), looked at when
+    /// it connected: the screen cast is decided by its container. The zone's
+    /// own for a filter with no zone to read (a sandbox's).
+    who: crate::origin::Who,
 }
 
 impl Conn {
-    fn new(client: UnixStream) -> Self {
+    fn new(client: UnixStream, who: crate::origin::Who) -> Self {
         Self {
+            who,
             client,
             write: Mutex::new(()),
             unique: Mutex::new(None),
@@ -890,10 +914,9 @@ pub fn run(args: &Args) -> u8 {
     // The zone's directories for its screen cast switch, held before the
     // socket appears: the holder waits for the socket and then covers the
     // project's state in this very mount namespace.
-    let screencast = args
-        .zone
-        .as_ref()
-        .map(|z| crate::screencast::Policy::hold(&z.name, &z.dir, &z.config));
+    let screencast = args.zone.as_ref().map(|z| {
+        crate::screencast::Policy::hold(&z.name, &z.dir, &z.config, z.profiles.as_deref())
+    });
     let _ = fs::remove_file(&args.listen);
     let listener = match UnixListener::bind(&args.listen) {
         Ok(l) => l,
@@ -938,7 +961,14 @@ pub fn run(args: &Args) -> u8 {
 }
 
 fn serve(client: UnixStream, ctx: &Arc<Ctx>) -> io::Result<()> {
-    let conn = Arc::new(Conn::new(client.try_clone()?));
+    // Whose program connected, while it is certainly the one: only where
+    // there is a zone's switch to read by it.
+    let who = match &ctx.screencast {
+        Some(policy) => crate::origin::Peer::of(client.as_raw_fd())
+            .map_or(crate::origin::Who::Unknown, |peer| policy.who(&peer)),
+        None => crate::origin::Who::Main,
+    };
+    let conn = Arc::new(Conn::new(client.try_clone()?, who));
     serve_conn(client, &conn, ctx)
 }
 
@@ -2013,10 +2043,20 @@ mod tests {
 
     impl Served {
         fn start(tag: &str, portal_app: Option<&str>, ctx: impl FnOnce(Ctx) -> Ctx) -> Self {
+            Self::start_as(tag, portal_app, crate::origin::Who::Main, ctx)
+        }
+
+        /// [`Served::start`] for a program of `who`.
+        fn start_as(
+            tag: &str,
+            portal_app: Option<&str>,
+            who: crate::origin::Who,
+            ctx: impl FnOnce(Ctx) -> Ctx,
+        ) -> Self {
             let stand = Stand::new(tag);
             let ctx = Arc::new(ctx(Ctx::for_test(stand.socket(), portal_app)));
             let (program, filter) = UnixStream::pair().unwrap();
-            let conn = Arc::new(Conn::new(filter.try_clone().unwrap()));
+            let conn = Arc::new(Conn::new(filter.try_clone().unwrap(), who));
             let serving = {
                 let (conn, ctx) = (Arc::clone(&conn), Arc::clone(&ctx));
                 thread::spawn(move || {
@@ -2323,6 +2363,7 @@ mod tests {
                 name: "nl".to_owned(),
                 dir: PathBuf::from("/s/nl"),
                 config: PathBuf::from("/c"),
+                profiles: None,
             })
         );
         assert!(args(&["--zone", "nl"]).is_err());
@@ -2356,6 +2397,7 @@ mod tests {
                 "nl",
                 &self.base.join("state/nl"),
                 &self.base.join("config"),
+                None,
             )
         }
 
@@ -2588,6 +2630,41 @@ mod tests {
         let mut s = Served::start("cast-none", Some("cellward.zone.nl"), |c| c);
         s.registered();
         let got = s.through(&select_sources(10, ":1.7"));
+        assert_eq!(remembers(&got), (false, false));
+    }
+
+    /// A program of a container casts as the container's switch says: its
+    /// `no` stands against the zone's `yes`, the refusal names it, and its
+    /// `yes` keeps no choice — the portal knows the connection as the zone.
+    #[test]
+    fn a_container_casts_as_its_own_switch_says() {
+        let d = ZoneDirs::new("container");
+        d.write("state/nl/screencast", "yes");
+        fs::create_dir_all(d.base.join("config/containers/work")).unwrap();
+        d.write("config/containers/work/container.conf", "screencast = no\n");
+        let policy = d.policy();
+        let work = crate::origin::Who::Container("work".into());
+        let mut s = Served::start_as("cast-work", Some("cellward.zone.nl"), work, |c| Ctx {
+            screencast: Some(policy),
+            ..c
+        });
+        s.registered();
+        s.program.send(&select_sources(10, ":1.7"), &[]);
+        let (msg, h, _) = s.program.message();
+        assert_eq!((h.kind, h.reply_serial), (wire::ERROR, Some(10)));
+        let text = wire::body_string(&msg, &h).unwrap();
+        assert!(text.contains("контейнера «work» (зона «nl»)"), "{text}");
+        assert!(
+            d.journal().contains("\"container\":\"work\""),
+            "{}",
+            d.journal()
+        );
+        // Its own yes: the cast goes on, but no choice is kept.
+        d.write(
+            "config/containers/work/container.conf",
+            "screencast = yes\n",
+        );
+        let got = s.through(&select_sources(11, ":1.7"));
         assert_eq!(remembers(&got), (false, false));
     }
 }

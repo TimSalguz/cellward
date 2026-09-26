@@ -130,39 +130,55 @@ pub fn setting(zone_dir: &Path, config: &Path, zone: &str) -> (Setting, Source) 
     zone_switch(Some(zone_dir), config, zone, MARKER, DECLARED)
 }
 
-/// A container's own setting (`microphone =` in its declaration or its local
-/// settings) and where it comes from; `None` without one. A word that is
-/// none of the three, or a file that is there and cannot be read, is `no`.
-pub fn container_setting(config: &Path, name: &str) -> Option<(Setting, Source)> {
-    match crate::container::own_value_in(config, name, "microphone") {
+/// A container's own `yes|no|ask` switch `key` (`microphone =`,
+/// `screencast =` in its declaration or its local settings) and where it
+/// comes from; `None` without one. A word that is none of the three, or a
+/// file that is there and cannot be read, is `no`.
+pub fn container_switch(config: &Path, name: &str, key: &str) -> Option<(Setting, Source)> {
+    match crate::container::own_value_in(config, name, key) {
         Ok(own) => own.map(|(word, source)| (Setting::parse(&word).unwrap_or(Setting::No), source)),
         Err(source) => Some((Setting::No, source)),
     }
 }
 
-/// The setting for a program of `who` in `zone`, and where it comes from
-/// (`docs/PERMISSIONS.md` §11.10). For a container: Nix's word for the
-/// container, then Nix's for the zone — a local setting never overrides a
-/// declared one —, then the container's own local one, then the zone's
-/// marker, then `ask`. For the zone's own programs, the zone's. For one whose
-/// container is not known, the zone's — but never `yes`: a program that left
-/// its container's launch must not get the zone's "yes" that its container
-/// may have been refused; it is asked.
-pub fn setting_for(zone_dir: &Path, config: &Path, zone: &str, who: &Who) -> (Setting, Source) {
-    let zone_setting = setting(zone_dir, config, zone);
+/// A container's own microphone setting ([`container_switch`]).
+pub fn container_setting(config: &Path, name: &str) -> Option<(Setting, Source)> {
+    container_switch(config, name, "microphone")
+}
+
+/// A switch for a program of `who`, the zone's being `zone_setting`, and
+/// where it comes from (`docs/PERMISSIONS.md` §11.10) — the microphone's and
+/// the screen cast's rule. For a container: Nix's word for the container,
+/// then Nix's for the zone — a local setting never overrides a declared one
+/// —, then the container's own local one (`key` in its settings), then the
+/// zone's local one, then `ask`. For the zone's own programs, the zone's.
+/// For one whose container is not known, the zone's — but never `yes`: a
+/// program that left its container's launch must not get the zone's "yes"
+/// that its container may have been refused; it is asked.
+pub fn by_container(
+    zone_setting: (Setting, Source),
+    config: &Path,
+    key: &str,
+    who: &Who,
+) -> (Setting, Source) {
     match who {
         Who::Main => zone_setting,
         Who::Unknown => match zone_setting {
             (Setting::Yes, source) => (Setting::Ask, source),
             other => other,
         },
-        Who::Container(name) => match container_setting(config, name) {
+        Who::Container(name) => match container_switch(config, name, key) {
             Some(own @ (_, Source::Nix)) => own,
             _ if zone_setting.1 == Source::Nix => zone_setting,
             Some(own) => own,
             None => zone_setting,
         },
     }
+}
+
+/// The microphone for a program of `who` in `zone` ([`by_container`]).
+pub fn setting_for(zone_dir: &Path, config: &Path, zone: &str, who: &Who) -> (Setting, Source) {
+    by_container(setting(zone_dir, config, zone), config, "microphone", who)
 }
 
 /// A zone's `yes|no|ask` switch by the microphone's rules — the screen

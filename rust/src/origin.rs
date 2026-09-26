@@ -200,6 +200,14 @@ fn owner_of(places: Places, owner: Option<&str>) -> Who {
 
 /// Whose program the peer is, in `zone`.
 pub fn of_peer(places: Places, zone: &str, peer: &Peer) -> Who {
+    let own = zones_own_mounts(places.state, zone);
+    of_peer_in(places, zone, peer, own.as_deref())
+}
+
+/// [`of_peer`], the zone's own mount namespace given: a helper that lives in
+/// it has it as its own (`/proc/self/ns/mnt`) — the holder's `/proc`, which
+/// has capabilities the helper has not, may be out of its reach.
+pub fn of_peer_in(places: Places, zone: &str, peer: &Peer, own_mnt: Option<&Path>) -> Who {
     let live = launches(places, zone);
     // The nearest launch the peer descends from, its parents read once —
     // before the zone's own namespace: a program of the main profile runs in
@@ -214,9 +222,11 @@ pub fn of_peer(places: Places, zone: &str, peer: &Peer) -> Who {
     // Nothing the registry knows: the zone's own programs are the ones in
     // its own namespace — a link opened by its bus filter, a terminal of the
     // zone's own — read again now: still the peer's, still that one.
-    let own = zones_own_mounts(places.state, zone);
     let still = peer.ns("mnt");
-    if own.is_some() && own == still && still.as_deref() == Some(peer.mnt.as_path()) {
+    if own_mnt.is_some()
+        && own_mnt == still.as_deref()
+        && still.as_deref() == Some(peer.mnt.as_path())
+    {
         Who::Main
     } else {
         Who::Unknown
