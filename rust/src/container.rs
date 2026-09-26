@@ -1282,6 +1282,25 @@ fn move_policy_file(old: &Path, new: &Path) -> io::Result<()> {
 /// Set (`Some`) or drop (`None`) one key of a settings file, keeping the rest.
 /// With `replace` false an existing key is left as it is.
 pub fn write_key(path: &Path, key: &str, value: Option<&str>, replace: bool) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{}: не файл в каталоге", path.display()))?;
+    fs::create_dir_all(parent).map_err(|e| format!("не создать {}: {e}", parent.display()))?;
+    // One writer at a time: the directory held while its file is read,
+    // changed and replaced — the command line and the sound filter's
+    // "always" write the same file, and one must not drop the other's key.
+    let dir =
+        fs::File::open(parent).map_err(|e| format!("не открыть {}: {e}", parent.display()))?;
+    // SAFETY: a valid open descriptor; LOCK_EX blocks until the lock is ours,
+    // and closing `dir` at the end of the function releases it.
+    if unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(format!(
+            "не занять {}: {}",
+            parent.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
     // A file that is there and cannot be read is not rewritten: its other
     // settings would be lost with it.
     let mut conf: Vec<(String, String)> = match fs::read_to_string(path) {
@@ -1303,21 +1322,20 @@ pub fn write_key(path: &Path, key: &str, value: Option<&str>, replace: bool) -> 
     for (k, v) in &conf {
         text.push_str(&format!("{k} = {v}\n"));
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("не создать {}: {e}", parent.display()))?;
-    }
     // Through a temporary: the zone's helpers read these files while the
     // command line and the sound filter's "always" write them, and half a
     // file is a setting nobody made.
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".{}.new", std::process::id()));
     let tmp = PathBuf::from(tmp);
-    fs::write(&tmp, text)
+    let written = fs::write(&tmp, text)
         .and_then(|()| fs::rename(&tmp, path))
         .map_err(|e| {
             let _ = fs::remove_file(&tmp);
             format!("не записать {}: {e}", path.display())
-        })
+        });
+    drop(dir);
+    written
 }
 
 /// The kind of home the data of a container are in, when nothing says it:
@@ -1611,24 +1629,10 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
             })
         });
 
-    // A word that is none of the three is "no" (`microphone::Setting`).
-    let microphone_of = |conf: &[(String, String)]| {
-        values(conf, "microphone").last().map(|word| {
-            crate::microphone::Setting::parse(word).unwrap_or(crate::microphone::Setting::No)
-        })
-    };
-    let microphone = declared_conf
-        .and_then(microphone_of)
-        .map(|value| Sourced {
-            value,
-            source: Source::Nix,
-        })
-        .or_else(|| {
-            microphone_of(&local).map(|value| Sourced {
-                value,
-                source: Source::Local,
-            })
-        });
+    // Read the way the sound filter reads it (`microphone::container_setting`):
+    // what is shown is what decides.
+    let microphone = crate::microphone::container_setting(&tools.config, name)
+        .map(|(value, source)| Sourced { value, source });
 
     Some(Container {
         name: name.to_owned(),

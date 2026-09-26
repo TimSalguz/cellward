@@ -51,8 +51,10 @@
 //! socket, so the socket stays bound and listening; this process connects
 //! again every [`TICK`] and hands the same descriptor to the new daemon.
 //!
-//! **The microphone** (`crate::microphone`): the zone's setting is published
-//! in the same metadata, [`MICROPHONE_KEY`]`<zone>` = `yes` or `no`: as soon
+//! **The microphone** (`crate::microphone`): the zone's setting — made
+//! stricter by the own setting of every container with a program running in
+//! the zone, since this path does not know its clients' containers yet
+//! (`docs/PERMISSIONS.md` §11.10) — is published in the same metadata, [`MICROPHONE_KEY`]`<zone>` = `yes` or `no`: as soon
 //! as the metadata is bound, again right before the socket is handed out (on
 //! the same connection, so WirePlumber has it before any client of the zone
 //! — the key outlives a helper, and an earlier run's `yes` must not decide),
@@ -650,6 +652,9 @@ pub struct Args {
     pub zone: String,
     pub zone_dir: PathBuf,
     pub config: PathBuf,
+    /// `~/.local/state/vpn-profiles`: which containers are still ones
+    /// (`crate::origin`).
+    pub profiles: PathBuf,
     /// The holder's pid: `pipewire.sec.instance-id`.
     pub instance: u32,
 }
@@ -662,6 +667,7 @@ impl Args {
         let mut zone = None;
         let mut zone_dir = None;
         let mut config = None;
+        let mut profiles = None;
         let mut instance = None;
         let mut it = args.iter();
         while let Some(flag) = it.next() {
@@ -687,6 +693,7 @@ impl Args {
                 }
                 Some("--zone-dir") => zone_dir = Some(path),
                 Some("--config") => config = Some(path),
+                Some("--profiles") => profiles = Some(path),
                 Some("--instance") => {
                     instance = Some(
                         value
@@ -704,6 +711,7 @@ impl Args {
             zone: zone.ok_or("--zone is required")?,
             zone_dir: zone_dir.ok_or("--zone-dir is required")?,
             config: config.ok_or("--config is required")?,
+            profiles: profiles.ok_or("--profiles is required")?,
             instance: instance.ok_or("--instance is required")?,
         })
     }
@@ -714,16 +722,26 @@ pub trait MicSource {
     fn setting(&self) -> Setting;
 }
 
-/// The zone's own setting (`crate::microphone::setting`).
+/// The zone's setting, made stricter by every container with a program
+/// running in the zone (`crate::microphone::strictest_running`): this path
+/// decides for all the zone's clients at once, and does not know their
+/// containers yet — a container's "no" must not be passed by its zone's
+/// "yes" here either.
 pub struct ZoneMic {
     pub zone: String,
     pub zone_dir: PathBuf,
     pub config: PathBuf,
+    pub profiles: PathBuf,
 }
 
 impl MicSource for ZoneMic {
     fn setting(&self) -> Setting {
-        crate::microphone::setting(&self.zone_dir, &self.config, &self.zone).0
+        crate::microphone::strictest_running(
+            &self.zone_dir,
+            &self.config,
+            &self.profiles,
+            &self.zone,
+        )
     }
 }
 
@@ -1173,6 +1191,7 @@ pub fn run(args: &Args) -> u8 {
         zone: args.zone.clone(),
         zone_dir: args.zone_dir.clone(),
         config: args.config.clone(),
+        profiles: args.profiles.clone(),
     };
     let mut say = Say {
         zone: args.zone.clone(),
@@ -1469,6 +1488,8 @@ mod tests {
             "/c",
             "--instance",
             "77",
+            "--profiles",
+            "/p",
         ];
         let parsed = Args::parse(&args(&full)).unwrap();
         assert_eq!(parsed.instance, 77);

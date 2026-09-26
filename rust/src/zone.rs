@@ -2187,6 +2187,8 @@ fn start_pipewire_context(zone: &Zone) -> Option<Child> {
         .arg(&zone.dir)
         .arg("--config")
         .arg(zone.home.join(CONFIG_SUBDIR))
+        .arg("--profiles")
+        .arg(zone.home.join(crate::container::PROFILES_SUBDIR))
         .arg("--instance")
         .arg(std::process::id().to_string())
         .stdin(Stdio::null())

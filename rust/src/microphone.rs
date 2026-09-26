@@ -202,6 +202,40 @@ pub fn zone_switch(
     }
 }
 
+/// How strict a setting is: `no` over `ask` over `yes`.
+fn strictness(setting: Setting) -> u8 {
+    match setting {
+        Setting::Yes => 0,
+        Setting::Ask => 1,
+        Setting::No => 2,
+    }
+}
+
+/// The strictest setting among the programs of `zone` now: the zone's own
+/// programs' (always there to be), and that of the owner of every live
+/// launch into the zone ([`setting_for`]). For a path that decides for the
+/// whole zone at once — the restricted PipeWire (`crate::pw_context`) —
+/// until it knows its clients' containers: a container's "no" is not passed
+/// there by its zone's "yes" either.
+pub fn strictest_running(zone_dir: &Path, config: &Path, profiles: &Path, zone: &str) -> Setting {
+    let mut strictest = setting(zone_dir, config, zone).0;
+    let Some(state) = zone_dir.parent() else {
+        return Setting::No;
+    };
+    let places = crate::origin::Places {
+        state,
+        config,
+        profiles,
+    };
+    for who in crate::origin::running(places, zone) {
+        let own = setting_for(zone_dir, config, zone, &who).0;
+        if strictness(own) > strictness(strictest) {
+            strictest = own;
+        }
+    }
+    strictest
+}
+
 /// What becomes of a record stream, by the setting alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -634,7 +668,15 @@ impl Policy {
         };
         match who {
             Who::Main => std::fs::write(f.zone_dir.join(MARKER), "yes").map_err(|e| e.to_string()),
-            Who::Container(name) if crate::container::exists_in(&f.config, &f.profiles, name) => {
+            Who::Container(name) => {
+                // Under the lock `container rm` removes under: an answer that
+                // comes while its container is being removed does not bring
+                // it back as a policy with nothing else.
+                let _lock = crate::registry::lock(&f.config.join(crate::container::POLICY_DIR))
+                    .map_err(|e| e.to_string())?;
+                if !crate::container::exists_in(&f.config, &f.profiles, name) {
+                    return Err(format!("контейнера {name} больше нет"));
+                }
                 crate::container::write_key(
                     &crate::container::policy_dir_in(&f.config, name).join(crate::container::FILE),
                     "microphone",
@@ -642,7 +684,6 @@ impl Policy {
                     true,
                 )
             }
-            Who::Container(name) => Err(format!("контейнера {name} больше нет")),
             Who::Unknown => Err("контейнер не известен".to_owned()),
         }
     }

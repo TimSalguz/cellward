@@ -1412,7 +1412,9 @@ fn who_is(client: &UnixStream, args: &Args) -> Who {
         config: &args.config,
         profiles: &args.profiles,
     };
-    crate::origin::of_peer(places, &args.zone, &peer)
+    // One that may have left a container of the main home is not given the
+    // zone's own setting (`crate::origin`).
+    crate::origin::of_peer(places, &args.zone, &peer, Who::Unknown)
 }
 
 fn serve(client: UnixStream, upstream: &PathBuf, mic: Arc<Policy>, who: Who) -> io::Result<()> {

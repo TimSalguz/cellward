@@ -1665,11 +1665,16 @@ fn container_remove(tools: &Tools, name: &OsStr) -> u8 {
         );
         return 1;
     }
-    for dir in [&c.dir, &c.policy] {
-        if fs::symlink_metadata(dir).is_ok() {
-            if let Err(e) = crate::sys::remove_tree(dir) {
-                eprintln!("не удалить {}: {e}", dir.display());
-                return 1;
+    {
+        // The lock the sound filter writes "always" under
+        // (`microphone::Policy::remember`): not back into what goes here.
+        let _lock = crate::registry::lock(&tools.config.join(crate::container::POLICY_DIR)).ok();
+        for dir in [&c.dir, &c.policy] {
+            if fs::symlink_metadata(dir).is_ok() {
+                if let Err(e) = crate::sys::remove_tree(dir) {
+                    eprintln!("не удалить {}: {e}", dir.display());
+                    return 1;
+                }
             }
         }
     }
