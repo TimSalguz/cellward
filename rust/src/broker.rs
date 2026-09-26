@@ -708,7 +708,8 @@ fn ask(
         Origin::SystemZone(zone) => format!("системной зоны «{zone}»"),
         other => format!("зоны «{}»", other.name()),
     };
-    let container = match selector.split_once('@') {
+    // The kind is after the LAST `@`: a name may have one of its own.
+    let container = match selector.rsplit_once('@') {
         Some((name, _)) => crate::picker::container_label_in(tools, name),
         None => crate::picker::container_label_in(tools, selector),
     };

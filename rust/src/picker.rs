@@ -251,7 +251,9 @@ fn canon(tools: &Tools, selector: &str) -> String {
                 None => TMP.to_owned(),
             }
         }
-        s if s.starts_with(SANDBOX_PREFIX) => match crate::container::canonical(tools, s) {
+        // Resolved here once; `run --sandbox` takes a home of its own of
+        // that very name as it is, and renames nothing twice.
+        s if s.starts_with(SANDBOX_PREFIX) => match crate::container::sandbox_name(tools, s) {
             Some(name) => format!("{SANDBOX_PREFIX}{name}"),
             None => s.to_owned(),
         },

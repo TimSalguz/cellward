@@ -1312,12 +1312,7 @@ pub fn resolve_selection(tools: &Tools, selection: Selection) -> Result<Selectio
         }
         (Container::Main, Sandbox::Named(name)) => {
             // A stale `--sandbox work` is the sandbox that became `work-sb`.
-            let old = format!(
-                "{}{}",
-                crate::container::SANDBOX_PREFIX,
-                name.to_string_lossy()
-            );
-            let name = crate::container::canonical(tools, &old)
+            let name = crate::container::sandbox_name(tools, &name.to_string_lossy())
                 .unwrap_or_else(|| name.to_string_lossy().into_owned());
             (name, true)
         }
@@ -1820,6 +1815,27 @@ mod tests {
                 "{two:?}"
             );
         }
+        // A sandbox of that very name wins over a rename of the move, and a
+        // renamed one is renamed once: `sb:a` → `a-sb`, never `a-sb-sb`.
+        container::create(&tools, "a-sb", Home::Private).unwrap();
+        fs::write(
+            base.join("config/containers/.renamed"),
+            "sb:a\ta-sb\nsb:a-sb\ta-sb-sb\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve(&["nl", "--sandbox", "a", "--", "x"]),
+            Ok((Container::Main, Sandbox::Named(name("a-sb"))))
+        );
+        assert_eq!(
+            resolve(&["nl", "--sandbox", "a-sb", "--", "x"]),
+            Ok((Container::Main, Sandbox::Named(name("a-sb"))))
+        );
+        container::create(&tools, "a", Home::Private).unwrap();
+        assert_eq!(
+            resolve(&["nl", "--sandbox", "a", "--", "x"]),
+            Ok((Container::Main, Sandbox::Named(name("a"))))
+        );
         // Nothing named: nothing to resolve.
         assert_eq!(
             resolve(&["nl", "--fs-sandbox", "--", "x"]),
