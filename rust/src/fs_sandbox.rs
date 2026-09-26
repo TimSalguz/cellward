@@ -258,7 +258,7 @@ pub struct Args {
     /// which has none otherwise.
     pub camera: bool,
     /// `--device PATH`, repeated: a device its container is given
-    /// (`crate::devices`), already uncovered in the launch's namespace by
+    /// (`crate::devices`), already bound into the launch's namespace by
     /// `profile-run`: bound into the sandbox's own `/dev`.
     pub devices: Vec<PathBuf>,
     /// `--zone <zone>`: the zone the launch runs in, none for an unconfined
@@ -882,7 +882,7 @@ pub fn pick_display(seed: u64) -> String {
 
 /// The cameras' nodes under `dev`: `v4l/` (their links by id and path) and
 /// every `video<N>`, `media<N>` — for a launch let the cameras, whose own
-/// mount namespace has the zone's covers off (`profile::uncover_capture`).
+/// mount namespace has them bound in (`profile::give_capture`).
 pub fn capture_nodes(dev: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = match fs::read_dir(dev) {
         Ok(entries) => entries

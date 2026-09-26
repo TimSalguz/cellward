@@ -65,6 +65,49 @@ pub fn mount(
     Ok(())
 }
 
+/// A detached copy of the mount at `path` and every mount below it
+/// (`open_tree(OPEN_TREE_CLONE | AT_RECURSIVE)`), to be attached elsewhere
+/// with [`attach_tree`]. Recursive, because a mount whose children came from
+/// a more privileged namespace (locked) cannot be copied without them: the
+/// copy would bare what they cover.
+pub fn clone_tree(path: &Path) -> io::Result<OwnedFd> {
+    const OPEN_TREE_CLONE: libc::c_uint = 1;
+    const AT_RECURSIVE: libc::c_uint = 0x8000;
+    let c = cstring(path.as_os_str().as_bytes())?;
+    let flags = OPEN_TREE_CLONE | AT_RECURSIVE | libc::O_CLOEXEC as libc::c_uint;
+    // SAFETY: open_tree(2) with a NUL-terminated path; a new descriptor or -1.
+    let fd = unsafe { libc::syscall(libc::SYS_open_tree, libc::AT_FDCWD, c.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the descriptor was just returned to us.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
+/// Attach a tree from [`clone_tree`] at `target` (`move_mount(2)`).
+pub fn attach_tree(tree: &OwnedFd, target: &Path) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
+    let c = cstring(target.as_os_str().as_bytes())?;
+    let empty = cstring(b"")?;
+    // SAFETY: move_mount(2) with a descriptor we hold and two NUL-terminated
+    // paths.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_move_mount,
+            tree.as_raw_fd(),
+            empty.as_ptr(),
+            libc::AT_FDCWD,
+            c.as_ptr(),
+            MOVE_MOUNT_F_EMPTY_PATH,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// A directory as a descriptor that only names it (`O_PATH`): what a process
 /// keeps to reach a directory that is about to be covered by a mount, through
 /// `/proc/self/fd/N`.

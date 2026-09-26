@@ -664,8 +664,8 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
 
     // --- THE CAMERAS ---
     // The host's cameras for this launch (`docs/PERMISSIONS.md` §11.10): the
-    // zone covers them for all its programs, and a launch they are let takes
-    // the covers off in its own mount namespace (`profile::uncover_capture`)
+    // zone's `/dev` has none, and a launch they are let gets them bound in,
+    // in its own mount namespace (`profile::give_capture`)
     // — by its container's setting, the zone's for a launch with none.
     let camera = zone != UNCONFINED && {
         let zone_dir = tools.state.join(&zone_name);
@@ -677,8 +677,8 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
 
     // --- THE DEVICES ---
     // The devices given to its container (`docs/PERMISSIONS.md` §11.12): the
-    // zone hides them all, and this launch takes the covers off the given
-    // ones in its own mount namespace (`profile-run --device`), checking each
+    // zone's `/dev` has none, and this launch gets the given ones bound in,
+    // in its own mount namespace (`profile-run --device`), checking each
     // once more there. None for a launch with no container.
     let devices: Vec<crate::devices::Pass> = match container_name(&selection) {
         Some(name) if zone != UNCONFINED => {
@@ -1242,12 +1242,11 @@ pub struct Entry<'a> {
     /// then not taken for a program of the zone with no container, whose
     /// settings are not its container's (`crate::origin`).
     pub own_mounts: bool,
-    /// The host's cameras let this launch in a zone: the covers the zone
-    /// put over them are taken off in its own mount namespace
-    /// (`profile-run --camera`).
+    /// The host's cameras let this launch in a zone: bound into its own
+    /// mount namespace (`profile-run --camera`).
     pub camera: bool,
     /// The devices its container is given, as `profile-run --device` takes
-    /// them (`devices::Pass::arg`): uncovered in its own mount namespace.
+    /// them (`devices::Pass::arg`): bound into its own mount namespace.
     pub devices: &'a [String],
 }
 
@@ -2571,8 +2570,8 @@ mod tests {
     }
 
     /// Cameras let a launch into a zone: a mount namespace of its own, and
-    /// `profile-run --camera` takes the zone's covers off there. Outside a
-    /// zone there are none to take off.
+    /// `profile-run --camera` binds them in there. Outside a zone they are
+    /// the host's anyway.
     #[test]
     fn a_launch_let_the_cameras_uncovers_them_in_its_own_namespace() {
         let mut e = entry(Network::Zone(42), Path::new(""), false);

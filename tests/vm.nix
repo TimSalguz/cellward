@@ -1848,40 +1848,44 @@ let
           in_zone(hp, "sh -c '! mkdir -p /home/alice/.config/wireplumber/wireplumber.conf.d'")
           in_zone(hp, "sh -c '! mkdir -p /home/alice/.local/share/wireplumber/scripts/vpn-zones'")
           alice("touch ~/.local/share/wireplumber/from-host && rm ~/.local/share/wireplumber/from-host")
-          # Sound and camera devices out of reach: the capture device is not
-          # there, the camera is /dev/null — and so is one plugged in later.
+          def nodes(*paths):
+              """What each path is to a program: its device's number, or
+              none — nothing there, or the empty stand-in of a node given
+              to another launch."""
+              ps = " ".join(paths)
+              return f"sh -c 'for n in {ps}; do if [ -c $n ]; then stat -c %t:%T $n; else echo none; fi; done'"
+
+          # A /dev of the zone's own (docs/PERMISSIONS.md §11.12): sound and
+          # camera devices are not there — nor one plugged in later.
           in_zone(hp, "test ! -e /dev/snd/pcmC9D0c")
-          out = in_zone(hp, "stat -c %t:%T /dev/video7").strip()
-          assert out == "1:3", f"the camera is in reach: {out}"
+          out = in_zone(hp, nodes("/dev/video7")).strip()
+          assert out == "none", f"the camera is in reach: {out}"
           machine.succeed("mknod -m 600 /dev/video8 c 81 8 && chown alice /dev/video8")
-          machine.wait_until_succeeds(
-              f"su -l alice -c \"nsenter --preserve-credentials -U -n -m -t {hp} -- stat -c %t:%T /dev/video8\" | grep -qx 1:3",
-              timeout=30,
-          )
-          # The cameras by container (docs/PERMISSIONS.md §11.10): the zone
-          # covers them for all its programs; a launch they are let takes the
-          # covers off in its own mount namespace — by its container's
-          # setting, the zone's for a launch with none — from the next launch
-          # on, without a restart of the zone.
-          stat7 = "stat -c %t:%T /dev/video7"
+          out = in_zone(hp, nodes("/dev/video8")).strip()
+          assert out == "none", f"a camera plugged in later is in reach: {out}"
+          # The cameras by container (docs/PERMISSIONS.md §11.10): none in
+          # the zone's /dev; a launch they are let gets them bound into its
+          # own mount namespace — by its container's setting, the zone's for
+          # a launch with none — from the next launch on, without a restart
+          # of the zone.
+          stat7 = nodes("/dev/video7")
           alice("cellward container create vmcam --home layer")
           alice("cellward container set vmcam camera on")
           out = alice(f"cellward run vmherm --container vmcam -- {stat7}").strip()
           assert out == "51:7", f"a container let the cameras does not reach them: {out}"
           out = alice(f"cellward run vmherm --container vmlayer -- {stat7}").strip()
-          assert out == "1:3", f"a container not let the cameras reaches them: {out}"
+          assert out == "none", f"a container not let the cameras reaches them: {out}"
           out = alice(f"cellward run vmherm -- {stat7}").strip()
-          assert out == "1:3", f"the zone's own program reached a camera on the zone's no: {out}"
+          assert out == "none", f"the zone's own program reached a camera on the zone's no: {out}"
           alice("cellward camera vmherm on")
           out = alice(f"cellward run vmherm -- {stat7}").strip()
           assert out == "51:7", f"the zone's yes did not reach its next launch: {out}"
           alice("cellward container set vmcam camera off")
           out = alice(f"cellward run vmherm --container vmcam -- {stat7}").strip()
-          assert out == "1:3", f"the zone's yes overrode a container's no: {out}"
+          assert out == "none", f"the zone's yes overrode a container's no: {out}"
           alice("cellward camera vmherm default")
-          # A camera plugged in while programs run: covered in both — the one
-          # let the cameras too stays a slave of the zone's shared /dev, or a
-          # security key plugged in later would reach it uncovered (restart
+          # A camera plugged in while programs run: in neither — the one let
+          # the cameras has those that were there when it started (restart
           # the program for a new camera).
           alice("cellward container set vmcam camera on")
           uppers = {
@@ -1892,58 +1896,52 @@ let
               alice(
                   f"systemd-run --user --unit=camwait-{c} cellward run vmherm --container {c} -- "
                   "sh -c 'touch /home/alice/cam-waiting; "
-                  "while ! test -e /dev/video9; do sleep 0.2; done; sleep 2; "
-                  "stat -c %t:%T /dev/video9 /dev/video7 > /home/alice/cam9'"
+                  "while ! test -e /tmp/cam-go; do sleep 0.2; done; "
+                  "for n in /dev/video9 /dev/video7; do "
+                  "if [ -c $n ]; then stat -c %t:%T $n; else echo none; fi; "
+                  "done > /home/alice/cam9'"
               )
           for upper in uppers.values():
               machine.wait_until_succeeds(f"test -e {upper}/cam-waiting", timeout=60)
           machine.succeed("mknod -m 600 /dev/video9 c 81 9 && chown alice /dev/video9")
+          # The go through the zone's own /tmp, which its launches share.
+          in_zone(hp, "touch /tmp/cam-go")
           for upper in uppers.values():
               machine.wait_until_succeeds(f"test -s {upper}/cam9", timeout=30)
           seen = machine.succeed(f"cat {uppers['vmcam']}/cam9").split()
-          assert seen == ["1:3", "51:7"], f"a camera plugged in later, let: {seen}"
+          assert seen == ["none", "51:7"], f"a camera plugged in later, let: {seen}"
           seen = machine.succeed(f"cat {uppers['vmlayer']}/cam9").split()
-          assert seen == ["1:3", "1:3"], f"a camera plugged in later, not let: {seen}"
+          assert seen == ["none", "none"], f"a camera plugged in later, not let: {seen}"
           for c in uppers:
               alice(f"systemctl --user stop camwait-{c}.service || true")
           alice("cellward container rm vmcam")
           machine.succeed("rm -f /dev/video7 /dev/video8 /dev/video9 /dev/snd/pcmC9D0c")
-          # The rest the ACL opens: a raw HID node covered — and one plugged
-          # in later —, the input and USB directories empty, uinput and
-          # rfkill covered where the VM has them.
-          out = in_zone(hp, "stat -c %t:%T /dev/hidraw9").strip()
-          assert out == "1:3", f"a raw HID node is in reach: {out}"
-          machine.succeed("mknod -m 600 /dev/hidraw8 c 240 8 && chown alice /dev/hidraw8")
-          machine.wait_until_succeeds(
-              f"su -l alice -c \"nsenter --preserve-credentials -U -n -m -t {hp} -- stat -c %t:%T /dev/hidraw8\" | grep -qx 1:3",
-              timeout=30,
+          # The rest the ACL opens — a raw HID node, a gamepad, a USB device,
+          # uinput, rfkill — not there, and none plugged in later either;
+          # nor anything that is not the basics or the GPU, by no name: a
+          # node nobody listed, one open to everyone on the host (net/tun).
+          machine.succeed(
+              "mknod -m 600 /dev/hidraw8 c 240 8 && chown alice /dev/hidraw8 && "
+              "mknod -m 600 /dev/input/js8 c 13 8 && chown alice /dev/input/js8 && "
+              "mknod -m 666 /dev/weird9 c 240 20"
           )
-          # Input and USB nodes one by one: the planted gamepad and USB
-          # device covered, and one plugged in later.
-          for node in ("/dev/input/js9", "/dev/bus/usb/009/001"):
-              out = in_zone(hp, f"stat -c %t:%T {node}").strip()
-              assert out == "1:3", f"{node} is in reach: {out}"
-          machine.succeed("mknod -m 600 /dev/input/js8 c 13 8 && chown alice /dev/input/js8")
-          machine.wait_until_succeeds(
-              f"su -l alice -c \"nsenter --preserve-credentials -U -n -m -t {hp} -- stat -c %t:%T /dev/input/js8\" | grep -qx 1:3",
-              timeout=30,
-          )
-          for node in ("uinput", "rfkill"):
-              in_zone(
-                  hp,
-                  f"sh -c 'test ! -c /dev/{node} || test \"$(stat -c %t:%T /dev/{node})\" = 1:3'",
-              )
-          # Default-deny: whatever is not the basics or the GPU is covered by
-          # no name — a node nobody listed, planted after the zone came up,
-          # and one open to everyone on the host from the start (net/tun) —;
-          # the basics stay what they are.
-          machine.succeed("mknod -m 666 /dev/weird9 c 240 20")
-          machine.wait_until_succeeds(
-              f"su -l alice -c \"nsenter --preserve-credentials -U -n -m -t {hp} -- stat -c %t:%T /dev/weird9\" | grep -qx 1:3",
-              timeout=30,
-          )
-          out = in_zone(hp, "stat -c %t:%T /dev/net/tun /dev/zero /dev/urandom /dev/tty").split()
-          assert out == ["1:3", "1:5", "1:9", "5:0"], f"default-deny: {out}"
+          hidden = ["/dev/hidraw9", "/dev/hidraw8", "/dev/input/js9", "/dev/input/js8",
+                    "/dev/bus/usb/009/001", "/dev/uinput", "/dev/rfkill", "/dev/weird9", "/dev/net/tun"]
+          out = in_zone(hp, nodes(*hidden)).split()
+          assert out == ["none"] * len(hidden), f"default-deny: {dict(zip(hidden, out))}"
+          out = in_zone(hp, nodes("/dev/null", "/dev/zero", "/dev/urandom", "/dev/tty")).split()
+          assert out == ["1:3", "1:5", "1:9", "5:0"], f"the basics: {out}"
+          # The devtmpfs the zone keeps is out of its programs' reach.
+          in_zone(hp, "sh -c '! ls /dev/.cellward/devtmpfs'")
+          # Terminals of its own: none of the host's — alice's own there —,
+          # and one opened in the zone is named.
+          machine.succeed("systemd-run --unit=hostpty su -l alice -c \"script -qfc 'sleep 600' /dev/null\"")
+          machine.wait_until_succeeds("ls /dev/pts | grep -qv ptmx", timeout=30)
+          out = in_zone(hp, "ls /dev/pts").split()
+          assert out == ["ptmx"], f"the host's terminals in the zone: {out}"
+          out = in_zone(hp, "script -qc tty /dev/null").strip()
+          assert out.startswith("/dev/pts/"), f"a terminal opened in the zone: {out}"
+          machine.succeed("systemctl stop hostpty.service || true")
           # Given to a container on purpose (docs/PERMISSIONS.md §11.12): a
           # security key by its set, a serial adapter by its set, a USB
           # device by what it is — udev's word on each planted here. Only
@@ -1955,10 +1953,8 @@ let
               "printf 'E:ID_VENDOR_ID=18d1\\nE:ID_MODEL_ID=4ee7\\n' > /run/udev/data/c189:1024 && "
               "mknod -m 600 /dev/ttyUSB9 c 188 9 && chown alice /dev/ttyUSB9"
           )
-          machine.wait_until_succeeds(
-              f"su -l alice -c \"nsenter --preserve-credentials -U -n -m -t {hp} -- stat -c %t:%T /dev/ttyUSB9\" | grep -qx 1:3",
-              timeout=30,
-          )
+          out = in_zone(hp, nodes("/dev/ttyUSB9")).strip()
+          assert out == "none", f"a serial adapter is in reach: {out}"
           devices_json = json.loads(alice("cellward devices --json"))["devices"]
           key = next(d for d in devices_json if "/dev/hidraw9" in d["nodes"])
           assert key["id"] == "usb:1050:0407" and key["sets"] == ["security-keys"], key
@@ -1967,17 +1963,17 @@ let
               alice(f"cellward container devices vmdev add {grant}")
           shown = json.loads(alice("cellward container show vmdev --json"))["container"]
           assert [d["value"] for d in shown["devices"]] == ["security-keys", "serial", "usb:18d1:4ee7"], shown
-          look = "stat -c %t:%T /dev/hidraw9 /dev/ttyUSB9 /dev/bus/usb/009/001 /dev/input/js9"
+          look = nodes("/dev/hidraw9", "/dev/ttyUSB9", "/dev/bus/usb/009/001", "/dev/input/js9")
           seen = alice(f"cellward run vmherm --container vmdev -- {look}").split()
-          assert seen == ["f0:9", "bc:9", "bd:400", "1:3"], f"given devices: {seen}"
+          assert seen == ["f0:9", "bc:9", "bd:400", "none"], f"given devices: {seen}"
           seen = alice(f"cellward run vmherm --container vmlayer -- {look}").split()
-          assert seen == ["1:3"] * 4, f"devices not given: {seen}"
+          assert seen == ["none"] * 4, f"devices not given: {seen}"
           alice("cellward container devices vmdev rm serial")
-          out = alice("cellward run vmherm --container vmdev -- stat -c %t:%T /dev/ttyUSB9").strip()
-          assert out == "1:3", f"a device taken back: {out}"
+          out = alice(f"cellward run vmherm --container vmdev -- {nodes('/dev/ttyUSB9')}").strip()
+          assert out == "none", f"a device taken back: {out}"
           # The vm set: tun (and kvm, vhost where the VM has them).
           alice("cellward container devices vmdev add vm")
-          out = alice("cellward run vmherm --container vmdev -- stat -c %t:%T /dev/net/tun").strip()
+          out = alice(f"cellward run vmherm --container vmdev -- {nodes('/dev/net/tun')}").strip()
           assert out == "a:c8", f"the vm set: {out}"
           alice("cellward container rm vmdev")
           # A device gone while a sandbox has it bound: the zone's holder

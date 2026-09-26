@@ -95,6 +95,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   zone's camera setting applies from the next launch on: no restart of the
   zone (and `camera` is no longer in `restart_needed`).
 
+- **A `/dev` of the zone's own, and terminals of its own**
+  (`docs/PERMISSIONS.md` §11.12, `docs/LEAK-MODEL.md` §19): the zone's
+  `/dev` is a tmpfs with only the basics and the GPU bound in from the
+  devtmpfs, which the zone keeps at `/dev/.cellward/devtmpfs` (a directory
+  only its root enters). Covering nodes on the shared devtmpfs left a
+  device plugged in later bare in a mount namespace a program made private
+  (`unshare -Urm`); now it appears in none. `/dev/pts` is a devpts instance
+  of the zone's: the host's showed every terminal of the host's to a
+  program that is their owner — it could read what is typed into one or
+  write a fake prompt. A program started into a zone from a host terminal
+  keeps that terminal but has no name for it (`tty`: "not a tty"). A
+  device given to a launch, and the cameras, are bound onto an empty
+  stand-in in its own mount namespace; when the device goes the zone
+  unlinks the stand-in, and the kernel takes every bind on it away.
 - **A zone keeps only the basics and the GPU of `/dev`** — default-deny
   (`docs/PERMISSIONS.md` §11.12, `docs/LEAK-MODEL.md` §19): every other
   device node of the devtmpfs, character or block, is covered with

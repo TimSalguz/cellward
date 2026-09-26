@@ -454,8 +454,8 @@ struct Look {
 /// `/dev/null` over `path` in every mount namespace of the zone's programs
 /// but this one's, where `path` still is: a sandbox binds the nodes it is
 /// given (`fs-sandbox --device`, `--camera`), and a bind outlives the
-/// device. The zone's own namespace, and every launch's copy of it, lose the
-/// entry with the device.
+/// device. A launch's bind of it stands on a stand-in of the zone's `/dev`,
+/// which the zone unlinks when the device goes, and the bind goes with it.
 ///
 /// Nothing mounts over such a bind: its dentry is the gone node's, unlinked,
 /// and the kernel refuses a mount on an unlinked dentry (ENOENT). So the bind

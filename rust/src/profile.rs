@@ -98,12 +98,11 @@ pub struct Args {
     /// (`home_layer::KEPT_STORAGE`), in this launch's mount namespace only,
     /// before anything else.
     pub storage: Option<PathBuf>,
-    /// `--camera`: the host's cameras let this launch — the covers the zone
-    /// put over them are taken off in this mount namespace
-    /// ([`uncover_capture`]).
+    /// `--camera`: the host's cameras let this launch — bound into this
+    /// mount namespace's `/dev` from the zone's devtmpfs ([`give_capture`]).
     pub camera: bool,
     /// `--device <path>=<major>:<minor>:<vendor>:<product>`, repeated: a
-    /// device its container is given (`crate::devices`), uncovered in this
+    /// device its container is given (`crate::devices`), bound into this
     /// mount namespace once it is checked again here ([`give_devices`]).
     pub devices: Vec<crate::devices::Pass>,
     /// `--share PATH`, repeated: a path of the real home granted to the
@@ -546,75 +545,72 @@ fn lossy(name: &OsStr) -> std::borrow::Cow<'_, str> {
 /// `nsenter` (`net:[…]`). Set, it must be the one this process is in.
 pub const ENV_EXPECT_NETNS: &str = "VPN_ZONE_EXPECT_NETNS";
 
-/// Let this launch reach the host's cameras. The zone covers them in its mount
-/// namespace (`zone::hide_devices`); this one is a slave copy of it
-/// (`launch::entry_argv`), where the covers are taken off — here, and nowhere
-/// else. It stays a slave: every other device the zone covers later — a
-/// security key, a serial adapter plugged in while this runs — is covered here
-/// too, and so is a camera plugged in later (restart the program for it; the
-/// zone's holder uncovering a device in the launches it is let is to come).
-fn uncover_capture() -> Result<(), String> {
-    let off = |path: &Path| {
-        let Ok(target) = CString::new(path.as_os_str().as_bytes()) else {
-            return;
+/// Let this launch reach the host's cameras: every capture node of the
+/// devtmpfs the zone keeps out of its programs' reach (`zone::DEVTMPFS`),
+/// and the cameras' links (`/dev/v4l`), bound into this launch's `/dev` — in
+/// its own mount namespace, a slave copy of the zone's (`launch::
+/// entry_argv`), and nowhere else. A camera plugged in later is not here:
+/// restart the program. Never fatal: a camera not bound is one the program
+/// does not get.
+fn give_capture() -> Result<(), String> {
+    let host = Path::new(crate::zone::DEVTMPFS);
+    let v4l = host.join("v4l");
+    if v4l.is_dir() {
+        let to = Path::new("/dev/v4l");
+        let made = if to.is_dir() {
+            Ok(())
+        } else {
+            fs::create_dir(to).and_then(|()| std::os::unix::fs::lchown(to, Some(0), Some(0)))
         };
-        // SAFETY: a NUL-terminated path and constant flags. Until nothing is
-        // mounted there any more: a node covered twice has two covers.
-        while unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH | libc::UMOUNT_NOFOLLOW) }
-            == 0
-        {}
-    };
-    off(Path::new("/dev/v4l"));
-    for entry in fs::read_dir("/dev")
-        .map_err(|e| format!("cannot read /dev: {e}"))?
+        made.and_then(|()| crate::sys::mount(v4l.as_os_str(), to, "", libc::MS_BIND, ""))
+            .map_err(|e| format!("cannot give /dev/v4l: {e}"))?;
+    }
+    for entry in fs::read_dir(host)
+        .map_err(|e| format!("cannot read {}: {e}", host.display()))?
         .flatten()
     {
-        if crate::zone::is_capture_node(&entry.file_name().to_string_lossy()) {
-            off(&entry.path());
+        let name = entry.file_name();
+        if crate::zone::is_capture_node(&name.to_string_lossy())
+            && crate::devices::char_device(&entry.path()).is_some()
+        {
+            let to = Path::new("/dev").join(&name);
+            crate::zone::give_node(&entry.path(), &to)
+                .map_err(|e| format!("cannot give {}: {e}", to.display()))?;
         }
     }
     Ok(())
-}
-
-/// Everything mounted at `path` off, in this namespace.
-fn umount_all(path: &Path) {
-    let Ok(target) = CString::new(path.as_os_str().as_bytes()) else {
-        return;
-    };
-    // SAFETY: a NUL-terminated path and constant flags; until nothing is
-    // mounted there.
-    while unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH | libc::UMOUNT_NOFOLLOW) } == 0 {
-    }
 }
 
 /// Give this launch the devices its container is given (`docs/PERMISSIONS.md`
-/// §11.12). The zone covers each node one by one in its mount namespace
-/// (`zone::hide_devices`); this one is a slave copy, where the covers come
-/// off the given ones — the device's own entry then, never a bind, so that it
-/// goes with the device and a node that comes later under its name is
-/// covered by the zone's watcher here too. Each is checked here once more by
-/// its number and udev's word on it (`devices::Pass::still`): the number may
-/// have gone to another device since the launch listed them. One that is not
-/// the one given is covered again.
-fn give_devices(passes: &[crate::devices::Pass]) -> Result<(), String> {
+/// §11.12): each node bound from the devtmpfs the zone keeps out of its
+/// programs' reach (`zone::DEVTMPFS`) into this launch's `/dev`, in its own
+/// mount namespace. Each is checked here once more by its number and udev's
+/// word on it (`devices::Pass::still`): the number may have gone to another
+/// device since the launch listed them — then it is not given. When the
+/// device goes, the zone unlinks the stand-in under the bind, and the bind
+/// goes with it. What cannot be given is said, not fatal: nothing is given
+/// that is not the one.
+fn give_devices(passes: &[crate::devices::Pass]) {
     let udev = Path::new("/run/udev/data");
+    let host = Path::new(crate::zone::DEVTMPFS);
     for pass in passes {
-        umount_all(&pass.path);
-        match crate::devices::char_device(&pass.path) {
-            Some((major, minor)) if pass.still(udev, major, minor) => {}
-            Some(_) => {
-                crate::sys::mount(OsStr::new("/dev/null"), &pass.path, "", libc::MS_BIND, "")
-                    .map_err(|e| {
-                        format!(
-                            "{} is another device now and cannot be covered again: {e}",
-                            pass.path.display()
-                        )
-                    })?;
+        let Ok(rel) = pass.path.strip_prefix("/dev") else {
+            continue;
+        };
+        let from = host.join(rel);
+        match crate::devices::char_device(&from) {
+            Some((major, minor)) if pass.still(udev, major, minor) => {
+                if let Err(e) = crate::zone::give_node(&from, &pass.path) {
+                    eprintln!("profile-run: {} not given: {e}", pass.path.display());
+                }
             }
+            Some(_) => eprintln!(
+                "profile-run: {} is another device now — not given",
+                pass.path.display()
+            ),
             None => {}
         }
     }
-    Ok(())
 }
 
 pub fn run(args: Args) -> u8 {
@@ -654,21 +650,14 @@ pub fn run(args: Args) -> u8 {
         }
     }
     // The cameras, where this launch is let them: never fatal — a camera
-    // that stays covered is one the program does not get.
+    // not given is one the program does not get.
     if args.camera {
-        if let Err(e) = uncover_capture() {
-            eprintln!("profile-run: the cameras stay covered: {e}");
+        if let Err(e) = give_capture() {
+            eprintln!("profile-run: the cameras are not given: {e}");
         }
     }
-    // The devices its container is given. Fatal where a node that is not
-    // the one given could not be covered again: better nothing than another
-    // device.
-    if !args.devices.is_empty() {
-        if let Err(e) = give_devices(&args.devices) {
-            eprintln!("profile-run: {e} — the program is not started");
-            return EXIT_NOT_STARTED;
-        }
-    }
+    // The devices its container is given.
+    give_devices(&args.devices);
     let mounted = if args.profile_dir.as_os_str().is_empty() {
         Vec::new()
     } else {
