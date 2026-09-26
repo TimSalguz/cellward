@@ -456,6 +456,26 @@ struct CapData {
     inheritable: u32,
 }
 
+/// The effective set made the permitted one again.
+fn raise_effective_capabilities() {
+    let mut header = CapHeader {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let mut data = [CapData::default(); 2];
+    // SAFETY: capget/capset with a version 3 header and two data words, as
+    // the kernel's ABI has them.
+    unsafe {
+        if libc::syscall(libc::SYS_capget, &mut header, data.as_mut_ptr()) != 0 {
+            return;
+        }
+        for word in &mut data {
+            word.effective = word.permitted;
+        }
+        libc::syscall(libc::SYS_capset, &mut header, data.as_ptr());
+    }
+}
+
 /// The inheritable set emptied; the effective and permitted ones left as
 /// they are (a throwaway container is cleaned up after its program).
 fn clear_inheritable_capabilities() {
@@ -691,6 +711,10 @@ impl Drop for AsZoneRoot {
             libc::setfsuid(self.uid);
             libc::setfsgid(self.gid);
         }
+        // The kernel takes the file capabilities out of the effective set
+        // when the fsuid goes from 0 to another (capabilities(7)); the
+        // layer is still to be mounted, with them.
+        raise_effective_capabilities();
     }
 }
 
