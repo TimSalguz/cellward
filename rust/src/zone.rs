@@ -743,6 +743,25 @@ pub fn run(args: Args) -> u8 {
     let _ = fs::remove_file(zone.path(STATUS));
     let _ = fs::remove_file(zone.path(UPLINK_PID));
     let _ = fs::remove_file(zone.path(READY));
+    // What this run comes up with, before it is up: `status --json` names what
+    // has changed since (`hermetic::APPLIED`). The last run's goes first — a
+    // note that cannot be written leaves "not known", never a stale one.
+    let _ = fs::remove_file(zone.path(crate::hermetic::APPLIED));
+    if let Err(e) = crate::hermetic::note_applied(
+        &zone.dir,
+        &[
+            ("hermetic", zone.hermetic),
+            ("nix_daemon", zone.nix_daemon),
+            ("host_files_writable", zone.host_files_writable),
+            ("camera", zone.camera),
+            ("audio_manager", zone.audio_manager),
+        ],
+    ) {
+        eprintln!(
+            "zone {}: cannot note its settings ({e}) — status cannot tell what needs a restart",
+            zone.name()
+        );
+    }
     // What the zone keeps of the project's state has to exist before the zone
     // hides the rest (`hide_project_state`): a directory created afterwards
     // would not be seen in there. As the user, so that the host keeps writing

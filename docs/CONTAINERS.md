@@ -531,6 +531,12 @@ and `cellward container show <name> --json` print subsets of the same schema.
 - **Every settable value carries its origin**: `{"value": …, "source": "nix" |
   "local" | "default"}`. Runtime facts (`running`, `up`, `handshake_age_s`) are
   plain values.
+- **`networks[].restart_needed`**: for a zone that is up, the names of the
+  settings it takes when it comes up (`hermetic`, `nix_daemon`,
+  `host_files_writable`, `camera`, `audio_manager`) whose value now differs
+  from the one it came up with — in force after `cellward down <zone> &&
+  cellward up <zone>`; `[]` when all are in force; `null` when the zone is
+  down, or was started by a build from before the note (`build: "previous"`).
 
 ```json
 {
@@ -563,7 +569,8 @@ and `cellward container show <name> --json` print subsets of the same schema.
       "microphone":          { "value": "ask", "source": "default" },
       "screencast":          { "value": "ask", "source": "default" },
       "audio_manager":       { "value": false, "source": "default" },
-      "frame_color":         { "value": "#4cacd9", "source": "default" } },
+      "frame_color":         { "value": "#4cacd9", "source": "default" },
+      "build": "current", "restart_needed": ["camera"] },
     { "name": "lan", "kind": "host-interface", "aliases": [], "source": "local",
       "up": false, "locked": false, "tunnel_alive": null,
       "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,

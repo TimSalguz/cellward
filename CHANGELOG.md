@@ -49,6 +49,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   mount the host makes later on such a directory, as the document portal's
   FUSE, still does not reach the zone at all.)
 
+- **`networks[].restart_needed` in `status --json`**: for a zone that is
+  up, the settings it takes when it comes up (`hermetic`, `nix_daemon`,
+  `host_files_writable`, `camera`, `audio_manager`) whose value changed
+  since it came up — in force after a restart; `[]` when all are in force,
+  `null` when down or not known. The holder notes what it came up with
+  (`zone.settings`, `hermetic::APPLIED`) before the zone is up.
+
 ### Changed
 - **The microphone for a program whose container is not known** (a
   throwaway sandbox, a temporary container, a daemon that left its

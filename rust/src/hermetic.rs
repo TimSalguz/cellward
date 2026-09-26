@@ -161,6 +161,55 @@ pub fn host_files_writable(zone_dir: &Path, config: &Path, zone: &str) -> (bool,
     )
 }
 
+/// Below a zone's state directory: the settings it came up with, one
+/// `<name>=<true|false>` a line, written by its holder before the zone is
+/// up. They are in force until it comes up again; `status --json` names
+/// those that have changed since (`networks[].restart_needed`).
+pub const APPLIED: &str = "zone.settings";
+
+/// The settings a zone takes when it comes up, by their names in
+/// `status --json`.
+pub fn start_settings(zone_dir: &Path, config: &Path, zone: &str) -> [(&'static str, bool); 5] {
+    [
+        ("hermetic", zone_setting(zone_dir, config, zone).0),
+        ("nix_daemon", nix_daemon(zone_dir, config, zone).0),
+        (
+            "host_files_writable",
+            host_files_writable(zone_dir, config, zone).0,
+        ),
+        ("camera", camera(zone_dir, config, zone).0),
+        ("audio_manager", audio_manager(zone_dir, config, zone).0),
+    ]
+}
+
+/// Note what a zone comes up with ([`APPLIED`]), through a temporary.
+pub fn note_applied(zone_dir: &Path, settings: &[(&str, bool)]) -> std::io::Result<()> {
+    let text: String = settings.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+    let tmp = zone_dir.join(format!("{APPLIED}.new"));
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, zone_dir.join(APPLIED))
+}
+
+/// Which settings of a running zone differ now from those it came up with,
+/// by name. `None`: not known — no note (a zone a build from before it
+/// started). A setting the note does not name is not counted.
+pub fn restart_needed(zone_dir: &Path, config: &Path, zone: &str) -> Option<Vec<&'static str>> {
+    let text = std::fs::read_to_string(zone_dir.join(APPLIED)).ok()?;
+    let applied = |name: &str| {
+        text.lines()
+            .filter_map(|line| line.split_once('='))
+            .find(|(k, _)| k.trim() == name)
+            .map(|(_, v)| v.trim() == "true")
+    };
+    Some(
+        start_settings(zone_dir, config, zone)
+            .into_iter()
+            .filter(|(name, now)| applied(name).is_some_and(|then| then != *now))
+            .map(|(name, _)| name)
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +357,25 @@ mod tests {
             zone_setting(&d.zone(), &d.config(), "fr"),
             (true, Source::Local)
         );
+    }
+
+    /// What a running zone came up with, against what is set now: a changed
+    /// start-time setting is named, an unchanged one is not; no note, not
+    /// known.
+    #[test]
+    fn a_setting_changed_since_the_zone_came_up_is_named() {
+        let base = std::env::temp_dir().join(format!("vz-applied-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let zone = base.join("state/nl");
+        let config = base.join("config");
+        std::fs::create_dir_all(&zone).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        assert_eq!(restart_needed(&zone, &config, "nl"), None);
+        let now = start_settings(&zone, &config, "nl");
+        note_applied(&zone, &now).unwrap();
+        assert_eq!(restart_needed(&zone, &config, "nl"), Some(vec![]));
+        std::fs::write(zone.join(CAMERA), "on").unwrap();
+        assert_eq!(restart_needed(&zone, &config, "nl"), Some(vec!["camera"]));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

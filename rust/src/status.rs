@@ -161,7 +161,7 @@ pub fn networks(tools: &Tools) -> String {
         // 2026-09, may still be in a configuration or in Nix.
         "{\"name\":\"unconfined\",\"kind\":\"unconfined\",\"aliases\":[\"direct\"],\"source\":\"default\",\"up\":true,\
          \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
-             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\"microphone\":null,\"screencast\":null,\"audio_manager\":null,\"system_zone\":null,\"frame_color\":null,\"build\":null}"
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\"microphone\":null,\"screencast\":null,\"audio_manager\":null,\"system_zone\":null,\"frame_color\":null,\"build\":null,\"restart_needed\":null}"
             .to_owned(),
     ];
     let mut offline_listed = false;
@@ -190,6 +190,19 @@ pub fn networks(tools: &Tools) -> String {
         // was started from (`crate::build`).
         let build = if up {
             crate::build::string(crate::build::age(&dir, &installed))
+        } else {
+            "null".to_owned()
+        };
+        // What it came up with and is set otherwise now — in force from its
+        // next start (`hermetic::APPLIED`); `null` down, or not known.
+        let restart_needed = if up {
+            crate::hermetic::restart_needed(&dir, &tools.config, &name).map_or(
+                "null".to_owned(),
+                |names| {
+                    let names: Vec<String> = names.into_iter().map(string).collect();
+                    format!("[{}]", names.join(","))
+                },
+            )
         } else {
             "null".to_owned()
         };
@@ -278,7 +291,7 @@ pub fn networks(tools: &Tools) -> String {
             "local"
         };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"camera\":{camera},\"microphone\":{microphone},\"screencast\":{screencast},\"audio_manager\":{audio_manager},\"system_zone\":{system_zone},\"frame_color\":{frame_color},\"build\":{build}}}",
+            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"camera\":{camera},\"microphone\":{microphone},\"screencast\":{screencast},\"audio_manager\":{audio_manager},\"system_zone\":{system_zone},\"frame_color\":{frame_color},\"build\":{build},\"restart_needed\":{restart_needed}}}",
             string(&name),
             dir.join(NO_ESCAPE).exists()
         ));
@@ -295,7 +308,7 @@ pub fn networks(tools: &Tools) -> String {
             "{{\"name\":\"offline\",\"kind\":\"offline\",\"aliases\":[],\"source\":\"default\",\"up\":false,\
              \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
              \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\
-             \"microphone\":{},\"screencast\":{},\"audio_manager\":null,\"system_zone\":null,\"frame_color\":{},\"build\":null}}",
+             \"microphone\":{},\"screencast\":{},\"audio_manager\":null,\"system_zone\":null,\"frame_color\":{},\"build\":null,\"restart_needed\":null}}",
             sourced_str(mic.as_str(), mic_source),
             sourced_str(cast.as_str(), cast_source),
             sourced_str(&color.hex(), source)
