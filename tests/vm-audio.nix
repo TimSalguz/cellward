@@ -360,7 +360,8 @@ let
           assert out.strip() == "0", f"the zone's own program recorded on the zone's no: {out}"
           meta = alice("pw-metadata -n vpn-zones 0")
           assert "vpn-zones.microphone-by-client.offline" in meta, meta
-          assert "vpn-zones.microphone.client." in meta, meta
+          # A client's key goes with it: nothing is left of those above.
+          assert "vpn-zones.microphone.client." not in meta, meta
           alice("cellward microphone offline yes")
           alice("cellward container set vmpwmic microphone no")
           out = in_container(record.format("vz-cno"))
