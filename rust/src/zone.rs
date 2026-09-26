@@ -2328,6 +2328,10 @@ fn start_session_filter(zone: &Zone) {
         // passes; the entry that names it was written as the zone came up.
         .arg("--portal-app")
         .arg(crate::desktop::zone_app_id(&zone.name()))
+        // A container's connections go by the container's own id where its
+        // entry is there (`desktop::container_app_id`, written by sync).
+        .arg("--applications")
+        .arg(zone.home.join(".local/share/applications"))
         // The zone's screen cast switch (`crate::screencast`), read for every
         // call through descriptors the filter opens before its socket
         // appears — the project's state is covered right after that

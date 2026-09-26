@@ -445,7 +445,25 @@ const MAX_APP_ID: usize = 255;
 /// one entry file the two would overwrite and `rm` of either would take. A
 /// name that is too long is cut, and hashed for the same reason.
 pub fn zone_app_id(zone: &str) -> String {
-    let mut id: String = zone
+    app_id_of(ZONE_APP_PREFIX, zone)
+}
+
+/// The first elements of every container's application id.
+pub const CONTAINER_APP_PREFIX: &str = "cellward.c.";
+
+/// The application id a container's programs have for the portal, in every
+/// zone: `cellward.c.<id>` — the zone's bus filter registers it for a
+/// connection of the container's (`crate::bus_filter`), where the entry for
+/// it is there ([`write_container_entry`], kept by sync); what the portal
+/// remembers (a screen cast) is then the container's, not every container's
+/// of the zone. `<id>` as a zone's ([`zone_app_id`]).
+pub fn container_app_id(container: &str) -> String {
+    app_id_of(CONTAINER_APP_PREFIX, container)
+}
+
+/// `<prefix><id>`, `<id>` made of `name` as [`zone_app_id`] says.
+fn app_id_of(prefix: &str, name: &str) -> String {
+    let mut id: String = name
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' {
@@ -458,13 +476,56 @@ pub fn zone_app_id(zone: &str) -> String {
     if id.is_empty() || id.starts_with(|c: char| c.is_ascii_digit()) {
         id.insert(0, '_');
     }
-    let room = MAX_APP_ID - ZONE_APP_PREFIX.len();
-    if id != zone || id.len() > room {
+    let room = MAX_APP_ID - prefix.len();
+    if id != name || id.len() > room {
         // All ASCII by now: cutting at a byte is cutting at a character.
         id.truncate(room - 9);
-        id = format!("{id}_{:08x}", fnv1a(zone));
+        id = format!("{id}_{:08x}", fnv1a(name));
     }
-    format!("{ZONE_APP_PREFIX}{id}")
+    format!("{prefix}{id}")
+}
+
+/// The file of a container's entry for the portal.
+pub fn container_entry_file(container: &str) -> String {
+    format!("{}.desktop", container_app_id(container))
+}
+
+/// A container's entry for the portal, as a zone's ([`render_zone_entry`]):
+/// what its dialogs name the container's programs by; `Exec` harmless —
+/// `cellward container show <name>`.
+pub fn render_container_entry(container: &str, label: &str, runner: &str) -> String {
+    let exec = format!(
+        "{} container show {}",
+        exec_argument(runner),
+        exec_argument(container)
+    );
+    format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name={}\n\
+         Comment={}\n\
+         Exec={}\n\
+         Icon={ZONE_ICON}\n\
+         NoDisplay=true\n\
+         {MARK}={PORTAL_ENTRY}\n",
+        desktop_value(&format!("cellward · {label}")),
+        desktop_value(&format!("Программы контейнера «{label}»")),
+        desktop_value(&exec),
+    )
+}
+
+/// Write a container's entry for the portal into `out_dir` when it is not
+/// there as it should be; a place taken by a file that is not ours stays as
+/// it is. How many were written.
+fn write_container_entry(out_dir: &Path, container: &str, runner: &str) -> u32 {
+    let target = out_dir.join(container_entry_file(container));
+    if occupied(&target) && !ours(&target) {
+        return 0;
+    }
+    write_if_changed(
+        &target,
+        &render_container_entry(container, container, runner),
+    )
 }
 
 /// The file of a zone's entry for the portal, in the applications directory:
@@ -582,6 +643,15 @@ fn portal_zones(state_dir: &Path) -> Vec<String> {
         .collect();
     zones.sort();
     zones
+}
+
+/// The containers whose entries for the portal sync keeps: every one there
+/// is (`container::names_in`).
+fn portal_containers(home: &Path) -> Vec<String> {
+    crate::container::names_in(
+        &home.join(".config/vpn-zones"),
+        &home.join(crate::container::PROFILES_SUBDIR),
+    )
 }
 
 /// A key without spaces or quotes, so that `Exec` parses for anybody.
@@ -2092,6 +2162,13 @@ fn sync_from(
     // mode — it is no launcher entry — and taken with the zone.
     let mut kept = wanted.clone();
     kept.extend(portal_zones(state_dir).iter().map(|z| zone_entry_file(z)));
+    // Each container's entry for the portal (`container_app_id`), in every
+    // mode as well: written here, for every container there is, and taken
+    // with it.
+    for container in portal_containers(home) {
+        written += write_container_entry(&out_dir, &container, runner);
+        kept.insert(container_entry_file(&container));
+    }
     let removed = cleanup(&out_dir, &kept, &adopted_dir);
     let dbus_removed = cleanup_dbus(&dbus_dir, &dbus_wanted);
     // Where a shim looks for the real program: the search path of this pass,

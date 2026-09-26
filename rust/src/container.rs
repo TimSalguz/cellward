@@ -1751,8 +1751,18 @@ pub fn load_all(tools: &Tools) -> Vec<Container> {
 
 /// [`load_all`] without the move: for the move itself.
 fn load_all_quiet(tools: &Tools) -> Vec<Container> {
+    names_in(&tools.config, &tools.profiles)
+        .iter()
+        .filter_map(|n| load_quiet(tools, n))
+        .collect()
+}
+
+/// The names of the containers there are — their data, their policy or their
+/// declaration ([`exists_in`]'s rule) — from the directories alone: for sync,
+/// which has no manifest. Sorted, each once.
+pub fn names_in(config: &Path, profiles: &Path) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for dir in [&tools.profiles, &tools.config.join(POLICY_DIR)] {
+    for dir in [profiles, &config.join(POLICY_DIR)] {
         for entry in visible_entries(dir) {
             if entry.is_dir() {
                 names.push(
@@ -1765,7 +1775,7 @@ fn load_all_quiet(tools: &Tools) -> Vec<Container> {
             }
         }
     }
-    for file in visible_entries(&tools.config.join(DECLARED)) {
+    for file in visible_entries(&config.join(DECLARED)) {
         let name = file
             .file_name()
             .unwrap_or_default()
@@ -1789,7 +1799,7 @@ fn load_all_quiet(tools: &Tools) -> Vec<Container> {
     names.retain(|n| valid_name(n));
     names.sort();
     names.dedup();
-    names.iter().filter_map(|n| load_quiet(tools, n)).collect()
+    names
 }
 
 /// `~/x` against the home; anything else as it is.

@@ -130,6 +130,11 @@ pub struct Args {
     /// as the program's is (`refused`) — and that one has already registered
     /// the connection.
     pub portal_app: Option<String>,
+    /// `--applications`: where the entries for the portal are
+    /// (`~/.local/share/applications`). A connection of a container whose
+    /// entry is there is registered with the container's id
+    /// (`desktop::container_app_id`) instead of `portal_app`.
+    pub applications: Option<PathBuf>,
     /// `--zone`, `--zone-dir`, `--config`, all three or none: the zone whose
     /// screen cast switch the filter reads for every call of the portal's
     /// ScreenCast (`crate::screencast`), its state directory and
@@ -151,7 +156,7 @@ pub struct ZoneArgs {
 impl Args {
     pub fn parse(argv: &[OsString]) -> Result<Self, String> {
         let (mut listen, mut upstream, mut opener, mut via_broker) = (None, None, None, None);
-        let mut portal_app = None;
+        let (mut portal_app, mut applications) = (None, None);
         let (mut zone, mut zone_dir, mut config, mut profiles) = (None, None, None, None);
         let mut it = argv.iter();
         while let Some(flag) = it.next() {
@@ -180,6 +185,7 @@ impl Args {
                             .to_owned(),
                     )
                 }
+                Some("--applications") => applications = Some(value),
                 Some("--zone-dir") => zone_dir = Some(value),
                 Some("--config") => config = Some(value),
                 Some("--profiles") => profiles = Some(value),
@@ -207,6 +213,7 @@ impl Args {
             opener: opener.ok_or("--opener is required")?,
             via_broker,
             portal_app,
+            applications,
             zone,
         })
     }
@@ -449,10 +456,11 @@ fn screencast_verdict(conn: &Conn, ctx: &Ctx, h: &Header) -> Cast {
         Setting::Ask => Cast::Pass,
         // Only the selection carries a choice to remember.
         Setting::Yes if h.member.as_deref() != Some("SelectSources") => Cast::Pass,
-        // The portal knows the connection as the zone: a choice kept there
-        // would be every container's of the zone. A container's `yes` keeps
-        // none until it has a name of its own with the portal.
-        Setting::Yes if conn.who != crate::origin::Who::Main => Cast::Pass,
+        // A choice is kept only under the name of whose switch said yes: the
+        // zone's for its own programs; a container's own (`Ctx::app_for`) for
+        // a container's — kept under the zone's, it would be every
+        // container's of the zone.
+        Setting::Yes if !named_as_its_own(conn) => Cast::Pass,
         Setting::Yes if identified(conn, ctx, h) => Cast::Remember,
         Setting::Yes => {
             if !ctx.told_unremembered.swap(true, Ordering::SeqCst) {
@@ -465,6 +473,19 @@ fn screencast_verdict(conn: &Conn, ctx: &Ctx, h: &Header) -> Cast {
             }
             Cast::Pass
         }
+    }
+}
+
+/// Whether the id the connection was registered with is its own: the
+/// zone's for the zone's programs, the container's for a container's.
+fn named_as_its_own(conn: &Conn) -> bool {
+    match &conn.who {
+        crate::origin::Who::Main => true,
+        crate::origin::Who::Container(name) => {
+            conn.registration().app.as_deref()
+                == Some(crate::desktop::container_app_id(name).as_str())
+        }
+        crate::origin::Who::Unknown => false,
     }
 }
 
@@ -544,6 +565,8 @@ struct Ctx {
     via_broker: Option<String>,
     /// `--portal-app`.
     portal_app: Option<String>,
+    /// `--applications`.
+    applications: Option<PathBuf>,
     /// Why a connection has no id of the zone's has been said: once per
     /// filter, not once per connection — an old portal would say it for
     /// every program.
@@ -565,6 +588,7 @@ impl Ctx {
             opener: args.opener.clone(),
             via_broker: args.via_broker.clone(),
             portal_app: args.portal_app.clone(),
+            applications: args.applications.clone(),
             told_register: AtomicBool::new(false),
             screencast,
             told_unremembered: AtomicBool::new(false),
@@ -585,6 +609,23 @@ impl Ctx {
                 self.portal_app.as_deref().unwrap_or("?")
             );
         }
+    }
+
+    /// The id a connection of `who` is registered with: its container's
+    /// (`desktop::container_app_id`) where the portal can take it — the
+    /// entry is there —, else the zone's (`portal_app`). A container whose
+    /// entry sync has not written yet goes as the zone, as before.
+    fn app_for(&self, who: &crate::origin::Who) -> Option<String> {
+        let zone = self.portal_app.clone()?;
+        if let (crate::origin::Who::Container(name), Some(dir)) = (who, &self.applications) {
+            if dir
+                .join(crate::desktop::container_entry_file(name))
+                .is_file()
+            {
+                return Some(crate::desktop::container_app_id(name));
+            }
+        }
+        Some(zone)
     }
 
     fn serial(&self) -> u32 {
@@ -832,6 +873,8 @@ struct Registration {
     /// The portal (its unique name) that took the zone's id for this
     /// connection; `None`: the connection has no id of the zone's.
     portal: Option<String>,
+    /// The id asked for (`Ctx::app_for`): the zone's, or its container's.
+    app: Option<String>,
 }
 
 /// The serial of our `Register` on a connection whose Hello had `hello`: the
@@ -880,9 +923,10 @@ fn is_hello(h: &Header) -> bool {
 /// an older portal, and the id only ever narrows what the portal does
 /// (`screencast yes` needs it; nothing is let because of it).
 fn register(conn: &Conn, ctx: &Ctx, up: RawFd, hello: &Header) -> io::Result<()> {
-    let Some(app) = ctx.portal_app.as_deref() else {
+    let Some(app) = ctx.app_for(&conn.who) else {
         return Ok(());
     };
+    let app = app.as_str();
     conn.wait_while(|s| matches!(s, Stage::Hello(_)));
     let serial = register_serial(hello.serial);
     // Looked at and moved on under one lock: the bus side going in between
@@ -895,6 +939,7 @@ fn register(conn: &Conn, ctx: &Ctx, up: RawFd, hello: &Header) -> io::Result<()>
             Stage::Welcomed(true) => {
                 reg.stage = Stage::Register(serial);
                 reg.outstanding = Some(serial);
+                reg.app = Some(app.to_owned());
             }
             Stage::Closed => {}
             _ => reg.stage = Stage::Done,
@@ -1936,6 +1981,7 @@ mod tests {
                 opener: PathBuf::new(),
                 via_broker: None,
                 portal_app: portal_app.map(str::to_owned),
+                applications: None,
                 zone: None,
             };
             Self::new(upstream, &args, None)
@@ -2862,12 +2908,50 @@ mod tests {
             "{}",
             d.journal()
         );
-        // Its own yes: the cast goes on, but no choice is kept.
+        // Its own yes: the cast goes on, but no choice is kept — the portal
+        // knows the connection as the zone, not as the container.
         d.write(
             "config/containers/work/container.conf",
             "screencast = yes\n",
         );
         let got = s.through(&select_sources(11, ":1.7"));
         assert_eq!(remembers(&got), (false, false));
+    }
+
+    /// A container whose entry for the portal is there goes by its own id,
+    /// and its yes keeps the choice — under its own name, not the zone's.
+    #[test]
+    fn a_container_with_a_name_of_its_own_keeps_its_own_choice() {
+        let d = ZoneDirs::new("container-named");
+        d.write("state/nl/screencast", "ask");
+        fs::create_dir_all(d.base.join("config/containers/work")).unwrap();
+        d.write(
+            "config/containers/work/container.conf",
+            "screencast = yes\n",
+        );
+        let apps = d.base.join("applications");
+        fs::create_dir_all(&apps).unwrap();
+        fs::write(apps.join(crate::desktop::container_entry_file("work")), "").unwrap();
+        let policy = d.policy();
+        let work = crate::origin::Who::Container("work".into());
+        let mut s = Served::start_as("cast-named", Some("cellward.zone.nl"), work, |c| Ctx {
+            screencast: Some(policy),
+            applications: Some(apps.clone()),
+            ..c
+        });
+        let mut first = AUTH.to_vec();
+        first.extend(hello(1));
+        s.program.send(&first, &[]);
+        s.authenticated();
+        let _ = s.bus.message();
+        s.bus.send(&reply_to(1, "org.freedesktop.DBus"), &[]);
+        let (msg, h, _) = s.bus.message();
+        assert_eq!(h.member.as_deref(), Some("Register"));
+        assert_eq!(&msg[h.body_offset..], body::register("cellward.c.work"));
+        s.bus.send(&reply_to(REGISTER_SERIAL, ":1.7"), &[]);
+        let (_, h, _) = s.program.message();
+        assert_eq!(h.reply_serial, Some(1));
+        let got = s.through(&select_sources(10, ":1.7"));
+        assert_eq!(remembers(&got), (true, true));
     }
 }

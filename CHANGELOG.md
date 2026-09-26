@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A container has a name of its own with the portal**
+  (`cellward.c.<id>`, `desktop::container_app_id`; the owner, 2026-09-26:
+  permissions move from zones to containers). Sync writes an entry for the
+  portal for every container (`~/.local/share/applications/
+  cellward.c.<id>.desktop`, `X-VPNZone=portal`, as a zone's), and a
+  hermetic zone's bus filter registers a container's connections with it
+  where that entry is there — else with the zone's, as before. A
+  container's `screencast yes` now keeps its choice, under its own name:
+  what the portal remembers is the container's, not every container's of
+  the zone.
 - **The waits kept on purpose are settings** (the owner, 2026-09-27:
   adjustable in stillconf; `rust/src/timings.rs`). How long a question of
   the broker's waits for its answer — `cellward question-timeout

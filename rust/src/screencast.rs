@@ -31,10 +31,11 @@
 //! (`screencast =` in its settings), by the microphone's rule
 //! (`microphone::by_container`); the filter knows the container of each
 //! connection by the launch its program descends from (`crate::origin`),
-//! looked at once, when it connects. A container's `yes` keeps no choice yet:
-//! the portal would keep it under the zone's name, which every program of the
-//! zone is registered as — for all its containers; until a container has a
-//! name of its own with the portal, its `yes` is `ask`.
+//! looked at once, when it connects. A container's `yes` keeps its choice
+//! under the container's own name with the portal (`cellward.c.<id>`,
+//! `desktop::container_app_id`, registered by the bus filter where sync has
+//! written its entry); kept under the zone's, it would be every container's
+//! of the zone — so without the container's own name, its `yes` is `ask`.
 //!
 //! **Where the setting lives**, as the microphone's (`crate::microphone`):
 //! the zone's marker `screencast` in its state directory, hidden from zones
