@@ -58,8 +58,15 @@ pub fn keeps_flags(rel: &Path, granted: &[PathBuf]) -> bool {
 /// setup, before the program) can. `profiles` and `sandboxes` in it.
 pub const KEPT_STORAGE: &str = ".local/state/vpn-zones/.storage";
 
+/// The throwaway containers' directories, below the home — kept by a zone
+/// as the other storage is (`KEPT_STORAGE`/throwaway), and covered: one
+/// zone's throwaway container is no other zone's, nor any other launch's.
+pub const THROWAWAY_STORAGE: &str = ".local/state/vpn-zones/.throwaway";
+
 /// The kept copy of a storage root's entry, from its path below the home:
-/// `.local/state/vpn-sandboxes/work` → `<KEPT_STORAGE>/sandboxes/work`.
+/// `.local/state/vpn-sandboxes/work` → `<KEPT_STORAGE>/sandboxes/work`,
+/// `.local/state/vpn-zones/.throwaway/vpn-profile-x` →
+/// `<KEPT_STORAGE>/throwaway/vpn-profile-x`.
 pub fn kept_storage_of(home: &Path, path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?;
     let parent = path.parent()?;
@@ -67,6 +74,8 @@ pub fn kept_storage_of(home: &Path, path: &Path) -> Option<PathBuf> {
         "profiles"
     } else if parent == home.join(STORAGE[1]) {
         "sandboxes"
+    } else if parent == home.join(THROWAWAY_STORAGE) {
+        "throwaway"
     } else {
         return None;
     };
@@ -366,6 +375,15 @@ mod kept_tests {
             kept_storage_of(home, Path::new("/home/u/.local/state/vpn-profiles/w")),
             Some(PathBuf::from(
                 "/home/u/.local/state/vpn-zones/.storage/profiles/w"
+            ))
+        );
+        assert_eq!(
+            kept_storage_of(
+                home,
+                Path::new("/home/u/.local/state/vpn-zones/.throwaway/vpn-profile-ab12")
+            ),
+            Some(PathBuf::from(
+                "/home/u/.local/state/vpn-zones/.storage/throwaway/vpn-profile-ab12"
             ))
         );
         assert_eq!(

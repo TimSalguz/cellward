@@ -1841,6 +1841,21 @@ let
           # The real container storage, kept for the zone's launches: the
           # zone's root's, and no program of the zone enters it.
           in_zone(hp, "sh -c '! ls /home/alice/.local/state/vpn-zones/.storage'")
+          # A throwaway container is its launch's alone (review 2026-09-27:
+          # every zone read and wrote every zone's): another's is out of the
+          # zone's sight, and a launch gets its own back.
+          alice(
+              "mkdir -p ~/.local/state/vpn-zones/.throwaway/vpn-profile-vmother "
+              "&& touch ~/.local/state/vpn-zones/.throwaway/vpn-profile-vmother/secret"
+          )
+          in_zone(hp, "sh -c 'test -z \"$(ls -A /home/alice/.local/state/vpn-zones/.throwaway)\"'")
+          out = alice(
+              "cellward run vmherm --tmp-profile -- sh -c "
+              "'echo tmp-ok > $HOME/.vm-tmp && cat $HOME/.vm-tmp "
+              "&& ! ls /home/alice/.local/state/vpn-zones/.throwaway/vpn-profile-vmother'"
+          )
+          assert "tmp-ok" in out, out
+          alice("rm -rf ~/.local/state/vpn-zones/.throwaway/vpn-profile-vmother")
           for path in [".local/state/vpn-zones/.running/x", ".config/vpn-zones/x", ".local/share/vpn-zones/x"]:
               in_zone(hp, f"sh -c '! touch /home/alice/{path}'")
           alice("touch ~/.config/vpn-zones/from-host && rm ~/.config/vpn-zones/from-host")
