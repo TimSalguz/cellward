@@ -99,6 +99,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   zone's camera setting applies from the next launch on: no restart of the
   zone (and `camera` is no longer in `restart_needed`).
 
+- **Links on behalf of a container** (`docs/PERMISSIONS.md` §11.13): a link a
+  program of a hermetic zone (or of a sandbox) opens goes from the bus filter
+  to the broker on the host, not to `xdg-open` in the zone. The program is
+  the distribution's to offer: the portal backend's window of choice
+  (`AppChooser`, called on the implementation, which starts nothing; the
+  backend the portal configuration names for it, else GNOME, KDE, GTK, else a
+  kdialog menu) with the programs that claim the scheme, the distribution's
+  default first — no window where only one program does. The container and
+  the network are CellWard's: the launch window, as for any launch a zone
+  asks for; an entry CellWard does not take over (a symlink) runs in the
+  asking zone at once, as before. "Always" is per container: a checkbox of
+  its own in the launch window keeps a rule `link = <scheme> <id>`
+  (Nix `containers.<name>.links`, `cellward container links <c> [set|rm]`,
+  `containers[].links` in `status --json`) which skips the choice of the
+  program only. The container is the zone's filter's word for the
+  connection, believed from that filter alone (its parent is the zone's
+  process); the host's default applications are never changed. The filter
+  answers the portal call at once and hands the link over in a thread of
+  its own: the program's bus goes on while the person chooses.
 - **A `/dev` of the zone's own, and terminals of its own**
   (`docs/PERMISSIONS.md` §11.12, `docs/LEAK-MODEL.md` §19): the zone's
   `/dev` is a tmpfs with only the basics and the GPU bound in from the

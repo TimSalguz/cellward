@@ -936,6 +936,18 @@ pub fn ours(path: &Path) -> bool {
     }
 }
 
+/// Whether CellWard takes the entry `id` over: the user's directory has our
+/// entry in its place (the picker's, or the adopted one). A symlink there —
+/// home-manager's, the user's — is left alone, and a program started from it
+/// runs where it was asked for, as `xdg-open` would run it.
+pub fn intercepted(home: &Path, id: &str) -> bool {
+    ours(
+        &home
+            .join(".local/share/applications")
+            .join(format!("{id}.desktop")),
+    )
+}
+
 /// Is this an entry taken over in place — ours, with the `adopted` marker?
 pub fn adopted(path: &Path) -> bool {
     ours(path)

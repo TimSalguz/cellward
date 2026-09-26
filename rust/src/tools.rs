@@ -99,11 +99,14 @@ pub struct Tools {
     /// `vpn-zone-window`: the launch window, the network and the container in
     /// one (`crate::window`). Where it is missing the picker asks with kdialog.
     pub window: PathBuf,
+    /// `busctl`: the broker asks the portal backend's window of choice which
+    /// program opens a link (`crate::links`).
+    pub busctl: PathBuf,
 }
 
 /// The keys of the manifest, in the order they are reported. Kept next to the
 /// struct so that `module/default.nix` and this file can be diffed by eye.
-const KEYS: [&str; 22] = [
+const KEYS: [&str; 23] = [
     "home",
     "state",
     "profiles",
@@ -126,6 +129,7 @@ const KEYS: [&str; 22] = [
     "certutil",
     "opener",
     "window",
+    "busctl",
 ];
 
 /// Why the manifest could not be used. Every variant names the file: when this
@@ -216,6 +220,7 @@ impl Tools {
             certutil: take("certutil")?,
             opener: take("opener")?,
             window: take("window")?,
+            busctl: take("busctl")?,
         })
     }
 

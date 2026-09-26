@@ -43,6 +43,15 @@
 //! zone and the command in it. What the person chose comes back as the
 //! arguments of `run`; the broker checks them against the request and starts
 //! them. No question after that one: the window was the question.
+//!
+//! **A link to open** (`VZL1\0`, the app-id, the link, the container the
+//! asking program is of — `crate::links`, [`handle_link`]): the program
+//! chosen by the container's rule, else in the distribution's window of
+//! choice; then the launch window as for a choice to make. The container
+//! is the zone's bus filter's word for its program's connection, believed
+//! from that filter alone — a child of the zone's process, which a program
+//! of the zone cannot be ([`is_zones_filter`]); anyone else's is the
+//! container the kernel says the asking process is of.
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -60,6 +69,8 @@ use crate::tools::Tools;
 const MAGIC: &[u8] = b"VZB1\0";
 /// The magic of a choice to make ([`handle_pick`]).
 const PICK_MAGIC: &[u8] = b"VZP1\0";
+/// The magic of a link to open ([`handle_link`]).
+const LINK_MAGIC: &[u8] = b"VZL1\0";
 /// The socket, below the runtime directory.
 pub const SOCKET: &str = "vpn-zones/broker";
 /// The largest request the broker reads: a command line, not a file.
@@ -103,6 +114,17 @@ pub fn decode(bytes: &[u8]) -> Option<(OsString, Vec<OsString>)> {
 /// A choice to make from bytes: `(app_id, cmd)`.
 pub fn decode_pick(bytes: &[u8]) -> Option<(OsString, Vec<OsString>)> {
     decode_with(PICK_MAGIC, bytes)
+}
+
+/// A link to open, as bytes: the app-id, the link, and the container the
+/// asking program is of (empty: none said).
+pub fn encode_link(app_id: &[u8], uri: &str, container: &str) -> Vec<u8> {
+    encode_with(LINK_MAGIC, app_id, &[uri.into(), container.into()])
+}
+
+/// A link to open from bytes: `(app_id, [uri, container])`.
+pub fn decode_link(bytes: &[u8]) -> Option<(OsString, Vec<OsString>)> {
+    decode_with(LINK_MAGIC, bytes)
 }
 
 fn decode_with(magic: &[u8], bytes: &[u8]) -> Option<(OsString, Vec<OsString>)> {
@@ -351,6 +373,7 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
     let oversized = if bytes.len() as u64 > MAX_REQUEST {
         Some("запрос длиннее 64 КиБ")
     } else if decode_pick(&bytes)
+        .or_else(|| decode_link(&bytes))
         .or_else(|| decode(&bytes))
         .is_some_and(|(app_id, _)| app_id.len() > MAX_APP_ID)
     {
@@ -365,6 +388,12 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
     }
     if let Some((app_id, cmd)) = decode_pick(&bytes) {
         let answer = handle_pick(tools, &origin, &app_id, &cmd);
+        eprintln!("broker: {answer}");
+        let _ = stream.write_all(format!("{answer}\n").as_bytes());
+        return;
+    }
+    if let Some((_, args)) = decode_link(&bytes) {
+        let answer = handle_link(tools, &origin, peer.as_ref(), &args);
         eprintln!("broker: {answer}");
         let _ = stream.write_all(format!("{answer}\n").as_bytes());
         return;
@@ -949,7 +978,8 @@ fn handle_pick(tools: &Tools, origin: &Origin, app_id: &OsString, cmd: &[OsStrin
                 .to_owned()
         }
     };
-    let result = pick_and_check(&zone, locked, app_id, cmd, &origin.name());
+    let result =
+        pick_and_check(&zone, locked, app_id, cmd, &origin.name(), None).map(|(argv, _)| argv);
     let (answer, target) = match result {
         Ok(argv) => {
             let target = argv
@@ -987,7 +1017,8 @@ fn pick_and_check(
     app_id: &OsString,
     cmd: &[OsString],
     origin: &str,
-) -> Result<Vec<OsString>, String> {
+    offer_rule: Option<&str>,
+) -> Result<(Vec<OsString>, bool), String> {
     if cmd.is_empty() {
         return Err("нечего запускать".to_owned());
     }
@@ -1022,6 +1053,9 @@ fn pick_and_check(
     command.arg("--from-zone").arg(zone);
     if locked {
         command.arg("--locked");
+    }
+    if let Some(rule) = offer_rule {
+        command.arg("--offer-rule").arg(rule);
     }
     command
         .arg("--id")
@@ -1075,8 +1109,212 @@ fn pick_and_check(
     if argv.last().is_some_and(|a| a.is_empty()) {
         argv.pop();
     }
+    // The rule offered and ticked: said first.
+    let rule = offer_rule.is_some() && argv.first().is_some_and(|w| w == "--rule");
+    if rule {
+        argv.remove(0);
+    }
     check_pick(&argv, zone, locked, cmd)?;
-    Ok(argv)
+    Ok((argv, rule))
+}
+
+/// Whether the asking process is the zone's own bus filter: a child of the
+/// zone's process (`zone.pid`) — which a program of the zone cannot be: it
+/// comes in from the host (`nsenter`), and an orphan goes to the host's
+/// reaper, never to the zone's process. Read while the process is held.
+fn is_zones_filter(tools: &Tools, zone: &str, peer: Option<&Peer>) -> bool {
+    let (Some(peer), Some(zone_pid)) = (peer, zone_pid(&tools.state, std::ffi::OsStr::new(zone)))
+    else {
+        return false;
+    };
+    crate::sys::ancestors(peer.pid, &peer.pidfd).get(1) == Some(&zone_pid) && peer.alive()
+}
+
+/// A link a program of a zone opens (`crate::links`): the program — the
+/// container's rule, else the distribution's window of choice —, then the
+/// launch window, as for [`handle_pick`], with the rule offered where the
+/// container is known and has none for this scheme.
+fn handle_link(tools: &Tools, origin: &Origin, peer: Option<&Peer>, args: &[OsString]) -> String {
+    let answer = link_answer(tools, origin, peer, args);
+    let decision = if answer.0 == "ok" {
+        "started"
+    } else {
+        "refused"
+    };
+    let why = answer.0.strip_prefix("refused: ").unwrap_or("");
+    if !may_journal(&origin.name()) {
+        eprintln!("broker: journal: too many lines of this zone — {decision}");
+    } else if let Err(e) = crate::journal::append(
+        &tools.state,
+        "broker",
+        &[
+            ("origin", origin.name().as_str()),
+            ("target", answer.1.as_str()),
+            ("app", answer.2.as_str()),
+            ("link", answer.3.as_str()),
+            ("decision", decision),
+            ("why", why),
+        ],
+    ) {
+        eprintln!("broker: journal: {e}");
+    }
+    answer.0
+}
+
+/// [`handle_link`]'s work: the answer, the network it went to, the program,
+/// and the link as the log may show it.
+fn link_answer(
+    tools: &Tools,
+    origin: &Origin,
+    peer: Option<&Peer>,
+    args: &[OsString],
+) -> (String, String, String, String) {
+    let refused = |why: String, shown: &str| {
+        (
+            format!("refused: {why}"),
+            String::new(),
+            String::new(),
+            shown.to_owned(),
+        )
+    };
+    // A zone's program, or a sandbox's on the host.
+    let zone = match origin {
+        Origin::Zone(zone) => Some(zone.as_str()),
+        Origin::Host => None,
+        _ => return refused("не понять, откуда ссылка".to_owned(), ""),
+    };
+    let Some(uri) = args.first().and_then(|u| u.to_str()) else {
+        return refused("нет ссылки".to_owned(), "");
+    };
+    let shown = crate::bus_filter::loggable(uri);
+    if let Err(why) = crate::bus_filter::acceptable(uri) {
+        return refused(format!("ссылка не принята: {why}"), &shown);
+    }
+    let Some(scheme) = crate::links::scheme_of(uri) else {
+        return refused("у ссылки нет схемы".to_owned(), &shown);
+    };
+    // Whose program asks: the filter's word from the zone's filter alone,
+    // else the kernel's. Only a container that is one keeps a rule.
+    let claim = args
+        .get(1)
+        .and_then(|c| c.to_str())
+        .filter(|c| !c.is_empty());
+    let container = zone
+        .and_then(|zone| match claim {
+            Some(c) if is_zones_filter(tools, zone, peer) => Some(c.to_owned()),
+            _ => container_of(tools, zone, peer),
+        })
+        .filter(|c| !c.is_empty())
+        .and_then(|c| crate::container::load(tools, &c));
+    let dirs = crate::desktop::source_dirs(&tools.home);
+    let ruled = container
+        .as_ref()
+        .and_then(|c| crate::links::rule(c, &scheme));
+    let id = match &ruled {
+        Some(id) => id.clone(),
+        None => {
+            let default =
+                crate::links::distro_default(&crate::links::mimeapps_files(&tools.home), &scheme);
+            let programs = crate::links::programs_for(
+                &dirs,
+                &tools.home,
+                &tools.state,
+                &scheme,
+                default.as_deref(),
+            );
+            // One program for such links: nothing to choose, as on a phone.
+            if let [only] = programs.as_slice() {
+                only.id.clone()
+            } else {
+                if !crate::launch::has_display() {
+                    return refused(
+                        "спросить некого (нет графической сессии)".to_owned(),
+                        &shown,
+                    );
+                }
+                match crate::links::choose(&tools.busctl, &tools.kdialog, &scheme, uri, &programs) {
+                    crate::links::Choice::Chosen(id) => id,
+                    crate::links::Choice::Cancelled => {
+                        return refused("программу не выбрали".to_owned(), &shown)
+                    }
+                    crate::links::Choice::Unavailable(why) => return refused(why, &shown),
+                }
+            }
+        }
+    };
+    let Some((file, groups)) = crate::desktop::find_entry(&dirs, &tools.home, &tools.state, &id)
+    else {
+        return refused(format!("ярлыка {id} нет"), &shown);
+    };
+    let Some(entry) = crate::desktop::desktop_entry(&groups) else {
+        return refused(format!("{id} — не ярлык программы"), &shown);
+    };
+    let (cmd, used) = crate::desktop::expand_exec(entry, &file, &[OsString::from(uri)]);
+    if cmd.is_empty() || !used {
+        return refused(format!("{id} не принимает ссылок"), &shown);
+    }
+    let name = entry
+        .get("Name")
+        .filter(|n| !n.is_empty())
+        .unwrap_or(&id)
+        .to_owned();
+    let app_id = OsString::from(crate::desktop::stable_key(&id));
+    let Some(zone) = zone else {
+        // A sandbox's program on the host: the host's own launch of it, with
+        // the picker's window as any launch has.
+        return (start_picker(&app_id, &name, &cmd), String::new(), id, shown);
+    };
+    // An entry CellWard does not take over (a symlink of the user's, of
+    // home-manager's): run where the link was asked for, as `xdg-open` in the
+    // zone would run it — no network or container is crossed.
+    if !crate::desktop::intercepted(&tools.home, &id) {
+        let argv: Vec<OsString> = [OsString::from(zone), "--".into()]
+            .into_iter()
+            .chain(cmd)
+            .collect();
+        return (start(&app_id, &argv, true), zone.to_owned(), id, shown);
+    }
+    let locked = tools
+        .state
+        .join(zone)
+        .join(crate::launch::NO_ESCAPE)
+        .exists();
+    // "Always", per container and only where it is known: the program kept
+    // for this scheme — the choice of it skipped next time, the window not.
+    let offer = match (&container, &ruled) {
+        (Some(c), None) => Some(format!(
+            "Всегда открывать ссылки {scheme}: из контейнера {} в {name}",
+            c.name
+        )),
+        _ => None,
+    };
+    let result = pick_and_check(
+        zone,
+        locked,
+        &app_id,
+        &cmd,
+        &origin.name(),
+        offer.as_deref(),
+    );
+    let (argv, keep) = match result {
+        Ok(chosen) => chosen,
+        Err(why) => return refused(why, &shown),
+    };
+    let target = argv
+        .first()
+        .map(|z| z.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if keep {
+        if let Some(c) = &container {
+            if let Err(e) = crate::container::set_link(tools, &c.name, &scheme, Some(&id)) {
+                eprintln!(
+                    "broker: the rule for {scheme} links of {} not kept: {e}",
+                    c.name
+                );
+            }
+        }
+    }
+    (start(&app_id, &argv, false), target, id, shown)
 }
 
 /// What the window chose, against the request: the arguments of `run`, with
@@ -1138,6 +1376,42 @@ fn start(app_id: &OsString, argv: &[OsString], unasked: bool) -> String {
             "ok".to_owned()
         }
         Err(e) => format!("refused: не запустить vpn-zone: {e}"),
+    }
+}
+
+/// The picker, as a launch on the host starts it: for a link of a sandboxed
+/// program of the host, its program chosen.
+fn start_picker(app_id: &OsString, label: &str, cmd: &[OsString]) -> String {
+    let exe = match own_binary() {
+        Ok(exe) => exe,
+        Err(why) => return format!("refused: {why}"),
+    };
+    let mut command = Command::new(exe.with_file_name("vpn-zone-pick"));
+    command
+        .arg("--id")
+        .arg(app_id)
+        .arg("--label")
+        .arg(label)
+        .arg("--")
+        .args(cmd)
+        .env_remove(crate::launch::ENV_CURRENT)
+        .env_remove(crate::launch::ENV_DELEGATED)
+        .env_remove("VPN_ZONE_ASK")
+        .env_remove("VPN_ZONE_PROFILE")
+        .env_remove("LISTEN_PID")
+        .env_remove("LISTEN_FDS")
+        .env_remove("LISTEN_FDNAMES")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    match command.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            "ok".to_owned()
+        }
+        Err(e) => format!("refused: не запустить пикер: {e}"),
     }
 }
 
@@ -1225,6 +1499,13 @@ fn accept_forever(tools: &Tools, listener: &UnixListener) -> u8 {
 /// `None` when there is none to ask.
 pub fn request(app_id: &[u8], argv: &[OsString]) -> Option<u8> {
     exchange(&encode(app_id, argv))
+}
+
+/// The client half of a link to open, for a bus filter: `Some(code)` when a
+/// broker answered (after the windows were answered or closed), `None` when
+/// there is none to ask.
+pub fn link(uri: &str, container: &str) -> Option<u8> {
+    exchange(&encode_link(b"", uri, container))
 }
 
 /// The client half of a choice to make, for the picker in a zone: `Some(code)`

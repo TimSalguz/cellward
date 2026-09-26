@@ -514,10 +514,25 @@ pub fn container(tools: &Tools, c: &Container) -> String {
             .map(|d| sourced_str(&d.value, d.source))
             .collect(),
     );
+    // Its rules for links (`crate::links`): the program its links of a
+    // scheme open in without the choice of one, each with where from.
+    let links = array(
+        c.links
+            .iter()
+            .map(|l| {
+                format!(
+                    "{{\"scheme\":{},\"program\":{},\"source\":{}}}",
+                    string(&l.value.0),
+                    string(&l.value.1),
+                    string(l.source.as_str())
+                )
+            })
+            .collect(),
+    );
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
          \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"devices\":{devices}}}",
+         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"devices\":{devices},\"links\":{links}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),

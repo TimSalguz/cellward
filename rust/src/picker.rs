@@ -114,6 +114,10 @@ pub struct Args {
     /// zone ([`pick_for_zone`]); `--locked`: that zone is locked.
     pub from_zone: Option<String>,
     pub locked: bool,
+    /// `--offer-rule <text>`: with `--from-zone`, a checkbox of its own in
+    /// the window — a container's rule for links (`crate::links`); ticked,
+    /// the answer starts with the word `--rule`.
+    pub offer_rule: Option<String>,
     pub cmd: Vec<OsString>,
 }
 
@@ -136,6 +140,7 @@ impl Args {
         let mut autostart = false;
         let mut from_zone = None;
         let mut locked = false;
+        let mut offer_rule = None;
         let mut at = 0;
         while at < rest.len() {
             match rest[at].as_bytes() {
@@ -162,6 +167,13 @@ impl Args {
                     locked = true;
                     at += 1;
                 }
+                b"--offer-rule" => {
+                    offer_rule = rest
+                        .get(at + 1)
+                        .map(|r| r.to_string_lossy().into_owned())
+                        .filter(|r| !r.is_empty());
+                    at += 2;
+                }
                 b"--" => {
                     at += 1;
                     break;
@@ -176,6 +188,7 @@ impl Args {
             autostart,
             from_zone,
             locked,
+            offer_rule,
             cmd: rest.get(at..).unwrap_or(&[]).to_vec(),
         }
     }
@@ -1469,7 +1482,15 @@ pub fn main() -> ExitCode {
 
     if let Some(zone) = &args.from_zone {
         let memory = read_memory_with(&tools, &key, false);
-        return pick_for_zone(&tools, &key, &memory, &args.cmd, zone, args.locked);
+        return pick_for_zone(
+            &tools,
+            &key,
+            &memory,
+            &args.cmd,
+            zone,
+            args.locked,
+            args.offer_rule.as_deref(),
+        );
     }
     let memory = read_memory(&tools, &key);
     if args.autostart {
@@ -1673,6 +1694,7 @@ fn pick_for_zone(
     cmd: &[OsString],
     zone: &str,
     locked: bool,
+    offer_rule: Option<&str>,
 ) -> ExitCode {
     let refuse = |why: &str| {
         eprintln!("vpn-zone-pick: {why}");
@@ -1687,7 +1709,8 @@ fn pick_for_zone(
     let Some(shown) = crate::broker::shown_words(cmd) else {
         return refuse("команда слишком длинная, чтобы показать её целиком");
     };
-    let req = zone_request(tools, key, memory, cmd, &shown, zone, locked);
+    let mut req = zone_request(tools, key, memory, cmd, &shown, zone, locked);
+    req.rule = offer_rule.map(str::to_owned);
 
     let asked = std::time::Instant::now();
     let reply = match show_window(tools, &req) {
@@ -1720,6 +1743,10 @@ fn pick_for_zone(
     }
     let argv = run_argv(Path::new(""), net, &container, cmd);
     let mut out = Vec::new();
+    // The rule ticked: said first, apart from the arguments of `run`.
+    if offer_rule.is_some() && reply.rule {
+        out.extend_from_slice(b"--rule\0");
+    }
     for word in &argv[2..] {
         out.extend_from_slice(word.as_bytes());
         out.push(0);

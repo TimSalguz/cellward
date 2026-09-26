@@ -255,6 +255,10 @@ pub struct Container {
     /// The devices it is given (`crate::devices::Grant` words): declared
     /// ones first, then the local ones.
     pub devices: Vec<Sourced<String>>,
+    /// Its rules for links (`crate::links`): `(scheme, program id)`, the
+    /// program its links of that scheme open in without asking which;
+    /// declared ones first, one per scheme.
+    pub links: Vec<Sourced<(String, String)>>,
     /// The container's data directory ([`data_dir`]). May not exist yet — and
     /// a container of the main home has none it uses.
     pub dir: PathBuf,
@@ -1700,6 +1704,22 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
             }
         }
     }
+    // One rule a scheme, the declared one before a local one.
+    let mut links: Vec<Sourced<(String, String)>> = Vec::new();
+    let declared_links: Vec<&str> = declared_conf
+        .map(|conf| values(conf, "link").collect())
+        .unwrap_or_default();
+    for (word, source) in declared_links
+        .into_iter()
+        .map(|w| (w, Source::Nix))
+        .chain(values(&local, "link").map(|w| (w, Source::Local)))
+    {
+        if let Some(value) = crate::links::parse_rule(word) {
+            if !links.iter().any(|l| l.value.0 == value.0) {
+                links.push(Sourced { value, source });
+            }
+        }
+    }
 
     Some(Container {
         name: name.to_owned(),
@@ -1712,6 +1732,7 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         screencast,
         camera,
         devices,
+        links,
         declared_trust,
         paths,
         expires,
@@ -2484,6 +2505,45 @@ pub fn set_device(tools: &Tools, selector: &str, word: &str, add: bool) -> Resul
         local.push(word);
     }
     write_values(&container.policy.join(FILE), "device", &local)
+}
+
+/// A container's rule for links of `scheme`, locally: they open in program
+/// `id` without asking which (`None`: the rule taken away). Refused where
+/// Nix set one.
+pub fn set_link(
+    tools: &Tools,
+    selector: &str,
+    scheme: &str,
+    id: Option<&str>,
+) -> Result<(), String> {
+    let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    let Some(scheme) = crate::links::scheme_of(&format!("{scheme}:")) else {
+        return Err(format!("«{scheme}» — не схема ссылки (https, tg, mailto…)"));
+    };
+    if container
+        .links
+        .iter()
+        .any(|l| l.value.0 == scheme && l.source == Source::Nix)
+    {
+        return Err(format!(
+            "ссылки {scheme}: контейнера {selector} заданы в Nix — меняются там"
+        ));
+    }
+    let mut local: Vec<String> = container
+        .links
+        .iter()
+        .filter(|l| l.source == Source::Local && l.value.0 != scheme)
+        .map(|l| crate::links::rule_word(&l.value.0, &l.value.1))
+        .collect();
+    if let Some(id) = id {
+        if !crate::links::plausible_id(id) {
+            return Err(format!(
+                "«{id}» — не id ярлыка (имя .desktop-файла без расширения)"
+            ));
+        }
+        local.push(crate::links::rule_word(&scheme, id));
+    }
+    write_values(&container.policy.join(FILE), "link", &local)
 }
 
 /// A container's `yes|no|ask` switch `key`, locally; refused where Nix set
@@ -3317,6 +3377,7 @@ mod tests {
             screencast: None,
             camera: None,
             devices: Vec::new(),
+            links: Vec::new(),
             dir: PathBuf::from("/s/work"),
             policy: PathBuf::from("/c/containers/work"),
         }

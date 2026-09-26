@@ -23,6 +23,8 @@
 //! asker⇥<net>                         (a zone asks: Enter starts only there)
 //! program⇥<text>                      (what the command runs, on the host)
 //! cmd⇥<word>                          (the zone's command, a word each)
+//! rule⇥<text>                         (a checkbox of its own: a container's
+//!                                      rule for links, `crate::links`)
 //! ```
 //!
 //! Flags, comma-separated: `selected`; `dead` (the tunnel does not answer);
@@ -37,6 +39,7 @@
 //! name⇥<text>                         (for a `new` container)
 //! pin-net⇥0|1
 //! pin-container⇥0|1
+//! rule⇥0|1                            (where the request had one)
 //! ```
 //!
 //! The same window is the hotkey menu of a running program
@@ -78,6 +81,9 @@ pub struct Request {
     pub program: String,
     /// The zone's command, one word each, shown apart from the notes.
     pub command: Vec<String>,
+    /// A checkbox of its own, unticked: the rule a link's program would be
+    /// kept by (`crate::links`) — what it says.
+    pub rule: Option<String>,
 }
 
 /// The hotkey menu: entries to choose one of.
@@ -122,6 +128,8 @@ pub struct Reply {
     pub name: Option<String>,
     pub pin_net: bool,
     pub pin_container: bool,
+    /// The request's rule ticked.
+    pub rule: bool,
 }
 
 /// A field as the format can carry it: tabs and line breaks become spaces.
@@ -190,6 +198,9 @@ pub fn render(req: &Request) -> String {
     for word in &req.command {
         out.push_str(&format!("cmd\t{}\n", clean(word)));
     }
+    if let Some(rule) = &req.rule {
+        out.push_str(&format!("rule\t{}\n", clean(rule)));
+    }
     out
 }
 
@@ -206,6 +217,7 @@ pub fn parse_reply(text: &str) -> Option<Reply> {
             "name" => reply.name = Some(value.to_owned()).filter(|v| !v.is_empty()),
             "pin-net" => reply.pin_net = value == "1",
             "pin-container" => reply.pin_container = value == "1",
+            "rule" => reply.rule = value == "1",
             _ => {}
         }
     }

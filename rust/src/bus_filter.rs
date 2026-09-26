@@ -10,15 +10,17 @@
 //!
 //! Refusing the call is no answer: GLib does not fall back to `xdg-open` when
 //! the portal says no, the link simply does not open. So the call is answered
-//! HERE, the way the portal would answer it, and the link is opened with
-//! `xdg-open` in the sandbox launcher's context — in the zone, outside the
-//! sandbox. From there it takes the door every link of a program in a zone
-//! takes: the picker, and for another network the broker's question.
+//! HERE, the way the portal would answer it, and the link goes to the broker
+//! on the host (`crate::links`, `docs/PERMISSIONS.md` §11.13): the program
+//! chosen there — the container's rule, the distribution's window of choice
+//! —, then the network and the container in the launch window. The filter
+//! tells the broker whose program's connection asked; with no broker, a
+//! sandbox's filter on the host opens the link with `xdg-open` as before.
 //!
 //! ```text
 //! program in bwrap ──► bus-filter (this) ──► xdg-dbus-proxy ──► session bus
 //!                         │ OpenURI/OpenFile/OpenDirectory, ComposeEmail:
-//!                         │ answered here; a link → `xdg-open` in the zone
+//!                         │ answered here; a link → the broker, on the host
 //! ```
 //!
 //! Everything else passes byte for byte, file descriptors with the message
@@ -1344,7 +1346,7 @@ fn answer(conn: &Conn, ctx: &Ctx, msg: &[u8], h: &Header, which: Door) -> io::Re
 
     let code = match which {
         Door::Uri => match parsed.as_ref().and_then(|(s, _)| s.get(1)) {
-            Some(uri) => open_link(ctx, uri),
+            Some(uri) => open_link(ctx, uri, &conn.who),
             None => {
                 eprintln!("bus-filter: OpenURI that does not parse — refused");
                 RESPONSE_OTHER
@@ -1403,9 +1405,17 @@ fn answer(conn: &Conn, ctx: &Ctx, msg: &[u8], h: &Header, which: Door) -> io::Re
     conn.send(&signal, &[])
 }
 
-/// Hand a link to the opener, in this process's context — the zone, outside
-/// the sandbox. The response code for the portal answer.
-fn open_link(ctx: &Ctx, uri: &str) -> u32 {
+/// Hand a link to the broker on the host (`crate::links`): the program is
+/// chosen there — the container's rule, the distribution's window of choice
+/// —, then the network and the container. `who`: whose program's connection
+/// asks, which the broker believes from the zone's own filter alone. The
+/// person may take their time over the windows, and the program's bus goes
+/// on meanwhile: handed over in a thread of its own, and the portal's answer
+/// is "done" at once — a link they then decide not to open is one the
+/// program need not hear of. With no broker to hand it to, a sandbox's
+/// filter on the host opens it as it did, with the opener; a zone's does not.
+/// The response code for the portal answer.
+fn open_link(ctx: &Ctx, uri: &str, who: &crate::origin::Who) -> u32 {
     let shown = loggable(uri);
     if let Err(why) = acceptable(uri) {
         eprintln!("bus-filter: link {shown} refused: {why}");
@@ -1418,47 +1428,39 @@ fn open_link(ctx: &Ctx, uri: &str) -> u32 {
         eprintln!("bus-filter: link {shown} refused: more than {MAX_OPENS_PER_MINUTE} a minute");
         return RESPONSE_OTHER;
     }
-    if let Some(zone) = &ctx.via_broker {
-        let argv: Vec<OsString> = vec![
-            zone.into(),
-            "--".into(),
-            ctx.opener.clone().into(),
-            uri.into(),
-        ];
-        return match crate::broker::request(b"", &argv) {
-            Some(0) => {
-                eprintln!("bus-filter: link {shown} → the broker, into the zone {zone}");
-                RESPONSE_OK
-            }
-            other => {
-                eprintln!("bus-filter: link {shown}: the broker did not start it ({other:?})");
-                RESPONSE_OTHER
-            }
-        };
-    }
-    match Command::new(&ctx.opener)
+    let claim = match who {
+        crate::origin::Who::Container(name) => name.clone(),
+        _ => String::new(),
+    };
+    let (uri, opener, in_zone) = (uri.to_owned(), ctx.opener.clone(), ctx.via_broker.is_some());
+    thread::spawn(move || match crate::broker::link(&uri, &claim) {
+        Some(0) => eprintln!("bus-filter: link {shown} → the broker"),
+        Some(_) => eprintln!("bus-filter: link {shown}: the broker did not open it"),
+        None if in_zone => {
+            eprintln!("bus-filter: link {shown}: no broker to hand it to — not opened")
+        }
+        None => run_opener(&opener, &uri, &shown),
+    });
+    RESPONSE_OK
+}
+
+/// The opener, in this process's context: a sandbox's filter on the host
+/// with no broker to ask.
+fn run_opener(opener: &Path, uri: &str, shown: &str) {
+    match Command::new(opener)
         .arg(uri)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .spawn()
     {
         Ok(mut child) => {
-            eprintln!(
-                "bus-filter: link {shown} → {} in the zone",
-                ctx.opener.display()
-            );
-            thread::spawn(move || {
-                let _ = child.wait();
-            });
-            RESPONSE_OK
+            eprintln!("bus-filter: link {shown} → {}", opener.display());
+            let _ = child.wait();
         }
-        Err(e) => {
-            eprintln!(
-                "bus-filter: link {shown}: cannot run {}: {e}",
-                ctx.opener.display()
-            );
-            RESPONSE_OTHER
-        }
+        Err(e) => eprintln!(
+            "bus-filter: link {shown}: cannot run {}: {e}",
+            opener.display()
+        ),
     }
 }
 

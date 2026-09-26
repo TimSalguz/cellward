@@ -111,6 +111,7 @@ pub mod journal;
 pub mod json;
 pub mod kill;
 pub mod launch;
+pub mod links;
 pub mod microphone;
 pub mod openconnect;
 pub mod origin;

@@ -296,11 +296,15 @@ let
       # базы NSS контейнера из `profile-run`.
       openssl = "${pkgs.openssl}/bin/openssl";
       certutil = "${pkgs.nss.tools}/bin/certutil";
-      # Ссылки программ из песочницы (LEAK-MODEL §2): их портал отвечает
-      # фильтр шины песочницы, а открывает xdg-open — в зоне, мимо портала хоста.
+      # Ссылки программ из песочницы на хосте, когда брокера нет (LEAK-MODEL §2):
+      # портал им отвечает фильтр шины песочницы, открывает xdg-open. Из зоны
+      # ссылки идут брокеру (PERMISSIONS §11.13).
       opener = "${vpn-zone-opener}";
       # Окно запуска: пикер спрашивает им вместо двух меню kdialog.
       window = "${vpn-zone-window}/bin/vpn-zone-window";
+      # Выбор программы для ссылки из зоны: окно бэкенда портала
+      # (AppChooser), зовёт брокер (rust/src/links.rs).
+      busctl = "${pkgs.systemd}/bin/busctl";
       # awg/wg/pasta/nft/openconnect здесь намеренно НЕТ: их зовёт только
       # держатель зоны, и получает он их флагами ExecStart своего юнита.
       # Дублировать пути в двух местах — значит однажды поменять их в одном.
@@ -557,6 +561,7 @@ let
       ++ lib.optional (c.permissions.screencast != null) "screencast = ${c.permissions.screencast}"
       ++ lib.optional (c.permissions.camera != null) "camera = ${lib.boolToString c.permissions.camera}"
       ++ map (device: "device = ${device}") c.permissions.devices
+      ++ lib.mapAttrsToList (scheme: app: "link = ${scheme} ${app}") c.links
     )
     + "\n";
 
@@ -615,6 +620,15 @@ let
         default = null;
         example = "ask";
         description = "Может ли программа контейнера записывать микрофон: yes (без вопроса), no (никогда) или ask — спросить при первой записи: один раз, всегда (этому контейнеру) или отказать. Контейнер знают по запуску, из которого вышла программа (docs/PERMISSIONS.md §11.10). null — как у его зоны (programs.cellward.microphone) или как задано локально (cellward container set <контейнер> microphone). Значение зоны из Nix важнее местной настройки контейнера, значение контейнера из Nix — важнее всего. Путь PulseAudio; ограниченный PipeWire герметичной зоны пока решает по зоне.";
+      };
+      links = lib.mkOption {
+        type = lib.types.attrsOf (lib.types.strMatching "[^[:space:]/]+");
+        default = { };
+        example = {
+          https = "firefox";
+          tg = "org.telegram.desktop";
+        };
+        description = "В какой программе открывать ссылки схемы из этого контейнера без выбора программы (docs/PERMISSIONS.md §11.13): схема → id ярлыка (имя .desktop-файла без расширения). Окно сети и контейнера при этом остаётся. Без правила программу для ссылки предлагает окно выбора дистрибутива (портал); системное умолчание (mimeapps.list) cellward не меняет. Локально — cellward container links.";
       };
       permissions.devices = lib.mkOption {
         type = lib.types.listOf (

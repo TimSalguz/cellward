@@ -2428,6 +2428,38 @@ let
           lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
           at = lines.index("https://example.test/raw-begin")
           assert lines[at + 1] == zone_ns, f"{lines} (zone {zone_ns})"
+          # Links on behalf of a container (docs/PERMISSIONS.md §11.13): two
+          # programs claim https now. A container's rule chooses one without
+          # a window — the zone's filter says whose program's connection
+          # asked, and the broker believes the filter alone; the zone's own
+          # program has no rule, and with no window of choice to show here
+          # (no portal backend, no display), its link does not open.
+          alice(
+              "printf '#!/bin/sh\\necho \"second $1\" >> /home/alice/opened-urls\\n' "
+              "> ~/.local/share/vmurl/record2 && chmod 755 ~/.local/share/vmurl/record2"
+          )
+          alice(
+              "printf '[Desktop Entry]\\nType=Application\\nName=VM URL 2\\n"
+              "Exec=/home/alice/.local/share/vmurl/record2 %%u\\n"
+              "MimeType=x-scheme-handler/https;\\n' > ~/.local/share/vmurl/vmurl2.desktop"
+          )
+          alice("ln -sfn ~/.local/share/vmurl/vmurl2.desktop ~/.local/share/applications/vmurl2.desktop")
+          alice("cellward container create vmlink --home layer")
+          alice("cellward container links vmlink set https vmurl2")
+          shown = json.loads(alice("cellward container show vmlink --json"))["container"]
+          assert shown["links"] == [{"scheme": "https", "program": "vmurl2", "source": "local"}], shown
+          out = alice(f"cellward run vmherm --container vmlink -- {portal} ''' 'https://example.test/by-rule' '@a{{sv}} {{}}'")
+          assert "/org/freedesktop/portal/desktop/request/" in out, out
+          machine.wait_until_succeeds("grep -q 'second https://example.test/by-rule' /home/alice/opened-urls", timeout=30)
+          out = in_zone(hp, f"{portal} ''' 'https://example.test/no-rule' '@a{{sv}} {{}}'")
+          assert "/org/freedesktop/portal/desktop/request/" in out, out
+          machine.sleep(3)
+          machine.fail("grep -q no-rule /home/alice/opened-urls")
+          alice("cellward container links vmlink rm https")
+          shown = json.loads(alice("cellward container show vmlink --json"))["container"]
+          assert shown["links"] == [], shown
+          alice("cellward container rm vmlink")
+          alice("rm -f ~/.local/share/applications/vmurl2.desktop")
           # A notification from the zone reaches the host's daemon without
           # what points anywhere: no link in the text, no icon by URL, no
           # application to activate, no URLs among the hints. The types said

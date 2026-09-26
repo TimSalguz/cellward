@@ -70,6 +70,9 @@ struct Request {
     program: String,
     /// `cmd⇥<word>`: the command, one word each.
     command: Vec<String>,
+    /// `rule⇥<text>`: a checkbox of its own, unticked — a container's rule
+    /// for links; answered `rule⇥0|1`.
+    rule: Option<String>,
 }
 
 fn parse_item(fields: &[&str]) -> Option<Item> {
@@ -120,6 +123,7 @@ fn parse_request(text: &str) -> Request {
             "asker" => req.asker = fields.get(1).map(|v| v.to_string()),
             "program" => req.program = fields.get(1).unwrap_or(&"").to_string(),
             "cmd" => req.command.push(fields.get(1).unwrap_or(&"").to_string()),
+            "rule" => req.rule = fields.get(1).map(|v| v.to_string()).filter(|v| !v.is_empty()),
             _ => {}
         }
     }
@@ -144,6 +148,7 @@ enum Msg {
     Container(usize),
     PinNet(bool),
     PinContainer(bool),
+    Rule(bool),
     Name(String),
     Launch,
     Cancel,
@@ -167,6 +172,8 @@ struct Window {
     container: usize,
     pin_net: bool,
     pin_container: bool,
+    /// The request's rule ticked.
+    rule: bool,
     name: String,
     /// False while the request's guard runs.
     armed: bool,
@@ -200,6 +207,7 @@ impl Window {
         Self {
             pin_net: req.pin_net,
             pin_container: req.pin_container,
+            rule: false,
             pane: Pane::Net,
             net,
             container,
@@ -290,6 +298,9 @@ impl Window {
             "pin-container\t{}\n",
             u8::from(self.pin_container)
         ));
+        if self.req.rule.is_some() {
+            out.push_str(&format!("rule\t{}\n", u8::from(self.rule)));
+        }
         out
     }
 
@@ -362,6 +373,7 @@ impl Window {
             }
             Msg::PinNet(v) => self.pin_net = v && !self.req.no_pins,
             Msg::PinContainer(v) => self.pin_container = v && !self.req.no_pins,
+            Msg::Rule(v) => self.rule = v && self.req.rule.is_some(),
             Msg::Armed(holds) => self.armed |= holds == self.holds,
             Msg::Press => {}
             // Losing the focus disarms; getting it back starts the guard.
@@ -601,6 +613,9 @@ impl Window {
             page = page.push(self.command_view());
         }
         page = page.push(row![left, right].spacing(16).height(Length::Fill));
+        if let Some(rule) = &self.req.rule {
+            page = page.push(checkbox(self.rule).label(rule).on_toggle(Msg::Rule));
+        }
         let label = if !self.armed {
             "Секунду…".to_owned()
         } else if self.enter_starts() {
@@ -887,6 +902,26 @@ mod tests {
         press(&mut w, Key::Named(key::Named::Space));
         assert!(!w.pin_net && !w.pin_container);
         assert!(w.answer().ends_with("pin-net\t0\npin-container\t0\n"));
+    }
+
+    /// A link's rule: offered unticked, answered as ticked or not, and never
+    /// ticked where it was not offered.
+    #[test]
+    fn a_rule_is_offered_unticked_and_answered() {
+        let text = "title\tt\nnet\tnl\tnl\tselected\ncontainer\t\tОсновной\t\n\
+                    pins\t0\nrule\tВсегда открывать ссылки https: из контейнера tg в Firefox\n";
+        let req = parse_request(text);
+        assert_eq!(
+            req.rule.as_deref(),
+            Some("Всегда открывать ссылки https: из контейнера tg в Firefox")
+        );
+        let mut w = Window::new(req);
+        assert!(w.answer().ends_with("rule\t0\n"));
+        let _ = w.update(Msg::Rule(true));
+        assert!(w.answer().ends_with("rule\t1\n"));
+        let mut plain = Window::new(parse_request("title\tt\nnet\tnl\tnl\ncontainer\t\tОсновной\t\n"));
+        let _ = plain.update(Msg::Rule(true));
+        assert!(!plain.answer().contains("rule"));
     }
 
     /// In a zone's window Enter starts only in the network that asks; digits
