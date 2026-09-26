@@ -617,6 +617,14 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         refuse(tools, &why);
         return 1;
     }
+    // Only now anything is made or moved for it — never for a launch that is
+    // refused, never in a dry run.
+    if env_nonempty(ENV_DRYRUN).is_none() {
+        if let Err(why) = prepare_selection(tools, &selection) {
+            refuse(tools, &why);
+            return 1;
+        }
+    }
 
     // --- 2. THE CONTAINER ---
     let Some(container) = resolve_container(tools, &selection) else {
@@ -1284,15 +1292,24 @@ pub fn container_name(selection: &Selection) -> Option<String> {
 /// One launch, one container (`docs/PERMISSIONS.md` §11.7): the name —
 /// `--container`, and the words from before, `--profile` and `--sandbox` —
 /// read as the container it is now, its kind of home deciding how it is
-/// mounted. A layer and a home of its own together, or a named container
-/// with a throwaway one, are two containers: refused. `--sandbox` makes a
-/// missing container, with a home of its own, as it always made a sandbox;
-/// the others refuse one that is not there.
+/// mounted. Nothing is made or moved here: that is [`prepare_selection`],
+/// after the network is checked.
+///
+/// A layer and a home of its own together, or a named container with a
+/// throwaway one, are two containers: refused. `--sandbox` (and `sb:`) asks
+/// for a home of its own and gets nothing else: a name that is a layer or the
+/// main home is refused, not given the real home without a word; a missing
+/// one is made at the launch, as a sandbox always was. The others refuse a
+/// container that is not there, and one whose move to this layout has not
+/// finished (its data are not where the launch would look).
 pub fn resolve_selection(tools: &Tools, selection: Selection) -> Result<Selection, String> {
-    let (asked, create) = match (&selection.container, &selection.sandbox) {
+    use crate::container::Home;
+    let (asked, sandbox_asked) = match (&selection.container, &selection.sandbox) {
         (Container::Main, Sandbox::None | Sandbox::Throwaway)
         | (Container::TmpNew | Container::TmpJoin(_), Sandbox::None) => return Ok(selection),
-        (Container::Named(name), Sandbox::None) => (name.to_string_lossy().into_owned(), false),
+        (Container::Named(name) | Container::MainNamed(name), Sandbox::None) => {
+            (name.to_string_lossy().into_owned(), false)
+        }
         (Container::Main, Sandbox::Named(name)) => {
             // A stale `--sandbox work` is the sandbox that became `work-sb`.
             let old = format!(
@@ -1304,7 +1321,6 @@ pub fn resolve_selection(tools: &Tools, selection: Selection) -> Result<Selectio
                 .unwrap_or_else(|| name.to_string_lossy().into_owned());
             (name, true)
         }
-        (Container::MainNamed(name), Sandbox::None) => (name.to_string_lossy().into_owned(), false),
         _ => {
             return Err(
                 "один запуск — один контейнер: слой (--profile, --tmp-profile) и песочница \
@@ -1316,31 +1332,63 @@ pub fn resolve_selection(tools: &Tools, selection: Selection) -> Result<Selectio
     let Some(name) = crate::container::canonical(tools, &asked) else {
         return Err(format!("«{asked}» не может быть именем контейнера"));
     };
-    let container = match crate::container::load(tools, &name) {
-        Some(container) => container,
-        None if create => crate::container::create(tools, &name, crate::container::Home::Private)?,
+    if crate::container::move_pending(tools, &name) {
+        return Err(format!(
+            "данные контейнера {name} ещё не перенесены в новый каталог (см. сообщение \
+             переноса выше) — запуск остановлен, чтобы не открыть его с пустым домом"
+        ));
+    }
+    let home = match crate::container::load(tools, &name) {
+        Some(c) if sandbox_asked && c.home != Home::Private => {
+            return Err(format!(
+                "«{name}» — не песочница, а {}: запуск песочницы в нём остановлен. \
+                 Запустить в нём: --container {name}",
+                c.home.label()
+            ))
+        }
+        Some(c) => c.home,
+        None if sandbox_asked => Home::Private,
         None => {
             return Err(format!(
                 "контейнера {name} нет — создай: cellward container create {name}"
             ))
         }
     };
-    // Its data as its kind says, the other kind's set aside: on the host,
-    // before anything is mounted from them.
-    if env_nonempty(ENV_DRYRUN).is_none() {
-        crate::container::prepare_data(&container)?;
-    }
-    let name = OsString::from(&container.name);
-    let (container_axis, sandbox) = match container.home {
-        crate::container::Home::Layer => (Container::Named(name), Sandbox::None),
-        crate::container::Home::Private => (Container::Main, Sandbox::Named(name)),
-        crate::container::Home::Main => (Container::MainNamed(name), Sandbox::None),
+    let name = OsString::from(&name);
+    let (container_axis, sandbox) = match home {
+        Home::Layer => (Container::Named(name), Sandbox::None),
+        Home::Private => (Container::Main, Sandbox::Named(name)),
+        Home::Main => (Container::MainNamed(name), Sandbox::None),
     };
     Ok(Selection {
         container: container_axis,
         sandbox,
         ..selection
     })
+}
+
+/// Make a resolved launch's container ready, once the launch may go: a home
+/// of its own asked for and not there yet is made; the data are made the kind
+/// the settings say, the other kind's set aside — never under programs of
+/// the container that run, whose home would change under them (a change of
+/// kind in Nix does not ask).
+pub fn prepare_selection(tools: &Tools, selection: &Selection) -> Result<(), String> {
+    let Some(name) = container_name(selection) else {
+        return Ok(());
+    };
+    let container = match crate::container::load(tools, &name) {
+        Some(c) => c,
+        None => crate::container::create(tools, &name, crate::container::Home::Private)?,
+    };
+    if !crate::container::data_ready(&container) {
+        if let Some(busy) = crate::container::running_network(tools, &container) {
+            return Err(format!(
+                "у контейнера {name} сменился вид дома, а его программы работают (в сети \
+                 {busy}) — закрой их: дом сменится при следующем запуске"
+            ));
+        }
+    }
+    crate::container::prepare_data(&container)
 }
 
 /// Is the process `pid` in our network namespace?
@@ -1727,19 +1775,33 @@ mod tests {
                 "{flag}"
             );
         }
-        assert_eq!(
-            resolve(&["nl", "--sandbox", "work", "--", "x"]),
-            Ok((Container::Named(name("work")), Sandbox::None)),
-            "a name is one container, whatever word named it"
-        );
+        // A sandbox asked for gets a home of its own or nothing: never the
+        // real home through a layer or the main home by that name.
+        for layer_or_main in ["work", "files"] {
+            assert!(resolve(&["nl", "--sandbox", layer_or_main, "--", "x"])
+                .unwrap_err()
+                .contains("не песочница"));
+        }
         assert_eq!(
             resolve(&["nl", "--container", "files", "--", "x"]),
             Ok((Container::MainNamed(name("files")), Sandbox::None))
         );
+        // A missing one is made — at the launch, after its network is
+        // checked, not while it is resolved.
+        let new = Selection::parse(&[
+            OsString::from("nl"),
+            OsString::from("--sandbox"),
+            OsString::from("new"),
+            OsString::from("x"),
+        ])
+        .unwrap();
+        let new = resolve_selection(&tools, new).unwrap();
         assert_eq!(
-            resolve(&["nl", "--sandbox", "new", "--", "x"]),
-            Ok((Container::Main, Sandbox::Named(name("new"))))
+            (&new.container, &new.sandbox),
+            (&Container::Main, &Sandbox::Named(name("new")))
         );
+        assert!(container::load(&tools, "new").is_none());
+        prepare_selection(&tools, &new).unwrap();
         assert_eq!(
             container::load(&tools, "new").map(|c| c.home),
             Some(Home::Private)

@@ -1661,7 +1661,15 @@ fn container_remove(tools: &Tools, name: &OsStr) -> u8 {
             c.name
         );
     } else if c.home == crate::container::Home::Main {
-        println!("контейнер {} удалён (настоящий дом не тронут)", c.name);
+        let aside = if fs::symlink_metadata(&c.dir).is_ok() {
+            ", и данные, отложенные от прежнего вида его дома"
+        } else {
+            ""
+        };
+        println!(
+            "контейнер {} удалён (настоящий дом не тронут{aside})",
+            c.name
+        );
     } else {
         println!("контейнер {} удалён вместе со своими данными", c.name);
     }
@@ -2803,15 +2811,22 @@ fn mode(tools: &Tools, args: &[OsString]) -> u8 {
 }
 
 fn default_profile(tools: &Tools, args: &[OsString]) -> u8 {
-    let Some(value) = required(args, 0, "ask | main | own | <имя профиля>") else {
+    let Some(value) = required(args, 0, "ask | main | own | <имя контейнера>") else {
         return 1;
     };
-    if !matches!(value.as_bytes(), b"ask" | b"main" | b"own")
-        && !tools.profiles.join(value).is_dir()
-    {
-        eprintln!("профиля {} нет", value.to_string_lossy());
-        return 1;
-    }
+    // A container by its one name, whatever its home.
+    let value = if matches!(value.as_bytes(), b"ask" | b"main" | b"own") {
+        value.clone()
+    } else {
+        match crate::container::load(tools, &value.to_string_lossy()) {
+            Some(c) => OsString::from(c.name),
+            None => {
+                eprintln!("контейнера {} нет", value.to_string_lossy());
+                return 1;
+            }
+        }
+    };
+    let value = &value;
     if let Err(e) = write_setting(tools, "default-profile", value) {
         eprintln!("не записать {e}");
         return 1;

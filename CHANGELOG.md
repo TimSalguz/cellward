@@ -33,9 +33,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     and is said.
   - `cellward container create <name> [--home private|layer|main]`,
     `container rm`; `sandbox` and `profile` are the same command with their
-    kind as the default. `run --container <name>`; `--profile` and
-    `--sandbox` name the same container, whatever its kind (`--sandbox` makes
-    a missing one with a home of its own, as before).
+    kind as the default. `run --container <name>`; `--profile` names the same
+    container, whatever its kind. `--sandbox` (and `sb:<name>` anywhere —
+    a pin, Nix `defaults.container`, a record) asks for a home of its own
+    and gets nothing else: a layer or the main home by that name is refused,
+    a missing one is made, as before.
+  - The move plans first and under a lock (the first pickers at a login
+    start together), writes the renames before anything moves, and takes
+    the kind of home from its plan, not from the files next to the data that
+    programs could write; a name Nix declares keeps it. A container whose
+    data could not be moved (another disk, a link among its old files) is
+    not launched until they are — never with an empty home next to them.
+  - Nothing is made or moved for a launch before its network is checked:
+    a new sandbox is made, and the data of a changed kind set aside, only for
+    a launch that goes — and not while programs of the container run.
+  - The broker asks, and keeps "always", for the container a request will
+    really be in, with its kind (`work@private`): `--sandbox work` and
+    `--container work` are no longer one question. "Always" given before
+    is asked once more.
+  - `default-profile = main` is the main home even when the last choice was
+    a sandbox (the default used to be laid over it: one launch of two
+    containers). A pin to a container that is gone is dropped, and the launch
+    goes on as with no pin; a pinned sandbox (`sb:`) is made again, as
+    before.
   - **One launch, one container**: a layer and a sandbox at once (`--profile
     X --sandbox Y`, or with `--fs-sandbox`/`--tmp-profile`) is refused — the
     picker built it from a default container laid over the sandbox of the

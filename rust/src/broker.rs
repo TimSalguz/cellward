@@ -393,13 +393,23 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                     let allowed = match decide(&origin, locked, &target, same_identity) {
                         Decision::Start => Ok(()),
                         Decision::Refuse(why) => Err(why),
-                        Decision::Ask => ask(
-                            tools,
-                            &origin,
-                            &target,
-                            &selection_selector(&selection),
-                            &selection.cmd,
-                        ),
+                        // Asked about the container the launch will really
+                        // be in — `--sandbox work` is `work-sb` when a layer
+                        // has the name —, and "always" kept for that one and
+                        // its kind of home: resolved here the way `run` will,
+                        // making nothing (`launch::resolve_selection`).
+                        Decision::Ask => {
+                            match crate::launch::resolve_selection(tools, selection.clone()) {
+                                Err(why) => Err(why),
+                                Ok(resolved) => ask(
+                                    tools,
+                                    &origin,
+                                    &target,
+                                    &resolved_selector(tools, &resolved),
+                                    &selection.cmd,
+                                ),
+                            }
+                        }
                     };
                     let answer = match &allowed {
                         Ok(()) => start(&app_id, &argv),
@@ -628,9 +638,8 @@ fn remember(tools: &Tools, line: &str) {
 }
 
 /// The container a request asks for, as a selector (a container's name,
-/// `__fs__`, `__tmp__`, empty for the main one): shown in the question and
-/// part of what "always" remembers. As asked — the broker resolves nothing,
-/// and makes nothing, for a request before it is allowed.
+/// `__fs__`, `__tmp__`, empty for the main one), as it was asked: what the
+/// no-question path looks at — empty is the main profile and nothing else.
 pub fn selection_selector(selection: &crate::launch::Selection) -> String {
     use crate::launch::{Container, Sandbox};
     match (&selection.sandbox, &selection.container) {
@@ -641,6 +650,20 @@ pub fn selection_selector(selection: &crate::launch::Selection) -> String {
         }
         (Sandbox::None, Container::TmpNew | Container::TmpJoin(_)) => "__tmp__".to_owned(),
         (Sandbox::None, Container::Main) => String::new(),
+    }
+}
+
+/// A resolved request's container for the question and for "always": its
+/// name and its kind of home (`work@private`) — a change of kind is not the
+/// container "always" was said for. The rest as [`selection_selector`].
+fn resolved_selector(tools: &Tools, selection: &crate::launch::Selection) -> String {
+    match crate::launch::container_name(selection) {
+        Some(name) => {
+            let home = crate::container::load(tools, &name)
+                .map_or(crate::container::Home::Private, |c| c.home);
+            format!("{name}@{}", home.setting())
+        }
+        None => selection_selector(selection),
     }
 }
 
@@ -685,7 +708,10 @@ fn ask(
         Origin::SystemZone(zone) => format!("системной зоны «{zone}»"),
         other => format!("зоны «{}»", other.name()),
     };
-    let container = crate::picker::container_label_in(tools, selector);
+    let container = match selector.split_once('@') {
+        Some((name, _)) => crate::picker::container_label_in(tools, name),
+        None => crate::picker::container_label_in(tools, selector),
+    };
     let Some(shown) = shown_command(cmd) else {
         return Err(format!(
             "команда длиннее {SHOWN_WORDS} слов — целиком её не показать, а не целиком не спрашивают"

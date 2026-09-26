@@ -235,10 +235,26 @@ pub fn reserved_name(name: &str) -> bool {
 /// A selector from memory as it is now: a container's name after the move to
 /// one name per container (`sb:work` → `work`, or `work-sb` when a layer had
 /// the name); the words of the menus and the settings as they are.
+///
+/// `sb:<name>` keeps its prefix, with the name as it is now: what was a
+/// sandbox is asked for as one ([`Container::from_selector`]). A temporary
+/// container of a running program (its directory's name) is joined while it
+/// is there, and a new one is made when it is gone — never a container of
+/// that name.
 fn canon(tools: &Tools, selector: &str) -> String {
     match selector {
         "" | MAIN | THROWAWAY | TMP | "ask" | "main" | "own" => selector.to_owned(),
         s if s.starts_with(TMPJOIN_PREFIX) => s.to_owned(),
+        s if s.starts_with(crate::container::TEMPORARY_PREFIX) => {
+            match launch::throwaway_path(&tools.state, std::ffi::OsStr::new(s)) {
+                Some(dir) => format!("{TMPJOIN_PREFIX}{}", dir.display()),
+                None => TMP.to_owned(),
+            }
+        }
+        s if s.starts_with(SANDBOX_PREFIX) => match crate::container::canonical(tools, s) {
+            Some(name) => format!("{SANDBOX_PREFIX}{name}"),
+            None => s.to_owned(),
+        },
         s => crate::container::canonical(tools, s).unwrap_or_else(|| s.to_owned()),
     }
 }
@@ -433,16 +449,23 @@ impl Container {
                 profile: other.to_owned(),
                 ..Self::default()
             }),
-            other => {
-                let name = other.strip_prefix(SANDBOX_PREFIX).unwrap_or(other);
-                if name.is_empty() || !exists(name) {
-                    return None;
-                }
-                Some(Self {
-                    profile: name.to_owned(),
+            // `sb:<name>` — a stale pin, a default from Nix, a record of a
+            // program started before one name per container — asked for a
+            // home of its own and gets nothing else: `run --sandbox` refuses
+            // a layer or the main home by that name, and makes a missing one.
+            other => match other.strip_prefix(SANDBOX_PREFIX) {
+                Some("") => None,
+                Some(name) => Some(Self {
+                    fs_sandbox: true,
+                    sandbox: name.to_owned(),
                     ..Self::default()
-                })
-            }
+                }),
+                None if exists(other) => Some(Self {
+                    profile: other.to_owned(),
+                    ..Self::default()
+                }),
+                None => None,
+            },
         }
     }
 
@@ -510,12 +533,7 @@ pub fn container_without_dialog(
         "main" => return Container::default(),
         "own" => return Container::own_sandbox(key),
         "ask" => {}
-        name if exists(name) => {
-            return Container {
-                profile: name.to_owned(),
-                ..Container::default()
-            }
-        }
+        name if exists(name) => return Container::from_selector(name, &exists),
         _ => {}
     }
     Container::from_selector_checked(&memory.last_profile, &exists)
@@ -576,13 +594,9 @@ pub fn autostart_plan(
         match memory.default_profile.as_str() {
             "main" => (Container::default(), false),
             "own" => (Container::own_sandbox(key), false),
-            name if name != "ask" && exists(name) => (
-                Container {
-                    profile: name.to_owned(),
-                    ..Container::default()
-                },
-                false,
-            ),
+            name if name != "ask" && exists(name) => {
+                (Container::from_selector(name, &exists), false)
+            }
             _ => (Container::own_sandbox(key), true),
         }
     };
@@ -619,13 +633,13 @@ pub fn pin_is_valid(pinned: &str, zone_exists: impl Fn(&str) -> bool) -> bool {
 /// launch, which makes it — it used to be checked as something that had to
 /// exist, and the pin was erased on the very next click: "🔒 Своя песочница
 /// — всегда" did not work at all. (`docs/GOTCHAS.md` §11)
+/// A pinned sandbox (`sb:<name>`) likewise: a home of its own is made when it
+/// is not there, as it always was.
 pub fn profile_pin_is_valid(pinned: &str, profile_exists: impl Fn(&str) -> bool) -> bool {
     match pinned {
         "" | MAIN | THROWAWAY => true,
-        other => {
-            let name = other.strip_prefix(SANDBOX_PREFIX).unwrap_or(other);
-            name.starts_with("app-") || profile_exists(name)
-        }
+        other if other.starts_with(SANDBOX_PREFIX) => true,
+        other => other.starts_with("app-") || profile_exists(other),
     }
 }
 
@@ -963,6 +977,7 @@ pub fn window_containers(
     new_profile.new = true;
     items.push(new_profile);
 
+    let current = current.strip_prefix(SANDBOX_PREFIX).unwrap_or(current);
     let selected = match current {
         "" | MAIN => "",
         c if c == own => "__ownsb__",
@@ -1776,6 +1791,9 @@ fn read_memory(tools: &Tools, key: &str) -> Memory {
 /// zone's program asks for, under a launcher's name the zone chose: a pin
 /// is not dropped because the zone moved a container away for a moment.
 fn read_memory_with(tools: &Tools, key: &str, tidy: bool) -> Memory {
+    // The memory as the layout of one name per container has it: the move
+    // rewrites the pins it renames, before they are read.
+    crate::container::migrate(tools);
     let state = &tools.state;
     let pinned_path = state.join(".pinned").join(key);
     let mut pinned =
@@ -1916,10 +1934,9 @@ fn ask_profile(
         "own" => return Some(Container::own_sandbox(key)),
         name => {
             if container_exists(tools, name) {
-                return Some(Container {
-                    profile: name.to_owned(),
-                    ..Container::default()
-                });
+                return Some(Container::from_selector(name, |n| {
+                    container_exists(tools, n)
+                }));
             }
         }
     }
@@ -2746,18 +2763,24 @@ mod tests {
                 ..Container::default()
             }
         );
-        // A container that exists, by its name, whatever its home — the old
-        // prefix of a sandbox read as the same name.
-        for selector in ["work", "sb:work"] {
-            assert_eq!(
-                Container::from_selector(selector, anything),
-                Container {
-                    profile: "work".to_owned(),
-                    ..Container::default()
-                },
-                "{selector}"
-            );
-        }
+        // A container that exists, by its name, whatever its home.
+        assert_eq!(
+            Container::from_selector("work", anything),
+            Container {
+                profile: "work".to_owned(),
+                ..Container::default()
+            }
+        );
+        // The old prefix asks for a home of its own and nothing else: `run
+        // --sandbox` refuses a layer or the main home by that name.
+        assert_eq!(
+            Container::from_selector("sb:work", anything),
+            Container {
+                fs_sandbox: true,
+                sandbox: "work".to_owned(),
+                ..Container::default()
+            }
+        );
         // One that is gone is made again with a home of its own: the
         // program's own home, never the whole real one.
         assert_eq!(
@@ -2940,8 +2963,9 @@ mod tests {
         // click, and "🔒 Своя песочница — всегда" never worked at all.
         assert!(profile_pin_is_valid("app-firefox", nothing));
         assert!(profile_pin_is_valid("sb:app-firefox", nothing));
-        assert!(profile_pin_is_valid("sb:work", |p| p == "work"));
-        assert!(!profile_pin_is_valid("sb:work", nothing));
+        // A pinned sandbox is made again when it is gone, as it always was.
+        assert!(profile_pin_is_valid("sb:work", nothing));
+        assert!(!profile_pin_is_valid("work", nothing));
         assert!(profile_pin_is_valid(THROWAWAY, nothing));
         assert!(profile_pin_is_valid(MAIN, nothing));
         assert!(profile_pin_is_valid("", nothing));

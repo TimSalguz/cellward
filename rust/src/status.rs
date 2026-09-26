@@ -25,7 +25,6 @@ use crate::config::WgConfig;
 use crate::container::{self, Container, Home, Source};
 use crate::fs_sandbox::Perms;
 use crate::launch::NO_ESCAPE;
-use crate::registry;
 use crate::tools::Tools;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -79,6 +78,12 @@ pub fn defaults(tools: &Tools) -> String {
     let (network, network_source) = setting(tools, "default", "offline");
     let network = crate::launch::network_name(&network).to_owned();
     let (container, container_source) = setting(tools, "default-profile", "ask");
+    // A container by the name `containers[].selector` has — `sb:work` from
+    // before one name per container is `work` (or `work-sb`) there.
+    let container = match container.as_str() {
+        "ask" | "main" | "own" => container,
+        other => crate::container::canonical(tools, other).unwrap_or(container),
+    };
     let (mode, mode_source) = setting(tools, "mode", "picker");
     let (wayland, wayland_source) = setting(tools, "wayland-sandbox", "on");
     // As `launch::proxy_wanted` decides it: only `off` switches it off.
@@ -362,17 +367,7 @@ pub fn system_networks() -> String {
 
 /// The live launches of a container: `{app, pid, network}`.
 fn running(tools: &Tools, c: &Container) -> String {
-    let base = tools.state.join(".running");
-    let alive = |pid| registry::alive(&base, pid);
-    // Its own registry directory, and the launches of a named sandbox from
-    // before it had one — filed under `__main__`, told apart by the selector.
-    let legacy = format!("{}{}", container::SANDBOX_PREFIX, c.name);
-    let mut records = registry::live_records(&base.join(&c.name), &alive);
-    records.extend(
-        registry::live_records(&base.join(registry::MAIN), &alive)
-            .into_iter()
-            .filter(|(_, r)| r.selector == legacy),
-    );
+    let records = container::live_records(tools, c);
     array(
         records
             .iter()

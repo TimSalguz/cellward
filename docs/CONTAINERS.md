@@ -592,7 +592,10 @@ every key of version 1.
   `containers[].selector` is what it matches. Since one name per container
   (2026-09-26, [PERMISSIONS.md](PERMISSIONS.md) §11.7) the selector IS the
   name — `sb:` is not written any more — and `home` has the value `main` for a
-  container of the real home (a layer is still `overlay`);
+  container of the real home (a layer is still `overlay`). **A reader must
+  take a `home` value it does not know as "not isolated"**: `main` is the
+  whole real home, and a tool that showed an unknown kind as a home of its
+  own would show the real home as isolated;
 - a network by `name`; `networks[].kind` is one of `unconfined`, `offline`,
   `wireguard`, `openconnect`, `host-interface`, `system-zone`, and `interface`
   is the host's interface for `host-interface` and `null` for every other kind

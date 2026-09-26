@@ -488,9 +488,13 @@ fn profile_add(tools: &Tools) -> u8 {
 /// throw it away without touching the main environment — which stays untouched
 /// by construction, being the lower layer of the overlay.
 fn profile_rm(tools: &Tools) -> u8 {
-    // Every container, whatever its home — one name each (`docs/PERMISSIONS.md`
-    // §11.7); one of the main home loses its settings only.
-    let all = crate::container::load_all(tools);
+    // The layers over the home, as this dialog always meant by «профили»:
+    // a home of its own is a program's whole world, not removed by a "delete
+    // all profiles" (`cellward container rm` removes any one of them).
+    let all: Vec<crate::container::Container> = crate::container::load_all(tools)
+        .into_iter()
+        .filter(|c| c.home == crate::container::Home::Layer)
+        .collect();
     let names: Vec<String> = all.iter().map(|c| c.name.clone()).collect();
     let total = names.len();
 
@@ -498,11 +502,7 @@ fn profile_rm(tools: &Tools) -> u8 {
         .iter()
         .map(|c| {
             let name = &c.name;
-            let size = if c.home == crate::container::Home::Main {
-                "основной дом".to_owned()
-            } else {
-                format!("{}, {}", c.home.label(), human_size(tree_size(&c.dir)))
-            };
+            let size = human_size(tree_size(&c.dir));
             match crate::container::running_network(tools, c) {
                 Some(zone) => row(
                     name,
