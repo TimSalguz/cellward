@@ -341,14 +341,20 @@ fn mount_profile(profile_dir: &Path, shares: &[PathBuf]) -> Result<Vec<PathBuf>,
             home.display()
         )
     })?;
+    // The mounts below the home by the home's real path: mountinfo names
+    // mount points resolved, and a home reached through a link (`/home` →
+    // `/var/home`) would find none of them — the zone's covers gone under
+    // the layer (review 2026-09-27). Fatal if it cannot be resolved.
+    let real_home =
+        fs::canonicalize(&home).map_err(|e| format!("cannot resolve {}: {e}", home.display()))?;
     let below = crate::home_layer::submounts(
-        &fs::read_to_string("/proc/self/mountinfo").unwrap_or_default(),
-        &home,
+        &fs::read_to_string("/proc/self/mountinfo")
+            .map_err(|e| format!("cannot read the mounts below the home: {e}"))?,
+        &real_home,
     );
     // The grants, checked again: the file is the host's, but a link along a
     // path may have changed since it was written. As written and as
     // resolved, and relative to the home they resolve in.
-    let real_home = fs::canonicalize(&home).unwrap_or_else(|_| home.clone());
     let mut granted: Vec<PathBuf> = Vec::new();
     for share in shares {
         let resolved = fs::canonicalize(share).unwrap_or_else(|_| share.clone());
