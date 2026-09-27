@@ -2381,8 +2381,19 @@ let
           )
           machine.wait_until_succeeds("test -S /run/user/1000/vzbound/evil.sock")
           alice("cellward nix-daemon vmsmoke on")
+          alice("rm -rf ~/.cache/ibus ~/.config/ibus")
           alice("cellward up vmsmoke")
           sp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
+          # IBus that had never run before the zone came up: its first start
+          # after must not put its bus in the zone's sight (review
+          # 2026-09-27: a place that was not there was not covered).
+          alice(
+              "mkdir -p ~/.cache/ibus && systemd-run --user --unit=lateibus "
+              "socat UNIX-LISTEN:/home/alice/.cache/ibus/dbus-late,fork OPEN:/dev/null"
+          )
+          machine.wait_until_succeeds("test -S /home/alice/.cache/ibus/dbus-late")
+          in_zone(sp, "test ! -e /home/alice/.cache/ibus/dbus-late")
+          alice("systemctl --user stop lateibus")
           in_zone(sp, "socat -T2 - UNIX-CONNECT:/run/user/1000/vzbound/evil.sock </dev/null")
           in_zone(sp, "test -S /nix/var/nix/daemon-socket/socket")
           out = alice("cellward doctor vmsmoke --json")
