@@ -66,7 +66,7 @@
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -435,6 +435,11 @@ pub struct Policy {
     after_deny: Option<Duration>,
     /// The last journal line for a refusal nobody was asked about.
     last_told: Mutex<Option<Instant>>,
+    /// How many times the files the setting is read from have changed
+    /// ([`Policy::watch`]).
+    generation: AtomicU64,
+    /// Those files are watched: a change is seen by its generation.
+    watched: AtomicBool,
 }
 
 impl Default for Policy {
@@ -473,6 +478,8 @@ impl Policy {
             quiet_until: Mutex::new(None),
             after_deny: None,
             last_told: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            watched: AtomicBool::new(false),
         }
     }
 
@@ -492,7 +499,102 @@ impl Policy {
             quiet_until: Mutex::new(None),
             after_deny: Some(AFTER_DENY),
             last_told: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            // Nothing to watch: nothing changes.
+            watched: AtomicBool::new(true),
         }
+    }
+
+    /// The setting's files have changed this many times ([`Policy::watch`]).
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Whether a change of the setting is told by [`Policy::generation`];
+    /// otherwise it has to be read again to be known.
+    pub fn watched(&self) -> bool {
+        self.watched.load(Ordering::Acquire)
+    }
+
+    /// Watch the files the setting is read from, on a thread of its own:
+    /// every change counts a generation. A record stream goes on only while
+    /// its program may record — a microphone taken away ends the streams it
+    /// had (review 2026-09-27: it ended only the next one) —, and looks at
+    /// the generation with every packet of sound, reading the setting again
+    /// only when it moved. The zone's marker, Nix's words, and the
+    /// containers' own settings, new containers' included.
+    pub fn watch(self: &std::sync::Arc<Self>) {
+        let Some(files) = &self.files else {
+            return;
+        };
+        // SAFETY: inotify_init1 takes flags and returns a new descriptor or -1.
+        let raw = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+        if raw < 0 {
+            eprintln!(
+                "pulse-filter: the microphone's setting is not watched ({}) — it is read with \
+                 every packet of sound instead",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        // SAFETY: just returned to us, and nobody else's.
+        let fd = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) };
+        let containers = files.config.join(crate::container::POLICY_DIR);
+        let fixed = [
+            files.zone_dir.clone(),
+            files.config.clone(),
+            files.config.join(DECLARED_DIR),
+            files.config.join(crate::container::DECLARED),
+            containers.clone(),
+        ];
+        let add = move |fd: &std::os::fd::OwnedFd| {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::ffi::OsStrExt;
+            let own = std::fs::read_dir(&containers)
+                .map(|e| e.flatten().map(|e| e.path()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            for dir in fixed.iter().chain(&own) {
+                let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+                    continue;
+                };
+                // SAFETY: an inotify descriptor and a NUL-terminated path. A
+                // directory watched already keeps its watch.
+                unsafe {
+                    libc::inotify_add_watch(
+                        fd.as_raw_fd(),
+                        path.as_ptr(),
+                        libc::IN_CLOSE_WRITE
+                            | libc::IN_MOVED_TO
+                            | libc::IN_MOVED_FROM
+                            | libc::IN_CREATE
+                            | libc::IN_DELETE
+                            | libc::IN_ATTRIB,
+                    )
+                };
+            }
+        };
+        add(&fd);
+        self.watched.store(true, Ordering::Release);
+        let policy = std::sync::Arc::clone(self);
+        std::thread::spawn(move || {
+            use std::os::fd::AsRawFd;
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                // SAFETY: a valid descriptor and a buffer of the length passed.
+                let n = unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+                if n < 0 && std::io::Error::last_os_error().kind() == ErrorKind::Interrupted {
+                    continue;
+                }
+                if n <= 0 {
+                    // No more watching: every packet reads the setting again.
+                    policy.watched.store(false, Ordering::Release);
+                    return;
+                }
+                // A container made since has a directory to watch now.
+                add(&fd);
+                policy.generation.fetch_add(1, Ordering::AcqRel);
+            }
+        });
     }
 
     pub fn zone(&self) -> &str {

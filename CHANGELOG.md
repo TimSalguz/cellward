@@ -249,6 +249,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A microphone taken away ends the recording going on** (bug hunt
+  2026-09-27). The sound filter read the microphone's setting when a
+  record stream was asked for, and only then: set to `no` while a program
+  recorded, it went on recording. The filter now watches the files the
+  setting is read from (inotify: the zone's marker, Nix's words, the
+  containers' own settings), and a record stream's next packet of sound
+  after a change reads the setting again — `no` ends the connection.
 - **A layer container's grant is bound from where it was checked**
   (bug hunt 2026-09-27). A granted directory was checked as it resolved,
   then bound by its path: a program of the container with a grant above
