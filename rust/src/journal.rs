@@ -175,7 +175,7 @@ pub fn tail(state: &Path, count: usize) -> Vec<String> {
 /// A value as a terminal may show it: every control character (escapes,
 /// line breaks, C1), and the characters that turn text around or break a
 /// line where none is seen, as `·`.
-fn shown(value: &str) -> String {
+pub(crate) fn shown(value: &str) -> String {
     value
         .chars()
         .map(|c| {

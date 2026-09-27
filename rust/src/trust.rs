@@ -39,7 +39,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -426,12 +426,14 @@ fn sync_nss(layer: &Layer<'_>, certs: &[(String, Vec<u8>)], warnings: &mut Vec<S
 ///
 /// The database and every name in it are the container's: a program of a
 /// sandbox cannot reach the host's `~/.pki`, but it can make its own
-/// `cert9.db` a link there — and certutil, or SQLite's journal beside it,
-/// run from here, where the real home is in sight, would write the host's
-/// (review 2026-09-27). So the directory is opened once, not through a link,
-/// and found to be the container's once open; certutil gets that
-/// descriptor in a box where nothing else is ([`certutil`]), and the stamp
-/// is read and written through it, never through a link.
+/// `cert9.db` a link there, or its `.pki` — and certutil, or SQLite's
+/// journal beside it, run from here, where the real home is in sight, would
+/// write the host's (review 2026-09-27). So the directory is opened a name
+/// at a time, none of them a link, and found to be the container's once
+/// open; its two database files are opened in it the same way, and certutil
+/// gets just those in a box of its own ([`certutil`]) — not the
+/// container's `pkcs11.txt`, whose `library=` lines NSS would load. The
+/// stamp is read and written through the directory, never through a link.
 fn sync_database(
     layer: &Layer<'_>,
     db: &Path,
@@ -440,17 +442,11 @@ fn sync_database(
     want: &BTreeSet<String>,
     warnings: &mut Vec<String>,
 ) {
-    if fs::symlink_metadata(db).is_err() {
-        // Nothing there and nothing to put there.
-        if want.is_empty() {
-            return;
-        }
-        // Chromium makes `.pki/nssdb` on its first start, and a certificate
-        // has to be there before.
-        if let Err(e) = fs::DirBuilder::new().recursive(true).mode(0o700).create(db) {
-            warnings.push(format!("cannot create {}: {e}", db.display()));
-            return;
-        }
+    // Nothing there and nothing to put there. Otherwise made where it is
+    // missing: Chromium makes `.pki/nssdb` on its first start, and a
+    // certificate has to be there before.
+    if want.is_empty() && fs::symlink_metadata(db).is_err() {
+        return;
     }
     let dir = match open_database(db, roots) {
         Ok(dir) => dir,
@@ -465,8 +461,16 @@ fn sync_database(
     if old == *want {
         return;
     }
-    let run = |args: &[&str], input: Option<&[u8]>| certutil(layer, &dir, db, args, input);
-    if !plain_in(&dir, "cert9.db") {
+    let files = match (file_in(&dir, "cert9.db"), file_in(&dir, "key4.db")) {
+        (Ok(cert), Ok(key)) => [cert, key],
+        (Err(e), _) | (_, Err(e)) => {
+            warnings.push(format!("{}: {e}", db.display()));
+            return;
+        }
+    };
+    let run = |args: &[&str], input: Option<&[u8]>| certutil(layer, &files, db, args, input);
+    // A database not made yet: two empty files, which SQLite takes for new.
+    if files[0].metadata().is_ok_and(|m| m.len() == 0) {
         if let Err(e) = run(&["-N", "--empty-password"], None) {
             warnings.push(e);
             return;
@@ -493,30 +497,66 @@ fn sync_database(
     }
 }
 
-/// The database's directory, opened: never through a link at its end, and —
-/// wherever links before it led — the container's own once open. Whatever
-/// is done to the database from here on goes through this descriptor, and
-/// the directory cannot be swapped for another after the check.
+/// The database's directory, opened a name at a time from `/`, none of them
+/// through a link, and made (0700) where it is missing — then found to be
+/// the container's own. Whatever is done to the database from here on goes
+/// through this descriptor: no link on the way, then or since, can lead
+/// anywhere else.
 fn open_database(db: &Path, roots: &[PathBuf]) -> Result<OwnedFd, String> {
-    let path = CString::new(db.as_os_str().as_bytes())
-        .map_err(|_| format!("{}: a NUL in the path", db.display()))?;
-    // SAFETY: a NUL-terminated path; the descriptor is owned right below.
-    let fd = unsafe {
-        libc::open(
-            path.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(format!(
-            "cannot open {}: {}",
+    let fail = |what: &str| {
+        format!(
+            "cannot {what} {}: {}",
             db.display(),
             std::io::Error::last_os_error()
-        ));
+        )
+    };
+    let open_at = |at: libc::c_int, name: &CString| {
+        // SAFETY: a directory descriptor and a NUL-terminated name.
+        unsafe {
+            libc::openat(
+                at,
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        }
+    };
+    // SAFETY: a NUL-terminated literal.
+    let root = unsafe {
+        libc::open(
+            c"/".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if root < 0 {
+        return Err(fail("open /, for"));
     }
     // SAFETY: just opened, and nobody else's.
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let real = fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+    let mut dir = unsafe { OwnedFd::from_raw_fd(root) };
+    for component in db.components() {
+        let name = match component {
+            std::path::Component::RootDir => continue,
+            std::path::Component::Normal(name) => CString::new(name.as_bytes())
+                .map_err(|_| format!("{}: a NUL in the path", db.display()))?,
+            _ => return Err(format!("{}: not a plain path", db.display())),
+        };
+        let mut fd = open_at(dir.as_raw_fd(), &name);
+        if fd < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+            // SAFETY: a directory descriptor and a NUL-terminated name.
+            let made = unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) };
+            if made != 0
+                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return Err(fail("create"));
+            }
+            fd = open_at(dir.as_raw_fd(), &name);
+        }
+        if fd < 0 {
+            return Err(fail("open, not through a link,"));
+        }
+        // SAFETY: just opened, and nobody else's.
+        dir = unsafe { OwnedFd::from_raw_fd(fd) };
+    }
+    let real = fs::read_link(format!("/proc/self/fd/{}", dir.as_raw_fd()))
         .map_err(|e| format!("cannot tell where {} is: {e}", db.display()))?;
     if !under_any(&real, roots) {
         return Err(format!(
@@ -525,7 +565,45 @@ fn open_database(db: &Path, roots: &[PathBuf]) -> Result<OwnedFd, String> {
             db.display()
         ));
     }
-    Ok(fd)
+    Ok(dir)
+}
+
+/// A file of the database, opened for certutil's box — made, empty, where
+/// it is missing; never through a link, and only a plain file of one name.
+fn file_in(dir: &OwnedFd, name: &str) -> Result<fs::File, String> {
+    let c_name = CString::new(name).map_err(|_| format!("{name}: a NUL in the name"))?;
+    let open = |flags: libc::c_int| {
+        // SAFETY: a directory descriptor, a NUL-terminated name; the mode
+        // is openat's third, variadic argument.
+        unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                c_name.as_ptr(),
+                libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC | flags,
+                0o600 as libc::c_uint,
+            )
+        }
+    };
+    let mut fd = open(0);
+    if fd < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+        fd = open(libc::O_CREAT | libc::O_EXCL);
+    }
+    if fd < 0 {
+        return Err(format!(
+            "cannot open {name}, not through a link: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: just opened, and nobody else's.
+    let file = unsafe { fs::File::from_raw_fd(fd) };
+    use std::os::unix::fs::MetadataExt;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("cannot look at {name}: {e}"))?;
+    if !meta.is_file() || meta.nlink() != 1 {
+        return Err(format!("{name} is not a plain file of its own"));
+    }
+    Ok(file)
 }
 
 /// A file of the database, read — never through a link. `None` when it is
@@ -551,25 +629,6 @@ fn read_in(dir: &OwnedFd, name: &str) -> Option<String> {
     let mut text = String::new();
     file.take(1 << 16).read_to_string(&mut text).ok()?;
     Some(text)
-}
-
-/// Is `name` a plain file in the directory — not a link to one?
-fn plain_in(dir: &OwnedFd, name: &str) -> bool {
-    let Ok(name) = CString::new(name) else {
-        return false;
-    };
-    // SAFETY: an all-zero stat is a valid out-parameter.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: a directory descriptor, a NUL-terminated name, a stat to fill.
-    let found = unsafe {
-        libc::fstatat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            &mut st,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    } == 0;
-    found && st.st_mode & libc::S_IFMT == libc::S_IFREG
 }
 
 /// A file of the database, written whole: a new file beside it, renamed over
@@ -640,42 +699,57 @@ pub fn sync_home(certutil: &Path, bwrap: &Path, dir: &Path, home: &Path) -> Vec<
 /// Where the database is in certutil's box.
 const BOX_DB: &str = "/db";
 
-/// `certutil <args>` on the database `dir`, stdin from `input` when given —
-/// in a box of its own (bwrap, every namespace its own) where there is
-/// nothing but the database, bound from the descriptor, and the programs'
-/// directories, read-only: a link the container left in the database leads
-/// nowhere from there. `shown` names the database in messages.
+/// `certutil <args>` on the database whose two files are `files` (`cert9.db`,
+/// `key4.db`), stdin from `input` when given — in a box of its own (bwrap,
+/// every namespace its own) that holds a directory of its own for the
+/// database, with just those two files bound in by their descriptors, and
+/// the programs' directories read-only: nothing else of the container's
+/// directory, no link it left there, no `pkcs11.txt` of its with a module to
+/// load — and no environment, and no descriptor of this process's but those
+/// two. `shown` names the database in messages.
 fn certutil(
     layer: &Layer<'_>,
-    dir: &OwnedFd,
+    files: &[fs::File; 2],
     shown: &Path,
     args: &[&str],
     input: Option<&[u8]>,
 ) -> Result<(), String> {
     let tool = program_path(layer.certutil)
         .ok_or_else(|| format!("no {} to run", layer.certutil.display()))?;
-    let fd = dir.as_raw_fd();
+    let fds = [files[0].as_raw_fd(), files[1].as_raw_fd()];
     let mut cmd = Command::new(layer.bwrap);
-    cmd.args(["--unshare-all", "--die-with-parent", "--new-session"]);
+    cmd.env_clear()
+        .args(["--unshare-all", "--die-with-parent", "--new-session"]);
     for system in ["/nix/store", "/usr", "/bin", "/lib", "/lib64"] {
         cmd.args(["--ro-bind-try", system, system]);
     }
-    cmd.args(["--dev", "/dev", "--tmpfs", "/tmp"])
-        .arg("--bind-fd")
-        .arg(fd.to_string())
-        .arg(BOX_DB)
-        .arg("--")
+    cmd.args(["--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", BOX_DB]);
+    for (fd, name) in fds.iter().zip(["cert9.db", "key4.db"]) {
+        cmd.arg("--bind-fd")
+            .arg(fd.to_string())
+            .arg(format!("{BOX_DB}/{name}"));
+    }
+    cmd.arg("--")
         .arg(&tool)
         .args(args)
         .arg("-d")
         .arg(format!("sql:{BOX_DB}"));
-    // SAFETY: fcntl and prctl only, both async-signal-safe.
+    // SAFETY: close_range, fcntl and prctl only, all async-signal-safe.
     unsafe {
         cmd.pre_exec(move || {
-            // The descriptor goes to bwrap; none of this process's
-            // capabilities do (`profile-run` may still hold the zone's).
-            if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
+            // Nothing of this process's goes along but the two files (the
+            // picker's hand-over pipe, a zone's descriptors); none of its
+            // capabilities either (`profile-run` may still hold the zone's).
+            libc::syscall(
+                libc::SYS_close_range,
+                3u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            );
+            for fd in fds {
+                if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             libc::prctl(
                 libc::PR_CAP_AMBIENT,
@@ -706,11 +780,13 @@ fn certutil(
     if out.status.success() {
         Ok(())
     } else {
+        // What certutil said, as words: the database is the container's, and
+        // so may be what certutil reads out of it.
+        let said = crate::journal::shown(String::from_utf8_lossy(&out.stderr).trim());
         Err(format!(
-            "certutil {} on {}: {}",
+            "certutil {} on {}: {said}",
             args.first().copied().unwrap_or(""),
             shown.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
         ))
     }
 }
@@ -921,6 +997,49 @@ X509v3 Basic Constraints: critical
             "resolved it is the host's: {}",
             real.display()
         );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The database's directory is reached with no link on the way — one
+    /// swapped in after the check leads nowhere —, made where missing; its
+    /// files are plain ones of their own, made empty where missing.
+    #[test]
+    fn the_database_is_reached_through_no_link() {
+        let base = std::env::temp_dir().join(format!("vz-trust-nofollow-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let home = base.join("sandbox/home");
+        let host = base.join("host/nssdb");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&host).unwrap();
+        let roots = vec![fs::canonicalize(&home).unwrap()];
+        let home = roots[0].clone();
+
+        // Missing: made, 0700, and the container's.
+        let dir = open_database(&home.join(".pki/nssdb"), &roots).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(home.join(".pki/nssdb"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+        // Its files: made empty, and a link in place of one is refused.
+        let cert = file_in(&dir, "cert9.db").unwrap();
+        assert_eq!(cert.metadata().unwrap().len(), 0);
+        std::os::unix::fs::symlink(host.join("key4.db"), home.join(".pki/nssdb/key4.db")).unwrap();
+        assert!(file_in(&dir, "key4.db").is_err());
+        assert!(!host.join("key4.db").exists(), "the link was followed");
+        // A link on the way to the directory: refused, whatever it leads to.
+        std::os::unix::fs::symlink(base.join("host"), home.join(".mozilla")).unwrap();
+        assert!(open_database(&home.join(".mozilla/nssdb"), &roots).is_err());
+        // The stamp is written over a link, not through it.
+        std::os::unix::fs::symlink(host.join("victim"), home.join(".pki/nssdb").join(STAMP))
+            .unwrap();
+        write_in(&dir, STAMP, "x\n").unwrap();
+        assert!(
+            !host.join("victim").exists(),
+            "the stamp went through the link"
+        );
+        assert_eq!(read_in(&dir, STAMP).as_deref(), Some("x\n"));
         let _ = fs::remove_dir_all(&base);
     }
 }

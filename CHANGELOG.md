@@ -288,10 +288,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `~/.pki`, but it could make its own `cert9.db` (or the stamp beside it)
   a link there — and the trust layer, which runs where the real home is in
   sight, would have added the container's roots to the host's database.
-  certutil now works in a bwrap box of its own that holds only the
-  database, bound from a directory descriptor checked to be the
-  container's once open; the stamp is read and written through that
-  descriptor, never through a link. `profile-run` takes `--bwrap`.
+  The database's directory is now reached a name at a time, none of them
+  a link, and checked to be the container's once open; certutil works in a
+  bwrap box of its own that holds just the database's two files, bound in
+  by their descriptors — not the container's `pkcs11.txt`, whose modules
+  NSS would load — with no environment and no other descriptor; the stamp
+  is read and written through the directory, never through a link.
+  `profile-run` takes `--bwrap`.
 - **A system zone's command sees neither the user zones' state nor the
   containers' data** (bug hunt 2026-09-27). `vpn-zone-sys` covers the
   project's state and makes its settings read-only, as a user zone does —

@@ -936,8 +936,34 @@ let
           out = in_container("vmca", "direct", "sh -c 'certutil -L -d sql:$HOME/.pki/nssdb'")
           assert "vpn-zones " in out, f"the container's NSS database lacks the CA:\n{out}"
           # Through a zone too: the layer lives in the launch's namespace, not
-          # the zone's.
+          # the zone's. The database made anew in there — certutil's box
+          # inside the zone's user namespace (review 2026-09-27).
+          alice("rm -rf ~/.local/state/vpn-profiles/vmca/home/upper/.pki")
           in_container("vmca", "vmsmoke", f"openssl verify {CA}/srv.pem")
+          out = in_container("vmca", "vmsmoke", "sh -c 'certutil -L -d sql:$HOME/.pki/nssdb'")
+          assert "vpn-zones " in out, f"no CA in the database made in the zone:\n{out}"
+
+      # A sandboxed program sees its own home only, and the trust layer the
+      # real one: a link it leaves in its database must not lead the
+      # container's roots into the host's (review 2026-09-27).
+      with subtest("trust: a sandbox's links do not lead its roots into the host's database"):
+          alice("mkdir -p ~/hostdb && certutil -N --empty-password -d sql:/home/alice/hostdb")
+          alice("cellward container create vmcasb")
+          alice(
+              "mkdir -p ~/.local/state/vpn-profiles/vmcasb/home/.pki/nssdb && "
+              "ln -s /home/alice/hostdb/cert9.db "
+              "~/.local/state/vpn-profiles/vmcasb/home/.pki/nssdb/cert9.db"
+          )
+          alice(f"cellward trust add vmcasb {CA}/ca.pem --yes || true")
+          alice("cellward run direct --container vmcasb -- true || true")
+          out = alice("certutil -L -d sql:/home/alice/hostdb")
+          assert "vpn-zones " not in out, f"the host's database got the container's CA:\n{out}"
+          # Put right, the sandbox has it in its own.
+          alice("rm ~/.local/state/vpn-profiles/vmcasb/home/.pki/nssdb/cert9.db")
+          alice("cellward run direct --container vmcasb -- true")
+          out = in_container("vmcasb", "direct", "sh -c 'certutil -L -d sql:$HOME/.pki/nssdb'")
+          assert "vpn-zones " in out, f"the sandbox's own database lacks the CA:\n{out}"
+          alice("rm -rf ~/hostdb")
 
       with subtest("trust: the host and the container next door do not"):
           machine.fail(f"su -l alice -c 'openssl verify {CA}/srv.pem'")
