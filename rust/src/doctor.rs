@@ -1392,6 +1392,53 @@ pub fn build_check(age: crate::build::Age) -> Check {
     }
 }
 
+/// Whether a zone that is up carries containers' instances (stage 2 of the
+/// container design): its bridge's socket and its refusal of its own
+/// addresses to the bridge. A zone of a previous build has neither — its
+/// launches take its own namespaces, as before, and a restart gives it
+/// both; a socket without the refusal carries nothing (fail-closed).
+pub fn bridge_check(socket: bool, ruled: bool) -> Check {
+    match (socket, ruled) {
+        (true, true) => Check::new(
+            "bridge",
+            Level::Ok,
+            "везёт контейнеры: у каждого своё сетевое пространство, выход — через неё",
+        ),
+        (true, false) => Check::new(
+            "bridge",
+            Level::Fail,
+            "мост без запрета своих адресов (nftables?) — зона не везёт контейнеры, их \
+             запуски в неё отказывают",
+        ),
+        (false, _) => Check::new(
+            "bridge",
+            Level::Warn,
+            "зона прошлой сборки: запуски в неё идут в её собственное пространство — \
+             перезапусти её (cellward down, cellward up)",
+        ),
+    }
+}
+
+/// An instance's way out as its keeper noted it (stage 2): through its
+/// zone; none by its network (`offline`); cut, and why — its programs have
+/// no way out meanwhile, which is what the person should know.
+pub fn exit_check(exit: Option<crate::instance::Exit>, network: &str) -> Check {
+    match exit {
+        Some(crate::instance::Exit::Through(zone)) => {
+            Check::new("exit", Level::Ok, format!("выход — через зону {zone}"))
+        }
+        _ if network == crate::launch::OFFLINE => {
+            Check::new("exit", Level::Ok, "без сети: только lo")
+        }
+        Some(crate::instance::Exit::Cut(why)) => Check::new(
+            "exit",
+            Level::Warn,
+            format!("отрезан от зоны {network} ({why}) — программы работают без выхода в сеть"),
+        ),
+        None => Check::new("exit", Level::Skip, "выход не записан"),
+    }
+}
+
 pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     let Some(pid) = zone_pid(&tools.state, name.as_ref()) else {
         return (
@@ -1409,6 +1456,12 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
         &dir,
         &crate::build::installed(tools),
     ))];
+    if !offline {
+        checks.push(bridge_check(
+            crate::bridge::carries(&dir),
+            dir.join(crate::bridge::RULE_MARK).exists(),
+        ));
+    }
     // What the zone is to be, read as its holder reads it: the probe judges
     // the host's bus and the Nix daemon by it.
     let (hermetic, _) = crate::hermetic::zone_setting(&dir, &tools.config, name);
@@ -1576,6 +1629,10 @@ pub fn instance_checks(tools: &Tools, running: &crate::instance::Running, uid: u
             .ok()
             .as_deref(),
         crate::zone::uplink_owner().map(|(subuid, _)| subuid),
+    ));
+    checks.push(exit_check(
+        crate::instance::exit_of(&running.dir),
+        &running.network,
     ));
     // What it came up with (`instance::SETTINGS`), which the probe judges by.
     let applied =
@@ -1876,6 +1933,29 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_zones_bridge_and_an_instances_exit_are_named() {
+        use crate::instance::Exit;
+        assert_eq!(bridge_check(true, true).level, Level::Ok);
+        // A socket without the refusal carries nothing: a failure.
+        assert_eq!(bridge_check(true, false).level, Level::Fail);
+        // A zone of a previous build: said, and how to change it.
+        assert_eq!(bridge_check(false, false).level, Level::Warn);
+        assert_eq!(
+            exit_check(Some(Exit::Through("nl".to_owned())), "nl").level,
+            Level::Ok
+        );
+        assert_eq!(
+            exit_check(Some(Exit::Cut("offline".to_owned())), "offline").level,
+            Level::Ok
+        );
+        assert_eq!(
+            exit_check(Some(Exit::Cut("zone-down".to_owned())), "nl").level,
+            Level::Warn
+        );
+        assert_eq!(exit_check(None, "nl").level, Level::Skip);
+    }
 
     #[test]
     fn an_instances_root_is_the_fourth_subordinate_id() {

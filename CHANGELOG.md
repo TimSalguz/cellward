@@ -6,6 +6,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Every launch into a zone runs in its container's instance**
+  (2026-09-27, stage 2c of the container-first model). The zone is the
+  transport: the program gets a network namespace of its own with `lo` and
+  a tap, out through a `passt` its zone runs for it (stages 2a, 2b), never
+  the zone's own namespaces. Two containers in one zone no longer share
+  loopback, abstract sockets or System V IPC. A launch starts the zone when
+  it is down, then the instance, asking for the network by
+  `~/.local/state/vpn-zones/.instances/<key>.network` when the instance's
+  id does not name it; a container whose instance runs in another network
+  is refused (one container, one network). `cellward down <zone>` cuts the
+  instances it carries and names them; `cellward kill <zone>` ends them
+  first. `status --json`: `networks[].bridge` (does the zone carry
+  instances), `networks[].attached` on every zone (the instances going out
+  through it), `containers[].running[].instance` for launches into zones
+  too. `doctor` checks a zone's bridge (its socket and its refusal rule)
+  and an instance's exit. **After updating, restart your zones**
+  (`cellward down <zone>; cellward up <zone>`): a zone started by the
+  previous build has no bridge, and launches into it keep running in the
+  zone's own namespaces, with a notice, until it is restarted; a container
+  whose programs still run there is not started in an instance beside them.
 - **A container's instance can go out through a zone — its side**
   (2026-09-27, stage 2b). An instance whose network is a zone (its id's
   own, `<c>:<zone>`, or what the launch that started it asked, a file
@@ -324,6 +344,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and `usb:` for a board a program can reflash.
 
 ### Changed
+- **A launch into a zone is a container's instance** (2026-09-27, stage 2c).
+  What scripts may notice: `cellward run <zone> -- …` starts
+  `vpn-zone-container@<id>.service` (and the zone, when it is down); the
+  program's network namespace is not the zone's (`nsenter` by `zone.pid`
+  reaches the zone, not the program), its `awg0` is a tap on
+  `10.254.0.0/16`, and its `resolv.conf` names `10.254.255.253` (and
+  `fd63:656c:6c77::53`) instead of the tunnel's resolvers.
 - **Offline is containers' instances, not a zone** (2026-09-27, stage 1 of
   the container design). What scripts may notice: a launch offline starts
   `vpn-zone-container@<id>.service` instead of `vpn-zone@offline.service`;

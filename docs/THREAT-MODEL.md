@@ -88,8 +88,9 @@ It is shown as `host-interface` everywhere.
 | main home | nothing about files | the same identity in every network (I2) |
 | system zone: a service, a NixOS container, `vpn-zone-sys` | the network rows (sys1, sys10); the resolvers and, by default, the system bus hidden; see SYSTEM §10 | the Nix daemon for services, unless `InaccessiblePaths` (H1) |
 
-**Every zone gets:** an app namespace with `lo` and the tunnel; the nftables insurance; the
-host's resolvers hidden, and its own `resolv.conf` and `nsswitch.conf`; its own runtime
+**Every zone gets:** an app namespace with `lo` and the tunnel — since 2026-09-27 a launch
+runs beside it, in its container's instance, whose only way out is the zone's bridge
+(N17); the nftables insurance; the host's resolvers hidden, and its own `resolv.conf` and `nsswitch.conf`; its own runtime
 directory without the raw Wayland socket or compositor IPC; Wayland only through a
 restricted socket; no host X server; a filtered system bus and an allow-list over `/run/systemd`; its own
 `/dev` and devpts; its own IPC namespace; the Nix daemon and the system tier's socket hidden;
@@ -120,7 +121,7 @@ satellite, when granted.
 | N6 | A zone program re-routes, adds an interface or unloads the filter | yes | no capabilities, and no rights in the zone's user namespace; a nested one owns only new, empty namespaces | C · vm38 sys2 sys3 |
 | N7 | A regression of ours adds a way out | insurance | nftables in the app namespace: `policy drop`, only `lo` and `awg0` | vm5 sm4 |
 | N8 | The uplink sends anything but the tunnel's transport | yes | uplink ruleset: the endpoint's address and port (OpenConnect: the gateway's address, any port) | vm6 vm8 sm5 sm17 sys6 |
-| N9 | The tunnel or its holder dies while programs run | yes, fail-closed | the uplink namespace dies with the holder; the interface stays and drops everything | C · vm39 sys10 br3 br4 sm19 vm24 up1 |
+| N9 | The tunnel or its holder dies while programs run | yes, fail-closed | the uplink namespace dies with the holder; the interface stays and drops everything. A container's instance is cut when its zone ends (2026-09-27): its tap goes, `lo` and unreachable default routes are left, its programs live on; it is attached again only to the same zone (the same config), another one waits for `cellward container reattach` | C · vm39 sys10 br3 br4 sm19 vm24 up1 vm63 vm64 vm65 |
 | N10 | A host-interface zone falls back to the host's routes | yes | every socket is bound to the interface (patched pasta); the zone goes down when the interface does | vm22 vm23 vm24 vm25 |
 | N11 | A host-interface zone goes out through a host service (proxy, Tor, sshd on a host address) | partly | the filter refuses the host's IPv4 and IPv6 (global, ULA) addresses as they are at zone start; later ones are not listed | vm22 vm40 |
 | N12 | A user zone through a system zone reaches that zone's services, or goes around its tunnel | yes | its pasta runs as `vpn-zones-bridge`, which the system zone refuses to every local address, both families; IPv6 passed on only when the system zone's network carries it | br1 br2 br3 br4 br5 |
@@ -128,6 +129,7 @@ satellite, when granted.
 | N14 | A device granted to a container brings its own network (a phone's adb or modem, an ESP32, an LTE modem) | no | a warning when such a device is granted | — |
 | N15 | Metadata: the endpoint's name is resolved in the host's network; DNS content is readable at the tunnel's exit | no | a literal endpoint address avoids the first; DoT/DoH is planned (M3) | — |
 | N16 | A socket family no network namespace holds: `AF_VSOCK` to the host's or a VM's vsock services (a guest's sshd since systemd 256), around the tunnel | yes for 64-bit programs · 32-bit: **no** | a seccomp allow-list of families in every launch into a zone and for the OpenConnect client (`AF_UNIX`, `AF_INET`, `AF_INET6`, `AF_NETLINK`, `AF_PACKET`); x86's 32-bit `socketcall` cannot be filtered by family and passes | vm45 u14 |
+| N17 | A container's instance reaches its zone's own services (a listener on the zone's address or loopback), or goes out other than through the zone's tunnel | yes | the only way out of the instance is a `passt --fd` its zone runs for it in the zone's app namespace (2026-09-27), as the bridge's own id (the zone's third subordinate uid): the zone's filter refuses that id every local address and loopback, both families, and the zone does not carry an instance without the rule; passt maps nothing to the zone's loopback (`--no-map-gw`, `--map-guest-addr none`) and takes nothing in; the instance's relay runs under a seccomp allow-list | C · vm60 vm61 vm62 vm22 sm26 |
 | | **DNS** | | | |
 | D1 | The host's resolver answers over a unix socket (nscd/nsncd, resolved's varlink, avahi) | yes | tmpfs over their directories in every zone (the zone fails if this fails); the zone's own `nsswitch.conf`: `hosts: files dns` | vm9 vm10 vm11 sm6 sys1 |
 | D2 | The host's `resolv.conf` inside a zone | partly | the zone's own file is bound in; a host that replaces its file by rename (NetworkManager, resolvconf) detaches the bind, or renames away the link that led to it: the zone then reads the host's file and asks the host's resolvers, through the tunnel, until it restarts; nothing reaches the host's resolver or leaves around the tunnel | vm12 vm48 |
@@ -179,7 +181,7 @@ satellite, when granted.
 | A8 | Playing to a network sink the host has loaded (RAOP, RTP); the shared sample cache | no | open (LEAK-MODEL §17) | — |
 | | **Processes, IPC, temporary files** | | | |
 | X1 | The host's `/tmp` and `/dev/shm`: listening sockets (tmux `run-shell`, a VPN client's IPC, single-instance sockets), other sandboxes' bus filters | hermetic: yes · ordinary: **no** (`doctor` names them) | its own `/tmp`, `/var/tmp`, `/dev/shm`; the filters moved into the runtime directory | vm19 |
-| X2 | The host's abstract unix sockets | yes | they belong to the network namespace — an offline container's instance has one of its own (2026-09-27); a sandbox in the host's network: a Landlock scope (Linux 6.12+) | vm19 vm32 vm54 |
+| X2 | The host's abstract unix sockets | yes | they belong to the network namespace — every container's instance has one of its own, offline and in a zone (2026-09-27); a sandbox in the host's network: a Landlock scope (Linux 6.12+) | vm19 vm32 vm54 vm66 |
 | X3 | `/proc/<pid>/root`, `cwd`, `fd`, `environ` of the host's session processes | yes | the kernel's ptrace rules across user namespaces; `vpn-zone-sys` gets a user namespace of its own | vm15 vm17 vm18 sys4 |
 | X4 | `/proc/<pid>/cmdline` of host processes (which zones and profiles are in use) | sandbox: yes · zone and offline container: **no** | zones have no pid namespace, nor do containers' instances yet (stage 3 of the container design gives each instance its own); the sandbox has its own. An instance's `/sys/fs/cgroup`, which names every unit and scope, is covered | sandbox: C · **no test** |
 | X5 | Signals to the host's processes of the same user (killing the compositor) | yes (Linux 6.12+) | each launch into a zone is a Landlock domain of its own with `LANDLOCK_SCOPE_SIGNAL`: it signals itself and what it starts, nothing else — another launch of the same zone neither; the sandbox also cannot name host pids | vm44 |
@@ -187,7 +189,7 @@ satellite, when granted.
 | X7 | The session's supplementary groups (docker, libvirt, input) | yes | dropped for zone programs | vm18 |
 | X8 | Exhausting memory, CPU or processes | no | limits per zone are planned (ROADMAP §17) | — |
 | X9 | `TIOCSTI` into the host terminal a program was started from | sandbox: yes · zone: **no** | seccomp in the sandbox; a zone program keeps that terminal, and the kernel's `legacy_tiocsti` decides | u6 |
-| X10 | Another container's loopback services, abstract sockets, System V IPC and `/tmp` (a container reaching another) | offline: yes · in one zone: **no** | offline, each container runs in its own instance: network, IPC and mount namespaces of its own (stage 1 of the container design, 2026-09-27); in a zone its containers share the zone's (§5) | vm53 vm54 |
+| X10 | Another container's loopback services, abstract sockets, System V IPC and `/tmp` (a container reaching another) | yes · `/tmp` in an ordinary network: **no** (X1) | each container runs in its own instance: network, IPC and mount namespaces of its own — offline since stage 1 of the container design, in a zone since stage 2 (2026-09-27); a launch into a zone of a previous build still running (no bridge) takes the zone's own, with a notice | vm53 vm54 vm66 vm68 |
 | | **Helpers outside the zone** | | | |
 | H1 | The Nix daemon: a fixed-output build fetches any URL from the host's network | yes, unless `nix-daemon on` | hidden in every zone and always in the OpenConnect uplink; system tier: hidden from containers and `vpn-zone-sys`, optional for services | vm18 vm20 sm16 sys2 |
 | H2 | The system tier's service (add a system zone, run in one, around the zone's tunnel) | yes | `/run/vpn-zones` hidden in user zones; `VZP1` accepted only from a zone's root; per-zone user lists | br2 sys5 |
@@ -275,7 +277,7 @@ Notes:
 | A compromised host | root, the user's session outside the zones, the Nix store and the system configuration are trusted |
 | An escape from the browser's own sandbox | not prevented or detected; the escaped code has what its container and zone give, as this table says |
 | A same-uid program outside the sandbox | a host program, or a zone program without a sandbox, can read and change a sandbox's data on disk and the whole home; only other containers' data is hidden from zones (H4) |
-| Programs of one zone against each other | one user namespace, one `/tmp`, one set of abstract sockets: per-container settings are not walls (PERMISSIONS §11.10). Offline, containers are apart (X10): each runs in its own instance |
+| Programs of one container against each other | one instance, one user namespace, one `/tmp`, one set of abstract sockets: per-program settings are not walls (PERMISSIONS §11.10). Containers are apart (X10): each runs in its own instance, offline and in a zone |
 | The person's answer | a "yes" or a grant is taken as meant; W16 guards only against keys typed on |
 | Traffic analysis; the VPN provider | what leaves through the tunnel is the provider's to see |
 
@@ -354,6 +356,15 @@ apart from DynamicLauncher and the two network portals.
 - vm57 "cellward container kill ends every program of the container at once"
 - vm58 "an instance ends with its last program, by that event alone"
 - vm59 "a throwaway container is erased when its instance ends"
+- vm60 "stage 2: the zone's bridge carries a sibling namespace, and refuses it the zone's own addresses" (in `tests/vm-probe-container-ns.py`)
+- vm61 "a zone carries an instance: a namespace of its own, out through the zone" (in `tests/vm-instance-bridge.py`, as are vm62–vm68)
+- vm62 "an instance reaches nothing that listens in its zone"
+- vm63 "the zone's end cuts the instance: its programs live on, with no way out"
+- vm64 "the zone back as it was: attached again, with new addresses"
+- vm65 "the zone back as another one: cut until the person says"
+- vm66 "a launch into the zone runs in its container's instance, not in the zone"
+- vm67 "the instance ends with its program, and its zone's passt with it"
+- vm68 "a zone of a previous build (no bridge): entered as before, and the person told"
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -409,6 +420,8 @@ the other"
 - sm23 «Экземпляр: корень — четвёртый подчинённый id, не корень зон» (a container's instance, its keeper started without systemd)
 - sm24 «Запуск offline в экземпляр: только lo, своя сеть, зона offline не нужна» (lo only, the registry out of sight)
 - sm25 «Экземпляр останавливается сигналом держателю, и его программы — с ним» (a stopped instance ends its programs)
+- sm26 «Запуск в зону — в экземпляре контейнера: своя сеть, lo и tap, выход через зону» (a launch into a zone, in its container's instance)
+- sm27 «Зона OpenConnect везёт экземпляр: search шлюза в его resolv.conf, выход через туннель» (an OpenConnect zone carries an instance)
 
 Rust tests (`cargo test`):
 

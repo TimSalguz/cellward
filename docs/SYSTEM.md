@@ -354,6 +354,14 @@ system zone they may not use is a refusal, never a second tunnel behind its back
   stopping leaves the system zone with lo and the user zone with nothing (the VM test checks
   both the tunnel's address and the host's own). pasta's sockets are in the system zone's
   namespace, so the host's egress policy never sees them — and does not have to.
+- **Containers' instances** (stage 2 of the container design, 2026-09-27). A launch into
+  the user zone runs in its container's instance, not in the app namespace: the instance's
+  one link is a tap whose far end is a passt the user zone runs for it in its app namespace
+  (CONTAINERS §3.3). A packet goes instance → that passt → the app namespace → this pasta
+  → the system zone's tunnel; nothing is added on the system tier, and passt's sockets are
+  in the user zone's app namespace, not the host's. The system zone's services stay out of
+  reach twice: passt's own id is refused the user zone's addresses, pasta's group the
+  system zone's (the VM test `br1` checks the instance's tap address).
 - **The system zone made anew** — its namespace unit restarted, cellward off and on — would
   leave pasta in the old namespace, which has no tunnel. The service keeps the zone's two
   descriptors for as long as the connection lasts and looks every second: the system zone's
@@ -439,7 +447,9 @@ the network, however it was started.
   let out by its mark: its UDP socket is the kernel's own, has no file and so no owner, and
   the holder writes `FwMark = 0x767a` into what `setconf` gets (`system::TUNNEL_MARK`,
   replacing any the config had) — found by the VM test, where the first handshake was
-  refused. Everything in a zone never passes this hook. Anybody else: a rate-limited
+  refused. Everything in a zone never passes this hook — nor does a container instance's
+  way out (stage 2): the bridge's passt, the third subordinate id, has its sockets in the
+  zone's app namespace, never in the host's. Anybody else: a rate-limited
   `vpn-zones-egress: … UID=<uid>` line in the kernel log, and in `enforce` `reject with
   icmpx admin-prohibited` — the program fails at once instead of hanging.
   Cgroup sets (`NFTSet=`) were the other design: systemd fills them when a unit starts, and

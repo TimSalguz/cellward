@@ -706,7 +706,23 @@ fn down(tools: &Tools, args: &[OsString]) -> u8 {
     if code != 0 {
         return code;
     }
-    println!("зона {} опущена", name.to_string_lossy());
+    let text = name.to_string_lossy();
+    println!("зона {text} опущена");
+    // The containers' instances it carried (stage 2): cut, not ended — their
+    // programs go on with no way out, and are attached again when the zone
+    // comes back as it was.
+    let cut: Vec<String> = crate::instance::running(&tools.state)
+        .into_iter()
+        .filter(|i| i.network == *text)
+        .map(|i| i.id)
+        .collect();
+    if !cut.is_empty() {
+        println!(
+            "без выхода в сеть остались контейнеры: {} — их программы работают дальше; \
+             поднимешь зону — снова будут в сети (обрывает всё: cellward kill {text})",
+            cut.join(", ")
+        );
+    }
     0
 }
 

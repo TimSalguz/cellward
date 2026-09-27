@@ -611,6 +611,8 @@ let
                   f"/share/bash-completion/completions/{name}"
               )
 
+      exec(open("${./vm-instance-helpers.py}").read())
+
       # The DNS leak test needs two resolvers that disagree: the HOST's, which
       # a zone must never reach, and the tunnel's own further down. One lookup
       # then names whoever answered it. This one is the host's.
@@ -1809,7 +1811,11 @@ let
           assert up.strip(), "no security-context listener in wl-up"
           zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
           in_zone(zp, "test ! -e /run/user/1000/vpn-zones/wl-up")
-          in_zone(zp, "sh -c 'ls /run/user/1000/vpn-zones/wayland/vmsmoke | grep -q wl-sandbox-'")
+          # The launch runs in its main home's instance (stage 2).
+          mi = ("main:vmsmoke", "vmsmoke")
+          wl_dir = f"/run/user/1000/vpn-zones/wayland/{ikey(mi[0])}"
+          in_inst(*mi, "test ! -e /run/user/1000/vpn-zones/wl-up")
+          in_inst(*mi, f"sh -c 'ls {wl_dir} | grep -q wl-sandbox-'")
 
           # An X server of the launch's own (docs/HERMETICITY.md §7, A; review
           # 2026-09-27): the satellite serves a socket x11-run bound itself —
@@ -1827,8 +1833,8 @@ let
           assert "name of display" in info, f"no X server answered:\n{info}"
           xd = machine.succeed("cat /home/alice/vmx-display").strip()
           assert xd.startswith(":"), xd
-          in_zone(zp, f"test ! -e /tmp/.X11-unix/X{xd[1:]}")
-          in_zone(zp, f"sh -c '! grep -q @/tmp/.X11-unix/X{xd[1:]} /proc/net/unix'")
+          in_inst(*mi, f"test ! -e /tmp/.X11-unix/X{xd[1:]}")
+          in_inst(*mi, f"sh -c '! grep -q @/tmp/.X11-unix/X{xd[1:]} /proc/net/unix'")
           alice("systemctl --user stop vmxhold || true")
           alice("cellward x11 vmsmoke off")
           alice("rm -f ~/vmx-info ~/vmx-display")
@@ -1836,18 +1842,17 @@ let
           # The zone's directory of sockets is read-only in the zone: a
           # program cannot take another launch's socket's place, nor put one
           # of its own there (review 2026-09-25).
-          wl_dir = "/run/user/1000/vpn-zones/wayland/vmsmoke"
-          sock = in_zone(zp, f"sh -c 'ls {wl_dir} | grep wl-sandbox- | head -1'").strip()
+          sock = in_inst(*mi, f"sh -c 'ls {wl_dir} | grep wl-sandbox- | head -1'").strip()
           assert sock, "no socket of the launch"
-          in_zone(zp, f"sh -c '! rm -f {wl_dir}/{sock}'")
-          in_zone(zp, f"sh -c '! touch {wl_dir}/x'")
-          in_zone(zp, f"test -S {wl_dir}/{sock}")
-          # A process of the zone that is not of this launch — entered by
-          # hand, not below its supervisor — is not passed on by its proxy:
-          # its window would carry the launch's pid (review 2026-09-25).
-          foreign = in_zone(
-              zp,
-              f"sh -c 'WAYLAND_DISPLAY=vpn-zones/wayland/vmsmoke/{sock} wayland-info 2>&1; true'",
+          in_inst(*mi, f"sh -c '! rm -f {wl_dir}/{sock}'")
+          in_inst(*mi, f"sh -c '! touch {wl_dir}/x'")
+          in_inst(*mi, f"test -S {wl_dir}/{sock}")
+          # A process of the instance that is not of this launch — entered
+          # by hand, not below its supervisor — is not passed on by its
+          # proxy: its window would carry the launch's pid (review 2026-09-25).
+          foreign = in_inst(
+              *mi,
+              f"sh -c 'WAYLAND_DISPLAY=vpn-zones/wayland/{ikey(mi[0])}/{sock} wayland-info 2>&1; true'",
           )
           assert "wl_compositor" not in foreign, foreign
           # The launch's own processes are: a child of the held program.
@@ -1987,8 +1992,10 @@ let
           assert "tmp-ok" in out, out
           # Gone behind its launch: nothing on the host but the other one
           # (review: the given-back directory was a mount point, and stayed).
-          out = alice("ls -A ~/.local/state/vpn-zones/.throwaway")
-          assert out.split() == ["vpn-profile-vmother"], out
+          # Its instance erases it as it ends, right after the launch.
+          machine.wait_until_succeeds(
+              f"test \"$(ls -A {STATE}/.throwaway)\" = vpn-profile-vmother", timeout=60
+          )
           # Joined only while it runs, in its own network: one whose programs
           # are gone holds what nobody may take over.
           alice(
@@ -2078,8 +2085,9 @@ let
           for upper in uppers.values():
               machine.wait_until_succeeds(f"test -e {upper}/cam-waiting", timeout=60)
           machine.succeed("mknod -m 600 /dev/video9 c 81 9 && chown alice /dev/video9")
-          # The go through the zone's own /tmp, which its launches share.
-          in_zone(hp, "touch /tmp/cam-go")
+          # The go through each one's own /tmp: its container's instance's.
+          for c in uppers:
+              alice(f"cellward run vmherm --container {c} -- touch /tmp/cam-go")
           for upper in uppers.values():
               machine.wait_until_succeeds(f"test -s {upper}/cam9", timeout=30)
           seen = machine.succeed(f"cat {uppers['vmcam']}/cam9").split()
@@ -2417,12 +2425,20 @@ let
           machine.fail("test -e /dev/shm/from-zone")
           # A sandbox's bus filter: in the zone's runtime directory.
           alice("systemd-run --user --unit=vmsbsleep cellward run vmherm --fs-sandbox -- sleep 60")
-          probe = shlex.quote(
-              "export XDG_RUNTIME_DIR=/run/user/1000; "
-              f"nsenter --preserve-credentials -U -n -m -t {hp} -- "
-              "sh -c 'test -S /run/user/1000/vpn-zones/sandbox/*/bus'"
+          # In the sandbox's own instance (`:fs:<launch>`, stage 2).
+          machine.wait_until_succeeds(
+              "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 cellward status --json' "
+              "| grep -q '\"id\":\":fs:'",
+              timeout=60,
           )
-          machine.wait_until_succeeds(f"su -l alice -c {probe}", timeout=30)
+          fs_id = next(
+              i["id"] for i in json.loads(alice("cellward status --json"))["instances"]
+              if i["id"].startswith(":fs:") and i["network"] == "vmherm"
+          )
+          machine.wait_until_succeeds(
+              in_inst_q(fs_id, "vmherm", "sh -c 'test -S /run/user/1000/vpn-zones/sandbox/*/bus'"),
+              timeout=30,
+          )
           machine.fail("ls -d /tmp/vpn-fs-sandbox-*")
           alice("systemctl --user stop vmsbsleep eviltmp evilabs || true")
           alice("tmux kill-server || true")
@@ -2574,7 +2590,7 @@ let
           alice("mkdir -p ~/.local/share/vmurl ~/.local/share/applications ~/.config")
           alice(
               "printf '#!/bin/sh\\necho \"$1\" >> /home/alice/opened-urls\\n"
-              "readlink /proc/self/ns/net >> /home/alice/opened-urls\\n' "
+              "echo \"$(readlink /proc/self/ns/net) net=$VPN_ZONE_CURRENT\" >> /home/alice/opened-urls\\n' "
               "> ~/.local/share/vmurl/record && chmod 755 ~/.local/share/vmurl/record"
           )
           alice(
@@ -2604,7 +2620,15 @@ let
           zone_ns = machine.succeed(f"readlink /proc/{hp}/ns/net").strip()
           host_ns = machine.succeed("readlink /proc/1/ns/net").strip()
           opened = machine.succeed("cat /home/alice/opened-urls")
-          assert zone_ns in opened and host_ns not in opened, f"{opened} (zone {zone_ns})"
+          # In the zone's network, not the host's: where the sandbox runs —
+          # its container's instance since stage 2.
+          assert "net=vmherm" in opened and host_ns not in opened, f"{opened} (zone {zone_ns})"
+
+          def opened_in(url):
+              """The network namespace and the network the link opened in."""
+              lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
+              return lines[lines.index(url) + 1].split()
+
           out = alice(f"WAYLAND_DISPLAY=wayland-vmtest cellward run vmherm --fs-sandbox -- {portal} ''' 'file:///etc/hostname' '@a{{sv}} {{}}'")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
           machine.sleep(2)
@@ -2619,18 +2643,17 @@ let
           out = in_zone(hp, f"{portal} ''' 'https://example.test/from-zone' '@a{{sv}} {{}}'")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
           machine.wait_until_succeeds("grep -q from-zone /home/alice/opened-urls", timeout=30)
-          lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
-          at = lines.index("https://example.test/from-zone")
-          assert lines[at + 1] == zone_ns, f"{lines} (zone {zone_ns})"
+          # In the zone's network — a launch into it, in its instance.
+          ns, net = opened_in("https://example.test/from-zone")
+          assert net == "net=vmherm" and ns not in (host_ns, zone_ns), (ns, net, zone_ns)
           # The same call after an authentication ended with more on the
           # BEGIN line, which the proxy takes as the end: the filter takes it
           # so too, answers, and the link opens in the zone.
           out = in_zone(hp, "${pkgs.python3}/bin/python3 ${rawBegin} https://example.test/raw-begin")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
           machine.wait_until_succeeds("grep -q raw-begin /home/alice/opened-urls", timeout=30)
-          lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
-          at = lines.index("https://example.test/raw-begin")
-          assert lines[at + 1] == zone_ns, f"{lines} (zone {zone_ns})"
+          ns, net = opened_in("https://example.test/raw-begin")
+          assert net == "net=vmherm" and ns not in (host_ns, zone_ns), (ns, net, zone_ns)
           # Links on behalf of a container (docs/PERMISSIONS.md §11.13): two
           # programs claim https now. A container's rule chooses one without
           # a window — the zone's filter says whose program's connection
@@ -2763,11 +2786,8 @@ let
           out = alice(f"WAYLAND_DISPLAY=wayland-vmtest cellward run vmsmoke --fs-sandbox -- {portal} ''' 'https://example.test/from-ordinary' '@a{{sv}} {{}}'")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
           machine.wait_until_succeeds("grep -q from-ordinary /home/alice/opened-urls", timeout=30)
-          sp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
-          smoke_ns = machine.succeed(f"readlink /proc/{sp}/ns/net").strip()
-          lines = machine.succeed("cat /home/alice/opened-urls").splitlines()
-          at = lines.index("https://example.test/from-ordinary")
-          assert lines[at + 1] == smoke_ns, f"{lines} (zone {smoke_ns})"
+          ns, net = opened_in("https://example.test/from-ordinary")
+          assert net == "net=vmsmoke" and ns != host_ns, (ns, net)
           alice("cellward down vmsmoke")
 
       exec(open("${./vm-hostif.py}").read())

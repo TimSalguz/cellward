@@ -33,6 +33,12 @@
 //! instance is stopped, and finds nobody left to end. `cellward container
 //! stop` only stops it: its keeper ends its programs with TERM, as a logout
 //! does ([`instances`]).
+//!
+//! **A zone's instances** (stage 2): `cellward kill <zone>` ends the
+//! instances the zone carries first — their programs are in namespaces of
+//! their own, and the zone's end alone would only cut them off —, then
+//! what is left in the zone's own namespaces (a launch of a previous build),
+//! then the zone. With the zone down, the instances cut from it.
 
 use std::ffi::OsString;
 use std::fs;
@@ -179,6 +185,16 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
         .ok()
         .and_then(|t| cgroup_of(&t).map(str::to_owned));
 
+    // The containers' instances it carries first (stage 2 of the container
+    // design): their programs are in namespaces of their own, not the
+    // zone's, and the zone's end alone would only cut them off — they are
+    // frozen and killed, and the instances stopped.
+    let carried: Vec<crate::instance::Running> = crate::instance::running(&tools.state)
+        .into_iter()
+        .filter(|i| i.network == *text)
+        .collect();
+    let (from_instances, _) = end_instances(tools, &carried, true);
+
     // The zone's placeholder is spared by name too: frozen, it would hold the
     // stop up even when its cgroup could not be read.
     let spare = [std::process::id() as i32, zone];
@@ -192,7 +208,7 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     // The namespace outlives the zone while anything is in it: one more
     // round for whoever got in between the passes and the stop.
     let (late, _) = freeze(&netns, unit.as_deref(), &spare);
-    let killed: Vec<&Target> = frozen
+    let in_zone: Vec<&Target> = frozen
         .iter()
         .chain(
             late.iter()
@@ -200,6 +216,7 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
         )
         .filter(|t| pidfd_signal(&t.fd, libc::SIGKILL))
         .collect();
+    let killed: Vec<&Target> = from_instances.iter().chain(in_zone).collect();
     let names: Vec<String> = killed
         .iter()
         .map(|t| format!("{} ({})", t.name, t.pid))
@@ -288,40 +305,7 @@ pub fn instances(tools: &Tools, name: &str, kill: bool) -> u8 {
         eprintln!("у «{name}» нет запущенного экземпляра контейнера — останавливать нечего");
         return EXIT_NOT_UP;
     }
-    let mut killed: Vec<Target> = Vec::new();
-    let mut all_stopped = true;
-    for instance in &found {
-        if kill {
-            // Its user namespace, looked at while its space is still the
-            // process that wrote its number; its keeper spared, and what it
-            // started — the space's holder, the relay (stage 2) — with it.
-            let key = crate::place::ns_key(Path::new(&format!("/proc/{}/ns/user", instance.pid)));
-            let keeper = crate::sys::parent_of(instance.pid)
-                .filter(|&h| h > 1)
-                .and_then(crate::sys::parent_of)
-                .filter(|&k| k > 1);
-            let still = crate::instance::up(&tools.state, &instance.id) == Some(instance.pid);
-            if let (Some(key), Some(keeper), true) = (key, keeper, still) {
-                let (frozen, overrun) = freeze_members(key, keeper);
-                if let Some(why) = overrun {
-                    eprintln!("{why}");
-                }
-                killed.extend(
-                    frozen
-                        .into_iter()
-                        .filter(|t| pidfd_signal(&t.fd, libc::SIGKILL)),
-                );
-            }
-        }
-        let unit = crate::instance::unit_name(&instance.id).unwrap_or_default();
-        if crate::cli::systemctl_unit(tools, "stop", std::ffi::OsStr::new(&unit)) != 0 {
-            all_stopped = false;
-            eprintln!(
-                "контейнер {}: не остановлен (systemctl stop {unit})",
-                instance.id
-            );
-        }
-    }
+    let (killed, all_stopped) = end_instances(tools, &found, kill);
     let ids: Vec<&str> = found.iter().map(|i| i.id.as_str()).collect();
     let names: Vec<String> = killed
         .iter()
@@ -357,6 +341,51 @@ pub fn instances(tools: &Tools, name: &str, kill: bool) -> u8 {
     } else {
         EXIT_NOT_DOWN
     }
+}
+
+/// The instances of `found` stopped — with `kill`, their programs frozen
+/// and killed first. The programs killed, and whether every instance
+/// stopped.
+fn end_instances(
+    tools: &Tools,
+    found: &[crate::instance::Running],
+    kill: bool,
+) -> (Vec<Target>, bool) {
+    let mut killed: Vec<Target> = Vec::new();
+    let mut all_stopped = true;
+    for instance in found {
+        if kill {
+            // Its user namespace, looked at while its space is still the
+            // process that wrote its number; its keeper spared, and what it
+            // started — the space's holder, the relay (stage 2) — with it.
+            let key = crate::place::ns_key(Path::new(&format!("/proc/{}/ns/user", instance.pid)));
+            let keeper = crate::sys::parent_of(instance.pid)
+                .filter(|&h| h > 1)
+                .and_then(crate::sys::parent_of)
+                .filter(|&k| k > 1);
+            let still = crate::instance::up(&tools.state, &instance.id) == Some(instance.pid);
+            if let (Some(key), Some(keeper), true) = (key, keeper, still) {
+                let (frozen, overrun) = freeze_members(key, keeper);
+                if let Some(why) = overrun {
+                    eprintln!("{why}");
+                }
+                killed.extend(
+                    frozen
+                        .into_iter()
+                        .filter(|t| pidfd_signal(&t.fd, libc::SIGKILL)),
+                );
+            }
+        }
+        let unit = crate::instance::unit_name(&instance.id).unwrap_or_default();
+        if crate::cli::systemctl_unit(tools, "stop", std::ffi::OsStr::new(&unit)) != 0 {
+            all_stopped = false;
+            eprintln!(
+                "контейнер {}: не остановлен (systemctl stop {unit})",
+                instance.id
+            );
+        }
+    }
+    (killed, all_stopped)
 }
 
 #[cfg(test)]

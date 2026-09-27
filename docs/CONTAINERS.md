@@ -145,6 +145,34 @@ container = {
 | `offline` | loopback only (done) | no |
 | a host interface **itself** inside the container | moving a real link into another network namespace needs `CAP_NET_ADMIN` in the host's namespace | **yes**: a small system helper (NixOS module option), never the default |
 
+**A network carries containers** (stage 2 of the container design,
+2026-09-27). A launch into a zone runs in its container's instance (§3.6),
+never in the zone's own namespaces: the zone is the transport. The instance
+has a network namespace of its own with `lo` and a tap, `awg0` —
+`10.254.x.y/16` by the gateway `10.254.255.254`, and `fd63:656c:6c77::/64`
+by `fe80::1` only when the zone carries IPv6. Its only way out is a `passt
+--fd` its zone starts for it in the zone's app namespace: the instance's
+keeper asks over the zone's `bridge.sock`, handing one end of a stream
+socket; passt runs as the bridge's own id (the zone's third subordinate
+uid), which the zone's filter refuses every address of the zone and its
+loopback, both families; a relay in the instance (`vpn-zone-core
+frame-relay --attach`, a seccomp allow-list) pumps frames between the tap
+and the stream. Names: the instance's `resolv.conf` is constant
+(`10.254.255.253`, `fd63:656c:6c77::53`), which passt forwards to the
+zone's resolvers — the tunnel's; the search list is the zone's (the
+gateway's for OpenConnect).
+
+When the zone ends, its instances are **cut**: the tap goes, loopback and
+unreachable default routes are left, the programs go on with no way out.
+The zone back as it was — the same config and resolvers, by a fingerprint
+the zone's answer carries — attaches them again, with new addresses; back
+as another one, they stay cut until `cellward container reattach <c>`:
+never moved to another exit as a side effect (I1). A zone started by a
+previous build that an update left running has no `bridge.sock`: a launch
+into it takes the zone's own namespaces as before, with a notice to restart
+the zone. Each zone needs a third subordinate id for the bridge (a user's
+range of at least four with the instances' root).
+
 **Extra routes** (`routes`) sit beside the one network — the typical one is the
 LAN next to a tunnel. Each is a named, explicit exception: a rule in the
 uplink plus a route in the app namespace for exactly that prefix, off by
@@ -288,6 +316,18 @@ a throwaway's layer and records go with it. Stopped (`cellward container
 stop <c>`, a logout), it ends its programs: TERM, and systemd's stop timeout
 for one that does not end. `cellward container kill <c>` freezes and kills
 them at once.
+
+**Into a zone, the same** (stage 2, 2026-09-27; §3.3): the waiter is given
+`--network <zone>` and refuses an instance that runs in another network. The
+launch starts the zone when it is down (and waits for it, as a launch always
+did), asks for the network by `~/.local/state/vpn-zones/.instances/<key>.network`
+when the id does not carry it (a container's own name; `main:<zone>` and
+`<c>:<zone>` do), starts the instance, and refuses a container whose instance
+runs in another network (I2) or whose live launches still run in the zone's
+own namespaces (from before the switch-over, or into a zone of a previous
+build): one home is not two worlds. `cellward down <zone>` cuts the instances
+it carries and says which; `cellward kill <zone>` ends them first, then the
+zone.
 
 ## 4. Choosing a container
 
@@ -710,13 +750,22 @@ version 1 unchanged): the containers' running instances (§3.6), each
 instance (`main:offline`) and `null` for a throwaway's; `pid` is the host pid
 of its space; `restart_needed` names the offline network's settings that
 changed since it came up (the instance takes them at its next start);
-`programs` counts its live launches. `exit`, `why`, `epoch`, `pid_namespace`
-and `live_switch` are fixed in stage 1 (no way out, no switch, no pid
-namespace of its own) and will move in the later stages. With it:
+`programs` counts its live launches. `exit` is `"through"` with `why`
+`null` for an instance that goes out through its zone (stage 2), and
+`"none"` with `why` one of `offline`, `zone-down` (cut by its zone's end,
+attached again when it comes back the same), `zone-changed` (it came back as
+another one: cut until `cellward container reattach`) and `attach-failed`.
+`epoch`, `pid_namespace` and `live_switch` are fixed (no switch, no pid
+namespace of its own yet) and will move in the later stages. With it:
 `containers[].instances` (the ids of a container's running instances),
-`containers[].running[].instance` (the instance a launch runs in, `null` for
-one in a zone or unconfined) and `attached` on the `offline` network (the
-ids of the instances with no network). State under
+`containers[].running[].instance` (the instance a launch runs in — offline
+and, since stage 2, in a zone; `null` for one unconfined or in a zone's own
+namespaces), `attached` on the `offline` network (the ids of the instances
+with no network) and, since stage 2, on every zone (the ids of the
+instances going out through it now; `[]` when it is down), and `bridge` on
+every zone: `true` when it is up and carries instances, `false` when it is
+up without a bridge (a previous build's: its launches take its own
+namespaces), `null` when it is down (and for `unconfined` and `offline`). State under
 `~/.local/state/vpn-zones/.instances/` is the instances', named by a key and
 not a zone: a reader of zones skips it (a dot directory).
 
@@ -728,7 +777,9 @@ OpenConnect client runs as the second subordinate uid since 2026-09-27
 (`zone::CLIENT_ID`), but its sockets are in the uplink's network, not the
 host's: what reaches the host is pasta's. Stable as long as `/etc/subuid` is;
 note that a rootless container tool mapping its own uid 1 onto the same
-subordinate uid would match too.
+subordinate uid would match too. The bridge's passt (stage 2) runs as the
+third subordinate uid, and its sockets are in the zone's app namespace, not
+the host's.
 
 ## 10. Where can a packet or a DNS query go around the tunnel now?
 
@@ -744,6 +795,13 @@ subordinate uid would match too.
   everywhere it is shown (`host-interface`).
 - **Extra routes.** Each is a hole by definition — explicit, per prefix, off by
   default, listed in every view and in `doctor`.
+- **A zone carries instances** (stage 2, done). The instance's only link is
+  its tap, whose far end is a passt in the zone's app namespace: what passt
+  sends goes where the zone's own packets may go — into the tunnel —, never
+  to the zone's addresses or loopback (the bridge id is refused them), and
+  never anywhere once the zone is gone (cut; attached again only to the same
+  zone). Its names go to the zone's resolvers through the constant
+  forwarder address. [LEAK-MODEL](LEAK-MODEL.md) «Шлюзовая архитектура».
 - **`unconfined` containers** (done). No network namespace — the host's network and
   resolvers, and the name says so. The user namespace grants nothing over the
   host's netns.

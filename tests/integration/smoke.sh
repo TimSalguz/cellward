@@ -79,6 +79,17 @@ cleanup() {
     sudo -n ip addr del "$OC_HOST_ADDR/32" dev lo 2>/dev/null
   fi
   for p in "${HOLDER_PIDS[@]}"; do kill -TERM "$p" 2>/dev/null; done
+  # Держатели экземпляров, поднятые подставным systemctl.
+  for f in "$WORK"/units/*.pid; do
+    [ -f "$f" ] && kill -TERM "$(cat "$f")" 2>/dev/null
+  done
+  if [ "$rc" -ne 0 ]; then
+    for f in "$WORK"/units/*.log; do
+      [ -s "$f" ] || continue
+      printf -- '--- журнал экземпляра %s ---\n' "$(basename "$f")"
+      tail -60 "$f"
+    done
+  fi
   # Оба namespace зоны: держатель гасит их вместе, но если он сам уже убит,
   # аплинк остался бы висеть с pasta на шее.
   for z in "${TEST_ZONES[@]}"; do
@@ -164,6 +175,72 @@ for alias in cw vpn-zone; do
     || fail "$alias — не cellward: $(readlink -f "$WORK/cellward/bin/$alias")"
 done
 echo "ok: cw и vpn-zone ведут на cellward"
+
+# --- 1а. systemd --user, которого на раннере нет ------------------------------
+# С этапа 2 контейнерного дизайна (2026-09-27) запуск в зону идёт в экземпляр
+# контейнера — юнит vpn-zone-container@<id>, который запуск поднимает через
+# `systemctl --user start`. Менеджера пользователя на раннере нет, поэтому
+# systemctl в манифесте — подставной: держатель экземпляра запускается в фоне
+# и, как Type=notify, `start` возвращается, когда тот готов (или умер);
+# уходящий держатель сначала дожидается своего конца. Это тестовый код — в
+# продукте не подменено ничего, cellward тот же, другой только манифест.
+step "Подставной systemctl для экземпляров контейнеров"
+UNITS="$WORK/units"
+mkdir -p "$UNITS"
+cat > "$WORK/fake-systemctl" <<EOF
+#!/usr/bin/env bash
+set -u
+[ "\${1:-}" = --user ] || exit 1
+verb=\${2:-} unit=\${3:-}
+case "\$unit" in
+  vpn-zone-container@*.service) ;;
+  *) echo "подставной systemctl: \$verb \$unit — не экземпляр" >&2; exit 1 ;;
+esac
+id=\${unit#vpn-zone-container@}
+id=\$(printf '%b' "\${id%.service}")
+pidfile="$UNITS/\$unit.pid"
+alive() { [ -e "/proc/\$1" ] && [ "\$(awk '/^State:/ {print \$2}' "/proc/\$1/status" 2>/dev/null)" != Z ]; }
+old=\$(cat "\$pidfile" 2>/dev/null || true)
+case "\$verb" in
+  start)
+    if [ -n "\$old" ]; then
+      for _ in \$(seq 1 600); do alive "\$old" || break; sleep 0.1; done
+    fi
+    log="$UNITS/\$unit.\$(date +%s%N).log"
+    setsid "$CONTAINER_HOLDER" "\$id" >"\$log" 2>&1 </dev/null &
+    pid=\$!
+    echo "\$pid" > "\$pidfile"
+    for _ in \$(seq 1 600); do
+      grep -q "^instance .*: up, " "\$log" && exit 0
+      alive "\$pid" || { cat "\$log" >&2; exit 1; }
+      sleep 0.1
+    done
+    exit 1 ;;
+  stop)
+    [ -n "\$old" ] || exit 0
+    kill -TERM "\$old" 2>/dev/null || exit 0
+    for _ in \$(seq 1 600); do alive "\$old" || exit 0; sleep 0.1; done
+    exit 1 ;;
+  is-active)
+    if [ -n "\$old" ] && alive "\$old"; then echo active; exit 0; fi
+    echo inactive
+    exit 3 ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod 755 "$WORK/fake-systemctl"
+VZ_BIN=$(grep -m1 -o '/nix/store/[^ "]*/bin/vpn-zone' "$VPN_ZONE")
+VZ_TOOLS=$(grep -m1 -o '/nix/store/[^ "]*-vpn-zone-tools.json' "$VPN_ZONE")
+[ -x "$VZ_BIN" ] && [ -f "$VZ_TOOLS" ] || fail "в обёртке cellward нет бинаря или манифеста"
+sed "s|\"systemctl\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"systemctl\": \"$WORK/fake-systemctl\"|" \
+  "$VZ_TOOLS" > "$WORK/cellward-tools.json"
+grep -q "\"systemctl\": \"$WORK/fake-systemctl\"" "$WORK/cellward-tools.json" \
+  || fail "не подменился systemctl в манифесте"
+printf '#!/usr/bin/env bash\nexport VPN_ZONE_TOOLS=%s\nexec %s "$@"\n' \
+  "$WORK/cellward-tools.json" "$VZ_BIN" > "$WORK/cellward-smoke"
+chmod 755 "$WORK/cellward-smoke"
+VPN_ZONE="$WORK/cellward-smoke"
+echo "ok: $VPN_ZONE — cellward с подставным systemctl"
 
 step "Убираю остатки прошлых прогонов"
 for z in "${TEST_ZONES[@]}"; do
@@ -424,6 +501,35 @@ cwdout=$(cd "$HOME/.config" && "$VPN_ZONE" run smoke --profile "$TEST_PROFILE" -
 [ "$cwdout" = "В-СЛОЕ" ] \
   || fail "рабочий каталог контейнера — не слой, а каталог под ним (chdir до монтирования): «$cwdout»"
 echo "ok: каталог сохранён, и это каталог внутри слоя"
+
+# Этап 2 контейнерного дизайна (2026-09-27): программа, запущенная в зону,
+# живёт в экземпляре своего контейнера — своё сетевое пространство с lo и tap
+# awg0, адрес из 10.254.0.0/16, DNS — постоянный форвардер, выход — passt,
+# который зона запускает для него у себя. Ни пространства зоны, ни сети хоста.
+step "Запуск в зону — в экземпляре контейнера: своя сеть, lo и tap, выход через зону"
+ins_ns=$("$VPN_ZONE" run smoke -- readlink /proc/self/ns/net)
+echo "$ins_ns"
+[ "$ins_ns" != "$(readlink "/proc/$ZPID/ns/net")" ] || fail "запуск в зону оказался в пространстве самой зоны"
+[ "$ins_ns" != "$(readlink /proc/self/ns/net)" ] || fail "запуск в зону оказался в сети хоста"
+links=$("$VPN_ZONE" run smoke -- "$IP" -o link show)
+echo "$links"
+[ "$(echo "$links" | wc -l)" -eq 2 ] || fail "в экземпляре не два линка"
+echo "$links" | grep -q ': awg0[:@]' || fail "в экземпляре нет awg0"
+addr=$("$VPN_ZONE" run smoke -- "$IP" -4 -o addr show dev awg0)
+echo "$addr"
+echo "$addr" | grep -q 'inet 10\.254\.' || fail "у tap экземпляра не его адрес"
+resolv=$("$VPN_ZONE" run smoke -- cat /etc/resolv.conf)
+echo "$resolv"
+echo "$resolv" | grep -qx 'nameserver 10.254.255.253' || fail "в resolv.conf экземпляра нет форвардера"
+if echo "$resolv" | grep -q '1\.1\.1\.1'; then
+  fail "в resolv.conf экземпляра настоящий резолвер"
+fi
+"$VPN_ZONE" status --json | python3 -c '
+import json, sys
+nets = {n["name"]: n for n in json.load(sys.stdin)["networks"]}
+sys.exit(0 if nets["smoke"]["bridge"] is True else 1)
+' || fail "status --json не говорит, что зона smoke везёт контейнеры"
+echo "ok: экземпляр main:smoke — своя сеть, tap, форвардер DNS"
 
 # --- 6а. Тот же контейнер без ограничений зоны (unconfined, прежде direct) ----
 # Раньше пикер при выборе direct просто становился командой, и выбранный
@@ -1186,6 +1292,24 @@ EOF
     || fail "в resolv.conf зоны нет резолвера шлюза"
   echo "$ocresolv" | grep -Eq '^search[[:space:]]+smoke\.example' \
     || fail "в resolv.conf зоны нет search-домена шлюза"
+
+  # Этап 2 контейнерного дизайна: зона OpenConnect везёт экземпляр контейнера
+  # так же, как WireGuard-зона. В его resolv.conf — постоянный форвардер и
+  # search-домен шлюза (из ответа моста), ни одного настоящего резолвера; до
+  # ocserv со стороны туннеля — через passt в сети зоны и её tun.
+  step "Зона OpenConnect везёт экземпляр: search шлюза в его resolv.conf, выход через туннель"
+  ociresolv=$("$VPN_ZONE" run ocsmoke -- cat /etc/resolv.conf)
+  echo "$ociresolv"
+  echo "$ociresolv" | grep -qx 'nameserver 10.254.255.253' \
+    || fail "в resolv.conf экземпляра нет форвардера"
+  echo "$ociresolv" | grep -Eq '^search[[:space:]]+smoke\.example' \
+    || fail "в resolv.conf экземпляра нет search-домена шлюза"
+  if echo "$ociresolv" | grep -q '192\.168\.222\.1'; then
+    fail "в resolv.conf экземпляра настоящий резолвер шлюза"
+  fi
+  "$VPN_ZONE" run ocsmoke -- timeout 10 bash -c "exec 3<>/dev/tcp/192.168.222.1/4443" \
+    || fail "из экземпляра не достучаться до ocserv через туннель зоны"
+  echo "ok: экземпляр в зоне OpenConnect"
 
   step "Зона OpenConnect: IPv6 от шлюза — через туннель, и только через него"
   # С 2026-09-27 IPv6, который выдаёт шлюз, едет в туннель, как у WireGuard-

@@ -45,6 +45,17 @@ with subtest("host-interface zone: out through eth1 only"):
     machine.succeed("socat -T5 - TCP:192.168.1.1:8091 | grep -q host-local")
     in_zone(lpid, "sh -c '! timeout 10 socat -T5 - TCP:192.168.1.1:8091'")
     assert "192.168.1.1 reject" in rules, rules
+    # A launch into it runs in its container's instance (stage 2c,
+    # 2026-09-27): out through the zone's bridge, as the host — and the
+    # host's own services are refused there as well (the bridge's own
+    # rule: pasta put the host's address on the zone's awg0).
+    out = alice(f"cellward run vmlan -- socat -T10 - TCP:{server_ip}:8090")
+    assert "peer=192.168.1.1" in out, f"from the instance: {out}"
+    out = alice(
+        "cellward run vmlan -- sh -c "
+        "'timeout -s KILL 10 socat -T5 - TCP:192.168.1.1:8091 </dev/null; true'"
+    )
+    assert "host-local" not in out, out
     machine.succeed("systemctl stop hostlocal")
     machine.wait_until_succeeds(
         "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; cellward check vmlan'",

@@ -682,17 +682,40 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // instance`, stage 1 of the container design of 2026-09-27): namespaces
     // of the container's own, no way out — and the `offline` zone is not
     // started for it any more.
-    let instance_id: Option<String> = if zone == OFFLINE {
-        match instance_of(tools, &selection, &container) {
+    // Stage 2 (2026-09-27): into a zone too — its instance's way out is a
+    // passt the zone runs for it, and nothing of the zone's own namespaces is
+    // the program's. A zone of a previous build (no bridge: an update left it
+    // running) is entered as before, and the person told how to change that.
+    let legacy = zone_takes_its_own(&tools.state, &zone);
+    let instance_id: Option<String> = if zone == UNCONFINED || legacy {
+        None
+    } else {
+        match instance_of(tools, &selection, &container, &zone_name) {
             Ok(id) => Some(id),
             Err(why) => {
                 refuse(tools, &why);
                 return 1;
             }
         }
-    } else {
-        None
     };
+    if legacy {
+        eprintln!(
+            "зона {zone_name} поднята прошлой сборкой: программа запускается в пространстве \
+             самой зоны, как раньше, — без своего сетевого пространства контейнера. \
+             Перезапусти зону (cellward down {zone_name}; cellward up {zone_name}), и контейнеры \
+             в ней получат свои"
+        );
+    }
+    // A container whose launches still run in the zone's own namespaces — of
+    // before the switch-over, or into the zone of a previous build — is not
+    // started in its instance beside them: two worlds of one home and one
+    // profile (`docs/CONTAINERS.md` I2, stage 2's form of it).
+    if let (Some(_), Some(name)) = (&instance_id, container_name(&selection)) {
+        if let Some(why) = zone_launches_refusal(tools, &name, &zone_name) {
+            refuse(tools, &why);
+            return 1;
+        }
+    }
 
     // --- 3. THE WRAPPERS ---
     // The app-id is worked out BEFORE anything is prepended to the command:
@@ -1059,15 +1082,13 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         // Nothing to start and nothing to enter: the host's own network.
         Network::Unconfined
     } else if let Some(id) = &instance_id {
-        // The container's instance, up and ready — started when it is not
-        // (`Type=notify`: `systemctl start` returns when it is ready or
-        // failed; no clock of ours). Not in a dry run: nothing is started
-        // for one.
-        if !dryrun && crate::instance::up(&tools.state, id).is_none() {
-            let unit = crate::instance::unit_name(id).unwrap_or_default();
-            let _ = cli::systemctl_unit(tools, "start", OsStr::new(&unit));
-            if crate::instance::up(&tools.state, id).is_none() {
-                eprintln!("контейнер {id} не поднимается (journalctl --user -u '{unit}')");
+        // The container's instance, up and ready in this network — its zone
+        // and it started when they are not (`Type=notify`: `systemctl start`
+        // returns when it is ready or failed; no clock of ours). Not in a dry
+        // run: nothing is started for one.
+        if !dryrun {
+            if let Err(why) = up_instance(tools, id, &zone, &zone_name) {
+                eprintln!("{why}");
                 return 1;
             }
         }
@@ -1445,6 +1466,10 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
             exec.push("container-enter".into());
             exec.push("--instance".into());
             exec.push(entry.instance.unwrap_or_default().into());
+            // The network asked for: an instance started meanwhile in
+            // another one is not entered (stage 2).
+            exec.push("--network".into());
+            exec.push(entry.zone.into());
             exec.push("--systemctl".into());
             exec.push(entry.systemctl.into());
             exec.push("--".into());
@@ -1564,6 +1589,7 @@ fn instance_of(
     tools: &Tools,
     selection: &Selection,
     container: &ResolvedContainer,
+    network: &str,
 ) -> Result<String, String> {
     use crate::container::Home;
     use crate::instance::Of;
@@ -1572,7 +1598,7 @@ fn instance_of(
         let name = name.to_str().ok_or_else(none)?;
         let asks = crate::container::load(tools, name)
             .is_some_and(|c| c.network.value == crate::container::Network::Ask);
-        crate::instance::id_of(Of::Container { name, home, asks }, OFFLINE).ok_or_else(none)
+        crate::instance::id_of(Of::Container { name, home, asks }, network).ok_or_else(none)
     };
     let id = match (&selection.sandbox, &selection.container) {
         (Sandbox::Named(name), _) => named(name, Home::Private)?,
@@ -1584,15 +1610,15 @@ fn instance_of(
                 .file_name()
                 .and_then(OsStr::to_str)
                 .unwrap_or_default();
-            crate::instance::id_of(Of::Throwaway(layer), OFFLINE).ok_or_else(none)?
+            crate::instance::id_of(Of::Throwaway(layer), network).ok_or_else(none)?
         }
         (Sandbox::Throwaway, _) => {
             let pid = std::process::id() as i32;
             let unique = format!("{pid}-{}", crate::sys::start_time(pid).unwrap_or(0));
-            crate::instance::id_of(Of::ThrowawaySandbox(&unique), OFFLINE).ok_or_else(none)?
+            crate::instance::id_of(Of::ThrowawaySandbox(&unique), network).ok_or_else(none)?
         }
         (Sandbox::None, Container::Main) => {
-            crate::instance::id_of(Of::Main, OFFLINE).ok_or_else(none)?
+            crate::instance::id_of(Of::Main, network).ok_or_else(none)?
         }
     };
     if crate::instance::unit_name(&id).is_none() {
@@ -1601,6 +1627,160 @@ fn instance_of(
         ));
     }
     Ok(id)
+}
+
+/// Whether a launch into `zone` takes the zone's own namespaces, as before
+/// stage 2 of the container design (2026-09-27): a zone that is up and
+/// carries no instance — its holder of a previous build, which an update
+/// left running (`X-SwitchMethod=keep-old`), with no bridge
+/// (`bridge::carries`: by the socket's presence, never by a build's name).
+/// A zone that is down is started by this build, and carries them;
+/// `offline` and `unconfined` are no zones.
+pub fn zone_takes_its_own(state: &Path, zone: &OsStr) -> bool {
+    zone != OsStr::new(OFFLINE)
+        && zone != OsStr::new(UNCONFINED)
+        && cli::zone_up(state, zone).is_some()
+        && !crate::bridge::carries(&state.join(zone))
+}
+
+/// Every process's children, by their `PPid`, read once.
+fn process_children() -> std::collections::HashMap<i32, Vec<i32>> {
+    let mut children: std::collections::HashMap<i32, Vec<i32>> = Default::default();
+    for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if let Some(parent) = crate::sys::parent_of(pid) {
+            children.entry(parent).or_default().push(pid);
+        }
+    }
+    children
+}
+
+/// Whether `root` or a process below it is in the user namespace `userns`
+/// (`user:[…]`, as `/proc/<pid>/ns/user` reads).
+fn tree_in_userns(
+    children: &std::collections::HashMap<i32, Vec<i32>>,
+    root: i32,
+    userns: &Path,
+) -> bool {
+    let mut todo = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(at) = todo.pop() {
+        if !seen.insert(at) {
+            continue;
+        }
+        if fs::read_link(format!("/proc/{at}/ns/user")).ok().as_deref() == Some(userns) {
+            return true;
+        }
+        if let Some(below) = children.get(&at) {
+            todo.extend(below);
+        }
+    }
+    false
+}
+
+/// Why container `name` may not start in its instance in `zone` (stage 2):
+/// live launches of it run in the zone's own namespaces — from before the
+/// switch-over, or into this zone when it was of a previous build. Beside
+/// them its instance would be a second world of one home and one profile,
+/// whose programs' locks and sockets do not see each other's.
+fn zone_launches_refusal(tools: &Tools, name: &str, zone: &str) -> Option<String> {
+    if zone == OFFLINE {
+        return None;
+    }
+    let container = crate::container::load(tools, name)?;
+    let records: Vec<(String, registry::Record)> =
+        crate::container::live_records(tools, &container)
+            .into_iter()
+            .filter(|(_, record)| record.zone == zone)
+            .collect();
+    if records.is_empty() {
+        return None;
+    }
+    let pid = cli::zone_pid(&tools.state, OsStr::new(zone))?;
+    let userns = fs::read_link(format!("/proc/{pid}/ns/user")).ok()?;
+    let children = process_children();
+    let apps: Vec<String> = records
+        .iter()
+        .filter(|(_, record)| tree_in_userns(&children, record.pid, &userns))
+        .map(|(app, _)| app.clone())
+        .collect();
+    if apps.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "программы контейнера «{name}» ({}) работают в пространстве самой зоны {zone} — \
+         запущены до обновления или в зону прошлой сборки. Рядом с ними контейнер в своём \
+         пространстве не запускается: закрой их и запусти снова",
+        apps.join(", ")
+    ))
+}
+
+/// The launch's instance `id` up and ready in `zone` (stage 2): its zone up
+/// first — started when it is down, as a launch into a zone always did —
+/// and carrying instances; the instance started when it is not up, asked
+/// for this network (`instance::ask_network`); one that runs in another
+/// network refused (`docs/CONTAINERS.md` I2) — before its start and after,
+/// for a launch that asked otherwise meanwhile.
+fn up_instance(tools: &Tools, id: &str, zone: &OsStr, zone_name: &str) -> Result<(), String> {
+    let running_in = || {
+        fs::read_to_string(crate::instance::dir(&tools.state, id).join(crate::instance::NETWORK))
+            .map(|text| text.trim().to_owned())
+            .unwrap_or_default()
+    };
+    let elsewhere = |running: String| {
+        format!(
+            "контейнер {id} уже работает в сети «{running}», а запуск просит «{zone_name}»: \
+             контейнер не бывает в двух сетях сразу — закрой его программы \
+             (cellward container stop {id}) или запусти в «{running}»"
+        )
+    };
+    if crate::instance::up(&tools.state, id).is_some() {
+        let running = running_in();
+        if running != zone_name {
+            return Err(elsewhere(running));
+        }
+    }
+    if zone_name != OFFLINE {
+        let mut pid = cli::zone_up(&tools.state, zone);
+        if pid.is_none() {
+            // Returns once the zone is ready or failed (`Type=notify`), and
+            // says so while it waits (`cli::start_zone`).
+            let _ = cli::start_zone(tools, zone, true);
+            pid = cli::zone_up(&tools.state, zone);
+        }
+        if pid.is_none() {
+            return Err(format!("зона {zone_name} не поднимается"));
+        }
+        if !crate::bridge::carries(&tools.state.join(zone)) {
+            return Err(format!(
+                "зона {zone_name} не везёт контейнеры (journalctl --user -u \
+                 'vpn-zone@{zone_name}.service') — перезапусти её: cellward down {zone_name}, \
+                 cellward up {zone_name}"
+            ));
+        }
+    }
+    if crate::instance::up(&tools.state, id).is_none() {
+        crate::instance::ask_network(&tools.state, id, zone_name)
+            .map_err(|e| format!("контейнер {id}: не попросить сеть {zone_name} ({e})"))?;
+        let unit = crate::instance::unit_name(id).unwrap_or_default();
+        let _ = cli::systemctl_unit(tools, "start", OsStr::new(&unit));
+        if crate::instance::up(&tools.state, id).is_none() {
+            return Err(format!(
+                "контейнер {id} не поднимается (journalctl --user -u '{unit}')"
+            ));
+        }
+    }
+    let running = running_in();
+    if running != zone_name {
+        return Err(elsewhere(running));
+    }
+    Ok(())
 }
 
 /// Why this launch may not use its container in `zone`, if it may not.
@@ -3071,6 +3251,8 @@ mod tests {
                 "container-enter",
                 "--instance",
                 "work",
+                "--network",
+                "offline",
                 "--systemctl",
                 "/t/systemctl",
                 "--",
@@ -3088,7 +3270,56 @@ mod tests {
         );
         let parsed = crate::enter::Args::parse(&line[2..]).unwrap();
         assert_eq!(parsed.instance, "work");
+        // The network asked for goes with it (stage 2).
+        assert_eq!(parsed.network.as_deref(), Some("offline"));
         assert_eq!(parsed.cmd[1], "profile-run");
+    }
+
+    /// Stage 2 (2026-09-27): a zone that is up and has no bridge — of a
+    /// previous build — is entered as before; one with its socket, and one
+    /// that is down (this build will start it), carry the launch's instance.
+    #[test]
+    fn a_zone_of_a_previous_build_is_entered_as_before() {
+        let state = std::env::temp_dir().join(format!("vz-legacy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        let zone = state.join("nl");
+        fs::create_dir_all(&zone).unwrap();
+        // Down: this build starts it, and it carries.
+        assert!(!zone_takes_its_own(&state, OsStr::new("nl")));
+        let me = std::process::id();
+        fs::write(zone.join("zone.pid"), format!("{me}\n")).unwrap();
+        fs::write(
+            zone.join("zone.start"),
+            format!("{}\n", crate::sys::process_stamp(me as i32).unwrap()),
+        )
+        .unwrap();
+        fs::write(zone.join("ready"), "").unwrap();
+        // Up, and no bridge: a previous build's.
+        assert!(zone_takes_its_own(&state, OsStr::new("nl")));
+        // A file of that name is no bridge.
+        fs::write(zone.join(crate::bridge::SOCKET), "").unwrap();
+        assert!(zone_takes_its_own(&state, OsStr::new("nl")));
+        fs::remove_file(zone.join(crate::bridge::SOCKET)).unwrap();
+        let bridge =
+            std::os::unix::net::UnixListener::bind(zone.join(crate::bridge::SOCKET)).unwrap();
+        assert!(!zone_takes_its_own(&state, OsStr::new("nl")));
+        drop(bridge);
+        // No zones at all.
+        assert!(!zone_takes_its_own(&state, OsStr::new(OFFLINE)));
+        assert!(!zone_takes_its_own(&state, OsStr::new(UNCONFINED)));
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    /// A launch's tree is looked through for a program in a zone's own
+    /// user namespace: this process, in its own, is found; in another, not.
+    #[test]
+    fn a_launch_in_a_zones_own_namespaces_is_found() {
+        let me = std::process::id() as i32;
+        let children = process_children();
+        let own = fs::read_link("/proc/self/ns/user").unwrap();
+        assert!(tree_in_userns(&children, me, &own));
+        assert!(!tree_in_userns(&children, me, Path::new("user:[1]")));
+        assert!(!tree_in_userns(&children, i32::MAX, &own));
     }
 
     /// A throwaway container's instance erases it when its last program

@@ -2,8 +2,8 @@
 the same zone and from another zone (docs/THREAT-MODEL.md W10).
 
 Executed by the main test script with exec(), in its globals (machine,
-alice, in_zone, FAKE_BUS_OWNER, and of the sway subtest `display` and `zp`,
-vmsmoke's zone): the script is handed to the driver's build in one
+alice, in_zone, in_inst_q, FAKE_BUS_OWNER, and of the sway subtest `display` and
+`zp`, vmsmoke's zone): the script is handed to the driver's build in one
 environment variable, and the kernel takes 128 KiB there (MAX_ARG_STRLEN).
 """
 
@@ -102,12 +102,12 @@ with subtest("one launch's X server: out of reach of another launch and of anoth
             "systemd-run --user --unit=vmxsquat cellward run vmsmoke -- "
             f"socat ABSTRACT-LISTEN:/tmp/.X11-unix/X{n},fork OPEN:/tmp/vmx-squat,creat,append"
         )
-        q = shlex.quote(
-            "export XDG_RUNTIME_DIR=/run/user/1000; "
-            f"nsenter --preserve-credentials -U -n -m -t {zp} -- "
-            f"grep -q @/tmp/.X11-unix/X{n} /proc/net/unix"
+        # In the network namespace of the launches of vmsmoke: its main
+        # home's instance since stage 2 of the container design.
+        machine.wait_until_succeeds(
+            in_inst_q("main:vmsmoke", "vmsmoke", f"grep -q @/tmp/.X11-unix/X{n} /proc/net/unix"),
+            timeout=60,
         )
-        machine.wait_until_succeeds(f"su -l alice -c {q}", timeout=60)
     machine.succeed("touch /tmp/vmxa-go")
     machine.wait_until_succeeds("grep -q '^rc=' /home/alice/vmxa-after", timeout=60)
     print(machine.succeed("cat /home/alice/vmxa-after"))

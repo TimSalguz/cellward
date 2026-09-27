@@ -203,9 +203,14 @@ let
           # The server sees the system zone's tunnel address: the same tunnel.
           out = machine.succeed(alice("cellward run mz -- socat -T10 - TCP:10.99.0.1:8080"))
           assert "peer=10.99.0.2" in out, out
-          # lo and pasta's awg0, nothing else; the tunnel's resolver.
+          # lo and awg0, nothing else; the tunnel's resolver. Since stage 2c
+          # (2026-09-27) the launch runs in its container's instance, whose
+          # awg0 is the relay's tap on the instance's own addresses; out
+          # through mz's bridge, then mz's pasta into sz.
           out = machine.succeed(alice("cellward run mz -- ip -o link show"))
           assert len(links(out)) == 2 and ": awg0" in out, out
+          out = machine.succeed(alice("cellward run mz -- ip -4 -o addr show dev awg0"))
+          assert "inet 10.254." in out, out
           out = machine.succeed(alice("cellward run mz -- getent ahostsv4 leaktest.internal"))
           assert "10.99.0.9" in out, out
           # Not the host: the only way out is sz's tunnel.

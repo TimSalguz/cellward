@@ -744,6 +744,43 @@ fn only_a_throwaway_container_of_ours_can_be_joined() {
     assert!(stderr(&out).contains("двух сетях"), "{}", stderr(&out));
 }
 
+/// Stage 2 of the container design (2026-09-27): a launch into a zone that
+/// carries instances — its bridge's socket there — runs in its container's
+/// instance (the Wayland sockets by the instance's key, no word of an old
+/// zone); one into a zone of a previous build, as before, and the person is
+/// told how to change that.
+#[test]
+fn a_launch_into_a_zone_runs_in_its_containers_instance() {
+    let home = Home::new("into-instance");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), "[Interface]\n").unwrap();
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+    let out = home.run_with(&["run", "nl", "--", "foot"], &dry);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("wl-sandbox foot --zone nl "),
+        "{}",
+        stdout(&out)
+    );
+    assert!(stderr(&out).contains("прошлой сборкой"), "{}", stderr(&out));
+    let socket = home.state().join("nl").join(vpn_zone::bridge::SOCKET);
+    let bridge = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let out = home.run_with(&["run", "nl", "--", "foot"], &dry);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let key = vpn_zone::instance::key("main:nl");
+    assert!(
+        stdout(&out).contains(&format!("wl-sandbox foot --zone {key} ")),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        !stderr(&out).contains("прошлой сборкой"),
+        "{}",
+        stderr(&out)
+    );
+    drop(bridge);
+}
+
 #[test]
 fn a_zone_whose_process_is_in_our_network_is_not_entered() {
     // `zone.pid` of a stopped zone stays behind, and its number comes round to
