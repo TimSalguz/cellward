@@ -546,6 +546,7 @@ let
       };
 
     testScript = ''
+      import ipaddress
       import json
       import re
       import shlex
@@ -1318,7 +1319,12 @@ let
 
       with subtest("IPv6 through the tunnel: TCP and ping, the server sees the tunnel's v6 address"):
           out = in_zone(rzpid, "socat -T10 - TCP6:[fd99::1]:8081")
-          assert "fd99::2" in out, f"server saw someone else over v6: {out}"
+          # socat writes the peer in full (`[fd99:0000:…:0002]`): compare
+          # addresses, not spellings.
+          seen = re.search(r"peer=\[?([0-9a-fA-F:]+)\]?", out)
+          assert seen and ipaddress.ip_address(seen.group(1)) == ipaddress.ip_address(
+              "fd99::2"
+          ), f"server saw someone else over v6: {out}"
           out = in_zone(rzpid, "ping -6 -c1 -W5 fd99::1")
           assert " 0% packet loss" in out, out
 
