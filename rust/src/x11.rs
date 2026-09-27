@@ -43,7 +43,7 @@ pub const DECLARED_ZONES: &str = "declared/zone-x11";
 /// `(on, source)`. Declared in Nix wins over the local marker.
 pub fn zone_setting(state: &Path, config: &Path, zone: &str) -> (bool, crate::container::Source) {
     use crate::container::Source;
-    if let Ok(text) = std::fs::read_to_string(config.join(DECLARED_ZONES)) {
+    if let Ok(text) = crate::declared::read(&config.join(DECLARED_ZONES)) {
         if text.lines().map(str::trim).any(|l| l == zone) {
             return (true, Source::Nix);
         }

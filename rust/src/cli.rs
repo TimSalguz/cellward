@@ -357,13 +357,15 @@ pub fn read_setting(path: &Path) -> Option<String> {
 }
 
 /// Where the home-manager module puts what is declared in Nix, below the
-/// config directory: one file per setting, and `containers/`.
+/// config directory: one file per setting, and `containers/`. Read only
+/// through [`crate::declared`], which believes a file there only as a link
+/// into the Nix store.
 pub const DECLARED_DIR: &str = "declared";
 
 /// A setting of `~/.config/vpn-zones` and where it comes from: the value
 /// declared in Nix wins over the local one. `None` when neither is set.
 pub fn setting(tools: &Tools, name: &str) -> Option<(String, crate::container::Source)> {
-    if let Some(value) = read_setting(&tools.config.join(DECLARED_DIR).join(name)) {
+    if let Some(value) = crate::declared::setting(&tools.config.join(DECLARED_DIR).join(name)) {
         return Some((value, crate::container::Source::Nix));
     }
     read_setting(&tools.config.join(name)).map(|value| (value, crate::container::Source::Local))
@@ -376,7 +378,7 @@ pub fn setting(tools: &Tools, name: &str) -> Option<(String, crate::container::S
 /// would change nothing (the declared one wins) and the command would look
 /// like it worked.
 fn write_setting(tools: &Tools, name: &str, value: &OsStr) -> Result<(), String> {
-    if tools.config.join(DECLARED_DIR).join(name).exists() {
+    if crate::declared::declares(&tools.config, name) {
         return Err(format!(
             "«{name}» задано в Nix (programs.cellward) и меняется там"
         ));
@@ -1040,12 +1042,7 @@ fn ask_again(tools: &Tools, args: &[OsString]) -> u8 {
         }
     };
     let written = if value == "default" {
-        if tools
-            .config
-            .join(DECLARED_DIR)
-            .join(ASK_AGAIN_SETTING)
-            .exists()
-        {
+        if crate::declared::declares(&tools.config, ASK_AGAIN_SETTING) {
             Err(format!(
                 "«{ASK_AGAIN_SETTING}» задано в Nix (programs.cellward) и меняется там"
             ))
@@ -1108,7 +1105,7 @@ fn term_setting(
         }
     };
     let written = if value == "default" {
-        if tools.config.join(DECLARED_DIR).join(setting.name).exists() {
+        if crate::declared::declares(&tools.config, setting.name) {
             Err(format!(
                 "«{}» задано в Nix (programs.cellward.{}) и меняется там",
                 setting.name, setting.nix
@@ -3187,7 +3184,7 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             };
             let written = if value == "default" {
-                if tools.config.join(DECLARED_DIR).join(TITLE_SETTING).exists() {
+                if crate::declared::declares(&tools.config, TITLE_SETTING) {
                     Err(format!(
                         "«{TITLE_SETTING}» задано в Nix (programs.cellward) и меняется там"
                     ))
@@ -3240,7 +3237,7 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             };
             let written = if value == "default" {
-                if tools.config.join(DECLARED_DIR).join(WIDTH_SETTING).exists() {
+                if crate::declared::declares(&tools.config, WIDTH_SETTING) {
                     Err(format!(
                         "«{WIDTH_SETTING}» задано в Nix (programs.cellward) и меняется там"
                     ))

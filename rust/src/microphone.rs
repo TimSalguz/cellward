@@ -194,7 +194,8 @@ pub fn zone_switch(
     marker: &str,
     declared: &str,
 ) -> (Setting, Source) {
-    match std::fs::read_to_string(config.join(DECLARED_DIR).join(declared)) {
+    // Not Nix's (not a link into the store) is NotFound: as if none.
+    match crate::declared::read(&config.join(DECLARED_DIR).join(declared)) {
         Ok(text) => {
             let declared = text.lines().find_map(|line| {
                 let (name, value) = line.trim().split_once(char::is_whitespace)?;
@@ -956,6 +957,11 @@ mod tests {
         fn write(&self, path: &str, text: &str) {
             std::fs::write(self.base.join(path), text).unwrap();
         }
+        /// What Nix declares, as home-manager puts it there: a link into the
+        /// store (`crate::declared`).
+        fn declare(&self, name: &str, text: &str) {
+            crate::declared::declare(&self.base.join("config/declared").join(name), text);
+        }
         fn setting(&self) -> (Setting, Source) {
             setting(&self.zone(), &self.config(), "nl")
         }
@@ -1004,19 +1010,22 @@ mod tests {
         d.write("state/nl/microphone", "on");
         assert_eq!(d.setting(), (Setting::No, Source::Local));
         // Another zone's line is not this zone's.
-        d.write("config/declared/microphone", "de yes\nnlx yes\n");
+        d.declare("microphone", "de yes\nnlx yes\n");
         assert_eq!(d.setting(), (Setting::No, Source::Local));
         d.write("state/nl/microphone", "yes");
-        d.write("config/declared/microphone", "de yes\nnl no\n");
+        d.declare("microphone", "de yes\nnl no\n");
         assert_eq!(d.setting(), (Setting::No, Source::Nix));
-        d.write("config/declared/microphone", "nl ask\n");
+        d.declare("microphone", "nl ask\n");
         assert_eq!(d.setting(), (Setting::Ask, Source::Nix));
-        d.write("config/declared/microphone", "nl maybe\n");
+        d.declare("microphone", "nl maybe\n");
         assert_eq!(d.setting(), (Setting::No, Source::Nix));
         // A declared file that is there and cannot be read: no.
-        std::fs::remove_file(d.config().join("declared/microphone")).unwrap();
-        std::fs::create_dir(d.config().join("declared/microphone")).unwrap();
+        crate::declared::declare_unreadable(&d.config().join("declared/microphone"));
         assert_eq!(d.setting(), (Setting::No, Source::Nix));
+        // A plain file where Nix's link was is nobody's word: the marker's.
+        std::fs::remove_file(d.config().join("declared/microphone")).unwrap();
+        d.write("config/declared/microphone", "nl no\n");
+        assert_eq!(d.setting(), (Setting::Yes, Source::Local));
     }
 
     #[test]
@@ -1103,7 +1112,7 @@ mod tests {
         assert_eq!(p.decide("app", &Who::Main), Verdict::Allow);
         // Nix says ask: "always" is not offered, and its button is a no.
         std::fs::remove_file(&marker).unwrap();
-        d.write("config/declared/microphone", "nl ask\n");
+        d.declare("microphone", "nl ask\n");
         let p = d.policy(d.kdialog("two", "exit 1"), true, TIMEOUT);
         assert_eq!(
             p.decide("app", &Who::Main),
@@ -1235,10 +1244,10 @@ mod tests {
         assert_eq!(p.pause(), AFTER_DENY);
         d.write("config/ask-again", "10m");
         assert_eq!(p.pause(), Duration::from_secs(600));
-        d.write("config/declared/ask-again", "1h\n");
+        d.declare("ask-again", "1h\n");
         assert_eq!(p.pause(), Duration::from_secs(3_600));
         for bad in ["5s", "0m", "2d", "", "soon"] {
-            d.write("config/declared/ask-again", bad);
+            d.declare("ask-again", bad);
             assert_eq!(p.pause(), Duration::from_secs(600), "{bad:?}");
         }
         d.write("config/ask-again", "1s");
@@ -1332,16 +1341,13 @@ mod tests {
             "config/containers/work/container.conf",
             "microphone = yes\n",
         );
-        d.write("config/declared/microphone", "nl no\n");
+        d.declare("microphone", "nl no\n");
         assert_eq!(setting(&work), (Setting::No, Source::Nix));
         // Nix's word for the container over everything.
-        d.write(
-            "config/declared/containers/work.conf",
-            "home = private\nmicrophone = ask\n",
-        );
+        d.declare("containers/work.conf", "home = private\nmicrophone = ask\n");
         assert_eq!(setting(&work), (Setting::Ask, Source::Nix));
         // An old module's file of another container is not this one's.
-        d.write("config/declared/containers/work.conf", "microphone = yes\n");
+        d.declare("containers/work.conf", "microphone = yes\n");
         assert_eq!(setting(&work), (Setting::No, Source::Nix));
         // A settings file that cannot be read: no.
         std::fs::remove_file(d.config().join("declared/microphone")).unwrap();

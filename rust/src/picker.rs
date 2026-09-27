@@ -1862,7 +1862,7 @@ fn zone_request(
 /// `autostart.unassigned`: the declared setting, then the local one; `ask` by
 /// default (owner, 2026-09-24 — `offline` before).
 fn autostart_setting(tools: &Tools) -> String {
-    read_setting(&tools.config.join("declared/autostart"))
+    crate::declared::setting(&tools.config.join("declared/autostart"))
         .or_else(|| read_setting(&tools.config.join("autostart")))
         .map(|v| v.trim().to_owned())
         .unwrap_or_else(|| "ask".to_owned())

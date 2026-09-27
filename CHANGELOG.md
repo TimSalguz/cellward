@@ -310,6 +310,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   are owned now, by the same rule of our patched proxy: that name and
   nothing more — not the portals' or the notification daemon's names under
   `org.freedesktop.*`. Checked in the VM test next to the KDE spelling.
+- **What sits in `declared/` is Nix's word only as home-manager's link
+  into the store** (2026-09-27, `docs/THREAT-MODEL.md` H6,
+  `docs/LEAK-MODEL.md` §27). Every file in `~/.config/vpn-zones/declared/`
+  was taken for a declaration: it beat the local value, and the CLI
+  refused to change it ("задано в Nix"). The directory is in the home, and
+  whatever writes the home — a program of the host, a file chooser a zone's
+  program suggests a path to — could switch hermeticity off for every zone
+  or bind a container to the host's network in Nix's name. Now a
+  declaration counts only when the file, every link followed, is in
+  `/nix/store`, as home-manager puts it; a plain file or a link elsewhere
+  is ignored with a warning on stderr, and the local value or the default
+  applies. One helper reads for every place (`rust/src/declared.rs`): the
+  path is held `O_PATH` and the kernel says where the file is, so a FIFO
+  there is not waited on and a directory the filters hold is read as held.
+  The store is a constant, not something an environment variable can move.
+  `status --json` keeps its shape; where a plain file was read as `"nix"`,
+  it now says `"local"` or `"default"`. The crate's tests put what they
+  declare into the real store (`nix-store --add`), as home-manager does.
 - **The sandbox's seccomp refuses `pidfd_getfd`** (2026-09-27,
   `docs/LEAK-MODEL.md` §26): it copied a descriptor out of another process
   of the sandbox. It answers `ENOSYS`, as a kernel before 5.6 does; the

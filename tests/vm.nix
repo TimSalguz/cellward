@@ -1155,6 +1155,8 @@ let
           alice("sh -c '! cellward container set vmdecl network offline'")
           alice("test -d /home/alice/.local/state/vpn-profiles/vmdecl")
 
+      exec(open("${./vm-promise-declared.py}").read())
+
       with subtest("declared: the container runs in its network only, trusting its declared CA"):
           in_container("vmdecl", "direct", f"openssl verify {DECLCA}/srv.pem")
           machine.fail(

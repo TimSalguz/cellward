@@ -191,6 +191,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | H3 | Собственные состояние и настройки cellward (ключи всех зон, `zone.pid`, реестр, сырые сокеты за фильтрами, `broker-always`, `declared/`) | да | tmpfs поверх `~/.local/state/vpn-zones` в каждой зоне; `~/.config/vpn-zones` и `~/.local/share/vpn-zones` только для чтения | vm18 sm10 |
 | H4 | Данные других контейнеров | да | хранилища контейнеров в зонах накрыты; запуск получает назад только своё | vm33 vm18 |
 | H5 | Программы вне всех зон выходят в сеть | только с политикой выхода системного уровня | nftables по владельцу сокета (`enforce`, `strict`) | sys7 sys8 ho1 |
+| H6 | Файл в `declared/` говорит от имени Nix (файловый диалог, которым правит программа зоны, программа хоста): `hermetic-default off`, контейнер, привязанный к `unconfined`, отказ CLI это менять | да | объявленным считается только файл, который по всем ссылкам лежит в Nix store, как ссылки home-manager; обычный файл или ссылка в другое место пропускаются с предупреждением, и действует локальное значение или умолчание | vm46 u15 |
 | | **Файлы и то, что хост запускает из дома** | | | |
 | F1 | Программа зоны читает дом (`~/.ssh`, профили браузеров, данные других программ) | свой дом: да · иначе **нет** | песочница: пустой дом плюс выданные пути | sm8 sm10 |
 | F2 | Программа зоны пишет то, что хост потом исполнит (`~/.bashrc`, автозапуск, ярлыки, юниты пользователя, конфиги композитора, `mimeapps.list`) | герметичная: частично · обычная: **нет** · свой дом: да | покрытия только для чтения по списку, родительские каталоги закреплены | vm18 |
@@ -234,7 +235,8 @@ PulseAudio; дополнительные группы сеанса сняты; �
   перечисление. Оно не накрывает ссылки home-manager в корне дома и файлы, которых ещё нет,
   кроме заранее созданных точек входа.
 - **H3.** Программа того же пользователя вне всех зон по-прежнему может писать в `declared/`
-  и `broker-always`. Это хост — не цель.
+  и `broker-always`. Это хост — не цель. С 2026-09-27 то, что она пишет в `declared/`, не слово
+  Nix (H6); убрать ссылку home-manager или перевести её на другой файл store она всё ещё может.
 - **W13.** В песочнице обычной зоны `screencast no` не действует; запомнить выбор там тоже
   нельзя.
 - **K1.** Разрешены сознательно: `modify_ldt` (записи LDT у Wine: 16-битные программы; Flatpak
@@ -328,6 +330,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 - vm43 "a launch into a zone is restricted whatever its program is called" (в `tests/vm-promise-wayland.py`)
 - vm44 "a zone's program cannot signal the host's processes of the user" (в `tests/vm-promise-signals.py`; до Linux 6.12 пропускается)
 - vm45 "a zone's program cannot reach the host over vsock" (в `tests/vm-promise-vsock.py`)
+- vm46 "declared: a plain file or a link out of the store is not Nix's word" (в `tests/vm-promise-declared.py`)
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -397,3 +400,4 @@ the other"
 - u12 `rust/src/pulse_filter.rs`: `module_loading_is_refused_and_answered_as_the_server_would`, `recording_a_monitor_is_refused_before_the_server_sees_it`
 - u13 `rust/src/launch.rs`: `a_name_on_the_list_is_only_the_program_the_system_gives_under_it`
 - u14 `rust/src/seccomp.rs`: `the_zone_socket_filter_builds`
+- u15 `rust/src/declared.rs`: `a_link_into_the_store_is_declared`, `a_plain_file_or_a_link_elsewhere_is_not_declared`, `a_held_directory_is_read_as_held`; `rust/tests/vpn_zone_cli.rs`: `a_plain_file_in_declared_is_not_nixs_word`

@@ -1990,18 +1990,20 @@ pub fn names_program(entry: &str, launched: &Path, dirs: &[PathBuf]) -> bool {
 fn wayland_proxy_wanted(tools: &Tools, appbin: &OsStr, unasked: bool) -> bool {
     let mode = cli::setting(tools, "wayland-proxy").map(|(value, _)| value);
     let lists = [
-        tools.config.join("wayland-no-proxy"),
-        tools
-            .config
-            .join(cli::DECLARED_DIR)
-            .join("wayland-no-proxy"),
+        std::fs::read_to_string(tools.config.join("wayland-no-proxy")),
+        crate::declared::read(
+            &tools
+                .config
+                .join(cli::DECLARED_DIR)
+                .join("wayland-no-proxy"),
+        ),
     ];
     let listed = !unasked
         && appbin.to_str().is_some_and(|name| {
-            lists.iter().any(|path| {
-                std::fs::read_to_string(path)
-                    .is_ok_and(|text| text.lines().map(str::trim).any(|line| line == name))
-            })
+            lists
+                .iter()
+                .flatten()
+                .any(|text| text.lines().map(str::trim).any(|line| line == name))
         });
     proxy_wanted(mode.as_deref(), listed)
 }
