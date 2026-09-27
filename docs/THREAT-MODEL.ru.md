@@ -120,8 +120,8 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | N8 | Аплинк отправляет что-то кроме транспорта туннеля | да | правила аплинка: адрес и порт endpoint (OpenConnect: адрес шлюза, любой порт) | vm6 vm8 sm5 sm17 sys6 |
 | N9 | Туннель или его держатель умер, а программы работают | да, fail-closed | пространство аплинка умирает вместе с держателем; интерфейс остаётся и дропает всё | У · vm39 sys10 br3 br4 sm19 vm24 up1 |
 | N10 | Зона через интерфейс хоста откатывается на маршруты хоста | да | каждый сокет привязан к интерфейсу (pasta с правкой); ушёл интерфейс — зона опускается | vm22 vm23 vm24 vm25 |
-| N11 | Зона через интерфейс хоста выходит через службу хоста (прокси, Tor, sshd на адресе хоста) | частично | фильтр отказывает IPv4- и IPv6-адресам хоста (глобальным, ULA), какими они были при подъёме зоны; появившихся позже нет в списке | vm22 (IPv4); IPv6: **нет теста** |
-| N12 | Пользовательская зона через системную достаёт службы системной зоны или обходит её туннель | да | её pasta работает с группой `vpn-zones-bridge`, которой системная зона отказывает к своим адресам | br1 br2 br3 br4 |
+| N11 | Зона через интерфейс хоста выходит через службу хоста (прокси, Tor, sshd на адресе хоста) | частично | фильтр отказывает IPv4- и IPv6-адресам хоста (глобальным, ULA), какими они были при подъёме зоны; появившихся позже нет в списке | vm22 vm40 |
+| N12 | Пользовательская зона через системную достаёт службы системной зоны или обходит её туннель | да | её pasta работает с группой `vpn-zones-bridge`, которой системная зона отказывает ко всем своим адресам, в обоих семействах; IPv6 передаётся, только если сеть системной зоны его несёт | br1 br2 br3 br4 br5 |
 | N13 | Зона offline куда-то достаёт | да | только loopback; резолверы скрыты до ветки offline | У · vm26 vm10 sm7 |
 | N14 | Устройство, выданное контейнеру, приносит свою сеть (adb или модем телефона, ESP32, LTE-модем) | нет | предупреждение при выдаче такого устройства | — |
 | N15 | Метаданные: имя endpoint резолвится в сети хоста; содержимое DNS видно на выходе туннеля | нет | литеральный адрес endpoint снимает первое; DoT/DoH в планах (M3) | — |
@@ -259,7 +259,6 @@ PulseAudio; дополнительные группы сеанса сняты; �
 
 - **N3:** локальная сеть у пользовательской зоны с ядерным WireGuard/AmneziaWG (для
   системных зон и зон через них тесты есть);
-- **N11:** отказ IPv6-адресам хоста зоне через интерфейс хоста (IPv4 проверен);
 - **D2:** хост заменяет `resolv.conf` переименованием;
 - **D3:** сам `resolve1` по системной шине (`hostname1` и `ListSessions` проверены);
 - **P5:** Secret Service и `flatpak-spawn --host` из герметичной зоны;
@@ -318,6 +317,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 - vm37 "IPv6 through the tunnel: TCP and ping, the server sees the tunnel's v6 address", "IPv6 through the tunnel: DNS over v6, from the config, answers inside"
 - vm38 "a zone's program cannot touch the routes, the tunnel or the filter"
 - vm39 "the zone killed under a running program: it fails closed"
+- vm40 "host-interface zone: IPv6 bound to eth1, the host's other v6 addresses refused" (в `tests/vm-hostif.py`)
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -339,7 +339,7 @@ and reach nothing"
 `tests/vm-bridge.nix`: br1 "a user zone through the system zone: one tunnel for both tiers" ·
 br2 "from inside a user zone, no door to the system tier (review)" · br3 "it fails closed with
 the tunnel, and lets go of its pasta when down" · br4 "the system zone made anew: the user zone
-follows, without a restart"
+follows, without a restart" · br5 "IPv6 through the system zone: out through its tunnel, not into it"
 
 `tests/vm-uplink.nix`: up1 "a tunnel zone through the wrong interface stays closed, never takes
 the other"

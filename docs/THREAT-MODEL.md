@@ -122,8 +122,8 @@ satellite, when granted.
 | N8 | The uplink sends anything but the tunnel's transport | yes | uplink ruleset: the endpoint's address and port (OpenConnect: the gateway's address, any port) | vm6 vm8 sm5 sm17 sys6 |
 | N9 | The tunnel or its holder dies while programs run | yes, fail-closed | the uplink namespace dies with the holder; the interface stays and drops everything | C · vm39 sys10 br3 br4 sm19 vm24 up1 |
 | N10 | A host-interface zone falls back to the host's routes | yes | every socket is bound to the interface (patched pasta); the zone goes down when the interface does | vm22 vm23 vm24 vm25 |
-| N11 | A host-interface zone goes out through a host service (proxy, Tor, sshd on a host address) | partly | the filter refuses the host's IPv4 and IPv6 (global, ULA) addresses as they are at zone start; later ones are not listed | vm22 (IPv4); IPv6: **no test** |
-| N12 | A user zone through a system zone reaches that zone's services, or goes around its tunnel | yes | its pasta runs as `vpn-zones-bridge`, which the system zone refuses to its own addresses | br1 br2 br3 br4 |
+| N11 | A host-interface zone goes out through a host service (proxy, Tor, sshd on a host address) | partly | the filter refuses the host's IPv4 and IPv6 (global, ULA) addresses as they are at zone start; later ones are not listed | vm22 vm40 |
+| N12 | A user zone through a system zone reaches that zone's services, or goes around its tunnel | yes | its pasta runs as `vpn-zones-bridge`, which the system zone refuses to every local address, both families; IPv6 passed on only when the system zone's network carries it | br1 br2 br3 br4 br5 |
 | N13 | An offline zone reaches anything | yes | loopback only; the resolvers are hidden before the offline branch | C · vm26 vm10 sm7 |
 | N14 | A device granted to a container brings its own network (a phone's adb or modem, an ESP32, an LTE modem) | no | a warning when such a device is granted | — |
 | N15 | Metadata: the endpoint's name is resolved in the host's network; DNS content is readable at the tunnel's exit | no | a literal endpoint address avoids the first; DoT/DoH is planned (M3) | — |
@@ -261,7 +261,6 @@ smoke test tries to break:
 
 - **N3:** the LAN, for a kernel WireGuard/AmneziaWG user zone (covered for system zones and
   zones through them);
-- **N11:** the host's IPv6 addresses refused to a host-interface zone (IPv4 is tested);
 - **D2:** the host replacing `resolv.conf` by rename;
 - **D3:** `resolve1` itself over the system bus (`hostname1` and `ListSessions` are tested);
 - **P5:** the Secret Service and `flatpak-spawn --host` from a hermetic zone;
@@ -319,6 +318,7 @@ apart from DynamicLauncher and the two network portals.
 - vm37 "IPv6 through the tunnel: TCP and ping, the server sees the tunnel's v6 address", "IPv6 through the tunnel: DNS over v6, from the config, answers inside"
 - vm38 "a zone's program cannot touch the routes, the tunnel or the filter"
 - vm39 "the zone killed under a running program: it fails closed"
+- vm40 "host-interface zone: IPv6 bound to eth1, the host's other v6 addresses refused" (in `tests/vm-hostif.py`)
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -340,7 +340,7 @@ and reach nothing"
 `tests/vm-bridge.nix`: br1 "a user zone through the system zone: one tunnel for both tiers" ·
 br2 "from inside a user zone, no door to the system tier (review)" · br3 "it fails closed with
 the tunnel, and lets go of its pasta when down" · br4 "the system zone made anew: the user zone
-follows, without a restart"
+follows, without a restart" · br5 "IPv6 through the system zone: out through its tunnel, not into it"
 
 `tests/vm-uplink.nix`: up1 "a tunnel zone through the wrong interface stays closed, never takes
 the other"
