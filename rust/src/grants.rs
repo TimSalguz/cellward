@@ -308,15 +308,14 @@ pub fn container_namespace(mountinfo: &str, home: &Path, name: &str) -> bool {
 pub fn detach_live(tools: &Tools, selector: &str, dest: &Path) -> (usize, Vec<String>) {
     let mut namespaces: BTreeMap<PathBuf, i32> = BTreeMap::new();
     if let Some(name) = crate::container::canonical(tools, selector) {
-        use std::os::unix::fs::MetadataExt;
+        // Every process: one that made itself not dumpable shows as root's
+        // in /proc, and is the user's all the same (review). What is not
+        // ours cannot be read, nor entered.
         let mut looked: BTreeSet<PathBuf> = BTreeSet::new();
-        // SAFETY: getuid(2) takes no arguments and cannot fail.
-        let uid = unsafe { libc::getuid() };
         let pids = fs::read_dir("/proc")
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|e| e.metadata().is_ok_and(|m| m.uid() == uid))
             .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok());
         for pid in pids {
             let Ok(ns) = fs::read_link(format!("/proc/{pid}/ns/mnt")) else {
