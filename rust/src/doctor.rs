@@ -696,6 +696,22 @@ fn as_a_program() -> Result<bool, String> {
     // SAFETY: a list of one gid and its length. Failing is an answer, read
     // back below.
     let _ = unsafe { libc::setgroups(1, &gid) };
+    // Out of the zone's programs' reach through prlimit(2) (audit
+    // 2026-09-27): the kernel lets a process change another's limits when
+    // that one's real, effective and saved gids are all the caller's — the
+    // user's, a zone program's. A program lowered the probe's open files to
+    // nothing, every open failed, and was read as "not there": "ok" for
+    // everything. With its saved gid the zone's root's, the probe's limits
+    // are no program's to change; it looks as the user all the same (its
+    // effective gid). Not dumpable already: the change does not reset that
+    // (read back below).
+    // SAFETY: setresgid(2) takes three ids.
+    if unsafe { libc::setresgid(gid, gid, 0) } != 0 {
+        return Err(format!(
+            "cannot keep the zone's programs off the probe's limits: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
     let mut header = Header {
         version: VERSION_3,
         pid: 0,

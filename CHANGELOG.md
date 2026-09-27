@@ -429,6 +429,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (`/run/vpn-zones/pasta/x-uplink.pid`), so one pasta's word that it was
   done could be taken for the other's. The files are now named by kind:
   `zone-<name>.pid`, `uplink-<name>.pid`, `sysrun-<pid>.pid`.
+- **The doctor's probe cannot be made to say "ok"** (audit 2026-09-27): a
+  zone program could lower the probe's open-file limit with `prlimit(2)` —
+  the kernel allows it between processes of the same uid and gids — and
+  every check that found nothing to open said "ok". The probe now keeps a
+  saved gid of its zone's root, which no program of the zone has.
 - **A zone's POSIX message queues are its own** (review 2026-09-27): the
   zone kept the host's `/dev/mqueue`, an mqueue mount of the host's IPC
   namespace, and with it the host's queues — around the IPC namespace the
