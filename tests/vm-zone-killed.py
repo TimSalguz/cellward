@@ -48,3 +48,12 @@ with subtest("the zone killed under a running program: it fails closed"):
     )
     machine.succeed(f"kill {orphan}")
     alice("systemctl --user reset-failed vpn-zone@vmreal || true")
+    # The server's side of the dead session still has something for the
+    # client and knocks at its last address with handshakes (148 bytes, every
+    # 5 s) for a minute and a half, which the host answers "port
+    # unreachable": nothing of the zone's, but noise in the next capture. The
+    # peer made anew has no address to knock at.
+    server.succeed(
+        f"wg set wg0 peer '{cpub}' remove && "
+        f"wg set wg0 peer '{cpub}' allowed-ips 10.99.0.2/32,fd99::2/128"
+    )
