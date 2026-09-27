@@ -171,19 +171,30 @@ const PROXY_GRACE: Duration = Duration::from_millis(500);
 /// Without a filter it reaches the Secret Service through the bus — that is
 /// KWallet with every password in it — plus the window list and every other
 /// application. Only the portals and notifications get through.
-const BUS_TALK: [&str; 7] = [
+const BUS_TALK: [&str; 17] = [
     // By name (`zone::PORTALS`): not the Flatpak portal, which starts
     // processes outside the sandbox.
     crate::zone::PORTALS[0],
     crate::zone::PORTALS[1],
-    "--talk=org.freedesktop.Notifications",
-    "--talk=org.kde.StatusNotifierWatcher",
+    // The notification daemon and the tray's watcher by their own
+    // interfaces only (`zone::DESKTOP_SERVICES`).
+    crate::zone::DESKTOP_SERVICES[0],
+    crate::zone::DESKTOP_SERVICES[1],
+    crate::zone::DESKTOP_SERVICES[2],
+    crate::zone::DESKTOP_SERVICES[3],
+    crate::zone::DESKTOP_SERVICES[4],
+    crate::zone::DESKTOP_SERVICES[5],
+    crate::zone::DESKTOP_SERVICES[6],
+    crate::zone::DESKTOP_SERVICES[7],
+    crate::zone::DESKTOP_SERVICES[8],
     // The tray icon's own name (`zone::TRAY_ITEM_NAMES`): in a container the
     // program's pid is its namespace's, but the name is still one per icon.
     crate::zone::TRAY_ITEM_NAMES,
     // Typing, through the input methods' portals only (`zone::SESSION_BUS_RULES`).
     "--talk=org.freedesktop.portal.IBus",
-    "--talk=org.freedesktop.portal.Fcitx",
+    crate::zone::INPUT_METHOD_PORTAL[0],
+    crate::zone::INPUT_METHOD_PORTAL[1],
+    crate::zone::INPUT_METHOD_PORTAL[2],
 ];
 
 /// The lowest and the number of X display numbers a satellite may take
