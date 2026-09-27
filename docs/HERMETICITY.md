@@ -180,6 +180,13 @@ becomes a default, with the table above as the list of what the owner accepts.
   A container with the `x11` permission gets its own `xwayland-satellite`.
   There is no `x11 = "host"` hole. The same per zone, for zones without
   containers: `cellward x11 <zone> on` or `zoneX11 = [ "<zone>" ]`.
+  An X server asks its clients for nothing, so its socket is the launch's
+  alone (2026-09-27): `x11-run` binds `/tmp/.X11-unix/X<n>` itself, in a
+  `/tmp/.X11-unix` of the launch's own mount namespace (`profile-run
+  --own-x11`), and hands it to the satellite (`-listenfd`) — Xwayland then
+  opens no socket of its own, none in the abstract namespace the zone's
+  programs share. A sandbox is kept off the abstract sockets of the outside by
+  a Landlock scope (Linux 6.12 or later).
 - **B — the system bus: B2, narrowed — implemented.** `xdg-dbus-proxy` per zone; `UPower`
   allowed; `login1` only `Inhibit` and reading properties — no session list,
   no power management; `NetworkManager`, `hostname1`, `resolve1`, `machined`,

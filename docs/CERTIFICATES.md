@@ -135,6 +135,17 @@ manifest.
   certificate from then on. Containers with trust therefore create the missing
   lower directories (empty, mode 0700) before stacking, and the check above
   catches whatever is still missed.
+- **Nothing in the database is followed** (2026-09-27). The database and every
+  name in it are the container's, and the trust layer runs where the real home
+  is in sight (`profile-run` of a sandbox launch, `cellward trust` on the
+  host): a `cert9.db` made a link to the host's would have had the host's
+  database written. The directory is reached a name at a time with no link on
+  the way and checked to be the container's once open; `certutil` runs in a
+  bwrap box of its own that holds a fresh `/db` with only `cert9.db` and
+  `key4.db` bound in by descriptor — never the container's `pkcs11.txt`, whose
+  `library=` lines NSS would load — with no environment and no other
+  descriptor; the stamp is read and written through the directory, never
+  through a link.
 - Idempotent: a stamp file in the database directory records the fingerprints
   installed; equal stamp → no `certutil` at all.
 - The first copy-up forks the container's database from the host's at that
