@@ -193,6 +193,7 @@ satellite, when granted.
 | H3 | cellward's own state and settings (every zone's key, `zone.pid`, the registry, raw sockets behind the filters, `broker-always`, `declared/`) | yes | tmpfs over `~/.local/state/vpn-zones` in every zone; `~/.config/vpn-zones` and `~/.local/share/vpn-zones` read-only | vm18 sm10 |
 | H4 | Other containers' data | yes | container storage is covered in zones; a launch gets back its own | vm33 vm18 |
 | H5 | Programs outside every zone reach the network | only with the system tier's egress policy | nftables by socket owner (`enforce`, `strict`) | sys7 sys8 ho1 |
+| H6 | A file in `declared/` speaks in Nix's name (a file chooser a zone's program steers, a program of the host): `hermetic-default off`, a container bound to `unconfined`, the CLI refusing to change it | yes | a declaration counts only when the file, every link followed, is in the Nix store, as home-manager's links are; a plain file or a link elsewhere is ignored with a warning, and the local value or the default applies | vm46 u15 |
 | | **Files and the host's startup files** | | | |
 | F1 | A zone program reads the home (`~/.ssh`, browser profiles, other programs' data) | own home: yes · otherwise **no** | the sandbox: an empty home plus granted paths | sm8 sm10 |
 | F2 | A zone program writes what the host runs later (`~/.bashrc`, autostart, launcher entries, user units, compositor configs, `mimeapps.list`) | hermetic: partly · ordinary: **no** · own home: yes | read-only covers from a list, their parent directories pinned | vm18 |
@@ -236,7 +237,9 @@ Notes:
   enumeration. It does not cover home-manager's links in the home's root, or a file that does
   not exist yet, other than the entry points made beforehand.
 - **H3.** A program of the same user outside every zone can still write `declared/` and
-  `broker-always`. That is the host, a non-goal.
+  `broker-always`. That is the host, a non-goal. Since 2026-09-27 what it writes into
+  `declared/` is not Nix's word (H6); it can still remove home-manager's link, or point it
+  at another file of the store.
 - **W13.** In a sandbox of an ordinary zone, `screencast no` does not apply; nothing is
   remembered there either.
 - **K1.** Allowed on purpose: `modify_ldt` (Wine's LDT entries: 16-bit programs; Flatpak
@@ -329,6 +332,7 @@ apart from DynamicLauncher and the two network portals.
 - vm43 "a launch into a zone is restricted whatever its program is called" (in `tests/vm-promise-wayland.py`)
 - vm44 "a zone's program cannot signal the host's processes of the user" (in `tests/vm-promise-signals.py`; skipped before Linux 6.12)
 - vm45 "a zone's program cannot reach the host over vsock" (in `tests/vm-promise-vsock.py`)
+- vm46 "declared: a plain file or a link out of the store is not Nix's word" (in `tests/vm-promise-declared.py`)
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -398,3 +402,4 @@ Rust tests (`cargo test`):
 - u12 `rust/src/pulse_filter.rs`: `module_loading_is_refused_and_answered_as_the_server_would`, `recording_a_monitor_is_refused_before_the_server_sees_it`
 - u13 `rust/src/launch.rs`: `a_name_on_the_list_is_only_the_program_the_system_gives_under_it`
 - u14 `rust/src/seccomp.rs`: `the_zone_socket_filter_builds`
+- u15 `rust/src/declared.rs`: `a_link_into_the_store_is_declared`, `a_plain_file_or_a_link_elsewhere_is_not_declared`, `a_held_directory_is_read_as_held`; `rust/tests/vpn_zone_cli.rs`: `a_plain_file_in_declared_is_not_nixs_word`

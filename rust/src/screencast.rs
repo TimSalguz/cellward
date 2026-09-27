@@ -257,6 +257,11 @@ mod tests {
         fn write(&self, path: &str, text: &str) {
             std::fs::write(self.base.join(path), text).unwrap();
         }
+        /// What Nix declares, as home-manager puts it there: a link into the
+        /// store (`crate::declared`).
+        fn declare(&self, name: &str, text: &str) {
+            crate::declared::declare(&self.base.join("config/declared").join(name), text);
+        }
         fn policy(&self) -> Policy {
             Policy::hold(
                 "nl",
@@ -282,16 +287,16 @@ mod tests {
         let read = || setting(&d.base.join("state/nl"), &d.base.join("config"), "nl");
         assert_eq!(read(), (Setting::Ask, Source::Default));
         d.write("state/nl/microphone", "yes");
-        d.write("config/declared/microphone", "nl no\n");
+        d.declare("microphone", "nl no\n");
         assert_eq!(read(), (Setting::Ask, Source::Default));
         d.write("state/nl/screencast", "yes\n");
         assert_eq!(read(), (Setting::Yes, Source::Local));
         d.write("state/nl/screencast", "sure");
         assert_eq!(read(), (Setting::No, Source::Local));
         d.write("state/nl/screencast", "yes");
-        d.write("config/declared/screencast", "de no\nnl ask\n");
+        d.declare("screencast", "de no\nnl ask\n");
         assert_eq!(read(), (Setting::Ask, Source::Nix));
-        d.write("config/declared/screencast", "nl maybe\n");
+        d.declare("screencast", "nl maybe\n");
         assert_eq!(read(), (Setting::No, Source::Nix));
     }
 
@@ -318,7 +323,7 @@ mod tests {
             None,
         );
         assert_eq!(lost.setting(), (Setting::No, Source::Local));
-        d.write("config/declared/screencast", "nl yes\n");
+        d.declare("screencast", "nl yes\n");
         assert_eq!(lost.setting(), (Setting::Yes, Source::Nix));
         let blind = Policy::hold(
             "nl",

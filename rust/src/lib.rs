@@ -32,6 +32,8 @@
 //! * [`container`] — containers as identities: the network a data container or
 //!   a named sandbox is bound to, the programs assigned to it, and where each
 //!   of those settings comes from (`docs/CONTAINERS.md`);
+//! * [`declared`] — what Nix declared, believed only as the links into the
+//!   store home-manager makes (`docs/THREAT-MODEL.md` H6);
 //! * [`config`] — WireGuard/AmneziaWG config parsing, the behaviour of the
 //!   `sed`/`grep` pipeline the zones used to run, written down as code and
 //!   tests (`docs/GOTCHAS.md` §4);
@@ -92,6 +94,7 @@ pub mod config;
 pub mod console;
 pub mod container;
 pub mod dbus_wire;
+pub mod declared;
 pub mod desktop;
 pub mod device_guard;
 pub mod devices;

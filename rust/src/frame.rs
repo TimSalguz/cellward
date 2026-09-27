@@ -117,7 +117,7 @@ fn hsv(h: f64, s: f64, v: f64) -> Rgb {
 /// zone's own file (`vpn-zone frame color`), or [`default_color`]. A value
 /// that does not parse is skipped, as if it were not there.
 pub fn zone_color(state: &Path, config: &Path, zone: &str) -> (Rgb, Source) {
-    if let Ok(text) = std::fs::read_to_string(config.join(DECLARED_DIR).join(DECLARED_COLORS)) {
+    if let Ok(text) = crate::declared::read(&config.join(DECLARED_DIR).join(DECLARED_COLORS)) {
         let declared = text.lines().find_map(|line| {
             let (name, color) = line.trim().split_once(char::is_whitespace)?;
             (name == zone).then(|| Rgb::parse(color)).flatten()
@@ -135,9 +135,9 @@ pub fn zone_color(state: &Path, config: &Path, zone: &str) -> (Rgb, Source) {
     (default_color(zone), Source::Default)
 }
 
-/// A width setting file: `None` when absent or not a width.
-fn width_file(path: &Path) -> Option<i32> {
-    read_setting(path)?
+/// A width setting file's text: `None` when absent or not a width.
+fn width_file(text: Option<String>) -> Option<i32> {
+    text?
         .trim()
         .parse()
         .ok()
@@ -146,10 +146,11 @@ fn width_file(path: &Path) -> Option<i32> {
 
 /// The border's width in logical pixels and where it comes from.
 pub fn width(config: &Path) -> (i32, Source) {
-    if let Some(w) = width_file(&config.join(DECLARED_DIR).join(WIDTH_SETTING)) {
+    let declared = crate::declared::setting(&config.join(DECLARED_DIR).join(WIDTH_SETTING));
+    if let Some(w) = width_file(declared) {
         return (w, Source::Nix);
     }
-    if let Some(w) = width_file(&config.join(WIDTH_SETTING)) {
+    if let Some(w) = width_file(read_setting(&config.join(WIDTH_SETTING))) {
         return (w, Source::Local);
     }
     (DEFAULT_WIDTH, Source::Default)
@@ -165,7 +166,7 @@ pub fn hidden(config: &Path) -> bool {
     if !config.is_absolute() {
         return false;
     }
-    let value = read_setting(&config.join(DECLARED_DIR).join(SWITCH_SETTING))
+    let value = crate::declared::setting(&config.join(DECLARED_DIR).join(SWITCH_SETTING))
         .or_else(|| read_setting(&config.join(SWITCH_SETTING)));
     value.is_some_and(|v| v.trim() == "hidden")
 }
@@ -209,11 +210,13 @@ impl TitleMode {
 /// The title strip's mode and where it comes from. A value that is not a
 /// mode is skipped, as if it were not there.
 pub fn title_mode(config: &Path) -> (TitleMode, Source) {
-    let file = |path: &Path| read_setting(path).as_deref().and_then(TitleMode::parse);
-    if let Some(mode) = file(&config.join(DECLARED_DIR).join(TITLE_SETTING)) {
+    let file = |text: Option<String>| text.as_deref().and_then(TitleMode::parse);
+    if let Some(mode) = file(crate::declared::setting(
+        &config.join(DECLARED_DIR).join(TITLE_SETTING),
+    )) {
         return (mode, Source::Nix);
     }
-    if let Some(mode) = file(&config.join(TITLE_SETTING)) {
+    if let Some(mode) = file(read_setting(&config.join(TITLE_SETTING))) {
         return (mode, Source::Local);
     }
     (DEFAULT_TITLE, Source::Default)
@@ -393,21 +396,19 @@ mod tests {
             zone_color(&state, &config, "nl"),
             (Rgb(0x10, 0x20, 0x30), Source::Local)
         );
-        fs::write(
-            config.join(DECLARED_DIR).join(DECLARED_COLORS),
+        crate::declared::declare(
+            &config.join(DECLARED_DIR).join(DECLARED_COLORS),
             "de #ffffff\nnl #ff0000\nnl2 #00ff00\n",
-        )
-        .unwrap();
+        );
         assert_eq!(
             zone_color(&state, &config, "nl"),
             (Rgb(255, 0, 0), Source::Nix)
         );
         // Another zone's line is not this one's, nor is a broken one.
-        fs::write(
-            config.join(DECLARED_DIR).join(DECLARED_COLORS),
+        crate::declared::declare(
+            &config.join(DECLARED_DIR).join(DECLARED_COLORS),
             "nl2 #00ff00\nnl nonsense\n",
-        )
-        .unwrap();
+        );
         assert_eq!(
             zone_color(&state, &config, "nl"),
             (Rgb(0x10, 0x20, 0x30), Source::Local)
@@ -423,10 +424,10 @@ mod tests {
         assert_eq!(width(&config), (DEFAULT_WIDTH, Source::Default));
         fs::write(config.join(WIDTH_SETTING), "7").unwrap();
         assert_eq!(width(&config), (7, Source::Local));
-        fs::write(config.join(DECLARED_DIR).join(WIDTH_SETTING), "2\n").unwrap();
+        crate::declared::declare(&config.join(DECLARED_DIR).join(WIDTH_SETTING), "2\n");
         assert_eq!(width(&config), (2, Source::Nix));
         for bad in ["0", "-3", "33", "wide", ""] {
-            fs::write(config.join(DECLARED_DIR).join(WIDTH_SETTING), bad).unwrap();
+            crate::declared::declare(&config.join(DECLARED_DIR).join(WIDTH_SETTING), bad);
             assert_eq!(width(&config), (7, Source::Local), "{bad:?}");
         }
         assert!(!hidden(&config));
@@ -479,9 +480,9 @@ mod tests {
         assert_eq!(title_mode(&config), (TitleMode::Always, Source::Default));
         fs::write(config.join(TITLE_SETTING), "hover\n").unwrap();
         assert_eq!(title_mode(&config), (TitleMode::Hover, Source::Local));
-        fs::write(config.join(DECLARED_DIR).join(TITLE_SETTING), "off").unwrap();
+        crate::declared::declare(&config.join(DECLARED_DIR).join(TITLE_SETTING), "off");
         assert_eq!(title_mode(&config), (TitleMode::Off, Source::Nix));
-        fs::write(config.join(DECLARED_DIR).join(TITLE_SETTING), "never").unwrap();
+        crate::declared::declare(&config.join(DECLARED_DIR).join(TITLE_SETTING), "never");
         assert_eq!(
             title_mode(&config),
             (TitleMode::Hover, Source::Local),

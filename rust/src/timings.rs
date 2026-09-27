@@ -96,14 +96,14 @@ impl Setting {
     /// Its value and where it comes from: Nix, the local file, the default.
     pub fn read(&self, config: &Path) -> (Term, Source) {
         let declared = config.join(crate::cli::DECLARED_DIR).join(self.name);
-        for (path, source) in [
-            (declared, Source::Nix),
-            (config.join(self.name), Source::Local),
+        for (text, source) in [
+            (crate::declared::read(&declared), Source::Nix),
+            (
+                std::fs::read_to_string(config.join(self.name)),
+                Source::Local,
+            ),
         ] {
-            if let Some(term) = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|t| self.parse(&t))
-            {
+            if let Some(term) = text.ok().and_then(|t| self.parse(&t)) {
                 return (term, source);
             }
         }
@@ -137,10 +137,16 @@ mod tests {
         assert_eq!(QUESTION.read(&dir), (Term::After(120), Source::Default));
         std::fs::write(dir.join(QUESTION.name), "never\n").unwrap();
         assert_eq!(QUESTION.read(&dir), (Term::Never, Source::Local));
-        std::fs::write(dir.join(crate::cli::DECLARED_DIR).join(QUESTION.name), "5m").unwrap();
+        crate::declared::declare(
+            &dir.join(crate::cli::DECLARED_DIR).join(QUESTION.name),
+            "5m",
+        );
         assert_eq!(QUESTION.read(&dir), (Term::After(300), Source::Nix));
         // Out of bounds, or not a word it takes: passed over.
-        std::fs::write(dir.join(crate::cli::DECLARED_DIR).join(QUESTION.name), "5s").unwrap();
+        crate::declared::declare(
+            &dir.join(crate::cli::DECLARED_DIR).join(QUESTION.name),
+            "5s",
+        );
         assert_eq!(QUESTION.read(&dir), (Term::Never, Source::Local));
         assert_eq!(HANDSHAKE_CHECK.parse("never"), None);
         assert_eq!(HANDSHAKE_CHECK.parse("15s"), Some(Term::After(15)));

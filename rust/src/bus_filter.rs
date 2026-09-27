@@ -2663,6 +2663,12 @@ mod tests {
             fs::write(self.base.join(path), text).unwrap();
         }
 
+        /// What Nix declares, as home-manager puts it there: a link into the
+        /// store (`crate::declared`).
+        fn declare(&self, name: &str, text: &str) {
+            crate::declared::declare(&self.base.join("config/declared").join(name), text);
+        }
+
         fn journal(&self) -> String {
             fs::read_to_string(self.base.join("state").join(crate::journal::FILE))
                 .unwrap_or_default()
@@ -2830,10 +2836,10 @@ mod tests {
         // Once in the journal for the three: at most a line per ten seconds.
         assert_eq!(d.journal().matches("\"event\":\"screencast\"").count(), 1);
         // Nix over the zone's own word, at once.
-        d.write("config/declared/screencast", "nl ask\n");
+        d.declare("screencast", "nl ask\n");
         let got = s.through(&select_sources(16, ":1.7"));
         assert_eq!(remembers(&got), (false, false));
-        d.write("config/declared/screencast", "nl no\n");
+        d.declare("screencast", "nl no\n");
         s.program.send(&select_sources(17, ":1.7"), &[]);
         let (msg, h, _) = s.program.message();
         assert_eq!(h.reply_serial, Some(17));

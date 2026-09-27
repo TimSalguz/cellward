@@ -57,14 +57,14 @@ pub fn ask_again(config: &Path) -> (u64, crate::container::Source) {
     let declared = config
         .join(crate::cli::DECLARED_DIR)
         .join(ASK_AGAIN_SETTING);
-    for (path, source) in [
-        (declared, Source::Nix),
-        (config.join(ASK_AGAIN_SETTING), Source::Local),
+    for (text, source) in [
+        (crate::declared::read(&declared), Source::Nix),
+        (
+            fs::read_to_string(config.join(ASK_AGAIN_SETTING)),
+            Source::Local,
+        ),
     ] {
-        if let Some(secs) = fs::read_to_string(&path)
-            .ok()
-            .and_then(|t| ask_again_term(&t))
-        {
+        if let Some(secs) = text.ok().and_then(|t| ask_again_term(&t)) {
             return (secs, source);
         }
     }

@@ -154,7 +154,14 @@
    `rust/tests/vpn_zone_gui_cli.rs` для шести ярлыков (какой глагол CLI
    получается из пункта меню, какие тексты показаны, что провал не празднуют
    уведомлением). В деривации модуля тесты выключены (`doCheck = false`): там
-   их гонять негде.
+   их гонять негде. Объявленное в Nix тесты кладут так же, как home-manager:
+   текст — в настоящий Nix store (`nix-store --add`), файл в `declared/` —
+   ссылка на него (`crate::declared::declare`, `declare` в
+   `rust/tests/vpn_zone_cli.rs`). Обычный файл там рантайм за слово Nix не
+   принимает (`docs/THREAT-MODEL.md` H6), а подменить «где store» тестам
+   нечем — нарочно: переменная, которой это задаётся, сняла бы проверку и в
+   жизни. Поэтому тестам нужен Nix, как и его libseccomp; пути в store
+   адресуются содержимым и уходят при сборке мусора.
 4. **integration** — подготовка раннера (снять AppArmor-запрет на userns,
    `modprobe wireguard`, `uidmap` + диапазоны в `/etc/subuid`/`subgid`) и
    запуск `tests/integration/smoke.sh`.

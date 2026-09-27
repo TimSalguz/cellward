@@ -1331,7 +1331,7 @@ const SHIM_MARK: &str = "# X-VPNZone=shim";
 /// that is the person's call.
 fn wants_shims(home: &Path) -> bool {
     let config = home.join(".config/vpn-zones");
-    fs::read_to_string(config.join("declared/path-shims"))
+    crate::declared::read(&config.join("declared/path-shims"))
         .or_else(|_| fs::read_to_string(config.join("path-shims")))
         .is_ok_and(|v| v.trim() == "on")
 }
@@ -1398,7 +1398,7 @@ fn sync_shims(
             .into_iter()
             .flatten()
             .flatten()
-            .filter_map(|f| fs::read_to_string(f.path()).ok())
+            .filter_map(|f| crate::declared::read(&f.path()).ok())
             .flat_map(|text| {
                 text.lines()
                     .filter_map(|l| l.split_once('='))
@@ -1466,7 +1466,7 @@ fn sync_shims(
 /// gives back the ones taken over.
 fn takes_over_autostart(home: &Path) -> bool {
     let config = home.join(".config/vpn-zones");
-    let value = fs::read_to_string(config.join("declared/autostart"))
+    let value = crate::declared::read(&config.join("declared/autostart"))
         .or_else(|_| fs::read_to_string(config.join("autostart")))
         .unwrap_or_default();
     value.trim() != "as-is"
@@ -1477,7 +1477,7 @@ fn takes_over_autostart(home: &Path) -> bool {
 /// (`docs/LAUNCHERS.md` §3.2, the owner's decision of 2026-09-17).
 fn takes_over_user_entries(home: &Path) -> bool {
     let config = home.join(".config/vpn-zones");
-    let value = fs::read_to_string(config.join("declared/user-entries"))
+    let value = crate::declared::read(&config.join("declared/user-entries"))
         .or_else(|_| fs::read_to_string(config.join("user-entries")))
         .unwrap_or_default();
     value.trim() != "leave"
@@ -2192,12 +2192,12 @@ fn sync_from(
 
     // The mode declared in Nix, when there is one, wins over the local file.
     let declared_mode = home.join(".config/vpn-zones/declared/mode");
-    let mode_file = if declared_mode.exists() {
-        declared_mode
+    let mode_text = if crate::declared::is_declared(&declared_mode) {
+        crate::declared::read(&declared_mode)
     } else {
-        home.join(".config/vpn-zones/mode")
+        fs::read_to_string(home.join(".config/vpn-zones/mode"))
     };
-    let mode = match fs::read_to_string(mode_file) {
+    let mode = match mode_text {
         Ok(text) => Mode::parse(&text),
         Err(_) => Mode::Picker,
     };
