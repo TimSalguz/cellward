@@ -635,6 +635,9 @@ pub fn probe_main(args: &[OsString]) -> u8 {
         // SAFETY: setting a standard signal's disposition to "ignore".
         unsafe { libc::signal(signal, libc::SIG_IGN) };
     }
+    // Without the zone's capabilities (run by hand, on the host) there is no
+    // saved gid to keep: said as a failed check, not a probe that fails.
+    let limits = out_of_prlimit_reach();
     let groups_shed = match as_a_program() {
         Ok(shed) => shed,
         Err(e) => {
@@ -644,7 +647,15 @@ pub fn probe_main(args: &[OsString]) -> u8 {
             return 1;
         }
     };
-    for check in probe(&args, groups_shed) {
+    let mut checks = probe(&args, groups_shed);
+    if let Err(e) = limits {
+        checks.push(Check::new(
+            "probe-limits",
+            Level::Fail,
+            format!("{e} — программа зоны могла урезать пробе лимиты, и её «ok» не доказаны"),
+        ));
+    }
+    for check in checks {
         println!("{}", check.line());
     }
     0
@@ -671,6 +682,27 @@ pub fn probe_main(args: &[OsString]) -> u8 {
 /// `bus_filter::run`). Set while the probe still holds its capabilities, so
 /// that there is no moment it is readable; lowering capabilities does not
 /// make a process dumpable again.
+/// Out of the zone's programs' reach through prlimit(2) (audit 2026-09-27):
+/// the kernel lets a process change another's limits when that one's real,
+/// effective and saved gids are all the caller's — the user's, a zone
+/// program's. A program lowered the probe's open files to nothing, every
+/// open failed, and was read as "not there": "ok" for everything. With its
+/// saved gid the zone's root's, the probe's limits are no program's to
+/// change; it looks as the user all the same (its effective gid). With the
+/// zone's capabilities still held, before [`as_a_program`].
+fn out_of_prlimit_reach() -> Result<(), String> {
+    // SAFETY: getgid(2) takes no arguments and cannot fail.
+    let gid = unsafe { libc::getgid() };
+    // SAFETY: setresgid(2) takes three ids.
+    if unsafe { libc::setresgid(gid, gid, 0) } != 0 {
+        return Err(format!(
+            "cannot keep the zone's programs off the probe's limits: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
 fn as_a_program() -> Result<bool, String> {
     // SAFETY: prctl with these arguments takes no pointers.
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
