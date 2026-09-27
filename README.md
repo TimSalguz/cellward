@@ -78,13 +78,15 @@ cannot see other windows.
 
 - a compositor supporting `wp_security_context_v1` — tested on **niri** and
   **KWin**; Mutter (GNOME) does not have the protocol, so the compositor
-  isolation layer will not work;
+  isolation layer will not work, and programs in zones get no display there
+  (below);
 - unprivileged user namespaces (`kernel.unprivileged_userns_clone`);
 - a range in `/etc/subuid` and `/etc/subgid` for your user — NixOS hands them
   out to regular users by default;
 - `/dev/net/tun` with read and write access (this is all an OpenConnect zone
-  needs — no kernel module and no root: the client creates its tun inside the
-  zone's own user namespace);
+  needs — no kernel module and no root: the uplink creates the tun inside the
+  zone's own user namespace, and the client, an id of its own without
+  capabilities, attaches to it);
 - for WireGuard zones — the `wireguard` or `amneziawg` kernel module;
 - working XDG portals (for the filesystem sandbox).
 
@@ -108,8 +110,8 @@ dialogs.
 |---|---|
 | **Plasma 6, Wayland** | every layer, out of the box |
 | **niri / sway / wlroots, Wayland** | every layer — the development platform |
-| **GNOME, Wayland** | works, minus the compositor layer: Mutter has no `wp_security_context_v1`, so `wl-sandbox` starts the program unrestricted and says so on stderr. Mitigating: Mutter hands out no `wlr-screencopy`, `data-control`, `virtual-keyboard` or `foreign-toplevel` either — most of what that layer takes away does not exist there. Dialogs are Qt and look foreign |
-| **any X11 session** | the network and the filesystem are isolated, the display is NOT: the host's X socket is reachable from inside a zone, and one client there sees every window, keystroke and clipboard on the machine. Not recommended |
+| **GNOME, Wayland** | the network and the containers work, windows only outside zones: Mutter has no `wp_security_context_v1`, and a zone has no compositor socket but the restricted one, so a program in a zone gets no display at all — no Wayland, and a container's own X server runs on Wayland too (a degradation, not a leak: `docs/LEAK-MODEL.md` §13). An `unconfined` launch is started unrestricted, with a warning on stderr; mitigating there: Mutter hands out no `wlr-screencopy`, `data-control`, `virtual-keyboard` or `foreign-toplevel` either — most of what that layer takes away does not exist there. Dialogs are Qt and look foreign |
+| **any X11 session** | the network and the filesystem are isolated; the host's X server is out of reach from a zone (its socket directory is covered, its abstract socket is in the host's network namespace), and there is no Wayland to give instead — a program in a zone gets no display at all. Only `unconfined` launches get the host's X server, where one client sees every window, keystroke and clipboard on the machine. Not recommended |
 | **not NixOS** | same logic, different packaging: nix plus standalone home-manager (a plain package is planned), unprivileged userns (on Ubuntu 24.04 also `sysctl kernel.apparmor_restrict_unprivileged_userns=0`), subuid/subgid, and `amneziawg` through DKMS — or the in-tree `wireguard`, which is supported as a fallback |
 
 Check the compositor:

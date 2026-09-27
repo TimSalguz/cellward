@@ -9,10 +9,12 @@
 until it is closed, and names by path every unix socket a program of the zone
 can connect to that is not the zone's own (`docs/LEAK-MODEL.md` §18).
 
-## 1. What is open today
+## 1. What was open (before the decisions of §7)
 
-A program started in a zone WITHOUT a sandbox (no `--sandbox`/`--fs-sandbox`)
-sees, in the zone's mount namespace, what every host program sees:
+The state the decisions answer, kept as it was (2026-09-17; the `/tmp` row
+2026-09-24). A program started in a zone WITHOUT a sandbox (no
+`--sandbox`/`--fs-sandbox`) saw, in the zone's mount namespace, what every
+host program sees:
 
 | channel | what it gives a program in the zone | LEAK-MODEL |
 |---|---|---|
@@ -21,6 +23,14 @@ sees, in the zone's mount namespace, what every host program sees:
 | `/run/dbus/system_bus_socket` | NetworkManager (real interfaces, SSIDs, addresses), hostname1, resolve1, machined: de-anonymisation without a packet | §3 |
 | `/tmp/.X11-unix/X*`, `DISPLAY` | the host's X server: keyboard, screen and clipboard of the whole machine | §7 |
 | the rest of `/tmp`, `/var/tmp`, `/dev/shm` | the host's listening sockets — a tmux server (`run-shell` runs on the host), a VPN client's IPC to a root service, single-instance sockets —, JACK, other programs' shared memory; a hermetic zone gets all three of its own (tmpfs, as Flatpak) | §15 |
+
+**Now** (§7): the host's X server is out of reach in every zone, and the
+system bus goes through a filter in every zone (B2). A hermetic zone — the
+default since 2026-09 — has the session bus only through a filter, no
+`systemd/private`, and a `/tmp`, `/var/tmp` and `/dev/shm` of its own. A zone
+switched out of hermeticity (`cellward hermetic <zone> off`) still gives its
+programs the whole session bus, `systemd --user` and the host's `/tmp`, by
+design (`docs/LEAK-MODEL.md` §1, §15).
 
 The network topology cannot close any of them: they are Unix sockets, not
 interfaces. Only the mount namespace can, and the sandbox already does it for
@@ -137,11 +147,18 @@ inherited by every program it started: it is close-on-exec now.) A container of 
 `VPN_ZONE_CURRENT`) is no zone to the broker and keeps its own picker, as does a zone
 without a broker to ask.
 
-Inside the zone `xdg-open`/`$BROWSER` resolve to the broker client, and the
-portal's `OpenURI`/`OpenFile` are filtered out of the bus proxy (`--call`
-rules) so that GTK/Qt fall back to `xdg-open`. Firefox and GTK under
-`/.flatpak-info` call the portal and do NOT fall back — a portal-compatible
-front for `OpenURI` is needed first; that is the research part.
+Inside the zone `xdg-open` ends at the broker: the handler entry it finds is
+our shadow, and the picker in a zone asks the broker (above). For the portal
+the plan here was to filter `OpenURI`/`OpenFile` out of the bus proxy
+(`--call` rules) so that GTK/Qt fall back to `xdg-open`, with a
+portal-compatible front for `OpenURI` as the research part, since Firefox and
+GTK under `/.flatpak-info` call the portal and do NOT fall back. Done as that
+front instead (2026-09-24): the zone's bus filter (`rust/src/bus_filter.rs`, in
+front of the zone's `xdg-dbus-proxy`) answers `OpenURI` itself, as the portal
+would, and hands the link to the broker on the host — with the connection's
+container since 2026-09-26 ([PERMISSIONS.md](PERMISSIONS.md) §11.13);
+`OpenFile`, `OpenDirectory` and `file:` links are answered "cancelled". The
+host's portal never gets the link (`docs/LEAK-MODEL.md` §2).
 
 **Proposed order** (nix-cm-eb recommends it too): a prototype behind a
 per-zone flag `hermetic = true`, OFF by default, proven in the VM by an "evil

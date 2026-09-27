@@ -235,11 +235,13 @@ vpn-zone-core wl-sandbox <program> --zone <zone> --     on the host: the restric
                                                      (a slave of the zone's shared /run/user/<uid>)
       └─ vpn-zone-core profile-run --cwd <dir> …     (done)
            1. home layer: overlay slots, or binds for permissions.paths
-           2. runtime hermeticity (§6, phase 4 — not done): tmpfs over
-              /run/user/<uid>, sockets back by name; tmpfs over /tmp/.X11-unix.
-              A cover here would hide what the zone binds into its runtime
-              later (the shared mount a launch is a slave of): it has to
-              carry that through, or not cover the runtime directory
+           2. runtime hermeticity (§6): done by the zone, not here — its
+              /run/user/<uid> (sockets back by name) and /tmp/.X11-unix are
+              covered once, when it comes up, and every launch inherits
+              them; a cover here would hide what the zone binds into its
+              runtime later (the shared mount a launch is a slave of).
+              The launch's own, mounted before step 1: --own-x11 (a
+              /tmp/.X11-unix of its own for its X server, 2026-09-27), --camera
            3. trust layer: bundle binds, NSS databases (CERTIFICATES.md)
            4. chdir <dir> → $HOME → /                (done)
            5. drop ambient capabilities
@@ -297,10 +299,10 @@ boundary is the container → outside direction (§6).
 | compositor key bindings | only if the binding calls `vpn-zone-pick` | **done** (§5.1): `cellward launch <launcher-id>` reads the entry's `Exec` and goes through the picker | 3 |
 | shell | uncontained | **done**: opt-in PATH shims for assigned programs (`pathShims.enable`); never a boundary | 3 |
 | portal `OpenURI` from a host program | portal → handler entry → shadow → picker | unchanged | — |
-| portal `OpenURI` from a container | the origin is lost | broker (§6.2) | 4 |
-| a link opened from inside a zone | delegated through `systemd --user` | the same door, guarded: broker | 4 |
-| `systemd-run --user`, `systemctl --user` from inside a zone | reachable | runtime hermeticity (§6.1) | 4 |
-| `flatpak-spawn --host` | escapes over the session bus | filtered for private homes today; overlays with §6.1 | 4 |
+| portal `OpenURI` from a container | **done** in hermetic zones and sandboxes: the bus filter answers it and hands the link, with its container, to the broker (§6.2) | — | 4 |
+| a link opened from inside a zone | **done** in hermetic zones (the default): the broker, not `systemd --user` (§6.2); a zone switched out of hermeticity still delegates through `systemd --user` | — | 4 |
+| `systemd-run --user`, `systemctl --user` from inside a zone | **done** in hermetic zones: out of reach (§6.1); reachable, by design, in a zone switched out of hermeticity | — | 4 |
+| `flatpak-spawn --host` | **done** for private homes and in hermetic zones: the session bus filter does not pass `org.freedesktop.Flatpak`; open in a zone switched out of hermeticity | — | 4 |
 | programs started by other host programs | uncontained | out of scope (host is trusted); `doctor` names it | — |
 
 ### 5.1 The launch command for bindings
@@ -412,6 +414,16 @@ programs granted `x11`; optionally tmpfs over `/run/dbus`. Private homes
 already get all of it through bwrap; overlay containers get it once the broker
 exists.
 
+**Done at zone level**, not per launch ([HERMETICITY.md](HERMETICITY.md) §2,
+§7): in the zone's mount namespace, once, when it comes up, so every container
+of the zone has it. In every zone the runtime directory is covered and the
+compositor's raw socket and IPC are never bound back (LEAK-MODEL §13),
+`/tmp/.X11-unix` is covered and `DISPLAY` unset, and the system bus goes
+through a filter instead of a tmpfs (B2); a hermetic zone (the default) binds
+back only the restricted PipeWire, the sound filter, the filtered session bus
+and the broker. A container granted `x11` gets its satellite, and a
+`/tmp/.X11-unix` of its launch's own (2026-09-27).
+
 ### 6.2 Broker
 
 One socket per container, bound into its runtime directory. One verb: "open
@@ -427,7 +439,19 @@ client; the delegation in `launch.rs` step 1 goes to the broker; portals stop
 getting `OpenURI`/`OpenFile` through the bus proxy (`--call` rules per portal
 interface). GTK, Qt and Firefox under `/.flatpak-info` call the portal and do
 not fall back to `xdg-open`, so a portal-compatible front for `OpenURI` is
-needed first. **Open research item**, VM prototype before any promise.
+needed first. ~~**Open research item**, VM prototype before any promise.~~
+
+**Done at zone level** (hermetic zones: the broker since 2026-09-17, the
+portal's `OpenURI` since 2026-09-24, by container since 2026-09-26):
+one broker socket per zone rather than per container — the broker tells the
+origin container by the launch the asker descends from
+([PERMISSIONS.md](PERMISSIONS.md) §11.9). `xdg-open` in a zone ends at the
+broker through the shadow entry and the picker; the delegation of step 1 goes
+to the broker where there is no `systemd --user` (`launch::delegate`); the
+portal-compatible front is the zone's bus filter, which answers `OpenURI`
+itself and hands the link to the broker with the connection's container
+([LEAK-MODEL](LEAK-MODEL.md) §2, [PERMISSIONS.md](PERMISSIONS.md) §11.13).
+`OpenFile`/`OpenDirectory` are answered "cancelled" for now.
 
 ## 7. Limits without root
 
@@ -635,12 +659,14 @@ every key of version 1.
   the lossless key of `docs/LAUNCHERS.md` §3.4.
 
 **`uplink_owner`** (`{uid, gid}` or `null`) is for a host egress policy: every
-socket a zone's traffic leaves the host by — pasta's, the OpenConnect
-client's — belongs to the zone's uid 0, the start of the user's subordinate
-ranges, so `meta skuid <uid>` in the host's nftables lets the zones out and
-nothing else of the user. Stable as long as `/etc/subuid` is; note that a
-rootless container tool mapping its own uid 1 onto the same subordinate uid
-would match too.
+socket a zone's traffic leaves the host by is pasta's and belongs to the zone's
+uid 0, the start of the user's subordinate ranges, so `meta skuid <uid>` in the
+host's nftables lets the zones out and nothing else of the user. The
+OpenConnect client runs as the second subordinate uid since 2026-09-27
+(`zone::CLIENT_ID`), but its sockets are in the uplink's network, not the
+host's: what reaches the host is pasta's. Stable as long as `/etc/subuid` is;
+note that a rootless container tool mapping its own uid 1 onto the same
+subordinate uid would match too.
 
 ## 10. Where can a packet or a DNS query go around the tunnel now?
 
@@ -683,10 +709,10 @@ would match too.
 | phase | content | proof |
 |---|---|---|
 | 0 | **done**: `direct` keeps its layers, working directory, conflict by id and binary, hidden handlers, Steam children | smoke; unit and scenario tests |
-| 1 | **done**: network binding with I1/I2 in `run` and the picker, `cellward container list/show/set/assign/unassign`, `status --json` (`schema_version`, sources), home-manager options with `declared/`, clones deprecated, path grants (`container grant/revoke`, `permissions.paths`), merge (`container merge`). **Left**: `own` by default, hints (Wine prefix, Steam), container-first picker, GUI entries | CLI/picker scenario tests; VM: a declared container with its declared CA, refused elsewhere, reported as Nix |
+| 1 | **done**: network binding with I1/I2 in `run` and the picker, `cellward container list/show/set/assign/unassign`, `status --json` (`schema_version`, sources), home-manager options with `declared/`, clones deprecated, path grants (`container grant/revoke`, `permissions.paths`), merge (`container merge`). **Left**: `own` by default — in part: since 2026-09-27 a program never given a container has its own home preselected in the launch window (and taken by a launch without one), while `default-profile` itself stays `ask`; hints (Wine prefix, Steam), container-first picker, GUI entries | CLI/picker scenario tests; VM: a declared container with its declared CA, refused elsewhere, reported as Nix |
 | 2 | trust layer ([CERTIFICATES.md](CERTIFICATES.md)) — **done** (GUI dialog left) | VM and smoke: synthetic CA trusted in one container only |
 | 3 | **done**: user-dir take-over, autostart take-over (§5.2). `cellward launch` (§5.1), D-Bus shadows (§5.3). web apps as children, host-interface networks (§3.3). **Left**: PATH shims | VM: activation via `gdbus call` lands in the container; autostart of an unassigned program is offline |
-| 4 | runtime hermeticity, broker, X11 closure, extra routes | VM "evil host": a `systemd --user` counting `StartTransientUnit`, a portal logging callers, an HTTP beacon |
+| 4 | **done** at zone level (§6): runtime hermeticity, broker, X11 closure. **Left**: extra routes | VM "evil host": a `systemd --user` counting `StartTransientUnit`, a portal logging callers, an HTTP beacon |
 
 ## 12. The owner's decisions (2026-09-17)
 
