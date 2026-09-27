@@ -100,6 +100,10 @@ let
     '';
   });
   pasta = "${passtPatched}/bin/pasta";
+  # passt из того же пакета: мост, которым зона везёт экземпляр контейнера
+  # (rust/src/bridge.rs, этап 2 контейнерного дизайна, 2026-09-27), —
+  # `passt --fd` в сети приложений зоны на каждый экземпляр.
+  passtBin = "${passtPatched}/bin/passt";
   # Второй эшелон герметичности (docs/LEAK-MODEL.md): фаерволл в обоих
   # namespace зоны. Зовёт его только держатель зоны, поэтому путь идёт флагом
   # ExecStart, как ip/awg/wg/pasta, а не манифестом.
@@ -1374,6 +1378,9 @@ in
       ExecStart =
         "${vpn-zone-rust}/bin/vpn-zone-core zone-holder"
         + " --ip ${iproute} --awg ${awg} --wg ${wg} --pasta ${pasta} --nft ${nft}"
+        # Мост для экземпляров контейнеров (rust/src/bridge.rs): зона
+        # запускает passt --fd на каждый экземпляр, который везёт.
+        + " --passt ${passtBin}"
         + " --openconnect ${openconnect} --dbus-proxy ${dbusProxy}/bin/xdg-dbus-proxy"
         # Фильтр шины герметичной зоны отдаёт ссылки брокеру (PERMISSIONS
         # §11.13); opener остался ему на случай песочницы на хосте.

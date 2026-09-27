@@ -109,6 +109,41 @@ const DENY_ENOSYS: [&str; 13] = [
     "pidfd_getfd",
 ];
 
+/// What the frame relay may call once it is sealed ([`Filter::relay`]): its
+/// descriptors' reads and writes (`send` is `sendto`), the wait on them,
+/// making them non-blocking, closing them, memory, and its end — nothing
+/// that opens, makes, maps a file or a socket, or reaches another process.
+const RELAY_ALLOWED: [&str; 28] = [
+    "read",
+    "write",
+    "readv",
+    "writev",
+    "recvfrom",
+    "recvmsg",
+    "sendto",
+    "sendmsg",
+    "poll",
+    "ppoll",
+    "fcntl",
+    "close",
+    "brk",
+    "mmap",
+    "munmap",
+    "mremap",
+    "madvise",
+    "futex",
+    "rt_sigreturn",
+    "rt_sigprocmask",
+    "sigaltstack",
+    "clock_gettime",
+    "getpid",
+    "gettid",
+    "getrandom",
+    "restart_syscall",
+    "exit",
+    "exit_group",
+];
+
 /// `TIOCSTI` / `TIOCLINUX` from `asm-generic/ioctls.h` — the values used by
 /// x86, arm, arm64, riscv and s390. (mips and alpha number them differently;
 /// they are not targets of this project.)
@@ -317,6 +352,27 @@ impl Filter {
                     highest + 1,
                 )],
             )?;
+        }
+        Ok(Self { ctx, unknown })
+    }
+
+    /// The frame relay's filter (`crate::relay`, stage 2 of the container
+    /// design, 2026-09-27): an allow-list, where every other filter here is
+    /// a blocklist — the relay is our own code with one job, pumping frames
+    /// between two descriptors it already holds, and what a frame crafted by
+    /// a program of the instance could make it do past that is what this
+    /// takes away. [`RELAY_ALLOWED`]; anything else answers `EPERM`, and the
+    /// pump ends on the error — the tap with it, fail-closed. For the native
+    /// architecture only (a call of another is killed: libseccomp's default),
+    /// and loaded after `no_new_privs`.
+    pub fn relay() -> Result<Self, Error> {
+        let mut ctx = ScmpFilterContext::new(ScmpAction::Errno(libc::EPERM))?;
+        ctx.set_ctl_nnp(true)?;
+        let mut unknown = Vec::new();
+        for name in RELAY_ALLOWED {
+            if let Some(syscall) = resolve(name, &mut unknown) {
+                ctx.add_rule(ScmpAction::Allow, syscall)?;
+            }
         }
         Ok(Self { ctx, unknown })
     }
@@ -542,6 +598,20 @@ fn scratch_file() -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The relay's allow-list builds, every name known to libseccomp: a
+    /// name it did not know would be a call the relay needs and gets
+    /// `EPERM` for (stage 2, 2026-09-27).
+    #[test]
+    fn the_relays_allow_list_builds_whole() {
+        let filter = Filter::relay().unwrap();
+        assert!(
+            filter.unknown_syscalls().is_empty(),
+            "{:?}",
+            filter.unknown_syscalls()
+        );
+        assert!(!filter.export_bpf().unwrap().is_empty());
+    }
 
     /// `struct sock_filter` is 8 bytes: u16 code, u8 jt, u8 jf, u32 k.
     const INSN_LEN: usize = 8;

@@ -256,4 +256,69 @@ with subtest("probe (g), informative: pasta instead of passt, handed the tap its
     )
     verdict("pasta-mode --fd (informative)", f"exit {code}: {out.strip()[-700:]}")
 
+with subtest("stage 2: the zone's bridge carries a sibling namespace, and refuses it the zone's own addresses"):
+    # The product's two ends, the test where an instance's keeper stands:
+    # a VZA1 request over the zone's socket, the relay's attach mode.
+    zdir = f"{STATE}/vmreal"
+    machine.succeed(f"test -S {zdir}/bridge.sock && test -e {zdir}/bridge-rule")
+    rules = in_zone_root(rzpid, "nft list ruleset")
+    assert "skuid 2" in rules, f"no refusal for the bridge's uid:\n{rules}"
+    # A listener of the zone's own, on its tunnel's address: the zone
+    # reaches it, what the bridge carries does not.
+    alice(
+        f"systemd-run --user --unit=zonelocal nsenter --preserve-credentials -U -n -m -t {rzpid} -- "
+        "socat TCP-LISTEN:7789,bind=10.99.0.2,fork,reuseaddr OPEN:/tmp/zonelocal-got,creat,append"
+    )
+    machine.wait_until_succeeds(
+        "su -l alice -c "
+        + shlex.quote(
+            f"nsenter --preserve-credentials -U -n -m -t {rzpid} -- sh -c "
+            "'ss -ltn | grep -q 10.99.0.2:7789'"
+        ),
+        timeout=30,
+    )
+    in_zone(rzpid, "sh -c 'echo from-zone | socat -u - TCP:10.99.0.2:7789'")
+    machine.wait_until_succeeds("grep -q from-zone /tmp/zonelocal-got", timeout=30)
+    tools = [alice(f"command -v {t}").strip() for t in ("ip", "nft")]
+    got = last_json(
+        alice(helper("bridge", zdir, "10.254.7.8", "fd63:656c:6c77::7:8", *tools))
+    )
+    assert got["answer"].startswith("OK v6=1 "), got
+    sib = got["holder"]
+    out = in_probe(sib, "socat -T10 - TCP:10.99.0.1:8080")
+    assert "peer=10.99.0.2" in out, f"TCP through the bridge: {out}"
+    out = in_probe(sib, "dig +time=5 +tries=2 +short leaktest.internal @10.254.255.253")
+    assert "10.99.0.9" in out, f"DNS through the bridge's forwarder: {out}"
+    # passt's echo sockets: its group is in the zone's ping range.
+    out = in_probe(sib, "ping -c1 -W5 10.99.0.1")
+    assert " 0% packet loss" in out, out
+    out = in_probe(sib, "socat -T10 - TCP6:[fd99::1]:8081")
+    seen = re.search(r"peer=\[?([0-9a-fA-F:]+)\]?", out)
+    assert seen and ipaddress.ip_address(seen.group(1)) == ipaddress.ip_address(
+        "fd99::2"
+    ), f"TCP over IPv6 through the bridge: {out}"
+    # The zone's own address is delivered in the zone: refused to passt.
+    in_probe(sib, "sh -c 'echo from-bridge | timeout -s KILL 8 socat -u - TCP:10.99.0.2:7789; true'")
+    machine.sleep(1)
+    machine.fail("grep -q from-bridge /tmp/zonelocal-got")
+    # The relay is sealed: no capability, no new privileges, its filter.
+    status = machine.succeed(f"cat /proc/{got['relay']}/status")
+    assert re.search(r"^Seccomp:\s+2$", status, re.M), status
+    assert re.search(r"^NoNewPrivs:\s+1$", status, re.M), status
+    assert re.search(r"^CapEff:\s+0+$", status, re.M), status
+    # Let go: the zone kills its passt, the relay ends and its tap with it.
+    machine.succeed(f"kill {got['keeper']}")
+    machine.wait_until_fails(f"kill -0 {got['relay']}", timeout=30)
+    links = in_probe(sib, "ip -o link show")
+    assert len(links.strip().splitlines()) == 1 and ": lo:" in links, links
+    machine.succeed(f"kill {sib}")
+    alice("systemctl --user stop zonelocal")
+    machine.succeed("rm -f /tmp/zonelocal-got")
+    verdict(
+        "zone bridge",
+        "a VZA1 request over the zone's socket gets a passt as uid 2; the relay's attach mode "
+        "makes, seals and pumps the tap; TCP, DNS, ICMP and IPv6 go out, the zone's own "
+        "address does not",
+    )
+
 print("PROBE VERDICTS " + json.dumps(PROBE_VERDICTS))

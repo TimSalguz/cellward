@@ -34,11 +34,30 @@
 //! yet; the VM probe (`tests/vm-probe-container-ns.py`) runs the whole path
 //! — a tap in a namespace of its own, the relay, `passt --fd` in a real
 //! zone — against the test's server.
+//!
+//! Stage 2 (2026-09-27): `vpn-zone-core frame-relay --attach …` ([`Attach`]),
+//! what an instance's keeper starts for every attach (`bridge::attach`): in
+//! the instance's user and network namespaces as their root, exec'd there —
+//! its memory that user namespace's own, out of the reach of every zone and
+//! every other instance (J3 of the design) —, not dumpable from its first
+//! step. It makes the tap itself, **not persistent**, from `/dev/net/tun` of
+//! the host's mount namespace (the instance's `/dev` has none), and is its
+//! only owner: the device goes with the relay. Then its addresses and routes
+//! (`ip`, as the namespace's root) and the instance's rules (`nft`: out by
+//! the tap from this attach's own addresses, or not at all; a loud warning
+//! when they cannot be loaded — the topology, loopback and one tap, is the
+//! wall), and then it seals itself: every capability gone, no new
+//! privileges, a seccomp allow-list of what the pump does
+//! (`seccomp::Filter::relay`). Only then does it say it is ready (a byte on
+//! a pipe its keeper waits on), and pump.
 
 use std::ffi::OsString;
 use std::fmt;
-use std::io;
+use std::fs;
+use std::io::{self, Write};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::path::PathBuf;
 
 /// The length before every frame: four bytes, big-endian.
 pub const LEN_BYTES: usize = 4;
@@ -458,10 +477,305 @@ fn confine() -> io::Result<()> {
     Ok(())
 }
 
+/// What an instance's keeper starts the relay with (`bridge::attach`):
+/// `frame-relay --attach --stream-fd N --ready-fd M --a4 A [--a6 A]
+/// --ip PATH --nft PATH`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attach {
+    /// Its end of the stream to the zone's passt.
+    pub stream: RawFd,
+    /// Where it says it is ready: one byte, `1`, once its tap is up and it
+    /// is sealed.
+    pub ready: RawFd,
+    /// The instance's addresses of this attach (`bridge::plan`).
+    pub a4: Ipv4Addr,
+    pub a6: Option<Ipv6Addr>,
+    /// What configures the tap and loads the instance's rules.
+    pub ip: PathBuf,
+    pub nft: PathBuf,
+}
+
+/// Set a flag's value, once.
+fn once<T>(slot: &mut Option<T>, value: T, flag: &str) -> Result<(), String> {
+    if slot.replace(value).is_some() {
+        return Err(format!("{flag} given twice"));
+    }
+    Ok(())
+}
+
+/// A tool's path as the keeper passes it: absolute, nothing looked up.
+fn absolute(value: &OsString) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(format!("{} is not an absolute path", path.display()))
+    }
+}
+
+impl Attach {
+    /// Its command line after `frame-relay`, as [`Attach::parse`] reads it
+    /// back.
+    pub fn args(&self) -> Vec<OsString> {
+        let mut out: Vec<OsString> = vec![
+            "--attach".into(),
+            "--stream-fd".into(),
+            self.stream.to_string().into(),
+            "--ready-fd".into(),
+            self.ready.to_string().into(),
+            "--a4".into(),
+            self.a4.to_string().into(),
+        ];
+        if let Some(a6) = self.a6 {
+            out.push("--a6".into());
+            out.push(a6.to_string().into());
+        }
+        out.push("--ip".into());
+        out.push(self.ip.clone().into_os_string());
+        out.push("--nft".into());
+        out.push(self.nft.clone().into_os_string());
+        out
+    }
+
+    /// What follows `--attach`: every flag once, both descriptors above 2
+    /// and not the same, the addresses in the instance's own ranges
+    /// (`bridge::a4_usable`, `bridge::a6_usable`), the tools by absolute
+    /// paths.
+    pub fn parse(args: &[OsString]) -> Result<Self, String> {
+        let (mut stream, mut ready, mut a4, mut a6, mut ip, mut nft) =
+            (None, None, None, None, None, None);
+        let mut rest = args;
+        while let [flag, value, tail @ ..] = rest {
+            let flag = flag.to_string_lossy();
+            let text = value.to_str().unwrap_or("");
+            let fd = text.parse::<RawFd>().ok().filter(|fd| *fd > 2);
+            match &*flag {
+                "--stream-fd" => once(
+                    &mut stream,
+                    fd.ok_or("--stream-fd takes a descriptor above 2")?,
+                    &flag,
+                )?,
+                "--ready-fd" => once(
+                    &mut ready,
+                    fd.ok_or("--ready-fd takes a descriptor above 2")?,
+                    &flag,
+                )?,
+                "--a4" => once(
+                    &mut a4,
+                    text.parse::<Ipv4Addr>()
+                        .ok()
+                        .filter(|a| crate::bridge::a4_usable(*a, None))
+                        .ok_or("--a4 is no address of the instance's network")?,
+                    &flag,
+                )?,
+                "--a6" => once(
+                    &mut a6,
+                    text.parse::<Ipv6Addr>()
+                        .ok()
+                        .filter(|a| crate::bridge::a6_usable(*a, None))
+                        .ok_or("--a6 is no address of the instance's network")?,
+                    &flag,
+                )?,
+                "--ip" => once(&mut ip, absolute(value)?, &flag)?,
+                "--nft" => once(&mut nft, absolute(value)?, &flag)?,
+                _ => return Err(format!("unknown argument {flag}")),
+            }
+            rest = tail;
+        }
+        if let [odd] = rest {
+            return Err(format!("{} without a value", odd.to_string_lossy()));
+        }
+        let (Some(stream), Some(ready), Some(a4), Some(ip), Some(nft)) =
+            (stream, ready, a4, ip, nft)
+        else {
+            return Err("needs --stream-fd, --ready-fd, --a4, --ip and --nft".to_owned());
+        };
+        if stream == ready {
+            return Err("the stream and the pipe of its word are one descriptor".to_owned());
+        }
+        Ok(Self {
+            stream,
+            ready,
+            a4,
+            a6,
+            ip,
+            nft,
+        })
+    }
+}
+
+/// The instance's tap, `awg0` as a zone's tunnel is named — the name the
+/// instance's rules and the doctor's probe know: made here, not persistent,
+/// this process its only owner.
+fn make_tap() -> io::Result<OwnedFd> {
+    let tun = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/net/tun")?;
+    // SAFETY: an all-zero ifreq is a valid one: an empty name, no flags.
+    let mut req: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (to, from) in req.ifr_name.iter_mut().zip(crate::zone::TUN_IFACE.bytes()) {
+        *to = from as libc::c_char;
+    }
+    req.ifr_ifru.ifru_flags = (libc::IFF_TAP | libc::IFF_NO_PI) as libc::c_short;
+    // SAFETY: TUNSETIFF reads the ifreq and writes the name back into it; it
+    // lives past the call.
+    if unsafe {
+        libc::ioctl(
+            tun.as_raw_fd(),
+            libc::TUNSETIFF,
+            std::ptr::from_mut(&mut req),
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(tun.into())
+}
+
+/// The tap's address, MTU and routes, as the instance's root: a random MAC
+/// (locally administered, one host's), `a4` in the instance's /16 with the
+/// default through passt's gateway, and — IPv6 carried — `a6` with the
+/// default through `fe80::1`. Lower than the space's unreachable defaults
+/// (`zone::instance_ground`), which answer at once while there is no tap.
+fn configure(attach: &Attach) -> Result<(), String> {
+    let mut mac = [0u8; 6];
+    crate::bridge::random_bytes(&mut mac).map_err(|e| format!("no random MAC ({e})"))?;
+    mac[0] = (mac[0] & 0xfe) | 0x02;
+    let mac: Vec<String> = mac.iter().map(|b| format!("{b:02x}")).collect();
+    let mac = mac.join(":");
+    let dev = crate::zone::TUN_IFACE;
+    let mtu = crate::bridge::MTU.to_string();
+    let a4 = format!("{}/{}", attach.a4, crate::bridge::PREFIX4);
+    let g4 = crate::bridge::G4.to_string();
+    let ip = |args: &[&str]| crate::zone::run_tool(&attach.ip, args, false);
+    ip(&[
+        "link",
+        "set",
+        "dev",
+        dev,
+        "address",
+        mac.as_str(),
+        "mtu",
+        mtu.as_str(),
+        "up",
+    ])?;
+    ip(&["-4", "addr", "add", a4.as_str(), "dev", dev])?;
+    ip(&[
+        "-4",
+        "route",
+        "add",
+        "default",
+        "via",
+        g4.as_str(),
+        "dev",
+        dev,
+    ])?;
+    if let Some(a6) = attach.a6 {
+        let a6 = format!("{a6}/128");
+        let g6 = crate::bridge::G6.to_string();
+        ip(&["-6", "addr", "add", a6.as_str(), "dev", dev, "nodad"])?;
+        ip(&[
+            "-6",
+            "route",
+            "add",
+            "default",
+            "via",
+            g6.as_str(),
+            "dev",
+            dev,
+        ])?;
+    }
+    Ok(())
+}
+
+/// The instance's rules: out by the tap from this attach's addresses, or
+/// not at all (`zone::instance_ruleset`), in place of any an earlier attach
+/// left. Not loaded — no nft, a kernel without nf_tables — is said loudly,
+/// and the relay goes on: the topology is the wall (stage 2 of the design).
+fn seal(attach: &Attach) {
+    let loaded = crate::zone::instance_ruleset(None, attach.a4, attach.a6)
+        .map(|ruleset| crate::zone::replacing_table(&ruleset))
+        .and_then(|ruleset| crate::zone::feed_nft(&attach.nft, &ruleset));
+    if let Err(e) = loaded {
+        eprintln!(
+            "vpn-zone-core frame-relay: the instance's second echelon is OFF ({e}) — its way \
+             out is its tap alone, and nothing insures it against a mistake"
+        );
+    }
+}
+
+/// `frame-relay --attach …` ([`Attach`]).
+fn attach_main(args: &[OsString]) -> u8 {
+    // Not dumpable before anything else: the root of the instance's user
+    // namespace, exec'd in it — nothing of the instance's may read it.
+    // SAFETY: prctl with these arguments takes no pointers.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    let attach = match Attach::parse(args) {
+        Ok(attach) => attach,
+        Err(e) => {
+            eprintln!("vpn-zone-core frame-relay: {e}");
+            return 2;
+        }
+    };
+    let (stream, ready) = match (adopt(attach.stream), adopt(attach.ready)) {
+        (Ok(stream), Ok(ready)) => (stream, ready),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("vpn-zone-core frame-relay: a descriptor it was given is not open: {e}");
+            return 2;
+        }
+    };
+    let tap = match make_tap() {
+        Ok(tap) => tap,
+        Err(e) => {
+            eprintln!(
+                "vpn-zone-core frame-relay: cannot make the instance's tap ({e}) — it stays \
+                 without a way out"
+            );
+            return 1;
+        }
+    };
+    if let Err(e) = configure(&attach) {
+        eprintln!("vpn-zone-core frame-relay: {e} — the instance stays without a way out");
+        return 1;
+    }
+    seal(&attach);
+    if let Err(e) = confine() {
+        eprintln!("vpn-zone-core frame-relay: cannot confine itself ({e}) — not relaying");
+        return 1;
+    }
+    if let Err(e) = crate::seccomp::Filter::relay().and_then(|filter| filter.load()) {
+        eprintln!("vpn-zone-core frame-relay: no seccomp filter ({e}) — not relaying");
+        return 1;
+    }
+    // Sealed: its keeper may say the instance has a way out.
+    if fs::File::from(ready).write_all(b"1").is_err() {
+        return 1;
+    }
+    match pump(tap.as_fd(), stream.as_fd()) {
+        Ok(End::StreamClosed) => 0,
+        Ok(End::TapClosed) => {
+            eprintln!("vpn-zone-core frame-relay: the tap ended");
+            0
+        }
+        Err(e) => {
+            eprintln!(
+                "vpn-zone-core frame-relay: {e} — the relay ends, and the instance's way out \
+                 with it"
+            );
+            1
+        }
+    }
+}
+
 /// `vpn-zone-core frame-relay --tap-fd N --stream-fd M`: confine itself,
 /// then [`pump`] between the two descriptors it inherited until either
 /// ends. 0 when one side ended, 1 on an error, 2 on a bad command line.
+/// `--attach …`: an instance's relay ([`Attach`]).
 pub fn main(args: &[OsString]) -> u8 {
+    if args.first().is_some_and(|a| a == "--attach") {
+        return attach_main(&args[1..]);
+    }
     let (tap, stream) = match parse_args(args) {
         Ok(fds) => fds,
         Err(e) => {
@@ -811,6 +1125,173 @@ mod tests {
         ];
         for &bad in bad_lines {
             assert!(parse_args(&args(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    /// What an instance's keeper starts the relay with is read back as it
+    /// was written (stage 2); anything else is refused before a tap is made.
+    #[test]
+    fn an_attachs_command_line_goes_there_and_back() {
+        let attach = Attach {
+            stream: 7,
+            ready: 8,
+            a4: Ipv4Addr::new(10, 254, 3, 4),
+            a6: Some(crate::bridge::a6_from(0xabcd_0000_0000_0001)),
+            ip: PathBuf::from("/nix/store/x-iproute2/bin/ip"),
+            nft: PathBuf::from("/nix/store/x-nftables/bin/nft"),
+        };
+        let line = attach.args();
+        assert_eq!(line[0], "--attach");
+        assert_eq!(Attach::parse(&line[1..]), Ok(attach.clone()));
+        let four = Attach {
+            a6: None,
+            ..attach.clone()
+        };
+        let line = four.args();
+        assert!(!line.contains(&OsString::from("--a6")), "{line:?}");
+        assert_eq!(Attach::parse(&line[1..]), Ok(four));
+        let args = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+        let good = [
+            "--stream-fd",
+            "7",
+            "--ready-fd",
+            "8",
+            "--a4",
+            "10.254.3.4",
+            "--ip",
+            "/x/ip",
+            "--nft",
+            "/x/nft",
+        ];
+        assert!(Attach::parse(&args(&good)).is_ok());
+        let bad_lines: &[&[&str]] = &[
+            &[],
+            &[
+                "--stream-fd",
+                "7",
+                "--ready-fd",
+                "7",
+                "--a4",
+                "10.254.3.4",
+                "--ip",
+                "/x/ip",
+                "--nft",
+                "/x/nft",
+            ],
+            &[
+                "--stream-fd",
+                "2",
+                "--ready-fd",
+                "8",
+                "--a4",
+                "10.254.3.4",
+                "--ip",
+                "/x/ip",
+                "--nft",
+                "/x/nft",
+            ],
+            &[
+                "--stream-fd",
+                "7",
+                "--ready-fd",
+                "8",
+                "--a4",
+                "10.99.0.2",
+                "--ip",
+                "/x/ip",
+                "--nft",
+                "/x/nft",
+            ],
+            &[
+                "--stream-fd",
+                "7",
+                "--ready-fd",
+                "8",
+                "--a4",
+                "10.254.255.254",
+                "--ip",
+                "/x/ip",
+                "--nft",
+                "/x/nft",
+            ],
+            &[
+                "--stream-fd",
+                "7",
+                "--ready-fd",
+                "8",
+                "--a4",
+                "10.254.3.4",
+                "--a6",
+                "fd99::2",
+                "--ip",
+                "/x/ip",
+                "--nft",
+                "/x/nft",
+            ],
+            &[
+                "--stream-fd",
+                "7",
+                "--ready-fd",
+                "8",
+                "--a4",
+                "10.254.3.4",
+                "--ip",
+                "ip",
+                "--nft",
+                "/x/nft",
+            ],
+            &[
+                "--stream-fd",
+                "7",
+                "--ready-fd",
+                "8",
+                "--a4",
+                "10.254.3.4",
+                "--ip",
+                "/x/ip",
+            ],
+            &[
+                "--stream-fd",
+                "7",
+                "--ready-fd",
+                "8",
+                "--a4",
+                "10.254.3.4",
+                "--ip",
+                "/x/ip",
+                "--nft",
+                "/x/nft",
+                "--a4",
+                "10.254.3.5",
+            ],
+            &[
+                "--stream-fd",
+                "7",
+                "--ready-fd",
+                "8",
+                "--a4",
+                "10.254.3.4",
+                "--ip",
+                "/x/ip",
+                "--nft",
+                "/x/nft",
+                "--tap-fd",
+                "9",
+            ],
+            &[
+                "--stream-fd",
+                "7",
+                "--ready-fd",
+                "8",
+                "--a4",
+                "10.254.3.4",
+                "--ip",
+                "/x/ip",
+                "--nft",
+            ],
+        ];
+        for &bad in bad_lines {
+            assert!(Attach::parse(&args(bad)).is_err(), "{bad:?}");
         }
     }
 }

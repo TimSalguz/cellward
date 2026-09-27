@@ -559,6 +559,11 @@ pub struct Tools {
     pub awg: PathBuf,
     pub wg: PathBuf,
     pub pasta: PathBuf,
+    /// What carries a container's instance out through the zone
+    /// (`crate::bridge`, stage 2 of the container design of 2026-09-27):
+    /// `passt --fd`, from the same package as pasta. A zone started without
+    /// it ends every attach at once — passt not there — and says so.
+    pub passt: PathBuf,
     /// The second echelon (`docs/LEAK-MODEL.md`). Optional in the sense that a
     /// zone without it still comes up — loudly, and on its topology alone.
     pub nft: PathBuf,
@@ -591,6 +596,7 @@ impl Default for Tools {
             awg: PathBuf::from("awg"),
             wg: PathBuf::from("wg"),
             pasta: PathBuf::from("pasta"),
+            passt: PathBuf::from("passt"),
             nft: PathBuf::from("nft"),
             openconnect: PathBuf::from("openconnect"),
             dbus_proxy: PathBuf::from("xdg-dbus-proxy"),
@@ -637,7 +643,7 @@ impl std::fmt::Display for ArgError {
 impl std::error::Error for ArgError {}
 
 impl Args {
-    /// Parse `[--ip P] [--awg P] [--wg P] [--pasta P] [--nft P]
+    /// Parse `[--ip P] [--awg P] [--wg P] [--pasta P] [--passt P] [--nft P]
     /// [--openconnect P] [--dbus-proxy P] [--opener P] [--kdialog P]
     /// [--runner P] <name>`.
     ///
@@ -663,6 +669,7 @@ impl Args {
                 "--awg" => &mut tools.awg,
                 "--wg" => &mut tools.wg,
                 "--pasta" => &mut tools.pasta,
+                "--passt" => &mut tools.passt,
                 "--nft" => &mut tools.nft,
                 "--openconnect" => &mut tools.openconnect,
                 "--dbus-proxy" => &mut tools.dbus_proxy,
@@ -894,6 +901,11 @@ pub fn run(args: Args) -> u8 {
     let _ = fs::remove_file(zone.path(UPLINK_PID));
     let _ = fs::remove_file(zone.path(READY));
     let _ = fs::remove_file(zone.path(PASTA_DONE));
+    // And the last run's bridge (`crate::bridge`): a launch that found its
+    // socket would take this run for one that carries instances before it
+    // does.
+    let _ = fs::remove_file(zone.path(crate::bridge::SOCKET));
+    let _ = fs::remove_file(zone.path(crate::bridge::RULE_MARK));
     // What this run comes up with, before it is up: `status --json` names what
     // has changed since (`hermetic::APPLIED`). The last run's goes first — a
     // note that cannot be written leaves "not known", never a stale one.
@@ -1139,15 +1151,32 @@ fn runs_a_client(zone: &Zone) -> bool {
 /// `/usr/bin` — hardcoding either would break the other. util-linux's `unshare`
 /// (what this replaces) did the same `execvp`.
 fn map_ids(pid: libc::pid_t, ids: &Ids, client: bool) -> Result<(), String> {
-    map_range("newuidmap", pid, ids.subuid, ids.uid, client)?;
-    map_range("newgidmap", pid, ids.subgid, ids.gid, client)
+    map_range("newuidmap", pid, ids.subuid, ids.uid, client, false)?;
+    map_range("newgidmap", pid, ids.subgid, ids.gid, client, true)
 }
 
-/// The arguments of `newuidmap`/`newgidmap`: `<pid>` and then `<inside>
-/// <outside> <count>` per range. Uid 0 inside comes from the subordinate
-/// range, the real id is mapped onto itself, and an OpenConnect zone's client
-/// gets [`CLIENT_ID`] from the next subordinate id.
-fn map_args(pid: libc::pid_t, sub: u64, id: u32, client: bool) -> Result<Vec<String>, String> {
+/// The arguments of `newuidmap`/`newgidmap` (`gids`): `<pid>` and then
+/// `<inside> <outside> <count>` per range. Uid 0 inside comes from the
+/// subordinate range, the real id is mapped onto itself, and an OpenConnect
+/// zone's client gets [`CLIENT_ID`] from the next subordinate id.
+///
+/// And the bridge's passt (`crate::bridge`, stage 2 of the container design
+/// of 2026-09-27), in every zone: the third subordinate id — as uid
+/// [`crate::bridge::BRIDGE_ID`], what the zone's refusal of its local
+/// addresses is keyed on (`meta skuid`), and as a gid mapped onto itself.
+/// Not 2 for the group: the ping range of a network namespace is one range
+/// of gids, kept by its two ends as the host's ids and taken only when they
+/// are in order both inside and out (`ping_range`) — the user's group and
+/// gid 2 → subgid+2 are in one order inside and the other outside, and no
+/// range would hold both. Mapped onto itself, it is in the same order either
+/// way, and passt's echo sockets work as the user's do.
+fn map_args(
+    pid: libc::pid_t,
+    sub: u64,
+    id: u32,
+    client: bool,
+    gids: bool,
+) -> Result<Vec<String>, String> {
     let mut args = vec![
         pid.to_string(),
         "0".to_string(),
@@ -1170,12 +1199,32 @@ fn map_args(pid: libc::pid_t, sub: u64, id: u32, client: bool) -> Result<Vec<Str
             "1".to_string(),
         ]);
     }
+    let bridge = sub + u64::from(crate::bridge::BRIDGE_ID);
+    let inside = if gids {
+        bridge
+    } else {
+        u64::from(crate::bridge::BRIDGE_ID)
+    };
+    if u64::from(id) == inside {
+        return Err(format!(
+            "your own id is {inside}, the one a zone's bridge runs as inside the zone — the \
+             two cannot share it"
+        ));
+    }
+    args.extend([inside.to_string(), bridge.to_string(), "1".to_string()]);
     Ok(args)
 }
 
-fn map_range(tool: &str, pid: libc::pid_t, sub: u64, id: u32, client: bool) -> Result<(), String> {
+fn map_range(
+    tool: &str,
+    pid: libc::pid_t,
+    sub: u64,
+    id: u32,
+    client: bool,
+    gids: bool,
+) -> Result<(), String> {
     let status = Command::new(tool)
-        .args(map_args(pid, sub, id, client)?)
+        .args(map_args(pid, sub, id, client, gids)?)
         .status()
         .map_err(|e| {
             if e.kind() == io::ErrorKind::NotFound {
@@ -1185,13 +1234,10 @@ fn map_range(tool: &str, pid: libc::pid_t, sub: u64, id: u32, client: bool) -> R
             }
         })?;
     if !status.success() {
-        let two = if client {
-            " (an OpenConnect zone takes the first two ids of each)"
-        } else {
-            ""
-        };
         return Err(format!(
-            "{tool} failed ({status}) — check your ranges in /etc/subuid and /etc/subgid{two}"
+            "{tool} failed ({status}) — check your ranges in /etc/subuid and /etc/subgid (a \
+             zone takes the first three ids of each: its root, an OpenConnect client, the \
+             bridge that carries containers)"
         ));
     }
     Ok(())
@@ -1651,6 +1697,7 @@ fn tool_flags(tools: &Tools) -> Vec<OsString> {
         ("--awg", &tools.awg),
         ("--wg", &tools.wg),
         ("--pasta", &tools.pasta),
+        ("--passt", &tools.passt),
         ("--nft", &tools.nft),
         ("--openconnect", &tools.openconnect),
         ("--dbus-proxy", &tools.dbus_proxy),
@@ -2339,6 +2386,9 @@ struct ZoneLinks<'a> {
     /// Rules the zone's filter takes before its own (a host-interface zone's
     /// refusal of the host's addresses, [`host_address_rules`]).
     first: Vec<String>,
+    /// The config this run came up with, hashed: the first half of the
+    /// zone's fingerprint (`bridge::fingerprint`).
+    config_seed: u64,
 }
 
 /// What the uplink is handed: the backend, the host pid of the app namespace to
@@ -2363,10 +2413,11 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
     // Read the config and resolve its endpoints HERE: this is the last place
     // with the host's network and the host's resolver. An offline zone has no
     // config at all — and no uplink, and no pasta.
-    let cfg = if zone.is_offline() {
-        None
+    let (cfg, config_seed) = if zone.is_offline() {
+        (None, 0)
     } else {
-        Some(prepare(zone)?)
+        let (backend, seed) = prepare(zone)?;
+        (Some(backend), seed)
     };
     // A host-interface zone's pasta is in the host's network: the host's own
     // addresses, taken here where they can be seen.
@@ -2399,6 +2450,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
             ready_w: zone_up_w,
             moved_r,
             first,
+            config_seed,
         });
         let code = zone_main(zone, links);
         // SAFETY: _exit never returns and touches nothing of ours.
@@ -2706,9 +2758,17 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
 /// the note on `getaddrinfo` in the module docs. A name that does not resolve
 /// is fatal on purpose — the alternative is `wg setconf` retrying DNS for a
 /// minute and a half inside a namespace that has none, and then failing anyway.
-fn prepare(zone: &Zone) -> Result<Backend, String> {
+fn prepare(zone: &Zone) -> Result<(Backend, u64), String> {
     let raw = fs::read(zone.path(CONFIG)).map_err(|e| format!("cannot read {CONFIG}: {e}"))?;
-    let mut cfg = WgConfig::parse(&raw).map_err(|e| format!("{CONFIG}: {e}"))?;
+    // The config as this run reads it, for the zone's fingerprint
+    // (`bridge::fingerprint`): the very bytes it comes up with.
+    let seed = crate::bridge::config_seed(&raw);
+    prepare_backend(zone, &raw).map(|backend| (backend, seed))
+}
+
+/// [`prepare`] of the config's bytes.
+fn prepare_backend(zone: &Zone, raw: &[u8]) -> Result<Backend, String> {
+    let mut cfg = WgConfig::parse(raw).map_err(|e| format!("{CONFIG}: {e}"))?;
     if openconnect::is_openconnect(&cfg) {
         return prepare_openconnect(zone, &cfg);
     }
@@ -6031,6 +6091,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         ready_w,
         moved_r,
         first,
+        config_seed,
     }) = links
     else {
         // An offline zone gets no rules, and needs none: loopback is the only
@@ -6149,28 +6210,15 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
             DEFAULT_RESOLVERS.join(" and ")
         );
     }
-    let resolv = zone.path(RESOLV);
-    fs::write(&resolv, &text).map_err(|e| format!("cannot write {RESOLV}: {e}"))?;
-    // WHERE the mount lands is not /etc/resolv.conf. `mount(2)` follows the
-    // symlinks in its target, and on NixOS that path is a chain ending in
-    // /run/systemd/resolve/stub-resolv.conf — inside the tmpfs that has just
-    // hidden the host's resolved. The last link then dangles, so the file has
-    // to be created before anything can be mounted over it; the old code
-    // mounted onto whatever the chain happened to point at and would have
-    // failed here with a bare ENOENT.
-    let target = sys::link_target(Path::new(ETC_RESOLV));
-    if !target.exists() {
-        if let Some(dir) = target.parent() {
-            fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        }
-        touch(&target).map_err(|e| format!("cannot create {}: {e}", target.display()))?;
-    }
-    sys::mount(resolv.as_os_str(), &target, "", libc::MS_BIND, "").map_err(|e| {
-        format!(
-            "cannot bind-mount {RESOLV} over {ETC_RESOLV} ({}): {e}",
-            target.display()
-        )
-    })?;
+    fs::write(zone.path(RESOLV), &text).map_err(|e| format!("cannot write {RESOLV}: {e}"))?;
+    bind_resolv(zone)?;
+
+    // The bridge (`crate::bridge`, stage 2 of the container design of
+    // 2026-09-27): what carries a container's instance out through this
+    // zone. Its refusal of the zone's own addresses and its socket before
+    // `ready`, so that a zone found ready carries instances — or says why
+    // it does not to each that asks.
+    let bridge = open_bridge(zone, &first, &text, search.as_deref(), config_seed);
 
     // THE PROFILE IS NOT MOUNTED HERE, AND THAT MATTERS. The first version
     // stacked the data layer right here, over the whole zone — and the profile
@@ -6184,6 +6232,9 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         zone.name(),
         zone.ip_line(&["-br", "-4", "addr", "show", TUN_IFACE])
     );
+    if let Some((listener, carrier)) = bridge {
+        thread::spawn(move || crate::bridge::serve(listener, carrier));
+    }
 
     start_status_mirror(zone, mirror.clone());
 
@@ -6229,6 +6280,170 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The space's `resolv.conf` (its directory's [`RESOLV`]) bound over the
+/// file `/etc/resolv.conf` leads to.
+///
+/// WHERE the mount lands is not /etc/resolv.conf. `mount(2)` follows the
+/// symlinks in its target, and on NixOS that path is a chain ending in
+/// /run/systemd/resolve/stub-resolv.conf — inside the tmpfs that has just
+/// hidden the host's resolved. The last link then dangles, so the file has
+/// to be created before anything can be mounted over it; the old code
+/// mounted onto whatever the chain happened to point at and would have
+/// failed here with a bare ENOENT.
+fn bind_resolv(zone: &Zone) -> Result<(), String> {
+    let resolv = zone.path(RESOLV);
+    let target = sys::link_target(Path::new(ETC_RESOLV));
+    if !target.exists() {
+        if let Some(dir) = target.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        }
+        touch(&target).map_err(|e| format!("cannot create {}: {e}", target.display()))?;
+    }
+    sys::mount(resolv.as_os_str(), &target, "", libc::MS_BIND, "").map_err(|e| {
+        format!(
+            "cannot bind-mount {RESOLV} over {ETC_RESOLV} ({}): {e}",
+            target.display()
+        )
+    })
+}
+
+/// A zone's bridge, once the zone is set up (`crate::bridge`, stage 2 of
+/// the container design of 2026-09-27): its rules reloaded with the refusal
+/// of every address of its own to passt ([`bridge_refusal_rules`], after
+/// `first` and before the accepts), the mark once they are in, its socket
+/// bound — the user's, 0600: the instance's keeper, the user, asks — and
+/// what it carries with: the resolvers its `resolv_conf` names (those this
+/// zone's own programs ask), its search domains, whether it has IPv6, and
+/// its fingerprint. `None`: no socket, said — a launch into the zone takes
+/// its own namespaces then, as into a zone of a previous build. Without the
+/// rule or passt's group the socket is there and refuses every request
+/// with the reason: fail-closed, and the person is told why.
+fn open_bridge(
+    zone: &Zone,
+    first: &[String],
+    resolv_conf: &str,
+    search: Option<&str>,
+    config_seed: u64,
+) -> Option<(std::os::unix::net::UnixListener, crate::bridge::Carrier)> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let socket = zone.path(crate::bridge::SOCKET);
+    let mark = zone.path(crate::bridge::RULE_MARK);
+    let _ = fs::remove_file(&socket);
+    let _ = fs::remove_file(&mark);
+    // Every address of this namespace as it is now, the tunnel's included:
+    // a connection there is delivered in the zone itself.
+    let addresses = tool_output(&zone.tools.ip, &["-j", "addr", "show"])
+        .and_then(|text| {
+            crate::bridge::local_addresses(&text)
+                .ok_or_else(|| "`ip -j addr` gave no list of addresses".to_owned())
+        })
+        .and_then(|addresses| {
+            let mut rules = first.to_vec();
+            rules.extend(bridge_refusal_rules(crate::bridge::BRIDGE_ID, &addresses));
+            feed_nft(&zone.tools.nft, &replacing_table(&app_ruleset_with(&rules)))
+        })
+        .and_then(|()| touch(&mark).map_err(|e| format!("cannot mark it: {e}")));
+    let ruled = match addresses {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!(
+                "zone {}: the bridge's refusal of the zone's own addresses is not loaded ({e}) — \
+                 the zone carries no container",
+                zone.name()
+            );
+            false
+        }
+    };
+    let gid =
+        crate::bridge::bridge_gid(&fs::read_to_string("/proc/self/gid_map").unwrap_or_default());
+    if gid.is_none() {
+        eprintln!(
+            "zone {}: its user namespace has no group for the bridge — it carries no container",
+            zone.name()
+        );
+    }
+    let owner = match fs::metadata(&zone.dir) {
+        Ok(meta) => (meta.uid(), meta.gid()),
+        Err(e) => {
+            eprintln!("zone {}: no bridge ({e})", zone.name());
+            return None;
+        }
+    };
+    let listener = match std::os::unix::net::UnixListener::bind(&socket) {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!(
+                "zone {}: no bridge ({e}) — a launch into it takes the zone's own namespaces",
+                zone.name()
+            );
+            return None;
+        }
+    };
+    let owned = std::os::unix::fs::chown(&socket, Some(owner.0), Some(owner.1))
+        .and_then(|()| fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)));
+    if let Err(e) = owned {
+        eprintln!(
+            "zone {}: no bridge — its socket is not the user's ({e})",
+            zone.name()
+        );
+        let _ = fs::remove_file(&socket);
+        return None;
+    }
+    let servers: Vec<IpAddr> = crate::doctor::nameservers(resolv_conf)
+        .iter()
+        .filter_map(|server| server.parse().ok())
+        .collect();
+    let resolver4 = servers.iter().find_map(|server| match server {
+        IpAddr::V4(a) => Some(*a),
+        IpAddr::V6(_) => None,
+    });
+    let resolver6 = servers.iter().find_map(|server| match server {
+        IpAddr::V6(a) => Some(*a),
+        IpAddr::V4(_) => None,
+    });
+    let search: Vec<String> = search
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    let v6 = zone_carries_v6(zone);
+    let fp = crate::bridge::fingerprint(config_seed, resolver4, resolver6, &search);
+    if ruled && gid.is_some() {
+        println!(
+            "zone {}: carries containers (IPv6 {}, fingerprint {fp:016x})",
+            zone.name(),
+            if v6 { "too" } else { "not" }
+        );
+    }
+    Some((
+        listener,
+        crate::bridge::Carrier {
+            zone: zone.name().into_owned(),
+            passt: zone.tools.passt.clone(),
+            owner: owner.0,
+            gid,
+            ruled,
+            v6,
+            resolver4,
+            resolver6,
+            search,
+            fp,
+        },
+    ))
+}
+
+/// Whether the zone carries IPv6: its default route of the family goes
+/// into its way out, `awg0` (`close_or_tunnel_v6`; a host-interface or a
+/// system zone's pasta names its interface so too), and is no unreachable
+/// one.
+fn zone_carries_v6(zone: &Zone) -> bool {
+    let into = format!("dev {TUN_IFACE}");
+    tool_output(&zone.tools.ip, &["-6", "route", "show", "default"]).is_ok_and(|text| {
+        text.lines()
+            .any(|line| !line.starts_with("unreachable") && line.contains(&into))
+    })
 }
 
 /// Put the WireGuard config onto the interface the uplink handed down.
@@ -6364,21 +6579,31 @@ fn allow_ping(zone: &Zone) {
 }
 
 /// The user's own groups in the user namespace whose `gid_map` this is: the
-/// line mapped to itself (`100 100 1` — the zone's root is some subordinate
-/// id instead). As `lowest highest`: the kernel keeps both ends as the host's
-/// ids and takes a range only when those are in order as well, so a range
-/// over every line (`0 100`, the root being 100000 outside) is empty — the
-/// first try, found by the VM test.
+/// lines mapped to themselves (`100 100 1` — the zone's root is some
+/// subordinate id instead). As `lowest highest`: the kernel keeps both ends
+/// as the host's ids and takes a range only when those are in order as
+/// well, so a range over every line (`0 100`, the root being 100000
+/// outside) is empty — the first try, found by the VM test. Lines mapped to
+/// themselves are in the same order either way: the user's group and the
+/// bridge's passt's (`map_args`, stage 2 of the container design), from the
+/// lowest to the highest of them. What lies between is no process's of the
+/// app namespace but the zone's root, which needs no echo socket.
 pub fn ping_range(gid_map: &str) -> Option<String> {
-    gid_map.lines().find_map(|line| {
-        let mut fields = line.split_whitespace().map(str::parse::<u64>);
-        let (Some(Ok(inside)), Some(Ok(outside)), Some(Ok(count))) =
-            (fields.next(), fields.next(), fields.next())
-        else {
-            return None;
-        };
-        (inside == outside && count > 0).then(|| format!("{inside} {}", inside + count - 1))
-    })
+    let own: Vec<(u64, u64)> = gid_map
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace().map(str::parse::<u64>);
+            let (Some(Ok(inside)), Some(Ok(outside)), Some(Ok(count))) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                return None;
+            };
+            (inside == outside && count > 0).then(|| (inside, inside + count - 1))
+        })
+        .collect();
+    let low = own.iter().map(|(low, _)| *low).min()?;
+    let high = own.iter().map(|(_, high)| *high).max()?;
+    Some(format!("{low} {high}"))
 }
 
 /// --- IPv6: INTO THE TUNNEL OR NOWHERE AT ALL ---
@@ -7007,6 +7232,16 @@ pub fn uplink_ruleset(endpoints: &[EndpointSocket]) -> String {
     output_table(&rules)
 }
 
+/// A ruleset of [`output_table`]'s in place of the table that is there, in
+/// one `nft -f` transaction: the table made when there is none, emptied,
+/// and filled anew — never the old rules and the new side by side, never a
+/// moment with neither (stage 2 of the container design: a zone's rules
+/// with its refusal to the bridge added once its addresses are known, an
+/// instance's with each attach's own addresses).
+pub(crate) fn replacing_table(ruleset: &str) -> String {
+    format!("table inet {NFT_TABLE}\nflush table inet {NFT_TABLE}\n{ruleset}")
+}
+
 /// Wrap accept rules into the one table and chain both namespaces get.
 ///
 /// Only `output` is filtered. There is no point in an input chain: the app
@@ -7178,7 +7413,7 @@ pub(crate) fn tool_output(tool: &Path, args: &[&str]) -> Result<String, String> 
 /// existing on disk, and a file would need a directory that both namespaces can
 /// write to. nft's own diagnostics go to the journal untouched — when a ruleset
 /// is refused, the line and the reason are the only things worth having.
-fn feed_nft(nft: &Path, ruleset: &str) -> Result<(), String> {
+pub(crate) fn feed_nft(nft: &Path, ruleset: &str) -> Result<(), String> {
     let mut child = Command::new(nft)
         .arg("-f")
         .arg("-")
@@ -7315,6 +7550,21 @@ mod tests {
         assert!(app_ruleset_with(&v6).contains("ip6 daddr 2001:db8::1 reject"));
     }
 
+    /// A ruleset put in place of the table that is there: made when there
+    /// is none, emptied, filled — one text, one transaction (stage 2).
+    #[test]
+    fn a_table_is_replaced_whole() {
+        let rules = app_ruleset_with(&bridge_refusal_rules(2, &[]));
+        let text = replacing_table(&rules);
+        assert!(text
+            .starts_with("table inet vpnzone\nflush table inet vpnzone\ntable inet vpnzone {\n"));
+        assert!(text.ends_with(&rules));
+        // The refusal before the accepts, loopback's too.
+        let drop4 = text.find("meta skuid 2 ip daddr").unwrap();
+        let lo = text.find("oifname \"lo\" accept").unwrap();
+        assert!(drop4 < lo, "{text}");
+    }
+
     /// Which host addresses are refused: not loopback, multicast or IPv6
     /// link-local.
     #[test]
@@ -7328,21 +7578,46 @@ mod tests {
     }
 
     /// An OpenConnect zone's user namespace gets one id more, the client's,
-    /// from the next subordinate id; every other zone gets exactly the two
-    /// (review 2026-09-27).
+    /// from the next subordinate id (review 2026-09-27); every zone gets the
+    /// bridge's, the third (stage 2 of the container design): uid 2, and as
+    /// a gid the subordinate id itself.
     #[test]
     fn only_an_openconnect_zone_maps_the_clients_id() {
         assert_eq!(
-            map_args(42, 100_000, 1000, false).unwrap(),
-            ["42", "0", "100000", "1", "1000", "1000", "1"]
+            map_args(42, 100_000, 1000, false, false).unwrap(),
+            ["42", "0", "100000", "1", "1000", "1000", "1", "2", "100002", "1"]
         );
         assert_eq!(
-            map_args(42, 100_000, 1000, true).unwrap(),
-            ["42", "0", "100000", "1", "1000", "1000", "1", "1", "100001", "1"]
+            map_args(42, 100_000, 1000, true, false).unwrap(),
+            [
+                "42", "0", "100000", "1", "1000", "1000", "1", "1", "100001", "1", "2", "100002",
+                "1"
+            ]
+        );
+        assert_eq!(
+            map_args(42, 100_000, 100, false, true).unwrap(),
+            ["42", "0", "100000", "1", "100", "100", "1", "100002", "100002", "1"]
         );
         // A user whose own id is the client's cannot have both.
-        assert!(map_args(42, 100_000, CLIENT_ID, true).is_err());
-        assert!(map_args(42, 100_000, CLIENT_ID, false).is_ok());
+        assert!(map_args(42, 100_000, CLIENT_ID, true, false).is_err());
+        assert!(map_args(42, 100_000, CLIENT_ID, false, false).is_ok());
+        // Nor one whose own id is the bridge's.
+        assert!(map_args(42, 100_000, 2, false, false).is_err());
+        assert!(map_args(42, 100_000, 2, false, true).is_ok());
+        assert!(map_args(42, 100_000, 100_002, false, true).is_err());
+    }
+
+    /// The ping range a zone mapped so writes takes the user's group and
+    /// passt's, in one order inside and out (stage 2, 2026-09-27).
+    #[test]
+    fn a_zones_ping_range_takes_the_bridge_too() {
+        let uids = map_args(42, 100_000, 1000, true, true).unwrap();
+        let gid_map: String = uids[1..]
+            .chunks(3)
+            .map(|line| format!("{} {} {}\n", line[0], line[1], line[2]))
+            .collect();
+        assert_eq!(ping_range(&gid_map).as_deref(), Some("1000 100002"));
+        assert_eq!(crate::bridge::bridge_gid(&gid_map), Some(100_002));
     }
 
     /// An instance's root is the fourth subordinate id, never a zone's
@@ -7356,7 +7631,7 @@ mod tests {
         );
         assert_ne!(
             instance_map_args(42, 100_000, 1000)[2],
-            map_args(42, 100_000, 1000, true).unwrap()[2]
+            map_args(42, 100_000, 1000, true, false).unwrap()[2]
         );
     }
 
@@ -7378,6 +7653,7 @@ mod tests {
             awg: PathBuf::from("/t/awg"),
             wg: PathBuf::from("/t/wg"),
             pasta: PathBuf::from("/t/pasta"),
+            passt: PathBuf::from("/t/passt"),
             nft: PathBuf::from("/t/nft"),
             openconnect: PathBuf::from("/t/openconnect"),
             dbus_proxy: PathBuf::from("/t/xdg-dbus-proxy"),

@@ -24,6 +24,11 @@ on. Run in the VM as alice, or as root of a user namespace of hers:
   pasta-fd <pasta> <a4>
       Informative (J4): pasta, not passt, given a tap descriptor from a
       sibling namespace. Prints what came of it.
+  bridge <zone dir> <a4> <a6|-> <ip> <nft>
+      Stage 2: a VZA1 request to the zone's own bridge socket, and
+      `vpn-zone-core frame-relay --attach` in a holder namespace — the
+      product's two ends, with the test standing where an instance's keeper
+      stands. Prints the answer and the pids once the relay is ready.
 
 Test code only: nothing here is product code, and every wait is bounded.
 """
@@ -308,6 +313,69 @@ def tap_send(sock_fd, a4):
     socket.send_fds(s, [b"tap"], [fd])
 
 
+def keep_open(sock):
+    """A process of its own that holds `sock` until the other side closes it
+    — its own session, and none of the driver's pipes: the driver would
+    otherwise wait for it to close the output it inherited. Its pid."""
+    pid = os.fork()
+    if pid != 0:
+        sock.close()
+        return pid
+    os.setsid()
+    null = os.open("/dev/null", os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(null, fd)
+    try:
+        while sock.recv(256):
+            pass
+    finally:
+        os._exit(0)
+
+
+def bridge(zone_dir, a4, a6, ip_tool, nft_tool):
+    """Stage 2 (2026-09-27): ask a zone's bridge for a way out over its
+    socket, as an instance's keeper does (VZA1, one end of a socketpair),
+    and start `vpn-zone-core frame-relay --attach` in a holder namespace as
+    its root. Prints the zone's answer and the pids as JSON once the relay
+    says it is ready; the request is held open by a process of its own."""
+    os.makedirs(WORK, exist_ok=True)
+    holder = hold()
+    ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    control = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    control.connect(f"{zone_dir}/bridge.sock")
+    words = [b"VZA1", b"probe", b"1" if a6 != "-" else b"0", a4.encode(),
+             a6.encode() if a6 != "-" else b""]
+    socket.send_fds(control, [b"".join(w + b"\0" for w in words)], [theirs.fileno()])
+    theirs.close()
+    line = b""
+    while not line.endswith(b"\n"):
+        got = control.recv(1)
+        if not got:
+            raise SystemExit(f"the zone hung up: {line!r}")
+        line += got
+    answer = line.decode().strip()
+    if not answer.startswith("OK "):
+        print(json.dumps({"answer": answer}))
+        return
+    v6 = "v6=1" in answer.split()
+    ready_r, ready_w = os.pipe()
+    core = shutil.which("vpn-zone-core")
+    argv = [core, "frame-relay", "--attach", "--stream-fd", str(ours.fileno()),
+            "--ready-fd", str(ready_w), "--a4", a4]
+    if v6:
+        argv += ["--a6", a6]
+    argv += ["--ip", ip_tool, "--nft", nft_tool]
+    r = spawn(inside(holder, *argv), f"{WORK}/bridge-relay.log",
+              pass_fds=(ours.fileno(), ready_w))
+    ours.close()
+    os.close(ready_w)
+    word = os.read(ready_r, 1)
+    if word != b"1":
+        raise SystemExit(f"the relay did not come up: {read(WORK + '/bridge-relay.log')}")
+    keeper = keep_open(control)
+    print(json.dumps({"answer": answer, "holder": holder, "relay": r.pid, "keeper": keeper}))
+
+
 def main():
     cmd, args = sys.argv[1], sys.argv[2:]
     if cmd == "relay":
@@ -324,6 +392,8 @@ def main():
         pasta_fd(*args)
     elif cmd == "tap-send":
         tap_send(*args)
+    elif cmd == "bridge":
+        bridge(*args)
     else:
         raise SystemExit(f"unknown: {cmd}")
 

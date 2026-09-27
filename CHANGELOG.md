@@ -6,6 +6,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A zone can carry a container's instance — its side of the bridge**
+  (2026-09-27, stage 2a of the container-first model). Every zone maps a
+  third subordinate id, the bridge's (uid 2 inside, its group the
+  subordinate id itself so that one ping range holds it and the user's),
+  reloads its rules with a refusal of its own addresses to that uid —
+  loopback, IPv6 link-local and every address of its app namespace: what
+  the zone carries reaches nothing that listens in the zone itself —, and
+  serves `bridge.sock` in its state directory, bound before `ready`: the
+  user asks with one end of a stream socket (VZA1) and gets a `passt --fd`
+  in the zone's app namespace, as uid 2, with no supplementary group, no
+  new privileges and the death of the thread that holds it, answered once
+  its pid file says it is up, with the zone's search domains, whether it
+  carries IPv6, and the zone's fingerprint (its config, resolvers and
+  search domains). The other end, `vpn-zone-core frame-relay --attach`,
+  makes the instance's tap (not persistent), its addresses, routes and
+  rules, drops every capability, loads a seccomp allow-list and pumps.
+  Nothing launches through it yet. **A zone now takes the first three ids
+  of the user's subordinate ranges** (it took one, two for OpenConnect):
+  shorter ranges make zones fail to start, and say so. The unit gets
+  `--passt`.
 - **Containers' instances, and every offline launch in one** (2026-09-27,
   stage 1 of the container-first model). A running container is an
   instance now: `vpn-zone-container@<id>.service`, with a user, network,
