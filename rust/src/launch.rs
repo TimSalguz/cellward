@@ -372,12 +372,25 @@ pub fn strip_selection(argv: &[OsString]) -> Vec<OsString> {
 pub fn app_word(cmd: &[OsString]) -> Option<&OsStr> {
     for word in cmd {
         let bytes = word.as_bytes();
-        // A wrapper by its name wherever it lies: the broker pins a program
-        // by its path (`/nix/store/…/bin/env`, review 2026-09-27).
-        if matches!(
-            basename(word).as_bytes(),
-            b"env" | b"sh" | b"bash" | b"setsid" | b"nohup"
-        ) || bytes.starts_with(b"-")
+        // A wrapper by its name, bare or where the system keeps it: the
+        // broker pins a program by its path (`/nix/store/…/bin/env`, review
+        // 2026-09-27) — but a `~/.local/bin/env` of a zone's is a program of
+        // its own, not a wrapper to see past.
+        let system = !bytes.contains(&b'/')
+            || [
+                &b"/nix/store/"[..],
+                b"/run/current-system/",
+                b"/usr/",
+                b"/bin/",
+            ]
+            .iter()
+            .any(|place| bytes.starts_with(place));
+        if (system
+            && matches!(
+                basename(word).as_bytes(),
+                b"env" | b"sh" | b"bash" | b"setsid" | b"nohup"
+            ))
+            || bytes.starts_with(b"-")
         {
             continue;
         }
@@ -2301,6 +2314,15 @@ mod tests {
             Some(OsStr::new("telegram-desktop"))
         );
         assert_eq!(app_word(&argv(&["env"])), None);
+        // A wrapper pinned by its path is one; one in the home is a program.
+        assert_eq!(
+            app_word(&argv(&["/nix/store/x-coreutils/bin/env", "firefox"])),
+            Some(OsStr::new("firefox"))
+        );
+        assert_eq!(
+            app_word(&argv(&["/home/u/.local/bin/env", "firefox"])),
+            Some(OsStr::new("env"))
+        );
         assert_eq!(app_word(&[]), None);
     }
 
