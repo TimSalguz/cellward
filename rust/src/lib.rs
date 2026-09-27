@@ -72,6 +72,11 @@
 //! * [`sockets`] — the unix sockets a zone can reach, walked from inside it by
 //!   `vpn-zone doctor` and told apart: the zone's own, the system's, a helper
 //!   outside (`docs/LEAK-MODEL.md` §15, §17);
+//! * [`instance`], [`bridge`], [`relay`], [`sockdiag`] — the container as the
+//!   unit of isolation (the design of 2026-09-27, stage 0): the names of a
+//!   container's instances, how a zone carries one (`passt --fd` and the
+//!   relay that pumps its frames), and the socket diagnostics a live
+//!   switch of its network will use. Nothing launches into an instance yet;
 //! * [`sys`] — the handful of syscalls more than one of them needs.
 //!
 //! `profile` and `desktop` were Python scripts in `module/`, `wl_sandbox` was a
@@ -83,6 +88,7 @@
 //! and the systemd unit delegate to) and `vpn-zone-seccomp` (the filter, and its
 //! own selftest).
 
+pub mod bridge;
 pub mod broker;
 pub mod build;
 pub mod bus_filter;
@@ -107,6 +113,7 @@ pub mod gui;
 pub mod hermetic;
 pub mod home_layer;
 pub mod hostif;
+pub mod instance;
 pub mod journal;
 pub mod json;
 pub mod kill;
@@ -120,8 +127,10 @@ pub mod profile;
 pub mod pulse_filter;
 pub mod pw_context;
 pub mod registry;
+pub mod relay;
 pub mod screencast;
 pub mod seccomp;
+pub mod sockdiag;
 pub mod sockets;
 pub mod status;
 pub mod sys;

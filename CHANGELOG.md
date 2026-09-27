@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Groundwork for containers as the unit of isolation** (2026-09-27, stage
+  0 of the owner's container-first model: a container gets network, mount
+  and pid namespaces of its own, a zone is only its way out). Nothing
+  launches differently yet. The pieces the later stages rest on, with their
+  unit tests: the frame relay between an instance's tap and a `passt --fd`
+  in its zone (qemu's stream framing, back-pressure both ways, any error
+  ends it — `vpn-zone-core frame-relay`, used by nothing yet), the socket
+  diagnostics a live network switch will destroy connections with, the
+  bridge's request and answers, passt's command line with every door shut
+  and the instance's addresses (a DNS forwarder at one address in every
+  network), the names of instances and their units, and the rulesets of an
+  instance and of a zone's refusal of its local addresses to the bridge
+  (core `nf_tables` only). A VM probe proves on the test kernel and passt
+  what the design assumes — see `docs/GOTCHAS.md` §14 for its verdicts.
 - **Buttons, dragging and resizing on the zone's frame** (2026-09-27, stage 3
   of `docs/WINDOW-FRAME.md`). The title strip the Wayland proxy draws gets
   three buttons at its right end: ≡ opens the window menu of that launch, ⇄

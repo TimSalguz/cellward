@@ -6,6 +6,22 @@
 //! containers (`crate::profile`) and the zones (`crate::zone`) mount things,
 //! and both the Wayland sandbox (`crate::wl_sandbox`) and the zone holder need
 //! a pipe to synchronise a fork with.
+//!
+//! **The pid view** (the container design of 2026-09-27). A pid is a number
+//! in one pid namespace, and a `/proc` answers for the pid namespace it was
+//! mounted for. Every helper here that goes from a pid to `/proc/<pid>/…`
+//! ([`start_time`], [`parent_of`], [`children_of`], [`descends_from`],
+//! [`ancestors`]), or from `/proc` to a pid it then signals, opens or waits
+//! for, is right only when the calling process's pid namespace is the one of
+//! the `/proc` it reads — as are `kill(2)`, `pidfd_open(2)` and
+//! `SO_PEERCRED`, which answer in the caller's. Zones make no pid namespace,
+//! so today there is one view. Once a container instance has a pid namespace
+//! of its own, a process that reads the instance's `/proc` must be a member
+//! of it (the instance's keeper, its bus filter, its device guard), and a
+//! process of the host's never reads it (a launch's waiter joins the
+//! instance's user, network and IPC namespaces, never its mount namespace):
+//! in a mixed view `/proc/self` does not exist, and a number read there is
+//! somebody else's here.
 
 use std::ffi::{CString, OsStr};
 use std::io;

@@ -248,6 +248,12 @@ fn main() -> ExitCode {
             }
         },
         Some("doctor-probe") => ExitCode::from(vpn_zone::doctor::probe_main(&args[1..])),
+        // The relay between a container instance's tap and the passt of its
+        // zone (`relay`): `--tap-fd N --stream-fd M`, both inherited. Not in
+        // the usage: an instance's holder is what starts it — and as of stage
+        // 0 of the container design (2026-09-27) nothing does yet but the VM
+        // probe.
+        Some("frame-relay") => ExitCode::from(vpn_zone::relay::main(&args[1..])),
         Some("wl-sandbox") => match wl_sandbox::Args::parse(&args[1..]) {
             Ok(parsed) => ExitCode::from(wl_sandbox::run(parsed)),
             Err(e) => {

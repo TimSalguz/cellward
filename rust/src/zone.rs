@@ -5958,6 +5958,88 @@ pub fn app_ruleset_with(first: &[String]) -> String {
     output_table(&rules)
 }
 
+/// A zone's refusal, ahead of [`app_ruleset_with`]'s accepts, of every
+/// local address to the passt that carries a container instance
+/// (`crate::bridge`, the container design of 2026-09-27): the loopback of
+/// both families, IPv6's link-local range, and the app namespace's own
+/// addresses (`addresses`, its tunnel's). A connection there is delivered in
+/// the zone itself — to a program of the zone's own, a resolver, a proxy —
+/// and not by the zone's way out. Keyed on passt's uid as the app
+/// namespace's user namespace sees it (`bridge::BRIDGE_ID`): passt's own
+/// nested user namespace does not change its kuid.
+///
+/// Core `nf_tables` only — `meta skuid`, the address payloads and anonymous
+/// sets — and no `fib`: an expression in a module of its own is not loaded
+/// for a user namespace (`docs/GOTCHAS.md` §14), and the rule would not load
+/// on a host that did not load that module first. Addresses inside the
+/// ranges named already are left out of the sets: an anonymous interval set
+/// takes no overlap.
+pub fn bridge_refusal_rules(uid: u32, addresses: &[IpAddr]) -> Vec<String> {
+    let mut four = vec!["127.0.0.0/8".to_string()];
+    let mut six = vec!["::1".to_string(), "fe80::/10".to_string()];
+    for address in addresses {
+        let (list, text) = match address {
+            IpAddr::V4(a) if !a.is_loopback() => (&mut four, a.to_string()),
+            IpAddr::V6(a) if !a.is_loopback() && (a.segments()[0] & 0xffc0) != 0xfe80 => {
+                (&mut six, a.to_string())
+            }
+            _ => continue,
+        };
+        if !list.contains(&text) {
+            list.push(text);
+        }
+    }
+    vec![
+        format!("meta skuid {uid} ip daddr {{ {} }} drop", four.join(", ")),
+        format!("meta skuid {uid} ip6 daddr {{ {} }} drop", six.join(", ")),
+    ]
+}
+
+/// A container instance's output ruleset (the container design of
+/// 2026-09-27, §3.1), loaded by its relay into the instance's network
+/// namespace: out through its tap from its own address of this attach, or
+/// not at all. Neighbour discovery as in every namespace here ([`NDP_RULE`]).
+///
+/// `epoch`, from the live switch on (stage 4): the cgroup of this epoch's
+/// programs, as `(level, path)` — the path absolute, as `/proc/<pid>/cgroup`
+/// has it, the level its depth. A socket's cgroup is fixed when the socket
+/// is made, so a socket of an earlier epoch never matches again, whatever
+/// its address — the wall that holds where destroying sockets cannot
+/// (`crate::sockdiag`). `socket cgroupv2` is `nft_socket`'s, not core
+/// `nf_tables`': a host that does not load it has no live switch.
+///
+/// A path nft could not take as it is — not absolute, a quote, a control
+/// character — is refused rather than escaped.
+pub fn instance_ruleset(
+    epoch: Option<(u32, &str)>,
+    a4: std::net::Ipv4Addr,
+    a6: Option<std::net::Ipv6Addr>,
+) -> Result<String, String> {
+    let cgroup = match epoch {
+        None => String::new(),
+        Some((level, path)) => {
+            let relative = path
+                .strip_prefix('/')
+                // nft takes a quoted string as it is, a unit name's `\x2d`
+                // included; only a quote would end it.
+                .filter(|p| !p.is_empty() && !p.contains('"') && !p.contains(char::is_control))
+                .ok_or_else(|| format!("a cgroup nft cannot name: {path:?}"))?;
+            format!(" socket cgroupv2 level {level} \"{relative}\"")
+        }
+    };
+    let mut rules = vec![
+        "oifname \"lo\" accept".to_string(),
+        NDP_RULE.to_string(),
+        format!("oifname \"{TUN_IFACE}\" ip saddr {a4}{cgroup} accept"),
+    ];
+    if let Some(a6) = a6 {
+        rules.push(format!(
+            "oifname \"{TUN_IFACE}\" ip6 saddr {a6}{cgroup} accept"
+        ));
+    }
+    Ok(output_table(&rules))
+}
+
 /// The uplink's ruleset: the tunnel's own packets to the endpoint, and nothing
 /// else.
 ///
@@ -6977,6 +7059,96 @@ networks:  files
                 "}\n",
             )
         );
+    }
+
+    /// The zone's refusal of its local addresses to the bridge's passt: the
+    /// loopback and link-local ranges always, the tunnel's addresses, no
+    /// overlap and no repeat, ahead of the accepts (the container design of
+    /// 2026-09-27; core nf_tables only).
+    #[test]
+    fn the_bridge_is_refused_every_local_address_first() {
+        let addresses: Vec<IpAddr> = [
+            "10.99.0.2",
+            "fd99::2",
+            "127.0.0.1",
+            "::1",
+            "fe80::1234",
+            "10.99.0.2",
+        ]
+        .iter()
+        .map(|a| a.parse().unwrap())
+        .collect();
+        let rules = bridge_refusal_rules(2, &addresses);
+        assert_eq!(
+            rules,
+            [
+                "meta skuid 2 ip daddr { 127.0.0.0/8, 10.99.0.2 } drop",
+                "meta skuid 2 ip6 daddr { ::1, fe80::/10, fd99::2 } drop",
+            ]
+        );
+        // Nothing but core expressions: no fib, no socket match.
+        for rule in &rules {
+            assert!(!rule.contains("fib") && !rule.contains("socket"), "{rule}");
+        }
+        assert_eq!(
+            bridge_refusal_rules(2, &[]),
+            [
+                "meta skuid 2 ip daddr { 127.0.0.0/8 } drop",
+                "meta skuid 2 ip6 daddr { ::1, fe80::/10 } drop",
+            ]
+        );
+        let ruleset = app_ruleset_with(&rules);
+        let drop = ruleset.find("meta skuid 2 ip daddr").unwrap();
+        let accept = ruleset.find("oifname \"lo\" accept").unwrap();
+        assert!(drop < accept, "{ruleset}");
+    }
+
+    /// A container instance's ruleset: out through the tap from this
+    /// attach's addresses only, and with an epoch from that epoch's cgroup
+    /// only (the container design of 2026-09-27, §3.1).
+    #[test]
+    fn an_instance_goes_out_from_its_own_address_only() {
+        let a4: std::net::Ipv4Addr = "10.254.3.4".parse().unwrap();
+        let a6: std::net::Ipv6Addr = "fd63:656c:6c77::1:2".parse().unwrap();
+        assert_eq!(
+            instance_ruleset(None, a4, None).unwrap(),
+            concat!(
+                "table inet vpnzone {\n",
+                "\tchain output {\n",
+                "\t\ttype filter hook output priority filter; policy drop;\n",
+                "\t\toifname \"lo\" accept\n",
+                "\t\ticmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept\n",
+                "\t\toifname \"awg0\" ip saddr 10.254.3.4 accept\n",
+                "\t}\n",
+                "}\n",
+            )
+        );
+        let path = "/user.slice/user-1000.slice/user@1000.service/app.slice/\
+                    vpn-zone-container@work\\x2d2.service/e3";
+        assert_eq!(
+            instance_ruleset(Some((6, path)), a4, Some(a6)).unwrap(),
+            concat!(
+                "table inet vpnzone {\n",
+                "\tchain output {\n",
+                "\t\ttype filter hook output priority filter; policy drop;\n",
+                "\t\toifname \"lo\" accept\n",
+                "\t\ticmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept\n",
+                "\t\toifname \"awg0\" ip saddr 10.254.3.4 socket cgroupv2 level 6 ",
+                "\"user.slice/user-1000.slice/user@1000.service/app.slice/",
+                "vpn-zone-container@work\\x2d2.service/e3\" accept\n",
+                "\t\toifname \"awg0\" ip6 saddr fd63:656c:6c77::1:2 socket cgroupv2 level 6 ",
+                "\"user.slice/user-1000.slice/user@1000.service/app.slice/",
+                "vpn-zone-container@work\\x2d2.service/e3\" accept\n",
+                "\t}\n",
+                "}\n",
+            )
+        );
+        for bad in ["", "/", "relative/e1", "/a\"b/e1", "/a\nb/e1"] {
+            assert!(
+                instance_ruleset(Some((2, bad)), a4, None).is_err(),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
