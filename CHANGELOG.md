@@ -249,6 +249,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A container's NSS database is written where nothing else can be**
+  (bug hunt 2026-09-27). A sandboxed program cannot reach the host's
+  `~/.pki`, but it could make its own `cert9.db` (or the stamp beside it)
+  a link there — and the trust layer, which runs where the real home is in
+  sight, would have added the container's roots to the host's database.
+  certutil now works in a bwrap box of its own that holds only the
+  database, bound from a directory descriptor checked to be the
+  container's once open; the stamp is read and written through that
+  descriptor, never through a link. `profile-run` takes `--bwrap`.
 - **A system zone's command sees neither the user zones' state nor the
   containers' data** (bug hunt 2026-09-27). `vpn-zone-sys` covers the
   project's state and makes its settings read-only, as a user zone does —

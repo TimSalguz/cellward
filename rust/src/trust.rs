@@ -34,10 +34,13 @@
 //! be proven private is skipped with a warning.
 
 use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::{CString, OsStr, OsString};
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -286,6 +289,8 @@ pub struct Layer<'a> {
     /// The container's trust directory.
     pub dir: &'a Path,
     pub certutil: &'a Path,
+    /// bwrap: certutil works on a database in a box where nothing else is.
+    pub bwrap: &'a Path,
     /// The home the program will see: `$HOME` with its overlay, or the home
     /// of a named sandbox as it lies on disk.
     pub home: &'a Path,
@@ -413,43 +418,203 @@ fn sync_nss(layer: &Layer<'_>, certs: &[(String, Vec<u8>)], warnings: &mut Vec<S
             }
             continue;
         };
-        let stamp_path = db.join(STAMP);
-        let old = fs::read_to_string(&stamp_path)
-            .map(|t| parse_stamp(&t))
-            .unwrap_or_default();
-        if old == want {
-            continue;
+        sync_database(layer, &db, &roots, certs, &want, warnings);
+    }
+}
+
+/// One database brought in line with the container's certificates.
+///
+/// The database and every name in it are the container's: a program of a
+/// sandbox cannot reach the host's `~/.pki`, but it can make its own
+/// `cert9.db` a link there — and certutil, or SQLite's journal beside it,
+/// run from here, where the real home is in sight, would write the host's
+/// (review 2026-09-27). So the directory is opened once, not through a link,
+/// and found to be the container's once open; certutil gets that
+/// descriptor in a box where nothing else is ([`certutil`]), and the stamp
+/// is read and written through it, never through a link.
+fn sync_database(
+    layer: &Layer<'_>,
+    db: &Path,
+    roots: &[PathBuf],
+    certs: &[(String, Vec<u8>)],
+    want: &BTreeSet<String>,
+    warnings: &mut Vec<String>,
+) {
+    if fs::symlink_metadata(db).is_err() {
+        // Nothing there and nothing to put there.
+        if want.is_empty() {
+            return;
         }
-        if let Err(e) = ensure_database(layer.certutil, &db) {
-            warnings.push(e);
-            continue;
-        }
-        let mut done: BTreeSet<String> = old.clone();
-        for fp in old.difference(&want) {
-            // A certificate no longer in the container. An entry that is
-            // already gone is fine too.
-            let _ = certutil(layer.certutil, &["-D", "-n", &nickname(fp)], &db, None);
-            done.remove(fp);
-        }
-        for (fp, pem) in certs.iter().filter(|(fp, _)| !old.contains(fp)) {
-            let args = ["-A", "-n", &nickname(fp), "-t", "C,,", "-a"];
-            match certutil(layer.certutil, &args, &db, Some(pem)) {
-                Ok(()) => {
-                    done.insert(fp.clone());
-                }
-                Err(e) => warnings.push(e),
-            }
-        }
-        if let Err(e) = fs::write(&stamp_path, stamp_text(&done)) {
-            warnings.push(format!("cannot write {}: {e}", stamp_path.display()));
+        // Chromium makes `.pki/nssdb` on its first start, and a certificate
+        // has to be there before.
+        if let Err(e) = fs::DirBuilder::new().recursive(true).mode(0o700).create(db) {
+            warnings.push(format!("cannot create {}: {e}", db.display()));
+            return;
         }
     }
+    let dir = match open_database(db, roots) {
+        Ok(dir) => dir,
+        Err(e) => {
+            warnings.push(e);
+            return;
+        }
+    };
+    let old = read_in(&dir, STAMP)
+        .map(|t| parse_stamp(&t))
+        .unwrap_or_default();
+    if old == *want {
+        return;
+    }
+    let run = |args: &[&str], input: Option<&[u8]>| certutil(layer, &dir, db, args, input);
+    if !plain_in(&dir, "cert9.db") {
+        if let Err(e) = run(&["-N", "--empty-password"], None) {
+            warnings.push(e);
+            return;
+        }
+    }
+    let mut done: BTreeSet<String> = old.clone();
+    for fp in old.difference(want) {
+        // A certificate no longer in the container. An entry that is
+        // already gone is fine too.
+        let _ = run(&["-D", "-n", &nickname(fp)], None);
+        done.remove(fp);
+    }
+    for (fp, pem) in certs.iter().filter(|(fp, _)| !old.contains(fp)) {
+        let args = ["-A", "-n", &nickname(fp), "-t", "C,,", "-a"];
+        match run(&args, Some(pem)) {
+            Ok(()) => {
+                done.insert(fp.clone());
+            }
+            Err(e) => warnings.push(e),
+        }
+    }
+    if let Err(e) = write_in(&dir, STAMP, &stamp_text(&done)) {
+        warnings.push(format!("cannot write {}: {e}", db.join(STAMP).display()));
+    }
+}
+
+/// The database's directory, opened: never through a link at its end, and —
+/// wherever links before it led — the container's own once open. Whatever
+/// is done to the database from here on goes through this descriptor, and
+/// the directory cannot be swapped for another after the check.
+fn open_database(db: &Path, roots: &[PathBuf]) -> Result<OwnedFd, String> {
+    let path = CString::new(db.as_os_str().as_bytes())
+        .map_err(|_| format!("{}: a NUL in the path", db.display()))?;
+    // SAFETY: a NUL-terminated path; the descriptor is owned right below.
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "cannot open {}: {}",
+            db.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: just opened, and nobody else's.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let real = fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+        .map_err(|e| format!("cannot tell where {} is: {e}", db.display()))?;
+    if !under_any(&real, roots) {
+        return Err(format!(
+            "{} is not the container's own (it lies outside its layer) — the extra roots are \
+             NOT installed there",
+            db.display()
+        ));
+    }
+    Ok(fd)
+}
+
+/// A file of the database, read — never through a link. `None` when it is
+/// not there, or not a plain file.
+fn read_in(dir: &OwnedFd, name: &str) -> Option<String> {
+    let name = CString::new(name).ok()?;
+    // SAFETY: a directory descriptor and a NUL-terminated name.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: just opened, and nobody else's.
+    let file = unsafe { fs::File::from_raw_fd(fd) };
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    file.take(1 << 16).read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// Is `name` a plain file in the directory — not a link to one?
+fn plain_in(dir: &OwnedFd, name: &str) -> bool {
+    let Ok(name) = CString::new(name) else {
+        return false;
+    };
+    // SAFETY: an all-zero stat is a valid out-parameter.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: a directory descriptor, a NUL-terminated name, a stat to fill.
+    let found = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } == 0;
+    found && st.st_mode & libc::S_IFMT == libc::S_IFREG
+}
+
+/// A file of the database, written whole: a new file beside it, renamed over
+/// the name — a rename replaces a link, it never writes where one points.
+fn write_in(dir: &OwnedFd, name: &str, text: &str) -> std::io::Result<()> {
+    let tmp = CString::new(format!(".{name}.{}.new", std::process::id()))?;
+    let name = CString::new(name)?;
+    let at = dir.as_raw_fd();
+    // SAFETY: a directory descriptor and NUL-terminated names throughout.
+    unsafe { libc::unlinkat(at, tmp.as_ptr(), 0) };
+    // SAFETY: as above; the mode is openat's third, variadic argument.
+    let fd = unsafe {
+        libc::openat(
+            at,
+            tmp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: just opened, and nobody else's.
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    let written = file.write_all(text.as_bytes());
+    drop(file);
+    // SAFETY: as above.
+    let renamed = written.and_then(|()| {
+        if unsafe { libc::renameat(at, tmp.as_ptr(), at, name.as_ptr()) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    });
+    if renamed.is_err() {
+        // SAFETY: as above.
+        unsafe { libc::unlinkat(at, tmp.as_ptr(), 0) };
+    }
+    renamed
 }
 
 /// Bring the NSS databases of a home that is the container's own by
 /// construction (a named sandbox's, on disk) in line with its certificates,
 /// from outside any launch. Returns the warnings.
-pub fn sync_home(certutil: &Path, dir: &Path, home: &Path) -> Vec<String> {
+pub fn sync_home(certutil: &Path, bwrap: &Path, dir: &Path, home: &Path) -> Vec<String> {
     let mut warnings = Vec::new();
     let mut certs = Vec::new();
     for cert in stored(dir) {
@@ -462,6 +627,7 @@ pub fn sync_home(certutil: &Path, dir: &Path, home: &Path) -> Vec<String> {
     let layer = Layer {
         dir,
         certutil,
+        bwrap,
         home,
         private: &private,
         extra: &[],
@@ -471,23 +637,51 @@ pub fn sync_home(certutil: &Path, dir: &Path, home: &Path) -> Vec<String> {
 }
 
 /// Create the database directory and an empty database in it when missing.
-fn ensure_database(tool: &Path, db: &Path) -> Result<(), String> {
-    if db.join("cert9.db").is_file() {
-        return Ok(());
-    }
-    fs::create_dir_all(db).map_err(|e| format!("cannot create {}: {e}", db.display()))?;
-    let _ = fs::set_permissions(db, fs::Permissions::from_mode(0o700));
-    certutil(tool, &["-N", "--empty-password"], db, None)
-}
+/// Where the database is in certutil's box.
+const BOX_DB: &str = "/db";
 
-/// `certutil <args> -d sql:<db>`, stdin from `input` when given.
-fn certutil(tool: &Path, args: &[&str], db: &Path, input: Option<&[u8]>) -> Result<(), String> {
-    let mut dbarg = OsString::from("sql:");
-    dbarg.push(db);
-    let mut child = Command::new(tool)
+/// `certutil <args>` on the database `dir`, stdin from `input` when given —
+/// in a box of its own (bwrap, every namespace its own) where there is
+/// nothing but the database, bound from the descriptor, and the programs'
+/// directories, read-only: a link the container left in the database leads
+/// nowhere from there. `shown` names the database in messages.
+fn certutil(
+    layer: &Layer<'_>,
+    dir: &OwnedFd,
+    shown: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> Result<(), String> {
+    let tool = program_path(layer.certutil)
+        .ok_or_else(|| format!("no {} to run", layer.certutil.display()))?;
+    let fd = dir.as_raw_fd();
+    let mut cmd = Command::new(layer.bwrap);
+    cmd.args(["--unshare-all", "--die-with-parent", "--new-session"]);
+    for system in ["/nix/store", "/usr", "/bin", "/lib", "/lib64"] {
+        cmd.args(["--ro-bind-try", system, system]);
+    }
+    cmd.args(["--dev", "/dev", "--tmpfs", "/tmp"])
+        .arg("--bind-fd")
+        .arg(fd.to_string())
+        .arg(BOX_DB)
+        .arg("--")
+        .arg(&tool)
         .args(args)
         .arg("-d")
-        .arg(&dbarg)
+        .arg(format!("sql:{BOX_DB}"));
+    // SAFETY: fcntl and prctl only, both async-signal-safe.
+    unsafe {
+        cmd.pre_exec(move || {
+            // The descriptor goes to bwrap; none of this process's
+            // capabilities do (`profile-run` may still hold the zone's).
+            if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
+            Ok(())
+        });
+    }
+    let mut child = cmd
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -496,7 +690,7 @@ fn certutil(tool: &Path, args: &[&str], db: &Path, input: Option<&[u8]>) -> Resu
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("cannot run {}: {e}", tool.display()))?;
+        .map_err(|e| format!("cannot run {}: {e}", layer.bwrap.display()))?;
     if let (Some(bytes), Some(mut stdin)) = (input, child.stdin.take()) {
         let _ = stdin.write_all(bytes);
     }
@@ -509,10 +703,22 @@ fn certutil(tool: &Path, args: &[&str], db: &Path, input: Option<&[u8]>) -> Resu
         Err(format!(
             "certutil {} on {}: {}",
             args.first().copied().unwrap_or(""),
-            db.display(),
+            shown.display(),
             String::from_utf8_lossy(&out.stderr).trim()
         ))
     }
+}
+
+/// A program's own path, links resolved — what the box has of it: a bare
+/// name looked up in `PATH` here, where `PATH` leads somewhere.
+fn program_path(program: &Path) -> Option<PathBuf> {
+    if program.as_os_str().as_bytes().contains(&b'/') {
+        return fs::canonicalize(program).ok();
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(program))
+        .find(|p| p.is_file())
+        .and_then(|p| fs::canonicalize(p).ok())
 }
 
 #[cfg(test)]
@@ -665,6 +871,7 @@ X509v3 Basic Constraints: critical
             dir: &trust,
             // Would fail loudly if it were ever run.
             certutil: Path::new("/nonexistent/certutil"),
+            bwrap: Path::new("/nonexistent/bwrap"),
             home: &home,
             private: &[tmp.0.join("somewhere-else")],
             extra: &[],

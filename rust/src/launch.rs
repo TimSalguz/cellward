@@ -1168,6 +1168,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             nss_home: nss_home.as_deref(),
             trust_extra: &trust_extra,
             certutil: &tools.certutil,
+            bwrap: &tools.bwrap,
             shares: &shares,
             own_mounts: matches!(
                 (&selection.sandbox, &selection.container),
@@ -1271,6 +1272,7 @@ pub struct Entry<'a> {
     /// Directories of certificates declared in Nix, besides `trust`.
     pub trust_extra: &'a [PathBuf],
     pub certutil: &'a Path,
+    pub bwrap: &'a Path,
     /// Paths of the real home granted to a layer container
     /// (`container grant`): written through its layer (`--share`).
     pub shares: &'a [PathBuf],
@@ -1396,6 +1398,8 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
             exec.push(trust.into());
             exec.push("--certutil".into());
             exec.push(entry.certutil.into());
+            exec.push("--bwrap".into());
+            exec.push(entry.bwrap.into());
             if let Some(home) = entry.nss_home {
                 exec.push("--nss-home".into());
                 exec.push(home.into());
@@ -2397,6 +2401,7 @@ mod tests {
             nss_home: None,
             trust_extra: &[],
             certutil: Path::new("/t/certutil"),
+            bwrap: Path::new("/t/bwrap"),
             shares: &[],
             storage: None,
             own_mounts: false,
@@ -2471,6 +2476,8 @@ mod tests {
                 "/s/sb/work/trust",
                 "--certutil",
                 "/t/certutil",
+                "--bwrap",
+                "/t/bwrap",
                 "--nss-home",
                 "/s/sb/work/home",
                 "",
