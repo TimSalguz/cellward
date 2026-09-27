@@ -249,6 +249,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A grant taken away is taken from programs that left their launch**
+  (bug hunt 2026-09-27). Revoking a container's grant detached it in the
+  mount namespaces of its launches' processes and their descendants: a
+  program that had left its launch by a double fork kept the launch's
+  namespace, and the grant with it. The user's other processes are looked
+  at too, and a mount namespace whose home is the container's (its
+  sandbox home, its layer's upper directory) loses the grant as well.
 - **A microphone taken away ends the recording going on** (bug hunt
   2026-09-27). The sound filter read the microphone's setting when a
   record stream was asked for, and only then: set to `no` while a program
