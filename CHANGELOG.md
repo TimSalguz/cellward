@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **IPv6 through an OpenConnect tunnel** (2026-09-27, the owner: IPv6 is
+  needed, and it has to stay in the tunnel, not be switched off). The
+  client ran with `--disable-ipv6`, so an OpenConnect zone never had IPv6.
+  Now the address the gateway gives (`INTERNAL_IP6_ADDRESS`, or the
+  `addr/prefix` of `INTERNAL_IP6_NETMASK`) goes on the tunnel as a `/128`,
+  the family's default into it, and the gateway's IPv6 resolvers
+  (`INTERNAL_IP6_DNS`) into the zone's `resolv.conf`, each checked to be an
+  address. A gateway without IPv6, or with an "address" that is not one,
+  leaves the family closed and IPv4 working. The plan file gains an
+  `address6=` line. The smoke test's ocserv now hands out IPv6 and the zone
+  reaches it over IPv6 through the tunnel.
 - **A container has a name of its own with the portal**
   (`cellward.c.<id>`, `desktop::container_app_id`; the owner, 2026-09-26:
   permissions move from zones to containers). Sync writes an entry for the

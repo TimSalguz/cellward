@@ -66,7 +66,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -527,6 +527,10 @@ pub struct Plan {
     /// The address the gateway assigned, applied as a `/32` on a
     /// point-to-point device — what the upstream `vpnc-script` does too.
     pub address: Ipv4Addr,
+    /// The IPv6 address the gateway assigned, if it gave one: applied as a
+    /// `/128`, and the family's default goes into the tunnel with it. None:
+    /// IPv6 ends in the zone, as for a WireGuard config without a v6 address.
+    pub address6: Option<Ipv6Addr>,
     pub mtu: u32,
     /// Resolvers, already checked to be addresses.
     pub dns: Vec<IpAddr>,
@@ -535,8 +539,8 @@ pub struct Plan {
     /// How many `CISCO_SPLIT_INC_*` entries were deliberately ignored — for the
     /// journal, so that "why does this zone route everything" has an answer.
     pub ignored_splits: usize,
-    /// Did the gateway offer IPv6 anyway? Recorded so the journal can say the
-    /// zone is not using it (`--disable-ipv6` normally stops it being offered).
+    /// The gateway offered IPv6 the zone cannot use (its address is not an
+    /// address): recorded so the journal can say why the family is closed.
     pub ipv6_offered: bool,
 }
 
@@ -636,15 +640,38 @@ pub fn plan(
         },
     };
 
+    // IPv6, when the gateway gives it (2026-09-27; `--disable-ipv6` is gone):
+    // the address from INTERNAL_IP6_ADDRESS, or from the `addr/prefix` of
+    // INTERNAL_IP6_NETMASK, which some gateways send alone. Anything that is
+    // not an address closes the family instead of failing the zone: IPv4
+    // still works, and IPv6 has nowhere to go but the tunnel or nowhere.
+    let raw6 = get("INTERNAL_IP6_ADDRESS")
+        .or_else(|| get("INTERNAL_IP6_NETMASK").map(|n| n.split_once('/').map_or(n, |(a, _)| a)));
+    let address6 = raw6
+        .and_then(|raw| raw.parse::<Ipv6Addr>().ok())
+        .filter(|a| !a.is_loopback() && !a.is_unspecified() && !a.is_multicast());
+
     // Resolvers have to BE addresses. A name here would be written into the
     // zone's resolv.conf verbatim and never resolve; anything with a newline in
     // it would write a line of its own into that file, and the gateway is not
-    // who decides what is in it.
+    // who decides what is in it. IPv6 ones only when the zone has IPv6: a
+    // resolver the zone cannot reach is a timeout on every lookup.
     let dns: Vec<IpAddr> = get("INTERNAL_IP4_DNS")
         .unwrap_or_default()
         .split_whitespace()
-        .filter_map(|s| s.parse().ok())
-        .collect();
+        .chain(
+            get("INTERNAL_IP6_DNS")
+                .unwrap_or_default()
+                .split_whitespace(),
+        )
+        .filter_map(|s| s.parse::<IpAddr>().ok())
+        .filter(|a| a.is_ipv4() || address6.is_some())
+        .fold(Vec::new(), |mut all, a| {
+            if !all.contains(&a) {
+                all.push(a);
+            }
+            all
+        });
 
     // One search domain, the gateway's default one. `CISCO_SPLIT_DNS` (the
     // split-DNS list) is ignored together with the split routes: this zone has
@@ -664,12 +691,12 @@ pub fn plan(
     Ok(Action::Connect(Box::new(Plan {
         iface: iface.to_string(),
         address,
+        address6,
         mtu,
         dns,
         search,
         ignored_splits,
-        ipv6_offered: get("INTERNAL_IP6_ADDRESS").is_some()
-            || get("INTERNAL_IP6_NETMASK").is_some(),
+        ipv6_offered: raw6.is_some() && address6.is_none(),
     })))
 }
 
@@ -712,8 +739,12 @@ impl Plan {
             Some(domain) => format!("search={domain}\n"),
             None => String::new(),
         };
+        let address6 = match &self.address6 {
+            Some(a) => format!("address6={a}\n"),
+            None => String::new(),
+        };
         format!(
-            "iface={}\naddress={}\nmtu={}\ndns={dns}\n{search}",
+            "iface={}\naddress={}\n{address6}mtu={}\ndns={dns}\n{search}",
             self.iface, self.address, self.mtu
         )
     }
@@ -722,6 +753,7 @@ impl Plan {
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut iface = None;
         let mut address = None;
+        let mut address6 = None;
         let mut mtu = None;
         let mut dns = Vec::new();
         let mut search = None;
@@ -739,6 +771,12 @@ impl Plan {
                     address =
                         Some(value.parse::<Ipv4Addr>().map_err(|_| {
                             format!("{PLAN_FILE}: address={value} is not an address")
+                        })?);
+                }
+                "address6" => {
+                    address6 =
+                        Some(value.parse::<Ipv6Addr>().map_err(|_| {
+                            format!("{PLAN_FILE}: address6={value} is not an address")
                         })?);
                 }
                 "mtu" => {
@@ -761,6 +799,7 @@ impl Plan {
         Ok(Self {
             iface: iface.ok_or_else(|| format!("{PLAN_FILE}: no iface="))?,
             address: address.ok_or_else(|| format!("{PLAN_FILE}: no address="))?,
+            address6,
             mtu: mtu.ok_or_else(|| format!("{PLAN_FILE}: no mtu="))?,
             dns,
             search,
@@ -935,8 +974,8 @@ fn connect(plan: &Plan, plan_path: &Path) -> Result<(), String> {
     }
     if plan.ipv6_offered {
         println!(
-            "oc-script: the gateway offered IPv6; this backend does not use it yet, and the \
-             app namespace closes the family instead of routing it anywhere else"
+            "oc-script: the gateway's IPv6 address is not an address — the app namespace \
+             closes the family instead of routing it anywhere else"
         );
     }
 
@@ -1281,6 +1320,63 @@ mod tests {
         // journal can say so.
         assert_eq!(plan.ignored_splits, 4);
         assert!(!plan.ipv6_offered);
+        assert_eq!(plan.address6, None);
+    }
+
+    /// IPv6 when the gateway gives it: the address, and its resolvers; from
+    /// the netmask's `addr/prefix` when that is all it sends; closed, not
+    /// failed, when it is not an address (2026-09-27).
+    #[test]
+    fn ipv6_from_the_gateway_goes_into_the_plan_and_nowhere_else() {
+        let base = [
+            ("reason", "connect"),
+            ("TUNDEV", "awg0"),
+            ("INTERNAL_IP4_ADDRESS", "10.5.0.7"),
+            ("INTERNAL_IP4_DNS", "10.5.0.1"),
+        ];
+        let with = |extra: &[(&'static str, &'static str)]| {
+            let all: Vec<(&str, &str)> =
+                base.iter().copied().chain(extra.iter().copied()).collect();
+            match plan(&env(&all), None).unwrap() {
+                Action::Connect(p) => p,
+                other => panic!("{other:?}"),
+            }
+        };
+        let p = with(&[
+            ("INTERNAL_IP6_ADDRESS", "fd00:1::5"),
+            ("INTERNAL_IP6_DNS", "fd00:1::1 not-an-address"),
+        ]);
+        assert_eq!(p.address6, Some("fd00:1::5".parse().unwrap()));
+        assert_eq!(
+            p.dns,
+            [
+                "10.5.0.1".parse::<IpAddr>().unwrap(),
+                "fd00:1::1".parse().unwrap()
+            ]
+        );
+        assert!(!p.ipv6_offered);
+
+        let p = with(&[("INTERNAL_IP6_NETMASK", "fd00:1::6/64")]);
+        assert_eq!(p.address6, Some("fd00:1::6".parse().unwrap()));
+
+        // Not an address: the family closed, IPv4 untouched, v6 resolvers
+        // dropped (nothing could reach them).
+        for bad in [
+            "garbage",
+            "::1",
+            "::",
+            "ff02::1",
+            "fd00::1\nnameserver 6.6.6.6",
+        ] {
+            let p = with(&[
+                ("INTERNAL_IP6_ADDRESS", bad),
+                ("INTERNAL_IP6_DNS", "fd00:1::1"),
+            ]);
+            assert_eq!(p.address6, None, "{bad:?}");
+            assert!(p.ipv6_offered, "{bad:?}");
+            assert_eq!(p.dns, ["10.5.0.1".parse::<IpAddr>().unwrap()], "{bad:?}");
+            assert_eq!(p.address, "10.5.0.7".parse::<Ipv4Addr>().unwrap());
+        }
     }
 
     #[test]
@@ -1373,20 +1469,22 @@ mod tests {
         let plan = Plan {
             iface: "awg0".to_string(),
             address: "10.5.0.7".parse().unwrap(),
+            address6: Some("fd00::7".parse().unwrap()),
             mtu: 1300,
             dns: vec!["10.5.0.1".parse().unwrap(), "fd00::1".parse().unwrap()],
             search: Some("corp.example.org".to_string()),
             ignored_splits: 3,
-            ipv6_offered: true,
+            ipv6_offered: false,
         };
         let text = plan.to_text();
         assert_eq!(
             text,
-            "iface=awg0\naddress=10.5.0.7\nmtu=1300\ndns=10.5.0.1 fd00::1\nsearch=corp.example.org\n"
+            "iface=awg0\naddress=10.5.0.7\naddress6=fd00::7\nmtu=1300\ndns=10.5.0.1 fd00::1\nsearch=corp.example.org\n"
         );
         let back = Plan::parse(&text).unwrap();
         assert_eq!(back.iface, plan.iface);
         assert_eq!(back.address, plan.address);
+        assert_eq!(back.address6, plan.address6);
         assert_eq!(back.mtu, plan.mtu);
         assert_eq!(back.dns, plan.dns);
         assert_eq!(back.search, plan.search);
@@ -1395,6 +1493,7 @@ mod tests {
         let bare = Plan {
             search: None,
             dns: Vec::new(),
+            address6: None,
             ..plan
         };
         assert_eq!(

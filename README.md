@@ -349,6 +349,10 @@ and the module puts it on your `PATH` for this one purpose:
 openconnect --non-inter vpn.example.com   # prints "--servercert pin-sha256:…"
 ```
 
+IPv6 is carried when the gateway gives it (since 2026-09-27): its address goes
+on the tunnel and the family's default into it, as for a WireGuard config with
+a v6 address; a gateway without IPv6 leaves the family closed in the zone.
+
 What such a zone deliberately does **not** do, all of it for one reason —
 a zone routes everything into the tunnel and has no second interface to route
 anything else through (`docs/LEAK-MODEL.md`):
@@ -359,8 +363,6 @@ anything else through (`docs/LEAK-MODEL.md`):
 - **split DNS.** The gateway's resolvers and its one default domain go into the
   zone's `resolv.conf`; a per-domain resolver would be a second path by another
   name;
-- **IPv6**, which is not requested at all (`--disable-ipv6`) and closed in the
-  zone, as for a WireGuard config without a v6 address;
 - **interactive 2FA/OTP.** A zone is started by a systemd unit with no terminal
   to ask on, so the client runs `--non-inter`. The config format leaves room for
   it (ROADMAP M4);

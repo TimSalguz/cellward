@@ -4625,9 +4625,10 @@ fn real_program(program: &Path) -> Result<PathBuf, String> {
 ///   failing it.
 /// * `--no-external-auth` so that authentication never tries to open a browser
 ///   OUTSIDE the zone — the exact move `docs/LEAK-MODEL.md` spends a section on.
-/// * `--disable-ipv6` because this backend does not carry IPv6 yet, and a
-///   gateway that thinks we do would route a family into a black hole. Not
-///   asking is honest; the app namespace closes the family either way.
+/// * No `--disable-ipv6` (it was there until 2026-09-27): IPv6 the gateway
+///   gives goes into the tunnel like IPv4, and without it the app namespace
+///   closes the family (`configure_oc`). The client's own transport is IPv4 —
+///   `--resolve` names the gateway by the address resolved above.
 /// * `--resolve` hands over the address resolved in the host's network, so the
 ///   client never needs a resolver in a namespace that has none.
 /// * `--passwd-on-stdin` with the password written on one line and the pipe
@@ -4681,8 +4682,7 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
         .arg("--script")
         .arg(format!("{exe} oc-script"))
         .arg("--non-inter")
-        .arg("--no-external-auth")
-        .arg("--disable-ipv6");
+        .arg("--no-external-auth");
     if cfg.server_literal().is_none() {
         cmd.arg(format!("--resolve={}:{}", cfg.server, oc.addr));
     }
@@ -5350,10 +5350,33 @@ fn configure_oc(zone: &Zone, plan: &openconnect::Plan) -> Result<(), String> {
     zone.ip(&["-4", "addr", "replace", addr.as_str(), "dev", TUN_IFACE])?;
     zone.ip(&["link", "set", TUN_IFACE, "mtu", mtu.as_str(), "up"])?;
     default_into_tunnel(zone)?;
-    // This backend does not carry IPv6 yet and asks the gateway not to offer
-    // it (`--disable-ipv6`), so the family ends here — the same way it does for
-    // a WireGuard config without a v6 address.
-    close_or_tunnel_v6(zone, false)
+    // IPv6 as the gateway gave it (2026-09-27): a /128 on the tunnel and the
+    // family's default into it, the same way as a WireGuard config with a v6
+    // address. None, or an address the kernel will not take: the family ends
+    // here, and IPv4 works on — there is no second interface for IPv6 to
+    // take either way.
+    let tunnel_v6 = plan.address6.is_some_and(|a6| {
+        let a6 = format!("{a6}/128");
+        let applied = zone
+            .ip_quiet(&[
+                "-6",
+                "addr",
+                "replace",
+                a6.as_str(),
+                "dev",
+                TUN_IFACE,
+                "nodad",
+            ])
+            .is_ok();
+        if !applied {
+            eprintln!(
+                "zone {}: the gateway's v6 address {a6} did not apply — IPv6 is closed here",
+                zone.name()
+            );
+        }
+        applied
+    });
+    close_or_tunnel_v6(zone, tunnel_v6)
 }
 
 /// THERE IS NO ROUTE AROUND THE TUNNEL, AND THERE MUST NOT BE.

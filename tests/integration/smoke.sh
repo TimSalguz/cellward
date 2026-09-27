@@ -969,7 +969,10 @@ device = ocsmoketun
 predictable-ips = true
 ipv4-network = 192.168.222.0
 ipv4-netmask = 255.255.255.0
+ipv6-network = fd42:5a0e::/64
+ipv6-subnet-prefix = 128
 dns = 192.168.222.1
+dns = fd42:5a0e::1
 default-domain = smoke.example
 ping-leases = false
 cisco-client-compat = true
@@ -1088,13 +1091,31 @@ EOF
   echo "$ocresolv" | grep -Eq '^search[[:space:]]+smoke\.example' \
     || fail "в resolv.conf зоны нет search-домена шлюза"
 
-  step "Зона OpenConnect: IPv6 без пути наружу"
+  step "Зона OpenConnect: IPv6 от шлюза — через туннель, и только через него"
+  # С 2026-09-27 IPv6, который выдаёт шлюз, едет в туннель, как у WireGuard-
+  # зоны с v6-адресом (раньше клиент шёл с --disable-ipv6 и семейство было
+  # закрыто всегда). ocserv выдаёт адрес из fd42:5a0e::/64: адрес — на awg0,
+  # default — в awg0, резолвер шлюза — в resolv.conf. И соединение до самого
+  # ocserv по его v6-адресу со стороны туннеля проходит.
   if in_oc test -e /proc/sys/net/ipv6; then
-    ocdef6=$(in_oc "$IP" -6 route show default 2>/dev/null || true)
+    ocaddr6=$(in_oc "$IP" -br -6 addr show awg0 scope global)
+    echo "$ocaddr6"
+    echo "$ocaddr6" | grep -q 'fd42:5a0e:' || fail "у awg0 нет v6-адреса от шлюза: $ocaddr6"
+    ocdef6=$(in_oc "$IP" -6 route show default)
     echo "v6 default: ${ocdef6:-<пусто>}"
-    if [ -n "$ocdef6" ]; then
-      echo "$ocdef6" | grep -q '^unreachable' || fail "v6 default есть и он не unreachable"
-    fi
+    echo "$ocdef6" | grep -q 'dev awg0' || fail "v6 default не через awg0: $ocdef6"
+    in_oc cat /etc/resolv.conf | grep -Eq '^nameserver[[:space:]]+fd42:5a0e::1' \
+      || fail "в resolv.conf зоны нет v6-резолвера шлюза"
+    # Адрес ocserv со стороны туннеля — у его tun на раннере.
+    SRV6=$(ip -6 -o addr show scope global 2>/dev/null \
+      | awk '$2 ~ /^ocsmoketun/ { sub("/.*", "", $4); print $4; exit }')
+    echo "ocserv со стороны туннеля (v6): ${SRV6:-<нет>}"
+    [ -n "$SRV6" ] || fail "у tun ocserv нет v6-адреса — не с чем проверить трафик"
+    in_oc timeout 10 bash -c "exec 3<>/dev/tcp/$SRV6/4443" \
+      || fail "из зоны не достучаться до ocserv по v6 через туннель"
+    echo "ok: v6 через туннель ходит"
+  else
+    echo "в ядре раннера нет IPv6 — проверять нечего"
   fi
 
   step "Зона OpenConnect: в uplink-ns есть pasta, но НЕТ туннеля"

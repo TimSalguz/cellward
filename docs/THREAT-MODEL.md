@@ -138,7 +138,7 @@ satellite, when granted.
 | O3 | A subverted client reads host files | partly | its root holds only `/nix/store`, `/usr`, `/lib*`, the CA stores and its own directory; the store is world-readable (on NixOS, the system's configuration too) | sm20 |
 | O4 | The client talks to anything but its gateway | yes | uplink filter: the gateway's address only | sm17 |
 | O5 | The config or the environment steers the client (`--script`, `--csd-wrapper`, `--external-browser`, `--no-system-trust`, a `sha1:` pin, proxy variables) | yes | `Args` is an allow-list of single `--flag=value` chunks; the pin must be SHA-256; the environment is built from scratch | u2 |
-| O6 | The gateway pushes split routes, split DNS, IPv6, or its own lines into `resolv.conf` | yes | split lists are ignored, since there is no second interface; `--disable-ipv6`; resolvers and domain are validated | u1 sm14 sm15 |
+| O6 | The gateway pushes split routes, split DNS, IPv6, or its own lines into `resolv.conf` | yes | split lists are ignored, since there is no second interface; IPv6 only into the tunnel, closed when not given or not an address; resolvers and domain are validated | u1 sm14 sm15 |
 | | **Session bus, portals, system bus** | | | |
 | P1 | `systemd --user` (`StartTransientUnit`) starts a process outside the zone | hermetic: yes · ordinary: **no** | no `systemd/private`; the filtered bus refuses `systemd1` | vm18; vm15 shows an ordinary zone keeps both |
 | P2 | The `OpenURI` portal opens a link on the host (the home address, an identity link) | hermetic, sandbox: yes · ordinary: **no** | the bus filter answers `OpenURI` and gives the link to the broker; `file:`, `OpenFile`, `OpenDirectory` are refused | vm21 |
