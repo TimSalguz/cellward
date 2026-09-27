@@ -372,7 +372,15 @@ fn mount_profile(profile_dir: &Path, shares: &[PathBuf]) -> Result<Vec<PathBuf>,
     )
     .map_err(|e| format!("overlayfs refused the home: {e}"))?;
     for rel in &below {
-        give_back(&real, &home, rel)?;
+        // Not there to give back: the layer would show what lies under the
+        // mount instead — under a zone's cover, the project's state. And a
+        // path given nothing would make the layer itself read-only below.
+        if !give_back(&real, &home, rel)? {
+            return Err(format!(
+                "{} was mounted below the home and cannot be given back over the layer",
+                rel.display()
+            ));
+        }
         if !keeps_flags(rel, &granted) {
             crate::sys::read_only_tree(&home.join(rel))
                 .map_err(|e| format!("cannot make {} read-only: {e}", rel.display()))?;

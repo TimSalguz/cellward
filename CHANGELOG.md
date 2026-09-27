@@ -291,7 +291,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   granted — the project's state among them — bound in writable. What is
   given back over the layer is now opened once below the real home
   through no link (`openat2`, `RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH`),
-  and bound from that descriptor.
+  and bound from that descriptor. A mount below the home that cannot be
+  given back over the layer — gone meanwhile — stops the launch: the
+  layer would have shown what lies under it (under a zone's cover, the
+  project's state), and made itself read-only there.
 - **A zone's record stream is not moved onto what the host plays** (bug
   hunt 2026-09-27). The sound filter took a record stream's move as the
   server named it, and refused a monitor by its `.monitor` name — which
