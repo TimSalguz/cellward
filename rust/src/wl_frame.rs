@@ -2984,24 +2984,19 @@ impl Pointer {
             .try_borrow()
             .map_or(Hit::Nothing, |w| w.hit(over.part, over.x, over.y));
         self.set_cursor(slf, cursor_for(hit));
-        if let Ok(mut window) = window.try_borrow_mut() {
-            window.hover_button(match hit {
-                Hit::Button(button) => Some(button),
-                _ => None,
-            });
-        }
+        let under = match hit {
+            Hit::Button(button) => Some(button),
+            _ => None,
+        };
+        light_under(&window, under, false);
     }
 
     /// The pointer left the frame it was over: nothing of it is lit, and a
     /// button pressed and not let go of is let go (the release will not
     /// come here).
     fn off_frame(&mut self) {
-        let Some(window) = self.over.take().and_then(|o| o.window.upgrade()) else {
-            return;
-        };
-        if let Ok(mut window) = window.try_borrow_mut() {
-            window.pressed = None;
-            window.hover_button(None);
+        if let Some(window) = self.over.take().and_then(|o| o.window.upgrade()) {
+            light_under(&window, None, true);
         }
     }
 
@@ -3045,11 +3040,35 @@ impl Pointer {
         }
         let (part, x, y) = (over.part, over.x, over.y);
         let seat = self.seat.upgrade();
-        if let Ok(mut window) = window.try_borrow_mut() {
-            let hit = window.hit(part, x, y);
-            let down = state == WlPointerButtonState::PRESSED;
-            window.click(&self.f, hit, down, seat.as_ref(), serial);
+        let down = state == WlPointerButtonState::PRESSED;
+        click(&window, &self.f, (part, x, y), down, seat.as_ref(), serial);
+    }
+}
+
+/// The button under the pointer lit on `window` (none: nothing lit), and
+/// the one pressed let go of when `let_go`.
+fn light_under(window: &Rc<RefCell<Window>>, under: Option<Button>, let_go: bool) {
+    if let Ok(mut window) = window.try_borrow_mut() {
+        if let_go {
+            window.pressed = None;
         }
+        window.hover_button(under);
+    }
+}
+
+/// The left pointer button down or up at `at` (a part of `window`'s frame
+/// and a point on it): [`Window::click`] with what is there.
+fn click(
+    window: &Rc<RefCell<Window>>,
+    f: &Frames,
+    at: (Part, f64, f64),
+    down: bool,
+    seat: Option<&Rc<WlSeat>>,
+    serial: u32,
+) {
+    if let Ok(mut window) = window.try_borrow_mut() {
+        let hit = window.hit(at.0, at.1, at.2);
+        window.click(f, hit, down, seat, serial);
     }
 }
 

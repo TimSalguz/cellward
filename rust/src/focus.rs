@@ -245,7 +245,15 @@ enum Proxied {
 /// windows'. After an update of the package a supervisor started before it
 /// runs the old file: its windows show no network until the program is
 /// started again — the safe way round.
-fn proxied(state: &Path, core: &Path, pid: i32) -> Proxied {
+///
+/// Nor is the supervisor's own `systemd-run` counted, while it hands a
+/// window menu of the frame's buttons to the manager (`crate::wl_proxy`):
+/// a child in the host's network running `starter`, the manifest's
+/// `systemd-run` (review 2026-09-27: one at a time, a moment long — and the
+/// menu it starts looks at this launch at that very moment). No process of
+/// a zone is in the host's network, so none of the launch's program is
+/// taken for it; and leaving a child out never makes a network of none.
+fn proxied(state: &Path, core: &Path, starter: Option<&Path>, pid: i32) -> Proxied {
     if comm(pid) != crate::wl_proxy::SUPERVISOR_NAME {
         return Proxied::No;
     }
@@ -256,9 +264,15 @@ fn proxied(state: &Path, core: &Path, pid: i32) -> Proxied {
     if !runs_core(pid, core) || !registry::launched(&state.join(".running"), pid) {
         return Proxied::Unknown;
     }
+    let host = netns("self");
     let networks = children(pid)
         .into_iter()
         .filter(|&child| comm(child) != crate::wl_proxy::PROCESS_NAME)
+        .filter(|&child| {
+            !starter.is_some_and(|starter| {
+                netns(&child.to_string()) == host && runs_core(child, starter)
+            })
+        })
         .filter_map(|child| network_of(state, &netns(&child.to_string())?));
     match one_network(networks) {
         Some(zone) => Proxied::Yes(zone),
@@ -284,7 +298,8 @@ fn children(pid: i32) -> Vec<i32> {
 }
 
 /// Whether `pid` runs our own `vpn-zone-core` (`core`, as the tools manifest
-/// names it): the file the kernel executed, which a process cannot rename.
+/// names it) — or another file of the manifest: the file the kernel
+/// executed, which a process cannot rename.
 /// Readable for a process of the same user that is dumpable, as the
 /// supervisor is.
 fn runs_core(pid: i32, core: &Path) -> bool {
@@ -304,7 +319,17 @@ fn runs_core(pid: i32, core: &Path) -> bool {
 /// its children's ([`proxied`]); `core` is our `vpn-zone-core`, the file a
 /// supervisor runs.
 pub fn launch_of(state: &Path, core: &Path, pid: i32) -> Option<Launch> {
-    let zone = match proxied(state, core, pid) {
+    launch_with(state, core, None, pid)
+}
+
+/// [`launch_of`] as the tools manifest has our files: the supervisor's
+/// `systemd-run` starting a window menu is not taken for the launch's.
+pub fn launch_with_tools(tools: &Tools, pid: i32) -> Option<Launch> {
+    launch_with(&tools.state, &tools.core, Some(&tools.systemd_run), pid)
+}
+
+fn launch_with(state: &Path, core: &Path, starter: Option<&Path>, pid: i32) -> Option<Launch> {
+    let zone = match proxied(state, core, starter, pid) {
         Proxied::No => network_of(state, &netns(&pid.to_string())?)?,
         Proxied::Yes(zone) => zone,
         Proxied::Unknown => return None,
@@ -509,7 +534,7 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     };
     let launch = window
         .as_ref()
-        .and_then(|w| launch_of(&tools.state, &tools.core, w.pid));
+        .and_then(|w| launch_with_tools(tools, w.pid));
     match flag {
         "--json" => println!(
             "{}",
@@ -565,7 +590,7 @@ fn watch(tools: &Tools) -> u8 {
         let window = focused_window().ok().flatten();
         let launch = window
             .as_ref()
-            .and_then(|w| launch_of(&tools.state, &tools.core, w.pid));
+            .and_then(|w| launch_with_tools(tools, w.pid));
         let line = bar_line(&tools.state, window.as_ref(), launch.as_ref());
         if line != last {
             println!("{line}");
@@ -921,7 +946,7 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
         notify(crate::dialog::APP, "Программа уже закрылась");
         return 0;
     }
-    let launch = launch_of(&tools.state, &tools.core, window.pid);
+    let launch = launch_with_tools(tools, window.pid);
     let program = launch.as_ref().and_then(|l| l.program.clone());
     let label = window_name(&tools.state, &window, launch.as_ref());
     let pin = launch.as_ref().map_or(Pin::Nothing, |l| pin_of(tools, l));
@@ -1267,24 +1292,39 @@ mod tests {
         let core = find("bash");
         // The name alone is not a supervisor: no launch on record yet, and
         // then a file that is not ours — no network, not the children's.
-        assert!(matches!(proxied(&state, &core, sup), Proxied::Unknown));
+        assert!(matches!(
+            proxied(&state, &core, None, sup),
+            Proxied::Unknown
+        ));
         registry::note_start(&running, sup, false).unwrap();
         assert!(matches!(
-            proxied(&state, &find("sleep"), sup),
+            proxied(&state, &find("sleep"), None, sup),
             Proxied::Unknown
         ));
         assert!(launch_of(&state, &find("sleep"), sup).is_none());
         // Taken for a supervisor, its network is its children's; a child is
         // taken for itself.
         assert!(
-            matches!(proxied(&state, &core, sup), Proxied::Yes(ref z) if z == crate::launch::UNCONFINED)
+            matches!(proxied(&state, &core, None, sup), Proxied::Yes(ref z) if z == crate::launch::UNCONFINED)
         );
         assert!(matches!(
-            proxied(&state, &core, children(sup)[0]),
+            proxied(&state, &core, None, children(sup)[0]),
             Proxied::No
         ));
         let launch = launch_of(&state, &core, sup).unwrap();
         assert_eq!(launch.zone, crate::launch::UNCONFINED);
+        // A child in the host's network running the starter — the
+        // supervisor's `systemd-run` of a window menu — is not counted: here
+        // the "program" runs `sleep`, and taken for the starter, no child is
+        // left to tell the network by.
+        assert!(matches!(
+            proxied(&state, &core, Some(&find("sleep")), sup),
+            Proxied::Unknown
+        ));
+        assert!(matches!(
+            proxied(&state, &core, Some(&find("bash")), sup),
+            Proxied::Yes(_)
+        ));
         assert_eq!(launch.program.as_deref(), Some("foot"));
         assert_eq!(launch.selector.as_deref(), Some("sb:work"));
         for child in children(sup) {

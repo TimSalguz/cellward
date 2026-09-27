@@ -331,6 +331,8 @@ pub struct Proxy {
     /// was started, before the program's is set): where the window menu of
     /// the frame's buttons comes up.
     display: Option<OsString>,
+    /// The `systemd-run` starting a window menu, while it runs.
+    menu: MenuStart,
 }
 
 /// The signals the supervisor passes on to its launch. The pid of the launch
@@ -477,6 +479,7 @@ pub fn start(
         signals: None,
         frame: frame.map(|setup| setup.switch),
         display,
+        menu: MenuStart::default(),
     };
     match proxy.await_ready() {
         Ok(()) => Ok(proxy),
@@ -698,6 +701,7 @@ impl Proxy {
                 }
                 Some(pid) => {
                     told.remove(&pid);
+                    self.menu.reaped(pid);
                     if pid == main {
                         *main_status = Some(status);
                     } else if pid == self.pid {
@@ -781,18 +785,21 @@ impl Proxy {
     /// this launch, for the person to choose in — `cellward window-menu
     /// --pid <this process>`, and for ⇄ straight to the restart with a
     /// network chosen. Nothing is done without the person: the menu asks,
-    /// and a restart or a cut is confirmed there. A proxy taken over by its
-    /// program can open this one menu and no other thing.
+    /// and a restart or a cut is confirmed there.
     ///
-    /// Started by `systemd --user`, in a unit of its own ([`menu_argv`]): not
-    /// a child of this process, whose children are the program and its
-    /// orphans — the network `crate::focus` reads the launch's in, and the
-    /// ones "close" is passed on to —, and not in the launch's cgroup, which
-    /// may end with it before the menu is done: a restart waits for the
-    /// launch to end, then starts it again. Its environment is the manager's
-    /// and what [`menu_argv`] gives it, not the launch's, which is the
-    /// program's by now (`WAYLAND_DISPLAY`, the zone's marks).
+    /// The menu runs in a unit of `systemd --user` of its own ([`menu_argv`]):
+    /// not in this launch's cgroup, which may end with it before the menu is
+    /// done (a restart waits for the launch to end, then starts it again),
+    /// and with the manager's environment and what [`menu_argv`] gives it,
+    /// not the launch's, which is the program's by now. Only the short-lived
+    /// `systemd-run` is a child here ([`MenuStart`]), and one at a time: an
+    /// ask while it runs is dropped — a proxy taken over by its program
+    /// writing the byte in a loop gets one `systemd-run`, not a flood of
+    /// them (review 2026-09-27).
     fn ask(&self, ask: Ask) {
+        if self.menu.running() {
+            return;
+        }
         let tools = match crate::tools::Tools::from_env() {
             Ok(tools) => tools,
             Err(e) => {
@@ -811,23 +818,39 @@ impl Proxy {
             std::process::id(),
             ask,
         );
-        if let Err(e) = self.start_outside(&argv) {
+        let mask = self.signals.as_ref().map(|s| s.old);
+        if let Err(e) = self.menu.start(&argv, mask.as_ref()) {
             eprintln!("wl-sandbox: the window menu did not start: {e}");
         }
     }
+}
 
-    /// Start `argv` not as a child of this process: a middle process forks it
-    /// and leaves at once, and the orphan goes up the tree to whoever adopts
-    /// orphans there — not here: the subreaper flag is lifted for the moment
-    /// that takes. An orphan of the program in that moment goes up too; it
-    /// loses only what the flag gives it — "close" passed on to it, its
-    /// launch's display for a new connection —, which a program can give up
-    /// anyway (ignoring the signal, exiting). The middle process is waited
-    /// for here: when this returns, it is gone and the command is adopted.
-    /// The forks call only fork, sigprocmask, execv and _exit (tests run the
-    /// supervisor in a process with threads): the arguments are made before.
-    fn start_outside(&self, argv: &[OsString]) -> io::Result<()> {
+/// The `systemd-run` that starts a window menu of the launch: at most one
+/// at a time, its pid kept until it is reaped ([`Proxy::reap`]). A child of
+/// the supervisor, in the host's network, for as long as `systemd-run`
+/// takes to hand the menu to the manager: `crate::focus` knows it by the
+/// file it runs and does not count it among the launch's.
+#[derive(Default)]
+struct MenuStart {
+    pid: Cell<Option<libc::pid_t>>,
+}
+
+impl MenuStart {
+    /// One is started and not reaped yet.
+    fn running(&self) -> bool {
+        self.pid.get().is_some()
+    }
+
+    /// Start `argv` (`argv[0]` a path) as a child, with the signal mask
+    /// `mask` — the program's, not the one that keeps the signals for this
+    /// process's signalfd. `Ok(false)`: one runs already, nothing started.
+    /// The child calls only sigprocmask, execv and _exit (tests run this in
+    /// a process with threads): its arguments are made before the fork.
+    fn start(&self, argv: &[OsString], mask: Option<&libc::sigset_t>) -> io::Result<bool> {
         use std::os::unix::ffi::OsStrExt;
+        if self.running() {
+            return Ok(false);
+        }
         let args = argv
             .iter()
             .map(|a| CString::new(a.as_bytes()))
@@ -838,54 +861,41 @@ impl Proxy {
         };
         let mut ptrs: Vec<*const libc::c_char> = args.iter().map(|a| a.as_ptr()).collect();
         ptrs.push(std::ptr::null());
-        // The command gets the mask the program got, not the one that keeps
-        // the signals for this process's signalfd.
-        let mask = self.signals.as_ref().map(|s| s.old);
-        if self.adopting {
-            // SAFETY: prctl with these arguments takes no pointers.
-            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0) };
-        }
-        // SAFETY: the children below only fork, set their mask, execv and
-        // _exit — async-signal-safe calls on memory made before the fork.
-        let middle = unsafe { libc::fork() };
-        if middle == 0 {
+        let mask = mask.copied();
+        // SAFETY: the child only sets its mask, execs and _exits —
+        // async-signal-safe calls on memory made before the fork.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
             // SAFETY: as above.
             unsafe {
-                let pid = libc::fork();
-                if pid == 0 {
-                    if let Some(mask) = &mask {
-                        libc::sigprocmask(libc::SIG_SETMASK, mask, std::ptr::null_mut());
-                    }
-                    libc::execv(program.as_ptr(), ptrs.as_ptr());
-                    libc::_exit(127);
+                if let Some(mask) = &mask {
+                    libc::sigprocmask(libc::SIG_SETMASK, mask, std::ptr::null_mut());
                 }
-                libc::_exit(i32::from(pid < 0));
+                libc::execv(program.as_ptr(), ptrs.as_ptr());
+                libc::_exit(127);
             }
         }
-        let started = if middle < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            let mut status = 0;
-            wait(middle, &mut status, 0);
-            if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::other(format!("fork ({})", describe(status))))
-            }
-        };
-        if self.adopting {
-            // SAFETY: as above.
-            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+        if pid < 0 {
+            return Err(io::Error::last_os_error());
         }
-        started
+        self.pid.set(Some(pid));
+        Ok(true)
+    }
+
+    /// `pid` has been reaped: when it was this one, the next ask starts a
+    /// menu again.
+    fn reaped(&self, pid: libc::pid_t) {
+        if self.pid.get() == Some(pid) {
+            self.pid.set(None);
+        }
     }
 }
 
 /// The command that starts the window menu of the launch `pid` for `ask`
 /// ([`Proxy::ask`]): `systemd-run --user`, with
 ///
-/// * the unit named after the launch — one menu of it at a time: a second
-///   click while it is up starts nothing, the unit is there;
+/// * the unit named after the launch — one menu of it at a time: a click
+///   while it is up starts nothing, the unit is there;
 /// * `KillMode=process`: a restart's new launch is the menu's child, and
 ///   must outlive the menu, which ends as soon as it has started it;
 /// * the environment the menu needs from here: the tools manifest, and the
@@ -3978,6 +3988,47 @@ mod tests {
         assert!(!argv(Some(""), Ask::Menu)
             .iter()
             .any(|a| a.contains("WAYLAND_DISPLAY")));
+    }
+
+    /// One `systemd-run` of the window menu at a time (review 2026-09-27):
+    /// an ask while one runs starts nothing, whatever else is reaped; once
+    /// it is reaped, the next ask starts one again. A stand-in `sleep` for
+    /// `systemd-run`.
+    #[test]
+    fn one_window_menu_is_started_at_a_time() {
+        let sleep = std::env::var_os("PATH")
+            .and_then(|p| {
+                std::env::split_paths(&p)
+                    .map(|d| d.join("sleep"))
+                    .find(|p| p.is_file())
+            })
+            .expect("sleep in PATH");
+        let argv: Vec<OsString> = vec![sleep.into(), "30".into()];
+        let end = |pid: libc::pid_t| {
+            // SAFETY: a signal to our own child, not reaped yet.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            let mut status = 0;
+            wait(pid, &mut status, 0);
+        };
+        let menu = MenuStart::default();
+        assert!(menu.start(&argv, None).unwrap());
+        let first = menu.pid.get().unwrap();
+        assert!(!menu.start(&argv, None).unwrap(), "a second one at once");
+        menu.reaped(first + 1);
+        assert!(menu.running(), "another child reaped");
+        assert!(!menu.start(&argv, None).unwrap());
+        end(first);
+        menu.reaped(first);
+        assert!(!menu.running());
+        assert!(menu.start(&argv, None).unwrap(), "after the reap, again");
+        let second = menu.pid.get().unwrap();
+        assert_ne!(second, first);
+        end(second);
+        menu.reaped(second);
+        // A command with a NUL is none: nothing started, nothing kept.
+        let broken = vec![OsString::from("/bin/tr\0ue")];
+        assert!(menu.start(&broken, None).is_err());
+        assert!(!menu.running());
     }
 
     #[test]
