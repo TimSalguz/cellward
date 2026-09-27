@@ -310,6 +310,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   are owned now, by the same rule of our patched proxy: that name and
   nothing more — not the portals' or the notification daemon's names under
   `org.freedesktop.*`. Checked in the VM test next to the KDE spelling.
+- **A sandbox whose seccomp filter cannot be built is not started**
+  (2026-09-27, `docs/THREAT-MODEL.md` K1). `fs-sandbox` warned on stderr
+  and started the program without a filter when libseccomp failed to build
+  or export it, or exported an empty program: a sandbox without TIOCSTI,
+  ptrace, keyring or io_uring refusals that looked exactly like one with
+  them. Now the launch stops with "фильтр seccomp … — запуск остановлен"
+  and the not-started code (127). A rule the installed libseccomp does not
+  know by name is still skipped and named on stderr. The filter is built
+  first, before the permission question and the bus proxy, and its memfd
+  is close-on-exec, so that the proxy and the bus filter no longer inherit
+  it; bwrap gets its copy on descriptor 34 as before.
 - **A zone's program cannot open a vsock — or any socket its network
   namespace does not hold** (2026-09-27, `docs/LEAK-MODEL.md` §25). A VM
   test showed a program in a zone reaching a vsock listener of the host's:

@@ -553,7 +553,10 @@ pub struct Layout {
     pub flatpak_info: PathBuf,
     /// `:100`…`:499` with the x11 permission, `None` without it.
     pub display: Option<String>,
-    pub seccomp_fd: Option<libc::c_int>,
+    /// The descriptor bwrap reads the seccomp filter from. Not optional: a
+    /// sandbox without its filter is not started at all (`seccomp_program`),
+    /// so there is no list without `--seccomp` to build.
+    pub seccomp_fd: libc::c_int,
 }
 
 fn push(v: &mut Vec<OsString>, s: &str) {
@@ -786,10 +789,8 @@ pub fn bwrap_args(layout: &Layout, cmd: &[OsString]) -> Vec<OsString> {
         }
     }
 
-    if let Some(fd) = layout.seccomp_fd {
-        push(&mut a, "--seccomp");
-        push(&mut a, &fd.to_string());
-    }
+    push(&mut a, "--seccomp");
+    push(&mut a, &layout.seccomp_fd.to_string());
 
     push(&mut a, "--unshare-pid");
     push(&mut a, "--unshare-ipc");
@@ -1096,43 +1097,50 @@ fn is_ours_and_closed(dir: &Path) -> bool {
     meta.mode() & 0o077 == 0 || fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).is_ok()
 }
 
-/// The compiled filter on a descriptor, or `None` with a word on stderr.
+/// The compiled filter on a descriptor, or why there is none — in words for
+/// the refusal (`фильтр seccomp {why}`).
 ///
-/// Soft degradation, as in every other layer: a filter that will not build must
-/// not cost the user the program. This is where the shell called
-/// `vpn-zone-seccomp export` as a subprocess and redirected its output into a
-/// file; the filter is now built in this process, which removes both the fork
-/// and the temporary file from the startup path of every sandboxed program.
-fn seccomp_program() -> Option<File> {
-    let filter = match Filter::build(FilterOptions::default()) {
-        Ok(filter) => filter,
-        Err(e) => {
-            eprintln!("fs-sandbox: cannot build the seccomp filter ({e}) — running without it");
-            return None;
-        }
-    };
-    // Never fatal: a rule missing because this libseccomp does not know the
-    // syscall still leaves a filter that is better than none. Saying nothing
-    // about a filter with holes in it, on the other hand, would be wrong.
+/// **Fail-closed (2026-09-27).** It used to be soft degradation: a warning on
+/// stderr and the program started without a filter. But the filter is one of
+/// the walls the sandbox promises (`docs/THREAT-MODEL.md` K1 and X9: TIOCSTI
+/// into the terminal it was started from, ptrace, the keyrings, io_uring),
+/// and a sandbox without it looks exactly like a sandbox with it — nobody
+/// reads a launcher's stderr. So a filter that does not build, does not
+/// export or comes out empty stops the launch ([`run`]).
+///
+/// A rule this libseccomp does not know by name is still only reported: it
+/// is a hole in one rule, not a missing filter, and the libseccomp the
+/// package is built with knows every name on the list (a unit test of
+/// `crate::seccomp` says so).
+///
+/// This is where the shell called `vpn-zone-seccomp export` as a subprocess
+/// and redirected its output into a file; the filter is built in this
+/// process, which removes both the fork and the temporary file from the
+/// startup path of every sandboxed program.
+fn seccomp_program() -> Result<File, String> {
+    let filter =
+        Filter::build(FilterOptions::default()).map_err(|e| format!("не собирается ({e})"))?;
     let unknown = filter.unknown_syscalls();
     if !unknown.is_empty() {
         eprintln!("fs-sandbox: unknown to libseccomp, rules skipped: {unknown:?}");
     }
-    let file = match filter.export_to_file() {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!("fs-sandbox: cannot export the seccomp filter ({e}) — running without it");
-            return None;
-        }
-    };
-    // The shell version's `[ -s "$info/seccomp.bpf" ]`, and worth keeping: an
-    // empty program is accepted by bwrap and filters absolutely nothing, which
-    // is the one failure mode that would look like success.
-    if file.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
-        eprintln!("fs-sandbox: libseccomp produced an empty program — running without a filter");
-        return None;
+    let file = filter
+        .export_to_file()
+        .map_err(|e| format!("не выгружается ({e})"))?;
+    usable_program(file)
+}
+
+/// The exported program, when it is one.
+///
+/// The shell version's `[ -s "$info/seccomp.bpf" ]`, and worth keeping: an
+/// empty program is accepted by bwrap and filters absolutely nothing, which
+/// is the one failure that would look like success.
+fn usable_program(file: File) -> Result<File, String> {
+    match file.metadata() {
+        Ok(meta) if meta.len() > 0 => Ok(file),
+        Ok(_) => Err("вышел пустым".to_owned()),
+        Err(e) => Err(format!("не прочитать ({e})")),
     }
-    Some(file)
 }
 
 /// Start the filtered session bus and wait for its socket.
@@ -1280,6 +1288,22 @@ pub fn run(args: Args) -> u8 {
         return EXIT_NOT_STARTED;
     };
     let runtime = runtime_dir();
+
+    // --- SECCOMP ---
+    // First, before anything is asked or started: no filter, no sandbox
+    // ([`seccomp_program`]). The descriptor is close-on-exec, so the bus
+    // proxy and filter started below do not inherit it; bwrap gets its copy
+    // at SECCOMP_FD.
+    let program = match seccomp_program() {
+        Ok(program) => program,
+        Err(why) => {
+            eprintln!(
+                "fs-sandbox: фильтр seccomp {why} — запуск остановлен: без фильтра песочница \
+                 не запускается"
+            );
+            return EXIT_NOT_STARTED;
+        }
+    };
 
     // --- PERMISSIONS ---
     // Asked once per program and remembered. Empty means "nothing beyond the
@@ -1435,10 +1459,6 @@ pub fn run(args: Args) -> u8 {
         return 128 + libc::SIGTERM as u8;
     }
 
-    // --- SECCOMP ---
-    let program = seccomp_program();
-    let seccomp_fd = program.as_ref().map(|_| SECCOMP_FD);
-
     // --- X11 ---
     // The host's X socket is never passed in. With the permission the sandbox
     // gets a satellite of ITS OWN instead, on the already restricted Wayland
@@ -1550,7 +1570,7 @@ pub fn run(args: Args) -> u8 {
         bus_proxy,
         flatpak_info: info,
         display,
-        seccomp_fd,
+        seccomp_fd: SECCOMP_FD,
     };
 
     let mut command = Command::new(&args.tools.bwrap);
@@ -1575,25 +1595,23 @@ pub fn run(args: Args) -> u8 {
              outside (Landlock scopes, Linux 6.12) — in the host's network it reaches them"
         ),
     }
-    if let Some(file) = &program {
-        let raw = file.as_raw_fd();
-        // SAFETY: the closure runs between fork and exec in the child. It calls
-        // only dup2/fcntl, both async-signal-safe, and touches no allocator.
-        unsafe {
-            command.pre_exec(move || {
-                if raw == SECCOMP_FD {
-                    // dup2 onto itself is a no-op and would NOT clear
-                    // FD_CLOEXEC, so the descriptor would be gone by the time
-                    // bwrap looked at it.
-                    if libc::fcntl(raw, libc::F_SETFD, 0) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                } else if libc::dup2(raw, SECCOMP_FD) < 0 {
+    let raw = program.as_raw_fd();
+    // SAFETY: the closure runs between fork and exec in the child. It calls
+    // only dup2/fcntl, both async-signal-safe, and touches no allocator.
+    unsafe {
+        command.pre_exec(move || {
+            if raw == SECCOMP_FD {
+                // dup2 onto itself is a no-op and would NOT clear
+                // FD_CLOEXEC, so the descriptor would be gone by the time
+                // bwrap looked at it.
+                if libc::fcntl(raw, libc::F_SETFD, 0) < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                Ok(())
-            });
-        }
+            } else if libc::dup2(raw, SECCOMP_FD) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
 
     // NOT exec: the bus proxy has to be killed after the program exits, and
@@ -2012,7 +2030,7 @@ mod tests {
             bus_proxy: None,
             flatpak_info: PathBuf::from("/tmp/sb/flatpak-info"),
             display: None,
-            seccomp_fd: None,
+            seccomp_fd: SECCOMP_FD,
         }
     }
 
@@ -2190,6 +2208,9 @@ mod tests {
                 "DBUS_SYSTEM_BUS_ADDRESS",
                 "--unsetenv",
                 "DISPLAY",
+                // The filter, always: a sandbox without one is not started.
+                "--seccomp",
+                "34",
                 "--unshare-pid",
                 "--unshare-ipc",
                 "--unshare-uts",
@@ -2396,13 +2417,13 @@ mod tests {
     fn the_x11_permission_sets_display_and_the_filter_gets_a_number() {
         let mut l = layout();
         l.display = Some(":123".to_string());
-        l.seccomp_fd = Some(34);
+        l.seccomp_fd = 7;
         let got = strs(&bwrap_args(&l, &argv(&["prog"])));
         let i = got.iter().position(|a| a == "DISPLAY").unwrap();
         assert_eq!(got[i - 1], "--setenv");
         assert_eq!(got[i + 1], ":123");
         let s = got.iter().position(|a| a == "--seccomp").unwrap();
-        assert_eq!(got[s + 1], "34");
+        assert_eq!(got[s + 1], "7");
         // The filter must be in place before the namespaces are unshared, i.e.
         // before the trailing block bwrap applies last.
         assert!(s < got.iter().position(|a| a == "--unshare-pid").unwrap());
@@ -2412,6 +2433,39 @@ mod tests {
     fn the_command_is_last_and_separated() {
         let got = strs(&bwrap_args(&layout(), &argv(&["sh", "-c", "echo -- hi"])));
         assert_eq!(got[got.len() - 4..], ["--", "sh", "-c", "echo -- hi"]);
+    }
+
+    // --- THE FILTER ---
+
+    /// The sandbox's filter builds here, is a whole number of instructions
+    /// and waits at its start for bwrap — and is close-on-exec, so that what
+    /// `run` starts before bwrap does not inherit it.
+    #[test]
+    fn the_sandboxs_filter_is_a_program_on_a_private_descriptor() {
+        use std::io::{Read, Seek};
+        let mut file = seccomp_program().expect("the sandbox's filter did not build");
+        assert_eq!(file.stream_position().unwrap(), 0, "not rewound for bwrap");
+        let mut bpf = Vec::new();
+        file.read_to_end(&mut bpf).unwrap();
+        assert!(!bpf.is_empty() && bpf.len() % 8 == 0, "{} bytes", bpf.len());
+        // SAFETY: fcntl(F_GETFD) on a descriptor this test owns.
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0, "flags {flags}");
+    }
+
+    /// An empty program is no filter: bwrap would take it and filter nothing,
+    /// so it is a refusal, never a sandbox without seccomp (fail-closed,
+    /// 2026-09-27).
+    #[test]
+    fn an_empty_program_is_a_refusal_and_not_a_sandbox_without_a_filter() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("vz-empty-bpf-{}", std::process::id()));
+        let empty = File::create(&path).unwrap();
+        assert!(usable_program(empty).is_err());
+        let mut one = File::create(&path).unwrap();
+        one.write_all(&[0u8; 8]).unwrap();
+        assert!(usable_program(one).is_ok());
+        let _ = fs::remove_file(&path);
     }
 
     // --- THE REST ---
