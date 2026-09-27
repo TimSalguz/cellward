@@ -536,7 +536,9 @@ pub fn own_name(key: &str) -> String {
 ///    `.lastprofile` is usually empty for somebody who pinned one;
 /// 3. the global `default-profile` setting when it is an answer (`main`,
 ///    `own`, an existing container);
-/// 4. `.lastprofile`; one that is gone is the program's own container, not
+/// 4. the container a copy of it runs in already, as the launch window
+///    preselects it: a program that runs somewhere was put there;
+/// 5. `.lastprofile`; one that is gone is the program's own container, not
 ///    the whole real home — and so is none at all ([`Memory::last_choice`]).
 ///
 /// Whole containers, never a part of one laid over another: the shell's
@@ -560,6 +562,13 @@ pub fn container_without_dialog(
         "ask" => {}
         name if exists(name) => return Container::from_selector(name, &exists),
         _ => {}
+    }
+    if let Some(running) = memory
+        .running
+        .as_ref()
+        .and_then(|running| Container::from_selector_checked(&running.selector, &exists))
+    {
+        return running;
     }
     memory
         .last_choice()
