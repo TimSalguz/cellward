@@ -5969,9 +5969,11 @@ pub fn app_ruleset_with(first: &[String]) -> String {
 /// nested user namespace does not change its kuid.
 ///
 /// Core `nf_tables` only — `meta skuid`, the address payloads and anonymous
-/// sets — and no `fib`: an expression in a module of its own is not loaded
-/// for a user namespace (`docs/GOTCHAS.md` §14), and the rule would not load
-/// on a host that did not load that module first. Addresses inside the
+/// sets — and no `fib`: what every zone's second echelon needs loaded
+/// anyway. An expression in a module of its own is one more module a host
+/// may lack, or may not load on a user namespace's request (the VM probe
+/// saw `nft_socket` autoloaded from one; `docs/GOTCHAS.md` §14), and the
+/// zone refuses to carry instances without this rule. Addresses inside the
 /// ranges named already are left out of the sets: an anonymous interval set
 /// takes no overlap.
 pub fn bridge_refusal_rules(uid: u32, addresses: &[IpAddr]) -> Vec<String> {

@@ -214,9 +214,14 @@ with subtest("probe (d): a socket cgroupv2 rule in a user-owned namespace passes
     before = "nft_socket" in loaded(["nft_socket"])
     got = try_rule()
     if got["loaded"]:
+        after = "nft_socket" in loaded(["nft_socket"])
         verdict(
             "nft_socket",
-            "loaded before the probe" if before else "autoloaded from a user namespace",
+            "loaded before the probe"
+            if before
+            else "autoloaded from a user namespace (in /sys/module after the rule loaded)"
+            if after
+            else "built into the kernel",
         )
     else:
         assert not before, f"nft_socket is loaded and the rule was refused: {got}"
@@ -233,7 +238,11 @@ with subtest("probe (d): a socket cgroupv2 rule in a user-owned namespace passes
         f"loads in a user-owned netns (level {level}); passes the cgroup's sockets, drops "
         "the others, and a socket born before its process moved in stays outside",
     )
-    alice("systemctl --user stop vzprobe.service vzprobe-prog.service")
+    # The unit with the cgroups first: its end takes the moved sleep, the
+    # shell that waited for it ends, and its transient unit is gone by the
+    # time it would be stopped.
+    alice("systemctl --user stop vzprobe.service")
+    alice("systemctl --user stop vzprobe-prog.service 2>/dev/null || true")
 
 with subtest("probe (g), informative: pasta instead of passt, handed the tap itself (J4)"):
     code, out = machine.execute(
