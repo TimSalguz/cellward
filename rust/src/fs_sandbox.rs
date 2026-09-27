@@ -1285,6 +1285,7 @@ pub fn run(args: Args) -> u8 {
         }
     }
 
+    let mut asked = None;
     if !perm_file.is_file() {
         let perms = if has_graphics() {
             ask_permissions(
@@ -1304,9 +1305,13 @@ pub fn run(args: Args) -> u8 {
                 "fs-sandbox: cannot write {}: {e} — asking again next time",
                 perm_file.display()
             );
+            asked = Some(perms);
         }
     }
-    let mut perms = Perms::parse(&fs::read_to_string(&perm_file).unwrap_or_default());
+    let mut perms = match asked {
+        Some(perms) => perms,
+        None => Perms::parse(&fs::read_to_string(&perm_file).unwrap_or_default()),
+    };
     perms.x11 |= args.x11;
     if !perms.home {
         for (allowed, name) in [
