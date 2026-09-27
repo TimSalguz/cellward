@@ -220,10 +220,21 @@ with subtest("a zone of a previous build (no bridge): entered as before, and the
     status = json.loads(alice("cellward status --json"))
     net = next(n for n in status["networks"] if n["name"] == "vmreal")
     assert net["bridge"] is False, net
-    # Restarted, it carries instances again.
+    # Restarted, it carries instances again — and a launch goes out through
+    # it, which is also the tunnel's first handshake since the restart (the
+    # checks after this file want one: WireGuard makes none with nothing
+    # to send; red once in CI).
     alice("cellward down vmreal")
     alice("cellward up vmreal")
     machine.succeed(f"test -S {STATE}/vmreal/bridge.sock")
+    machine.wait_until_succeeds(
+        "su -l alice -c "
+        + shlex.quote(
+            "export XDG_RUNTIME_DIR=/run/user/1000; "
+            "cellward run vmreal -- socat -T5 - TCP:10.99.0.1:8080 | grep -q peer=10.99.0.2"
+        ),
+        timeout=60,
+    )
 
 # The zone was restarted: its app namespace is another process now.
 rzpid = machine.succeed(f"cat {STATE}/vmreal/zone.pid").strip()
