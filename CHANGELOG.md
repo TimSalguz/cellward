@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **IPv6 for a user zone through a system zone** (2026-09-27). Its pasta
+  ran with `-4`, so such a zone never had IPv6 even when the system zone's
+  tunnel carried it. A system zone now marks that its network carries IPv6
+  (`/run/vpn-zones/system/<zone>/ipv6`: its tunnel has a v6 address, or a
+  plain zone's interface has usable IPv6), and the user zones' pasta passes
+  IPv6 on only then. pasta's sockets are in the system zone's network,
+  whose only way out is its tunnel or its one interface, and the bridge's
+  group is refused every local address there, both families. The bridge VM
+  test's system zone carries IPv6 now: the user zone goes out over it as the
+  system zone, and does not reach a service of the system zone's own.
 - **IPv6 through an OpenConnect tunnel** (2026-09-27, the owner: IPv6 is
   needed, and it has to stay in the tunnel, not be switched off). The
   client ran with `--disable-ipv6`, so an OpenConnect zone never had IPv6.

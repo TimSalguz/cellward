@@ -105,6 +105,8 @@ let
       };
 
     testScript = ''
+      import ipaddress
+      import re
       import shlex
 
       def as_user(user, cmd):
@@ -144,10 +146,17 @@ let
           server_ip = server.succeed(
               "ip -4 -o addr show eth1 | head -1 | tr -s ' ' | cut -d' ' -f4 | cut -d/ -f1"
           ).strip()
+          # IPv6 inside the tunnel too: the user zones through sz get it
+          # (2026-09-27; their pasta was IPv4 only).
           server.succeed(
               "ip link add wg0 type wireguard && ip addr add 10.99.0.1/24 dev wg0 && "
+              "ip -6 addr add fd99::1/64 dev wg0 nodad && "
               "wg set wg0 listen-port 51820 private-key /root/wg.key "
-              f"peer '{cpub}' allowed-ips 10.99.0.2/32 && ip link set wg0 up"
+              f"peer '{cpub}' allowed-ips 10.99.0.2/32,fd99::2/128 && ip link set wg0 up"
+          )
+          server.succeed(
+              "systemd-run --unit=hello6 socat TCP6-LISTEN:8081,bind=[fd99::1],fork,reuseaddr "
+              "'SYSTEM:echo peer=$SOCAT_PEERADDR'"
           )
           server.succeed(
               "systemd-run --unit=hello socat TCP-LISTEN:8080,bind=10.99.0.1,fork,reuseaddr "
@@ -164,9 +173,9 @@ let
           )
           machine.succeed(
               "mkdir -p /var/lib/vpn-zones/system/sz && "
-              f"printf '[Interface]\\nPrivateKey = {cpriv}\\nAddress = 10.99.0.2/32\\n"
+              f"printf '[Interface]\\nPrivateKey = {cpriv}\\nAddress = 10.99.0.2/32, fd99::2/128\\n"
               f"DNS = 10.99.0.1\\n\\n[Peer]\\nPublicKey = {spub}\\n"
-              f"AllowedIPs = 0.0.0.0/0\\nEndpoint = {server_ip}:51820\\n' "
+              f"AllowedIPs = 0.0.0.0/0, ::/0\\nEndpoint = {server_ip}:51820\\n' "
               "> /var/lib/vpn-zones/system/sz/config.conf && "
               "chmod 600 /var/lib/vpn-zones/system/sz/config.conf"
           )
@@ -206,6 +215,36 @@ let
           assert pastas("alice") and not pastas("root"), out
           # Its liveness is the system zone's handshake.
           machine.wait_until_succeeds(alice("cellward check mz"), timeout=60)
+
+      # IPv6 through the system zone: the user zone gets it when sz's tunnel
+      # carries it, goes out as sz, and reaches nothing of sz's own over it.
+      with subtest("IPv6 through the system zone: out through its tunnel, not into it"):
+          machine.succeed("test -e /run/vpn-zones/system/sz/ipv6")
+          out = machine.succeed(alice("cellward run mz -- ip -6 route show default"))
+          assert "dev awg0" in out, out
+          out = machine.succeed(alice("cellward run mz -- socat -T10 - TCP6:[fd99::1]:8081"))
+          seen = re.search(r"peer=\[?([0-9a-fA-F:]+)\]?", out)
+          assert seen and ipaddress.ip_address(seen.group(1)) == ipaddress.ip_address(
+              "fd99::2"
+          ), f"the server saw someone else over v6: {out}"
+          # A service of sz's on its v6 address: sz reaches it, the user zone
+          # does not — the bridge's group is refused every local address,
+          # both families.
+          machine.succeed(
+              "systemd-run --unit=insz6 -p NetworkNamespacePath=/run/netns/vz-sz "
+              "socat TCP6-LISTEN:8094,fork,reuseaddr 'SYSTEM:echo inside6'"
+          )
+          machine.wait_until_succeeds(
+              "ip netns exec vz-sz socat -T5 - TCP6:[fd99::2]:8094 </dev/null | grep inside6",
+              timeout=30,
+          )
+          out = machine.succeed(
+              alice(
+                  "cellward run mz -- sh -c "
+                  "'timeout -s KILL 5 socat -T3 - TCP6:[fd99::2]:8094 </dev/null; true'"
+              )
+          )
+          assert "inside6" not in out, out
 
       with subtest("from inside a user zone, no door to the system tier (review)"):
           # The service's socket is hidden in every user zone: a program in

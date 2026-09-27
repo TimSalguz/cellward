@@ -1029,6 +1029,7 @@ fn spawn_uplink_pasta(
     pid: i32,
     user: &User,
     pid_file: Option<&Path>,
+    ipv6: bool,
 ) -> Result<std::process::Child, String> {
     use std::os::unix::process::CommandExt;
     let sysnet_fd = sysnet.as_raw_fd();
@@ -1059,7 +1060,13 @@ fn spawn_uplink_pasta(
         .arg(&user_path)
         .arg("--netns")
         .arg(&net_path)
-        .args(["--config-net", "-q", "-I", zone::TUN_IFACE, "-f", "-4"])
+        .args(["--config-net", "-q", "-I", zone::TUN_IFACE, "-f"])
+        // IPv6 when the system zone's network carries it (`system::IPV6_MARK`):
+        // pasta's sockets are in that network, whose only way out is its
+        // tunnel (or a plain zone's one interface), so IPv6 has nowhere else
+        // to go; the guest's gateway is pasta's link-local one. Otherwise IPv4
+        // only, as before 2026-09-27.
+        .args(if ipv6 { &[][..] } else { &["-4"][..] })
         // pasta would watch the namespace's /proc directory to quit with it,
         // and that directory is the zone's uid 0's, not the user's: EACCES.
         // Its life is this service's to end anyway, on the zone letting go.
@@ -1194,7 +1201,9 @@ fn serve_uplink(
     system::make_pasta_pid_dir()?;
     let pid_file =
         Path::new(system::PASTA_PID_DIR).join(format!("sysrun-{}.pid", std::process::id()));
-    let mut pasta = spawn_uplink_pasta(&sysnet, &userns, &netns, pid, &user, Some(&pid_file))?;
+    let ipv6 = system::run_dir(zone).join(system::IPV6_MARK).is_file();
+    let mut pasta =
+        spawn_uplink_pasta(&sysnet, &userns, &netns, pid, &user, Some(&pid_file), ipv6)?;
     // The namespace pasta was started in: the one to follow if it changes.
     let mut serving = file_ns_id(&sysnet);
     drop(sysnet);
@@ -1292,7 +1301,8 @@ fn serve_uplink(
                     );
                     return Ok(answer_exit(1));
                 }
-                match spawn_uplink_pasta(&file, &userns, &netns, pid, &user, None) {
+                let ipv6 = system::run_dir(zone).join(system::IPV6_MARK).is_file();
+                match spawn_uplink_pasta(&file, &userns, &netns, pid, &user, None, ipv6) {
                     Ok(child) => {
                         pasta = Some(child);
                         serving = Some(id);

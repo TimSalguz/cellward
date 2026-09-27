@@ -896,6 +896,7 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
         } else {
             pasta.arg("-4");
         }
+        mark_ipv6(&name, v6);
         println!("system zone {name}: out through {interface} only");
     }
     pasta.args(zone::PASTA_CLOSED);
@@ -1107,6 +1108,26 @@ pub fn is_foreign_config(name: &str, path: &Path) -> bool {
 /// In the run directory: the gid the rule that keeps user zones out of this
 /// zone is for, written once the rule is in.
 pub const BRIDGE_RULE: &str = "bridge-gid";
+
+/// This zone's network carries IPv6 — its tunnel has a v6 address, or a plain
+/// zone's interface has usable IPv6: a marker in its run directory. The user
+/// zones' way through it (`sysrun`, the uplink's pasta) passes IPv6 on only
+/// then (2026-09-27; before, never). Whatever the marker says, a user zone
+/// reaches nothing of this zone's own: its pasta's group is refused every
+/// local address here, both families (`fib daddr type local`, [`BRIDGE_RULE`]).
+pub const IPV6_MARK: &str = "ipv6";
+
+fn mark_ipv6(name: &str, carried: bool) {
+    let run = run_dir(name);
+    let mark = run.join(IPV6_MARK);
+    if carried {
+        if make_run_dir(&run).is_ok() {
+            let _ = fs::write(&mark, "");
+        }
+    } else {
+        let _ = fs::remove_file(&mark);
+    }
+}
 
 /// A zone's `uplink` file that is there but names no interface a name can be
 /// (`.`, `..`, a slash, a control byte): read as "no uplink" it would send the
@@ -1343,7 +1364,9 @@ fn configure(
         &["route", "replace", "default", "dev", TUN],
         false,
     )?;
-    match zone::v6_plan(Path::new("/proc/net/if_inet6").exists(), tunnel_v6) {
+    let plan = zone::v6_plan(Path::new("/proc/net/if_inet6").exists(), tunnel_v6);
+    mark_ipv6(name, plan == V6Plan::IntoTunnel);
+    match plan {
         V6Plan::NoKernel => {}
         V6Plan::IntoTunnel => ip_in(
             tools,
