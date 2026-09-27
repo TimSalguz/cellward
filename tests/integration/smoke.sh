@@ -1167,9 +1167,11 @@ EOF
   # (zone::client_root; второе мнение 2026-09-27): store, системные программы и
   # библиотеки, хранилище CA, несколько устройств и его каталог. Ни /home, ни
   # /run, ни /var, ни /proc — и никакого сокета ничьего демона.
-  # Утилиты — по store-путям: в корне клиента нет ничего другого.
-  LSREAL=$(readlink -f "$WORK/tools/bin/ls")
-  TESTREAL=$(readlink -f "$WORK/tools/bin/test")
+  # Утилиты — по store-путям: в корне клиента нет ничего другого. Ссылка
+  # buildEnv — на ОДИН уровень: `readlink -f` довёл бы до многоликого
+  # `coreutils`, который без имени applet'а не знает ни `ls`, ни `test`.
+  LSREAL=$(readlink "$WORK/tools/bin/ls")
+  TESTREAL=$(readlink "$WORK/tools/bin/test")
   in_client() {
     "$NSENTER" -U -m -t "$OCPID" -- "$@"
   }
