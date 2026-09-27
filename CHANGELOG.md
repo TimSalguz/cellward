@@ -257,7 +257,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   around the tunnel, or lift the covers. It now runs as an id of its own —
   an OpenConnect zone's user namespace maps a third id, `1` inside and the
   second subordinate uid/gid outside — with no capabilities, no
-  supplementary groups and `no_new_privs`. What needed the rights is the
+  supplementary groups, `no_new_privs`, and the sandbox's seccomp blocklist
+  with nested user namespaces refused (a client that cannot have its filter
+  does not start). What needed the rights is the
   uplink's now: it makes `awg0` in advance, persistent and owned by the
   client's id, for the client's `TUNSETIFF` to attach to; gives the client
   one directory, `/tmp/openconnect` in the uplink's own `/tmp` (which only

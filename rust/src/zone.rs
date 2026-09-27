@@ -132,6 +132,7 @@ use crate::config::{Endpoint, EndpointHost, Family, WgConfig};
 use crate::hostif::{self, HostIfConfig};
 use crate::openconnect::{self, OcConfig};
 use crate::profile::{exit_code_of, home_dir};
+use crate::seccomp;
 use crate::sys;
 use crate::sysuplink::{self, SysUplinkConfig};
 
@@ -4418,11 +4419,23 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
         Stdio::null()
     });
 
+    // And the sandbox's blocklist of syscalls, nested user namespaces
+    // included: the client builds no sandbox of its own, and a user namespace
+    // of its own is the one place it could hold capabilities again — over
+    // nothing of the zone's, but it is kernel surface the client has no use
+    // for. Built here; loaded in the child, where nothing may be allocated.
+    // No filter, no client: this is the part of the zone a gateway talks to.
+    let filter = seccomp::Filter::build(seccomp::FilterOptions { deny_userns: true })
+        .and_then(|f| f.instructions())
+        .map_err(|e| format!("cannot build the client's seccomp filter: {e}"))?;
+    let filter_len = u16::try_from(filter.len())
+        .map_err(|_| "the client's seccomp filter is too long to load".to_string())?;
+
     // SAFETY: getpid(2) takes no arguments and cannot fail.
     let uplink = unsafe { libc::getpid() };
     // SAFETY: pre_exec runs between fork and execve in the child; every call
-    // here takes plain integers or a null pointer, allocates nothing and is
-    // async-signal-safe.
+    // here takes plain integers, a null pointer or a pointer to memory that
+    // lives through the call, allocates nothing and is async-signal-safe.
     unsafe {
         cmd.pre_exec(move || {
             // WHO THE CLIENT IS: `CLIENT_ID`, with no supplementary groups —
@@ -4451,6 +4464,20 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
             }
             if libc::getppid() != uplink {
                 return Err(io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            // Last: the filter holds from here to the client's end, and
+            // no_new_privs above is what lets an unprivileged process load it.
+            let program = libc::sock_fprog {
+                len: filter_len,
+                filter: filter.as_ptr().cast_mut(),
+            };
+            if libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                std::ptr::from_ref(&program),
+            ) != 0
+            {
+                return Err(io::Error::last_os_error());
             }
             Ok(())
         });

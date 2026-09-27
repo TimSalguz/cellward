@@ -258,6 +258,29 @@ impl Filter {
         Ok(bpf)
     }
 
+    /// The compiled program as the kernel's own instructions, for a process
+    /// that loads it itself between fork and exec, where nothing may be
+    /// allocated: built here, loaded there with one `prctl(PR_SET_SECCOMP)`.
+    /// (The OpenConnect client, `crate::zone`.)
+    pub fn instructions(&self) -> Result<Vec<libc::sock_filter>, Error> {
+        let bpf = self.export_bpf()?;
+        if bpf.is_empty() || bpf.len() % 8 != 0 {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("a program of {} bytes is not instructions", bpf.len()),
+            )));
+        }
+        Ok(bpf
+            .chunks_exact(8)
+            .map(|insn| libc::sock_filter {
+                code: u16::from_ne_bytes([insn[0], insn[1]]),
+                jt: insn[2],
+                jf: insn[3],
+                k: u32::from_ne_bytes([insn[4], insn[5], insn[6], insn[7]]),
+            })
+            .collect())
+    }
+
     /// Load the filter into the **current process**. Irreversible.
     pub fn load(&self) -> Result<(), Error> {
         self.ctx.load()?;
@@ -423,6 +446,20 @@ mod tests {
     /// call past the rules (review 2026-09-25 asked). libseccomp checks the
     /// bit and sends such calls to the bad-arch action — killed, not let
     /// through; this keeps it so.
+    /// The instructions are the exported program, one for every eight bytes.
+    #[test]
+    fn the_instructions_are_the_program() {
+        let filter = Filter::build(FilterOptions { deny_userns: true }).unwrap();
+        let bpf = filter.export_bpf().unwrap();
+        let insns = filter.instructions().unwrap();
+        assert_eq!(insns.len() * INSN_LEN, bpf.len());
+        for (insn, raw) in insns.iter().zip(bpf.chunks(INSN_LEN)) {
+            assert_eq!(insn.code, insn_code(raw));
+            assert_eq!((insn.jt, insn.jf), (raw[2], raw[3]));
+            assert_eq!(insn.k, u32::from_ne_bytes([raw[4], raw[5], raw[6], raw[7]]));
+        }
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn x32_calls_are_not_let_past_the_rules() {

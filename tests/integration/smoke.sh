@@ -1120,6 +1120,9 @@ EOF
   occaps=$(awk '/^Cap(Eff|Prm|Amb):/ { print $2 }' "/proc/$OCPID/status" | sort -u)
   [ "$occaps" = "0000000000000000" ] || fail "у клиента остались capabilities: $occaps"
   grep -Eq '^NoNewPrivs:[[:space:]]+1' "/proc/$OCPID/status" || fail "клиент без no_new_privs"
+  # И фильтр seccomp (2 — режим filter): блоклист песочницы вместе с запретом
+  # вложенных user namespace.
+  grep -Eq '^Seccomp:[[:space:]]+2' "/proc/$OCPID/status" || fail "клиент без фильтра seccomp"
   ocgroups=$(awk '/^Groups:/ { $1 = ""; print }' "/proc/$OCPID/status" | tr -d ' \t')
   [ -z "$ocgroups" ] || fail "у клиента остались дополнительные группы: $ocgroups"
   # Главное следствие: снять фильтр аплинка от ЕГО имени нельзя. nft — по
