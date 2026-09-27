@@ -301,6 +301,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **Tray icons of today's Electron in zones and containers** (owner
+  2026-09-27: Claude Desktop in its own sandbox, closed to the tray, gone).
+  Electron now names its icon `org.freedesktop.StatusNotifierItem-<pid>-<n>`
+  (Claude Desktop 2.110's log: "Failed to get the ownership of
+  org.freedesktop.StatusNotifierItem-13-1"), and the session bus filter let
+  a program own only the KDE spelling, `org.kde.StatusNotifierItem-…`. Both
+  are owned now, by the same rule of our patched proxy: that name and
+  nothing more — not the portals' or the notification daemon's names under
+  `org.freedesktop.*`. Checked in the VM test next to the KDE spelling.
 - **A zone's program cannot open a vsock — or any socket its network
   namespace does not hold** (2026-09-27, `docs/LEAK-MODEL.md` §25). A VM
   test showed a program in a zone reaching a vsock listener of the host's:

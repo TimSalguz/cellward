@@ -121,7 +121,8 @@ let
   # `--own=ИМЯ.*` — то же для ИМЯ.<имя> (MPRIS-плееры: у апстрима это OWN на всё
   # поддерево, то есть разговор с целым соединением любого хостового плеера).
   # Нужна значкам трея: Electron и Qt регистрируют их под
-  # org.kde.StatusNotifierItem-<pid>-<n>, а шаблоны xdg-dbus-proxy бывают только
+  # org.kde.StatusNotifierItem-<pid>-<n> (нынешний Electron — под
+  # org.freedesktop.StatusNotifierItem-<pid>-<n>), а шаблоны xdg-dbus-proxy бывают только
   # вида org.kde.* — а занять любое org.kde.* значит занять и имя KWallet.
   dbusProxy = pkgs.xdg-dbus-proxy.overrideAttrs (old: {
     patches = (old.patches or [ ]) ++ [ ./patches/xdg-dbus-proxy-own-prefix.patch ];

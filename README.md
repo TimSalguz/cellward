@@ -601,7 +601,8 @@ The subtleties that took the most time are commented in detail in
   parameters, on which `awg setconf` rejects the whole file;
 - the session bus filter is `xdg-dbus-proxy` with one small patch of ours
   (`module/patches/`): its wildcards are only `org.kde.*`-shaped, and a tray
-  icon of Electron or Qt must own `org.kde.StatusNotifierItem-<pid>-<n>` —
+  icon of Electron or Qt must own `org.kde.StatusNotifierItem-<pid>-<n>` (or,
+  today's Electron, `org.freedesktop.StatusNotifierItem-<pid>-<n>`) —
   owning all of `org.kde.*` would own KWallet's name too, so `--own=NAME-*`
   owns that prefix and nothing more;
 - the system tier's services join a zone through a systemd generator, not

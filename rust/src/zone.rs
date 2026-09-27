@@ -349,11 +349,16 @@ pub fn runtime_entry_kept(name: &str, hermetic: bool, raw_pipewire: bool) -> boo
 /// Wildcards: a `.*` suffix as in xdg-dbus-proxy itself, and `-*` for OWN
 /// only — our patch of it (`module/patches/xdg-dbus-proxy-own-prefix.patch`),
 /// without which the stock proxy refuses the rule and does not start at all.
-/// Tray icons need it: Electron and Qt register theirs as
-/// `org.kde.StatusNotifierItem-<pid>-<n>` and show nothing if they may not own
-/// that name (owner, 2026-09-24: no tray icon from Claude Desktop in a hermetic
-/// zone). `--own=org.kde.*` would do it too — and let the program take
-/// `org.kde.kwalletd6` and collect other programs' passwords.
+/// Tray icons need it: Qt and older Electron register theirs as
+/// `org.kde.StatusNotifierItem-<pid>-<n>`, the Electron of today (Claude
+/// Desktop 2.110, 2026-09-27: "Failed to get the ownership of
+/// org.freedesktop.StatusNotifierItem-13-1") as
+/// `org.freedesktop.StatusNotifierItem-<pid>-<n>`, and they show nothing if
+/// they may not own that name (owner, 2026-09-24 and again 2026-09-27: no tray
+/// icon from Claude Desktop in a hermetic zone). `--own=org.kde.*` would do it
+/// too — and let the program take `org.kde.kwalletd6` and collect other
+/// programs' passwords; `--own=org.freedesktop.*` would take the portals' and
+/// the notification daemon's names.
 ///
 /// The portals by name, not `org.freedesktop.portal.*`: that subtree has
 /// `org.freedesktop.portal.Flatpak` in it too, whose whole job is starting
@@ -375,7 +380,7 @@ pub const PORTALS: [&str; 2] = [
 /// stands in for IBus, `org.freedesktop.IBus` is the same. The portals expose
 /// `CreateInputContext` and contexts guarded by their owner; typing works
 /// through them as it does in Flatpak.
-pub const SESSION_BUS_RULES: [&str; 24] = [
+pub const SESSION_BUS_RULES: [&str; 25] = [
     "--filter",
     PORTALS[0],
     PORTALS[1],
@@ -388,7 +393,8 @@ pub const SESSION_BUS_RULES: [&str; 24] = [
     DESKTOP_SERVICES[6],
     DESKTOP_SERVICES[7],
     DESKTOP_SERVICES[8],
-    TRAY_ITEM_NAMES,
+    TRAY_ITEM_NAMES[0],
+    TRAY_ITEM_NAMES[1],
     // A media player's name to take, and only that: our proxy's `.*` for
     // OWN (module/patches) — upstream, OWN on the subtree was talk to every
     // host player's whole connection (host Firefox's `OpenURL`).
@@ -448,8 +454,13 @@ pub const SCREEN_SAVER: [&str; 6] = [
     "--call=org.freedesktop.ScreenSaver=org.freedesktop.DBus.Introspectable.Introspect@/ScreenSaver",
 ];
 
-/// Tray icons' names, owned and nothing more (see [`SESSION_BUS_RULES`]).
-pub const TRAY_ITEM_NAMES: &str = "--own=org.kde.StatusNotifierItem-*";
+/// Tray icons' names, owned and nothing more (see [`SESSION_BUS_RULES`]): the
+/// KDE spelling and the freedesktop one — the same protocol, and the watcher
+/// takes an item by either.
+pub const TRAY_ITEM_NAMES: [&str; 2] = [
+    "--own=org.kde.StatusNotifierItem-*",
+    "--own=org.freedesktop.StatusNotifierItem-*",
+];
 
 /// The host's system bus.
 pub(crate) const SYSTEM_BUS: &str = "/run/dbus/system_bus_socket";
@@ -6649,7 +6660,11 @@ mod tests {
         assert!(!SESSION_BUS_RULES.iter().any(|r| r.contains("secrets")));
         // Owning a whole org.kde.* would own KWallet's name as well.
         assert!(!SESSION_BUS_RULES.contains(&"--own=org.kde.*"));
-        assert!(SESSION_BUS_RULES.contains(&TRAY_ITEM_NAMES));
+        // And a whole org.freedesktop.* the portals' and the notifications'.
+        assert!(!SESSION_BUS_RULES.contains(&"--own=org.freedesktop.*"));
+        for tray in TRAY_ITEM_NAMES {
+            assert!(SESSION_BUS_RULES.contains(&tray), "{tray}");
+        }
     }
 
     #[test]

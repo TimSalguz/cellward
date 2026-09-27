@@ -1933,6 +1933,10 @@ let
           own = "call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus RequestName su"
           out = in_zone(hp, f"busctl --user --timeout=5 {own} org.kde.StatusNotifierItem-4242-1 4")
           assert out.strip() == "u 1", out
+          # Today's Electron spells it org.freedesktop.… (Claude Desktop 2.110).
+          out = in_zone(hp, f"busctl --user --timeout=5 {own} org.freedesktop.StatusNotifierItem-4242-1 4")
+          assert out.strip() == "u 1", out
+          in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.freedesktop.Notifications 4'")
           in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.kde.kwalletd6 4'")
           in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.kde.StatusNotifierItem-1.evil 4'")
           exec(open("${./vm-promise-keyring.py}").read())
