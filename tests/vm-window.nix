@@ -196,6 +196,9 @@ let
       # text on magenta: near-black, the one that stands out more.
       title = 20
       ink = (0x14, 0x14, 0x14)
+      # The row of buttons at the strip's right end (wl_title::LOOK): three
+      # of 24 — their glyphs are not the title's text.
+      buttons = 3 * 24
 
       def view(app_id):
           """Where sway shows a window's contents, in logical pixels."""
@@ -262,10 +265,11 @@ let
 
       def lettering(at, x, y, w, scale=1):
           """The pixels of the title strip that are not the zone's colour:
-          its text. The strip is under the top border, between the sides."""
+          its text. The strip is under the top border, between the sides,
+          and its text before the row of buttons."""
           d = lambda v: int(round(v * scale))
           rows = range(d(y + width), d(y + width + title))
-          cols = range(d(x + width), d(x + w - width))
+          cols = range(d(x + width), d(x + w - width - buttons))
           return [(c, r) for r in rows for c in cols if at(c, r) != border]
 
       def titled(at, x, y, w, scale=1):

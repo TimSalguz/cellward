@@ -121,6 +121,12 @@ with subtest("the frame's ≡ opens the window menu of that launch"):
     machine.copy_from_vm("/tmp/frame-buttons-menu.png", "")
     alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
     machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=15)
+    # Its unit gone with it: the next menu of the launch may start.
+    machine.wait_until_fails(
+        f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active -q "
+        f"cellward-window-menu-{sup}'",
+        timeout=30,
+    )
     assert node("btn") is not None, "the menu did something"
 
 with subtest("the frame's ⇄ asks for the restart with a network chosen"):
