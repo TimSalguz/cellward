@@ -91,13 +91,50 @@ pub fn layer_dirs(container_dir: &Path) -> (PathBuf, PathBuf) {
 /// The mount points strictly below `home` in a `mountinfo`, relative to it,
 /// each once, and none below another — a recursive bind of the one above
 /// brings it along with its own flags.
+///
+/// A mount that shows exactly what its parent shows there — the same
+/// filesystem, the same place in it, the same flags: a directory bound onto
+/// itself, as a hermetic zone pins the ones above its covers
+/// (`zone::pin_parents`) — is none: given back over a layer, it would bring
+/// the real directory back over the container's, and the mounts below it
+/// count on their own.
 pub fn submounts(mountinfo: &str, home: &Path) -> Vec<PathBuf> {
-    let mut all: Vec<PathBuf> = mountinfo
+    struct Mount {
+        id: String,
+        parent: String,
+        device: String,
+        root: PathBuf,
+        point: PathBuf,
+        flags: String,
+    }
+    let mounts: Vec<Mount> = mountinfo
         .lines()
-        .filter_map(|line| line.split(' ').nth(4))
-        .map(unescape)
-        .filter_map(|point| {
-            PathBuf::from(point)
+        .filter_map(|line| {
+            let mut fields = line.split(' ');
+            Some(Mount {
+                id: fields.next()?.to_owned(),
+                parent: fields.next()?.to_owned(),
+                device: fields.next()?.to_owned(),
+                root: PathBuf::from(unescape(fields.next()?)),
+                point: PathBuf::from(unescape(fields.next()?)),
+                flags: fields.next().unwrap_or_default().to_owned(),
+            })
+        })
+        .collect();
+    let pinned = |m: &Mount| {
+        mounts.iter().find(|p| p.id == m.parent).is_some_and(|p| {
+            p.device == m.device
+                && p.flags == m.flags
+                && m.point
+                    .strip_prefix(&p.point)
+                    .is_ok_and(|rel| !rel.as_os_str().is_empty() && p.root.join(rel) == m.root)
+        })
+    };
+    let mut all: Vec<PathBuf> = mounts
+        .iter()
+        .filter(|m| !pinned(m))
+        .filter_map(|m| {
+            m.point
                 .strip_prefix(home)
                 .ok()
                 .filter(|rel| !rel.as_os_str().is_empty())
@@ -270,6 +307,31 @@ mod tests {
         assert_eq!(
             submounts(info, Path::new("/home/u")),
             [".local/state/vpn-zones", "Games", "My Disk"].map(PathBuf::from)
+        );
+    }
+
+    /// A hermetic zone's pins (`zone::pin_parents`) are no mounts to give
+    /// back: what is below them is, each on its own — a read-only bind of a
+    /// directory onto itself is not a pin, its flags differ.
+    #[test]
+    fn a_directory_bound_onto_itself_is_no_mount_but_what_is_below_it_is() {
+        let info = "36 1 0:32 / / rw,relatime - btrfs /dev/x rw\n\
+                    50 36 0:32 /home/u/.config /home/u/.config rw,relatime - btrfs /dev/x rw\n\
+                    51 50 0:32 /home/u/.config/autostart /home/u/.config/autostart ro,relatime - btrfs /dev/x rw\n\
+                    52 50 0:45 / /home/u/.config/ibus rw - tmpfs t rw\n\
+                    53 36 0:32 /home/u/.local /home/u/.local rw,relatime - btrfs /dev/x rw\n\
+                    54 53 0:32 /home/u/.local/share /home/u/.local/share rw,relatime - btrfs /dev/x rw\n\
+                    55 54 0:32 /home/u/.local/share/vpn-zones /home/u/.local/share/vpn-zones ro,relatime - btrfs /dev/x rw\n\
+                    56 36 0:32 /srv/data /home/u/data rw,relatime - btrfs /dev/x rw\n";
+        assert_eq!(
+            submounts(info, Path::new("/home/u")),
+            [
+                ".config/autostart",
+                ".config/ibus",
+                ".local/share/vpn-zones",
+                "data"
+            ]
+            .map(PathBuf::from)
         );
     }
 

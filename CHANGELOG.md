@@ -249,6 +249,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A hermetic zone cannot move the covers away by renaming what is above
+  them** (bug hunt 2026-09-27). A cover holds the directory it is on, not
+  its name: a program in a hermetic zone could `mv ~/.config
+  ~/.config.old`, taking the read-only covers along, and make a new
+  `~/.config/autostart/` — run by the host at its next login — or a
+  `~/.local/state/vpn-zones` of its own where the host looks for its
+  state. The directories between the home and every covered place
+  (`~/.config`, `~/.local`, `~/.local/share`, `~/.local/state`,
+  `~/.cache`) are now mount points of themselves in the zone, which the
+  kernel does not let a program rename or remove. The price, in hermetic
+  zones with the host's files read-only only: a rename across one of them
+  fails as between two disks (EXDEV) — moving a file from the home into
+  `~/.local/share/Trash` among them; programs copy then, or say they
+  cannot. A layer container does not take these for mounts to give back.
 - **IBus's places are covered in a zone even where IBus had never run**
   (bug hunt 2026-09-27). A zone hid IBus's addresses and private bus only
   where their directories were when it came up: on a host where IBus

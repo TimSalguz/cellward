@@ -3724,6 +3724,7 @@ const HOST_RUNS_IN_ZONES: &[&str] = &[
 /// and said so. A directory home-manager fills with links is covered whole.
 /// Fatal when a real one cannot be made read-only.
 fn protect_host_files(zone: &Zone) -> Result<(), String> {
+    pin_parents(zone)?;
     let mut covered = 0;
     let mut links = Vec::new();
     for entry in ENTRY_POINTS.iter().chain(HOST_RUNS_IN_ZONES) {
@@ -3754,6 +3755,62 @@ fn protect_host_files(zone: &Zone) -> Result<(), String> {
             format!("; links, which a mount cannot cover: {}", links.join(", "))
         }
     );
+    Ok(())
+}
+
+/// The directories between the home and every place a hermetic zone covers,
+/// each made a mount point of itself: a mount point is neither renamed nor
+/// removed in its namespace (EBUSY). A cover holds the directory it is on,
+/// not its name: `mv ~/.config ~/.config.old` took the covers along, and a
+/// new `~/.config/autostart/` was the host's at its next login — or a
+/// `~/.local/state/vpn-zones` of the zone's making, where the host looks for
+/// its own (review 2026-09-27). Only where the host's startup places are
+/// read-only: elsewhere `~/.bashrc` is the zone's to write anyway. The price:
+/// a rename across one of these is EXDEV, as between two disks — a file
+/// moved from the home into `~/.local/share/Trash` among them; programs copy
+/// then, or say they cannot. Shallow first, and recursive: what is mounted
+/// below stays. A link is left, and said so: a mount follows it.
+fn pin_parents(zone: &Zone) -> Result<(), String> {
+    let mut places: Vec<PathBuf> = ENTRY_POINTS
+        .iter()
+        .chain(HOST_RUNS_IN_ZONES)
+        .chain(READ_ONLY_IN_ZONES.iter())
+        .chain(crate::home_layer::STORAGE.iter())
+        .map(|p| zone.home.join(p))
+        .collect();
+    places.extend(input_method_places(&zone.home));
+    places.extend(zone.dir.parent().map(Path::to_path_buf));
+    // Component-wise order: a directory before those below it.
+    let mut parents = std::collections::BTreeSet::new();
+    for place in &places {
+        let Ok(rel) = place.strip_prefix(&zone.home) else {
+            continue;
+        };
+        let mut dir = zone.home.clone();
+        let components: Vec<_> = rel.components().collect();
+        for component in &components[..components.len().saturating_sub(1)] {
+            dir.push(component);
+            parents.insert(dir.clone());
+        }
+    }
+    let mut links = Vec::new();
+    for dir in parents {
+        match fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_symlink() => links.push(dir.display().to_string()),
+            Ok(meta) if meta.is_dir() => {
+                sys::mount(dir.as_os_str(), &dir, "", libc::MS_BIND | libc::MS_REC, "")
+                    .map_err(|e| format!("cannot pin {}: {e}", dir.display()))?;
+            }
+            _ => {}
+        }
+    }
+    if !links.is_empty() {
+        eprintln!(
+            "zone {}: links, which a mount cannot pin — a program of the zone can rename them: {}",
+            zone.name(),
+            links.join(", ")
+        );
+    }
     Ok(())
 }
 
