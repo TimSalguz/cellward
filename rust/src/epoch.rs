@@ -323,7 +323,16 @@ fn wait_for(watch: Option<&crate::sys::Inotify>, wake: Option<RawFd>) -> io::Res
             watch.names()?;
         }
     }
-    // The wake-up pipe is the keeper's to empty: its stop is what is asked.
+    // The keeper's wake-up pipe emptied, as its other waits do: what woke
+    // it is in its flags (a stop, a child's end), looked at by the caller.
+    if fds[1].revents != 0 {
+        if let Some(wake) = wake {
+            let mut buf = [0u8; 64];
+            // SAFETY: read(2) into a buffer of the length passed; the pipe
+            // is non-blocking.
+            while unsafe { libc::read(wake, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+        }
+    }
     Ok(())
 }
 

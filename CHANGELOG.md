@@ -6,6 +6,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A container's network switched live** (2026-09-27, stage 4b of the
+  container-first model; `docs/LEAK-MODEL.md` §29, `docs/THREAT-MODEL.md`
+  N19–N21). **`cellward container set <c> network <net>`** while the
+  container's programs run switches its instance's way out without
+  restarting them — after showing what it breaks and what it cannot
+  (`--yes` without asking; `--restart` closes the programs and binds the
+  container instead). Never two ways out at once: the old relay is killed
+  and reaped first; loopback and the unreachable defaults alone in between;
+  the programs are frozen and moved into the next epoch, every socket that
+  may reach out destroyed (`SOCK_DESTROY`) and muted for good by the wall —
+  the instance's rules let out only a socket born in the new epoch, from
+  the new address; DNS follows through the constant forwarders. Any failure
+  after the cut leaves the container cut, in the new network, never back in
+  the old. Only the person, only from the host: the instance's control
+  socket takes `SWITCH <net>` from a peer of the host's user namespace
+  alone; the broker has no such verb. Refused, with the way out, for an
+  instance of one network (`<c>:<net>`, throwaways), a program launched from
+  a login session, a locked current zone, `unconfined`, zones whose search
+  domains differ, a network declared in Nix, a host without `nft_socket` or
+  `SOCK_DESTROY`. After the switch, the programs that still hold a UDP
+  socket of the old network are named. A zone that comes back now attaches
+  its instances as a new epoch (the fingerprint rule stays for an instance
+  that cannot make one). An offline instance gets the constant
+  `resolv.conf` and the unreachable defaults too. The switch binds the
+  container to the new network and moves its launches' records there
+  (`registry::retarget`): the launch checks, the picker, the focus and
+  `status` see it where it is. Journal: `switch-cut`, `switch`,
+  `switch-refused`, `switch-failed`, `reattach` (with its epoch). `status
+  --json`: `instances[].switch` `{state, from, to}` and
+  `containers[].running[].network_now`.
 - **The epoch wall under a container's live network switch** (2026-09-27,
   stage 4a of the container-first model; `docs/LEAK-MODEL.md` «Смена сети
   на ходу»). A container's instance keeps its programs in a cgroup of the

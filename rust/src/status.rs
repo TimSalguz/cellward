@@ -423,13 +423,18 @@ fn running(tools: &Tools, c: &Container) -> String {
                     },
                     &r.zone,
                 )
-                .filter(|id| instances.iter().any(|i| i.id == *id && i.network == r.zone))
-                .map_or_else(|| "null".to_owned(), |id| string(&id));
+                .and_then(|id| instances.iter().find(|i| i.id == id && i.network == r.zone));
+                // The network it is in now (stage 4): its instance's — a live
+                // switch moves its records as well (`registry::retarget`).
+                let network_now = instance.map_or(r.zone.as_str(), |i| i.network.as_str());
+                let instance = instance.map_or_else(|| "null".to_owned(), |i| string(&i.id));
                 format!(
-                    "{{\"app\":{},\"pid\":{},\"network\":{},\"instance\":{instance}}}",
+                    "{{\"app\":{},\"pid\":{},\"network\":{},\"network_now\":{},\
+                     \"instance\":{instance}}}",
                     string(app),
                     r.pid,
-                    string(&r.zone)
+                    string(&r.zone),
+                    string(network_now)
                 )
             })
             .collect(),
@@ -531,15 +536,31 @@ pub fn instance(tools: &Tools, running: &crate::instance::Running) -> String {
     // `crate::epoch`), as its keeper noted them.
     let epoch = crate::epoch::read(&running.dir).map_or(1, |e| e.n);
     let live_switch = live_switch(crate::epoch::read_live(&running.dir));
+    let switch = switch_state(crate::instance::switch_of(&running.dir));
     format!(
         "{{\"id\":{},\"container\":{container},\"network\":{},\"exit\":{exit},\
          \"why\":{why},\"up\":true,\"pid\":{},\"since\":{since},\"epoch\":{epoch},\
          \"pid_namespace\":{pid_namespace},\"build\":{build},\"restart_needed\":{restart_needed},\
-         \"programs\":{launches},\"live_switch\":{live_switch}}}",
+         \"programs\":{launches},\"live_switch\":{live_switch},\"switch\":{switch}}}",
         string(&running.id),
         string(&running.network),
         running.pid
     )
+}
+
+/// `{state, from, to}` of a live switch under way or failed (stage 4,
+/// `instance::SWITCH`): `cutting`, `attaching` or `failed`; `idle` with
+/// `from` and `to` null when there is none.
+pub fn switch_state(noted: Option<(String, String, String)>) -> String {
+    match noted {
+        Some((state, from, to)) => format!(
+            "{{\"state\":{},\"from\":{},\"to\":{}}}",
+            string(&state),
+            string(&from),
+            string(&to)
+        ),
+        None => "{\"state\":\"idle\",\"from\":null,\"to\":null}".to_owned(),
+    }
 }
 
 /// `{available, reason}` of an instance's live switch (stage 4): its
@@ -941,6 +962,18 @@ mod tests {
         assert_eq!(
             live_switch(None),
             "{\"available\":false,\"reason\":\"previous-build\"}"
+        );
+        assert_eq!(
+            switch_state(None),
+            "{\"state\":\"idle\",\"from\":null,\"to\":null}"
+        );
+        assert_eq!(
+            switch_state(Some((
+                "failed".to_owned(),
+                "nl".to_owned(),
+                "de".to_owned()
+            ))),
+            "{\"state\":\"failed\",\"from\":\"nl\",\"to\":\"de\"}"
         );
     }
 

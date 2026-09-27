@@ -19,7 +19,8 @@ it cut until the person says. Entered here as a launch enters it
 
 import ipaddress
 
-# ikey, instance, in_inst, in_inst_q, CORE: tests/vm-instance-helpers.py.
+# ikey, instance, in_inst, in_inst_q, in_placed, in_placed_q:
+# tests/vm-instance-helpers.py.
 
 
 # The bridge's passt processes in vmreal's app namespace: told by what only
@@ -44,12 +45,26 @@ def wait_exit(id_, exit_, why):
     raise AssertionError(f"{id_}: never {exit_}/{why}: {instance(id_)}")
 
 
+# Changed on purpose in stage 4: entered as a launch from the desktop is,
+# through the user's manager (`in_placed`), and not from a login session
+# (`in_inst`). A zone that comes back makes the instance a new epoch now,
+# and behind its wall a program the kernel did not let into the epoch has
+# no way out (docs/GOTCHAS.md §18).
 def in_i(cmd):
-    return in_inst("vmbr", "vmreal", cmd)
+    return in_placed("vmbr", "vmreal", cmd)
 
 
 def in_i_q(cmd):
-    return in_inst_q("vmbr", "vmreal", cmd)
+    return in_placed_q("vmbr", "vmreal", cmd)
+
+
+BR_CORE = alice("command -v vpn-zone-core").strip()
+
+
+def in_inst_cmd_outside(cmd):
+    """A launch into vmbr as one from a login session makes it: the kernel
+    does not let its program into the instance's epoch."""
+    return f"{BR_CORE} container-enter --instance vmbr --network vmreal -- {cmd}"
 
 
 def a4_of():
@@ -138,8 +153,30 @@ with subtest("the zone back as it was: attached again, with new addresses"):
     machine.wait_until_succeeds(
         in_i_q("socat -T5 - TCP:10.99.0.1:8080 | grep -q peer=10.99.0.2"), timeout=60
     )
+    # Stage 4 (O3 of the design): attached again as a new epoch — every
+    # socket of before behind the wall, as in a switch to the same network.
+    assert instance("vmbr")["epoch"] == 2, instance("vmbr")
 
-with subtest("the zone back as another one: cut until the person says"):
+# Changed on purpose in stage 4: a zone that comes back as another one
+# attaches an instance that can make a new epoch as well (the zone's
+# fingerprint decided before); one that cannot — a program of it launched
+# from a login session, outside its epoch — stays cut until the person says,
+# as in stage 2.
+with subtest("the zone back as another one: cut until the person says, when no new epoch can be made"):
+    machine.succeed(
+        "su -l alice -c "
+        + shlex.quote(
+            "export XDG_RUNTIME_DIR=/run/user/1000; setsid "
+            + in_inst_cmd_outside("sleep 4747")
+            + " </dev/null >/dev/null 2>&1 &"
+        )
+    )
+    for _ in range(120):
+        if instance("vmbr")["live_switch"]["reason"] == "outside":
+            break
+        machine.sleep(0.5)
+    else:
+        raise AssertionError(f"never outside: {instance('vmbr')}")
     alice("cellward down vmreal")
     wait_exit("vmbr", "none", "zone-down")
     alice(f"printf '# another config\\n' >> {STATE}/vmreal/config.conf")
@@ -147,9 +184,17 @@ with subtest("the zone back as another one: cut until the person says"):
     wait_exit("vmbr", "none", "zone-changed")
     links = in_i("ip -o link show")
     assert len(links.strip().splitlines()) == 1, links
+    # The program from the login session gone, a new epoch can be made: the
+    # person's word attaches the instance as one.
+    machine.succeed("pkill -xf 'sleep 4747'")
+    for _ in range(120):
+        if instance("vmbr")["live_switch"]["available"]:
+            break
+        machine.sleep(0.5)
     out = alice("cellward container reattach vmbr")
     assert "vmbr" in out, out
     wait_exit("vmbr", "through", None)
+    assert instance("vmbr")["epoch"] == 3, instance("vmbr")
     machine.wait_until_succeeds(
         in_i_q("socat -T5 - TCP:10.99.0.1:8080 | grep -q peer=10.99.0.2"), timeout=60
     )
@@ -160,6 +205,8 @@ with subtest("the zone back as another one: cut until the person says"):
     kinds = [(e["event"], e.get("why")) for e in events]
     assert ("cut", "zone-down") in kinds and ("cut", "zone-changed") in kinds, kinds
     assert ("reattach", None) in kinds and ("attach", None) in kinds, kinds
+    epochs = {e.get("epoch") for e in events if e["event"] == "reattach"}
+    assert {"2", "3"} <= epochs, events
 
 with subtest("a launch into the zone runs in its container's instance, not in the zone"):
     # The main home's, `main:vmreal`: its own network namespace, the tap,

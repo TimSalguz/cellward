@@ -148,6 +148,7 @@ pub mod seccomp;
 pub mod sockdiag;
 pub mod sockets;
 pub mod status;
+pub mod switch;
 pub mod sys;
 pub mod sysrun;
 pub mod system;

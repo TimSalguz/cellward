@@ -1822,13 +1822,12 @@ pub fn run_instance(tools: Tools, home: PathBuf, plan: crate::instance::Plan) ->
     }
     // Its `resolv.conf` before its space binds it (`instance_ground`): the
     // constant forwarder alone, until an attach says what else — written
-    // over in place then, never replaced (the space holds this file).
-    if plan.network != OFFLINE {
-        let resolv = dir.join(crate::instance::RESOLV);
-        if let Err(e) = fs::write(&resolv, crate::bridge::resolv_text(false, &[])) {
-            eprintln!("instance {id}: cannot write {} ({e})", resolv.display());
-            return 1;
-        }
+    // over in place then, never replaced (the space holds this file). An
+    // offline instance's too (stage 4): a live switch gives it a zone.
+    let resolv = dir.join(crate::instance::RESOLV);
+    if let Err(e) = fs::write(&resolv, crate::bridge::resolv_text(false, &[])) {
+        eprintln!("instance {id}: cannot write {} ({e})", resolv.display());
+        return 1;
     }
     // The network's zone-level settings, frozen for the instance's life: its
     // covers and helpers are made by them once, and `status --json` names
@@ -2355,6 +2354,9 @@ fn keep(
     let mut members: Vec<(i32, OwnedFd)> = Vec::new();
     // Its programs outside the current epoch at the last look (stage 4).
     let mut outside: Vec<i32> = Vec::new();
+    // Connections to the control socket not closed yet (stage 4): a ring
+    // closes at once, a request says one line first.
+    let mut pending: Vec<(std::os::unix::net::UnixStream, Vec<u8>)> = Vec::new();
     let mut armed = false;
     let mut space_gone = false;
     // How the holder ended: KILL passed on from its pid 1 is a kill.
@@ -2375,6 +2377,12 @@ fn keep(
         fds.extend(transport.polled());
         let first_member = fds.len();
         fds.extend(members.iter().map(|(_, fd)| pollin(fd.as_raw_fd())));
+        let first_pending = fds.len();
+        fds.extend(pending.iter().map(|(conn, _)| libc::pollfd {
+            fd: conn.as_raw_fd(),
+            events: libc::POLLIN | libc::POLLRDHUP,
+            revents: 0,
+        }));
         // A child's end whose word an attach's wait took from the pipe:
         // looked at now, not waited for.
         let timeout = if CHILD_ENDED.load(Ordering::SeqCst) {
@@ -2426,14 +2434,48 @@ fn keep(
         if fds[1].revents != 0 {
             if let Some(doorbell) = &doorbell {
                 while let Ok((rung, _)) = doorbell.accept() {
-                    drop(rung);
+                    // Heard until it says a line or closes; a flood of
+                    // connections is not kept — a ring needs none.
+                    if pending.len() < PENDING_MAX && rung.set_nonblocking(true).is_ok() {
+                        pending.push((rung, Vec::new()));
+                    }
                 }
             }
             look = true;
             armed = true;
             transport.reattach(wake_r.as_raw_fd());
         }
-        let ended: Vec<bool> = fds[first_member..].iter().map(|p| p.revents != 0).collect();
+        // Requests (stage 4): each ready connection read; a whole line is
+        // answered — a live switch, with the programs as they are now.
+        let mut heard: Vec<bool> = fds[first_pending..]
+            .iter()
+            .map(|p| p.revents != 0)
+            .collect();
+        // Those just accepted were not polled yet: heard at the next turn.
+        heard.resize(pending.len(), false);
+        let mut requests = Vec::new();
+        let mut kept = Vec::new();
+        for ((conn, mut said), ready) in pending.drain(..).zip(heard) {
+            if !ready {
+                kept.push((conn, said));
+                continue;
+            }
+            match read_request(&conn, &mut said) {
+                Some(Heard::Line(line)) => requests.push((conn, line)),
+                Some(Heard::More) => kept.push((conn, said)),
+                None => {}
+            }
+        }
+        pending = kept;
+        for (conn, line) in requests {
+            let now = || crate::place::members(userns, Some(keeper), Some(space));
+            answer_request(transport, conn, &line, &now, wake_r.as_raw_fd());
+            look = true;
+        }
+        let ended: Vec<bool> = fds[first_member..first_pending]
+            .iter()
+            .map(|p| p.revents != 0)
+            .collect();
         if ended.contains(&true) {
             let mut at = 0;
             let mut outside_ended = false;
@@ -2482,6 +2524,132 @@ fn lock_exclusive_now(lock: &File) -> bool {
     unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
+/// How many connections to the control socket are heard at once (stage 4):
+/// a ring closes at once, a request is one line.
+const PENDING_MAX: usize = 16;
+/// The longest request line.
+const REQUEST_LINE_MAX: usize = 256;
+
+/// What a connection to the control socket said so far.
+enum Heard {
+    /// A whole line.
+    Line(String),
+    /// Nothing whole yet.
+    More,
+}
+
+/// What is there to read on a control connection; `None`: it closed with no
+/// line — a launch's ring — or says more than a request does.
+fn read_request(conn: &std::os::unix::net::UnixStream, said: &mut Vec<u8>) -> Option<Heard> {
+    let mut reader: &std::os::unix::net::UnixStream = conn;
+    let mut buf = [0u8; 128];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => return None,
+            Ok(n) => {
+                said.extend_from_slice(&buf[..n]);
+                if let Some(at) = said.iter().position(|b| *b == b'\n') {
+                    return String::from_utf8(said[..at].to_vec()).ok().map(Heard::Line);
+                }
+                if said.len() > REQUEST_LINE_MAX {
+                    return None;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Some(Heard::More),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Whether the peer of a control connection is the user in the host's user
+/// namespace — this process's — and nothing else (P1 of the live switch): a
+/// program of a zone or of an instance runs as the user as well, in a user
+/// namespace of its own. Its path is covered in every zone and instance
+/// besides; this holds where that would not.
+fn from_host(conn: &std::os::unix::net::UnixStream) -> bool {
+    // SAFETY: getuid(2) takes no arguments and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if crate::bridge::peer_uid(conn.as_raw_fd()) != Some(uid) {
+        return false;
+    }
+    let Some(peer) = crate::origin::Peer::of(conn.as_raw_fd()) else {
+        return false;
+    };
+    let ours = fs::read_link("/proc/self/ns/user").ok();
+    ours.is_some() && peer.ns("user") == ours
+}
+
+/// Text on one line of an answer.
+fn one_line(text: &str) -> String {
+    text.replace(['\n', '\r'], " ")
+}
+
+/// The programs among `members` that still hold one of the UDP sockets
+/// `inodes` a switch's break saw: muted by the epoch's wall for good — an
+/// unconnected socket gets one error and sends on into nothing —, until the
+/// program makes a new one or is restarted.
+fn muted(members: &[(i32, OwnedFd)], inodes: &[u32]) -> Vec<(i32, String)> {
+    if inodes.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (pid, _) in members {
+        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        let holds = fds.flatten().any(|fd| {
+            fs::read_link(fd.path())
+                .ok()
+                .and_then(|link| crate::sockdiag::socket_inode(&link.to_string_lossy()))
+                .is_some_and(|inode| inodes.contains(&inode))
+        });
+        if holds {
+            let name = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+            out.push((*pid, name.trim().to_owned()));
+        }
+    }
+    out
+}
+
+/// A request on the instance's control socket (stage 4, `crate::switch`):
+/// `SWITCH <network>`, answered in lines and the connection closed —
+/// `REFUSED <code> <text>` (nothing touched), `FAILED <step> <text>` (cut,
+/// bound to the network asked for), or `DONE <network> epoch=<N> <the
+/// break's tally>` and a `MUTED <pid> <name>` for each program that still
+/// holds a UDP socket of the network before. `members_now`: the instance's
+/// programs, looked at when asked.
+fn answer_request(
+    transport: &mut Transport,
+    conn: std::os::unix::net::UnixStream,
+    line: &str,
+    members_now: &dyn Fn() -> Vec<(i32, OwnedFd)>,
+    wake: RawFd,
+) {
+    let _ = conn.set_nonblocking(false);
+    let reply = match crate::switch::parse_request(line) {
+        None => "REFUSED request not a request this socket takes\n".to_owned(),
+        Some(to) => {
+            let members = members_now();
+            match transport.switch(to, from_host(&conn), &members, wake) {
+                Switched::Refused(r) => format!("REFUSED {} {}\n", r.code, one_line(&r.text)),
+                Switched::Failed { phase, why } => {
+                    format!("FAILED {} {}\n", phase.word(), one_line(&why))
+                }
+                Switched::Done { epoch, tally } => {
+                    let mut text = format!("DONE {to} epoch={epoch} {}\n", tally.word());
+                    for (pid, name) in muted(&members_now(), &tally.udp_inodes) {
+                        text.push_str(&format!("MUTED {pid} {}\n", one_line(&name)));
+                    }
+                    text
+                }
+            }
+        }
+    };
+    let mut out: &std::os::unix::net::UnixStream = &conn;
+    let _ = out.write_all(reply.as_bytes());
+}
+
 /// Every program of the instance whose user namespace is `userns` ended:
 /// TERM (and CONT, for one stopped), waited for, and looked for again —
 /// what forked meanwhile goes the same way. What the keeper started — its
@@ -2526,6 +2694,13 @@ struct Epochs {
     found: Result<(), &'static str>,
     /// Its note as last written.
     noted: Option<crate::epoch::LiveSwitch>,
+    /// Its programs outside the current epoch at the last look.
+    outside: usize,
+    /// Every program in the current epoch, and its wall the one to attach
+    /// with: false from a new epoch's start until it is whole — a switch
+    /// that failed half-way leaves programs in two epochs, and nothing
+    /// attaches before a new epoch that is whole.
+    whole: bool,
 }
 
 impl Epochs {
@@ -2596,9 +2771,17 @@ impl Epochs {
             kind_ok: !id.contains(':'),
             found,
             noted: None,
+            outside: 0,
+            whole: true,
         };
         epochs.note(0);
         epochs
+    }
+
+    /// Whether a new epoch can be made now: epochs, what its start found,
+    /// and every program in the current one at the last look.
+    fn renewable(&self) -> bool {
+        self.now.is_some() && self.found.is_ok() && self.outside == 0
     }
 
     /// The note rewritten when what it says changed: `outside` programs of
@@ -2630,6 +2813,7 @@ impl Epochs {
                 .collect(),
             None => Vec::new(),
         };
+        self.outside = outside.len();
         self.note(outside.len());
         outside
     }
@@ -2646,13 +2830,15 @@ impl Epochs {
 /// while it has one; why not while it has none ([`crate::instance::Exit`],
 /// noted in its directory for `status`); and what it was carried by — the
 /// zone's fingerprint and the last addresses —, which a zone that comes
-/// back is held to. Its exit is fixed for the instance's life: it goes out
-/// through its zone or nowhere, and is never moved to another network by
-/// anything but the person.
+/// back is held to. It goes out through its zone or nowhere, and is never
+/// moved to another network by anything but the person: since stage 4 the
+/// person may, live ([`Transport::switch`]).
 struct Transport {
     id: String,
     network: String,
     state: PathBuf,
+    /// The user's settings: a switch binds the container there (stage 4).
+    config: PathBuf,
     /// The instance's directory.
     dir: PathBuf,
     /// Its space's host pid: what the relay joins.
@@ -2674,6 +2860,29 @@ struct Transport {
     watch: Option<sys::Inotify>,
     /// Its epoch wall (stage 4).
     epochs: Epochs,
+    /// The search domains its programs have now (its `resolv.conf`): a
+    /// switch keeps them (O8 of the design).
+    search: Vec<String>,
+    /// The instance's lock, a descriptor of its own: taken exclusively for
+    /// a new epoch — a launch holds it shared until its program is placed.
+    lock: Option<File>,
+}
+
+/// How a live switch ended ([`Transport::switch`]).
+enum Switched {
+    /// Not made; nothing touched.
+    Refused(crate::switch::Refusal),
+    /// Made: its epoch, and what its break did.
+    Done {
+        epoch: u32,
+        tally: crate::sockdiag::Tally,
+    },
+    /// Failed at a step from the cut on: the instance is cut, bound to the
+    /// new network (G7).
+    Failed {
+        phase: crate::switch::Phase,
+        why: String,
+    },
 }
 
 impl Transport {
@@ -2684,10 +2893,19 @@ impl Transport {
         space: i32,
         epochs: Epochs,
     ) -> Self {
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(zone.path(crate::instance::LOCK))
+            .ok();
         Self {
             id: plan.id.clone(),
             network: plan.network.clone(),
             state: state.to_path_buf(),
+            config: zone.home.join(CONFIG_SUBDIR),
             dir: zone.dir.clone(),
             space,
             ip: zone.tools.ip.clone(),
@@ -2699,7 +2917,83 @@ impl Transport {
             previous: None,
             watch: None,
             epochs,
+            search: Vec::new(),
+            lock,
         }
+    }
+
+    /// Its space held by a pidfd, while it is the process that wrote its
+    /// number.
+    fn space_pidfd(&self) -> Option<OwnedFd> {
+        sys::pidfd_open(self.space)
+            .filter(|_| crate::instance::space(&self.state, &self.id) == Some(self.space))
+    }
+
+    /// Its `resolv.conf` rewritten in place: its space holds the file
+    /// (`instance_ground`), and a new one would not be the one bound.
+    fn write_resolv(&self, text: &str) {
+        let written = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(self.dir.join(crate::instance::RESOLV))
+            .and_then(|mut file| file.write_all(text.as_bytes()));
+        if let Err(e) = written {
+            eprintln!(
+                "instance {}: cannot write its resolv.conf ({e}) — names may not resolve",
+                self.id
+            );
+        }
+    }
+
+    /// Its network noted where launches, the broker and `status` read it
+    /// ([`crate::instance::NETWORK`]) — in place, as its space may hold the
+    /// file (stage 4).
+    fn note_network(&self) {
+        let written = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(self.dir.join(crate::instance::NETWORK))
+            .and_then(|mut file| file.write_all(format!("{}\n", self.network).as_bytes()));
+        if let Err(e) = written {
+            eprintln!("instance {}: cannot note its network ({e})", self.id);
+        }
+    }
+
+    /// A switch under way or failed, noted for `status`
+    /// ([`crate::instance::SWITCH`]); `None`: none.
+    fn note_switch(&self, state: Option<(&str, &str, &str)>) {
+        let noted = match state {
+            Some((state, from, to)) => crate::epoch::write_whole(
+                &self.dir,
+                crate::instance::SWITCH,
+                &format!("{state} {from} {to}\n"),
+            ),
+            None => match fs::remove_file(self.dir.join(crate::instance::SWITCH)) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            },
+        };
+        if let Err(e) = noted {
+            eprintln!("instance {}: cannot note its switch ({e})", self.id);
+        }
+    }
+
+    /// `f` with the instance's lock taken exclusively, as long as that
+    /// takes: a launch holds it shared only until its program is placed.
+    fn with_lock<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let fd = self.lock.as_ref().map(AsRawFd::as_raw_fd);
+        if let Some(fd) = fd {
+            // SAFETY: flock(2) on a descriptor we hold.
+            while unsafe { libc::flock(fd, libc::LOCK_EX) } != 0
+                && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
+            {}
+        }
+        let out = f(self);
+        if let Some(fd) = fd {
+            // SAFETY: flock(2) on a descriptor we hold.
+            unsafe { libc::flock(fd, libc::LOCK_UN) };
+        }
+        out
     }
 
     fn offline(&self) -> bool {
@@ -2757,6 +3051,13 @@ impl Transport {
         wake: Option<RawFd>,
     ) -> Result<(), crate::bridge::NoLink> {
         use crate::bridge::NoLink;
+        // A new epoch that did not complete (stage 4): its programs may be in
+        // two, and no wall to attach with holds them all.
+        if !self.epochs.whole {
+            return Err(NoLink::Failed(
+                "its last new epoch did not complete — it attaches after one that does".to_owned(),
+            ));
+        }
         let zone_dir = self.state.join(&self.network);
         let Some(zone_pid) = crate::cli::zone_up(&self.state, OsStr::new(&self.network)) else {
             return Err(NoLink::Failed(format!("zone {} is not up", self.network)));
@@ -2767,8 +3068,8 @@ impl Transport {
                 self.network
             )));
         }
-        let space = sys::pidfd_open(self.space)
-            .filter(|_| crate::instance::space(&self.state, &self.id) == Some(self.space))
+        let space = self
+            .space_pidfd()
             .ok_or_else(|| NoLink::Failed("its space is gone".to_owned()))?;
         let core = std::env::current_exe()
             .map_err(|e| NoLink::Failed(format!("cannot find our own binary: {e}")))?;
@@ -2789,18 +3090,8 @@ impl Transport {
             wake,
             &stop,
         )?;
-        let resolv = crate::bridge::resolv_text(link.v6, &link.search);
-        let written = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(self.dir.join(crate::instance::RESOLV))
-            .and_then(|mut file| file.write_all(resolv.as_bytes()));
-        if let Err(e) = written {
-            eprintln!(
-                "instance {}: cannot write its resolv.conf ({e}) — names may not resolve",
-                self.id
-            );
-        }
+        self.write_resolv(&crate::bridge::resolv_text(link.v6, &link.search));
+        self.search = link.search.clone();
         self.previous = Some(link.plan);
         self.fp = Some(link.fp);
         self.zone_pid = Some(zone_pid);
@@ -2857,15 +3148,20 @@ impl Transport {
                 self.id, self.network
             );
         }
-        self.zone_back(Some(wake));
+        self.zone_back(wake);
     }
 
-    /// The zone may be back: attached again when it is the one that carried
-    /// the instance (its fingerprint); left cut, until the person says,
-    /// when it is another — never moved to another exit as a side effect.
-    fn zone_back(&mut self, wake: Option<RawFd>) {
+    /// The zone may be back. Stage 4 (O3 of the design): with its epochs
+    /// whole and every program in the current one, attached again as a new
+    /// epoch, whatever the zone came back as — every socket of before muted
+    /// by the wall and broken, as in a switch to the same network. Else, as
+    /// in stage 2: attached again when it is the one that carried the
+    /// instance (its fingerprint); left cut, until the person says, when it
+    /// is another — never moved to another exit as a side effect.
+    fn zone_back(&mut self, wake: RawFd) {
         use crate::bridge::NoLink;
-        if self.link.is_some() || self.why == "zone-changed" || self.offline() {
+        let renewable = self.epochs.renewable();
+        if self.link.is_some() || self.offline() || (self.why == "zone-changed" && !renewable) {
             return;
         }
         let zone_dir = self.state.join(&self.network);
@@ -2877,7 +3173,15 @@ impl Transport {
         if Some(now) == self.zone_pid || !crate::bridge::carries(&zone_dir) {
             return;
         }
-        match self.attach(self.fp, wake) {
+        if renewable {
+            println!(
+                "instance {}: zone {} is back — a new epoch, then attached",
+                self.id, self.network
+            );
+            self.renew_and_attach(wake);
+            return;
+        }
+        match self.attach(self.fp, Some(wake)) {
             Ok(()) => println!(
                 "instance {}: zone {} is back as it was — attached again",
                 self.id, self.network
@@ -2903,12 +3207,17 @@ impl Transport {
     }
 
     /// The person's word (`cellward container reattach`): its mark taken
-    /// and, cut, the instance attached to its zone as the zone is now.
+    /// and, cut, the instance attached to its zone as the zone is now — as a
+    /// new epoch when it can be (stage 4).
     fn reattach(&mut self, wake: RawFd) {
         if fs::remove_file(self.dir.join(crate::instance::REATTACH)).is_err() {
             return;
         }
         if self.offline() || self.link.is_some() {
+            return;
+        }
+        if self.epochs.renewable() {
+            self.renew_and_attach(wake);
             return;
         }
         match self.attach(None, Some(wake)) {
@@ -2923,6 +3232,324 @@ impl Transport {
                 }
             }
         }
+    }
+
+    // --- THE LIVE SWITCH (stage 4, `crate::switch`, `crate::epoch`) ---------
+
+    /// A new epoch: taken with the instance's lock held exclusively and no
+    /// way out — the next epoch's cgroup made, both frozen, every program
+    /// moved into the next (`epoch::move_all`, until the old one has
+    /// nobody), the old one removed; every socket that may reach out
+    /// destroyed and the rules closed to loopback (`frame-relay --seal`);
+    /// the programs thawed. A failure says at which step: the instance stays
+    /// cut, and attaches again only after a new epoch that is whole.
+    fn renew(
+        &mut self,
+        wake: RawFd,
+    ) -> Result<crate::sockdiag::Tally, (crate::switch::Phase, String)> {
+        use crate::switch::Phase;
+        let Some(now) = self.epochs.now.clone() else {
+            return Err((
+                Phase::Epoch,
+                "it has no epochs (no delegated cgroup)".to_owned(),
+            ));
+        };
+        let Some(next) = now.next() else {
+            return Err((Phase::Epoch, "no epoch after the last".to_owned()));
+        };
+        self.epochs.whole = false;
+        let stop = || ASKED_TO_STOP.load(Ordering::SeqCst);
+        if let Err(e) = crate::epoch::make(&next) {
+            return Err((Phase::Epoch, format!("cannot make {} ({e})", next.path)));
+        }
+        let thaw = |epoch: &crate::epoch::Epoch| {
+            if let Err(e) = crate::epoch::freeze(epoch, false) {
+                eprintln!(
+                    "instance {}: cannot thaw {} ({e}) — its programs stay frozen until it is \
+                     stopped",
+                    self.id, epoch.path
+                );
+            }
+        };
+        let moved = crate::epoch::freeze(&next, true)
+            .and_then(|()| crate::epoch::freeze(&now, true))
+            .map_err(crate::epoch::Gave::Io)
+            .and_then(|()| crate::epoch::move_all(&now, &next, Some(wake), &stop));
+        if let Err(e) = moved {
+            thaw(&now);
+            thaw(&next);
+            return Err((
+                Phase::Epoch,
+                format!("its programs were not all moved into {} ({e})", next.path),
+            ));
+        }
+        if let Err(e) = crate::epoch::remove(&now) {
+            eprintln!(
+                "instance {}: cannot remove the old epoch {} ({e})",
+                self.id, now.path
+            );
+        }
+        if let Err(e) = crate::epoch::write(&self.dir, &next) {
+            eprintln!("instance {}: cannot note its epoch ({e})", self.id);
+        }
+        let sealed = match (std::env::current_exe(), self.space_pidfd()) {
+            (Ok(core), Some(space)) => crate::bridge::seal(&core, &self.nft, &space),
+            (Err(e), _) => Err(format!("cannot find our own binary: {e}")),
+            (_, None) => Err("its space is gone".to_owned()),
+        };
+        thaw(&next);
+        self.epochs.now = Some(next);
+        let tally = sealed.map_err(|e| (Phase::Seal, e))?;
+        for (what, count) in [
+            ("TCP", tally.tcp),
+            ("UDP", tally.udp),
+            ("missed", tally.missed),
+            ("not destroyable", tally.unsupported),
+            ("refused", tally.failed),
+        ] {
+            if count > 0 {
+                println!("instance {}: {what} sockets broken: {count}", self.id);
+            }
+        }
+        self.epochs.whole = true;
+        Ok(tally)
+    }
+
+    /// A new epoch, then the attach — as one, under the instance's lock: a
+    /// zone's return, the person's `reattach` (stage 4). Its journal:
+    /// `reattach` with the epoch; what failed leaves it cut.
+    fn renew_and_attach(&mut self, wake: RawFd) {
+        let done = self.with_lock(|t| {
+            let tally = t
+                .renew(wake)
+                .map_err(|(phase, why)| format!("{}: {why}", phase.word()))?;
+            t.attach(None, Some(wake)).map_err(|e| e.to_string())?;
+            Ok::<_, String>(tally)
+        });
+        match done {
+            Ok(tally) => {
+                let epoch = self.epochs.now.as_ref().map_or(0, |e| e.n).to_string();
+                let (tcp, udp) = (tally.tcp.to_string(), tally.udp.to_string());
+                self.journal(
+                    "reattach",
+                    &[
+                        ("epoch", epoch.as_str()),
+                        ("tcp", tcp.as_str()),
+                        ("udp", udp.as_str()),
+                    ],
+                );
+            }
+            Err(e) => {
+                if ASKED_TO_STOP.load(Ordering::SeqCst) {
+                    return;
+                }
+                self.why = "attach-failed";
+                self.note();
+                eprintln!("instance {}: not attached again: {e}", self.id);
+                if self.watch.is_none() {
+                    self.watch = sys::Inotify::watch(&self.state.join(&self.network)).ok();
+                }
+            }
+        }
+    }
+
+    /// What the network a switch asks for is ([`crate::switch::Target`]).
+    fn target(&self, to: &str) -> crate::switch::Target {
+        use crate::switch::Target;
+        if to == OFFLINE {
+            return Target::Offline;
+        }
+        if to == crate::launch::UNCONFINED || to == crate::launch::UNCONFINED_ALIAS {
+            return Target::Unconfined;
+        }
+        let dir = self.state.join(to);
+        if !crate::instance::valid_network(to) || !dir.join(CONFIG).is_file() {
+            return Target::Unknown;
+        }
+        Target::Zone {
+            up: crate::cli::zone_up(&self.state, OsStr::new(to)).is_some(),
+            carries: crate::bridge::carries(&dir),
+            search: crate::bridge::search_in(
+                &fs::read_to_string(dir.join(RESOLV)).unwrap_or_default(),
+            ),
+        }
+    }
+
+    /// A live switch to `to`, asked on the control socket: its
+    /// preconditions first (`switch::refusal` — a refusal touches nothing);
+    /// then, with the instance's lock held exclusively — launches wait —,
+    /// the switch itself ([`Transport::switch_taken`]). `members`: its
+    /// programs, looked at now.
+    fn switch(
+        &mut self,
+        to: &str,
+        from_host: bool,
+        members: &[(i32, OwnedFd)],
+        wake: RawFd,
+    ) -> Switched {
+        let from = self.network.clone();
+        self.epochs.look(members);
+        let target = self.target(to);
+        let container = crate::instance::container_of(&self.id).map(str::to_owned);
+        let facts = crate::switch::Facts {
+            from_host,
+            declared: container
+                .as_deref()
+                .is_some_and(|c| crate::container::network_declared_in(&self.config, c)),
+            named: !self.id.contains(':'),
+            live: self.epochs.noted.as_ref(),
+            outside: self.epochs.outside,
+            locked: from != OFFLINE
+                && self
+                    .state
+                    .join(&from)
+                    .join(crate::launch::NO_ESCAPE)
+                    .exists(),
+            target: &target,
+            search_now: &self.search,
+        };
+        if let Some(refusal) = crate::switch::refusal(&facts) {
+            println!(
+                "instance {}: no switch from {from} to {to} ({}): {}",
+                self.id, refusal.code, refusal.text
+            );
+            self.journal(
+                "switch-refused",
+                &[("from", from.as_str()), ("to", to), ("why", refusal.code)],
+            );
+            return Switched::Refused(refusal);
+        }
+        self.with_lock(|t| t.switch_taken(to, &from, container.as_deref(), wake))
+    }
+
+    /// The switch, its preconditions met and the lock held (§5.3 of the
+    /// design). Bound to `to` first, whatever becomes of it (G7): its
+    /// container's setting, the ask of its next start, its programs' records,
+    /// the instance's note. Then the cut (G1: the old relay killed and
+    /// reaped, its tap gone with it — before anything of the new), a new
+    /// epoch with its break ([`Transport::renew`]: G3, G4; G2 — nothing but
+    /// loopback and the unreachable defaults meanwhile), and the new way out
+    /// with its rules walled by the new epoch (`to` a zone; `offline`: none).
+    fn switch_taken(
+        &mut self,
+        to: &str,
+        from: &str,
+        container: Option<&str>,
+        wake: RawFd,
+    ) -> Switched {
+        use crate::switch::Phase;
+        if let Some(name) = container {
+            if let Err(e) = crate::container::write_network_in(&self.config, name, to) {
+                eprintln!(
+                    "instance {}: cannot bind the container to {to} ({e})",
+                    self.id
+                );
+            }
+            let records = self.state.join(".running").join(name);
+            if let Err(e) = crate::registry::retarget(&records, from, to) {
+                eprintln!(
+                    "instance {}: its launches' records stay in {from} ({e})",
+                    self.id
+                );
+            }
+        }
+        if let Err(e) = crate::instance::ask_network(&self.state, &self.id, to) {
+            eprintln!(
+                "instance {}: cannot note its next start's network ({e})",
+                self.id
+            );
+        }
+        self.note_switch(Some(("cutting", from, to)));
+        if let Some(link) = self.link.take() {
+            link.close();
+        }
+        self.watch = None;
+        self.network = to.to_owned();
+        self.fp = None;
+        self.zone_pid = None;
+        self.why = "switching";
+        self.note();
+        self.note_network();
+        println!("instance {}: cut from {from} — switching to {to}", self.id);
+        self.journal("switch-cut", &[("from", from), ("to", to)]);
+        let tally = match self.renew(wake) {
+            Ok(tally) => tally,
+            Err((phase, why)) => return self.switch_failed(phase, from, to, why),
+        };
+        if to == OFFLINE {
+            self.why = "offline";
+            self.search.clear();
+            self.write_resolv(&crate::bridge::resolv_text(false, &[]));
+            self.note();
+        } else {
+            self.note_switch(Some(("attaching", from, to)));
+            if let Err(e) = self.attach(None, Some(wake)) {
+                if self.why == "switching" {
+                    self.why = "attach-failed";
+                }
+                self.note();
+                if self.watch.is_none() {
+                    self.watch = sys::Inotify::watch(&self.state.join(&self.network)).ok();
+                }
+                return self.switch_failed(Phase::Attach, from, to, e.to_string());
+            }
+        }
+        self.note_switch(None);
+        let epoch = self.epochs.now.as_ref().map_or(0, |e| e.n);
+        let (epoch_text, tcp, udp, missed) = (
+            epoch.to_string(),
+            tally.tcp.to_string(),
+            tally.udp.to_string(),
+            tally.missed.to_string(),
+        );
+        println!(
+            "instance {}: switched from {from} to {to} (epoch {epoch})",
+            self.id
+        );
+        self.journal(
+            "switch",
+            &[
+                ("from", from),
+                ("to", to),
+                ("epoch", epoch_text.as_str()),
+                ("tcp", tcp.as_str()),
+                ("udp", udp.as_str()),
+                ("missed", missed.as_str()),
+            ],
+        );
+        Switched::Done { epoch, tally }
+    }
+
+    /// A switch that failed from the cut on: cut, bound to `to` (G7) — said,
+    /// noted and journalled.
+    fn switch_failed(
+        &mut self,
+        phase: crate::switch::Phase,
+        from: &str,
+        to: &str,
+        why: String,
+    ) -> Switched {
+        eprintln!(
+            "instance {}: the switch from {from} to {to} failed at its {} ({why}) — it stays \
+             cut, in {to}",
+            self.id,
+            phase.word()
+        );
+        if self.why == "switching" {
+            self.why = "switch-failed";
+            self.note();
+        }
+        self.note_switch(Some(("failed", from, to)));
+        self.journal(
+            "switch-failed",
+            &[
+                ("from", from),
+                ("to", to),
+                ("phase", phase.word()),
+                ("why", why.as_str()),
+            ],
+        );
+        Switched::Failed { phase, why }
     }
 
     /// What the keeper polls for it, in the order [`Transport::handle`]
@@ -2980,7 +3607,7 @@ impl Transport {
                 .iter()
                 .any(|name| name == READY || name == crate::bridge::SOCKET)
             {
-                self.zone_back(Some(wake));
+                self.zone_back(wake);
             }
         }
     }
@@ -6813,9 +7440,11 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         // taps stand on ([`instance_ground`]). `ready` is its keeper's to
         // write, once its way out is attached: this says the space is set up.
         if let Some(instance) = &zone.instance {
-            if instance.network != OFFLINE {
-                instance_ground(zone)?;
-            }
+            // Every instance since stage 4, an offline one too: its network
+            // can be switched live to a zone, and its programs find the
+            // ground a zone's taps stand on — the constant forwarders in
+            // the file they read, the unreachable defaults.
+            instance_ground(zone)?;
             let done = zone.path(crate::instance::SPACE_READY);
             touch(&done).map_err(|e| format!("cannot create {}: {e}", done.display()))?;
             println!(
@@ -9274,6 +9903,19 @@ networks:  files
                 "{bad:?}"
             );
         }
+    }
+
+    /// Between a switch's cut and its next attach (stage 4): loopback, and
+    /// no tap's accept at all — and a relay's walled rules replace it whole.
+    #[test]
+    fn a_switchs_break_closes_an_instance_to_loopback() {
+        let closed = instance_closed_ruleset();
+        assert!(closed.contains("policy drop;"), "{closed}");
+        assert!(closed.contains("oifname \"lo\" accept"), "{closed}");
+        assert!(!closed.contains(TUN_IFACE), "{closed}");
+        assert!(
+            replacing_table(&closed).starts_with("table inet vpnzone\nflush table inet vpnzone\n")
+        );
     }
 
     #[test]

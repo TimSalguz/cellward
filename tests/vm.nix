@@ -615,7 +615,7 @@ let
       # exec() defines is one it does not know (red once in CI).
       _ih = dict(globals())
       exec(open("${./vm-instance-helpers.py}").read(), _ih)
-      ikey, instance, in_inst, in_inst_q = (_ih[n] for n in ("ikey", "instance", "in_inst", "in_inst_q"))
+      ikey, instance, in_inst, in_inst_q, in_placed, in_placed_q = (_ih[n] for n in ("ikey", "instance", "in_inst", "in_inst_q", "in_placed", "in_placed_q"))
 
       # The DNS leak test needs two resolvers that disagree: the HOST's, which
       # a zone must never reach, and the tunnel's own further down. One lookup
@@ -1347,6 +1347,7 @@ let
       PROBE = {"py": "${pkgs.python3}/bin/python3", "helper": "${./vm-probe-helper.py}",
                "passt": "${pkgs.passt}/bin/passt", "pasta": "${pkgs.passt}/bin/pasta"}
       exec(open("${./vm-probe-container-ns.py}").read())
+      exec(open("${./vm-switch.py}").read())
       exec(open("${./vm-instance-bridge.py}").read())
 
       with subtest("cellward check reports a live tunnel"):

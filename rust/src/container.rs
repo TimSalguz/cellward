@@ -2416,6 +2416,32 @@ pub fn set_network(tools: &Tools, selector: &str, network: &Network) -> Result<(
     write_key(&container.policy.join(FILE), "network", value, true)
 }
 
+/// Whether a container's network is declared in Nix, from the config dir
+/// alone — for its instance's keeper, which has no tool manifest (a live
+/// switch's P2, `crate::switch`).
+pub fn network_declared_in(config: &Path, name: &str) -> bool {
+    read_declared_in(config, name).is_some_and(|(conf, _)| {
+        values(&conf, "network")
+            .last()
+            .and_then(Network::parse)
+            .is_some()
+    })
+}
+
+/// A container bound to `network` in its local policy, from the config dir
+/// alone: what its instance's keeper writes as a live switch cuts the old
+/// network — from then on the container is the new network's, whatever
+/// becomes of the switch (G7 of the design). Nothing is checked here: the
+/// switch's preconditions were (`crate::switch::refusal`).
+pub fn write_network_in(config: &Path, name: &str, network: &str) -> Result<(), String> {
+    write_key(
+        &policy_dir_in(config, name).join(FILE),
+        "network",
+        Some(network),
+        true,
+    )
+}
+
 /// Give a container an X server of its own in zones, or take it away, locally.
 pub fn set_x11(tools: &Tools, selector: &str, on: bool) -> Result<(), String> {
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
@@ -2717,9 +2743,16 @@ pub fn live_records(tools: &Tools, container: &Container) -> Vec<(String, regist
     records
 }
 
-/// The network the container's programs run in right now, if any: the first
-/// live record of any of its programs ([`live_records`]).
+/// The network the container's programs run in right now, if any: its
+/// instance's — which a live switch changes (stage 4) — when it runs in one,
+/// else the first live record of any of its programs ([`live_records`]).
 pub fn running_network(tools: &Tools, container: &Container) -> Option<String> {
+    if let Some(instance) = crate::instance::running(&tools.state)
+        .into_iter()
+        .find(|i| i.id == container.name)
+    {
+        return Some(instance.network);
+    }
     live_records(tools, container)
         .into_iter()
         .map(|(_, r)| r.zone)

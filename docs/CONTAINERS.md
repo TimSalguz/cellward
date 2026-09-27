@@ -116,10 +116,18 @@ container = {
   set <c> network <net>` on the command line, the option in Nix — and never a
   side effect of choosing where to run a program. `cellward run <other>
   --profile <c>` is a refusal naming the way out, not a silent launch.
-- **I2. Running programs keep their network.** A process cannot be moved into
-  another network (§7). While programs of a container run in network A, the
-  container is not started in B; the network change offers to close and
-  restart them instead.
+- **I2. Programs follow their container; its exit is switched live,
+  explicitly, fail-closed.** A container is in one network at a time: while
+  programs of it run in network A, it is not started in B beside them. Since
+  stage 4 (2026-09-27) the person may switch a running container's network
+  — `cellward container set <c> network <net>` — without restarting its
+  programs: they are in the container's own network namespace, whose one
+  way out changes; the old one is cut before the new one exists, every
+  socket of before is broken and muted for good by the epoch's wall, DNS
+  follows (LEAK-MODEL §29). What cannot be switched live (an instance of one
+  network, a program launched from a login session, a host without the
+  kernel's pieces) is refused with the way out: close the programs and start
+  them in the new network (`--restart`). Nothing else ever switches it.
 - **I3. One container per program instance.** The registry records the
   selector; the conflict check also looks at the binary (done).
 - **I4. Every layer on every road.** Network, home, permissions, trust and the
@@ -539,8 +547,13 @@ itself and hands the link to the broker with the connection's container
   on), and still does not reach the children of `systemd --user`.
 - **No per-process network policy on the host.** cgroup BPF and `net_cls`
   need root. A network is only ever a namespace.
-- **A running process cannot be moved** into another network or container;
-  `setns` acts on the caller (I2).
+- **A running process cannot be moved** into another network namespace or
+  container; `setns` acts on the caller. What a live switch changes is the
+  one way out of the container's own namespace (I2), not the process.
+- **A process cannot be moved between cgroups from a login session's scope**
+  into the user manager's tree (the common ancestor is root's): a program
+  launched from a tty or ssh stays out of its instance's epoch, and holds
+  the live switch while it runs.
 - **A host interface cannot be moved into a container** without
   `CAP_NET_ADMIN` in the host's network namespace (§3.3). Traffic *through* it
   is possible rootless; the interface *itself* inside needs a system helper.
@@ -790,6 +803,14 @@ the host's.
 - **Changeable networks (I1, I2).** A change is explicit and shown; a
   container never runs in two networks at once. The identity channel of
   [LEAK-MODEL](LEAK-MODEL.md) §4 is narrowed to a deliberate act.
+- **A live switch** (stage 4, [LEAK-MODEL](LEAK-MODEL.md) §29). Never two
+  ways out at once, nothing but loopback between them, no socket of the old
+  network ever speaking in the new one (the epoch's wall: `socket cgroupv2`
+  over the cgroup a socket was born in, with the new address), DNS through
+  the constant forwarders the new zone's passt answers; any failure after
+  the cut leaves the container cut, in the new network. What a program
+  carries itself — cookies, TLS tickets, a session resumed over a new socket
+  — is not cut, and the person is told so.
 - **Networks through a host interface** (done). pasta in the app namespace
   binds every socket to one interface of the host; the app namespace is the
   same two-link namespace (`lo` and `awg0`) as for a tunnel, with the same

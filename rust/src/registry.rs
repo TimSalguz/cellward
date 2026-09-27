@@ -183,6 +183,49 @@ where
     Ok(busy)
 }
 
+/// A registry file's text with every record in `from` moved to `to`, the
+/// rest as it was; `None` when none was in `from`.
+pub fn retarget_text(text: &str, from: &str, to: &str) -> Option<String> {
+    let mut changed = false;
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        match parse_record(line) {
+            Some(record) if record.zone == from => {
+                changed = true;
+                out.push_str(&format!("{} {to} {}\n", record.pid, record.selector));
+            }
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    changed.then_some(out)
+}
+
+/// Every record of one registry directory (and its binary index) in
+/// network `from` moved to `to`, under its lock: a container's live network
+/// switch (stage 4 of the container design) moves its programs, and every
+/// reader of the registry — a launch's "one network at a time" and "already
+/// running elsewhere", the picker, the focus, `status` — sees them where they
+/// are now. The network a launch was started in is not kept.
+pub fn retarget(dir: &Path, from: &str, to: &str) -> io::Result<usize> {
+    let _guard = lock(dir)?;
+    let mut moved = 0;
+    for file in files(dir).into_iter().chain(files(&dir.join(BY_BINARY))) {
+        let Ok(text) = fs::read_to_string(&file) else {
+            continue;
+        };
+        if let Some(new) = retarget_text(&text, from, to) {
+            let tmp = tmp_path(&file);
+            fs::write(&tmp, new)?;
+            fs::rename(&tmp, &file)?;
+            moved += 1;
+        }
+    }
+    Ok(moved)
+}
+
 /// Add our own record. Caller holds [`lock`].
 pub fn append(reg: &Path, pid: i32, zone: &str, selector: &str) -> io::Result<()> {
     if let Some(dir) = reg.parent() {
@@ -551,6 +594,19 @@ mod tests {
     fn alive(pids: &[i32]) -> impl Fn(i32) -> bool + '_ {
         let set: HashSet<i32> = pids.iter().copied().collect();
         move |pid| set.contains(&pid)
+    }
+
+    /// A live switch moves a container's records from its old network to
+    /// its new one, and nothing else.
+    #[test]
+    fn a_switch_moves_the_records_of_its_network_only() {
+        let text = "12 nl work\n13 unconfined work\n14 nl \ngarbage\n";
+        assert_eq!(
+            retarget_text(text, "nl", "de").as_deref(),
+            Some("12 de work\n13 unconfined work\n14 de \ngarbage\n")
+        );
+        assert_eq!(retarget_text(text, "fi", "de"), None);
+        assert_eq!(retarget_text("", "nl", "de"), None);
     }
 
     #[test]

@@ -106,6 +106,21 @@ pub const CONTROL: &str = "control";
 pub const LOCK: &str = "lock";
 /// Which build started the instance.
 pub const BUILD: &str = "build";
+/// A live switch under way or failed (stage 4): `<state> <from> <to>`, the
+/// state `cutting`, `attaching` or `failed`; none when idle.
+pub const SWITCH: &str = "switch";
+
+/// A live switch's note ([`SWITCH`]): `(state, from, to)`.
+pub fn switch_of(dir: &Path) -> Option<(String, String, String)> {
+    let text = fs::read_to_string(dir.join(SWITCH)).ok()?;
+    let mut words = text.split_whitespace();
+    let state = words
+        .next()
+        .filter(|s| matches!(*s, "cutting" | "attaching" | "failed"))?;
+    let from = words.next().filter(|n| valid_network(n))?;
+    let to = words.next().filter(|n| valid_network(n))?;
+    Some((state.to_owned(), from.to_owned(), to.to_owned()))
+}
 /// The instance's user namespace maps its root to this subordinate id —
 /// not a zone's (0), nor the OpenConnect client's (1), nor the bridge's
 /// passt's (2): a process with the kuid of a zone's holder may attach to it

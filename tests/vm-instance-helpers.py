@@ -44,3 +44,24 @@ def in_inst_q(id_, net, cmd):
     return "su -l alice -c " + shlex.quote(
         "export XDG_RUNTIME_DIR=/run/user/1000; " + in_inst_cmd(id_, net, cmd)
     )
+
+
+def placed_cmd(id_, net, cmd):
+    """Entered as a launch from the desktop is (stage 4): through the user's
+    manager, so that its program is put into the instance's epoch — one from
+    a login session (`su`, as `in_inst`) the kernel does not let move, and
+    after the instance's first new epoch it has no way out."""
+    return (
+        'systemd-run --user --pipe --wait --quiet --collect -E PATH="$PATH" -- '
+        + in_inst_cmd(id_, net, cmd)
+    )
+
+
+def in_placed(id_, net, cmd):
+    return alice(placed_cmd(id_, net, cmd))
+
+
+def in_placed_q(id_, net, cmd):
+    return "su -l alice -c " + shlex.quote(
+        "export XDG_RUNTIME_DIR=/run/user/1000; " + placed_cmd(id_, net, cmd)
+    )

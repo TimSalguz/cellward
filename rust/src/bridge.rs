@@ -615,6 +615,20 @@ pub fn resolv_text(v6: bool, search: &[String]) -> String {
     text
 }
 
+/// The search domains of a `resolv.conf` text: the words of its last
+/// `search` line — what a zone's bridge answers with (`Carrier::search`, the
+/// same line split the same way), read by an instance's keeper before a live
+/// switch (stage 4, O8 of the design).
+pub fn search_in(resolv: &str) -> Vec<String> {
+    resolv
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("search"))
+        .filter(|rest| rest.starts_with([' ', '\t']))
+        .next_back()
+        .map(|rest| rest.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
 // --- THE ZONE'S END -----------------------------------------------------------
 
 /// What a zone carries instances with ([`serve`]), fixed as it came up.
@@ -676,7 +690,7 @@ pub fn serve(listener: UnixListener, carrier: Carrier) {
 
 /// The uid of the process on the other end, as this process's user
 /// namespace sees it (`SO_PEERCRED`).
-fn peer_uid(fd: RawFd) -> Option<u32> {
+pub(crate) fn peer_uid(fd: RawFd) -> Option<u32> {
     let mut cred = libc::ucred {
         pid: 0,
         uid: 0,
@@ -1706,6 +1720,24 @@ mod tests {
             ),
             "nameserver 10.254.255.253\nnameserver fd63:656c:6c77::53\nsearch corp.example lab.example\n"
         );
+    }
+
+    /// A zone's search domains as its `resolv.conf` has them — the same list
+    /// its bridge answers with, what a live switch compares (stage 4).
+    #[test]
+    fn a_zones_search_domains_are_its_last_search_line() {
+        assert!(search_in("nameserver 10.99.0.1\n").is_empty());
+        assert_eq!(
+            search_in("nameserver 10.99.0.1\nsearch corp.example  lab.example\n"),
+            vec!["corp.example".to_owned(), "lab.example".to_owned()]
+        );
+        assert_eq!(
+            search_in("search a.example\nsearch b.example\n"),
+            vec!["b.example".to_owned()]
+        );
+        assert!(search_in("searching x\n").is_empty());
+        let text = resolv_text(false, &["corp.example".to_owned()]);
+        assert_eq!(search_in(&text), vec!["corp.example".to_owned()]);
     }
 
     fn carrier() -> Carrier {
