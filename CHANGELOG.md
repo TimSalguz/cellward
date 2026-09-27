@@ -331,6 +331,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the launch window's answer — the zone's command comes back in it — is
   read as it comes: a long command filled the pipe before the window could
   end, and the broker waited on it until its deadline, or for ever.
+- **"Always" is not offered for more programs that start anything**
+  (bug hunt 2026-09-27): launchers (`gio`, `kioclient`, `gtk-launch`,
+  `dex`…; plain openers such as `xdg-open` stay), unit and session starters (`systemctl`, `run0`,
+  `dbus-run-session`…), terminals, multiplexers, debuggers, other
+  sandboxes and containers (`flatpak`, `bwrap`, `docker`…), `ssh`,
+  `socat` and more interpreters — an "always" for one of them was an
+  "always" for whatever it is told to run.
 - **Each system pasta has a pid file of its own** (bug hunt 2026-09-27).
   A system zone named `x-uplink` shared `x`'s uplink's pid file
   (`/run/vpn-zones/pasta/x-uplink.pid`), so one pasta's word that it was
