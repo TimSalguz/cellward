@@ -40,12 +40,13 @@ Usage:
         the last one ends, and ends them when it is stopped. The ExecStart of
         vpn-zone-container@<id>.service.
 
-  vpn-zone-core container-enter --instance <id> [--systemctl P] -- cmd...
+  vpn-zone-core container-enter --instance <id> [--network N] [--systemctl P] -- cmd...
         Run the command in instance <id>: its user, network and IPC
         namespaces for this process, its mount namespace (a copy of it of the
         launch's own) for the command, with the instance's capabilities kept
         for profile-run. Starts the instance with systemctl when it stopped
-        meanwhile. Called from `cellward run`.
+        meanwhile; with --network, refuses an instance that runs in another
+        network. Called from `cellward run`.
 
   vpn-zone-core system-zone <ns-up|ns-down|up|down> [--ip P] [--awg P] [--wg P]
                             [--nft P] [--config P] <name>

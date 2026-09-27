@@ -274,6 +274,15 @@ impl Inotify {
     }
 }
 
+/// Its descriptor, for a caller's own `poll` among others (an instance's
+/// keeper watching its zone's return, `zone::Transport`): readable when
+/// [`Inotify::names`] has something.
+impl std::os::fd::AsRawFd for Inotify {
+    fn as_raw_fd(&self) -> RawFd {
+        std::os::fd::AsRawFd::as_raw_fd(&self.fd)
+    }
+}
+
 /// How a [`wait_for_entry_or`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Waited {

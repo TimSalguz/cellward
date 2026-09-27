@@ -237,21 +237,20 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
 
 /// The running instances `name` names: the instance of that id, a
 /// container's (its own, and one per network of a container of the main
-/// home), or — `offline` — every instance with no network.
+/// home), or — a network's name — every instance in that network: `offline`
+/// every one with no network, a zone's every one it carries (stage 2).
 pub fn instances_named(state: &Path, name: &str) -> Vec<crate::instance::Running> {
     crate::instance::running(state)
         .into_iter()
         .filter(|i| {
-            i.id == name
-                || crate::instance::container_of(&i.id) == Some(name)
-                || (name == crate::launch::OFFLINE && i.network == crate::launch::OFFLINE)
+            i.id == name || crate::instance::container_of(&i.id) == Some(name) || i.network == name
         })
         .collect()
 }
 
 /// Freeze every program of the instance whose user namespace is `userns`
-/// but its own (`spare`, its holder, and below), pass after pass, as
-/// [`freeze`] does a zone's.
+/// but its own (`spare`, its keeper, and below: its space, its relay), pass
+/// after pass, as [`freeze`] does a zone's.
 fn freeze_members(userns: (u64, u64), spare: i32) -> (Vec<Target>, Option<String>) {
     let mut held: Vec<Target> = Vec::new();
     for _ in 0..PASSES {
@@ -294,12 +293,16 @@ pub fn instances(tools: &Tools, name: &str, kill: bool) -> u8 {
     for instance in &found {
         if kill {
             // Its user namespace, looked at while its space is still the
-            // process that wrote its number; its holder spared with it.
+            // process that wrote its number; its keeper spared, and what it
+            // started — the space's holder, the relay (stage 2) — with it.
             let key = crate::place::ns_key(Path::new(&format!("/proc/{}/ns/user", instance.pid)));
-            let holder = crate::sys::parent_of(instance.pid).filter(|&h| h > 1);
+            let keeper = crate::sys::parent_of(instance.pid)
+                .filter(|&h| h > 1)
+                .and_then(crate::sys::parent_of)
+                .filter(|&k| k > 1);
             let still = crate::instance::up(&tools.state, &instance.id) == Some(instance.pid);
-            if let (Some(key), Some(holder), true) = (key, holder, still) {
-                let (frozen, overrun) = freeze_members(key, holder);
+            if let (Some(key), Some(keeper), true) = (key, keeper, still) {
+                let (frozen, overrun) = freeze_members(key, keeper);
                 if let Some(why) = overrun {
                     eprintln!("{why}");
                 }

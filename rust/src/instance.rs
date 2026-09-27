@@ -29,7 +29,19 @@
 //!
 //! `unconfined` has no instance: it is the host's network, and its
 //! programs are host processes.
+//!
+//! Stage 2 (2026-09-27): an instance's network may be a zone — its way out
+//! through that zone's bridge (`crate::bridge`), fixed for its life. Which
+//! network is the id's own for `<c>:<network>` and `main:<network>`, and for
+//! the others what the launch that started it asked ([`ask_network`]: a
+//! file beside the instance's directory, which an ending instance does not
+//! take with it). Its space writes [`SPACE_READY`] once it is set up; its
+//! keeper attaches it, rewrites its [`RESOLV`] in place, notes its [`EXIT`]
+//! and only then writes [`READY`]: a launch that finds an instance ready
+//! finds it with its way out.
 
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::origin::Who;
@@ -57,10 +69,22 @@ pub const PID: &str = "instance.pid";
 /// …and that process's start (`crate::sys::process_stamp`), which tells it
 /// from whoever has the number later.
 pub const START: &str = "instance.start";
-/// Written once the instance is set up, as a zone's `ready`.
+/// Written by the instance's keeper once the instance is set up and its way
+/// out attached, as a zone's `ready`: what a launch enters by.
 pub const READY: &str = "ready";
-/// What the instance's way out is now: `none` or `through <zone> …`.
+/// Written by the instance's space once it is set up (stage 2): the keeper
+/// attaches its way out then.
+pub const SPACE_READY: &str = "space-ready";
+/// What the instance's way out is now ([`Exit`]): `through <zone>` or
+/// `none <why>`.
 pub const EXIT: &str = "exit";
+/// Its `resolv.conf`, bound over the system's by its space and rewritten in
+/// place by its keeper with each attach (`bridge::resolv_text`): the
+/// constant forwarders and the zone's search domains.
+pub const RESOLV: &str = "resolv.conf";
+/// Left by `cellward container reattach`, taken by the keeper when the
+/// doorbell rings: attach a cut instance to its zone as the zone is now.
+pub const REATTACH: &str = "reattach";
 /// The holder's control socket, for the host's side only.
 pub const CONTROL: &str = "control";
 /// Taken shared by a launch until its program is in, exclusively by an idle
@@ -247,6 +271,89 @@ pub fn up(state: &Path, id: &str) -> Option<i32> {
     space_pid(&dir)
 }
 
+/// The host pid of instance `id`'s space as [`up`] finds it, ready or not
+/// yet: for its keeper, which attaches the space's way out before it says
+/// the instance is ready.
+pub fn space(state: &Path, id: &str) -> Option<i32> {
+    let dir = dir(state, id);
+    if read_word(&dir.join(ID)).as_deref() != Some(id) {
+        return None;
+    }
+    space_pid(&dir)
+}
+
+/// Where a launch says which network instance `id` is to run in, when its
+/// id does not ([`Plan::of`]): `<state>/.instances/<key>.network`, beside
+/// the instance's directory — which an instance that ends takes with it,
+/// while a launch may be writing this for the next one.
+pub fn want_path(state: &Path, id: &str) -> PathBuf {
+    state
+        .join(INSTANCES_DIR)
+        .join(format!("{}.network", key(id)))
+}
+
+/// Ask for instance `id` in `network` ([`want_path`]), before its unit is
+/// started: whole or not at all (a rename), the user's alone.
+pub fn ask_network(state: &Path, id: &str, network: &str) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let path = want_path(state, id);
+    if let Some(parent) = path.parent() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
+    }
+    let tmp = path.with_extension("network.tmp");
+    fs::write(&tmp, format!("{network}\n"))?;
+    fs::rename(&tmp, &path)
+}
+
+/// What [`ask_network`] asked, when it is a network an instance can have.
+fn wanted_network(state: &Path, id: &str) -> Option<String> {
+    read_word(&want_path(state, id)).filter(|network| valid_network(network))
+}
+
+/// What an instance's way out is ([`EXIT`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Exit {
+    /// Out through this zone.
+    Through(String),
+    /// None, and why: `offline` (none asked for), `zone-down` (cut by the
+    /// zone's end, re-attached when it comes back the same), `zone-changed`
+    /// (it came back as another zone: cut until `cellward container
+    /// reattach`), `attach-failed`.
+    Cut(String),
+}
+
+impl Exit {
+    pub fn text(&self) -> String {
+        match self {
+            Self::Through(zone) => format!("through {zone}\n"),
+            Self::Cut(why) => format!("none {why}\n"),
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        let (word, rest) = text.trim().split_once(' ')?;
+        match word {
+            "through" if valid_network(rest) => Some(Self::Through(rest.to_owned())),
+            "none"
+                if !rest.is_empty()
+                    && rest.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') =>
+            {
+                Some(Self::Cut(rest.to_owned()))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// An instance's way out as its keeper last noted it; `None` when there is
+/// no note that reads as one.
+pub fn exit_of(dir: &Path) -> Option<Exit> {
+    Exit::parse(&fs::read_to_string(dir.join(EXIT)).ok()?)
+}
+
 /// A running instance, as its directory says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Running {
@@ -369,8 +476,8 @@ pub fn holder_main(args: &[std::ffi::OsString]) -> u8 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     pub id: String,
-    /// The network it runs in: `offline` — the one network an instance has
-    /// in stage 1.
+    /// The network it runs in: `offline`, or a zone (stage 2) — fixed for
+    /// the instance's life.
     pub network: String,
     /// Whose programs its are ([`who_of`]).
     pub who: Who,
@@ -385,21 +492,21 @@ pub struct Plan {
 
 impl Plan {
     /// The plan of instance `id`, below `home` and its state directory
-    /// `state`. An id for another network than `offline` is refused: stage 1
-    /// has no way out for an instance to have.
+    /// `state`. Its network: the id's own for `<c>:<network>` and
+    /// `main:<network>`; for the others what the launch asked
+    /// ([`ask_network`]), `offline` when nothing was. A network that is no
+    /// zone's is refused.
     pub fn of(home: &Path, state: &Path, id: &str) -> Result<Self, String> {
         if !valid_id(id) {
             return Err(format!("«{id}» is no instance's id"));
         }
-        let network = crate::launch::OFFLINE.to_owned();
-        if !id.starts_with(':') {
-            if let Some((_, asked)) = id.split_once(':') {
-                if asked != network {
-                    return Err(format!(
-                        "an instance has no network but {network} yet, not {asked}"
-                    ));
-                }
-            }
+        let network = match id.split_once(':') {
+            Some((_, network)) if !id.starts_with(':') => network.to_owned(),
+            _ => wanted_network(state, id).unwrap_or_else(|| crate::launch::OFFLINE.to_owned()),
+        };
+        if network != crate::launch::OFFLINE && !state.join(&network).join("config.conf").is_file()
+        {
+            return Err(format!("there is no zone {network} to run in"));
         }
         let who = who_of(id);
         let (storage, erase) = if let Some(layer) = id.strip_prefix(TMP_PREFIX) {
@@ -659,10 +766,70 @@ mod tests {
         assert_eq!(tmp.who, Who::Unknown);
         assert_eq!(tmp.storage, Some(layer.clone()));
         assert_eq!(tmp.erase, vec![layer, state.join(".running/vpn-profile-x")]);
-        // No other network than offline yet, and no id that is none.
+        // A network that is no zone's is refused (stage 2: a zone's is
+        // taken — below), and an id that is none.
         assert!(Plan::of(&h.0, &state, "docs:nl").is_err());
         assert!(Plan::of(&h.0, &state, "docs:offline").is_ok());
         assert!(Plan::of(&h.0, &state, "a/b").is_err());
+    }
+
+    /// Stage 2 (2026-09-27): an instance's network is its id's own, or what
+    /// the launch asked; a zone's when there is such a zone.
+    #[test]
+    fn a_plans_network_is_the_ids_or_the_one_asked() {
+        let h = Dirs::new("network");
+        let state = h.state();
+        std::fs::create_dir_all(state.join("nl")).unwrap();
+        std::fs::write(state.join("nl/config.conf"), "[Interface]\n").unwrap();
+        assert_eq!(Plan::of(&h.0, &state, "docs:nl").unwrap().network, "nl");
+        assert_eq!(Plan::of(&h.0, &state, "main:nl").unwrap().network, "nl");
+        // Nothing asked: offline.
+        assert_eq!(Plan::of(&h.0, &state, "work").unwrap().network, "offline");
+        ask_network(&state, "work", "nl").unwrap();
+        assert_eq!(Plan::of(&h.0, &state, "work").unwrap().network, "nl");
+        assert!(want_path(&state, "work").starts_with(state.join(INSTANCES_DIR)));
+        // Asked again, the last word counts; a zone that is gone is refused.
+        ask_network(&state, "work", "offline").unwrap();
+        assert_eq!(Plan::of(&h.0, &state, "work").unwrap().network, "offline");
+        ask_network(&state, "work", "de").unwrap();
+        assert!(Plan::of(&h.0, &state, "work").is_err());
+        // What is no network is not taken for one.
+        ask_network(&state, "work", "unconfined").unwrap();
+        assert_eq!(Plan::of(&h.0, &state, "work").unwrap().network, "offline");
+        // A throwaway's is asked the same way.
+        std::fs::create_dir_all(state.join(".throwaway/vpn-profile-y")).unwrap();
+        ask_network(&state, ":tmp:vpn-profile-y", "nl").unwrap();
+        assert_eq!(
+            Plan::of(&h.0, &state, ":tmp:vpn-profile-y")
+                .unwrap()
+                .network,
+            "nl"
+        );
+        // The id's own network is not overridden by what was asked.
+        ask_network(&state, "docs:nl", "offline").unwrap();
+        assert_eq!(Plan::of(&h.0, &state, "docs:nl").unwrap().network, "nl");
+    }
+
+    #[test]
+    fn an_exit_is_written_and_read_back() {
+        for exit in [
+            Exit::Through("nl".to_owned()),
+            Exit::Cut("offline".to_owned()),
+            Exit::Cut("zone-changed".to_owned()),
+        ] {
+            assert_eq!(Exit::parse(&exit.text()), Some(exit));
+        }
+        for bad in [
+            "",
+            "through",
+            "through a/b",
+            "none",
+            "none Why",
+            "gone nl",
+            "through unconfined",
+        ] {
+            assert_eq!(Exit::parse(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
@@ -681,8 +848,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(d.join(ID), "work\n").unwrap();
-        // Not ready yet.
+        // Not ready yet — its keeper finds its space all the same.
         assert_eq!(up(&state, "work"), None);
+        assert_eq!(space(&state, "work"), Some(me));
         std::fs::write(d.join(READY), "").unwrap();
         assert_eq!(up(&state, "work"), Some(me));
         let found = running(&state);

@@ -438,10 +438,24 @@ fn attached_to(instances: &[crate::instance::Running], network: &str) -> String 
     )
 }
 
+/// What an instance's way out is, as `status --json` says it: `exit`
+/// (`"through"` or `"none"`) and `why` there is none (`null` while there is
+/// one) — its keeper's note (`instance::Exit`). No note: `offline` for an
+/// instance with no network, `null` for one that has not said yet.
+pub fn exit_fields(exit: Option<crate::instance::Exit>, network: &str) -> (String, String) {
+    match exit {
+        Some(crate::instance::Exit::Through(_)) => (string("through"), "null".to_owned()),
+        Some(crate::instance::Exit::Cut(why)) => (string("none"), string(&why)),
+        None if network == crate::launch::OFFLINE => (string("none"), string("offline")),
+        None => (string("none"), "null".to_owned()),
+    }
+}
+
 /// One running container instance (`crate::instance`, the container design
-/// of 2026-09-27): its runtime facts. Stage 1 has no way out for one
-/// (`exit` `none`, `why` `offline`), no switch, no pid namespace of its own.
+/// of 2026-09-27): its runtime facts. Its way out since stage 2 (a zone, or
+/// none); no switch, no pid namespace of its own yet.
 pub fn instance(tools: &Tools, running: &crate::instance::Running) -> String {
+    let (exit, why) = exit_fields(crate::instance::exit_of(&running.dir), &running.network);
     let container = match crate::instance::who_of(&running.id) {
         crate::origin::Who::Container(name) => string(&name),
         crate::origin::Who::Main => string(crate::instance::MAIN),
@@ -479,8 +493,8 @@ pub fn instance(tools: &Tools, running: &crate::instance::Running) -> String {
         .count()
     });
     format!(
-        "{{\"id\":{},\"container\":{container},\"network\":{},\"exit\":\"none\",\
-         \"why\":\"offline\",\"up\":true,\"pid\":{},\"since\":{since},\"epoch\":1,\
+        "{{\"id\":{},\"container\":{container},\"network\":{},\"exit\":{exit},\
+         \"why\":{why},\"up\":true,\"pid\":{},\"since\":{since},\"epoch\":1,\
          \"pid_namespace\":false,\"build\":{build},\"restart_needed\":{restart_needed},\
          \"programs\":{launches},\"live_switch\":{{\"available\":false,\"reason\":\"unsupported\"}}}}",
         string(&running.id),
@@ -828,6 +842,29 @@ pub fn document(tools: &Tools) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An instance's way out as its keeper noted it (stage 2): through its
+    /// zone, or none and why.
+    #[test]
+    fn an_instances_exit_is_its_keepers_note() {
+        use crate::instance::Exit;
+        assert_eq!(
+            exit_fields(Some(Exit::Through("nl".to_owned())), "nl"),
+            ("\"through\"".to_owned(), "null".to_owned())
+        );
+        assert_eq!(
+            exit_fields(Some(Exit::Cut("zone-down".to_owned())), "nl"),
+            ("\"none\"".to_owned(), "\"zone-down\"".to_owned())
+        );
+        assert_eq!(
+            exit_fields(None, "offline"),
+            ("\"none\"".to_owned(), "\"offline\"".to_owned())
+        );
+        assert_eq!(
+            exit_fields(None, "nl"),
+            ("\"none\"".to_owned(), "null".to_owned())
+        );
+    }
 
     #[test]
     fn strings_are_escaped_the_json_way() {

@@ -149,7 +149,8 @@ fn pids() -> Vec<i32> {
 
 /// The programs of the instance whose user namespace is `key`: every
 /// process whose user namespace is it or below it — but this one, and
-/// `spare` and what descends from it (the instance's own space) — each held
+/// `spare` and what descends from it (the instance's keeper: its space, and
+/// its relay, which runs in the instance's user namespace too) — each held
 /// by a pidfd opened while it was one (looked at again with the pidfd
 /// held: a number that went to another process in between is not taken).
 ///

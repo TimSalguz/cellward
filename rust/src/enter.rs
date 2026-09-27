@@ -57,6 +57,10 @@ use crate::profile::{exec_command, exit_code_of, EXIT_NOT_STARTED};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub instance: String,
+    /// The network the launch asked for (stage 2): an instance running in
+    /// another — started again meanwhile by another launch's word — is not
+    /// entered.
+    pub network: Option<String>,
     /// `systemctl`, to start an instance that stopped between the launch's
     /// look and this one's. Without it such a launch is not started.
     pub systemctl: Option<PathBuf>,
@@ -64,9 +68,10 @@ pub struct Args {
 }
 
 impl Args {
-    /// `--instance <id> [--systemctl <path>] -- cmd…`.
+    /// `--instance <id> [--network <name>] [--systemctl <path>] -- cmd…`.
     pub fn parse(argv: &[OsString]) -> Result<Self, String> {
         let mut instance = None;
+        let mut network = None;
         let mut systemctl = None;
         let mut rest = argv.iter();
         while let Some(flag) = rest.next() {
@@ -78,6 +83,7 @@ impl Args {
                 let instance = instance.ok_or("--instance is required")?;
                 return Ok(Self {
                     instance,
+                    network,
                     systemctl,
                     cmd,
                 });
@@ -92,6 +98,15 @@ impl Args {
                             .to_str()
                             .filter(|id| crate::instance::valid_id(id))
                             .ok_or("--instance is not an instance's id")?
+                            .to_owned(),
+                    )
+                }
+                Some("--network") => {
+                    network = Some(
+                        value
+                            .to_str()
+                            .filter(|name| crate::instance::valid_network(name))
+                            .ok_or("--network is not a network an instance can have")?
                             .to_owned(),
                     )
                 }
@@ -154,7 +169,7 @@ fn lock_shared(lock: &File) -> bool {
 /// once, is the word "look again". Through the directory's descriptor —
 /// the path may be longer than a socket's. Nobody answers: an instance
 /// whose keeper is gone is looked at by nobody.
-fn ring(dir: &Path) {
+pub(crate) fn ring(dir: &Path) {
     let Ok(held) = crate::sys::open_dir(dir) else {
         return;
     };
@@ -347,6 +362,24 @@ pub fn run(args: &Args) -> u8 {
             return EXIT_NOT_STARTED;
         }
     };
+    // The network it runs in, as its keeper resolved it: the one asked for,
+    // or no launch into it (stage 2 — a container is in one network at a
+    // time, `docs/CONTAINERS.md` I2).
+    if let Some(asked) = &args.network {
+        let running = std::fs::read_to_string(dir.join(crate::instance::NETWORK))
+            .map(|text| text.trim().to_owned())
+            .unwrap_or_default();
+        if running != *asked {
+            eprintln!(
+                "контейнер {} работает в сети «{running}», а запуск просит «{asked}» — запуск \
+                 остановлен: контейнер не бывает в двух сетях сразу",
+                args.instance
+            );
+            drop(lock);
+            ring(&dir);
+            return EXIT_NOT_STARTED;
+        }
+    }
     // Its network as it is now: what `profile-run` checks from inside. Not
     // ours: a space in the host's network would be no instance's.
     let netns = std::fs::read_link(format!("/proc/{pid}/ns/net")).ok();
@@ -454,6 +487,17 @@ mod tests {
         .unwrap();
         assert_eq!(a.instance, "main:offline");
         assert_eq!(a.systemctl, Some(PathBuf::from("/bin/systemctl")));
+        assert_eq!(a.network, None);
+        let a = Args::parse(&argv(&[
+            "--instance",
+            "work",
+            "--network",
+            "nl",
+            "--",
+            "true",
+        ]))
+        .unwrap();
+        assert_eq!(a.network.as_deref(), Some("nl"));
     }
 
     #[test]
@@ -466,6 +510,15 @@ mod tests {
             &["--instance", "a/b", "--", "true"],
             &["--instance", "work", "--other", "x", "--", "true"],
             &["--instance"],
+            &[
+                "--instance",
+                "work",
+                "--network",
+                "unconfined",
+                "--",
+                "true",
+            ],
+            &["--instance", "work", "--network", "a/b", "--", "true"],
         ] {
             assert!(Args::parse(&argv(bad)).is_err(), "{bad:?}");
         }

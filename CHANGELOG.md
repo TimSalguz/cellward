@@ -6,6 +6,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A container's instance can go out through a zone — its side**
+  (2026-09-27, stage 2b). An instance whose network is a zone (its id's
+  own, `<c>:<zone>`, or what the launch that started it asked, a file
+  beside its directory) gets unreachable defaults and a `resolv.conf` that
+  names the constant forwarders only; its keeper asks the zone's bridge for
+  a way out and starts the relay into the instance's user and network
+  namespaces as their root, and only then says the instance is ready. The
+  zone's end cuts it (`exit` `none`, `why` `zone-down`): its programs live
+  on with loopback alone. The zone back as it was — its fingerprint the
+  same — attaches it again with new addresses; back as another one, it
+  stays cut (`zone-changed`) until **`cellward container reattach <c>`**.
+  `status --json` says each instance's `exit` and `why` from its keeper's
+  note; the journal gets `attach`, `cut` and `reattach`. What the keeper
+  starts (its space, its relay) is never counted among its programs.
+  Launches do not use it yet. `vpn-zone-core container-enter --network`
+  refuses an instance running in another network.
 - **A zone can carry a container's instance — its side of the bridge**
   (2026-09-27, stage 2a of the container-first model). Every zone maps a
   third subordinate id, the bridge's (uid 2 inside, its group the

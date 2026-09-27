@@ -167,14 +167,22 @@ pub fn links_check(links: &[String]) -> Check {
     }
 }
 
-/// The interfaces of the IPv4 default routes in a `/proc/net/route`.
+/// The interfaces of the IPv4 default routes in a `/proc/net/route`,
+/// without unreachable ones (`RTF_REJECT`, shown on `*`): a container
+/// instance keeps one under its tap's (stage 2 of the container design), and
+/// it leads nowhere.
 pub fn default_routes4(route: &str) -> Vec<String> {
+    const RTF_REJECT: u32 = 0x0200;
     route
         .lines()
         .skip(1)
         .filter_map(|line| {
             let f: Vec<&str> = line.split_whitespace().collect();
-            (f.len() >= 8 && f[1] == "00000000" && f[7] == "00000000").then(|| f[0].to_owned())
+            if f.len() < 8 || f[1] != "00000000" || f[7] != "00000000" {
+                return None;
+            }
+            let flags = u32::from_str_radix(f[3], 16).unwrap_or(0);
+            (flags & RTF_REJECT == 0).then(|| f[0].to_owned())
         })
         .collect()
 }
@@ -1908,6 +1916,15 @@ mod tests {
             routes_check("route4", "IPv4", &default_routes4(v4)).level,
             Level::Ok
         );
+        // An instance's unreachable default under its tap's (stage 2): no
+        // way anywhere, with the tap or without it.
+        let ground =
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+                  *\t00000000\t00000000\t0201\t0\t0\t4294967295\t00000000\t0\t0\t0\n";
+        assert!(default_routes4(ground).is_empty());
+        let with_tap =
+            format!("{ground}awg0\t00000000\tFEFFFE0A\t0003\t0\t0\t0\t00000000\t0\t0\t0\n");
+        assert_eq!(default_routes4(&with_tap), ["awg0"]);
         let leak =
             "Iface\tDestination\n eth0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n";
         assert_eq!(

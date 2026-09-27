@@ -1340,6 +1340,7 @@ let
       PROBE = {"py": "${pkgs.python3}/bin/python3", "helper": "${./vm-probe-helper.py}",
                "passt": "${pkgs.passt}/bin/passt", "pasta": "${pkgs.passt}/bin/pasta"}
       exec(open("${./vm-probe-container-ns.py}").read())
+      exec(open("${./vm-instance-bridge.py}").read())
 
       with subtest("cellward check reports a live tunnel"):
           # The status mirror refreshes every 5 seconds from inside the zone;

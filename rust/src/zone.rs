@@ -1795,11 +1795,25 @@ pub fn run_instance(tools: Tools, home: PathBuf, plan: crate::instance::Plan) ->
         crate::instance::PID,
         crate::instance::START,
         READY,
+        crate::instance::SPACE_READY,
         crate::instance::CONTROL,
         crate::instance::USERNS,
+        crate::instance::EXIT,
+        crate::instance::REATTACH,
+        crate::instance::RESOLV,
         crate::pw_context::STATE_FILE,
     ] {
         let _ = fs::remove_file(dir.join(file));
+    }
+    // Its `resolv.conf` before its space binds it (`instance_ground`): the
+    // constant forwarder alone, until an attach says what else — written
+    // over in place then, never replaced (the space holds this file).
+    if plan.network != OFFLINE {
+        let resolv = dir.join(crate::instance::RESOLV);
+        if let Err(e) = fs::write(&resolv, crate::bridge::resolv_text(false, &[])) {
+            eprintln!("instance {id}: cannot write {} ({e})", resolv.display());
+            return 1;
+        }
     }
     // The network's zone-level settings, frozen for the instance's life: its
     // covers and helpers are made by them once, and `status --json` names
@@ -1932,21 +1946,50 @@ fn hold_instance(zone: &mut Zone, ids: &Ids, plan: &crate::instance::Plan) -> Re
         return Err("the instance stopped listening before the mapping was done".to_string());
     }
     drop(mapped);
-    // Ready, or the end of the one making it: waited for as long as that
-    // takes (the unit has no start timeout; `systemctl stop` ends a stuck
-    // one).
+    // The space set up, or the end of the one making it: waited for as long
+    // as that takes (the unit has no start timeout; `systemctl stop` ends a
+    // stuck one).
     let state = zone.home.join(STATE_SUBDIR);
-    let ready = sys::pidfd_open(pid)
-        .is_some_and(|h| sys::wait_for_entry(&zone.path(READY), Some(&h), Path::is_file));
-    if !ready || crate::instance::up(&state, &plan.id).is_none() {
+    let set_up = sys::pidfd_open(pid).is_some_and(|h| {
+        sys::wait_for_entry(
+            &zone.path(crate::instance::SPACE_READY),
+            Some(&h),
+            Path::is_file,
+        )
+    });
+    let space = if set_up {
+        crate::instance::space(&state, &plan.id)
+    } else {
+        None
+    };
+    let give_up = |helpers: &mut Helpers, why: String| {
         // SAFETY: kill(2) of our own child, not reaped yet.
         unsafe { libc::kill(pid, libc::SIGTERM) };
         let _ = reap(pid);
         helpers.stop();
-        return Err("its space did not come up".to_string());
+        Err(why)
+    };
+    let Some(space) = space else {
+        return give_up(&mut helpers, "its space did not come up".to_string());
+    };
+    // Its way out (stage 2 of the container design): attached before the
+    // instance is ready, so that a launch that finds it ready finds it
+    // going out — or refused to come up, with the zone's reason.
+    let mut transport = Transport::new(zone, plan, &state, space);
+    if let Err(e) = transport.first() {
+        return give_up(&mut helpers, e);
+    }
+    if let Err(e) = touch(&zone.path(READY)) {
+        transport.close();
+        return give_up(&mut helpers, format!("cannot create {READY}: {e}"));
+    }
+    if crate::instance::up(&state, &plan.id).is_none() {
+        transport.close();
+        return give_up(&mut helpers, "its space did not come up".to_string());
     }
     crate::system::notify_ready();
-    println!("instance {}: up, {} (loopback only)", plan.id, plan.network);
+    let exit = transport.describe();
+    println!("instance {}: up, {} ({exit})", plan.id, plan.network);
     let who = plan.who.word();
     if let Err(e) = crate::journal::append(
         &state,
@@ -1955,12 +1998,13 @@ fn hold_instance(zone: &mut Zone, ids: &Ids, plan: &crate::instance::Plan) -> Re
             ("instance", plan.id.as_str()),
             ("network", plan.network.as_str()),
             ("container", who.as_str()),
+            ("exit", exit.as_str()),
         ],
     ) {
         eprintln!("instance {}: journal: {e}", plan.id);
     }
 
-    let (ending, space_gone) = keep(zone, pid, userns, &mut helpers);
+    let (ending, space_gone) = keep(zone, pid, userns, &mut helpers, &mut transport);
     let why = match ending {
         Ending::Idle => {
             println!("instance {}: its last program ended — it stops", plan.id);
@@ -1977,9 +2021,11 @@ fn hold_instance(zone: &mut Zone, ids: &Ids, plan: &crate::instance::Plan) -> Re
     };
     // An instance ending ends its programs (the design's stop semantics):
     // TERM, and waited for — systemd's own stop timeout is the one clock.
+    // Their way out goes after them, before the space.
     if ending != Ending::Idle {
-        end_programs(userns, (!space_gone).then_some(pid));
+        end_programs(userns);
     }
+    transport.close();
     if !space_gone {
         // SAFETY: kill(2) of our own child, not reaped yet.
         unsafe { libc::kill(pid, libc::SIGTERM) };
@@ -2106,12 +2152,23 @@ pub fn run_instance_inner(tools: Tools, home: PathBuf, plan: crate::instance::Pl
 /// look at the instance until its program is in), it ends
 /// ([`Ending::Idle`]) — and not before a first launch has rung.
 /// `(how it ended, whether the space is gone and reaped)`.
+///
+/// And its way out (stage 2 of the container design, [`Transport`]): the
+/// zone's word that its passt ended, or the relay's end, cuts it; the
+/// zone's directory is watched while it is cut, and a zone that comes back
+/// as the one that carried it is attached again; the doorbell with
+/// [`crate::instance::REATTACH`] left is the person's word to attach it to
+/// the zone as it is now. What the keeper starts itself — its space and its
+/// relay — is never taken for a program of the instance.
 fn keep(
     zone: &Zone,
     holder: libc::pid_t,
     userns: (u64, u64),
     helpers: &mut Helpers,
+    transport: &mut Transport,
 ) -> (Ending, bool) {
+    // SAFETY: getpid(2) takes no arguments and cannot fail.
+    let keeper = unsafe { libc::getpid() };
     let (wake_r, wake_w) = match sys::pipe() {
         Ok(pipe) => pipe,
         Err(e) => {
@@ -2182,12 +2239,22 @@ fn keep(
         if ASKED_TO_STOP.load(Ordering::SeqCst) {
             break Ending::Asked;
         }
-        let mut fds: Vec<libc::pollfd> = Vec::with_capacity(members.len() + 2);
+        let mut fds: Vec<libc::pollfd> = Vec::with_capacity(members.len() + 5);
         fds.push(pollin(wake_r.as_raw_fd()));
         fds.push(pollin(doorbell.as_ref().map_or(-1, AsRawFd::as_raw_fd)));
+        let way = fds.len();
+        fds.extend(transport.polled());
+        let first_member = fds.len();
         fds.extend(members.iter().map(|(_, fd)| pollin(fd.as_raw_fd())));
+        // A child's end whose word an attach's wait took from the pipe:
+        // looked at now, not waited for.
+        let timeout = if CHILD_ENDED.load(Ordering::SeqCst) {
+            0
+        } else {
+            -1
+        };
         // SAFETY: a valid array of pollfd and its length.
-        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
         if rc < 0 {
             if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
                 // No memory for the poll: looked at again in a moment.
@@ -2220,6 +2287,7 @@ fn keep(
                 break Ending::Broken;
             }
         }
+        transport.handle(&fds[way..first_member], wake_r.as_raw_fd());
         let mut look = false;
         if fds[1].revents != 0 {
             if let Some(doorbell) = &doorbell {
@@ -2229,8 +2297,9 @@ fn keep(
             }
             look = true;
             armed = true;
+            transport.reattach(wake_r.as_raw_fd());
         }
-        let ended: Vec<bool> = fds[2..].iter().map(|p| p.revents != 0).collect();
+        let ended: Vec<bool> = fds[first_member..].iter().map(|p| p.revents != 0).collect();
         if ended.contains(&true) {
             let mut at = 0;
             members.retain(|_| {
@@ -2243,11 +2312,11 @@ fn keep(
         if !look {
             continue;
         }
-        members = crate::place::members(userns, Some(holder));
+        members = crate::place::members(userns, Some(keeper));
         if members.is_empty() && armed && lock.as_ref().is_some_and(lock_exclusive_now) {
             // Nobody on the way in (a launch holds the lock shared until its
             // program is in): looked at once more, and nobody is in.
-            members = crate::place::members(userns, Some(holder));
+            members = crate::place::members(userns, Some(keeper));
             if members.is_empty() {
                 break Ending::Idle;
             }
@@ -2276,12 +2345,15 @@ fn lock_exclusive_now(lock: &File) -> bool {
 
 /// Every program of the instance whose user namespace is `userns` ended:
 /// TERM (and CONT, for one stopped), waited for, and looked for again —
-/// what forked meanwhile goes the same way. `spare`: the space, which the
-/// keeper ends after them. No clock: a program that does not end is ended
-/// by systemd's stop timeout of the unit — the one clock (O10 of the design).
-fn end_programs(userns: (u64, u64), spare: Option<libc::pid_t>) {
+/// what forked meanwhile goes the same way. What the keeper started — its
+/// space, its relay — is spared: the keeper ends it after them. No clock: a
+/// program that does not end is ended by systemd's stop timeout of the
+/// unit — the one clock (O10 of the design).
+fn end_programs(userns: (u64, u64)) {
+    // SAFETY: getpid(2) takes no arguments and cannot fail.
+    let keeper = unsafe { libc::getpid() };
     loop {
-        let found = crate::place::members(userns, spare);
+        let found = crate::place::members(userns, Some(keeper));
         if found.is_empty() {
             return;
         }
@@ -2292,6 +2364,349 @@ fn end_programs(userns: (u64, u64), spare: Option<libc::pid_t>) {
         for (_, fd) in &found {
             sys::pidfd_wait_end(fd);
         }
+    }
+}
+
+/// A container instance's way out, as its keeper holds it (stage 2 of the
+/// container design of 2026-09-27, `crate::bridge`): the link to its zone
+/// while it has one; why not while it has none ([`crate::instance::Exit`],
+/// noted in its directory for `status`); and what it was carried by — the
+/// zone's fingerprint and the last addresses —, which a zone that comes
+/// back is held to. Its exit is fixed for the instance's life: it goes out
+/// through its zone or nowhere, and is never moved to another network by
+/// anything but the person.
+struct Transport {
+    id: String,
+    network: String,
+    state: PathBuf,
+    /// The instance's directory.
+    dir: PathBuf,
+    /// Its space's host pid: what the relay joins.
+    space: i32,
+    ip: PathBuf,
+    nft: PathBuf,
+    link: Option<crate::bridge::Link>,
+    /// Why there is no link, while there is none.
+    why: &'static str,
+    /// The fingerprint of the zone that carried it.
+    fp: Option<u64>,
+    /// The zone's app namespace's process that carried it: a zone that
+    /// comes back is another process — the same one never re-attaches the
+    /// instance by itself (its passt or the relay ended, and a relay that
+    /// ends at once would end again and again).
+    zone_pid: Option<i32>,
+    previous: Option<crate::bridge::GuestPlan>,
+    /// The zone's directory, watched while the instance is cut from it.
+    watch: Option<sys::Inotify>,
+}
+
+impl Transport {
+    fn new(zone: &Zone, plan: &crate::instance::Plan, state: &Path, space: i32) -> Self {
+        Self {
+            id: plan.id.clone(),
+            network: plan.network.clone(),
+            state: state.to_path_buf(),
+            dir: zone.dir.clone(),
+            space,
+            ip: zone.tools.ip.clone(),
+            nft: zone.tools.nft.clone(),
+            link: None,
+            why: "offline",
+            fp: None,
+            zone_pid: None,
+            previous: None,
+            watch: None,
+        }
+    }
+
+    fn offline(&self) -> bool {
+        self.network == OFFLINE
+    }
+
+    /// For its journal and its keeper's word.
+    fn describe(&self) -> String {
+        match &self.link {
+            Some(link) => format!(
+                "out through {} as {}{}",
+                self.network,
+                link.plan.a4,
+                link.plan
+                    .a6
+                    .map(|a| format!(" and {a}"))
+                    .unwrap_or_default()
+            ),
+            None if self.offline() => "loopback only".to_owned(),
+            None => format!("cut: {}", self.why),
+        }
+    }
+
+    /// Its exit noted where `status` reads it ([`crate::instance::EXIT`]).
+    fn note(&self) {
+        let exit = match &self.link {
+            Some(_) => crate::instance::Exit::Through(self.network.clone()),
+            None => crate::instance::Exit::Cut(self.why.to_owned()),
+        };
+        let path = self.dir.join(crate::instance::EXIT);
+        if let Err(e) = write_private(&path, exit.text().as_bytes()) {
+            eprintln!("instance {}: cannot note its way out ({e})", self.id);
+        }
+    }
+
+    fn journal(&self, event: &str, fields: &[(&str, &str)]) {
+        let mut all = vec![
+            ("instance", self.id.as_str()),
+            ("zone", self.network.as_str()),
+        ];
+        all.extend_from_slice(fields);
+        if let Err(e) = crate::journal::append(&self.state, event, &all) {
+            eprintln!("instance {}: journal: {e}", self.id);
+        }
+    }
+
+    /// Attached through its zone's bridge (`bridge::attach`): the relay
+    /// started, the `resolv.conf` its space holds rewritten in place (the
+    /// constant forwarders, the zone's search domains), the exit noted.
+    /// `expect`: the fingerprint of the zone that carried it — a return;
+    /// `None`: the first attach, or the person's word.
+    fn attach(
+        &mut self,
+        expect: Option<u64>,
+        wake: Option<RawFd>,
+    ) -> Result<(), crate::bridge::NoLink> {
+        use crate::bridge::NoLink;
+        let zone_dir = self.state.join(&self.network);
+        let Some(zone_pid) = crate::cli::zone_up(&self.state, OsStr::new(&self.network)) else {
+            return Err(NoLink::Failed(format!("zone {} is not up", self.network)));
+        };
+        if !crate::bridge::carries(&zone_dir) {
+            return Err(NoLink::Failed(format!(
+                "zone {} carries no container: it runs a previous build — restart it",
+                self.network
+            )));
+        }
+        let space = sys::pidfd_open(self.space)
+            .filter(|_| crate::instance::space(&self.state, &self.id) == Some(self.space))
+            .ok_or_else(|| NoLink::Failed("its space is gone".to_owned()))?;
+        let core = std::env::current_exe()
+            .map_err(|e| NoLink::Failed(format!("cannot find our own binary: {e}")))?;
+        let tools = crate::bridge::RelayTools {
+            core: &core,
+            ip: &self.ip,
+            nft: &self.nft,
+        };
+        let stop = || ASKED_TO_STOP.load(Ordering::SeqCst);
+        let link = crate::bridge::attach(
+            &zone_dir,
+            &self.id,
+            &space,
+            self.previous,
+            expect,
+            &tools,
+            wake,
+            &stop,
+        )?;
+        let resolv = crate::bridge::resolv_text(link.v6, &link.search);
+        let written = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(self.dir.join(crate::instance::RESOLV))
+            .and_then(|mut file| file.write_all(resolv.as_bytes()));
+        if let Err(e) = written {
+            eprintln!(
+                "instance {}: cannot write its resolv.conf ({e}) — names may not resolve",
+                self.id
+            );
+        }
+        self.previous = Some(link.plan);
+        self.fp = Some(link.fp);
+        self.zone_pid = Some(zone_pid);
+        self.link = Some(link);
+        self.why = "";
+        self.watch = None;
+        self.note();
+        let exit = self.describe();
+        println!("instance {}: {exit}", self.id);
+        self.journal("attach", &[("exit", exit.as_str())]);
+        Ok(())
+    }
+
+    /// Its first way out, as the instance comes up: none for an offline
+    /// one; through its zone, or the instance does not come up.
+    fn first(&mut self) -> Result<(), String> {
+        if self.offline() {
+            self.why = "offline";
+            self.note();
+            return Ok(());
+        }
+        self.attach(None, None)
+            .map_err(|e| format!("no way out through zone {}: {e}", self.network))
+    }
+
+    /// Cut: the link dropped — the zone kills its passt, the relay is
+    /// killed, the tap goes with it —, the programs left with loopback and
+    /// the unreachable defaults, and the zone's directory watched for its
+    /// return.
+    fn cut(&mut self, why: &'static str, wake: RawFd) {
+        let Some(link) = self.link.take() else {
+            return;
+        };
+        link.close();
+        self.why = why;
+        self.note();
+        println!(
+            "instance {}: cut from zone {} ({why}) — its programs go on with no way out",
+            self.id, self.network
+        );
+        self.journal("cut", &[("why", why)]);
+        self.watch_zone(wake);
+    }
+
+    /// The zone's directory watched for its return (its `ready`, its
+    /// bridge's socket appearing), and looked at once: it may be back
+    /// already.
+    fn watch_zone(&mut self, wake: RawFd) {
+        self.watch = sys::Inotify::watch(&self.state.join(&self.network)).ok();
+        if self.watch.is_none() {
+            eprintln!(
+                "instance {}: cannot watch zone {} — only `cellward container reattach` \
+                 attaches it again",
+                self.id, self.network
+            );
+        }
+        self.zone_back(Some(wake));
+    }
+
+    /// The zone may be back: attached again when it is the one that carried
+    /// the instance (its fingerprint); left cut, until the person says,
+    /// when it is another — never moved to another exit as a side effect.
+    fn zone_back(&mut self, wake: Option<RawFd>) {
+        use crate::bridge::NoLink;
+        if self.link.is_some() || self.why == "zone-changed" || self.offline() {
+            return;
+        }
+        let zone_dir = self.state.join(&self.network);
+        let Some(now) = crate::cli::zone_up(&self.state, OsStr::new(&self.network)) else {
+            return;
+        };
+        // The very process that carried it: not back — going, or with its
+        // passt or the relay ended. Only the person re-attaches then.
+        if Some(now) == self.zone_pid || !crate::bridge::carries(&zone_dir) {
+            return;
+        }
+        match self.attach(self.fp, wake) {
+            Ok(()) => println!(
+                "instance {}: zone {} is back as it was — attached again",
+                self.id, self.network
+            ),
+            Err(NoLink::Changed(fp)) => {
+                self.why = "zone-changed";
+                self.watch = None;
+                self.note();
+                eprintln!(
+                    "instance {}: zone {} came back as another one (fingerprint {fp:016x}) — \
+                     it stays cut; `cellward container reattach` attaches it",
+                    self.id, self.network
+                );
+                self.journal("cut", &[("why", "zone-changed")]);
+            }
+            Err(NoLink::Stopped) => {}
+            Err(NoLink::Failed(e)) => {
+                self.why = "attach-failed";
+                self.note();
+                eprintln!("instance {}: not attached again: {e}", self.id);
+            }
+        }
+    }
+
+    /// The person's word (`cellward container reattach`): its mark taken
+    /// and, cut, the instance attached to its zone as the zone is now.
+    fn reattach(&mut self, wake: RawFd) {
+        if fs::remove_file(self.dir.join(crate::instance::REATTACH)).is_err() {
+            return;
+        }
+        if self.offline() || self.link.is_some() {
+            return;
+        }
+        match self.attach(None, Some(wake)) {
+            Ok(()) => self.journal("reattach", &[]),
+            Err(crate::bridge::NoLink::Stopped) => {}
+            Err(e) => {
+                self.why = "attach-failed";
+                self.note();
+                eprintln!("instance {}: not attached: {e}", self.id);
+                if self.watch.is_none() {
+                    self.watch = sys::Inotify::watch(&self.state.join(&self.network)).ok();
+                }
+            }
+        }
+    }
+
+    /// What the keeper polls for it, in the order [`Transport::handle`]
+    /// reads them back: the link's request and relay, the zone's
+    /// directory while cut.
+    fn polled(&self) -> Vec<libc::pollfd> {
+        let mut out = Vec::new();
+        if let Some(link) = &self.link {
+            out.push(libc::pollfd {
+                fd: link.control.as_raw_fd(),
+                events: libc::POLLIN | libc::POLLRDHUP,
+                revents: 0,
+            });
+            out.push(libc::pollfd {
+                fd: link.relay_fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        if let Some(watch) = &self.watch {
+            out.push(libc::pollfd {
+                fd: watch.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        out
+    }
+
+    /// What happened to it ([`Transport::polled`]'s answers): the zone's
+    /// side ended — the zone, or its passt, which the zone says — or the
+    /// relay did: cut, `zone-down` either way (the zone's word and the
+    /// relay's end come at nearly one moment, in either order); the zone's
+    /// directory changed — perhaps back.
+    fn handle(&mut self, polled: &[libc::pollfd], wake: RawFd) {
+        let mut at = 0;
+        if let Some(link) = &self.link {
+            let control = polled.get(at).map_or(0, |p| p.revents);
+            let relay = polled.get(at + 1).map_or(0, |p| p.revents);
+            at += 2;
+            if (control != 0 && link.zone_ended()) || relay != 0 {
+                self.cut("zone-down", wake);
+                return;
+            }
+        }
+        if self.watch.is_some() && polled.get(at).is_some_and(|p| p.revents != 0) {
+            let names = match self.watch.as_ref().map(sys::Inotify::names) {
+                Some(Ok(names)) => names,
+                _ => {
+                    self.watch = None;
+                    return;
+                }
+            };
+            if names
+                .iter()
+                .any(|name| name == READY || name == crate::bridge::SOCKET)
+            {
+                self.zone_back(Some(wake));
+            }
+        }
+    }
+
+    /// At the instance's end: its link dropped.
+    fn close(&mut self) {
+        if let Some(link) = self.link.take() {
+            link.close();
+        }
+        self.watch = None;
     }
 }
 
@@ -6102,6 +6517,25 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         // hidden, whatever the host's file names is unreachable from a
         // namespace that has only loopback, and a name here simply does not
         // resolve. Which is what offline has to mean.
+        //
+        // A container's instance (stage 2 of the container design): no rules
+        // here either — its relay loads them with each attach
+        // (`crate::relay`) —, and with a zone for its network the ground its
+        // taps stand on ([`instance_ground`]). `ready` is its keeper's to
+        // write, once its way out is attached: this says the space is set up.
+        if let Some(instance) = &zone.instance {
+            if instance.network != OFFLINE {
+                instance_ground(zone)?;
+            }
+            let done = zone.path(crate::instance::SPACE_READY);
+            touch(&done).map_err(|e| format!("cannot create {}: {e}", done.display()))?;
+            println!(
+                "instance {}: its space is set up (network {})",
+                zone.name(),
+                instance.network
+            );
+            return Ok(());
+        }
         touch(&zone.path(READY)).map_err(|e| format!("cannot create {READY}: {e}"))?;
         println!("zone {}: no network (loopback only)", zone.name());
         return Ok(());
@@ -6280,6 +6714,35 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// What an instance with a zone for its network has before any attach
+/// (stage 2 of the container design, 2026-09-27): the unreachable defaults
+/// of both families at the highest metric, under the routes each attach
+/// puts on its tap — while there is no tap, a connection and a name fail at
+/// once instead of waiting for a route —, and the `resolv.conf` its keeper
+/// wrote (`bridge::resolv_text`: the constant forwarders, never a real
+/// resolver) bound over the system's: the keeper rewrites it in place with
+/// each attach, and programs see the new text in the same file.
+fn instance_ground(zone: &Zone) -> Result<(), String> {
+    let unreachable = [
+        "route",
+        "add",
+        "unreachable",
+        "default",
+        "metric",
+        "4294967295",
+    ];
+    if zone.ip_quiet(&unreachable).is_err() {
+        eprintln!(
+            "instance {}: no unreachable IPv4 default — without a tap a connection fails as \
+             no route is found",
+            zone.name()
+        );
+    }
+    let six: Vec<&str> = std::iter::once("-6").chain(unreachable).collect();
+    let _ = zone.ip_quiet(&six);
+    bind_resolv(zone)
 }
 
 /// The space's `resolv.conf` (its directory's [`RESOLV`]) bound over the
