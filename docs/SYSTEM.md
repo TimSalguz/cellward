@@ -476,7 +476,9 @@ the network, however it was started.
     the zone to one of the host's addresses is delivered locally — to a DNS forwarder, a
     proxy, Tor, sshd listening on it — and whatever that service sends goes out by the
     host's routes, not by the interface chosen. Plain system zones refuse this
-    (`plain_host_ruleset`); user host-interface zones do not yet.
+    (`plain_host_ruleset`); a user host-interface zone refuses the host's IPv4 addresses
+    it had when the zone came up (the zone's filter) — one the host gets later is not
+    among them until the zone is restarted.
   - *Established flows stay.* `ct state established,related accept` comes first: a
     connection opened while cellward was off, during the emergency key's window or
     before the policy loaded keeps flowing afterwards, and so does the reply side of a

@@ -2720,6 +2720,18 @@ let
           # The app namespace's filter holds here too.
           rules = in_zone_root(lpid, "nft list ruleset")
           assert 'oifname "awg0" accept' in rules and "policy drop" in rules, rules
+          # And the host's own services are not the zone's way out (audit
+          # 2026-09-27): pasta is in the host's network, and a connection to
+          # the host's address would be delivered to whatever listens there,
+          # to go on by the host's routes.
+          machine.succeed(
+              "systemd-run --unit=hostlocal socat TCP-LISTEN:8091,fork,reuseaddr 'SYSTEM:echo host-local'"
+          )
+          machine.wait_until_succeeds("ss -ltn | grep -q ':8091 '")
+          machine.succeed("socat -T5 - TCP:192.168.1.1:8091 | grep -q host-local")
+          in_zone(lpid, "sh -c '! timeout 10 socat -T5 - TCP:192.168.1.1:8091'")
+          assert "192.168.1.1 reject" in rules, rules
+          machine.succeed("systemctl stop hostlocal")
           machine.wait_until_succeeds(
               "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; cellward check vmlan'",
               timeout=30,

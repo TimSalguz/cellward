@@ -1432,6 +1432,9 @@ struct ZoneLinks<'a> {
     backend: &'a Backend,
     ready_w: OwnedFd,
     moved_r: OwnedFd,
+    /// Rules the zone's filter takes before its own (a host-interface zone's
+    /// refusal of the host's addresses, [`host_address_rules`]).
+    first: Vec<String>,
 }
 
 /// What the uplink is handed: the backend, the host pid of the app namespace to
@@ -1461,6 +1464,12 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
     } else {
         Some(prepare(zone)?)
     };
+    // A host-interface zone's pasta is in the host's network: the host's own
+    // addresses, taken here where they can be seen.
+    let first = match &cfg {
+        Some(Backend::HostIf(_)) => host_address_rules(&host_ipv4_addresses()),
+        _ => Vec::new(),
+    };
 
     // The buses' proxies and the sound filter are up already: the unit's own
     // process started them, out of the zone's user namespace (`Helpers`).
@@ -1485,6 +1494,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
             backend,
             ready_w: zone_up_w,
             moved_r,
+            first,
         });
         let code = zone_main(zone, links);
         // SAFETY: _exit never returns and touches nothing of ours.
@@ -4433,6 +4443,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         backend,
         ready_w,
         moved_r,
+        first,
     }) = links
     else {
         // An offline zone gets no rules, and needs none: loopback is the only
@@ -4460,7 +4471,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // capabilities over it). That is precisely what makes it worth having — the
     // day a change of ours puts an interface here by mistake, the packets stop
     // instead of quietly leaving through it.
-    zone.seal("zone", &app_ruleset());
+    zone.seal("zone", &app_ruleset_with(&first));
 
     // The uplink is waiting for this before it hands the interface over.
     let mut ready = File::from(ready_w);
@@ -5180,6 +5191,51 @@ pub fn app_ruleset() -> String {
     app_ruleset_with(&[])
 }
 
+/// The host's own IPv4 addresses, from where the host's network is seen:
+/// every interface's but loopback's.
+fn host_ipv4_addresses() -> Vec<std::net::Ipv4Addr> {
+    let mut out = Vec::new();
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills the pointer with a list freed below.
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return out;
+    }
+    let mut at = list;
+    while !at.is_null() {
+        // SAFETY: a node of the list getifaddrs made, alive until freeifaddrs.
+        let node = unsafe { &*at };
+        if !node.ifa_addr.is_null()
+            // SAFETY: a non-null sockaddr of the node.
+            && i32::from(unsafe { (*node.ifa_addr).sa_family }) == libc::AF_INET
+        {
+            // SAFETY: an AF_INET address is a sockaddr_in.
+            let sin = unsafe { &*(node.ifa_addr as *const libc::sockaddr_in) };
+            let addr = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+            if !addr.is_loopback() && !out.contains(&addr) {
+                out.push(addr);
+            }
+        }
+        at = node.ifa_next;
+    }
+    // SAFETY: the list getifaddrs made, freed once.
+    unsafe { libc::freeifaddrs(list) };
+    out
+}
+
+/// A host-interface zone's refusal of the host's own addresses (audit
+/// 2026-09-27). Its pasta runs in the host's network and gives the zone an
+/// address of its own, so a connection to one of the host's is delivered
+/// locally — to a DNS forwarder, a proxy, Tor, sshd — and what that service
+/// sends goes out by the host's routes, not by the interface chosen. The
+/// addresses the host has when the zone comes up; one it gets later is not
+/// among them.
+pub fn host_address_rules(addresses: &[std::net::Ipv4Addr]) -> Vec<String> {
+    addresses
+        .iter()
+        .map(|a| format!("ip daddr {a} reject with icmpx admin-prohibited"))
+        .collect()
+}
+
 /// [`app_ruleset`] with rules of the caller's first — a system zone's refusal
 /// of what its user zones' pasta sends to its own addresses.
 pub fn app_ruleset_with(first: &[String]) -> String {
@@ -5513,6 +5569,18 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host-interface zone refuses the host's own addresses, before its
+    /// own accepts (audit 2026-09-27).
+    #[test]
+    fn a_host_interface_zone_refuses_the_hosts_addresses_first() {
+        let first = host_address_rules(&["192.168.1.1".parse().unwrap()]);
+        let rules = app_ruleset_with(&first);
+        let reject = rules.find("ip daddr 192.168.1.1 reject").unwrap();
+        let accept = rules.find("oifname \"lo\" accept").unwrap();
+        assert!(reject < accept, "{rules}");
+        assert!(host_address_rules(&[]).is_empty());
+    }
 
     /// The user's own groups, the line mapped to itself: a range over the
     /// zone's root too would be empty to the kernel (100000 > 100 outside).

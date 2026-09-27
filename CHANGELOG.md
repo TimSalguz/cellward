@@ -249,6 +249,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A host-interface zone does not go out through the host's own
+  services** (audit 2026-09-27). Its pasta runs in the host's network and
+  gives the zone an address of its own, so a connection from the zone to
+  one of the host's addresses was delivered locally — to a DNS forwarder,
+  a proxy, Tor, sshd listening there — and what that service sent went out
+  by the host's routes, not by the interface chosen. The zone's filter now
+  refuses the host's IPv4 addresses, as they are when the zone comes up.
 - **Smaller holes of the same night** (bug hunt 2026-09-27):
   - the window menu's "cut the network" is not offered for a system
     zone's window (`kill` knows user zones only, and would cut one of the
