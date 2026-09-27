@@ -3429,11 +3429,27 @@ mod tests {
             let got = log_until(&log, |m| {
                 m.iface == "wl_subsurface" && m.opcode == 4 && m.object == title_sub
             });
-            let buffer = find(&got, "wl_shm_pool", 0);
+            // The text and the buttons beside it (stage 3), each drawn
+            // again: the text's buffer is the one attached to it.
+            let buffers = find(&got, "wl_shm_pool", 0);
+            assert_eq!(buffers.len(), 2, "{got:#?}");
+            let attached = got
+                .iter()
+                .find(|m| m.iface == "wl_surface" && m.opcode == 1 && m.object == text)
+                .map(|m| m.args[0]);
+            let buffer: Vec<&Msg> = buffers
+                .iter()
+                .filter(|m| Some(m.args[0]) == attached)
+                .collect();
             assert_eq!(buffer.len(), 1, "{got:#?}");
             assert_eq!(
                 (buffer[0].args[2] as i32, buffer[0].args[3] as i32),
                 (crate::wl_title::device(width, 180), 30)
+            );
+            // The row of buttons at 1.5: 72 × 20 logical, 108 × 30 pixels.
+            assert!(
+                buffers.iter().any(|m| m.args[2..4] == [108, 30]),
+                "{buffers:#?}"
             );
             let order: Vec<(String, u32, u32)> = got
                 .iter()

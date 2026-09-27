@@ -6,6 +6,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Buttons, dragging and resizing on the zone's frame** (2026-09-27, stage 3
+  of `docs/WINDOW-FRAME.md`). The title strip the Wayland proxy draws gets
+  three buttons at its right end: ≡ opens the window menu of that launch, ⇄
+  closes the program and starts it again with the network chosen (to become
+  a network switch without the restart), × sends the program its own close,
+  as a server-side decoration's. The button under the pointer lights up (a
+  shade of the frame's colour, close red), pressed a stronger one. Dragging
+  the strip moves the window (`xdg_toplevel.move`), the border resizes it by
+  its edge, both edges within 16 px of a corner (`xdg_toplevel.resize`), with
+  resize arrows for a cursor (`wp_cursor_shape_v1`, where the compositor
+  offers it); the default cursor over the strip and the buttons. Only the
+  compositor's pointer events on the proxy's own surfaces act — the program
+  can name neither. The menu and the network are asked of the launch's
+  supervisor by a byte on its channel; it starts `cellward window-menu --pid
+  <pid> [--restart]` through `systemd-run --user`, one at a time. The proxy's
+  seccomp filter is unchanged. The buttons' look — end, order, glyphs, shape,
+  colours — is one value in the code, so that looks like GNOME's, KDE's,
+  macOS's and Windows's can come later as a setting.
+- **`cellward window-menu --pid <pid> [--restart]`**: the window menu of the
+  launch of a pid (a window's pid as the compositor has it) instead of the
+  focused window's, and straight to "restart with a network chosen".
 - **IPv6 for a user zone through a system zone** (2026-09-27). Its pasta
   ran with `-4`, so such a zone never had IPv6 even when the system zone's
   tunnel carried it. A system zone now marks that its network carries IPv6

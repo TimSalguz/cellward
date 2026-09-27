@@ -407,6 +407,7 @@ cellward watch [--json]                        # are the tunnels alive (a timer 
 cellward status --bar                          # one JSON line for waybar and similar bars
 cellward focused [--json|--bar|--watch]        # the zone and container of the focused window (niri, sway)
 cellward window-menu                           # its menu: pin the network, restart with a choice, close, cut off
+cellward window-menu --pid <pid> [--restart]   # the same menu for the launch of <pid> (what the frame's ≡ opens)
 cellward launch <id> [-- args]                 # a launcher entry through the picker (key bindings)
 cellward run <zone> -- firefox                 # run in a zone
 cellward run <zone> --profile work -- firefox  # + data container
@@ -472,6 +473,17 @@ the container comes from the nearest launch up its parents, when that launch
 is certainly still running (its start time on record) and in the same network.
 A program that detached from its launch shows its network with the container
 unknown. Nothing trusts the window's title; the bar line escapes markup.
+
+**The zone's frame.** Windows of a program in a zone come with a frame the
+Wayland proxy draws inside the window: a border of the zone's (or the
+container's) colour and a title strip with `<zone> · <container>`
+(`cellward frame show|hide|width|color|title`). At the right end of the strip
+three buttons: **≡** opens the window menu of that very launch (`cellward
+window-menu --pid`), **⇄** closes the program and starts it again with the
+network chosen, **×** closes the window as its own close button would. Drag
+the strip to move the window, its border or corners to resize it; the button
+under the pointer lights up. The frame is a reminder, not a boundary a
+program cannot fake: the panel's `cellward focused` is the one it cannot.
 
 ## The system tier (optional)
 

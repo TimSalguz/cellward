@@ -414,6 +414,12 @@ let
           machine.wait_until_fails(f"test -e /proc/{sup}", timeout=30)
           machine.wait_until_fails("pgrep -x vz-wl-proxy", timeout=30)
           machine.fail(f"test -e /run/user/1000/vpn-zones/wayland/offline/wl-sandbox-{sup}")
+
+      # The frame's buttons, dragging and resizing (docs/WINDOW-FRAME.md §8,
+      # "Этап 3"), with a pointer: a file of its own, exec()'d in these
+      # globals, and the virtual pointer it drives (tests/vm-pointer.py).
+      POINTER = "${pkgs.python3}/bin/python3 ${./vm-pointer.py}"
+      exec(open("${./vm-window-buttons.py}").read())
     '';
   };
 in
