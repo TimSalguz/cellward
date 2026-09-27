@@ -301,6 +301,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A throwaway container is erased when its last program exits, on a
+  Wayland desktop too** (2026-09-27). `profile-run` left its own pid out of
+  "is anybody else still in here?", but the registry holds the launcher's
+  pid, and the launcher becomes `wl-sandbox`, which forks: that record was
+  alive at the moment of the question, so with a compositor a throwaway
+  container's layer stayed on disk until `cellward gc` swept it. The launch
+  now names its own record to `profile-run` (`--registered <pid>:<start>`),
+  and exactly that record — by its pid and its start time — is not counted;
+  a pid that came round to another launch still is.
 - **A zone's program cannot open a vsock — or any socket its network
   namespace does not hold** (2026-09-27, `docs/LEAK-MODEL.md` §25). A VM
   test showed a program in a zone reaching a vsock listener of the host's:

@@ -1193,6 +1193,12 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             dir: &container.dir,
             ephemeral: container.ephemeral,
             regdir: &regdir,
+            // The record written above: this process's pid, which the
+            // `exec` below keeps, and its start time.
+            registered: {
+                let pid = std::process::id() as i32;
+                crate::sys::start_time(pid).map(|start| crate::profile::Registered { pid, start })
+            },
             cwd: &cwd,
             trust: trust.as_deref(),
             nss_home: nss_home.as_deref(),
@@ -1292,6 +1298,10 @@ pub struct Entry<'a> {
     pub dir: &'a Path,
     pub ephemeral: bool,
     pub regdir: &'a Path,
+    /// This launch's own record in `regdir`: its pid and its start time.
+    /// Passed to a throwaway container's `profile-run --registered`, which
+    /// tells it from the other tenants when its program exits (J9).
+    pub registered: Option<crate::profile::Registered>,
     /// The directory the program is to start in: the caller's.
     pub cwd: &'a Path,
     /// The container's directory of trusted certificates, when it has one
@@ -1425,6 +1435,11 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
         exec.push("profile-run".into());
         exec.push("--cwd".into());
         exec.push(entry.cwd.into());
+        // Only a throwaway container asks who else is in it.
+        if let Some(me) = entry.registered.filter(|_| entry.ephemeral) {
+            exec.push("--registered".into());
+            exec.push(me.arg().into());
+        }
         if entry.camera && matches!(entry.network, Network::Zone(_)) {
             exec.push("--camera".into());
         }
@@ -2637,6 +2652,7 @@ mod tests {
             dir,
             ephemeral,
             regdir: Path::new("/r/.running/work"),
+            registered: None,
             cwd: Path::new("/home/u/src"),
             trust: None,
             nss_home: None,
@@ -2890,6 +2906,33 @@ mod tests {
             "unconfined is the host's network"
         );
         assert!(!line.contains(&os("/t/nsenter")));
+    }
+
+    /// A throwaway container's `profile-run` is told the launch's own record
+    /// (J9): with `wl-sandbox` in between, its own pid is in no record, and
+    /// the launcher's record kept the container forever. A container that
+    /// is kept asks nobody, and its command line stays as it was.
+    #[test]
+    fn a_throwaway_launch_names_its_own_record() {
+        let me = crate::profile::Registered {
+            pid: 4242,
+            start: 777,
+        };
+        let mut e = entry(Network::Zone(42), Path::new("/s/.tmp/vpn-profile-x"), true);
+        e.registered = Some(me);
+        let line = entry_argv(&e, argv(&["firefox"]));
+        let at = |w: &str| line.iter().position(|a| a == w).unwrap();
+        assert!(at("profile-run") < at("--registered"), "{line:?}");
+        assert_eq!(line[at("--registered") + 1], "4242:777");
+        assert!(at("--registered") < at("/s/.tmp/vpn-profile-x"), "{line:?}");
+        let parsed = crate::profile::Args::parse(&line[at("profile-run") + 1..]).unwrap();
+        assert_eq!(parsed.registered, Some(me));
+        assert!(parsed.ephemeral);
+
+        let mut e = entry(Network::Zone(42), Path::new("/p/work"), false);
+        e.registered = Some(me);
+        let line = entry_argv(&e, argv(&["firefox"]));
+        assert!(!line.contains(&os("--registered")), "{line:?}");
     }
 
     /// What a zone asked the broker for is a file name in the registry, not

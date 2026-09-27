@@ -74,6 +74,10 @@ pub struct Args {
     /// Directory of the launch registry for this container, or empty. Used
     /// only to answer "is anybody else still in here?".
     pub regdir: PathBuf,
+    /// `--registered <pid>:<start>`: the launch's own record in that
+    /// registry — the launcher's pid and its start time — which is not
+    /// "anybody else" ([`others_alive`]). Without it, this process itself.
+    pub registered: Option<Registered>,
     /// `--cwd`: the directory the program is to start in — the caller's.
     ///
     /// Needed because `nsenter`, joining another mount namespace, does
@@ -173,7 +177,18 @@ impl Args {
         let mut camera = false;
         let mut own_x11 = false;
         let mut devices = Vec::new();
+        let mut registered = None;
         while let Some(flag) = positional.first() {
+            if flag == "--registered" {
+                // One that does not read is none: this process counts as the
+                // launch's own record then, as it did before the flag.
+                registered = positional
+                    .get(1)
+                    .and_then(|v| v.to_str())
+                    .and_then(Registered::parse);
+                positional = positional.get(2..).unwrap_or(&[]);
+                continue;
+            }
             if flag == "--device" {
                 // One that does not read is not given: nothing more.
                 if let Some(pass) = positional
@@ -243,6 +258,7 @@ impl Args {
             // safe way round: a typo must not delete somebody's data.
             ephemeral: positional.get(2).is_some_and(|e| e == "1"),
             regdir: PathBuf::from(positional.get(3).cloned().unwrap_or_default()),
+            registered,
             cwd,
             trust,
             nss_home,
@@ -538,14 +554,70 @@ pub fn proc_is_alive(pid: i32) -> bool {
     Path::new("/proc").join(pid.to_string()).is_dir()
 }
 
+/// A launch's own record in the registry: the pid `vpn-zone run` wrote
+/// there — its own, which survives its `exec` — and when that process
+/// started (`crate::sys::start_time`). The two together name the one
+/// process; the pid alone names whoever has the number now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Registered {
+    pub pid: i32,
+    pub start: u64,
+}
+
+impl Registered {
+    /// `<pid>:<start>`, as `profile-run --registered` takes it. Anything
+    /// else is none.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (pid, start) = text.split_once(':')?;
+        let all_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        if !all_digits(pid) || !all_digits(start) {
+            return None;
+        }
+        let pid = pid.parse::<i32>().ok().filter(|p| *p > 0)?;
+        Some(Self {
+            pid,
+            start: start.parse().ok()?,
+        })
+    }
+
+    /// The flag's value: what [`Registered::parse`] reads back.
+    pub fn arg(&self) -> String {
+        format!("{}:{}", self.pid, self.start)
+    }
+
+    /// This process, as the registry would have it when its pid is the
+    /// record's: the launch with nothing between `vpn-zone run` and here
+    /// (the fallback without `--registered`). A start time that cannot be
+    /// read matches no process — the container is kept, the safe way round.
+    pub fn myself() -> Self {
+        let pid = std::process::id() as i32;
+        Self {
+            pid,
+            start: crate::sys::start_time(pid).unwrap_or(u64::MAX),
+        }
+    }
+}
+
 /// Is anybody else still living in this container?
 ///
 /// The registry is the one `vpn-zone run` writes: one file per program, one
-/// line per launch, `pid zone selector`. Liveness is a parameter so that the
-/// tests can answer it without spawning processes.
-pub fn others_alive<F>(regdir: &Path, myself: i32, is_alive: F) -> bool
+/// line per launch, `pid zone selector`. Liveness and the start time of a
+/// pid are parameters so that the tests can answer them without spawning
+/// processes.
+///
+/// **Only the launch's own record is not "anybody else"** — `myself`, by
+/// its pid AND its start time (review 2026-09-27, J9). It used to be this
+/// process's pid, and with a compositor there is `wl-sandbox` between the
+/// launcher and here: the record names the launcher, which became
+/// `wl-sandbox` and forked, so this process's pid was never in the
+/// registry, the launcher was alive until after this check, and a
+/// throwaway container was never erased at its program's exit (`gc` swept
+/// it later). A record with the same pid and another start time is another
+/// launch that got the number since: a tenant like any other.
+pub fn others_alive<F, S>(regdir: &Path, myself: Registered, is_alive: F, start_of: S) -> bool
 where
     F: Fn(i32) -> bool,
+    S: Fn(i32) -> Option<u64>,
 {
     if regdir.as_os_str().is_empty() || !regdir.is_dir() {
         return false;
@@ -567,7 +639,10 @@ where
             let Ok(pid) = field.parse::<i32>() else {
                 continue;
             };
-            if pid != myself && is_alive(pid) {
+            if pid == myself.pid && start_of(pid) == Some(myself.start) {
+                continue;
+            }
+            if is_alive(pid) {
                 return true;
             }
         }
@@ -969,12 +1044,19 @@ pub fn run(args: Args) -> u8 {
     // The layer is erased for the LAST tenant only. Several programs can be
     // put into one throwaway container (`--tmp-profile --join`), and removing
     // it when the first one exits would pull the filesystem out from under the
-    // others. The count comes from the shared launch registry; our own pid —
-    // which survived the `exec` into this binary — is excluded.
+    // others. The count comes from the shared launch registry; this launch's
+    // own record is excluded — the one `--registered` names (the launcher,
+    // `wl-sandbox` by now, still alive above us), or, from a launcher that
+    // did not say, our own pid, which survived the `exec` into this binary
+    // when nothing forked in between (J9, 2026-09-27).
     let running = args.regdir.parent().unwrap_or(Path::new(""));
-    if others_alive(&args.regdir, std::process::id() as i32, |pid| {
-        crate::registry::alive(running, pid)
-    }) {
+    let myself = args.registered.unwrap_or_else(Registered::myself);
+    if others_alive(
+        &args.regdir,
+        myself,
+        |pid| crate::registry::alive(running, pid),
+        crate::sys::start_time,
+    ) {
         let name = args
             .profile_dir
             .file_name()
@@ -1284,9 +1366,100 @@ mod tests {
             ],
         );
         let alive: HashSet<i32> = [200].into_iter().collect();
-        assert!(others_alive(&reg.dir, 100, |pid| alive.contains(&pid)));
+        assert!(others_alive(
+            &reg.dir,
+            me(100),
+            |pid| alive.contains(&pid),
+            started
+        ));
         // 200 is the only live one, and if it is us there is nobody else.
-        assert!(!others_alive(&reg.dir, 200, |pid| alive.contains(&pid)));
+        assert!(!others_alive(
+            &reg.dir,
+            me(200),
+            |pid| alive.contains(&pid),
+            started
+        ));
+    }
+
+    /// Every process of these tests started at tick 7, unless said otherwise.
+    fn started(_pid: i32) -> Option<u64> {
+        Some(7)
+    }
+
+    fn me(pid: i32) -> Registered {
+        Registered { pid, start: 7 }
+    }
+
+    /// The launch's own record is the one excluded — by its pid and its
+    /// start time (J9): not this process's pid, which with `wl-sandbox`
+    /// between the launcher and `profile-run` is in no record at all.
+    #[test]
+    fn only_the_launchs_own_record_is_not_another_tenant() {
+        let reg = Reg::new(
+            "own-record",
+            &[("firefox", "300 nl prof\n"), ("telegram", "400 nl prof\n")],
+        );
+        // The launcher (300, wl-sandbox by now) is alive above us; 400 is
+        // not: nobody else.
+        assert!(!others_alive(&reg.dir, me(300), |pid| pid == 300, started));
+        // With 400 alive, somebody else.
+        assert!(others_alive(
+            &reg.dir,
+            me(300),
+            |pid| pid == 300 || pid == 400,
+            started
+        ));
+        // Our own pid (what was excluded before) is no record's: the
+        // launcher's record still counts as another tenant unless it is
+        // named.
+        assert!(others_alive(&reg.dir, me(4242), |pid| pid == 300, started));
+        // The record's pid with another start time is another process that
+        // got the number since — a tenant like any other.
+        assert!(others_alive(
+            &reg.dir,
+            Registered { pid: 300, start: 6 },
+            |pid| pid == 300,
+            started
+        ));
+        // A pid whose start cannot be read is not ours to skip either.
+        assert!(others_alive(&reg.dir, me(300), |pid| pid == 300, |_| None));
+    }
+
+    #[test]
+    fn the_registered_flag_reads_pid_and_start_or_nothing() {
+        assert_eq!(
+            Registered::parse("1234:98765"),
+            Some(Registered {
+                pid: 1234,
+                start: 98765
+            })
+        );
+        assert_eq!(Registered::parse(&me(12).arg()), Some(me(12)));
+        for bad in [
+            "", "1234", ":5", "5:", "0:5", "-1:5", "1:-5", "1:2:3", "a:1", "1 :2",
+        ] {
+            assert_eq!(Registered::parse(bad), None, "{bad:?}");
+        }
+        let a = Args::parse(&argv(&[
+            "--registered",
+            "55:66",
+            "--cwd",
+            "/w",
+            "/state/tmp",
+            "nl",
+            "1",
+            "/state/.running/tmp",
+            "--",
+            "sh",
+        ]))
+        .unwrap();
+        assert_eq!(a.registered, Some(Registered { pid: 55, start: 66 }));
+        assert_eq!(a.cwd, Some(PathBuf::from("/w")));
+        assert!(a.ephemeral);
+        // Unreadable: none, and the rest still parses.
+        let a = Args::parse(&argv(&["--registered", "x", "", "nl", "0", "", "--", "sh"])).unwrap();
+        assert_eq!(a.registered, None);
+        assert_eq!(a.zone, OsString::from("nl"));
     }
 
     #[test]
@@ -1300,17 +1473,18 @@ mod tests {
                 ("junk", "\nnot-a-pid nl prof\n1x2 nl\n  \n"),
             ],
         );
-        assert!(!others_alive(&reg.dir, 999, |_| false));
-        assert!(!others_alive(&reg.dir, 999, |pid| pid == 42));
+        assert!(!others_alive(&reg.dir, me(999), |_| false, started));
+        assert!(!others_alive(&reg.dir, me(999), |pid| pid == 42, started));
     }
 
     #[test]
     fn a_missing_or_unnamed_registry_means_nobody_else() {
-        assert!(!others_alive(Path::new(""), 1, |_| true));
+        assert!(!others_alive(Path::new(""), me(1), |_| true, started));
         assert!(!others_alive(
             Path::new("/nonexistent/vpn-zone-core/registry"),
-            1,
-            |_| true
+            me(1),
+            |_| true,
+            started
         ));
     }
 }
