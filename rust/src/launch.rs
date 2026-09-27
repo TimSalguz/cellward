@@ -370,6 +370,13 @@ pub fn strip_selection(argv: &[OsString]) -> Vec<OsString> {
 ///   `basename`) rather than skipped, because that is the `sh -c '…'` case and
 ///   an empty app-id would mean no compositor restriction at all.
 pub fn app_word(cmd: &[OsString]) -> Option<&OsStr> {
+    program_word(cmd).map(basename)
+}
+
+/// The word of a command line that names the program, whole — a path stays
+/// a path ([`app_word`] is its last component). What the compositor's list
+/// asks the origin of (`wayland_sandbox_wanted`).
+fn program_word(cmd: &[OsString]) -> Option<&OsStr> {
     for word in cmd {
         let bytes = word.as_bytes();
         // A wrapper by its name, bare or where the system keeps it: the
@@ -395,12 +402,12 @@ pub fn app_word(cmd: &[OsString]) -> Option<&OsStr> {
             continue;
         }
         if bytes.contains(&b' ') {
-            return Some(basename(word));
+            return Some(word);
         }
         if is_assignment(bytes) {
             continue;
         }
-        return Some(basename(word));
+        return Some(word);
     }
     None
 }
@@ -771,7 +778,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // `wayland-sandbox off` are for unconfined launches only, where the
     // compositor's own socket is there anyway.
     let compositor_wrap: Option<Vec<OsString>> = (zone != UNCONFINED
-        || wayland_sandbox_wanted(tools, &appbin, app_word(&selection.cmd), unasked))
+        || wayland_sandbox_wanted(tools, &appbin, program_word(&selection.cmd), unasked))
     .then(|| {
         let app = if appbin.is_empty() {
             OsString::from("shell")
