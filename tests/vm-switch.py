@@ -471,9 +471,16 @@ with subtest("switch: the keeper killed in the middle — the instance and its p
     ).strip()
     assert keeper and keeper != "0", keeper
     machine.succeed(f"kill -9 {keeper}")
-    machine.wait_until_succeeds(
-        "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 "
-        f"systemctl --user is-active vpn-zone-container@{SW}.service' | grep -vqx active",
+    # The driver runs every command under `set -o pipefail`: a pipe into
+    # `grep -vqx active` failed with is-active's own non-zero exit and the
+    # wait never ended (red once in CI, 2026-09-28). is-active answers
+    # non-zero for every state but active — waited for directly.
+    machine.wait_until_fails(
+        "su -l alice -c "
+        + shlex.quote(
+            "XDG_RUNTIME_DIR=/run/user/1000 "
+            f"systemctl --user is-active vpn-zone-container@{SW}.service"
+        ),
         timeout=60,
     )
     machine.wait_until_succeeds("grep -qx 'hung up' /tmp/vmfake.log", timeout=60)
