@@ -742,22 +742,25 @@ version 1 unchanged): the containers' running instances (§3.6), each
 ```json
 { "id": "work", "container": "work", "network": "offline",
   "exit": "none", "why": "offline", "up": true, "pid": 4321,
-  "since": "2026-09-27T12:00:00Z", "epoch": 1, "pid_namespace": false,
+  "since": "2026-09-27T12:00:00Z", "epoch": 1, "pid_namespace": true,
   "build": "current", "restart_needed": [], "programs": 2,
   "live_switch": { "available": false, "reason": "unsupported" } }
 ```
 
 — `container` is the container's name, `"main"` for the main home's
 instance (`main:offline`) and `null` for a throwaway's; `pid` is the host pid
-of its space; `restart_needed` names the offline network's settings that
-changed since it came up (the instance takes them at its next start);
+of its space — since stage 3 its pid 1; `restart_needed` names the offline network's settings that
+changed since it came up (the instance takes them at its next start), and
+`pid_namespace` for an instance an earlier build started;
 `programs` counts its live launches. `exit` is `"through"` with `why`
 `null` for an instance that goes out through its zone (stage 2), and
 `"none"` with `why` one of `offline`, `zone-down` (cut by its zone's end,
 attached again when it comes back the same), `zone-changed` (it came back as
 another one: cut until `cellward container reattach`) and `attach-failed`.
-`epoch`, `pid_namespace` and `live_switch` are fixed (no switch, no pid
-namespace of its own yet) and will move in the later stages. With it:
+`pid_namespace` is `true` since stage 3 (a pid namespace of its own: its
+programs see only its processes, THREAT-MODEL X4) — `false` for an instance
+an earlier build started, until it is restarted; `epoch` and `live_switch`
+are fixed (no switch yet) and will move with stage 4. With it:
 `containers[].instances` (the ids of a container's running instances),
 `containers[].running[].instance` (the instance a launch runs in — offline
 and, since stage 2, in a zone; `null` for one unconfined or in a zone's own

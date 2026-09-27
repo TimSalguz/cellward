@@ -479,7 +479,9 @@ pub fn exit_fields(exit: Option<crate::instance::Exit>, network: &str) -> (Strin
 
 /// One running container instance (`crate::instance`, the container design
 /// of 2026-09-27): its runtime facts. Its way out since stage 2 (a zone, or
-/// none); no switch, no pid namespace of its own yet.
+/// none); its own pid namespace since stage 3 (`pid_namespace`: false for
+/// an instance an earlier build started — `pid_namespace` is then among
+/// what it needs a restart for); no switch yet.
 pub fn instance(tools: &Tools, running: &crate::instance::Running) -> String {
     let (exit, why) = exit_fields(crate::instance::exit_of(&running.dir), &running.network);
     let container = match crate::instance::who_of(&running.id) {
@@ -499,12 +501,19 @@ pub fn instance(tools: &Tools, running: &crate::instance::Running) -> String {
         &running.dir,
         &crate::build::installed(tools),
     ));
+    let pid_namespace = crate::instance::own_pid_namespace(running.pid);
     let restart_needed = crate::hermetic::restart_needed_of(
         &running.dir,
         &tools.state.join(&running.network),
         &tools.config,
         &running.network,
     )
+    .map(|mut names| {
+        if !pid_namespace {
+            names.push(PID_NAMESPACE);
+        }
+        names
+    })
     .map_or("null".to_owned(), |names| {
         array(names.into_iter().map(string).collect())
     });
@@ -521,13 +530,17 @@ pub fn instance(tools: &Tools, running: &crate::instance::Running) -> String {
     format!(
         "{{\"id\":{},\"container\":{container},\"network\":{},\"exit\":{exit},\
          \"why\":{why},\"up\":true,\"pid\":{},\"since\":{since},\"epoch\":1,\
-         \"pid_namespace\":false,\"build\":{build},\"restart_needed\":{restart_needed},\
+         \"pid_namespace\":{pid_namespace},\"build\":{build},\"restart_needed\":{restart_needed},\
          \"programs\":{launches},\"live_switch\":{{\"available\":false,\"reason\":\"unsupported\"}}}}",
         string(&running.id),
         string(&running.network),
         running.pid
     )
 }
+
+/// What an instance of an earlier build needs a restart for besides its
+/// settings (`restart_needed`): a pid namespace of its own (stage 3).
+pub const PID_NAMESPACE: &str = "pid_namespace";
 
 /// Every running container instance ([`instance`]).
 pub fn instances(tools: &Tools) -> String {

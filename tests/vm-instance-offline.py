@@ -76,7 +76,9 @@ with subtest("an offline launch runs in its container's instance: loopback only,
         "offline",
         "vmia",
     ), a
-    assert a["pid_namespace"] is False and a["live_switch"]["available"] is False, a
+    # A pid namespace of its own since stage 3 (tests/vm-promise-pidns.py);
+    # no live switch before stage 4.
+    assert a["pid_namespace"] is True and a["live_switch"]["available"] is False, a
     out = in_c("vmia", "ip -o link show")
     lines = [l for l in out.strip().splitlines() if ": " in l]
     assert len(lines) == 1 and ": lo:" in lines[0], f"an instance with more than lo: {out}"
@@ -148,7 +150,11 @@ with subtest("an instance's own processes: the fourth subordinate id, out of its
     for p in [str(pid), holder]:
         uid = machine.succeed(f"awk '/^Uid:/ {{print $2}}' /proc/{p}/status").strip()
         assert int(uid) == sub + 3, f"{p}: uid {uid}, subuid {sub}"
-        in_c("vmia", f"sh -c '! cat /proc/{p}/environ'")
+    # Since stage 3 the instance's process is its pid 1, and a program sees
+    # it as that, /proc/1 — the holder not at all: it is not in the
+    # instance's pid namespace (tests/vm-promise-pidns.py). Out of its reach
+    # as before.
+    in_c("vmia", "sh -c 'grep -q container-holder /proc/1/cmdline && ! cat /proc/1/environ'")
     # Nor the registry, nor the host's cgroups.
     in_c("vmia", f"test ! -e {STATE}/.running")
     out = in_c("vmia", "ls -A /sys/fs/cgroup")

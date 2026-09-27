@@ -6,6 +6,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A container's instance has a pid namespace of its own** (2026-09-27,
+  stage 3 of the container-first model; `docs/THREAT-MODEL.md` X4). A
+  program of a container sees in `/proc` its own container's processes and
+  no one else's: not the host's command lines (which zones and containers
+  are in use, the URLs and paths programs were given), not another
+  container's, and no host process's `/proc/<pid>/net` or `mountinfo`,
+  which no ptrace check guarded. The instance's holder makes the namespace
+  and forks its pid 1 into it (`vpn-zone-core container-holder`,
+  `rust/src/init.rs`), which mounts the namespace's own `/proc`; every
+  launch into the instance joins it (`container-enter`), and `profile-run`
+  checks from inside that it did (`VPN_ZONE_EXPECT_PIDNS`). `status --json`:
+  `instances[].pid_namespace` is `true` now, and an instance an earlier
+  build started says `false` and names `pid_namespace` in `restart_needed`.
+  `doctor` checks an instance's `/proc` from inside (`pid-namespace`: its
+  own namespace, its pid 1 at `/proc/1`, no host process in sight). **After
+  updating, restart the containers you keep running** (`cellward container
+  stop <c>`): an instance an earlier build started is entered as before,
+  with a notice, and its programs see the host's processes until then.
 - **Every launch into a zone runs in its container's instance**
   (2026-09-27, stage 2c of the container-first model). The zone is the
   transport: the program gets a network namespace of its own with `lo` and
@@ -369,6 +387,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and `usb:` for a board a program can reflash.
 
 ### Changed
+- **An instance's end is its programs' end, through its pid namespace**
+  (2026-09-27, stage 3). Stopping an instance (`systemctl --user stop`,
+  logging out, `cellward container stop`) asks its programs to end (TERM)
+  and waits, as before; what is left ends with the instance's pid 1 — the
+  kernel's doing. A keeper that crashes no longer leaves programs running
+  with no helpers and no network: systemd ends the unit, and the pid
+  namespace with it. `cellward container kill` (and `cellward kill` of a
+  zone's instances) kills the instance's pid 1 instead of freezing its
+  programs pass after pass: nothing forks its way past it, and the journal
+  says `instance-stop … why: kill`.
+- **`profile-run` stays as its launch's subreaper in an instance**
+  (2026-09-27, stage 3): a daemon the program leaves behind is its, not the
+  instance's pid 1's — still below the launch's supervisor, whose close
+  (the window menu, a TERM to the window's pid) reaches it and whose
+  window it can still open. `cellward run` returns when the main program
+  does, with its status (a pipe from `profile-run` to the launch's waiter);
+  `profile-run` holds none of the launch's standard descriptors after that.
+  One more process per launch in an instance (`vpn-zone-core profile-run`).
+- **An application of the main home is not started in an instance while
+  it runs elsewhere** (2026-09-27, stage 3). Pid lock files (Chromium's
+  `SingletonLock`, Firefox's `lock`, wineserver's) name a pid, and a pid of
+  another pid namespace is nobody there: the real home opened on the host
+  and in an instance would have a second browser take a profile the first
+  has open. A launch with an app's id (a launcher entry, the picker) of the
+  main home into an instance is refused, saying why, while the same program
+  (by its file, or by the name a wrapper called it by) runs as the user
+  outside that instance. Commands from a terminal are not checked.
 - **A launch into a zone is a container's instance** (2026-09-27, stage 2c).
   What scripts may notice: `cellward run <zone> -- …` starts
   `vpn-zone-container@<id>.service` (and the zone, when it is down); the

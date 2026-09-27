@@ -80,9 +80,9 @@ It is shown as `host-interface` everywhere.
 | launch | promises | does not promise |
 |---|---|---|
 | `unconfined` | nothing about the network; its kind of home still applies | anything else: it has the host's network, resolver, session bus and `systemd --user` |
-| `offline` (a container's instance since 2026-09-27) | no network at all, names included (N13, D1), plus what every zone gets — per container: its own network, IPC and mount namespaces, apart from every other container (X10) | what an ordinary or a hermetic zone does not, by its setting; host `/proc` (X4) |
+| `offline` (a container's instance since 2026-09-27) | no network at all, names included (N13, D1), plus what every zone gets — per container: its own network, IPC, mount and pid namespaces, apart from every other container (X10, X4) | what an ordinary or a hermetic zone does not, by its setting |
 | ordinary zone, no sandbox | the N and D rows and "every zone gets" below, against leaks by mistake | anything against a hostile program: it has `systemd --user`, the whole session bus and the portals (P1–P6), the host's `/tmp` (X1), the raw PipeWire socket (A2, A3), the whole home (F1, F2) |
-| hermetic zone (the default), no sandbox | the network rows against a hostile program too, plus "hermetic adds" | the home: readable, and writable except the host's startup places (F1, F2); host `/proc` (X4), signals (X5), `machine-id` (I3) |
+| hermetic zone (the default), no sandbox | the network rows against a hostile program too, plus "hermetic adds" | the home: readable, and writable except the host's startup places (F1, F2); signals before Linux 6.12 (X5), `machine-id` (I3) |
 | any zone with a home of its own | plus "the sandbox adds" | `/sys`, `/etc`, `/nix/store` (I4); the kernel surface (K1) |
 | layer over the home | writes stay in the layer; other containers' data is not visible (H4) | reads of the real home (F4) |
 | main home | nothing about files | the same identity in every network (I2) |
@@ -90,7 +90,7 @@ It is shown as `host-interface` everywhere.
 
 **Every zone gets:** an app namespace with `lo` and the tunnel — since 2026-09-27 a launch
 runs beside it, in its container's instance, whose only way out is the zone's bridge
-(N17); the nftables insurance; the host's resolvers hidden, and its own `resolv.conf` and `nsswitch.conf`; its own runtime
+(N17), and whose pid namespace is its own (X4); the nftables insurance; the host's resolvers hidden, and its own `resolv.conf` and `nsswitch.conf`; its own runtime
 directory without the raw Wayland socket or compositor IPC; Wayland only through a
 restricted socket; no host X server; a filtered system bus and an allow-list over `/run/systemd`; its own
 `/dev` and devpts; its own IPC namespace; the Nix daemon and the system tier's socket hidden;
@@ -129,6 +129,7 @@ satellite, when granted.
 | N14 | A device granted to a container brings its own network (a phone's adb or modem, an ESP32, an LTE modem) | no | a warning when such a device is granted | — |
 | N15 | Metadata: the endpoint's name is resolved in the host's network; DNS content is readable at the tunnel's exit | no | a literal endpoint address avoids the first; DoT/DoH is planned (M3) | — |
 | N16 | A socket family no network namespace holds: `AF_VSOCK` to the host's or a VM's vsock services (a guest's sshd since systemd 256), around the tunnel | yes for 64-bit programs · 32-bit: **no** | a seccomp allow-list of families in every launch into a zone and for the OpenConnect client (`AF_UNIX`, `AF_INET`, `AF_INET6`, `AF_NETLINK`, `AF_PACKET`); x86's 32-bit `socketcall` cannot be filtered by family and passes | vm45 u14 |
+| N18 | A container's instance ends while its programs run: stopped, killed, logged out of, its keeper or its pid 1 dead | yes: its programs end with it | its programs are in its pid namespace (2026-09-27, stage 3): its keeper asks them to end (TERM) and waits, and its pid 1's end takes whatever is left with the namespace — the kernel's doing, at once; a TERM ignored is ended by `cellward container kill` or systemd's own stop timeout. Nothing of an instance outlives it, offline or with a way out | vm57 vm72 vm73 sm25 |
 | N17 | A container's instance reaches its zone's own services (a listener on the zone's address or loopback), or goes out other than through the zone's tunnel | yes | the only way out of the instance is a `passt --fd` its zone runs for it in the zone's app namespace (2026-09-27), as the bridge's own id (the zone's third subordinate uid): the zone's filter refuses that id every local address and loopback, both families, and the zone does not carry an instance without the rule; passt maps nothing to the zone's loopback (`--no-map-gw`, `--map-guest-addr none`) and takes nothing in; the instance's relay runs under a seccomp allow-list | C · vm60 vm61 vm62 vm22 sm26 |
 | | **DNS** | | | |
 | D1 | The host's resolver answers over a unix socket (nscd/nsncd, resolved's varlink, avahi) | yes | tmpfs over their directories in every zone (the zone fails if this fails); the zone's own `nsswitch.conf`: `hosts: files dns` | vm9 vm10 vm11 sm6 sys1 |
@@ -183,9 +184,9 @@ satellite, when granted.
 | | **Processes, IPC, temporary files** | | | |
 | X1 | The host's `/tmp` and `/dev/shm`: listening sockets (tmux `run-shell`, a VPN client's IPC, single-instance sockets), other sandboxes' bus filters | hermetic: yes · ordinary: **no** (`doctor` names them) | its own `/tmp`, `/var/tmp`, `/dev/shm`; the filters moved into the runtime directory | vm19 |
 | X2 | The host's abstract unix sockets | yes | they belong to the network namespace — every container's instance has one of its own, offline and in a zone (2026-09-27); a sandbox in the host's network: a Landlock scope (Linux 6.12+) | vm19 vm32 vm54 vm66 |
-| X3 | `/proc/<pid>/root`, `cwd`, `fd`, `environ` of the host's session processes | yes | the kernel's ptrace rules across user namespaces; `vpn-zone-sys` gets a user namespace of its own | vm15 vm17 vm18 sys4 |
-| X4 | `/proc/<pid>/cmdline` of host processes (which zones and profiles are in use) | sandbox: yes · zone and offline container: **no** | zones have no pid namespace, nor do containers' instances yet (stage 3 of the container design gives each instance its own); the sandbox has its own. An instance's `/sys/fs/cgroup`, which names every unit and scope, is covered | sandbox: C · **no test** |
-| X5 | Signals to the host's processes of the same user (killing the compositor) | yes (Linux 6.12+) | each launch into a zone is a Landlock domain of its own with `LANDLOCK_SCOPE_SIGNAL`: it signals itself and what it starts, nothing else — another launch of the same zone neither; the sandbox also cannot name host pids | vm44 |
+| X3 | `/proc/<pid>/root`, `cwd`, `fd`, `environ` of the host's session processes | yes | the kernel's ptrace rules across user namespaces; `vpn-zone-sys` gets a user namespace of its own; a container's instance cannot even name a host process: its pid namespace (X4) | vm15 vm17 vm18 sys4 vm70 |
+| X4 | `/proc/<pid>/cmdline` of host processes and of other containers' (which zones and containers are in use, the arguments, URLs and paths programs were given), and `/proc/<pid>/net` of any of them (their network's sockets and addresses: no ptrace check guards it) | yes: every container's instance, offline and in a zone; the sandbox · **no**: `unconfined`, a launch into a zone of a previous build (no bridge), an instance an earlier build started (until restarted: `doctor`, `restart_needed`) | each container's instance has a pid namespace of its own (stage 3 of the container design, 2026-09-27): its pid 1 mounts the namespace's own `/proc`, and every launch into the instance joins it — a program sees its own container's processes and no one else's, neither the host's nor another container's; the sandbox has its own. An instance's `/sys/fs/cgroup`, which names every unit and scope, is covered. Global counters (`/proc/loadavg`, `/proc/stat`) and a pid a program is told (`WAYLAND_DISPLAY` names the supervisor's) stay | C · vm70 vm71 vm44 sm28 u17 |
+| X5 | Signals to the host's processes of the same user (killing the compositor) | yes (Linux 6.12+) | each launch into a zone is a Landlock domain of its own with `LANDLOCK_SCOPE_SIGNAL`: it signals itself and what it starts, nothing else — another launch of the same container neither; the sandbox and, since stage 3 of the container design (2026-09-27), a container's instance also cannot name host pids: a host number means nobody, or somebody else, in their pid namespace (X4) | vm44 vm69 |
 | X6 | The host's System V IPC and POSIX message queues | yes | an IPC namespace per zone, per uplink, per sandbox and per container's instance | vm18 sm16 vm54 |
 | X7 | The session's supplementary groups (docker, libvirt, input) | yes | dropped for zone programs | vm18 |
 | X8 | Exhausting memory, CPU or processes | no | limits per zone are planned (ROADMAP §17) | — |
@@ -287,7 +288,7 @@ Notes:
 | A compromised host | root, the user's session outside the zones, the Nix store and the system configuration are trusted |
 | An escape from the browser's own sandbox | not prevented or detected; the escaped code has what its container and zone give, as this table says |
 | A same-uid program outside the sandbox | a host program, or a zone program without a sandbox, can read and change a sandbox's data on disk and the whole home; only other containers' data is hidden from zones (H4) |
-| Programs of one container against each other | one instance, one user namespace, one `/tmp`, one set of abstract sockets: per-program settings are not walls (PERMISSIONS §11.10). Containers are apart (X10): each runs in its own instance, offline and in a zone |
+| Programs of one container against each other | one instance, one user namespace, one pid namespace, one `/tmp`, one set of abstract sockets: per-program settings are not walls (PERMISSIONS §11.10). Containers are apart (X10): each runs in its own instance, offline and in a zone |
 | The person's answer | a "yes" or a grant is taken as meant; W16 guards only against keys typed on |
 | Traffic analysis; the VPN provider | what leaves through the tunnel is the provider's to see |
 
@@ -296,7 +297,8 @@ Notes:
 These are the gaps. Each is a claim made by construction, or none at all, that no VM or
 smoke test tries to break:
 
-- **X4:** `/proc/<pid>/cmdline`, sandboxed and not.
+- none: X4 (`/proc/<pid>/cmdline` of the host's processes) was the last, and got vm70,
+  vm71 and sm28 with stage 3 of the container design (2026-09-27).
 
 Rows whose "no" is itself tested, so that closing it shows: P1 (vm15) and W7 (vm51).
 
@@ -350,7 +352,7 @@ apart from DynamicLauncher and the two network portals.
 - vm41 "system bus in a zone: resolve1 refused, it names in the host's network" (in `tests/vm-promise-resolve1.py`)
 - vm42 "hermetic zone: the keyring and flatpak's host command are out of reach" (in `tests/vm-promise-keyring.py`)
 - vm43 "a launch into a zone is restricted whatever its program is called" (in `tests/vm-promise-wayland.py`)
-- vm44 "a zone's program cannot signal the host's processes of the user" (in `tests/vm-promise-signals.py`; skipped before Linux 6.12)
+- vm44 "a zone's program neither sees nor signals the host's processes of the user" (in `tests/vm-promise-signals.py`, as is vm69)
 - vm45 "a zone's program cannot reach the host over vsock" (in `tests/vm-promise-vsock.py`)
 - vm46 "declared: a plain file or a link out of the store is not Nix's word" (in `tests/vm-promise-declared.py`)
 - vm47 "a tunnel zone reaches neither the LAN nor the host's own addresses" (in `tests/vm-promise-lan.py`)
@@ -375,6 +377,13 @@ apart from DynamicLauncher and the two network portals.
 - vm66 "a launch into the zone runs in its container's instance, not in the zone"
 - vm67 "the instance ends with its program, and its zone's passt with it"
 - vm68 "a zone of a previous build (no bridge): entered as before, and the person told"
+- vm69 "a program sees another launch of its container, and cannot signal it (X5)" (skipped before Linux 6.12)
+- vm70 "an instance's program sees its own container's processes, no one else's" (in `tests/vm-promise-pidns.py`, as are vm71–vm75)
+- vm71 "a host process's /proc/<pid>/net is out of an instance's reach"
+- vm72 "stopping an instance ends its programs, and reaches no timeout"
+- vm73 "a program that ignores TERM ends on cellward container kill"
+- vm74 "a daemon forked twice stays in its launch's tree, under profile-run"
+- vm75 "an orphan pid 1 adopts is reaped, and counted as a program"
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -384,7 +393,8 @@ socket comes back, the raw one never" · au6 "an audio manager gets the raw sock
 `tests/vm-window.nix`: win1 "the focused window's zone and program; the hotkey menu" ·
 win2 "focus input: asking again after one click moves the focus once" · win3 "focus allow:
 every request of that click moves the focus" · win4 "focus notify: no request moves the
-focus; the person is told" (the last three in `tests/vm-window-focus.py`)
+focus; the person is told" (the last three in `tests/vm-window-focus.py`) · win5 "close
+reaches a daemon the program left, through the pid namespace"
 
 `tests/vm-system.nix`: sys1 "a service in the zone: the tunnel's network and the tunnel's
 names" · sys2 "a NixOS container in the zone: the same network, no way to change it" ·
@@ -435,6 +445,7 @@ the other"
 - sm25 «Экземпляр останавливается сигналом держателю, и его программы — с ним» (a stopped instance ends its programs)
 - sm26 «Запуск в зону — в экземпляре контейнера: своя сеть, lo и tap, выход через зону» (a launch into a zone, in its container's instance)
 - sm27 «Зона OpenConnect везёт экземпляр: search шлюза в его resolv.conf, выход через туннель» (an OpenConnect zone carries an instance)
+- sm28 «Экземпляр: своё пространство pid, процессов хоста в /proc не видно (X4)» (a host process's command line not seen, `/proc/1` the instance's holder)
 
 Rust tests (`cargo test`):
 
@@ -454,3 +465,4 @@ Rust tests (`cargo test`):
 - u14 `rust/src/seccomp.rs`: `the_zone_socket_filter_builds`
 - u15 `rust/src/declared.rs`: `a_link_into_the_store_is_declared`, `a_plain_file_or_a_link_elsewhere_is_not_declared`, `a_held_directory_is_read_as_held`; `rust/tests/vpn_zone_cli.rs`: `a_plain_file_in_declared_is_not_nixs_word`
 - u16 `rust/src/wl_focus.rs`: `one_input_event_is_one_change_of_the_focus`, `a_forgotten_serial_is_still_used_up`, `a_forgotten_token_of_the_launch_is_used_up`; `rust/src/wl_proxy.rs`: `input_passes_one_activate_per_input_event`, `notify_sends_the_byte_and_no_activate`, `allow_passes_every_activate`
+- u17 `rust/src/init.rs`: `a_stop_from_outside_ends_the_space_then_pid_1`, `a_stop_from_inside_is_nothing`, `the_space_ending_by_itself_is_a_failure`; `rust/src/profile.rs`: `the_subreaper_says_the_main_programs_end_once`, `a_signal_goes_to_the_program_and_the_orphans_it_adopted`; `rust/src/enter.rs`: `the_main_programs_status_is_read_back`; `rust/src/place.rs`: `an_orphan_pid_1_adopted_is_a_program`; `rust/src/launch.rs`: `the_main_home_guard_finds_the_program_outside_the_instance`; `rust/src/doctor.rs`: `an_instances_programs_see_its_processes_alone`; `rust/src/dbus_wire.rs`: `no_hint_carries_a_pid`

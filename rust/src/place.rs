@@ -148,16 +148,17 @@ fn pids() -> Vec<i32> {
 }
 
 /// The programs of the instance whose user namespace is `key`: every
-/// process whose user namespace is it or below it — but this one, and
-/// `spare` and what descends from it (the instance's keeper: its space, and
-/// its relay, which runs in the instance's user namespace too) — each held
-/// by a pidfd opened while it was one (looked at again with the pidfd
-/// held: a number that went to another process in between is not taken).
+/// process whose user namespace is it or below it — but this one, and what
+/// is the keeper's own ([`keepers_own`]: below `spare`, the instance's
+/// keeper — its holder, its pid 1 `init` and its space, its relay, which run
+/// in the instance's user namespace too) — each held by a pidfd opened
+/// while it was one (looked at again with the pidfd held: a number that
+/// went to another process in between is not taken).
 ///
 /// What cannot be read is not seen: a launch's waiter (`crate::enter`), not
 /// dumpable in the host's user namespace, is nobody's to read — its child,
 /// the program, is, from its `exec` on.
-pub fn members(key: (u64, u64), spare: Option<i32>) -> Vec<(i32, OwnedFd)> {
+pub fn members(key: (u64, u64), spare: Option<i32>, init: Option<i32>) -> Vec<(i32, OwnedFd)> {
     let me = std::process::id() as i32;
     let mut out = Vec::new();
     for pid in pids() {
@@ -170,12 +171,59 @@ pub fn members(key: (u64, u64), spare: Option<i32>) -> Vec<(i32, OwnedFd)> {
         if !chain_of(pid).contains(&key) {
             continue;
         }
-        if spare.is_some_and(|root| crate::sys::descends_from(pid, &fd, root)) {
-            continue;
+        if let Some(keeper) = spare {
+            let parents = crate::sys::ancestors(pid, &fd);
+            if keepers_own(&parents, keeper, init, &|child| {
+                init.is_some_and(|init| same_uid(child, init))
+            }) {
+                continue;
+            }
         }
         out.push((pid, fd));
     }
     out
+}
+
+/// Whether a process is its instance's keeper's own, and no program: by its
+/// chain of parents, itself first (`sys::ancestors`). Below the keeper, and
+/// — below the instance's pid 1 (`init`, stage 3) — below the one child of
+/// pid 1 that runs as pid 1 does, the instance's root (`space_like`): its
+/// space, and the bus filter the space started. Pid 1 is every orphan's of
+/// its namespace: a program whose launch's subreaper (`profile-run`) is
+/// gone is handed to it, and is a program all the same — the user's uid,
+/// never the instance's root. The keeper's other children (the holder, the
+/// relay) are its own; without `init`, everything below the keeper is.
+pub fn keepers_own(
+    chain: &[i32],
+    keeper: i32,
+    init: Option<i32>,
+    space_like: &dyn Fn(i32) -> bool,
+) -> bool {
+    if !chain.contains(&keeper) {
+        return false;
+    }
+    let Some(init) = init else {
+        return true;
+    };
+    match chain.iter().position(|&p| p == init) {
+        None | Some(0) => true,
+        Some(at) => space_like(chain[at - 1]),
+    }
+}
+
+/// Whether two processes run as one host uid (`Uid:` of their status, the
+/// real one).
+fn same_uid(a: i32, b: i32) -> bool {
+    let uid = |pid: i32| {
+        std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()?
+            .lines()
+            .find_map(|l| l.strip_prefix("Uid:"))?
+            .split_whitespace()
+            .next()
+            .map(str::to_owned)
+    };
+    matches!((uid(a), uid(b)), (Some(x), Some(y)) if x == y)
 }
 
 #[cfg(test)]
@@ -205,7 +253,29 @@ mod tests {
 
     #[test]
     fn nobody_is_a_member_of_a_namespace_that_is_not() {
-        assert!(members((0, 1), None).is_empty());
+        assert!(members((0, 1), None, None).is_empty());
+    }
+
+    /// The keeper (10), its holder (11), its relay (12), its pid 1 (13),
+    /// the space (14, the instance's root) and the bus filter the space
+    /// started (15) are the keeper's own; a program of a launch (21 under
+    /// 20) is not, nor an orphan pid 1 adopted (30) and what it started
+    /// (31) — the user's uid, not the root's.
+    #[test]
+    fn an_orphan_pid_1_adopted_is_a_program() {
+        let root = |pid: i32| pid == 14;
+        let own = |chain: &[i32]| keepers_own(chain, 10, Some(13), &root);
+        assert!(own(&[11, 10, 1]));
+        assert!(own(&[12, 10, 1]));
+        assert!(own(&[13, 11, 10, 1]));
+        assert!(own(&[14, 13, 11, 10, 1]));
+        assert!(own(&[15, 14, 13, 11, 10, 1]));
+        assert!(!own(&[21, 20, 1]));
+        assert!(!own(&[30, 13, 11, 10, 1]));
+        assert!(!own(&[31, 30, 13, 11, 10, 1]));
+        // Without a pid 1 (an instance of stage 2): all below the keeper.
+        assert!(keepers_own(&[30, 13, 11, 10, 1], 10, None, &root));
+        assert!(!keepers_own(&[21, 20, 1], 10, None, &root));
     }
 
     #[test]

@@ -14,6 +14,27 @@
 //! for `profile-run` to mount the container's layer with — and becomes the
 //! command.
 //!
+//! **The pid namespace** (stage 3, `docs/THREAT-MODEL.md` X4). The waiter
+//! joins it too, in the same `setns` — which moves only the namespace its
+//! CHILDREN are made in: it stays a process of the host's pid namespace
+//! itself, and its child is born in the instance's, a member of the
+//! namespace whose `/proc` the mount namespace it joins shows. A member
+//! reads that `/proc`, a host process never does (the pid view,
+//! `crate::sys`). What `profile-run` checks from inside is that pid
+//! namespace ([`crate::profile::ENV_EXPECT_PIDNS`]). An instance started by
+//! an earlier build has no pid namespace of its own (its space's is the
+//! host's): it is joined as it is, with a notice — its programs see the
+//! host's processes until it is restarted.
+//!
+//! **The main program's end.** `profile-run` stays in the instance as the
+//! launch's subreaper (`crate::profile`), for as long as anything it
+//! started lives; the main program's status it writes into a pipe of this
+//! process's ([`crate::profile::ENV_STATUS_FD`]), and the waiter ends with
+//! it then — a terminal's `cellward run` returns when the program does, and
+//! the supervisor sees its child end (its proxy stops taking new
+//! connections, as it always did). Without a word — the child was no
+//! `profile-run`, or it was killed — the child's own end is the launch's.
+//!
 //! **Which instance.** By its id, again here and not by a number handed
 //! down: the space's process is read from the instance's directory, held
 //! by a pidfd, and believed only while it is the one that wrote the number
@@ -301,7 +322,21 @@ fn drop_capabilities() {
 /// The child: the instance's mount namespace, a copy of it of its own, the
 /// capabilities kept, the command. Returns only when something failed —
 /// what, for the waiter to say.
-fn become_the_launch(space: &OwnedFd, cmd: &[OsString]) -> String {
+fn become_the_launch(space: &OwnedFd, cmd: &[OsString], status_w: &OwnedFd) -> String {
+    // The main program's status comes back through this one descriptor,
+    // kept across the exec (the pipe's other descriptors are not), and
+    // `profile-run` is told its number.
+    // SAFETY: fcntl on a descriptor we hold.
+    if unsafe { libc::fcntl(status_w.as_raw_fd(), libc::F_SETFD, 0) } != 0 {
+        return format!(
+            "cannot keep the launch's status pipe: {}",
+            io::Error::last_os_error()
+        );
+    }
+    std::env::set_var(
+        crate::profile::ENV_STATUS_FD,
+        status_w.as_raw_fd().to_string(),
+    );
     if let Err(e) = setns(space, libc::CLONE_NEWNS) {
         return format!("cannot join the instance's mount namespace: {e}");
     }
@@ -326,6 +361,81 @@ fn become_the_launch(space: &OwnedFd, cmd: &[OsString]) -> String {
     }
     let e = exec_command(cmd);
     format!("cannot start {}: {e}", cmd[0].to_string_lossy())
+}
+
+/// The main program's status as `profile-run` wrote it
+/// ([`crate::profile::status_word`]), when `said` holds one.
+fn status_of(said: &[u8]) -> Option<u8> {
+    match said {
+        [b'S', code] => Some(*code),
+        _ => None,
+    }
+}
+
+/// Wait for the launch's end: the main program's status from `profile-run`
+/// (`status`), or the child's own end — whichever comes first; with the
+/// word said, the waiter does not wait for what `profile-run` still
+/// reaps. No clock: each is an event (the pipe, the child's pidfd).
+fn wait_for_launch(child: libc::pid_t, status: OwnedFd) -> u8 {
+    let Some(pidfd) = crate::sys::pidfd_open(child) else {
+        return wait_for_end(child);
+    };
+    let mut status = Some(status);
+    loop {
+        let mut fds = vec![libc::pollfd {
+            fd: pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        if let Some(pipe) = &status {
+            fds.push(libc::pollfd {
+                fd: pipe.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        // SAFETY: a valid array of pollfd and its length.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        if rc < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return wait_for_end(child);
+        }
+        if fds.get(1).is_some_and(|p| p.revents != 0) {
+            if let Some(code) = status.as_ref().and_then(read_status) {
+                return code;
+            }
+            // Closed with no word: the child's own end decides.
+            status = None;
+        }
+        if fds[0].revents != 0 {
+            let code = wait_for_end(child);
+            // A word written just before the end is the main program's.
+            return status.as_ref().and_then(read_status).unwrap_or(code);
+        }
+    }
+}
+
+/// The status word from `pipe`, when one is there to read now.
+fn read_status(pipe: &OwnedFd) -> Option<u8> {
+    let mut pfd = libc::pollfd {
+        fd: pipe.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd for the duration of the call.
+    if unsafe { libc::poll(&mut pfd, 1, 0) } != 1 {
+        return None;
+    }
+    let mut word = [0u8; 2];
+    // SAFETY: read(2) into a buffer of the length passed.
+    let n = unsafe { libc::read(pipe.as_raw_fd(), word.as_mut_ptr().cast(), word.len()) };
+    if n == 2 {
+        status_of(&word)
+    } else {
+        None
+    }
 }
 
 /// Wait for the child's end — not its stops (the module's words) — and give
@@ -394,10 +504,33 @@ pub fn run(args: &Args) -> u8 {
         return EXIT_NOT_STARTED;
     };
     std::env::set_var(crate::profile::ENV_EXPECT_NETNS, &netns);
-    if let Err(e) = setns(
-        &space,
-        libc::CLONE_NEWUSER | libc::CLONE_NEWNET | libc::CLONE_NEWIPC,
-    ) {
+    // Its pid namespace (stage 3): joined for the child, and checked from
+    // inside. One of an earlier build's instance is the host's: not joined
+    // — there is nothing to join — and the person told.
+    let mut flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNET | libc::CLONE_NEWIPC;
+    std::env::remove_var(crate::profile::ENV_EXPECT_PIDNS);
+    if crate::instance::own_pid_namespace(pid) {
+        match std::fs::read_link(format!("/proc/{pid}/ns/pid")) {
+            Ok(pidns) => std::env::set_var(crate::profile::ENV_EXPECT_PIDNS, pidns),
+            Err(e) => {
+                eprintln!(
+                    "контейнер {}: его пространство pid не читается ({e}) — запуск остановлен",
+                    args.instance
+                );
+                drop(lock);
+                ring(&dir);
+                return EXIT_NOT_STARTED;
+            }
+        }
+        flags |= libc::CLONE_NEWPID;
+    } else {
+        eprintln!(
+            "контейнер {} поднят прошлой сборкой: своего пространства pid у него нет, и его \
+             программы видят процессы хоста — перезапусти его (cellward container stop {})",
+            args.instance, args.instance
+        );
+    }
+    if let Err(e) = setns(&space, flags) {
         eprintln!(
             "контейнер {}: не войти в его пространство ({e}) — запуск остановлен",
             args.instance
@@ -407,9 +540,10 @@ pub fn run(args: &Args) -> u8 {
         return EXIT_NOT_STARTED;
     }
     // The child's word: nothing (its exec closed the pipe) or why it could
-    // not become the launch.
-    let (said_r, said_w) = match crate::sys::pipe() {
-        Ok(pipe) => pipe,
+    // not become the launch. And the main program's status, later.
+    let pipes = crate::sys::pipe().and_then(|said| crate::sys::pipe().map(|status| (said, status)));
+    let ((said_r, said_w), (status_r, status_w)) = match pipes {
+        Ok(pipes) => pipes,
         Err(e) => {
             eprintln!("container-enter: cannot create a pipe ({e})");
             drop(lock);
@@ -430,13 +564,15 @@ pub fn run(args: &Args) -> u8 {
     }
     if child == 0 {
         drop(said_r);
+        drop(status_r);
         drop(lock);
-        let why = become_the_launch(&space, &args.cmd);
+        let why = become_the_launch(&space, &args.cmd, &status_w);
         let _ = File::from(said_w).write_all(why.as_bytes());
         // SAFETY: _exit never returns and touches nothing of ours.
         unsafe { libc::_exit(libc::c_int::from(EXIT_NOT_STARTED)) };
     }
     drop(said_w);
+    drop(status_w);
     drop(space);
     CHILD.store(child, Ordering::SeqCst);
     for sig in PASSED_ON {
@@ -459,7 +595,7 @@ pub fn run(args: &Args) -> u8 {
     if !said.is_empty() {
         eprintln!("контейнер {}: {said}", args.instance);
     }
-    wait_for_end(child)
+    wait_for_launch(child, status_r)
 }
 
 #[cfg(test)]
@@ -498,6 +634,19 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(a.network.as_deref(), Some("nl"));
+    }
+
+    /// `profile-run`'s word (`profile::status_word`) is read back; anything
+    /// else is no word, and the child's own end decides.
+    #[test]
+    fn the_main_programs_status_is_read_back() {
+        for code in [0u8, 1, 127, 137, 255] {
+            assert_eq!(status_of(&crate::profile::status_word(code)), Some(code));
+        }
+        assert_eq!(status_of(b""), None);
+        assert_eq!(status_of(b"S"), None);
+        assert_eq!(status_of(b"X0"), None);
+        assert_eq!(status_of(b"S01"), None);
     }
 
     #[test]

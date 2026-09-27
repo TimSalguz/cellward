@@ -27,6 +27,19 @@
 //! without an explicit clear Chrome would inherit CAP_SYS_ADMIN inside the
 //! namespace. It cannot reach the host from there, but there is no reason to
 //! hand it over either. (`docs/GOTCHAS.md` §1)
+//!
+//! **In a container's instance with a pid namespace of its own** (stage 3
+//! of the container design, 2026-09-27, `crate::init`) this process does
+//! not become the program: it stays, as the launch's subreaper
+//! ([`supervise`]). Pid 1 of the namespace is every orphan's there, and a
+//! daemon the program leaves behind would otherwise go to the instance's
+//! pid 1 — out of the launch's tree, where its supervisor (`wl-sandbox`)
+//! passes a close on and finds a window's launch (J7 of the design). Kept
+//! here instead, it stays in the launch's subtree: the kernel hands this
+//! process itself, once its waiter is gone, to the supervisor, the
+//! subreaper one level up. The main program's status goes back to the
+//! waiter at once ([`ENV_STATUS_FD`]): `cellward run` returns when the
+//! program does, not when its daemons do.
 
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fmt;
@@ -53,6 +66,71 @@ const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_int = 4;
 
 /// The program could not be started at all — the code a shell uses for it.
 pub const EXIT_NOT_STARTED: u8 = 127;
+
+/// The pid namespace the launch was made to enter (`pid:[…]`, stage 3):
+/// set by `container-enter`, it must be the one this process is in.
+pub const ENV_EXPECT_PIDNS: &str = "VPN_ZONE_EXPECT_PIDNS";
+
+/// The descriptor of the pipe the main program's status goes back through
+/// to the launch's waiter (`crate::enter`), as a number: [`status_word`]
+/// once the main program has ended.
+pub const ENV_STATUS_FD: &str = "VPN_ZONE_STATUS_FD";
+
+/// The signals passed on to every child of the launch's subreaper — the
+/// program and the orphans it adopted —, as `wl-sandbox` passes them on
+/// (`wl_proxy::pass_on`): what a launch is ended or told something with.
+pub const FORWARDED: [libc::c_int; 6] = [
+    libc::SIGTERM,
+    libc::SIGINT,
+    libc::SIGHUP,
+    libc::SIGQUIT,
+    libc::SIGUSR1,
+    libc::SIGUSR2,
+];
+
+/// What goes into the status pipe: `S` and the main program's exit code, as
+/// a shell reports it ([`exit_code_of`]).
+pub fn status_word(code: u8) -> [u8; 2] {
+    [b'S', code]
+}
+
+/// The launch's subreaper's one question: which end is the main program's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Subreaper {
+    main: libc::pid_t,
+    code: Option<u8>,
+}
+
+impl Subreaper {
+    pub fn new(main: libc::pid_t) -> Self {
+        Self { main, code: None }
+    }
+
+    /// A child reaped, with its code: the main program's status — once, to
+    /// be said to the waiter — or nothing (an orphan it adopted).
+    pub fn reaped(&mut self, pid: libc::pid_t, code: u8) -> Option<u8> {
+        if pid != self.main || self.code.is_some() {
+            return None;
+        }
+        self.code = Some(code);
+        self.code
+    }
+
+    /// What to end with when nothing is left: the main program's status.
+    pub fn code(&self) -> u8 {
+        self.code.unwrap_or(1)
+    }
+}
+
+/// Whom a signal is passed on to: every child of `me` — the program and the
+/// orphans it adopted — in a table of `(pid, parent)`.
+pub fn forward_targets(me: libc::pid_t, table: &[(i32, i32)]) -> Vec<i32> {
+    table
+        .iter()
+        .filter(|&&(pid, parent)| parent == me && pid != me)
+        .map(|&(pid, _)| pid)
+        .collect()
+}
 
 /// What `profile-run` was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -828,7 +906,190 @@ impl Drop for AsZoneRoot {
     }
 }
 
+/// The launch's status pipe ([`ENV_STATUS_FD`]): taken out of the
+/// environment, believed only as an open pipe, and closed on every `exec`
+/// from here on — nothing this process starts has it. `None`: not given.
+fn take_status_fd() -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    let value = std::env::var_os(ENV_STATUS_FD)?;
+    std::env::remove_var(ENV_STATUS_FD);
+    let fd: libc::c_int = value.to_str()?.parse().ok().filter(|&fd| fd > 2)?;
+    // SAFETY: fstat of a number that may be no descriptor at all: it fails
+    // then, into a zeroed struct of our own.
+    let is_pipe = unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        libc::fstat(fd, &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFIFO
+    };
+    if !is_pipe {
+        return None;
+    }
+    // SAFETY: fcntl on that descriptor, open as just seen.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    // SAFETY: an open descriptor this process was handed, owned by nobody
+    // else here.
+    Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+/// Every capability dropped: the effective, permitted and inheritable sets
+/// emptied (the ambient one is already).
+fn drop_all_capabilities() {
+    let mut header = CapHeader {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let data = [CapData::default(); 2];
+    // SAFETY: capset with a version 3 header and two zeroed data words.
+    unsafe {
+        libc::syscall(libc::SYS_capset, &mut header, data.as_ptr());
+    }
+}
+
+/// The standard descriptors pointed at `/dev/null`: a subreaper that
+/// outlives its main program must not hold a pipe it was started with open
+/// — `$(cellward run …)` would wait for its daemons.
+fn quiet_stdio() {
+    use std::os::fd::AsRawFd;
+    let Ok(null) = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")
+    else {
+        return;
+    };
+    for fd in 0..3 {
+        // SAFETY: dup2 of a descriptor we hold onto a standard one of ours.
+        unsafe { libc::dup2(null.as_raw_fd(), fd) };
+    }
+}
+
+/// Every process of this pid namespace with its parent, from `/proc` (the
+/// namespace's own: this process is a member of it).
+fn process_table() -> Vec<(i32, i32)> {
+    fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+        .filter_map(|pid| Some((pid, crate::sys::parent_of(pid)?)))
+        .collect()
+}
+
+/// The launch's subreaper, in a container's instance (the module's words):
+/// the program forked with the signal mask it would have had, then every
+/// child reaped — the program and every orphan it leaves, adopted
+/// (`PR_SET_CHILD_SUBREAPER`) — and every signal of [`FORWARDED`] passed on
+/// to all of them. The main program's status is said to the waiter at once
+/// (`status`); this process ends when nothing it started is left, with that
+/// status. Its capabilities are gone before the fork — it holds nothing the
+/// program lacks —, it is not dumpable (the program's to trace otherwise),
+/// and its waiter's end is a TERM to it (`PR_SET_PDEATHSIG`) until the main
+/// program's end is said: the launch's waiter killed ends the launch.
+fn supervise(cmd: &[OsString], mut status: Option<std::os::fd::OwnedFd>) -> u8 {
+    use std::io::Write;
+    drop_all_capabilities();
+    // SAFETY: prctl with these arguments takes no pointers.
+    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+    // SAFETY: sigemptyset and sigaddset fill a sigset_t of our own.
+    let waited = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for sig in FORWARDED {
+            libc::sigaddset(&mut set, sig);
+        }
+        libc::sigaddset(&mut set, libc::SIGCHLD);
+        set
+    };
+    let before = match crate::init::block(&waited) {
+        Ok(mask) => mask,
+        Err(e) => {
+            eprintln!("profile-run: cannot block the launch's signals ({e}) — not starting");
+            return EXIT_NOT_STARTED;
+        }
+    };
+    // SAFETY: single-threaded, so the child may allocate before its exec.
+    let main = unsafe { libc::fork() };
+    if main < 0 {
+        eprintln!("cannot fork: {}", io::Error::last_os_error());
+        return EXIT_NOT_STARTED;
+    }
+    if main == 0 {
+        crate::init::set_mask(&before);
+        let e = exec_command(cmd);
+        eprintln!("cannot start {}: {e}", lossy(&cmd[0]));
+        // SAFETY: _exit never returns and touches nothing of ours.
+        unsafe { libc::_exit(libc::c_int::from(EXIT_NOT_STARTED)) };
+    }
+    // SAFETY: prctl with these arguments takes no pointers.
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0);
+    }
+    quiet_stdio();
+    // SAFETY: getpid(2) takes no arguments and cannot fail.
+    let me = unsafe { libc::getpid() };
+    let mut launch = Subreaper::new(main);
+    loop {
+        // SAFETY: an all-zero siginfo_t is a valid one to be filled.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a sigset_t and a siginfo_t of our own.
+        let sig = unsafe { libc::sigwaitinfo(&waited, &mut info) };
+        if sig < 0 {
+            continue;
+        }
+        if sig != libc::SIGCHLD {
+            for child in forward_targets(me, &process_table()) {
+                // SAFETY: kill(2) takes no pointers; a child of ours, not
+                // reaped (only this loop reaps).
+                unsafe { libc::kill(child, sig) };
+            }
+            continue;
+        }
+        loop {
+            let mut raw: libc::c_int = 0;
+            // SAFETY: `raw` is a valid pointer for the duration of the call.
+            let dead = unsafe { libc::waitpid(-1, &mut raw, libc::WNOHANG) };
+            if dead > 0 {
+                if let Some(code) = launch.reaped(dead, exit_code_of(raw)) {
+                    // Said, and the waiter's end is no stop of ours any more.
+                    // SAFETY: prctl with these arguments takes no pointers.
+                    unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, 0, 0, 0, 0) };
+                    if let Some(pipe) = status.take() {
+                        let _ = fs::File::from(pipe).write_all(&status_word(code));
+                    }
+                }
+                continue;
+            }
+            if dead < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+                return launch.code();
+            }
+            break;
+        }
+    }
+}
+
 pub fn run(args: Args) -> u8 {
+    // The launch's status pipe first, before anything is started: nothing
+    // else has it.
+    let status = take_status_fd();
+    // The instance's pid namespace (stage 3): the one `container-enter`
+    // made this launch's, or it does not start — as its network below.
+    let in_own_pids = match std::env::var_os(ENV_EXPECT_PIDNS) {
+        Some(expected) => {
+            std::env::remove_var(ENV_EXPECT_PIDNS);
+            let here = fs::read_link("/proc/self/ns/pid").ok();
+            if here.as_deref().map(Path::as_os_str) != Some(expected.as_os_str()) {
+                eprintln!(
+                    "profile-run: in the pid namespace {} instead of the instance's {} — not \
+                     starting",
+                    here.map_or("?".to_owned(), |p| p.display().to_string()),
+                    expected.to_string_lossy()
+                );
+                return EXIT_NOT_STARTED;
+            }
+            true
+        }
+        None => false,
+    };
     let into_zone = std::env::var_os(ENV_EXPECT_NETNS).is_some();
     // The zone entered is the zone checked: `nsenter` finds it by a number,
     // later, in a child of wl-sandbox, and a number can change hands in
@@ -1000,6 +1261,14 @@ pub fn run(args: Args) -> u8 {
     // Nothing below this line needs privileges.
     clear_ambient_capabilities();
 
+    // In an instance's own pid namespace: the launch's subreaper, not the
+    // program (the module's words). A throwaway's layer goes with its
+    // instance there (`zone::keep`): never one of those.
+    if in_own_pids && !args.ephemeral {
+        return supervise(&args.cmd, status);
+    }
+    drop(status);
+
     if !args.ephemeral {
         let e = exec_command(&args.cmd);
         eprintln!("cannot start {}: {e}", lossy(&args.cmd[0]));
@@ -1104,6 +1373,38 @@ fn take_storage_back(path: &Path) {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// The main program's end is said once; an orphan's end is not the
+    /// launch's; the subreaper ends with the main program's status.
+    #[test]
+    fn the_subreaper_says_the_main_programs_end_once() {
+        let mut launch = Subreaper::new(5);
+        assert_eq!(launch.reaped(9, 0), None);
+        assert_eq!(launch.reaped(5, 42), Some(42));
+        assert_eq!(launch.reaped(5, 0), None);
+        assert_eq!(launch.reaped(11, 143), None);
+        assert_eq!(launch.code(), 42);
+        // Nothing reaped of the main program: a failure.
+        assert_eq!(Subreaper::new(5).code(), 1);
+        assert_eq!(status_word(137), [b'S', 137]);
+    }
+
+    /// A signal goes to every child: the program, and the orphans it left
+    /// that were handed to the subreaper — not to their own children, and
+    /// not to anybody else.
+    #[test]
+    fn a_signal_goes_to_the_program_and_the_orphans_it_adopted() {
+        // 3 is the subreaper: 4 the program, 7 an orphan it adopted, 8 the
+        // orphan's child, 2 its own parent, 9 another launch's.
+        let table = [(2, 1), (3, 0), (4, 3), (7, 3), (8, 7), (9, 6)];
+        assert_eq!(forward_targets(3, &table), [4, 7]);
+        assert!(forward_targets(5, &table).is_empty());
+        for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            assert!(FORWARDED.contains(&sig), "{sig}");
+        }
+        assert!(!FORWARDED.contains(&libc::SIGKILL));
+        assert!(!FORWARDED.contains(&libc::SIGCHLD));
+    }
 
     fn argv(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()

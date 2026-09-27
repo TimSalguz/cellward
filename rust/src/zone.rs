@@ -107,11 +107,18 @@
 //! stop instead of leaving quietly. nftables missing or refused by the kernel is
 //! a loud warning and a zone that comes up anyway.
 //!
-//! **No PID namespace anywhere**, and that is deliberate: `zone.pid` has to
+//! **No PID namespace in a zone**, and that is deliberate: `zone.pid` has to
 //! name the app-namespace process the way the HOST sees it — `vpn-zone
 //! run`/`status` `nsenter` into it by that number — and the uplink hands the
 //! interface over by that same host pid, while pasta is given the uplink's.
-//! All three are host pids only as long as no pid namespace is created.
+//! All three are host pids only as long as no pid namespace is created. A
+//! zone is transport now (the container design of 2026-09-27): the programs
+//! run in their containers' instances, and those have one — their holder
+//! makes it, forks the instance's pid 1 into it (`crate::init`), and writes
+//! down pid 1's HOST pid as the instance's. Every pid a keeper, a holder or
+//! a zone's holder holds is a host pid; only the space's own processes (its
+//! device guard, its runtime watcher, its bus filter) number by the
+//! instance's namespace, and they read its `/proc`.
 
 use std::borrow::Cow;
 use std::ffi::{CStr, CString, OsStr, OsString};
@@ -728,7 +735,8 @@ struct Zone {
 /// * the zone-level settings it came up with, and the switches read live
 ///   (microphone, screen cast), are its network's — the zone's directory of
 ///   `network`, not its own ([`Zone::settings_dir`]);
-/// * its space writes `instance.pid`/`instance.start`, not `zone.pid`;
+/// * its holder writes `instance.pid`/`instance.start` — its pid 1's host
+///   pid (stage 3, `crate::init`) —, not `zone.pid`;
 /// * of the project's state it keeps its own throwaway layer and nothing
 ///   else — never the registry (`.running`), which names every container's
 ///   programs; of the containers' storage, its own container's alone
@@ -1611,8 +1619,13 @@ fn holder(zone: &Zone, unshared_w: OwnedFd, mapped_r: OwnedFd) -> u8 {
 // vpn-zone-core container-holder <id>     (systemd main process, host user)
 //  ├─ the helpers, as a zone's (`Helpers`)            [host user namespace]
 //  └─ fork ─ user namespace, uid 0 = subuid+3, then exec `--inner`   [H]
-//      └─ fork ─ net + mount + IPC namespace: THE SPACE   [instance.pid]
+//      └─ unshare(pid), fork ─ PID 1 (`crate::init`)      [instance.pid]
+//          │  net + mount + IPC namespaces, the pid namespace's /proc
+//          └─ fork ─ THE SPACE: covers, /dev, guard, bus filter
 // ```
+//
+// Stage 3 (2026-09-27, X4): the pid namespace, and the pid 1 its end ends —
+// with every program of the instance. `instance.pid` is pid 1's host pid.
 //
 // Stage 1 gives an instance no way out (lo only): every launch whose network
 // is `offline` runs in one, and the `offline` zone is never started for it.
@@ -1860,9 +1873,17 @@ enum Ending {
     /// Stopped (TERM or INT): `systemctl stop`, a logout, `cellward
     /// container stop`.
     Asked,
+    /// Its pid 1 killed (`cellward container kill`, stage 3): everything in
+    /// its pid namespace ended with it, at once.
+    Killed,
     /// Its space ended by itself: nothing holds its covers any more.
     Broken,
 }
+
+/// The holder's exit code when its pid 1 was killed (128 + SIGKILL, as
+/// `exit_code_of` gives it and `stopped_cleanly` passes it on): the
+/// instance was killed, not broken ([`Ending::Killed`]).
+const KILLED: u8 = 128 + libc::SIGKILL as u8;
 
 /// The keeper's wake-up pipe's write end, for its signal handlers.
 static WAKE: AtomicI32 = AtomicI32::new(-1);
@@ -2004,33 +2025,44 @@ fn hold_instance(zone: &mut Zone, ids: &Ids, plan: &crate::instance::Plan) -> Re
         eprintln!("instance {}: journal: {e}", plan.id);
     }
 
-    let (ending, space_gone) = keep(zone, pid, userns, &mut helpers, &mut transport);
-    let why = match ending {
-        Ending::Idle => {
-            println!("instance {}: its last program ended — it stops", plan.id);
-            "idle"
-        }
-        Ending::Asked => "stop",
-        Ending::Broken => {
-            eprintln!(
-                "instance {}: its space ended by itself — its programs are ended with it",
-                plan.id
-            );
-            "broken"
-        }
-    };
+    let (mut ending, space_gone) = keep(zone, pid, space, userns, &mut helpers, &mut transport);
+    match ending {
+        Ending::Idle => println!("instance {}: its last program ended — it stops", plan.id),
+        Ending::Broken => eprintln!(
+            "instance {}: its space ended by itself — its programs are ended with it",
+            plan.id
+        ),
+        Ending::Asked | Ending::Killed => {}
+    }
     // An instance ending ends its programs (the design's stop semantics):
     // TERM, and waited for — systemd's own stop timeout is the one clock.
-    // Their way out goes after them, before the space.
+    // Their way out goes after them, before the space. (Its pid 1's end
+    // would end them too — KILL, with no word: they are asked first.)
     if ending != Ending::Idle {
-        end_programs(userns);
+        end_programs(userns, space);
     }
     transport.close();
     if !space_gone {
         // SAFETY: kill(2) of our own child, not reaped yet.
         unsafe { libc::kill(pid, libc::SIGTERM) };
-        let _ = reap(pid);
+        // A kill's own stop: `cellward container kill` kills the pid 1, then
+        // stops the unit — whose TERM may come before the holder's end.
+        if reap(pid) == KILLED && ending == Ending::Asked {
+            ending = Ending::Killed;
+        }
     }
+    let why = match ending {
+        Ending::Idle => "idle",
+        Ending::Asked => "stop",
+        Ending::Killed => {
+            println!(
+                "instance {}: killed — its programs ended with its pid namespace",
+                plan.id
+            );
+            "kill"
+        }
+        Ending::Broken => "broken",
+    };
     helpers.stop();
     // A throwaway's layer and records: nothing of it outlives it.
     for path in &plan.erase {
@@ -2100,9 +2132,28 @@ fn instance_user_namespace(zone: &Zone, exe: &Path, unshared_w: OwnedFd, mapped_
 
 /// `vpn-zone-core container-holder --inner <id>`: [`hold_instance`]'s
 /// child once it is uid 0 of the instance's user namespace and exec'd in
-/// it. Not dumpable from its first step (the zones' holders are, for pasta
-/// and `nsenter`; an instance has neither): nothing of the instance's may
-/// read it, the host's user may. Forks the space and waits for it.
+/// it (H). Not dumpable from its first step (the zones' holders are, for
+/// pasta and `nsenter`; an instance has neither): nothing of the instance's
+/// may read it, the host's user may.
+///
+/// Since stage 3 (`docs/THREAT-MODEL.md` X4) it makes the instance's pid
+/// namespace, and forks its pid 1 into it (`crate::init`, I), which makes
+/// the network, mount and IPC namespaces and forks the space (K) — and
+/// writes down I's HOST pid as the instance's (`instance.pid`): every
+/// reader of an instance is on the host, and I is a member of every one of
+/// its namespaces. `unshare(CLONE_NEWPID)` and glibc's `fork`, not a raw
+/// `clone(2)` with the flags: glibc keeps the thread's id in the thread's
+/// own block, and a raw clone leaves the parent's there — `raise`, `abort`
+/// and error-checking mutexes would name a thread the child's namespace
+/// does not have. This process forks nothing else: whatever it forked now
+/// would be in the instance's namespace, and after I's end nothing can be.
+///
+/// The stop signals and SIGCHLD are blocked across the fork: I starts with
+/// them blocked and takes them with `sigwaitinfo` — pid 1 of a namespace is
+/// never delivered a signal it has no handler for, and a blocked one is
+/// never dropped. I waits for this process's word before it forks the
+/// space: the space's `space-ready` is then always read after
+/// `instance.pid` was written.
 pub fn run_instance_inner(tools: Tools, home: PathBuf, plan: crate::instance::Plan) -> u8 {
     // SAFETY: prctl with these arguments takes no pointers.
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
@@ -2115,6 +2166,30 @@ pub fn run_instance_inner(tools: Tools, home: PathBuf, plan: crate::instance::Pl
         }
     };
     let zone = instance_zone(tools, home, &plan, &applied);
+    let (go_r, go_w) = match sys::pipe() {
+        Ok(pipe) => pipe,
+        Err(e) => {
+            eprintln!("instance {}: cannot create a pipe ({e})", plan.id);
+            return 1;
+        }
+    };
+    let waited = crate::init::waited_set();
+    let before = match crate::init::block(&waited) {
+        Ok(mask) => mask,
+        Err(e) => {
+            eprintln!("instance {}: cannot block its signals ({e})", plan.id);
+            return 1;
+        }
+    };
+    // SAFETY: unshare(2) takes no pointers.
+    if unsafe { libc::unshare(libc::CLONE_NEWPID) } != 0 {
+        eprintln!(
+            "instance {}: cannot create a pid namespace ({})",
+            plan.id,
+            io::Error::last_os_error()
+        );
+        return 1;
+    }
     // SAFETY: single-threaded here.
     let pid = unsafe { libc::fork() };
     if pid < 0 {
@@ -2126,21 +2201,61 @@ pub fn run_instance_inner(tools: Tools, home: PathBuf, plan: crate::instance::Pl
         return 1;
     }
     if pid == 0 {
-        let code = zone_main(&zone, None);
+        drop(go_w);
+        let code = crate::init::run(&plan.id, go_r, || zone_main(&zone, None));
         // SAFETY: _exit never returns and touches nothing of ours.
         unsafe { libc::_exit(libc::c_int::from(code)) };
     }
-    // The keeper stops the instance by signalling this process; the space
-    // goes with it.
+    drop(go_r);
+    // The keeper stops the instance by signalling this process; it is
+    // passed on to pid 1, from outside its namespace — and the namespace
+    // goes with pid 1.
     USERNS_CHILD.store(pid, Ordering::SeqCst);
     on_term_and_int(forward_signal);
+    // SAFETY: signal(2) with a plain function pointer, as `on_term_and_int`.
+    unsafe {
+        libc::signal(
+            libc::SIGHUP,
+            forward_signal as extern "C" fn(libc::c_int) as libc::sighandler_t,
+        )
+    };
+    crate::init::set_mask(&before);
+    let noted = note_instance_pid(&dir, pid).and_then(|()| {
+        File::from(go_w)
+            .write_all(&[SYNC_OK])
+            .map_err(|e| format!("cannot give its pid 1 the word: {e}"))
+    });
+    if let Err(e) = noted {
+        eprintln!("instance {}: {e}", plan.id);
+        // SAFETY: kill(2) of our own child, not reaped yet: KILL, which pid
+        // 1 of a namespace gets from its parent's.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let _ = reap(pid);
+        return 1;
+    }
     let code = loop {
         let (dead, code) = wait_any();
         if dead == pid || dead == -1 {
             break code;
         }
     };
+    // Its pid 1 killed is said as it is, asked to stop or not: the keeper
+    // tells a kill from a stop by it (`Ending::Killed`).
+    if code == KILLED {
+        return code;
+    }
     stopped_cleanly(code)
+}
+
+/// The instance's process as the host numbers it — its pid 1, `pid` —
+/// written into its directory `dir`: its start first, so that whoever sees
+/// the number sees its start too (`crate::instance::up`).
+fn note_instance_pid(dir: &Path, pid: libc::pid_t) -> Result<(), String> {
+    let stamp = sys::process_stamp(pid).ok_or("cannot read its pid 1's start time")?;
+    fs::write(dir.join(crate::instance::START), format!("{stamp}\n"))
+        .map_err(|e| format!("cannot write {}: {e}", crate::instance::START))?;
+    fs::write(dir.join(crate::instance::PID), format!("{pid}\n"))
+        .map_err(|e| format!("cannot write {}: {e}", crate::instance::PID))
 }
 
 /// Keep the instance for as long as it has programs: its space held, its
@@ -2163,6 +2278,7 @@ pub fn run_instance_inner(tools: Tools, home: PathBuf, plan: crate::instance::Pl
 fn keep(
     zone: &Zone,
     holder: libc::pid_t,
+    space: libc::pid_t,
     userns: (u64, u64),
     helpers: &mut Helpers,
     transport: &mut Transport,
@@ -2230,6 +2346,8 @@ fn keep(
     let mut members: Vec<(i32, OwnedFd)> = Vec::new();
     let mut armed = false;
     let mut space_gone = false;
+    // How the holder ended: KILL passed on from its pid 1 is a kill.
+    let mut holder_code = 0u8;
     let pollin = |fd: RawFd| libc::pollfd {
         fd,
         events: libc::POLLIN,
@@ -2279,12 +2397,17 @@ fn keep(
                 }
                 if dead == holder {
                     space_gone = true;
+                    holder_code = exit_code_of(status);
                 } else {
                     helpers.died(zone, dead);
                 }
             }
             if space_gone {
-                break Ending::Broken;
+                break if holder_code == KILLED {
+                    Ending::Killed
+                } else {
+                    Ending::Broken
+                };
             }
         }
         transport.handle(&fds[way..first_member], wake_r.as_raw_fd());
@@ -2312,11 +2435,11 @@ fn keep(
         if !look {
             continue;
         }
-        members = crate::place::members(userns, Some(keeper));
+        members = crate::place::members(userns, Some(keeper), Some(space));
         if members.is_empty() && armed && lock.as_ref().is_some_and(lock_exclusive_now) {
             // Nobody on the way in (a launch holds the lock shared until its
             // program is in): looked at once more, and nobody is in.
-            members = crate::place::members(userns, Some(keeper));
+            members = crate::place::members(userns, Some(keeper), Some(space));
             if members.is_empty() {
                 break Ending::Idle;
             }
@@ -2346,14 +2469,16 @@ fn lock_exclusive_now(lock: &File) -> bool {
 /// Every program of the instance whose user namespace is `userns` ended:
 /// TERM (and CONT, for one stopped), waited for, and looked for again —
 /// what forked meanwhile goes the same way. What the keeper started — its
-/// space, its relay — is spared: the keeper ends it after them. No clock: a
-/// program that does not end is ended by systemd's stop timeout of the
-/// unit — the one clock (O10 of the design).
-fn end_programs(userns: (u64, u64)) {
+/// holder, its pid 1 (`space`) and its space, its relay — is spared: the
+/// keeper ends it after them; an orphan pid 1 adopted is a program
+/// (`crate::place::members`). No clock: a program that does not end is
+/// ended by systemd's stop timeout of the unit — the one clock (O10 of the
+/// design): its KILL reaches the pid 1, and the kernel ends the rest.
+fn end_programs(userns: (u64, u64), space: libc::pid_t) {
     // SAFETY: getpid(2) takes no arguments and cannot fail.
     let keeper = unsafe { libc::getpid() };
     loop {
-        let found = crate::place::members(userns, Some(keeper));
+        let found = crate::place::members(userns, Some(keeper), Some(space));
         if found.is_empty() {
             return;
         }
@@ -6392,9 +6517,15 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // An IPC namespace too (review 2026-09-27): System V shared memory and
     // message queues go by number, and the zone's programs are the user's
     // uid — an X client's MIT-SHM segment on the host, the pixels of its
-    // windows, was one `shmat` away.
+    // windows, was one `shmat` away. An instance's space is in them already
+    // (stage 3): its pid 1 made them, and mounted the pid namespace's
+    // `/proc` in the mount namespace before it forked this process
+    // (`crate::init`).
     // SAFETY: unshare(2) takes no pointers.
-    if unsafe { libc::unshare(libc::CLONE_NEWNET | libc::CLONE_NEWNS | libc::CLONE_NEWIPC) } != 0 {
+    if zone.instance.is_none()
+        && unsafe { libc::unshare(libc::CLONE_NEWNET | libc::CLONE_NEWNS | libc::CLONE_NEWIPC) }
+            != 0
+    {
         return Err(format!(
             "cannot create the net+mount+IPC namespace: {}",
             io::Error::last_os_error()
@@ -6412,21 +6543,20 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     .map_err(|e| format!("cannot make the mount tree private: {e}"))?;
 
     // Only now: the file's appearance means "the namespaces exist", and this is
-    // the number `vpn-zone run`/`status` enter by.
-    // SAFETY: getpid(2) takes no arguments and cannot fail.
-    let pid = unsafe { libc::getpid() };
-    // The start time first: whoever sees the new number sees its start too.
-    let stamp = sys::process_stamp(pid).ok_or("cannot read our own start time")?;
-    // An instance's space names itself so (`crate::instance::up`): a
-    // `zone.pid` there would be a zone's to every reader of zones.
-    let (pid_file, start_file) = match zone.instance {
-        Some(_) => (crate::instance::PID, crate::instance::START),
-        None => (PID, START),
-    };
-    fs::write(zone.path(start_file), format!("{stamp}\n"))
-        .map_err(|e| format!("cannot write {start_file}: {e}"))?;
-    fs::write(zone.path(pid_file), format!("{pid}\n"))
-        .map_err(|e| format!("cannot write {pid_file}: {e}"))?;
+    // the number `vpn-zone run`/`status` enter by. An instance's is its pid
+    // 1's host pid, written by its holder (`instance.pid`, stage 3): this
+    // process's own number is its pid namespace's, which no reader of the
+    // instance's directory shares.
+    if zone.instance.is_none() {
+        // SAFETY: getpid(2) takes no arguments and cannot fail.
+        let pid = unsafe { libc::getpid() };
+        // The start time first: whoever sees the new number sees its start too.
+        let stamp = sys::process_stamp(pid).ok_or("cannot read our own start time")?;
+        fs::write(zone.path(START), format!("{stamp}\n"))
+            .map_err(|e| format!("cannot write {START}: {e}"))?;
+        fs::write(zone.path(PID), format!("{pid}\n"))
+            .map_err(|e| format!("cannot write {PID}: {e}"))?;
+    }
     // Which build runs the zone: an update leaves it running (keep-old), and
     // status/doctor/watch tell the person it is left on the previous one.
     crate::build::record(&zone.dir);

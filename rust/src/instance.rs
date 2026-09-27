@@ -39,6 +39,15 @@
 //! keeper attaches it, rewrites its [`RESOLV`] in place, notes its [`EXIT`]
 //! and only then writes [`READY`]: a launch that finds an instance ready
 //! finds it with its way out.
+//!
+//! Stage 3 (2026-09-27, `docs/THREAT-MODEL.md` X4): an instance has a pid
+//! namespace of its own. Its holder makes it and forks the instance's pid 1
+//! into it (`crate::init`), whose HOST pid is [`PID`] — the process every
+//! reader of an instance on the host holds and reads the namespaces of. A
+//! program of the instance sees in `/proc` its own container's processes
+//! and no one else's; a launch joins the pid namespace with the others
+//! (`crate::enter`), and its `profile-run` stays as the launch's subreaper
+//! (`crate::profile`).
 
 use std::fs;
 use std::io;
@@ -398,6 +407,17 @@ pub fn running(state: &Path) -> Vec<Running> {
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
+}
+
+/// Whether the process `pid` — an instance's (`Running::pid`) — has a pid
+/// namespace other than this process's: its own (stage 3, `crate::init`).
+/// An instance started by an earlier build has none — its programs see
+/// every process of the host until it is restarted. False when either
+/// cannot be read.
+pub fn own_pid_namespace(pid: i32) -> bool {
+    let theirs = fs::read_link(format!("/proc/{pid}/ns/pid")).ok();
+    let ours = fs::read_link("/proc/self/ns/pid").ok();
+    matches!((theirs, ours), (Some(theirs), Some(ours)) if theirs != ours)
 }
 
 /// The container an instance is of: its name — `None` for the built-in

@@ -39,6 +39,17 @@
 //! their own, and the zone's end alone would only cut them off —, then
 //! what is left in the zone's own namespaces (a launch of a previous build),
 //! then the zone. With the zone down, the instances cut from it.
+//!
+//! **An instance's pid namespace** (stage 3, `crate::init`): no freezing
+//! passes for an instance that has one. Every program of it is in its pid
+//! namespace, and its pid 1 killed (`SIGKILL`, through a pidfd held while it
+//! was the instance's) takes the whole namespace with it — the kernel's
+//! doing, at once: nothing forks its way past it. Its programs are listed
+//! (by their user namespace) only to say which were killed. An instance of
+//! an earlier build, with no pid namespace, is frozen and killed as before.
+//! Zones have no pid namespace: a zone's own namespaces still go by passes.
+//!
+//! Every pid here is a host pid, read from the host's `/proc`.
 
 use std::ffi::OsString;
 use std::fs;
@@ -265,20 +276,26 @@ pub fn instances_named(state: &Path, name: &str) -> Vec<crate::instance::Running
         .collect()
 }
 
+/// The name of process `pid` (its `comm`), for the list of what was killed.
+fn comm_of(pid: i32) -> String {
+    fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|c| c.trim().to_owned())
+        .unwrap_or_default()
+}
+
 /// Freeze every program of the instance whose user namespace is `userns`
 /// but its own (`spare`, its keeper, and below: its space, its relay), pass
-/// after pass, as [`freeze`] does a zone's.
+/// after pass, as [`freeze`] does a zone's — for an instance with no pid
+/// namespace of its own (an earlier build's).
 fn freeze_members(userns: (u64, u64), spare: i32) -> (Vec<Target>, Option<String>) {
     let mut held: Vec<Target> = Vec::new();
     for _ in 0..PASSES {
         let mut fresh = 0;
-        for (pid, fd) in crate::place::members(userns, Some(spare)) {
+        for (pid, fd) in crate::place::members(userns, Some(spare), None) {
             if held.iter().any(|t| t.pid == pid) {
                 continue;
             }
-            let name = fs::read_to_string(format!("/proc/{pid}/comm"))
-                .map(|c| c.trim().to_owned())
-                .unwrap_or_default();
+            let name = comm_of(pid);
             if pidfd_signal(&fd, libc::SIGSTOP) {
                 fresh += 1;
                 held.push(Target { pid, name, fd });
@@ -365,15 +382,19 @@ fn end_instances(
                 .filter(|&k| k > 1);
             let still = crate::instance::up(&tools.state, &instance.id) == Some(instance.pid);
             if let (Some(key), Some(keeper), true) = (key, keeper, still) {
-                let (frozen, overrun) = freeze_members(key, keeper);
-                if let Some(why) = overrun {
-                    eprintln!("{why}");
+                if crate::instance::own_pid_namespace(instance.pid) {
+                    killed.extend(kill_namespace(tools, instance, key, keeper));
+                } else {
+                    let (frozen, overrun) = freeze_members(key, keeper);
+                    if let Some(why) = overrun {
+                        eprintln!("{why}");
+                    }
+                    killed.extend(
+                        frozen
+                            .into_iter()
+                            .filter(|t| pidfd_signal(&t.fd, libc::SIGKILL)),
+                    );
                 }
-                killed.extend(
-                    frozen
-                        .into_iter()
-                        .filter(|t| pidfd_signal(&t.fd, libc::SIGKILL)),
-                );
             }
         }
         let unit = crate::instance::unit_name(&instance.id).unwrap_or_default();
@@ -386,6 +407,43 @@ fn end_instances(
         }
     }
     (killed, all_stopped)
+}
+
+/// Instance `instance`'s pid namespace ended (stage 3): its programs
+/// listed — the processes of its user namespace but its keeper's own
+/// (`place::members`) —, then its pid 1 killed through a pidfd held while
+/// it was still the instance's, and the kernel ends everything in the
+/// namespace with it. The programs listed, as killed; none when its pid 1
+/// could not be held or signalled (it ended meanwhile: so did they).
+fn kill_namespace(
+    tools: &Tools,
+    instance: &crate::instance::Running,
+    key: (u64, u64),
+    keeper: i32,
+) -> Vec<Target> {
+    let listed: Vec<Target> = crate::place::members(key, Some(keeper), Some(instance.pid))
+        .into_iter()
+        .map(|(pid, fd)| Target {
+            pid,
+            name: comm_of(pid),
+            fd,
+        })
+        .collect();
+    let Some(init) = pidfd_open(instance.pid)
+        .filter(|_| crate::instance::up(&tools.state, &instance.id) == Some(instance.pid))
+    else {
+        return Vec::new();
+    };
+    if !pidfd_signal(&init, libc::SIGKILL) {
+        return Vec::new();
+    }
+    // Its end waited for: the kernel ends it once everything in its
+    // namespace is gone — then its keeper tells the kill from the stop that
+    // follows (`zone::hold_instance`). Held up only by a launch's waiter
+    // that does not reap its child: stopped by its terminal (`^Z`), it holds
+    // a zombie of the namespace until it goes on.
+    crate::sys::pidfd_wait_end(&init);
+    listed
 }
 
 #[cfg(test)]

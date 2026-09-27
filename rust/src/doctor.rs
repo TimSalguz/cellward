@@ -379,8 +379,10 @@ fn reachable(path: &Path, slow: &crate::sockets::Slow) -> bool {
 /// host's own mounts, so that the probe can tell a filesystem only the zone
 /// has, `crate::sockets::own_devs`) and `--closed=<kind:maj:min:ino>,…` (the
 /// host's sockets promised out of the zone's reach, by identity,
-/// `crate::sockets::parse_closed`). Anything else is ignored: the two sides
-/// may be different builds for a moment after an update.
+/// `crate::sockets::parse_closed`), and for a container's instance
+/// `--host-pidns=pid:[…]` (the host's pid namespace: the X4 check,
+/// [`pid_namespace_check`]). Anything else is ignored: the two sides may be
+/// different builds for a moment after an update.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProbeArgs {
     pub uid: u32,
@@ -392,6 +394,10 @@ pub struct ProbeArgs {
     /// hand): then nothing is the zone's own by its device.
     pub host_devs: Option<HashSet<crate::sockets::Dev>>,
     pub closed: HashMap<(crate::sockets::Dev, u64), crate::sockets::HostSocket>,
+    /// The host's pid namespace (`pid:[…]`), for an instance's probe: its
+    /// `/proc` is looked at (X4). `None`: a zone's, which has none of its
+    /// own.
+    pub host_pidns: Option<String>,
 }
 
 impl ProbeArgs {
@@ -414,6 +420,9 @@ impl ProbeArgs {
                         // A name, never a path: compared with one component.
                         parsed.zone = Some(name.to_owned())
                             .filter(|n| !n.is_empty() && !n.contains('/') && n != "." && n != "..");
+                    }
+                    if let Some(ns) = arg.strip_prefix("--host-pidns=") {
+                        parsed.host_pidns = Some(ns.to_owned()).filter(|n| n.starts_with("pid:["));
                     }
                     if let Some(list) = arg.strip_prefix("--closed=") {
                         parsed.closed = crate::sockets::parse_closed(list);
@@ -526,6 +535,9 @@ pub fn probe(args: &ProbeArgs, groups_shed: bool) -> Vec<Check> {
         closed: args.closed.clone(),
     };
     checks.extend(crate::sockets::checks(&walk, &context, groups_shed));
+    if let Some(host) = &args.host_pidns {
+        checks.push(pids_seen(host));
+    }
     let (raw, ipc) = compositor_entries(&runtime);
     checks.push(listed_channel_check(
         "wayland-raw",
@@ -539,6 +551,84 @@ pub fn probe(args: &ProbeArgs, groups_shed: bool) -> Vec<Check> {
         "IPC композитора: запуск процесса на хосте (`niri msg action spawn`) (§13)",
     ));
     checks
+}
+
+/// What an instance's `/proc` shows its program (X4): read here, judged by
+/// [`pid_namespace_check`].
+fn pids_seen(host: &str) -> Check {
+    let own = fs::read_link("/proc/self/ns/pid")
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+    let cmdline = |path: &Path| {
+        fs::read(path)
+            .ok()
+            .map(|bytes| String::from_utf8_lossy(&bytes).replace('\0', " "))
+    };
+    let init = cmdline(Path::new("/proc/1/cmdline"));
+    let lines: Vec<String> = fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.parse::<u32>().is_ok())
+        })
+        .filter_map(|e| cmdline(&e.path().join("cmdline")))
+        .collect();
+    pid_namespace_check(own.as_deref(), host, init.as_deref(), &lines)
+}
+
+/// X4 (`docs/THREAT-MODEL.md`, stage 3 of the container design): a program
+/// of a container's instance sees its own container's processes and no one
+/// else's. Its pid namespace (`own`) is not the host's (`host`); `/proc/1`
+/// is the instance's pid 1, its holder (`init`, a command line); and none
+/// of the command lines it sees (`seen`) is a process of the host's — not
+/// even this probe's own launch's waiter (`container-enter`), which is
+/// certainly alive on the host while the probe runs.
+pub fn pid_namespace_check(
+    own: Option<&str>,
+    host: &str,
+    init: Option<&str>,
+    seen: &[String],
+) -> Check {
+    let Some(own) = own else {
+        return Check::new(
+            "pid-namespace",
+            Level::Skip,
+            "не прочитать своё пространство pid",
+        );
+    };
+    if own == host {
+        return Check::new(
+            "pid-namespace",
+            Level::Fail,
+            "своего пространства pid нет — программам контейнера видны все процессы хоста, \
+             их командные строки (X4); контейнер поднят прошлой сборкой — перезапусти его",
+        );
+    }
+    if seen.iter().any(|line| line.contains("container-enter")) {
+        return Check::new(
+            "pid-namespace",
+            Level::Fail,
+            "в /proc видны процессы хоста: ждущий этого же запуска (X4)",
+        );
+    }
+    if !init.is_some_and(|line| line.contains("container-holder")) {
+        return Check::new(
+            "pid-namespace",
+            Level::Fail,
+            "/proc/1 — не держатель экземпляра: /proc не своего пространства pid (X4)",
+        );
+    }
+    Check::new(
+        "pid-namespace",
+        Level::Ok,
+        format!(
+            "своё пространство pid: видны только процессы контейнера ({})",
+            seen.len()
+        ),
+    )
 }
 
 /// The temporary directories a zone may share with the host
@@ -1666,6 +1756,11 @@ pub fn instance_checks(tools: &Tools, running: &crate::instance::Running, uid: u
     if !closed.is_empty() {
         probe_args.push(format!("--closed={closed}"));
     }
+    // What its programs see of the processes (X4, stage 3), judged against
+    // the host's pid namespace.
+    if let Ok(host) = fs::read_link("/proc/self/ns/pid") {
+        probe_args.push(format!("--host-pidns={}", host.to_string_lossy()));
+    }
     let mut command = Command::new(&tools.core);
     command
         .env_clear()
@@ -1971,6 +2066,55 @@ mod tests {
             instance_root_check(Some(&status(100_003)), None).level,
             Level::Skip
         );
+    }
+
+    /// X4: an instance's own pid namespace, its pid 1 at /proc/1, and no
+    /// host process in sight — the launch's own waiter least of all.
+    #[test]
+    fn an_instances_programs_see_its_processes_alone() {
+        let host = "pid:[4026531836]";
+        let own = Some("pid:[4026532999]");
+        let init = Some("/nix/store/x/bin/vpn-zone-core container-holder --inner work ");
+        let seen = |lines: &[&str]| lines.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let inside = seen(&[
+            "/nix/store/x/bin/vpn-zone-core container-holder --inner work ",
+            "vpn-zone-core profile-run --cwd /home/a  work 0  -- sleep 600 ",
+            "sleep 600 ",
+        ]);
+        let ok = pid_namespace_check(own, host, init, &inside);
+        assert_eq!(ok.level, Level::Ok, "{}", ok.detail);
+        assert!(ok.detail.contains("(3)"), "{}", ok.detail);
+        // The host's namespace: every process of the host in sight.
+        let old = pid_namespace_check(Some(host), host, init, &inside);
+        assert_eq!(old.level, Level::Fail, "{}", old.detail);
+        // A waiter of the host's seen: a /proc that is not the namespace's.
+        let mut leak = inside.clone();
+        leak.push("vpn-zone-core container-enter --instance work -- x ".to_owned());
+        let seen_waiter = pid_namespace_check(own, host, init, &leak);
+        assert_eq!(seen_waiter.level, Level::Fail, "{}", seen_waiter.detail);
+        // /proc/1 is somebody else: systemd, the host's.
+        let systemd = pid_namespace_check(own, host, Some("/sbin/init "), &inside);
+        assert_eq!(systemd.level, Level::Fail, "{}", systemd.detail);
+        assert_eq!(
+            pid_namespace_check(None, host, init, &inside).level,
+            Level::Skip
+        );
+    }
+
+    #[test]
+    fn the_host_pid_namespace_is_taken_as_one() {
+        let parsed = ProbeArgs::parse(&[
+            OsString::from("1000"),
+            OsString::from("--host-pidns=pid:[4026531836]"),
+        ])
+        .unwrap();
+        assert_eq!(parsed.host_pidns.as_deref(), Some("pid:[4026531836]"));
+        let parsed = ProbeArgs::parse(&[
+            OsString::from("1000"),
+            OsString::from("--host-pidns=/etc/passwd"),
+        ])
+        .unwrap();
+        assert_eq!(parsed.host_pidns, None);
     }
 
     #[test]

@@ -79,9 +79,9 @@ doctor` (vm35, vm20). Она смотрит линки, маршруты, `nsswi
 | запуск | обещает | не обещает |
 |---|---|---|
 | `unconfined` | ничего о сети; его вид дома при этом действует | ничего больше: у него сеть, резолвер, сессионная шина и `systemd --user` хоста |
-| `offline` (с 2026-09-27 — экземпляр контейнера) | никакой сети, включая имена (N13, D1), плюс всё, что есть у любой зоны, — на контейнер: свои пространства сети, IPC и точек монтирования, отдельно от любого другого контейнера (X10) | того, чего не обещает обычная или герметичная зона, по её настройке; `/proc` хоста (X4) |
+| `offline` (с 2026-09-27 — экземпляр контейнера) | никакой сети, включая имена (N13, D1), плюс всё, что есть у любой зоны, — на контейнер: свои пространства сети, IPC, точек монтирования и pid, отдельно от любого другого контейнера (X10, X4) | того, чего не обещает обычная или герметичная зона, по её настройке |
 | обычная зона без песочницы | строки N и D и «у каждой зоны» ниже — против утечек по ошибке | ничего против враждебной программы: у неё `systemd --user`, вся сессионная шина и порталы (P1–P6), `/tmp` хоста (X1), сырой сокет PipeWire (A2, A3), весь дом (F1, F2) |
-| герметичная зона (по умолчанию) без песочницы | сетевые строки — и против враждебной программы, плюс «герметичность добавляет» | дом: читается, и пишется везде, кроме мест, откуда хост запускает код (F1, F2); `/proc` хоста (X4), сигналы (X5), `machine-id` (I3) |
+| герметичная зона (по умолчанию) без песочницы | сетевые строки — и против враждебной программы, плюс «герметичность добавляет» | дом: читается, и пишется везде, кроме мест, откуда хост запускает код (F1, F2); сигналы до Linux 6.12 (X5), `machine-id` (I3) |
 | любая зона со своим домом | плюс «песочница добавляет» | `/sys`, `/etc`, `/nix/store` (I4); поверхность ядра (K1) |
 | слой над домом | запись остаётся в слое; данные других контейнеров не видны (H4) | чтение настоящего дома (F4) |
 | основной дом | ничего о файлах | одна и та же личность во всех сетях (I2) |
@@ -89,7 +89,7 @@ doctor` (vm35, vm20). Она смотрит линки, маршруты, `nsswi
 
 **У каждой зоны:** пространство приложений с `lo` и туннелем — с 2026-09-27 запуск
 работает рядом с ним, в экземпляре своего контейнера, чей единственный выход — мост зоны
-(N17); страховка nftables; резолверы
+(N17), а пространство pid — своё (X4); страховка nftables; резолверы
 хоста скрыты, свои `resolv.conf` и `nsswitch.conf`; свой runtime-каталог без сырого сокета
 Wayland и IPC композитора; Wayland только через ограниченный сокет; нет X-сервера хоста;
 отфильтрованная системная шина и список разрешённого поверх `/run/systemd`; свои `/dev` и
@@ -128,6 +128,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | N14 | Устройство, выданное контейнеру, приносит свою сеть (adb или модем телефона, ESP32, LTE-модем) | нет | предупреждение при выдаче такого устройства | — |
 | N15 | Метаданные: имя endpoint резолвится в сети хоста; содержимое DNS видно на выходе туннеля | нет | литеральный адрес endpoint снимает первое; DoT/DoH в планах (M3) | — |
 | N16 | Семейство сокетов, которого нет ни в одном сетевом пространстве: `AF_VSOCK` к службам vsock хоста или виртуалки (sshd гостя с systemd 256), мимо туннеля | да для 64-битных программ · 32-битных: **нет** | seccomp-список разрешённых семейств в каждом запуске в зону и у клиента OpenConnect (`AF_UNIX`, `AF_INET`, `AF_INET6`, `AF_NETLINK`, `AF_PACKET`); 32-битный `socketcall` x86 по семейству не отфильтровать, он проходит | vm45 u14 |
+| N18 | Экземпляр контейнера кончается, а его программы работают: остановлен, убит, сеанс закрыт, умер его хранитель или его pid 1 | да: программы кончаются с ним | его программы — в его пространстве pid (2026-09-27, этап 3): хранитель просит их закончить (TERM) и ждёт, а конец его pid 1 уносит с пространством всё, что осталось, — это делает ядро, сразу; не послушавшую TERM программу кончает `cellward container kill` или таймаут остановки самого systemd. Ничто из экземпляра его не переживает — ни без сети, ни с выходом | vm57 vm72 vm73 sm25 |
 | N17 | Экземпляр контейнера достаёт до служб самой своей зоны (слушателя на адресе зоны или на её loopback) или выходит иначе, чем туннелем зоны | да | единственный выход экземпляра — `passt --fd`, который зона запускает для него в своём пространстве приложений (2026-09-27), под собственным id моста (третий подчинённый uid зоны): фильтр зоны запрещает этому id каждый свой адрес и loopback, в обоих семействах, а без этого правила зона экземпляров не везёт; passt ничего не отображает на loopback зоны (`--no-map-gw`, `--map-guest-addr none`) и ничего не принимает внутрь; ретранслятор экземпляра работает под seccomp-списком разрешённого | У · vm60 vm61 vm62 vm22 sm26 |
 | | **DNS** | | | |
 | D1 | Резолвер хоста отвечает по unix-сокету (nscd/nsncd, varlink resolved, avahi) | да | tmpfs поверх их каталогов в каждой зоне (не вышло — зона не поднимается); свой `nsswitch.conf` зоны: `hosts: files dns` | vm9 vm10 vm11 sm6 sys1 |
@@ -182,9 +183,9 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | | **Процессы, IPC, временные файлы** | | | |
 | X1 | `/tmp` и `/dev/shm` хоста: слушающие сокеты (`run-shell` у tmux, IPC клиента VPN, «единственные экземпляры»), фильтры шины чужих песочниц | герметичная: да · обычная: **нет** (`doctor` их называет) | свои `/tmp`, `/var/tmp`, `/dev/shm`; фильтры переехали в runtime-каталог | vm19 |
 | X2 | Абстрактные unix-сокеты хоста | да | они принадлежат сетевому пространству — у каждого экземпляра контейнера оно своё, и offline, и в зоне (2026-09-27); песочница в сети хоста: scope Landlock (Linux 6.12+) | vm19 vm32 vm54 vm66 |
-| X3 | `/proc/<pid>/root`, `cwd`, `fd`, `environ` процессов сеанса хоста | да | правила ptrace между пространствами пользователей (ядро); `vpn-zone-sys` получает своё пространство пользователей | vm15 vm17 vm18 sys4 |
-| X4 | `/proc/<pid>/cmdline` процессов хоста (какие зоны и профили в ходу) | песочница: да · зона и контейнер offline: **нет** | у зон нет пространства pid, у экземпляров контейнеров пока тоже (этап 3 контейнерного дизайна даст его каждому экземпляру); у песочницы своё. `/sys/fs/cgroup` экземпляра — имена всех юнитов и областей — закрыт | песочница: У · **нет теста** |
-| X5 | Сигналы процессам хоста того же пользователя (убить композитор) | да (Linux 6.12+) | каждый запуск в зону — свой домен Landlock с `LANDLOCK_SCOPE_SIGNAL`: сигналит себе и тому, что запустил сам, и никому больше — другому запуску той же зоны тоже; песочница к тому же не может назвать pid хоста | vm44 |
+| X3 | `/proc/<pid>/root`, `cwd`, `fd`, `environ` процессов сеанса хоста | да | правила ptrace между пространствами пользователей (ядро); `vpn-zone-sys` получает своё пространство пользователей; экземпляр контейнера не может даже назвать процесс хоста: его пространство pid (X4) | vm15 vm17 vm18 sys4 vm70 |
+| X4 | `/proc/<pid>/cmdline` процессов хоста и чужих контейнеров (какие зоны и контейнеры в ходу, аргументы, адреса и пути, данные программам) и `/proc/<pid>/net` любого из них (сокеты и адреса его сети: проверки ptrace на нём нет) | да: каждый экземпляр контейнера, offline и в зоне; песочница · **нет**: `unconfined`, запуск в зону прошлой сборки (без моста), экземпляр, поднятый прошлой сборкой (пока не перезапущен: `doctor`, `restart_needed`) | у каждого экземпляра контейнера своё пространство pid (этап 3 контейнерного дизайна, 2026-09-27): его pid 1 монтирует свой `/proc` пространства, и каждый запуск в экземпляр входит в него — программа видит процессы своего контейнера и больше ничьи, ни хоста, ни другого контейнера; у песочницы своё. `/sys/fs/cgroup` экземпляра — имена всех юнитов и областей — закрыт. Остаются общие счётчики (`/proc/loadavg`, `/proc/stat`) и pid, который программе сказали (`WAYLAND_DISPLAY` называет pid супервизора) | У · vm70 vm71 vm44 sm28 u17 |
+| X5 | Сигналы процессам хоста того же пользователя (убить композитор) | да (Linux 6.12+) | каждый запуск в зону — свой домен Landlock с `LANDLOCK_SCOPE_SIGNAL`: сигналит себе и тому, что запустил сам, и никому больше — другому запуску того же контейнера тоже; песочница и, с этапа 3 контейнерного дизайна (2026-09-27), экземпляр контейнера к тому же не могут назвать pid хоста: номер хоста в их пространстве pid — никто или кто-то другой (X4) | vm44 vm69 |
 | X6 | System V IPC и очереди сообщений POSIX хоста | да | своё пространство IPC у каждой зоны, аплинка, песочницы и экземпляра контейнера | vm18 sm16 vm54 |
 | X7 | Дополнительные группы сеанса (docker, libvirt, input) | да | у программ зоны сняты | vm18 |
 | X8 | Исчерпание памяти, процессора или числа процессов | нет | пределы на зону в планах (ROADMAP §17) | — |
@@ -285,7 +286,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | Взломанный хост | root, сеанс пользователя вне зон, хранилище Nix и конфигурация системы — доверенные |
 | Побег из собственной песочницы браузера | не предотвращается и не обнаруживается; сбежавший код получает то, что дают его контейнер и зона, — как сказано в этой таблице |
 | Программа того же uid вне песочницы | программа хоста или программа зоны без песочницы может читать и менять данные песочницы на диске и весь дом; от зон скрыты только данные других контейнеров (H4) |
-| Программы одного контейнера друг против друга | один экземпляр, одно пространство пользователей, один `/tmp`, одни абстрактные сокеты: настройки программ — не стены (PERMISSIONS §11.10). Контейнеры разделены (X10): каждый в своём экземпляре, и offline, и в зоне |
+| Программы одного контейнера друг против друга | один экземпляр, одно пространство пользователей, одно пространство pid, один `/tmp`, одни абстрактные сокеты: настройки программ — не стены (PERMISSIONS §11.10). Контейнеры разделены (X10): каждый в своём экземпляре, и offline, и в зоне |
 | Ответ человека | «да» или выдача принимаются как сказаны; W16 защищает только от клавиш, нажатых по инерции |
 | Анализ трафика; провайдер VPN | то, что уходит в туннель, видит провайдер |
 
@@ -294,7 +295,8 @@ PulseAudio; дополнительные группы сеанса сняты; �
 Это пробелы. Каждый из них — утверждение устройством или никакое, которое не пытается
 сломать ни один VM- или смоук-тест:
 
-- **X4:** `/proc/<pid>/cmdline`, в песочнице и без неё.
+- нет: X4 (`/proc/<pid>/cmdline` процессов хоста) была последней и получила vm70, vm71 и
+  sm28 с этапом 3 контейнерного дизайна (2026-09-27).
 
 Строки, чьё «нет» само проверено тестом, чтобы его закрытие было видно: P1 (vm15) и W7 (vm51).
 
@@ -348,7 +350,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 - vm41 "system bus in a zone: resolve1 refused, it names in the host's network" (в `tests/vm-promise-resolve1.py`)
 - vm42 "hermetic zone: the keyring and flatpak's host command are out of reach" (в `tests/vm-promise-keyring.py`)
 - vm43 "a launch into a zone is restricted whatever its program is called" (в `tests/vm-promise-wayland.py`)
-- vm44 "a zone's program cannot signal the host's processes of the user" (в `tests/vm-promise-signals.py`; до Linux 6.12 пропускается)
+- vm44 "a zone's program neither sees nor signals the host's processes of the user" (в `tests/vm-promise-signals.py`, как и vm69)
 - vm45 "a zone's program cannot reach the host over vsock" (в `tests/vm-promise-vsock.py`)
 - vm46 "declared: a plain file or a link out of the store is not Nix's word" (в `tests/vm-promise-declared.py`)
 - vm47 "a tunnel zone reaches neither the LAN nor the host's own addresses" (в `tests/vm-promise-lan.py`)
@@ -373,6 +375,13 @@ PulseAudio; дополнительные группы сеанса сняты; �
 - vm66 "a launch into the zone runs in its container's instance, not in the zone"
 - vm67 "the instance ends with its program, and its zone's passt with it"
 - vm68 "a zone of a previous build (no bridge): entered as before, and the person told"
+- vm69 "a program sees another launch of its container, and cannot signal it (X5)" (до Linux 6.12 пропускается)
+- vm70 "an instance's program sees its own container's processes, no one else's" (в `tests/vm-promise-pidns.py`, как и vm71–vm75)
+- vm71 "a host process's /proc/<pid>/net is out of an instance's reach"
+- vm72 "stopping an instance ends its programs, and reaches no timeout"
+- vm73 "a program that ignores TERM ends on cellward container kill"
+- vm74 "a daemon forked twice stays in its launch's tree, under profile-run"
+- vm75 "an orphan pid 1 adopts is reaped, and counted as a program"
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -382,7 +391,8 @@ socket comes back, the raw one never" · au6 "an audio manager gets the raw sock
 `tests/vm-window.nix`: win1 "the focused window's zone and program; the hotkey menu" ·
 win2 "focus input: asking again after one click moves the focus once" · win3 "focus allow:
 every request of that click moves the focus" · win4 "focus notify: no request moves the
-focus; the person is told" (последние три — в `tests/vm-window-focus.py`)
+focus; the person is told" (последние три — в `tests/vm-window-focus.py`) · win5 "close
+reaches a daemon the program left, through the pid namespace"
 
 `tests/vm-system.nix`: sys1 "a service in the zone: the tunnel's network and the tunnel's
 names" · sys2 "a NixOS container in the zone: the same network, no way to change it" ·
@@ -433,6 +443,7 @@ the other"
 - sm25 «Экземпляр останавливается сигналом держателю, и его программы — с ним» (остановленный экземпляр закрывает свои программы)
 - sm26 «Запуск в зону — в экземпляре контейнера: своя сеть, lo и tap, выход через зону»
 - sm27 «Зона OpenConnect везёт экземпляр: search шлюза в его resolv.conf, выход через туннель»
+- sm28 «Экземпляр: своё пространство pid, процессов хоста в /proc не видно (X4)» (командной строки процесса хоста не видно, `/proc/1` — держатель экземпляра)
 
 Тесты на Rust (`cargo test`):
 
@@ -452,3 +463,4 @@ the other"
 - u14 `rust/src/seccomp.rs`: `the_zone_socket_filter_builds`
 - u15 `rust/src/declared.rs`: `a_link_into_the_store_is_declared`, `a_plain_file_or_a_link_elsewhere_is_not_declared`, `a_held_directory_is_read_as_held`; `rust/tests/vpn_zone_cli.rs`: `a_plain_file_in_declared_is_not_nixs_word`
 - u16 `rust/src/wl_focus.rs`: `one_input_event_is_one_change_of_the_focus`, `a_forgotten_serial_is_still_used_up`, `a_forgotten_token_of_the_launch_is_used_up`; `rust/src/wl_proxy.rs`: `input_passes_one_activate_per_input_event`, `notify_sends_the_byte_and_no_activate`, `allow_passes_every_activate`
+- u17 `rust/src/init.rs`: `a_stop_from_outside_ends_the_space_then_pid_1`, `a_stop_from_inside_is_nothing`, `the_space_ending_by_itself_is_a_failure`; `rust/src/profile.rs`: `the_subreaper_says_the_main_programs_end_once`, `a_signal_goes_to_the_program_and_the_orphans_it_adopted`; `rust/src/enter.rs`: `the_main_programs_status_is_read_back`; `rust/src/place.rs`: `an_orphan_pid_1_adopted_is_a_program`; `rust/src/launch.rs`: `the_main_home_guard_finds_the_program_outside_the_instance`; `rust/src/doctor.rs`: `an_instances_programs_see_its_processes_alone`; `rust/src/dbus_wire.rs`: `no_hint_carries_a_pid`

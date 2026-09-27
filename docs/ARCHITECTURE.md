@@ -58,9 +58,10 @@ separate gateways.
    namespace; a zone becomes only its way out. Stage 1 *exists*: every launch
    whose network is `offline` runs in its container's instance
    (`vpn-zone-container@<id>.service`, [CONTAINERS.md](CONTAINERS.md) §3.6).
-   Next: zones carrying instances (`passt --fd` in the zone, a relay in the
-   instance), a pid namespace per instance, switching a running container's
-   network live.
+   Stage 2 exists too — zones carrying instances (`passt --fd` in the zone, a
+   relay in the instance) — and stage 3, a pid namespace per instance: a
+   program sees only its own container's processes. Next: switching a
+   running container's network live.
 3. **The gatekeeper — who decides.** Every way of starting something ends in one place
    that knows which container and which zone a program gets. An unknown program is asked
    about once and remembered. **Inside a container everything inherits**: `ls | grep` in a
@@ -154,7 +155,7 @@ gatekeeper's exceptions are **packages in the store, not names**: anybody can pu
 |---|---|
 | User zones, gateway topology, second echelon, hermeticity | done |
 | Program containers, launch interception, per-container trust | done, M8 tails |
-| Containers' instances (the container as the unit of isolation) | stage 1 done: offline launches; zones carrying instances, a pid namespace, the live switch next |
+| Containers' instances (the container as the unit of isolation) | stages 1–3 done: offline launches, zones carrying instances, a pid namespace per instance; the live switch next |
 | Machine-readable state and declarative options | done (`status --json`, home-manager) |
 | System zones | done (M10, stage 1) |
 | Services and NixOS containers in system zones | done (M10, stages 2–3) |

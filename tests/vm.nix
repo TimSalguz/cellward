@@ -868,6 +868,7 @@ let
           alice("cellward run offline -- sh -c '! getent ahostsv4 leaktest.internal'")
 
       exec(open("${./vm-instance-offline.py}").read())
+      exec(open("${./vm-promise-pidns.py}").read())
 
       # `cellward doctor` (ROADMAP M5): the probe runs INSIDE the zone and must
       # find nothing wrong there — and, run in the host's own namespaces, it

@@ -1942,6 +1942,8 @@ mod tests {
             "org.freedesktop.portal.Camera",
             "org.freedesktop.portal.Screenshot",
             "org.freedesktop.portal.Secret",
+            // Its calls carry a pid, of the caller's pid namespace — an
+            // instance's names somebody else on the host (stage 3).
             "org.freedesktop.portal.Realtime",
             "org.freedesktop.portal.Documents",
             "org.freedesktop.portal.SomethingNew",

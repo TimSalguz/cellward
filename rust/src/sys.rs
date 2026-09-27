@@ -14,14 +14,18 @@
 //! [`ancestors`]), or from `/proc` to a pid it then signals, opens or waits
 //! for, is right only when the calling process's pid namespace is the one of
 //! the `/proc` it reads — as are `kill(2)`, `pidfd_open(2)` and
-//! `SO_PEERCRED`, which answer in the caller's. Zones make no pid namespace,
-//! so today there is one view. Once a container instance has a pid namespace
-//! of its own, a process that reads the instance's `/proc` must be a member
-//! of it (the instance's keeper, its bus filter, its device guard), and a
+//! `SO_PEERCRED`, which answer in the caller's. Zones make no pid namespace.
+//! A container's instance has one of its own (stage 3, `crate::init`), and
+//! its `/proc` is mounted in its mount namespace: a process that reads it is
+//! a member of the pid namespace (the instance's pid 1 and space, its bus
+//! filter, its device guard, a launch's `profile-run` and program), and a
 //! process of the host's never reads it (a launch's waiter joins the
-//! instance's user, network and IPC namespaces, never its mount namespace):
-//! in a mixed view `/proc/self` does not exist, and a number read there is
-//! somebody else's here.
+//! instance's user, network, IPC and — for its children — pid namespaces,
+//! never its mount namespace): in a mixed view `/proc/self` does not exist,
+//! and a number read there is somebody else's here. Everything on the
+//! host's side — the instance's keeper, `cellward kill`, the broker, the
+//! helpers, the focus — reads the host's `/proc`, where the instance's
+//! processes have host numbers too.
 
 use std::ffi::{CString, OsStr};
 use std::io;

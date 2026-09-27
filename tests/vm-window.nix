@@ -434,6 +434,28 @@ let
       # (tests/vm-activate.py), under input, allow and notify.
       ACTIVATE = "${pkgs.python3}/bin/python3 ${./vm-activate.py}"
       exec(open("${./vm-window-focus.py}").read())
+
+      # A daemon the program leaves behind (stage 3 of the container design,
+      # rust/src/profile.rs `supervise`): in its instance's pid namespace an
+      # orphan goes to the launch's profile-run, not to the instance's pid 1
+      # — and stays below the supervisor, whose close reaches it.
+      with subtest("close reaches a daemon the program left, through the pid namespace"):
+          alice(
+              f"systemd-run --user --unit=vmfootd --setenv=WAYLAND_DISPLAY={display} "
+              "cellward run offline -- bash -c "
+              "'(exec -a vmx4-wdaemon sleep 600 </dev/null >/dev/null 2>&1 &); "
+              "exec foot --app-id footd'"
+          )
+          machine.wait_until_succeeds(
+              f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q footd",
+              timeout=60,
+          )
+          daemon = machine.succeed("pgrep -u alice -f '^vmx4-wdaemon'").split()[0]
+          tree = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r"))
+          sup = find(tree, "footd")["pid"]
+          machine.succeed(f"kill -TERM {sup}")
+          machine.wait_until_fails(f"test -e /proc/{daemon}", timeout=30)
+          machine.wait_until_fails(f"test -e /proc/{sup}", timeout=30)
     '';
   };
 in

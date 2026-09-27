@@ -79,8 +79,9 @@
 //!   isolation (the design of 2026-09-27, stage 1): a container's instance,
 //!   its keeper (`vpn-zone-container@<id>.service`, [`zone`]'s instance
 //!   mode), a launch into it (`container-enter`), and which instance a
-//!   process is of, by its user namespace. Every launch whose network is
-//!   `offline` runs in one;
+//!   process is of, by its user namespace. Every launch runs in one but an
+//!   unconfined one; [`init`] is its pid 1 (stage 3): its programs see only
+//!   their own container's processes;
 //! * [`bridge`], [`relay`], [`sockdiag`] — what the later stages build on:
 //!   how a zone carries an instance (`passt --fd` and the relay that pumps
 //!   its frames), and the socket diagnostics a live switch of its network
@@ -123,6 +124,7 @@ pub mod gui;
 pub mod hermetic;
 pub mod home_layer;
 pub mod hostif;
+pub mod init;
 pub mod instance;
 pub mod journal;
 pub mod json;

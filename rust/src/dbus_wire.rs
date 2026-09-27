@@ -823,6 +823,15 @@ mod tests {
         w.string("urgency");
         w.signature("y");
         w.buf.push(2);
+        // The sender's pid (KDE's `sender-pid`): a number of the program's
+        // pid namespace, which means somebody else's on the host — a
+        // daemon that acted on it would act on another process (stage 3 of
+        // the container design). Not in the allow-list: dropped.
+        w.align(8);
+        w.string("sender-pid");
+        w.signature("x");
+        w.align(8);
+        w.buf.extend_from_slice(&4242i64.to_le_bytes());
         w.align(8);
         w.string("x-kde-urls");
         w.signature("as");
@@ -900,6 +909,13 @@ mod tests {
         assert_eq!(keys, ["image_path", "urgency"]);
         assert_eq!(r.u32().unwrap(), u32::MAX);
         assert_eq!(r.pos, out.len());
+    }
+
+    /// No hint that carries a pid reaches the host's daemon: a pid of an
+    /// instance's namespace names another process there.
+    #[test]
+    fn no_hint_carries_a_pid() {
+        assert!(!NOTIFY_HINTS.iter().any(|h| h.contains("pid")));
     }
 
     #[test]

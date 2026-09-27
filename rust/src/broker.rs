@@ -1427,6 +1427,15 @@ fn ask_window(
 /// zone's process (`zone.pid`) — which a program of the zone cannot be: it
 /// comes in from the host (`nsenter`), and an orphan goes to the host's
 /// reaper, never to the zone's process. Read while the process is held.
+///
+/// For the zones' own namespaces only — launches of a zone of a previous
+/// build (stage 2 of the container design); zones have no pid namespace, so
+/// every number here is the host's. A container's instance is never asked
+/// this: its programs are known by their user namespace (`crate::place`),
+/// and the container a link is for is the instance's, whatever its filter
+/// says (J2 of the design). There the rule above would not even hold: an
+/// orphan of an instance goes to the instance's pid 1 (stage 3,
+/// `crate::init`), a child of the instance's own.
 fn is_zones_filter(tools: &Tools, zone: &str, peer: Option<&Peer>) -> bool {
     let (Some(peer), Some(zone_pid)) = (peer, zone_pid(&tools.state, std::ffi::OsStr::new(zone)))
     else {

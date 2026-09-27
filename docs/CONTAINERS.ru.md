@@ -729,22 +729,24 @@ JSON пишется руками, как руками читается мани�
 ```json
 { "id": "work", "container": "work", "network": "offline",
   "exit": "none", "why": "offline", "up": true, "pid": 4321,
-  "since": "2026-09-27T12:00:00Z", "epoch": 1, "pid_namespace": false,
+  "since": "2026-09-27T12:00:00Z", "epoch": 1, "pid_namespace": true,
   "build": "current", "restart_needed": [], "programs": 2,
   "live_switch": { "available": false, "reason": "unsupported" } }
 ```
 
 — `container` — имя контейнера, `"main"` у экземпляра основного дома
-(`main:offline`) и `null` у временного; `pid` — pid его пространства на хосте;
-`restart_needed` называет настройки сети offline, изменившиеся с его подъёма
-(экземпляр возьмёт их при следующем); `programs` — число его живых запусков.
+(`main:offline`) и `null` у временного; `pid` — pid его пространства на хосте,
+с этапа 3 — его pid 1; `restart_needed` называет настройки сети offline,
+изменившиеся с его подъёма (экземпляр возьмёт их при следующем), и
+`pid_namespace` у экземпляра, поднятого прошлой сборкой; `programs` — число его живых запусков.
 `exit` — `"through"` с `why` `null` у экземпляра, который выходит через свою
 зону (этап 2), и `"none"` с `why` из `offline`, `zone-down` (отрезан концом
 зоны, подключится снова, когда она вернётся той же), `zone-changed`
 (вернулась другой: отрезан до `cellward container reattach`) и
-`attach-failed`. `epoch`, `pid_namespace` и `live_switch` постоянны
-(переключения нет, своего пространства pid пока нет) и оживут на следующих
-этапах. С ним же: `containers[].instances` (id работающих экземпляров
+`attach-failed`. `pid_namespace` с этапа 3 — `true` (своё пространство pid:
+программы видят только процессы экземпляра, THREAT-MODEL X4), `false` — у
+экземпляра, поднятого прошлой сборкой, пока его не перезапустят; `epoch` и
+`live_switch` постоянны (переключения пока нет) и оживут на этапе 4. С ним же: `containers[].instances` (id работающих экземпляров
 контейнера), `containers[].running[].instance` (экземпляр, в котором идёт
 запуск, — offline и, с этапа 2, в зоне; `null` у запуска без ограничений или
 в пространствах самой зоны), `attached` у сети `offline` (id экземпляров без

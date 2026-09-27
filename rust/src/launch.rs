@@ -1085,6 +1085,35 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
     }
 
+    // The real home in a pid namespace of the instance's own (stage 3,
+    // `docs/THREAT-MODEL.md` X4): an application of the main home that runs
+    // elsewhere already is not started beside it (`main_home_rival`).
+    let main_home = matches!(
+        (&selection.sandbox, &selection.container),
+        (Sandbox::None, Container::Main | Container::MainNamed(_))
+    );
+    if let Some(id) = instance_id
+        .as_deref()
+        .filter(|_| main_home && appid_env.is_some() && !dryrun)
+    {
+        if let Some(word) = program_word(&selection.cmd) {
+            if let Some(pid) = main_home_rival(&tools.state, id, word) {
+                refuse(
+                    tools,
+                    &format!(
+                        "«{}» уже работает с основным домом вне контейнера «{id}» (pid {pid}). \
+                         У контейнера своё пространство процессов, и замок профиля, которым \
+                         программа вроде браузера не даёт открыть его дважды, сквозь него не \
+                         виден: второй процесс открыл бы тот же профиль. Закрой ту программу — \
+                         или запусти эту в контейнере со своим домом",
+                        basename(word).to_string_lossy()
+                    ),
+                );
+                return 1;
+            }
+        }
+    }
+
     // --- 5. THE ZONE ITSELF ---
     let network = if zone == UNCONFINED {
         // Nothing to start and nothing to enter: the host's own network.
@@ -2271,6 +2300,105 @@ fn trusted_bin_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// A process as the main-home guard sees it ([`rival`]): its real uid, the
+/// file it runs (`dev`, `ino` of `/proc/<pid>/exe`, when it may be read) and
+/// its `argv[0]`'s last component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seen {
+    pub pid: i32,
+    pub uid: u32,
+    pub exe: Option<(u64, u64)>,
+    pub name: Option<OsString>,
+}
+
+/// The first process of `seen` that runs the launch's program as the user
+/// (`uid`) outside the instance the launch goes to — by the file (`exe`,
+/// what the command resolves to) or by its name (`name`: wrappers exec the
+/// real binary with the name they were called by, `exec -a "$0"`) —, never
+/// one of `skip` (this launch and its parents) nor one `inside` says is in
+/// the target instance.
+pub fn rival(
+    seen: &[Seen],
+    uid: u32,
+    exe: Option<(u64, u64)>,
+    name: &OsStr,
+    skip: &[i32],
+    inside: &dyn Fn(i32) -> bool,
+) -> Option<i32> {
+    seen.iter()
+        .filter(|s| s.uid == uid && !skip.contains(&s.pid))
+        .filter(|s| {
+            (exe.is_some() && s.exe == exe) || (!name.is_empty() && s.name.as_deref() == Some(name))
+        })
+        .find(|s| !inside(s.pid))
+        .map(|s| s.pid)
+}
+
+/// A process of the user's running the program `word` starts, outside
+/// instance `id` — its pid (the main-home guard, stage 3 of the container
+/// design). Two pid namespaces sharing the real home cannot see each other's
+/// pid lock files: Chromium's `SingletonLock`, Firefox's `lock`, wineserver's
+/// name a pid, and a pid of another namespace is nobody (or somebody else)
+/// in this one — a second browser would take the profile the first one has
+/// open. So a launch of the main home into an instance is refused while the
+/// program runs outside it: on the host, in a zone's own namespaces, in
+/// another instance. Asked for applications only (a launch with an app's
+/// id): a terminal's `cellward run nl -- sh` is no single-instance program,
+/// and the user's shells are everywhere.
+fn main_home_rival(state: &Path, id: &str, word: &OsStr) -> Option<i32> {
+    use std::os::unix::fs::MetadataExt;
+    // By its file only when the file is the program's own: a name that
+    // resolves to a file of another name is a multicall binary's
+    // (coreutils, busybox), which every other command of it runs too.
+    let exe = resolve_program(word, std::env::var_os("PATH").as_deref())
+        .filter(|path| path.file_name() == Some(basename(word)))
+        .and_then(|path| fs::metadata(path).ok())
+        .map(|m| (m.dev(), m.ino()));
+    // SAFETY: getuid(2) takes no arguments and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let me = std::process::id() as i32;
+    let skip = crate::sys::pidfd_open(me)
+        .map(|fd| crate::sys::ancestors(me, &fd))
+        .unwrap_or_else(|| vec![me]);
+    // The target instance's user namespace, while it is up: what is in it
+    // or below it shares its pid namespace.
+    let target = crate::instance::up(state, id)
+        .and_then(|pid| crate::place::ns_key(Path::new(&format!("/proc/{pid}/ns/user"))));
+    let inside = |pid: i32| target.is_some_and(|key| crate::place::chain_of(pid).contains(&key));
+    let seen: Vec<Seen> = fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+        .filter_map(|pid| {
+            let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+            let uid = status
+                .lines()
+                .find_map(|l| l.strip_prefix("Uid:"))?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()?;
+            let exe = fs::metadata(format!("/proc/{pid}/exe"))
+                .ok()
+                .map(|m| (m.dev(), m.ino()));
+            let name = fs::read(format!("/proc/{pid}/cmdline"))
+                .ok()
+                .and_then(|line| {
+                    let first = line.split(|b| *b == 0).next()?.to_vec();
+                    (!first.is_empty()).then(|| basename(&OsString::from_vec(first)).to_owned())
+                });
+            Some(Seen {
+                pid,
+                uid,
+                exe,
+                name,
+            })
+        })
+        .collect();
+    rival(&seen, uid, exe, basename(word), &skip, &inside)
+}
+
 /// The real path of the program a command word starts: the word itself when
 /// it names a path, else the first executable file of that name on `path`.
 fn resolve_program(word: &OsStr, path: Option<&OsStr>) -> Option<PathBuf> {
@@ -2777,6 +2905,64 @@ mod tests {
         assert_eq!(sanitize_app_id(OsStr::new(&long)).len(), 64);
         // Byte-wise, exactly as `tr -c` was: one underscore per byte.
         assert_eq!(sanitize_app_id(OsStr::new("зона")), os("________"));
+    }
+
+    #[test]
+    fn the_main_home_guard_finds_the_program_outside_the_instance() {
+        let seen = |pid, uid, exe: Option<(u64, u64)>, name: Option<&str>| Seen {
+            pid,
+            uid,
+            exe,
+            name: name.map(OsString::from),
+        };
+        let table = [
+            // This launch's own parent (the picker) and itself.
+            seen(10, 1000, Some((1, 5)), Some("vpn-zone-pick")),
+            seen(11, 1000, Some((1, 6)), Some("vpn-zone")),
+            // Another user's firefox: not ours to mind.
+            seen(20, 1001, Some((1, 7)), Some("firefox")),
+            // The user's firefox in the target instance itself.
+            seen(30, 1000, Some((1, 7)), Some("firefox")),
+            // A shell of the user's, and an unreadable process.
+            seen(40, 1000, Some((1, 8)), Some("bash")),
+            seen(41, 1000, None, None),
+        ];
+        let inside = |pid: i32| pid == 30;
+        let skip = [11, 10];
+        let firefox = OsStr::new("firefox");
+        assert_eq!(
+            rival(&table, 1000, Some((1, 7)), firefox, &skip, &inside),
+            None
+        );
+        // The same file on the host: refused.
+        let mut host = table.to_vec();
+        host.push(seen(50, 1000, Some((1, 7)), None));
+        assert_eq!(
+            rival(&host, 1000, Some((1, 7)), firefox, &skip, &inside),
+            Some(50)
+        );
+        // A wrapper's real binary, by the name it was called by.
+        let mut wrapped = table.to_vec();
+        wrapped.push(seen(60, 1000, Some((9, 9)), Some("firefox")));
+        assert_eq!(
+            rival(&wrapped, 1000, Some((1, 7)), firefox, &skip, &inside),
+            Some(60)
+        );
+        assert_eq!(
+            rival(&wrapped, 1000, None, firefox, &skip, &inside),
+            Some(60)
+        );
+        // Nothing to go by: nothing found.
+        assert_eq!(
+            rival(&wrapped, 1000, None, OsStr::new(""), &skip, &inside),
+            None
+        );
+        // Its own parent is not its rival, whatever it runs.
+        let firefox_picker = [seen(10, 1000, Some((1, 7)), Some("firefox"))];
+        assert_eq!(
+            rival(&firefox_picker, 1000, Some((1, 7)), firefox, &skip, &inside),
+            None
+        );
     }
 
     #[test]

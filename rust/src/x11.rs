@@ -9,9 +9,12 @@
 //! and only its own programs are its clients.
 //!
 //! Unlike the sandbox's launcher (`fs-sandbox-x11`), nothing here dies with a
-//! pid namespace, so this one supervises: it starts the satellite (which is
-//! told to die with it), starts the program, waits for it, and takes the
-//! satellite down.
+//! pid namespace of its own, so this one supervises: it starts the satellite
+//! (which is told to die with it), starts the program, waits for it, and
+//! takes the satellite down. (In a container's instance, stage 3, the
+//! launch is in the instance's pid namespace — shared by all its launches,
+//! and ended with the instance, not with this program: the supervision here
+//! is still what ends the satellite with its program.)
 //!
 //! The display's socket is this process's own (review 2026-09-27): bound
 //! here, in the launch's own `/tmp/.X11-unix` (`profile-run --own-x11`), and

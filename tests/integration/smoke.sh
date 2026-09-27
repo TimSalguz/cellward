@@ -1065,6 +1065,32 @@ ins=$("$VPN_ZONE" run offline --container "$INST" -- readlink /proc/self/ns/net)
   || fail "реестр запусков виден в экземпляре"
 echo "ok: сеть экземпляра $ins, только lo"
 
+# Этап 3 (X4): у экземпляра своё пространство pid — программа в нём видит в
+# /proc процессы своего контейнера и больше ничьи. Ищем по командной строке,
+# не по номеру: номер хоста в пространстве экземпляра — никто или кто-то другой.
+step "Экземпляр: своё пространство pid, процессов хоста в /proc не видно (X4)"
+x4marker="vpn-smoke-x4-$$"
+bash -c "exec -a $x4marker sleep 300" &
+X4HOST=$!
+for _ in $(seq 1 100); do
+  grep -q "$x4marker" "/proc/$X4HOST/cmdline" 2>/dev/null && break
+  sleep 0.1
+done
+grep -q "$x4marker" "/proc/$X4HOST/cmdline" || fail "метка хоста не появилась"
+seen=$("$VPN_ZONE" run offline --container "$INST" -- \
+  sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null | tr "\0" " "; true')
+if echo "$seen" | grep -q "$x4marker"; then
+  fail "процесс хоста виден в /proc экземпляра"
+fi
+echo "$seen" | grep -q 'sleep 300' || fail "в экземпляре не видно даже его программы: $seen"
+ipidns=$("$VPN_ZONE" run offline --container "$INST" -- readlink /proc/self/ns/pid)
+[ -n "$ipidns" ] && [ "$ipidns" != "$(readlink /proc/self/ns/pid)" ] \
+  || fail "у экземпляра пространство pid хоста: $ipidns"
+init=$("$VPN_ZONE" run offline --container "$INST" -- sh -c 'tr "\0" " " < /proc/1/cmdline')
+echo "$init" | grep -q 'container-holder' || fail "/proc/1 экземпляра — не его держатель: $init"
+kill "$X4HOST" 2>/dev/null || true
+echo "ok: пространство pid $ipidns, процессов хоста не видно, /proc/1 — держатель"
+
 step "Экземпляр останавливается сигналом держателю, и его программы — с ним"
 kill -TERM "${HOLDER_PIDS[-1]}"
 for _ in $(seq 1 300); do
