@@ -6,7 +6,8 @@ still works, as `vpn-zone-gui` does for `cellward-gui`), the options are
 warning), and `github:TimSalguz/vpn-zones` redirects here.
 
 Читать по-русски: [README.ru.md](README.ru.md) · Development plan: [ROADMAP.md](ROADMAP.md)
-· Design: [architecture](docs/ARCHITECTURE.md), [leak model](docs/LEAK-MODEL.md),
+· Design: [architecture](docs/ARCHITECTURE.md), [threat model](docs/THREAT-MODEL.md),
+[leak model](docs/LEAK-MODEL.md),
 [the system tier](docs/SYSTEM.md), [containers by default](docs/CONTAINERS.md),
 [launcher entries](docs/LAUNCHERS.md), [per-container certificates](docs/CERTIFICATES.md),
 [zone hermeticity](docs/HERMETICITY.md)

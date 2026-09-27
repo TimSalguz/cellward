@@ -6,7 +6,8 @@
 предупреждением), а `github:TimSalguz/vpn-zones` ведёт сюда.
 
 Read in English: [README.md](README.md) · План развития: [ROADMAP.md](ROADMAP.md)
-· Устройство: [архитектура](docs/ARCHITECTURE.ru.md), [модель утечек](docs/LEAK-MODEL.md),
+· Устройство: [архитектура](docs/ARCHITECTURE.ru.md), [модель угроз](docs/THREAT-MODEL.ru.md),
+[модель утечек](docs/LEAK-MODEL.md),
 [системный уровень](docs/SYSTEM.md), [всё в контейнерах](docs/CONTAINERS.ru.md),
 [ярлыки](docs/LAUNCHERS.ru.md), [сертификаты по контейнерам](docs/CERTIFICATES.ru.md),
 [герметизация зоны](docs/HERMETICITY.ru.md)
