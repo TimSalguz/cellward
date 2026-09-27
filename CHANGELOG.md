@@ -6,6 +6,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A container's focus policy** (2026-09-27, the owner: AyuGram in a zone,
+  opening an image in a window of its own, took the focus several times
+  over — Qt makes a new `xdg_activation_v1` token for every
+  `requestActivate()`, each from the serial of the same click, and the
+  compositor honours each). The Wayland proxy sees every request for the
+  focus of the programs in zones and containers, so the policy holds on any
+  compositor: `cellward container set <c> focus input|notify|ask|allow|default`,
+  `programs.cellward.containers.<name>.focus` in Nix, `containers[].focus`
+  (`{value, source}`) in `status --json`. `input`, the default: one input
+  event of the person, one change of the focus — the first `activate` for
+  the serial its token was made from goes up, the rest are dropped without an
+  error; a token made without a serial, or not on the launch's connections
+  (a launcher's), passes once. `notify`: none goes up; the supervisor is asked
+  by a byte on its channel and starts `cellward window-focus --pid <pid>`
+  through `systemd-run --user --wait`, one at a time: a notification
+  "<program> просит внимания" with "Перейти", which focuses the launch's
+  window through niri's or sway's IPC. `ask`: a guarded question in its
+  place. `allow`: as before. The launch passes the policy to
+  `wl-sandbox --focus`; a new setting applies to programs started after it.
+  A new window focused as it opens stays the compositor's policy (niri:
+  `open-focused false`). The proxy's seccomp filter is unchanged; the sway
+  snippet of `desktop.sway.enable` imports `SWAYSOCK` into the user manager.
+  `docs/THREAT-MODEL.md` W17.
+- **`cellward window-focus --pid <pid> [--ask]`**: that notification or
+  question, as the proxy's supervisor starts it.
 - **Buttons, dragging and resizing on the zone's frame** (2026-09-27, stage 3
   of `docs/WINDOW-FRAME.md`). The title strip the Wayland proxy draws gets
   three buttons at its right end: ≡ opens the window menu of that launch, ⇄
