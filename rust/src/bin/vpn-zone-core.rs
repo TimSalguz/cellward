@@ -105,7 +105,8 @@ Usage:
         are the paths that end up in the generated Exec lines.
 
   vpn-zone-core wl-sandbox <app-id> [--zone <zone>] [--no-proxy]
-                           [--frame <rrggbb>:<width> [--frame-switch <dir>]] -- cmd...
+                           [--frame <rrggbb>:<width> [--frame-switch <dir>]]
+                           [--focus input|notify|ask|allow] -- cmd...
         Run the command on a Wayland socket of its own, registered with the
         compositor as a sandbox (wp_security_context_v1): no screen capture,
         no background clipboard reads, no input emulation, no list of other
@@ -118,7 +119,10 @@ Usage:
         --frame: the proxy draws a border of that colour and width (logical
         pixels) around the program's windows; the `frames` setting of the
         --frame-switch directory hides it for connections made while it says
-        `hidden`.
+        `hidden`. --focus: what becomes of the program's asking for the
+        focus (xdg-activation) — one change per input event (input, the
+        default), none but through a notification or a question (notify,
+        ask), or every one (allow).
         Without the protocol — an older compositor, an X11 session —
         the command is run as it is, with a warning on stderr.
 

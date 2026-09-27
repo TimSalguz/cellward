@@ -424,6 +424,12 @@ let
       # globals, and the virtual pointer it drives (tests/vm-pointer.py).
       POINTER = "${pkgs.python3}/bin/python3 ${./vm-pointer.py}"
       exec(open("${./vm-window-buttons.py}").read())
+
+      # A container's focus policy (rust/src/wl_focus.rs): a program in a
+      # zone that asks for the focus again and again after one click
+      # (tests/vm-activate.py), under input, allow and notify.
+      ACTIVATE = "${pkgs.python3}/bin/python3 ${./vm-activate.py}"
+      exec(open("${./vm-window-focus.py}").read())
     '';
   };
 in

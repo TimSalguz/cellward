@@ -259,6 +259,9 @@ pub struct Container {
     /// program its links of that scheme open in without asking which;
     /// declared ones first, one per scheme.
     pub links: Vec<Sourced<(String, String)>>,
+    /// What becomes of its programs' asking for the focus
+    /// (`crate::wl_focus`); `input` when nobody set it.
+    pub focus: Sourced<crate::wl_focus::FocusPolicy>,
     /// The container's data directory ([`data_dir`]). May not exist yet — and
     /// a container of the main home has none it uses.
     pub dir: PathBuf,
@@ -1726,6 +1729,9 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         }
     }
 
+    // Read the way the launch reads it (`wl_focus::of_launch`).
+    let focus = crate::wl_focus::of_container(&tools.config, name);
+
     Some(Container {
         name: name.to_owned(),
         home,
@@ -1738,6 +1744,7 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         camera,
         devices,
         links,
+        focus,
         declared_trust,
         paths,
         expires,
@@ -2421,6 +2428,27 @@ pub fn set_x11(tools: &Tools, selector: &str, on: bool) -> Result<(), String> {
         &container.policy.join(FILE),
         "x11",
         on.then_some("true"),
+        true,
+    )
+}
+
+/// Give a container a focus policy of its own (`None`: none — `input`),
+/// locally.
+pub fn set_focus(
+    tools: &Tools,
+    selector: &str,
+    policy: Option<crate::wl_focus::FocusPolicy>,
+) -> Result<(), String> {
+    let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    if container.focus.source == Source::Nix {
+        return Err(format!(
+            "фокус контейнера {selector} задан в Nix — меняется там"
+        ));
+    }
+    write_key(
+        &container.policy.join(FILE),
+        crate::wl_focus::KEY,
+        policy.map(crate::wl_focus::FocusPolicy::as_str),
         true,
     )
 }
@@ -3398,6 +3426,10 @@ mod tests {
             camera: None,
             devices: Vec::new(),
             links: Vec::new(),
+            focus: Sourced {
+                value: crate::wl_focus::FocusPolicy::Input,
+                source: Source::Default,
+            },
             dir: PathBuf::from("/s/work"),
             policy: PathBuf::from("/c/containers/work"),
         }

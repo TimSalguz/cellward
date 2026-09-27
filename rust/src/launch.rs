@@ -830,6 +830,14 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             wrap.push("--frame-switch".into());
             wrap.push(tools.config.clone().into());
         }
+        // What becomes of the program's asking for the focus
+        // (`crate::wl_focus`): its container's policy. `input`, the
+        // default, is wl-sandbox's own and not said.
+        let focus = crate::wl_focus::of_launch(tools, container_name(&selection).as_deref());
+        if focus != crate::wl_focus::FocusPolicy::Input {
+            wrap.push("--focus".into());
+            wrap.push(focus.as_str().into());
+        }
         wrap.push("--".into());
         wrap
     });

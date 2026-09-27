@@ -1563,6 +1563,65 @@ fn watch_announces_a_dead_tunnel_once_and_its_recovery() {
 }
 
 #[test]
+fn a_containers_focus_policy_goes_to_the_proxy_with_its_source() {
+    // rust/src/wl_focus.rs: `input` by default and not said to wl-sandbox
+    // (its own default); another word goes to it with the launch; Nix over
+    // the local word, and the CLI does not change what Nix set.
+    let home = Home::new("focus");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+
+    let json = stdout(&home.run(&["container", "show", "work", "--json"]));
+    assert!(
+        json.contains("\"focus\":{\"value\":\"input\",\"source\":\"default\"}"),
+        "{json}"
+    );
+    let line = stdout(&home.run_with(&["run", "nl", "--profile", "work", "--", "tg"], &dry));
+    assert!(line.contains("wl-sandbox tg --zone nl "), "{line}");
+    assert!(!line.contains("--focus"), "{line}");
+
+    let out = home.run(&["container", "set", "work", "focus", "notify"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("после этого"), "{}", stdout(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"focus\":{\"value\":\"notify\",\"source\":\"local\"}"),
+        "{json}"
+    );
+    let line = stdout(&home.run_with(&["run", "nl", "--profile", "work", "--", "tg"], &dry));
+    assert!(line.contains(" --focus notify -- "), "{line}");
+    // The main home has no container: `input`.
+    let line = stdout(&home.run_with(&["run", "nl", "--", "tg"], &dry));
+    assert!(!line.contains("--focus"), "{line}");
+
+    let out = home.run(&["container", "set", "work", "focus", "sometimes"]);
+    assert_eq!(out.status.code(), Some(1));
+    let out = home.run(&["container", "set", "work", "focus", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["container", "show", "work", "--json"]));
+    assert!(
+        json.contains("\"focus\":{\"value\":\"input\",\"source\":\"default\"}"),
+        "{json}"
+    );
+
+    let declared = home.root.join("config/declared/containers");
+    fs::create_dir_all(&declared).unwrap();
+    declare(&declared.join("chat.conf"), "home = main\nfocus = allow\n");
+    let out = home.run(&["container", "set", "chat", "focus", "ask"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
+    let json = stdout(&home.run(&["container", "show", "chat", "--json"]));
+    assert!(
+        json.contains("\"focus\":{\"value\":\"allow\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    let line = stdout(&home.run_with(&["run", "nl", "--container", "chat", "--", "tg"], &dry));
+    assert!(line.contains(" --focus allow -- "), "{line}");
+}
+
+#[test]
 fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     // docs/HERMETICITY.md §7, A.
     let home = Home::new("x11");
