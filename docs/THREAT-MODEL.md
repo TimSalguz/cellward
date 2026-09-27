@@ -156,7 +156,7 @@ satellite, when granted.
 | W2 | The raw Wayland socket | yes | only a restricted socket per launch, served by a confined proxy; the compositor's listener is in a directory no zone has | vm15 vm16 |
 | W3 | Screen capture, keyboard and pointer emulation, background clipboard, other windows, through Wayland protocols | yes, with `wp_security_context_v1` | the security context, plus the proxy's fixed hidden list; a hidden global cannot be bound by its number | vm16 u5 |
 | W4 | A compositor without `wp_security_context_v1` (GNOME's Mutter) | degraded, not open | in a zone the raw socket is not there, so there is no Wayland; `unconfined` gets it unrestricted | C · **no test** |
-| W5 | The allow-list by binary name (`obs`, `copyq`) unlocks the full protocols | zones: yes · `unconfined`: **no** | a launch into a zone is always restricted; the list applies to `unconfined` only | C (`launch.rs`) · vm43 |
+| W5 | The allow-list by binary name (`obs`, `copyq`) unlocks the full protocols | yes | a launch into a zone is always restricted; for `unconfined` a name counts only for the program the system's profiles give under it, or a path entry's file | C (`launch.rs`) · vm43 u13 |
 | W6 | Another process of the zone uses a launch's proxy, or puts its own socket in its place | yes | the proxy passes on only its supervisor's descendants (`SO_PEERPIDFD`); the socket directory is read-only | vm16 |
 | W7 | Compositor or shell IPC outside the runtime directory or over the bus (Wayfire in `/tmp`, quickshell, KWin) | hermetic: yes · ordinary: **no** | hermetic: its own `/tmp`, a runtime directory by allow-list, the filtered bus | C · **no test** |
 | W8 | A window draws another zone's frame and title | no | the frame is a label, not a boundary; the trusted one is the panel's (`cellward focused`: window pid → network namespace, from the kernel) | win1 |
@@ -388,4 +388,5 @@ Rust tests (`cargo test`):
 - u10 `rust/src/container.rs`: `the_state_of_this_project_is_never_granted`, `a_grant_is_resolved_before_anything_is_created`
 - u11 `rust/src/picker.rs`: `a_program_seen_for_the_first_time_gets_a_home_of_its_own`
 - u14 `rust/src/seccomp.rs`: `the_zone_socket_filter_builds`
+- u13 `rust/src/launch.rs`: `a_name_on_the_list_is_only_the_program_the_system_gives_under_it`
 - u12 `rust/src/pulse_filter.rs`: `module_loading_is_refused_and_answered_as_the_server_would`, `recording_a_monitor_is_refused_before_the_server_sees_it`

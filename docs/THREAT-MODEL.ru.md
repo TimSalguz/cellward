@@ -154,7 +154,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | W2 | Сырой сокет Wayland | да | только ограниченный сокет на запуск, за ним — посредник под фильтром; слушатель композитора — в каталоге, которого нет ни у одной зоны | vm15 vm16 |
 | W3 | Захват экрана, эмуляция клавиатуры и указателя, буфер обмена в фоне, чужие окна — через протоколы Wayland | да, при `wp_security_context_v1` | контекст безопасности плюс фиксированный список скрытого у посредника; скрытый глобал не привязать по номеру | vm16 u5 |
 | W4 | Композитор без `wp_security_context_v1` (Mutter в GNOME) | деградация, не дыра | в зоне сырого сокета нет, значит, нет и Wayland; `unconfined` получает его без ограничений | У · **нет теста** |
-| W5 | Список разрешённых по имени бинаря (`obs`, `copyq`) открывает полные протоколы | зоны: да · `unconfined`: **нет** | запуск в зону ограничен всегда; список действует только для `unconfined` | У (`launch.rs`) · vm43 |
+| W5 | Список разрешённых по имени бинаря (`obs`, `copyq`) открывает полные протоколы | да | запуск в зону ограничен всегда; для `unconfined` имя действует только для программы, которую под ним дают профили системы, или файла строки с путём | У (`launch.rs`) · vm43 u13 |
 | W6 | Другой процесс зоны пользуется посредником запуска или кладёт свой сокет на его место | да | посредник пропускает только потомков своего надзирателя (`SO_PEERPIDFD`); каталог сокетов только для чтения | vm16 |
 | W7 | IPC композитора или оболочки вне runtime-каталога или по шине (Wayfire в `/tmp`, quickshell, KWin) | герметичная: да · обычная: **нет** | герметичная: свой `/tmp`, runtime-каталог по списку разрешённого, фильтр шины | У · **нет теста** |
 | W8 | Окно рисует рамку и заголовок чужой зоны | нет | рамка — метка, не граница; доверенная метка — у панели (`cellward focused`: pid окна → его сетевое пространство, слово ядра) | win1 |
@@ -387,4 +387,5 @@ the other"
 - u10 `rust/src/container.rs`: `the_state_of_this_project_is_never_granted`, `a_grant_is_resolved_before_anything_is_created`
 - u11 `rust/src/picker.rs`: `a_program_seen_for_the_first_time_gets_a_home_of_its_own`
 - u14 `rust/src/seccomp.rs`: `the_zone_socket_filter_builds`
+- u13 `rust/src/launch.rs`: `a_name_on_the_list_is_only_the_program_the_system_gives_under_it`
 - u12 `rust/src/pulse_filter.rs`: `module_loading_is_refused_and_answered_as_the_server_would`, `recording_a_monitor_is_refused_before_the_server_sees_it`

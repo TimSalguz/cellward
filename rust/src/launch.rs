@@ -770,61 +770,62 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // handed the unrestricted one. Into a zone always — the allowlist and
     // `wayland-sandbox off` are for unconfined launches only, where the
     // compositor's own socket is there anyway.
-    let compositor_wrap: Option<Vec<OsString>> =
-        (zone != UNCONFINED || wayland_sandbox_wanted(tools, &appbin, unasked)).then(|| {
-            let app = if appbin.is_empty() {
-                OsString::from("shell")
+    let compositor_wrap: Option<Vec<OsString>> = (zone != UNCONFINED
+        || wayland_sandbox_wanted(tools, &appbin, app_word(&selection.cmd), unasked))
+    .then(|| {
+        let app = if appbin.is_empty() {
+            OsString::from("shell")
+        } else {
+            appbin.clone()
+        };
+        let dir = if zone == UNCONFINED {
+            crate::wl_sandbox::NO_ZONE.to_owned()
+        } else {
+            zone_name.clone()
+        };
+        let mut wrap: Vec<OsString> = vec![
+            tools.core.clone().into(),
+            "wl-sandbox".into(),
+            app,
+            "--zone".into(),
+            dir.into(),
+        ];
+        if !wayland_proxy_wanted(tools, &appbin, unasked) {
+            wrap.push("--no-proxy".into());
+        } else if zone != UNCONFINED {
+            // The zone's frame around its windows (docs/WINDOW-FRAME.md
+            // §0а): the colour, width and title mode as they are now, and
+            // the title's text — the zone and the container as this
+            // launch knows them; the switch that hides it is read by the
+            // supervisor for each connection.
+            // The container's colour, the zone's when it has none.
+            let color = container_name(&selection)
+                .and_then(|name| crate::container::load(tools, &name))
+                .and_then(|c| c.frame_color.map(|c| c.value));
+            let frame = crate::frame::Frame::of_launch(
+                &tools.state,
+                &tools.config,
+                &zone_name,
+                color.as_deref(),
+            );
+            wrap.push("--frame".into());
+            wrap.push(frame.to_arg().into());
+            let selector = selector_of(&selection, &container.profile);
+            let shown = if container.ephemeral && selection.sandbox == Sandbox::None {
+                // Its name is a random directory's: what it IS is what
+                // the owner needs to read.
+                "временный".to_owned()
             } else {
-                appbin.clone()
+                crate::picker::container_label_in(tools, &selector.to_string_lossy())
             };
-            let dir = if zone == UNCONFINED {
-                crate::wl_sandbox::NO_ZONE.to_owned()
-            } else {
-                zone_name.clone()
-            };
-            let mut wrap: Vec<OsString> = vec![
-                tools.core.clone().into(),
-                "wl-sandbox".into(),
-                app,
-                "--zone".into(),
-                dir.into(),
-            ];
-            if !wayland_proxy_wanted(tools, &appbin, unasked) {
-                wrap.push("--no-proxy".into());
-            } else if zone != UNCONFINED {
-                // The zone's frame around its windows (docs/WINDOW-FRAME.md
-                // §0а): the colour, width and title mode as they are now, and
-                // the title's text — the zone and the container as this
-                // launch knows them; the switch that hides it is read by the
-                // supervisor for each connection.
-                // The container's colour, the zone's when it has none.
-                let color = container_name(&selection)
-                    .and_then(|name| crate::container::load(tools, &name))
-                    .and_then(|c| c.frame_color.map(|c| c.value));
-                let frame = crate::frame::Frame::of_launch(
-                    &tools.state,
-                    &tools.config,
-                    &zone_name,
-                    color.as_deref(),
-                );
-                wrap.push("--frame".into());
-                wrap.push(frame.to_arg().into());
-                let selector = selector_of(&selection, &container.profile);
-                let shown = if container.ephemeral && selection.sandbox == Sandbox::None {
-                    // Its name is a random directory's: what it IS is what
-                    // the owner needs to read.
-                    "временный".to_owned()
-                } else {
-                    crate::picker::container_label_in(tools, &selector.to_string_lossy())
-                };
-                wrap.push("--frame-title".into());
-                wrap.push(crate::frame::title_text(&zone_name, &shown).into());
-                wrap.push("--frame-switch".into());
-                wrap.push(tools.config.clone().into());
-            }
-            wrap.push("--".into());
-            wrap
-        });
+            wrap.push("--frame-title".into());
+            wrap.push(crate::frame::title_text(&zone_name, &shown).into());
+            wrap.push("--frame-switch".into());
+            wrap.push(tools.config.clone().into());
+        }
+        wrap.push("--".into());
+        wrap
+    });
 
     if selection.sandbox != Sandbox::None {
         // The permissions belong to the launcher's id when there is one: the
@@ -1897,12 +1898,79 @@ fn mkdtemp(template: &str) -> std::io::Result<PathBuf> {
 /// Should this program be put on a restricted Wayland socket? Reads the two
 /// files the answer depends on and asks [`restrict_compositor`].
 /// `unasked` ([`ENV_UNASKED`]): the list by program is not read.
-fn wayland_sandbox_wanted(tools: &Tools, appbin: &OsStr, unasked: bool) -> bool {
+fn wayland_sandbox_wanted(
+    tools: &Tools,
+    appbin: &OsStr,
+    program: Option<&OsStr>,
+    unasked: bool,
+) -> bool {
     let mode = cli::setting(tools, "wayland-sandbox").map(|(value, _)| value);
     let allowlist = std::fs::read_to_string(tools.config.join("wayland-allow"))
         .ok()
         .filter(|_| !unasked);
-    restrict_compositor(mode.as_deref(), appbin, allowlist.as_deref())
+    let launched =
+        program.and_then(|word| resolve_program(word, std::env::var_os("PATH").as_deref()));
+    let dirs = trusted_bin_dirs();
+    let origin = |entry: &str| {
+        launched
+            .as_deref()
+            .is_some_and(|p| names_program(entry, p, &dirs))
+    };
+    restrict_compositor(mode.as_deref(), appbin, allowlist.as_deref(), &origin)
+}
+
+/// Where a program let the compositor's full protocols BY NAME has to come
+/// from: the system's profile and the user's as NixOS keeps it, and the
+/// directories a distribution installs programs into — all of them root's.
+/// Not `~/.nix-profile` (a link in the home a program may re-point) and
+/// nothing else in the home.
+fn trusted_bin_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = [
+        "/run/current-system/sw/bin",
+        "/nix/var/nix/profiles/default/bin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        "/usr/bin",
+        "/usr/sbin",
+        "/bin",
+        "/sbin",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect();
+    if let Some(user) = std::env::var_os("USER").filter(|u| !u.is_empty()) {
+        let mut dir = PathBuf::from("/etc/profiles/per-user");
+        dir.push(user);
+        dir.push("bin");
+        dirs.push(dir);
+    }
+    dirs
+}
+
+/// The real path of the program a command word starts: the word itself when
+/// it names a path, else the first executable file of that name on `path`.
+fn resolve_program(word: &OsStr, path: Option<&OsStr>) -> Option<PathBuf> {
+    let found = if word.as_bytes().contains(&b'/') {
+        PathBuf::from(word)
+    } else {
+        std::env::split_paths(path?)
+            .map(|dir| dir.join(word))
+            .find(|candidate| {
+                std::fs::metadata(candidate)
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            })?
+    };
+    std::fs::canonicalize(found).ok()
+}
+
+/// Is `launched` (a real path) the program an allow-list entry names: an
+/// absolute path, that file; a name, what one of `dirs` gives under it.
+pub fn names_program(entry: &str, launched: &Path, dirs: &[PathBuf]) -> bool {
+    let same = |p: &Path| std::fs::canonicalize(p).is_ok_and(|real| real == launched);
+    if entry.starts_with('/') {
+        return same(Path::new(entry));
+    }
+    !entry.is_empty() && !entry.contains('/') && dirs.iter().any(|dir| same(&dir.join(entry)))
 }
 
 /// Whether the Wayland proxy stands between this program and the compositor
@@ -1946,8 +2014,22 @@ pub fn proxy_wanted(mode: Option<&str>, listed: bool) -> bool {
 ///
 /// Two ways out of the restriction: the built-in [`WAYLAND_ALLOWED`] list, and
 /// `~/.config/vpn-zones/wayland-allow`, one program per line and matched whole
-/// (the shell's `grep -qxF`).
-pub fn restrict_compositor(mode: Option<&str>, appbin: &OsStr, allowlist: Option<&str>) -> bool {
+/// (the shell's `grep -qxF`) — a name, or an absolute path.
+///
+/// **A name is not enough (2026-09-27, `docs/LEAK-MODEL.md` §8):** it is the
+/// program's own word, and anything called `obs` — a script in `~/.local/bin`,
+/// something downloaded — would have had screen capture, input emulation and
+/// the clipboard in the background. `origin` answers whether the program of
+/// this launch IS the one an entry names: under a name, the one the system's
+/// and the user's profiles give ([`names_program`]); under a path, that file.
+/// Only for launches outside every zone: a launch into a zone is restricted
+/// whatever its program.
+pub fn restrict_compositor(
+    mode: Option<&str>,
+    appbin: &OsStr,
+    allowlist: Option<&str>,
+    origin: &dyn Fn(&str) -> bool,
+) -> bool {
     if appbin.is_empty() {
         return false;
     }
@@ -1959,10 +2041,13 @@ pub fn restrict_compositor(mode: Option<&str>, appbin: &OsStr, allowlist: Option
         // does, restricting is the safe answer.
         return true;
     };
-    if WAYLAND_ALLOWED.contains(&name) {
+    if WAYLAND_ALLOWED.contains(&name) && origin(name) {
         return false;
     }
-    !allowlist.is_some_and(|text| text.lines().any(|line| line == name))
+    !allowlist.is_some_and(|text| {
+        text.lines()
+            .any(|line| (line == name || line.starts_with('/')) && origin(line))
+    })
 }
 
 #[cfg(test)]
@@ -2381,41 +2466,124 @@ mod tests {
         assert_eq!(basename(OsStr::new("")), OsStr::new(""));
     }
 
+    /// An origin that always agrees: the name logic alone.
+    fn yes(_: &str) -> bool {
+        true
+    }
+
+    /// A name on a list is not enough: the program has to be the one the
+    /// system's profiles give under it, or the file a path entry names
+    /// (2026-09-27, LEAK-MODEL §8).
+    #[test]
+    fn a_name_on_the_list_is_only_the_program_the_system_gives_under_it() {
+        let no = |_: &str| false;
+        assert!(restrict_compositor(None, OsStr::new("obs"), None, &no));
+        assert!(!restrict_compositor(None, OsStr::new("obs"), None, &yes));
+        assert!(restrict_compositor(
+            None,
+            OsStr::new("my-rec"),
+            Some("my-rec\n"),
+            &no
+        ));
+        // A path entry lets the file it names, whatever the program is called.
+        let only_path = |e: &str| e == "/opt/rec/bin/rec";
+        assert!(!restrict_compositor(
+            None,
+            OsStr::new("rec"),
+            Some("/opt/rec/bin/rec\n"),
+            &only_path
+        ));
+
+        let base = std::env::temp_dir().join(format!("wl-origin-{}", std::process::id()));
+        let store = base.join("store/obs-1/bin");
+        let profile = base.join("profile/bin");
+        let home = base.join("home/.local/bin");
+        for dir in [&store, &profile, &home] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let real = store.join("obs");
+        let fake = home.join("obs");
+        for file in [&real, &fake] {
+            std::fs::write(file, b"").unwrap();
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::os::unix::fs::symlink(&real, profile.join("obs")).unwrap();
+        let dirs = vec![profile.clone()];
+        let real_c = std::fs::canonicalize(&real).unwrap();
+        let fake_c = std::fs::canonicalize(&fake).unwrap();
+        let in_profile = names_program("obs", &real_c, &dirs);
+        let in_home = names_program("obs", &fake_c, &dirs);
+        let by_path = names_program(fake.to_str().unwrap(), &fake_c, &dirs);
+        // Found on PATH: the home's first, as a user's PATH may have it.
+        let path = std::env::join_paths([&home, &profile]).unwrap();
+        let resolved = resolve_program(OsStr::new("obs"), Some(path.as_os_str()));
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(in_profile);
+        assert!(!in_home, "a program in the home passed for the system's");
+        assert!(by_path);
+        assert_eq!(resolved, Some(fake_c));
+        assert!(!names_program("", &real_c, &dirs));
+        assert!(!names_program("../obs", &real_c, &dirs));
+    }
+
     #[test]
     fn no_setting_file_means_the_compositor_restriction_is_on() {
         // The default the project promises. Getting it wrong is invisible from
         // the outside: the program starts and works, only the spying is back.
-        assert!(restrict_compositor(None, OsStr::new("firefox"), None));
-        assert!(restrict_compositor(Some("on"), OsStr::new("firefox"), None));
+        assert!(restrict_compositor(None, OsStr::new("firefox"), None, &yes));
+        assert!(restrict_compositor(
+            Some("on"),
+            OsStr::new("firefox"),
+            None,
+            &yes
+        ));
         assert!(!restrict_compositor(
             Some("off"),
             OsStr::new("firefox"),
-            None
+            None,
+            &yes
         ));
         // Anything that is not "on" is off, as the shell comparison was.
-        assert!(!restrict_compositor(Some(""), OsStr::new("firefox"), None));
+        assert!(!restrict_compositor(
+            Some(""),
+            OsStr::new("firefox"),
+            None,
+            &yes
+        ));
     }
 
     #[test]
     fn the_exceptions_are_the_built_in_list_and_the_allow_file() {
-        assert!(!restrict_compositor(None, OsStr::new("grim"), None));
-        assert!(!restrict_compositor(None, OsStr::new("flatpak"), None));
+        assert!(!restrict_compositor(None, OsStr::new("grim"), None, &yes));
+        assert!(!restrict_compositor(
+            None,
+            OsStr::new("flatpak"),
+            None,
+            &yes
+        ));
         // One program per line, matched whole — `grep -qxF`.
         let allow = "copyq\nmy-recorder\n";
         assert!(!restrict_compositor(
             None,
             OsStr::new("my-recorder"),
-            Some(allow)
+            Some(allow),
+            &yes
         ));
         assert!(restrict_compositor(
             None,
             OsStr::new("my-recorder-2"),
-            Some(allow)
+            Some(allow),
+            &yes
         ));
-        assert!(restrict_compositor(None, OsStr::new("record"), Some(allow)));
+        assert!(restrict_compositor(
+            None,
+            OsStr::new("record"),
+            Some(allow),
+            &yes
+        ));
         // No app-id at all: there is nothing to name the sandbox after, and the
         // shell version skipped the wrapper too.
-        assert!(!restrict_compositor(None, OsStr::new(""), None));
+        assert!(!restrict_compositor(None, OsStr::new(""), None, &yes));
     }
 
     #[test]
