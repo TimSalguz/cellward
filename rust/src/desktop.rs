@@ -355,6 +355,10 @@ const SHELLS: [&str; 17] = [
 fn code_option(program: &str, option: &str) -> bool {
     let name = program.rsplit('/').next().unwrap_or(program);
     let family = |prefix: &str| name.starts_with(prefix);
+    // fish runs `-C` (`--init-command`) too, as code.
+    if name == "fish" && matches!(option, "-C" | "--init-command" | "--command") {
+        return true;
+    }
     if SHELLS.contains(&name) {
         return option.len() > 1
             && option.starts_with('-')
@@ -379,13 +383,62 @@ fn code_option(program: &str, option: &str) -> bool {
     false
 }
 
-/// A shell's options that take the word after them as their value, not as
-/// a script (`-o pipefail`).
-fn takes_value(option: &str) -> bool {
-    matches!(
+/// Whether `word` is `program`'s code option with the code attached to it
+/// (`python3 -c%u`, `node --eval=%u`, `perl -e%u`).
+fn attached_code(program: &str, word: &str) -> bool {
+    let name = program.rsplit('/').next().unwrap_or(program);
+    let family = |prefix: &str| name.starts_with(prefix);
+    let short = |flags: &[&str]| {
+        flags
+            .iter()
+            .any(|flag| word.len() > flag.len() && word.starts_with(flag))
+    };
+    if family("python") || family("pypy") {
+        return short(&["-c"]);
+    }
+    if family("perl") {
+        return short(&["-e", "-E"]);
+    }
+    if family("ruby") || family("lua") || family("julia") || name == "Rscript" {
+        return short(&["-e"]);
+    }
+    if family("node") || name == "bun" || name == "deno" {
+        return short(&["-e", "-p"]) || word.starts_with("--eval=") || word.starts_with("--print=");
+    }
+    if family("php") {
+        return short(&["-r"]);
+    }
+    if name == "fish" {
+        return word.starts_with("--init-command=") || word.starts_with("--command=");
+    }
+    false
+}
+
+/// Options that take the word after them as their value, not as a script:
+/// a shell's (`-o pipefail`), an interpreter's (`python3 -W ignore`,
+/// `node -r module`, `php -d x=1`).
+fn takes_value(program: &str, option: &str) -> bool {
+    let name = program.rsplit('/').next().unwrap_or(program);
+    let family = |prefix: &str| name.starts_with(prefix);
+    if matches!(
         option,
         "-o" | "+o" | "-O" | "+O" | "--rcfile" | "--init-file"
-    )
+    ) {
+        return true;
+    }
+    if family("python") || family("pypy") {
+        return matches!(option, "-W" | "-X");
+    }
+    if family("node") || name == "bun" || name == "deno" {
+        return matches!(option, "-r" | "--require" | "--import" | "--loader");
+    }
+    if family("php") {
+        return matches!(option, "-d" | "-c" | "-z");
+    }
+    if family("ruby") || family("perl") {
+        return matches!(option, "-I" | "-r");
+    }
+    false
 }
 
 /// Which words of an `Exec` line a shell or an interpreter reads as code:
@@ -406,11 +459,15 @@ fn script_words(words: &[(String, bool)]) -> Vec<bool> {
                 script[j] = true;
                 break;
             }
+            if attached_code(program, word) {
+                script[j] = true;
+                break;
+            }
             if code_option(program, word) {
                 told = true;
                 continue;
             }
-            if takes_value(word) {
+            if takes_value(program, word) {
                 skip = true;
                 continue;
             }
@@ -3411,6 +3468,13 @@ Name=not carried over
             "node -e %u",
             "python3.12 -c %u",
             "fox --run=$(%u)",
+            // The code attached to its option; options that take a value.
+            "python3 -c%u",
+            "node --eval=%u",
+            "python3 -W ignore -c %u",
+            "node -r m -e %u",
+            "php -d x=1 -r %u",
+            "fish -C %u",
         ] {
             let (words, used) = expand(exec);
             assert!(!used, "{exec}: {words:?}");
