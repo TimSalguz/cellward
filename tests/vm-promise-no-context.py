@@ -28,7 +28,7 @@ with subtest("a compositor without the security context: no Wayland in a zone, a
     def interfaces(out):
         return set(re.findall(r"interface: '([^']+)'", out))
 
-    host = interfaces(alice(f"WAYLAND_DISPLAY={bare} wayland-info"))
+    host = interfaces(alice(f"WAYLAND_DISPLAY={bare} timeout 60 wayland-info"))
     print(f"cage offers: {sorted(host)}")
     assert "wl_compositor" in host, host
     assert "wp_security_context_manager_v1" not in host, (
@@ -39,7 +39,7 @@ with subtest("a compositor without the security context: no Wayland in a zone, a
     # the environment, and no socket by that name or any other.
     out = alice(
         f"WAYLAND_DISPLAY={bare} cellward run vmsmoke -- sh -c "
-        "'echo D=$WAYLAND_DISPLAY; wayland-info 2>&1 || echo NO-WAYLAND; "
+        "'echo D=$WAYLAND_DISPLAY; timeout 60 wayland-info 2>&1 || echo NO-WAYLAND; "
         "ls -A $XDG_RUNTIME_DIR | grep ^wayland- || echo NO-SOCKET'"
     )
     print(out)
@@ -59,7 +59,7 @@ with subtest("a compositor without the security context: no Wayland in a zone, a
     assert '{"id":"wayland-raw","level":"ok"' in out, out
 
     # Unconfined: the compositor's own socket, every global it offers.
-    unconfined = interfaces(alice(f"WAYLAND_DISPLAY={bare} cellward run unconfined -- wayland-info"))
+    unconfined = interfaces(alice(f"WAYLAND_DISPLAY={bare} cellward run unconfined -- timeout 60 wayland-info"))
     assert unconfined == host, (sorted(host - unconfined), sorted(unconfined - host))
 
     alice("cellward down vmsmoke")

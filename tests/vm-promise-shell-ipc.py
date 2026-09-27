@@ -26,7 +26,7 @@ alice(
     f"--unit=fakeshell socat UNIX-LISTEN:{SHELL},fork OPEN:/tmp/shell-got,creat,append"
 )
 alice(f"systemd-run --user --unit=fakekwin {FAKE_BUS_OWNER} {KWIN_GOT} org.kde.KWin")
-machine.wait_until_succeeds(f"test -S {WAYFIRE} && test -S {SHELL}")
+machine.wait_until_succeeds(f"test -S {WAYFIRE} && test -S {SHELL}", timeout=30)
 machine.wait_until_succeeds(
     "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
     "busctl --user --timeout=5 list' | grep -q org.kde.KWin",
@@ -37,7 +37,9 @@ machine.wait_until_succeeds(
 alice(f"echo from-host | socat -u - UNIX-CONNECT:{WAYFIRE}")
 alice(f"echo from-host | socat -u - UNIX-CONNECT:{SHELL}")
 alice(f"sh -c 'busctl --user --timeout=2 {KWIN} || true'")
-machine.wait_until_succeeds("grep -q from-host /tmp/wayfire-got && grep -q from-host /tmp/shell-got")
+machine.wait_until_succeeds(
+    "grep -q from-host /tmp/wayfire-got && grep -q from-host /tmp/shell-got", timeout=30
+)
 machine.wait_until_succeeds(f"grep -q loadScript {KWIN_GOT}", timeout=10)
 alice(f": > {KWIN_GOT}")
 

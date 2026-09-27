@@ -38,10 +38,12 @@ with subtest("a tunnel zone reaches neither the LAN nor the host's own addresses
         "systemd-run --unit=n3host socat TCP6-LISTEN:8097,fork,reuseaddr "
         "OPEN:/tmp/n3-got,creat,append"
     )
-    machine.wait_until_succeeds("ss -ltn | grep -q ':8097 '")
+    machine.wait_until_succeeds("ss -ltn | grep -q ':8097 '", timeout=30)
     machine.succeed(f"echo host-v4 | socat -u - TCP4:{machine_ip}:8097")
     machine.succeed(f"echo host-v6 | socat -u - TCP6:[{machine_ip6}]:8097")
-    machine.wait_until_succeeds("grep -q host-v4 /tmp/n3-got && grep -q host-v6 /tmp/n3-got")
+    machine.wait_until_succeeds(
+        "grep -q host-v4 /tmp/n3-got && grep -q host-v6 /tmp/n3-got", timeout=30
+    )
     # From the zone, the same: the tunnel takes the SYN to the server, which
     # routes nothing on; the attempt is bounded, and what decides is the
     # listener's file. The host's loopback is the zone's own: the host's
@@ -59,15 +61,15 @@ with subtest("a tunnel zone reaches neither the LAN nor the host's own addresses
     assert "zone-" not in got, f"the zone reached the host's own service: {got}"
     machine.succeed("systemctl stop n3host && rm -f /tmp/n3-got")
 
-    # The LAN by the server's LAN address: it answers (asked on the server
-    # itself — the host asking would be a flow the leak capture rightly
-    # counts), and it sees the zone only as the tunnel's address.
+    # The LAN by the server's LAN address sees the zone only as the tunnel's
+    # address. (Not asked from the host: that is a flow the leak capture
+    # rightly counts.)
     server.succeed(
         "systemd-run --unit=n3lan socat "
         f"TCP4-LISTEN:8090,bind={server_ip},fork,reuseaddr "
         "'SYSTEM:echo peer=$SOCAT_PEERADDR'"
     )
-    server.wait_until_succeeds(f"socat -T5 - TCP4:{server_ip}:8090 | grep -q peer={server_ip}")
+    server.wait_until_succeeds(f"ss -ltn | grep -q '{server_ip}:8090 '", timeout=30)
     out = alice(f"cellward run vmreal -- socat -T10 - TCP4:{server_ip}:8090")
     assert "peer=10.99.0.2" in out, f"the LAN saw the zone as someone else: {out}"
     server.succeed("systemctl stop n3lan")

@@ -38,12 +38,15 @@ with subtest("the host's resolv.conf replaced by rename: the zone's names go onl
 
     def host_asks(name):
         """The host's resolver answers, and has the name written down."""
-        for server in (machine_ip, "127.0.0.1"):
+        for resolver in (machine_ip, "127.0.0.1"):
             machine.wait_until_succeeds(
-                f"dig +time=2 +tries=1 +short @{server} {name}.leaktest.internal "
-                "| grep -qx 10.66.66.66"
+                f"dig +time=2 +tries=1 +short @{resolver} {name}.leaktest.internal "
+                "| grep -qx 10.66.66.66",
+                timeout=60,
             )
-        machine.wait_until_succeeds(f"grep -q '{name}.leaktest.internal' /tmp/hostdns53.log")
+        machine.wait_until_succeeds(
+            f"grep -q '{name}.leaktest.internal' /tmp/hostdns53.log", timeout=30
+        )
 
     host_asks("host-d2")
     # Where the zone's names go: into the tunnel, seen on the server's
@@ -52,12 +55,12 @@ with subtest("the host's resolv.conf replaced by rename: the zone's names go onl
         "systemd-run --unit=d2watch tcpdump -n --immediate-mode -U -i wg0 "
         "-w /tmp/d2.pcap 'udp port 53'"
     )
-    server.wait_until_succeeds("journalctl -u d2watch | grep -q 'listening on wg0'")
+    server.wait_until_succeeds("journalctl -u d2watch | grep -q 'listening on wg0'", timeout=60)
     machine.succeed(
         "systemd-run --unit=d2leak tcpdump -n --immediate-mode -U -i eth1 "
         "-w /tmp/d2-leak.pcap 'port 53'"
     )
-    machine.wait_until_succeeds("journalctl -u d2leak | grep -q 'listening on eth1'")
+    machine.wait_until_succeeds("journalctl -u d2leak | grep -q 'listening on eth1'", timeout=60)
 
     host_file = f"nameserver {machine_ip}\\nnameserver 127.0.0.1\\noptions timeout:2 attempts:1\\n"
 
@@ -115,8 +118,10 @@ with subtest("the host's resolv.conf replaced by rename: the zone's names go onl
     # zone's is written down, and the zone's are not — it takes its queries
     # one at a time, so the zone's would have been written first.
     host_asks("host-after-d2")
-    log = machine.succeed("cat /tmp/hostdns53.log")
-    assert "zone-d2" not in log, f"DNS LEAK: the host's resolver was asked by the zone:\n{log}"
+    asked_of_host = machine.succeed("cat /tmp/hostdns53.log")
+    assert "zone-d2" not in asked_of_host, (
+        f"DNS LEAK: the host's resolver was asked by the zone:\n{asked_of_host}"
+    )
     # Where they went instead: into the tunnel, to the host's addresses as
     # the host's file names them, from the tunnel's address.
     server.succeed("systemctl stop d2watch")
@@ -134,3 +139,10 @@ with subtest("the host's resolv.conf replaced by rename: the zone's names go onl
     alice("cellward down vmreal")
     machine.succeed(f"ln -sfn {shlex.quote(link)} /etc/resolv.conf && test -L /etc/resolv.conf")
     machine.succeed("systemctl stop hostdns53 && rm -f /tmp/hostdns53.log /tmp/d2-leak.pcap")
+    # The peer made anew, as after the zone killed: a session the server
+    # still holds would knock at the zone's last address, into the next
+    # capture.
+    server.succeed(
+        f"wg set wg0 peer '{cpub}' remove && "
+        f"wg set wg0 peer '{cpub}' allowed-ips 10.99.0.2/32,fd99::2/128"
+    )
