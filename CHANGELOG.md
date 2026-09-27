@@ -249,6 +249,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A zone's link is never filled in where it would be code** (bug hunt
+  2026-09-27). The broker opens a zone's link with the program chosen for
+  it, filling the link into its launcher's `Exec` — and a launcher with
+  `Exec=sh -c "xdg-open %u"` (the specification leaves a code in quotes
+  undefined) ran whatever the link said. A field code in a shell's script
+  (`sh -c …`) or inside a word in quotes (an interpreter's `-c "…"`) is no
+  longer filled in: such a launcher does not take links, as one without a
+  code. A code as an argument of its own is filled in as before.
 - **The broker's questions all end** (bug hunt 2026-09-27). The window
   that chooses a program for a zone's link (the portal's, or kdialog's)
   had no deadline, and the broker asks one question at a time: a window

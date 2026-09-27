@@ -299,16 +299,26 @@ pub fn is_hidden_handler(file_name: &str, entry: Option<&Group>) -> bool {
 /// Used only to recognise WHICH PROGRAM an entry starts and what it hands over
 /// — never to build a command line: `Exec` is always passed on verbatim.
 pub fn exec_words(exec: &str) -> Vec<String> {
+    exec_words_marked(exec)
+        .into_iter()
+        .map(|(word, _)| word)
+        .collect()
+}
+
+/// [`exec_words`], each with whether any of it was in quotes.
+fn exec_words_marked(exec: &str) -> Vec<(String, bool)> {
     let mut words = Vec::new();
     let mut current = String::new();
     let mut in_word = false;
     let mut quoted = false;
+    let mut had_quotes = false;
     let mut chars = exec.chars();
     while let Some(c) = chars.next() {
         match c {
             '"' => {
                 quoted = !quoted;
                 in_word = true;
+                had_quotes = true;
             }
             '\\' if quoted => {
                 if let Some(next) = chars.next() {
@@ -317,8 +327,9 @@ pub fn exec_words(exec: &str) -> Vec<String> {
             }
             c if c.is_whitespace() && !quoted => {
                 if in_word {
-                    words.push(std::mem::take(&mut current));
+                    words.push((std::mem::take(&mut current), had_quotes));
                     in_word = false;
+                    had_quotes = false;
                 }
             }
             c => {
@@ -328,9 +339,40 @@ pub fn exec_words(exec: &str) -> Vec<String> {
         }
     }
     if in_word {
-        words.push(current);
+        words.push((current, had_quotes));
     }
     words
+}
+
+/// The shells, by the name of their program.
+const SHELLS: [&str; 9] = [
+    "sh", "bash", "dash", "zsh", "ksh", "mksh", "fish", "csh", "tcsh",
+];
+
+/// Which words of an `Exec` line a shell reads as its script: the first
+/// one after the options of a shell, where one of them is `-c` (`-lc`,
+/// `-ec`…).
+fn script_words(words: &[(String, bool)]) -> Vec<bool> {
+    let mut script = vec![false; words.len()];
+    for (i, (word, _)) in words.iter().enumerate() {
+        let name = word.rsplit('/').next().unwrap_or(word);
+        if !SHELLS.contains(&name) {
+            continue;
+        }
+        let mut told = false;
+        for (j, (next, _)) in words.iter().enumerate().skip(i + 1) {
+            if next.starts_with('-') && !next.starts_with("--") {
+                told |= next.contains('c');
+                continue;
+            }
+            if next.starts_with("--") {
+                continue;
+            }
+            script[j] = told;
+            break;
+        }
+    }
+    script
 }
 
 /// The program an `Exec` line starts: wrappers and assignments skipped, by the
@@ -1875,11 +1917,25 @@ pub fn find_entry(
 /// the deprecated codes vanish. Arguments with no field code to take them are
 /// not appended: the program did not say it accepts any. Returns the words and
 /// whether the arguments were used.
+///
+/// Never where something reads them as code (review 2026-09-27: the
+/// argument is a zone's link, `Exec=sh -c "xdg-open %u"` ran what it said):
+/// a code in a shell's script, or inside a word in quotes — which the
+/// specification leaves undefined, and where an interpreter's `-c "…"` has
+/// it. Nothing is filled in there, and the arguments count as not used.
 pub fn expand_exec(entry: &Group, file: &Path, args: &[OsString]) -> (Vec<OsString>, bool) {
     let exec = entry.get("Exec").unwrap_or("");
     let mut out: Vec<OsString> = Vec::new();
     let mut used = false;
-    for word in exec_words(exec) {
+    let mut refused = false;
+    let words = exec_words_marked(exec);
+    let scripts = script_words(&words);
+    for ((word, quoted), script) in words.into_iter().zip(scripts) {
+        let code = |c: char| word.contains(&format!("%{c}"));
+        if script && ['u', 'f', 'U', 'F'].into_iter().any(code) {
+            refused = true;
+            continue;
+        }
         match word.as_str() {
             "%U" | "%F" => {
                 out.extend(args.iter().cloned());
@@ -1913,6 +1969,7 @@ pub fn expand_exec(entry: &Group, file: &Path, args: &[OsString]) -> (Vec<OsStri
             coded = true;
             match chars.next() {
                 Some('%') => filled.push('%'),
+                Some('u' | 'f' | 'U' | 'F') if quoted => refused = true,
                 Some('u' | 'f' | 'U' | 'F') => {
                     if let Some(first) = args.first() {
                         filled.push_str(&first.to_string_lossy());
@@ -1935,7 +1992,7 @@ pub fn expand_exec(entry: &Group, file: &Path, args: &[OsString]) -> (Vec<OsStri
             out.push(filled.into());
         }
     }
-    (out, used)
+    (out, used && !refused)
 }
 
 /// The whole pass. Returns the process exit code.
@@ -3232,6 +3289,42 @@ Name=not carried over
     }
 
     // --- vpn-zone launch -----------------------------------------------------
+
+    /// A zone's link is never code: not a shell's script, not inside a word
+    /// in quotes (an interpreter's `-c "…"`). As an argument of its own, after
+    /// the script, it is only an argument.
+    #[test]
+    fn a_link_is_never_filled_in_where_it_would_be_code() {
+        let link: Vec<OsString> = vec!["https://a/$(touch x)".into()];
+        let expand = |exec: &str| {
+            let groups = parse_desktop(&format!("[Desktop Entry]\nName=X\nExec={exec}\n"));
+            expand_exec(
+                desktop_entry(&groups).unwrap(),
+                Path::new("/x/x.desktop"),
+                &link,
+            )
+        };
+        for exec in [
+            "sh -c \"xdg-open %u\"",
+            "bash -lc %u",
+            "/bin/sh -e -c %U",
+            "env A=1 dash -c \"exec fox %f\"",
+            "python3 -c \"import webbrowser; webbrowser.open('%u')\"",
+            "fox \"--url=%u\"",
+        ] {
+            let (words, used) = expand(exec);
+            assert!(!used, "{exec}: {words:?}");
+            assert!(
+                !words.iter().any(|w| w.to_string_lossy().contains("touch")),
+                "{exec}: {words:?}"
+            );
+        }
+        let (words, used) = expand("sh -c \"exec fox \\\"$1\\\"\" sh %u");
+        assert!(used);
+        assert_eq!(words.last(), Some(&link[0]));
+        let (_, used) = expand("fox --url=%u");
+        assert!(used);
+    }
 
     #[test]
     fn field_codes_are_filled_like_a_launcher_fills_them() {
