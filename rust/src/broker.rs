@@ -446,6 +446,7 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                     let same_identity =
                         origin_container.is_some() && origin_container == asked_container;
                     let label = origin_label(&origin, origin_container.as_deref());
+                    let mut pinned: Option<Vec<OsString>> = None;
                     let allowed = match decide(&origin, locked, &target, same_identity) {
                         Decision::Start => Ok(()),
                         Decision::Refuse(why) => Err(why),
@@ -459,18 +460,32 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                                 Some(resolved) => resolved,
                                 None => crate::launch::resolve_selection(tools, selection.clone()),
                             };
-                            match resolved {
-                                Err(why) => Err(why),
-                                Ok(resolved) => ask(
-                                    tools,
-                                    &origin,
-                                    &label,
-                                    &target,
-                                    &resolved_selector(tools, &resolved),
-                                    &selection.cmd,
-                                ),
+                            match (resolved, pin_program(&selection.cmd)) {
+                                (Err(why), _) | (_, Err(why)) => Err(why),
+                                (Ok(resolved), Ok(cmd)) => {
+                                    let asked = ask(
+                                        tools,
+                                        &origin,
+                                        &label,
+                                        &target,
+                                        &resolved_selector(tools, &resolved),
+                                        &cmd,
+                                    );
+                                    pinned = Some(cmd);
+                                    asked
+                                }
                             }
                         }
+                    };
+                    // What was asked about is what starts: the program by the
+                    // path the question showed.
+                    let argv = match pinned {
+                        Some(cmd) if argv.ends_with(&selection.cmd) => {
+                            let mut pinned = argv[..argv.len() - selection.cmd.len()].to_vec();
+                            pinned.extend(cmd);
+                            pinned
+                        }
+                        _ => argv,
                     };
                     // A launch that goes on without a question takes no word of
                     // the requester's about what it is: the policies kept by a
@@ -534,6 +549,29 @@ pub fn program_of(cmd: &[OsString]) -> Option<PathBuf> {
     };
     let dir = std::fs::canonicalize(path.parent()?).ok()?;
     Some(dir.join(path.file_name()?))
+}
+
+/// The command a question shows and a "yes" starts, the same one: its
+/// program by its path on the host, found now — not a name looked up again
+/// when the launch starts, by when a program of the zone could have put one
+/// of the same name earlier in `PATH` (`~/.local/bin`, in the home it
+/// writes; review 2026-09-27). A name found nowhere is refused.
+pub fn pin_program(cmd: &[OsString]) -> Result<Vec<OsString>, String> {
+    let Some(first) = cmd.first() else {
+        return Ok(Vec::new());
+    };
+    if Path::new(first).components().count() > 1 {
+        return Ok(cmd.to_vec());
+    }
+    let program = program_of(cmd).ok_or_else(|| {
+        format!(
+            "программы «{}» нет на хосте",
+            shown_word(&first.to_string_lossy())
+        )
+    })?;
+    let mut pinned = cmd.to_vec();
+    pinned[0] = program.into_os_string();
+    Ok(pinned)
 }
 
 /// Whether "always" may be offered for this program: only for one in the
@@ -1705,6 +1743,23 @@ fn exchange_text(request: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a question shows is what a "yes" starts: a bare name is pinned
+    /// to its path now, a path stays, a name found nowhere is refused.
+    #[test]
+    fn the_program_asked_about_is_pinned_by_its_path() {
+        let os = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+        let pinned = pin_program(&os(&["sh", "-c", "true"])).unwrap();
+        assert!(Path::new(&pinned[0]).is_absolute(), "{pinned:?}");
+        assert!(Path::new(&pinned[0]).ends_with("sh"), "{pinned:?}");
+        assert_eq!(pinned[1..], os(&["-c", "true"])[..]);
+        assert_eq!(
+            pin_program(&os(&["/x/y", "a"])).unwrap(),
+            os(&["/x/y", "a"])
+        );
+        assert!(pin_program(&os(&["no-such-program-cellward-test"])).is_err());
+        assert!(pin_program(&[]).unwrap().is_empty());
+    }
 
     /// Every word on a line of its own, whole up to a length and marked when
     /// cut; nothing that reorders text; a command too long to show is not

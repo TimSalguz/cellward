@@ -249,6 +249,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **What the broker asks about is what it starts** (bug hunt
+  2026-09-27). A zone's request named its program by a bare name, the
+  question showed that name, and the launch looked it up in `PATH` again
+  when it started — by when a program of the zone could have put one of
+  the same name earlier in `PATH` (`~/.local/bin`, in a home it writes).
+  A request that is asked about now has its program found once, on the
+  host: the question shows that path, and that path is what starts. A
+  name found nowhere is refused.
 - **A zone's link is never filled in where it would be code** (bug hunt
   2026-09-27). The broker opens a zone's link with the program chosen for
   it, filling the link into its launcher's `Exec` — and a launcher with
