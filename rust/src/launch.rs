@@ -22,7 +22,10 @@
 //!  5. the launch registry says whether this program is already running in
 //!     ANOTHER network — the "I thought I was on the VPN" warning;
 //!  6. the zone is started if it was down, we write ourselves into the registry
-//!     and `execvp` into `nsenter`.
+//!     and `execvp` into `nsenter` — offline, into the container's instance
+//!     (`crate::instance`, since stage 1 of the container design of
+//!     2026-09-27): its unit is started if it was down, and the last word is
+//!     `container-enter`, which finds it again by its id.
 //!
 //! **`direct` takes the same road**, minus the zone. It used to be a special
 //! case of the picker, which simply became the command — and with that the

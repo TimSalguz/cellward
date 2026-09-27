@@ -31,8 +31,17 @@
 //! instance's user namespace with the host's files around it, and a
 //! program of the instance that could trace it would reach them. Its
 //! capabilities go once the child is on its way. It passes the signals a
-//! launch is ended with on to the child, stops when the child stops (a
-//! job of a terminal), and ends with its status.
+//! launch is ended with on to the child, and ends with its status.
+//!
+//! **It does not stop when the child stops**, as `nsenter` did. A terminal's
+//! job control needs no mirror here — the waiter, its child and the
+//! supervisor are one process group, and `^Z` and `fg` reach them all —,
+//! and a mirror would hang: `cellward container kill` freezes the
+//! instance's programs with SIGSTOP, the waiter would stop itself for good
+//! (it is not in sight of that scan to be killed — not dumpable), and its
+//! child killed a moment later would stay its unreaped zombie under a
+//! stopped parent. (`nsenter`, dumpable, was frozen and killed with a
+//! zone's programs.)
 
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
@@ -304,27 +313,18 @@ fn become_the_launch(space: &OwnedFd, cmd: &[OsString]) -> String {
     format!("cannot start {}: {e}", cmd[0].to_string_lossy())
 }
 
-/// Wait for the child as a terminal's job: stopped, this process stops too
-/// (the shell sees it), and when it is continued, so is the child. Its
-/// status, as a shell reports it.
-fn wait_as_a_job(child: libc::pid_t) -> u8 {
+/// Wait for the child's end — not its stops (the module's words) — and give
+/// its status as a shell reports it.
+fn wait_for_end(child: libc::pid_t) -> u8 {
     loop {
         let mut status: libc::c_int = 0;
         // SAFETY: `status` is a valid pointer for the duration of the call.
-        let r = unsafe { libc::waitpid(child, &mut status, libc::WUNTRACED) };
+        let r = unsafe { libc::waitpid(child, &mut status, 0) };
         if r < 0 {
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
             return 1;
-        }
-        if libc::WIFSTOPPED(status) {
-            // SAFETY: kill(2) of ourselves and of our own child.
-            unsafe {
-                libc::kill(libc::getpid(), libc::SIGSTOP);
-                libc::kill(child, libc::SIGCONT);
-            }
-            continue;
         }
         return exit_code_of(status);
     }
@@ -426,7 +426,7 @@ pub fn run(args: &Args) -> u8 {
     if !said.is_empty() {
         eprintln!("контейнер {}: {said}", args.instance);
     }
-    wait_as_a_job(child)
+    wait_for_end(child)
 }
 
 #[cfg(test)]

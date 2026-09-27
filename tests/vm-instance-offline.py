@@ -170,7 +170,7 @@ with subtest("cellward container kill ends every program of the container at onc
     )
     machine.wait_until_succeeds(
         f"test $(for p in $(pgrep -x sleep); do readlink /proc/$p/ns/net; done "
-        f"| grep -cx '{ns_b}') -ge 3",
+        f"| grep -cxF '{ns_b}') -ge 3",
         timeout=60,
     )
     out = alice("cellward container kill vmib")
