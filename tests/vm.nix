@@ -535,8 +535,12 @@ let
           51820
           51821
         ];
-        # The responder a host-interface zone talks to directly, on eth1.
-        networking.firewall.allowedTCPPorts = [ 8090 ];
+        # The responders a host-interface zone talks to directly, on eth1:
+        # over IPv4 and over IPv6.
+        networking.firewall.allowedTCPPorts = [
+          8090
+          8095
+        ];
         # Services listen on the tunnel address only; the firewall must not
         # get in their way there.
         networking.firewall.trustedInterfaces = [
@@ -2862,6 +2866,50 @@ let
           out = alice("cellward doctor vmlan --json")
           assert '"worst":"fail"' not in out, out
           alice("cellward down vmlan")
+
+      # IPv6 through the host's interface when it has usable IPv6 (a global
+      # address and a default route): bound to eth1 like IPv4, out as the
+      # host, and never to the host's own IPv6 addresses (2026-09-27; only
+      # IPv4 ones were refused). pasta gives the zone eth1's own v6 address,
+      # so a connection to THAT stays in the zone; the leak was the host's
+      # other addresses — a ULA on another interface here.
+      with subtest("host-interface zone: IPv6 bound to eth1, the host's other v6 addresses refused"):
+          machine_ip6 = machine.succeed(
+              "ip -6 -o addr show eth1 scope global | head -1 | tr -s ' ' | cut -d' ' -f4 | cut -d/ -f1"
+          ).strip()
+          machine.succeed(
+              f"ip -6 route replace default via {server_ip6} dev eth1 && "
+              "ip link add vmv6 type dummy && ip -6 addr add fd77::1/64 dev vmv6 nodad && "
+              "ip link set vmv6 up"
+          )
+          server.succeed(
+              "systemd-run --unit=hello-lan6 socat "
+              f"TCP6-LISTEN:8095,bind=[{server_ip6}],fork,reuseaddr "
+              "'SYSTEM:echo peer=$SOCAT_PEERADDR'"
+          )
+          machine.succeed(
+              "systemd-run --unit=hostlocal6 socat TCP6-LISTEN:8096,bind=[fd77::1],fork,reuseaddr "
+              "'SYSTEM:echo host-local6'"
+          )
+          machine.wait_until_succeeds("ss -ltn | grep -q ':8096 '")
+          machine.succeed("socat -T5 - TCP6:[fd77::1]:8096 | grep -q host-local6")
+          alice("cellward up vmlan")
+          lpid = machine.succeed(f"cat {STATE}/vmlan/zone.pid").strip()
+          out = in_zone(lpid, "ip -6 route show default")
+          assert "dev awg0" in out, out
+          out = in_zone(lpid, f"socat -T10 - TCP6:[{server_ip6}]:8095")
+          seen = re.search(r"peer=\[?([0-9a-fA-F:]+)\]?", out)
+          assert seen and ipaddress.ip_address(seen.group(1)) == ipaddress.ip_address(
+              machine_ip6
+          ), f"the server saw someone else over v6: {out}"
+          rules = in_zone_root(lpid, "nft list ruleset")
+          assert "ip6 daddr fd77::1 reject" in rules, rules
+          in_zone(lpid, "sh -c '! timeout 10 socat -T5 - TCP6:[fd77::1]:8096'")
+          alice("cellward down vmlan")
+          machine.succeed(
+              "systemctl stop hostlocal6 && ip link del vmv6 && "
+              f"ip -6 route del default via {server_ip6} dev eth1"
+          )
 
       # A dummy interface with an address and no way to the server: bound to
       # it, the zone must not reach the server even though the host itself
