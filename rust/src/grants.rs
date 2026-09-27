@@ -268,10 +268,71 @@ fn detach_in(pid: i32, dest: &Path) -> Result<(), String> {
     }
 }
 
+/// Whether this mountinfo is a mount namespace of the container `name`: its
+/// home there is the container's — a sandbox's home bound over it, or a
+/// layer whose upper directory is the container's.
+pub fn container_namespace(mountinfo: &str, home: &Path, name: &str) -> bool {
+    let wanted = home.as_os_str().as_bytes();
+    let own_home = format!("/{name}/home");
+    let own_upper = format!("/{name}/home/upper");
+    mountinfo.lines().any(|line| {
+        let fields: Vec<&str> = line.split(' ').collect();
+        if fields.get(4).map(|p| unescape(p)).as_deref() != Some(wanted) {
+            return false;
+        }
+        let root = fields.get(3).map(|r| unescape(r)).unwrap_or_default();
+        if root.ends_with(own_home.as_bytes()) {
+            return true;
+        }
+        // After the separator: type, source, super options.
+        let supers = fields
+            .iter()
+            .position(|f| *f == "-")
+            .and_then(|i| fields.get(i + 3))
+            .copied()
+            .unwrap_or("");
+        supers.split(',').any(|option| {
+            option
+                .strip_prefix("upperdir=")
+                .is_some_and(|dir| unescape(dir).ends_with(own_upper.as_bytes()))
+        })
+    })
+}
+
 /// Take `dest` away from every running program of the sandbox `selector`:
-/// `(detached, failed)` — mount namespaces, not processes.
+/// `(detached, failed)` — mount namespaces, not processes. Those of its
+/// launches, and any other of the user's processes whose mount namespace
+/// is the container's with `dest` bound in: a program that left its launch
+/// (a double fork) keeps the launch's namespace, and with it the grant
+/// (review 2026-09-27).
 pub fn detach_live(tools: &Tools, selector: &str, dest: &Path) -> (usize, Vec<String>) {
     let mut namespaces: BTreeMap<PathBuf, i32> = BTreeMap::new();
+    if let Some(name) = crate::container::canonical(tools, selector) {
+        use std::os::unix::fs::MetadataExt;
+        let mut looked: BTreeSet<PathBuf> = BTreeSet::new();
+        // SAFETY: getuid(2) takes no arguments and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let pids = fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.metadata().is_ok_and(|m| m.uid() == uid))
+            .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok());
+        for pid in pids {
+            let Ok(ns) = fs::read_link(format!("/proc/{pid}/ns/mnt")) else {
+                continue;
+            };
+            if !looked.insert(ns.clone()) {
+                continue;
+            }
+            let ours = fs::read_to_string(format!("/proc/{pid}/mountinfo")).is_ok_and(|info| {
+                mounted_at(&info, dest) && container_namespace(&info, &tools.home, &name)
+            });
+            if ours {
+                namespaces.insert(ns, pid);
+            }
+        }
+    }
     for pid in sandbox_processes(tools, selector) {
         let Ok(ns) = fs::read_link(format!("/proc/{pid}/ns/mnt")) else {
             continue;
@@ -378,6 +439,16 @@ mod tests {
         let info = "36 35 0:31 / /home/u/My\\040Games rw,relatime - ext4 /dev/x rw\n\
                     37 35 0:32 / /mnt/games rw - ext4 /dev/y rw\n";
         assert!(mounted_at(info, Path::new("/home/u/My Games")));
+        // Whose namespace: a sandbox's home bound over the home, or a
+        // layer's upper directory — the container's name, not a prefix.
+        let sandbox =
+            "36 1 0:32 /home/u/.local/state/vpn-profiles/work/home /home/u rw - btrfs /dev/x rw\n";
+        assert!(container_namespace(sandbox, Path::new("/home/u"), "work"));
+        assert!(!container_namespace(sandbox, Path::new("/home/u"), "ork"));
+        let layer = "40 1 0:50 / /home/u rw - overlay overlay rw,lowerdir=/proc/self/fd/7,upperdir=/home/u/.local/state/vpn-profiles/work/home/upper,workdir=/w\n";
+        assert!(container_namespace(layer, Path::new("/home/u"), "work"));
+        assert!(!container_namespace(layer, Path::new("/home/u"), "play"));
+        assert!(!container_namespace(sandbox, Path::new("/home/v"), "work"));
         assert!(mounted_at(info, Path::new("/mnt/games")));
         assert!(!mounted_at(info, Path::new("/mnt")));
     }
