@@ -3,7 +3,7 @@ of the container design of 2026-09-27 (docs/CONTAINERS.md §3.3,
 docs/LEAK-MODEL.md «Шлюзовая архитектура»).
 
 Executed by the main test script with exec(), in its globals (machine,
-server, alice, in_zone, STATE, rzpid, json, re, shlex; vmreal up): the
+server, alice, in_zone, in_zone_root, STATE, rzpid, json, re, shlex; vmreal up): the
 script is handed to the driver's build in one environment variable, and the
 kernel takes 128 KiB there (MAX_ARG_STRLEN).
 
@@ -231,10 +231,29 @@ with subtest("a zone of a previous build (no bridge): entered as before, and the
         "su -l alice -c "
         + shlex.quote(
             "export XDG_RUNTIME_DIR=/run/user/1000; "
-            "cellward run vmreal -- socat -T5 - TCP:10.99.0.1:8080 | grep -q peer=10.99.0.2"
+            "cellward run vmreal -- ping -c1 -W5 10.99.0.1"
         ),
         timeout=60,
     )
 
 # The zone was restarted: its app namespace is another process now.
 rzpid = machine.succeed(f"cat {STATE}/vmreal/zone.pid").strip()
+
+# The tunnel quiet before the next file kills the zone. The echo's reply was
+# the last data: the zone owes the server a keepalive, and until it has sent
+# it the server waits for one, then knocks with a handshake — at a port
+# nobody holds once the zone is killed, and the host's "port unreachable"
+# lands in the leak capture (red once in CI). Its keepalive sent, neither
+# side owes the other anything: waited for as that, by the tunnel's count
+# of what it sent.
+def tunnel_sent():
+    return int(in_zone_root(rzpid, "wg show awg0 transfer").split()[2])
+
+
+sent = tunnel_sent()
+for _ in range(120):
+    if tunnel_sent() > sent:
+        break
+    machine.sleep(0.5)
+else:
+    raise AssertionError(f"the zone's tunnel sent no keepalive (it sent {sent} bytes)")
