@@ -1454,7 +1454,17 @@ pub fn run(args: Args) -> u8 {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| d.subsec_nanos()),
                     );
-                let chosen = pick_display(seed);
+                // One whose abstract name nobody holds in this network
+                // namespace: the sandbox's clients try it first and, under
+                // its Landlock scope, fail on somebody else's (review).
+                let chosen = (0..DISPLAY_SPAN)
+                    .map(|i| pick_display(seed.wrapping_add(i)))
+                    .find(|d| {
+                        d[1..]
+                            .parse::<u32>()
+                            .is_ok_and(|n| !crate::x11::abstract_name_taken(n))
+                    })
+                    .unwrap_or_else(|| pick_display(seed));
                 let mut wrapped: Vec<OsString> = vec![
                     exe.into_os_string(),
                     OsString::from("fs-sandbox-x11"),

@@ -117,7 +117,7 @@ pub fn own_display(dir: &Path, lock_dir: &Path) -> Option<(u32, UnixListener)> {
 
 /// Whether `@/tmp/.X11-unix/X<n>` is bound by somebody in this network
 /// namespace: a bind of our own fails. Ours, if it succeeds, goes at once.
-fn abstract_name_taken(n: u32) -> bool {
+pub(crate) fn abstract_name_taken(n: u32) -> bool {
     use std::os::linux::net::SocketAddrExt;
     let Ok(addr) =
         std::os::unix::net::SocketAddr::from_abstract_name(format!("/tmp/.X11-unix/X{n}"))
