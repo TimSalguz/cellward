@@ -317,11 +317,14 @@ fn a_program_nobody_has_run_before_is_asked_about_and_started() {
     );
     assert!(out.status.success(), "{}", stderr(&out));
 
+    // In a home of its own: nobody chose the main home for it (2026-09-27).
     assert_eq!(
         home.launched(),
         vec![vec![
             "run".to_owned(),
             "nl".to_owned(),
+            "--sandbox".to_owned(),
+            "app-firefox".to_owned(),
             "--".to_owned(),
             "firefox".to_owned(),
             "%u".to_owned()
@@ -352,6 +355,8 @@ fn a_program_nobody_has_run_before_is_asked_about_and_started() {
 fn choosing_always_in_the_main_home_moves_the_program_to_its_container() {
     let home = Home::new("pin");
     home.zone("nl");
+    // The main home, chosen for it before: an empty file.
+    home.write("state/.lastprofile/firefox", "");
     home.answers(&["pin:nl"]);
     let out = home.run(&pick("firefox"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -742,7 +747,20 @@ fn a_dead_record_is_not_a_running_program() {
     let out = home.run(&pick("firefox"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(home.asked().len(), 1);
-    assert_eq!(home.launched()[0], ["run", "nl", "--", "firefox", "%u"]);
+    // Not the dead copy's container either: nothing was chosen for it, so a
+    // home of its own.
+    assert_eq!(
+        home.launched()[0],
+        [
+            "run",
+            "nl",
+            "--sandbox",
+            "app-firefox",
+            "--",
+            "firefox",
+            "%u"
+        ]
+    );
 }
 
 #[test]
@@ -782,6 +800,7 @@ fn without_a_graphical_session_the_remembered_choice_is_taken_and_said_out_loud(
     let home = Home::new("headless");
     home.zone("nl");
     home.write("state/.last/firefox", "nl");
+    home.write("state/.lastprofile/firefox", "");
     let out = home.run_headless(&pick("firefox"));
 
     assert!(out.status.success(), "{}", stderr(&out));
@@ -801,6 +820,7 @@ fn the_unconfined_choice_goes_through_run_like_any_other_network() {
     // and everything `vpn-zone run` adds on the way (the container, the
     // compositor restriction, the registry record) was lost without a word.
     let home = Home::new("unconfined");
+    home.write("state/.lastprofile/hello", "");
     home.answers(&["unconfined"]);
     let out = home.run(
         &["--id", "hello", "--", "/bin/sh", "-c", "echo ЗАПУЩЕНО"],
@@ -939,7 +959,19 @@ fn a_pin_that_names_a_zone_that_is_gone_is_dropped_rather_than_obeyed() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!home.path("state/.pinned/firefox").exists());
     assert!(!home.path("state/.pinnedprofile/firefox").exists());
-    assert_eq!(home.launched()[0], ["run", "nl", "--", "firefox", "%u"]);
+    // The container that is gone is the program's own one, not the main home.
+    assert_eq!(
+        home.launched()[0],
+        [
+            "run",
+            "nl",
+            "--sandbox",
+            "app-firefox",
+            "--",
+            "firefox",
+            "%u"
+        ]
+    );
 }
 
 #[test]
@@ -968,6 +1000,7 @@ fn the_old_shortcut_format_still_launches() {
     // starting at all.
     let home = Home::new("legacy");
     home.zone("nl");
+    home.write("state/.lastprofile/AyuGram", "");
     home.answers(&["nl"]);
     let out = home.run(
         &[
@@ -1127,6 +1160,7 @@ fn an_unassigned_autostart_starts_offline_in_its_own_home_without_a_dialog() {
 fn an_unassigned_autostart_asks_and_remembers_always() {
     let home = Home::new("autostart-asks");
     home.zone("nl");
+    home.write("state/.lastprofile/tg", "");
     home.answers(&["pin:nl"]);
     let out = home.run(
         &["--autostart", "--id", "tg", "--", "telegram", "-autostart"],

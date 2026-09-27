@@ -711,11 +711,15 @@ mkdir -p "$STATE/.last"
 # `direct` — прежнее имя unconfined: память, записанная до переименования,
 # обязана читаться как новое имя (и в реестр пишется уже оно).
 printf '%s' direct > "$STATE/.last/$PICKKEY"
+# Основной дом, выбранный для неё раньше (пустой файл): шаг — про память СЕТИ.
+# Новая программа идёт в свой дом — это следующий шаг.
+mkdir -p "$STATE/.lastprofile"
+: > "$STATE/.lastprofile/$PICKKEY"
 pickout=$(env -u WAYLAND_DISPLAY -u DISPLAY -u VPN_ZONE_ASK -u VPN_ZONE_PROFILE \
   -u VPN_ZONE_CURRENT -u VPN_ZONE_DELEGATED VPN_ZONE_TOOLS="$WORK/pick-tools.json" \
   "$PICK_BIN" --label "Смоук-программа" --id "$PICKKEY" \
   -- sh -c 'echo ПИКЕР-ЗАПУСТИЛ' 2>"$WORK/pick.err") \
-  || fail "пикер без графики завершился с ошибкой (см. $WORK/pick.err)"
+  || fail "пикер без графики завершился с ошибкой: $(cat "$WORK/pick.err")"
 echo "${pickout:-<пусто>}"
 [ "$pickout" = "ПИКЕР-ЗАПУСТИЛ" ] || fail "пикер не запустил команду: $pickout"
 grep -q 'спросить негде' "$WORK/pick.err" \
@@ -729,6 +733,22 @@ grep -q 'спросить негде' "$WORK/pick.err" \
 grep -q '^[0-9]* unconfined ' "$STATE/.running/__main__/$PICKKEY" 2>/dev/null \
   || fail "запуск в unconfined не записан в реестр: $(cat "$STATE/.running/__main__/$PICKKEY" 2>&1)"
 echo "ok: без графики выбран unconfined (из памяти с прежним именем direct), команда запущена через run, метка и реестр записаны"
+
+step "Пикер без графики: программе, которой контейнер не выбирали, — свой дом"
+# 2026-09-27: не основной дом (весь настоящий $HOME без песочницы), а свой.
+# Сеть — из памяти (unconfined), контейнер — свой, и запуск обязан пройти.
+NEWKEY="${PICKKEY}-new"
+printf '%s' unconfined > "$STATE/.last/$NEWKEY"
+newout=$(env -u WAYLAND_DISPLAY -u DISPLAY -u VPN_ZONE_ASK -u VPN_ZONE_PROFILE \
+  -u VPN_ZONE_CURRENT -u VPN_ZONE_DELEGATED VPN_ZONE_TOOLS="$WORK/pick-tools.json" \
+  "$PICK_BIN" --label "Новая программа" --id "$NEWKEY" \
+  -- sh -c 'echo В-СВОЁМ-ДОМЕ; echo "$HOME"' 2>"$WORK/pick-new.err") \
+  || fail "новая программа без графики не запустилась: $(cat "$WORK/pick-new.err")"
+echo "${newout:-<пусто>}"
+echo "$newout" | grep -qx 'В-СВОЁМ-ДОМЕ' || fail "команда не запустилась: $newout"
+[ "$(echo "$newout" | tail -1)" != "$HOME" ] \
+  || fail "новая программа получила настоящий \$HOME: $newout"
+echo "ok: новая программа — в своём доме, не в настоящем"
 
 # --- 6г. Доверенный сертификат — только в своём контейнере -----------------
 # docs/CERTIFICATES.ru.md. Всё на УЦ, сгенерированном здесь же: ничего
