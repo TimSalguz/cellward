@@ -468,6 +468,15 @@ the network, however it was started.
     container started with the host's network (`distrobox`/`toolbox`, `--network host`), or
     a namespace the user maps on purpose with `newuidmap`. Narrowing it needs the zones'
     pasta under an owner no container uses (ROADMAP).
+  - *`nixbld` is let out in `enforce`* (audit 2026-09-27): any local user can have the Nix
+    daemon build a fixed-output derivation, whose builder runs as `nixbldN` in the host's
+    network and may connect anywhere. `strict` does not let the group out.
+  - *A host-interface zone reaches the host's own services* (audit 2026-09-27): pasta runs
+    in the host's network and gives the zone an address of its own, so a connection from
+    the zone to one of the host's addresses is delivered locally — to a DNS forwarder, a
+    proxy, Tor, sshd listening on it — and whatever that service sends goes out by the
+    host's routes, not by the interface chosen. Plain system zones refuse this
+    (`plain_host_ruleset`); user host-interface zones do not yet.
   - *Established flows stay.* `ct state established,related accept` comes first: a
     connection opened while cellward was off, during the emergency key's window or
     before the policy loaded keeps flowing afterwards, and so does the reply side of a
