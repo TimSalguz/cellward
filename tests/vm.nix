@@ -1856,6 +1856,16 @@ let
               "&& ! ls /home/alice/.local/state/vpn-zones/.throwaway/vpn-profile-vmother'"
           )
           assert "tmp-ok" in out, out
+          # Gone behind its launch: nothing on the host but the other one
+          # (review: the given-back directory was a mount point, and stayed).
+          out = alice("ls -A ~/.local/state/vpn-zones/.throwaway")
+          assert out.split() == ["vpn-profile-vmother"], out
+          # Joined only while it runs, in its own network: one whose programs
+          # are gone holds what nobody may take over.
+          alice(
+              "! cellward run vmherm --tmp-profile --join "
+              "/home/alice/.local/state/vpn-zones/.throwaway/vpn-profile-vmother -- true"
+          )
           alice("rm -rf ~/.local/state/vpn-zones/.throwaway/vpn-profile-vmother")
           for path in [".local/state/vpn-zones/.running/x", ".config/vpn-zones/x", ".local/share/vpn-zones/x"]:
               in_zone(hp, f"sh -c '! touch /home/alice/{path}'")

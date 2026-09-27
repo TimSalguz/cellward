@@ -664,19 +664,33 @@ fn only_a_throwaway_container_of_ours_can_be_joined() {
     );
     let ours = home.state().join(".throwaway/vpn-profile-abc12345");
     fs::create_dir_all(&ours).unwrap();
-    let out = home.run_with(
-        &[
-            "run",
-            "nl",
-            "--tmp-profile",
-            "--join",
-            ours.to_str().unwrap(),
-            "--",
-            "true",
-        ],
-        &[("VPN_ZONE_DRYRUN", "1")],
-    );
+    let join = |zone: &str| {
+        home.run_with(
+            &[
+                "run",
+                zone,
+                "--tmp-profile",
+                "--join",
+                ours.to_str().unwrap(),
+                "--",
+                "true",
+            ],
+            &[("VPN_ZONE_DRYRUN", "1")],
+        )
+    };
+    // Nothing runs in it: what is left of it is nobody's to join.
+    let out = join("nl");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("больше нет"), "{}", stderr(&out));
+    // Its programs run in nl: joined there, and nowhere else.
+    let reg = home.state().join(".running/vpn-profile-abc12345/firefox");
+    fs::create_dir_all(reg.parent().unwrap()).unwrap();
+    fs::write(&reg, format!("{} nl __tmp__\n", std::process::id())).unwrap();
+    let out = join("nl");
     assert!(out.status.success(), "{}", stderr(&out));
+    let out = join("direct");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("двух сетях"), "{}", stderr(&out));
 }
 
 #[test]

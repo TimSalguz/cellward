@@ -281,7 +281,13 @@ fn give_storage_back(path: &Path) -> Result<(), String> {
         return Ok(());
     }
     if !fs::symlink_metadata(&kept).is_ok_and(|m| m.is_dir()) {
-        return Err(format!("the zone keeps no {}", kept.display()));
+        // A zone brought up by a build that kept no such storage (the
+        // throwaway containers', before 2026-09-27): it shows every launch
+        // the whole root, and this one is not started into it.
+        return Err(format!(
+            "the zone keeps no {} — it was brought up by an older cellward: restart the zone",
+            kept.display()
+        ));
     }
     if fs::symlink_metadata(path).is_err() {
         fs::create_dir(path).map_err(|e| format!("cannot make {}: {e}", path.display()))?;
@@ -888,9 +894,37 @@ pub fn run(args: Args) -> u8 {
         );
     } else {
         remove_tree(&args.profile_dir);
+        if let Some(path) = &args.storage {
+            take_storage_back(path);
+        }
         remove_tree(&args.regdir);
     }
     exit_code_of(status)
+}
+
+/// A throwaway container's storage, given back into a zone
+/// ([`give_storage_back`]), is a mount point here: its contents went with
+/// the layer, and the real directory, in the zone's keep, goes now. The
+/// empty one it was mounted on in the zone's cover stays, as a rule: the
+/// first mount of it is under the layer, out of reach, and keeps it busy.
+/// Outside a zone nothing was mounted, and the directory went already.
+fn take_storage_back(path: &Path) {
+    let Some(home) = home_dir() else {
+        return;
+    };
+    let Some(kept) = crate::home_layer::kept_storage_of(&home, path) else {
+        return;
+    };
+    if !home.join(crate::home_layer::KEPT_STORAGE).is_dir() {
+        return;
+    }
+    let Ok(target) = CString::new(path.as_os_str().as_bytes()) else {
+        return;
+    };
+    // SAFETY: a NUL-terminated path that outlives the call.
+    unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH | libc::UMOUNT_NOFOLLOW) };
+    let _ = fs::remove_dir(path);
+    let _ = fs::remove_dir(&kept);
 }
 
 #[cfg(test)]

@@ -1424,9 +1424,53 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
 
 /// Why this launch may not use its container in `zone`, if it may not.
 fn identity_refusal(tools: &Tools, selection: &Selection, zone: &str) -> Option<String> {
+    if let (Sandbox::None, Container::TmpJoin(dir)) = (&selection.sandbox, &selection.container) {
+        return throwaway_join_refusal(tools, dir, zone);
+    }
     let container = crate::container::load(tools, &container_name(selection)?)?;
     let running = crate::container::running_network(tools, &container);
     crate::container::refusal(&container, zone, running.as_deref())
+}
+
+/// A throwaway container is joined while it runs, and in the network it
+/// runs in, only. Its name is in `.running`, which every zone reads: a
+/// request naming another zone's would carry that session — its cookies,
+/// its logins — into another network, and one whose programs are gone
+/// holds what a launch that did not end cleanly left, nobody's to join.
+fn throwaway_join_refusal(tools: &Tools, dir: &Path, zone: &str) -> Option<String> {
+    let closed = || {
+        Some(format!(
+            "временного контейнера {} больше нет: присоединиться нельзя",
+            dir.display()
+        ))
+    };
+    let Some(real) = fs::canonicalize(dir).ok() else {
+        return closed();
+    };
+    // Not one of ours at all: `resolve_container` says so, in its words.
+    if !our_throwaway(tools, &real) {
+        return None;
+    }
+    let Some(name) = real.file_name().map(OsStr::to_owned) else {
+        return closed();
+    };
+    let running = tools.state.join(".running");
+    let records =
+        registry::live_records(&running.join(&name), &|pid| registry::alive(&running, pid));
+    if records.is_empty() {
+        return closed();
+    }
+    records
+        .into_iter()
+        .map(|(_, r)| r.zone)
+        .find(|busy| busy != zone)
+        .map(|busy| {
+            format!(
+                "временный контейнер {} работает в сети «{busy}», а запуск просит «{zone}»: \
+                 контейнер не бывает в двух сетях сразу",
+                name.to_string_lossy()
+            )
+        })
 }
 
 /// The name of the container a resolved launch runs in, whatever its home;
@@ -1715,6 +1759,16 @@ pub fn throwaway_bases(state: &Path) -> [PathBuf; 2] {
     [state.join(THROWAWAY_DIR), PathBuf::from("/tmp")]
 }
 
+/// Is `real` (links resolved) a throwaway container of ours: `vpn-profile-…`
+/// right in one of [`throwaway_bases`]?
+fn our_throwaway(tools: &Tools, real: &Path) -> bool {
+    real.file_name()
+        .is_some_and(|n| n.as_bytes().starts_with(b"vpn-profile-"))
+        && throwaway_bases(&tools.state)
+            .iter()
+            .any(|base| fs::canonicalize(base).is_ok_and(|b| real.parent() == Some(b.as_path())))
+}
+
 /// Turn the parsed container into directories, creating a throwaway one.
 ///
 /// `None` means the message has been printed and the launch is over.
@@ -1757,13 +1811,7 @@ fn resolve_container(tools: &Tools, selection: &Selection) -> Option<ResolvedCon
             // last tenant, and a directory named here — by a request that came
             // through the broker, or by a slip of the hand — would go with it.
             let real = fs::canonicalize(dir).ok()?;
-            let ours = real
-                .file_name()
-                .is_some_and(|n| n.as_bytes().starts_with(b"vpn-profile-"))
-                && throwaway_bases(&tools.state).iter().any(|base| {
-                    fs::canonicalize(base).is_ok_and(|b| real.parent() == Some(b.as_path()))
-                });
-            if !ours {
+            if !our_throwaway(tools, &real) {
                 eprintln!(
                     "{} — не временный контейнер cellward: присоединиться нельзя",
                     dir.display()
