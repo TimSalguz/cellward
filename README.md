@@ -37,7 +37,10 @@ can be any number of zones, each with its own config. There are built-in
 2026-09; the old name still works) is the host's own network with nothing of a
 zone around the program: no VPN, the host's resolver, session bus and
 `systemd --user`. `offline` means the literal absence of a route, not a
-firewall rule.
+firewall rule — and, since 2026-09-27, a namespace of the container's own:
+an offline launch runs in its container's instance (network, IPC and mount
+namespaces of that container alone, the covers of a zone), so two
+containers offline do not reach each other either.
 
 Zones are **hermetic by default** (since 2026-09): a program in a zone has no
 `systemd --user` and a filtered session bus — portals, notifications, tray
@@ -401,6 +404,7 @@ cellward check <zone>                          # is the tunnel alive
 cellward doctor [<zone>] [--json]              # what is really closed, checked inside the zone
 cellward journal [--json] [<N>]                # unconfined launches and the broker's decisions
 cellward kill <zone>                           # cut a zone off now: its programs killed, the zone down
+cellward container stop|kill <container>       # end a container's instance: its programs closed / killed at once
 cellward container create <name> [--home private|layer|main]  # a container: its own home, a layer, or the real one
 cellward container grant <name> <dir> [--for 2h]  # a directory of the real home, for a while
 cellward watch [--json]                        # are the tunnels alive (a timer runs it and notifies)

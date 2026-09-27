@@ -252,6 +252,43 @@ Every mount happens in the launch's own mount namespace, never in the zone's:
 two containers in one zone must not see each other's layers or certificates.
 bwrap binds recursively, so what steps 1–3 mounted is what the sandbox sees.
 
+**Offline, the container's instance** (2026-09-27, stage 1 of the container
+design: the container is the unit of isolation, a zone only its way out). A
+launch whose network is `offline` enters no zone: it runs in its container's
+*instance* — `vpn-zone-container@<id>.service`, started when it is not up —,
+and the steps above differ only in how it gets there:
+
+```
+vpn-zone-core wl-sandbox <program> --zone <instance key> --     on the host
+vpn-zone-core container-enter --instance <id> --   the WAITER: joins the instance's user,
+  │                                                 network and IPC namespaces (never its
+  │                                                 mount namespace), holds `lock` shared,
+  │                                                 not dumpable, no capabilities once the
+  │                                                 child is on its way
+  └─ fork: the CHILD joins its mount namespace, a slave copy of its own,
+      the instance's capabilities kept (ambient) — what nsenter --keep-caps did
+      └─ vpn-zone-core profile-run --cwd <dir> …    steps 1–6 as above
+```
+
+The instance's id is its container's name; `main:offline` for the main home
+(and `<c>:offline` for a container of the main home whose network is
+`ask`); `:tmp:<layer>` for a throwaway container; `:fs:<pid>-<start>` for a
+throwaway sandbox, one per launch. An instance is set up by the same code
+as a zone's space, with loopback alone, and holds what a zone holds for its
+programs — the covers, the private `/tmp` of a hermetic one, `/dev`, the
+helpers —, per container: two containers offline share no `/tmp`, no
+abstract socket, no System V IPC, no loopback. Its settings are the offline
+network's zone-level ones, frozen as it comes up; the container's own
+(microphone, screen cast, camera, devices, x11) are read as for a zone.
+
+It is kept by `vpn-zone-core container-holder <id>` (`rust/src/zone.rs`,
+`run_instance`) for as long as it has programs — known by their user
+namespace, the instance's or one below it — and ends with the last of them;
+a throwaway's layer and records go with it. Stopped (`cellward container
+stop <c>`, a logout), it ends its programs: TERM, and systemd's stop timeout
+for one that does not end. `cellward container kill <c>` freezes and kills
+them at once.
+
 ## 4. Choosing a container
 
 Resolution order for a launch of program `P`:
@@ -657,6 +694,31 @@ every key of version 1.
   `unconfined`;
 - a program by its launcher key (`apps[].id`, `containers[].apps[].value`),
   the lossless key of `docs/LAUNCHERS.md` §3.4.
+
+**`instances`** (added 2026-09-27, stage 1 of the container design; additive,
+version 1 unchanged): the containers' running instances (§3.6), each
+
+```json
+{ "id": "work", "container": "work", "network": "offline",
+  "exit": "none", "why": "offline", "up": true, "pid": 4321,
+  "since": "2026-09-27T12:00:00Z", "epoch": 1, "pid_namespace": false,
+  "build": "current", "restart_needed": [], "programs": 2,
+  "live_switch": { "available": false, "reason": "unsupported" } }
+```
+
+— `container` is the container's name, `"main"` for the main home's
+instance (`main:offline`) and `null` for a throwaway's; `pid` is the host pid
+of its space; `restart_needed` names the offline network's settings that
+changed since it came up (the instance takes them at its next start);
+`programs` counts its live launches. `exit`, `why`, `epoch`, `pid_namespace`
+and `live_switch` are fixed in stage 1 (no way out, no switch, no pid
+namespace of its own) and will move in the later stages. With it:
+`containers[].instances` (the ids of a container's running instances),
+`containers[].running[].instance` (the instance a launch runs in, `null` for
+one in a zone or unconfined) and `attached` on the `offline` network (the
+ids of the instances with no network). State under
+`~/.local/state/vpn-zones/.instances/` is the instances', named by a key and
+not a zone: a reader of zones skips it (a dot directory).
 
 **`uplink_owner`** (`{uid, gid}` or `null`) is for a host egress policy: every
 socket a zone's traffic leaves the host by is pasta's and belongs to the zone's

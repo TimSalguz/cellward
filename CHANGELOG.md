@@ -6,6 +6,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Containers' instances, and every offline launch in one** (2026-09-27,
+  stage 1 of the container-first model). A running container is an
+  instance now: `vpn-zone-container@<id>.service`, with a user, network,
+  mount and IPC namespace of its own, the covers of a zone, a `/dev` of its
+  own with the device guard, and helpers of its own (the filtered buses,
+  the sound filter, a PipeWire context with its own key in the policy's
+  metadata, `instance:<id>`). Every launch whose network is `offline` runs
+  in its container's instance — the main home's is `main:offline`, a
+  throwaway's `:tmp:<layer>` —, entered by `vpn-zone-core container-enter`;
+  the `offline` zone is not started for a launch any more. Two containers
+  offline no longer share `/tmp`, abstract sockets, System V IPC or
+  loopback. Who a program is, the broker, the sound filter and the
+  PipeWire context learn from its user namespace, which it cannot leave
+  (nested sandboxes and daemons that left their launch included), not from
+  the registry. The instance's root is the user's fourth subordinate id —
+  never a zone's —, and its own processes are not dumpable. It ends with
+  its last program (a throwaway's layer and records with it) and ends its
+  programs when it is stopped: `cellward container stop <c>`; `cellward
+  container kill <c>` and `cellward kill <c>` freeze and kill them at once,
+  `cellward kill offline` every instance with no network. Zones, and
+  launches into them, are as they were.
+- **`status --json`**: a top-level `instances` array (`id`, `container`,
+  `network`, `exit`, `why`, `up`, `pid`, `since`, `epoch`,
+  `pid_namespace`, `build`, `restart_needed`, `programs`, `live_switch`),
+  `containers[].instances`, `containers[].running[].instance`, and
+  `attached` on the `offline` network. Additive: `schema_version` stays 1.
+  **`doctor --json`**: an `instances` array with each one's checks — its
+  probe runs inside through `container-enter`, and its root is checked to
+  be the fourth subordinate id.
 - **Groundwork for containers as the unit of isolation** (2026-09-27, stage
   0 of the owner's container-first model: a container gets network, mount
   and pid namespaces of its own, a zone is only its way out). Nothing
@@ -259,6 +288,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and `usb:` for a board a program can reflash.
 
 ### Changed
+- **Offline is containers' instances, not a zone** (2026-09-27, stage 1 of
+  the container design). What scripts may notice: a launch offline starts
+  `vpn-zone-container@<id>.service` instead of `vpn-zone@offline.service`;
+  `cellward down offline` no longer ends offline programs (`cellward
+  container stop <c>` or `cellward kill offline` does); an instance ends
+  when its last program does, and stopping it — a logout too — ends its
+  programs; the offline network's settings (`hermetic`, `nix-daemon`,
+  `host-files`, `audio-manager`) are frozen per instance as it comes up. A
+  throwaway container launched offline is erased by its instance, not by
+  `profile-run`. Offline programs stay in their desktop scopes: from a login
+  session the kernel refuses to move a process into the user manager's
+  tree, so an instance knows its programs by their user namespace. A user
+  needs at least 4 subordinate ids in `/etc/subuid` and `/etc/subgid` (0 a
+  zone's root, 1 an OpenConnect client, 2 a bridge, 3 an instance's root);
+  `doctor` names the range. PipeWire's policy sees each instance under its
+  own key, `vpn-zones.microphone.instance:<id>`.
 - **A program seen for the first time is offered a home of its own, not the
   main home** (2026-09-27; the owner's model of 2026-09-17, every program a
   home of its own — `docs/CONTAINERS.md` §12). With `default-profile ask`

@@ -79,6 +79,21 @@ the zone gets it — not per launch):
    (decision A).
 3. **The system bus**: one of B1–B3 below.
 
+**Per container, offline** (2026-09-27, stage 1 of the container design,
+`docs/CONTAINERS.md` §3.6). A launch whose network is `offline` runs in its
+container's *instance*, and the instance is set up by the same code as a
+zone's mount namespace: everything above holds in it, once per instance
+instead of once per zone. What changes is who shares it — nobody: every
+container offline has its own runtime directory, its own `/tmp`, `/var/tmp`
+and `/dev/shm` when hermetic, its own filtered buses, sound filter and
+PipeWire context (its key in the policy's metadata is `instance:<id>`), and
+its own directory of restricted Wayland sockets, named by the instance's key.
+Whether it is hermetic is the offline network's setting (`cellward hermetic
+offline on|off`), frozen as the instance comes up; the settings a zone takes
+at its start take effect at the instance's next one (`status --json`
+`instances[].restart_needed`). An instance also covers `/sys/fs/cgroup`, and
+keeps nothing of the project's state but its own throwaway layer.
+
 ## 3. Decision C — the session bus and the broker
 
 A filter with the rules of the sandbox (the desktop and document portals by name, `Notifications`,

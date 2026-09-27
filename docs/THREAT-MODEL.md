@@ -80,7 +80,7 @@ It is shown as `host-interface` everywhere.
 | launch | promises | does not promise |
 |---|---|---|
 | `unconfined` | nothing about the network; its kind of home still applies | anything else: it has the host's network, resolver, session bus and `systemd --user` |
-| `offline` zone | no network at all, names included (N13, D1), plus what every zone gets | what an ordinary or a hermetic zone does not, by its setting |
+| `offline` (a container's instance since 2026-09-27) | no network at all, names included (N13, D1), plus what every zone gets — per container: its own network, IPC and mount namespaces, apart from every other container (X10) | what an ordinary or a hermetic zone does not, by its setting; host `/proc` (X4) |
 | ordinary zone, no sandbox | the N and D rows and "every zone gets" below, against leaks by mistake | anything against a hostile program: it has `systemd --user`, the whole session bus and the portals (P1–P6), the host's `/tmp` (X1), the raw PipeWire socket (A2, A3), the whole home (F1, F2) |
 | hermetic zone (the default), no sandbox | the network rows against a hostile program too, plus "hermetic adds" | the home: readable, and writable except the host's startup places (F1, F2); host `/proc` (X4), signals (X5), `machine-id` (I3) |
 | any zone with a home of its own | plus "the sandbox adds" | `/sys`, `/etc`, `/nix/store` (I4); the kernel surface (K1) |
@@ -124,7 +124,7 @@ satellite, when granted.
 | N10 | A host-interface zone falls back to the host's routes | yes | every socket is bound to the interface (patched pasta); the zone goes down when the interface does | vm22 vm23 vm24 vm25 |
 | N11 | A host-interface zone goes out through a host service (proxy, Tor, sshd on a host address) | partly | the filter refuses the host's IPv4 and IPv6 (global, ULA) addresses as they are at zone start; later ones are not listed | vm22 vm40 |
 | N12 | A user zone through a system zone reaches that zone's services, or goes around its tunnel | yes | its pasta runs as `vpn-zones-bridge`, which the system zone refuses to every local address, both families; IPv6 passed on only when the system zone's network carries it | br1 br2 br3 br4 br5 |
-| N13 | An offline zone reaches anything | yes | loopback only; the resolvers are hidden before the offline branch | C · vm26 vm10 sm7 |
+| N13 | An offline zone, or an offline container's instance, reaches anything | yes | loopback only; the resolvers are hidden before the offline branch — the same code for an instance (2026-09-27) | C · vm26 vm10 vm53 sm7 sm24 |
 | N14 | A device granted to a container brings its own network (a phone's adb or modem, an ESP32, an LTE modem) | no | a warning when such a device is granted | — |
 | N15 | Metadata: the endpoint's name is resolved in the host's network; DNS content is readable at the tunnel's exit | no | a literal endpoint address avoids the first; DoT/DoH is planned (M3) | — |
 | N16 | A socket family no network namespace holds: `AF_VSOCK` to the host's or a VM's vsock services (a guest's sshd since systemd 256), around the tunnel | yes for 64-bit programs · 32-bit: **no** | a seccomp allow-list of families in every launch into a zone and for the OpenConnect client (`AF_UNIX`, `AF_INET`, `AF_INET6`, `AF_NETLINK`, `AF_PACKET`); x86's 32-bit `socketcall` cannot be filtered by family and passes | vm45 u14 |
@@ -179,18 +179,19 @@ satellite, when granted.
 | A8 | Playing to a network sink the host has loaded (RAOP, RTP); the shared sample cache | no | open (LEAK-MODEL §17) | — |
 | | **Processes, IPC, temporary files** | | | |
 | X1 | The host's `/tmp` and `/dev/shm`: listening sockets (tmux `run-shell`, a VPN client's IPC, single-instance sockets), other sandboxes' bus filters | hermetic: yes · ordinary: **no** (`doctor` names them) | its own `/tmp`, `/var/tmp`, `/dev/shm`; the filters moved into the runtime directory | vm19 |
-| X2 | The host's abstract unix sockets | yes | they belong to the network namespace; a sandbox in the host's network: a Landlock scope (Linux 6.12+) | vm19 vm32 |
+| X2 | The host's abstract unix sockets | yes | they belong to the network namespace — an offline container's instance has one of its own (2026-09-27); a sandbox in the host's network: a Landlock scope (Linux 6.12+) | vm19 vm32 vm54 |
 | X3 | `/proc/<pid>/root`, `cwd`, `fd`, `environ` of the host's session processes | yes | the kernel's ptrace rules across user namespaces; `vpn-zone-sys` gets a user namespace of its own | vm15 vm17 vm18 sys4 |
-| X4 | `/proc/<pid>/cmdline` of host processes (which zones and profiles are in use) | sandbox: yes · zone: **no** | zones have no pid namespace; the sandbox has its own | sandbox: C · **no test** |
+| X4 | `/proc/<pid>/cmdline` of host processes (which zones and profiles are in use) | sandbox: yes · zone and offline container: **no** | zones have no pid namespace, nor do containers' instances yet (stage 3 of the container design gives each instance its own); the sandbox has its own. An instance's `/sys/fs/cgroup`, which names every unit and scope, is covered | sandbox: C · **no test** |
 | X5 | Signals to the host's processes of the same user (killing the compositor) | yes (Linux 6.12+) | each launch into a zone is a Landlock domain of its own with `LANDLOCK_SCOPE_SIGNAL`: it signals itself and what it starts, nothing else — another launch of the same zone neither; the sandbox also cannot name host pids | vm44 |
-| X6 | The host's System V IPC and POSIX message queues | yes | an IPC namespace per zone, per uplink and per sandbox | vm18 sm16 |
+| X6 | The host's System V IPC and POSIX message queues | yes | an IPC namespace per zone, per uplink, per sandbox and per container's instance | vm18 sm16 vm54 |
 | X7 | The session's supplementary groups (docker, libvirt, input) | yes | dropped for zone programs | vm18 |
 | X8 | Exhausting memory, CPU or processes | no | limits per zone are planned (ROADMAP §17) | — |
 | X9 | `TIOCSTI` into the host terminal a program was started from | sandbox: yes · zone: **no** | seccomp in the sandbox; a zone program keeps that terminal, and the kernel's `legacy_tiocsti` decides | u6 |
+| X10 | Another container's loopback services, abstract sockets, System V IPC and `/tmp` (a container reaching another) | offline: yes · in one zone: **no** | offline, each container runs in its own instance: network, IPC and mount namespaces of its own (stage 1 of the container design, 2026-09-27); in a zone its containers share the zone's (§5) | vm53 vm54 |
 | | **Helpers outside the zone** | | | |
 | H1 | The Nix daemon: a fixed-output build fetches any URL from the host's network | yes, unless `nix-daemon on` | hidden in every zone and always in the OpenConnect uplink; system tier: hidden from containers and `vpn-zone-sys`, optional for services | vm18 vm20 sm16 sys2 |
 | H2 | The system tier's service (add a system zone, run in one, around the zone's tunnel) | yes | `/run/vpn-zones` hidden in user zones; `VZP1` accepted only from a zone's root; per-zone user lists | br2 sys5 |
-| H3 | cellward's own state and settings (every zone's key, `zone.pid`, the registry, raw sockets behind the filters, `broker-always`, `declared/`) | yes | tmpfs over `~/.local/state/vpn-zones` in every zone; `~/.config/vpn-zones` and `~/.local/share/vpn-zones` read-only | vm18 sm10 |
+| H3 | cellward's own state and settings (every zone's key, `zone.pid`, the instances' `.instances/` with their control sockets, the registry, raw sockets behind the filters, `broker-always`, `declared/`) | yes | tmpfs over `~/.local/state/vpn-zones` in every zone and every container's instance — an instance keeps its own throwaway layer and never the registry; `~/.config/vpn-zones` and `~/.local/share/vpn-zones` read-only | vm18 sm10 vm56 |
 | H4 | Other containers' data | yes | container storage is covered in zones; a launch gets back its own | vm33 vm18 |
 | H5 | Programs outside every zone reach the network | only with the system tier's egress policy | nftables by socket owner (`enforce`, `strict`) | sys7 sys8 ho1 |
 | H6 | A file in `declared/` speaks in Nix's name (a file chooser a zone's program steers, a program of the host): `hermetic-default off`, a container bound to `unconfined`, the CLI refusing to change it | yes | a declaration counts only when the file, every link followed, is in the Nix store, as home-manager's links are; a plain file or a link elsewhere is ignored with a warning, and the local value or the default applies | vm46 u15 |
@@ -274,7 +275,7 @@ Notes:
 | A compromised host | root, the user's session outside the zones, the Nix store and the system configuration are trusted |
 | An escape from the browser's own sandbox | not prevented or detected; the escaped code has what its container and zone give, as this table says |
 | A same-uid program outside the sandbox | a host program, or a zone program without a sandbox, can read and change a sandbox's data on disk and the whole home; only other containers' data is hidden from zones (H4) |
-| Programs of one zone against each other | one user namespace, one `/tmp`, one set of abstract sockets: per-container settings are not walls (PERMISSIONS §11.10) |
+| Programs of one zone against each other | one user namespace, one `/tmp`, one set of abstract sockets: per-container settings are not walls (PERMISSIONS §11.10). Offline, containers are apart (X10): each runs in its own instance |
 | The person's answer | a "yes" or a grant is taken as meant; W16 guards only against keys typed on |
 | Traffic analysis; the VPN provider | what leaves through the tunnel is the provider's to see |
 
@@ -303,7 +304,7 @@ apart from DynamicLauncher and the two network portals.
 - vm7 "uplink: pasta mirrors none of the host's loopback ports"
 - vm8 "the leak capture is empty", "the obfuscated tunnel's leak capture is empty"
 - vm9 "no DNS leak: the NSS path stays inside the tunnel"
-- vm10 "an offline zone cannot reach the host's resolver either"
+- vm10 "an offline instance cannot reach the host's resolver either"
 - vm11 "the zone's own nsswitch.conf: hosts is files dns, the host's is untouched"
 - vm12 "zone DNS defaults to 1.1.1.1 (config has no DNS=)", "DNS from the config: resolv.conf points into the tunnel and answers"
 - vm13 "system bus in a zone: hostname1 and ListSessions refused, login1 readable"
@@ -319,7 +320,7 @@ apart from DynamicLauncher and the two network portals.
 - vm23 "host-interface zone bound to another interface cannot reach eth1's network"
 - vm24 "host-interface zone: its interface deleted, the zone goes down"
 - vm25 "host-interface zone: a missing interface refuses to come up"
-- vm26 "picker offline branch: zone via systemctl --user, lo-only"
+- vm26 "picker offline branch: an instance via systemctl --user, lo-only"
 - vm27 "trust: the host and the container next door do not", "trust: a leaked environment gives the host nothing", "trust: a sandbox's links do not lead its roots into the host's database"
 - vm28 "user entries: a foreign one is taken over, a symlink is not, and both come back"
 - vm29 "D-Bus activation: the shadow service starts the program through the picker"
@@ -346,6 +347,13 @@ apart from DynamicLauncher and the two network portals.
 - vm50 "hermetic zone: a shell's IPC in /tmp, in the runtime directory and on the bus is out of reach" (in `tests/vm-promise-shell-ipc.py`)
 - vm51 "ordinary zone: a shell's IPC in /tmp, in the runtime directory and on the bus stays in reach" (in `tests/vm-promise-shell-ipc.py`)
 - vm52 "one launch's X server: out of reach of another launch and of another zone" (in `tests/vm-promise-x11.py`; its `/proc` and abstract-name parts need Linux 6.12)
+- vm53 "an offline launch runs in its container's instance: loopback only, apart" (in `tests/vm-instance-offline.py`, as are vm54–vm59)
+- vm54 "two containers' instances share no /tmp, no abstract socket, no System V IPC"
+- vm55 "the broker: the same container starts, another one is a person's to say"
+- vm56 "an instance's own processes: the fourth subordinate id, out of its programs' reach"
+- vm57 "cellward container kill ends every program of the container at once"
+- vm58 "an instance ends with its last program, by that event alone"
+- vm59 "a throwaway container is erased when its instance ends"
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -398,6 +406,9 @@ the other"
 - sm20 «Зона OpenConnect: у клиента свой корень, и в нём только нужное» (no `/home`, `/run`, `/var`, `/proc`, `/sys`, Nix daemon)
 - sm21 «Пикер без графики: программе, которой контейнер не выбирали, — свой дом» (the real home's marker not seen)
 - sm22 «Доверенный сертификат: слой не лёг — программа не запускается» (an unreadable stored certificate)
+- sm23 «Экземпляр: корень — четвёртый подчинённый id, не корень зон» (a container's instance, its keeper started without systemd)
+- sm24 «Запуск offline в экземпляр: только lo, своя сеть, зона offline не нужна» (lo only, the registry out of sight)
+- sm25 «Экземпляр останавливается сигналом держателю, и его программы — с ним» (a stopped instance ends its programs)
 
 Rust tests (`cargo test`):
 

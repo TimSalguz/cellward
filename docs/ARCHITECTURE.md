@@ -51,6 +51,16 @@ separate gateways.
    - a whole system with its own services and users — nspawn, NixOS `containers.<name>`
      (*not yet*, M10).
    Any container attaches to any zone of its tier, one at a time.
+   **Since 2026-09-27 the container is the unit of isolation** (the owner's
+   container-first model): a running container is an *instance* with a user,
+   network, mount and IPC namespace of its own, the covers a zone gives, its
+   own `/dev` and helpers, and an identity the kernel gives — its user
+   namespace; a zone becomes only its way out. Stage 1 *exists*: every launch
+   whose network is `offline` runs in its container's instance
+   (`vpn-zone-container@<id>.service`, [CONTAINERS.md](CONTAINERS.md) §3.6).
+   Next: zones carrying instances (`passt --fd` in the zone, a relay in the
+   instance), a pid namespace per instance, switching a running container's
+   network live.
 3. **The gatekeeper — who decides.** Every way of starting something ends in one place
    that knows which container and which zone a program gets. An unknown program is asked
    about once and remembered. **Inside a container everything inherits**: `ls | grep` in a
@@ -144,6 +154,7 @@ gatekeeper's exceptions are **packages in the store, not names**: anybody can pu
 |---|---|
 | User zones, gateway topology, second echelon, hermeticity | done |
 | Program containers, launch interception, per-container trust | done, M8 tails |
+| Containers' instances (the container as the unit of isolation) | stage 1 done: offline launches; zones carrying instances, a pid namespace, the live switch next |
 | Machine-readable state and declarative options | done (`status --json`, home-manager) |
 | System zones | done (M10, stage 1) |
 | Services and NixOS containers in system zones | done (M10, stages 2–3) |
