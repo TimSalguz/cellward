@@ -740,6 +740,11 @@ fn strip_field_codes(exec: &str) -> String {
     for c in exec.chars() {
         if pending_percent {
             pending_percent = false;
+            // `%%` is a percent sign, whole: the `%` after it is no code's.
+            if c == '%' {
+                out.push_str("%%");
+                continue;
+            }
             if FIELD_CODES.contains(c) {
                 continue;
             }
@@ -2493,9 +2498,11 @@ Name=not carried over
         // A literal percent is not a field code.
         assert_eq!(strip_field_codes("app 50%% %i"), "app 50%% ");
         assert_eq!(strip_field_codes("app %Z"), "app %Z");
-        // A `%` at the very end is kept, and `%%U` loses only the `%U`.
+        // A `%` at the very end is kept, and `%%U` is a percent sign and a
+        // U, read left to right (the specification) — no code to drop.
         assert_eq!(strip_field_codes("app %"), "app %");
-        assert_eq!(strip_field_codes("%%U"), "%");
+        assert_eq!(strip_field_codes("%%U"), "%%U");
+        assert_eq!(strip_field_codes("%%%U"), "%%");
     }
 
     #[test]
