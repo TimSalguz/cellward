@@ -100,9 +100,22 @@
 //! line out and makes the memfd its pixels go to before the filter, and
 //! writes them there (`pwrite`, the only call the title added to the filter)
 //! at whatever scale the compositor asks for.
+//!
+//! **The buttons** (stage 3, 2026-09-27; `crate::wl_frame`): close, menu and
+//! network on the title strip, dragging by the title and resizing by the
+//! border. Close, moving and resizing are Wayland requests and events of the
+//! connection itself. The menu and another network are the supervisor's to
+//! start — the proxy may not `exec` —: a byte each on the channel ([`MENU`],
+//! [`NETWORK`]), which the supervisor answers by starting `cellward
+//! window-menu --pid <its pid>` in a unit of `systemd --user`
+//! ([`menu_argv`]). The filter is as it was: the buttons' pixels go into the
+//! title's memfd, and the bytes are `sendmsg` on the channel. The program
+//! has no way to that channel, nor to the events that make the proxy send
+//! them.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::{CString, OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
@@ -127,8 +140,8 @@ use wl_proxy::state::{State, StateHandler};
 
 use crate::frame::{Frame, Rgb, Setup, TitleMode};
 use crate::sys;
-use crate::wl_frame::{Frames, MAX_FRAMED};
-use crate::wl_title::{Prepared, Text};
+use crate::wl_frame::{Ask, Asks, Frames, MAX_FRAMED};
+use crate::wl_title::{Prepared, Text, LOOK};
 
 /// The proxy's process name (`/proc/<pid>/comm`, 15 bytes at most).
 pub const PROCESS_NAME: &str = "vz-wl-proxy";
@@ -230,6 +243,8 @@ const MAX_ERROR_TEXT: usize = 1024;
 // --- THE CHANNEL -------------------------------------------------------------
 // One byte per message on a stream socketpair; the upstream descriptor rides
 // on its byte. The supervisor closing its end is "the program has exited".
+// The supervisor answers each CONNECT, in order; MENU and NETWORK it does not
+// answer, so they never come between a CONNECT and its answer's place.
 
 /// Proxy → supervisor: hardened, filter loaded, serving.
 const READY: u8 = b'r';
@@ -243,6 +258,30 @@ const UPSTREAM: u8 = b'u';
 const UPSTREAM_BARE: u8 = b'b';
 /// Supervisor → proxy: the security context no longer accepts.
 const REFUSED: u8 = b'n';
+/// Proxy → supervisor: the launch's window menu, please — the frame's ≡
+/// clicked (`crate::wl_frame::Ask`). No answer.
+const MENU: u8 = b'm';
+/// Proxy → supervisor: another network for the launch — the frame's ⇄
+/// clicked. For now the menu's restart with a network chosen ([`menu_argv`]).
+/// No answer.
+const NETWORK: u8 = b's';
+
+/// The byte of an ask of the frame, on the channel.
+fn ask_byte(ask: Ask) -> u8 {
+    match ask {
+        Ask::Menu => MENU,
+        Ask::Network => NETWORK,
+    }
+}
+
+/// The ask of a byte from the proxy; `None` for anything else.
+fn ask_of(byte: u8) -> Option<Ask> {
+    match byte {
+        MENU => Some(Ask::Menu),
+        NETWORK => Some(Ask::Network),
+        _ => None,
+    }
+}
 
 /// `wl_display` error codes.
 const INVALID_OBJECT: u32 = 0;
@@ -288,6 +327,10 @@ pub struct Proxy {
     /// When the proxy draws the zone's border: the directory of the
     /// settings whose switch can hide it, read for each connection.
     frame: Option<PathBuf>,
+    /// The compositor the launch runs on (`WAYLAND_DISPLAY` when the proxy
+    /// was started, before the program's is set): where the window menu of
+    /// the frame's buttons comes up.
+    display: Option<OsString>,
 }
 
 /// The signals the supervisor passes on to its launch. The pid of the launch
@@ -402,6 +445,9 @@ pub fn start(
     });
     // SAFETY: getpid takes nothing and cannot fail.
     let supervisor = unsafe { libc::getpid() };
+    // Still the compositor's own here: `wl_sandbox::run` names the zone's
+    // socket in it only after the proxy is up.
+    let display = std::env::var_os("WAYLAND_DISPLAY");
     // SAFETY: single-threaded here (wl-sandbox has no threads), so the child
     // may allocate before it confines itself.
     let pid = unsafe { libc::fork() };
@@ -430,6 +476,7 @@ pub fn start(
         adopting: false,
         signals: None,
         frame: frame.map(|setup| setup.switch),
+        display,
     };
     match proxy.await_ready() {
         Ok(()) => Ok(proxy),
@@ -692,7 +739,14 @@ impl Proxy {
         // supervisor only asks the kernel who connected, it never reads.
         let client = match sys::recv_into_with_fds(channel.as_raw_fd(), &mut byte, 1) {
             Ok((1, mut fds, _)) if byte[0] == CONNECT => fds.pop(),
-            Ok((1, _, _)) => return true,
+            // A click on the frame's ≡ or ⇄: answered with nothing on the
+            // channel (whatever descriptor came with it is closed here).
+            Ok((1, _, _)) => {
+                if let Some(ask) = ask_of(byte[0]) {
+                    self.ask(ask);
+                }
+                return true;
+            }
             Ok(_) => return false,
             Err(e) => return e.kind() == io::ErrorKind::Interrupted,
         };
@@ -722,6 +776,160 @@ impl Proxy {
         };
         sent.is_ok()
     }
+
+    /// A click on the frame's ≡ or ⇄ (`crate::wl_frame`): the window menu of
+    /// this launch, for the person to choose in — `cellward window-menu
+    /// --pid <this process>`, and for ⇄ straight to the restart with a
+    /// network chosen. Nothing is done without the person: the menu asks,
+    /// and a restart or a cut is confirmed there. A proxy taken over by its
+    /// program can open this one menu and no other thing.
+    ///
+    /// Started by `systemd --user`, in a unit of its own ([`menu_argv`]): not
+    /// a child of this process, whose children are the program and its
+    /// orphans — the network `crate::focus` reads the launch's in, and the
+    /// ones "close" is passed on to —, and not in the launch's cgroup, which
+    /// may end with it before the menu is done: a restart waits for the
+    /// launch to end, then starts it again. Its environment is the manager's
+    /// and what [`menu_argv`] gives it, not the launch's, which is the
+    /// program's by now (`WAYLAND_DISPLAY`, the zone's marks).
+    fn ask(&self, ask: Ask) {
+        let tools = match crate::tools::Tools::from_env() {
+            Ok(tools) => tools,
+            Err(e) => {
+                eprintln!("wl-sandbox: no window menu: {e}");
+                return;
+            }
+        };
+        let Some(manifest) = std::env::var_os(crate::tools::ENV_VAR) else {
+            return;
+        };
+        let argv = menu_argv(
+            &tools.systemd_run,
+            &tools.core,
+            &manifest,
+            self.display.as_deref(),
+            std::process::id(),
+            ask,
+        );
+        if let Err(e) = self.start_outside(&argv) {
+            eprintln!("wl-sandbox: the window menu did not start: {e}");
+        }
+    }
+
+    /// Start `argv` not as a child of this process: a middle process forks it
+    /// and leaves at once, and the orphan goes up the tree to whoever adopts
+    /// orphans there — not here: the subreaper flag is lifted for the moment
+    /// that takes. An orphan of the program in that moment goes up too; it
+    /// loses only what the flag gives it — "close" passed on to it, its
+    /// launch's display for a new connection —, which a program can give up
+    /// anyway (ignoring the signal, exiting). The middle process is waited
+    /// for here: when this returns, it is gone and the command is adopted.
+    /// The forks call only fork, sigprocmask, execv and _exit (tests run the
+    /// supervisor in a process with threads): the arguments are made before.
+    fn start_outside(&self, argv: &[OsString]) -> io::Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+        let args = argv
+            .iter()
+            .map(|a| CString::new(a.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| io::Error::other("a NUL in the command"))?;
+        let Some(program) = args.first() else {
+            return Err(io::Error::other("no command"));
+        };
+        let mut ptrs: Vec<*const libc::c_char> = args.iter().map(|a| a.as_ptr()).collect();
+        ptrs.push(std::ptr::null());
+        // The command gets the mask the program got, not the one that keeps
+        // the signals for this process's signalfd.
+        let mask = self.signals.as_ref().map(|s| s.old);
+        if self.adopting {
+            // SAFETY: prctl with these arguments takes no pointers.
+            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0) };
+        }
+        // SAFETY: the children below only fork, set their mask, execv and
+        // _exit — async-signal-safe calls on memory made before the fork.
+        let middle = unsafe { libc::fork() };
+        if middle == 0 {
+            // SAFETY: as above.
+            unsafe {
+                let pid = libc::fork();
+                if pid == 0 {
+                    if let Some(mask) = &mask {
+                        libc::sigprocmask(libc::SIG_SETMASK, mask, std::ptr::null_mut());
+                    }
+                    libc::execv(program.as_ptr(), ptrs.as_ptr());
+                    libc::_exit(127);
+                }
+                libc::_exit(i32::from(pid < 0));
+            }
+        }
+        let started = if middle < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            let mut status = 0;
+            wait(middle, &mut status, 0);
+            if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!("fork ({})", describe(status))))
+            }
+        };
+        if self.adopting {
+            // SAFETY: as above.
+            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+        }
+        started
+    }
+}
+
+/// The command that starts the window menu of the launch `pid` for `ask`
+/// ([`Proxy::ask`]): `systemd-run --user`, with
+///
+/// * the unit named after the launch — one menu of it at a time: a second
+///   click while it is up starts nothing, the unit is there;
+/// * `KillMode=process`: a restart's new launch is the menu's child, and
+///   must outlive the menu, which ends as soon as it has started it;
+/// * the environment the menu needs from here: the tools manifest, and the
+///   compositor the launch runs on (`display`; the manager's environment
+///   may name none);
+/// * our own binary from the store, next to `vpn-zone-core` (`core`), as the
+///   broker runs it — not the profile's `cellward`, a link a program with
+///   the home could point elsewhere (review 2026-09-25).
+///
+/// "Another network" is for now the menu's restart with a network chosen
+/// (`--restart`); switching the network live takes its place here later.
+pub(crate) fn menu_argv(
+    systemd_run: &Path,
+    core: &Path,
+    manifest: &OsStr,
+    display: Option<&OsStr>,
+    pid: u32,
+    ask: Ask,
+) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = vec![
+        systemd_run.into(),
+        "--user".into(),
+        "--quiet".into(),
+        "--collect".into(),
+        format!("--unit=cellward-window-menu-{pid}").into(),
+        "--property=KillMode=process".into(),
+    ];
+    let mut tools = OsString::from(format!("--setenv={}=", crate::tools::ENV_VAR));
+    tools.push(manifest);
+    argv.push(tools);
+    if let Some(display) = display.filter(|d| !d.is_empty()) {
+        let mut set = OsString::from("--setenv=WAYLAND_DISPLAY=");
+        set.push(display);
+        argv.push(set);
+    }
+    argv.push("--".into());
+    argv.push(core.with_file_name("vpn-zone").into());
+    argv.push("window-menu".into());
+    argv.push("--pid".into());
+    argv.push(pid.to_string().into());
+    if ask == Ask::Network {
+        argv.push("--restart".into());
+    }
+    argv
 }
 
 /// Whether the process that connected on `client` belongs to this launch:
@@ -933,8 +1141,9 @@ fn title_memfd(size: usize) -> io::Result<(OwnedFd, OwnedFd)> {
 /// compositor ever has it. Made before the filter is loaded — the filter has
 /// no `memfd_create` — and never mapped here: written with `write`.
 fn pixel(color: Rgb) -> io::Result<OwnedFd> {
-    let bytes = color
-        .xrgb8888()
+    let bytes = LOOK
+        .pixels
+        .word(color)
         .repeat((crate::wl_frame::PIXEL_BYTES / 4) as usize);
     sealed_memfd(c"vz-frame", &bytes, bytes.len())
 }
@@ -1202,6 +1411,8 @@ fn title_writer(border: Option<&Border>) -> Option<RawFd> {
 fn serve(listener: UnixListener, channel: UnixStream, border: Option<Border>) -> libc::c_int {
     // "Cannot draw" is said once for the launch, not once per connection.
     let warned = Rc::new(Cell::new(false));
+    // What the frames' buttons ask of the supervisor, sent after each round.
+    let asks = Rc::new(Asks::default());
     let mut listener = Some(listener);
     let mut channel = Some(channel);
     // Accepted, their upstream asked for, in the order asked.
@@ -1272,7 +1483,7 @@ fn serve(listener: UnixListener, channel: UnixStream, border: Option<Border>) ->
                     Answer::Upstream(up, framed) => {
                         if let Some(client) = waiting.pop_front() {
                             let border = border.as_ref().filter(|_| framed);
-                            match Conn::open(client, up, border, &warned) {
+                            match Conn::open(client, up, border, &warned, &asks) {
                                 Ok(conn) => conns.push(conn),
                                 Err(e) => eprintln!("wl-sandbox: the Wayland proxy: {e}"),
                             }
@@ -1298,6 +1509,15 @@ fn serve(listener: UnixListener, channel: UnixStream, border: Option<Border>) ->
         for (conn, pfd) in conns.iter_mut().zip(polled) {
             if pfd.revents != 0 || conn.stopped {
                 conn.dispatch();
+            }
+        }
+        // The clicks of this round on the frames' ≡ and ⇄, to the
+        // supervisor: a byte each on the channel (`sendmsg`, as a request
+        // for an upstream). The program gone, the launch's menu is too: they
+        // are dropped.
+        for ask in asks.take() {
+            if let Some(c) = &channel {
+                let _ = sys::send_with_fds(c.as_raw_fd(), &[ask_byte(ask)], &[]);
             }
         }
         conns.retain(Conn::alive);
@@ -1379,6 +1599,7 @@ impl Conn {
         upstream: OwnedFd,
         border: Option<&Border>,
         warned: &Rc<Cell<bool>>,
+        asks: &Rc<Asks>,
     ) -> Result<Self, String> {
         let upstream = Rc::new(upstream);
         let state = State::builder(BASELINE)
@@ -1403,7 +1624,7 @@ impl Conn {
         // Before any request of the program is read: the border's own
         // registry goes upstream first, so that its answer is in before the
         // compositor's first configure of any window (`crate::wl_frame`).
-        let frames = border.map(|b| Frames::install(&client, b, warned.clone()));
+        let frames = border.map(|b| Frames::install(&client, b, warned.clone(), asks.clone()));
         client.display().set_handler(Display {
             closing: closing.clone(),
             frames: frames.clone(),
@@ -2652,6 +2873,7 @@ mod tests {
                     ("xdg_surface", 1) => new(args[0], "xdg_toplevel"),
                     ("wl_seat", 0) => new(args[0], "wl_pointer"),
                     ("wp_fractional_scale_manager_v1", 1) => new(args[0], "wp_fractional_scale_v1"),
+                    ("wp_cursor_shape_manager_v1", 1) => new(args[0], "wp_cursor_shape_device_v1"),
                     _ => {}
                 }
                 let _ = log.send(Msg {
@@ -3469,6 +3691,293 @@ mod tests {
         assert!(hidden, "{got:#?}");
         drop(client);
         assert_eq!(rig.finish(), 0);
+    }
+
+    // --- the buttons, moving, resizing (crate::wl_frame, stage 3) ------------
+
+    const BUTTON_GLOBALS: &[(&str, u32)] = &[
+        ("wl_compositor", 6),
+        ("wl_subcompositor", 1),
+        ("wl_shm", 1),
+        ("wp_viewporter", 1),
+        ("xdg_wm_base", 6),
+        ("wl_seat", 7),
+        ("wp_fractional_scale_manager_v1", 1),
+        ("wp_cursor_shape_manager_v1", 1),
+    ];
+
+    /// The frame's buttons and edges on the wire (§5.4, §5.5, §5.11): over
+    /// a button the default cursor and the button lit — pressed while held
+    /// —, and let go on it, close is the program's own close event and the
+    /// menu and the network are asked of the supervisor on the channel; let
+    /// go elsewhere, nothing. Down on the title the window is moved, on the
+    /// border resized by its edge, both edges at a corner, with the arrow
+    /// of those edges for a cursor — each with the serial of the press, on
+    /// the program's seat. The program hears none of it.
+    #[test]
+    fn the_frame_moves_resizes_closes_and_asks_for_the_menu() {
+        let font = test_font();
+        let with_buttons = font.is_some();
+        let rig = Rig::with_drawing("buttons", Some(titled(TitleMode::Always, font)));
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, BUTTON_GLOBALS);
+        a_window(&mut client);
+        let mut got = log_until(&log, |m| m.iface == "xdg_wm_base" && m.opcode == 2);
+        let root = got.last().unwrap().args[1];
+        got.extend(log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        }));
+        let find = |got: &[Msg], iface: &str, opcode: u32| -> Vec<Msg> {
+            got.iter()
+                .filter(|m| m.iface == iface && m.opcode == opcode)
+                .cloned()
+                .collect()
+        };
+        let toplevel = find(&got, "xdg_surface", 1)[0].args[0];
+        let subs = find(&got, "wl_subcompositor", 1);
+        let on_root: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == root).collect();
+        assert_eq!(on_root.len(), 5, "{subs:?}");
+        // Top, bottom, left, right; the title.
+        let strip: Vec<u32> = on_root[..4].iter().map(|m| m.args[1]).collect();
+        let (title_sub, title) = (on_root[4].args[0], on_root[4].args[1]);
+        let on_title: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == title).collect();
+        assert_eq!(on_title.len(), if with_buttons { 2 } else { 0 }, "{subs:?}");
+        let fixed = |v: i32| v * 256;
+
+        // The pointer, and the program's seat as the compositor knows it.
+        request(&mut client, 6, 0, &10u32.to_ne_bytes());
+        let get_pointer = log_until(&log, |m| m.iface == "wl_seat" && m.opcode == 0);
+        let (seat, pointer) = (
+            get_pointer.last().unwrap().object,
+            get_pointer.last().unwrap().args[0],
+        );
+        let send = |compositor: &mut UnixStream, events: &[(u32, Vec<i32>)]| {
+            let mut out = Vec::new();
+            for (opcode, args) in events {
+                event(&mut out, pointer, *opcode, |a| {
+                    a.extend_from_slice(&words(args))
+                });
+                event(&mut out, pointer, 5, |_| {});
+            }
+            compositor.write_all(&out).unwrap();
+        };
+        let enter = |serial: i32, surface: u32, x: i32, y: i32| {
+            (0u32, vec![serial, surface as i32, fixed(x), fixed(y)])
+        };
+        let leave = |serial: i32, surface: u32| (1u32, vec![serial, surface as i32]);
+        let motion = |x: i32, y: i32| (2u32, vec![1, fixed(x), fixed(y)]);
+        let button = |serial: i32, down: bool| (3u32, vec![serial, 2, 0x110, i32::from(down)]);
+
+        if with_buttons {
+            let (buttons_sub, buttons) = (on_title[1].args[0], on_title[1].args[1]);
+            // At the right end of the strip, the row's size.
+            let placed = got
+                .iter()
+                .find(|m| m.iface == "wl_subsurface" && m.opcode == 1 && m.object == buttons_sub)
+                .map(|m| signed(&m.args));
+            assert_eq!(placed, Some(vec![300 - 72, 0]), "{got:#?}");
+            let view = find(&got, "wp_viewporter", 1)
+                .into_iter()
+                .find(|m| m.args[1] == buttons)
+                .unwrap()
+                .args[0];
+            let size = got
+                .iter()
+                .find(|m| m.iface == "wp_viewport" && m.opcode == 2 && m.object == view)
+                .map(|m| signed(&m.args));
+            assert_eq!(size, Some(vec![72, 20]));
+            // The image attached to the row, as the offset of its buffer in
+            // the pool: at rest first.
+            let image = |got: &[Msg]| -> i32 {
+                let attached = got
+                    .iter()
+                    .rev()
+                    .find(|m| m.iface == "wl_surface" && m.opcode == 1 && m.object == buttons)
+                    .unwrap_or_else(|| panic!("the row not drawn: {got:#?}"))
+                    .args[0];
+                let made = got
+                    .iter()
+                    .find(|m| m.iface == "wl_shm_pool" && m.opcode == 0 && m.args[0] == attached)
+                    .unwrap();
+                assert_eq!(made.args[2..4], [72, 20], "the row at scale 1");
+                made.args[1] as i32
+            };
+            let rest = image(&got);
+            let bytes = 72 * 20 * 4;
+            // Every change shows at once: the strip desynchronized for it.
+            let next = |log: &mpsc::Receiver<Msg>| {
+                let got = log_until(log, |m| {
+                    m.iface == "wl_subsurface" && m.opcode == 4 && m.object == title_sub
+                });
+                (image(&got) - rest) / bytes
+            };
+
+            // Over close: the default cursor, close lit; down, pressed; up,
+            // the program is told to close — and close is lit again.
+            send(&mut compositor, &[enter(40, buttons, 60, 10)]);
+            let got = log_until(&log, |m| m.iface == "wp_cursor_shape_device_v1");
+            assert_eq!(got.last().unwrap().args, [40, 1], "the default cursor");
+            assert!(
+                got.iter()
+                    .any(|m| m.iface == "wp_cursor_shape_manager_v1" && m.args[1] == pointer),
+                "{got:#?}"
+            );
+            assert_eq!(next(&log), 3, "close under the pointer");
+            send(&mut compositor, &[button(41, true)]);
+            assert_eq!(next(&log), 6, "close pressed");
+            send(&mut compositor, &[button(42, false)]);
+            assert_eq!(next(&log), 3, "close let go");
+            events_until(&mut client, |o, op, _| o == 9 && op == 1);
+
+            // Over the menu: lit; clicked, asked of the supervisor. The
+            // network likewise.
+            let channel = rig.channel.as_ref().unwrap();
+            channel
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let asked = || {
+                let mut byte = [0u8];
+                (&*channel).read_exact(&mut byte).unwrap();
+                byte[0]
+            };
+            send(&mut compositor, &[motion(10, 10)]);
+            assert_eq!(next(&log), 1, "the menu under the pointer");
+            send(&mut compositor, &[button(43, true), button(44, false)]);
+            assert_eq!((next(&log), next(&log)), (4, 1), "pressed, let go");
+            assert_eq!(asked(), MENU);
+            send(&mut compositor, &[motion(30, 10)]);
+            assert_eq!(next(&log), 2, "the network under the pointer");
+            send(&mut compositor, &[button(45, true), button(46, false)]);
+            assert_eq!((next(&log), next(&log)), (5, 2));
+            assert_eq!(asked(), NETWORK);
+            // Down on the menu, up on close: neither acts, and close under
+            // the pointer is not pressed. The next ask is the network's.
+            send(
+                &mut compositor,
+                &[
+                    motion(10, 10),
+                    button(47, true),
+                    motion(60, 10),
+                    button(48, false),
+                    motion(30, 10),
+                    button(49, true),
+                    button(50, false),
+                ],
+            );
+            let seen: Vec<i32> = (0..6).map(|_| next(&log)).collect();
+            assert_eq!(seen, [1, 4, 3, 2, 5, 2]);
+            assert_eq!(asked(), NETWORK);
+            // Off the row: nothing lit.
+            send(&mut compositor, &[leave(51, buttons)]);
+            assert_eq!(next(&log), 0, "left lit");
+        }
+
+        // Down on the title: moved, with the press's serial, on the seat.
+        send(&mut compositor, &[enter(52, title, 50, 10)]);
+        let got = log_until(&log, |m| m.iface == "wp_cursor_shape_device_v1");
+        assert_eq!(got.last().unwrap().args, [52, 1], "the default cursor");
+        send(&mut compositor, &[button(53, true)]);
+        let got = log_until(&log, |m| m.iface == "xdg_toplevel" && m.opcode == 5);
+        let moved = got.last().unwrap();
+        assert_eq!(
+            (moved.object, moved.args.clone()),
+            (toplevel, vec![seat, 53])
+        );
+        send(&mut compositor, &[button(54, false), leave(55, title)]);
+
+        // The right border: the east arrow, resized by the right edge.
+        send(&mut compositor, &[enter(56, strip[3], 2, 100)]);
+        let got = log_until(&log, |m| m.iface == "wp_cursor_shape_device_v1");
+        assert_eq!(got.last().unwrap().args, [56, 18], "e-resize");
+        send(&mut compositor, &[button(57, true)]);
+        let got = log_until(&log, |m| m.iface == "xdg_toplevel" && m.opcode == 6);
+        let resized = got.last().unwrap();
+        assert_eq!(resized.args, [seat, 57, 8], "the right edge");
+        send(&mut compositor, &[button(58, false), leave(59, strip[3])]);
+
+        // The top strip near its left end: the corner, both edges.
+        send(&mut compositor, &[enter(60, strip[0], 3, 2)]);
+        let got = log_until(&log, |m| m.iface == "wp_cursor_shape_device_v1");
+        assert_eq!(got.last().unwrap().args, [60, 21], "nw-resize");
+        send(&mut compositor, &[button(61, true)]);
+        let got = log_until(&log, |m| m.iface == "xdg_toplevel" && m.opcode == 6);
+        assert_eq!(got.last().unwrap().args, [seat, 61, 5], "top and left");
+        send(&mut compositor, &[button(62, false), leave(63, strip[0])]);
+
+        // None of it reached the program: on its own surface it hears the
+        // pointer come.
+        send(&mut compositor, &[enter(70, root, 7, 40)]);
+        let events = events_until(&mut client, |o, op, _| o == 10 && op == 5);
+        let pointer_events: Vec<(u32, Vec<u32>)> = events
+            .into_iter()
+            .filter(|(o, _, _)| *o == 10)
+            .map(|(_, op, args)| (op, args))
+            .collect();
+        assert_eq!(
+            pointer_events,
+            [(0, vec![70, 7, 7 * 256, 40 * 256]), (5, vec![])],
+            "the program saw input on the frame"
+        );
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    #[test]
+    fn the_asks_have_bytes_of_their_own() {
+        // Distinct from every other byte of the channel, either way.
+        let others = [READY, CONNECT, UPSTREAM, UPSTREAM_BARE, REFUSED];
+        for ask in [Ask::Menu, Ask::Network] {
+            let byte = ask_byte(ask);
+            assert!(!others.contains(&byte), "{ask:?}");
+            assert_eq!(ask_of(byte), Some(ask));
+        }
+        assert_ne!(ask_byte(Ask::Menu), ask_byte(Ask::Network));
+        for byte in others {
+            assert_eq!(ask_of(byte), None);
+        }
+    }
+
+    /// The menu of the launch through `systemd --user`: named after the
+    /// launch, its children kept, the manifest and the compositor passed on,
+    /// our own binary from the store; the network is the restart for now.
+    #[test]
+    fn the_window_menu_is_started_by_the_user_manager_for_this_launch() {
+        let argv = |display: Option<&str>, ask| -> Vec<String> {
+            menu_argv(
+                Path::new("/s/systemd-run"),
+                Path::new("/nix/store/x-cellward/bin/vpn-zone-core"),
+                OsStr::new("/nix/store/t-tools.json"),
+                display.map(OsStr::new),
+                4242,
+                ask,
+            )
+            .into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+        };
+        assert_eq!(
+            argv(Some("wayland-1"), Ask::Menu),
+            [
+                "/s/systemd-run",
+                "--user",
+                "--quiet",
+                "--collect",
+                "--unit=cellward-window-menu-4242",
+                "--property=KillMode=process",
+                "--setenv=VPN_ZONE_TOOLS=/nix/store/t-tools.json",
+                "--setenv=WAYLAND_DISPLAY=wayland-1",
+                "--",
+                "/nix/store/x-cellward/bin/vpn-zone",
+                "window-menu",
+                "--pid",
+                "4242",
+            ]
+        );
+        let network = argv(None, Ask::Network);
+        assert!(!network.iter().any(|a| a.contains("WAYLAND_DISPLAY")));
+        assert_eq!(network.last().map(String::as_str), Some("--restart"));
+        assert!(!argv(Some(""), Ask::Menu)
+            .iter()
+            .any(|a| a.contains("WAYLAND_DISPLAY")));
     }
 
     #[test]

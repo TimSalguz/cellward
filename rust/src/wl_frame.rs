@@ -60,6 +60,27 @@
 //! synchronized again ([`TitleParts::apply_now`]); so is the text drawn anew
 //! at a new scale.
 //!
+//! **Buttons, moving, resizing** (stage 3, 2026-09-27; §5.4, §5.5, §5.11).
+//! At the look's end of the title strip (`crate::wl_title::LOOK`: today the
+//! right end, menu ≡, network ⇄, close ×) the buttons are a subsurface of
+//! the strip, like the text — placed anew with the strip at every resize,
+//! hidden with it (mode `hover`, fullscreen), and not there when the strip
+//! is too narrow for them ([`title_layout`]). The pointer over the frame is
+//! seen on the program's own `wl_pointer` (the events the filters below drop
+//! for the program): the cursor is set by `wp_cursor_shape_v1` when there is
+//! one — an arrow of the edges over the border, the default one elsewhere —,
+//! the button under the pointer is lit, and the left button acts. Down on
+//! the title, `xdg_toplevel.move` goes upstream with the press's serial; on
+//! the border, `xdg_toplevel.resize` with the edges of the side, both of a
+//! corner within [`CORNER`] of it ([`edges`]): the compositor issued that
+//! serial to this connection and takes the request as the program's. A
+//! button acts on its release, pressed and let go on it: close is the
+//! program's own `xdg_toplevel.close` event, as a server-side decoration's;
+//! menu and network are asked of the supervisor ([`Ask`]), which starts
+//! `cellward window-menu` for the launch. Only what the compositor sends
+//! reaches this: the program cannot name the proxy's surfaces, nor send the
+//! events of a pointer. No double click (it would take a clock).
+//!
 //! **Scale.** The strips are a single pixel stretched to a size in logical
 //! pixels: at any scale, fractional included, the compositor fills whole
 //! device pixels with one colour — nothing to blur, no buffer per scale, no
@@ -117,6 +138,10 @@ use std::rc::{Rc, Weak};
 use wl_proxy::client::Client;
 use wl_proxy::fixed::Fixed;
 use wl_proxy::object::{ConcreteObject, Object, ObjectCoreApi, ObjectRcUtils, ObjectUtils};
+use wl_proxy::protocols::cursor_shape_v1::wp_cursor_shape_device_v1::{
+    WpCursorShapeDeviceV1, WpCursorShapeDeviceV1Shape,
+};
+use wl_proxy::protocols::cursor_shape_v1::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 use wl_proxy::protocols::drm::wl_drm::{WlDrm, WlDrmHandler};
 use wl_proxy::protocols::fractional_scale_v1::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
 use wl_proxy::protocols::fractional_scale_v1::wp_fractional_scale_v1::{
@@ -178,7 +203,9 @@ use wl_proxy::protocols::wayland::wl_touch::{WlTouch, WlTouchHandler};
 use wl_proxy::protocols::xdg_shell::xdg_popup::{XdgPopup, XdgPopupHandler};
 use wl_proxy::protocols::xdg_shell::xdg_positioner::{XdgPositioner, XdgPositionerHandler};
 use wl_proxy::protocols::xdg_shell::xdg_surface::{XdgSurface, XdgSurfaceHandler};
-use wl_proxy::protocols::xdg_shell::xdg_toplevel::{XdgToplevel, XdgToplevelHandler};
+use wl_proxy::protocols::xdg_shell::xdg_toplevel::{
+    XdgToplevel, XdgToplevelHandler, XdgToplevelResizeEdge,
+};
 use wl_proxy::protocols::xdg_shell::xdg_wm_base::{XdgWmBase, XdgWmBaseHandler};
 use wl_proxy::protocols::xdg_toplevel_drag_v1::xdg_toplevel_drag_manager_v1::{
     XdgToplevelDragManagerV1, XdgToplevelDragManagerV1Handler,
@@ -190,7 +217,7 @@ use wl_proxy::protocols::ObjectInterface;
 
 use crate::frame::TitleMode;
 use crate::wl_proxy::Border;
-use crate::wl_title::{Lease, Text};
+use crate::wl_title::{Button, ButtonsLook, End, Lease, Lit, Pixels, StripWidth, Text, LOOK};
 
 // --- THE ARITHMETIC ---------------------------------------------------------
 // What the frame takes of a window is its [`Insets`]: the border all round,
@@ -319,22 +346,162 @@ pub(crate) fn strips(g: Rect, i: Insets) -> [Rect; 4] {
 /// the insets keep for it, above `g`; or, `over` the content (hover), along
 /// the top of `g` — never taller than `g`. `None`: no strip.
 pub(crate) fn title_strip(g: Rect, i: Insets, over: bool) -> Option<Rect> {
+    // How wide, the look says: all of the window's width (a tag look would
+    // take only its label's, `crate::wl_title::Look`).
+    let w = match LOOK.strip {
+        StripWidth::Full => g.w,
+    };
     if i.title > 0 {
         Some(Rect {
             x: g.x,
             y: g.y.saturating_sub(i.title),
-            w: g.w,
+            w,
             h: i.title,
         })
     } else if over && i.border > 0 {
         Some(Rect {
             x: g.x,
             y: g.y,
-            w: g.w,
+            w,
             h: TITLE_HEIGHT.min(g.h),
         })
     } else {
         None
+    }
+}
+
+/// Where the text and the buttons go on a title strip, by the look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TitleLayout {
+    /// The text's place on the strip, and the room it has — its pad at
+    /// both ends included, as [`text_shown`] takes it.
+    pub text_x: i32,
+    pub room: i32,
+    /// The buttons' place on the strip; `None` when the strip is too narrow
+    /// for them and a little of itself to drag the window by.
+    pub buttons: Option<i32>,
+}
+
+/// [`TitleLayout`] of a strip `w` wide, with the buttons of `look` at its
+/// end: the text keeps [`TITLE_PAD`] clear of them.
+pub(crate) fn title_layout(w: i32, look: &ButtonsLook) -> TitleLayout {
+    let row = look.width_all();
+    if row <= 0 || w < row.saturating_add(TITLE_PAD.saturating_mul(2)) {
+        return TitleLayout {
+            text_x: TITLE_PAD,
+            room: w,
+            buttons: None,
+        };
+    }
+    match look.end {
+        End::Right => TitleLayout {
+            text_x: TITLE_PAD,
+            room: w - row,
+            buttons: Some(w - row),
+        },
+        End::Left => TitleLayout {
+            text_x: row + TITLE_PAD,
+            room: w - row,
+            buttons: Some(0),
+        },
+    }
+}
+
+/// A strip of the border, by the side it is on — in the order of
+/// [`strips`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Side {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl Side {
+    const ALL: [Side; 4] = [Side::Top, Side::Bottom, Side::Left, Side::Right];
+
+    fn index(self) -> usize {
+        match self {
+            Side::Top => 0,
+            Side::Bottom => 1,
+            Side::Left => 2,
+            Side::Right => 3,
+        }
+    }
+}
+
+/// `xdg_toplevel.resize_edge`, as bits.
+pub(crate) const EDGE_TOP: u32 = 1;
+pub(crate) const EDGE_BOTTOM: u32 = 2;
+pub(crate) const EDGE_LEFT: u32 = 4;
+pub(crate) const EDGE_RIGHT: u32 = 8;
+
+/// How far from a corner of the window, along either edge, the border
+/// resizes both edges of that corner, logical pixels.
+pub(crate) const CORNER: i32 = 16;
+
+/// The edges a press at (`x`, `y`) on the border's strip `strip` (on its
+/// `side`, of a border `border` wide; surface-local) resizes: its own, and
+/// the one across it within [`CORNER`] of a corner of the window. The side
+/// strips begin under the top strip and end above the bottom one, `border`
+/// from the corners.
+pub(crate) fn edges(side: Side, strip: Rect, border: i32, x: f64, y: f64) -> u32 {
+    let (own, along, len, from, before, after) = match side {
+        Side::Top => (EDGE_TOP, x, strip.w, 0, EDGE_LEFT, EDGE_RIGHT),
+        Side::Bottom => (EDGE_BOTTOM, x, strip.w, 0, EDGE_LEFT, EDGE_RIGHT),
+        Side::Left => (EDGE_LEFT, y, strip.h, border, EDGE_TOP, EDGE_BOTTOM),
+        Side::Right => (EDGE_RIGHT, y, strip.h, border, EDGE_TOP, EDGE_BOTTOM),
+    };
+    let from = f64::from(from.max(0));
+    // From the window's corner, and the whole edge.
+    let at = along + from;
+    let whole = f64::from(len) + 2.0 * from;
+    let corner = f64::from(CORNER);
+    if at < corner {
+        own | before
+    } else if at >= whole - corner {
+        own | after
+    } else {
+        own
+    }
+}
+
+/// What a point on the frame is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hit {
+    Nothing,
+    /// The title strip or its text: pressed, it moves the window.
+    Title,
+    Button(Button),
+    /// The border: pressed, it resizes the window by these edges.
+    Edge(u32),
+}
+
+/// The cursor over `hit`: an arrow of the edges over the border, the
+/// default one over the title and the buttons (the owner, 2026-09-27: no
+/// hand over them — they light up instead).
+pub(crate) fn cursor_for(hit: Hit) -> WpCursorShapeDeviceV1Shape {
+    use WpCursorShapeDeviceV1Shape as Shape;
+    match hit {
+        Hit::Edge(edges) => match edges {
+            EDGE_TOP => Shape::N_RESIZE,
+            EDGE_BOTTOM => Shape::S_RESIZE,
+            EDGE_LEFT => Shape::W_RESIZE,
+            EDGE_RIGHT => Shape::E_RESIZE,
+            e if e == EDGE_TOP | EDGE_LEFT => Shape::NW_RESIZE,
+            e if e == EDGE_TOP | EDGE_RIGHT => Shape::NE_RESIZE,
+            e if e == EDGE_BOTTOM | EDGE_LEFT => Shape::SW_RESIZE,
+            e if e == EDGE_BOTTOM | EDGE_RIGHT => Shape::SE_RESIZE,
+            _ => Shape::DEFAULT,
+        },
+        Hit::Nothing | Hit::Title | Hit::Button(_) => Shape::DEFAULT,
+    }
+}
+
+/// The format of the frame's buffers, as the look keeps its pixels.
+fn shm_format() -> WlShmFormat {
+    match LOOK.pixels {
+        Pixels::Opaque => WlShmFormat::XRGB8888,
     }
 }
 
@@ -415,6 +582,47 @@ pub(crate) struct Frames {
     warned: Rc<Cell<bool>>,
     /// Windows of this connection with a frame now ([`Framed`]).
     framed: Rc<Cell<usize>>,
+    /// What the frame's buttons ask of the supervisor, the proxy's for all
+    /// its connections: its loop sends them.
+    asks: Rc<Asks>,
+    /// The serial of the pointer event the frame acted on last: every
+    /// `wl_pointer` of the program on a seat hears the same event, and one
+    /// of them acts on it ([`Frames::first`]).
+    acted: Cell<Option<u32>>,
+}
+
+/// What a click on the frame asks of the supervisor (`crate::wl_proxy`),
+/// over the channel the two share: the proxy starts nothing itself (no
+/// `exec`, no `connect` in its filter).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ask {
+    /// The launch's window menu.
+    Menu,
+    /// Another network for the container: for now its restart with a
+    /// network chosen; switching it live later takes this ask's place.
+    Network,
+}
+
+/// Asks the proxy's loop has not sent yet. A few at most: a click is one,
+/// and the proxy sends them after every round of its loop.
+#[derive(Default)]
+pub(crate) struct Asks(RefCell<VecDeque<Ask>>);
+
+/// Asks kept at once; more in one round are not the person's clicks.
+const MAX_ASKS: usize = 4;
+
+impl Asks {
+    fn push(&self, ask: Ask) {
+        let mut asks = self.0.borrow_mut();
+        if asks.len() < MAX_ASKS {
+            asks.push_back(ask);
+        }
+    }
+
+    /// The asks to send, in their order; none are left.
+    pub(crate) fn take(&self) -> Vec<Ask> {
+        self.0.borrow_mut().drain(..).collect()
+    }
 }
 
 /// One framed window's share of [`Frames::framed`], given back when its frame
@@ -458,6 +666,9 @@ struct Own {
     /// For the title's text, when the compositor offers it to the restricted
     /// client; without it, `wl_surface.preferred_buffer_scale`.
     fractional: Option<Rc<WpFractionalScaleManagerV1>>,
+    /// For the cursor over the frame, when the compositor offers it; without
+    /// it the cursor over the frame is whatever it was.
+    cursor_shape: Option<Rc<WpCursorShapeManagerV1>>,
     buffer: Option<Rc<WlBuffer>>,
     /// The pool of the title's pixels: the launch's memfd, this connection's
     /// pool of it.
@@ -503,6 +714,14 @@ impl Frames {
         self.framed.get()
     }
 
+    /// Whether the pointer event of `serial` is heard here first. The
+    /// compositor sends an event to every `wl_pointer` the program made of
+    /// the seat, each with the same serial: the frame acts on it once — one
+    /// click, one move, one close.
+    fn first(&self, serial: u32) -> bool {
+        self.acted.replace(Some(serial)) != Some(serial)
+    }
+
     /// Start the frame on a new connection, before any request of the
     /// program is read: a registry of the proxy's own and a sync after it,
     /// whose answer says the globals are all in.
@@ -510,6 +729,7 @@ impl Frames {
         client: &Rc<Client>,
         border: &Border,
         warned: Rc<Cell<bool>>,
+        asks: Rc<Asks>,
     ) -> Rc<Self> {
         let frames = Rc::new(Self {
             width: border.width,
@@ -520,6 +740,8 @@ impl Frames {
             scale: Cell::new(crate::wl_title::MIN_SCALE),
             warned,
             framed: Rc::default(),
+            asks,
+            acted: Cell::new(None),
         });
         let display = client.display();
         let registry = display.new_send_get_registry();
@@ -548,7 +770,7 @@ impl Frames {
         } else if let Some(o) = id.try_downcast::<WpViewporter>() {
             o.set_handler(Viewporter);
         } else if let Some(o) = id.try_downcast::<WlSeat>() {
-            o.set_handler(Seat);
+            o.set_handler(Seat { f });
         } else if let Some(o) = id.try_downcast::<WlShm>() {
             o.set_handler(Shm);
         } else if let Some(o) = id.try_downcast::<ZwpLinuxDmabufV1>() {
@@ -578,13 +800,8 @@ impl Frames {
         };
         let pool = shm.new_send_create_pool(&self.pixel, PIXEL_BYTES);
         quiet(&*pool);
-        let buffer = pool.new_send_create_buffer(
-            0,
-            PIXEL_SIDE,
-            PIXEL_SIDE,
-            PIXEL_SIDE * 4,
-            WlShmFormat::XRGB8888,
-        );
+        let buffer =
+            pool.new_send_create_buffer(0, PIXEL_SIDE, PIXEL_SIDE, PIXEL_SIDE * 4, shm_format());
         quiet(&*buffer);
         pool.send_destroy();
         own.buffer = Some(buffer);
@@ -635,15 +852,14 @@ impl Frames {
         ) else {
             return None;
         };
-        let strips = (0..4)
-            .map(|i| {
+        let strips = Side::ALL
+            .into_iter()
+            .map(|side| {
                 let surface = compositor.new_send_create_surface();
                 quiet(&*surface);
-                // The top strip brings a hover title out.
-                let part = if i == 0 { Part::Top } else { Part::Side };
                 surface.set_handler(Mine {
                     window: me.clone(),
-                    part,
+                    part: Part::Border(side),
                 });
                 let sub = subcompositor.new_send_get_subsurface(&surface, root);
                 quiet(&*sub);
@@ -666,8 +882,9 @@ impl Frames {
 
     /// The title strip of a new window, above `top`: the colour's pixel
     /// stretched like a strip of the border (not attached yet: a hover strip
-    /// starts hidden), and the text a subsurface of it — so that the text
-    /// goes where the strip goes, and is hidden with it.
+    /// starts hidden), and the text and the buttons subsurfaces of it — so
+    /// that they go where the strip goes, and are hidden with it. The
+    /// buttons are drawn with the text's font, and are there only with it.
     fn make_title(
         self: &Rc<Self>,
         root: &Rc<WlSurface>,
@@ -683,16 +900,16 @@ impl Frames {
         ) else {
             return None;
         };
-        let own_surface = || {
+        let own_surface = |part: Part| {
             let surface = compositor.new_send_create_surface();
             quiet(&*surface);
             surface.set_handler(Mine {
                 window: me.clone(),
-                part: Part::Title,
+                part,
             });
             surface
         };
-        let surface = own_surface();
+        let surface = own_surface(Part::Title);
         let sub = subcompositor.new_send_get_subsurface(&surface, root);
         quiet(&*sub);
         sub.send_place_above(top);
@@ -700,9 +917,9 @@ impl Frames {
         quiet(&*view);
         let one = Fixed::from_i32_saturating(1);
         view.send_set_source(one, one, one, one);
-        let text = match (&self.text, &own.text_pool) {
+        let (text, buttons) = match (&self.text, &own.text_pool) {
             (Some(text), Some(pool)) => {
-                let text_surface = own_surface();
+                let text_surface = own_surface(Part::Text);
                 let text_sub = subcompositor.new_send_get_subsurface(&text_surface, &surface);
                 quiet(&*text_sub);
                 text_sub.send_set_position(TITLE_PAD, 0);
@@ -717,21 +934,44 @@ impl Frames {
                     });
                     fraction
                 });
-                Some(TextParts {
-                    text: text.clone(),
-                    pool: pool.clone(),
-                    surface: text_surface,
-                    sub: text_sub,
-                    view: text_view,
-                    fraction,
-                    scale: self.scale.get(),
-                    drawn: None,
-                    current: None,
-                    retired: Vec::new(),
-                    shown: 0,
-                })
+                // The buttons: the row at its logical size, whatever scale
+                // it is drawn at; placed by the strip's layout.
+                let buttons_surface = own_surface(Part::Buttons);
+                let buttons_sub = subcompositor.new_send_get_subsurface(&buttons_surface, &surface);
+                quiet(&*buttons_sub);
+                let buttons_view = viewporter.new_send_get_viewport(&buttons_surface);
+                quiet(&*buttons_view);
+                buttons_view.send_set_destination(LOOK.buttons.width_all(), TITLE_HEIGHT);
+                (
+                    Some(TextParts {
+                        text: text.clone(),
+                        pool: pool.clone(),
+                        surface: text_surface,
+                        sub: text_sub,
+                        view: text_view,
+                        fraction,
+                        scale: self.scale.get(),
+                        drawn: None,
+                        current: None,
+                        retired: Vec::new(),
+                        shown: 0,
+                        x: TITLE_PAD,
+                    }),
+                    Some(ButtonParts {
+                        text: text.clone(),
+                        pool: pool.clone(),
+                        surface: buttons_surface,
+                        sub: buttons_sub,
+                        view: buttons_view,
+                        scale: self.scale.get(),
+                        at: None,
+                        lit: None,
+                        current: None,
+                        retired: Vec::new(),
+                    }),
+                )
             }
-            _ => None,
+            _ => (None, None),
         };
         Some(TitleParts {
             pixel: buffer.clone(),
@@ -740,6 +980,7 @@ impl Frames {
             view,
             shown: false,
             text,
+            buttons,
         })
     }
 }
@@ -794,6 +1035,9 @@ impl WlRegistryHandler for OwnRegistry {
             ObjectInterface::WpFractionalScaleManagerV1 if own.fractional.is_none() => {
                 own.fractional = Some(bind(slf, name, 1));
             }
+            ObjectInterface::WpCursorShapeManagerV1 if own.cursor_shape.is_none() => {
+                own.cursor_shape = Some(bind(slf, name, 1));
+            }
             _ => {}
         }
     }
@@ -812,13 +1056,23 @@ impl WlCallbackHandler for OwnSync {
 }
 
 /// What one of the proxy's surfaces is, for the input that comes to it and
-/// for its scale: the top strip of the border (it brings a hover title
-/// out), another strip, or the title strip and its text.
+/// for its scale: a strip of the border (the top one brings a hover title
+/// out, each resizes the window by its edge), or the title strip, its text
+/// and its buttons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Part {
-    Top,
-    Side,
+    Border(Side),
     Title,
+    Text,
+    Buttons,
+}
+
+impl Part {
+    /// Part of the title strip, and drawn at a scale: the text and the
+    /// buttons (the strip itself is one stretched pixel).
+    fn titled(self) -> bool {
+        matches!(self, Part::Title | Part::Text | Part::Buttons)
+    }
 }
 
 /// The handler of the proxy's own surfaces: which window, which part.
@@ -828,10 +1082,10 @@ struct Mine {
 }
 
 impl WlSurfaceHandler for Mine {
-    /// The integer scale, `wl_compositor` v6: the text's where the
-    /// compositor offers no fractional one.
+    /// The integer scale, `wl_compositor` v6: the text's and the buttons'
+    /// where the compositor offers no fractional one.
     fn handle_preferred_buffer_scale(&mut self, _slf: &Rc<WlSurface>, factor: i32) {
-        if self.part != Part::Title {
+        if !self.part.titled() {
             return;
         }
         if let Some(window) = self.window.upgrade() {
@@ -860,9 +1114,9 @@ impl WpFractionalScaleV1Handler for Scale {
     }
 }
 
-/// A buffer of the title's text: its hold on the region of the memfd it
-/// shows, until the compositor releases it. Destroyed once released and no
-/// longer attached (`retired`).
+/// A buffer of the title's memfd — of its text or its buttons: its hold on
+/// the region of the memfd it shows, until the compositor releases it.
+/// Destroyed once released and no longer attached (`retired`).
 struct TextBuffer {
     lease: Option<Lease>,
     retired: bool,
@@ -895,7 +1149,8 @@ struct Strip {
     viewport: Rc<WpViewport>,
 }
 
-/// The title strip of a window: the colour stretched, and the text on it.
+/// The title strip of a window: the colour stretched, the text and the
+/// buttons on it.
 struct TitleParts {
     pixel: Rc<WlBuffer>,
     surface: Rc<WlSurface>,
@@ -904,6 +1159,7 @@ struct TitleParts {
     /// The colour is attached: the strip is shown.
     shown: bool,
     text: Option<TextParts>,
+    buttons: Option<ButtonParts>,
 }
 
 impl TitleParts {
@@ -917,13 +1173,14 @@ impl TitleParts {
         self.shown = on;
     }
 
-    /// Show what is pending of the strip and its text now, without waiting
-    /// for the program's commit (§5.3): the strip is a synchronized
-    /// subsurface, whose state the root's commit applies, and the program
-    /// may not commit for a long while — a text drawn at a new scale, a
-    /// hover strip coming out. Desynchronized for its own commit, and
-    /// synchronized again at once. Its pending state holds nothing else: the
-    /// proxy lays it out only right before the program's commit.
+    /// Show what is pending of the strip, its text and its buttons now,
+    /// without waiting for the program's commit (§5.3): the strip is a
+    /// synchronized subsurface, whose state the root's commit applies, and
+    /// the program may not commit for a long while — a text drawn at a new
+    /// scale, a hover strip coming out, a button lit. Desynchronized for its
+    /// own commit, and synchronized again at once. Its pending state holds
+    /// nothing else: the proxy lays it out only right before the program's
+    /// commit.
     fn apply_now(&self) {
         self.sub.send_set_desync();
         self.surface.send_commit();
@@ -934,9 +1191,71 @@ impl TitleParts {
         if let Some(text) = self.text {
             text.destroy();
         }
+        if let Some(buttons) = self.buttons {
+            buttons.destroy();
+        }
         self.view.send_destroy();
         self.sub.send_destroy();
         self.surface.send_destroy();
+    }
+}
+
+/// Attach a buffer of `width` × `height` to one of the proxy's surfaces,
+/// all of it damaged.
+fn attach_whole(surface: &Rc<WlSurface>, buffer: &Rc<WlBuffer>, width: i32, height: i32) {
+    surface.send_attach(Some(buffer), 0, 0);
+    if surface.version() >= 4 {
+        surface.send_damage_buffer(0, 0, width, height);
+    } else {
+        surface.send_damage(0, 0, 1 << 15, 1 << 15);
+    }
+}
+
+/// A buffer of the title's memfd made of `drawn`'s region at `offset`:
+/// its hold on the region goes with it ([`TextBuffer`]).
+fn memfd_buffer(pool: &Rc<WlShmPool>, drawn: crate::wl_title::Drawn, offset: i32) -> Rc<WlBuffer> {
+    let buffer = pool.new_send_create_buffer(
+        offset,
+        drawn.width,
+        drawn.height,
+        drawn.width * 4,
+        shm_format(),
+    );
+    quiet(&*buffer);
+    buffer.set_handler(TextBuffer {
+        lease: Some(drawn.lease),
+        retired: false,
+        destroyed: false,
+    });
+    buffer
+}
+
+/// The buffer attached until now (`current`) is not any more: it joins
+/// `retired`, and whatever of those the compositor has released is
+/// destroyed (at once when it has).
+fn retire(current: &mut Option<Rc<WlBuffer>>, retired: &mut Vec<Rc<WlBuffer>>) {
+    if let Some(old) = current.take() {
+        retired.push(old);
+    }
+    retired.retain(|buffer| {
+        let Ok(mut h) = buffer.try_get_handler_mut::<TextBuffer>() else {
+            return false;
+        };
+        h.retired = true;
+        if h.lease.is_none() {
+            h.destroy(buffer);
+        }
+        !h.destroyed
+    });
+}
+
+/// A surface of these buffers is gone: nothing of them is shown any more.
+fn destroy_buffers(current: Option<Rc<WlBuffer>>, retired: Vec<Rc<WlBuffer>>) {
+    for buffer in current.into_iter().chain(retired) {
+        if let Ok(mut h) = buffer.try_get_handler_mut::<TextBuffer>() {
+            h.destroy(&buffer);
+            h.lease = None;
+        }
     }
 }
 
@@ -957,6 +1276,9 @@ struct TextParts {
     retired: Vec<Rc<WlBuffer>>,
     /// How much of the line the strip shows, logical pixels.
     shown: i32,
+    /// Where on the strip it is: after the pad, or after buttons at the left
+    /// end ([`title_layout`]).
+    x: i32,
 }
 
 impl TextParts {
@@ -966,50 +1288,15 @@ impl TextParts {
         let Some(drawn) = self.text.at(self.scale) else {
             return false;
         };
-        let buffer = self.pool.new_send_create_buffer(
-            drawn.offset,
-            drawn.width,
-            drawn.height,
-            drawn.width * 4,
-            WlShmFormat::XRGB8888,
-        );
-        quiet(&*buffer);
-        buffer.set_handler(TextBuffer {
-            lease: Some(drawn.lease),
-            retired: false,
-            destroyed: false,
-        });
-        self.surface.send_attach(Some(&buffer), 0, 0);
-        if self.surface.version() >= 4 {
-            self.surface
-                .send_damage_buffer(0, 0, drawn.width, drawn.height);
-        } else {
-            self.surface.send_damage(0, 0, 1 << 15, 1 << 15);
-        }
-        self.retire();
+        let (width, height, offset) = (drawn.width, drawn.height, drawn.offset);
+        let buffer = memfd_buffer(&self.pool, drawn, offset);
+        attach_whole(&self.surface, &buffer, width, height);
+        retire(&mut self.current, &mut self.retired);
         self.current = Some(buffer);
-        self.drawn = Some((drawn.width, drawn.height));
+        self.drawn = Some((width, height));
         self.crop();
         self.surface.send_commit();
         true
-    }
-
-    /// The buffer attached until now is not any more: destroyed once the
-    /// compositor has released it (at once when it has).
-    fn retire(&mut self) {
-        if let Some(old) = self.current.take() {
-            self.retired.push(old);
-        }
-        self.retired.retain(|buffer| {
-            let Ok(mut h) = buffer.try_get_handler_mut::<TextBuffer>() else {
-                return false;
-            };
-            h.retired = true;
-            if h.lease.is_none() {
-                h.destroy(buffer);
-            }
-            !h.destroyed
-        });
     }
 
     /// The viewport: `shown` logical pixels of the line, from the buffer's
@@ -1029,17 +1316,22 @@ impl TextParts {
         self.view.send_set_destination(self.shown, TITLE_HEIGHT);
     }
 
-    /// Fit the text to a strip `strip` wide; committed (cached) when that
-    /// changed anything.
-    fn fit(&mut self, strip: i32) {
-        let shown = text_shown(strip, self.text.width());
+    /// Put the text at `x` on the strip and fit it to `room` there (its pads
+    /// included); committed (cached) when that changed what it shows. Its
+    /// place is the strip's state, applied with the strip.
+    fn fit(&mut self, x: i32, room: i32) {
+        if x != self.x {
+            self.sub.send_set_position(x, 0);
+            self.x = x;
+        }
+        let shown = text_shown(room, self.text.width());
         if shown == self.shown && (shown <= 0 || self.drawn.is_some()) {
             return;
         }
         self.shown = shown;
         if shown <= 0 {
             self.surface.send_attach(None, 0, 0);
-            self.retire();
+            retire(&mut self.current, &mut self.retired);
             self.drawn = None;
             self.surface.send_commit();
         } else if self.drawn.is_none() {
@@ -1057,18 +1349,102 @@ impl TextParts {
         self.view.send_destroy();
         self.sub.send_destroy();
         self.surface.send_destroy();
-        // The surface is gone: nothing of its buffers is shown any more.
-        for buffer in self
-            .current
-            .take()
-            .into_iter()
-            .chain(self.retired.drain(..))
-        {
-            if let Ok(mut h) = buffer.try_get_handler_mut::<TextBuffer>() {
-                h.destroy(&buffer);
-                h.lease = None;
+        destroy_buffers(self.current.take(), std::mem::take(&mut self.retired));
+    }
+}
+
+/// The buttons on a title strip (§5.11): the row of [`LOOK`] at the scale
+/// the compositor prefers, in the image of the state it is in — at rest, a
+/// button under the pointer, a button pressed. Another state is another
+/// buffer of the same region of the memfd, drawn once for the scale; the
+/// viewport gives it the row's logical size.
+struct ButtonParts {
+    text: Rc<Text>,
+    pool: Rc<WlShmPool>,
+    surface: Rc<WlSurface>,
+    sub: Rc<WlSubsurface>,
+    view: Rc<WpViewport>,
+    /// The scale asked for (120ths).
+    scale: u32,
+    /// Where on the strip the row is; `None`: the strip is too narrow for
+    /// it, and it is not there.
+    at: Option<i32>,
+    /// The button lit, and whether pressed.
+    lit: Option<Lit>,
+    current: Option<Rc<WlBuffer>>,
+    retired: Vec<Rc<WlBuffer>>,
+}
+
+impl ButtonParts {
+    /// Attach the row in its state at `self.scale` and commit (cached: the
+    /// strip's commit applies it). False when there is nothing to draw it
+    /// in.
+    fn draw(&mut self) -> bool {
+        let Some(drawn) = self.text.buttons_at(self.scale) else {
+            return false;
+        };
+        let (width, height) = (drawn.width, drawn.height);
+        let image = width.saturating_mul(height).saturating_mul(4);
+        let variant = i32::try_from(LOOK.buttons.variant(self.lit)).unwrap_or(0);
+        let offset = drawn.offset.saturating_add(image.saturating_mul(variant));
+        let buffer = memfd_buffer(&self.pool, drawn, offset);
+        attach_whole(&self.surface, &buffer, width, height);
+        retire(&mut self.current, &mut self.retired);
+        self.current = Some(buffer);
+        self.surface.send_commit();
+        true
+    }
+
+    /// Put the row at `at` on the strip, or take it away (`None`: no room).
+    /// Its place is the strip's state, applied with the strip; its buffer is
+    /// committed (cached) when that changes.
+    fn fit(&mut self, at: Option<i32>) {
+        match at {
+            Some(x) => {
+                if self.at != Some(x) {
+                    self.sub.send_set_position(x, 0);
+                }
+                self.at = Some(x);
+                if self.current.is_none() {
+                    self.draw();
+                }
+            }
+            None => {
+                self.at = None;
+                self.lit = None;
+                if self.current.is_some() {
+                    self.surface.send_attach(None, 0, 0);
+                    retire(&mut self.current, &mut self.retired);
+                    self.surface.send_commit();
+                }
             }
         }
+    }
+
+    /// The row in state `lit`, committed (cached) when it is there and that
+    /// changed its image. Whether it did: the caller shows it now.
+    fn light(&mut self, lit: Option<Lit>) -> bool {
+        if self.lit == lit {
+            return false;
+        }
+        self.lit = lit;
+        self.at.is_some() && self.draw()
+    }
+
+    /// Drawn anew at `scale` when it is there. Whether it was.
+    fn rescale(&mut self, scale: u32) -> bool {
+        if self.scale == scale && (self.at.is_none() || self.current.is_some()) {
+            return false;
+        }
+        self.scale = scale;
+        self.at.is_some() && self.draw()
+    }
+
+    fn destroy(mut self) {
+        self.view.send_destroy();
+        self.sub.send_destroy();
+        self.surface.send_destroy();
+        destroy_buffers(self.current.take(), std::mem::take(&mut self.retired));
     }
 }
 
@@ -1109,6 +1485,9 @@ struct Window {
     hover: bool,
     /// What the frame is laid around now: the area, the insets, the strip.
     laid: Option<(Rect, Insets, Option<Rect>)>,
+    /// The button the left pointer button went down on, until it comes up:
+    /// a button acts when both happen on it.
+    pressed: Option<Button>,
 }
 
 impl Window {
@@ -1139,6 +1518,7 @@ impl Window {
             configures: VecDeque::new(),
             hover: false,
             laid: None,
+            pressed: None,
         }
     }
 
@@ -1319,27 +1699,36 @@ impl Window {
         if t.shown != want {
             t.show(want);
         }
+        // The buttons at the look's end when there is room for them, the
+        // text in what is left.
+        let layout = title_layout(r.w, &LOOK.buttons);
+        if let Some(buttons) = &mut t.buttons {
+            buttons.fit(layout.buttons);
+        }
         if let Some(text) = &mut t.text {
-            text.fit(r.w);
+            text.fit(layout.text_x, layout.room);
         }
         t.surface.send_commit();
     }
 
-    /// The compositor prefers `scale` (120ths) for the title's text: drawn at
-    /// it, and shown now.
+    /// The compositor prefers `scale` (120ths) for the title's text: it and
+    /// the buttons beside it are drawn at it, and shown now.
     fn rescale(&mut self, scale: u32) {
         let scale = crate::wl_title::clamp_scale(scale);
         let Some(t) = &mut self.title else {
             return;
         };
-        let Some(text) = &mut t.text else {
-            return;
-        };
-        if text.scale == scale && text.drawn.is_some() {
-            return;
+        let mut drawn = false;
+        if let Some(text) = &mut t.text {
+            if text.scale != scale || text.drawn.is_none() {
+                text.scale = scale;
+                drawn |= text.shown > 0 && text.draw();
+            }
         }
-        text.scale = scale;
-        if text.shown > 0 && text.draw() {
+        if let Some(buttons) = &mut t.buttons {
+            drawn |= buttons.rescale(scale);
+        }
+        if drawn {
             t.apply_now();
         }
     }
@@ -1374,6 +1763,91 @@ impl Window {
     fn configured(&mut self, fullscreen: bool) {
         self.next_fullscreen = fullscreen;
         self.show_title(true);
+    }
+
+    /// What a point (`x`, `y`, surface-local) on the frame's `part` is for
+    /// ([`Hit`]): the title moves the window, the border resizes it, a
+    /// button is a button of the look's row — and nothing while the
+    /// compositor has the window fullscreen (there is nothing to move it
+    /// to), nor before the frame is laid out.
+    fn hit(&self, part: Part, x: f64, y: f64) -> Hit {
+        let Some((area, i, _)) = self.laid else {
+            return Hit::Nothing;
+        };
+        match part {
+            Part::Buttons => LOOK.buttons.at(x, y).map_or(Hit::Nothing, Hit::Button),
+            _ if self.next_fullscreen => Hit::Nothing,
+            Part::Title | Part::Text => Hit::Title,
+            Part::Border(side) => {
+                let strip = strips(area, i)[side.index()];
+                Hit::Edge(edges(side, strip, i.border, x, y))
+            }
+        }
+    }
+
+    /// The buttons in state `lit`, shown now: the pointer does not wait for
+    /// the program's commit.
+    fn light(&mut self, lit: Option<Lit>) {
+        let Some(t) = &mut self.title else {
+            return;
+        };
+        if t.buttons.as_mut().is_some_and(|b| b.light(lit)) {
+            t.apply_now();
+        }
+    }
+
+    /// The pointer is over the button `under`, or over none of them: that
+    /// one is lit — pressed while it is the one the pointer button went down
+    /// on.
+    fn hover_button(&mut self, under: Option<Button>) {
+        let lit = under.map(|button| Lit {
+            button,
+            pressed: self.pressed == Some(button),
+        });
+        self.light(lit);
+    }
+
+    /// The left pointer button went down (`down`) or up over `hit`, the
+    /// event of `serial` on `seat` (§5.11). Down on the title the window is
+    /// moved, on the border resized — by the compositor, which issued the
+    /// serial to this connection and so takes the request as the program's;
+    /// down on a button it is pressed, and up on the same button it acts.
+    fn click(&mut self, f: &Frames, hit: Hit, down: bool, seat: Option<&Rc<WlSeat>>, serial: u32) {
+        let toplevel = self.toplevel.as_ref().and_then(Weak::upgrade);
+        if down {
+            self.pressed = None;
+            match (hit, &toplevel, seat) {
+                (Hit::Title, Some(toplevel), Some(seat)) => toplevel.send_move(seat, serial),
+                (Hit::Edge(edges), Some(toplevel), Some(seat)) if edges != 0 => {
+                    toplevel.send_resize(seat, serial, XdgToplevelResizeEdge(edges))
+                }
+                (Hit::Button(button), _, _) => {
+                    self.pressed = Some(button);
+                    self.hover_button(Some(button));
+                }
+                _ => {}
+            }
+            return;
+        }
+        let pressed = self.pressed.take();
+        let Hit::Button(button) = hit else {
+            return;
+        };
+        self.hover_button(Some(button));
+        if pressed != Some(button) {
+            return;
+        }
+        match button {
+            // What a server-side decoration's "close" is: the program's own
+            // close event; it may ask whether to save.
+            Button::Close => {
+                if let Some(toplevel) = &toplevel {
+                    toplevel.send_close();
+                }
+            }
+            Button::Menu => f.asks.push(Ask::Menu),
+            Button::Network => f.asks.push(Ask::Network),
+        }
     }
 
     /// Put the strips and the title on top of the root's stack again, above
@@ -2310,12 +2784,18 @@ impl WpViewportHandler for Viewport {
 
 // --- INPUT ON THE BORDER --------------------------------------------------------
 
-struct Seat;
+/// The left pointer button (`linux/input-event-codes.h`): the one the frame
+/// acts on.
+const BTN_LEFT: u32 = 0x110;
+
+struct Seat {
+    f: Rc<Frames>,
+}
 
 impl WlSeatHandler for Seat {
     fn handle_get_pointer(&mut self, slf: &Rc<WlSeat>, id: &Rc<WlPointer>) {
         slf.send_get_pointer(id);
-        id.set_handler(Pointer::default());
+        id.set_handler(Pointer::new(self.f.clone(), slf));
     }
 
     fn handle_get_touch(&mut self, slf: &Rc<WlSeat>, id: &Rc<WlTouch>) {
@@ -2329,13 +2809,20 @@ impl WlSeatHandler for Seat {
 /// group was — leaving the program's surface for a strip is a `leave` and a
 /// `frame` to the program, and nothing after.
 ///
-/// It is also what brings a hover title out (§0а, [`hover_at`]): the
-/// compositor sends a client's pointer events to every `wl_pointer` of it,
-/// so the proxy sees the pointer over the program's windows and over its
-/// own strips on the program's pointer. (A program that binds no pointer
-/// has no hover title; the proxy's own pointer is stage 3's.)
-#[derive(Default)]
+/// It is also the frame's own pointer: the compositor sends a client's
+/// pointer events to every `wl_pointer` of it, so the proxy sees the
+/// pointer over the program's windows and over its own strips on the
+/// program's pointer. Over the program's surface near the top it brings a
+/// hover title out (§0а, [`hover_at`]); over the frame it sets the cursor
+/// (§5.5), lights the button under it, and a click of its left button moves
+/// or resizes the window or presses a button (§5.11) — only events the
+/// compositor sent, on surfaces the program cannot name. (A program that
+/// binds no pointer has none of this: the proxy's own `wl_seat` and
+/// `wl_pointer`, which would have it, are not made.)
 struct Pointer {
+    f: Rc<Frames>,
+    /// The seat the program made it of: what a move or a resize names.
+    seat: Weak<WlSeat>,
     away: bool,
     sent: bool,
     /// The window whose root surface the pointer is on.
@@ -2343,6 +2830,23 @@ struct Pointer {
     /// The window the pointer left in this frame: its hover strip goes in
     /// unless the pointer is back on it by the frame's end.
     leaving: Option<Weak<RefCell<Window>>>,
+    /// The part of a frame the pointer is over, and where.
+    over: Option<Over>,
+    /// The serial of the pointer's last enter: the cursor is set with it.
+    entered: u32,
+    /// The proxy's cursor-shape device for this pointer, made when first
+    /// needed, and the shape it set since the last enter.
+    shape: Option<Rc<WpCursorShapeDeviceV1>>,
+    cursor: Option<WpCursorShapeDeviceV1Shape>,
+}
+
+/// Where on a frame the pointer is: the window, its part, and the point on
+/// the part's surface.
+struct Over {
+    window: Weak<RefCell<Window>>,
+    part: Part,
+    x: f64,
+    y: f64,
 }
 
 /// Where on a window the pointer is.
@@ -2350,7 +2854,7 @@ struct Pointer {
 enum Spot {
     /// The program's root surface.
     Root,
-    /// The top strip of the border or the title strip.
+    /// The top strip of the border, or the title strip and what is on it.
     Top,
     /// Another strip of the border.
     Side,
@@ -2360,10 +2864,10 @@ enum Spot {
 /// surface of a window, or a surface of the proxy's.
 fn spot(surface: &Rc<WlSurface>) -> Option<(Rc<RefCell<Window>>, Spot)> {
     if let Ok(own) = surface.try_get_handler_ref::<Mine>() {
-        let spot = if own.part == Part::Side {
-            Spot::Side
-        } else {
-            Spot::Top
+        let spot = match own.part {
+            Part::Border(Side::Top) => Spot::Top,
+            Part::Border(_) => Spot::Side,
+            Part::Title | Part::Text | Part::Buttons => Spot::Top,
         };
         return own.window.upgrade().map(|w| (w, spot));
     }
@@ -2378,6 +2882,21 @@ fn set_hover(window: &Rc<RefCell<Window>>, on: bool) {
 }
 
 impl Pointer {
+    fn new(f: Rc<Frames>, seat: &Rc<WlSeat>) -> Self {
+        Self {
+            f,
+            seat: Rc::downgrade(seat),
+            away: false,
+            sent: false,
+            on: None,
+            leaving: None,
+            over: None,
+            entered: 0,
+            shape: None,
+            cursor: None,
+        }
+    }
+
     fn pass(&mut self, send: impl FnOnce()) {
         if !self.away {
             send();
@@ -2451,6 +2970,87 @@ impl Pointer {
             set_hover(&window, on);
         }
     }
+
+    /// The pointer came onto a part of a frame, or moved on it: the cursor
+    /// for what is under it, and the button under it lit (the others not).
+    fn over_frame(&mut self, slf: &Rc<WlPointer>) {
+        let Some(over) = &self.over else {
+            return;
+        };
+        let Some(window) = over.window.upgrade() else {
+            return;
+        };
+        let hit = window
+            .try_borrow()
+            .map_or(Hit::Nothing, |w| w.hit(over.part, over.x, over.y));
+        self.set_cursor(slf, cursor_for(hit));
+        if let Ok(mut window) = window.try_borrow_mut() {
+            window.hover_button(match hit {
+                Hit::Button(button) => Some(button),
+                _ => None,
+            });
+        }
+    }
+
+    /// The pointer left the frame it was over: nothing of it is lit, and a
+    /// button pressed and not let go of is let go (the release will not
+    /// come here).
+    fn off_frame(&mut self) {
+        let Some(window) = self.over.take().and_then(|o| o.window.upgrade()) else {
+            return;
+        };
+        if let Ok(mut window) = window.try_borrow_mut() {
+            window.pressed = None;
+            window.hover_button(None);
+        }
+    }
+
+    /// The cursor over the frame, with the serial of the enter onto it:
+    /// the compositor takes a shape only with the latest enter's serial, and
+    /// the program, which was not told of this enter, has none to set
+    /// another. Without `wp_cursor_shape_v1` the cursor stays what it was.
+    fn set_cursor(&mut self, slf: &Rc<WlPointer>, shape: WpCursorShapeDeviceV1Shape) {
+        if self.cursor == Some(shape) {
+            return;
+        }
+        if self.shape.is_none() {
+            let manager = self.f.own.borrow().cursor_shape.clone();
+            let Some(manager) = manager else {
+                return;
+            };
+            let device = manager.new_send_get_pointer(slf);
+            quiet(&*device);
+            self.shape = Some(device);
+        }
+        if let Some(device) = &self.shape {
+            device.send_set_shape(self.entered, shape);
+            self.cursor = Some(shape);
+        }
+    }
+
+    /// A button of the pointer over the frame (§5.11): the left one acts,
+    /// once for all the program's pointers ([`Frames::first`]).
+    fn frame_button(&mut self, serial: u32, button: u32, state: WlPointerButtonState) {
+        if button != BTN_LEFT {
+            return;
+        }
+        let Some(over) = &self.over else {
+            return;
+        };
+        let Some(window) = over.window.upgrade() else {
+            return;
+        };
+        if !self.f.first(serial) {
+            return;
+        }
+        let (part, x, y) = (over.part, over.x, over.y);
+        let seat = self.seat.upgrade();
+        if let Ok(mut window) = window.try_borrow_mut() {
+            let hit = window.hit(part, x, y);
+            let down = state == WlPointerButtonState::PRESSED;
+            window.click(&self.f, hit, down, seat.as_ref(), serial);
+        }
+    }
 }
 
 impl WlPointerHandler for Pointer {
@@ -2464,11 +3064,22 @@ impl WlPointerHandler for Pointer {
     ) {
         self.hover_enter(surface, surface_y);
         self.away = !programs(surface);
+        self.entered = serial;
+        self.cursor = None;
+        self.off_frame();
+        self.over = surface.try_get_handler_ref::<Mine>().ok().map(|own| Over {
+            window: own.window.clone(),
+            part: own.part,
+            x: surface_x.to_f64(),
+            y: surface_y.to_f64(),
+        });
+        self.over_frame(slf);
         self.pass(|| slf.send_enter(serial, surface, surface_x, surface_y));
     }
 
     fn handle_leave(&mut self, slf: &Rc<WlPointer>, serial: u32, surface: &Rc<WlSurface>) {
         self.hover_leave(slf, surface);
+        self.off_frame();
         if programs(surface) {
             self.away = false;
             self.pass(|| slf.send_leave(serial, surface));
@@ -2485,6 +3096,11 @@ impl WlPointerHandler for Pointer {
         surface_y: Fixed,
     ) {
         self.hover_motion(surface_y);
+        if let Some(over) = &mut self.over {
+            over.x = surface_x.to_f64();
+            over.y = surface_y.to_f64();
+            self.over_frame(slf);
+        }
         self.pass(|| slf.send_motion(time, surface_x, surface_y));
     }
 
@@ -2496,6 +3112,7 @@ impl WlPointerHandler for Pointer {
         button: u32,
         state: WlPointerButtonState,
     ) {
+        self.frame_button(serial, button, state);
         self.pass(|| slf.send_button(serial, time, button, state));
     }
 
@@ -2537,6 +3154,15 @@ impl WlPointerHandler for Pointer {
 
     fn handle_warp(&mut self, slf: &Rc<WlPointer>, surface_x: Fixed, surface_y: Fixed) {
         self.pass(|| slf.send_warp(surface_x, surface_y));
+    }
+
+    /// The program lets its pointer go: the proxy's cursor-shape device of
+    /// it goes first.
+    fn handle_release(&mut self, slf: &Rc<WlPointer>) {
+        if let Some(device) = self.shape.take() {
+            device.send_destroy();
+        }
+        slf.send_release();
     }
 }
 
@@ -3203,5 +3829,153 @@ mod tests {
             Some((1000, 700)),
             "a destination is the size even before the buffer's is known"
         );
+    }
+
+    /// The buttons at the look's end of the strip, the text in the rest with
+    /// its pads; a strip too narrow for them and a little to drag by has
+    /// none.
+    #[test]
+    fn the_buttons_take_the_end_of_the_strip_and_the_text_the_rest() {
+        let look = &LOOK.buttons;
+        let row = look.width_all();
+        assert_eq!(row, 72);
+        // The look there is: at the right end.
+        let wide = title_layout(640, look);
+        assert_eq!(
+            wide,
+            TitleLayout {
+                text_x: TITLE_PAD,
+                room: 640 - row,
+                buttons: Some(640 - row)
+            }
+        );
+        // The text stops a pad before the buttons.
+        let shown = text_shown(wide.room, 1000);
+        assert_eq!(wide.text_x + shown + TITLE_PAD, 640 - row);
+        // Just room for them and the drag, and not.
+        let least = row + 2 * TITLE_PAD;
+        assert_eq!(title_layout(least, look).buttons, Some(least - row));
+        let narrow = title_layout(least - 1, look);
+        assert_eq!(narrow.buttons, None);
+        assert_eq!((narrow.text_x, narrow.room), (TITLE_PAD, least - 1));
+        // A look with its buttons at the left end (macOS's, later): the row
+        // first, the text after it.
+        let left = ButtonsLook {
+            end: End::Left,
+            ..*look
+        };
+        let l = title_layout(640, &left);
+        assert_eq!(l.buttons, Some(0));
+        assert_eq!(l.text_x, row + TITLE_PAD);
+        assert_eq!(l.text_x + text_shown(l.room, 1000) + TITLE_PAD, 640);
+    }
+
+    /// Which button a point on the row is: the look's cell under it, and
+    /// none outside the row — so, which one is lit and which one a click
+    /// is for. Wherever the row is on the strip, its surface's own
+    /// coordinates say.
+    #[test]
+    fn the_button_under_the_pointer_is_the_one_lit() {
+        let look = &LOOK.buttons;
+        let row = title_layout(300, look).buttons.unwrap();
+        // A point of the strip, on the row's surface.
+        let on_row = |strip_x: f64, y: f64| look.at(strip_x - f64::from(row), y);
+        assert_eq!(
+            on_row(f64::from(row) - 1.0, 10.0),
+            None,
+            "left of it: the title"
+        );
+        assert_eq!(on_row(f64::from(row) + 1.0, 10.0), Some(Button::Menu));
+        assert_eq!(on_row(f64::from(row) + 30.0, 10.0), Some(Button::Network));
+        assert_eq!(on_row(299.0, 10.0), Some(Button::Close));
+        assert_eq!(on_row(299.0, 25.0), None, "below the strip");
+        let lit = |b: Option<Button>, pressed| b.map(|button| Lit { button, pressed });
+        assert_eq!(look.variant(lit(on_row(299.0, 5.0), false)), 3);
+        assert_eq!(
+            look.variant(lit(on_row(f64::from(row) - 1.0, 5.0), false)),
+            0
+        );
+    }
+
+    /// A press on the border resizes by its side's edge — and by both edges
+    /// of a corner within [`CORNER`] of it, measured from the window's
+    /// corner (the side strips begin a border's width below it).
+    #[test]
+    fn the_border_resizes_by_its_edge_and_its_corners_by_both() {
+        let [top, bottom, left, right] = strips(R, BT);
+        let b = BT.border;
+        let e = |side, r: Rect, x: f64, y: f64| edges(side, r, b, x, y);
+        assert_eq!(e(Side::Top, top, 300.0, 2.0), EDGE_TOP);
+        assert_eq!(e(Side::Top, top, 3.0, 2.0), EDGE_TOP | EDGE_LEFT);
+        assert_eq!(
+            e(Side::Top, top, f64::from(CORNER) - 0.5, 0.0),
+            EDGE_TOP | EDGE_LEFT
+        );
+        assert_eq!(e(Side::Top, top, f64::from(CORNER), 0.0), EDGE_TOP);
+        assert_eq!(
+            e(Side::Top, top, f64::from(top.w) - 1.0, 1.0),
+            EDGE_TOP | EDGE_RIGHT
+        );
+        assert_eq!(e(Side::Bottom, bottom, 300.0, 1.0), EDGE_BOTTOM);
+        assert_eq!(e(Side::Bottom, bottom, 0.0, 1.0), EDGE_BOTTOM | EDGE_LEFT);
+        assert_eq!(e(Side::Left, left, 1.0, 200.0), EDGE_LEFT);
+        // The left strip starts `b` below the corner: its first CORNER - b
+        // are the corner's.
+        assert_eq!(e(Side::Left, left, 1.0, 0.0), EDGE_LEFT | EDGE_TOP);
+        assert_eq!(
+            e(Side::Left, left, 1.0, f64::from(CORNER - b) - 0.5),
+            EDGE_LEFT | EDGE_TOP
+        );
+        assert_eq!(e(Side::Left, left, 1.0, f64::from(CORNER - b)), EDGE_LEFT);
+        assert_eq!(
+            e(Side::Right, right, 1.0, f64::from(right.h) - 1.0),
+            EDGE_RIGHT | EDGE_BOTTOM
+        );
+        assert_eq!(e(Side::Right, right, 1.0, 100.0), EDGE_RIGHT);
+        // The resize edges of xdg-shell.
+        assert_eq!(EDGE_TOP | EDGE_LEFT, XdgToplevelResizeEdge::TOP_LEFT.0);
+        assert_eq!(
+            EDGE_BOTTOM | EDGE_RIGHT,
+            XdgToplevelResizeEdge::BOTTOM_RIGHT.0
+        );
+        assert_eq!(Side::ALL.map(Side::index), [0, 1, 2, 3], "strips' order");
+    }
+
+    /// Arrows over the border, the default cursor over the title and the
+    /// buttons (no hand: they light up instead).
+    #[test]
+    fn the_cursor_says_what_a_press_would_do() {
+        use WpCursorShapeDeviceV1Shape as S;
+        let c = |hit| cursor_for(hit).0;
+        assert_eq!(c(Hit::Edge(EDGE_TOP)), S::N_RESIZE.0);
+        assert_eq!(c(Hit::Edge(EDGE_BOTTOM)), S::S_RESIZE.0);
+        assert_eq!(c(Hit::Edge(EDGE_LEFT)), S::W_RESIZE.0);
+        assert_eq!(c(Hit::Edge(EDGE_RIGHT)), S::E_RESIZE.0);
+        assert_eq!(c(Hit::Edge(EDGE_TOP | EDGE_LEFT)), S::NW_RESIZE.0);
+        assert_eq!(c(Hit::Edge(EDGE_TOP | EDGE_RIGHT)), S::NE_RESIZE.0);
+        assert_eq!(c(Hit::Edge(EDGE_BOTTOM | EDGE_LEFT)), S::SW_RESIZE.0);
+        assert_eq!(c(Hit::Edge(EDGE_BOTTOM | EDGE_RIGHT)), S::SE_RESIZE.0);
+        for hit in [
+            Hit::Title,
+            Hit::Button(Button::Close),
+            Hit::Button(Button::Menu),
+            Hit::Nothing,
+        ] {
+            assert_eq!(c(hit), S::DEFAULT.0, "{hit:?}");
+        }
+    }
+
+    /// Asks wait for the proxy's loop in their order, a few at most.
+    #[test]
+    fn asks_are_kept_in_order_and_bounded() {
+        let asks = Asks::default();
+        asks.push(Ask::Menu);
+        asks.push(Ask::Network);
+        assert_eq!(asks.take(), [Ask::Menu, Ask::Network]);
+        assert!(asks.take().is_empty());
+        for _ in 0..10 {
+            asks.push(Ask::Menu);
+        }
+        assert_eq!(asks.take().len(), MAX_ASKS);
     }
 }

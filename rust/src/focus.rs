@@ -840,27 +840,87 @@ fn closed_after_all(tools: &Tools, label: &str, program: &OwnedFd) -> bool {
     }
 }
 
-/// `vpn-zone window-menu`: what can be done with the program of the focused
-/// window — for a key binding of the compositor.
-pub fn menu(tools: &Tools) -> u8 {
+/// What `window-menu` is asked for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MenuArgs {
+    /// The launch of this pid (`--pid`) — a window's pid as the compositor
+    /// has it; behind the Wayland proxy, its supervisor's, which is what the
+    /// frame's buttons pass (`crate::wl_proxy`). Without it: the focused
+    /// window's.
+    pub pid: Option<i32>,
+    /// Straight to "restart with a network chosen" (`--restart`), with no
+    /// menu first: the frame's ⇄, until the network can be switched live.
+    pub restart: bool,
+}
+
+/// `[--pid <pid>] [--restart]`.
+pub fn parse_menu_args(args: &[OsString]) -> Result<MenuArgs, String> {
+    let mut out = MenuArgs::default();
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        match word.to_str() {
+            Some("--pid") => {
+                let pid = words
+                    .next()
+                    .and_then(|p| p.to_str())
+                    .and_then(|p| p.parse::<i32>().ok())
+                    .filter(|&p| p > 0)
+                    .ok_or("--pid: нужен номер процесса")?;
+                out.pid = Some(pid);
+            }
+            Some("--restart") => out.restart = true,
+            _ => {
+                return Err(format!(
+                    "cellward window-menu [--pid <pid>] [--restart], не {}",
+                    word.to_string_lossy()
+                ))
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `vpn-zone window-menu [--pid <pid>] [--restart]`: what can be done with the
+/// program of the focused window — for a key binding of the compositor —,
+/// or of the launch of `--pid` — for the frame's buttons, whose window may
+/// not have the focus.
+pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
     let notify = |title: &str, body: &str| {
         crate::dialog::notify(&tools.notify_send, None, "5000", title, body);
     };
-    let window = match focused_window() {
-        Ok(Some(w)) => w,
-        Ok(None) => {
-            notify(crate::dialog::APP, "Нет окна в фокусе");
-            return 0;
-        }
+    let args = match parse_menu_args(args) {
+        Ok(args) => args,
         Err(e) => {
-            eprintln!("cellward window-menu: {e}");
-            notify(crate::dialog::APP, &e);
-            return 1;
+            eprintln!("{e}");
+            return 2;
         }
+    };
+    let window = match args.pid {
+        // Nothing of the window but its pid: its launch names the program.
+        Some(pid) => Window {
+            pid,
+            ..Window::default()
+        },
+        None => match focused_window() {
+            Ok(Some(w)) => w,
+            Ok(None) => {
+                notify(crate::dialog::APP, "Нет окна в фокусе");
+                return 0;
+            }
+            Err(e) => {
+                eprintln!("cellward window-menu: {e}");
+                notify(crate::dialog::APP, &e);
+                return 1;
+            }
+        },
     };
     // Held from here on: the menu may stay open a while, and a number can
     // change hands in that time — "close" reaches this process or nobody.
     let target = crate::sys::pidfd_open(window.pid);
+    if args.pid.is_some() && target.is_none() {
+        notify(crate::dialog::APP, "Программа уже закрылась");
+        return 0;
+    }
     let launch = launch_of(&tools.state, &tools.core, window.pid);
     let program = launch.as_ref().and_then(|l| l.program.clone());
     let label = window_name(&tools.state, &window, launch.as_ref());
@@ -880,8 +940,22 @@ pub fn menu(tools: &Tools) -> u8 {
             .collect(),
         ..Default::default()
     };
-    let Some(choice) = ask_menu(tools, &menu) else {
-        return 0;
+    let choice = if args.restart {
+        // The frame's ⇄: the restart with a network chosen — where the menu
+        // would offer it (a program of the registry); still confirmed below.
+        if !menu.actions.iter().any(|(tag, _, _)| tag == "restart") {
+            notify(
+                &label,
+                "Не известно, какая это программа, — её не перезапустить с выбором сети",
+            );
+            return 1;
+        }
+        "restart".to_owned()
+    } else {
+        let Some(choice) = ask_menu(tools, &menu) else {
+            return 0;
+        };
+        choice
     };
     let confirm = |text: String| {
         crate::dialog::confirm(
@@ -1094,6 +1168,48 @@ mod tests {
         let entries = menu_entries("Лис", Some(&launch), &Pin::Main);
         assert!(entries[3].2, "cutting a zone off is marked as dangerous");
         assert!(entries[3].1.contains("nl"));
+    }
+
+    /// `window-menu`: the focused window's by default, a launch's by
+    /// `--pid`, straight to the restart by `--restart`; anything else is
+    /// refused, not guessed at.
+    #[test]
+    fn the_window_menu_takes_a_pid_and_a_restart() {
+        let parse =
+            |args: &[&str]| parse_menu_args(&args.iter().map(OsString::from).collect::<Vec<_>>());
+        assert_eq!(parse(&[]), Ok(MenuArgs::default()));
+        assert_eq!(
+            parse(&["--pid", "4242"]),
+            Ok(MenuArgs {
+                pid: Some(4242),
+                restart: false
+            })
+        );
+        assert_eq!(
+            parse(&["--pid", "4242", "--restart"]),
+            Ok(MenuArgs {
+                pid: Some(4242),
+                restart: true
+            })
+        );
+        assert_eq!(
+            parse(&["--restart"]),
+            Ok(MenuArgs {
+                pid: None,
+                restart: true
+            })
+        );
+        for bad in [
+            &["--pid"][..],
+            &["--pid", "x"],
+            &["--pid", "0"],
+            &["--pid", "-5"],
+            &["--pid", ""],
+            &["--menu"],
+            &["4242"],
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
