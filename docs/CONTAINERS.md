@@ -757,7 +757,8 @@ version 1 unchanged): the containers' running instances (§3.6), each
   "exit": "none", "why": "offline", "up": true, "pid": 4321,
   "since": "2026-09-27T12:00:00Z", "epoch": 1, "pid_namespace": true,
   "build": "current", "restart_needed": [], "programs": 2,
-  "live_switch": { "available": false, "reason": "unsupported" } }
+  "live_switch": { "available": true, "reason": null },
+  "switch": { "state": "idle", "from": null, "to": null } }
 ```
 
 — `container` is the container's name, `"main"` for the main home's
@@ -772,12 +773,22 @@ attached again when it comes back the same), `zone-changed` (it came back as
 another one: cut until `cellward container reattach`) and `attach-failed`.
 `pid_namespace` is `true` since stage 3 (a pid namespace of its own: its
 programs see only its processes, THREAT-MODEL X4) — `false` for an instance
-an earlier build started, until it is restarted; `epoch` and `live_switch`
-are fixed (no switch yet) and will move with stage 4. With it:
+an earlier build started, until it is restarted. Since stage 4 (the live
+switch, LEAK-MODEL §29): `epoch` is the instance's current epoch (1 until
+its first switch or a zone's return; its programs' cgroup
+`vpn-zone-container@<id>.service/e<N>`); `live_switch` says whether its
+network can be switched live now — `reason` `kind` (an instance of one
+network), `cgroup` (no delegated cgroup), `nft-socket`, `sock-destroy` (the
+host lacks them), `outside` (a program launched from a login session runs),
+`previous-build`; `switch` is a switch under way or failed — `state`
+`cutting`, `attaching` or `failed`, with `from` and `to`, `idle` otherwise;
+`why` may also be `switching` and `switch-failed`. With it:
 `containers[].instances` (the ids of a container's running instances),
 `containers[].running[].instance` (the instance a launch runs in — offline
 and, since stage 2, in a zone; `null` for one unconfined or in a zone's own
-namespaces), `attached` on the `offline` network (the ids of the instances
+namespaces), `containers[].running[].network_now` (stage 4: the network the
+launch is in now — a live switch moves its record, so `network` says the
+same), `attached` on the `offline` network (the ids of the instances
 with no network) and, since stage 2, on every zone (the ids of the
 instances going out through it now; `[]` when it is down), and `bridge` on
 every zone: `true` when it is up and carries instances, `false` when it is

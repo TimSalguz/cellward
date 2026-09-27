@@ -633,7 +633,7 @@ fn containers(tools: &Tools) -> u8 {
     };
 
     let mut actions = vec![
-        row("network", "⇄ Сменить сеть…"),
+        row("network", "⇄ Сменить сеть контейнера…"),
         row("merge", "⊕ Объединить с другим контейнером…"),
     ];
     if container.home != Home::Main {
@@ -680,7 +680,51 @@ fn containers(tools: &Tools) -> u8 {
             ) else {
                 return 0;
             };
-            let (ok, text) = cli(tools, &["container", "set", &selector, "network", &network]);
+            // Its programs running in another network (stage 4 of the
+            // container design): switched live — what it breaks and what it
+            // cannot said first, and the person's choice among the ways.
+            let running = crate::instance::running(&tools.state)
+                .into_iter()
+                .find(|i| i.id == container.name && i.network != network && network != "ask");
+            let mut args = vec![
+                "container",
+                "set",
+                selector.as_str(),
+                "network",
+                network.as_str(),
+            ];
+            if let Some(instance) = running {
+                let ways = [
+                    row("now", "Сменить сейчас"),
+                    row("restart", "Сменить и перезапустить программы"),
+                    row("other", "Другой контейнер…"),
+                ];
+                let Some(way) = menu(
+                    tools,
+                    &format!("Сеть контейнера «{selector}»"),
+                    &crate::switch::warning(&container.name, &instance.network, &network),
+                    &ways,
+                ) else {
+                    return 0;
+                };
+                match way.as_str() {
+                    "now" => args.push("--yes"),
+                    "restart" => args.extend(["--restart", "--yes"]),
+                    _ => {
+                        dialog::message(
+                            &tools.kdialog,
+                            [
+                                "--msgbox",
+                                "Чтобы в новой сети быть другим, запусти программу в другом \
+                                 контейнере: в окне запуска выбери другой контейнер (или «➕ \
+                                 Новый профиль…»).",
+                            ],
+                        );
+                        return 0;
+                    }
+                }
+            }
+            let (ok, text) = cli(tools, &args);
             done(ok, text, "Сеть контейнера изменена");
         }
         "merge" => {

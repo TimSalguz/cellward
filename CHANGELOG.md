@@ -6,6 +6,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **What a live switch shows** (2026-09-27, stage 4c of the container-first
+  model). The GUI's containers menu (`cellward-gui containers`, «⇄ Сменить
+  сеть контейнера…») asks, for a container whose programs run in another
+  network, how: «Сменить сейчас», «Сменить и перезапустить программы» or
+  «Другой контейнер…», after the text of what a switch breaks and what it
+  cannot. A program reads the network its container is in now in
+  `$XDG_RUNTIME_DIR/cellward/network` (read-only, rewritten in place by the
+  switch); `VPN_ZONE_CURRENT` stays the network it was launched into. Not
+  yet: the window frame's colour and title strip keep the network the
+  program was launched into until the frame's work that follows
+  (`docs/WINDOW-FRAME.md`); `cellward focused` and `status` say the current
+  one.
 - **A container's network switched live** (2026-09-27, stage 4b of the
   container-first model; `docs/LEAK-MODEL.md` §29, `docs/THREAT-MODEL.md`
   N19–N21). **`cellward container set <c> network <net>`** while the

@@ -7445,6 +7445,12 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
             // ground a zone's taps stand on — the constant forwarders in
             // the file they read, the unreachable defaults.
             instance_ground(zone)?;
+            if let Err(e) = note_network_inside(zone) {
+                eprintln!(
+                    "instance {}: its programs cannot read which network it is in ({e})",
+                    zone.name()
+                );
+            }
             let done = zone.path(crate::instance::SPACE_READY);
             touch(&done).map_err(|e| format!("cannot create {}: {e}", done.display()))?;
             println!(
@@ -7632,6 +7638,29 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Where an instance's programs read the network it is in now (stage 4):
+/// `cellward/network` in their runtime directory — its own tmpfs
+/// (`seal_runtime`); `/run` itself is the host's.
+pub const NETWORK_INSIDE: &str = "cellward/network";
+
+/// The instance's network for its programs (stage 4 of the container
+/// design): its directory's `network`, bound read-only at
+/// [`NETWORK_INSIDE`] in the runtime directory. Its keeper rewrites that
+/// file in place with each switch (`Transport::note_network`): a program
+/// reads the network it is in now there — `VPN_ZONE_CURRENT` in its
+/// environment stays the network it was launched into.
+fn note_network_inside(zone: &Zone) -> Result<(), String> {
+    let target = host_runtime_dir(zone).join(NETWORK_INSIDE);
+    if let Some(dir) = target.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    touch(&target).map_err(|e| format!("cannot create {}: {e}", target.display()))?;
+    let from = zone.path(crate::instance::NETWORK);
+    sys::mount(from.as_os_str(), &target, "", libc::MS_BIND, "")
+        .map_err(|e| format!("cannot bind {}: {e}", target.display()))?;
+    sys::remount_read_only(&target).map_err(|e| format!("cannot close {}: {e}", target.display()))
 }
 
 /// What an instance with a zone for its network has before any attach

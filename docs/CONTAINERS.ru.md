@@ -746,7 +746,8 @@ JSON пишется руками, как руками читается мани�
   "exit": "none", "why": "offline", "up": true, "pid": 4321,
   "since": "2026-09-27T12:00:00Z", "epoch": 1, "pid_namespace": true,
   "build": "current", "restart_needed": [], "programs": 2,
-  "live_switch": { "available": false, "reason": "unsupported" } }
+  "live_switch": { "available": true, "reason": null },
+  "switch": { "state": "idle", "from": null, "to": null } }
 ```
 
 — `container` — имя контейнера, `"main"` у экземпляра основного дома
@@ -760,11 +761,21 @@ JSON пишется руками, как руками читается мани�
 (вернулась другой: отрезан до `cellward container reattach`) и
 `attach-failed`. `pid_namespace` с этапа 3 — `true` (своё пространство pid:
 программы видят только процессы экземпляра, THREAT-MODEL X4), `false` — у
-экземпляра, поднятого прошлой сборкой, пока его не перезапустят; `epoch` и
-`live_switch` постоянны (переключения пока нет) и оживут на этапе 4. С ним же: `containers[].instances` (id работающих экземпляров
+экземпляра, поднятого прошлой сборкой, пока его не перезапустят. С этапа 4
+(смена сети на ходу, LEAK-MODEL §29): `epoch` — текущая эпоха экземпляра (1
+до первой смены или возвращения зоны; cgroup его программ
+`vpn-zone-container@<id>.service/e<N>`); `live_switch` — можно ли сменить его
+сеть на ходу сейчас: `reason` `kind` (экземпляр на одну сеть), `cgroup` (нет
+делегированной cgroup), `nft-socket`, `sock-destroy` (их нет у хоста),
+`outside` (работает программа, запущенная из сеанса входа),
+`previous-build`; `switch` — смена в ходе или неудавшаяся: `state`
+`cutting`, `attaching` или `failed` с `from` и `to`, иначе `idle`; `why`
+бывает ещё `switching` и `switch-failed`. С ним же: `containers[].instances` (id работающих экземпляров
 контейнера), `containers[].running[].instance` (экземпляр, в котором идёт
 запуск, — offline и, с этапа 2, в зоне; `null` у запуска без ограничений или
-в пространствах самой зоны), `attached` у сети `offline` (id экземпляров без
+в пространствах самой зоны), `containers[].running[].network_now` (этап 4:
+сеть, в которой запуск сейчас, — смена на ходу переносит его запись, так что
+`network` говорит то же), `attached` у сети `offline` (id экземпляров без
 сети) и, с этапа 2, у каждой зоны (id экземпляров, выходящих через неё
 сейчас; `[]`, когда она лежит), и `bridge` у каждой зоны: `true`, когда она
 поднята и везёт экземпляры, `false`, когда поднята без моста (прошлой

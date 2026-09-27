@@ -273,6 +273,10 @@ with subtest("switch: container vmsw in A with its programs, each socket kind op
     machine.wait_until_succeeds("grep -q '^reply' /tmp/sw-ping.out", timeout=60)
     i = sw()
     assert (i["network"], i["epoch"], i["switch"]["state"]) == ("vmreal", 1, "idle"), i
+    # Where its programs read the network it is in (stage 4c): read-only.
+    note = in_placed(SW, "vmreal", "cat /run/user/1000/cellward/network").strip()
+    assert note == "vmreal", note
+    in_placed(SW, "vmreal", "sh -c '! echo x > /run/user/1000/cellward/network'")
 
 with subtest("switch: every refusal leaves A attached, its sockets as they were"):
     def flowing():
@@ -371,6 +375,9 @@ with subtest("switch: A to B live — programs stay, nothing of A goes on in B, 
     assert "10.99.0.9" in out, out
     resolv = in_placed(SW, "vmswb", "cat /etc/resolv.conf")
     assert "nameserver 10.254.255.253" in resolv and "10.99.0.1" not in resolv, resolv
+    # The network it is in now, in the same file, rewritten in place (4c).
+    note = in_placed(SW, "vmswb", "cat /run/user/1000/cellward/network").strip()
+    assert note == "vmswb", note
     # A socket with the old IPv6 source, made after the switch: not out.
     in_placed(SW, "vmswb", f"{PY} /tmp/swhelper.py freebind {a6_old} fd99::1 7302 v6free")
     pings = machine.succeed("grep -c '^reply' /tmp/sw-ping.out").strip()
