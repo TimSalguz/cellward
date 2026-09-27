@@ -1001,13 +1001,12 @@ fn a_container_is_never_in_two_networks_at_once() {
 #[test]
 fn a_plain_file_in_declared_is_not_nixs_word() {
     let home = Home::new("declared-plain");
-    home.zone_is_up("nl");
     let declared = home.root.join("config/declared");
     fs::create_dir_all(declared.join("containers")).unwrap();
     fs::write(declared.join("hermetic-default"), "off").unwrap();
     let elsewhere = home.root.join("elsewhere");
-    fs::write(&elsewhere, "nl\n").unwrap();
-    std::os::unix::fs::symlink(&elsewhere, declared.join("audio-manager")).unwrap();
+    fs::write(&elsewhere, "leave").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, declared.join("user-entries")).unwrap();
     fs::write(
         declared.join("containers/dev.conf"),
         "home = private\nnetwork = unconfined\n",
@@ -1022,7 +1021,7 @@ fn a_plain_file_in_declared_is_not_nixs_word() {
         "{json}"
     );
     assert!(
-        json.contains("\"audio_manager\":{\"value\":false,\"source\":\"default\"}"),
+        json.contains("\"user_entries\":{\"value\":\"take-over\",\"source\":\"default\"}"),
         "{json}"
     );
     assert!(!json.contains("\"selector\":\"dev\""), "{json}");
