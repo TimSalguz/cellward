@@ -407,7 +407,7 @@ cellward lock|unlock <зона>                    # запретить выхо
 cellward x11 <зона> on|off                     # свой X-сервер программам зоны
 cellward hermetic <зона> default|on|off        # без systemd --user, шина через фильтр, брокер; default — как у всех зон
 cellward hermetic --default on|off             # для зон без своей настройки (on — по умолчанию с 2026-09)
-cellward default-profile ask|main|own|<имя>
+cellward default-profile ask|main|own|<имя>   # ask (по умолчанию): спрашивает окно; программе, которой контейнер не выбирали, предвыбран свой дом
 cellward mode picker|per-zone|both|off         # как ведут себя ярлыки (per-zone, both — устарели)
 cellward default offline|unconfined|<зона>     # что пикер предлагает незнакомой программе
 cellward pins / forget <программа|--all>       # закреплённые за контейнерами программы (сеть — у контейнера) и снять закрепление

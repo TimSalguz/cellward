@@ -416,7 +416,7 @@ cellward lock|unlock <zone>                    # forbid leaving for other networ
 cellward x11 <zone> on|off                     # an X server of their own for the zone's programs
 cellward hermetic <zone> default|on|off        # no systemd --user, a filtered session bus, the broker; default: as all zones
 cellward hermetic --default on|off             # for zones without a setting of their own (on — the default since 2026-09)
-cellward default-profile ask|main|own|<name>
+cellward default-profile ask|main|own|<name>  # ask (default): the window asks; a program never given a container gets its own home preselected
 cellward mode picker|per-zone|both|off         # how launcher entries behave (per-zone, both: deprecated)
 cellward default offline|unconfined|<zone>     # what the picker offers an unknown program
 cellward pins / forget <program|--all>         # programs pinned to a container (the network is the container's), and unpinning
