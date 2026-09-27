@@ -20,10 +20,17 @@ SCAN = "sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null; true'"
 # in CI).
 VICTIM, SIBLING = "600.201", "600.202"
 
+
+def exactly(marker):
+    """`sleep <marker>` as a whole command line, `sleep` by its name or by
+    its path (systemd-run starts it by the path)."""
+    return "(/[^ ]*/)?sleep " + marker.replace(".", "[.]")
+
+
 with subtest("a zone's program neither sees nor signals the host's processes of the user"):
     alice(f"systemd-run --user --unit=vmvictim sleep {VICTIM}")
-    machine.wait_until_succeeds(f"pgrep -u alice -f '^sleep {VICTIM}'", timeout=30)
-    victim = machine.succeed(f"pgrep -u alice -f '^sleep {VICTIM}'").split()[0]
+    machine.wait_until_succeeds(f"pgrep -u alice -xf '{exactly(VICTIM)}'", timeout=30)
+    victim = machine.succeed(f"pgrep -u alice -xf '{exactly(VICTIM)}'").split()[0]
     # On the host it is there to be seen: the check below is not vacuous.
     assert VICTIM in alice(SCAN)
     # In the zone (its main home's instance, main:vmsmoke): not in /proc at
@@ -34,7 +41,7 @@ with subtest("a zone's program neither sees nor signals the host's processes of 
     # Nor by name: nothing there to signal.
     out = alice(
         "cellward run vmsmoke -- sh -c "
-        f"'pkill -TERM -f \"^sleep {VICTIM}\" && echo KILLED || echo NOT-FOUND'"
+        f"'pkill -TERM -xf \"{exactly(VICTIM)}\" && echo KILLED || echo NOT-FOUND'"
     )
     assert "NOT-FOUND" in out, out
     machine.succeed(f"kill -0 {victim}")
@@ -46,14 +53,14 @@ with subtest("a program sees another launch of its container, and cannot signal 
     release = machine.succeed("uname -r").strip()
     if tuple(int(x) for x in release.split("-")[0].split(".")[:2]) >= (6, 12):
         alice(f"systemd-run --user --unit=vmsibling cellward run vmsmoke -- sleep {SIBLING}")
-        machine.wait_until_succeeds(f"pgrep -u alice -f '^sleep {SIBLING}'", timeout=60)
+        machine.wait_until_succeeds(f"pgrep -u alice -xf '{exactly(SIBLING)}'", timeout=60)
         out = alice(
             "cellward run vmsmoke -- sh -c "
-            f"'p=$(pgrep -f \"^sleep {SIBLING}\") && echo SEEN; "
+            f"'p=$(pgrep -xf \"{exactly(SIBLING)}\") && echo SEEN; "
             "kill -TERM $p && echo KILLED || echo REFUSED'"
         )
         assert "SEEN" in out and "REFUSED" in out, out
-        machine.succeed(f"pgrep -u alice -f '^sleep {SIBLING}'")
+        machine.succeed(f"pgrep -u alice -xf '{exactly(SIBLING)}'")
         # What it starts itself, it may signal.
         out = alice("cellward run vmsmoke -- sh -c 'sleep 60 & kill $! && echo OWN-OK'")
         assert "OWN-OK" in out, out

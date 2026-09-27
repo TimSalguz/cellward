@@ -40,9 +40,16 @@ def run_in(c, cmd):
     return alice(f"cellward run offline --container {c} -- {cmd}")
 
 
+def exactly(marker):
+    """`sleep <marker>` as a whole command line, `sleep` by its name or by
+    its path (systemd-run starts it by the path)."""
+    return "(/[^ ]*/)?sleep " + marker.replace(".", "[.]")
+
+
 def seek(marker):
-    """A look for the user's `sleep <marker>` alone."""
-    return f"pgrep -u alice -f '^sleep {marker}'"
+    """A look for the user's `sleep <marker>` alone — not a launch's
+    profile-run, whose command line has it at the end."""
+    return f"pgrep -u alice -xf '{exactly(marker)}'"
 
 
 def marked(marker):
@@ -129,7 +136,7 @@ with subtest("a program that ignores TERM ends on cellward container kill"):
     )
     machine.wait_until_succeeds(seek(STUBBORN), timeout=60)
     # It does ignore TERM: the kill below is not vacuous.
-    machine.succeed(f"pkill -TERM -u alice -f '^sleep {STUBBORN}'")
+    machine.succeed(f"pkill -TERM -u alice -xf '{exactly(STUBBORN)}'")
     machine.sleep(1)
     stubborn = marked(STUBBORN)
     assert stubborn, "TERM ended the program that ignores it"
