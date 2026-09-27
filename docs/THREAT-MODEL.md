@@ -113,14 +113,14 @@ satellite, when granted.
 |---|---|---|---|---|
 | | **Network** | | | |
 | N1 | IPv4 traffic around the tunnel | yes | the app namespace has only `lo` and the tunnel; there is nothing else to route to | C · vm1 vm2 vm8 sm1 sm13 |
-| N2 | IPv6 around the tunnel | yes | the same topology; a config without v6 leaves no v6 default route | C · vm3 sm2 sm15 |
+| N2 | IPv6 around the tunnel | yes | the same topology: IPv6 goes into the tunnel when it carries it (WireGuard with a v6 address, OpenConnect when the gateway gives one), and a tunnel without it leaves no v6 default route | C · vm3 vm36 vm37 sm2 sm15 |
 | N3 | The LAN and the host's own addresses, from a tunnel zone | yes | no route to them in the app namespace; the uplink filter lets out only the endpoint | C · br1 sys1; kernel-WireGuard user zone: **no test** |
 | N4 | Host loopback services through pasta (port mirroring, gateway mapping) | yes | pasta runs with `-t/-u/-T/-U none` and `--no-map-gw` | vm7 sys9 |
 | N5 | Programs see the route to the endpoint or the tunnel's socket | yes | the tunnel is made in the uplink and moved down; its socket stays in the uplink | C · vm4 sm3 |
-| N6 | A zone program re-routes, adds an interface or unloads the filter | yes | no capabilities, and no rights in the zone's user namespace; a nested one owns only new, empty namespaces | C · sys2 sys3 (system tier); user tier: **no test** |
+| N6 | A zone program re-routes, adds an interface or unloads the filter | yes | no capabilities, and no rights in the zone's user namespace; a nested one owns only new, empty namespaces | C · vm38 sys2 sys3 |
 | N7 | A regression of ours adds a way out | insurance | nftables in the app namespace: `policy drop`, only `lo` and `awg0` | vm5 sm4 |
 | N8 | The uplink sends anything but the tunnel's transport | yes | uplink ruleset: the endpoint's address and port (OpenConnect: the gateway's address, any port) | vm6 vm8 sm5 sm17 sys6 |
-| N9 | The tunnel or its holder dies while programs run | yes, fail-closed | the uplink namespace dies with the holder; the interface stays and drops everything | C · sys10 br3 br4 sm19 vm24 up1; kernel-WireGuard user zone: **no test** |
+| N9 | The tunnel or its holder dies while programs run | yes, fail-closed | the uplink namespace dies with the holder; the interface stays and drops everything | C · vm39 sys10 br3 br4 sm19 vm24 up1 |
 | N10 | A host-interface zone falls back to the host's routes | yes | every socket is bound to the interface (patched pasta); the zone goes down when the interface does | vm22 vm23 vm24 vm25 |
 | N11 | A host-interface zone goes out through a host service (proxy, Tor, sshd on a host address) | partly | the filter refuses the host's IPv4 and IPv6 (global, ULA) addresses as they are at zone start; later ones are not listed | vm22 (IPv4); IPv6: **no test** |
 | N12 | A user zone through a system zone reaches that zone's services, or goes around its tunnel | yes | its pasta runs as `vpn-zones-bridge`, which the system zone refuses to its own addresses | br1 br2 br3 br4 |
@@ -219,8 +219,8 @@ satellite, when granted.
 Notes:
 
 - **N3, N9.** For a kernel WireGuard/AmneziaWG user zone, fail-closed rests on the kernel
-  destroying the uplink namespace along with its holder (GOTCHAS §2). No test kills the holder
-  while programs run. An OpenConnect gateway that gives out another address on reconnect
+  destroying the uplink namespace along with its holder (GOTCHAS §2); vm39 kills the zone
+  under a running program. An OpenConnect gateway that gives out another address on reconnect
   leaves the zone dead, not open (LEAK-MODEL, OpenConnect item 11).
 - **N8.** A kernel without `nf_tables` costs a warning, not the zone, because the topology
   carries the weight. The exception is OpenConnect, whose zone does not come up without the
@@ -259,10 +259,8 @@ Notes:
 These are the gaps. Each is a claim made by construction, or none at all, that no VM or
 smoke test tries to break:
 
-- **N3, N9:** the LAN and a dead holder, for a kernel WireGuard/AmneziaWG user zone (covered
-  for system zones and zones through them);
-- **N6:** a user-tier zone program changing routes or the filter (covered for the system
-  tier);
+- **N3:** the LAN, for a kernel WireGuard/AmneziaWG user zone (covered for system zones and
+  zones through them);
 - **N11:** the host's IPv6 addresses refused to a host-interface zone (IPv4 is tested);
 - **D2:** the host replacing `resolv.conf` by rename;
 - **D3:** `resolve1` itself over the system bus (`hostname1` and `ListSessions` are tested);
@@ -317,6 +315,10 @@ apart from DynamicLauncher and the two network portals.
 - vm33 "zone: container storage covered, a container's own given back"
 - vm34 "layer container: the whole home under its layer, grants in the real one"
 - vm35 "doctor: a zone passes, the host's own namespace does not"
+- vm36 "IPv6 through the tunnel: the v6 default goes into awg0", "IPv6 aimed at the server's real address goes into the tunnel, not around it"
+- vm37 "IPv6 through the tunnel: TCP and ping, the server sees the tunnel's v6 address", "IPv6 through the tunnel: DNS over v6, from the config, answers inside"
+- vm38 "a zone's program cannot touch the routes, the tunnel or the filter"
+- vm39 "the zone killed under a running program: it fails closed"
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -361,7 +363,7 @@ the other"
 - sm12 «Доверенный сертификат: соседний контейнер и хост — не доверяют» (CA not trusted next door)
 - sm13 «Зона OpenConnect: в app-ns РОВНО два линка — lo и awg0»
 - sm14 «Зона OpenConnect: DNS и search — от шлюза, а не от хоста»
-- sm15 «Зона OpenConnect: IPv6 без пути наружу»
+- sm15 «Зона OpenConnect: IPv6 от шлюза — через туннель, и только через него» (address, default, resolver, TCP to the gateway over v6)
 - sm16 «Зона OpenConnect: в uplink-ns закрыто то же, что в зоне» (Nix daemon, IPC, `/dev/mqueue`, `/dev/shm`)
 - sm17 «Зона OpenConnect: второй эшелон аплинка — только адрес шлюза»
 - sm18 «Зона OpenConnect: клиент — отдельный id без прав» (uid, capabilities, groups, `no_new_privs`, seccomp, `nft delete` refused)
