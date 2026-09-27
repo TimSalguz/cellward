@@ -21,26 +21,42 @@ tree, and an orphan the instance's pid 1 adopted is reaped and counted.
 # glob and the read is skipped.
 SCAN = "sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null; true'"
 
+# Each marked process is a sleep of a duration of its own, looked for by it:
+# NixOS's coreutils is one binary that goes by argv[0], so `exec -a <name>
+# sleep` runs no sleep at all (red once in CI).
+A, B, HOST, STUBBORN, DAEMON, ORPHAN, D = (
+    "600.301",
+    "600.302",
+    "600.303",
+    "600.304",
+    "600.305",
+    "600.306",
+    "600.307",
+)
+
 
 def run_in(c, cmd):
     """A launch into container `c`'s instance, as a person makes one."""
     return alice(f"cellward run offline --container {c} -- {cmd}")
 
 
+def seek(marker):
+    """A look for the user's `sleep <marker>` alone."""
+    return f"pgrep -u alice -f '^sleep {marker}'"
+
+
 def marked(marker):
-    """The host pids of the user's processes whose command line starts with
-    `marker`."""
-    return machine.succeed(f"pgrep -u alice -f '^{marker}' || true").split()
+    """The host pids of the user's `sleep <marker>`."""
+    return machine.succeed(f"{seek(marker)} || true").split()
 
 
 def keep(c, unit, marker):
-    """A program of `c` named `marker` (its command line), keeping `c`'s
-    instance up."""
+    """A program of `c`, `sleep <marker>`, keeping `c`'s instance up."""
     alice(
         f"systemd-run --user --collect --unit={unit} "
-        f"cellward run offline --container {c} -- bash -c 'exec -a {marker} sleep 600'"
+        f"cellward run offline --container {c} -- sleep {marker}"
     )
-    machine.wait_until_succeeds(f"pgrep -u alice -f '^{marker}'", timeout=60)
+    machine.wait_until_succeeds(seek(marker), timeout=60)
 
 
 def events(kind, id_):
@@ -53,22 +69,22 @@ def events(kind, id_):
 
 for c in ["vmpa", "vmpb", "vmpc", "vmpd"]:
     alice(f"cellward container create {c} --home layer")
-keep("vmpa", "vmpa-keep", "vmx4-a-marker")
-keep("vmpb", "vmpb-keep", "vmx4-b-marker")
-alice("systemd-run --user --unit=vmx4-host bash -c 'exec -a vmx4-host-marker sleep 600'")
-machine.wait_until_succeeds("pgrep -u alice -f '^vmx4-host-marker'", timeout=30)
-host_marker = marked("vmx4-host-marker")[0]
+keep("vmpa", "vmpa-keep", A)
+keep("vmpb", "vmpb-keep", B)
+alice(f"systemd-run --user --unit=vmx4-host sleep {HOST}")
+machine.wait_until_succeeds(seek(HOST), timeout=30)
+host_marker = marked(HOST)[0]
 
 with subtest("an instance's program sees its own container's processes, no one else's"):
     host = alice(SCAN)
-    for m in ["vmx4-a-marker", "vmx4-b-marker", "vmx4-host-marker", "container-enter"]:
+    for m in [A, B, HOST, "container-enter"]:
         assert m in host, f"{m} not even on the host"
     inside = run_in("vmpa", SCAN)
     # The same container's other launch: seen.
-    assert "vmx4-a-marker" in inside, inside
+    assert A in inside, inside
     # Another container's program, the host's, a launch's waiter (a host
     # process — this one's own is alive while it looks): not.
-    for m in ["vmx4-b-marker", "vmx4-host-marker", "container-enter"]:
+    for m in [B, HOST, "container-enter"]:
         assert m not in inside, f"{m} seen in an instance"
     # Its own pid namespace, not the host's nor another instance's.
     ns_a = run_in("vmpa", "readlink /proc/self/ns/pid").strip()
@@ -81,7 +97,7 @@ with subtest("an instance's program sees its own container's processes, no one e
     i = instance("vmpa")
     assert i["pid_namespace"] is True, i
     # And the host's number of it names nothing of the host's there.
-    run_in("vmpa", f"sh -c '! grep -qs vmx4-host-marker /proc/{host_marker}/cmdline'")
+    run_in("vmpa", f"sh -c '! grep -qs {HOST} /proc/{host_marker}/cmdline'")
 
 with subtest("a host process's /proc/<pid>/net is out of an instance's reach"):
     # /proc/<pid>/net is that process's network, and no ptrace check guards
@@ -101,7 +117,7 @@ with subtest("stopping an instance ends its programs, and reaches no timeout"):
     assert b is not None
     # Well below systemd's own stop timeout (90 s): a hang would be caught.
     alice("timeout 60 systemctl --user stop vpn-zone-container@vmpb.service")
-    machine.wait_until_fails("pgrep -u alice -f '^vmx4-b-marker'", timeout=30)
+    machine.wait_until_fails(seek(B), timeout=30)
     assert instance("vmpb") is None
     assert any(e.get("why") == "stop" for e in events("instance-stop", "vmpb"))
 
@@ -109,31 +125,28 @@ with subtest("a program that ignores TERM ends on cellward container kill"):
     alice(
         "systemd-run --user --collect --unit=vmpa-stubborn "
         "cellward run offline --container vmpa -- "
-        "bash -c 'trap \"\" TERM; exec -a vmx4-stubborn sleep 600'"
+        f"bash -c 'trap \"\" TERM; exec sleep {STUBBORN}'"
     )
-    machine.wait_until_succeeds("pgrep -u alice -f '^vmx4-stubborn'", timeout=60)
+    machine.wait_until_succeeds(seek(STUBBORN), timeout=60)
     # It does ignore TERM: the kill below is not vacuous.
-    machine.succeed("pkill -TERM -u alice -f '^vmx4-stubborn'")
+    machine.succeed(f"pkill -TERM -u alice -f '^sleep {STUBBORN}'")
     machine.sleep(1)
-    stubborn = marked("vmx4-stubborn")
+    stubborn = marked(STUBBORN)
     assert stubborn, "TERM ended the program that ignores it"
     out = alice("cellward container kill vmpa")
     assert "убито программ" in out, out
     for pid in stubborn:
         machine.wait_until_fails(f"test -e /proc/{pid}", timeout=30)
-    machine.wait_until_fails("pgrep -u alice -f '^vmx4-a-marker'", timeout=30)
+    machine.wait_until_fails(seek(A), timeout=30)
     assert instance("vmpa") is None
     assert any(e.get("why") == "kill" for e in events("instance-stop", "vmpa"))
 
 with subtest("a daemon forked twice stays in its launch's tree, under profile-run"):
     # The launch returns when its program does — the daemon lives on, its
     # output not held by anyone's pipe (profile-run's own is /dev/null).
-    run_in(
-        "vmpc",
-        "bash -c '(exec -a vmx4-daemon sleep 600 </dev/null >/dev/null 2>&1 &)'",
-    )
-    machine.wait_until_succeeds("pgrep -u alice -f '^vmx4-daemon'", timeout=30)
-    daemon = marked("vmx4-daemon")[0]
+    run_in("vmpc", f"bash -c '(exec sleep {DAEMON} </dev/null >/dev/null 2>&1 &)'")
+    machine.wait_until_succeeds(seek(DAEMON), timeout=30)
+    daemon = marked(DAEMON)[0]
     parent = machine.succeed(f"awk '/^PPid:/ {{print $2}}' /proc/{daemon}/status").strip()
     line = machine.succeed(f"tr '\\0' ' ' < /proc/{parent}/cmdline")
     assert "profile-run" in line, f"the daemon's parent is {parent}: {line}"
@@ -143,21 +156,17 @@ with subtest("a daemon forked twice stays in its launch's tree, under profile-ru
     machine.wait_until_fails(f"test -e /proc/{daemon}", timeout=30)
 
 with subtest("an orphan pid 1 adopts is reaped, and counted as a program"):
-    keep("vmpd", "vmpd-keep", "vmx4-d-marker")
+    keep("vmpd", "vmpd-keep", D)
     # Entered with no profile-run: the orphan goes to the instance's pid 1.
-    in_inst(
-        "vmpd",
-        "offline",
-        "bash -c '(exec -a vmx4-orphan sleep 600 </dev/null >/dev/null 2>&1 &)'",
-    )
-    machine.wait_until_succeeds("pgrep -u alice -f '^vmx4-orphan'", timeout=30)
-    orphan = marked("vmx4-orphan")[0]
+    in_inst("vmpd", "offline", f"bash -c '(exec sleep {ORPHAN} </dev/null >/dev/null 2>&1 &)'")
+    machine.wait_until_succeeds(seek(ORPHAN), timeout=30)
+    orphan = marked(ORPHAN)[0]
     init = str(instance("vmpd")["pid"])
     parent = machine.succeed(f"awk '/^PPid:/ {{print $2}}' /proc/{orphan}/status").strip()
     assert parent == init, (parent, init)
     # Its keeper's launch gone, the orphan still keeps the instance up.
     alice("systemctl --user stop vmpd-keep")
-    machine.wait_until_fails("pgrep -u alice -f '^vmx4-d-marker'", timeout=30)
+    machine.wait_until_fails(seek(D), timeout=30)
     machine.sleep(2)
     assert instance("vmpd") is not None, "an orphan was not counted as a program"
     # Ended, it is reaped — no zombie — and the instance goes with it.

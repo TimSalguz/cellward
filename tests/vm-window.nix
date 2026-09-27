@@ -443,14 +443,16 @@ let
           alice(
               f"systemd-run --user --unit=vmfootd --setenv=WAYLAND_DISPLAY={display} "
               "cellward run offline -- bash -c "
-              "'(exec -a vmx4-wdaemon sleep 600 </dev/null >/dev/null 2>&1 &); "
+              "'(exec sleep 600.401 </dev/null >/dev/null 2>&1 &); "
               "exec foot --app-id footd'"
           )
           machine.wait_until_succeeds(
               f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q footd",
               timeout=60,
           )
-          daemon = machine.succeed("pgrep -u alice -f '^vmx4-wdaemon'").split()[0]
+          # A sleep of a duration of its own: NixOS's coreutils goes by
+          # argv[0], so `exec -a <name> sleep` would be no sleep.
+          daemon = machine.succeed("pgrep -u alice -f '^sleep 600.401'").split()[0]
           tree = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r"))
           sup = find(tree, "footd")["pid"]
           machine.succeed(f"kill -TERM {sup}")
