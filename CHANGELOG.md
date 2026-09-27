@@ -249,6 +249,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **Smaller holes of the same night** (bug hunt 2026-09-27):
+  - a launcher's `Exec` with the link as an interpreter's code (`perl -e`,
+    `python -c`, `node -e`…), after a shell option's value (`bash -o
+    pipefail -c %u`), or inside a word with quotes or brackets around it,
+    takes no link; `%%` in a script is a percent sign;
+  - the broker refuses a request whose command it could not pin, instead
+    of running it unpinned, and closes a timed-out chooser on the side;
+  - a layer container finds the mounts below the home by its real path
+    (`/home` → `/var/home` lost the zone's covers under the layer), and a
+    home or a mount table that cannot be read stops the launch;
+  - `wl-sandbox --frame` without a settings directory never reads one
+    from the working directory;
+  - the Wayland proxy ends a half-closed client instead of spinning;
+  - a DNS message over TCP is bounded as a whole, not per read;
+  - a hermetic zone's bus filter closes a connection whose first message
+    is not a Hello that wants its answer.
 - **A program is never given the unrestricted compositor once the
   restricted one could be made** (bug hunt 2026-09-27). After the
   compositor had said it speaks the security context, a step of
