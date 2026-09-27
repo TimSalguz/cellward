@@ -1424,9 +1424,40 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
 
 /// Why this launch may not use its container in `zone`, if it may not.
 fn identity_refusal(tools: &Tools, selection: &Selection, zone: &str) -> Option<String> {
+    if let (Sandbox::None, Container::TmpJoin(dir)) = (&selection.sandbox, &selection.container) {
+        return throwaway_join_refusal(tools, dir, zone);
+    }
     let container = crate::container::load(tools, &container_name(selection)?)?;
     let running = crate::container::running_network(tools, &container);
     crate::container::refusal(&container, zone, running.as_deref())
+}
+
+/// A throwaway container is joined while it runs, and in the network it
+/// runs in, only. Its name is in `.running`, which every zone reads: a
+/// request naming another zone's would carry that session — its cookies,
+/// its logins — into another network, and one whose programs are gone
+/// holds what a launch that did not end cleanly left, nobody's to join.
+fn throwaway_join_refusal(tools: &Tools, dir: &Path, zone: &str) -> Option<String> {
+    let closed = || Some(format!("временного контейнера {} больше нет: присоединиться нельзя", dir.display()));
+    let Some(name) = fs::canonicalize(dir).ok().and_then(|d| d.file_name().map(OsStr::to_owned)) else {
+        return closed();
+    };
+    let running = tools.state.join(".running");
+    let records = registry::live_records(&running.join(&name), &|pid| registry::alive(&running, pid));
+    if records.is_empty() {
+        return closed();
+    }
+    records
+        .into_iter()
+        .map(|(_, r)| r.zone)
+        .find(|busy| busy != zone)
+        .map(|busy| {
+            format!(
+                "временный контейнер {} работает в сети «{busy}», а запуск просит «{zone}»: \
+                 контейнер не бывает в двух сетях сразу",
+                name.to_string_lossy()
+            )
+        })
 }
 
 /// The name of the container a resolved launch runs in, whatever its home;

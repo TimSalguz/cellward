@@ -731,7 +731,13 @@ pub fn selection_selector(selection: &crate::launch::Selection) -> String {
         (Sandbox::None, Container::Named(name) | Container::MainNamed(name)) => {
             name.to_string_lossy().into_owned()
         }
-        (Sandbox::None, Container::TmpNew | Container::TmpJoin(_)) => "__tmp__".to_owned(),
+        (Sandbox::None, Container::TmpNew) => "__tmp__".to_owned(),
+        // Which one: joining a throwaway container is not starting a new
+        // one, and "always" said for a new one says nothing about a join.
+        (Sandbox::None, Container::TmpJoin(dir)) => format!(
+            "tmpjoin:{}",
+            dir.file_name().unwrap_or_default().to_string_lossy()
+        ),
         (Sandbox::None, Container::Main) => String::new(),
     }
 }

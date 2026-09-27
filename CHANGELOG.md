@@ -266,7 +266,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   throwaway browser profile, or plant files in it. A zone now keeps them as
   it keeps the other container storage (`.storage/throwaway`, the zone's
   root's, 0700) under a cover, and a launch gets back only its own
-  (`profile-run --storage`).
+  (`profile-run --storage`), which goes from the host behind it. A zone
+  brought up before this update refuses throwaway launches until it is
+  restarted. A throwaway container is joined (`--tmp-profile --join`) only
+  while its programs run, and in their network: a zone read every
+  throwaway's name in `.running` and could ask to join another zone's —
+  its session carried into another network. The broker asks about a join
+  as one (`tmpjoin:<name>`), not as a new throwaway container, and
+  "always" said for new ones does not cover it.
 - **A hand-over is told by the program's windows, not by five seconds**
   (the owner, 2026-09-26/27: no fixed waits a slow or busy machine
   breaks). A launch into the network a running program is in used to count
