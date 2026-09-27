@@ -484,6 +484,8 @@ let
           pkgs.glib
           # A real compositor for the restricted-Wayland check, headless.
           pkgs.sway
+          # And one without wp_security_context_v1 (tests/vm-promise-no-context.py).
+          pkgs.cage
           # An X client for a launch's own X server (x11-run).
           (pkgs.xdpyinfo or pkgs.xorg.xdpyinfo)
           pkgs.wayland-utils
@@ -530,6 +532,8 @@ let
           # peer address it saw, and a DNS server for the DNS= path.
           pkgs.socat
           pkgs.dnsmasq
+          # What arrives through the tunnel (tests/vm-promise-resolv-rename.py).
+          pkgs.tcpdump
         ];
         networking.firewall.allowedUDPPorts = [
           51820
@@ -1325,6 +1329,7 @@ let
           assert "10.66.66.66" in out, f"the zone broke the host's own resolver: {out}"
 
       exec(open("${./vm-tunnel-ipv6.py}").read())
+      exec(open("${./vm-promise-lan.py}").read())
 
       with subtest("cellward check reports a live tunnel"):
           # The status mirror refreshes every 5 seconds from inside the zone;
@@ -1353,6 +1358,8 @@ let
           assert len(counts) == 2 and int(counts[1]) > 0, out
           assert counts[0] == counts[1], f"tunnel packets from another owner:\n{out}"
           machine.succeed("nft delete table inet vzowner")
+
+      exec(open("${./vm-promise-resolv-rename.py}").read())
 
       # --- The obfuscated tunnel: AmneziaWG as a real user runs it ----------
       # Everything so far was wire-compatible with plain WireGuard. This zone
@@ -1814,6 +1821,7 @@ let
           alice("systemctl --user stop vmxhold || true")
           alice("cellward x11 vmsmoke off")
           alice("rm -f ~/vmx-info ~/vmx-display")
+          exec(open("${./vm-promise-x11.py}").read())
           # The zone's directory of sockets is read-only in the zone: a
           # program cannot take another launch's socket's place, nor put one
           # of its own there (review 2026-09-25).
@@ -1843,6 +1851,8 @@ let
           alice("cellward down vmsmoke")
 
           alice("systemctl --user stop vmsway.service")
+
+      exec(open("${./vm-promise-no-context.py}").read())
 
       # --- A hermetic zone (docs/HERMETICITY.md §7 C, the prototype) --------
       # The evil host: from inside, systemd --user is gone and its D-Bus name
@@ -2354,6 +2364,8 @@ let
           assert '"target":"unconfined","app":"","decision":"refused"' in out, out
           out = alice("cellward doctor vmherm --json")
           assert '{"id":"session-bus","level":"ok"' in out, out
+
+      exec(open("${./vm-promise-shell-ipc.py}").read())
 
       # The evil host's /tmp (LEAK-MODEL §15): a tmux server — `run-shell` runs
       # on the host, in the host's network —, a listening socket, an abstract
