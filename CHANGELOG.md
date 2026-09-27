@@ -256,7 +256,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the same name earlier in `PATH` (`~/.local/bin`, in a home it writes).
   A request that is asked about now has its program found once, on the
   host: the question shows that path, and that path is what starts. A
-  name found nowhere is refused.
+  name found nowhere is refused. Nor does a launch take the app id a zone
+  named unless it is the command's own — its program's name, or a
+  launcher of that id that starts that program: the policies kept by an
+  id (its Wayland grants, its files, its proxy) went with any id a zone
+  named, and the question showed only the command.
 - **A zone's link is never filled in where it would be code** (bug hunt
   2026-09-27). The broker opens a zone's link with the program chosen for
   it, filling the link into its launcher's `Exec` — and a launcher with

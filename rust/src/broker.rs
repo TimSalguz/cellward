@@ -53,7 +53,7 @@
 //! of the zone cannot be ([`is_zones_filter`]); anyone else's is the
 //! container the kernel says the asking process is of.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -490,7 +490,12 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                     // A launch that goes on without a question takes no word of
                     // the requester's about what it is: the policies kept by a
                     // program's id (the proxy, the frame) are the command's.
-                    let started_id = if same_identity {
+                    // Nor one that was asked about, where the word is not the
+                    // command's own: the question showed the command, and
+                    // another program's id would bring its policies along —
+                    // its Wayland grants, its files (review 2026-09-27).
+                    let command = &argv[argv.len().saturating_sub(selection.cmd.len())..];
+                    let started_id = if same_identity || !id_of_command(tools, &app_id, command) {
                         OsString::new()
                     } else {
                         app_id.clone()
@@ -549,6 +554,29 @@ pub fn program_of(cmd: &[OsString]) -> Option<PathBuf> {
     };
     let dir = std::fs::canonicalize(path.parent()?).ok()?;
     Some(dir.join(path.file_name()?))
+}
+
+/// Whether an app id a request came with is its command's own: the name of
+/// its program, or a launcher of that id whose `Exec` starts that program.
+/// The policies kept by an id — its Wayland grants, its files, its proxy —
+/// go with it, and a zone could name any.
+pub fn id_of_command(tools: &Tools, app_id: &OsString, cmd: &[OsString]) -> bool {
+    let Some(program) = crate::launch::app_word(cmd) else {
+        return false;
+    };
+    let program = crate::launch::sanitize_app_id(program);
+    if app_id.is_empty() || crate::launch::sanitize_app_id(app_id) == program {
+        return true;
+    }
+    let dirs = crate::desktop::source_dirs(&tools.home);
+    crate::desktop::find_entry(&dirs, &tools.home, &tools.state, &app_id.to_string_lossy())
+        .and_then(|(_, groups)| {
+            let entry = crate::desktop::desktop_entry(&groups)?;
+            crate::desktop::exec_program(entry.get("Exec")?)
+        })
+        .is_some_and(|exec| {
+            crate::launch::sanitize_app_id(crate::launch::basename(OsStr::new(&exec))) == program
+        })
 }
 
 /// The command a question shows and a "yes" starts, the same one: its
