@@ -4259,10 +4259,14 @@ fn park() -> ! {
 }
 
 fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
+    // An IPC namespace too (review 2026-09-27): System V shared memory and
+    // message queues go by number, and the zone's programs are the user's
+    // uid — an X client's MIT-SHM segment on the host, the pixels of its
+    // windows, was one `shmat` away.
     // SAFETY: unshare(2) takes no pointers.
-    if unsafe { libc::unshare(libc::CLONE_NEWNET | libc::CLONE_NEWNS) } != 0 {
+    if unsafe { libc::unshare(libc::CLONE_NEWNET | libc::CLONE_NEWNS | libc::CLONE_NEWIPC) } != 0 {
         return Err(format!(
-            "cannot create the net+mount namespace: {}",
+            "cannot create the net+mount+IPC namespace: {}",
             io::Error::last_os_error()
         ));
     }

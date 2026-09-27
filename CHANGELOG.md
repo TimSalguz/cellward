@@ -249,6 +249,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A zone and a system zone's command have System V IPC of their own**
+  (bug hunt 2026-09-27). Shared memory segments and message queues go by
+  number, and a zone's programs are the user's uid: an X client's MIT-SHM
+  segment on the host — the pixels of its windows — was one `shmat` away.
+  A zone now has an IPC namespace of its own, which every launch into it
+  enters (`nsenter -i`), and so has every `vpn-zone-sys` command. A
+  sandbox had one already.
 - **A hermetic zone cannot move the covers away by renaming what is above
   them** (bug hunt 2026-09-27). A cover holds the directory it is on, not
   its name: a program in a hermetic zone could `mv ~/.config

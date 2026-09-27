@@ -1344,7 +1344,13 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
             // Always, a container or not: `profile-run` sheds the session's
             // groups with them before the program starts (`profile::run`).
             exec.push("--keep-caps".into());
-            exec.extend(["-U".into(), "-n".into(), "-m".into(), "-t".into()]);
+            exec.extend([
+                "-U".into(),
+                "-n".into(),
+                "-m".into(),
+                "-i".into(),
+                "-t".into(),
+            ]);
             exec.push(pid.to_string().into());
             exec.push("--".into());
             if container || entry.own_mounts || entry.camera || !entry.devices.is_empty() {
@@ -2477,6 +2483,7 @@ mod tests {
                 "-U",
                 "-n",
                 "-m",
+                "-i",
                 "-t",
                 "42",
                 "--",
@@ -2534,6 +2541,7 @@ mod tests {
                 "-U",
                 "-n",
                 "-m",
+                "-i",
                 "-t",
                 "42",
                 "--",
@@ -2570,6 +2578,7 @@ mod tests {
                 "-U",
                 "-n",
                 "-m",
+                "-i",
                 "-t",
                 "42",
                 "--",

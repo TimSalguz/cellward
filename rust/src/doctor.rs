@@ -1406,6 +1406,7 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
             "-U",
             "-n",
             "-m",
+            "-i",
             "-t",
         ])
         .arg(pid.to_string())

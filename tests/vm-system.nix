@@ -367,6 +367,11 @@ let
           machine.fail(as_user("alice", "vpn-zone-sys sz -- test -e /home/alice/.local/state/vpn-profiles/probe/cookies"))
           machine.fail(as_user("alice", "vpn-zone-sys sz -- touch /home/alice/.config/vpn-zones/new"))
           machine.succeed(as_user("alice", "vpn-zone-sys sz -- touch /home/alice/sysrun-writes-home"))
+          # System V IPC of its own: the session's shared memory is not there.
+          shm = machine.succeed(as_user("alice", "ipcmk -M 4096")).split()[-1]
+          out = machine.succeed(as_user("alice", "vpn-zone-sys sz -- ipcs -m"))
+          assert shm not in out.split(), out
+          machine.succeed(as_user("alice", f"ipcrm -m {shm}"))
           machine.succeed(as_user(
               "alice",
               "rm -rf ~/.local/state/vpn-zones/probe ~/.local/state/vpn-profiles/probe ~/sysrun-writes-home",

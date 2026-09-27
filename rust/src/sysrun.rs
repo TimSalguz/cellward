@@ -1735,10 +1735,13 @@ fn become_the_command(launch: &Launch) -> String {
 /// A mount namespace of the command's own: what a service in the zone gets
 /// from its unit, done by hand.
 fn seal_mounts(launch: &Launch) -> Result<(), String> {
+    // And System V IPC of its own, as a user zone has (review 2026-09-27):
+    // the command is the user's uid, and the session's shared memory
+    // segments go by number.
     // SAFETY: unshare takes flags only.
-    if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+    if unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWIPC) } != 0 {
         return Err(format!(
-            "cannot make a mount namespace: {}",
+            "cannot make a mount and IPC namespace: {}",
             io::Error::last_os_error()
         ));
     }

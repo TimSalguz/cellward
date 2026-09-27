@@ -2118,6 +2118,13 @@ let
           in_zone(hp, "test ! -e /home/alice/.cache/ibus/dbus-vmtest")
           alice("cellward run vmherm -- sh -c 'echo ibus=$IBUS_USE_PORTAL > /home/alice/zone-ibus'")
           machine.succeed("grep -qx ibus=1 /home/alice/zone-ibus")
+          # System V IPC of the zone's own (review 2026-09-27): a shared
+          # memory segment of the session's — an X client's MIT-SHM — is not
+          # the zone's to attach.
+          shm = alice("ipcmk -M 4096").split()[-1]
+          out = alice("cellward run vmherm -- ipcs -m")
+          assert shm not in out.split(), out
+          alice(f"ipcrm -m {shm}")
           alice("systemctl --user stop fakeibus || true")
           # A program started in the zone has the user's own group only: the
           # session's groups open doors (libvirt, docker, /dev/input).

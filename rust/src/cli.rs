@@ -739,7 +739,7 @@ fn status(tools: &Tools, args: &[OsString]) -> u8 {
         return 1;
     };
     let code = match Command::new(&tools.nsenter)
-        .args(["--preserve-credentials", "-U", "-n", "-m", "-t"])
+        .args(["--preserve-credentials", "-U", "-n", "-m", "-i", "-t"])
         .arg(pid.to_string())
         .arg("--")
         .arg(&tools.ip)
