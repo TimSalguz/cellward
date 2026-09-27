@@ -261,6 +261,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     zone's window (`kill` knows user zones only, and would cut one of the
     same name, or nothing, without a word), and says so when it fails;
   - a grant's path with a line break is refused;
+  - a hermetic zone with the host's files read-only has `~/.config/mimeapps.list`
+    read-only too (made empty where there is none): it decides which
+    program the host opens links and files with;
+  - `cellward gc` takes away only the user's own throwaway directories in
+    `/tmp`, never through a link, and without the fallback walk by paths;
   - a launch whose pid came round again takes the dead launch's records
     under that number out of the registry: its start note brought them
     back to life, and the picker could start a click into a dead run's

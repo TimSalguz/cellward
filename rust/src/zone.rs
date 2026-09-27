@@ -876,6 +876,15 @@ pub fn run(args: Args) -> u8 {
                     .create(&path);
             }
         }
+        // The associations too, empty where there are none: a file a program
+        // of the zone made would be the host's choice of what opens links.
+        let mimeapps = zone.home.join(".config/mimeapps.list");
+        if fs::symlink_metadata(&mimeapps).is_err() {
+            let _ = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&mimeapps);
+        }
     }
 
     let ids = match Ids::current() {
@@ -3722,6 +3731,9 @@ const ENTRY_POINTS: [&str; 12] = [
 /// tools that run what their config names, browsers' native-messaging hosts —
 /// not a program's own data (a browser's profile is not here).
 const HOST_RUNS_IN_ZONES: &[&str] = &[
+    // Which program the host opens links and files with (review 2026-09-27);
+    // the one under .local/share/applications is covered with its directory.
+    ".config/mimeapps.list",
     ".local/share/flatpak/exports",
     ".local/bin",
     ".local/state/nix",

@@ -1590,19 +1590,28 @@ fn gc(tools: &Tools) -> u8 {
     // the garbage in /tmp forever. (`docs/GOTCHAS.md` §5)
     // Below the state directory, and in /tmp, where they lived before
     // (`docs/LEAK-MODEL.md` §15).
+    // Only the user's own directories, never through a link, and taken away
+    // with remove_dir_all alone, which walks by descriptors: /tmp is
+    // everybody's, and a directory of that name made there by somebody else,
+    // with a link swapped in while it is walked, would lead the walk into
+    // the user's own files (review 2026-09-27).
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: getuid(2) takes no arguments and cannot fail.
+    let uid = unsafe { libc::getuid() };
     for base in crate::launch::throwaway_bases(&tools.state) {
         for dir in visible_entries(&base) {
             let Some(name) = dir.file_name() else {
                 continue;
             };
-            if !name.as_bytes().starts_with(b"vpn-profile-") || !dir.is_dir() {
+            let ours = fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir() && m.uid() == uid);
+            if !name.as_bytes().starts_with(b"vpn-profile-") || !ours {
                 continue;
             }
             let regdir = running.join(name);
             if registry::any_live(&regdir, &|pid| registry::alive(&running, pid)) {
                 continue;
             }
-            let _ = crate::sys::remove_tree(&dir);
+            let _ = fs::remove_dir_all(&dir);
             let _ = crate::sys::remove_tree(&regdir);
             cleaned += 1;
         }
