@@ -2600,6 +2600,23 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                                 "контейнеру {selector} выдано {word} — программам, запущенным \
                                  после этого"
                             );
+                            // A device with a network of its own is a way out
+                            // around the tunnel (docs/PERMISSIONS.md §11.12).
+                            let own_network = matches!(
+                                crate::devices::Grant::parse(word),
+                                Some(
+                                    crate::devices::Grant::Phone
+                                        | crate::devices::Grant::Serial
+                                        | crate::devices::Grant::Usb { .. }
+                                )
+                            );
+                            if own_network {
+                                eprintln!(
+                                    "внимание: у такого устройства может быть своя сеть — телефон \
+                                     (adb, USB-модем), плата с Wi-Fi или LTE-модем; через него \
+                                     контейнер выйдет в сеть не через туннель зоны"
+                                );
+                            }
                             0
                         }
                         Ok(()) => {
