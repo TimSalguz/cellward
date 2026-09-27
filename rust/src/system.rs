@@ -726,7 +726,7 @@ fn start_uplink(
         pasta.arg("-4");
     }
     pasta.args(zone::PASTA_CLOSED);
-    let pid_file = pasta_pid_file(&format!("{name}-uplink"), uid, gid)?;
+    let pid_file = pasta_pid_file(&format!("uplink-{name}"), uid, gid)?;
     pasta.arg("-P").arg(&pid_file);
     // SAFETY: between fork and exec the closure only makes syscalls.
     unsafe {
@@ -772,7 +772,10 @@ pub(crate) fn make_pasta_pid_dir() -> Result<(), String> {
 /// A pid file for a pasta about to run as `uid`/`gid`: its word that it is
 /// done — written "once initialisation is done", the namespace configured
 /// (`sys::written`). `<PASTA_PID_DIR>/<tag>.pid`, made for its user in a
-/// directory anyone may pass through and only root write.
+/// directory anyone may pass through and only root write. Each kind of
+/// pasta has a prefix of its own (`zone-`, `uplink-`, `sysrun-`): a zone
+/// named `x-uplink` shared `x`'s uplink's file, and one's word was taken
+/// for the other's.
 pub(crate) fn pasta_pid_file(tag: &str, uid: u32, gid: u32) -> Result<PathBuf, String> {
     make_pasta_pid_dir()?;
     let path = Path::new(PASTA_PID_DIR).join(format!("{tag}.pid"));
@@ -859,7 +862,7 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
     // does not come up without it.
     feed_host_ruleset(tools, &plain_host_ruleset(uid))
         .map_err(|e| format!("cannot keep the zone from the host's own addresses: {e}"))?;
-    let pid_file = pasta_pid_file(name, uid, gid)?;
+    let pid_file = pasta_pid_file(&format!("zone-{name}"), uid, gid)?;
     let mut pasta = Command::new(&tools.pasta);
     pasta
         .arg("--netns")

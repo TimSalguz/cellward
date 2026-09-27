@@ -331,6 +331,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the launch window's answer — the zone's command comes back in it — is
   read as it comes: a long command filled the pipe before the window could
   end, and the broker waited on it until its deadline, or for ever.
+- **Each system pasta has a pid file of its own** (bug hunt 2026-09-27).
+  A system zone named `x-uplink` shared `x`'s uplink's pid file
+  (`/run/vpn-zones/pasta/x-uplink.pid`), so one pasta's word that it was
+  done could be taken for the other's. The files are now named by kind:
+  `zone-<name>.pid`, `uplink-<name>.pid`, `sysrun-<pid>.pid`.
 - **A zone and a system zone's command have System V IPC of their own**
   (bug hunt 2026-09-27). Shared memory segments and message queues go by
   number, and a zone's programs are the user's uid: an X client's MIT-SHM
