@@ -768,6 +768,19 @@ pub fn run(args: Args) -> u8 {
     for dir in READ_ONLY_IN_ZONES {
         let _ = fs::create_dir_all(zone.home.join(dir));
     }
+    // IBus's places, covered in every zone (`hide_input_methods`) — where
+    // they are: one made after the zone came up, by the host's IBus starting
+    // for the first time, would put its address and its private bus's socket
+    // in the zone's sight.
+    for dir in input_method_places(&zone.home) {
+        if fs::symlink_metadata(&dir).is_err() {
+            use std::os::unix::fs::DirBuilderExt;
+            let _ = fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&dir);
+        }
+    }
     // Container storage, covered in the zone (`hide_container_storage`): it
     // has to exist to be covered — a directory a program of the zone made
     // there afterwards would be one the host takes for a container.
@@ -3568,19 +3581,7 @@ pub(crate) fn seal_run() -> Result<(), String> {
 /// socket by path. A tmpfs over both; programs take the IBus portal
 /// (`IBUS_USE_PORTAL`, set by the launch). Fatal when it cannot be done.
 fn hide_input_methods(zone: &Zone) -> Result<(), String> {
-    let cache = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| zone.home.join(".cache"));
-    let mut places = vec![
-        zone.home.join(".cache/ibus"),
-        zone.home.join(".config/ibus"),
-    ];
-    if cache.join("ibus") != places[0] {
-        places.push(cache.join("ibus"));
-    }
-    for dir in places {
+    for dir in input_method_places(&zone.home) {
         if !dir.is_dir() || fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) {
             continue;
         }
@@ -3599,6 +3600,21 @@ fn hide_input_methods(zone: &Zone) -> Result<(), String> {
         })?;
     }
     Ok(())
+}
+
+/// Where IBus keeps its addresses and its private bus's socket, below the
+/// home: the default cache, `XDG_CACHE_HOME`'s, and the config.
+fn input_method_places(home: &Path) -> Vec<PathBuf> {
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join(".cache"));
+    let mut places = vec![home.join(".cache/ibus"), home.join(".config/ibus")];
+    if cache.join("ibus") != places[0] {
+        places.push(cache.join("ibus"));
+    }
+    places
 }
 
 /// The session's own entry points below the home: created when missing before

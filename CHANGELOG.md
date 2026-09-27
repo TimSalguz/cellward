@@ -249,6 +249,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **IBus's places are covered in a zone even where IBus had never run**
+  (bug hunt 2026-09-27). A zone hid IBus's addresses and private bus only
+  where their directories were when it came up: on a host where IBus
+  started for the first time afterwards, the zone's programs found its
+  bus. The directories are made, empty, before the zone covers them.
 - **A container's NSS database is written where nothing else can be**
   (bug hunt 2026-09-27). A sandboxed program cannot reach the host's
   `~/.pki`, but it could make its own `cert9.db` (or the stamp beside it)
