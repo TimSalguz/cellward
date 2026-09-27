@@ -86,7 +86,10 @@ def hold():
 
 
 def inside(pid, *argv):
-    return ["nsenter", "-U", "-n", "-t", str(pid), "--", *argv]
+    """Into a holder's user and network namespaces as its root: alice's uid
+    is its 0, so she keeps it (--preserve-credentials) — nsenter's own
+    setgroups would be refused there (`unshare -r` denies it)."""
+    return ["nsenter", "--preserve-credentials", "-U", "-n", "-t", str(pid), "--", *argv]
 
 
 def read(path):

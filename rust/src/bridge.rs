@@ -569,7 +569,7 @@ mod tests {
             [&good[..], &b"x\x00"[..]].concat(),
             [&b"VZA2"[..], &good[4..]].concat(),
             b"VZA1\x00../x\x000\x0010.254.3.4\x00\x00".to_vec(),
-            b"VZA1\x00unconfined:x\x000\x0010.254.3.4\x00\x00".to_vec(),
+            b"VZA1\x00work:unconfined\x000\x0010.254.3.4\x00\x00".to_vec(),
             b"VZA1\x00work\x000\x0010.99.0.2\x00\x00".to_vec(),
             b"VZA1\x00work\x000\x0010.254.255.253\x00\x00".to_vec(),
             b"VZA1\x00work\x001\x0010.254.3.4\x00\x00".to_vec(),

@@ -59,8 +59,9 @@ def loaded(names):
 
 
 def in_probe(pid, cmd):
-    """As root of a probe namespace, in its network."""
-    return alice(f"nsenter -U -n -t {pid} -- {cmd}")
+    """As root of a probe namespace, in its network: alice's uid is its 0,
+    and nsenter's setgroups would be refused there (`unshare -r`)."""
+    return alice(f"nsenter --preserve-credentials -U -n -t {pid} -- {cmd}")
 
 
 def hold():
@@ -203,7 +204,7 @@ with subtest("probe (d): a socket cgroupv2 rule in a user-owned namespace passes
         return last_json(
             alice(
                 "systemd-run --user --wait --pipe --collect -q -E PATH=\"$PATH\" -- "
-                f"{nsenter} -U -n -t {pid} -- "
+                f"{nsenter} --preserve-credentials -U -n -t {pid} -- "
                 + helper("cgroup", nft, rel, level, f"{base}/e2/cgroup.procs")
             )
         )
