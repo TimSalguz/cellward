@@ -203,6 +203,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and `usb:` for a board a program can reflash.
 
 ### Changed
+- **A program seen for the first time is offered a home of its own, not the
+  main home** (2026-09-27; the owner's model of 2026-09-17, every program a
+  home of its own — `docs/CONTAINERS.md` §12). With `default-profile ask`
+  (the default) the launch window preselected the main home for a program
+  nobody had chosen a container for — the whole real home, with nothing
+  between it and the program — and a launch without a window took it. Now
+  both take the program's own home (its sandbox, `app-<key>`). What was
+  chosen before stays chosen, the main home included (an empty
+  `.lastprofile/<key>` file; "never" is no file), so nothing already in use
+  moves.
 - **The microphone for a program whose container is not known** (a
   throwaway sandbox, a temporary container, a daemon that left its
   launch's tree) is asked about even where the zone says `yes`, and is
