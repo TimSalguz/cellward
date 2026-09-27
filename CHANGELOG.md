@@ -310,6 +310,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   are owned now, by the same rule of our patched proxy: that name and
   nothing more — not the portals' or the notification daemon's names under
   `org.freedesktop.*`. Checked in the VM test next to the KDE spelling.
+- **The sandbox's seccomp refuses `pidfd_getfd`** (2026-09-27,
+  `docs/LEAK-MODEL.md` §26): it copied a descriptor out of another process
+  of the sandbox. It answers `ENOSYS`, as a kernel before 5.6 does; the
+  OpenConnect client's filter carries the same list. `modify_ldt`,
+  `process_vm_readv`/`process_vm_writev` and `kcmp` stay allowed, on
+  purpose and written down (`docs/THREAT-MODEL.md` K1): Wine sets LDT
+  entries and reads and writes other Windows processes' memory with them,
+  Mesa compares GPU descriptors with `kcmp`, and the sandbox's own pid
+  namespace and the kernel's ptrace-mode checks already hold them to the
+  sandbox's own processes.
 - **A sandbox whose seccomp filter cannot be built is not started**
   (2026-09-27, `docs/THREAT-MODEL.md` K1). `fs-sandbox` warned on stderr
   and started the program without a filter when libseccomp failed to build

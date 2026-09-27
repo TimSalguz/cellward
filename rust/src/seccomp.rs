@@ -19,9 +19,37 @@
 //!   answer `ENOSYS`, not `EPERM`, so that libc and applications fall back to
 //!   the old code path instead of failing. glibc ≥ 2.34 does exactly that with
 //!   `clone3`.
+//! * `pidfd_getfd` (Linux 5.6) copies a descriptor out of another process —
+//!   a sandboxed program's way to take what the X satellite or bwrap's own
+//!   init hold. No desktop program we know of calls it (flatpak leaves it
+//!   allowed all the same), and `ENOSYS` is the answer a kernel before 5.6
+//!   gives, so a caller has its old-kernel path (2026-09-27).
 //!
 //! Nested user namespaces are **not** blocked by default, and that is a
 //! deliberate decision, not an oversight — see [`FilterOptions::deny_userns`].
+//!
+//! **Allowed on purpose** (2026-09-27, `docs/THREAT-MODEL.md` K1), because
+//! each costs something real and none is a way out. What reaches into
+//! another process is held to the sandbox's own processes by the sandbox's
+//! own pid namespace (bwrap `--unshare-pid`: nothing outside has a number
+//! there) and by the kernel's ptrace-mode checks (same user, a dumpable
+//! target, and `CAP_SYS_PTRACE` in the target's user namespace when it is
+//! not the caller's — which the host's processes are not): refusing it
+//! walls the program off from itself only. `modify_ldt` changes the
+//! caller's own descriptor table; flatpak's case against it is kernel
+//! surface. What refusing each would cost:
+//!
+//! * `modify_ldt` — Wine sets LDT entries with it (`ldt_set_entry`): 16-bit
+//!   programs and installers, and Windows programs that make selectors of
+//!   their own. flatpak refuses it only to programs without `multiarch`, and
+//!   this filter is always multiarch (the x86 table, for Wine and Steam).
+//! * `process_vm_readv`/`process_vm_writev` — wineserver reads and writes a
+//!   Windows process's memory with them (`ReadProcessMemory`,
+//!   `WriteProcessMemory`: launchers, mod loaders, debuggers); its fallback
+//!   goes through `ptrace`, which this filter refuses. flatpak allows both.
+//! * `kcmp` — Mesa asks whether two GPU descriptors are one file with it
+//!   (`os_same_file_description`, before Linux 6.10's `F_DUPFD_QUERY`).
+//!   flatpak allows it.
 //!
 //! The filter is handed to bwrap as a raw compiled cBPF program on a file
 //! descriptor (`bwrap --seccomp FD`), which is the only format bwrap accepts.
@@ -63,8 +91,9 @@ const DENY_EPERM: [&str; 14] = [
 /// path instead of treating the call as a hard failure. `io_uring` and
 /// `userfaultfd` too (review 2026-09-25, third round): a large share of the
 /// kernel's own bugs of recent years, and nothing a desktop program cannot do
-/// without — liburing falls back to plain calls.
-const DENY_ENOSYS: [&str; 12] = [
+/// without — liburing falls back to plain calls. `pidfd_getfd` (2026-09-27):
+/// another process's descriptors, see the module's head.
+const DENY_ENOSYS: [&str; 13] = [
     "io_uring_setup",
     "io_uring_enter",
     "io_uring_register",
@@ -77,6 +106,7 @@ const DENY_ENOSYS: [&str; 12] = [
     "fsmount",
     "fspick",
     "mount_setattr",
+    "pidfd_getfd",
 ];
 
 /// `TIOCSTI` / `TIOCLINUX` from `asm-generic/ioctls.h` — the values used by
@@ -385,6 +415,15 @@ pub fn selftest(options: FilterOptions) -> Result<Vec<Check>, Error> {
         libc::syscall(libc::SYS_clone3, std::ptr::null_mut::<libc::c_void>(), zero)
     }));
 
+    // Another process's descriptor. A pidfd of -1: without the filter this is
+    // EBADF, and nothing is ever taken from anybody.
+    let no_pidfd: libc::c_long = -1;
+    checks.push(expect_errno(
+        "pidfd_getfd is ENOSYS",
+        libc::ENOSYS,
+        || unsafe { libc::syscall(libc::SYS_pidfd_getfd, no_pidfd, zero, zero) },
+    ));
+
     // Personality: PER_LINUX still works, everything else does not.
     checks.push(expect_errno(
         "personality(!= PER_LINUX) is EPERM",
@@ -600,6 +639,45 @@ mod tests {
             strict.len() > default.len(),
             "--deny-userns produced no extra instructions"
         );
+    }
+
+    /// `pidfd_getfd` is refused: the program carries a jump on its number
+    /// (2026-09-27; what it answers, `selftest` checks by calling it).
+    #[test]
+    fn the_filter_carries_the_pidfd_getfd_rule() {
+        assert!(DENY_ENOSYS.contains(&"pidfd_getfd"));
+        let nr = ScmpSyscall::from_name("pidfd_getfd")
+            .unwrap()
+            .as_raw_syscall();
+        let bpf = Filter::build(FilterOptions::default())
+            .unwrap()
+            .export_bpf()
+            .unwrap();
+        let jumps_on_it = bpf.chunks(INSN_LEN).any(|insn| {
+            insn_code(insn) & 0x07 == 0x05
+                && u32::from_ne_bytes([insn[4], insn[5], insn[6], insn[7]]) == nr as u32
+        });
+        assert!(jumps_on_it, "no jump on pidfd_getfd ({nr}) in the program");
+    }
+
+    /// What reaches into another process of the sandbox is left to the
+    /// sandbox's pid namespace and the kernel's ptrace-mode checks, on
+    /// purpose: Wine needs `modify_ldt` and `process_vm_*`, Mesa `kcmp`
+    /// (the module's head, `docs/THREAT-MODEL.md` K1). Refusing one is a
+    /// decision to make there, not in passing.
+    #[test]
+    fn what_wine_and_mesa_need_is_not_refused() {
+        for name in [
+            "modify_ldt",
+            "process_vm_readv",
+            "process_vm_writev",
+            "kcmp",
+        ] {
+            assert!(
+                !DENY_EPERM.contains(&name) && !DENY_ENOSYS.contains(&name),
+                "{name} is refused"
+            );
+        }
     }
 
     #[test]
