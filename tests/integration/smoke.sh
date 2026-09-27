@@ -1079,6 +1079,28 @@ EOF
     fail "awg0 остался в uplink-ns — переезд tun не состоялся"
   fi
 
+  step "Зона OpenConnect: в uplink-ns закрыто то же, что в зоне"
+  # Клиент — самая недоверенная программа зоны (ревью 2026-09-27, второе
+  # мнение): демон Nix (FOD качает в сети хоста — мимо туннеля и мимо фильтра
+  # аплинка), очереди и общая память хоста ему недоступны так же, как
+  # программам зоны.
+  if [ -S /nix/var/nix/daemon-socket/socket ]; then
+    if in_ocup test -S /nix/var/nix/daemon-socket/socket; then
+      fail "из uplink-ns виден сокет демона Nix"
+    fi
+    echo "ok: демон Nix из uplink-ns не виден"
+  fi
+  [ "$(readlink "/proc/$OCUPID/ns/ipc")" != "$(readlink /proc/self/ns/ipc)" ] \
+    || fail "у uplink-ns IPC-пространство хоста"
+  for d in /dev/mqueue /dev/shm; do
+    [ -d "$d" ] || continue
+    # Другое устройство — значит, своё покрытие, а не хостовая точка.
+    [ "$(in_ocup stat -c %d "$d")" != "$(stat -c %d "$d")" ] \
+      || fail "$d в uplink-ns — хостовый"
+    [ -z "$(in_ocup ls -A "$d")" ] || fail "в $d uplink-ns видно чужое"
+  done
+  echo "ok: IPC, /dev/mqueue и /dev/shm у uplink-ns свои"
+
   step "Зона OpenConnect: второй эшелон аплинка — только адрес шлюза"
   # Правило без порта, и это единственное место, где бэкенд шире WireGuard'а:
   # DTLS уходит на порт, который выбирает сервер. «Только этот шлюз» — то же.

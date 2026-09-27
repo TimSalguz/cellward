@@ -272,6 +272,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   cannot reach (run by hand from a home directory) is refused with a
   message. `openconnect` now says `SIOCSIFMTU: Operation not permitted`
   once: the MTU is the app namespace's to set.
+- **The uplink hides from the OpenConnect client what a zone hides from its
+  programs** (second opinion, 2026-09-27). It covered only the resolvers,
+  the system bus, the session's runtime directory and `/tmp`; a subverted
+  client could still reach the Nix daemon — whose fixed-output builds fetch
+  any address in the host's network, around the tunnel and the uplink's
+  filter — the system tier's service and systemd's varlink services. The
+  uplink now hides the Nix daemon always (whatever the zone's setting for
+  its programs), the system tier and `/run/systemd` by the zone's
+  allow-list, and has an IPC namespace, `/dev/shm` and `/dev/mqueue` of its
+  own. The smoke test checks each.
 - **A host-interface zone does not go out through the host's own
   services** (audit 2026-09-27). Its pasta runs in the host's network and
   gives the zone an address of its own, so a connection from the zone to

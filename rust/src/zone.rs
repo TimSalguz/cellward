@@ -2057,10 +2057,12 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
         moved_w,
     } = links;
 
+    // IPC too (review 2026-09-27, second opinion): the host's System V
+    // objects and POSIX queues are no business of a client's.
     // SAFETY: unshare(2) takes no pointers.
-    if unsafe { libc::unshare(libc::CLONE_NEWNET | libc::CLONE_NEWNS) } != 0 {
+    if unsafe { libc::unshare(libc::CLONE_NEWNET | libc::CLONE_NEWNS | libc::CLONE_NEWIPC) } != 0 {
         return Err(format!(
-            "cannot create the net+mount namespace: {}",
+            "cannot create the net+mount+IPC namespace: {}",
             io::Error::last_os_error()
         ));
     }
@@ -2093,11 +2095,16 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
     // directory an OpenConnect client may write is its own, made in it
     // ([`client_dir`]), and a /tmp of 1777 would let the client swap that
     // directory for a link to anywhere uid 0 may read.
+    // /dev/shm and /dev/mqueue are the host's too: files the session shares
+    // by path, and its queues, which open(2) reaches by name whatever IPC
+    // namespace the opener is in.
     let runtime = host_runtime_dir(zone);
     for (dir, options) in [
         (Path::new("/run/dbus"), "mode=0755,size=16k"),
         (runtime.as_path(), "mode=0700,size=16k"),
         (Path::new("/tmp"), "mode=0755,size=64m"),
+        (Path::new("/dev/shm"), "mode=1777,size=16m"),
+        (Path::new("/dev/mqueue"), "mode=0755,size=16k"),
     ] {
         if dir.is_dir() {
             sys::mount(
@@ -2110,6 +2117,17 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
             .map_err(|e| format!("cannot close {} for the uplink: {e}", dir.display()))?;
         }
     }
+    // And what every zone hides from its programs, hidden from the client as
+    // well — the least trusted program of all, whatever the gateway made of
+    // it (review 2026-09-27, second opinion: the uplink covered less than the
+    // zone). The Nix daemon ALWAYS, whatever the zone's own setting says for
+    // its programs: a fixed-output derivation fetches any address in the
+    // host's network, around the tunnel and around this namespace's filter.
+    // The system tier's service. systemd's services under /run/systemd, which
+    // answer over varlink to whoever connects.
+    hide_nix_daemon(zone)?;
+    hide_system_tier(zone)?;
+    seal_run().map_err(|e| format!("uplink: {e}"))?;
 
     // SAFETY: getpid(2) takes no arguments and cannot fail.
     let pid = unsafe { libc::getpid() };
