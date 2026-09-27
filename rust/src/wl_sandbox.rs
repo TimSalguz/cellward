@@ -69,7 +69,7 @@
 //! Rust unless `wayland-backend/client_system` is enabled, and it is not. The
 //! derivation therefore needs no Wayland `buildInputs`.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -397,6 +397,24 @@ fn not_started() -> u8 {
     EXIT_NOT_STARTED
 }
 
+/// What [`run_plain`] means for this launch, for the line that says it:
+/// unconfined, the compositor's whole socket; in a zone, no Wayland at all —
+/// the zone shows its programs the restricted sockets below [`SOCKET_DIR`]
+/// and not the compositor's own, so the program's `WAYLAND_DISPLAY` names
+/// nothing there (THREAT-MODEL W4, vm49). "Running unrestricted" said of a
+/// zone's program was the opposite of what happened (2026-09-27).
+fn plain_note(zone: &str, program: &OsStr) -> String {
+    let program = program.to_string_lossy();
+    if zone == NO_ZONE {
+        format!("running {program} unrestricted")
+    } else {
+        format!(
+            "running {program} without Wayland: zone {zone} shows its programs no socket of \
+             the compositor's but the restricted one"
+        )
+    }
+}
+
 /// Run without restrictions — before the compositor has said it speaks the
 /// security context: there is no restricted socket to be had.
 ///
@@ -523,7 +541,10 @@ pub fn run(args: Args) -> u8 {
     // come (`run_plain`, and below).
     take_opened();
     let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) else {
-        eprintln!("wl-sandbox: no XDG_RUNTIME_DIR — running unrestricted");
+        eprintln!(
+            "wl-sandbox: no XDG_RUNTIME_DIR — {}",
+            plain_note(&args.zone, &args.cmd[0])
+        );
         return run_plain(&args.cmd);
     };
     let runtime_dir = PathBuf::from(runtime_dir);
@@ -532,8 +553,8 @@ pub fn run(args: Args) -> u8 {
         Ok(compositor) => compositor,
         Err(why) => {
             eprintln!(
-                "wl-sandbox: {why} — running {} unrestricted",
-                args.cmd[0].to_string_lossy()
+                "wl-sandbox: {why} — {}",
+                plain_note(&args.zone, &args.cmd[0])
             );
             return run_plain(&args.cmd);
         }
@@ -886,6 +907,16 @@ mod tests {
         ] {
             assert_eq!(Args::parse(&argv(bad)), Err(ArgError::BadFocus), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn running_plain_is_unrestricted_only_outside_a_zone() {
+        let note = plain_note(NO_ZONE, OsStr::new("foot"));
+        assert_eq!(note, "running foot unrestricted");
+        let note = plain_note("work", OsStr::new("foot"));
+        assert!(note.contains("without Wayland"), "{note}");
+        assert!(note.contains("zone work"), "{note}");
+        assert!(!note.contains("unrestricted"), "{note}");
     }
 
     #[test]

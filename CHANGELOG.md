@@ -326,6 +326,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **`wl-sandbox` says what a zone's program gets under a compositor without
+  the security context** (found by the W4 test, vm49). It wrote "running …
+  unrestricted" for every launch, while a program in a zone gets no Wayland
+  at all there: the zone shows it no compositor socket but the restricted
+  one. Now the line says so; "unrestricted" is said of unconfined launches
+  only.
 - **Tray icons of today's Electron in zones and containers** (owner
   2026-09-27: Claude Desktop in its own sandbox, closed to the tray, gone).
   Electron now names its icon `org.freedesktop.StatusNotifierItem-<pid>-<n>`
