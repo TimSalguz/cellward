@@ -181,7 +181,7 @@ satellite, when granted.
 | X2 | The host's abstract unix sockets | yes | they belong to the network namespace; a sandbox in the host's network: a Landlock scope (Linux 6.12+) | vm19 vm32 |
 | X3 | `/proc/<pid>/root`, `cwd`, `fd`, `environ` of the host's session processes | yes | the kernel's ptrace rules across user namespaces; `vpn-zone-sys` gets a user namespace of its own | vm15 vm17 vm18 sys4 |
 | X4 | `/proc/<pid>/cmdline` of host processes (which zones and profiles are in use) | sandbox: yes · zone: **no** | zones have no pid namespace; the sandbox has its own | sandbox: C · **no test** |
-| X5 | Signals to the host's processes of the same user (killing the compositor) | sandbox: yes · zone: **no** | `kill(2)` checks only the uid; the sandbox cannot name host pids | **no test** |
+| X5 | Signals to the host's processes of the same user (killing the compositor) | yes (Linux 6.12+) | each launch into a zone is a Landlock domain of its own with `LANDLOCK_SCOPE_SIGNAL`: it signals itself and what it starts, nothing else — another launch of the same zone neither; the sandbox also cannot name host pids | vm44 |
 | X6 | The host's System V IPC and POSIX message queues | yes | an IPC namespace per zone, per uplink and per sandbox | vm18 sm16 |
 | X7 | The session's supplementary groups (docker, libvirt, input) | yes | dropped for zone programs | vm18 |
 | X8 | Exhausting memory, CPU or processes | no | limits per zone are planned (ROADMAP §17) | — |
@@ -268,7 +268,7 @@ smoke test tries to break:
 - **W5:** a launch into a zone is restricted whatever the binary's name;
 - **W7:** compositor and shell IPC outside the runtime directory;
 - **W10:** one launch's X satellite against another's (ROADMAP: "X11 в зоне против злого соседа");
-- **X4, X5:** `/proc/<pid>/cmdline` and signals, sandboxed and not;
+- **X4:** `/proc/<pid>/cmdline`, sandboxed and not;
 - **T2:** a trust layer that cannot be applied stops the launch (CERTIFICATES §6 item 7
   describes this test; none exists).
 
@@ -319,6 +319,7 @@ apart from DynamicLauncher and the two network portals.
 - vm38 "a zone's program cannot touch the routes, the tunnel or the filter"
 - vm39 "the zone killed under a running program: it fails closed"
 - vm40 "host-interface zone: IPv6 bound to eth1, the host's other v6 addresses refused" (in `tests/vm-hostif.py`)
+- vm44 "a zone's program cannot signal the host's processes of the user" (in `tests/vm-promise-signals.py`; skipped before Linux 6.12)
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·

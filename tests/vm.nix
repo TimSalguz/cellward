@@ -688,6 +688,8 @@ let
           assert "D=." in out, f"DISPLAY reached the zone: {out}"
           machine.succeed("systemctl stop fakex")
 
+      exec(open("${./vm-promise-signals.py}").read())
+
       with subtest("tab completion offers the zone where a zone is expected"):
           out = alice("cellward _complete -- cw up \"\" 3")
           assert "vmsmoke" in out.split(), out

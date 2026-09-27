@@ -179,7 +179,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | X2 | Абстрактные unix-сокеты хоста | да | они принадлежат сетевому пространству; песочница в сети хоста: scope Landlock (Linux 6.12+) | vm19 vm32 |
 | X3 | `/proc/<pid>/root`, `cwd`, `fd`, `environ` процессов сеанса хоста | да | правила ptrace между пространствами пользователей (ядро); `vpn-zone-sys` получает своё пространство пользователей | vm15 vm17 vm18 sys4 |
 | X4 | `/proc/<pid>/cmdline` процессов хоста (какие зоны и профили в ходу) | песочница: да · зона: **нет** | у зон нет пространства pid; у песочницы своё | песочница: У · **нет теста** |
-| X5 | Сигналы процессам хоста того же пользователя (убить композитор) | песочница: да · зона: **нет** | `kill(2)` проверяет только uid; песочница не может назвать pid хоста | **нет теста** |
+| X5 | Сигналы процессам хоста того же пользователя (убить композитор) | да (Linux 6.12+) | каждый запуск в зону — свой домен Landlock с `LANDLOCK_SCOPE_SIGNAL`: сигналит себе и тому, что запустил сам, и никому больше — другому запуску той же зоны тоже; песочница к тому же не может назвать pid хоста | vm44 |
 | X6 | System V IPC и очереди сообщений POSIX хоста | да | своё пространство IPC у каждой зоны, аплинка и песочницы | vm18 sm16 |
 | X7 | Дополнительные группы сеанса (docker, libvirt, input) | да | у программ зоны сняты | vm18 |
 | X8 | Исчерпание памяти, процессора или числа процессов | нет | пределы на зону в планах (ROADMAP §17) | — |
@@ -267,7 +267,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 - **W7:** IPC композитора и оболочки вне runtime-каталога;
 - **W10:** X-спутник одного запуска против другого (ROADMAP: «X11 в зоне против злого
   соседа»);
-- **X4, X5:** `/proc/<pid>/cmdline` и сигналы, в песочнице и без неё;
+- **X4:** `/proc/<pid>/cmdline`, в песочнице и без неё;
 - **T2:** слой доверия, который не наложился, останавливает запуск (CERTIFICATES §6, п. 7
   описывает этот тест; его нет).
 
@@ -318,6 +318,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 - vm38 "a zone's program cannot touch the routes, the tunnel or the filter"
 - vm39 "the zone killed under a running program: it fails closed"
 - vm40 "host-interface zone: IPv6 bound to eth1, the host's other v6 addresses refused" (в `tests/vm-hostif.py`)
+- vm44 "a zone's program cannot signal the host's processes of the user" (в `tests/vm-promise-signals.py`; до Linux 6.12 пропускается)
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
