@@ -215,16 +215,18 @@ with subtest("switch: a second network B, and the server's listeners that say wh
     )
     alice("cellward add vmswb /tmp/vmswb.conf")
     alice("cellward up vmswb")
+    # A transient service's PATH has no sh or sed in it (red once in CI):
+    # the logger's shell and its sed by the system's.
     server.succeed(
-        "systemd-run --unit=swtcp socat -u TCP-LISTEN:7301,bind=10.99.0.1,fork,reuseaddr "
+        "systemd-run --unit=swtcp -E PATH=/run/current-system/sw/bin socat -u TCP-LISTEN:7301,bind=10.99.0.1,fork,reuseaddr "
         "SYSTEM:'sh /tmp/swlog.sh tcp'"
     )
     server.succeed(
-        "systemd-run --unit=swudp socat -u UDP-RECVFROM:7300,bind=10.99.0.1,fork "
+        "systemd-run --unit=swudp -E PATH=/run/current-system/sw/bin socat -u UDP-RECVFROM:7300,bind=10.99.0.1,fork "
         "SYSTEM:'sh /tmp/swlog.sh udp'"
     )
     server.succeed(
-        "systemd-run --unit=swudp6 socat -u UDP6-RECVFROM:7302,bind=[fd99::1],fork "
+        "systemd-run --unit=swudp6 -E PATH=/run/current-system/sw/bin socat -u UDP6-RECVFROM:7302,bind=[fd99::1],fork "
         "SYSTEM:'sh /tmp/swlog.sh udp6'"
     )
     # DNS with every query logged by its source: the same answers.

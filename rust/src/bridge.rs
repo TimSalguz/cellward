@@ -623,8 +623,7 @@ pub fn search_in(resolv: &str) -> Vec<String> {
     resolv
         .lines()
         .filter_map(|line| line.trim().strip_prefix("search"))
-        .filter(|rest| rest.starts_with([' ', '\t']))
-        .next_back()
+        .rfind(|rest| rest.starts_with([' ', '\t']))
         .map(|rest| rest.split_whitespace().map(str::to_owned).collect())
         .unwrap_or_default()
 }

@@ -2743,16 +2743,13 @@ pub fn live_records(tools: &Tools, container: &Container) -> Vec<(String, regist
     records
 }
 
-/// The network the container's programs run in right now, if any: its
-/// instance's — which a live switch changes (stage 4) — when it runs in one,
-/// else the first live record of any of its programs ([`live_records`]).
+/// The network the container's programs run in right now, if any: the first
+/// live record of any of its programs ([`live_records`]) — which a live
+/// switch moves to its new network (`registry::retarget`, stage 4). Not the
+/// instance's: an instance whose last program just ended is still up until
+/// its keeper stops it, and a launch into another network meanwhile is no
+/// second network of a running container.
 pub fn running_network(tools: &Tools, container: &Container) -> Option<String> {
-    if let Some(instance) = crate::instance::running(&tools.state)
-        .into_iter()
-        .find(|i| i.id == container.name)
-    {
-        return Some(instance.network);
-    }
     live_records(tools, container)
         .into_iter()
         .map(|(_, r)| r.zone)
