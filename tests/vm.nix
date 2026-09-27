@@ -558,6 +558,9 @@ let
       import shlex
 
       STATE = "/home/alice/.local/state/vpn-zones"
+      # A stand-in that owns a name on alice's session bus and writes down
+      # every byte it is sent (tests/vm-promise-keyring.py).
+      FAKE_BUS_OWNER = "${pkgs.python3}/bin/python3 ${fakeNotifyd}"
 
       def alice(cmd):
           """Run a command as alice with her user manager reachable."""
@@ -673,6 +676,8 @@ let
           # refusals above are the filter, not a dead bus.
           code, out = bus(idle)
           assert code == 0, f"reading login1 refused in the zone: {out}"
+
+      exec(open("${./vm-promise-resolve1.py}").read())
 
       # X11 (docs/HERMETICITY.md §7, A): a socket in the host's /tmp/.X11-unix
       # is out of sight in a zone, and a launch into a zone carries no DISPLAY.
@@ -1829,6 +1834,7 @@ let
           )
           assert "wl_compositor" in own, own
           machine.wait_until_fails("pgrep -x vz-wl-proxy", timeout=30)
+          exec(open("${./vm-promise-wayland.py}").read())
           alice("cellward down vmsmoke")
 
           alice("systemctl --user stop vmsway.service")
@@ -1926,6 +1932,7 @@ let
           assert out.strip() == "u 1", out
           in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.kde.kwalletd6 4'")
           in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.kde.StatusNotifierItem-1.evil 4'")
+          exec(open("${./vm-promise-keyring.py}").read())
           # The project's state out of the zone's reach (review 2026-09-25):
           # no zone.pid to rewrite, no raw proxy behind the bus filter, no key;
           # the settings and the shims read-only; the host still writes.

@@ -130,7 +130,7 @@ satellite, when granted.
 | | **DNS** | | | |
 | D1 | The host's resolver answers over a unix socket (nscd/nsncd, resolved's varlink, avahi) | yes | tmpfs over their directories in every zone (the zone fails if this fails); the zone's own `nsswitch.conf`: `hosts: files dns` | vm9 vm10 vm11 sm6 sys1 |
 | D2 | The host's `resolv.conf` inside a zone | partly | the zone's own file is bound in; a host that replaces its file by rename detaches the bind, but queries still have only the tunnel | vm12; rename: **no test** |
-| D3 | Host network facts over the system bus (`resolve1`, NetworkManager, `hostname1`) or systemd's varlink and dhcpcd's sockets | yes | a system bus proxy per zone; `/run/systemd` covered, with an allow-list bound back | vm13 vm20; `resolve1` itself: **no test** |
+| D3 | Host network facts over the system bus (`resolve1`, NetworkManager, `hostname1`) or systemd's varlink and dhcpcd's sockets | yes | a system bus proxy per zone; `/run/systemd` covered, with an allow-list bound back | vm13 vm20 vm41 |
 | D4 | The OpenConnect client resolves a name through the host's resolver | yes | the gateway is resolved beforehand and passed with `--resolve`; the client's root has no `/run` at all | C · sm20 |
 | | **OpenConnect: the client and the gateway** | | | |
 | O1 | A client the gateway subverted takes the zone: unloads the uplink filter, enters the app namespace, lifts covers | yes | an id of its own (the second subordinate uid), no capabilities or groups, `no_new_privs`, seccomp refusing nested user namespaces | sm18 |
@@ -144,7 +144,7 @@ satellite, when granted.
 | P2 | The `OpenURI` portal opens a link on the host (the home address, an identity link) | hermetic, sandbox: yes · ordinary: **no** | the bus filter answers `OpenURI` and gives the link to the broker; `file:`, `OpenFile`, `OpenDirectory` are refused | vm21 |
 | P3 | Portals that grant a "host app" without a dialog (DynamicLauncher, Screenshot, Location, Camera, Secret, RemoteDesktop) or act in the host's network | hermetic, sandbox: yes · ordinary: **no** | an allow-list of portal interfaces; ProxyResolver and NetworkMonitor answered by the filter | vm21 u3 |
 | P4 | Posing as a host app (`org.freedesktop.host.portal.Registry`); the Background portal writing an autostart entry | hermetic, sandbox: yes | the `org.freedesktop.host.` tree is refused; the filter registers the connection as `cellward.zone.<id>`/`cellward.c.<id>` itself; `RequestBackground` is answered by the filter | u3 |
-| P5 | The Secret Service (every password in the keyring); `flatpak-spawn --host` | hermetic, sandbox: yes · ordinary: **no** | neither name is in the proxy's allow-list | C · **no test** |
+| P5 | The Secret Service (every password in the keyring); `flatpak-spawn --host` | hermetic, sandbox: yes · ordinary: **no** | neither name is in the proxy's allow-list | C · vm42 |
 | P6 | Other programs' bus APIs (a host player's `OpenURL`, a notification daemon's history); notifications with links or remote icons | hermetic: yes · ordinary: **no** | calls pass by name and interface only; MPRIS names can be owned, never talked through; `Notify` is rewritten | vm21 |
 | P7 | Input methods (fcitx `Configure` runs a program on the host; IBus's private bus) | hermetic: yes · ordinary: IBus only | IBus's places covered in every zone; hermetic: the input-method portals only (`IBUS_USE_PORTAL=1`) | vm18 vm20 |
 | P8 | A helper's `/proc/<pid>/root` leads to the unfiltered bus or `pulse/native` | yes | the bus proxies, the sound filter and the question windows run in the host's user namespace | vm17 vm18 |
@@ -155,7 +155,7 @@ satellite, when granted.
 | W2 | The raw Wayland socket | yes | only a restricted socket per launch, served by a confined proxy; the compositor's listener is in a directory no zone has | vm15 vm16 |
 | W3 | Screen capture, keyboard and pointer emulation, background clipboard, other windows, through Wayland protocols | yes, with `wp_security_context_v1` | the security context, plus the proxy's fixed hidden list; a hidden global cannot be bound by its number | vm16 u5 |
 | W4 | A compositor without `wp_security_context_v1` (GNOME's Mutter) | degraded, not open | in a zone the raw socket is not there, so there is no Wayland; `unconfined` gets it unrestricted | C · **no test** |
-| W5 | The allow-list by binary name (`obs`, `copyq`) unlocks the full protocols | zones: yes · `unconfined`: **no** | a launch into a zone is always restricted; the list applies to `unconfined` only | C (`launch.rs`) · **no test** |
+| W5 | The allow-list by binary name (`obs`, `copyq`) unlocks the full protocols | zones: yes · `unconfined`: **no** | a launch into a zone is always restricted; the list applies to `unconfined` only | C (`launch.rs`) · vm43 |
 | W6 | Another process of the zone uses a launch's proxy, or puts its own socket in its place | yes | the proxy passes on only its supervisor's descendants (`SO_PEERPIDFD`); the socket directory is read-only | vm16 |
 | W7 | Compositor or shell IPC outside the runtime directory or over the bus (Wayfire in `/tmp`, quickshell, KWin) | hermetic: yes · ordinary: **no** | hermetic: its own `/tmp`, a runtime directory by allow-list, the filtered bus | C · **no test** |
 | W8 | A window draws another zone's frame and title | no | the frame is a label, not a boundary; the trusted one is the panel's (`cellward focused`: window pid → network namespace, from the kernel) | win1 |
@@ -262,10 +262,7 @@ smoke test tries to break:
 - **N3:** the LAN, for a kernel WireGuard/AmneziaWG user zone (covered for system zones and
   zones through them);
 - **D2:** the host replacing `resolv.conf` by rename;
-- **D3:** `resolve1` itself over the system bus (`hostname1` and `ListSessions` are tested);
-- **P5:** the Secret Service and `flatpak-spawn --host` from a hermetic zone;
 - **W4:** a compositor without the security context gives a zone no Wayland;
-- **W5:** a launch into a zone is restricted whatever the binary's name;
 - **W7:** compositor and shell IPC outside the runtime directory;
 - **W10:** one launch's X satellite against another's (ROADMAP: "X11 в зоне против злого соседа");
 - **X4, X5:** `/proc/<pid>/cmdline` and signals, sandboxed and not;
@@ -319,6 +316,9 @@ apart from DynamicLauncher and the two network portals.
 - vm38 "a zone's program cannot touch the routes, the tunnel or the filter"
 - vm39 "the zone killed under a running program: it fails closed"
 - vm40 "host-interface zone: IPv6 bound to eth1, the host's other v6 addresses refused" (in `tests/vm-hostif.py`)
+- vm41 "system bus in a zone: resolve1 refused, it names in the host's network" (in `tests/vm-promise-resolve1.py`)
+- vm42 "hermetic zone: the keyring and flatpak's host command are out of reach" (in `tests/vm-promise-keyring.py`)
+- vm43 "a launch into a zone is restricted whatever its program is called" (in `tests/vm-promise-wayland.py`)
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
