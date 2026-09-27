@@ -271,7 +271,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `wl-sandbox` that failed — the socket's directory, the pipe, the
   registration, the fork (which a program of the same user can make fail
   on purpose) — fell back to running the program on the compositor's own
-  socket: screen copy, a virtual keyboard. It is not started instead.
+  socket: screen copy, a virtual keyboard. It is not started instead — but
+  for a launch from a connection that is confined already (the
+  compositor's `nested` error), which runs on that socket as before.
 - **A zone's app id, and a revoke, see through a pinned path and a
   process that hides** (review): the broker's pinned `/nix/store/…/env`
   was taken for the program's id; a process that made itself not dumpable
