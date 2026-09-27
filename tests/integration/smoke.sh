@@ -833,6 +833,23 @@ if [ -f "$HOME/.pki/nssdb/cert9.db" ] && "$CERTUTIL" -L -d "sql:$HOME/.pki/nssdb
 fi
 echo "ok"
 
+step "Доверенный сертификат: слой не лёг — программа не запускается"
+# docs/THREAT-MODEL.md T2: программа, которая ждёт доверия к корням
+# контейнера и молча его не получила, — сломанный запуск, и «запустить без
+# слоя» не должно быть путём, куда попадают случайно. Сертификат, который не
+# прочитать (каталог под именем отпечатка), — отказ запуска.
+BADCERT="$HOME/.config/vpn-zones/containers/$CA_PROFILE/trust/$(printf 'a%.0s' $(seq 64)).pem"
+mkdir -p "$BADCERT"
+trustout=$("$VPN_ZONE" run direct --profile "$CA_PROFILE" -- sh -c 'echo ЗАПУСТИЛАСЬ' 2>&1) \
+  && fail "запуск прошёл, хотя слой сертификатов не лёг: $trustout"
+rmdir "$BADCERT"
+echo "$trustout"
+if echo "$trustout" | grep -q 'ЗАПУСТИЛАСЬ'; then
+  fail "программа запустилась без своего слоя сертификатов"
+fi
+echo "$trustout" | grep -q 'not started' || fail "отказ не сказал, почему: $trustout"
+echo "ok: без слоя сертификатов программа не запускается"
+
 step "Доверенный сертификат: сброс — контейнер больше не доверяет, база NSS вычищена"
 "$VPN_ZONE" trust reset "$CA_PROFILE" || fail "trust reset"
 if verify_in "$CA_PROFILE" direct -CAfile "$BUNDLE" 2>/dev/null; then

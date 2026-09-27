@@ -200,7 +200,7 @@ satellite, when granted.
 | F4 | A layer container reads the real home | no, by design | a layer keeps writes out of the real home, not reads | vm34 |
 | | **Certificates** | | | |
 | T1 | An extra root CA reaches the host or another container | yes | bound in one launch's mount namespace; the variables name the system path; NSS databases written only where proven private | vm27 sm12 |
-| T2 | A trust layer that cannot be applied | yes, fail-closed | the launch stops | C · **no test** |
+| T2 | A trust layer that cannot be applied | yes, fail-closed | the launch stops | C · sm22 |
 | T3 | A container that trusts an inspection CA has its TLS read | no, the person's choice | `acknowledgeRisk` is required and the warning shown | — |
 | | **Identity and fingerprint** | | | |
 | I1 | One container (a browser profile) used in two networks | yes (own home, layer) | one network at a time; changing it is an action of its own; running programs keep their network | vm31 u9 |
@@ -266,9 +266,7 @@ smoke test tries to break:
 - **W4:** a compositor without the security context gives a zone no Wayland;
 - **W7:** compositor and shell IPC outside the runtime directory;
 - **W10:** one launch's X satellite against another's (ROADMAP: "X11 в зоне против злого соседа");
-- **X4:** `/proc/<pid>/cmdline`, sandboxed and not;
-- **T2:** a trust layer that cannot be applied stops the launch (CERTIFICATES §6 item 7
-  describes this test; none exists).
+- **X4:** `/proc/<pid>/cmdline`, sandboxed and not.
 
 Rows with Rust tests only and no VM or smoke test: O5, P4, W12, W13, W16, X9, K1, and P3
 apart from DynamicLauncher and the two network portals.
@@ -373,6 +371,7 @@ the other"
 - sm19 «Зона OpenConnect: смерть клиента валит зону» (client dies, zone goes)
 - sm20 «Зона OpenConnect: у клиента свой корень, и в нём только нужное» (no `/home`, `/run`, `/var`, `/proc`, `/sys`, Nix daemon)
 - sm21 «Пикер без графики: программе, которой контейнер не выбирали, — свой дом» (the real home's marker not seen)
+- sm22 «Доверенный сертификат: слой не лёг — программа не запускается» (an unreadable stored certificate)
 
 Rust tests (`cargo test`):
 
