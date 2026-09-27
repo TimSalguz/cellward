@@ -219,11 +219,45 @@ pub fn forward_udp(query: &[u8], resolvers: &[SocketAddr]) -> Option<Vec<u8>> {
 }
 
 fn read_message(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+    read_message_by(stream, None)
+}
+
+/// A length-prefixed message, whole by `deadline` when there is one: each
+/// read waits no longer than what is left of it, so a peer trickling a byte
+/// at a time cannot stretch one message past it (review 2026-09-27: the
+/// connection's life was looked at only between messages).
+fn read_message_by(
+    stream: &mut TcpStream,
+    deadline: Option<std::time::Instant>,
+) -> io::Result<Vec<u8>> {
     let mut len = [0u8; 2];
-    stream.read_exact(&mut len)?;
+    read_all_by(stream, &mut len, deadline)?;
     let mut message = vec![0u8; usize::from(u16::from_be_bytes(len))];
-    stream.read_exact(&mut message)?;
+    read_all_by(stream, &mut message, deadline)?;
     Ok(message)
+}
+
+fn read_all_by(
+    stream: &mut TcpStream,
+    mut buf: &mut [u8],
+    deadline: Option<std::time::Instant>,
+) -> io::Result<()> {
+    while !buf.is_empty() {
+        if let Some(deadline) = deadline {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(io::Error::from(io::ErrorKind::TimedOut));
+            }
+            stream.set_read_timeout(Some(left.min(TCP_IDLE)))?;
+        }
+        match stream.read(buf) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            Ok(n) => buf = &mut buf[n..],
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 fn write_message(stream: &mut TcpStream, message: &[u8]) -> io::Result<()> {
@@ -246,7 +280,9 @@ pub fn forward_tcp(query: &[u8], resolvers: &[SocketAddr]) -> Option<Vec<u8>> {
         if write_message(&mut up, query).is_err() {
             continue;
         }
-        if let Ok(reply) = read_message(&mut up) {
+        // A resolver's answer by the idle term as a whole, not per read.
+        let by = std::time::Instant::now() + TCP_IDLE;
+        if let Ok(reply) = read_message_by(&mut up, Some(by)) {
             if answers(query, &reply) {
                 return Some(reply);
             }
@@ -301,9 +337,9 @@ fn serve_udp(listener: UdpSocket, args: Arc<Args>) {
 fn serve_tcp_client(mut client: TcpStream, args: &Args) {
     let _ = client.set_read_timeout(Some(TCP_IDLE));
     let _ = client.set_write_timeout(Some(TCP_IDLE));
-    let born = std::time::Instant::now();
-    while born.elapsed() < TCP_LIFE {
-        let Ok(query) = read_message(&mut client) else {
+    let end = std::time::Instant::now() + TCP_LIFE;
+    while std::time::Instant::now() < end {
+        let Ok(query) = read_message_by(&mut client, Some(end)) else {
             return;
         };
         let Some(reply) = forward_tcp(&query, &args.resolvers()) else {
