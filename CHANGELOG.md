@@ -324,6 +324,54 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   now names its own record to `profile-run` (`--registered <pid>:<start>`),
   and exactly that record — by its pid and its start time — is not counted;
   a pid that came round to another launch still is.
+- **Tray icons of today's Electron in zones and containers** (owner
+  2026-09-27: Claude Desktop in its own sandbox, closed to the tray, gone).
+  Electron now names its icon `org.freedesktop.StatusNotifierItem-<pid>-<n>`
+  (Claude Desktop 2.110's log: "Failed to get the ownership of
+  org.freedesktop.StatusNotifierItem-13-1"), and the session bus filter let
+  a program own only the KDE spelling, `org.kde.StatusNotifierItem-…`. Both
+  are owned now, by the same rule of our patched proxy: that name and
+  nothing more — not the portals' or the notification daemon's names under
+  `org.freedesktop.*`. Checked in the VM test next to the KDE spelling.
+- **What sits in `declared/` is Nix's word only as home-manager's link
+  into the store** (2026-09-27, `docs/THREAT-MODEL.md` H6,
+  `docs/LEAK-MODEL.md` §27). Every file in `~/.config/vpn-zones/declared/`
+  was taken for a declaration: it beat the local value, and the CLI
+  refused to change it ("задано в Nix"). The directory is in the home, and
+  whatever writes the home — a program of the host, a file chooser a zone's
+  program suggests a path to — could switch hermeticity off for every zone
+  or bind a container to the host's network in Nix's name. Now a
+  declaration counts only when the file, every link followed, is in
+  `/nix/store`, as home-manager puts it; a plain file or a link elsewhere
+  is ignored with a warning on stderr, and the local value or the default
+  applies. One helper reads for every place (`rust/src/declared.rs`): the
+  path is held `O_PATH` and the kernel says where the file is, so a FIFO
+  there is not waited on and a directory the filters hold is read as held.
+  The store is a constant, not something an environment variable can move.
+  `status --json` keeps its shape; where a plain file was read as `"nix"`,
+  it now says `"local"` or `"default"`. The crate's tests put what they
+  declare into the real store (`nix-store --add`), as home-manager does.
+- **The sandbox's seccomp refuses `pidfd_getfd`** (2026-09-27,
+  `docs/LEAK-MODEL.md` §26): it copied a descriptor out of another process
+  of the sandbox. It answers `ENOSYS`, as a kernel before 5.6 does; the
+  OpenConnect client's filter carries the same list. `modify_ldt`,
+  `process_vm_readv`/`process_vm_writev` and `kcmp` stay allowed, on
+  purpose and written down (`docs/THREAT-MODEL.md` K1): Wine sets LDT
+  entries and reads and writes other Windows processes' memory with them,
+  Mesa compares GPU descriptors with `kcmp`, and the sandbox's own pid
+  namespace and the kernel's ptrace-mode checks already hold them to the
+  sandbox's own processes.
+- **A sandbox whose seccomp filter cannot be built is not started**
+  (2026-09-27, `docs/THREAT-MODEL.md` K1). `fs-sandbox` warned on stderr
+  and started the program without a filter when libseccomp failed to build
+  or export it, or exported an empty program: a sandbox without TIOCSTI,
+  ptrace, keyring or io_uring refusals that looked exactly like one with
+  them. Now the launch stops with "фильтр seccomp … — запуск остановлен"
+  and the not-started code (127). A rule the installed libseccomp does not
+  know by name is still skipped and named on stderr. The filter is built
+  first, before the permission question and the bus proxy, and its memfd
+  is close-on-exec, so that the proxy and the bus filter no longer inherit
+  it; bwrap gets its copy on descriptor 34 as before.
 - **A zone's program cannot open a vsock — or any socket its network
   namespace does not hold** (2026-09-27, `docs/LEAK-MODEL.md` §25). A VM
   test showed a program in a zone reaching a vsock listener of the host's:

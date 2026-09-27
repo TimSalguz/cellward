@@ -589,7 +589,8 @@ Flatpak. Его фильтр системных вызовов — образе�
   `I1`–`I5`, на которых `awg setconf` отвергает файл целиком;
 - фильтр сессионной шины — `xdg-dbus-proxy` с одной маленькой нашей правкой
   (`module/patches/`): шаблоны у него бывают только вида `org.kde.*`, а значок
-  трея Electron или Qt должен занять `org.kde.StatusNotifierItem-<pid>-<n>` —
+  трея Electron или Qt должен занять `org.kde.StatusNotifierItem-<pid>-<n>` (или,
+  у нынешнего Electron, `org.freedesktop.StatusNotifierItem-<pid>-<n>`) —
   занять всё `org.kde.*` значило бы занять и имя KWallet, поэтому
   `--own=ИМЯ-*` занимает этот префикс и больше ничего;
 - службы системного уровня входят в зону через генератор systemd, а не через

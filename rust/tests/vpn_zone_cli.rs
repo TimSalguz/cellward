@@ -130,6 +130,39 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// Declare `text` at `path` as home-manager does: the text into the Nix
+/// store, `path` a link to it (`rust/src/declared.rs`: a plain file in
+/// `declared/` is nobody's word). These tests need Nix, as they need its
+/// libseccomp; the store path is content-addressed and collected later.
+fn declare(path: &Path, text: &str) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "cellward-cli-declare-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("cellward-test-declared");
+    fs::write(&source, text).unwrap();
+    let out = Command::new("nix-store")
+        .arg("--add")
+        .arg(&source)
+        .output()
+        .unwrap_or_else(|e| panic!("nix-store: {e} — run the tests where Nix is"));
+    assert!(
+        out.status.success(),
+        "nix-store --add: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let stored = PathBuf::from(String::from_utf8(out.stdout).unwrap().trim());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let _ = fs::remove_file(path);
+    std::os::unix::fs::symlink(stored, path).unwrap();
+}
+
 /// A synthetic config, in the Windows line endings Amnezia hands out.
 fn crlf_config() -> String {
     [
@@ -961,16 +994,65 @@ fn a_container_is_never_in_two_networks_at_once() {
     );
 }
 
+/// A file in `declared/` that is not a link into the Nix store is nobody's
+/// declaration (review 2026-09-27): not shown as Nix's, not in the way of the
+/// CLI, and said so on stderr. Anything that writes the home — a host
+/// program, a file chooser — could put one there.
+#[test]
+fn a_plain_file_in_declared_is_not_nixs_word() {
+    let home = Home::new("declared-plain");
+    let declared = home.root.join("config/declared");
+    fs::create_dir_all(declared.join("containers")).unwrap();
+    fs::write(declared.join("hermetic-default"), "off").unwrap();
+    let elsewhere = home.root.join("elsewhere");
+    fs::write(&elsewhere, "leave").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, declared.join("user-entries")).unwrap();
+    fs::write(
+        declared.join("containers/dev.conf"),
+        "home = private\nnetwork = unconfined\n",
+    )
+    .unwrap();
+
+    let out = home.run(&["status", "--json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&out);
+    assert!(
+        json.contains("\"hermetic\":{\"value\":true,\"source\":\"default\"},\"ask_again\":"),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"user_entries\":{\"value\":\"take-over\",\"source\":\"default\"}"),
+        "{json}"
+    );
+    assert!(!json.contains("\"selector\":\"dev\""), "{json}");
+    assert!(stderr(&out).contains("не от Nix"), "{}", stderr(&out));
+
+    // Not in the way: the local setting is written, as with nothing declared.
+    let out = home.run(&["hermetic", "--default", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        fs::read_to_string(home.root.join("config/hermetic-default")).unwrap(),
+        "on"
+    );
+
+    // The same text as Nix's link is Nix's word.
+    declare(&declared.join("hermetic-default"), "off");
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"hermetic\":{\"value\":false,\"source\":\"nix\"},\"ask_again\":"),
+        "{json}"
+    );
+}
+
 #[test]
 fn what_nix_declares_is_shown_as_such_and_not_changed_here() {
     let home = Home::new("declared");
     let declared = home.root.join("config/declared/containers");
     fs::create_dir_all(&declared).unwrap();
-    fs::write(
-        declared.join("private-dev.conf"),
+    declare(
+        &declared.join("private-dev.conf"),
         "network = offline\napp = firefox\n",
-    )
-    .unwrap();
+    );
     fs::create_dir_all(home.root.join("profiles/work")).unwrap();
 
     let out = home.run(&["container", "set", "sb:dev", "network", "direct"]);
@@ -1246,7 +1328,7 @@ fn a_merge_keeps_what_the_target_has_and_moves_the_programs() {
     // What Nix declares is merged in the configuration.
     let declared = home.root.join("config/declared/containers");
     fs::create_dir_all(&declared).unwrap();
-    fs::write(declared.join("overlay-work.conf"), "network = direct\n").unwrap();
+    declare(&declared.join("overlay-work.conf"), "network = direct\n");
     let out = home.run(&["container", "merge", "old", "work", "--yes"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("объявлен в Nix"), "{}", stderr(&out));
@@ -1618,7 +1700,7 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     );
     assert!(!home.run(&["audio-manager", "nl", "yes"]).status.success());
     fs::create_dir_all(home.root.join("config/declared")).unwrap();
-    fs::write(home.root.join("config/declared/audio-manager"), "nl\n").unwrap();
+    declare(&home.root.join("config/declared/audio-manager"), "nl\n");
     assert!(home
         .run(&["audio-manager", "nl", "default"])
         .status
@@ -1642,7 +1724,7 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     assert!(!home.run(&["microphone", "nl", "maybe"]).status.success());
     assert!(!home.run(&["microphone", "nowhere", "yes"]).status.success());
     fs::create_dir_all(home.root.join("config/declared")).unwrap();
-    fs::write(home.root.join("config/declared/microphone"), "nl yes\n").unwrap();
+    declare(&home.root.join("config/declared/microphone"), "nl yes\n");
     let out = home.run(&["microphone", "nl", "ask"]);
     assert!(stdout(&out).contains("задано в Nix"), "{}", stdout(&out));
     let json = stdout(&home.run(&["status", "--json"]));
@@ -1689,7 +1771,7 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     assert!(!home.run(&["screencast", "nl", "maybe"]).status.success());
     assert!(!home.run(&["screencast", "nowhere", "yes"]).status.success());
     assert!(!home.run(&["screencast", "nl"]).status.success());
-    fs::write(home.root.join("config/declared/screencast"), "nl ask\n").unwrap();
+    declare(&home.root.join("config/declared/screencast"), "nl ask\n");
     let out = home.run(&["screencast", "nl", "no"]);
     assert!(stdout(&out).contains("задано в Nix"), "{}", stdout(&out));
     let json = stdout(&home.run(&["status", "--json"]));
@@ -1714,7 +1796,7 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
         json.contains("\"ask_again\":{\"value\":\"10m\",\"source\":\"local\"}"),
         "{json}"
     );
-    fs::write(home.root.join("config/declared/ask-again"), "1h").unwrap();
+    declare(&home.root.join("config/declared/ask-again"), "1h");
     let out = home.run(&["ask-again", "default"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
@@ -1742,7 +1824,7 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
         ),
         "{json}"
     );
-    fs::write(home.root.join("config/declared/question-timeout"), "10m").unwrap();
+    declare(&home.root.join("config/declared/question-timeout"), "10m");
     assert!(!home.run(&["question-timeout", "default"]).status.success());
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
@@ -1792,12 +1874,11 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     );
     // Declared in Nix: the default refuses the CLI, and an exception inverts it.
     fs::create_dir_all(home.root.join("config/declared")).unwrap();
-    fs::write(home.root.join("config/declared/hermetic-default"), "on").unwrap();
-    fs::write(
-        home.root.join("config/declared/hermetic-exceptions"),
+    declare(&home.root.join("config/declared/hermetic-default"), "on");
+    declare(
+        &home.root.join("config/declared/hermetic-exceptions"),
         "nl\n",
-    )
-    .unwrap();
+    );
     let out = home.run(&["hermetic", "--default", "off"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("в Nix"), "{}", stderr(&out));
@@ -1817,7 +1898,7 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     fs::remove_file(home.root.join("config/declared/hermetic-exceptions")).unwrap();
     // Declared in Nix: switched off there, not here.
     fs::create_dir_all(home.root.join("config/declared")).unwrap();
-    fs::write(home.root.join("config/declared/zone-x11"), "nl\n").unwrap();
+    declare(&home.root.join("config/declared/zone-x11"), "nl\n");
     let out = home.run(&["x11", "nl", "off"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("в Nix"), "{}", stderr(&out));
@@ -1904,9 +1985,9 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
     // Nix wins, and the command does not pretend to change what Nix set.
     let declared = home.root.join("config/declared");
     fs::create_dir_all(&declared).unwrap();
-    fs::write(declared.join("frame-colors"), "nl #ff0000\n").unwrap();
-    fs::write(declared.join("frame-width"), "3").unwrap();
-    fs::write(declared.join("frame-title"), "off").unwrap();
+    declare(&declared.join("frame-colors"), "nl #ff0000\n");
+    declare(&declared.join("frame-width"), "3");
+    declare(&declared.join("frame-title"), "off");
     let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
     assert!(line.contains("--frame ff0000:3:off "), "{line}");
     for change in [&["frame", "width", "8"][..], &["frame", "title", "default"]] {

@@ -193,6 +193,7 @@ satellite, when granted.
 | H3 | cellward's own state and settings (every zone's key, `zone.pid`, the registry, raw sockets behind the filters, `broker-always`, `declared/`) | yes | tmpfs over `~/.local/state/vpn-zones` in every zone; `~/.config/vpn-zones` and `~/.local/share/vpn-zones` read-only | vm18 sm10 |
 | H4 | Other containers' data | yes | container storage is covered in zones; a launch gets back its own | vm33 vm18 |
 | H5 | Programs outside every zone reach the network | only with the system tier's egress policy | nftables by socket owner (`enforce`, `strict`) | sys7 sys8 ho1 |
+| H6 | A file in `declared/` speaks in Nix's name (a file chooser a zone's program steers, a program of the host): `hermetic-default off`, a container bound to `unconfined`, the CLI refusing to change it | yes | a declaration counts only when the file, every link followed, is in the Nix store, as home-manager's links are; a plain file or a link elsewhere is ignored with a warning, and the local value or the default applies | vm46 u15 |
 | | **Files and the host's startup files** | | | |
 | F1 | A zone program reads the home (`~/.ssh`, browser profiles, other programs' data) | own home: yes · otherwise **no** | the sandbox: an empty home plus granted paths | sm8 sm10 |
 | F2 | A zone program writes what the host runs later (`~/.bashrc`, autostart, launcher entries, user units, compositor configs, `mimeapps.list`) | hermetic: partly · ordinary: **no** · own home: yes | read-only covers from a list, their parent directories pinned | vm18 |
@@ -214,7 +215,7 @@ satellite, when granted.
 | L4 | Launches around the picker: entries programs write, autostart, D-Bus activation | yes | entries taken over in place; shadow D-Bus service files | vm28 vm29 vm30 |
 | L5 | Other launches around the picker (`DBusActivatable` without `Exec`, the user's own `dbus-1/services`, a key binding that calls the program, scripts, other host programs) | no | interception is routing, not a boundary; the host is trusted | — |
 | | **Kernel surface** | | | |
-| K1 | System calls from a sandbox | partly | a Flatpak-like seccomp blocklist (TIOCSTI, ptrace, keyrings, perf, io_uring, userfaultfd, the new mount API); nested user namespaces allowed | u6 |
+| K1 | System calls from a sandbox | partly | a Flatpak-like seccomp blocklist (TIOCSTI, ptrace, keyrings, perf, io_uring, userfaultfd, the new mount API, `pidfd_getfd`); nested user namespaces allowed; a filter that cannot be built stops the launch, never a sandbox without one | u6 |
 | K2 | System calls from a zone program without a sandbox | partly | only the socket-family filter of N16 and the signal scope of X5; the GPU, `fuse` and `ntsync` nodes are there | — |
 
 Notes:
@@ -236,9 +237,20 @@ Notes:
   enumeration. It does not cover home-manager's links in the home's root, or a file that does
   not exist yet, other than the entry points made beforehand.
 - **H3.** A program of the same user outside every zone can still write `declared/` and
-  `broker-always`. That is the host, a non-goal.
+  `broker-always`. That is the host, a non-goal. Since 2026-09-27 what it writes into
+  `declared/` is not Nix's word (H6); it can still remove home-manager's link, or point it
+  at another file of the store.
 - **W13.** In a sandbox of an ordinary zone, `screencast no` does not apply; nothing is
   remembered there either.
+- **K1.** Allowed on purpose: `modify_ldt` (Wine's LDT entries: 16-bit programs; Flatpak
+  refuses it only without `multiarch`, and the sandbox is always multiarch),
+  `process_vm_readv`/`process_vm_writev` (wineserver's `ReadProcessMemory` and
+  `WriteProcessMemory`) and `kcmp` (Mesa, before Linux 6.10). What reaches into another
+  process is held to the sandbox's own by its pid namespace, where nothing outside has a
+  number, and by the kernel's ptrace-mode checks, which want `CAP_SYS_PTRACE` in the target's
+  user namespace for a process outside the caller's. Refusing them would wall the program off
+  from itself only. `pidfd_getfd`, which no desktop program uses, answers `ENOSYS`
+  (LEAK-MODEL §26).
 - **Tested only in a hermetic zone:** the IPC namespace, the own `/dev` and the dropped groups
   apply to every zone, but vm18 checks them in the hermetic one.
 
@@ -320,6 +332,7 @@ apart from DynamicLauncher and the two network portals.
 - vm43 "a launch into a zone is restricted whatever its program is called" (in `tests/vm-promise-wayland.py`)
 - vm44 "a zone's program cannot signal the host's processes of the user" (in `tests/vm-promise-signals.py`; skipped before Linux 6.12)
 - vm45 "a zone's program cannot reach the host over vsock" (in `tests/vm-promise-vsock.py`)
+- vm46 "declared: a plain file or a link out of the store is not Nix's word" (in `tests/vm-promise-declared.py`)
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -380,7 +393,7 @@ Rust tests (`cargo test`):
 - u3 `rust/src/bus_filter.rs`: `only_the_named_portal_interfaces_get_through`, `the_doors_are_known_by_member_and_interface`, `the_programs_own_register_is_refused_after_ours`
 - u4 `rust/src/dbus_wire.rs`: `a_screen_cast_is_not_remembered`; `rust/src/bus_filter.rs`: `the_screen_cast_switch_is_read_for_every_call`, `yes_is_ask_where_the_portal_does_not_know_the_zone`
 - u5 `rust/src/wl_proxy.rs`: `hidden_protocols_are_not_in_the_build`, `a_hidden_global_cannot_be_bound_by_its_number`
-- u6 `rust/tests/seccomp_cli.rs`: `selftest_passes`, `selftest_passes_with_denied_userns`; `rust/tests/fs_sandbox_cli.rs`: `the_filter_reaches_bwrap_on_the_descriptor_it_names`
+- u6 `rust/tests/seccomp_cli.rs`: `selftest_passes`, `selftest_passes_with_denied_userns`; `rust/tests/fs_sandbox_cli.rs`: `the_filter_reaches_bwrap_on_the_descriptor_it_names`; `rust/src/fs_sandbox.rs`: `the_sandboxs_filter_is_a_program_on_a_private_descriptor`, `an_empty_program_is_a_refusal_and_not_a_sandbox_without_a_filter`; `rust/src/seccomp.rs`: `the_filter_carries_the_pidfd_getfd_rule`, `what_wine_and_mesa_need_is_not_refused`
 - u7 `rust/src/broker.rs`: `always_is_kept_for_programs_of_the_store_only`, `the_program_asked_about_is_pinned_by_its_path`, `always_is_never_offered_for_what_runs_any_command`
 - u8 `window/src/main.rs`: `a_guarded_window_takes_nothing_until_the_person_is_still`, `a_question_takes_no_answer_typed_on`
 - u9 `rust/src/container.rs`: `a_container_is_never_in_two_networks_at_once`, `a_bound_container_runs_in_its_network_only`
@@ -389,3 +402,4 @@ Rust tests (`cargo test`):
 - u12 `rust/src/pulse_filter.rs`: `module_loading_is_refused_and_answered_as_the_server_would`, `recording_a_monitor_is_refused_before_the_server_sees_it`
 - u13 `rust/src/launch.rs`: `a_name_on_the_list_is_only_the_program_the_system_gives_under_it`
 - u14 `rust/src/seccomp.rs`: `the_zone_socket_filter_builds`
+- u15 `rust/src/declared.rs`: `a_link_into_the_store_is_declared`, `a_plain_file_or_a_link_elsewhere_is_not_declared`, `a_held_directory_is_read_as_held`; `rust/tests/vpn_zone_cli.rs`: `a_plain_file_in_declared_is_not_nixs_word`

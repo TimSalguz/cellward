@@ -191,6 +191,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | H3 | Собственные состояние и настройки cellward (ключи всех зон, `zone.pid`, реестр, сырые сокеты за фильтрами, `broker-always`, `declared/`) | да | tmpfs поверх `~/.local/state/vpn-zones` в каждой зоне; `~/.config/vpn-zones` и `~/.local/share/vpn-zones` только для чтения | vm18 sm10 |
 | H4 | Данные других контейнеров | да | хранилища контейнеров в зонах накрыты; запуск получает назад только своё | vm33 vm18 |
 | H5 | Программы вне всех зон выходят в сеть | только с политикой выхода системного уровня | nftables по владельцу сокета (`enforce`, `strict`) | sys7 sys8 ho1 |
+| H6 | Файл в `declared/` говорит от имени Nix (файловый диалог, которым правит программа зоны, программа хоста): `hermetic-default off`, контейнер, привязанный к `unconfined`, отказ CLI это менять | да | объявленным считается только файл, который по всем ссылкам лежит в Nix store, как ссылки home-manager; обычный файл или ссылка в другое место пропускаются с предупреждением, и действует локальное значение или умолчание | vm46 u15 |
 | | **Файлы и то, что хост запускает из дома** | | | |
 | F1 | Программа зоны читает дом (`~/.ssh`, профили браузеров, данные других программ) | свой дом: да · иначе **нет** | песочница: пустой дом плюс выданные пути | sm8 sm10 |
 | F2 | Программа зоны пишет то, что хост потом исполнит (`~/.bashrc`, автозапуск, ярлыки, юниты пользователя, конфиги композитора, `mimeapps.list`) | герметичная: частично · обычная: **нет** · свой дом: да | покрытия только для чтения по списку, родительские каталоги закреплены | vm18 |
@@ -212,7 +213,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | L4 | Запуски мимо пикера: ярлыки, которые пишут программы, автозапуск, активация по D-Bus | да | ярлыки перехватываются на месте; теневые файлы служб D-Bus | vm28 vm29 vm30 |
 | L5 | Другие запуски мимо пикера (`DBusActivatable` без `Exec`, свои `dbus-1/services` пользователя, привязка клавиши, вызывающая программу, скрипты, другие программы хоста) | нет | перехват — маршрутизация, а не граница; хост доверенный | — |
 | | **Поверхность ядра** | | | |
-| K1 | Системные вызовы из песочницы | частично | блок-список seccomp по образцу Flatpak (TIOCSTI, ptrace, связки ключей, perf, io_uring, userfaultfd, новый API монтирования); вложенные пространства пользователей разрешены | u6 |
+| K1 | Системные вызовы из песочницы | частично | блок-список seccomp по образцу Flatpak (TIOCSTI, ptrace, связки ключей, perf, io_uring, userfaultfd, новый API монтирования, `pidfd_getfd`); вложенные пространства пользователей разрешены; фильтр не собрался — запуск остановлен, песочницы без фильтра не бывает | u6 |
 | K2 | Системные вызовы программы зоны без песочницы | частично | только фильтр семейств сокетов (N16) и область сигналов (X5); узлы GPU, `fuse` и `ntsync` на месте | — |
 
 Примечания:
@@ -234,9 +235,19 @@ PulseAudio; дополнительные группы сеанса сняты; �
   перечисление. Оно не накрывает ссылки home-manager в корне дома и файлы, которых ещё нет,
   кроме заранее созданных точек входа.
 - **H3.** Программа того же пользователя вне всех зон по-прежнему может писать в `declared/`
-  и `broker-always`. Это хост — не цель.
+  и `broker-always`. Это хост — не цель. С 2026-09-27 то, что она пишет в `declared/`, не слово
+  Nix (H6); убрать ссылку home-manager или перевести её на другой файл store она всё ещё может.
 - **W13.** В песочнице обычной зоны `screencast no` не действует; запомнить выбор там тоже
   нельзя.
+- **K1.** Разрешены сознательно: `modify_ldt` (записи LDT у Wine: 16-битные программы; Flatpak
+  запрещает его только без `multiarch`, а песочница всегда multiarch),
+  `process_vm_readv`/`process_vm_writev` (`ReadProcessMemory` и `WriteProcessMemory` у
+  wineserver) и `kcmp` (Mesa, до Linux 6.10). То, что дотягивается до другого процесса,
+  ограничено процессами самой песочницы: в её пространстве pid у внешних процессов нет номера,
+  а проверки ptrace в ядре для процесса вне своего пространства пользователей требуют
+  `CAP_SYS_PTRACE` в пространстве цели. Запрет отгородил бы программу только от неё самой.
+  `pidfd_getfd`, которым не пользуется ни одна настольная программа, отвечает `ENOSYS`
+  (LEAK-MODEL §26).
 - **Проверено только в герметичной зоне:** своё пространство IPC, свой `/dev` и снятые группы
   есть у каждой зоны, но vm18 проверяет их в герметичной.
 
@@ -319,6 +330,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 - vm43 "a launch into a zone is restricted whatever its program is called" (в `tests/vm-promise-wayland.py`)
 - vm44 "a zone's program cannot signal the host's processes of the user" (в `tests/vm-promise-signals.py`; до Linux 6.12 пропускается)
 - vm45 "a zone's program cannot reach the host over vsock" (в `tests/vm-promise-vsock.py`)
+- vm46 "declared: a plain file or a link out of the store is not Nix's word" (в `tests/vm-promise-declared.py`)
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -379,7 +391,7 @@ the other"
 - u3 `rust/src/bus_filter.rs`: `only_the_named_portal_interfaces_get_through`, `the_doors_are_known_by_member_and_interface`, `the_programs_own_register_is_refused_after_ours`
 - u4 `rust/src/dbus_wire.rs`: `a_screen_cast_is_not_remembered`; `rust/src/bus_filter.rs`: `the_screen_cast_switch_is_read_for_every_call`, `yes_is_ask_where_the_portal_does_not_know_the_zone`
 - u5 `rust/src/wl_proxy.rs`: `hidden_protocols_are_not_in_the_build`, `a_hidden_global_cannot_be_bound_by_its_number`
-- u6 `rust/tests/seccomp_cli.rs`: `selftest_passes`, `selftest_passes_with_denied_userns`; `rust/tests/fs_sandbox_cli.rs`: `the_filter_reaches_bwrap_on_the_descriptor_it_names`
+- u6 `rust/tests/seccomp_cli.rs`: `selftest_passes`, `selftest_passes_with_denied_userns`; `rust/tests/fs_sandbox_cli.rs`: `the_filter_reaches_bwrap_on_the_descriptor_it_names`; `rust/src/fs_sandbox.rs`: `the_sandboxs_filter_is_a_program_on_a_private_descriptor`, `an_empty_program_is_a_refusal_and_not_a_sandbox_without_a_filter`; `rust/src/seccomp.rs`: `the_filter_carries_the_pidfd_getfd_rule`, `what_wine_and_mesa_need_is_not_refused`
 - u7 `rust/src/broker.rs`: `always_is_kept_for_programs_of_the_store_only`, `the_program_asked_about_is_pinned_by_its_path`, `always_is_never_offered_for_what_runs_any_command`
 - u8 `window/src/main.rs`: `a_guarded_window_takes_nothing_until_the_person_is_still`, `a_question_takes_no_answer_typed_on`
 - u9 `rust/src/container.rs`: `a_container_is_never_in_two_networks_at_once`, `a_bound_container_runs_in_its_network_only`
@@ -388,3 +400,4 @@ the other"
 - u12 `rust/src/pulse_filter.rs`: `module_loading_is_refused_and_answered_as_the_server_would`, `recording_a_monitor_is_refused_before_the_server_sees_it`
 - u13 `rust/src/launch.rs`: `a_name_on_the_list_is_only_the_program_the_system_gives_under_it`
 - u14 `rust/src/seccomp.rs`: `the_zone_socket_filter_builds`
+- u15 `rust/src/declared.rs`: `a_link_into_the_store_is_declared`, `a_plain_file_or_a_link_elsewhere_is_not_declared`, `a_held_directory_is_read_as_held`; `rust/tests/vpn_zone_cli.rs`: `a_plain_file_in_declared_is_not_nixs_word`

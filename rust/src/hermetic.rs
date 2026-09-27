@@ -34,19 +34,19 @@ pub const DEFAULT_SETTING: &str = "hermetic-default";
 /// `declared/`.
 pub const DECLARED_EXCEPTIONS: &str = "hermetic-exceptions";
 
-/// A default setting file: `None` when it is absent or empty.
-fn default_file(path: &Path) -> Option<bool> {
-    read_setting(path)
-        .filter(|text| !text.trim().is_empty())
+/// A default setting file's text: `None` when it is absent or empty.
+fn default_file(text: Option<String>) -> Option<bool> {
+    text.filter(|text| !text.trim().is_empty())
         .map(|text| text.trim() != "off")
 }
 
 /// The default for zones without a marker: `(on, source)`.
 pub fn default_setting(config: &Path) -> (bool, Source) {
-    if let Some(on) = default_file(&config.join(DECLARED_DIR).join(DEFAULT_SETTING)) {
+    let declared = crate::declared::setting(&config.join(DECLARED_DIR).join(DEFAULT_SETTING));
+    if let Some(on) = default_file(declared) {
         return (on, Source::Nix);
     }
-    if let Some(on) = default_file(&config.join(DEFAULT_SETTING)) {
+    if let Some(on) = default_file(read_setting(&config.join(DEFAULT_SETTING))) {
         return (on, Source::Local);
     }
     (true, Source::Default)
@@ -54,7 +54,7 @@ pub fn default_setting(config: &Path) -> (bool, Source) {
 
 /// Whether Nix names this zone an exception.
 pub fn declared_exception(config: &Path, zone: &str) -> bool {
-    std::fs::read_to_string(config.join(DECLARED_DIR).join(DECLARED_EXCEPTIONS))
+    crate::declared::read(&config.join(DECLARED_DIR).join(DECLARED_EXCEPTIONS))
         .is_ok_and(|text| text.lines().map(str::trim).any(|line| line == zone))
 }
 
@@ -102,7 +102,7 @@ fn allowance(
     marker: &str,
     on_word: &str,
 ) -> (bool, Source) {
-    let declared = std::fs::read_to_string(config.join(DECLARED_DIR).join(list))
+    let declared = crate::declared::read(&config.join(DECLARED_DIR).join(list))
         .is_ok_and(|text| text.lines().map(str::trim).any(|line| line == zone));
     if declared {
         return (true, Source::Nix);
@@ -241,6 +241,11 @@ mod tests {
         fn write(&self, path: &str, text: &str) {
             std::fs::write(self.base.join(path), text).unwrap();
         }
+        /// What Nix declares, as home-manager puts it there: a link into the
+        /// store (`crate::declared`).
+        fn declare(&self, name: &str, text: &str) {
+            crate::declared::declare(&self.base.join("config/declared").join(name), text);
+        }
         fn setting(&self) -> (bool, Source) {
             zone_setting(&self.zone(), &self.config(), "nl")
         }
@@ -271,7 +276,7 @@ mod tests {
             nix_daemon(&d.zone(), &d.config(), "nl"),
             (false, Source::Local)
         );
-        d.write("config/declared/nix-daemon", "de\nnl\n");
+        d.declare("nix-daemon", "de\nnl\n");
         assert_eq!(
             nix_daemon(&d.zone(), &d.config(), "nl"),
             (true, Source::Nix)
@@ -306,7 +311,7 @@ mod tests {
             (true, Source::Local)
         );
         d.write("zone/audio-manager", "off");
-        d.write("config/declared/audio-manager", "nl\n");
+        d.declare("audio-manager", "nl\n");
         assert_eq!(
             audio_manager(&d.zone(), &d.config(), "nl"),
             (true, Source::Nix)
@@ -340,7 +345,7 @@ mod tests {
         let d = Dirs::new("default");
         d.write("config/hermetic-default", "on");
         assert_eq!(d.setting(), (true, Source::Local));
-        d.write("config/declared/hermetic-default", "off");
+        d.declare("hermetic-default", "off");
         assert_eq!(d.setting(), (false, Source::Nix));
         // The zone's own marker is more specific than either default.
         d.write("zone/hermetic", "on");
@@ -350,13 +355,13 @@ mod tests {
     #[test]
     fn a_declared_exception_inverts_the_declared_default_over_the_marker() {
         let d = Dirs::new("exception");
-        d.write("config/declared/hermetic-exceptions", "de\nnl\n");
+        d.declare("hermetic-exceptions", "de\nnl\n");
         d.write("zone/hermetic", "on");
         // No declared default: the exception means nothing.
         assert_eq!(d.setting(), (true, Source::Local));
-        d.write("config/declared/hermetic-default", "on");
+        d.declare("hermetic-default", "on");
         assert_eq!(d.setting(), (false, Source::Nix));
-        d.write("config/declared/hermetic-default", "off");
+        d.declare("hermetic-default", "off");
         assert_eq!(d.setting(), (true, Source::Nix));
         assert_eq!(
             zone_setting(&d.zone(), &d.config(), "fr"),

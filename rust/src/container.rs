@@ -399,7 +399,7 @@ fn read_declared(tools: &Tools, name: &str) -> Option<(Conf, Option<Home>)> {
 
 /// [`read_declared`], from the config dir alone.
 fn read_declared_in(config: &Path, name: &str) -> Option<(Conf, Option<Home>)> {
-    if let Ok(text) = fs::read_to_string(declared_file_in(config, name)) {
+    if let Ok(text) = crate::declared::read(&declared_file_in(config, name)) {
         let conf = parse_conf(&text);
         if let Some(home) = values(&conf, "home").last().and_then(Home::parse) {
             return Some((conf, Some(home)));
@@ -407,7 +407,7 @@ fn read_declared_in(config: &Path, name: &str) -> Option<(Conf, Option<Home>)> {
     }
     for (prefix, home) in [("overlay-", Home::Layer), ("private-", Home::Private)] {
         let file = config.join(DECLARED).join(format!("{prefix}{name}.conf"));
-        if let Ok(text) = fs::read_to_string(file) {
+        if let Ok(text) = crate::declared::read(&file) {
             let conf = parse_conf(&text);
             if values(&conf, "home").next().is_none() {
                 return Some((conf, Some(home)));
@@ -779,7 +779,7 @@ const LAYOUT_PLAN: &str = ".layout-plan";
 /// file of one name per container, or one of the files from before it.
 fn declared_home_in(config: &Path, name: &str) -> Option<Home> {
     let dir = config.join(DECLARED);
-    if let Ok(text) = fs::read_to_string(dir.join(format!("{name}.conf"))) {
+    if let Ok(text) = crate::declared::read(&dir.join(format!("{name}.conf"))) {
         if let Some(home) = values(&parse_conf(&text), "home")
             .last()
             .and_then(Home::parse)
@@ -789,7 +789,11 @@ fn declared_home_in(config: &Path, name: &str) -> Option<Home> {
     }
     [("overlay-", Home::Layer), ("private-", Home::Private)]
         .into_iter()
-        .find(|(prefix, _)| dir.join(format!("{prefix}{name}.conf")).is_file())
+        .find(|(prefix, _)| {
+            crate::declared::hold(&dir.join(format!("{prefix}{name}.conf")))
+                .and_then(|held| held.metadata())
+                .is_ok_and(|meta| meta.is_file())
+        })
         .map(|(_, home)| home)
 }
 
@@ -1479,7 +1483,8 @@ pub fn own_value_in(
     key: &str,
 ) -> Result<Option<(String, Source)>, Source> {
     let declared = declared_file_in(config, name);
-    match fs::read_to_string(&declared) {
+    // Not Nix's (not a link into the store) is NotFound: as if none.
+    match crate::declared::read(&declared) {
         Ok(text) => {
             let conf = parse_conf(&text);
             // A file of this kind always has its `home`; `<name>.conf`
@@ -1784,9 +1789,12 @@ pub fn names_in(config: &Path, profiles: &Path) -> Vec<String> {
         let Some(stem) = name.strip_suffix(".conf") else {
             continue;
         };
-        let conf = fs::read_to_string(&file)
-            .map(|t| parse_conf(&t))
-            .unwrap_or_default();
+        let conf = match crate::declared::read(&file) {
+            Ok(text) => parse_conf(&text),
+            // Nobody's declaration: no container by it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => Conf::default(),
+        };
         if values(&conf, "home").next().is_some() {
             names.push(stem.to_owned());
         } else if let Some(n) = stem
@@ -3007,8 +3015,7 @@ mod tests {
     fn a_declared_name_is_kept_and_the_plan_comes_first() {
         let l = Layout::new("declared");
         let declared = l.config.join(DECLARED);
-        fs::create_dir_all(&declared).unwrap();
-        fs::write(declared.join("work.conf"), "home = layer\n").unwrap();
+        crate::declared::declare(&declared.join("work.conf"), "home = layer\n");
         fs::create_dir_all(l.profiles.join("work")).unwrap();
         fs::create_dir_all(l.sandboxes.join("work/home")).unwrap();
         fs::write(l.sandboxes.join("work/home/f"), "sandbox").unwrap();
@@ -3055,8 +3062,7 @@ mod tests {
         fs::create_dir_all(l.profiles.join("vpn-profile-x")).unwrap();
         fs::create_dir_all(l.sandboxes.join("vpn-profile-y/home")).unwrap();
         let declared = l.config.join(DECLARED);
-        fs::create_dir_all(&declared).unwrap();
-        fs::write(declared.join("work.conf"), "home = private\n").unwrap();
+        crate::declared::declare(&declared.join("work.conf"), "home = private\n");
         fs::create_dir_all(l.profiles.join("work/home/upper")).unwrap();
         fs::write(l.profiles.join("work/home/upper/f"), "layer").unwrap();
         fs::create_dir_all(l.sandboxes.join("work/home")).unwrap();
@@ -3569,15 +3575,14 @@ mod tests {
         fs::write(&conf, "camera = true\n").unwrap();
         assert!(camera_for(&zone, &config, "nl", "work"));
         // Nix's word for the zone over the container's local one.
-        fs::write(config.join("declared/camera"), "nl\n").unwrap();
+        crate::declared::declare(&config.join("declared/camera"), "nl\n");
         fs::write(&conf, "camera = false\n").unwrap();
         assert!(camera_for(&zone, &config, "nl", "work"));
         // Nix's for the container over everything.
-        fs::write(
-            config.join("declared/containers/work.conf"),
+        crate::declared::declare(
+            &config.join("declared/containers/work.conf"),
             "home = private\ncamera = false\n",
-        )
-        .unwrap();
+        );
         assert!(!camera_for(&zone, &config, "nl", "work"));
         let _ = fs::remove_dir_all(&base);
     }

@@ -96,6 +96,15 @@ const READ_CHUNK: usize = 64 * 1024;
 const MAX_FDS_PER_READ: usize = 64;
 const MAX_QUEUED_FDS: usize = 256;
 const MAX_AUTH_BYTES: usize = 16 * 1024;
+/// All of them, not per peer (weighed 2026-09-27): one program of the zone
+/// can hold all 64 and lock the zone's others out of the bus. A share per
+/// peer was not taken, because nothing tells peers apart that a hostile
+/// program cannot multiply — one uid for all, a pid per `fork`, a mount
+/// namespace per `unshare`, and launches have no cgroup of their own — while
+/// a sandbox's own bus filter is ONE peer that carries every connection of
+/// that sandbox, which a share per pid would cut. Programs of one zone
+/// against each other, and exhausting it, are not a goal
+/// (`docs/THREAT-MODEL.md` §5, X8); a cgroup per launch would be the identity.
 const MAX_CONNECTIONS: usize = 64;
 /// Links the filter opens: at most this many in a minute.
 const MAX_OPENS_PER_MINUTE: usize = 10;
@@ -2663,6 +2672,12 @@ mod tests {
             fs::write(self.base.join(path), text).unwrap();
         }
 
+        /// What Nix declares, as home-manager puts it there: a link into the
+        /// store (`crate::declared`).
+        fn declare(&self, name: &str, text: &str) {
+            crate::declared::declare(&self.base.join("config/declared").join(name), text);
+        }
+
         fn journal(&self) -> String {
             fs::read_to_string(self.base.join("state").join(crate::journal::FILE))
                 .unwrap_or_default()
@@ -2830,10 +2845,10 @@ mod tests {
         // Once in the journal for the three: at most a line per ten seconds.
         assert_eq!(d.journal().matches("\"event\":\"screencast\"").count(), 1);
         // Nix over the zone's own word, at once.
-        d.write("config/declared/screencast", "nl ask\n");
+        d.declare("screencast", "nl ask\n");
         let got = s.through(&select_sources(16, ":1.7"));
         assert_eq!(remembers(&got), (false, false));
-        d.write("config/declared/screencast", "nl no\n");
+        d.declare("screencast", "nl no\n");
         s.program.send(&select_sources(17, ":1.7"), &[]);
         let (msg, h, _) = s.program.message();
         assert_eq!(h.reply_serial, Some(17));
