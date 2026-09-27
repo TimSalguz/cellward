@@ -1676,37 +1676,65 @@ impl X11Args {
 /// bwrap pid 1 of a namespace of its own, and when the program (its only child
 /// that matters) exits, the kernel takes the whole namespace down with it.
 pub fn run_x11(args: X11Args) -> u8 {
-    match Command::new(&args.xwayland)
-        .arg(&args.display)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(mut satellite) => {
-            // Its socket first: started before it, the program dies with
-            // "cannot open display". Waited for as long as it takes, or until
-            // the satellite ends without it — no clock (this was one second:
-            // on a loaded machine, too short).
-            let socket = args
-                .display
-                .strip_prefix(':')
-                .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-                .map(|n| Path::new(crate::x11::X11_DIR).join(format!("X{n}")));
-            let up = socket.is_some_and(|socket| {
-                crate::sys::wait_for_child_entry(&socket, &mut satellite, |p| {
-                    fs::symlink_metadata(p).is_ok()
-                })
-            });
-            if !up {
-                eprintln!(
-                    "fs-sandbox: the X server ended before its socket was there — the program starts without it"
-                );
+    // The display's socket is this launcher's own, by its path in the
+    // sandbox's /tmp, handed to the satellite (`-listenfd`): Xwayland then
+    // makes no socket in the abstract namespace, which the network
+    // namespace — the zone's, or the host's — shows every program in it
+    // (review 2026-09-27: the sandbox's X server was theirs to connect to,
+    // and it asks for nothing). The sandbox's own clients reach no abstract
+    // name of the outside (its Landlock scope, `crate::sys`).
+    let socket = args
+        .display
+        .strip_prefix(':')
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .map(|n| Path::new(crate::x11::X11_DIR).join(format!("X{n}")));
+    let listener = socket.as_ref().and_then(|socket| {
+        let dir = Path::new(crate::x11::X11_DIR);
+        if fs::symlink_metadata(dir).is_err() {
+            let _ = fs::create_dir(dir);
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o1777));
+        }
+        std::os::unix::net::UnixListener::bind(socket)
+            .map_err(|e| eprintln!("fs-sandbox: cannot bind {}: {e}", socket.display()))
+            .ok()
+    });
+    match (socket, listener) {
+        (Some(socket), Some(listener)) => {
+            let fd = listener.as_raw_fd();
+            let mut satellite = Command::new(&args.xwayland);
+            satellite
+                .arg(&args.display)
+                .arg("-listenfd")
+                .arg(fd.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            // SAFETY: fcntl in the child before exec, async-signal-safe.
+            unsafe {
+                satellite.pre_exec(move || {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            match satellite.spawn() {
+                Ok(_satellite) => {
+                    // The satellite's copy is the only one: if it ends, the
+                    // socket closes, and the wait with it. No clock.
+                    drop(listener);
+                    if !crate::x11::x_answers(&socket) {
+                        eprintln!(
+                            "fs-sandbox: the X server ended before it answered — the program starts without it"
+                        );
+                    }
+                }
+                Err(e) => eprintln!(
+                    "fs-sandbox: cannot start {} ({e}) — the program gets no X server",
+                    args.xwayland.display()
+                ),
             }
         }
-        Err(e) => eprintln!(
-            "fs-sandbox: cannot start {} ({e}) — the program gets no X server",
-            args.xwayland.display()
-        ),
+        _ => eprintln!("fs-sandbox: no socket for the X display — the program gets no X server"),
     }
     let e = crate::profile::exec_command(&args.cmd);
     eprintln!(

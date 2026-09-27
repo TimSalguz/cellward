@@ -25,6 +25,7 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -103,10 +104,27 @@ pub fn own_display(dir: &Path, lock_dir: &Path) -> Option<(u32, UnixListener)> {
         if std::fs::symlink_metadata(lock_dir.join(format!(".X{n}-lock"))).is_ok() {
             return None;
         }
+        // Clients try the abstract name first (libxcb): one somebody holds
+        // is a display whose clients would go there (see [`run`]).
+        if abstract_name_taken(n) {
+            return None;
+        }
         UnixListener::bind(dir.join(format!("X{n}")))
             .ok()
             .map(|listener| (n, listener))
     })
+}
+
+/// Whether `@/tmp/.X11-unix/X<n>` is bound by somebody in this network
+/// namespace: a bind of our own fails. Ours, if it succeeds, goes at once.
+fn abstract_name_taken(n: u32) -> bool {
+    use std::os::linux::net::SocketAddrExt;
+    let Ok(addr) =
+        std::os::unix::net::SocketAddr::from_abstract_name(format!("/tmp/.X11-unix/X{n}"))
+    else {
+        return true;
+    };
+    UnixListener::bind_addr(&addr).is_err()
 }
 
 /// Whether an X server answers on `socket`: a connection of our own, and
@@ -130,6 +148,25 @@ pub fn x_answers(socket: &Path) -> bool {
 
 /// Start the satellite, run the program on it, take the satellite down.
 pub fn run(args: Args) -> u8 {
+    // The server's clients try the abstract name `@/tmp/.X11-unix/X<n>`
+    // before the socket's path (libxcb), and fall back only when there is
+    // none: a program of the zone that took the name after the display was
+    // chosen would be the server this launch's programs talk to — and relay
+    // them to the real one, seeing everything. Under a Landlock scope the
+    // launch reaches no abstract socket of the outside: a name taken is a
+    // display that does not open, never a server in between.
+    match crate::sys::abstract_socket_scope() {
+        Some(scope) => {
+            if let Err(e) = crate::sys::enter_scope(scope.as_raw_fd()) {
+                eprintln!("x11-run: cannot keep off the zone's abstract sockets ({e}) — the program starts without X");
+                return exec(&args.cmd);
+            }
+        }
+        None => eprintln!(
+            "x11-run: this kernel cannot keep the X clients off the zone's abstract sockets \
+             (Landlock scopes, Linux 6.12)"
+        ),
+    }
     let dir = Path::new(X11_DIR);
     let Some((number, listener)) = own_display(dir, Path::new("/tmp")) else {
         eprintln!("x11-run: no free X display — the program starts without X");
@@ -148,6 +185,30 @@ pub fn run(args: Args) -> u8 {
         .arg(fd.to_string())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // The satellite is a compositor to Xwayland, on a socket it makes in
+    // its runtime directory — the zone's is every program of the zone's, and
+    // one there first would be the one it serves. A runtime directory of its
+    // own, in the launch's own X11 directory; the host compositor's socket
+    // by its whole path.
+    let runtime = dir.join(format!(".run-{number}"));
+    let own_runtime = std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&runtime)
+        .is_ok();
+    if own_runtime {
+        if let (Some(wayland), Some(old)) = (
+            std::env::var_os("WAYLAND_DISPLAY").filter(|d| !d.is_empty()),
+            std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()),
+        ) {
+            satellite.env("WAYLAND_DISPLAY", Path::new(&old).join(wayland));
+        }
+        satellite.env("XDG_RUNTIME_DIR", &runtime);
+    } else {
+        eprintln!(
+            "x11-run: no runtime directory of the satellite's own ({}) — it uses the zone's",
+            runtime.display()
+        );
+    }
     // SAFETY: prctl and fcntl in the child before exec, async-signal-safe:
     // the satellite dies with this process, whatever kills it, and gets the
     // display's socket.
@@ -189,6 +250,7 @@ pub fn run(args: Args) -> u8 {
     let _ = satellite.kill();
     let _ = satellite.wait();
     gone();
+    let _ = std::fs::remove_dir_all(&runtime);
     match status {
         Ok(status) => {
             use std::os::unix::process::ExitStatusExt;
