@@ -694,6 +694,7 @@ let
           machine.succeed("systemctl stop fakex")
 
       exec(open("${./vm-promise-signals.py}").read())
+      exec(open("${./vm-promise-vsock.py}").read())
 
       with subtest("tab completion offers the zone where a zone is expected"):
           out = alice("cellward _complete -- cw up \"\" 3")
