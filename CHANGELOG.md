@@ -280,6 +280,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **The compositor's full protocols by origin, not by name** (2026-09-27,
+  `docs/LEAK-MODEL.md` §8). An unconfined launch whose program was called
+  `obs`, `copyq`, `grim` or anything on `wayland-allow` got the raw
+  compositor socket — screen capture, input emulation, the background
+  clipboard — whatever the program really was: a script in `~/.local/bin`
+  or something downloaded under that name got it too, a sandboxed one
+  included. A name now counts only when the launch's program is the one the
+  system's and the user's profiles give under it (`/run/current-system/sw/
+  bin`, `/etc/profiles/per-user/<user>/bin`, `/usr/bin` and the like; not
+  `~/.nix-profile`); a `wayland-allow` line may be an absolute path, which
+  lets that file. Launches into a zone were and are restricted whatever
+  their program.
 - **A zone's program cannot signal the host's processes of the user**
   (2026-09-27, Linux 6.12+; `docs/THREAT-MODEL.md` X5). `kill(2)` checks the
   user and not the namespace, so a program in a zone could kill the
