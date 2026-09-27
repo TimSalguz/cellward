@@ -191,24 +191,23 @@ pub fn run(args: Args) -> u8 {
     // own, in the launch's own X11 directory; the host compositor's socket
     // by its whole path.
     let runtime = dir.join(format!(".run-{number}"));
-    let own_runtime = std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&runtime)
-        .is_ok();
-    if own_runtime {
-        if let (Some(wayland), Some(old)) = (
-            std::env::var_os("WAYLAND_DISPLAY").filter(|d| !d.is_empty()),
-            std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()),
-        ) {
-            satellite.env("WAYLAND_DISPLAY", Path::new(&old).join(wayland));
-        }
-        satellite.env("XDG_RUNTIME_DIR", &runtime);
-    } else {
+    if let Err(e) = std::fs::DirBuilder::new().mode(0o700).create(&runtime) {
+        // The zone's instead would be the interception this is here against.
         eprintln!(
-            "x11-run: no runtime directory of the satellite's own ({}) — it uses the zone's",
+            "x11-run: no runtime directory of the satellite's own ({}: {e}) — the program \
+             starts without X",
             runtime.display()
         );
+        gone();
+        return exec(&args.cmd);
     }
+    if let (Some(wayland), Some(old)) = (
+        std::env::var_os("WAYLAND_DISPLAY").filter(|d| !d.is_empty()),
+        std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()),
+    ) {
+        satellite.env("WAYLAND_DISPLAY", Path::new(&old).join(wayland));
+    }
+    satellite.env("XDG_RUNTIME_DIR", &runtime);
     // SAFETY: prctl and fcntl in the child before exec, async-signal-safe:
     // the satellite dies with this process, whatever kills it, and gets the
     // display's socket.

@@ -349,12 +349,26 @@ pub fn socket_display(zone: &str, pid: u32) -> String {
     format!("{SOCKET_DIR}/{zone}/{}", socket_name(pid))
 }
 
-/// Run without restrictions — the shared path for everything that did not work
-/// out.
-///
-/// `execvp`, so the program replaces this process, exactly as the C version
-/// did: there is nothing left to supervise or clean up, and the caller gets the
-/// program's own exit status without a middleman.
+/// The manager's `nested` error (security-context-v1): this connection has a
+/// security context of its own already.
+const NESTED: u32 = 2;
+
+/// Why the compositor did not take the security context.
+enum Refused {
+    /// This connection is confined already.
+    Nested,
+    Other(String),
+}
+
+impl From<Refused> for String {
+    fn from(refused: Refused) -> Self {
+        match refused {
+            Refused::Nested => "the connection has a security context already".to_owned(),
+            Refused::Other(why) => why,
+        }
+    }
+}
+
 /// Not started: the compositor has said it speaks the security context, and
 /// the restricted socket could not be made after all — the program never gets
 /// more than the restricted socket once there could be one (review
@@ -365,6 +379,12 @@ fn not_started() -> u8 {
     EXIT_NOT_STARTED
 }
 
+/// Run without restrictions — before the compositor has said it speaks the
+/// security context: there is no restricted socket to be had.
+///
+/// `execvp`, so the program replaces this process, exactly as the C version
+/// did: there is nothing left to supervise or clean up, and the caller gets the
+/// program's own exit status without a middleman.
 fn run_plain(cmd: &[OsString]) -> u8 {
     no_word();
     let e = exec_command(cmd);
@@ -437,7 +457,7 @@ impl Compositor {
         listener: BorrowedFd<'_>,
         close_read: BorrowedFd<'_>,
         app_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), Refused> {
         let qh = self.queue.handle();
         let ctx: WpSecurityContextV1 = self.manager.create_listener(listener, close_read, &qh, ());
         ctx.set_sandbox_engine(SANDBOX_ENGINE.to_owned());
@@ -445,11 +465,21 @@ impl Compositor {
         ctx.set_instance_id(std::process::id().to_string());
         ctx.commit();
         if let Err(e) = self.queue.roundtrip(&mut State) {
-            // A compositor that refuses the context (nesting one sandbox
-            // inside another is a protocol error) must not cost the user the
-            // program: the socket we built is dropped and the program starts
-            // as it would have without us.
-            return Err(format!("the compositor refused the security context ({e})"));
+            // Nesting one sandbox inside another is the manager's `nested`
+            // protocol error: this connection has a security context already,
+            // and the program may start on it as it is — no more than the
+            // restricted socket it came through. Any other refusal is one.
+            let nested = matches!(
+                &e,
+                wayland_client::DispatchError::Backend(
+                    wayland_client::backend::WaylandError::Protocol(p)
+                ) if p.object_interface == "wp_security_context_manager_v1" && p.code == NESTED
+            );
+            return Err(if nested {
+                Refused::Nested
+            } else {
+                Refused::Other(format!("the compositor refused the security context ({e})"))
+            });
         }
         ctx.destroy();
         let _ = self.conn.flush();
@@ -567,12 +597,18 @@ pub fn run(args: Args) -> u8 {
     let target = upstream
         .as_ref()
         .map_or(listener.as_fd(), |up| up.listener.as_fd());
-    if let Err(why) = compositor.register(target, close_read.as_fd(), &args.app_id) {
-        eprintln!("wl-sandbox: {why} — the program is not started");
+    if let Err(refused) = compositor.register(target, close_read.as_fd(), &args.app_id) {
         drop(close_write);
         let _ = fs::remove_file(&sock_path);
         forget_upstream(&upstream);
-        return not_started();
+        return match refused {
+            // Already confined: on the socket it came through, as before.
+            Refused::Nested => run_plain(&args.cmd),
+            Refused::Other(why) => {
+                eprintln!("wl-sandbox: {why} — the program is not started");
+                not_started()
+            }
+        };
     }
     // Our copies of the handed-over descriptors are not needed any more: the
     // compositor has its own. `close_write` is the exception — that is the
