@@ -1162,6 +1162,31 @@ EOF
     || fail "таблица аплинка пропала"
   echo "ok: клиент под uid $ocid без прав, фильтр аплинка ему не по силам"
 
+  step "Зона OpenConnect: у клиента свой корень, и в нём только нужное"
+  # Не «копия хоста минус список», а пустой корень плюс названное
+  # (zone::client_root; второе мнение 2026-09-27): store, системные программы и
+  # библиотеки, хранилище CA, несколько устройств и его каталог. Ни /home, ни
+  # /run, ни /var, ни /proc — и никакого сокета ничьего демона.
+  # Утилиты — по store-путям: в корне клиента нет ничего другого.
+  LSREAL=$(readlink -f "$WORK/tools/bin/ls")
+  TESTREAL=$(readlink -f "$WORK/tools/bin/test")
+  in_client() {
+    "$NSENTER" -U -m -t "$OCPID" -- "$@"
+  }
+  ocroot=$(in_client "$LSREAL" -A /)
+  echo "корень клиента: $(echo "$ocroot" | tr '\n' ' ')"
+  for gone in home run var proc sys root; do
+    if echo "$ocroot" | grep -qx "$gone"; then
+      fail "в корне клиента есть /$gone"
+    fi
+  done
+  if in_client "$TESTREAL" -e /nix/var/nix/daemon-socket/socket; then
+    fail "клиенту виден сокет демона Nix"
+  fi
+  in_client "$TESTREAL" -c /dev/net/tun || fail "у клиента нет /dev/net/tun"
+  in_client "$TESTREAL" -d /tmp/openconnect || fail "у клиента нет своего каталога"
+  echo "ok: корень клиента — только нужное"
+
   step "Зона OpenConnect: смерть клиента валит зону"
   # Fail-closed: клиента убиваем, и зона обязана уйти целиком — держатель
   # видит смерть аплинка и гасит всё. Убить его можно только став root ВНУТРИ

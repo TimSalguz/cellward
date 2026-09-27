@@ -272,6 +272,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   cannot reach (run by hand from a home directory) is refused with a
   message. `openconnect` now says `SIOCSIFMTU: Operation not permitted`
   once: the MTU is the app namespace's to set.
+- **The OpenConnect client has a root of its own with only what it needs**
+  (second opinion, 2026-09-27). Instead of the uplink's copy of the host
+  with known-dangerous places covered, the client now `pivot_root`s into a
+  tmpfs of its own mount namespace holding only `/nix/store`, the system's
+  `/usr`, `/bin`, `/lib*`, the CA stores (`/etc/ssl`, `/etc/pki`,
+  `/etc/static`), a few devices with `/dev/net/tun`, and its own
+  directory — no `/home`, `/run`, `/var`, `/proc` or `/sys`, so no daemon's
+  socket a host may add is in its reach. Its program and CA files are named
+  by their real paths. The smoke test lists the client's root and checks
+  that the Nix daemon is not in it.
 - **The uplink hides from the OpenConnect client what a zone hides from its
   programs** (second opinion, 2026-09-27). It covered only the resolvers,
   the system bus, the session's runtime directory and `/tmp`; a subverted

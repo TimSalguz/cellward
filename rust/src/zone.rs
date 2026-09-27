@@ -114,7 +114,7 @@
 //! All three are host pids only as long as no pid namespace is created.
 
 use std::borrow::Cow;
-use std::ffi::{CStr, OsStr, OsString};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, ToSocketAddrs};
@@ -4328,6 +4328,285 @@ fn runnable_by_anyone(path: &Path) -> bool {
     searchable && fs::metadata(path).is_ok_and(|m| m.mode() & 0o001 != 0)
 }
 
+/// Where the client's root is put together: a directory in the uplink's own
+/// /tmp, which the client's mount namespace makes a tmpfs of and moves into.
+const CLIENT_ROOT: &str = "/tmp/openconnect-root";
+
+/// Trees of the host the client's root takes whole, where the host has them:
+/// the store, the system's own programs and libraries (what `/bin/sh` and a
+/// distribution's `openconnect` need on a host that is not NixOS), and the
+/// places a system CA store lives. One that is a link (`/bin` → `usr/bin` on a
+/// merged-/usr system, `/etc/static` on NixOS) is made the same link there.
+const CLIENT_ROOT_TREES: [&str; 12] = [
+    "/nix/store",
+    "/bin",
+    "/sbin",
+    "/usr",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/etc/ssl",
+    "/etc/pki",
+    "/etc/ca-certificates",
+    "/etc/static",
+];
+
+/// The device nodes the client has: the basics, and the tun it attaches to.
+const CLIENT_DEVICES: [&str; 6] = [
+    "/dev/null",
+    "/dev/zero",
+    "/dev/full",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/net/tun",
+];
+
+/// One step of putting the client's root together, each a single system call
+/// on paths made beforehand: between fork and exec nothing may be allocated.
+enum RootStep {
+    Dir(CString),
+    /// An empty file, for a file to be bound onto.
+    File(CString),
+    Link {
+        target: CString,
+        at: CString,
+    },
+    Bind {
+        from: CString,
+        to: CString,
+    },
+}
+
+/// The client's root, planned: what [`enter_client_root`] does in the child.
+struct ClientRoot {
+    root: CString,
+    steps: Vec<RootStep>,
+    /// Where the client starts: its own directory.
+    home: CString,
+    dot: CString,
+    slash: CString,
+}
+
+fn c_path(path: &Path) -> Result<CString, String> {
+    CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("{} has a NUL in it", path.display()))
+}
+
+/// Plan the client's root: EMPTY, and then only what the client needs — the
+/// trees of [`CLIENT_ROOT_TREES`], the devices of [`CLIENT_DEVICES`], its
+/// directory `dir`, and `files` (the programs it runs and the CA files it is
+/// named, by their real paths) where no tree already holds them.
+///
+/// This is the other way round from every other mount namespace of a zone,
+/// and on purpose (review 2026-09-27, second opinion): those are a copy of
+/// the host with what is known to be dangerous covered, and each daemon a host
+/// adds is in reach until somebody notices — the uplink had the Nix daemon in
+/// reach of the client that way. Here what is not named is not there: no
+/// `/home`, no `/run`, no `/var`, no `/proc`, no socket of anybody's.
+fn client_root(root: &Path, dir: &Path, files: &[PathBuf]) -> Result<ClientRoot, String> {
+    use std::collections::BTreeSet;
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new()
+        .mode(0o755)
+        .create(root)
+        .map_err(|e| format!("cannot make {}: {e}", root.display()))?;
+    let inside = |path: &Path| root.join(path.strip_prefix("/").unwrap_or(path));
+
+    let mut steps = Vec::new();
+    let mut made: BTreeSet<PathBuf> = BTreeSet::new();
+    // Every directory above `path` in the root, top down, each once.
+    let mut parents = |path: &Path, steps: &mut Vec<RootStep>| -> Result<(), String> {
+        let mut above: Vec<&Path> = path.ancestors().skip(1).collect();
+        above.reverse();
+        for dir in above {
+            if dir == Path::new("/") || !made.insert(dir.to_path_buf()) {
+                continue;
+            }
+            steps.push(RootStep::Dir(c_path(&inside(dir))?));
+        }
+        Ok(())
+    };
+
+    let mut trees: Vec<&Path> = Vec::new();
+    for tree in CLIENT_ROOT_TREES.map(Path::new) {
+        let Ok(meta) = fs::symlink_metadata(tree) else {
+            continue;
+        };
+        parents(tree, &mut steps)?;
+        if meta.file_type().is_symlink() {
+            let target = fs::read_link(tree)
+                .map_err(|e| format!("cannot read the link {}: {e}", tree.display()))?;
+            steps.push(RootStep::Link {
+                target: c_path(&target)?,
+                at: c_path(&inside(tree))?,
+            });
+        } else if meta.is_dir() {
+            steps.push(RootStep::Dir(c_path(&inside(tree))?));
+            steps.push(RootStep::Bind {
+                from: c_path(tree)?,
+                to: c_path(&inside(tree))?,
+            });
+            trees.push(tree);
+        }
+    }
+    for device in CLIENT_DEVICES.map(Path::new) {
+        if fs::symlink_metadata(device).is_err() {
+            continue;
+        }
+        parents(device, &mut steps)?;
+        steps.push(RootStep::File(c_path(&inside(device))?));
+        steps.push(RootStep::Bind {
+            from: c_path(device)?,
+            to: c_path(&inside(device))?,
+        });
+    }
+    parents(dir, &mut steps)?;
+    steps.push(RootStep::Dir(c_path(&inside(dir))?));
+    steps.push(RootStep::Bind {
+        from: c_path(dir)?,
+        to: c_path(&inside(dir))?,
+    });
+    for file in files {
+        if trees.iter().any(|tree| file.starts_with(tree)) {
+            continue;
+        }
+        parents(file, &mut steps)?;
+        steps.push(RootStep::File(c_path(&inside(file))?));
+        steps.push(RootStep::Bind {
+            from: c_path(file)?,
+            to: c_path(&inside(file))?,
+        });
+    }
+    Ok(ClientRoot {
+        root: c_path(root)?,
+        steps,
+        home: c_path(dir)?,
+        dot: c_path(Path::new("."))?,
+        slash: c_path(Path::new("/"))?,
+    })
+}
+
+/// Say on stderr which step of the client's root failed: the error itself
+/// comes back to the uplink as a bare errno. Only `write(2)`, as between fork
+/// and exec it must be.
+///
+/// # Safety
+/// Between fork and exec: touches nothing but fd 2.
+unsafe fn root_failed(what: &[u8], path: &CStr) {
+    let prefix = b"openconnect client root: ";
+    let path = path.to_bytes();
+    let parts: [&[u8]; 5] = [prefix, what, b" ", path, b"\n"];
+    for part in parts {
+        libc::write(2, part.as_ptr().cast(), part.len());
+    }
+}
+
+/// Move into the client's root: a mount namespace of its own, a tmpfs, the
+/// planned steps, `pivot_root`, the old root let go of, and the client's own
+/// directory as the working one. Runs as uid 0 of the zone, before the client
+/// becomes its own id. Nothing here allocates.
+///
+/// # Safety
+/// Between fork and exec in a child that is still uid 0 of the zone.
+unsafe fn enter_client_root(root: &ClientRoot) -> io::Result<()> {
+    let fail = |what: &[u8], path: &CStr| {
+        let e = io::Error::last_os_error();
+        root_failed(what, path);
+        Err(e)
+    };
+    if libc::unshare(libc::CLONE_NEWNS) != 0 {
+        return fail(b"unshare", &root.root);
+    }
+    let tmpfs = b"tmpfs\0";
+    let options = b"mode=0755,size=1m\0";
+    if libc::mount(
+        tmpfs.as_ptr().cast(),
+        root.root.as_ptr(),
+        tmpfs.as_ptr().cast(),
+        libc::MS_NOSUID | libc::MS_NODEV,
+        options.as_ptr().cast(),
+    ) != 0
+    {
+        return fail(b"tmpfs", &root.root);
+    }
+    for step in &root.steps {
+        match step {
+            RootStep::Dir(path) => {
+                if libc::mkdir(path.as_ptr(), 0o755) != 0 {
+                    return fail(b"mkdir", path);
+                }
+            }
+            RootStep::File(path) => {
+                let fd = libc::open(
+                    path.as_ptr(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+                    0o644,
+                );
+                if fd < 0 {
+                    return fail(b"create", path);
+                }
+                libc::close(fd);
+            }
+            RootStep::Link { target, at } => {
+                if libc::symlink(target.as_ptr(), at.as_ptr()) != 0 {
+                    return fail(b"symlink", at);
+                }
+            }
+            RootStep::Bind { from, to } => {
+                if libc::mount(
+                    from.as_ptr(),
+                    to.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND | libc::MS_REC,
+                    std::ptr::null(),
+                ) != 0
+                {
+                    return fail(b"bind", from);
+                }
+            }
+        }
+    }
+    // pivot_root(".", "."): the old root ends up mounted over the new one and
+    // is let go of at once (pivot_root(2), the runc way). Then the working
+    // directory is set anew: one left in the old tree would keep all of it
+    // in reach through "..".
+    if libc::chdir(root.root.as_ptr()) != 0 {
+        return fail(b"chdir", &root.root);
+    }
+    if libc::syscall(libc::SYS_pivot_root, root.dot.as_ptr(), root.dot.as_ptr()) != 0 {
+        return fail(b"pivot_root", &root.root);
+    }
+    if libc::umount2(root.dot.as_ptr(), libc::MNT_DETACH) != 0 {
+        return fail(b"umount", &root.dot);
+    }
+    if libc::chdir(root.slash.as_ptr()) != 0 || libc::chdir(root.home.as_ptr()) != 0 {
+        return fail(b"chdir", &root.home);
+    }
+    Ok(())
+}
+
+/// The real path of a program named by path or found on `PATH`, as the
+/// client's root holds it.
+fn real_program(program: &Path) -> Result<PathBuf, String> {
+    let found = if program.components().count() > 1 {
+        Some(program.to_path_buf())
+    } else {
+        std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(program))
+                .find(|candidate| candidate.is_file())
+        })
+    };
+    let found = found.ok_or_else(|| {
+        format!(
+            "{} is not there — an [OpenConnect] zone needs the openconnect client",
+            program.display()
+        )
+    })?;
+    fs::canonicalize(&found).map_err(|e| format!("cannot find {}: {e}", found.display()))
+}
+
 /// Start the OpenConnect client in the uplink namespace.
 ///
 /// Every argument here is either forced or checked, and that is the point: the
@@ -4392,7 +4671,10 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
         ));
     }
 
-    let mut cmd = Command::new(&zone.tools.openconnect);
+    // By their real paths: the client's root holds the trees they live in, or
+    // the files themselves, and nothing it would find on a PATH.
+    let program = real_program(&zone.tools.openconnect)?;
+    let mut cmd = Command::new(&program);
     cmd.arg(format!("--protocol={}", cfg.protocol))
         .arg("--interface")
         .arg(TUN_IFACE)
@@ -4428,9 +4710,25 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
     // should not have to be rescued by its second echelon from its own
     // start-up. What survives, and why, is `openconnect::CLIENT_ENV_KEPT`; the
     // rest is what the script needs and nobody else sets.
-    cmd.env_clear()
-        .envs(openconnect::client_env(std::env::vars_os(), dir, cfg.mtu));
-    cmd.current_dir(dir);
+    let mut env = openconnect::client_env(std::env::vars_os(), dir, cfg.mtu);
+    // The CA files by their real paths too: `/etc/ssl/certs/…` on NixOS and
+    // `/nix/var/nix/profiles/…` under a Nix installed elsewhere are links, and
+    // the client's root has no `/nix/var`.
+    let mut files = vec![program.clone(), PathBuf::from(exe)];
+    for (key, value) in &mut env {
+        if !["SSL_CERT_FILE", "NIX_SSL_CERT_FILE"]
+            .iter()
+            .any(|name| key.as_os_str() == OsStr::new(name))
+        {
+            continue;
+        }
+        if let Ok(real) = fs::canonicalize(value.as_os_str()) {
+            *value = real.clone().into_os_string();
+            files.push(real);
+        }
+    }
+    cmd.env_clear().envs(env);
+    let root = client_root(Path::new(CLIENT_ROOT), dir, &files)?;
     cmd.stdin(if password.is_some() {
         Stdio::piped()
     } else {
@@ -4456,6 +4754,10 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
     // lives through the call, allocates nothing and is async-signal-safe.
     unsafe {
         cmd.pre_exec(move || {
+            // WHAT THE CLIENT SEES: a root of its own, with nothing in it but
+            // what it needs (`client_root`). Done while still uid 0: mounts
+            // want the zone's capabilities, which go with the change of ids.
+            enter_client_root(&root)?;
             // WHO THE CLIENT IS: `CLIENT_ID`, with no supplementary groups —
             // the user's groups of the host would still open what they open —
             // and, by the kernel's rule for a uid that leaves 0, with no
@@ -5935,6 +6237,62 @@ mod tests {
         // A user whose own id is the client's cannot have both.
         assert!(map_args(42, 100_000, CLIENT_ID, true).is_err());
         assert!(map_args(42, 100_000, CLIENT_ID, false).is_ok());
+    }
+
+    /// The client's root takes the devices, its directory and the files it is
+    /// named, and nothing of the host that is not asked for (review
+    /// 2026-09-27, second opinion): no `/home`, `/run`, `/var`, `/proc`.
+    #[test]
+    fn the_clients_root_has_only_what_it_is_given() {
+        let base = std::env::temp_dir().join(format!("oc-root-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        let root = base.join("root");
+        let own = base.join("own");
+        fs::create_dir_all(&own).unwrap();
+        let named = base.join("elsewhere/program");
+        fs::create_dir_all(named.parent().unwrap()).unwrap();
+        fs::write(&named, b"").unwrap();
+        let plan = client_root(&root, &own, &[named.clone(), PathBuf::from("/usr/bin/env")]);
+        let _ = fs::remove_dir_all(&base);
+        let plan = plan.unwrap();
+
+        let inside = |p: &Path| root.join(p.strip_prefix("/").unwrap());
+        let binds: Vec<(PathBuf, PathBuf)> = plan
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                RootStep::Bind { from, to } => Some((
+                    PathBuf::from(OsStr::from_bytes(from.as_bytes())),
+                    PathBuf::from(OsStr::from_bytes(to.as_bytes())),
+                )),
+                _ => None,
+            })
+            .collect();
+        let bound = |from: &Path| binds.iter().any(|(f, t)| f == from && *t == inside(from));
+        assert!(bound(Path::new("/dev/null")), "{binds:?}");
+        assert!(bound(own.as_path()), "{binds:?}");
+        assert!(bound(named.as_path()), "{binds:?}");
+        // A file a tree already holds is not bound again.
+        if Path::new("/usr").is_dir() && !fs::symlink_metadata("/usr").unwrap().is_symlink() {
+            assert!(bound(Path::new("/usr")));
+            assert!(!binds.iter().any(|(f, _)| f == Path::new("/usr/bin/env")));
+        }
+        // (The two given here live wherever the temporary directory is — a
+        // nix-shell's is under /run.)
+        for never in ["/home", "/run", "/var", "/proc", "/sys", "/root"] {
+            assert!(
+                !binds
+                    .iter()
+                    .filter(|(f, _)| *f != own && *f != named)
+                    .any(|(f, _)| f.starts_with(never)),
+                "{never} in the client's root: {binds:?}"
+            );
+        }
+        // Every step lands inside the root.
+        for (_, to) in &binds {
+            assert!(to.starts_with(&root), "{to:?}");
+        }
+        assert_eq!(plan.home.as_bytes(), own.as_os_str().as_bytes());
     }
 
     /// The client's `--script` has to be reachable by an id that owns none
