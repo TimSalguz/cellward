@@ -1042,10 +1042,18 @@ pub fn ours(path: &Path) -> bool {
         Ok(meta) if !meta.file_type().is_symlink() && meta.is_file() => {}
         _ => return false,
     }
-    match fs::read(path) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).contains(&format!("{MARK}=")),
-        Err(_) => false,
-    }
+    // Our D-Bus service files carry theirs as their first line.
+    mark_of(path).is_some()
+        || fs::read(path)
+            .is_ok_and(|bytes| bytes.split(|b| *b == b'\n').next() == Some(DBUS_MARK.as_bytes()))
+}
+
+/// Our mark in the entry's `[Desktop Entry]` group, if it has one: the key,
+/// not the text anywhere in the file — a comment or another key's value
+/// (`Name=X-VPNZone=…`) is not a mark (review 2026-09-27).
+fn mark_of(path: &Path) -> Option<String> {
+    let groups = parse_desktop_file(path);
+    desktop_entry(&groups)?.get(MARK).map(str::to_owned)
 }
 
 /// Whether CellWard takes the entry `id` over: the user's directory has our
@@ -1062,9 +1070,7 @@ pub fn intercepted(home: &Path, id: &str) -> bool {
 
 /// Is this an entry taken over in place — ours, with the `adopted` marker?
 pub fn adopted(path: &Path) -> bool {
-    ours(path)
-        && fs::read(path)
-            .is_ok_and(|b| String::from_utf8_lossy(&b).contains(&format!("{MARK}={ADOPTED}")))
+    ours(path) && mark_of(path).as_deref() == Some(ADOPTED)
 }
 
 /// A regular file, not a symlink: the only kind of foreign entry that may ever
@@ -2504,6 +2510,12 @@ Name=not carried over
 
         assert!(ours(&mine));
         assert!(!ours(&theirs), "a file without the marker is not ours");
+        // The key, not the text: not in a comment, not in another's value.
+        let lookalike = tmp.write(
+            "lookalike.desktop",
+            "[Desktop Entry]\n# X-VPNZone=adopted\nName=X-VPNZone=adopted\nExec=x\n",
+        );
+        assert!(!ours(&lookalike) && !adopted(&lookalike));
         assert!(!ours(&link), "a symlink is never ours, marker or not");
         assert!(!ours(&broken));
         assert!(!ours(&tmp.join("absent.desktop")));
