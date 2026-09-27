@@ -295,12 +295,15 @@ mod tests {
         let base = std::env::temp_dir().join(format!("vpn-zone-x11-{}", std::process::id()));
         let sockets = base.join("sockets");
         std::fs::create_dir_all(&sockets).unwrap();
+        // The first free one: on a machine with X servers of its own, the
+        // abstract names below it may be somebody's.
         let (first, _held) = own_display(&sockets, &base).unwrap();
-        assert_eq!(first, 100);
+        assert!(sockets.join(format!("X{first}")).exists());
         // Taken: by a socket (ours, still held, or anybody's file), or a lock.
-        std::fs::write(sockets.join("X101"), "").unwrap();
-        std::fs::write(base.join(".X102-lock"), "").unwrap();
-        assert_eq!(own_display(&sockets, &base).unwrap().0, 103);
+        std::fs::write(sockets.join(format!("X{}", first + 1)), "").unwrap();
+        std::fs::write(base.join(format!(".X{}-lock", first + 2)), "").unwrap();
+        let second = own_display(&sockets, &base).unwrap().0;
+        assert!(second > first + 2, "{first} {second}");
         let _ = std::fs::remove_dir_all(&base);
     }
 

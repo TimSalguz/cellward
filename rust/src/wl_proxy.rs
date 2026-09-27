@@ -1434,14 +1434,24 @@ impl Conn {
         // the connection polls ready for ever: libwayland takes that for the
         // end of the client, and so does this (review 2026-09-27: a
         // half-closed client kept a core of the host busy).
+        // recvmsg, the call the proxy's seccomp filter lets through (recv is
+        // recvfrom); no room for control data, so a peek installs no
+        // descriptor.
         let mut byte = 0u8;
-        // SAFETY: a one-byte buffer that outlives the call; the peek takes
-        // nothing off the socket.
+        let mut iov = libc::iovec {
+            iov_base: (&mut byte as *mut u8).cast(),
+            iov_len: 1,
+        };
+        // SAFETY: an all-zero msghdr is valid; it gets one iovec below.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        // SAFETY: a msghdr whose one iovec points at a byte that outlives the
+        // call; the peek takes nothing off the socket.
         let peeked = unsafe {
-            libc::recv(
+            libc::recvmsg(
                 self.socket.as_raw_fd(),
-                (&mut byte as *mut u8).cast(),
-                1,
+                &mut msg,
                 libc::MSG_PEEK | libc::MSG_DONTWAIT,
             )
         };

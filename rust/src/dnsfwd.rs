@@ -218,10 +218,6 @@ pub fn forward_udp(query: &[u8], resolvers: &[SocketAddr]) -> Option<Vec<u8>> {
     None
 }
 
-fn read_message(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
-    read_message_by(stream, None)
-}
-
 /// A length-prefixed message, whole by `deadline` when there is one: each
 /// read waits no longer than what is left of it, so a peer trickling a byte
 /// at a time cannot stretch one message past it (review 2026-09-27: the
@@ -593,7 +589,7 @@ mod tests {
         thread::spawn(move || {
             for stream in resolver.incoming().flatten() {
                 let mut stream = stream;
-                if let Ok(mut message) = read_message(&mut stream) {
+                if let Ok(mut message) = read_message_by(&mut stream, None) {
                     message.push(0x43);
                     let _ = write_message(&mut stream, &message);
                 }
