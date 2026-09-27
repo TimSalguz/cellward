@@ -675,6 +675,21 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     let Some(container) = resolve_container(tools, &selection) else {
         return 1;
     };
+    // Offline, the launch runs in its container's instance (`crate::
+    // instance`, stage 1 of the container design of 2026-09-27): namespaces
+    // of the container's own, no way out — and the `offline` zone is not
+    // started for it any more.
+    let instance_id: Option<String> = if zone == OFFLINE {
+        match instance_of(tools, &selection, &container) {
+            Ok(id) => Some(id),
+            Err(why) => {
+                refuse(tools, &why);
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
 
     // --- 3. THE WRAPPERS ---
     // The app-id is worked out BEFORE anything is prepended to the command:
@@ -785,10 +800,12 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         } else {
             appbin.clone()
         };
-        let dir = if zone == UNCONFINED {
-            crate::wl_sandbox::NO_ZONE.to_owned()
-        } else {
-            zone_name.clone()
+        // An instance's sockets go by its key (`instance::key`): the one
+        // directory of them its space has bound.
+        let dir = match &instance_id {
+            Some(id) => crate::instance::key(id),
+            None if zone == UNCONFINED => crate::wl_sandbox::NO_ZONE.to_owned(),
+            None => zone_name.clone(),
         };
         let mut wrap: Vec<OsString> = vec![
             tools.core.clone().into(),
@@ -996,10 +1013,62 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
     }
 
+    // Into a zone, the container's storage: the zone covers it, and
+    // `profile-run` gives this one directory back in the launch's own mount
+    // namespace. Made here first, on the host: a sandbox's before its first
+    // launch, which the zone could not make.
+    // (Before the zone or the instance is up: an instance keeps its
+    // container's storage in reach only when it is there as it comes up.)
+    let in_space = zone != UNCONFINED;
+    let storage_dir: Option<PathBuf> = match (in_space, &selection.sandbox, &selection.container) {
+        (true, Sandbox::Named(name), _) => {
+            Some(crate::container::data_dir(tools, &name.to_string_lossy()))
+        }
+        (true, Sandbox::None, Container::Named(_)) if !container.ephemeral => {
+            Some(container.dir.clone())
+        }
+        // A throwaway one's too — the zone covers them all, and gives back
+        // only this launch's (`home_layer::THROWAWAY_STORAGE`). By its path
+        // below the state directory as the zone knows it; one left in /tmp
+        // from before the move is no zone's to keep.
+        (true, Sandbox::None, Container::TmpNew | Container::TmpJoin(_)) => {
+            let base = tools.state.join(THROWAWAY_DIR);
+            let in_base = fs::canonicalize(&base)
+                .is_ok_and(|b| container.dir.parent() == Some(b.as_path()))
+                || container.dir.parent() == Some(base.as_path());
+            container
+                .dir
+                .file_name()
+                .filter(|_| in_base)
+                .map(|name| base.join(name))
+        }
+        _ => None,
+    };
+    if let Some(dir) = storage_dir.as_ref().filter(|_| !dryrun) {
+        if let Err(e) = fs::create_dir_all(dir) {
+            eprintln!("не создать хранилище контейнера {}: {e}", dir.display());
+            return EXIT_NOT_STARTED;
+        }
+    }
+
     // --- 5. THE ZONE ITSELF ---
     let network = if zone == UNCONFINED {
         // Nothing to start and nothing to enter: the host's own network.
         Network::Unconfined
+    } else if let Some(id) = &instance_id {
+        // The container's instance, up and ready — started when it is not
+        // (`Type=notify`: `systemctl start` returns when it is ready or
+        // failed; no clock of ours). Not in a dry run: nothing is started
+        // for one.
+        if !dryrun && crate::instance::up(&tools.state, id).is_none() {
+            let unit = crate::instance::unit_name(id).unwrap_or_default();
+            let _ = cli::systemctl_unit(tools, "start", OsStr::new(&unit));
+            if crate::instance::up(&tools.state, id).is_none() {
+                eprintln!("контейнер {id} не поднимается (journalctl --user -u '{unit}')");
+                return 1;
+            }
+        }
+        Network::Instance
     } else {
         // Up and READY, not just up: a zone still being set up is not entered
         // (`cli::zone_up`).
@@ -1149,47 +1218,15 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
         _ => Vec::new(),
     };
-    // Into a zone, the container's storage: the zone covers it, and
-    // `profile-run` gives this one directory back in the launch's own mount
-    // namespace. Made here first, on the host: a sandbox's before its first
-    // launch, which the zone could not make.
-    let storage_dir: Option<PathBuf> = match (&network, &selection.sandbox, &selection.container) {
-        (Network::Zone(_), Sandbox::Named(name), _) => {
-            Some(crate::container::data_dir(tools, &name.to_string_lossy()))
-        }
-        (Network::Zone(_), Sandbox::None, Container::Named(_)) if !container.ephemeral => {
-            Some(container.dir.clone())
-        }
-        // A throwaway one's too — the zone covers them all, and gives back
-        // only this launch's (`home_layer::THROWAWAY_STORAGE`). By its path
-        // below the state directory as the zone knows it; one left in /tmp
-        // from before the move is no zone's to keep.
-        (Network::Zone(_), Sandbox::None, Container::TmpNew | Container::TmpJoin(_)) => {
-            let base = tools.state.join(THROWAWAY_DIR);
-            let in_base = fs::canonicalize(&base)
-                .is_ok_and(|b| container.dir.parent() == Some(b.as_path()))
-                || container.dir.parent() == Some(base.as_path());
-            container
-                .dir
-                .file_name()
-                .filter(|_| in_base)
-                .map(|name| base.join(name))
-        }
-        _ => None,
-    };
-    if let Some(dir) = &storage_dir {
-        if let Err(e) = fs::create_dir_all(dir) {
-            eprintln!("не создать хранилище контейнера {}: {e}", dir.display());
-            return EXIT_NOT_STARTED;
-        }
-    }
     let exec = entry_argv(
         &Entry {
             nsenter: &tools.nsenter,
             unshare: &tools.unshare,
             core: &tools.core,
+            systemctl: &tools.systemctl,
             zone: &zone,
             network,
+            instance: instance_id.as_deref(),
             dir: &container.dir,
             ephemeral: container.ephemeral,
             regdir: &regdir,
@@ -1282,6 +1319,10 @@ pub enum Network {
     /// A zone that is up; the pid of its APP namespace, the one `nsenter`
     /// targets.
     Zone(i32),
+    /// A container's instance that is up (`crate::instance`), entered by
+    /// `container-enter`, which finds it again by its id
+    /// (`Entry::instance`) — never by a number handed down.
+    Instance,
     /// The host's own network: there is no namespace to enter.
     Unconfined,
 }
@@ -1292,8 +1333,13 @@ pub struct Entry<'a> {
     pub nsenter: &'a Path,
     pub unshare: &'a Path,
     pub core: &'a Path,
+    /// What starts an instance that stopped between this launch's look and
+    /// `container-enter`'s (`Network::Instance`).
+    pub systemctl: &'a Path,
     pub zone: &'a OsStr,
     pub network: Network,
+    /// The instance's id, for `Network::Instance`.
+    pub instance: Option<&'a str>,
     /// The container's layer directory; empty for the main profile.
     pub dir: &'a Path,
     pub ephemeral: bool,
@@ -1379,9 +1425,27 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
     let container =
         !entry.dir.as_os_str().is_empty() || entry.trust.is_some() || entry.storage.is_some();
     let mut exec: Vec<OsString> = Vec::new();
+    // Into a space of ours — a zone's, an instance's —, with its own `/dev`
+    // and covers: what `profile-run` gives the launch from there.
+    let in_space = matches!(entry.network, Network::Zone(_) | Network::Instance);
     // Does the program end up in a mount namespace other than ours?
-    let entered = container || matches!(entry.network, Network::Zone(_));
+    let entered = container || in_space;
+    // A throwaway container's instance erases it when its last program ends
+    // (`zone::keep`): `profile-run` outlives nothing then, and asks nobody.
+    let ephemeral = entry.ephemeral && entry.network != Network::Instance;
     match entry.network {
+        // Into a container's instance: by its id, and `container-enter`
+        // gives the launch a mount namespace of its own, a slave of the
+        // instance's, whatever it mounts (`crate::enter`).
+        Network::Instance => {
+            exec.push(entry.core.into());
+            exec.push("container-enter".into());
+            exec.push("--instance".into());
+            exec.push(entry.instance.unwrap_or_default().into());
+            exec.push("--systemctl".into());
+            exec.push(entry.systemctl.into());
+            exec.push("--".into());
+        }
         Network::Zone(pid) => {
             exec.push(entry.nsenter.into());
             exec.push("--preserve-credentials".into());
@@ -1436,17 +1500,17 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
         exec.push("--cwd".into());
         exec.push(entry.cwd.into());
         // Only a throwaway container asks who else is in it.
-        if let Some(me) = entry.registered.filter(|_| entry.ephemeral) {
+        if let Some(me) = entry.registered.filter(|_| ephemeral) {
             exec.push("--registered".into());
             exec.push(me.arg().into());
         }
-        if entry.camera && matches!(entry.network, Network::Zone(_)) {
+        if entry.camera && in_space {
             exec.push("--camera".into());
         }
-        if entry.own_x11 && matches!(entry.network, Network::Zone(_)) {
+        if entry.own_x11 && in_space {
             exec.push("--own-x11".into());
         }
-        if matches!(entry.network, Network::Zone(_)) {
+        if in_space {
             for device in entry.devices {
                 exec.push("--device".into());
                 exec.push(device.into());
@@ -1481,12 +1545,59 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
         }
         exec.push(entry.dir.into());
         exec.push(entry.zone.into());
-        exec.push(if entry.ephemeral { "1" } else { "0" }.into());
+        exec.push(if ephemeral { "1" } else { "0" }.into());
         exec.push(entry.regdir.into());
         exec.push("--".into());
     }
     exec.extend(cmd);
     exec
+}
+
+/// The instance an offline launch runs in (`crate::instance::id_of`): its
+/// container's, the main home's, a throwaway's — a throwaway sandbox gets
+/// one of its own, named by this launch. Refused: an id that has no unit's
+/// name (a container's name too long for systemd).
+fn instance_of(
+    tools: &Tools,
+    selection: &Selection,
+    container: &ResolvedContainer,
+) -> Result<String, String> {
+    use crate::container::Home;
+    use crate::instance::Of;
+    let none = || "у этого запуска не может быть экземпляра контейнера".to_owned();
+    let named = |name: &OsString, home: Home| -> Result<String, String> {
+        let name = name.to_str().ok_or_else(none)?;
+        let asks = crate::container::load(tools, name)
+            .is_some_and(|c| c.network.value == crate::container::Network::Ask);
+        crate::instance::id_of(Of::Container { name, home, asks }, OFFLINE).ok_or_else(none)
+    };
+    let id = match (&selection.sandbox, &selection.container) {
+        (Sandbox::Named(name), _) => named(name, Home::Private)?,
+        (Sandbox::None, Container::Named(name)) => named(name, Home::Layer)?,
+        (Sandbox::None, Container::MainNamed(name)) => named(name, Home::Main)?,
+        (Sandbox::None, Container::TmpNew | Container::TmpJoin(_)) => {
+            let layer = container
+                .dir
+                .file_name()
+                .and_then(OsStr::to_str)
+                .unwrap_or_default();
+            crate::instance::id_of(Of::Throwaway(layer), OFFLINE).ok_or_else(none)?
+        }
+        (Sandbox::Throwaway, _) => {
+            let pid = std::process::id() as i32;
+            let unique = format!("{pid}-{}", crate::sys::start_time(pid).unwrap_or(0));
+            crate::instance::id_of(Of::ThrowawaySandbox(&unique), OFFLINE).ok_or_else(none)?
+        }
+        (Sandbox::None, Container::Main) => {
+            crate::instance::id_of(Of::Main, OFFLINE).ok_or_else(none)?
+        }
+    };
+    if crate::instance::unit_name(&id).is_none() {
+        return Err(format!(
+            "у контейнера «{id}» слишком длинное имя для юнита systemd — переименуй контейнер"
+        ));
+    }
+    Ok(id)
 }
 
 /// Why this launch may not use its container in `zone`, if it may not.
@@ -2646,11 +2757,14 @@ mod tests {
             nsenter: Path::new("/t/nsenter"),
             unshare: Path::new("/t/unshare"),
             core: Path::new("/t/core"),
+            systemctl: Path::new("/t/systemctl"),
             zone: OsStr::new(match network {
                 Network::Zone(_) => "nl",
+                Network::Instance => OFFLINE,
                 Network::Unconfined => UNCONFINED,
             }),
             network,
+            instance: (network == Network::Instance).then_some("work"),
             dir,
             ephemeral,
             regdir: Path::new("/r/.running/work"),
@@ -2935,6 +3049,74 @@ mod tests {
         e.registered = Some(me);
         let line = entry_argv(&e, argv(&["firefox"]));
         assert!(!line.contains(&os("--registered")), "{line:?}");
+    }
+
+    /// Into a container's instance (stage 1, 2026-09-27): `container-enter`
+    /// by the instance's id — no `nsenter`, no `unshare` (it gives the launch
+    /// a mount namespace of its own itself) —, then `profile-run` as into a
+    /// zone.
+    #[test]
+    fn into_an_instance_by_its_id_and_container_enter() {
+        let line = entry_argv(
+            &entry(Network::Instance, Path::new("/p/work"), false),
+            argv(&["firefox"]),
+        );
+        assert_eq!(
+            line,
+            argv(&[
+                "/t/core",
+                "container-enter",
+                "--instance",
+                "work",
+                "--systemctl",
+                "/t/systemctl",
+                "--",
+                "/t/core",
+                "profile-run",
+                "--cwd",
+                "/home/u/src",
+                "/p/work",
+                "offline",
+                "0",
+                "/r/.running/work",
+                "--",
+                "firefox"
+            ])
+        );
+        let parsed = crate::enter::Args::parse(&line[2..]).unwrap();
+        assert_eq!(parsed.instance, "work");
+        assert_eq!(parsed.cmd[1], "profile-run");
+    }
+
+    /// A throwaway container's instance erases it when its last program
+    /// ends: `profile-run` is not told it is a throwaway one, and asks
+    /// nobody who else is in it. The cameras and the devices come in as
+    /// into a zone: an instance has a `/dev` of its own too.
+    #[test]
+    fn a_throwaway_in_an_instance_is_the_instances_to_erase() {
+        let mut e = entry(
+            Network::Instance,
+            Path::new("/s/.throwaway/vpn-profile-x"),
+            true,
+        );
+        e.registered = Some(crate::profile::Registered {
+            pid: 4242,
+            start: 777,
+        });
+        e.camera = true;
+        let devices = ["/dev/hidraw3=241:3:1050:0407".to_owned()];
+        e.devices = &devices;
+        let line = entry_argv(&e, argv(&["firefox"]));
+        assert!(!line.contains(&os("--registered")), "{line:?}");
+        assert!(line.contains(&os("--camera")), "{line:?}");
+        assert!(
+            line.contains(&os("/dev/hidraw3=241:3:1050:0407")),
+            "{line:?}"
+        );
+        let at = line.iter().position(|a| a == "profile-run").unwrap();
+        let parsed = crate::profile::Args::parse(&line[at + 1..]).unwrap();
+        assert!(!parsed.ephemeral);
+        assert!(parsed.camera);
     }
 
     /// What a zone asked the broker for is a file name in the registry, not

@@ -194,10 +194,14 @@ fn registry_index(running: &Path) -> HashMap<i32, (String, String, registry::Rec
 }
 
 /// Which of our networks the namespace `ns` (`net:[…]`) is: the host's, a user
-/// zone's, a system zone's. `None` for any other.
+/// zone's, a container's instance's (the network it runs in), a system
+/// zone's. `None` for any other.
 fn network_of(state: &Path, ns: &str) -> Option<String> {
     if netns("self").as_deref() == Some(ns) {
         return Some(crate::launch::UNCONFINED.to_owned());
+    }
+    if let Some(network) = crate::place::network_of_netns(state, ns) {
+        return Some(network);
     }
     for entry in fs::read_dir(state).into_iter().flatten().flatten() {
         let name = entry.file_name();
@@ -265,9 +269,18 @@ fn proxied(state: &Path, core: &Path, starter: Option<&Path>, pid: i32) -> Proxi
         return Proxied::Unknown;
     }
     let host = netns("self");
-    let networks = children(pid)
+    // A launch into a container's instance has its waiter for a child
+    // (`crate::enter`): not dumpable, its namespace is nobody's to read —
+    // its children, the program, are what counts then (as below it no
+    // process can bring a host process in either).
+    let programs = children(pid)
         .into_iter()
         .filter(|&child| comm(child) != crate::wl_proxy::PROCESS_NAME)
+        .flat_map(|child| match netns(&child.to_string()) {
+            Some(_) => vec![child],
+            None => children(child),
+        });
+    let networks = programs
         .filter(|&child| {
             !starter.is_some_and(|starter| {
                 netns(&child.to_string()) == host && runs_core(child, starter)

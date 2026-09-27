@@ -360,6 +360,14 @@ pub struct Args {
     /// The launch window (`--window`, optional), which asks first: guarded,
     /// `crate::window::question`.
     pub window: PathBuf,
+    /// `--container <word>`: a container's instance's filter
+    /// (`crate::instance`) — whose programs its clients are, by the instance
+    /// and not by a launch in the registry (`origin::Who::from_word`).
+    pub container: Option<Who>,
+    /// `--userns <dev>:<ino>`: the instance's user namespace; a client not
+    /// in it or below it is not known (the socket is bound into the
+    /// instance alone: a second look).
+    pub userns: Option<(u64, u64)>,
 }
 
 impl Args {
@@ -375,6 +383,8 @@ impl Args {
         let mut profiles = None;
         let mut kdialog = None;
         let mut window = PathBuf::new();
+        let mut container = None;
+        let mut userns = None;
         let mut it = args.iter();
         while let Some(flag) = it.next() {
             let value = it
@@ -398,6 +408,17 @@ impl Args {
                 Some("--profiles") => profiles = Some(path),
                 Some("--kdialog") => kdialog = Some(path),
                 Some("--window") => window = path,
+                Some("--container") => {
+                    container = Some(Who::from_word(&value.to_string_lossy()));
+                }
+                Some("--userns") => {
+                    userns = Some(
+                        value
+                            .to_str()
+                            .and_then(crate::place::parse_key)
+                            .ok_or("--userns is not a namespace's <dev>:<ino>")?,
+                    );
+                }
                 _ => return Err(format!("unknown flag {}", flag.to_string_lossy())),
             }
         }
@@ -410,6 +431,8 @@ impl Args {
             profiles: profiles.ok_or("--profiles is required")?,
             kdialog: kdialog.ok_or("--kdialog is required")?,
             window,
+            container,
+            userns,
         })
     }
 }
@@ -1463,10 +1486,18 @@ fn pump_down(server: &UnixStream, to_client: &Out, session: &Mutex<Session>) -> 
 /// while it is certainly the process that connected. Unknown when it cannot
 /// be looked at.
 fn who_is(client: &UnixStream, args: &Args) -> Who {
-    let Some(state) = args.zone_dir.parent() else {
+    let Some(peer) = crate::origin::Peer::of(client.as_raw_fd()) else {
         return Who::Unknown;
     };
-    let Some(peer) = crate::origin::Peer::of(client.as_raw_fd()) else {
+    // An instance's filter: its clients are the instance's container — when
+    // they are in its user namespace, as they must be to reach the socket.
+    if let Some(who) = &args.container {
+        let inside = args
+            .userns
+            .is_none_or(|key| crate::place::chain_of(peer.pid).contains(&key) && peer.alive());
+        return if inside { who.clone() } else { Who::Unknown };
+    }
+    let Some(state) = args.zone_dir.parent() else {
         return Who::Unknown;
     };
     let places = crate::origin::Places {

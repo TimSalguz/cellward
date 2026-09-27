@@ -828,11 +828,13 @@ let
           alice("systemctl --user reset-failed vmremote.service || true")
 
       # The picker branch the smoke test explicitly cannot cover: offline
-      # starts vpn-zone@offline through `systemctl --user`. No graphics in the
-      # VM either, so the picker must take what would have been highlighted —
-      # the remembered last choice. The container axis is pinned to the main
-      # profile (`__main__`) so no second dialog is needed.
-      with subtest("picker offline branch: zone via systemctl --user, lo-only"):
+      # starts the main home's instance, vpn-zone-container@main:offline,
+      # through `systemctl --user` — never vpn-zone@offline (stage 1 of the
+      # container design, 2026-09-27). No graphics in the VM either, so the
+      # picker must take what would have been highlighted — the remembered
+      # last choice. The container axis is pinned to the main profile
+      # (`__main__`) so no second dialog is needed.
+      with subtest("picker offline branch: an instance via systemctl --user, lo-only"):
           alice(f"mkdir -p {STATE}/.last {STATE}/.pinnedprofile")
           alice(f"printf offline > {STATE}/.last/vmpickapp")
           alice(f"printf __main__ > {STATE}/.pinnedprofile/vmpickapp")
@@ -845,18 +847,21 @@ let
           status = alice(
               "systemctl --user is-active vpn-zone@offline.service || true"
           ).strip()
-          assert status == "active", f"picker did not start the offline unit: {status}"
+          assert status != "active", f"a launch started the offline zone: {status}"
+          out = alice("cellward journal --json")
+          assert '"event":"instance-start","instance":"main:offline"' in out, out
 
       # "Offline" has to mean offline for NAMES too. A unix socket is not an
       # interface: without the hiding, a program in a zone with nothing but
       # loopback could still have any name looked up by the host's resolver —
       # which tells the outside world what it wants and carries out with it
-      # anything that can be spelled into a hostname.
-      with subtest("an offline zone cannot reach the host's resolver either"):
-          opid = machine.succeed(f"cat {STATE}/offline/zone.pid").strip()
-          in_zone(opid, "test ! -e /run/systemd/resolve/io.systemd.Resolve")
-          in_zone(opid, "sh -c '! getent ahostsv4 leaktest.internal'")
-          alice("cellward down offline")
+      # anything that can be spelled into a hostname. An instance covers them
+      # as a zone does.
+      with subtest("an offline instance cannot reach the host's resolver either"):
+          alice("cellward run offline -- test ! -e /run/systemd/resolve/io.systemd.Resolve")
+          alice("cellward run offline -- sh -c '! getent ahostsv4 leaktest.internal'")
+
+      exec(open("${./vm-instance-offline.py}").read())
 
       # `cellward doctor` (ROADMAP M5): the probe runs INSIDE the zone and must
       # find nothing wrong there — and, run in the host's own namespaces, it

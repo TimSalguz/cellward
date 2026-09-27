@@ -193,7 +193,19 @@ pub fn note_applied(zone_dir: &Path, settings: &[(&str, bool)]) -> std::io::Resu
 /// by name. `None`: not known — no note (a zone a build from before it
 /// started). A setting the note does not name is not counted.
 pub fn restart_needed(zone_dir: &Path, config: &Path, zone: &str) -> Option<Vec<&'static str>> {
-    let text = std::fs::read_to_string(zone_dir.join(APPLIED)).ok()?;
+    restart_needed_of(zone_dir, zone_dir, config, zone)
+}
+
+/// [`restart_needed`] of what came up with the note in `applied_dir` by the
+/// settings of the zone in `zone_dir`: a container's instance notes them in
+/// its own directory, and they are its network's (`crate::instance`).
+pub fn restart_needed_of(
+    applied_dir: &Path,
+    zone_dir: &Path,
+    config: &Path,
+    zone: &str,
+) -> Option<Vec<&'static str>> {
+    let text = std::fs::read_to_string(applied_dir.join(APPLIED)).ok()?;
     let applied = |name: &str| {
         text.lines()
             .filter_map(|line| line.split_once('='))

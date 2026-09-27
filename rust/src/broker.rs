@@ -149,6 +149,16 @@ pub enum Origin {
     Host,
     /// A zone of this user.
     Zone(String),
+    /// A program of a container's instance (`crate::place`, stage 1 of the
+    /// container design of 2026-09-27): known by its user namespace, which
+    /// no program leaves — the instance is the container, and nothing the
+    /// asking program or its filter says about itself counts (J2).
+    Instance {
+        id: String,
+        /// The network the instance runs in: it asks as that zone would.
+        network: String,
+        who: crate::origin::Who,
+    },
     /// A system zone (`/run/netns/vz-<name>`, root's).
     SystemZone(String),
     /// Anything else: a namespace that is none of ours, or a process gone
@@ -158,13 +168,28 @@ pub enum Origin {
 
 impl Origin {
     /// How the journal and "always" name it; a system zone apart from a user
-    /// zone of the same name.
+    /// zone of the same name. An instance by its network and its container,
+    /// as a zone's program of that container was — "always" said for one
+    /// holds for the other.
     pub fn name(&self) -> String {
         match self {
             Origin::Host => String::new(),
             Origin::Zone(zone) => zone.clone(),
+            Origin::Instance { network, who, .. } => match who {
+                crate::origin::Who::Main => network.clone(),
+                crate::origin::Who::Container(name) => format!("{network}/{name}"),
+                crate::origin::Who::Unknown => format!("{network}/?"),
+            },
             Origin::SystemZone(zone) => format!("system:{zone}"),
             Origin::Unknown => "?".to_owned(),
+        }
+    }
+
+    /// The network a zone's or an instance's program asks from.
+    pub fn network(&self) -> Option<&str> {
+        match self {
+            Origin::Zone(zone) | Origin::Instance { network: zone, .. } => Some(zone.as_str()),
+            _ => None,
         }
     }
 }
@@ -208,6 +233,15 @@ pub fn decide(origin: &Origin, origin_locked: bool, target: &str, same_identity:
             "зона «{zone}» заперта: запуск в другой сети ({target}) запрещён"
         )),
         Origin::Zone(_) | Origin::SystemZone(_) => Decision::Ask,
+        // An instance's program asks as a program of its network's zone
+        // would: the same container in the same network starts, anything
+        // else is a person's to say — and its identity is the instance's.
+        Origin::Instance { network, .. } => decide(
+            &Origin::Zone(network.clone()),
+            origin_locked,
+            target,
+            same_identity,
+        ),
         Origin::Unknown => Decision::Refuse(
             "не понять, откуда запрос: не хост и не зона (или процесс уже вышел)".to_owned(),
         ),
@@ -256,6 +290,17 @@ fn origin_of(state: &Path, stream: &UnixStream) -> (Origin, Option<Peer>) {
     let Some(peer) = Peer::of(stream.as_raw_fd()) else {
         return unknown;
     };
+    // A container's instance first: by the user namespace, which also
+    // covers a program in a namespace of its own below it — a sandbox, a
+    // daemon that made one (`crate::place`).
+    if let Some(found) = crate::place::of_peer(state, &peer) {
+        let origin = Origin::Instance {
+            id: found.id,
+            network: found.network,
+            who: found.who,
+        };
+        return (origin, Some(peer));
+    }
     // Read while it lives (`Peer::ns`): the namespaces are the peer's own.
     let (Some(netns), Some(userns)) = (peer.ns("net"), peer.ns("user")) else {
         return unknown;
@@ -276,12 +321,30 @@ fn container_of(tools: &Tools, zone: &str, peer: Option<&Peer>) -> Option<String
     }
 }
 
+/// The container the asking program is of: its instance's — the instance
+/// is the container —, or in a zone the one of the launch it descends from
+/// ([`container_of`]). `Some("")` for the main home's, `None` when nothing
+/// is known.
+fn asking_container(tools: &Tools, origin: &Origin, peer: Option<&Peer>) -> Option<String> {
+    match origin {
+        Origin::Zone(zone) => container_of(tools, zone, peer),
+        Origin::Instance { who, .. } => match who {
+            crate::origin::Who::Main => Some(String::new()),
+            crate::origin::Who::Container(name) => Some(name.clone()),
+            crate::origin::Who::Unknown => None,
+        },
+        _ => None,
+    }
+}
+
 /// How the journal and "always" name where a request came from: the zone,
 /// and the container in it when there is one (`nl/work`); `nl/?` for a
 /// program of the zone whose container is not known — a throwaway one, a
 /// daemon that left its launch —, which must not pass for the zone's own.
 fn origin_label(origin: &Origin, container: Option<&str>) -> String {
     match (origin, container) {
+        // Its own name is the same shape already.
+        (Origin::Instance { .. }, _) => origin.name(),
         (Origin::Zone(zone), Some(c)) if !c.is_empty() => format!("{zone}/{c}"),
         (Origin::Zone(_), Some(_)) => origin.name(),
         (Origin::Zone(zone), None) => format!("{zone}/?"),
@@ -407,13 +470,13 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                 }
                 Ok(selection) => {
                     let target = selection.zone.to_string_lossy().into_owned();
-                    let locked = match &origin {
-                        Origin::Zone(zone) => tools
+                    let locked = match origin.network() {
+                        Some(zone) => tools
                             .state
                             .join(zone)
                             .join(crate::launch::NO_ESCAPE)
                             .exists(),
-                        _ => false,
+                        None => false,
                     };
                     // Without a question only where nothing is crossed: a
                     // program of a container asking for a launch in that very
@@ -422,15 +485,12 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                     // the real home, is a crossing (docs/PERMISSIONS.md
                     // §11.9). The container asked for as `run` will resolve
                     // it, making nothing; the origin's as the kernel says.
-                    let origin_container = match &origin {
-                        Origin::Zone(zone) => container_of(tools, zone, peer.as_ref()),
-                        _ => None,
-                    };
+                    let origin_container = asking_container(tools, &origin, peer.as_ref());
                     // The container asked for as `run` will resolve it,
                     // making nothing — only where it can make a difference:
                     // a known container of a zone asking in that zone.
-                    let resolved = match &origin {
-                        Origin::Zone(zone) if *zone == target => {
+                    let resolved = match origin.network() {
+                        Some(zone) if zone == target => {
                             Some(crate::launch::resolve_selection(tools, selection.clone()))
                         }
                         _ => None,
@@ -933,14 +993,16 @@ fn ask(
     };
     let asker = match origin {
         Origin::SystemZone(zone) => format!("системной зоны «{zone}»"),
-        Origin::Zone(zone) => match label.split_once('/') {
-            Some((_, "?")) => format!("зоны «{zone}», контейнер не опознан"),
-            Some((_, container)) => format!(
-                "контейнера «{}» (сеть «{zone}»)",
-                crate::picker::container_label_in(tools, container)
-            ),
-            None => format!("зоны «{zone}»"),
-        },
+        Origin::Zone(zone) | Origin::Instance { network: zone, .. } => {
+            match label.split_once('/') {
+                Some((_, "?")) => format!("зоны «{zone}», контейнер не опознан"),
+                Some((_, container)) => format!(
+                    "контейнера «{}» (сеть «{zone}»)",
+                    crate::picker::container_label_in(tools, container)
+                ),
+                None => format!("зоны «{zone}»"),
+            }
+        }
         other => format!("зоны «{}»", other.name()),
     };
     // The kind is after the LAST `@`: a name may have one of its own.
@@ -1187,7 +1249,7 @@ fn own_binary() -> Result<PathBuf, String> {
 /// sooner than a person could have read the window (`dialog::TOO_FAST`).
 fn handle_pick(tools: &Tools, origin: &Origin, app_id: &OsString, cmd: &[OsString]) -> String {
     let (zone, locked) = match origin {
-        Origin::Zone(zone) => (
+        Origin::Zone(zone) | Origin::Instance { network: zone, .. } => (
             zone.clone(),
             tools
                 .state
@@ -1437,8 +1499,9 @@ fn link_answer(
             String::new(),
         )
     };
-    // A zone's program only: a sandbox on the host opens its links itself.
-    let Origin::Zone(zone) = origin else {
+    // A zone's program only, or an instance's: a sandbox on the host opens
+    // its links itself.
+    let Some(zone) = origin.network() else {
         let nothing = String::new;
         return (
             NOT_A_ZONE.to_owned(),
@@ -1448,7 +1511,6 @@ fn link_answer(
             nothing(),
         );
     };
-    let zone = zone.as_str();
     let Some(uri) = args.first().and_then(|u| u.to_str()) else {
         return refused("нет ссылки".to_owned(), "");
     };
@@ -1462,7 +1524,18 @@ fn link_answer(
     // Whose program asks: the zone's filter's word from that filter alone
     // (`main`: the zone's own; a container's name; nothing: not known),
     // anyone else's container as the kernel says.
+    // An instance's program is its container's, whatever any word says: the
+    // instance is the container (J2 of the container design) — its filter's
+    // word is not read, nor needed.
     let word = match args.get(1).and_then(|c| c.to_str()) {
+        _ if matches!(origin, Origin::Instance { .. }) => asking_container(tools, origin, peer)
+            .map(|c| {
+                if c.is_empty() {
+                    LINK_MAIN.to_owned()
+                } else {
+                    c
+                }
+            }),
         Some(c) if is_zones_filter(tools, zone, peer) => Some(c.to_owned()),
         _ => container_of(tools, zone, peer).map(|c| {
             if c.is_empty() {
@@ -2229,5 +2302,62 @@ mod tests {
             origin_label(&Origin::SystemZone("nl".into()), Some("work")),
             "system:nl"
         );
+    }
+
+    fn instance(id: &str, who: crate::origin::Who) -> Origin {
+        Origin::Instance {
+            id: id.to_owned(),
+            network: "offline".to_owned(),
+            who,
+        }
+    }
+
+    /// A container's instance asks as its network's zone would, as the
+    /// container the instance is: the same container in the same network
+    /// starts, another one is asked about, a locked network keeps it in.
+    #[test]
+    fn an_instance_asks_as_its_container_in_its_network() {
+        use crate::origin::Who;
+        let work = instance("work", Who::Container("work".into()));
+        assert_eq!(decide(&work, false, "offline", true), Decision::Start);
+        assert_eq!(decide(&work, false, "offline", false), Decision::Ask);
+        assert_eq!(decide(&work, false, "nl", true), Decision::Ask);
+        assert!(matches!(
+            decide(&work, true, "nl", true),
+            Decision::Refuse(_)
+        ));
+        assert!(matches!(
+            decide(&Origin::Host, false, "offline", true),
+            Decision::Refuse(_)
+        ));
+        assert_eq!(work.network(), Some("offline"));
+        assert_eq!(Origin::Host.network(), None);
+    }
+
+    /// Whose program an instance's is comes from the instance, never from a
+    /// word: the container asking is the instance's (J2), and its name for
+    /// the journal and "always" is the one a zone's program of that
+    /// container had.
+    #[test]
+    fn an_instances_container_is_its_own() {
+        use crate::origin::Who;
+        let entries: std::collections::BTreeMap<String, String> = Tools::keys()
+            .iter()
+            .map(|k| ((*k).to_owned(), format!("/nonexistent/{k}")))
+            .collect();
+        let tools = Tools::from_entries(Path::new("/m.json"), &entries).unwrap();
+        let work = instance("work", Who::Container("work".into()));
+        assert_eq!(
+            asking_container(&tools, &work, None).as_deref(),
+            Some("work")
+        );
+        let main = instance("main:offline", Who::Main);
+        assert_eq!(asking_container(&tools, &main, None).as_deref(), Some(""));
+        let tmp = instance(":tmp:vpn-profile-x", Who::Unknown);
+        assert_eq!(asking_container(&tools, &tmp, None), None);
+        assert_eq!(origin_label(&work, Some("other")), "offline/work");
+        assert_eq!(origin_label(&main, None), "offline");
+        assert_eq!(origin_label(&tmp, Some("work")), "offline/?");
+        assert!(!may_always(&tmp.name()));
     }
 }

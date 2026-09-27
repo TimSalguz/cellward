@@ -292,6 +292,9 @@ let
 
   rawExecStart = hm.config.systemd.user.services."vpn-zone@".Service.ExecStart;
   zoneHolderExecLine = if lib.isList rawExecStart then lib.head rawExecStart else rawExecStart;
+  rawInstanceExecStart = hm.config.systemd.user.services."vpn-zone-container@".Service.ExecStart;
+  containerHolderExecLine =
+    if lib.isList rawInstanceExecStart then lib.head rawInstanceExecStart else rawInstanceExecStart;
 in
 {
   # Полная активация home-manager: инстанцируется в CI как «модуль хотя бы
@@ -344,6 +347,11 @@ in
     lib.all lib.id [
       (expect "a running zone is restarted by a switch" (
         u.services."vpn-zone@".Unit.X-SwitchMethod == "keep-old"
+      ))
+      # A container's instance ends its programs when it stops: a switch
+      # that restarted it would close them.
+      (expect "a running container's instance is restarted by a switch" (
+        u.services."vpn-zone-container@".Unit.X-SwitchMethod == "keep-old"
       ))
       (expect "the broker's socket is made anew by a switch" (
         u.sockets.vpn-zone-broker.Unit.X-SwitchMethod == "keep-old"
@@ -471,6 +479,13 @@ in
   # имя зоны своим аргументом.
   zoneHolder = pkgs.writeShellScriptBin "zone-holder" ''
     exec ${lib.replaceStrings [ " %i" ] [ "" ] zoneHolderExecLine} "''${1:?нужно имя зоны}"
+  '';
+
+  # То же для экземпляра контейнера (юнит vpn-zone-container@, этап 1
+  # контейнерного дизайна): `container-holder <id>` без systemd — смоук
+  # поднимает экземпляр сам. Имя экземпляра в юните — %I.
+  containerHolder = pkgs.writeShellScriptBin "container-holder" ''
+    exec ${lib.replaceStrings [ " %I" ] [ "" ] containerHolderExecLine} "''${1:?нужен id экземпляра}"
   '';
 
   # Инструменты для смоук-теста — теми же версиями, что использует модуль.

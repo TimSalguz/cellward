@@ -3,8 +3,13 @@
 # in the VM, with the policy of the NixOS module — switched on by its single
 # entry, programs.cellward.enable, as a machine does it —, a sink and a
 # microphone that are null devices (the VM has no sound card), and the
-# offline zone — hermetic by default, and needing nothing but a user
-# namespace.
+# offline network — hermetic by default, and needing nothing but a user
+# namespace. Since stage 1 of the container design (2026-09-27) a launch
+# there runs in its container's instance (rust/src/instance.rs): the main
+# home's `main:offline`, a container's own; each has its own PipeWire
+# context, its own key in the policy's metadata (`instance:<id>`) and its
+# own state — and ends with its last program, so a program of its own keeps
+# it up where the test needs it to stay.
 #
 # What is asserted, from inside the zone: its pipewire-0 is the security
 # context's socket and never the host's raw one (a PipeWire restart
@@ -122,6 +127,36 @@ let
       def zone(cmd):
           return alice("cellward run offline -- " + cmd)
 
+      def key(id_):
+          """An instance's directory's name (instance::key): its id's
+          FNV-1a hash."""
+          h = 0xCBF29CE484222325
+          for b in id_.encode():
+              h = ((h ^ b) * 0x100000001B3) % (1 << 64)
+          return f"i-{h:016x}"
+
+      # The main home's instance with no network (rust/src/instance.rs):
+      # its directory is named by its key, its PipeWire key by its id.
+      MAIN = f"{STATE}/.instances/{key('main:offline')}"
+      assert MAIN.endswith("i-242da5417b1a1e19"), MAIN
+      APP = "instance:main:offline"
+
+      def keep_main():
+          """A program of its own keeps the instance up: it ends with its
+          last program."""
+          alice(
+              "systemd-run --user --collect --unit=vzkeep "
+              "cellward run offline -- sleep infinity"
+          )
+          machine.wait_until_succeeds(f"test -e {MAIN}/ready", timeout=60)
+
+      def restart_main():
+          """What `cellward down offline` was: the instance stopped — its
+          programs with it —, to come up again by its settings of now."""
+          alice("systemctl --user stop vzkeep zoneplay || true")
+          alice("cellward container stop main:offline || true")
+          machine.wait_until_fails(f"test -e {MAIN}/ready", timeout=60)
+
       def parse(out):
           return json.loads(out[out.index("["):])
 
@@ -184,9 +219,9 @@ let
           assert "vm-sink" in n and "vm-mic" in n and "vm-duplex" in n, n
 
       with subtest("the zone's pipewire-0 is the restricted one, never the host's"):
-          zone("true")
+          keep_main()
           try:
-              machine.wait_until_succeeds(f"grep -qx active {STATE}/offline/pipewire-context.state", timeout=30)
+              machine.wait_until_succeeds(f"grep -qx active {MAIN}/pipewire-context.state", timeout=30)
           except Exception:
               logs()
               raise
@@ -203,8 +238,9 @@ let
           z = next(n for n in out["networks"] if n["name"] == "offline")
           assert z["audio_manager"] == {"value": False, "source": "default"}, z
           assert z["hermetic"]["value"] is True, z
+          # The instance's checks, not a zone's: the offline zone is not up.
           out = json.loads(alice_any("cellward doctor offline --json"))
-          checks = next(z for z in out["zones"] if z["name"] == "offline")["checks"]
+          checks = next(i for i in out["instances"] if i["id"] == "main:offline")["checks"]
           pw = [c for c in checks if c["id"] == "pipewire"]
           assert pw and pw[0]["level"] == "ok", checks
           assert not any(c["id"] == "socket" and "pipewire-0" in c["detail"] for c in checks), checks
@@ -317,15 +353,14 @@ let
       with subtest("an earlier run's yes never decides for a zone brought up on no"):
           # The key outlives the zone's helper: WirePlumber keeps it. The
           # helper publishes this run's value before the socket goes out.
-          mic_key = "pw-metadata -n vpn-zones 0 vpn-zones.microphone.offline"
+          mic_key = f"pw-metadata -n vpn-zones 0 vpn-zones.microphone.{APP}"
           alice("cellward microphone offline yes")
           machine.wait_until_succeeds(
               "su -l alice -c " + shlex.quote("XDG_RUNTIME_DIR=/run/user/1000 " + mic_key)
               + " | grep -q \"value:'yes'\"",
               timeout=30,
           )
-          alice("systemctl --user stop zoneplay.service || true")
-          alice("cellward down offline")
+          restart_main()
           alice("cellward microphone offline no")
           out = alice(mic_key)
           assert "value:'yes'" in out, f"no stale yes to test against: {out}"
@@ -337,17 +372,28 @@ let
           assert out.strip() == "0", f"recorded by an earlier run's yes: {out}"
           out = alice(mic_key)
           assert "value:'no'" in out, out
+          keep_main()
 
       with subtest("the microphone by the container of each client"):
-          # Each client of the zone gets a key of its own, by the container
-          # of the program that connected (rust/src/pw_context.rs,
-          # rust/src/origin.rs): a container's yes records while its zone
-          # says no, the zone's own programs do not, and a container's no
-          # stands against the zone's yes. A client is held until its key
-          # comes, so it sees at once what its container may.
+          # Each client gets a key of its own, by its container — the
+          # container's instance is the container (rust/src/pw_context.rs,
+          # InstanceMic): a container's yes records while its network says
+          # no, the main home's programs do not, and a container's no stands
+          # against the network's yes. A client is held until its key comes,
+          # so it sees at once what its container may.
           alice("cellward microphone offline no")
           alice("cellward container create vmpwmic --home layer")
           alice("cellward container set vmpwmic microphone yes")
+          # Its own instance, kept up, and its PipeWire context handed over
+          # before its programs come.
+          alice(
+              "systemd-run --user --collect --unit=vzkeepc "
+              "cellward run offline --container vmpwmic -- sleep infinity"
+          )
+          machine.wait_until_succeeds(
+              f"grep -qx active {STATE}/.instances/{key('vmpwmic')}/pipewire-context.state",
+              timeout=60,
+          )
           record = (
               "sh -c 'timeout 5 pw-record --raw --target vm-mic -P node.name={} - | wc -c'"
           )
@@ -384,7 +430,9 @@ let
               machine.sleep(1)
           else:
               raise Exception(f"a client's key outlived it: {meta}")
-          assert "vpn-zones.microphone-by-client.offline" in meta, meta
+          # Each instance's helper says it publishes its clients' keys.
+          assert f"vpn-zones.microphone-by-client.{APP}" in meta, meta
+          assert "vpn-zones.microphone-by-client.instance:vmpwmic" in meta, meta
           # Nor any request for a key: each went with its answer.
           assert "vpn-zones.microphone.pending." not in meta, meta
           alice("cellward microphone offline yes")
@@ -392,6 +440,10 @@ let
           out = in_container(record.format("vz-cno"))
           assert out.strip() == "0", f"the zone's yes overrode a container's no: {out}"
           alice("cellward microphone offline no")
+          alice("systemctl --user stop vzkeepc || true")
+          machine.wait_until_fails(
+              f"test -e {STATE}/.instances/{key('vmpwmic')}/ready", timeout=60
+          )
           alice("cellward container rm vmpwmic")
 
       with subtest("a device the zone makes is destroyed and never the default"):
@@ -410,7 +462,7 @@ let
       with subtest("PipeWire restarts: the restricted socket comes back, the raw one never"):
           alice("systemctl --user restart pipewire.service")
           alice("systemctl --user start pipewire-pulse.service wireplumber.service")
-          machine.wait_until_succeeds(f"grep -qx active {STATE}/offline/pipewire-context.state", timeout=60)
+          machine.wait_until_succeeds(f"grep -qx active {MAIN}/pipewire-context.state", timeout=60)
           mounts = zone("cat /proc/self/mountinfo")
           assert "/pipewire-context /run/user/1000/pipewire-0 " in mounts, mounts
           for _ in range(30):
@@ -430,9 +482,8 @@ let
           )
           out = alice("cellward audio-manager offline on")
           assert "ВНИМАНИЕ" in out, out
-          alice("systemctl --user stop zoneplay.service || true")
-          alice("cellward down offline")
-          zone("true")
+          restart_main()
+          keep_main()
           mounts = zone("cat /proc/self/mountinfo")
           assert "/pipewire-context /run/user/1000/pipewire-0 " not in mounts, mounts
           machine.wait_until_succeeds(
@@ -440,14 +491,14 @@ let
           )
           assert "host-player" in nodes(zone_dump())
           out = json.loads(alice_any("cellward doctor offline --json"))
-          checks = next(z for z in out["zones"] if z["name"] == "offline")["checks"]
+          checks = next(i for i in out["instances"] if i["id"] == "main:offline")["checks"]
           pw = [c for c in checks if c["id"] == "pipewire"]
           assert pw and pw[0]["level"] == "warn" and "МЕНЕДЖЕР ЗВУКА" in pw[0]["detail"], checks
           out = json.loads(alice("cellward status --json"))
           z = next(n for n in out["networks"] if n["name"] == "offline")
           assert z["audio_manager"] == {"value": True, "source": "local"}, z
           alice("cellward audio-manager offline default")
-          alice("cellward down offline")
+          restart_main()
     '';
   };
 in

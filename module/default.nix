@@ -1397,6 +1397,52 @@ in
     };
   };
 
+  # Экземпляр контейнера (rust/src/instance.rs, docs/CONTAINERS.md §3.6):
+  # у запущенного контейнера свои пространства имён — пользователь, сеть,
+  # точки монтирования, IPC — со всеми покрытиями зоны, свой /dev и свои
+  # помощники (шина, звук, PipeWire). Этап 1 (2026-09-27): выхода у
+  # экземпляра нет — в него идёт каждый запуск с сетью offline, а зона
+  # offline для запусков больше не поднимается. Имя экземпляра — id
+  # контейнера (systemd-экранированный, отсюда %I в ExecStart).
+  systemd.user.services."vpn-zone-container@" = {
+    Unit = {
+      Description = "Экземпляр контейнера %I";
+      # Обновление не трогает работающие экземпляры: их остановка закрыла бы
+      # программы контейнера. Новая сборка — со следующего запуска.
+      X-SwitchMethod = "keep-old";
+      # Брокер — дверь наружу и из экземпляра: его сокет держатель
+      # переносит внутрь при подъёме.
+      Wants = [ "vpn-zone-broker.socket" ];
+      After = [ "vpn-zone-broker.socket" ];
+    };
+    Service = {
+      # READY=1 — когда пространство экземпляра готово (`ready`); своих
+      # часов у старта нет, как у зоны.
+      Type = "notify";
+      TimeoutStartSec = "infinity";
+      # Своё дерево cgroup — задел под следующие этапы (живое переключение
+      # сети держит «стену эпох» на cgroup): держатель и его помощники — в
+      # подгруппе infra. На этапе 1 программы остаются в своих областях
+      # (из сеанса входа ядро не даёт перенести процесс в дерево
+      # user@.service), и экземпляр узнаёт свои программы по пространству
+      # имён пользователя.
+      Delegate = "yes";
+      DelegateSubgroup = "infra";
+      # SIGTERM — только держателю: он сам закрывает программы контейнера
+      # (TERM и ждёт), потом своё пространство. Единственные часы здесь —
+      # TimeoutStopSec самого systemd для программы, которая не закрывается.
+      KillMode = "mixed";
+      Restart = "no";
+      ExecStart =
+        "${vpn-zone-rust}/bin/vpn-zone-core container-holder"
+        + " --ip ${iproute} --nft ${nft} --dbus-proxy ${dbusProxy}/bin/xdg-dbus-proxy"
+        + " --opener ${vpn-zone-opener}"
+        + " --kdialog ${kdialog}"
+        + " --window ${vpn-zone-window}/bin/vpn-zone-window"
+        + " --runner ${config.home.profileDirectory}/bin/cellward %I";
+    };
+  };
+
   # Ярлыки пересобираются: раз в полчаса, при входе в сессию и при изменении
   # каталогов с .desktop (после nixos-rebuild там появляются новые программы).
   systemd.user.services.vpn-zone-desktop-sync = {

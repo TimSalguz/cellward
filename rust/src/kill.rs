@@ -24,6 +24,15 @@
 //!
 //! Every signal goes through a pidfd opened while the process was verified to
 //! be in the zone, so a pid that is reused in between is never signalled.
+//!
+//! **A container's instance** (`crate::instance`, stage 1 of the container
+//! design of 2026-09-27) — `cellward kill <container>`, `cellward container
+//! kill <container>`, and `cellward kill offline` for every instance with
+//! no network: its programs are the processes of its user namespace
+//! (`crate::place::members`), frozen pass after pass and killed; then the
+//! instance is stopped, and finds nobody left to end. `cellward container
+//! stop` only stops it: its keeper ends its programs with TERM, as a logout
+//! does ([`instances`]).
 
 use std::ffi::OsString;
 use std::fs;
@@ -148,6 +157,11 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
         return EXIT_REFUSED;
     }
     let Some(zone) = zone_pid(&tools.state, name) else {
+        // No zone of that name up: a container's instances, or — `offline`
+        // — every instance with no network.
+        if !instances_named(&tools.state, &text).is_empty() {
+            return instances(tools, &text, true);
+        }
         eprintln!("зона {text} не поднята: сети у её программ уже нет");
         return EXIT_NOT_UP;
     };
@@ -215,6 +229,127 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
         );
     }
     if stopped == 0 {
+        EXIT_CUT
+    } else {
+        EXIT_NOT_DOWN
+    }
+}
+
+/// The running instances `name` names: the instance of that id, a
+/// container's (its own, and one per network of a container of the main
+/// home), or — `offline` — every instance with no network.
+pub fn instances_named(state: &Path, name: &str) -> Vec<crate::instance::Running> {
+    crate::instance::running(state)
+        .into_iter()
+        .filter(|i| {
+            i.id == name
+                || crate::instance::container_of(&i.id) == Some(name)
+                || (name == crate::launch::OFFLINE && i.network == crate::launch::OFFLINE)
+        })
+        .collect()
+}
+
+/// Freeze every program of the instance whose user namespace is `userns`
+/// but its own (`spare`, its holder, and below), pass after pass, as
+/// [`freeze`] does a zone's.
+fn freeze_members(userns: (u64, u64), spare: i32) -> (Vec<Target>, Option<String>) {
+    let mut held: Vec<Target> = Vec::new();
+    for _ in 0..PASSES {
+        let mut fresh = 0;
+        for (pid, fd) in crate::place::members(userns, Some(spare)) {
+            if held.iter().any(|t| t.pid == pid) {
+                continue;
+            }
+            let name = fs::read_to_string(format!("/proc/{pid}/comm"))
+                .map(|c| c.trim().to_owned())
+                .unwrap_or_default();
+            if pidfd_signal(&fd, libc::SIGSTOP) {
+                fresh += 1;
+                held.push(Target { pid, name, fd });
+            }
+        }
+        if fresh == 0 {
+            return (held, None);
+        }
+    }
+    let why = format!(
+        "контейнер порождает процессы быстрее, чем их удаётся заморозить ({} заморожено)",
+        held.len()
+    );
+    (held, Some(why))
+}
+
+/// `cellward container stop|kill <name>` (and `cellward kill <name>` for
+/// one that is no zone up): the instances `name` names
+/// ([`instances_named`]) stopped — with `kill`, their programs frozen and
+/// killed first, all at once, rather than asked to end.
+pub fn instances(tools: &Tools, name: &str, kill: bool) -> u8 {
+    let found = instances_named(&tools.state, name);
+    if found.is_empty() {
+        eprintln!("у «{name}» нет запущенного экземпляра контейнера — останавливать нечего");
+        return EXIT_NOT_UP;
+    }
+    let mut killed: Vec<Target> = Vec::new();
+    let mut all_stopped = true;
+    for instance in &found {
+        if kill {
+            // Its user namespace, looked at while its space is still the
+            // process that wrote its number; its holder spared with it.
+            let key = crate::place::ns_key(Path::new(&format!("/proc/{}/ns/user", instance.pid)));
+            let holder = crate::sys::parent_of(instance.pid).filter(|&h| h > 1);
+            let still = crate::instance::up(&tools.state, &instance.id) == Some(instance.pid);
+            if let (Some(key), Some(holder), true) = (key, holder, still) {
+                let (frozen, overrun) = freeze_members(key, holder);
+                if let Some(why) = overrun {
+                    eprintln!("{why}");
+                }
+                killed.extend(
+                    frozen
+                        .into_iter()
+                        .filter(|t| pidfd_signal(&t.fd, libc::SIGKILL)),
+                );
+            }
+        }
+        let unit = crate::instance::unit_name(&instance.id).unwrap_or_default();
+        if crate::cli::systemctl_unit(tools, "stop", std::ffi::OsStr::new(&unit)) != 0 {
+            all_stopped = false;
+            eprintln!(
+                "контейнер {}: не остановлен (systemctl stop {unit})",
+                instance.id
+            );
+        }
+    }
+    let ids: Vec<&str> = found.iter().map(|i| i.id.as_str()).collect();
+    let names: Vec<String> = killed
+        .iter()
+        .map(|t| format!("{} ({})", t.name, t.pid))
+        .collect();
+    // A stop is on the record by the keeper's own `instance-stop`.
+    if kill {
+        if let Err(e) = crate::journal::append(
+            &tools.state,
+            "kill",
+            &[
+                ("container", name),
+                ("instances", ids.join(", ").as_str()),
+                ("killed", killed.len().to_string().as_str()),
+                ("programs", names.join(", ").as_str()),
+                ("down", if all_stopped { "yes" } else { "no" }),
+            ],
+        ) {
+            eprintln!("журнал: {e}");
+        }
+    }
+    match (kill, killed.is_empty()) {
+        (true, false) => println!(
+            "{name}: остановлен, убито программ — {}: {}",
+            killed.len(),
+            names.join(", ")
+        ),
+        (true, true) => println!("{name}: остановлен, программ в нём не было"),
+        (false, _) => println!("{name}: остановлен, его программы закрыты"),
+    }
+    if all_stopped {
         EXIT_CUT
     } else {
         EXIT_NOT_DOWN

@@ -51,6 +51,29 @@ pub enum Who {
     Unknown,
 }
 
+impl Who {
+    /// One word for it, as a helper of a container's instance is told whose
+    /// its programs are (`--container`): `main`, `?`, or the container's
+    /// name — which is never either (`container::valid_name`).
+    pub fn word(&self) -> String {
+        match self {
+            Who::Main => crate::instance::MAIN.to_owned(),
+            Who::Container(name) => name.clone(),
+            Who::Unknown => "?".to_owned(),
+        }
+    }
+
+    /// What [`Who::word`] said; a word that is no container's name is not
+    /// known.
+    pub fn from_word(word: &str) -> Self {
+        match word {
+            crate::instance::MAIN => Who::Main,
+            name if crate::container::valid_name(name) => Who::Container(name.to_owned()),
+            _ => Who::Unknown,
+        }
+    }
+}
+
 /// The directories the answer is read from.
 #[derive(Debug, Clone, Copy)]
 pub struct Places<'a> {
@@ -352,6 +375,25 @@ mod tests {
             zone,
             peer,
         )
+    }
+
+    /// Whose programs a helper of an instance is told they are, and reads
+    /// back: `main`, a container's name, `?` — nothing else is a name.
+    #[test]
+    fn whose_is_one_word_and_read_back() {
+        for who in [
+            Who::Main,
+            Who::Container("work".into()),
+            Who::Container("Работа".into()),
+            Who::Unknown,
+        ] {
+            assert_eq!(Who::from_word(&who.word()), who);
+        }
+        assert_eq!(Who::Main.word(), "main");
+        assert_eq!(Who::Unknown.word(), "?");
+        for not_a_name in ["", "a/b", "a:b", "-x", "ask"] {
+            assert_eq!(Who::from_word(not_a_name), Who::Unknown, "{not_a_name:?}");
+        }
     }
 
     /// A process is its launch's: the container recorded for the launch it

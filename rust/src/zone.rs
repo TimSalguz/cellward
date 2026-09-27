@@ -137,7 +137,7 @@ use crate::sys;
 use crate::sysuplink::{self, SysUplinkConfig};
 
 /// Where the zones live, below `$HOME`. The bash CLI computes the same path.
-const STATE_SUBDIR: &str = ".local/state/vpn-zones";
+pub(crate) const STATE_SUBDIR: &str = ".local/state/vpn-zones";
 /// Where the settings are, below `$HOME` — the same as the CLI's `config`.
 const CONFIG_SUBDIR: &str = ".config/vpn-zones";
 /// What a zone keeps of the project's state directory, and whether it may
@@ -706,12 +706,92 @@ struct Zone {
     /// The host's raw PipeWire socket in a hermetic zone
     /// (`hermetic::audio_manager`); off by default: the restricted one.
     audio_manager: bool,
+    /// Not a zone but a container's instance (`crate::instance`, the
+    /// container design of 2026-09-27): the same space for its programs —
+    /// every cover, the helpers, its own `/dev` —, set up by the same code,
+    /// with the differences [`InstanceInfo`] names. `None`: a zone, exactly
+    /// as before.
+    instance: Option<InstanceInfo>,
+}
+
+/// What makes a space a container's instance and not a zone
+/// (`crate::instance`). Its `Zone` is named by the instance's id and lives
+/// in the instance's directory; what differs:
+///
+/// * the zone-level settings it came up with, and the switches read live
+///   (microphone, screen cast), are its network's — the zone's directory of
+///   `network`, not its own ([`Zone::settings_dir`]);
+/// * its space writes `instance.pid`/`instance.start`, not `zone.pid`;
+/// * of the project's state it keeps its own throwaway layer and nothing
+///   else — never the registry (`.running`), which names every container's
+///   programs; of the containers' storage, its own container's alone
+///   ([`hide_container_storage`]);
+/// * `/sys/fs/cgroup`, which names every unit and scope of the user's, is
+///   covered ([`cover_cgroupfs`]);
+/// * its helpers are told whose its programs are (`--container`) and its
+///   user namespace (`--userns`): the instance is the container.
+#[derive(Debug, Clone)]
+struct InstanceInfo {
+    id: String,
+    network: String,
+    /// The network's zone directory: where its zone-level settings are.
+    network_dir: PathBuf,
+    who: crate::origin::Who,
+    /// Its own container's storage (`instance::Plan::storage`).
+    storage: Option<PathBuf>,
+    /// Its user namespace, once there is one: for the helpers.
+    userns: Option<(u64, u64)>,
 }
 
 impl Zone {
     /// For messages only — a directory name may be any byte string.
     fn name(&self) -> Cow<'_, str> {
         self.name.to_string_lossy()
+    }
+
+    /// The name the zone-level settings of this space are kept under: the
+    /// zone's own, an instance's network's.
+    fn settings_name(&self) -> String {
+        match &self.instance {
+            Some(instance) => instance.network.clone(),
+            None => self.name().into_owned(),
+        }
+    }
+
+    /// Where those settings are: the zone's directory, an instance's
+    /// network's.
+    fn settings_dir(&self) -> &Path {
+        match &self.instance {
+            Some(instance) => &instance.network_dir,
+            None => &self.dir,
+        }
+    }
+
+    /// Its directory of restricted Wayland sockets below
+    /// `wl_sandbox::SOCKET_DIR`: the zone's name, an instance's key.
+    fn wayland_dir(&self) -> String {
+        match &self.instance {
+            Some(instance) => crate::instance::key(&instance.id),
+            None => self.name().into_owned(),
+        }
+    }
+
+    /// What of the project's state stays in reach inside ([`hide_project_state`]),
+    /// and whether writable: [`ZONE_KEEPS`] for a zone; for an instance its
+    /// own throwaway layer, where it has one, and nothing else.
+    fn keeps(&self) -> Vec<(String, bool)> {
+        match &self.instance {
+            None => ZONE_KEEPS
+                .iter()
+                .map(|(name, writable)| ((*name).to_owned(), *writable))
+                .collect(),
+            Some(instance) => instance
+                .storage
+                .as_deref()
+                .and_then(|storage| storage.strip_prefix(self.home.join(STATE_SUBDIR)).ok())
+                .map(|rel| vec![(rel.to_string_lossy().into_owned(), true)])
+                .unwrap_or_default(),
+        }
     }
 
     fn path(&self, file: &str) -> PathBuf {
@@ -791,6 +871,7 @@ pub fn run(args: Args) -> u8 {
         nix_daemon,
         host_files_writable,
         audio_manager,
+        instance: None,
     };
 
     // A directory is a zone if it has a config or the offline marker; anything
@@ -831,13 +912,41 @@ pub fn run(args: Args) -> u8 {
             zone.name()
         );
     }
+    prepare_host(&zone, &label);
+
+    let ids = match Ids::current() {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("zone {}: {e}", zone.name());
+            return 1;
+        }
+    };
+
+    match hold(&zone, &ids, runs_a_client(&zone)) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("zone {}: {e}", zone.name());
+            1
+        }
+    }
+}
+
+/// What a zone — or a container's instance — needs of the host before its
+/// namespaces exist, made as the user: what its space keeps in reach, what it
+/// covers (a directory made after it came up would not be covered), and the
+/// portal's entry of `label`, the zone's name (an instance's network's).
+fn prepare_host(zone: &Zone, label: &str) {
     // What the zone keeps of the project's state has to exist before the zone
     // hides the rest (`hide_project_state`): a directory created afterwards
     // would not be seen in there. As the user, so that the host keeps writing
     // into them.
-    if let Some(state) = zone.dir.parent() {
-        for (name, _) in ZONE_KEEPS {
-            let _ = fs::create_dir_all(state.join(name));
+    // (An instance's own throwaway layer is there already: the launch made
+    // it before it started the instance.)
+    if zone.instance.is_none() {
+        if let Some(state) = zone.dir.parent() {
+            for (name, _) in ZONE_KEEPS {
+                let _ = fs::create_dir_all(state.join(name));
+            }
         }
     }
     for dir in READ_ONLY_IN_ZONES {
@@ -868,7 +977,7 @@ pub fn run(args: Args) -> u8 {
     // be found — else the zone's programs stay a nameless host application to
     // it. For every zone: a sandbox in a zone that is not hermetic registers
     // too (`fs_sandbox`). Sync keeps it while the zone is there.
-    match crate::desktop::write_zone_entry(&zone.home, &label, &zone.tools.runner.to_string_lossy())
+    match crate::desktop::write_zone_entry(&zone.home, label, &zone.tools.runner.to_string_lossy())
     {
         Ok(_) => {}
         Err(e) => eprintln!(
@@ -899,22 +1008,6 @@ pub fn run(args: Args) -> u8 {
                 .write(true)
                 .create_new(true)
                 .open(&mimeapps);
-        }
-    }
-
-    let ids = match Ids::current() {
-        Ok(ids) => ids,
-        Err(e) => {
-            eprintln!("zone {}: {e}", zone.name());
-            return 1;
-        }
-    };
-
-    match hold(&zone, &ids, runs_a_client(&zone)) {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("zone {}: {e}", zone.name());
-            1
         }
     }
 }
@@ -994,6 +1087,21 @@ fn first_subid(file: &str, user: &str, id: u32) -> Result<u64, String> {
     Err(format!(
         "no range for {user} in {file} — a rootless zone is impossible without one"
     ))
+}
+
+/// How many ids the first range of this user in a subordinate-id file's
+/// `text` has (its third field) — the range [`first_subid`] starts from.
+/// `None` when there is no such range or it does not say.
+pub fn subid_count_in(text: &str, user: &str, id: u32) -> Option<u64> {
+    text.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let owner = fields.next()?.trim();
+        if owner != user && !owner.parse::<u32>().is_ok_and(|o| o == id) {
+            return None;
+        }
+        let _start = fields.next()?;
+        Some(fields.next()?.trim().parse::<u64>().ok())
+    })?
 }
 
 /// The uid and the gid the OpenConnect client runs as inside its zone's user
@@ -1444,6 +1552,723 @@ fn holder(zone: &Zone, unshared_w: OwnedFd, mapped_r: OwnedFd) -> u8 {
             1
         }
     }
+}
+
+// --- CONTAINER INSTANCES -----------------------------------------------------
+//
+// A container's instance (`crate::instance`, the container design of
+// 2026-09-27) is a zone's space without its network: the same covers, the
+// same helpers, its own `/dev`, set up by the same code — `zone_setup` in
+// instance mode ([`InstanceInfo`]) —, held by processes of its own:
+//
+// ```text
+// vpn-zone-core container-holder <id>     (systemd main process, host user)
+//  ├─ the helpers, as a zone's (`Helpers`)            [host user namespace]
+//  └─ fork ─ user namespace, uid 0 = subuid+3, then exec `--inner`   [H]
+//      └─ fork ─ net + mount + IPC namespace: THE SPACE   [instance.pid]
+// ```
+//
+// Stage 1 gives an instance no way out (lo only): every launch whose network
+// is `offline` runs in one, and the `offline` zone is never started for it.
+
+/// The ids of an instance's user namespace, as `newuidmap`/`newgidmap` take
+/// them: its root is the user's [`crate::instance::ROOT_ID`]th subordinate
+/// id and the user's own id is mapped onto itself (J3 of the design). Not a
+/// zone's root, the first subordinate id: a zone's holder is dumpable on
+/// purpose ([`holder`]), and any process of the same host uid may trace it —
+/// a process of an instance that got out of hand would have been every
+/// zone's root, the one that holds the tunnel's keys.
+pub fn instance_map_args(pid: libc::pid_t, sub: u64, id: u32) -> Vec<String> {
+    vec![
+        pid.to_string(),
+        "0".to_string(),
+        (sub + u64::from(crate::instance::ROOT_ID)).to_string(),
+        "1".to_string(),
+        id.to_string(),
+        id.to_string(),
+        "1".to_string(),
+    ]
+}
+
+/// Write the instance's ids into the user namespace of `pid`
+/// ([`instance_map_args`]), from the outside, as [`map_ids`] does a zone's.
+fn map_instance(pid: libc::pid_t, ids: &Ids) -> Result<(), String> {
+    for (tool, sub, id) in [
+        ("newuidmap", ids.subuid, ids.uid),
+        ("newgidmap", ids.subgid, ids.gid),
+    ] {
+        let status = Command::new(tool)
+            .args(instance_map_args(pid, sub, id))
+            .status()
+            .map_err(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    format!("{tool} is not on PATH (package uidmap) — an instance needs it")
+                } else {
+                    format!("cannot run {tool}: {e}")
+                }
+            })?;
+        if !status.success() {
+            return Err(format!(
+                "{tool} failed ({status}) — an instance takes the first {} ids of your ranges \
+                 in /etc/subuid and /etc/subgid",
+                crate::instance::SUBORDINATE_IDS
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the user's subordinate ranges have the ids an instance takes —
+/// the first [`crate::instance::SUBORDINATE_IDS`] —, said before
+/// `newuidmap` fails less clearly.
+fn instance_ranges(ids: &Ids) -> Result<(), String> {
+    let user = user_name(ids.uid).ok_or("no passwd entry for the current uid")?;
+    for (file, id) in [("/etc/subuid", ids.uid), ("/etc/subgid", ids.gid)] {
+        let text = fs::read_to_string(file).map_err(|e| format!("cannot read {file}: {e}"))?;
+        match subid_count_in(&text, &user, id) {
+            Some(count) if count >= crate::instance::SUBORDINATE_IDS => {}
+            count => {
+                return Err(format!(
+                    "{file}: the range of {user} has {} ids — a container's instance takes the \
+                     first {} of it (0 a zone's root, 1 an OpenConnect client, 2 a bridge, 3 an \
+                     instance's root)",
+                    count.map_or_else(|| "?".to_owned(), |c| c.to_string()),
+                    crate::instance::SUBORDINATE_IDS
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The tool flags of `vpn-zone-core zone-holder`, as [`Args::parse`] reads
+/// them back: what the keeper passes on to its own re-exec. An empty path
+/// is the flag left out: its default.
+fn tool_flags(tools: &Tools) -> Vec<OsString> {
+    let mut out: Vec<OsString> = Vec::new();
+    for (flag, path) in [
+        ("--ip", &tools.ip),
+        ("--awg", &tools.awg),
+        ("--wg", &tools.wg),
+        ("--pasta", &tools.pasta),
+        ("--nft", &tools.nft),
+        ("--openconnect", &tools.openconnect),
+        ("--dbus-proxy", &tools.dbus_proxy),
+        ("--opener", &tools.opener),
+        ("--kdialog", &tools.kdialog),
+        ("--window", &tools.window),
+        ("--runner", &tools.runner),
+    ] {
+        if !path.as_os_str().is_empty() {
+            out.push(OsString::from(flag));
+            out.push(path.as_os_str().to_os_string());
+        }
+    }
+    out
+}
+
+/// A zone-level setting in the text [`crate::hermetic::note_applied`]
+/// wrote: `true` only where it says so.
+fn frozen(text: &str, name: &str) -> bool {
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .any(|(key, value)| key.trim() == name && value.trim() == "true")
+}
+
+/// The instance's `Zone`: named by its id, in its directory, with the
+/// settings `applied` (the text of [`crate::instance::SETTINGS`]).
+fn instance_zone(tools: Tools, home: PathBuf, plan: &crate::instance::Plan, applied: &str) -> Zone {
+    let state = home.join(STATE_SUBDIR);
+    Zone {
+        name: OsString::from(&plan.id),
+        dir: crate::instance::dir(&state, &plan.id),
+        tools,
+        hermetic: frozen(applied, "hermetic"),
+        nix_daemon: frozen(applied, "nix_daemon"),
+        host_files_writable: frozen(applied, "host_files_writable"),
+        audio_manager: frozen(applied, "audio_manager"),
+        instance: Some(InstanceInfo {
+            id: plan.id.clone(),
+            network: plan.network.clone(),
+            network_dir: state.join(&plan.network),
+            who: plan.who.clone(),
+            storage: plan.storage.clone(),
+            userns: None,
+        }),
+        home,
+    }
+}
+
+/// The instance's directory, the user's alone (0700), with its id in it —
+/// refused when it holds another id's: two ids of one key
+/// (`crate::instance::key`) would share it.
+fn own_instance_dir(dir: &Path, id: &str) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("cannot create {}: {e}", dir.display())),
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("cannot close {}: {e}", dir.display()))?;
+    let file = dir.join(crate::instance::ID);
+    match fs::read_to_string(&file) {
+        Ok(held) if held.trim() != id => Err(format!(
+            "{} is instance {}'s — the two ids share a key; rename the container",
+            dir.display(),
+            held.trim()
+        )),
+        Ok(_) => Ok(()),
+        Err(_) => write_private(&file, format!("{id}\n").as_bytes())
+            .map_err(|e| format!("cannot write {}: {e}", file.display())),
+    }
+}
+
+/// `vpn-zone-core container-holder <id>`: the keeper of a container's
+/// instance (`crate::instance`), `vpn-zone-container@<id>.service`'s main
+/// process — in the host's user namespace, like a zone's holder. It makes
+/// the instance's directory and freezes the network's settings, starts the
+/// helpers, has its space made ([`hold_instance`]), and keeps it for as long
+/// as its programs run ([`keep`]).
+pub fn run_instance(tools: Tools, home: PathBuf, plan: crate::instance::Plan) -> u8 {
+    let id = plan.id.clone();
+    let state = home.join(STATE_SUBDIR);
+    let config = home.join(CONFIG_SUBDIR);
+    let dir = crate::instance::dir(&state, &id);
+    if let Err(e) = own_instance_dir(&dir, &id) {
+        eprintln!("instance {id}: {e}");
+        return 1;
+    }
+    // Leftovers of a previous run would make a launch believe this one up.
+    for file in [
+        crate::instance::PID,
+        crate::instance::START,
+        READY,
+        crate::instance::CONTROL,
+        crate::instance::USERNS,
+        crate::pw_context::STATE_FILE,
+    ] {
+        let _ = fs::remove_file(dir.join(file));
+    }
+    // The network's zone-level settings, frozen for the instance's life: its
+    // covers and helpers are made by them once, and `status --json` names
+    // what has changed since (`restart_needed`).
+    let settings =
+        crate::hermetic::start_settings(&state.join(&plan.network), &config, &plan.network);
+    let applied: String = settings
+        .iter()
+        .map(|(name, on)| format!("{name}={on}\n"))
+        .collect();
+    let written = crate::hermetic::note_applied(&dir, &settings).and_then(|()| {
+        write_private(
+            &dir.join(crate::instance::NETWORK),
+            format!("{}\n", plan.network).as_bytes(),
+        )
+    });
+    if let Err(e) = written {
+        eprintln!("instance {id}: cannot write its settings ({e})");
+        return 1;
+    }
+    let mut zone = instance_zone(tools, home, &plan, &applied);
+    prepare_host(&zone, &plan.network);
+    let ids = match Ids::current().and_then(|ids| instance_ranges(&ids).map(|()| ids)) {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("instance {id}: {e}");
+            return 1;
+        }
+    };
+    match hold_instance(&mut zone, &ids, &plan) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("instance {id}: {e}");
+            1
+        }
+    }
+}
+
+/// How an instance's keeping ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// Its last program ended, and no launch was on its way in.
+    Idle,
+    /// Stopped (TERM or INT): `systemctl stop`, a logout, `cellward
+    /// container stop`.
+    Asked,
+    /// Its space ended by itself: nothing holds its covers any more.
+    Broken,
+}
+
+/// The keeper's wake-up pipe's write end, for its signal handlers.
+static WAKE: AtomicI32 = AtomicI32::new(-1);
+/// A child of the keeper's has ended.
+static CHILD_ENDED: AtomicBool = AtomicBool::new(false);
+
+fn wake() {
+    let fd = WAKE.load(Ordering::SeqCst);
+    if fd >= 0 {
+        let byte = 1u8;
+        // SAFETY: write(2) of one byte from a valid address; async-signal-safe.
+        unsafe { libc::write(fd, (&byte as *const u8).cast(), 1) };
+    }
+}
+
+extern "C" fn keeper_asked_to_stop(_sig: libc::c_int) {
+    ASKED_TO_STOP.store(true, Ordering::SeqCst);
+    wake();
+}
+
+extern "C" fn keeper_child_ended(_sig: libc::c_int) {
+    CHILD_ENDED.store(true, Ordering::SeqCst);
+    wake();
+}
+
+/// Fork off the instance's user namespace, map its ids from the outside,
+/// start the helpers, wait for its space to be ready, and keep it.
+fn hold_instance(zone: &mut Zone, ids: &Ids, plan: &crate::instance::Plan) -> Result<u8, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot find our own binary: {e}"))?;
+    let (unshared_r, unshared_w) = sys::pipe().map_err(|e| format!("cannot create a pipe: {e}"))?;
+    let (mapped_r, mapped_w) = sys::pipe().map_err(|e| format!("cannot create a pipe: {e}"))?;
+    // SAFETY: single-threaded at this point, so the child may allocate and
+    // print before it goes its own way.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(format!("cannot fork: {}", io::Error::last_os_error()));
+    }
+    if pid == 0 {
+        drop(unshared_r);
+        drop(mapped_w);
+        let code = instance_user_namespace(zone, &exe, unshared_w, mapped_r);
+        // SAFETY: _exit never returns and touches nothing of ours.
+        unsafe { libc::_exit(libc::c_int::from(code)) };
+    }
+    drop(unshared_w);
+    drop(mapped_r);
+    let mut byte = [0u8; 1];
+    let mut unshared = File::from(unshared_r);
+    if unshared.read_exact(&mut byte).is_err() || byte[0] != SYNC_OK {
+        let _ = reap(pid);
+        return Err("the instance could not get a user namespace of its own".to_string());
+    }
+    let userns = map_instance(pid, ids).and_then(|()| {
+        crate::place::ns_key(Path::new(&format!("/proc/{pid}/ns/user")))
+            .ok_or_else(|| "cannot read the instance's user namespace".to_string())
+    });
+    let userns = match userns {
+        Ok(userns) => userns,
+        Err(e) => {
+            // Dropping the write end is the child's signal to give up.
+            drop(mapped_w);
+            let _ = reap(pid);
+            return Err(e);
+        }
+    };
+    // What its programs are known by (`crate::place`), and its helpers told.
+    let _ = write_private(
+        &zone.path(crate::instance::USERNS),
+        format!("{}\n", crate::place::key_text(userns)).as_bytes(),
+    );
+    if let Some(info) = zone.instance.as_mut() {
+        info.userns = Some(userns);
+    }
+    // The helpers, before the space is made: it binds their sockets in as
+    // one of its first steps.
+    let mut helpers = Helpers::start(zone);
+    let mut mapped = File::from(mapped_w);
+    if mapped.write_all(&[SYNC_OK]).is_err() {
+        let _ = reap(pid);
+        helpers.stop();
+        return Err("the instance stopped listening before the mapping was done".to_string());
+    }
+    drop(mapped);
+    // Ready, or the end of the one making it: waited for as long as that
+    // takes (the unit has no start timeout; `systemctl stop` ends a stuck
+    // one).
+    let state = zone.home.join(STATE_SUBDIR);
+    let ready = sys::pidfd_open(pid)
+        .is_some_and(|h| sys::wait_for_entry(&zone.path(READY), Some(&h), Path::is_file));
+    if !ready || crate::instance::up(&state, &plan.id).is_none() {
+        // SAFETY: kill(2) of our own child, not reaped yet.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+        let _ = reap(pid);
+        helpers.stop();
+        return Err("its space did not come up".to_string());
+    }
+    crate::system::notify_ready();
+    println!("instance {}: up, {} (loopback only)", plan.id, plan.network);
+    let who = plan.who.word();
+    if let Err(e) = crate::journal::append(
+        &state,
+        "instance-start",
+        &[
+            ("instance", plan.id.as_str()),
+            ("network", plan.network.as_str()),
+            ("container", who.as_str()),
+        ],
+    ) {
+        eprintln!("instance {}: journal: {e}", plan.id);
+    }
+
+    let (ending, space_gone) = keep(zone, pid, userns, &mut helpers);
+    let why = match ending {
+        Ending::Idle => {
+            println!("instance {}: its last program ended — it stops", plan.id);
+            "idle"
+        }
+        Ending::Asked => "stop",
+        Ending::Broken => {
+            eprintln!(
+                "instance {}: its space ended by itself — its programs are ended with it",
+                plan.id
+            );
+            "broken"
+        }
+    };
+    // An instance ending ends its programs (the design's stop semantics):
+    // TERM, and waited for — systemd's own stop timeout is the one clock.
+    if ending != Ending::Idle {
+        end_programs(userns, (!space_gone).then_some(pid));
+    }
+    if !space_gone {
+        // SAFETY: kill(2) of our own child, not reaped yet.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+        let _ = reap(pid);
+    }
+    helpers.stop();
+    // A throwaway's layer and records: nothing of it outlives it.
+    for path in &plan.erase {
+        let _ = sys::remove_tree(path);
+    }
+    if let Err(e) = crate::journal::append(
+        &state,
+        "instance-stop",
+        &[("instance", plan.id.as_str()), ("why", why)],
+    ) {
+        eprintln!("instance {}: journal: {e}", plan.id);
+    }
+    let _ = sys::remove_tree(&zone.dir);
+    Ok(u8::from(ending == Ending::Broken))
+}
+
+/// The instance's user namespace, until the keeper has mapped its ids; then
+/// uid 0 in it, and an `exec` of ourselves (`container-holder --inner`),
+/// which makes it this process's own (J3 of the design): a process's memory
+/// belongs to the user namespace it was exec'd in, and only a process with
+/// `CAP_SYS_PTRACE` there — the host's user, its owner — may read one that
+/// is not dumpable. Returns only when something failed.
+fn instance_user_namespace(zone: &Zone, exe: &Path, unshared_w: OwnedFd, mapped_r: OwnedFd) -> u8 {
+    default_signals();
+    // SAFETY: unshare(2) takes no pointers.
+    if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+        eprintln!(
+            "instance {}: cannot create a user namespace ({})",
+            zone.name(),
+            io::Error::last_os_error()
+        );
+        let _ = File::from(unshared_w).write_all(&[SYNC_FAIL]);
+        return 1;
+    }
+    if File::from(unshared_w).write_all(&[SYNC_OK]).is_err() {
+        return 1;
+    }
+    let mut byte = [0u8; 1];
+    if File::from(mapped_r).read_exact(&mut byte).is_err() || byte[0] != SYNC_OK {
+        return 1;
+    }
+    // SAFETY: both take no pointers; we hold every capability in the
+    // namespace just made.
+    if unsafe { libc::setgid(0) } != 0 || unsafe { libc::setuid(0) } != 0 {
+        eprintln!(
+            "instance {}: cannot become uid 0 inside it ({})",
+            zone.name(),
+            io::Error::last_os_error()
+        );
+        return 1;
+    }
+    let mut argv: Vec<OsString> = vec![
+        exe.as_os_str().to_os_string(),
+        OsString::from("container-holder"),
+        OsString::from("--inner"),
+    ];
+    argv.extend(tool_flags(&zone.tools));
+    argv.push(zone.name.clone());
+    let e = crate::profile::exec_command(&argv);
+    eprintln!(
+        "instance {}: cannot exec {} ({e})",
+        zone.name(),
+        exe.display()
+    );
+    1
+}
+
+/// `vpn-zone-core container-holder --inner <id>`: [`hold_instance`]'s
+/// child once it is uid 0 of the instance's user namespace and exec'd in
+/// it. Not dumpable from its first step (the zones' holders are, for pasta
+/// and `nsenter`; an instance has neither): nothing of the instance's may
+/// read it, the host's user may. Forks the space and waits for it.
+pub fn run_instance_inner(tools: Tools, home: PathBuf, plan: crate::instance::Plan) -> u8 {
+    // SAFETY: prctl with these arguments takes no pointers.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    let dir = crate::instance::dir(&home.join(STATE_SUBDIR), &plan.id);
+    let applied = match fs::read_to_string(dir.join(crate::instance::SETTINGS)) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("instance {}: cannot read its settings ({e})", plan.id);
+            return 1;
+        }
+    };
+    let zone = instance_zone(tools, home, &plan, &applied);
+    // SAFETY: single-threaded here.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        eprintln!(
+            "instance {}: cannot fork: {}",
+            plan.id,
+            io::Error::last_os_error()
+        );
+        return 1;
+    }
+    if pid == 0 {
+        let code = zone_main(&zone, None);
+        // SAFETY: _exit never returns and touches nothing of ours.
+        unsafe { libc::_exit(libc::c_int::from(code)) };
+    }
+    // The keeper stops the instance by signalling this process; the space
+    // goes with it.
+    USERNS_CHILD.store(pid, Ordering::SeqCst);
+    on_term_and_int(forward_signal);
+    let code = loop {
+        let (dead, code) = wait_any();
+        if dead == pid || dead == -1 {
+            break code;
+        }
+    };
+    stopped_cleanly(code)
+}
+
+/// Keep the instance for as long as it has programs: its space held, its
+/// helpers' ends said (as in a zone), and a look at who is in it whenever
+/// something happens — a launch rings the doorbell
+/// ([`crate::instance::CONTROL`]) once its program is in, or could not get
+/// there; a program it knows of ends. No clock. When the last one is gone
+/// and no launch holds the lock ([`crate::instance::LOCK`]: shared from its
+/// look at the instance until its program is in), it ends
+/// ([`Ending::Idle`]) — and not before a first launch has rung.
+/// `(how it ended, whether the space is gone and reaped)`.
+fn keep(
+    zone: &Zone,
+    holder: libc::pid_t,
+    userns: (u64, u64),
+    helpers: &mut Helpers,
+) -> (Ending, bool) {
+    let (wake_r, wake_w) = match sys::pipe() {
+        Ok(pipe) => pipe,
+        Err(e) => {
+            eprintln!("instance {}: cannot create a pipe ({e})", zone.name());
+            return (Ending::Broken, false);
+        }
+    };
+    for fd in [wake_r.as_raw_fd(), wake_w.as_raw_fd()] {
+        // SAFETY: fcntl on a descriptor we own.
+        unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) };
+    }
+    WAKE.store(wake_w.as_raw_fd(), Ordering::SeqCst);
+    let stop = keeper_asked_to_stop as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    let child = keeper_child_ended as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    // SAFETY: signal(2) with plain function pointers; the handlers only
+    // touch atomics and write(2).
+    unsafe {
+        libc::signal(libc::SIGTERM, stop);
+        libc::signal(libc::SIGINT, stop);
+        libc::signal(libc::SIGCHLD, child);
+    }
+    // A child that ended before the handler: looked for at once.
+    CHILD_ENDED.store(true, Ordering::SeqCst);
+    // The doorbell, bound through the directory's descriptor: its path may
+    // be longer than a socket's. Without it the instance never ends by
+    // itself — said.
+    let held = sys::open_dir(&zone.dir).ok();
+    let doorbell = held.as_ref().and_then(|dir| {
+        let path = format!(
+            "/proc/self/fd/{}/{}",
+            dir.as_raw_fd(),
+            crate::instance::CONTROL
+        );
+        let bound = std::os::unix::net::UnixListener::bind(&path).and_then(|l| {
+            use std::os::unix::fs::PermissionsExt;
+            l.set_nonblocking(true)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            Ok(l)
+        });
+        match bound {
+            Ok(l) => Some(l),
+            Err(e) => {
+                eprintln!(
+                    "instance {}: no doorbell ({e}) — it ends only when stopped",
+                    zone.name()
+                );
+                None
+            }
+        }
+    });
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(zone.path(crate::instance::LOCK))
+        .ok();
+    let mut members: Vec<(i32, OwnedFd)> = Vec::new();
+    let mut armed = false;
+    let mut space_gone = false;
+    let pollin = |fd: RawFd| libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ending = loop {
+        if ASKED_TO_STOP.load(Ordering::SeqCst) {
+            break Ending::Asked;
+        }
+        let mut fds: Vec<libc::pollfd> = Vec::with_capacity(members.len() + 2);
+        fds.push(pollin(wake_r.as_raw_fd()));
+        fds.push(pollin(doorbell.as_ref().map_or(-1, AsRawFd::as_raw_fd)));
+        fds.extend(members.iter().map(|(_, fd)| pollin(fd.as_raw_fd())));
+        // SAFETY: a valid array of pollfd and its length.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        if rc < 0 {
+            if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                // No memory for the poll: looked at again in a moment.
+                thread::sleep(sys::LOOK_AGAIN);
+            }
+            continue;
+        }
+        if fds[0].revents != 0 {
+            let mut buf = [0u8; 64];
+            // SAFETY: read(2) into a buffer of the length passed.
+            while unsafe { libc::read(wake_r.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) } > 0
+            {
+            }
+        }
+        if CHILD_ENDED.swap(false, Ordering::SeqCst) {
+            loop {
+                let mut status: libc::c_int = 0;
+                // SAFETY: `status` is a valid pointer for the duration of the call.
+                let dead = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+                if dead <= 0 {
+                    break;
+                }
+                if dead == holder {
+                    space_gone = true;
+                } else {
+                    helpers.died(zone, dead);
+                }
+            }
+            if space_gone {
+                break Ending::Broken;
+            }
+        }
+        let mut look = false;
+        if fds[1].revents != 0 {
+            if let Some(doorbell) = &doorbell {
+                while let Ok((rung, _)) = doorbell.accept() {
+                    drop(rung);
+                }
+            }
+            look = true;
+            armed = true;
+        }
+        let ended: Vec<bool> = fds[2..].iter().map(|p| p.revents != 0).collect();
+        if ended.contains(&true) {
+            let mut at = 0;
+            members.retain(|_| {
+                let gone = ended[at];
+                at += 1;
+                !gone
+            });
+            look |= members.is_empty();
+        }
+        if !look {
+            continue;
+        }
+        members = crate::place::members(userns, Some(holder));
+        if members.is_empty() && armed && lock.as_ref().is_some_and(lock_exclusive_now) {
+            // Nobody on the way in (a launch holds the lock shared until its
+            // program is in): looked at once more, and nobody is in.
+            members = crate::place::members(userns, Some(holder));
+            if members.is_empty() {
+                break Ending::Idle;
+            }
+            if let Some(lock) = &lock {
+                // SAFETY: flock(2) on a descriptor we hold.
+                unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
+            }
+        }
+    };
+    WAKE.store(-1, Ordering::SeqCst);
+    if doorbell.is_some() {
+        let _ = fs::remove_file(zone.path(crate::instance::CONTROL));
+    }
+    // The lock stays taken to the keeper's end after an idle one: no launch
+    // gets in while the instance goes; one waiting finds it gone, and
+    // starts it again.
+    std::mem::forget(lock);
+    (ending, space_gone)
+}
+
+/// The lock taken exclusively, now or not at all.
+fn lock_exclusive_now(lock: &File) -> bool {
+    // SAFETY: flock(2) on a descriptor we hold.
+    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+/// Every program of the instance whose user namespace is `userns` ended:
+/// TERM (and CONT, for one stopped), waited for, and looked for again —
+/// what forked meanwhile goes the same way. `spare`: the space, which the
+/// keeper ends after them. No clock: a program that does not end is ended
+/// by systemd's stop timeout of the unit — the one clock (O10 of the design).
+fn end_programs(userns: (u64, u64), spare: Option<libc::pid_t>) {
+    loop {
+        let found = crate::place::members(userns, spare);
+        if found.is_empty() {
+            return;
+        }
+        for (_, fd) in &found {
+            sys::pidfd_signal(fd, libc::SIGTERM);
+            sys::pidfd_signal(fd, libc::SIGCONT);
+        }
+        for (_, fd) in &found {
+            sys::pidfd_wait_end(fd);
+        }
+    }
+}
+
+/// `/sys/fs/cgroup` covered in an instance, by an empty read-only tmpfs: it
+/// names every unit and scope of the user's (`vpn-zone@nl.service`,
+/// `app-firefox@….scope`), which zones and containers run and the programs
+/// in them — what a program of one container must not learn of the others
+/// (as X4 of `docs/THREAT-MODEL.md` for `/proc`). Nothing a program needs is
+/// there: its own limits are read in `/proc`. Fatal.
+fn cover_cgroupfs(zone: &Zone) -> Result<(), String> {
+    let dir = Path::new("/sys/fs/cgroup");
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    sys::mount(
+        OsStr::new("tmpfs"),
+        dir,
+        "tmpfs",
+        libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        "mode=0555,size=4k",
+    )
+    .map_err(|e| format!("cannot cover {}: {e}", dir.display()))?;
+    println!("instance {}: the host's cgroups covered", zone.name());
+    Ok(())
 }
 
 /// Which kind of tunnel this zone carries, decided once by [`prepare`] and read
@@ -2348,6 +3173,25 @@ fn start_proxy(
     None
 }
 
+/// What an instance's helpers on the host are told of it (`crate::instance`):
+/// whose its programs are (`--container`) and their user namespace
+/// (`--userns`) — its sockets are bound into its space alone. Nothing for a
+/// zone's.
+fn instance_helper_args(zone: &Zone) -> Vec<OsString> {
+    let Some(instance) = &zone.instance else {
+        return Vec::new();
+    };
+    let mut args = vec![
+        OsString::from("--container"),
+        OsString::from(instance.who.word()),
+    ];
+    if let Some(key) = instance.userns {
+        args.push(OsString::from("--userns"));
+        args.push(OsString::from(crate::place::key_text(key)));
+    }
+    args
+}
+
 /// The sound filter (`pulse_filter`), on the host — from the unit's own
 /// process, in the host's user namespace (`Helpers`) — as the user: listening
 /// in the zone's directory, passing on to the host's `pulse/native`. `None` when
@@ -2376,9 +3220,12 @@ fn start_pulse_filter(zone: &Zone) -> Option<Child> {
         .arg("--upstream")
         .arg(&upstream)
         .arg("--zone")
-        .arg(&zone.name)
+        .arg(zone.settings_name())
         .arg("--zone-dir")
-        .arg(&zone.dir)
+        .arg(zone.settings_dir())
+        // An instance's filter: whose its programs are, and their user
+        // namespace — the socket is theirs alone.
+        .args(instance_helper_args(zone))
         .arg("--config")
         .arg(zone.home.join(CONFIG_SUBDIR))
         .arg("--profiles")
@@ -2432,6 +3279,17 @@ fn start_pipewire_context(zone: &Zone) -> Option<Child> {
         (meta.uid(), meta.gid())
     };
     let exe = std::env::current_exe().ok()?;
+    // An instance's context: its own key and state (`--app-id`,
+    // `--state-dir`) — its network's would be every instance's of it.
+    let own: Vec<OsString> = match &zone.instance {
+        Some(instance) => vec![
+            OsString::from("--app-id"),
+            OsString::from(format!("instance:{}", instance.id)),
+            OsString::from("--state-dir"),
+            zone.dir.clone().into_os_string(),
+        ],
+        None => Vec::new(),
+    };
     let mut child = match Command::new(exe)
         .arg("pipewire-context")
         .arg("--listen")
@@ -2439,9 +3297,11 @@ fn start_pipewire_context(zone: &Zone) -> Option<Child> {
         .arg("--upstream")
         .arg(&upstream)
         .arg("--zone")
-        .arg(&zone.name)
+        .arg(zone.settings_name())
         .arg("--zone-dir")
-        .arg(&zone.dir)
+        .arg(zone.settings_dir())
+        .args(own)
+        .args(instance_helper_args(zone))
         .arg("--config")
         .arg(zone.home.join(CONFIG_SUBDIR))
         .arg("--profiles")
@@ -2522,12 +3382,12 @@ fn start_session_filter(zone: &Zone) {
         .arg("--opener")
         .arg(&zone.tools.opener)
         .arg("--via-broker")
-        .arg(&*zone.name())
+        .arg(zone.settings_name())
         // Who each program's connection is to the portal (LEAK-MODEL §23):
         // the zone, registered by the filter before the program's first call
         // passes; the entry that names it was written as the zone came up.
         .arg("--portal-app")
-        .arg(crate::desktop::zone_app_id(&zone.name()))
+        .arg(crate::desktop::zone_app_id(&zone.settings_name()))
         // A container's connections go by the container's own id where its
         // entry is there (`desktop::container_app_id`, written by sync).
         .arg("--applications")
@@ -2537,9 +3397,18 @@ fn start_session_filter(zone: &Zone) {
         // appears — the project's state is covered right after that
         // (`hide_project_state`).
         .arg("--zone")
-        .arg(&*zone.name())
+        .arg(zone.settings_name())
         .arg("--zone-dir")
-        .arg(&zone.dir)
+        .arg(zone.settings_dir())
+        // An instance's filter is told whose its programs are: the instance
+        // is the container, and no registry is read for it.
+        .args(
+            zone.instance
+                .as_ref()
+                .map(|instance| ["--container".to_owned(), instance.who.word()])
+                .into_iter()
+                .flatten(),
+        )
         .arg("--config")
         .arg(zone.home.join(CONFIG_SUBDIR))
         // The containers' data, held before the zone covers it too: a
@@ -2767,7 +3636,9 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
     // Our directories on the host, owned by the user: the zone's Wayland
     // directory has to exist before it can be bound, and wl-sandbox (the
     // user, on the host) creates its sockets in it.
-    let wayland_host = held.join(crate::wl_sandbox::SOCKET_DIR).join(&*zone.name());
+    let wayland_host = held
+        .join(crate::wl_sandbox::SOCKET_DIR)
+        .join(zone.wayland_dir());
     fs::create_dir_all(&wayland_host)
         .map_err(|e| format!("cannot create {}: {e}", wayland_host.display()))?;
     {
@@ -2818,7 +3689,7 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
     }
     let wayland_zone = runtime
         .join(crate::wl_sandbox::SOCKET_DIR)
-        .join(&*zone.name());
+        .join(zone.wayland_dir());
     bind_entry(&wayland_host, &wayland_zone)?;
     // Read-only in the zone (review 2026-09-25): the sockets of every launch
     // of the zone are in it, and a program of one launch could otherwise
@@ -2833,7 +3704,11 @@ fn seal_runtime(zone: &Zone) -> Result<(), String> {
     sys::remount_read_only(Path::new(&format!("/proc/self/fd/{}", bound.as_raw_fd())))
         .map_err(|e| format!("cannot make {} read-only: {e}", wayland_zone.display()))?;
     drop(bound);
-    kept.push(format!("{}/{}", crate::wl_sandbox::SOCKET_DIR, zone.name()));
+    kept.push(format!(
+        "{}/{}",
+        crate::wl_sandbox::SOCKET_DIR,
+        zone.wayland_dir()
+    ));
     // The scratch directories of the zone's sandboxes, with their bus filters
     // (`fs_sandbox::SCRATCH_SUBDIR`): in the zone's runtime directory, which no
     // other zone sees — they used to be in the shared /tmp. Made here, the
@@ -3980,7 +4855,12 @@ fn pin_parents(zone: &Zone) -> Result<(), String> {
         .map(|p| zone.home.join(p))
         .collect();
     places.extend(input_method_places(&zone.home));
-    places.extend(zone.dir.parent().map(Path::to_path_buf));
+    // The state directory: a zone's is its directory's parent, an
+    // instance's two levels up (`.instances/<key>`).
+    match zone.instance {
+        Some(_) => places.push(zone.home.join(STATE_SUBDIR)),
+        None => places.extend(zone.dir.parent().map(Path::to_path_buf)),
+    }
     // Component-wise order: a directory before those below it.
     let mut parents = std::collections::BTreeSet::new();
     for place in &places {
@@ -4037,6 +4917,12 @@ fn hide_container_storage(zone: &Zone) -> Result<(), String> {
     // `hide_project_state` (`ZONE_KEEPS`), and from there into the keep —
     // each launch gets its own back (`profile-run --storage`), no program
     // sees another's (review 2026-09-27: every zone read every zone's).
+    // An instance is one container: its own storage is kept and no other's
+    // — not even out of the programs' reach (`InstanceInfo`).
+    let own = zone
+        .instance
+        .as_ref()
+        .map(|instance| instance.storage.as_deref());
     for (dir, kind) in crate::home_layer::STORAGE
         .iter()
         .copied()
@@ -4049,8 +4935,22 @@ fn hide_container_storage(zone: &Zone) -> Result<(), String> {
         }
         let keep = kept.join(kind);
         fs::create_dir(&keep).map_err(|e| format!("cannot create {}: {e}", keep.display()))?;
-        sys::mount(dir.as_os_str(), &keep, "", libc::MS_BIND | libc::MS_REC, "")
-            .map_err(|e| format!("cannot keep {}: {e}", dir.display()))?;
+        match own {
+            None => sys::mount(dir.as_os_str(), &keep, "", libc::MS_BIND | libc::MS_REC, "")
+                .map_err(|e| format!("cannot keep {}: {e}", dir.display()))?,
+            Some(storage) => {
+                let name = storage
+                    .filter(|s| s.parent() == Some(dir.as_path()))
+                    .and_then(Path::file_name);
+                if let Some(name) = name {
+                    let (from, to) = (dir.join(name), keep.join(name));
+                    fs::create_dir(&to)
+                        .map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+                    sys::mount(from.as_os_str(), &to, "", libc::MS_BIND | libc::MS_REC, "")
+                        .map_err(|e| format!("cannot keep {}: {e}", from.display()))?;
+                }
+            }
+        }
         sys::mount(
             OsStr::new("tmpfs"),
             &dir,
@@ -4082,11 +4982,18 @@ fn hide_container_storage(zone: &Zone) -> Result<(), String> {
 fn hide_project_state(zone: &Zone) -> Result<Zone, String> {
     let own =
         sys::open_dir(&zone.dir).map_err(|e| format!("cannot open {}: {e}", zone.dir.display()))?;
-    let state = zone
-        .dir
-        .parent()
-        .ok_or("the zone's directory has no parent")?;
-    seal_project_state(state, &zone.home, &ZONE_KEEPS)?;
+    // An instance's directory is `.instances/<key>` below the state.
+    let state = match zone.instance {
+        Some(_) => zone.home.join(STATE_SUBDIR),
+        None => zone
+            .dir
+            .parent()
+            .ok_or("the zone's directory has no parent")?
+            .to_path_buf(),
+    };
+    let keeps = zone.keeps();
+    let keeps: Vec<(&str, bool)> = keeps.iter().map(|(n, w)| (n.as_str(), *w)).collect();
+    seal_project_state(&state, &zone.home, &keeps)?;
     println!("zone {}: the project's state hidden", zone.name());
     // SAFETY: getpid(2) takes no arguments and cannot fail.
     let pid = unsafe { libc::getpid() };
@@ -4099,6 +5006,7 @@ fn hide_project_state(zone: &Zone) -> Result<Zone, String> {
         nix_daemon: zone.nix_daemon,
         host_files_writable: zone.host_files_writable,
         audio_manager: zone.audio_manager,
+        instance: zone.instance.clone(),
     })
 }
 
@@ -4128,7 +5036,8 @@ pub(crate) fn seal_project_state(
                 continue;
             }
             let to = state.join(name);
-            fs::create_dir(&to).map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+            // All the way down: an instance keeps `.throwaway/<its layer>`.
+            fs::create_dir_all(&to).map_err(|e| format!("cannot create {}: {e}", to.display()))?;
             sys::mount(from.as_os_str(), &to, "", libc::MS_BIND | libc::MS_REC, "")
                 .map_err(|e| format!("cannot bind {} back: {e}", to.display()))?;
             if !writable {
@@ -5033,10 +5942,16 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     let pid = unsafe { libc::getpid() };
     // The start time first: whoever sees the new number sees its start too.
     let stamp = sys::process_stamp(pid).ok_or("cannot read our own start time")?;
-    fs::write(zone.path(START), format!("{stamp}\n"))
-        .map_err(|e| format!("cannot write {START}: {e}"))?;
-    fs::write(zone.path(PID), format!("{pid}\n"))
-        .map_err(|e| format!("cannot write {PID}: {e}"))?;
+    // An instance's space names itself so (`crate::instance::up`): a
+    // `zone.pid` there would be a zone's to every reader of zones.
+    let (pid_file, start_file) = match zone.instance {
+        Some(_) => (crate::instance::PID, crate::instance::START),
+        None => (PID, START),
+    };
+    fs::write(zone.path(start_file), format!("{stamp}\n"))
+        .map_err(|e| format!("cannot write {start_file}: {e}"))?;
+    fs::write(zone.path(pid_file), format!("{pid}\n"))
+        .map_err(|e| format!("cannot write {pid_file}: {e}"))?;
     // Which build runs the zone: an update leaves it running (keep-old), and
     // status/doctor/watch tell the person it is left on the previous one.
     crate::build::record(&zone.dir);
@@ -5107,6 +6022,9 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // directory is reached through a descriptor.
     let zone = &hide_project_state(zone)?;
     hide_container_storage(zone)?;
+    if zone.instance.is_some() {
+        cover_cgroupfs(zone)?;
+    }
 
     let Some(ZoneLinks {
         backend,
@@ -6425,6 +7343,158 @@ mod tests {
         // A user whose own id is the client's cannot have both.
         assert!(map_args(42, 100_000, CLIENT_ID, true).is_err());
         assert!(map_args(42, 100_000, CLIENT_ID, false).is_ok());
+    }
+
+    /// An instance's root is the fourth subordinate id, never a zone's
+    /// (J3 of the container design): the user's own id onto itself as in a
+    /// zone.
+    #[test]
+    fn an_instances_root_is_not_a_zones() {
+        assert_eq!(
+            instance_map_args(42, 100_000, 1000),
+            ["42", "0", "100003", "1", "1000", "1000", "1"]
+        );
+        assert_ne!(
+            instance_map_args(42, 100_000, 1000)[2],
+            map_args(42, 100_000, 1000, true).unwrap()[2]
+        );
+    }
+
+    #[test]
+    fn a_ranges_count_is_its_third_field() {
+        let text = "bob:200000:65536\nalice:100000:3\n1000:300000:65536\n";
+        assert_eq!(subid_count_in(text, "alice", 1001), Some(3));
+        assert_eq!(subid_count_in(text, "bob", 1002), Some(65536));
+        // By the numeric id too, as shadow reads it.
+        assert_eq!(subid_count_in(text, "carol", 1000), Some(65536));
+        assert_eq!(subid_count_in(text, "dave", 1003), None);
+        assert_eq!(subid_count_in("alice:100000\n", "alice", 1001), None);
+        assert_eq!(subid_count_in("alice:100000:x\n", "alice", 1001), None);
+    }
+
+    fn tools_with_every_path() -> Tools {
+        Tools {
+            ip: PathBuf::from("/t/ip"),
+            awg: PathBuf::from("/t/awg"),
+            wg: PathBuf::from("/t/wg"),
+            pasta: PathBuf::from("/t/pasta"),
+            nft: PathBuf::from("/t/nft"),
+            openconnect: PathBuf::from("/t/openconnect"),
+            dbus_proxy: PathBuf::from("/t/xdg-dbus-proxy"),
+            opener: PathBuf::from("/t/opener"),
+            kdialog: PathBuf::from("/t/kdialog"),
+            window: PathBuf::from("/t/window"),
+            runner: PathBuf::from("/t/cellward"),
+        }
+    }
+
+    /// The keeper's re-exec gets the very tools it was given, read back by
+    /// the parser the unit's line is read with; one left out stays out.
+    #[test]
+    fn the_keepers_tools_survive_its_re_exec() {
+        let tools = tools_with_every_path();
+        let mut argv = tool_flags(&tools);
+        argv.push(OsString::from("work"));
+        let parsed = Args::parse(&argv).unwrap();
+        assert_eq!(parsed.tools, tools);
+        assert_eq!(parsed.name, OsString::from("work"));
+        let without_window = Tools {
+            window: PathBuf::new(),
+            ..tools_with_every_path()
+        };
+        let flags = tool_flags(&without_window);
+        assert!(!flags.contains(&OsString::from("--window")));
+        let mut argv = flags;
+        argv.push(OsString::from(":tmp:vpn-profile-x"));
+        assert_eq!(Args::parse(&argv).unwrap().tools, without_window);
+    }
+
+    #[test]
+    fn frozen_settings_are_read_as_written() {
+        let text = "hermetic=true\nnix_daemon=false\nhost_files_writable=true\n";
+        assert!(frozen(text, "hermetic"));
+        assert!(!frozen(text, "nix_daemon"));
+        assert!(frozen(text, "host_files_writable"));
+        // Not there, or not `true`: off.
+        assert!(!frozen(text, "audio_manager"));
+        assert!(!frozen("hermetic=yes\n", "hermetic"));
+    }
+
+    fn zone_for(instance: Option<InstanceInfo>) -> Zone {
+        Zone {
+            name: OsString::from("nl"),
+            dir: PathBuf::from("/h/.local/state/vpn-zones/nl"),
+            home: PathBuf::from("/h"),
+            tools: tools_with_every_path(),
+            hermetic: true,
+            nix_daemon: false,
+            host_files_writable: false,
+            audio_manager: false,
+            instance,
+        }
+    }
+
+    /// A zone resolves exactly as before the instances: its own name and
+    /// directory for its settings and its Wayland sockets, and the keeps it
+    /// always had — pinned, so that the instance mode changes nothing of it.
+    #[test]
+    fn a_zone_is_what_it_was_and_an_instance_its_networks() {
+        let zone = zone_for(None);
+        assert_eq!(zone.settings_name(), "nl");
+        assert_eq!(
+            zone.settings_dir(),
+            Path::new("/h/.local/state/vpn-zones/nl")
+        );
+        assert_eq!(zone.wayland_dir(), "nl");
+        assert_eq!(
+            zone.keeps(),
+            vec![
+                (".throwaway".to_owned(), true),
+                (".running".to_owned(), false)
+            ]
+        );
+        assert!(instance_helper_args(&zone).is_empty());
+
+        let info = |id: &str, storage: Option<&str>| InstanceInfo {
+            id: id.to_owned(),
+            network: "offline".to_owned(),
+            network_dir: PathBuf::from("/h/.local/state/vpn-zones/offline"),
+            who: crate::instance::who_of(id),
+            storage: storage.map(PathBuf::from),
+            userns: Some((4, 4_026_532_000)),
+        };
+        let work = zone_for(Some(info(
+            "work",
+            Some("/h/.local/state/vpn-profiles/work"),
+        )));
+        assert_eq!(work.settings_name(), "offline");
+        assert_eq!(
+            work.settings_dir(),
+            Path::new("/h/.local/state/vpn-zones/offline")
+        );
+        assert_eq!(work.wayland_dir(), crate::instance::key("work"));
+        // Its storage is not the project's state: nothing of that is kept,
+        // `.running` least of all.
+        assert!(work.keeps().is_empty());
+        assert_eq!(
+            instance_helper_args(&work),
+            ["--container", "work", "--userns", "4:4026532000"]
+                .map(OsString::from)
+                .to_vec()
+        );
+        // A throwaway keeps its own layer, writable, and nothing else.
+        let tmp = zone_for(Some(info(
+            ":tmp:vpn-profile-x",
+            Some("/h/.local/state/vpn-zones/.throwaway/vpn-profile-x"),
+        )));
+        assert_eq!(
+            tmp.keeps(),
+            vec![(".throwaway/vpn-profile-x".to_owned(), true)]
+        );
+        assert_eq!(instance_helper_args(&tmp)[1], "?");
+        let main = zone_for(Some(info("main:offline", None)));
+        assert!(main.keeps().is_empty());
+        assert_eq!(instance_helper_args(&main)[1], "main");
     }
 
     /// The client's root takes the devices, its directory and the files it is

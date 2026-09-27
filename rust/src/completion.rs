@@ -259,7 +259,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 &mut out,
                 &[
                     "list", "show", "create", "rm", "set", "assign", "unassign", "grant", "revoke",
-                    "merge", "devices", "links",
+                    "merge", "devices", "links", "stop", "kill",
                 ],
             ),
             "container" if pos == 4 && word(2) == "create" => strs(&mut out, &["--home"]),
@@ -270,7 +270,16 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 if pos == 3
                     && matches!(
                         word(2),
-                        "grant" | "revoke" | "merge" | "show" | "set" | "rm" | "devices" | "links"
+                        "grant"
+                            | "revoke"
+                            | "merge"
+                            | "show"
+                            | "set"
+                            | "rm"
+                            | "devices"
+                            | "links"
+                            | "stop"
+                            | "kill"
                     ) =>
             {
                 owned(&mut out, &snap.containers)

@@ -31,6 +31,22 @@ Usage:
         a WireGuard/AmneziaWG one or an OpenConnect one, depending on whether
         its config has an [OpenConnect] section.
 
+  vpn-zone-core container-holder [--ip P] [--nft P] [--dbus-proxy P] [--opener P]
+                                 [--kdialog P] [--window P] [--runner P] <id>
+        A container's instance (docs/CONTAINERS.md §3.6): a user namespace
+        whose root is the user's fourth subordinate id, a net+mount+IPC
+        namespace with loopback only, every cover a zone's programs have, and
+        the helpers of its network. Kept while its programs run: it stops when
+        the last one ends, and ends them when it is stopped. The ExecStart of
+        vpn-zone-container@<id>.service.
+
+  vpn-zone-core container-enter --instance <id> [--systemctl P] -- cmd...
+        Run the command in instance <id>: its user, network and IPC
+        namespaces for this process, its mount namespace (a copy of it of the
+        launch's own) for the command, with the instance's capabilities kept
+        for profile-run. Starts the instance with systemctl when it stopped
+        meanwhile. Called from `cellward run`.
+
   vpn-zone-core system-zone <ns-up|ns-down|up|down> [--ip P] [--awg P] [--wg P]
                             [--nft P] [--config P] <name>
         A system zone (docs/SYSTEM.md), as root: ns-up makes the namespace
@@ -188,6 +204,15 @@ fn main() -> ExitCode {
             Ok(parsed) => ExitCode::from(zone::run(parsed)),
             Err(e) => {
                 eprintln!("vpn-zone-core zone-holder: {e}");
+                eprint!("{USAGE}");
+                ExitCode::from(EXIT_USAGE)
+            }
+        },
+        Some("container-holder") => ExitCode::from(vpn_zone::instance::holder_main(&args[1..])),
+        Some("container-enter") => match vpn_zone::enter::Args::parse(&args[1..]) {
+            Ok(parsed) => ExitCode::from(vpn_zone::enter::run(&parsed)),
+            Err(e) => {
+                eprintln!("vpn-zone-core container-enter: {e}");
                 eprint!("{USAGE}");
                 ExitCode::from(EXIT_USAGE)
             }

@@ -43,6 +43,9 @@ WORK=$(mktemp -d)
 STATE="$HOME/.local/state/vpn-zones"
 PROFILES="$HOME/.local/state/vpn-profiles"
 TEST_ZONES=(smoke smoke-crlf offsmoke ocsmoke)
+# Экземпляр контейнера без сети (этап 1 контейнерного дизайна): свой
+# контейнер-слой, держатель запускается напрямую, как держатель зоны.
+INST=smoke-inst
 TEST_PROFILE=smoketest-prof
 # Доверенный сертификат: контейнер, который ему доверяет, и соседний, который нет.
 CA_PROFILE=smoketest-ca
@@ -99,12 +102,13 @@ cleanup() {
   rm -rf "${PROFILES:?}/$TEST_PROFILE" "${STATE:?}/.running/$TEST_PROFILE"
   rm -rf "${PROFILES:?}/$CA_PROFILE" "${STATE:?}/.running/$CA_PROFILE" \
          "${PROFILES:?}/$NOCA_PROFILE" "${STATE:?}/.running/$NOCA_PROFILE"
+  rm -rf "${PROFILES:?}/$INST" "${STATE:?}/.running/$INST" "$HOME/.config/vpn-zones/containers/$INST"
   rm -f "$MARKER" "$DIRECT_MARKER" "$FSPERMS" "$FSMARKER"
   # Память пикера по синтетическому ключу — свои файлы, чужих здесь не бывает.
   rm -f "${STATE:?}/.last/$PICKKEY" "${STATE:?}/.lastprofile/$PICKKEY" \
         "${STATE:?}/.labels/$PICKKEY" "${STATE:?}/.running/__main__/$PICKKEY"
   if [ "$rc" -ne 0 ]; then
-    for z in smoke offsmoke ocsmoke; do
+    for z in smoke offsmoke ocsmoke inst; do
       if [ -s "$WORK/holder-$z.log" ]; then
         printf -- '--- журнал держателя %s ---\n' "$z"
         cat "$WORK/holder-$z.log"
@@ -130,11 +134,13 @@ build() {
 build scripts.cellward cellward
 build scripts.vpn-zone-pick vpn-zone-pick
 build zoneHolder zone-holder
+build containerHolder container-holder
 build smokeTools tools
 
 VPN_ZONE="$WORK/cellward/bin/cellward"
 VPN_ZONE_PICK="$WORK/vpn-zone-pick/bin/vpn-zone-pick"
 ZONE_HOLDER="$WORK/zone-holder/bin/zone-holder"
+CONTAINER_HOLDER="$WORK/container-holder/bin/container-holder"
 WG="$WORK/tools/bin/wg"
 IP="$WORK/tools/bin/ip"
 NSENTER="$WORK/tools/bin/nsenter"
@@ -895,6 +901,79 @@ step "Внутри offline-зоны: правил нет — запрещать 
 offrules=$(in_off_root "$NFT" list ruleset 2>/dev/null || true)
 [ -z "$offrules" ] || fail "в offline-зоне появился ruleset: $offrules"
 echo "ok: ruleset пуст"
+
+# --- 7а. Экземпляр контейнера без сети ---------------------------------------
+# Этап 1 контейнерного дизайна (rust/src/instance.rs): у запущенного
+# контейнера свои пространства имён — пользователь, сеть (только lo), точки
+# монтирования, IPC, — а запуск с сетью offline идёт в него через
+# `container-enter`, не через зону offline. Держатель — напрямую (systemd
+# --user на раннере нет); запуск находит экземпляр поднятым и systemctl не
+# зовёт. Экземпляр живёт, пока в нём есть программы: одна держит его, пока
+# идут проверки.
+step "Экземпляр контейнера $INST: держатель без systemd"
+"$VPN_ZONE" container create "$INST" --home layer >/dev/null
+"$CONTAINER_HOLDER" "$INST" >"$WORK/holder-inst.log" 2>&1 &
+HOLDER_PIDS+=("$!")
+IPID=""
+for _ in $(seq 1 300); do
+  IPID=$("$VPN_ZONE" status --json | grep -o "\"id\":\"$INST\",[^}]*\"pid\":[0-9]*" \
+    | grep -o '"pid":[0-9]*' | cut -d: -f2 || true)
+  [ -n "$IPID" ] && break
+  sleep 0.1
+done
+[ -n "$IPID" ] || fail "экземпляр $INST не поднялся за 30 секунд"
+echo "ok: экземпляр $INST поднят, его пространство — pid $IPID"
+
+step "Экземпляр: корень — четвёртый подчинённый id, не корень зон"
+sub=$(grep "^$(id -un):" /etc/subuid | head -1 | cut -d: -f2)
+iuid=$(awk '/^Uid:/ {print $2}' "/proc/$IPID/status")
+[ "$iuid" = "$((sub + 3))" ] || fail "корень экземпляра — uid $iuid, а не $((sub + 3))"
+echo "ok: uid $iuid"
+
+step "Запуск offline в экземпляр: только lo, своя сеть, зона offline не нужна"
+"$VPN_ZONE" run offline --container "$INST" -- sleep 300 &
+KEEPER=$!
+own_ns=$(readlink /proc/self/ns/net)
+kept=""
+for _ in $(seq 1 300); do
+  for p in $(pgrep -x sleep || true); do
+    ns=$(readlink "/proc/$p/ns/net" 2>/dev/null || true)
+    if [ -n "$ns" ] && [ "$ns" != "$own_ns" ] && [ "$ns" = "$(readlink "/proc/$IPID/ns/net")" ]; then
+      kept=1
+    fi
+  done
+  [ -n "$kept" ] && break
+  sleep 0.1
+done
+[ -n "$kept" ] || fail "программа запуска не оказалась в сети экземпляра"
+links=$("$VPN_ZONE" run offline --container "$INST" -- "$IP" -o link show)
+echo "$links"
+[ "$(echo "$links" | wc -l)" -eq 1 ] || fail "в экземпляре есть интерфейсы кроме lo"
+echo "$links" | grep -q ': lo:' || fail "в экземпляре нет даже lo"
+ins=$("$VPN_ZONE" run offline --container "$INST" -- readlink /proc/self/ns/net)
+[ "$ins" != "$own_ns" ] || fail "запуск в экземпляр оказался в сети хоста"
+"$VPN_ZONE" run offline --container "$INST" -- test ! -e "$STATE/.running" \
+  || fail "реестр запусков виден в экземпляре"
+echo "ok: сеть экземпляра $ins, только lo"
+
+step "Экземпляр останавливается сигналом держателю, и его программы — с ним"
+kill -TERM "${HOLDER_PIDS[-1]}"
+for _ in $(seq 1 300); do
+  kill -0 "$KEEPER" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$KEEPER" 2>/dev/null; then
+  fail "программа пережила остановку экземпляра"
+fi
+for _ in $(seq 1 300); do
+  "$VPN_ZONE" status --json | grep -q "\"id\":\"$INST\"" || break
+  sleep 0.1
+done
+if "$VPN_ZONE" status --json | grep -q "\"id\":\"$INST\""; then
+  fail "экземпляр остался в status после остановки"
+fi
+"$VPN_ZONE" container rm "$INST" >/dev/null
+echo "ok: остановлен, программы закрыты"
 
 # --- 7б. Зона OpenConnect ----------------------------------------------------
 # ВТОРОЙ ТИП БЭКЕНДА (rust/src/openconnect.rs). Проверяется весь контур целиком:

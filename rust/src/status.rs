@@ -172,6 +172,7 @@ pub fn networks(tools: &Tools) -> String {
     ];
     let mut offline_listed = false;
     let installed = crate::build::installed(tools);
+    let instances = crate::instance::running(&tools.state);
     for dir in visible_entries(&tools.state) {
         if !dir.is_dir() {
             continue;
@@ -296,8 +297,15 @@ pub fn networks(tools: &Tools) -> String {
         } else {
             "local"
         };
+        // The containers' instances that run with no network (stage 1 of
+        // the container design): what `offline` is now.
+        let attached = if name == crate::launch::OFFLINE {
+            format!(",\"attached\":{}", attached_to(&instances, &name))
+        } else {
+            String::new()
+        };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"camera\":{camera},\"microphone\":{microphone},\"screencast\":{screencast},\"audio_manager\":{audio_manager},\"system_zone\":{system_zone},\"frame_color\":{frame_color},\"build\":{build},\"restart_needed\":{restart_needed}}}",
+            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"camera\":{camera},\"microphone\":{microphone},\"screencast\":{screencast},\"audio_manager\":{audio_manager},\"system_zone\":{system_zone},\"frame_color\":{frame_color},\"build\":{build},\"restart_needed\":{restart_needed}{attached}}}",
             string(&name),
             dir.join(NO_ESCAPE).exists()
         ));
@@ -314,10 +322,11 @@ pub fn networks(tools: &Tools) -> String {
             "{{\"name\":\"offline\",\"kind\":\"offline\",\"aliases\":[],\"source\":\"default\",\"up\":false,\
              \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
              \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\
-             \"microphone\":{},\"screencast\":{},\"audio_manager\":null,\"system_zone\":null,\"frame_color\":{},\"build\":null,\"restart_needed\":null}}",
+             \"microphone\":{},\"screencast\":{},\"audio_manager\":null,\"system_zone\":null,\"frame_color\":{},\"build\":null,\"restart_needed\":null,\"attached\":{}}}",
             sourced_str(mic.as_str(), mic_source),
             sourced_str(cast.as_str(), cast_source),
-            sourced_str(&color.hex(), source)
+            sourced_str(&color.hex(), source),
+            attached_to(&instances, crate::launch::OFFLINE)
         ));
     }
     array(items)
@@ -384,20 +393,108 @@ pub fn system_networks() -> String {
     )
 }
 
-/// The live launches of a container: `{app, pid, network}`.
+/// The live launches of a container: `{app, pid, network, instance}` — the
+/// instance a launch runs in (`crate::instance`, offline since stage 1 of
+/// the container design), `null` for one in a zone or unconfined.
 fn running(tools: &Tools, c: &Container) -> String {
     let records = container::live_records(tools, c);
+    let asks = c.network.value == container::Network::Ask;
     array(
         records
             .iter()
             .map(|(app, r)| {
+                let instance = (r.zone == crate::launch::OFFLINE)
+                    .then(|| {
+                        crate::instance::id_of(
+                            crate::instance::Of::Container {
+                                name: &c.name,
+                                home: c.home,
+                                asks,
+                            },
+                            &r.zone,
+                        )
+                    })
+                    .flatten()
+                    .map_or_else(|| "null".to_owned(), |id| string(&id));
                 format!(
-                    "{{\"app\":{},\"pid\":{},\"network\":{}}}",
+                    "{{\"app\":{},\"pid\":{},\"network\":{},\"instance\":{instance}}}",
                     string(app),
                     r.pid,
                     string(&r.zone)
                 )
             })
+            .collect(),
+    )
+}
+
+/// The ids of the running instances in `network`, as a JSON array.
+fn attached_to(instances: &[crate::instance::Running], network: &str) -> String {
+    array(
+        instances
+            .iter()
+            .filter(|i| i.network == network)
+            .map(|i| string(&i.id))
+            .collect(),
+    )
+}
+
+/// One running container instance (`crate::instance`, the container design
+/// of 2026-09-27): its runtime facts. Stage 1 has no way out for one
+/// (`exit` `none`, `why` `offline`), no switch, no pid namespace of its own.
+pub fn instance(tools: &Tools, running: &crate::instance::Running) -> String {
+    let container = match crate::instance::who_of(&running.id) {
+        crate::origin::Who::Container(name) => string(&name),
+        crate::origin::Who::Main => string(crate::instance::MAIN),
+        crate::origin::Who::Unknown => "null".to_owned(),
+    };
+    let since = fs::metadata(running.dir.join(crate::instance::READY))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or_else(
+            || "null".to_owned(),
+            |d| string(&crate::journal::utc(d.as_secs())),
+        );
+    let build = crate::build::string(crate::build::age(
+        &running.dir,
+        &crate::build::installed(tools),
+    ));
+    let restart_needed = crate::hermetic::restart_needed_of(
+        &running.dir,
+        &tools.state.join(&running.network),
+        &tools.config,
+        &running.network,
+    )
+    .map_or("null".to_owned(), |names| {
+        array(names.into_iter().map(string).collect())
+    });
+    // Its live launches, by the registry.
+    let launches = crate::instance::container_of(&running.id).map_or(0, |name| {
+        let dir = tools.state.join(".running").join(name);
+        crate::registry::live_records(&dir, &|pid| {
+            crate::registry::alive(&tools.state.join(".running"), pid)
+        })
+        .iter()
+        .filter(|(_, r)| r.zone == running.network)
+        .count()
+    });
+    format!(
+        "{{\"id\":{},\"container\":{container},\"network\":{},\"exit\":\"none\",\
+         \"why\":\"offline\",\"up\":true,\"pid\":{},\"since\":{since},\"epoch\":1,\
+         \"pid_namespace\":false,\"build\":{build},\"restart_needed\":{restart_needed},\
+         \"programs\":{launches},\"live_switch\":{{\"available\":false,\"reason\":\"unsupported\"}}}}",
+        string(&running.id),
+        string(&running.network),
+        running.pid
+    )
+}
+
+/// Every running container instance ([`instance`]).
+pub fn instances(tools: &Tools) -> String {
+    array(
+        crate::instance::running(&tools.state)
+            .iter()
+            .map(|i| instance(tools, i))
             .collect(),
     )
 }
@@ -535,10 +632,19 @@ pub fn container(tools: &Tools, c: &Container) -> String {
             })
             .collect(),
     );
+    // Its running instances' ids (`crate::instance`): one, or one per
+    // network for a container of the main home.
+    let instances = array(
+        crate::instance::running(&tools.state)
+            .iter()
+            .filter(|i| crate::instance::container_of(&i.id) == Some(c.name.as_str()))
+            .map(|i| string(&i.id))
+            .collect(),
+    );
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
          \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"devices\":{devices},\"links\":{links}}}",
+         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"devices\":{devices},\"links\":{links},\"instances\":{instances}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),
@@ -709,12 +815,13 @@ pub fn document(tools: &Tools) -> String {
         format!("{{\"uid\":{uid},\"gid\":{gid}}}")
     });
     format!(
-        "{{\"schema_version\":{SCHEMA_VERSION},\"defaults\":{},\"networks\":{},\"containers\":{},\"apps\":{},\"system_networks\":{},\"uplink_owner\":{uplink_owner}}}",
+        "{{\"schema_version\":{SCHEMA_VERSION},\"defaults\":{},\"networks\":{},\"containers\":{},\"apps\":{},\"system_networks\":{},\"uplink_owner\":{uplink_owner},\"instances\":{}}}",
         defaults(tools),
         networks(tools),
         containers(tools),
         apps(tools),
-        system_networks()
+        system_networks(),
+        instances(tools)
     )
 }
 

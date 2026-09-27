@@ -1521,6 +1521,154 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     (true, checks)
 }
 
+/// Whose host uid the root of the instance whose space is `pid` is: the
+/// user's fourth subordinate id, never a zone's root — the first, which is
+/// dumpable on purpose and any process of the same host uid may trace (J3 of
+/// the container design, `zone::instance_map_args`).
+pub fn instance_root_check(status: Option<&str>, subuid: Option<u64>) -> Check {
+    let uid = status.and_then(|text| {
+        text.lines()
+            .find_map(|line| line.strip_prefix("Uid:"))
+            .and_then(|ids| ids.split_whitespace().next()?.parse::<u64>().ok())
+    });
+    let expected = subuid.map(|sub| sub + u64::from(crate::instance::ROOT_ID));
+    match (uid, expected) {
+        (Some(uid), Some(expected)) if uid == expected => Check::new(
+            "instance-root",
+            Level::Ok,
+            format!("корень экземпляра — uid {uid} хоста: не корень зон"),
+        ),
+        (Some(uid), Some(expected)) => Check::new(
+            "instance-root",
+            Level::Fail,
+            format!(
+                "корень экземпляра — uid {uid} хоста, а не {expected}: процесс зоны может \
+                 его трассировать"
+            ),
+        ),
+        _ => Check::new(
+            "instance-root",
+            Level::Skip,
+            "не прочитать, чей uid у корня экземпляра",
+        ),
+    }
+}
+
+/// The checks of a running container's instance (`crate::instance`): its
+/// build, its root (J3), the probe — run in it as a launch runs, through
+/// `container-enter` (the same namespaces, the same capabilities to shed) —
+/// and its PipeWire.
+pub fn instance_checks(tools: &Tools, running: &crate::instance::Running, uid: u32) -> Vec<Check> {
+    let mut checks = vec![build_check(crate::build::age(
+        &running.dir,
+        &crate::build::installed(tools),
+    ))];
+    checks.push(instance_root_check(
+        fs::read_to_string(format!("/proc/{}/status", running.pid))
+            .ok()
+            .as_deref(),
+        crate::zone::uplink_owner().map(|(subuid, _)| subuid),
+    ));
+    // What it came up with (`instance::SETTINGS`), which the probe judges by.
+    let applied =
+        fs::read_to_string(running.dir.join(crate::instance::SETTINGS)).unwrap_or_default();
+    let on = |name: &str| {
+        applied
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .any(|(key, value)| key.trim() == name && value.trim() == "true")
+    };
+    let (hermetic, nix_daemon, audio_manager) =
+        (on("hermetic"), on("nix_daemon"), on("audio_manager"));
+    // Its Wayland sockets go by its key: the probe's "own" directory.
+    let mut probe_args = vec![
+        uid.to_string(),
+        format!("--zone={}", crate::instance::key(&running.id)),
+    ];
+    if hermetic {
+        probe_args.push("--hermetic".to_owned());
+    }
+    if nix_daemon {
+        probe_args.push("--nix-daemon".to_owned());
+    }
+    if audio_manager {
+        probe_args.push("--audio-manager".to_owned());
+    }
+    if let Some(devs) = host_devs() {
+        probe_args.push(format!("--host-devs={devs}"));
+    }
+    let closed = closed_identities(uid, hermetic, nix_daemon, audio_manager);
+    if !closed.is_empty() {
+        probe_args.push(format!("--closed={closed}"));
+    }
+    let mut command = Command::new(&tools.core);
+    command
+        .env_clear()
+        .env("HOME", &tools.home)
+        .args(["container-enter", "--instance", running.id.as_str(), "--"])
+        .arg(&tools.core)
+        .arg("doctor-probe")
+        .args(&probe_args);
+    let waiting = format!(
+        "doctor: жду пробу в контейнере {} — Ctrl-C: не ждать (проверка не пройдена)",
+        running.id
+    );
+    match run_bounded(&mut command, PROBE_OUTPUT_MAX, Some(&waiting)) {
+        Ok(out) if out.stopped => checks.push(Check::new(
+            "probe",
+            Level::Fail,
+            "пробу в контейнере остановили сигналом — она снята (проверка не пройдена)",
+        )),
+        Ok(out) if out.interrupted => checks.push(Check::new(
+            "probe",
+            Level::Fail,
+            "пробу в контейнере не дождались (Ctrl-C) — проверка не пройдена",
+        )),
+        Ok(out) if out.overflow => checks.push(Check::new(
+            "probe",
+            Level::Fail,
+            format!(
+                "проба в контейнере ответила больше {} МБ — остановлена, ответ не принят",
+                PROBE_OUTPUT_MAX / (1024 * 1024)
+            ),
+        )),
+        Ok(out) if out.success => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let parsed: Vec<Check> = text.lines().filter_map(Check::parse_line).collect();
+            if parsed.is_empty() {
+                checks.push(Check::new(
+                    "probe",
+                    Level::Fail,
+                    "проба в контейнере ничего не ответила",
+                ));
+            }
+            checks.extend(repeated_check(&parsed));
+            checks.extend(parsed);
+        }
+        Ok(out) => checks.push(Check::new(
+            "probe",
+            Level::Fail,
+            format!(
+                "проба в контейнере не запустилась: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        )),
+        Err(e) => checks.push(Check::new(
+            "probe",
+            Level::Fail,
+            format!("не запустить {}: {e}", tools.core.display()),
+        )),
+    }
+    if let Some(check) = pipewire_check(
+        hermetic,
+        audio_manager,
+        crate::pw_context::read_state(&running.dir),
+    ) {
+        checks.push(check);
+    }
+    checks
+}
+
 /// A hermetic zone's PipeWire (`crate::pw_context`): restricted through
 /// WirePlumber's policy, closed without it, or — an audio manager — the
 /// host's raw socket, said loudly. `None` for an ordinary zone: its raw
@@ -1593,10 +1741,34 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     // SAFETY: getuid cannot fail.
     let uid = unsafe { libc::getuid() };
     let system = system_checks(tools, uid);
-    let names = if asked.is_empty() {
+    // The containers' instances (`crate::instance`): every running one, or
+    // those of the networks, containers or ids asked for.
+    let instances: Vec<(crate::instance::Running, Vec<Check>)> =
+        crate::instance::running(&tools.state)
+            .into_iter()
+            .filter(|i| {
+                asked.is_empty()
+                    || asked.iter().any(|n| {
+                        *n == i.id
+                            || *n == i.network
+                            || crate::instance::container_of(&i.id) == Some(n.as_str())
+                    })
+            })
+            .map(|i| {
+                let checks = instance_checks(tools, &i, uid);
+                (i, checks)
+            })
+            .collect();
+    // An instance asked for by its id or its container's name is no zone.
+    let is_instance = |name: &String| {
+        instances.iter().any(|(i, _)| {
+            *name == i.id || crate::instance::container_of(&i.id) == Some(name.as_str())
+        })
+    };
+    let names: Vec<String> = if asked.is_empty() {
         all_zones(tools)
     } else {
-        asked
+        asked.into_iter().filter(|n| !is_instance(n)).collect()
     };
     let zones: Vec<(String, bool, Vec<Check>)> = names
         .into_iter()
@@ -1613,6 +1785,7 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     let worst = system
         .iter()
         .chain(zones.iter().flat_map(|(_, _, c)| c.iter()))
+        .chain(instances.iter().flat_map(|(_, c)| c.iter()))
         .map(|c| c.level)
         .max()
         .unwrap_or(Level::Ok);
@@ -1634,12 +1807,24 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
                 )
             })
             .collect();
+        let instances_json: Vec<String> = instances
+            .iter()
+            .map(|(i, checks)| {
+                format!(
+                    "{{\"id\":{},\"network\":{},\"checks\":{}}}",
+                    json_string(&i.id),
+                    json_string(&i.network),
+                    list(checks)
+                )
+            })
+            .collect();
         println!(
-            "{{\"schema_version\":{},\"worst\":{},\"system\":{},\"zones\":[{}]}}",
+            "{{\"schema_version\":{},\"worst\":{},\"system\":{},\"zones\":[{}],\"instances\":[{}]}}",
             crate::status::SCHEMA_VERSION,
             json_string(worst.as_str()),
             list(&system),
-            zones_json.join(",")
+            zones_json.join(","),
+            instances_json.join(",")
         );
     } else {
         // Nothing that came from a zone reaches the terminal as it is.
@@ -1659,6 +1844,14 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
             println!("зона {}:", printable(name));
             print(checks);
         }
+        for (i, checks) in &instances {
+            println!(
+                "контейнер {} (экземпляр, сеть {}):",
+                printable(&i.id),
+                printable(&i.network)
+            );
+            print(checks);
+        }
         match worst {
             Level::Fail => println!("\n✗ есть нарушения — см. строки с ✗"),
             Level::Warn => println!(
@@ -1675,6 +1868,22 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn an_instances_root_is_the_fourth_subordinate_id() {
+        let status = |uid: u64| format!("Name:\tvpn-zone-core\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n");
+        let ok = instance_root_check(Some(&status(100_003)), Some(100_000));
+        assert_eq!(ok.level, Level::Ok, "{}", ok.detail);
+        // A zone's root, the first subordinate id: what any process of that
+        // host uid may trace.
+        let zones = instance_root_check(Some(&status(100_000)), Some(100_000));
+        assert_eq!(zones.level, Level::Fail, "{}", zones.detail);
+        assert_eq!(instance_root_check(None, Some(100_000)).level, Level::Skip);
+        assert_eq!(
+            instance_root_check(Some(&status(100_003)), None).level,
+            Level::Skip
+        );
+    }
 
     #[test]
     fn a_zone_has_loopback_and_its_tunnel_and_nothing_else() {

@@ -699,6 +699,20 @@ pub struct Args {
     pub profiles: PathBuf,
     /// The holder's pid: `pipewire.sec.instance-id`.
     pub instance: u32,
+    /// `--app-id <word>`: the clients' `pipewire.sec.app-id` and the key of
+    /// this helper's microphone in the metadata, when it is not the zone's
+    /// name — a container's instance's (`instance:<id>`): the instances of
+    /// one network each have their own.
+    pub app_id: Option<String>,
+    /// `--state-dir <dir>`: where [`STATE_FILE`] is written, when not in
+    /// `--zone-dir` — an instance's own directory.
+    pub state_dir: Option<PathBuf>,
+    /// `--container <word>`: an instance's helper — whose programs its
+    /// clients are (`origin::Who::from_word`): the instance is the container.
+    pub container: Option<crate::origin::Who>,
+    /// `--userns <dev>:<ino>`: the instance's user namespace, which a client
+    /// of it is in or below.
+    pub userns: Option<(u64, u64)>,
 }
 
 impl Args {
@@ -711,6 +725,10 @@ impl Args {
         let mut config = None;
         let mut profiles = None;
         let mut instance = None;
+        let mut app_id = None;
+        let mut state_dir = None;
+        let mut container = None;
+        let mut userns = None;
         let mut it = args.iter();
         while let Some(flag) = it.next() {
             let value = it
@@ -744,6 +762,33 @@ impl Args {
                             .ok_or("--instance is not a pid")?,
                     )
                 }
+                Some("--app-id") => {
+                    // A key of the metadata and an app-id: a word, never a
+                    // path, nothing a line of the metadata's could break on.
+                    app_id = Some(
+                        value
+                            .to_str()
+                            .filter(|id| {
+                                !id.is_empty()
+                                    && !id.contains('/')
+                                    && !id.chars().any(|c| c.is_control() || c.is_whitespace())
+                            })
+                            .ok_or("--app-id is not a word")?
+                            .to_owned(),
+                    )
+                }
+                Some("--state-dir") => state_dir = Some(path),
+                Some("--container") => {
+                    container = Some(crate::origin::Who::from_word(&value.to_string_lossy()))
+                }
+                Some("--userns") => {
+                    userns = Some(
+                        value
+                            .to_str()
+                            .and_then(crate::place::parse_key)
+                            .ok_or("--userns is not a namespace's <dev>:<ino>")?,
+                    )
+                }
                 _ => return Err(format!("unknown flag {}", flag.to_string_lossy())),
             }
         }
@@ -755,6 +800,10 @@ impl Args {
             config: config.ok_or("--config is required")?,
             profiles: profiles.ok_or("--profiles is required")?,
             instance: instance.ok_or("--instance is required")?,
+            app_id,
+            state_dir,
+            container,
+            userns,
         })
     }
 }
@@ -811,6 +860,37 @@ impl MicSource for ZoneMic {
             profiles: &self.profiles,
         };
         Some(crate::origin::of_peer(places, &self.zone, &peer))
+    }
+
+    fn setting_for(&self, who: &crate::origin::Who) -> Setting {
+        crate::microphone::setting_for(&self.zone_dir, &self.config, &self.zone, who).0
+    }
+}
+
+/// A container's instance's microphone for this helper (`crate::instance`):
+/// the instance is one container, so its setting is that container's in
+/// the network — for the whole instance at once and for each client alike;
+/// a client of the daemon is the instance's when its process is in the
+/// instance's user namespace or below it.
+pub struct InstanceMic {
+    pub zone: String,
+    pub zone_dir: PathBuf,
+    pub config: PathBuf,
+    pub who: crate::origin::Who,
+    pub userns: Option<(u64, u64)>,
+}
+
+impl MicSource for InstanceMic {
+    fn setting(&self) -> Setting {
+        crate::microphone::setting_for(&self.zone_dir, &self.config, &self.zone, &self.who).0
+    }
+
+    fn client(&self, pid: i32) -> Option<crate::origin::Who> {
+        let peer = crate::origin::Peer::of_pid(pid)?;
+        let inside = self
+            .userns
+            .is_none_or(|key| crate::place::chain_of(pid).contains(&key));
+        (inside && peer.alive()).then(|| self.who.clone())
     }
 
     fn setting_for(&self, who: &crate::origin::Who) -> Setting {
@@ -1452,14 +1532,29 @@ pub fn run(args: &Args) -> u8 {
             return 1;
         }
     };
-    let mic = ZoneMic {
-        zone: args.zone.clone(),
-        zone_dir: args.zone_dir.clone(),
-        config: args.config.clone(),
-        profiles: args.profiles.clone(),
+    // A zone's, or a container's instance's: its own key and state then.
+    let mic: Box<dyn MicSource> = match &args.container {
+        Some(who) => Box::new(InstanceMic {
+            zone: args.zone.clone(),
+            zone_dir: args.zone_dir.clone(),
+            config: args.config.clone(),
+            who: who.clone(),
+            userns: args.userns,
+        }),
+        None => Box::new(ZoneMic {
+            zone: args.zone.clone(),
+            zone_dir: args.zone_dir.clone(),
+            config: args.config.clone(),
+            profiles: args.profiles.clone(),
+        }),
     };
+    let app_id = args.app_id.clone().unwrap_or_else(|| args.zone.clone());
+    let state_dir = args
+        .state_dir
+        .clone()
+        .unwrap_or_else(|| args.zone_dir.clone());
     let mut say = Say {
-        zone: args.zone.clone(),
+        zone: app_id.clone(),
         last: None,
     };
     if mic.setting() == Setting::Ask {
@@ -1473,14 +1568,13 @@ pub fn run(args: &Args) -> u8 {
     loop {
         match UnixStream::connect(&args.upstream) {
             Ok(stream) => {
-                let zone_dir = args.zone_dir.clone();
-                let mut report = |state: State| write_state(&zone_dir, state, &mut last_state);
+                let mut report = |state: State| write_state(&state_dir, state, &mut last_state);
                 let result = serve(
                     stream,
                     &listener,
-                    &args.zone,
+                    &app_id,
                     args.instance,
-                    &mic,
+                    mic.as_ref(),
                     &mut say,
                     &mut report,
                 );
@@ -1494,7 +1588,7 @@ pub fn run(args: &Args) -> u8 {
                 args.upstream.display()
             )),
         }
-        write_state(&args.zone_dir, State::NoPipewire, &mut last_state);
+        write_state(&state_dir, State::NoPipewire, &mut last_state);
         // Until the daemon is back, what connects is refused — by the
         // socket itself if it never listened, else closed here.
         if !is_listening(&listener) {

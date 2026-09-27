@@ -409,7 +409,11 @@ let
       with subtest("the window menu's close ends the program behind the proxy, and its supervisor"):
           tree = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r"))
           sup = find(tree, "foot")["pid"]
-          machine.succeed(f"test -e /run/user/1000/vpn-zones/wayland/offline/wl-sandbox-{sup}")
+          # Offline, the program is in the main home's instance (stage 1 of
+          # the container design): its sockets go by the instance's key,
+          # instance::key("main:offline").
+          wl = "/run/user/1000/vpn-zones/wayland/i-242da5417b1a1e19"
+          machine.succeed(f"test -e {wl}/wl-sandbox-{sup}")
           alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -M logo -M shift -k z -m shift -m logo")
           machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
           machine.sleep(2)
@@ -417,7 +421,7 @@ let
           machine.wait_until_fails("pgrep -x foot", timeout=30)
           machine.wait_until_fails(f"test -e /proc/{sup}", timeout=30)
           machine.wait_until_fails("pgrep -x vz-wl-proxy", timeout=30)
-          machine.fail(f"test -e /run/user/1000/vpn-zones/wayland/offline/wl-sandbox-{sup}")
+          machine.fail(f"test -e {wl}/wl-sandbox-{sup}")
 
       # The frame's buttons, dragging and resizing (docs/WINDOW-FRAME.md §8,
       # "Этап 3"), with a pointer: a file of its own, exec()'d in these

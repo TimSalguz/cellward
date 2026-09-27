@@ -151,6 +151,11 @@ pub struct Args {
     /// With it, `--profiles`: the containers' data, by which a container is
     /// known to be one (`crate::origin`).
     pub zone: Option<ZoneArgs>,
+    /// `--container <word>`: a container's instance's filter
+    /// (`crate::instance`) — every connection is that container's
+    /// (`origin::Who::from_word`), by the instance and not by a launch in the
+    /// registry: the instance is the container.
+    pub container: Option<crate::origin::Who>,
 }
 
 /// The zone a filter reads the screen cast switch of.
@@ -167,6 +172,7 @@ impl Args {
         let (mut listen, mut upstream, mut opener, mut via_broker) = (None, None, None, None);
         let (mut portal_app, mut applications) = (None, None);
         let (mut zone, mut zone_dir, mut config, mut profiles) = (None, None, None, None);
+        let mut container = None;
         let mut it = argv.iter();
         while let Some(flag) = it.next() {
             let value = it
@@ -198,6 +204,9 @@ impl Args {
                 Some("--zone-dir") => zone_dir = Some(value),
                 Some("--config") => config = Some(value),
                 Some("--profiles") => profiles = Some(value),
+                Some("--container") => {
+                    container = Some(crate::origin::Who::from_word(&value.to_string_lossy()))
+                }
                 _ => return Err(format!("unknown argument {}", flag.to_string_lossy())),
             }
         }
@@ -224,6 +233,7 @@ impl Args {
             portal_app,
             applications,
             zone,
+            container,
         })
     }
 }
@@ -582,6 +592,8 @@ struct Ctx {
     told_register: AtomicBool,
     /// The zone's screen cast switch, its directories held (`--zone`).
     screencast: Option<crate::screencast::Policy>,
+    /// `--container`: whose every connection is.
+    container: Option<crate::origin::Who>,
     /// That `yes` was `ask` for want of an id has been said, once.
     told_unremembered: AtomicBool,
     opens: Mutex<VecDeque<Instant>>,
@@ -600,6 +612,7 @@ impl Ctx {
             applications: args.applications.clone(),
             told_register: AtomicBool::new(false),
             screencast,
+            container: args.container.clone(),
             told_unremembered: AtomicBool::new(false),
             opens: Mutex::new(VecDeque::new()),
             last_notice: Mutex::new(None),
@@ -1084,11 +1097,13 @@ pub fn run(args: &Args) -> u8 {
 
 fn serve(client: UnixStream, ctx: &Arc<Ctx>) -> io::Result<()> {
     // Whose program connected, while it is certainly the one: only where
-    // there is a zone's switch to read by it.
-    let who = match &ctx.screencast {
-        Some(policy) => crate::origin::Peer::of(client.as_raw_fd())
+    // there is a zone's switch to read by it. An instance's filter knows:
+    // the instance is the container.
+    let who = match (&ctx.container, &ctx.screencast) {
+        (Some(who), _) => who.clone(),
+        (None, Some(policy)) => crate::origin::Peer::of(client.as_raw_fd())
             .map_or(crate::origin::Who::Unknown, |peer| policy.who(&peer)),
-        None => crate::origin::Who::Main,
+        (None, None) => crate::origin::Who::Main,
     };
     let conn = Arc::new(Conn::new(client.try_clone()?, who));
     serve_conn(client, &conn, ctx)
@@ -2001,6 +2016,7 @@ mod tests {
                 portal_app: portal_app.map(str::to_owned),
                 applications: None,
                 zone: None,
+                container: None,
             };
             Self::new(upstream, &args, None)
         }

@@ -74,11 +74,16 @@
 //! * [`sockets`] — the unix sockets a zone can reach, walked from inside it by
 //!   `vpn-zone doctor` and told apart: the zone's own, the system's, a helper
 //!   outside (`docs/LEAK-MODEL.md` §15, §17);
-//! * [`instance`], [`bridge`], [`relay`], [`sockdiag`] — the container as the
-//!   unit of isolation (the design of 2026-09-27, stage 0): the names of a
-//!   container's instances, how a zone carries one (`passt --fd` and the
-//!   relay that pumps its frames), and the socket diagnostics a live
-//!   switch of its network will use. Nothing launches into an instance yet;
+//! * [`instance`], [`enter`], [`place`] — the container as the unit of
+//!   isolation (the design of 2026-09-27, stage 1): a container's instance,
+//!   its keeper (`vpn-zone-container@<id>.service`, [`zone`]'s instance
+//!   mode), a launch into it (`container-enter`), and which instance a
+//!   process is of, by its user namespace. Every launch whose network is
+//!   `offline` runs in one;
+//! * [`bridge`], [`relay`], [`sockdiag`] — what the later stages build on:
+//!   how a zone carries an instance (`passt --fd` and the relay that pumps
+//!   its frames), and the socket diagnostics a live switch of its network
+//!   will use;
 //! * [`sys`] — the handful of syscalls more than one of them needs.
 //!
 //! `profile` and `desktop` were Python scripts in `module/`, `wl_sandbox` was a
@@ -108,6 +113,7 @@ pub mod dialog;
 pub mod dnsfwd;
 pub mod doctor;
 pub mod egress;
+pub mod enter;
 pub mod focus;
 pub mod frame;
 pub mod fs_sandbox;
@@ -126,6 +132,7 @@ pub mod microphone;
 pub mod openconnect;
 pub mod origin;
 pub mod picker;
+pub mod place;
 pub mod profile;
 pub mod pulse_filter;
 pub mod pw_context;
