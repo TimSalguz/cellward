@@ -909,6 +909,17 @@ pub fn run(args: Args) -> u8 {
                  (Landlock scopes, Linux 6.12) — it can signal the host's processes of the user"
             ),
         }
+        // The network namespace's socket families and no other
+        // (`seccomp::ZONE_SOCKET_FAMILIES`): AF_VSOCK is no namespace's, and a
+        // program of the zone reached the host's vsock listeners around the
+        // tunnel. Fatal when it cannot be put in: that is a way out.
+        if let Err(e) = crate::seccomp::Filter::zone_sockets().and_then(|f| f.load()) {
+            eprintln!(
+                "profile-run: cannot keep the program to its network's socket families ({e}) \
+                 — not starting"
+            );
+            return EXIT_NOT_STARTED;
+        }
     }
 
     // Nothing below this line needs privileges.

@@ -127,6 +127,7 @@ satellite, when granted.
 | N13 | An offline zone reaches anything | yes | loopback only; the resolvers are hidden before the offline branch | C · vm26 vm10 sm7 |
 | N14 | A device granted to a container brings its own network (a phone's adb or modem, an ESP32, an LTE modem) | no | a warning when such a device is granted | — |
 | N15 | Metadata: the endpoint's name is resolved in the host's network; DNS content is readable at the tunnel's exit | no | a literal endpoint address avoids the first; DoT/DoH is planned (M3) | — |
+| N16 | A socket family no network namespace holds: `AF_VSOCK` to the host's or a VM's vsock services (a guest's sshd since systemd 256), around the tunnel | yes for 64-bit programs · 32-bit: **no** | a seccomp allow-list of families in every launch into a zone and for the OpenConnect client (`AF_UNIX`, `AF_INET`, `AF_INET6`, `AF_NETLINK`, `AF_PACKET`); x86's 32-bit `socketcall` cannot be filtered by family and passes | vm45 u14 |
 | | **DNS** | | | |
 | D1 | The host's resolver answers over a unix socket (nscd/nsncd, resolved's varlink, avahi) | yes | tmpfs over their directories in every zone (the zone fails if this fails); the zone's own `nsswitch.conf`: `hosts: files dns` | vm9 vm10 vm11 sm6 sys1 |
 | D2 | The host's `resolv.conf` inside a zone | partly | the zone's own file is bound in; a host that replaces its file by rename detaches the bind, but queries still have only the tunnel | vm12; rename: **no test** |
@@ -214,7 +215,7 @@ satellite, when granted.
 | L5 | Other launches around the picker (`DBusActivatable` without `Exec`, the user's own `dbus-1/services`, a key binding that calls the program, scripts, other host programs) | no | interception is routing, not a boundary; the host is trusted | — |
 | | **Kernel surface** | | | |
 | K1 | System calls from a sandbox | partly | a Flatpak-like seccomp blocklist (TIOCSTI, ptrace, keyrings, perf, io_uring, userfaultfd, the new mount API); nested user namespaces allowed | u6 |
-| K2 | System calls from a zone program without a sandbox | no | no seccomp; the GPU, `fuse` and `ntsync` nodes are there | — |
+| K2 | System calls from a zone program without a sandbox | partly | only the socket-family filter of N16 and the signal scope of X5; the GPU, `fuse` and `ntsync` nodes are there | — |
 
 Notes:
 
@@ -320,6 +321,7 @@ apart from DynamicLauncher and the two network portals.
 - vm42 "hermetic zone: the keyring and flatpak's host command are out of reach" (in `tests/vm-promise-keyring.py`)
 - vm43 "a launch into a zone is restricted whatever its program is called" (in `tests/vm-promise-wayland.py`)
 - vm44 "a zone's program cannot signal the host's processes of the user" (in `tests/vm-promise-signals.py`; skipped before Linux 6.12)
+- vm45 "a zone's program cannot reach the host over vsock" (in `tests/vm-promise-vsock.py`)
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -385,4 +387,5 @@ Rust tests (`cargo test`):
 - u9 `rust/src/container.rs`: `a_container_is_never_in_two_networks_at_once`, `a_bound_container_runs_in_its_network_only`
 - u10 `rust/src/container.rs`: `the_state_of_this_project_is_never_granted`, `a_grant_is_resolved_before_anything_is_created`
 - u11 `rust/src/picker.rs`: `a_program_seen_for_the_first_time_gets_a_home_of_its_own`
+- u14 `rust/src/seccomp.rs`: `the_zone_socket_filter_builds`
 - u12 `rust/src/pulse_filter.rs`: `module_loading_is_refused_and_answered_as_the_server_would`, `recording_a_monitor_is_refused_before_the_server_sees_it`

@@ -125,6 +125,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | N13 | Зона offline куда-то достаёт | да | только loopback; резолверы скрыты до ветки offline | У · vm26 vm10 sm7 |
 | N14 | Устройство, выданное контейнеру, приносит свою сеть (adb или модем телефона, ESP32, LTE-модем) | нет | предупреждение при выдаче такого устройства | — |
 | N15 | Метаданные: имя endpoint резолвится в сети хоста; содержимое DNS видно на выходе туннеля | нет | литеральный адрес endpoint снимает первое; DoT/DoH в планах (M3) | — |
+| N16 | Семейство сокетов, которого нет ни в одном сетевом пространстве: `AF_VSOCK` к службам vsock хоста или виртуалки (sshd гостя с systemd 256), мимо туннеля | да для 64-битных программ · 32-битных: **нет** | seccomp-список разрешённых семейств в каждом запуске в зону и у клиента OpenConnect (`AF_UNIX`, `AF_INET`, `AF_INET6`, `AF_NETLINK`, `AF_PACKET`); 32-битный `socketcall` x86 по семейству не отфильтровать, он проходит | vm45 u14 |
 | | **DNS** | | | |
 | D1 | Резолвер хоста отвечает по unix-сокету (nscd/nsncd, varlink resolved, avahi) | да | tmpfs поверх их каталогов в каждой зоне (не вышло — зона не поднимается); свой `nsswitch.conf` зоны: `hosts: files dns` | vm9 vm10 vm11 sm6 sys1 |
 | D2 | `resolv.conf` хоста внутри зоны | частично | свой файл зоны привязан поверх; хост, заменяющий файл переименованием, отцепляет привязку, но запросам по-прежнему некуда идти, кроме туннеля | vm12; переименование: **нет теста** |
@@ -212,7 +213,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | L5 | Другие запуски мимо пикера (`DBusActivatable` без `Exec`, свои `dbus-1/services` пользователя, привязка клавиши, вызывающая программу, скрипты, другие программы хоста) | нет | перехват — маршрутизация, а не граница; хост доверенный | — |
 | | **Поверхность ядра** | | | |
 | K1 | Системные вызовы из песочницы | частично | блок-список seccomp по образцу Flatpak (TIOCSTI, ptrace, связки ключей, perf, io_uring, userfaultfd, новый API монтирования); вложенные пространства пользователей разрешены | u6 |
-| K2 | Системные вызовы программы зоны без песочницы | нет | seccomp нет; узлы GPU, `fuse` и `ntsync` на месте | — |
+| K2 | Системные вызовы программы зоны без песочницы | частично | только фильтр семейств сокетов (N16) и область сигналов (X5); узлы GPU, `fuse` и `ntsync` на месте | — |
 
 Примечания:
 
@@ -319,6 +320,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 - vm42 "hermetic zone: the keyring and flatpak's host command are out of reach" (в `tests/vm-promise-keyring.py`)
 - vm43 "a launch into a zone is restricted whatever its program is called" (в `tests/vm-promise-wayland.py`)
 - vm44 "a zone's program cannot signal the host's processes of the user" (в `tests/vm-promise-signals.py`; до Linux 6.12 пропускается)
+- vm45 "a zone's program cannot reach the host over vsock" (в `tests/vm-promise-vsock.py`)
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -384,4 +386,5 @@ the other"
 - u9 `rust/src/container.rs`: `a_container_is_never_in_two_networks_at_once`, `a_bound_container_runs_in_its_network_only`
 - u10 `rust/src/container.rs`: `the_state_of_this_project_is_never_granted`, `a_grant_is_resolved_before_anything_is_created`
 - u11 `rust/src/picker.rs`: `a_program_seen_for_the_first_time_gets_a_home_of_its_own`
+- u14 `rust/src/seccomp.rs`: `the_zone_socket_filter_builds`
 - u12 `rust/src/pulse_filter.rs`: `module_loading_is_refused_and_answered_as_the_server_would`, `recording_a_monitor_is_refused_before_the_server_sees_it`

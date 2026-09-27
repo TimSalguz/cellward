@@ -93,6 +93,22 @@ const IOCTL_CMD_MASK: u64 = 0xffff_ffff;
 /// `PER_LINUX` from `linux/personality.h`.
 const PER_LINUX: u64 = 0x0;
 
+/// The socket families a program in a zone may open: the ones a network
+/// namespace holds — `AF_UNIX`, `AF_INET`, `AF_INET6`, `AF_NETLINK`,
+/// `AF_PACKET` (which wants CAP_NET_RAW besides). Every other family is
+/// refused with `EAFNOSUPPORT` ([`Filter::zone_sockets`]).
+///
+/// First of all `AF_VSOCK`, which no network namespace holds: a zone's
+/// program reached a vsock listener of the host's around its tunnel
+/// (2026-09-27, shown by a VM test) — and a VM's the same way, where
+/// systemd 256 puts sshd on vsock. An allow-list and not that one family:
+/// the next family a kernel adds must not be a way out either.
+pub const ZONE_SOCKET_FAMILIES: [u64; 5] = [1, 2, 10, 16, 17];
+
+/// The low 32 bits of a register: an `int` argument's, whatever the upper half
+/// holds.
+const INT_MASK: u64 = 0xffff_ffff;
+
 /// What to put in the filter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FilterOptions {
@@ -223,6 +239,55 @@ impl Filter {
             }
         }
 
+        Ok(Self { ctx, unknown })
+    }
+
+    /// The socket-family filter of a zone's programs ([`ZONE_SOCKET_FAMILIES`]):
+    /// `socket(2)` of any other family answers `EAFNOSUPPORT`, and nothing
+    /// else is touched.
+    ///
+    /// For the native architecture only. x86's 32-bit programs open sockets
+    /// through `socketcall(2)` as well, whose arguments are in memory a
+    /// filter cannot read: denying by family there is impossible, and
+    /// denying `socketcall` would take 32-bit programs' every socket (Wine,
+    /// Steam). Their calls pass this filter (`badarch` is allow) — said in
+    /// `docs/LEAK-MODEL.md`.
+    ///
+    /// No `no_new_privs`: it is loaded by a process that holds CAP_SYS_ADMIN
+    /// in its user namespace (`profile-run` in a zone, the uplink for the
+    /// OpenConnect client), which the kernel takes instead.
+    pub fn zone_sockets() -> Result<Self, Error> {
+        let mut ctx = ScmpFilterContext::new(ScmpAction::Allow)?;
+        ctx.set_ctl_nnp(false)?;
+        ctx.set_act_badarch(ScmpAction::Allow)?;
+        let refuse = ScmpAction::Errno(libc::EAFNOSUPPORT);
+        let mut unknown = Vec::new();
+        if let Some(socket) = resolve("socket", &mut unknown) {
+            let highest = ZONE_SOCKET_FAMILIES.iter().copied().max().unwrap_or(0);
+            // One rule a family: a rule may compare an argument only once.
+            for family in (0..=highest).filter(|f| !ZONE_SOCKET_FAMILIES.contains(f)) {
+                ctx.add_rule_conditional(
+                    refuse,
+                    socket,
+                    &[ScmpArgCompare::new(
+                        0,
+                        ScmpCompareOp::MaskedEqual(INT_MASK),
+                        family,
+                    )],
+                )?;
+            }
+            // And everything above, the upper half of the register included:
+            // a family with a high bit set is refused, not let through.
+            ctx.add_rule_conditional(
+                refuse,
+                socket,
+                &[ScmpArgCompare::new(
+                    0,
+                    ScmpCompareOp::GreaterEqual,
+                    highest + 1,
+                )],
+            )?;
+        }
         Ok(Self { ctx, unknown })
     }
 
@@ -446,6 +511,19 @@ mod tests {
     /// call past the rules (review 2026-09-25 asked). libseccomp checks the
     /// bit and sends such calls to the bad-arch action — killed, not let
     /// through; this keeps it so.
+    /// The zone's socket filter builds, and refuses what it says: every
+    /// family outside the list, AF_VSOCK first.
+    #[test]
+    fn the_zone_socket_filter_builds() {
+        let filter = Filter::zone_sockets().unwrap();
+        assert!(filter.unknown_syscalls().is_empty());
+        assert!(!filter.instructions().unwrap().is_empty());
+        assert!(!ZONE_SOCKET_FAMILIES.contains(&40), "AF_VSOCK let");
+        for family in [1, 2, 10, 16] {
+            assert!(ZONE_SOCKET_FAMILIES.contains(&family), "{family} refused");
+        }
+    }
+
     /// The instructions are the exported program, one for every eight bytes.
     #[test]
     fn the_instructions_are_the_program() {

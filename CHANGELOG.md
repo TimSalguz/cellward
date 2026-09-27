@@ -280,6 +280,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A zone's program cannot open a vsock — or any socket its network
+  namespace does not hold** (2026-09-27, `docs/LEAK-MODEL.md` §25). A VM
+  test showed a program in a zone reaching a vsock listener of the host's:
+  `AF_VSOCK` belongs to no network namespace, so the host's and VMs' vsock
+  services (a guest's sshd, since systemd 256) were a way out around the
+  tunnel. `profile-run` now loads a seccomp filter into every launch into a
+  zone that lets `socket(2)` open only `AF_UNIX`, `AF_INET`, `AF_INET6`,
+  `AF_NETLINK` and `AF_PACKET` and answers `EAFNOSUPPORT` to every other
+  family, the ones a later kernel adds included; the OpenConnect client
+  gets it as a second filter. A launch whose filter cannot be loaded does
+  not start. x86's 32-bit programs, which open sockets through
+  `socketcall(2)` too, are not filtered by family.
 - **A zone's program cannot signal the host's processes of the user**
   (2026-09-27, Linux 6.12+; `docs/THREAT-MODEL.md` X5). `kill(2)` checks the
   user and not the namespace, so a program in a zone could kill the

@@ -4746,6 +4746,13 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
         .map_err(|e| format!("cannot build the client's seccomp filter: {e}"))?;
     let filter_len = u16::try_from(filter.len())
         .map_err(|_| "the client's seccomp filter is too long to load".to_string())?;
+    // And the socket families of a network namespace only: vsock would be a
+    // way past the uplink's filter, which sees none of it.
+    let families = seccomp::Filter::zone_sockets()
+        .and_then(|f| f.instructions())
+        .map_err(|e| format!("cannot build the client's socket filter: {e}"))?;
+    let families_len = u16::try_from(families.len())
+        .map_err(|_| "the client's socket filter is too long to load".to_string())?;
 
     // SAFETY: getpid(2) takes no arguments and cannot fail.
     let uplink = unsafe { libc::getpid() };
@@ -4790,6 +4797,18 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
             let program = libc::sock_fprog {
                 len: filter_len,
                 filter: filter.as_ptr().cast_mut(),
+            };
+            if libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                std::ptr::from_ref(&program),
+            ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let program = libc::sock_fprog {
+                len: families_len,
+                filter: families.as_ptr().cast_mut(),
             };
             if libc::prctl(
                 libc::PR_SET_SECCOMP,

@@ -1,4 +1,4 @@
-"""tests/vm.nix, continued: a zone's program and vsock (docs/THREAT-MODEL.md).
+"""tests/vm.nix, continued: a zone's program and vsock (docs/THREAT-MODEL.md N16).
 
 AF_VSOCK is not a network namespace's: a host's listener on vsock — a VM's
 sshd since systemd 256, an agent — would be a way out of a zone around its
