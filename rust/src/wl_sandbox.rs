@@ -355,6 +355,16 @@ pub fn socket_display(zone: &str, pid: u32) -> String {
 /// `execvp`, so the program replaces this process, exactly as the C version
 /// did: there is nothing left to supervise or clean up, and the caller gets the
 /// program's own exit status without a middleman.
+/// Not started: the compositor has said it speaks the security context, and
+/// the restricted socket could not be made after all — the program never gets
+/// more than the restricted socket once there could be one (review
+/// 2026-09-27: every such step fell back to the unrestricted socket, and a
+/// program of the same user could make a fork fail on purpose).
+fn not_started() -> u8 {
+    no_word();
+    EXIT_NOT_STARTED
+}
+
 fn run_plain(cmd: &[OsString]) -> u8 {
     no_word();
     let e = exec_command(cmd);
@@ -455,9 +465,10 @@ impl Compositor {
 
 /// Register a sandboxed socket with the compositor, then run the program on it.
 ///
-/// Returns the program's exit code, or falls back to [`run_plain`] (which never
-/// returns unless the program itself could not be started) at every step that
-/// did not work out.
+/// Returns the program's exit code. Before the compositor has said it speaks
+/// the security context, a step that does not work out falls back to
+/// [`run_plain`] (which never returns unless the program itself could not be
+/// started); after, the program is not started ([`not_started`]).
 pub fn run(args: Args) -> u8 {
     // Taken before anything is started: the program never inherits it. The
     // proxy says the word; every way without a proxy says that none will
@@ -492,10 +503,10 @@ pub fn run(args: Args) -> u8 {
             .create(dir)
         {
             eprintln!(
-                "wl-sandbox: cannot create {} ({e}) — running unrestricted",
+                "wl-sandbox: cannot create {} ({e}) — the program is not started",
                 dir.display()
             );
-            return run_plain(&args.cmd);
+            return not_started();
         }
     }
     // A leftover from an earlier run that happened to have this pid would make
@@ -508,10 +519,10 @@ pub fn run(args: Args) -> u8 {
             // bytes, and a longer XDG_RUNTIME_DIR is an error here, not a
             // half-working socket.
             eprintln!(
-                "wl-sandbox: cannot create {} ({e}) — running unrestricted",
+                "wl-sandbox: cannot create {} ({e}) — the program is not started",
                 sock_path.display()
             );
-            return run_plain(&args.cmd);
+            return not_started();
         }
     };
 
@@ -544,10 +555,12 @@ pub fn run(args: Args) -> u8 {
     let (close_read, close_write) = match sys::pipe() {
         Ok(pipe) => pipe,
         Err(e) => {
-            eprintln!("wl-sandbox: cannot create the close-fd pipe ({e}) — running unrestricted");
+            eprintln!(
+                "wl-sandbox: cannot create the close-fd pipe ({e}) — the program is not started"
+            );
             let _ = fs::remove_file(&sock_path);
             forget_upstream(&upstream);
-            return run_plain(&args.cmd);
+            return not_started();
         }
     };
 
@@ -555,11 +568,11 @@ pub fn run(args: Args) -> u8 {
         .as_ref()
         .map_or(listener.as_fd(), |up| up.listener.as_fd());
     if let Err(why) = compositor.register(target, close_read.as_fd(), &args.app_id) {
-        eprintln!("wl-sandbox: {why} — running unrestricted");
+        eprintln!("wl-sandbox: {why} — the program is not started");
         drop(close_write);
         let _ = fs::remove_file(&sock_path);
         forget_upstream(&upstream);
-        return run_plain(&args.cmd);
+        return not_started();
     }
     // Our copies of the handed-over descriptors are not needed any more: the
     // compositor has its own. `close_write` is the exception — that is the
@@ -667,7 +680,7 @@ pub fn run(args: Args) -> u8 {
         // WAYLAND_SOCKET is deliberately not restored: our own connection
         // consumed that descriptor and it is closed by now.
         eprintln!(
-            "wl-sandbox: cannot fork ({}) — running unrestricted",
+            "wl-sandbox: cannot fork ({}) — the program is not started",
             io::Error::last_os_error()
         );
         match previous_display {
@@ -680,7 +693,7 @@ pub fn run(args: Args) -> u8 {
             proxy.kill();
             let _ = fs::remove_file(path);
         }
-        return run_plain(&args.cmd);
+        return not_started();
     }
 
     let status = match proxy {

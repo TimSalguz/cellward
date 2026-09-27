@@ -249,6 +249,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A program is never given the unrestricted compositor once the
+  restricted one could be made** (bug hunt 2026-09-27). After the
+  compositor had said it speaks the security context, a step of
+  `wl-sandbox` that failed — the socket's directory, the pipe, the
+  registration, the fork (which a program of the same user can make fail
+  on purpose) — fell back to running the program on the compositor's own
+  socket: screen copy, a virtual keyboard. It is not started instead.
+- **A zone's app id, and a revoke, see through a pinned path and a
+  process that hides** (review): the broker's pinned `/nix/store/…/env`
+  was taken for the program's id; a process that made itself not dumpable
+  shows as root's in `/proc` and was skipped by a grant's revoke.
 - **The notification daemon, the tray's watcher, the screensaver and
   fcitx5's portal are reached by their own interfaces only** (bug hunt
   2026-09-27). The session bus filter let a zone or a sandbox *talk* to

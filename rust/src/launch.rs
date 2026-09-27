@@ -372,8 +372,12 @@ pub fn strip_selection(argv: &[OsString]) -> Vec<OsString> {
 pub fn app_word(cmd: &[OsString]) -> Option<&OsStr> {
     for word in cmd {
         let bytes = word.as_bytes();
-        if matches!(bytes, b"env" | b"sh" | b"bash" | b"setsid" | b"nohup")
-            || bytes.starts_with(b"-")
+        // A wrapper by its name wherever it lies: the broker pins a program
+        // by its path (`/nix/store/…/bin/env`, review 2026-09-27).
+        if matches!(
+            basename(word).as_bytes(),
+            b"env" | b"sh" | b"bash" | b"setsid" | b"nohup"
+        ) || bytes.starts_with(b"-")
         {
             continue;
         }
