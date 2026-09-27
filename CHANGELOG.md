@@ -249,6 +249,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A zone's record stream is not moved onto what the host plays** (bug
+  hunt 2026-09-27). The sound filter took a record stream's move as the
+  server named it, and refused a monitor by its `.monitor` name — which
+  pipewire-pulse gives in a move only for a plain sink: a stream moved onto
+  another program's playback came with that stream's bare name and went
+  on. A record stream may now be moved back to the source it had, or to a
+  capture device of the host's (`alsa_input.…`, `bluez_input.…`,
+  `bluez_source.…`); a move anywhere else ends the connection.
 - **What the broker asks about is what it starts** (bug hunt
   2026-09-27). A zone's request named its program by a bare name, the
   question showed that name, and the launch looked it up in `PATH` again

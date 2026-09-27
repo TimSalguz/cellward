@@ -818,6 +818,15 @@ fn looks_like_index(name: &[u8]) -> bool {
     rest.first().is_some_and(u8::is_ascii_digit)
 }
 
+/// A capture device's node, by the name the host's session manager gives it
+/// (ALSA's and Bluetooth's inputs): what a record stream may be moved to
+/// besides the source it had.
+fn a_capture_device(name: &[u8]) -> bool {
+    [&b"alsa_input."[..], b"bluez_input.", b"bluez_source."]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
 /// A source name that is a monitor by name alone.
 fn names_a_monitor(name: &[u8]) -> bool {
     name.ends_with(b".monitor") || name == b"@DEFAULT_MONITOR@"
@@ -922,6 +931,9 @@ struct Session {
     creating: HashMap<u32, Kind>,
     /// The connection's streams: by kind and channel, their server index.
     streams: HashMap<(Kind, u32), u32>,
+    /// The source each record stream is linked to, by channel: the server's
+    /// word, at its start and at every move let through.
+    sources: HashMap<u32, Vec<u8>>,
     /// A cut has been logged on this connection.
     told_cut: bool,
     /// The zone's microphone setting and its question
@@ -1138,6 +1150,8 @@ impl Session {
                                 .to_string())
                         ));
                     }
+                    self.sources
+                        .insert(channel, source.unwrap_or_default().to_vec());
                 }
                 self.streams.insert((kind, channel), index);
                 Down::Forward
@@ -1155,17 +1169,38 @@ impl Session {
                 let items = parse(&frame[DESCRIPTOR..]);
                 if let Some(channel) = items.as_deref().and_then(|i| u32_at(i, 2)) {
                     self.streams.remove(&(kind, channel));
+                    if kind == Kind::Record {
+                        self.sources.remove(&channel);
+                    }
                 }
                 Down::Forward
             }
             COMMAND_RECORD_STREAM_MOVED => {
-                // Channel, source index, source name.
+                // Channel, source index, source name. Where a record stream
+                // may be moved: back to the source it had, or to a capture
+                // device of the host's. pipewire-pulse names a monitor
+                // `<sink>.monitor` in a move only for a plain sink: a stream
+                // linked to another program's playback, or to a node that is
+                // neither, comes with that node's bare name (review
+                // 2026-09-27) — which no name can tell from a microphone's.
                 let items = parse(&frame[DESCRIPTOR..]);
-                match items.as_deref().and_then(|i| str_at(i, 4)) {
-                    Some(source) if !record_source_refused(source) => Down::Forward,
+                let channel = items.as_deref().and_then(|i| u32_at(i, 2));
+                let source = items.as_deref().and_then(|i| str_at(i, 4)).flatten();
+                match (channel, source) {
+                    (Some(channel), Some(name))
+                        if !record_source_refused(Some(name))
+                            && (self
+                                .sources
+                                .get(&channel)
+                                .is_some_and(|had| had.as_slice() == name)
+                                || a_capture_device(name)) =>
+                    {
+                        self.sources.insert(channel, name.to_vec());
+                        Down::Forward
+                    }
                     _ => Down::Close(
-                        "the server moved a record stream to a monitor — the zone does not \
-                         record what the host plays"
+                        "the server moved a record stream to what is not a microphone — the \
+                         zone does not record what the host plays"
                             .to_owned(),
                     ),
                 }
@@ -2141,7 +2176,15 @@ mod tests {
             s.down(&moved(Some("alsa_input.pci.analog-stereo"))),
             Down::Forward
         );
+        assert_eq!(
+            s.down(&moved(Some("alsa_input.usb-Mic.mono"))),
+            Down::Forward
+        );
         assert!(matches!(s.down(&moved(Some("x.monitor"))), Down::Close(_)));
+        // Another program's playback, named bare by pipewire-pulse: no
+        // microphone, whatever its name says.
+        assert!(matches!(s.down(&moved(Some("Firefox"))), Down::Close(_)));
+        assert!(matches!(s.down(&moved(None)), Down::Close(_)));
         // A shared ring buffer would carry commands past the filter.
         assert!(matches!(
             s.down(&command(COMMAND_ENABLE_SRBCHANNEL, 0)),
