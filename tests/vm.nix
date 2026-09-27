@@ -2191,6 +2191,15 @@ let
           out = alice("cellward run vmherm -- ipcs -m")
           assert shm not in out.split(), out
           alice(f"ipcrm -m {shm}")
+          # POSIX message queues too: the host's /dev/mqueue is not the zone's.
+          alice(
+              "${pkgs.python3}/bin/python3 -c \"import ctypes; "
+              "l = ctypes.CDLL(None); "
+              "assert l.mq_open(b'/vzhost', 0o100 | 2, 0o600, None) >= 0\""
+          )
+          alice("test -e /dev/mqueue/vzhost")
+          in_zone(hp, "test ! -e /dev/mqueue/vzhost")
+          alice("rm -f /dev/mqueue/vzhost")
           alice("systemctl --user stop fakeibus || true")
           # A program started in the zone has the user's own group only: the
           # session's groups open doors (libvirt, docker, /dev/input).

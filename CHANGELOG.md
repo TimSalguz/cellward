@@ -429,6 +429,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (`/run/vpn-zones/pasta/x-uplink.pid`), so one pasta's word that it was
   done could be taken for the other's. The files are now named by kind:
   `zone-<name>.pid`, `uplink-<name>.pid`, `sysrun-<pid>.pid`.
+- **A zone's POSIX message queues are its own** (review 2026-09-27): the
+  zone kept the host's `/dev/mqueue`, an mqueue mount of the host's IPC
+  namespace, and with it the host's queues — around the IPC namespace the
+  zone got the same night. The zone mounts one of its own instead.
+- **A too-soon "yes" to the broker holds the zone off as a "no" does**
+  (review): an answer faster than the question can be read is refused, and
+  now starts the pause after a refusal — the zone cannot bring the question
+  up again at once to take the focus again.
 - **A zone and a system zone's command have System V IPC of their own**
   (bug hunt 2026-09-27). Shared memory segments and message queues go by
   number, and a zone's programs are the user's uid: an X client's MIT-SHM

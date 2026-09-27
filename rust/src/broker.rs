@@ -990,10 +990,10 @@ fn ask(
         question_timeout(tools),
     ) {
         crate::window::Asked::Chose(tag) if tag == "allow" => {
-            return crate::dialog::not_too_soon(asked)
+            return too_soon_is_no(asked, &origin.name())
         }
         crate::window::Asked::Chose(tag) if tag == "always" => {
-            crate::dialog::not_too_soon(asked)?;
+            too_soon_is_no(asked, &origin.name())?;
             if let Some(line) = line.as_ref() {
                 remember(tools, line);
             }
@@ -1018,7 +1018,7 @@ fn ask(
             question_timeout(tools),
         ) == Some(0)
         {
-            crate::dialog::not_too_soon(asked)
+            too_soon_is_no(asked, &origin.name())
         } else {
             answered_no(&origin.name());
             Err("человек отказал".to_owned())
@@ -1040,9 +1040,9 @@ fn ask(
         ],
         question_timeout(tools),
     ) {
-        Some(0) => crate::dialog::not_too_soon(asked),
+        Some(0) => too_soon_is_no(asked, &origin.name()),
         Some(1) => {
-            crate::dialog::not_too_soon(asked)?;
+            too_soon_is_no(asked, &origin.name())?;
             remember(tools, &line);
             Ok(())
         }
@@ -1147,6 +1147,14 @@ fn start_asking(origin: &str) -> Result<std::sync::MutexGuard<'static, ()>, Stri
         .map_err(|_| "уже открыт другой вопрос о запуске".to_owned())?;
     begin_asking(origin)?;
     Ok(guard)
+}
+
+/// An answer sooner than the question can be read (`dialog::TOO_FAST`) is
+/// taken for a no, and holds the zone's next question off as one does —
+/// else the zone could bring the question up again at once, and take the
+/// focus again (review 2026-09-27).
+fn too_soon_is_no(asked: std::time::Instant, origin: &str) -> Result<(), String> {
+    crate::dialog::not_too_soon(asked).inspect_err(|_| answered_no(origin))
 }
 
 /// The last question put to `origin` was answered no.
@@ -1334,7 +1342,7 @@ fn ask_window(
         answered_no(origin);
         return Err("человек отказал".to_owned());
     }
-    crate::dialog::not_too_soon(asked)?;
+    too_soon_is_no(asked, origin)?;
     let mut argv: Vec<OsString> = out
         .stdout
         .split(|b| *b == 0)

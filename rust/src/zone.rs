@@ -3018,7 +3018,9 @@ fn own_dev(zone: &Zone) -> Result<(), String> {
         let name = entry.file_name();
         let path = entry.path();
         let other_fs = fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir() && m.dev() != dev_id);
-        if other_fs && name != "pts" {
+        // Not the host's message queues: an mqueue mount is the IPC namespace
+        // of whoever mounted it, and the zone has one of its own (below).
+        if other_fs && name != "pts" && name != "mqueue" {
             let tree = sys::clone_tree(&path)
                 .map_err(|e| fail(&format!("cannot take hold of {}", path.display()), e))?;
             kept.push((name, tree));
@@ -3063,6 +3065,26 @@ fn own_dev(zone: &Zone) -> Result<(), String> {
     .map_err(|e| fail("cannot give the zone terminals of its own", e))?;
     std::os::unix::fs::symlink("pts/ptmx", dev.join("ptmx"))
         .map_err(|e| fail("cannot link /dev/ptmx", e))?;
+    // POSIX message queues of its own, in its own IPC namespace (review
+    // 2026-09-27: the host's /dev/mqueue was kept, and with it the host's
+    // queues). mq_open does not need it mounted: a failure leaves only the
+    // listing out.
+    let mqueue = dev.join("mqueue");
+    let mounted = fs::create_dir(&mqueue).and_then(|()| {
+        sys::mount(
+            OsStr::new("mqueue"),
+            &mqueue,
+            "mqueue",
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            "",
+        )
+    });
+    if let Err(e) = mounted {
+        eprintln!(
+            "zone {}: no /dev/mqueue of its own ({e}) — its queues are not listed there",
+            zone.name()
+        );
+    }
     // The basics and the GPU, from the devtmpfs; its links as they are
     // there (`fd`, `stdin`…, `log`), and the standard ones where it has none.
     let host = Path::new(DEVTMPFS);
