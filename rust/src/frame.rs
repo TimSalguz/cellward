@@ -159,6 +159,12 @@ pub fn width(config: &Path) -> (i32, Source) {
 /// that cannot be read, or says something else, leaves them — the border is
 /// the default, and nothing a zone can reach can remove it (see above).
 pub fn hidden(config: &Path) -> bool {
+    // No settings' directory: nothing hides the border — never a path
+    // relative to wherever this runs (review 2026-09-27: `--frame` without
+    // `--frame-switch` read the working directory's `frames`).
+    if !config.is_absolute() {
+        return false;
+    }
     let value = read_setting(&config.join(DECLARED_DIR).join(SWITCH_SETTING))
         .or_else(|| read_setting(&config.join(SWITCH_SETTING)));
     value.is_some_and(|v| v.trim() == "hidden")
@@ -430,6 +436,8 @@ mod tests {
         assert!(hidden(&config));
         fs::write(config.join(SWITCH_SETTING), "hide").unwrap();
         assert!(!hidden(&config), "only `hidden` hides");
+        // No directory given is none, not the working directory.
+        assert!(!hidden(Path::new("")));
         let _ = fs::remove_dir_all(state.parent().unwrap());
     }
 
