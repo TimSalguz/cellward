@@ -353,6 +353,24 @@ let
           out = machine.succeed(as_user("alice", "vpn-zone-sys sz -- id -G")).split()
           vz = machine.succeed("getent group vpn-zones | cut -d: -f3").strip()
           assert vz not in out, f"the vpn-zones group {vz} is among {out}"
+          # Nor the user zones' state, the project's settings to rewrite, or a
+          # container's data — behind a home of 0700, which this service may
+          # not pass (review 2026-09-27: the cover was skipped for it).
+          machine.succeed("test \"$(stat -c %a /home/alice)\" = 700")
+          machine.succeed(as_user(
+              "alice",
+              "mkdir -p ~/.local/state/vpn-zones/probe ~/.config/vpn-zones "
+              "~/.local/state/vpn-profiles/probe && touch ~/.local/state/vpn-zones/probe/key "
+              "~/.local/state/vpn-profiles/probe/cookies",
+          ))
+          machine.fail(as_user("alice", "vpn-zone-sys sz -- test -e /home/alice/.local/state/vpn-zones/probe/key"))
+          machine.fail(as_user("alice", "vpn-zone-sys sz -- test -e /home/alice/.local/state/vpn-profiles/probe/cookies"))
+          machine.fail(as_user("alice", "vpn-zone-sys sz -- touch /home/alice/.config/vpn-zones/new"))
+          machine.succeed(as_user("alice", "vpn-zone-sys sz -- touch /home/alice/sysrun-writes-home"))
+          machine.succeed(as_user(
+              "alice",
+              "rm -rf ~/.local/state/vpn-zones/probe ~/.local/state/vpn-profiles/probe ~/sysrun-writes-home",
+          ))
 
       with subtest("the session is out of reach through /proc, not only where it lies"):
           # A host process of alice's with a socket in her runtime directory — what

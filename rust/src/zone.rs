@@ -3837,7 +3837,7 @@ pub(crate) fn seal_project_state(
     home: &Path,
     keep: &[(&str, bool)],
 ) -> Result<(), String> {
-    if state.is_dir() {
+    if dir_there(state)? {
         let kept =
             sys::open_dir(state).map_err(|e| format!("cannot open {}: {e}", state.display()))?;
         sys::mount(
@@ -3865,7 +3865,7 @@ pub(crate) fn seal_project_state(
     }
     for dir in READ_ONLY_IN_ZONES {
         let dir = home.join(dir);
-        if !dir.is_dir() {
+        if !dir_there(&dir)? {
             continue;
         }
         sys::mount(dir.as_os_str(), &dir, "", libc::MS_BIND | libc::MS_REC, "")
@@ -3873,6 +3873,19 @@ pub(crate) fn seal_project_state(
             .map_err(|e| format!("cannot make {} read-only: {e}", dir.display()))?;
     }
     Ok(())
+}
+
+/// Is there a directory to cover? Only "no such thing" is a no: a path that
+/// cannot be looked at — a home of 0700 to a process with no capability to
+/// pass it — is one nobody knows is not there, and a cover skipped for it
+/// is the state in sight of whoever can look (review 2026-09-27: the system
+/// tier's command, the user once it is theirs).
+pub(crate) fn dir_there(path: &Path) -> Result<bool, String> {
+    match fs::metadata(path) {
+        Ok(meta) => Ok(meta.is_dir()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("cannot look at {}: {e}", path.display())),
+    }
 }
 
 /// Wait for the app namespace to say it exists.
