@@ -1045,6 +1045,65 @@ pub fn pidfd_wait(fd: &OwnedFd, timeout: std::time::Duration) -> bool {
     unsafe { libc::poll(&mut pfd, 1, ms) == 1 }
 }
 
+/// A child's whole output, by `deadline` when there is one. What it writes is
+/// read meanwhile, on threads of their own: a child that writes more than a
+/// pipe holds would otherwise never end, and its deadline never come (review
+/// 2026-09-27: a zone's long command, written back by the launch window).
+/// The end is waited for by the child's pidfd. `None` past the deadline —
+/// the child is killed — or when it cannot be waited for.
+pub fn output_by(
+    mut child: std::process::Child,
+    deadline: Option<std::time::Duration>,
+) -> Option<std::process::Output> {
+    use std::io::Read;
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    if let Some(deadline) = deadline {
+        let started = std::time::Instant::now();
+        let ended = match pidfd_open(child.id() as i32) {
+            Some(fd) => loop {
+                let left = deadline.saturating_sub(started.elapsed());
+                if pidfd_wait(&fd, left) {
+                    break true;
+                }
+                // Interrupted before its time: the rest of it.
+                if left.is_zero() || started.elapsed() >= deadline {
+                    break false;
+                }
+            },
+            None => loop {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    break true;
+                }
+                if started.elapsed() >= deadline {
+                    break false;
+                }
+                std::thread::sleep(LOOK_AGAIN);
+            },
+        };
+        if !ended {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    }
+    let status = child.wait().ok()?;
+    Some(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
 /// Wait, as long as it takes, for the process of a pidfd to exit.
 pub fn pidfd_wait_end(fd: &OwnedFd) {
     use std::os::fd::AsRawFd;

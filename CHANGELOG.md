@@ -249,6 +249,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **The broker's questions all end** (bug hunt 2026-09-27). The window
+  that chooses a program for a zone's link (the portal's, or kdialog's)
+  had no deadline, and the broker asks one question at a time: a window
+  left open kept every other zone's question out for good. It now goes at
+  `question-timeout`, as the other questions do, with nothing chosen. And
+  the launch window's answer — the zone's command comes back in it — is
+  read as it comes: a long command filled the pipe before the window could
+  end, and the broker waited on it until its deadline, or for ever.
 - **A zone and a system zone's command have System V IPC of their own**
   (bug hunt 2026-09-27). Shared memory segments and message queues go by
   number, and a zone's programs are the user's uid: an X client's MIT-SHM

@@ -1183,36 +1183,24 @@ fn ask_window(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let asked = std::time::Instant::now();
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|e| format!("не открыть окно запуска ({}): {e}", picker.display()))?;
     // An answer by the person's deadline (`question_timeout`): a window left
     // open keeps every other zone's question out. None set: as long as it
-    // takes.
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if timeout.is_none_or(|t| asked.elapsed() < t) => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                answered_no(origin);
-                return Err("на окно не ответили".to_owned());
-            }
-        }
+    // takes. Its answer is read as it comes: the zone's command comes back in
+    // it, and a long one would fill the pipe before the window could end.
+    let Some(out) = crate::sys::output_by(child, timeout) else {
+        answered_no(origin);
+        return Err("на окно не ответили".to_owned());
     };
-    if !status.success() {
+    if !out.status.success() {
         answered_no(origin);
         return Err("человек отказал".to_owned());
     }
     crate::dialog::not_too_soon(asked)?;
-    let mut stdout = Vec::new();
-    if let Some(mut out) = child.stdout.take() {
-        let _ = out.read_to_end(&mut stdout);
-    }
-    let mut argv: Vec<OsString> = stdout
+    let mut argv: Vec<OsString> = out
+        .stdout
         .split(|b| *b == 0)
         .map(|w| OsString::from_vec(w.to_vec()))
         .collect();
@@ -1396,7 +1384,14 @@ fn link_answer(
                     Ok(guard) => asking = Some(guard),
                     Err(why) => return refused(why, &shown),
                 }
-                match crate::links::choose(&tools.busctl, &tools.kdialog, &scheme, uri, &programs) {
+                match crate::links::choose(
+                    &tools.busctl,
+                    &tools.kdialog,
+                    &scheme,
+                    uri,
+                    &programs,
+                    question_timeout(tools),
+                ) {
                     crate::links::Choice::Chosen(id) => id,
                     crate::links::Choice::Cancelled => {
                         answered_no(&origin.name());

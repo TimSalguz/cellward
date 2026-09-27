@@ -295,25 +295,33 @@ pub fn configured(text: &str) -> Vec<String> {
 /// Ask the person which program opens `uri`: the portal backends' window of
 /// choice ([`backends`]), through `busctl` on the session bus — waited for as
 /// long as the person takes; `kdialog`'s menu where no backend has one.
+///
+/// By `deadline` when there is one (the broker's `question-timeout`): the
+/// broker asks one question at a time, and a window of choice left open
+/// kept every other zone's question out for good. Past it the window goes,
+/// and nothing is chosen.
 pub fn choose(
     busctl: &Path,
     kdialog: &Path,
     scheme: &str,
     uri: &str,
     programs: &[Program],
+    deadline: Option<std::time::Duration>,
 ) -> Choice {
     if programs.is_empty() {
         return Choice::Unavailable(format!("нет программы для ссылок {scheme}:"));
     }
+    let started = std::time::Instant::now();
+    let left = || deadline.map(|d| d.saturating_sub(started.elapsed()));
     let mut why = String::from("ни у одного бэкенда портала нет окна выбора программы");
     for backend in backends() {
-        match app_chooser(busctl, &backend, scheme, uri, programs) {
+        match app_chooser(busctl, &backend, scheme, uri, programs, left()) {
             Ok(choice) => return choice,
             Err(e) => why = e,
         }
     }
     eprintln!("links: {why} — kdialog");
-    kdialog_menu(kdialog, uri, programs).unwrap_or(Choice::Unavailable(why))
+    kdialog_menu(kdialog, uri, programs, left()).unwrap_or(Choice::Unavailable(why))
 }
 
 /// One backend's `AppChooser.ChooseApplication`. `Err` for a backend that
@@ -324,6 +332,7 @@ fn app_chooser(
     scheme: &str,
     uri: &str,
     programs: &[Program],
+    deadline: Option<std::time::Duration>,
 ) -> Result<Choice, String> {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -341,7 +350,7 @@ fn app_chooser(
     args.push("org.freedesktop.impl.portal.AppChooser".into());
     args.push("ChooseApplication".into());
     args.push("ossasa{sv}".into());
-    args.push(handle.into());
+    args.push(handle.clone().into());
     args.push("".into());
     args.push("".into());
     args.push(programs.len().to_string().into());
@@ -358,11 +367,27 @@ fn app_chooser(
         args.push("s".into());
         args.push(value.into());
     }
-    let out = Command::new(busctl)
+    let child = Command::new(busctl)
         .args(&args)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("не запустить {}: {e}", busctl.display()))?;
+    let Some(out) = crate::sys::output_by(child, deadline) else {
+        // Not answered in time: the window is closed with its request, and
+        // nothing is chosen — no other window is shown instead.
+        let _ = Command::new(busctl)
+            .args(["--user", "--", "call"])
+            .arg(format!("org.freedesktop.impl.portal.desktop.{backend}"))
+            .arg(&handle)
+            .args(["org.freedesktop.impl.portal.Request", "Close"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        return Ok(Choice::Cancelled);
+    };
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
         return Err(format!("{backend}: {err}"));
@@ -410,7 +435,12 @@ pub fn bare_id(id: &str) -> &str {
 }
 
 /// `kdialog`'s menu of `programs`, where no backend shows a window.
-fn kdialog_menu(kdialog: &Path, uri: &str, programs: &[Program]) -> Option<Choice> {
+fn kdialog_menu(
+    kdialog: &Path,
+    uri: &str,
+    programs: &[Program],
+    deadline: Option<std::time::Duration>,
+) -> Option<Choice> {
     let shown = crate::bus_filter::loggable(uri);
     let mut args: Vec<OsString> = vec![
         "--title".into(),
@@ -423,11 +453,16 @@ fn kdialog_menu(kdialog: &Path, uri: &str, programs: &[Program]) -> Option<Choic
         // Not taken for an option: a name is anybody's text.
         args.push(p.name.trim_start_matches('-').to_owned().into());
     }
-    let out = Command::new(kdialog)
+    let child = Command::new(kdialog)
         .args(&args)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
+    let Some(out) = crate::sys::output_by(child, deadline) else {
+        return Some(Choice::Cancelled);
+    };
     if !out.status.success() {
         return Some(Choice::Cancelled);
     }
