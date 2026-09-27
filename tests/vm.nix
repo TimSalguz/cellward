@@ -1169,11 +1169,21 @@ let
               "ip -4 -o addr show eth1 | head -1 | tr -s ' ' | cut -d' ' -f4 | cut -d/ -f1"
           ).strip()
           assert server_ip, "server has no address on eth1"
+          # The test network gives both VMs IPv6 on eth1 as well: an address a
+          # zone's IPv6 could reach AROUND the tunnel, which the capture below
+          # watches too.
+          server_ip6 = server.succeed(
+              "ip -6 -o addr show eth1 scope global | head -1 | tr -s ' ' | cut -d' ' -f4 | cut -d/ -f1"
+          ).strip()
+          assert server_ip6, "server has no IPv6 address on eth1"
+          # IPv6 inside the tunnel too (the owner, 2026-09-27: IPv6 is needed,
+          # and it has to stay in the tunnel, not be switched off).
           server.succeed(
               "ip link add wg0 type wireguard && "
               "ip addr add 10.99.0.1/24 dev wg0 && "
+              "ip -6 addr add fd99::1/64 dev wg0 nodad && "
               "wg set wg0 listen-port 51820 private-key /root/wg.key "
-              f"peer '{cpub}' allowed-ips 10.99.0.2/32 && "
+              f"peer '{cpub}' allowed-ips 10.99.0.2/32,fd99::2/128 && "
               "ip link set wg0 up"
           )
           # The services behind the tunnel, bound to the tunnel address only:
@@ -1184,16 +1194,21 @@ let
               "'SYSTEM:echo peer=$SOCAT_PEERADDR'"
           )
           server.succeed(
+              "systemd-run --unit=hello6 socat "
+              "TCP6-LISTEN:8081,bind=[fd99::1],fork,reuseaddr "
+              "'SYSTEM:echo peer=$SOCAT_PEERADDR'"
+          )
+          server.succeed(
               "systemd-run --unit=dns dnsmasq -k --port=53 --bind-interfaces "
-              "--listen-address=10.99.0.1 --no-resolv "
+              "--listen-address=10.99.0.1 --listen-address=fd99::1 --no-resolv "
               "--address=/leaktest.internal/10.99.0.9"
           )
 
       with subtest("cellward add vmreal: config with DNS= and a live endpoint"):
           alice(
-              f"printf '[Interface]\\nPrivateKey = {cpriv}\\nAddress = 10.99.0.2/32\\n"
-              f"DNS = 10.99.0.1\\n\\n[Peer]\\nPublicKey = {spub}\\n"
-              f"AllowedIPs = 0.0.0.0/0\\nEndpoint = {server_ip}:51820\\n' "
+              f"printf '[Interface]\\nPrivateKey = {cpriv}\\nAddress = 10.99.0.2/32, fd99::2/128\\n"
+              f"DNS = 10.99.0.1, fd99::1\\n\\n[Peer]\\nPublicKey = {spub}\\n"
+              f"AllowedIPs = 0.0.0.0/0, ::/0\\nEndpoint = {server_ip}:51820\\n' "
               "> /tmp/vmreal.conf"
           )
           alice("cellward add vmreal /tmp/vmreal.conf")
@@ -1205,7 +1220,7 @@ let
       with subtest("leak watch armed on the physical interface"):
           machine.succeed(
               "systemd-run --unit=leakwatch tcpdump -n --immediate-mode -i eth1 "
-              f"-w /tmp/leak.pcap 'host {server_ip} and not arp "
+              f"-w /tmp/leak.pcap '(host {server_ip} or host {server_ip6}) and not arp "
               "and not (udp and port 51820)'"
           )
           machine.wait_until_succeeds(
@@ -1292,6 +1307,62 @@ let
           out = machine.succeed("getent ahostsv4 leaktest.internal")
           assert "10.66.66.66" in out, f"the zone broke the host's own resolver: {out}"
 
+      # --- IPv6 where the tunnel carries it: works, and only inside ----------
+      with subtest("IPv6 through the tunnel: the v6 default goes into awg0"):
+          out = in_zone(rzpid, "ip -6 route show default")
+          assert "dev awg0" in out and "unreachable" not in out, out
+          # The server's REAL v6 address, on the network both VMs share, is
+          # routed into the tunnel too: there is no second way to it.
+          out = in_zone(rzpid, f"ip -6 route get {server_ip6}")
+          assert "dev awg0" in out, f"a v6 route around the tunnel: {out}"
+
+      with subtest("IPv6 through the tunnel: TCP and ping, the server sees the tunnel's v6 address"):
+          out = in_zone(rzpid, "socat -T10 - TCP6:[fd99::1]:8081")
+          assert "fd99::2" in out, f"server saw someone else over v6: {out}"
+          out = in_zone(rzpid, "ping -6 -c1 -W5 fd99::1")
+          assert " 0% packet loss" in out, out
+
+      with subtest("IPv6 through the tunnel: DNS over v6, from the config, answers inside"):
+          out = in_zone(rzpid, "cat /etc/resolv.conf")
+          assert "nameserver fd99::1" in out, out
+          out = in_zone(rzpid, "dig +time=5 +tries=2 +short leaktest.internal @fd99::1")
+          assert "10.99.0.9" in out, f"DNS over v6 through the tunnel failed: {out}"
+
+      with subtest("IPv6 aimed at the server's real address goes into the tunnel, not around it"):
+          # Nothing listens there, so the connection is refused — by the
+          # server, through the tunnel. Had it left by eth1, the capture holds it.
+          in_zone(rzpid, f"sh -c 'socat -T3 - TCP6:[{server_ip6}]:9 </dev/null || true'")
+
+      # --- A zone's program cannot change the zone's network ---------------
+      # The user tier's version of what vm-system checks for system zones
+      # (docs/THREAT-MODEL.md N6): the program is the user's uid in the zone's
+      # user namespace, with no capabilities there — and a user namespace of
+      # its own gives it capabilities over new, empty namespaces only.
+      with subtest("a zone's program cannot touch the routes, the tunnel or the filter"):
+          for cmd in [
+              "ip -4 route replace default dev lo",
+              "ip -6 route del default",
+              "ip link set awg0 down",
+              "ip link add dummy0 type dummy",
+              "nft delete table inet vpnzone",
+              "nft flush ruleset",
+              "unshare -Ur ip link set awg0 down",
+              "unshare -Ur nft flush ruleset",
+          ]:
+              machine.fail(
+                  "su -l alice -c "
+                  + shlex.quote(
+                      "export XDG_RUNTIME_DIR=/run/user/1000; "
+                      f"nsenter --preserve-credentials -U -n -m -t {rzpid} -- {cmd}"
+                  )
+              )
+          out = in_zone(rzpid, "ip -o link")
+          assert "awg0" in out and "UP" in out and "dummy0" not in out, out
+          out = in_zone(rzpid, "ip -4 route show default")
+          assert "dev awg0" in out, out
+          out = in_zone_root(rzpid, "nft list table inet vpnzone")
+          assert "policy drop" in out, out
+
       with subtest("cellward check reports a live tunnel"):
           # The status mirror refreshes every 5 seconds from inside the zone;
           # give it a couple of cycles after the first handshake.
@@ -1301,6 +1372,43 @@ let
               timeout=60,
           )
 
+      # --- The holder dies hard while a program runs --------------------------
+      # (docs/THREAT-MODEL.md N9, the user tier's version.) The program keeps
+      # the app namespace alive; everything of the zone's own is killed. The
+      # tunnel's socket was in the uplink, which is gone: the program keeps
+      # an awg0 that sends nothing anywhere — and the capture above sees
+      # nothing either.
+      with subtest("the zone killed under a running program: it fails closed"):
+          alice(
+              f"nsenter --preserve-credentials -U -n -m -t {rzpid} -- "
+              "setsid -f sleep 600"
+          )
+          orphan = machine.succeed("pgrep -u alice -xn sleep").strip()
+          alice("systemctl --user kill -s KILL vpn-zone@vmreal")
+          machine.wait_until_fails(f"kill -0 {rzpid}", timeout=30)
+          def in_orphan(cmd):
+              return alice(
+                  f"nsenter --preserve-credentials -U -n -m -t {orphan} -- {cmd}"
+              )
+          out = in_orphan("ip -o link")
+          assert "awg0" in out and len(out.strip().splitlines()) == 2, out
+          machine.fail(
+              "su -l alice -c "
+              + shlex.quote(
+                  f"nsenter --preserve-credentials -U -n -m -t {orphan} -- "
+                  "timeout 8 socat -T5 - TCP:10.99.0.1:8080"
+              )
+          )
+          machine.fail(
+              "su -l alice -c "
+              + shlex.quote(
+                  f"nsenter --preserve-credentials -U -n -m -t {orphan} -- "
+                  "ping -c1 -W3 10.99.0.1"
+              )
+          )
+          machine.succeed(f"kill {orphan}")
+          alice("systemctl --user reset-failed vpn-zone@vmreal || true")
+
       with subtest("the leak capture is empty"):
           machine.succeed("systemctl stop leakwatch")
           count = machine.succeed(
@@ -1309,7 +1417,7 @@ let
           if count != "0":
               escaped = machine.succeed("tcpdump -nr /tmp/leak.pcap 2>/dev/null")
               raise AssertionError(f"packets escaped the tunnel:\n{escaped}")
-          alice("cellward down vmreal")
+          alice("cellward down vmreal || true")
 
       with subtest("egress marker: every tunnel packet left from the zone's uid"):
           out = machine.succeed("nft list chain inet vzowner out")
