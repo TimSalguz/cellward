@@ -314,6 +314,11 @@ pub struct Memory {
     pub last: String,
     /// `.lastprofile/<key>`.
     pub last_profile: String,
+    /// `.lastprofile/<key>` is there at all: a container was chosen for this
+    /// program before. The main home is an EMPTY file, so an empty
+    /// `last_profile` alone cannot tell "the main home" from "never" — and
+    /// the two are answered differently ([`Memory::last_choice`]).
+    pub container_chosen: bool,
     /// `~/.config/vpn-zones/default`, `offline` when the file is absent.
     pub fallback: String,
     /// `~/.config/vpn-zones/default-profile`, `ask` when the file is absent.
@@ -323,6 +328,22 @@ pub struct Memory {
     /// The network the container this launch would use is bound to, empty
     /// when it is not bound (`ask`) or there is no container at all.
     pub bound: String,
+}
+
+impl Memory {
+    /// The container chosen for this program last time, or `None` for a
+    /// program nobody ever chose one for — seen for the first time.
+    ///
+    /// Such a program is given ITS OWN HOME, preselected in the window and
+    /// taken without one (2026-09-27, the owner's model of 2026-09-17: every
+    /// program a home of its own; `docs/CONTAINERS.md` §12): the main home, the
+    /// whole real one with nothing between it and the program, is a choice
+    /// somebody makes, not what a new program falls into. What was chosen
+    /// before — the main home included — stays chosen.
+    pub fn last_choice(&self) -> Option<&str> {
+        (self.container_chosen || !self.last_profile.is_empty())
+            .then_some(self.last_profile.as_str())
+    }
 }
 
 /// What the first (network) question resolves to.
@@ -516,7 +537,7 @@ pub fn own_name(key: &str) -> String {
 /// 3. the global `default-profile` setting when it is an answer (`main`,
 ///    `own`, an existing container);
 /// 4. `.lastprofile`; one that is gone is the program's own container, not
-///    the whole real home.
+///    the whole real home — and so is none at all ([`Memory::last_choice`]).
 ///
 /// Whole containers, never a part of one laid over another: the shell's
 /// partial overlay (a default container with the sandbox remembered from
@@ -540,7 +561,9 @@ pub fn container_without_dialog(
         name if exists(name) => return Container::from_selector(name, &exists),
         _ => {}
     }
-    Container::from_selector_checked(&memory.last_profile, &exists)
+    memory
+        .last_choice()
+        .and_then(|last| Container::from_selector_checked(last, &exists))
         .unwrap_or_else(|| Container::own_sandbox(key))
 }
 
@@ -1221,7 +1244,9 @@ fn window_request(
         match memory.default_profile.as_str() {
             "ask" => match &memory.running {
                 Some(running) => running.selector.clone(),
-                None => memory.last_profile.clone(),
+                None => memory
+                    .last_choice()
+                    .map_or_else(|| own_name(key), str::to_owned),
             },
             "main" => String::new(),
             "own" => own_name(key),
@@ -1971,6 +1996,7 @@ fn read_memory_with(tools: &Tools, key: &str, tidy: bool) -> Memory {
             tools,
             &read_setting(&state.join(".lastprofile").join(key)).unwrap_or_default(),
         ),
+        container_chosen: state.join(".lastprofile").join(key).is_file(),
         fallback: crate::cli::setting(tools, "default").map_or_else(
             || "offline".to_owned(),
             |(value, _)| crate::launch::network_name(&value).to_owned(),
@@ -2072,7 +2098,11 @@ fn ask_profile(
         // a terminal or from a unit ended in nothing at all. Take the last
         // choice and let the program start — its own home when that is gone.
         return Some(
-            Container::from_selector_checked(&memory.last_profile, |n| container_exists(tools, n))
+            memory
+                .last_choice()
+                .and_then(|last| {
+                    Container::from_selector_checked(last, |n| container_exists(tools, n))
+                })
                 .unwrap_or_else(|| Container::own_sandbox(key)),
         );
     }
@@ -2086,7 +2116,7 @@ fn ask_profile(
         "--title".into(),
         format!("Профиль для «{label}»").into(),
         "--default".into(),
-        memory.last_profile.as_str().into(),
+        memory.last_choice().unwrap_or("__ownsb__").into(),
         "--menu".into(),
         "В каком профиле открыть? Профиль хранит настройки, сессии и логины отдельно от системных"
             .into(),
@@ -3105,6 +3135,34 @@ mod tests {
             container_without_dialog(&m, "k", anything, None).profile,
             "last"
         );
+    }
+
+    /// A program nobody ever chose a container for gets a home of its own —
+    /// not the main home, which is somebody's choice (2026-09-27). A main
+    /// home chosen before stays chosen: an empty `.lastprofile` file.
+    #[test]
+    fn a_program_seen_for_the_first_time_gets_a_home_of_its_own() {
+        let own = Container {
+            fs_sandbox: true,
+            sandbox: "app-tg".to_owned(),
+            ..Container::default()
+        };
+        let mut m = memory();
+        m.default_profile = "ask".to_owned();
+        assert_eq!(m.last_choice(), None);
+        assert_eq!(container_without_dialog(&m, "tg", anything, None), own);
+
+        m.container_chosen = true;
+        assert_eq!(m.last_choice(), Some(""));
+        assert_eq!(
+            container_without_dialog(&m, "tg", anything, None),
+            Container::default()
+        );
+
+        // A name read from the file is a choice, whatever the flag says.
+        m.container_chosen = false;
+        m.last_profile = "work".to_owned();
+        assert_eq!(m.last_choice(), Some("work"));
     }
 
     #[test]
