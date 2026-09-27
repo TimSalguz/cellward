@@ -550,7 +550,9 @@ let
       };
 
     testScript = ''
-      import ipaddress
+      # Parts of this script live in files of their own (tests/vm-*.py) and
+      # are exec()'d in place: the script goes to the driver's build in one
+      # environment variable, and the kernel takes 128 KiB there.
       import json
       import re
       import shlex
@@ -1312,66 +1314,7 @@ let
           out = machine.succeed("getent ahostsv4 leaktest.internal")
           assert "10.66.66.66" in out, f"the zone broke the host's own resolver: {out}"
 
-      # --- IPv6 where the tunnel carries it: works, and only inside ----------
-      with subtest("IPv6 through the tunnel: the v6 default goes into awg0"):
-          out = in_zone(rzpid, "ip -6 route show default")
-          assert "dev awg0" in out and "unreachable" not in out, out
-          # The server's REAL v6 address, on the network both VMs share, is
-          # routed into the tunnel too: there is no second way to it.
-          out = in_zone(rzpid, f"ip -6 route get {server_ip6}")
-          assert "dev awg0" in out, f"a v6 route around the tunnel: {out}"
-
-      with subtest("IPv6 through the tunnel: TCP and ping, the server sees the tunnel's v6 address"):
-          out = in_zone(rzpid, "socat -T10 - TCP6:[fd99::1]:8081")
-          # socat writes the peer in full (`[fd99:0000:…:0002]`): compare
-          # addresses, not spellings.
-          seen = re.search(r"peer=\[?([0-9a-fA-F:]+)\]?", out)
-          assert seen and ipaddress.ip_address(seen.group(1)) == ipaddress.ip_address(
-              "fd99::2"
-          ), f"server saw someone else over v6: {out}"
-          out = in_zone(rzpid, "ping -6 -c1 -W5 fd99::1")
-          assert " 0% packet loss" in out, out
-
-      with subtest("IPv6 through the tunnel: DNS over v6, from the config, answers inside"):
-          out = in_zone(rzpid, "cat /etc/resolv.conf")
-          assert "nameserver fd99::1" in out, out
-          out = in_zone(rzpid, "dig +time=5 +tries=2 +short leaktest.internal @fd99::1")
-          assert "10.99.0.9" in out, f"DNS over v6 through the tunnel failed: {out}"
-
-      with subtest("IPv6 aimed at the server's real address goes into the tunnel, not around it"):
-          # Nothing listens there, so the connection is refused — by the
-          # server, through the tunnel. Had it left by eth1, the capture holds it.
-          in_zone(rzpid, f"sh -c 'socat -T3 - TCP6:[{server_ip6}]:9 </dev/null || true'")
-
-      # --- A zone's program cannot change the zone's network ---------------
-      # The user tier's version of what vm-system checks for system zones
-      # (docs/THREAT-MODEL.md N6): the program is the user's uid in the zone's
-      # user namespace, with no capabilities there — and a user namespace of
-      # its own gives it capabilities over new, empty namespaces only.
-      with subtest("a zone's program cannot touch the routes, the tunnel or the filter"):
-          for cmd in [
-              "ip -4 route replace default dev lo",
-              "ip -6 route del default",
-              "ip link set awg0 down",
-              "ip link add dummy0 type dummy",
-              "nft delete table inet vpnzone",
-              "nft flush ruleset",
-              "unshare -Ur ip link set awg0 down",
-              "unshare -Ur nft flush ruleset",
-          ]:
-              machine.fail(
-                  "su -l alice -c "
-                  + shlex.quote(
-                      "export XDG_RUNTIME_DIR=/run/user/1000; "
-                      f"nsenter --preserve-credentials -U -n -m -t {rzpid} -- {cmd}"
-                  )
-              )
-          out = in_zone(rzpid, "ip -o link")
-          assert "awg0" in out and "UP" in out and "dummy0" not in out, out
-          out = in_zone(rzpid, "ip -4 route show default")
-          assert "dev awg0" in out, out
-          out = in_zone_root(rzpid, "nft list table inet vpnzone")
-          assert "policy drop" in out, out
+      exec(open("${./vm-tunnel-ipv6.py}").read())
 
       with subtest("cellward check reports a live tunnel"):
           # The status mirror refreshes every 5 seconds from inside the zone;
@@ -1382,44 +1325,7 @@ let
               timeout=60,
           )
 
-      # --- The holder dies hard while a program runs --------------------------
-      # (docs/THREAT-MODEL.md N9, the user tier's version.) The program keeps
-      # the app namespace alive; everything of the zone's own is killed. The
-      # tunnel's socket was in the uplink, which is gone: the program keeps
-      # an awg0 that sends nothing anywhere — and the capture above sees
-      # nothing either.
-      with subtest("the zone killed under a running program: it fails closed"):
-          # Its own session and no pipe of ours: the driver would otherwise
-          # wait for the sleep to close the output it inherited.
-          alice(
-              f"nsenter --preserve-credentials -U -n -m -t {rzpid} -- "
-              "sh -c 'setsid -f sleep 600 </dev/null >/dev/null 2>&1'"
-          )
-          orphan = machine.succeed("pgrep -u alice -xn sleep").strip()
-          alice("systemctl --user kill -s KILL vpn-zone@vmreal")
-          machine.wait_until_fails(f"kill -0 {rzpid}", timeout=30)
-          def in_orphan(cmd):
-              return alice(
-                  f"nsenter --preserve-credentials -U -n -m -t {orphan} -- {cmd}"
-              )
-          out = in_orphan("ip -o link")
-          assert "awg0" in out and len(out.strip().splitlines()) == 2, out
-          machine.fail(
-              "su -l alice -c "
-              + shlex.quote(
-                  f"nsenter --preserve-credentials -U -n -m -t {orphan} -- "
-                  "timeout 8 socat -T5 - TCP:10.99.0.1:8080"
-              )
-          )
-          machine.fail(
-              "su -l alice -c "
-              + shlex.quote(
-                  f"nsenter --preserve-credentials -U -n -m -t {orphan} -- "
-                  "ping -c1 -W3 10.99.0.1"
-              )
-          )
-          machine.succeed(f"kill {orphan}")
-          alice("systemctl --user reset-failed vpn-zone@vmreal || true")
+      exec(open("${./vm-zone-killed.py}").read())
 
       with subtest("the leak capture is empty"):
           machine.succeed("systemctl stop leakwatch")
@@ -2825,129 +2731,8 @@ let
           assert lines[at + 1] == smoke_ns, f"{lines} (zone {smoke_ns})"
           alice("cellward down vmsmoke")
 
-      # --- A network through an interface of the host (CONTAINERS §3.3) -----
-      # No tunnel: pasta attached to the app namespace and bound to one host
-      # interface. The server must see the machine's own eth1 address, and a
-      # zone bound to eth0 must not reach the server at all — the binding, not
-      # the host's routing table, decides where packets go.
-      with subtest("host-interface zone: out through eth1 only"):
-          server.succeed(
-              "systemd-run --unit=hello-lan socat "
-              f"TCP-LISTEN:8090,bind={server_ip},fork,reuseaddr "
-              "'SYSTEM:echo peer=$SOCAT_PEERADDR'"
-          )
-          alice("printf '[HostInterface]\\nInterface = eth1\\n' > /tmp/vmlan.conf")
-          alice("cellward add vmlan /tmp/vmlan.conf")
-          alice("cellward up vmlan")
-          lpid = machine.succeed(f"cat {STATE}/vmlan/zone.pid").strip()
-          links = in_zone(lpid, "ip -o link show")
-          assert len(links.strip().splitlines()) == 2 and ": awg0" in links, links
-          out = in_zone(lpid, "ip -4 route show default")
-          assert "dev awg0" in out, out
-          out = in_zone(lpid, f"socat -T10 - TCP:{server_ip}:8090")
-          assert "peer=192.168.1.1" in out, f"server saw someone else: {out}"
-          # The app namespace's filter holds here too.
-          rules = in_zone_root(lpid, "nft list ruleset")
-          assert 'oifname "awg0" accept' in rules and "policy drop" in rules, rules
-          # And the host's own services are not the zone's way out (audit
-          # 2026-09-27): pasta is in the host's network, and a connection to
-          # the host's address would be delivered to whatever listens there,
-          # to go on by the host's routes.
-          machine.succeed(
-              "systemd-run --unit=hostlocal socat TCP-LISTEN:8091,fork,reuseaddr 'SYSTEM:echo host-local'"
-          )
-          machine.wait_until_succeeds("ss -ltn | grep -q ':8091 '")
-          machine.succeed("socat -T5 - TCP:192.168.1.1:8091 | grep -q host-local")
-          in_zone(lpid, "sh -c '! timeout 10 socat -T5 - TCP:192.168.1.1:8091'")
-          assert "192.168.1.1 reject" in rules, rules
-          machine.succeed("systemctl stop hostlocal")
-          machine.wait_until_succeeds(
-              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; cellward check vmlan'",
-              timeout=30,
-          )
-          out = alice("cellward doctor vmlan --json")
-          assert '"worst":"fail"' not in out, out
-          alice("cellward down vmlan")
+      exec(open("${./vm-hostif.py}").read())
 
-      # IPv6 through the host's interface when it has usable IPv6 (a global
-      # address and a default route): bound to eth1 like IPv4, out as the
-      # host, and never to the host's own IPv6 addresses (2026-09-27; only
-      # IPv4 ones were refused). pasta gives the zone eth1's own v6 address,
-      # so a connection to THAT stays in the zone; the leak was the host's
-      # other addresses — a ULA on another interface here.
-      with subtest("host-interface zone: IPv6 bound to eth1, the host's other v6 addresses refused"):
-          machine_ip6 = machine.succeed(
-              "ip -6 -o addr show eth1 scope global | head -1 | tr -s ' ' | cut -d' ' -f4 | cut -d/ -f1"
-          ).strip()
-          machine.succeed(
-              f"ip -6 route replace default via {server_ip6} dev eth1 && "
-              "ip link add vmv6 type dummy && ip -6 addr add fd77::1/64 dev vmv6 nodad && "
-              "ip link set vmv6 up"
-          )
-          server.succeed(
-              "systemd-run --unit=hello-lan6 socat "
-              f"TCP6-LISTEN:8095,bind=[{server_ip6}],fork,reuseaddr "
-              "'SYSTEM:echo peer=$SOCAT_PEERADDR'"
-          )
-          machine.succeed(
-              "systemd-run --unit=hostlocal6 socat TCP6-LISTEN:8096,bind=[fd77::1],fork,reuseaddr "
-              "'SYSTEM:echo host-local6'"
-          )
-          machine.wait_until_succeeds("ss -ltn | grep -q ':8096 '")
-          machine.succeed("socat -T5 - TCP6:[fd77::1]:8096 | grep -q host-local6")
-          alice("cellward up vmlan")
-          lpid = machine.succeed(f"cat {STATE}/vmlan/zone.pid").strip()
-          out = in_zone(lpid, "ip -6 route show default")
-          assert "dev awg0" in out, out
-          out = in_zone(lpid, f"socat -T10 - TCP6:[{server_ip6}]:8095")
-          seen = re.search(r"peer=\[?([0-9a-fA-F:]+)\]?", out)
-          assert seen and ipaddress.ip_address(seen.group(1)) == ipaddress.ip_address(
-              machine_ip6
-          ), f"the server saw someone else over v6: {out}"
-          rules = in_zone_root(lpid, "nft list ruleset")
-          assert "ip6 daddr fd77::1 reject" in rules, rules
-          in_zone(lpid, "sh -c '! timeout 10 socat -T5 - TCP6:[fd77::1]:8096'")
-          alice("cellward down vmlan")
-          machine.succeed(
-              "systemctl stop hostlocal6 && ip link del vmv6 && "
-              f"ip -6 route del default via {server_ip6} dev eth1"
-          )
-
-      # A dummy interface with an address and no way to the server: bound to
-      # it, the zone must not reach the server even though the host itself
-      # routes there through eth1.
-      with subtest("host-interface zone bound to another interface cannot reach eth1's network"):
-          machine.succeed(
-              "ip link add vmdummy type dummy && ip addr add 10.77.0.1/24 dev vmdummy "
-              "&& ip link set vmdummy up"
-          )
-          alice("printf '[HostInterface]\\nInterface = vmdummy\\n' > /tmp/vmwan.conf")
-          alice("cellward add vmwan /tmp/vmwan.conf")
-          alice("cellward up vmwan")
-          wpid = machine.succeed(f"cat {STATE}/vmwan/zone.pid").strip()
-          in_zone(wpid, f"sh -c '! timeout 10 socat -T5 - TCP:{server_ip}:8090'")
-          alice("cellward down vmwan")
-
-      # The interface deleted under a running zone: pasta binding a socket to
-      # an interface that is gone connects it UNBOUND (review 2026-09-24), so
-      # the holder watches the interface and takes the zone down at once.
-      with subtest("host-interface zone: its interface deleted, the zone goes down"):
-          alice("cellward up vmwan")
-          wpid = machine.succeed(f"cat {STATE}/vmwan/zone.pid").strip()
-          machine.succeed("ip link del vmdummy")
-          machine.wait_until_fails(f"test -e /proc/{wpid}", timeout=15)
-          machine.fail(
-              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
-              "systemctl --user is-active vpn-zone@vmwan'"
-          )
-
-      with subtest("host-interface zone: a missing interface refuses to come up"):
-          alice("printf '[HostInterface]\\nInterface = nosuchif0\\n' > /tmp/vmnone.conf")
-          alice("cellward add vmnone /tmp/vmnone.conf")
-          machine.fail(
-              "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; cellward up vmnone'"
-          )
-          machine.fail(f"test -f {STATE}/vmnone/ready")
     '';
   };
 in
