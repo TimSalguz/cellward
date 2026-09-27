@@ -3843,7 +3843,7 @@ fn hide_container_storage(zone: &Zone) -> Result<(), String> {
         .zip(["profiles", "sandboxes", "throwaway"])
     {
         let dir = zone.home.join(dir);
-        if !dir.is_dir() {
+        if !dir_there(&dir)? {
             continue;
         }
         let keep = kept.join(kind);
@@ -3956,7 +3956,14 @@ pub(crate) fn seal_project_state(
 pub(crate) fn dir_there(path: &Path) -> Result<bool, String> {
     match fs::metadata(path) {
         Ok(meta) => Ok(meta.is_dir()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        // Nothing there, or a file where a directory would be on the way:
+        // no directory, surely.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.raw_os_error() == Some(libc::ENOTDIR) =>
+        {
+            Ok(false)
+        }
         Err(e) => Err(format!("cannot look at {}: {e}", path.display())),
     }
 }

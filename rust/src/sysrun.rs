@@ -1860,6 +1860,15 @@ struct UserLookups;
 
 impl UserLookups {
     fn enter(user: &User) -> Result<Self, String> {
+        // The user's groups as well: a home reached through a directory of
+        // one of them. `drop_to` sets them again, for good.
+        // SAFETY: a list of gids and its length.
+        if unsafe { libc::setgroups(user.groups.len(), user.groups.as_ptr()) } != 0 {
+            return Err(format!(
+                "cannot take the user's groups: {}",
+                io::Error::last_os_error()
+            ));
+        }
         // SAFETY: setfs*id(2) take an id and return the previous one; asked
         // with -1, the current one, unchanged.
         let now = unsafe {
