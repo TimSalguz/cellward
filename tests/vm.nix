@@ -307,7 +307,8 @@ let
         b"BEGIN\r\n"
         + msg(1, bus[0], bus[1], "Hello", bus[1])
         + msg(2, bus[0], bus[1], "RequestName", bus[1], "su",
-              pad(s("org.freedesktop.Notifications"), 4) + struct.pack("<I", 4))
+              pad(s(sys.argv[2] if len(sys.argv) > 2 else "org.freedesktop.Notifications"), 4)
+              + struct.pack("<I", 4))
     )
     with open(sys.argv[1], "ab", buffering=0) as out:
         while True:
@@ -2638,6 +2639,26 @@ let
           machine.sleep(2)
           machine.fail("grep -q ListHistory /home/alice/notify-got")
           alice("systemctl --user stop fakenotifyd || true")
+          # A media player's name the zone may take, and no host player's
+          # connection it may talk to by one (review 2026-09-27: OWN on
+          # org.mpris.MediaPlayer2.* was talk to host Firefox's whole
+          # connection — its OpenURL opened any link on the host).
+          alice(
+              "systemd-run --user --unit=fakeplayer ${pkgs.python3}/bin/python3 ${fakeNotifyd} "
+              "/home/alice/player-got org.mpris.MediaPlayer2.vmhost"
+          )
+          machine.wait_until_succeeds("grep -q . /home/alice/player-got", timeout=30)
+          own = "call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus RequestName su"
+          out = in_zone(hp, f"busctl --user --timeout=5 {own} org.mpris.MediaPlayer2.vmzone.instance1 4")
+          assert out.strip() == "u 1", out
+          in_zone(
+              hp,
+              "sh -c 'busctl --user --timeout=3 call org.mpris.MediaPlayer2.vmhost "
+              "/org/mozilla/firefox/Remote org.mozilla.firefox OpenURL ay 0 || true'",
+          )
+          machine.sleep(2)
+          machine.fail("grep -q OpenURL /home/alice/player-got")
+          alice("systemctl --user stop fakeplayer || true")
           # The zone's bus is still the zone's: names and calls go through.
           in_zone(hp, "busctl --user --timeout=5 call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ListNames")
           # But not the portals the portal would grant a "host application"

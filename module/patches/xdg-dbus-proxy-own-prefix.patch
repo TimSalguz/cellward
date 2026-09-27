@@ -1,13 +1,19 @@
-diff -ruN a b
+diff --color -ruN a/dbus-proxy.c b/dbus-proxy.c
 --- a/dbus-proxy.c
 +++ b/dbus-proxy.c
-@@ -273,6 +273,23 @@
+@@ -273,6 +273,29 @@
            else if (arg[2] == 'o')
              policy = FLATPAK_POLICY_OWN;
  
-+          /* vpn-zones: `--own=NAME-*` — own names NAME-<suffix> and nothing else. */
-+          if (policy == FLATPAK_POLICY_OWN && g_str_has_suffix (name, "-*"))
++          /* vpn-zones: `--own=NAME-*` and `--own=NAME.*` — own names
++           * NAME-<suffix> (NAME.<suffix>) and nothing else: no SEE, no TALK
++           * on the names of others with the prefix. Upstream, `.*` gives the
++           * whole subtree OWN, and OWN on a name another connection holds is
++           * talk to that whole connection. */
++          if (policy == FLATPAK_POLICY_OWN
++              && (g_str_has_suffix (name, "-*") || g_str_has_suffix (name, ".*")))
 +            {
++              char separator[2] = { name[strlen (name) - 2], 0 };
 +              name[strlen (name) - 2] = 0;
 +              if (name[0] == ':' || !g_dbus_is_name (name))
 +                {
@@ -15,7 +21,7 @@ diff -ruN a b
 +                  return FALSE;
 +                }
 +              {
-+                g_autofree char *prefix = g_strconcat (name, "-", NULL);
++                g_autofree char *prefix = g_strconcat (name, separator, NULL);
 +                flatpak_proxy_add_own_prefix (proxy, prefix);
 +              }
 +              *args_i += 1;
@@ -25,7 +31,7 @@ diff -ruN a b
            if (g_str_has_suffix (name, ".*"))
              {
                name[strlen (name) - 2] = 0;
-diff --color -ruN '--color=never' a/flatpak-proxy.c b/flatpak-proxy.c
+diff --color -ruN a/flatpak-proxy.c b/flatpak-proxy.c
 --- a/flatpak-proxy.c
 +++ b/flatpak-proxy.c
 @@ -344,6 +344,10 @@
@@ -39,7 +45,7 @@ diff --color -ruN '--color=never' a/flatpak-proxy.c b/flatpak-proxy.c
  };
  
  typedef struct
-@@ -683,6 +687,43 @@
+@@ -683,6 +687,46 @@
  }
  
  void
@@ -50,7 +56,8 @@ diff --color -ruN '--color=never' a/flatpak-proxy.c b/flatpak-proxy.c
 +}
 +
 +/* The name is PREFIX followed by at least one of [A-Za-z0-9_-] and nothing
-+ * else: no dot, so no namespace below it. */
++ * else: no dot, so no namespace below it — unless PREFIX ends with a dot
++ * (`--own=NAME.*`): then elements of those, separated by single dots. */
 +static gboolean
 +own_prefix_matches (FlatpakProxy *proxy, const char *name)
 +{
@@ -64,12 +71,14 @@ diff --color -ruN '--color=never' a/flatpak-proxy.c b/flatpak-proxy.c
 +      if (!g_str_has_prefix (name, prefix))
 +        continue;
 +
++      gboolean dotted = g_str_has_suffix (prefix, ".");
 +      rest = name + strlen (prefix);
-+      if (*rest == 0)
++      if (*rest == 0 || *rest == '.')
 +        continue;
 +
 +      for (; *rest != 0; rest++)
-+        if (!g_ascii_isalnum (*rest) && *rest != '_' && *rest != '-')
++        if (!g_ascii_isalnum (*rest) && *rest != '_' && *rest != '-'
++            && !(dotted && *rest == '.' && rest[1] != '.' && rest[1] != 0))
 +          break;
 +
 +      if (*rest == 0)
@@ -83,7 +92,7 @@ diff --color -ruN '--color=never' a/flatpak-proxy.c b/flatpak-proxy.c
  flatpak_proxy_add_call_rule (FlatpakProxy *proxy,
                               const char   *name,
                               gboolean      name_is_subtree,
-@@ -715,6 +756,7 @@
+@@ -715,6 +759,7 @@
    g_assert (proxy->clients == NULL);
  
    g_hash_table_destroy (proxy->filters);
@@ -91,7 +100,7 @@ diff --color -ruN '--color=never' a/flatpak-proxy.c b/flatpak-proxy.c
  
    g_free (proxy->socket_path);
    g_free (proxy->dbus_address);
-@@ -2182,6 +2224,9 @@
+@@ -2182,6 +2227,9 @@
        if (name_policy >= required_policy)
          return TRUE;
  
@@ -101,7 +110,7 @@ diff --color -ruN '--color=never' a/flatpak-proxy.c b/flatpak-proxy.c
        if (client->proxy->log_messages)
          g_print ("Filtering message due to arg0 %s, policy: %d (required %d)\n", name, name_policy, required_policy);
      }
-@@ -3191,6 +3236,7 @@
+@@ -3191,6 +3239,7 @@
  flatpak_proxy_init (FlatpakProxy *proxy)
  {
    proxy->filters = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify) filter_list_free);
@@ -109,7 +118,7 @@ diff --color -ruN '--color=never' a/flatpak-proxy.c b/flatpak-proxy.c
    flatpak_proxy_add_policy (proxy, "org.freedesktop.DBus", FALSE, FLATPAK_POLICY_TALK);
  }
  
-diff --color -ruN '--color=never' a/flatpak-proxy.h b/flatpak-proxy.h
+diff --color -ruN a/flatpak-proxy.h b/flatpak-proxy.h
 --- a/flatpak-proxy.h
 +++ b/flatpak-proxy.h
 @@ -53,6 +53,8 @@

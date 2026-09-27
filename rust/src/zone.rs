@@ -371,7 +371,7 @@ pub const PORTALS: [&str; 2] = [
 /// stands in for IBus, `org.freedesktop.IBus` is the same. The portals expose
 /// `CreateInputContext` and contexts guarded by their owner; typing works
 /// through them as it does in Flatpak.
-pub const SESSION_BUS_RULES: [&str; 22] = [
+pub const SESSION_BUS_RULES: [&str; 24] = [
     "--filter",
     PORTALS[0],
     PORTALS[1],
@@ -385,6 +385,9 @@ pub const SESSION_BUS_RULES: [&str; 22] = [
     DESKTOP_SERVICES[7],
     DESKTOP_SERVICES[8],
     TRAY_ITEM_NAMES,
+    // A media player's name to take, and only that: our proxy's `.*` for
+    // OWN (module/patches) — upstream, OWN on the subtree was talk to every
+    // host player's whole connection (host Firefox's `OpenURL`).
     "--own=org.mpris.MediaPlayer2.*",
     "--talk=org.freedesktop.portal.IBus",
     INPUT_METHOD_PORTAL[0],
@@ -394,10 +397,14 @@ pub const SESSION_BUS_RULES: [&str; 22] = [
     SCREEN_SAVER[1],
     SCREEN_SAVER[2],
     SCREEN_SAVER[3],
+    SCREEN_SAVER[4],
+    SCREEN_SAVER[5],
 ];
 
 /// The notification daemon and the tray's watcher by their own interfaces
-/// only (review 2026-09-27). `--talk` to a name is talk to the whole
+/// only (review 2026-09-27) — the calls: xdg-dbus-proxy passes every
+/// broadcast of a name that has call rules, and the `--broadcast` lines
+/// only say which ones are wanted. `--talk` to a name is talk to the whole
 /// connection that owns it: mako's `fr.emersion.Mako.ListHistory` read every
 /// notification of the host and of the other zones, `InvokeAction` set off a
 /// host program's action; dunst has `org.dunstproject.cmd0`; on KDE and GNOME
@@ -426,12 +433,15 @@ pub const INPUT_METHOD_PORTAL: [&str; 3] = [
 ];
 
 /// Keeping the screen awake, and nothing else of the screensaver's owner
-/// (the shell, on KDE): at either path it answers on.
-pub const SCREEN_SAVER: [&str; 4] = [
+/// (the shell, on KDE): at either path it answers on. Introspection too: Qt's
+/// `QDBusInterface` asks for it first, and is no interface without it.
+pub const SCREEN_SAVER: [&str; 6] = [
     "--call=org.freedesktop.ScreenSaver=org.freedesktop.ScreenSaver.Inhibit@/org/freedesktop/ScreenSaver",
     "--call=org.freedesktop.ScreenSaver=org.freedesktop.ScreenSaver.UnInhibit@/org/freedesktop/ScreenSaver",
+    "--call=org.freedesktop.ScreenSaver=org.freedesktop.DBus.Introspectable.Introspect@/org/freedesktop/ScreenSaver",
     "--call=org.freedesktop.ScreenSaver=org.freedesktop.ScreenSaver.Inhibit@/ScreenSaver",
     "--call=org.freedesktop.ScreenSaver=org.freedesktop.ScreenSaver.UnInhibit@/ScreenSaver",
+    "--call=org.freedesktop.ScreenSaver=org.freedesktop.DBus.Introspectable.Introspect@/ScreenSaver",
 ];
 
 /// Tray icons' names, owned and nothing more (see [`SESSION_BUS_RULES`]).

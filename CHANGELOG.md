@@ -276,6 +276,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   process that hides** (review): the broker's pinned `/nix/store/…/env`
   was taken for the program's id; a process that made itself not dumpable
   shows as root's in `/proc` and was skipped by a grant's revoke.
+- **A hermetic zone's media players own their names, and talk to no host
+  player** (bug hunt 2026-09-27). `--own=org.mpris.MediaPlayer2.*` gave
+  the zone OWN on the whole subtree, and OWN on a name another connection
+  holds is talk to that connection: host Firefox has its MPRIS name on the
+  connection that answers `OpenURL`, so a program in a hermetic zone could
+  open any link in the host's Firefox, on the host's network. Our patched
+  xdg-dbus-proxy now reads `--own=NAME.*` as it reads `--own=NAME-*`: the
+  right to own such names, and nothing more.
 - **The notification daemon, the tray's watcher, the screensaver and
   fcitx5's portal are reached by their own interfaces only** (bug hunt
   2026-09-27). The session bus filter let a zone or a sandbox *talk* to
