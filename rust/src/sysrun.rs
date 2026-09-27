@@ -1279,7 +1279,12 @@ fn serve_uplink(
                 // as a plain one.
                 let still = system::settings(zone)
                     .filter(|s| s.users.contains(&user.name) && s.plain == plain);
-                if still.is_none() {
+                // And the rule keeping user zones out of it, as the first
+                // time: the zone made anew may have come up without it.
+                let ruled = fs::read_to_string(system::run_dir(zone).join(system::BRIDGE_RULE))
+                    .ok()
+                    .and_then(|t| t.trim().parse::<u32>().ok());
+                if still.is_none() || bridge.is_none() || ruled != bridge {
                     eprintln!(
                         "sysrun: {}'s way out through {zone} is not given again: the zone \
                          changed",

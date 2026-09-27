@@ -343,6 +343,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   sandboxes and containers (`flatpak`, `bwrap`, `docker`…), `ssh`,
   `socat` and more interpreters — an "always" for one of them was an
   "always" for whatever it is told to run.
+- **A user zone's way out through a system zone made anew is checked as
+  the first time** (bug hunt 2026-09-27). When the system zone came up
+  again, the way out was given back after its users and its kind were
+  checked, but not the rule that keeps user zones out of the system zone
+  (the bridge group's): a zone made anew without it was a way in. It is
+  checked again too.
 - **Each system pasta has a pid file of its own** (bug hunt 2026-09-27).
   A system zone named `x-uplink` shared `x`'s uplink's pid file
   (`/run/vpn-zones/pasta/x-uplink.pid`), so one pasta's word that it was
