@@ -1318,11 +1318,20 @@ fn client_to_bus(
             // zone's before anything else of the program's goes up
             // (`register`). Only the first message: the bus takes no other
             // for a Hello. One that wants no answer gives nothing to wait for.
-            if std::mem::take(&mut first)
+            let was_first = std::mem::take(&mut first);
+            // Anything else first — a Hello that wants no answer among it —
+            // would leave the connection never registered, and every portal
+            // call of it unheld (review 2026-09-27). The bus takes nothing
+            // but a Hello first anyway: such a program is no client of it.
+            if was_first
                 && ctx.portal_app.is_some()
-                && is_hello(&h)
-                && h.flags & wire::NO_REPLY_EXPECTED == 0
+                && !(is_hello(&h) && h.flags & wire::NO_REPLY_EXPECTED == 0)
             {
+                return Err(io::Error::other(
+                    "the first message is not a Hello that wants its answer",
+                ));
+            }
+            if was_first && ctx.portal_app.is_some() {
                 conn.registration().stage = Stage::Hello(h.serial);
                 let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
                 send_all(up, &msg, &raw)?;
