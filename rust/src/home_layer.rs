@@ -252,7 +252,15 @@ pub fn migrate_slots(container_dir: &Path) {
 /// is the target, of the source's kind. Nothing of the container runs yet:
 /// this is its launch, before the program.
 pub fn give_back(real: &OwnedFd, home: &Path, rel: &Path) -> Result<bool, String> {
-    let from = PathBuf::from(format!("/proc/self/fd/{}", real.as_raw_fd())).join(rel);
+    // Opened once, below the real home and through no link: `rel` was
+    // checked as it resolved then (the grants: not the project's state, not
+    // the home itself), and a link swapped in along it since — by a program
+    // with a grant above it — must not lead the bind anywhere else (review
+    // 2026-09-27). The bind is from this descriptor, not from the path.
+    let Some(source) = open_beneath(real, rel) else {
+        return Ok(false);
+    };
+    let from = PathBuf::from(format!("/proc/self/fd/{}", source.as_raw_fd()));
     let Ok(meta) = fs::metadata(&from) else {
         return Ok(false);
     };
@@ -290,9 +298,54 @@ pub fn give_back(real: &OwnedFd, home: &Path, rel: &Path) -> Result<bool, String
     Ok(true)
 }
 
+/// `rel` below the directory `dir`, as an `O_PATH` descriptor — never
+/// through a link, nor out of `dir` (`openat2`, `RESOLVE_NO_SYMLINKS |
+/// RESOLVE_BENEATH`). `None` where there is no such thing, or only through
+/// a link.
+fn open_beneath(dir: &OwnedFd, rel: &Path) -> Option<OwnedFd> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(rel.as_os_str().as_bytes()).ok()?;
+    let how = libc::open_how {
+        flags: (libc::O_PATH | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_BENEATH,
+    };
+    // SAFETY: a directory descriptor, a NUL-terminated path, and an
+    // open_how of the size given, all alive for the call.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            dir.as_raw_fd(),
+            path.as_ptr(),
+            &how as *const libc::open_how,
+            std::mem::size_of::<libc::open_how>(),
+        )
+    };
+    let fd = i32::try_from(fd).ok().filter(|fd| *fd >= 0)?;
+    // SAFETY: just opened, and nobody else's.
+    Some(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What is given back is reached below the real home through no link:
+    /// one swapped in along a grant leads nowhere.
+    #[test]
+    fn a_grant_is_reached_through_no_link() {
+        let base = std::env::temp_dir().join(format!("vz-beneath-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("home/a/b")).unwrap();
+        fs::create_dir_all(base.join("secret/b")).unwrap();
+        std::os::unix::fs::symlink(base.join("secret"), base.join("home/l")).unwrap();
+        let home = crate::sys::open_dir(&base.join("home")).unwrap();
+        assert!(open_beneath(&home, Path::new("a/b")).is_some());
+        assert!(open_beneath(&home, Path::new("l/b")).is_none());
+        assert!(open_beneath(&home, Path::new("../secret")).is_none());
+        let _ = fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn mounts_below_the_home_are_found_once_and_unescaped() {
