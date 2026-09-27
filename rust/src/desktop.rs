@@ -345,34 +345,104 @@ fn exec_words_marked(exec: &str) -> Vec<(String, bool)> {
 }
 
 /// The shells, by the name of their program.
-const SHELLS: [&str; 9] = [
-    "sh", "bash", "dash", "zsh", "ksh", "mksh", "fish", "csh", "tcsh",
+const SHELLS: [&str; 17] = [
+    "sh", "bash", "dash", "zsh", "ksh", "mksh", "oksh", "loksh", "fish", "csh", "tcsh", "ash",
+    "yash", "nu", "xonsh", "elvish", "rc",
 ];
 
-/// Which words of an `Exec` line a shell reads as its script: the first
-/// one after the options of a shell, where one of them is `-c` (`-lc`,
-/// `-ec`…).
+/// Whether `option` makes `program` run the word after it as code: a
+/// shell's `-c` (in a cluster too: `-lc`), an interpreter's `-c`, `-e`…
+fn code_option(program: &str, option: &str) -> bool {
+    let name = program.rsplit('/').next().unwrap_or(program);
+    let family = |prefix: &str| name.starts_with(prefix);
+    if SHELLS.contains(&name) {
+        return option.len() > 1
+            && option.starts_with('-')
+            && !option.starts_with("--")
+            && option[1..].contains('c');
+    }
+    if family("python") || family("pypy") {
+        return option == "-c";
+    }
+    if family("perl") {
+        return matches!(option, "-e" | "-E");
+    }
+    if family("ruby") || family("lua") || family("julia") || name == "Rscript" {
+        return option == "-e";
+    }
+    if family("node") || name == "bun" || name == "deno" {
+        return matches!(option, "-e" | "-p" | "--eval" | "--print" | "eval");
+    }
+    if family("php") {
+        return option == "-r";
+    }
+    false
+}
+
+/// A shell's options that take the word after them as their value, not as
+/// a script (`-o pipefail`).
+fn takes_value(option: &str) -> bool {
+    matches!(
+        option,
+        "-o" | "+o" | "-O" | "+O" | "--rcfile" | "--init-file"
+    )
+}
+
+/// Which words of an `Exec` line a shell or an interpreter reads as code:
+/// the first word that is no option after the option that says so, past
+/// the values other options take (review 2026-09-27: `bash -o pipefail -c
+/// %u` took `pipefail` for the script).
 fn script_words(words: &[(String, bool)]) -> Vec<bool> {
     let mut script = vec![false; words.len()];
-    for (i, (word, _)) in words.iter().enumerate() {
-        let name = word.rsplit('/').next().unwrap_or(word);
-        if !SHELLS.contains(&name) {
-            continue;
-        }
+    for (i, (program, _)) in words.iter().enumerate() {
         let mut told = false;
-        for (j, (next, _)) in words.iter().enumerate().skip(i + 1) {
-            if next.starts_with('-') && !next.starts_with("--") {
-                told |= next.contains('c');
+        let mut skip = false;
+        for (j, (word, _)) in words.iter().enumerate().skip(i + 1) {
+            if skip {
+                skip = false;
                 continue;
             }
-            if next.starts_with("--") {
+            if told && !(word.starts_with('-') || word.starts_with('+')) {
+                script[j] = true;
+                break;
+            }
+            if code_option(program, word) {
+                told = true;
                 continue;
             }
-            script[j] = told;
-            break;
+            if takes_value(word) {
+                skip = true;
+                continue;
+            }
+            if !(word.starts_with('-') || word.starts_with('+')) {
+                break;
+            }
         }
     }
     script
+}
+
+/// The field codes in a word, `%%` read as a percent sign.
+fn codes_in(word: &str) -> Vec<char> {
+    let mut codes = Vec::new();
+    let mut chars = word.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.next() {
+                Some('%') | None => {}
+                Some(code) => codes.push(code),
+            }
+        }
+    }
+    codes
+}
+
+/// Whether a code may be filled inside `word`: only among characters that
+/// no shell or interpreter reads as anything but the word itself
+/// (`--url=%u`, `-F%f`). Quotes, brackets, `;`, `$`… are code somewhere.
+fn plain_around_code(word: &str) -> bool {
+    word.chars()
+        .all(|c| c.is_alphanumeric() || "-_=:,./@+%".contains(c))
 }
 
 /// The program an `Exec` line starts: wrappers and assignments skipped, by the
@@ -1942,8 +2012,10 @@ pub fn expand_exec(entry: &Group, file: &Path, args: &[OsString]) -> (Vec<OsStri
     let words = exec_words_marked(exec);
     let scripts = script_words(&words);
     for ((word, quoted), script) in words.into_iter().zip(scripts) {
-        let code = |c: char| word.contains(&format!("%{c}"));
-        if script && ['u', 'f', 'U', 'F'].into_iter().any(code) {
+        let takes_args = codes_in(&word)
+            .iter()
+            .any(|c| matches!(c, 'u' | 'f' | 'U' | 'F'));
+        if script && takes_args {
             refused = true;
             continue;
         }
@@ -1980,7 +2052,9 @@ pub fn expand_exec(entry: &Group, file: &Path, args: &[OsString]) -> (Vec<OsStri
             coded = true;
             match chars.next() {
                 Some('%') => filled.push('%'),
-                Some('u' | 'f' | 'U' | 'F') if quoted => refused = true,
+                Some('u' | 'f' | 'U' | 'F') if quoted || !plain_around_code(&word) => {
+                    refused = true
+                }
                 Some('u' | 'f' | 'U' | 'F') => {
                     if let Some(first) = args.first() {
                         filled.push_str(&first.to_string_lossy());
@@ -3330,6 +3404,13 @@ Name=not carried over
             "env A=1 dash -c \"exec fox %f\"",
             "python3 -c \"import webbrowser; webbrowser.open('%u')\"",
             "fox \"--url=%u\"",
+            // An option's value is no script; interpreters by their own flag;
+            // code in a word without quotes.
+            "bash -o pipefail -c %u",
+            "perl -e system('%u')",
+            "node -e %u",
+            "python3.12 -c %u",
+            "fox --run=$(%u)",
         ] {
             let (words, used) = expand(exec);
             assert!(!used, "{exec}: {words:?}");
@@ -3343,6 +3424,10 @@ Name=not carried over
         assert_eq!(words.last(), Some(&link[0]));
         let (_, used) = expand("fox --url=%u");
         assert!(used);
+        // A percent sign in a script is no code.
+        let (words, used) = expand("sh -c \"echo 100%%u\" sh %u");
+        assert!(used, "{words:?}");
+        assert_eq!(words.last(), Some(&link[0]));
     }
 
     #[test]
