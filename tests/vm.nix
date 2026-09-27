@@ -1879,6 +1879,12 @@ let
           for path in [".config/autostart/x.desktop", ".local/share/applications/x.desktop", ".config/systemd/x"]:
               in_zone(hp, f"sh -c '! touch /home/alice/{path}'")
           alice("touch ~/.config/autostart/from-host && rm ~/.config/autostart/from-host")
+          # Nor is the name of a directory above one of them the zone's to
+          # change (review 2026-09-27: `mv ~/.config` took the covers along,
+          # and a new ~/.config/autostart was the host's).
+          for path in [".config", ".local", ".local/share", ".local/state"]:
+              in_zone(hp, f"sh -c '! mv /home/alice/{path} /home/alice/{path}.moved'")
+          machine.succeed("test -d /home/alice/.config/autostart && test ! -e /home/alice/.config.moved")
           # Where WirePlumber and PipeWire load scripts and fragments from —
           # the home before the system: the zones' PipeWire policy is one.
           # Made beforehand, so covered even where nothing was there.
