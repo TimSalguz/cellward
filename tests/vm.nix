@@ -1389,9 +1389,11 @@ let
       # an awg0 that sends nothing anywhere — and the capture above sees
       # nothing either.
       with subtest("the zone killed under a running program: it fails closed"):
+          # Its own session and no pipe of ours: the driver would otherwise
+          # wait for the sleep to close the output it inherited.
           alice(
               f"nsenter --preserve-credentials -U -n -m -t {rzpid} -- "
-              "setsid -f sleep 600"
+              "sh -c 'setsid -f sleep 600 </dev/null >/dev/null 2>&1'"
           )
           orphan = machine.succeed("pgrep -u alice -xn sleep").strip()
           alice("systemctl --user kill -s KILL vpn-zone@vmreal")
