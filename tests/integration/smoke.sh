@@ -229,8 +229,11 @@ case "\$verb" in
 esac
 EOF
 chmod 755 "$WORK/fake-systemctl"
-VZ_BIN=$(grep -m1 -o '/nix/store/[^ "]*/bin/vpn-zone' "$VPN_ZONE")
-VZ_TOOLS=$(grep -m1 -o '/nix/store/[^ "]*-vpn-zone-tools.json' "$VPN_ZONE")
+# Собранная обёртка остаётся для тех, кто читает её как файл (пути
+# инструментов, шебанг — шаги песочницы ФС); запускается подменённая.
+CELLWARD_BUILT="$VPN_ZONE"
+VZ_BIN=$(grep -m1 -o '/nix/store/[^ "]*/bin/vpn-zone' "$CELLWARD_BUILT")
+VZ_TOOLS=$(grep -m1 -o '/nix/store/[^ "]*-vpn-zone-tools.json' "$CELLWARD_BUILT")
 [ -x "$VZ_BIN" ] && [ -f "$VZ_TOOLS" ] || fail "в обёртке cellward нет бинаря или манифеста"
 sed "s|\"systemctl\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"systemctl\": \"$WORK/fake-systemctl\"|" \
   "$VZ_TOOLS" > "$WORK/cellward-tools.json"
@@ -584,7 +587,7 @@ step "Песочница ФС: достаю пути инструментов и
 # трубу первым, обрекает пайплайн на 141, и весь смоук падал бы по случайности
 # размера вывода. -m1 останавливает сам grep, а искомых подстрок в первой же
 # подходящей строке ровно по одной.
-TOOLS=$(grep -m1 -o '/nix/store/[^ "]*-vpn-zone-tools.json' "$VPN_ZONE")
+TOOLS=$(grep -m1 -o '/nix/store/[^ "]*-vpn-zone-tools.json' "$CELLWARD_BUILT")
 [ -n "$TOOLS" ] && [ -f "$TOOLS" ] || fail "в обёртке cellward нет пути к манифесту инструментов"
 # Плоский JSON «ключ: значение» — «|| true» на случай отсутствующего ключа:
 # пустое значение поймает общая проверка ниже и скажет, какого именно нет.
@@ -598,7 +601,7 @@ FSPROXY=$(tool dbus-proxy)
 # Оболочка и coreutils для команды ВНУТРИ песочницы: /usr и /bin туда не
 # пробрасываются, поэтому «sh» и «ls» обязаны быть store-путями. Шебанг обёртки
 # — это bash, а ls берём из тех же smokeTools, откуда nsenter и ip.
-FSSH=$(head -1 "$VPN_ZONE" | sed 's|^#!||')
+FSSH=$(head -1 "$CELLWARD_BUILT" | sed 's|^#!||')
 FSCOREUTILS="$WORK/tools/bin"
 for v in FSCORE FSBWRAP FSPROXY FSSH FSCOREUTILS; do
   [ -n "${!v}" ] || fail "не нашёл $v в тексте собранного cellward"

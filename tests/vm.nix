@@ -611,7 +611,11 @@ let
                   f"/share/bash-completion/completions/{name}"
               )
 
-      exec(open("${./vm-instance-helpers.py}").read())
+      # Taken out by name: the driver type-checks this script, and a name an
+      # exec() defines is one it does not know (red once in CI).
+      _ih = dict(globals())
+      exec(open("${./vm-instance-helpers.py}").read(), _ih)
+      ikey, instance, in_inst, in_inst_q = (_ih[n] for n in ("ikey", "instance", "in_inst", "in_inst_q"))
 
       # The DNS leak test needs two resolvers that disagree: the HOST's, which
       # a zone must never reach, and the tunnel's own further down. One lookup

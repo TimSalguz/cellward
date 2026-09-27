@@ -1,8 +1,10 @@
 """tests/vm.nix, continued: helpers for containers' instances (the container
-design of 2026-09-27). Executed by the main test script with exec(), in its
-globals (machine, alice, json, shlex), before any subtest: the script is
-handed to the driver's build in one environment variable, and the kernel
-takes 128 KiB there (MAX_ARG_STRLEN).
+design of 2026-09-27). Executed by the main test script with exec(), in a
+copy of its globals (machine, alice, json, shlex), before any subtest, which
+takes out ikey, instance, in_inst and in_inst_q by name — the driver
+type-checks the script and knows no name an exec() defines. A file of its
+own: the script is handed to the driver's build in one environment
+variable, and the kernel takes 128 KiB there (MAX_ARG_STRLEN).
 
 Since stage 2 a launch into a zone runs in its container's instance: what a
 program sees is looked at in the instance (`in_inst`, entered as a launch
