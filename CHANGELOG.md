@@ -281,7 +281,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   itself, in a `/tmp/.X11-unix` of the launch's own (`profile-run
   --own-x11`), and hands it to the satellite (`-listenfd`), which then
   opens no socket of its own; the program starts once the server answers
-  a connection of x11-run's, with no clock, as before.
+  a connection of x11-run's, with no clock, as before. X clients try the
+  abstract name `@/tmp/.X11-unix/X<n>` first: x11-run chooses a display
+  whose name nobody holds, and the launch runs under a Landlock scope, so
+  a name taken afterwards by a program of the zone is a display that does
+  not open, never a server in between (review). The satellite gets a
+  runtime directory of its own for the socket Xwayland connects to. A
+  sandbox's satellite gets its socket the same way.
 - **A grant taken away is taken from programs that left their launch**
   (bug hunt 2026-09-27). Revoking a container's grant detached it in the
   mount namespaces of its launches' processes and their descendants: a
