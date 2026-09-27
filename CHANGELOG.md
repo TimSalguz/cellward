@@ -249,6 +249,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **The notification daemon, the tray's watcher, the screensaver and
+  fcitx5's portal are reached by their own interfaces only** (bug hunt
+  2026-09-27). The session bus filter let a zone or a sandbox *talk* to
+  their names, and talk to a name is talk to the whole connection that owns
+  it: mako's `fr.emersion.Mako.ListHistory` read every notification of the
+  host and of the other zones and `InvokeAction` set off a host program's
+  action, dunst has the same, on KDE and GNOME the owner is the shell; and
+  fcitx5 owns its portal's name itself, so its controller (`Configure`
+  starts a program on the host) was in reach. Now `--call` and
+  `--broadcast` rules name the interfaces: notifications, the watcher's
+  registration and properties, `Inhibit`/`UnInhibit`, the input method
+  portal's input contexts.
 - **A sandbox reaches no abstract socket of the outside** (bug hunt
   2026-09-27). Abstract Unix sockets go by name in the network namespace,
   not by path: a sandbox in the host's network reached the host's X server

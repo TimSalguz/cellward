@@ -2620,6 +2620,23 @@ let
           assert "boldtext" in got and "urgency" in got, got
           for gone in ["link.test", "evil.test", "desktop-entry", "firefox", "kde.test"]:
               assert gone not in got, f"{gone} reached the daemon: {got}"
+          # Only the notification interface of the daemon, by its name or its
+          # owner's unique one (review 2026-09-27: talk to the name was talk
+          # to the whole connection — mako's ListHistory read every
+          # notification of the host).
+          owner = in_zone(
+              hp,
+              "busctl --user --timeout=5 call org.freedesktop.DBus /org/freedesktop/DBus "
+              "org.freedesktop.DBus GetNameOwner s org.freedesktop.Notifications",
+          ).split()[-1].strip('"')
+          for dest in ["org.freedesktop.Notifications", owner]:
+              in_zone(
+                  hp,
+                  f"sh -c 'busctl --user --timeout=3 call {dest} /fr/emersion/Mako "
+                  "fr.emersion.Mako ListHistory || true'",
+              )
+          machine.sleep(2)
+          machine.fail("grep -q ListHistory /home/alice/notify-got")
           alice("systemctl --user stop fakenotifyd || true")
           # The zone's bus is still the zone's: names and calls go through.
           in_zone(hp, "busctl --user --timeout=5 call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ListNames")

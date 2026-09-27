@@ -371,17 +371,67 @@ pub const PORTALS: [&str; 2] = [
 /// stands in for IBus, `org.freedesktop.IBus` is the same. The portals expose
 /// `CreateInputContext` and contexts guarded by their owner; typing works
 /// through them as it does in Flatpak.
-pub const SESSION_BUS_RULES: [&str; 10] = [
+pub const SESSION_BUS_RULES: [&str; 22] = [
     "--filter",
     PORTALS[0],
     PORTALS[1],
-    "--talk=org.freedesktop.Notifications",
-    "--talk=org.kde.StatusNotifierWatcher",
+    DESKTOP_SERVICES[0],
+    DESKTOP_SERVICES[1],
+    DESKTOP_SERVICES[2],
+    DESKTOP_SERVICES[3],
+    DESKTOP_SERVICES[4],
+    DESKTOP_SERVICES[5],
+    DESKTOP_SERVICES[6],
+    DESKTOP_SERVICES[7],
+    DESKTOP_SERVICES[8],
     TRAY_ITEM_NAMES,
     "--own=org.mpris.MediaPlayer2.*",
     "--talk=org.freedesktop.portal.IBus",
-    "--talk=org.freedesktop.portal.Fcitx",
-    "--talk=org.freedesktop.ScreenSaver",
+    INPUT_METHOD_PORTAL[0],
+    INPUT_METHOD_PORTAL[1],
+    INPUT_METHOD_PORTAL[2],
+    SCREEN_SAVER[0],
+    SCREEN_SAVER[1],
+    SCREEN_SAVER[2],
+    SCREEN_SAVER[3],
+];
+
+/// The notification daemon and the tray's watcher by their own interfaces
+/// only (review 2026-09-27). `--talk` to a name is talk to the whole
+/// connection that owns it: mako's `fr.emersion.Mako.ListHistory` read every
+/// notification of the host and of the other zones, `InvokeAction` set off a
+/// host program's action; dunst has `org.dunstproject.cmd0`; on KDE and GNOME
+/// the owner is the shell itself.
+pub const DESKTOP_SERVICES: [&str; 9] = [
+    "--call=org.freedesktop.Notifications=org.freedesktop.Notifications.*@/org/freedesktop/Notifications",
+    "--call=org.freedesktop.Notifications=org.freedesktop.DBus.Introspectable.Introspect@/org/freedesktop/Notifications",
+    "--broadcast=org.freedesktop.Notifications=org.freedesktop.Notifications.*@/org/freedesktop/Notifications",
+    "--call=org.kde.StatusNotifierWatcher=org.kde.StatusNotifierWatcher.*@/StatusNotifierWatcher",
+    "--call=org.kde.StatusNotifierWatcher=org.freedesktop.DBus.Properties.Get@/StatusNotifierWatcher",
+    "--call=org.kde.StatusNotifierWatcher=org.freedesktop.DBus.Properties.GetAll@/StatusNotifierWatcher",
+    "--call=org.kde.StatusNotifierWatcher=org.freedesktop.DBus.Introspectable.Introspect@/StatusNotifierWatcher",
+    "--broadcast=org.kde.StatusNotifierWatcher=org.kde.StatusNotifierWatcher.*@/StatusNotifierWatcher",
+    // The shell and the tray read each other's properties this way too.
+    "--broadcast=org.kde.StatusNotifierWatcher=org.freedesktop.DBus.Properties.*@/StatusNotifierWatcher",
+];
+
+/// fcitx5's portal by its interfaces only: fcitx5 owns
+/// `org.freedesktop.portal.Fcitx` itself, and talk to it was talk to its
+/// controller — `Configure` starts a program on the host (see
+/// [`SESSION_BUS_RULES`]).
+pub const INPUT_METHOD_PORTAL: [&str; 3] = [
+    "--call=org.freedesktop.portal.Fcitx=org.fcitx.Fcitx.InputMethod1.*@/org/freedesktop/portal/inputmethod",
+    "--call=org.freedesktop.portal.Fcitx=org.fcitx.Fcitx.InputContext1.*@/org/freedesktop/portal/inputcontext/*",
+    "--broadcast=org.freedesktop.portal.Fcitx=org.fcitx.Fcitx.InputContext1.*@/org/freedesktop/portal/inputcontext/*",
+];
+
+/// Keeping the screen awake, and nothing else of the screensaver's owner
+/// (the shell, on KDE): at either path it answers on.
+pub const SCREEN_SAVER: [&str; 4] = [
+    "--call=org.freedesktop.ScreenSaver=org.freedesktop.ScreenSaver.Inhibit@/org/freedesktop/ScreenSaver",
+    "--call=org.freedesktop.ScreenSaver=org.freedesktop.ScreenSaver.UnInhibit@/org/freedesktop/ScreenSaver",
+    "--call=org.freedesktop.ScreenSaver=org.freedesktop.ScreenSaver.Inhibit@/ScreenSaver",
+    "--call=org.freedesktop.ScreenSaver=org.freedesktop.ScreenSaver.UnInhibit@/ScreenSaver",
 ];
 
 /// Tray icons' names, owned and nothing more (see [`SESSION_BUS_RULES`]).
