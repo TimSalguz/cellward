@@ -96,6 +96,15 @@ const READ_CHUNK: usize = 64 * 1024;
 const MAX_FDS_PER_READ: usize = 64;
 const MAX_QUEUED_FDS: usize = 256;
 const MAX_AUTH_BYTES: usize = 16 * 1024;
+/// All of them, not per peer (weighed 2026-09-27): one program of the zone
+/// can hold all 64 and lock the zone's others out of the bus. A share per
+/// peer was not taken, because nothing tells peers apart that a hostile
+/// program cannot multiply — one uid for all, a pid per `fork`, a mount
+/// namespace per `unshare`, and launches have no cgroup of their own — while
+/// a sandbox's own bus filter is ONE peer that carries every connection of
+/// that sandbox, which a share per pid would cut. Programs of one zone
+/// against each other, and exhausting it, are not a goal
+/// (`docs/THREAT-MODEL.md` §5, X8); a cgroup per launch would be the identity.
 const MAX_CONNECTIONS: usize = 64;
 /// Links the filter opens: at most this many in a minute.
 const MAX_OPENS_PER_MINUTE: usize = 10;
