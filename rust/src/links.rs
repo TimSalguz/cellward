@@ -376,16 +376,20 @@ fn app_chooser(
         .map_err(|e| format!("не запустить {}: {e}", busctl.display()))?;
     let Some(out) = crate::sys::output_by(child, deadline) else {
         // Not answered in time: the window is closed with its request, and
-        // nothing is chosen — no other window is shown instead.
-        let _ = Command::new(busctl)
-            .args(["--user", "--", "call"])
-            .arg(format!("org.freedesktop.impl.portal.desktop.{backend}"))
-            .arg(&handle)
-            .args(["org.freedesktop.impl.portal.Request", "Close"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        // nothing is chosen — no other window is shown instead. Closed on
+        // the side: the broker's one question at a time does not wait on it.
+        let (busctl, backend) = (busctl.to_path_buf(), backend.to_owned());
+        std::thread::spawn(move || {
+            let _ = Command::new(busctl)
+                .args(["--user", "--", "call"])
+                .arg(format!("org.freedesktop.impl.portal.desktop.{backend}"))
+                .arg(&handle)
+                .args(["org.freedesktop.impl.portal.Request", "Close"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        });
         return Ok(Choice::Cancelled);
     };
     if !out.status.success() {

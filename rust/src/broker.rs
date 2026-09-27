@@ -479,13 +479,18 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                     };
                     // What was asked about is what starts: the program by the
                     // path the question showed.
-                    let argv = match pinned {
+                    let (argv, allowed) = match pinned {
                         Some(cmd) if argv.ends_with(&selection.cmd) => {
                             let mut pinned = argv[..argv.len() - selection.cmd.len()].to_vec();
                             pinned.extend(cmd);
-                            pinned
+                            (pinned, allowed)
                         }
-                        _ => argv,
+                        // Never the command unpinned instead.
+                        Some(_) => (
+                            argv,
+                            Err("запрос не заканчивается командой, о которой спросили".to_owned()),
+                        ),
+                        None => (argv, allowed),
                     };
                     // A launch that goes on without a question takes no word of
                     // the requester's about what it is: the policies kept by a
