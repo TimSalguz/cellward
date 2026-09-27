@@ -302,6 +302,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   its programs), the system tier and `/run/systemd` by the zone's
   allow-list, and has an IPC namespace, `/dev/shm` and `/dev/mqueue` of its
   own. The smoke test checks each.
+- **A host-interface zone refuses the host's IPv6 addresses too** (second
+  opinion, 2026-09-27). Only the host's IPv4 addresses were refused, and a
+  zone whose interface has usable IPv6 gets IPv6 through its pasta: a
+  connection to the host's global or ULA IPv6 address was delivered to the
+  host's own services, as over IPv4 before. Link-local addresses are left
+  alone — a zone cannot name the host's link with a scope, and pasta
+  answers the zone's neighbour discovery from such addresses.
 - **A host-interface zone does not go out through the host's own
   services** (audit 2026-09-27). Its pasta runs in the host's network and
   gives the zone an address of its own, so a connection from the zone to

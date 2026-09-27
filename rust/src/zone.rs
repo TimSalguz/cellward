@@ -1535,7 +1535,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
     // A host-interface zone's pasta is in the host's network: the host's own
     // addresses, taken here where they can be seen.
     let first = match &cfg {
-        Some(Backend::HostIf(_)) => host_address_rules(&host_ipv4_addresses()),
+        Some(Backend::HostIf(_)) => host_address_rules(&host_addresses()),
         _ => Vec::new(),
     };
 
@@ -5830,9 +5830,10 @@ pub fn app_ruleset() -> String {
     app_ruleset_with(&[])
 }
 
-/// The host's own IPv4 addresses, from where the host's network is seen:
-/// every interface's but loopback's.
-fn host_ipv4_addresses() -> Vec<std::net::Ipv4Addr> {
+/// The host's own addresses, from where the host's network is seen: every
+/// interface's IPv4 and IPv6 ones ([`refusable`] says which).
+fn host_addresses() -> Vec<std::net::IpAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     let mut out = Vec::new();
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs fills the pointer with a list freed below.
@@ -5843,16 +5844,27 @@ fn host_ipv4_addresses() -> Vec<std::net::Ipv4Addr> {
     while !at.is_null() {
         // SAFETY: a node of the list getifaddrs made, alive until freeifaddrs.
         let node = unsafe { &*at };
-        if !node.ifa_addr.is_null()
-            // SAFETY: a non-null sockaddr of the node.
-            && i32::from(unsafe { (*node.ifa_addr).sa_family }) == libc::AF_INET
-        {
-            // SAFETY: an AF_INET address is a sockaddr_in.
-            let sin = unsafe { &*(node.ifa_addr as *const libc::sockaddr_in) };
-            let addr = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-            if !addr.is_loopback() && !out.contains(&addr) {
-                out.push(addr);
+        let addr = if node.ifa_addr.is_null() {
+            None
+        } else {
+            // SAFETY: a non-null sockaddr of the node, read as the family it
+            // says it is.
+            match i32::from(unsafe { (*node.ifa_addr).sa_family }) {
+                libc::AF_INET => {
+                    let sin = unsafe { &*(node.ifa_addr as *const libc::sockaddr_in) };
+                    Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(
+                        sin.sin_addr.s_addr,
+                    ))))
+                }
+                libc::AF_INET6 => {
+                    let sin6 = unsafe { &*(node.ifa_addr as *const libc::sockaddr_in6) };
+                    Some(IpAddr::V6(Ipv6Addr::from(sin6.sin6_addr.s6_addr)))
+                }
+                _ => None,
             }
+        };
+        if let Some(addr) = addr.filter(|a| refusable(*a) && !out.contains(a)) {
+            out.push(addr);
         }
         at = node.ifa_next;
     }
@@ -5861,17 +5873,37 @@ fn host_ipv4_addresses() -> Vec<std::net::Ipv4Addr> {
     out
 }
 
+/// Whether a host address goes into [`host_address_rules`]: not loopback,
+/// which the zone's own is anyway; not multicast; and not an IPv6 link-local
+/// one — a zone cannot name the host's link with a scope, and pasta answers
+/// neighbour discovery for the zone from such addresses, which a refusal
+/// would cut.
+fn refusable(addr: std::net::IpAddr) -> bool {
+    match addr {
+        std::net::IpAddr::V4(a) => !a.is_loopback() && !a.is_multicast(),
+        std::net::IpAddr::V6(a) => {
+            !a.is_loopback() && !a.is_multicast() && (a.segments()[0] & 0xffc0) != 0xfe80
+        }
+    }
+}
+
 /// A host-interface zone's refusal of the host's own addresses (audit
 /// 2026-09-27). Its pasta runs in the host's network and gives the zone an
 /// address of its own, so a connection to one of the host's is delivered
 /// locally — to a DNS forwarder, a proxy, Tor, sshd — and what that service
 /// sends goes out by the host's routes, not by the interface chosen. The
 /// addresses the host has when the zone comes up; one it gets later is not
-/// among them.
-pub fn host_address_rules(addresses: &[std::net::Ipv4Addr]) -> Vec<String> {
+/// among them. IPv6 as well as IPv4 (second opinion, 2026-09-27: only IPv4
+/// was refused, and a zone whose interface has IPv6 gets it).
+pub fn host_address_rules(addresses: &[std::net::IpAddr]) -> Vec<String> {
     addresses
         .iter()
-        .map(|a| format!("ip daddr {a} reject with icmpx admin-prohibited"))
+        .map(|a| match a {
+            std::net::IpAddr::V4(a) => format!("ip daddr {a} reject with icmpx admin-prohibited"),
+            std::net::IpAddr::V6(a) => {
+                format!("ip6 daddr {a} reject with icmpx admin-prohibited")
+            }
+        })
         .collect()
 }
 
@@ -6219,6 +6251,25 @@ mod tests {
         let accept = rules.find("oifname \"lo\" accept").unwrap();
         assert!(reject < accept, "{rules}");
         assert!(host_address_rules(&[]).is_empty());
+        // IPv6 too, as `ip6`.
+        let v6 = host_address_rules(&["2001:db8::1".parse().unwrap()]);
+        assert_eq!(
+            v6,
+            ["ip6 daddr 2001:db8::1 reject with icmpx admin-prohibited"]
+        );
+        assert!(app_ruleset_with(&v6).contains("ip6 daddr 2001:db8::1 reject"));
+    }
+
+    /// Which host addresses are refused: not loopback, multicast or IPv6
+    /// link-local.
+    #[test]
+    fn the_hosts_refusable_addresses() {
+        for yes in ["192.168.1.1", "10.0.0.2", "2001:db8::5", "fd00::1"] {
+            assert!(refusable(yes.parse().unwrap()), "{yes}");
+        }
+        for no in ["127.0.0.1", "224.0.0.1", "::1", "fe80::1", "ff02::1"] {
+            assert!(!refusable(no.parse().unwrap()), "{no}");
+        }
     }
 
     /// An OpenConnect zone's user namespace gets one id more, the client's,
