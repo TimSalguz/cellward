@@ -896,7 +896,7 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
         } else {
             pasta.arg("-4");
         }
-        mark_ipv6(&name, v6);
+        mark_ipv6(name, v6);
         println!("system zone {name}: out through {interface} only");
     }
     pasta.args(zone::PASTA_CLOSED);

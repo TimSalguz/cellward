@@ -814,6 +814,10 @@ pub const ENV_STOP_GRACE: &str = "VPN_ZONE_STOP_GRACE";
 /// The group user zones' pasta runs with in a system zone (`BRIDGE_GROUP`
 /// rule in `system::ns_up`).
 pub const BRIDGE_GROUP: &str = "vpn-zones-bridge";
+
+/// The IPv6 gateway a user zone through a system zone is given: pasta's own
+/// link-local address towards it (see `spawn_uplink_pasta`).
+const BRIDGE_GATEWAY6: &str = "fe80::1";
 /// ioctl_ns(2): `_IO(0xb7, 0x1)` and `_IO(0xb7, 0x4)`.
 const NS_GET_USERNS: libc::c_ulong = 0xb701;
 const NS_GET_NSTYPE: libc::c_ulong = 0xb703;
@@ -1064,9 +1068,17 @@ fn spawn_uplink_pasta(
         // IPv6 when the system zone's network carries it (`system::IPV6_MARK`):
         // pasta's sockets are in that network, whose only way out is its
         // tunnel (or a plain zone's one interface), so IPv6 has nowhere else
-        // to go; the guest's gateway is pasta's link-local one. Otherwise IPv4
-        // only, as before 2026-09-27.
-        .args(if ipv6 { &[][..] } else { &["-4"][..] })
+        // to go. The guest's gateway is named, link-local: a tunnel has no
+        // link-local address and its default route no gateway, and pasta
+        // without one of the two turns IPv6 off in silence (its own address
+        // towards the guest comes from them). `--no-map-gw` (PASTA_CLOSED)
+        // keeps that gateway from standing for the system zone's loopback.
+        // Otherwise IPv4 only, as before 2026-09-27.
+        .args(if ipv6 {
+            &["-g", BRIDGE_GATEWAY6][..]
+        } else {
+            &["-4"][..]
+        })
         // pasta would watch the namespace's /proc directory to quit with it,
         // and that directory is the zone's uid 0's, not the user's: EACCES.
         // Its life is this service's to end anyway, on the zone letting go.
