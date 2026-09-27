@@ -367,8 +367,26 @@ fn a_launch_is_wrapped_in_the_compositor_restriction_by_default() {
         "{}",
         stdout(&out)
     );
+    // Unconfined, a name on the list is not enough (2026-09-27): an `obs`
+    // that is not the one the system's profiles give — none is, here — is
+    // restricted like any other program…
     let out = home.run_with(
         &["run", "unconfined", "--", "obs"],
+        &[("VPN_ZONE_DRYRUN", "1")],
+    );
+    assert!(stdout(&out).contains("wl-sandbox obs"), "{}", stdout(&out));
+    // …and a wayland-allow line naming a file by its path lets that file.
+    let recorder = home.root.join("bin-rec/rec");
+    fs::create_dir_all(recorder.parent().unwrap()).unwrap();
+    fs::write(&recorder, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(&recorder, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        home.root.join("config/wayland-allow"),
+        format!("{}\n", recorder.display()),
+    )
+    .unwrap();
+    let out = home.run_with(
+        &["run", "unconfined", "--", recorder.to_str().unwrap()],
         &[("VPN_ZONE_DRYRUN", "1")],
     );
     assert!(!stdout(&out).contains("wl-sandbox"), "{}", stdout(&out));
