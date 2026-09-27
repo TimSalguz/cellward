@@ -754,6 +754,7 @@ impl Drop for AsZoneRoot {
 }
 
 pub fn run(args: Args) -> u8 {
+    let into_zone = std::env::var_os(ENV_EXPECT_NETNS).is_some();
     // The zone entered is the zone checked: `nsenter` finds it by a number,
     // later, in a child of wl-sandbox, and a number can change hands in
     // between (review 2026-09-25). Here, inside, the kernel says which
@@ -879,6 +880,35 @@ pub fn run(args: Args) -> u8 {
     // would be the one UNDER the overlay.
     if args.cwd.is_some() {
         enter_start_dir(args.cwd.as_deref());
+    }
+
+    // Signals to its own and nobody else's (docs/THREAT-MODEL.md X5): `kill`
+    // checks the user and not the namespace, so a program of the zone could
+    // signal every process of the user's on the host — kill the compositor,
+    // the session. A Landlock domain of this launch's own confines its
+    // signals to itself and what it starts (LANDLOCK_SCOPE_SIGNAL, Linux
+    // 6.12); a program of another launch, in the same zone too, is outside it,
+    // and signals into it from outside (`cellward kill`, the supervisor) are
+    // not its business. Put in while the zone's capabilities are still held:
+    // they stand in for no_new_privs, which would change what the program
+    // may exec. A kernel without it is said, and the launch goes on — this
+    // is a denial of service closed, not a leak.
+    if into_zone {
+        use std::os::fd::AsRawFd;
+        match crate::sys::signal_scope() {
+            Some(scope) => {
+                if let Err(e) = crate::sys::restrict_self(scope.as_raw_fd()) {
+                    eprintln!(
+                        "profile-run: cannot keep the program's signals to its own ({e}) — it \
+                         can signal the host's processes of the user"
+                    );
+                }
+            }
+            None => eprintln!(
+                "profile-run: this kernel cannot keep a program's signals to its own \
+                 (Landlock scopes, Linux 6.12) — it can signal the host's processes of the user"
+            ),
+        }
     }
 
     // Nothing below this line needs privileges.

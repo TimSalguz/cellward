@@ -1109,6 +1109,24 @@ pub fn output_by(
 /// `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET`, Landlock ABI 6, Linux 6.12).
 /// `None` on a kernel without it.
 pub fn abstract_socket_scope() -> Option<OwnedFd> {
+    landlock_scope(SCOPE_ABSTRACT_UNIX_SOCKET)
+}
+
+/// A Landlock ruleset that restricts nothing but sending signals to processes
+/// outside the domain it makes (`LANDLOCK_SCOPE_SIGNAL`, Landlock ABI 6, Linux
+/// 6.12): the domain's own processes and what they start may be signalled,
+/// nothing else. Signals INTO the domain are not its business. `None` on a
+/// kernel without it.
+pub fn signal_scope() -> Option<OwnedFd> {
+    landlock_scope(SCOPE_SIGNAL)
+}
+
+const SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1;
+const SCOPE_SIGNAL: u64 = 2;
+
+/// A Landlock ruleset that handles no file system or network access and
+/// scopes what `scoped` names; `None` before Landlock ABI 6.
+fn landlock_scope(scoped: u64) -> Option<OwnedFd> {
     #[repr(C)]
     struct RulesetAttr {
         handled_access_fs: u64,
@@ -1116,7 +1134,6 @@ pub fn abstract_socket_scope() -> Option<OwnedFd> {
         scoped: u64,
     }
     const CREATE_RULESET_VERSION: u32 = 1;
-    const SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1;
     // SAFETY: the version query takes no attribute and no size.
     let abi = unsafe {
         libc::syscall(
@@ -1132,7 +1149,7 @@ pub fn abstract_socket_scope() -> Option<OwnedFd> {
     let attr = RulesetAttr {
         handled_access_fs: 0,
         handled_access_net: 0,
-        scoped: SCOPE_ABSTRACT_UNIX_SOCKET,
+        scoped,
     };
     // SAFETY: an attribute of the size given, alive for the call.
     let fd = unsafe {
@@ -1151,6 +1168,17 @@ pub fn abstract_socket_scope() -> Option<OwnedFd> {
 /// Put the calling process under the ruleset `fd` ([`abstract_socket_scope`]),
 /// with no new privileges, as Landlock requires. For a child between fork
 /// and exec: system calls only.
+/// Put the calling process under the ruleset `fd` WITHOUT no_new_privs: only
+/// for a process that holds CAP_SYS_ADMIN in its user namespace, which
+/// Landlock takes instead (`profile-run` in a zone, before the program).
+pub fn restrict_self(fd: RawFd) -> io::Result<()> {
+    // SAFETY: a system call on a descriptor, no pointers.
+    if unsafe { libc::syscall(libc::SYS_landlock_restrict_self, fd, 0u32) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub fn enter_scope(fd: RawFd) -> io::Result<()> {
     // SAFETY: prctl and a system call on a descriptor, no pointers.
     unsafe {

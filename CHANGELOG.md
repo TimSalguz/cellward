@@ -280,6 +280,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A zone's program cannot signal the host's processes of the user**
+  (2026-09-27, Linux 6.12+; `docs/THREAT-MODEL.md` X5). `kill(2)` checks the
+  user and not the namespace, so a program in a zone could kill the
+  compositor or anything else of the session. `profile-run` now puts every
+  launch into a zone in a Landlock domain of its own with
+  `LANDLOCK_SCOPE_SIGNAL`, while it still holds the zone's capabilities
+  (they stand in for `no_new_privs`): the program signals itself and what
+  it starts. A program of another launch of the same zone is outside that
+  domain too — `pkill` in a zone's terminal does not reach a browser
+  started separately. On an older kernel the launch goes on and says so.
 - **An OpenConnect zone's client runs without capabilities** (review
   2026-09-27; `docs/LEAK-MODEL.md`, OpenConnect item 15). It ran as the
   zone's uid 0, which owns every namespace of the zone: a client the
