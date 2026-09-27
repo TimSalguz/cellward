@@ -331,6 +331,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the launch window's answer — the zone's command comes back in it — is
   read as it comes: a long command filled the pipe before the window could
   end, and the broker waited on it until its deadline, or for ever.
+- **An entry is ours by its key, not by its text** (bug hunt 2026-09-27):
+  sync took any file with `X-VPNZone=` anywhere in it — a comment, another
+  key's value — for one of its own, to overwrite, remove or launch as
+  intercepted. The mark is now the `X-VPNZone` key of the `[Desktop
+  Entry]` group (for our D-Bus service files, their first line).
 - **"Always" is not offered for more programs that start anything**
   (bug hunt 2026-09-27): openers (`xdg-open`, `gio`, `kioclient`,
   `gtk-launch`…), unit and session starters (`systemctl`, `run0`,
