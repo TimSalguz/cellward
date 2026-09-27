@@ -1496,13 +1496,14 @@ fn serve(client: UnixStream, upstream: &PathBuf, mic: Arc<Policy>, who: Who) -> 
         let to_client = Arc::clone(&to_client);
         let session = Arc::clone(&session);
         let server = server.try_clone()?;
-        thread::spawn(move || {
+        // A thread that cannot be made ends this connection, not the filter.
+        thread::Builder::new().spawn(move || {
             if let Err(e) = pump_down(&server, &to_client, &session) {
                 report(&e);
             }
             let _ = to_client.sock.shutdown(std::net::Shutdown::Both);
             let _ = server.shutdown(std::net::Shutdown::Both);
-        })
+        })?
     };
     let result = pump_up(&client, &to_server, &to_client, &session);
     let _ = client.shutdown(std::net::Shutdown::Both);
@@ -1579,7 +1580,8 @@ pub fn run(args: &Args) -> u8 {
         let args = Arc::clone(&shared);
         let connections = Arc::clone(&connections);
         let mic = Arc::clone(&mic);
-        thread::spawn(move || {
+        let counted = Arc::clone(&connections);
+        let started = thread::Builder::new().spawn(move || {
             // On the connection's own thread: the registry is read for it.
             let who = who_is(&client, &args);
             if let Err(e) = serve(client, &args.upstream, mic, who) {
@@ -1587,6 +1589,11 @@ pub fn run(args: &Args) -> u8 {
             }
             connections.fetch_sub(1, Ordering::SeqCst);
         });
+        // No thread for it: this connection is refused, the filter goes on.
+        if let Err(e) = started {
+            eprintln!("pulse-filter: no thread for a connection ({e}) — refused");
+            counted.fetch_sub(1, Ordering::SeqCst);
+        }
     }
     0
 }
