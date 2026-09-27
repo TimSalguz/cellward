@@ -2093,6 +2093,9 @@ mod tests {
                     true
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => false,
+                // A signal meant for another test of this process (red once
+                // in CI): asked again.
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => true,
                 Err(e) => panic!("{e}"),
             }
         }

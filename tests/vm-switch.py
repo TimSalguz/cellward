@@ -248,16 +248,19 @@ with subtest("switch: container vmsw in A with its programs, each socket kind op
         r"inet6 (fd63:[0-9a-f:]+)/128",
         in_placed(SW, "vmreal", "ip -6 -o addr show dev awg0"),
     ).group(1)
+    # A service ignores SIGPIPE: the loops end on their own write error once
+    # socat is gone (red once in CI: both socats ended on their broken
+    # socket, and the loops wrote on).
     launch(
         "swtcp",
         "vmreal",
-        "sh -c 'i=0; while :; do i=$((i+1)); echo tcp-$i; sleep 0.5; done "
+        "sh -c 'i=0; while :; do i=$((i+1)); echo tcp-$i || exit 0; sleep 0.5; done "
         "| socat -u - TCP:10.99.0.1:7301'",
     )
     launch(
         "swcudp",
         "vmreal",
-        "sh -c 'i=0; while :; do i=$((i+1)); echo cudp-$i; sleep 0.5; done "
+        "sh -c 'i=0; while :; do i=$((i+1)); echo cudp-$i || exit 0; sleep 0.5; done "
         "| socat -u - UDP:10.99.0.1:7300'",
     )
     launch("swuudp", "vmreal", f"{PY} /tmp/swhelper.py udp 10.99.0.1 7300 uudp")
