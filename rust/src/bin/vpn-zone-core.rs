@@ -85,10 +85,11 @@ Usage:
         The vpnc-script of an [OpenConnect] zone, and nothing else's: this is
         what the zone's openconnect is started with as its --script. It takes
         no arguments — openconnect passes everything in the environment, and
-        the zone adds VPN_ZONE_OC_DIR, VPN_ZONE_OC_NETNS_PID, VPN_ZONE_OC_IP
-        and VPN_ZONE_OC_MTU to it. On `connect` it moves the tunnel interface
-        into the zone's app namespace and writes down what the gateway said;
-        the app namespace does the configuring. Not meant to be run by hand.
+        the zone adds VPN_ZONE_OC_DIR and VPN_ZONE_OC_MTU to it. On `connect`
+        it writes down what the gateway said, in the client's own directory;
+        the zone's uplink moves the tunnel interface into the app namespace,
+        and the app namespace does the configuring. Not meant to be run by
+        hand.
 
   vpn-zone-core profile-run [--cwd DIR] <profiledir> <zone> <ephemeral 0|1> <regdir> -- cmd...
         Stack the container's overlay layers over the XDG directories, change

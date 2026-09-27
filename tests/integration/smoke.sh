@@ -1101,13 +1101,47 @@ EOF
   echo "$ocstatus" | grep -q 'connected: yes' || fail "в зеркале нет connected: yes"
   "$VPN_ZONE" check ocsmoke || fail "cellward check не признал OpenConnect-зону живой"
 
+  step "Зона OpenConnect: клиент — отдельный id без прав"
+  # Клиент работает НЕ как uid 0 userns'а зоны: тот владеет всеми её
+  # namespace, и клиент, которого перехватил шлюз, снял бы фильтр аплинка,
+  # вошёл бы в app-ns, снял бы покрытия (ревью 2026-09-27). Его id — второй
+  # subuid, без capabilities, без групп, с no_new_privs.
+  OCPID=$(pgrep -f 'openconnect --protocol=anyconnect' | head -1 || true)
+  [ -n "$OCPID" ] || fail "процесс openconnect не найден"
+  ocsub=$(awk -F: -v u="$u" '$1 == u { print $2; exit }' /etc/subuid)
+  ocid=$((ocsub + 1))
+  ocuids=$(awk '/^Uid:/ { print $2, $3, $4, $5 }' "/proc/$OCPID/status")
+  ocgids=$(awk '/^Gid:/ { print $2, $3, $4, $5 }' "/proc/$OCPID/status")
+  echo "uid клиента: $ocuids, gid: $ocgids (subuid зоны $ocsub)"
+  [ "$ocuids" = "$ocid $ocid $ocid $ocid" ] || fail "клиент OpenConnect не под своим uid: $ocuids"
+  ocsubg=$(awk -F: -v u="$u" '$1 == u { print $2; exit }' /etc/subgid)
+  ocgid=$((ocsubg + 1))
+  [ "$ocgids" = "$ocgid $ocgid $ocgid $ocgid" ] || fail "клиент OpenConnect не под своим gid: $ocgids"
+  occaps=$(awk '/^Cap(Eff|Prm|Amb):/ { print $2 }' "/proc/$OCPID/status" | sort -u)
+  [ "$occaps" = "0000000000000000" ] || fail "у клиента остались capabilities: $occaps"
+  grep -Eq '^NoNewPrivs:[[:space:]]+1' "/proc/$OCPID/status" || fail "клиент без no_new_privs"
+  ocgroups=$(awk '/^Groups:/ { $1 = ""; print }' "/proc/$OCPID/status" | tr -d ' \t')
+  [ -z "$ocgroups" ] || fail "у клиента остались дополнительные группы: $ocgroups"
+  # Главное следствие: снять фильтр аплинка от ЕГО имени нельзя. nft — по
+  # store-пути: $WORK закрыт (mktemp -d), и отказ exec'а выглядел бы как
+  # «не смог». Ждём именно EPERM от netlink, а таблица остаётся на месте.
+  NFTREAL=$(readlink -f "$NFT")
+  if "$NSENTER" -U -n -t "$OCUPID" -S 1 -G 1 -- "$NFTREAL" delete table inet vpnzone \
+      >"$WORK/ocnft.out" 2>&1; then
+    fail "от имени клиента удалось удалить таблицу аплинка"
+  fi
+  cat "$WORK/ocnft.out"
+  grep -q 'Operation not permitted' "$WORK/ocnft.out" \
+    || fail "таблицу не удалили, но не из-за прав: $(cat "$WORK/ocnft.out")"
+  in_ocup_root "$NFT" list table inet vpnzone >/dev/null \
+    || fail "таблица аплинка пропала"
+  echo "ok: клиент под uid $ocid без прав, фильтр аплинка ему не по силам"
+
   step "Зона OpenConnect: смерть клиента валит зону"
   # Fail-closed: клиента убиваем, и зона обязана уйти целиком — держатель
   # видит смерть аплинка и гасит всё. Убить его можно только став root ВНУТРИ
   # userns зоны: настоящий uid процесса — это subuid, и обычным kill он не
   # достаётся (docs/GOTCHAS.md §1).
-  OCPID=$(pgrep -f 'openconnect --protocol=anyconnect' | head -1 || true)
-  [ -n "$OCPID" ] || fail "процесс openconnect не найден"
   "$NSENTER" -U -t "$OCUPID" -- kill -TERM "$OCPID" || fail "не убить openconnect"
   ocgone=""
   for _ in $(seq 1 100); do

@@ -363,11 +363,12 @@ app-ns. Общий разбор каналов утечки такого бэк�
 
 - [x] **OpenConnect-backend** (`rust/src/openconnect.rs`): Cisco AnyConnect и
       ocserv, а через `Protocol =` ещё GlobalProtect, Pulse, F5, Fortinet и
-      Array. Клиент работает в uplink-ns и сам создаёт там tun (root не нужен:
-      `TUNSETIFF` спрашивает CAP_NET_ADMIN у владельца netns), его `--script` —
-      наш `vpn-zone-core oc-script` — переносит интерфейс в app-ns и
-      записывает, что сказал шлюз; настраивает app-ns тем же кодом, что и
-      WireGuard-зону. Сплит-маршруты и split-DNS игнорируются сознательно,
+      Array. Клиент работает в uplink-ns под отдельным id без capabilities
+      (ревью 2026-09-27) и подключается к tun, который аплинк создал для него
+      заранее (root не нужен: `TUNSETIFF` спрашивает CAP_NET_ADMIN у владельца
+      netns); его `--script` — наш `vpn-zone-core oc-script` — записывает, что
+      сказал шлюз, аплинк переносит интерфейс в app-ns, а app-ns
+      настраивается тем же кодом, что и WireGuard-зона. Сплит-маршруты и split-DNS игнорируются сознательно,
       IPv6 не запрашивается, отключить проверку сертификата нечем: `ServerCert`
       — пин, `Args` — белый список. Смоук поднимает настоящий ocserv на раннере
       и проверяет герметичность и живой трафик через туннель

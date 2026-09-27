@@ -8,17 +8,23 @@
 //! ```text
 //! host ── pasta ── [uplink-ns]  openconnect: TLS/DTLS to the gateway,
 //!                     │         /dev/net/tun, the vpnc-script
-//!                     │         the tun is CREATED here and MOVES ↓
+//!                     │         the tun is MADE here and MOVES ↓
 //!                  [app-ns]     lo + the tunnel, nothing else, ever
 //! ```
 //!
-//! **Why the client may create a tun at all without root.** `TUNSETIFF` checks
-//! `CAP_NET_ADMIN` against the user namespace that owns the network namespace
-//! the `/dev/net/tun` descriptor belongs to — not against the host's root. The
-//! zone's uplink is a network namespace owned by our own user namespace, and
-//! inside it we are uid 0 with every capability, so the check passes. All the
-//! device node itself has to be is readable and writable (`crw-rw-rw-`), which
-//! is how every distribution ships it. (`docs/GOTCHAS.md` §2)
+//! **Why the tun needs no root, and the client not even that.** `TUNSETIFF`
+//! checks `CAP_NET_ADMIN` against the user namespace that owns the network
+//! namespace the `/dev/net/tun` descriptor belongs to — not against the host's
+//! root. The zone's uplink is a network namespace owned by our own user
+//! namespace, where the uplink is uid 0 with every capability, so the uplink
+//! may make one. The CLIENT is not uid 0 (review 2026-09-27): it runs as an id
+//! of its own with no capabilities (`crate::zone`'s `CLIENT_ID`), because uid 0
+//! owns every namespace of the zone and a client the gateway subverted would
+//! take them apart. The uplink therefore makes the tun first, persistent and
+//! owned by the client's id, and the client's `TUNSETIFF` on that name attaches
+//! to it — which asks for nothing but being its owner. All the device node
+//! itself has to be is readable and writable (`crw-rw-rw-`), which is how every
+//! distribution ships it. (`docs/GOTCHAS.md` §2)
 //!
 //! **Why the tun can be moved out from under a running client.** A tun device
 //! and the file descriptor attached to it are two different things: the
@@ -28,7 +34,8 @@
 //! interface those packets appear on is in the app namespace. This is the same
 //! property WireGuard's UDP socket has, only reached from the other side, and it
 //! is what keeps the TLS session — the thing that must never be visible to the
-//! programs — on the far side of the wall.
+//! programs — on the far side of the wall. The uplink does the moving: it has
+//! the capabilities, the client has none.
 //!
 //! **What this module is.** Three pure pieces and one small process:
 //!
@@ -40,10 +47,12 @@
 //!   test instead of a shell `case`;
 //! * [`Plan`] — the handful of facts the app namespace needs (address, MTU,
 //!   resolvers, search domain), written to a file the app namespace reads;
-//! * `oc-script` — what `openconnect` actually runs: it moves the interface into
-//!   the app namespace and writes that file. It configures NOTHING: every
-//!   address, route and resolver of the app namespace is applied by the app
-//!   namespace itself (`crate::zone`), exactly as for a WireGuard zone.
+//! * `oc-script` — what `openconnect` actually runs: it writes that file, in
+//!   the client's own directory, and the uplink reads it, moves the interface
+//!   into the app namespace and hands the plan down. It configures NOTHING, and
+//!   could not: it runs as the client, without capabilities. Every address,
+//!   route and resolver of the app namespace is applied by the app namespace
+//!   itself (`crate::zone`), exactly as for a WireGuard zone.
 //!
 //! **Split tunnelling is deliberately not implemented.** `CISCO_SPLIT_INC_*`
 //! says which networks the gateway would like to see; a zone sends EVERYTHING
@@ -66,9 +75,10 @@ use crate::config::WgConfig;
 /// The section that turns a zone config into an OpenConnect one.
 pub const SECTION: &str = "OpenConnect";
 
-/// Where the app namespace picks the tunnel's facts up. A dotted name, like
-/// `.stripped.conf`: nothing that walks the zone directory has any business
-/// seeing it.
+/// Where the tunnel's facts are written: by the script into the client's
+/// directory, and by the uplink, once it has read them, into the zone's, where
+/// the app namespace picks them up. A dotted name, like `.stripped.conf`:
+/// nothing that walks the zone directory has any business seeing it.
 pub const PLAN_FILE: &str = ".oc-plan";
 
 /// What `--protocol` defaults to: Cisco AnyConnect, which is also what ocserv
@@ -85,8 +95,6 @@ pub const DEFAULT_MTU: u32 = 1412;
 
 /// Environment the uplink hands `openconnect`, which hands it to the script.
 pub const ENV_DIR: &str = "VPN_ZONE_OC_DIR";
-pub const ENV_NETNS_PID: &str = "VPN_ZONE_OC_NETNS_PID";
-pub const ENV_IP: &str = "VPN_ZONE_OC_IP";
 pub const ENV_MTU: &str = "VPN_ZONE_OC_MTU";
 
 /// Extra `openconnect` flags a zone config may add, and whether each one takes
@@ -535,14 +543,16 @@ pub struct Plan {
 /// What the script was called for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// `pre-init`: the tun does not exist yet. Nothing to do — the device is
-    /// created by `openconnect` itself and needs no help from us.
+    /// `pre-init`: the client has not attached to its tun yet. Nothing to do —
+    /// the uplink made the device for it beforehand.
     Nothing,
-    /// `connect`: move the interface down and tell the app namespace about it.
+    /// `connect`: write down what the gateway said, for the uplink to move the
+    /// interface and hand the plan to the app namespace.
     Connect(Box<Plan>),
-    /// `disconnect`: forget the plan. Nothing has to be torn down — the device
-    /// is destroyed when `openconnect` closes it, and the app namespace's
-    /// default route goes with it. That IS the kill switch.
+    /// `disconnect`: forget the plan. Nothing has to be torn down: with
+    /// `openconnect`'s descriptor closed the device drops every packet it is
+    /// given, the app namespace's default route leads into nothing, and the
+    /// client's exit takes the whole zone down. That IS the kill switch.
     Disconnect,
 }
 
@@ -587,8 +597,8 @@ impl std::error::Error for ScriptError {}
 ///
 /// | `$reason` | what happens here |
 /// |---|---|
-/// | `pre-init` | nothing — the client makes its own tun |
-/// | `connect` | move the interface into the app namespace, write the plan |
+/// | `pre-init` | nothing — the uplink made the tun beforehand |
+/// | `connect` | write the plan; the uplink moves the interface and hands it on |
 /// | `reconnect` | nothing: the same device, the same address, already there |
 /// | `attempt-reconnect` | nothing, and the zone is DEAD meanwhile — by design |
 /// | `disconnect` | drop the plan; the vanishing device takes the route with it |
@@ -767,7 +777,6 @@ impl Plan {
 pub enum ArgError {
     ExtraArguments,
     MissingEnv(&'static str),
-    BadPid(String),
 }
 
 impl fmt::Display for ArgError {
@@ -781,7 +790,6 @@ impl fmt::Display for ArgError {
                 f,
                 "${k} is not set — this is the --script of a zone's openconnect, not a command"
             ),
-            Self::BadPid(v) => write!(f, "${ENV_NETNS_PID} is not a pid: {v}"),
         }
     }
 }
@@ -791,12 +799,8 @@ impl std::error::Error for ArgError {}
 /// What the script needs from us rather than from `openconnect`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
-    /// The zone's state directory: where the plan file goes.
+    /// The client's own directory: where the plan file goes.
     pub dir: PathBuf,
-    /// Host pid of the app-namespace process — the target of the move. A host
-    /// pid because no pid namespace is created anywhere in a zone.
-    pub netns_pid: i32,
-    pub ip: PathBuf,
     pub mtu: Option<u32>,
 }
 
@@ -814,20 +818,8 @@ impl Args {
             .get(ENV_DIR)
             .filter(|v| !v.is_empty())
             .ok_or(ArgError::MissingEnv(ENV_DIR))?;
-        let pid = env
-            .get(ENV_NETNS_PID)
-            .filter(|v| !v.is_empty())
-            .ok_or(ArgError::MissingEnv(ENV_NETNS_PID))?;
-        // Without a path for `ip` we fall back to a PATH lookup, exactly as the
-        // zone holder does when it is run by hand out of a nix-shell.
-        let ip = match env.get(ENV_IP).filter(|v| !v.is_empty()) {
-            Some(path) => PathBuf::from(path),
-            None => PathBuf::from("ip"),
-        };
         Ok(Self {
             dir: PathBuf::from(dir),
-            netns_pid: pid.parse().map_err(|_| ArgError::BadPid(pid.clone()))?,
-            ip,
             mtu: env.get(ENV_MTU).and_then(|v| v.parse().ok()),
         })
     }
@@ -854,24 +846,24 @@ pub fn environment() -> BTreeMap<String, String> {
 /// yet. Starting empty makes the list of what can steer the client finite and
 /// visible.
 ///
-/// * `PATH`: the script the client runs is named absolutely, and so is `ip`
-///   when Nix substituted it — but a holder run by hand out of a nix-shell
-///   passes neither, and both then have to be found somewhere.
-/// * `HOME`: carries no network meaning at all; it is here because libraries
-///   fail in obscure ways without it, not because anything of ours reads it.
+/// * `PATH`: the script the client runs is named absolutely, but `/bin/sh -c`
+///   runs it, and a holder run by hand out of a nix-shell may have `openconnect`
+///   found on it.
+/// * `HOME` is not kept but SET, to the client's own directory: it carries no
+///   network meaning at all, libraries fail in obscure ways without one, and
+///   the user's is a directory the client, an id of its own, cannot enter.
 /// * `SSL_CERT_FILE` / `NIX_SSL_CERT_FILE`: WHERE THE SYSTEM CA STORE IS. On
 ///   NixOS gnutls is patched to read them, so clearing them would leave a zone
 ///   without a `ServerCert` pin unable to verify anything — the fail-closed
 ///   outcome, but for the wrong reason and with a baffling message. They come
 ///   from the system's own environment, not from the network, and a user who
 ///   points them at a bad bundle has already done that to their whole session.
-pub const CLIENT_ENV_KEPT: [&str; 4] = ["PATH", "HOME", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"];
+pub const CLIENT_ENV_KEPT: [&str; 3] = ["PATH", "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"];
 
 /// Build the client's environment from scratch: what [`CLIENT_ENV_KEPT`] names,
-/// plus what the script needs and nobody else sets.
+/// plus its `HOME` and what the script needs, which nobody else sets.
 ///
-/// `OsString` throughout, because a zone directory lives under `$HOME` and a
-/// `$HOME` is bytes.
+/// `OsString` throughout, because a path is bytes.
 ///
 /// Note what this also does: a `VPN_ZONE_OC_*` variable inherited from
 /// whoever started the holder is filtered out with everything else, so the
@@ -879,20 +871,14 @@ pub const CLIENT_ENV_KEPT: [&str; 4] = ["PATH", "HOME", "SSL_CERT_FILE", "NIX_SS
 pub fn client_env(
     inherited: impl IntoIterator<Item = (OsString, OsString)>,
     dir: &Path,
-    netns_pid: i32,
-    ip: &Path,
     mtu: Option<u32>,
 ) -> Vec<(OsString, OsString)> {
     let mut out: Vec<(OsString, OsString)> = inherited
         .into_iter()
         .filter(|(key, _)| CLIENT_ENV_KEPT.iter().any(|kept| key == OsStr::new(kept)))
         .collect();
+    out.push((OsString::from("HOME"), dir.as_os_str().to_owned()));
     out.push((OsString::from(ENV_DIR), dir.as_os_str().to_owned()));
-    out.push((
-        OsString::from(ENV_NETNS_PID),
-        OsString::from(netns_pid.to_string()),
-    ));
-    out.push((OsString::from(ENV_IP), ip.as_os_str().to_owned()));
     if let Some(mtu) = mtu {
         out.push((OsString::from(ENV_MTU), OsString::from(mtu.to_string())));
     }
@@ -901,7 +887,7 @@ pub fn client_env(
 
 /// Run the script. The exit code is what `openconnect` sees, and a non-zero one
 /// on `connect` aborts the connection — which is the fail-closed answer to "the
-/// interface could not be put behind the wall".
+/// plan could not be written".
 pub fn run(args: &Args, env: &BTreeMap<String, String>) -> u8 {
     let action = match plan(env, args.mtu) {
         Ok(action) => action,
@@ -921,12 +907,11 @@ pub fn run(args: &Args, env: &BTreeMap<String, String>) -> u8 {
             println!("oc-script: disconnected — the zone has no route out any more");
             0
         }
-        Action::Connect(plan) => match connect(args, &plan, &plan_path) {
+        Action::Connect(plan) => match connect(&plan, &plan_path) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("oc-script: {e}");
-                // Leave nothing half-done behind: a plan file without an
-                // interface would make the app namespace configure thin air.
+                // Leave nothing half-done behind.
                 let _ = fs::remove_file(&plan_path);
                 1
             }
@@ -934,14 +919,13 @@ pub fn run(args: &Args, env: &BTreeMap<String, String>) -> u8 {
     }
 }
 
-/// Move the interface into the app namespace, then publish the plan.
+/// Publish the plan for the uplink.
 ///
-/// The ORDER is the whole of it. The plan file appearing is what tells the
-/// uplink that the app namespace may configure the interface; publish it before
-/// the move and the app namespace would look for a device that is still one
-/// namespace up. The write is a rename over a temporary file for the same
-/// reason the status mirror is: a reader sees the whole file or none of it.
-fn connect(args: &Args, plan: &Plan, plan_path: &Path) -> Result<(), String> {
+/// The plan file appearing is what tells the uplink that the session is up; it
+/// then moves the interface and hands the plan on (`crate::zone`). The write is
+/// a rename over a temporary file for the same reason the status mirror is: a
+/// reader sees the whole file or none of it.
+fn connect(plan: &Plan, plan_path: &Path) -> Result<(), String> {
     if plan.ignored_splits > 0 {
         println!(
             "oc-script: {} split-include route(s) from the gateway ignored — a zone sends \
@@ -956,24 +940,12 @@ fn connect(args: &Args, plan: &Plan, plan_path: &Path) -> Result<(), String> {
         );
     }
 
-    let target = args.netns_pid.to_string();
-    let status = std::process::Command::new(&args.ip)
-        .args(["link", "set", plan.iface.as_str(), "netns", target.as_str()])
-        .status()
-        .map_err(|e| format!("cannot run {}: {e}", args.ip.display()))?;
-    if !status.success() {
-        return Err(format!(
-            "cannot move {} into the app namespace (pid {target}): ip exited {status}",
-            plan.iface
-        ));
-    }
-
     let tmp = plan_path.with_extension("tmp");
     fs::write(&tmp, plan.to_text()).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
     fs::rename(&tmp, plan_path)
         .map_err(|e| format!("cannot rename {} into place: {e}", tmp.display()))?;
     println!(
-        "oc-script: {} moved into the app namespace, address {}, mtu {}",
+        "oc-script: connected, {} gets address {}, mtu {}",
         plan.iface, plan.address, plan.mtu
     );
     Ok(())
@@ -1460,11 +1432,12 @@ mod tests {
             ("WAYLAND_DISPLAY", "wayland-1"),
             // And a stale copy of our own contract, which must not win over
             // what the uplink actually meant.
-            (ENV_NETNS_PID, "1"),
             (ENV_DIR, "/somewhere/else"),
-            // The four that survive.
-            ("PATH", "/run/wrappers/bin:/usr/bin"),
+            (ENV_MTU, "9000"),
+            // The user's home, which is not the client's.
             ("HOME", "/home/u"),
+            // The three that survive.
+            ("PATH", "/run/wrappers/bin:/usr/bin"),
             ("SSL_CERT_FILE", "/etc/ssl/certs/ca-bundle.crt"),
             ("NIX_SSL_CERT_FILE", "/etc/ssl/certs/ca-bundle.crt"),
         ]
@@ -1472,13 +1445,7 @@ mod tests {
         .map(|(k, v)| (OsString::from(*k), OsString::from(*v)))
         .collect();
 
-        let built = client_env(
-            inherited,
-            Path::new("/home/u/.local/state/vpn-zones/work"),
-            4242,
-            Path::new("/nix/store/x/bin/ip"),
-            Some(1300),
-        );
+        let built = client_env(inherited, Path::new("/tmp/openconnect"), Some(1300));
         let by_key = |name: &str| -> Option<String> {
             built
                 .iter()
@@ -1498,12 +1465,11 @@ mod tests {
         ] {
             assert_eq!(by_key(gone), None, "{gone} reached the client");
         }
-        // The four that do, unchanged.
+        // The three that do, unchanged.
         assert_eq!(
             by_key("PATH").as_deref(),
             Some("/run/wrappers/bin:/usr/bin")
         );
-        assert_eq!(by_key("HOME").as_deref(), Some("/home/u"));
         assert_eq!(
             by_key("SSL_CERT_FILE").as_deref(),
             Some("/etc/ssl/certs/ca-bundle.crt")
@@ -1512,44 +1478,35 @@ mod tests {
             by_key("NIX_SSL_CERT_FILE").as_deref(),
             Some("/etc/ssl/certs/ca-bundle.crt")
         );
-        // And ours, which beat the stale copies rather than losing to them.
-        assert_eq!(
-            by_key(ENV_DIR).as_deref(),
-            Some("/home/u/.local/state/vpn-zones/work")
-        );
-        assert_eq!(by_key(ENV_NETNS_PID).as_deref(), Some("4242"));
-        assert_eq!(by_key(ENV_IP).as_deref(), Some("/nix/store/x/bin/ip"));
+        // And ours, which beat the stale copies rather than losing to them;
+        // the home is the client's own directory.
+        assert_eq!(by_key(ENV_DIR).as_deref(), Some("/tmp/openconnect"));
+        assert_eq!(by_key("HOME").as_deref(), Some("/tmp/openconnect"));
         assert_eq!(by_key(ENV_MTU).as_deref(), Some("1300"));
         // A stale value must not survive even as an earlier duplicate: the
         // whole vector goes to `Command::envs`, and there a later entry wins,
         // so the count is the assertion.
-        assert_eq!(
-            built
-                .iter()
-                .filter(|(k, _)| k == OsStr::new(ENV_NETNS_PID))
-                .count(),
-            1
-        );
-        assert_eq!(built.len(), CLIENT_ENV_KEPT.len() + 4);
+        for key in [ENV_DIR, ENV_MTU, "HOME"] {
+            assert_eq!(
+                built.iter().filter(|(k, _)| k == OsStr::new(key)).count(),
+                1,
+                "{key} twice"
+            );
+        }
+        assert_eq!(built.len(), CLIENT_ENV_KEPT.len() + 3);
 
         // No MTU in the config means no variable at all, not an empty one —
         // the script falls back to what the gateway says.
-        let bare = client_env(Vec::new(), Path::new("/z"), 7, Path::new("/bin/ip"), None);
+        let bare = client_env(Vec::new(), Path::new("/z"), None);
         assert!(!bare.iter().any(|(k, _)| k == OsStr::new(ENV_MTU)));
-        assert_eq!(bare.len(), 3);
+        assert_eq!(bare.len(), 2);
     }
 
     #[test]
     fn the_script_takes_its_bearings_from_the_environment_only() {
-        let full = env(&[
-            (ENV_DIR, "/home/u/.local/state/vpn-zones/work"),
-            (ENV_NETNS_PID, "4242"),
-            (ENV_IP, "/nix/store/x/bin/ip"),
-            (ENV_MTU, "1300"),
-        ]);
+        let full = env(&[(ENV_DIR, "/tmp/openconnect"), (ENV_MTU, "1300")]);
         let args = Args::from_env(&[], &full).unwrap();
-        assert_eq!(args.netns_pid, 4242);
-        assert_eq!(args.ip, PathBuf::from("/nix/store/x/bin/ip"));
+        assert_eq!(args.dir, PathBuf::from("/tmp/openconnect"));
         assert_eq!(args.mtu, Some(1300));
 
         // openconnect runs the script through `/bin/sh -c` with no arguments;
@@ -1559,21 +1516,14 @@ mod tests {
             Err(ArgError::ExtraArguments)
         );
         assert_eq!(
-            Args::from_env(&[], &env(&[(ENV_NETNS_PID, "1")])),
+            Args::from_env(&[], &env(&[(ENV_MTU, "1300")])),
             Err(ArgError::MissingEnv(ENV_DIR))
         );
         assert_eq!(
-            Args::from_env(&[], &env(&[(ENV_DIR, "/x")])),
-            Err(ArgError::MissingEnv(ENV_NETNS_PID))
+            Args::from_env(&[], &env(&[(ENV_DIR, "")])),
+            Err(ArgError::MissingEnv(ENV_DIR))
         );
-        assert!(matches!(
-            Args::from_env(&[], &env(&[(ENV_DIR, "/x"), (ENV_NETNS_PID, "no")])),
-            Err(ArgError::BadPid(_))
-        ));
-        // Without a path for `ip` the script falls back to PATH, as the zone
-        // holder does when it is run by hand out of a nix-shell.
-        let minimal = Args::from_env(&[], &env(&[(ENV_DIR, "/x"), (ENV_NETNS_PID, "7")])).unwrap();
-        assert_eq!(minimal.ip, PathBuf::from("ip"));
+        let minimal = Args::from_env(&[], &env(&[(ENV_DIR, "/x")])).unwrap();
         assert_eq!(minimal.mtu, None);
     }
 }

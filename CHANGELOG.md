@@ -249,6 +249,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **An OpenConnect zone's client runs without capabilities** (review
+  2026-09-27; `docs/LEAK-MODEL.md`, OpenConnect item 15). It ran as the
+  zone's uid 0, which owns every namespace of the zone: a client the
+  gateway subverted could unload the uplink's filter and talk to anything
+  pasta reaches, enter the app namespace and route the zone's traffic
+  around the tunnel, or lift the covers. It now runs as an id of its own —
+  an OpenConnect zone's user namespace maps a third id, `1` inside and the
+  second subordinate uid/gid outside — with no capabilities, no
+  supplementary groups and `no_new_privs`. What needed the rights is the
+  uplink's now: it makes `awg0` in advance, persistent and owned by the
+  client's id, for the client's `TUNSETIFF` to attach to; gives the client
+  one directory, `/tmp/openconnect` in the uplink's own `/tmp` (which only
+  uid 0 may write now); reads the plan the script writes there as
+  something the client wrote (no links, a regular file, bounded, parsed);
+  and moves the interface into the app namespace itself. The script no
+  longer gets `VPN_ZONE_OC_NETNS_PID` or `VPN_ZONE_OC_IP`, and the client's
+  `HOME` is its directory. A subordinate range of a single id is no longer
+  enough for an OpenConnect zone, and a holder whose binary other users
+  cannot reach (run by hand from a home directory) is refused with a
+  message. `openconnect` now says `SIOCSIFMTU: Operation not permitted`
+  once: the MTU is the app namespace's to set.
 - **A host-interface zone does not go out through the host's own
   services** (audit 2026-09-27). Its pasta runs in the host's network and
   gives the zone an address of its own, so a connection from the zone to

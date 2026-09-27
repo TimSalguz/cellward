@@ -41,11 +41,14 @@
 //! WireGuard it is a UDP socket; with OpenConnect it is a whole client process:
 //! the TLS session, the gateway's address and every packet still wrapped in it
 //! live one namespace up, and what arrives in the app namespace is a bare tun
-//! device with an address on it. Who creates and moves that device is the other
-//! difference: the uplink itself for WireGuard, the client's `--script` — which
-//! is us, `vpn-zone-core oc-script` — for OpenConnect. A tun device and the
-//! descriptor attached to it are separate things, so the client goes on reading
-//! and writing packets from the uplink after the interface has left it.
+//! device with an address on it. The uplink creates and moves the device in
+//! both cases; for OpenConnect it makes the tun in advance, for the client to
+//! attach to, because the client runs without a single capability
+//! ([`CLIENT_ID`]), and moves it once the client's `--script` — which is us,
+//! `vpn-zone-core oc-script` — has written down what the gateway said. A tun
+//! device and the descriptor attached to it are separate things, so the client
+//! goes on reading and writing packets from the uplink after the interface has
+//! left it.
 //!
 //! **The endpoint is resolved before either namespace exists.** `wg setconf`
 //! resolves `Endpoint` itself, through `getaddrinfo`, and retries for a minute
@@ -519,8 +522,8 @@ const SYNC_FAIL: u8 = b'0';
 const TOOL_AWG: u8 = b'a';
 const TOOL_WG: u8 = b'w';
 /// The tunnel came from the OpenConnect client: the interface is already in the
-/// app namespace and the facts about it are in the plan file the client's
-/// script wrote. (`crate::openconnect`)
+/// app namespace and the facts about it are in the plan file the uplink wrote
+/// from what the client's script said. (`crate::openconnect`)
 const TOOL_OC: u8 = b'o';
 /// pasta attached to the app namespace itself, going out through an interface
 /// of the host (`crate::hostif`).
@@ -895,7 +898,7 @@ pub fn run(args: Args) -> u8 {
         }
     };
 
-    match hold(&zone, &ids) {
+    match hold(&zone, &ids, runs_a_client(&zone)) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("zone {}: {e}", zone.name());
@@ -932,11 +935,12 @@ impl Ids {
 }
 
 /// The host ids every zone's way out runs under: the zone's uid 0 and gid 0,
-/// i.e. the start of the user's subordinate ranges. pasta and the OpenConnect
-/// client are started by the holder as uid 0 inside the zone's user namespace,
-/// so every socket a zone's traffic leaves the host by is owned by these —
-/// which a host firewall can match (`meta skuid`) without knowing anything
-/// about user units.
+/// i.e. the start of the user's subordinate ranges. pasta is started by the
+/// holder as uid 0 inside the zone's user namespace, so every socket a zone's
+/// traffic leaves the host by is owned by these — which a host firewall can
+/// match (`meta skuid`) without knowing anything about user units. (The
+/// OpenConnect client runs as [`CLIENT_ID`], but its sockets are in the
+/// uplink's network, not the host's: what reaches the host is pasta's.)
 pub fn uplink_owner() -> Option<(u64, u64)> {
     Ids::current().ok().map(|ids| (ids.subuid, ids.subgid))
 }
@@ -980,30 +984,78 @@ fn first_subid(file: &str, user: &str, id: u32) -> Result<u64, String> {
     ))
 }
 
-/// Write the two ranges into the child's namespace.
+/// The uid and the gid the OpenConnect client runs as inside its zone's user
+/// namespace; on the host it is the second id of the user's subordinate
+/// ranges. Mapped only into an `[OpenConnect]` zone ([`runs_a_client`]).
+///
+/// Not the zone's uid 0, and that is the whole point of it (review
+/// 2026-09-27). Uid 0 owns every namespace of the zone: a client running as it
+/// could unload the uplink's filter and talk to anything pasta reaches, enter
+/// the app namespace and route the zone's traffic around the tunnel, lift the
+/// covers — a client the gateway subverted would take the zone apart from the
+/// inside. This id owns nothing, has no capabilities anywhere, and is nobody
+/// else: not the user the zone's programs run as, not the root the zone's own
+/// processes run as. What it may do is what [`spawn_openconnect`] gives it —
+/// a tun made for it in advance, a directory of its own.
+const CLIENT_ID: u32 = 1;
+
+/// Whether the zone's config is an `[OpenConnect]` one, i.e. whether its user
+/// namespace needs [`CLIENT_ID`]. [`prepare`] reads the config again and is
+/// what decides; a config that cannot be read or parsed here is answered no,
+/// and fails there with its own message. (A config turned into an
+/// OpenConnect one in between gets a client that cannot become its id, and
+/// the zone does not come up.)
+fn runs_a_client(zone: &Zone) -> bool {
+    fs::read(zone.path(CONFIG))
+        .ok()
+        .and_then(|raw| WgConfig::parse(&raw).ok())
+        .is_some_and(|cfg| openconnect::is_openconnect(&cfg))
+}
+
+/// Write the ranges into the child's namespace.
 ///
 /// `newuidmap`/`newgidmap` are looked up on `PATH` on purpose: on NixOS the
 /// setuid wrappers live in `/run/wrappers/bin`, on a Debian-ish CI runner in
 /// `/usr/bin` — hardcoding either would break the other. util-linux's `unshare`
 /// (what this replaces) did the same `execvp`.
-fn map_ids(pid: libc::pid_t, ids: &Ids) -> Result<(), String> {
-    map_range("newuidmap", pid, ids.subuid, ids.uid)?;
-    map_range("newgidmap", pid, ids.subgid, ids.gid)
+fn map_ids(pid: libc::pid_t, ids: &Ids, client: bool) -> Result<(), String> {
+    map_range("newuidmap", pid, ids.subuid, ids.uid, client)?;
+    map_range("newgidmap", pid, ids.subgid, ids.gid, client)
 }
 
-fn map_range(tool: &str, pid: libc::pid_t, sub: u64, id: u32) -> Result<(), String> {
-    // <pid> <inside> <outside> <count> …: uid 0 inside comes from the subuid
-    // range, and the real uid is mapped onto itself.
+/// The arguments of `newuidmap`/`newgidmap`: `<pid>` and then `<inside>
+/// <outside> <count>` per range. Uid 0 inside comes from the subordinate
+/// range, the real id is mapped onto itself, and an OpenConnect zone's client
+/// gets [`CLIENT_ID`] from the next subordinate id.
+fn map_args(pid: libc::pid_t, sub: u64, id: u32, client: bool) -> Result<Vec<String>, String> {
+    let mut args = vec![
+        pid.to_string(),
+        "0".to_string(),
+        sub.to_string(),
+        "1".to_string(),
+        id.to_string(),
+        id.to_string(),
+        "1".to_string(),
+    ];
+    if client {
+        if id == CLIENT_ID {
+            return Err(format!(
+                "your own id is {CLIENT_ID}, the one an OpenConnect zone's client runs as \
+                 inside the zone — the two cannot share it"
+            ));
+        }
+        args.extend([
+            CLIENT_ID.to_string(),
+            (sub + u64::from(CLIENT_ID)).to_string(),
+            "1".to_string(),
+        ]);
+    }
+    Ok(args)
+}
+
+fn map_range(tool: &str, pid: libc::pid_t, sub: u64, id: u32, client: bool) -> Result<(), String> {
     let status = Command::new(tool)
-        .args([
-            pid.to_string(),
-            "0".to_string(),
-            sub.to_string(),
-            "1".to_string(),
-            id.to_string(),
-            id.to_string(),
-            "1".to_string(),
-        ])
+        .args(map_args(pid, sub, id, client)?)
         .status()
         .map_err(|e| {
             if e.kind() == io::ErrorKind::NotFound {
@@ -1013,8 +1065,13 @@ fn map_range(tool: &str, pid: libc::pid_t, sub: u64, id: u32) -> Result<(), Stri
             }
         })?;
     if !status.success() {
+        let two = if client {
+            " (an OpenConnect zone takes the first two ids of each)"
+        } else {
+            ""
+        };
         return Err(format!(
-            "{tool} failed ({status}) — check your ranges in /etc/subuid and /etc/subgid"
+            "{tool} failed ({status}) — check your ranges in /etc/subuid and /etc/subgid{two}"
         ));
     }
     Ok(())
@@ -1090,7 +1147,7 @@ fn default_signals() {
 /// The mapping has to be written by a process that is still in the PARENT
 /// namespace and can execute the setuid helpers, which is why this dance exists
 /// at all: the child unshares and blocks, we map, the child carries on.
-fn hold(zone: &Zone, ids: &Ids) -> Result<u8, String> {
+fn hold(zone: &Zone, ids: &Ids, client: bool) -> Result<u8, String> {
     let (unshared_r, unshared_w) = sys::pipe().map_err(|e| format!("cannot create a pipe: {e}"))?;
     let (mapped_r, mapped_w) = sys::pipe().map_err(|e| format!("cannot create a pipe: {e}"))?;
 
@@ -1137,7 +1194,7 @@ fn hold(zone: &Zone, ids: &Ids) -> Result<u8, String> {
         return Err("the zone could not get a user namespace of its own".to_string());
     }
 
-    if let Err(e) = map_ids(pid, ids) {
+    if let Err(e) = map_ids(pid, ids, client) {
         // Dropping the write end is the child's signal to give up.
         drop(mapped_w);
         let _ = reap(pid);
@@ -1388,9 +1445,10 @@ pub enum Backend {
     /// Kernel WireGuard or AmneziaWG. The uplink creates the interface itself
     /// and hands it down; the transport socket stays where it was created.
     Wg(WgConfig),
-    /// A userspace OpenConnect client running in the uplink. It creates the
-    /// interface and its own `--script` hands it down; the TLS session stays
-    /// with the process, which never leaves the uplink.
+    /// A userspace OpenConnect client running in the uplink, as an id of its
+    /// own with no capabilities. The uplink makes the interface for it and
+    /// hands it down once the client's `--script` says the session is up; the
+    /// TLS session stays with the process, which never leaves the uplink.
     Oc(Box<OcZone>),
     /// No tunnel and no uplink: pasta attaches to the app namespace and binds
     /// everything it sends to one interface of the host.
@@ -2030,12 +2088,15 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
     // session's runtime directory (the compositor's raw socket and IPC, which
     // start programs on the host), /tmp (the session's listening sockets). A
     // VPN client is a network-facing program a server may try to subvert
-    // (review 2026-09-25).
+    // (review 2026-09-25). This /tmp is writable by uid 0 only: the one
+    // directory an OpenConnect client may write is its own, made in it
+    // ([`client_dir`]), and a /tmp of 1777 would let the client swap that
+    // directory for a link to anywhere uid 0 may read.
     let runtime = host_runtime_dir(zone);
     for (dir, options) in [
         (Path::new("/run/dbus"), "mode=0755,size=16k"),
         (runtime.as_path(), "mode=0700,size=16k"),
-        (Path::new("/tmp"), "mode=1777,size=64m"),
+        (Path::new("/tmp"), "mode=0755,size=64m"),
     ] {
         if dir.is_dir() {
             sys::mount(
@@ -2143,19 +2204,25 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
             Ok(None)
         }
         Backend::Oc(oc) => {
-            // Same barrier, read EARLIER than on the WireGuard path: there the
-            // interface exists before the app namespace does, here the client's
-            // script moves it the moment the client connects, so the target has
-            // to be waiting before the client is even started.
-            wait_for_app_namespace(zone_up_r)?;
+            // The client gets no capabilities (`CLIENT_ID`), so what it needs
+            // them for is done here, first: the tun it attaches to, and the
+            // one directory it may write.
+            let dir = client_dir()?;
+            tun_for_the_client()?;
             println!(
                 "zone {}: uplink is up (default dev {dev}), starting openconnect to {}",
                 zone.name(),
                 oc.cfg.server
             );
 
-            let mut client = spawn_openconnect(zone, oc, zone_pid)?;
-            if let Err(e) = wait_for_plan(zone, &mut client) {
+            let mut client = spawn_openconnect(zone, oc, &dir)?;
+            // Its script writes the plan once the session is up; the move and
+            // the handing over are ours, as on the WireGuard path.
+            let handed = wait_for_plan(&dir, &mut client).and_then(|plan| {
+                wait_for_app_namespace(zone_up_r)?;
+                hand_over(zone, zone_pid, &plan)
+            });
+            if let Err(e) = handed {
                 // Nothing may outlive a failed setup: an orphaned client would
                 // hold this namespace open with a live session in it.
                 let _ = client.kill();
@@ -4149,6 +4216,99 @@ fn tell_the_zone(moved_w: OwnedFd, tool: u8) -> Result<(), String> {
         .map_err(|e| format!("cannot tell the zone about the tunnel: {e}"))
 }
 
+/// The one directory the OpenConnect client may write, in the uplink's own
+/// `/tmp` (a tmpfs of this mount namespace that only uid 0 writes): where its
+/// script writes the plan, and its `$HOME`.
+const CLIENT_DIR: &str = "/tmp/openconnect";
+
+/// Most a plan may take. A real one is a few lines; this is only a bound on
+/// what the client can make the uplink read.
+const PLAN_MAX: u64 = 64 * 1024;
+
+/// Make [`CLIENT_DIR`], the client's and nobody else's.
+fn client_dir() -> Result<PathBuf, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = PathBuf::from(CLIENT_DIR);
+    // Not recursive: the /tmp under it was mounted a moment ago, so a
+    // directory that is already there is something else's.
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| format!("cannot make {CLIENT_DIR} for the client: {e}"))?;
+    std::os::unix::fs::chown(&dir, Some(CLIENT_ID), Some(CLIENT_ID))
+        .map_err(|e| format!("cannot give {CLIENT_DIR} to the client: {e}"))?;
+    Ok(dir)
+}
+
+/// Make the tunnel's tun here, persistent and owned by [`CLIENT_ID`], for the
+/// client to attach to.
+///
+/// Making a tun asks for CAP_NET_ADMIN over this namespace, which the client
+/// does not have; ATTACHING to one that exists asks only that the caller be
+/// its owner (`tun_not_capable`, drivers/net/tun.c). So uid 0 makes the device
+/// and gives it away, and `openconnect --interface awg0` finds it by name: its
+/// `TUNSETIFF` attaches instead of creating. Persistent, so that closing this
+/// descriptor does not take the device away before the client has one of its
+/// own.
+///
+/// Persistence costs nothing the zone relies on. The device goes with the
+/// namespace it ends up in, as every device of a kind that can be deleted does.
+/// Without the client's queue it takes packets and drops them, so a client
+/// that dies leaves the app namespace a route into nothing, and the zone goes
+/// down behind it anyway ([`uplink_main`]). And nothing else can attach to it:
+/// in the app namespace nobody is its owner or has capabilities there.
+fn tun_for_the_client() -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    let tun = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/net/tun")
+        .map_err(|e| format!("cannot open /dev/net/tun: {e}"))?;
+    // SAFETY: an all-zero ifreq is a valid one: an empty name, no flags.
+    let mut req: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (to, from) in req.ifr_name.iter_mut().zip(TUN_IFACE.bytes()) {
+        *to = from as libc::c_char;
+    }
+    req.ifr_ifru.ifru_flags = (libc::IFF_TUN | libc::IFF_NO_PI) as libc::c_short;
+    let fd = tun.as_raw_fd();
+    let done = |what: &str, rc: libc::c_int| {
+        if rc < 0 {
+            Err(format!(
+                "cannot make {TUN_IFACE} for the client ({what}): {}",
+                io::Error::last_os_error()
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    // SAFETY: TUNSETIFF reads the ifreq and writes the name back into it; it
+    // lives past the call. The other two take plain integers.
+    done("TUNSETIFF", unsafe {
+        libc::ioctl(fd, libc::TUNSETIFF, std::ptr::from_mut(&mut req))
+    })?;
+    done("TUNSETOWNER", unsafe {
+        libc::ioctl(fd, libc::TUNSETOWNER, libc::c_ulong::from(CLIENT_ID))
+    })?;
+    let on: libc::c_ulong = 1;
+    done("TUNSETPERSIST", unsafe {
+        libc::ioctl(fd, libc::TUNSETPERSIST, on)
+    })
+}
+
+/// Whether a program at `path` can be run by an id that owns none of the
+/// directories on the way: each one searchable by others, the file executable
+/// by them. The client's `--script` is this binary, and the client has no
+/// other way to reach it.
+fn runnable_by_anyone(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let searchable = path
+        .ancestors()
+        .skip(1)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .all(|dir| fs::metadata(dir).is_ok_and(|m| m.mode() & 0o001 != 0));
+    searchable && fs::metadata(path).is_ok_and(|m| m.mode() & 0o001 != 0)
+}
+
 /// Start the OpenConnect client in the uplink namespace.
 ///
 /// Every argument here is either forced or checked, and that is the point: the
@@ -4180,7 +4340,11 @@ fn tell_the_zone(moved_w: OwnedFd, tool: u8) -> Result<(), String> {
 /// ([`crate::openconnect::client_env`]): `openconnect` honours `https_proxy`
 /// and its relatives, and a zone must not be one stray session variable away
 /// from talking to somebody else.
-fn spawn_openconnect(zone: &Zone, oc: &OcZone, zone_pid: libc::pid_t) -> Result<Child, String> {
+///
+/// And it runs as [`CLIENT_ID`], without a single capability: the gateway can
+/// make it do whatever a subverted client does, and nothing of that reaches
+/// past the tun it was given and the directory `dir`.
+fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, String> {
     let cfg = &oc.cfg;
     let password = cfg.read_password().map_err(|e| format!("{CONFIG}: {e}"))?;
 
@@ -4197,6 +4361,15 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, zone_pid: libc::pid_t) -> Result<
         return Err(format!(
             "my own path ({exe}) has shell characters in it, and openconnect's --script is \
              shell-parsed"
+        ));
+    }
+    // A holder run by hand out of a home directory: the client, an id of its
+    // own, could not run its script, and every connection would fail at the
+    // last step. Said now, and plainly.
+    if !runnable_by_anyone(Path::new(exe)) {
+        return Err(format!(
+            "the openconnect client runs as an id of its own, and it cannot run {exe} as its \
+             --script: every directory on the way has to be searchable by others"
         ));
     }
 
@@ -4236,29 +4409,49 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, zone_pid: libc::pid_t) -> Result<
     // should not have to be rescued by its second echelon from its own
     // start-up. What survives, and why, is `openconnect::CLIENT_ENV_KEPT`; the
     // rest is what the script needs and nobody else sets.
-    cmd.env_clear().envs(openconnect::client_env(
-        std::env::vars_os(),
-        &zone.dir,
-        zone_pid,
-        &zone.tools.ip,
-        cfg.mtu,
-    ));
+    cmd.env_clear()
+        .envs(openconnect::client_env(std::env::vars_os(), dir, cfg.mtu));
+    cmd.current_dir(dir);
     cmd.stdin(if password.is_some() {
         Stdio::piped()
     } else {
         Stdio::null()
     });
 
-    // THE CLIENT MUST NOT OUTLIVE THIS PROCESS. The uplink is killed with a
-    // plain signal and its default disposition, so no handler of ours runs on
-    // the way out; without this the client would go on holding the uplink
-    // namespace open, with a live VPN session in it, after the zone is gone.
-    // SAFETY: pre_exec runs between fork and execve in the child; prctl with
-    // these arguments takes no pointers, allocates nothing and is
+    // SAFETY: getpid(2) takes no arguments and cannot fail.
+    let uplink = unsafe { libc::getpid() };
+    // SAFETY: pre_exec runs between fork and execve in the child; every call
+    // here takes plain integers or a null pointer, allocates nothing and is
     // async-signal-safe.
     unsafe {
-        cmd.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+        cmd.pre_exec(move || {
+            // WHO THE CLIENT IS: `CLIENT_ID`, with no supplementary groups —
+            // the user's groups of the host would still open what they open —
+            // and, by the kernel's rule for a uid that leaves 0, with no
+            // capabilities left. Each step checked: a client that stayed uid 0
+            // is the zone's namespaces in a gateway's hands.
+            if libc::setgroups(0, std::ptr::null()) != 0
+                || libc::setresgid(CLIENT_ID, CLIENT_ID, CLIENT_ID) != 0
+                || libc::setresuid(CLIENT_ID, CLIENT_ID, CLIENT_ID) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // Nor any way back up through something setuid or file-capable.
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // THE CLIENT MUST NOT OUTLIVE THIS PROCESS. The uplink is killed
+            // with a plain signal and its default disposition, so no handler of
+            // ours runs on the way out; without this the client would go on
+            // holding the uplink namespace open, with a live VPN session in
+            // it, after the zone is gone. After the change of ids, which
+            // clears it; and an uplink already gone is no uplink to follow.
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::getppid() != uplink {
+                return Err(io::Error::from_raw_os_error(libc::ESRCH));
+            }
             Ok(())
         });
     }
@@ -4270,7 +4463,12 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, zone_pid: libc::pid_t) -> Result<
                 zone.tools.openconnect.display()
             )
         } else {
-            format!("cannot run {}: {e}", zone.tools.openconnect.display())
+            // Also what a failed change of ids says: the zone's user namespace
+            // without the client's id in it.
+            format!(
+                "cannot run {} as the client's own id: {e}",
+                zone.tools.openconnect.display()
+            )
         }
     })?;
     if let Some(password) = password {
@@ -4293,21 +4491,20 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, zone_pid: libc::pid_t) -> Result<
     Ok(child)
 }
 
-/// Wait for the client's script to report that the tunnel is in the app
-/// namespace.
+/// Wait for the client's script to say the tunnel is up, and read what it
+/// wrote.
 ///
-/// The plan file appearing IS the report — the script writes it by rename after
-/// the move, so its existence means the interface is already down there. The
-/// wait ends early if the client dies, which is the ordinary failure: a wrong
-/// password, a refused certificate, an unreachable gateway. Otherwise as long
-/// as it takes — no clock: a corporate gateway with a slow authentication step
-/// is ordinary, and giving up on a connection that was about to succeed costs
-/// the user the zone (this was two minutes). A client that hangs is ended by
-/// stopping the zone.
-fn wait_for_plan(zone: &Zone, client: &mut Child) -> Result<(), String> {
-    let plan = zone.path(openconnect::PLAN_FILE);
-    if sys::wait_for_child_entry(&plan, client, Path::exists) {
-        return Ok(());
+/// The plan file appearing IS the report — the script writes it by rename, so
+/// a reader sees the whole file or none of it. The wait ends early if the
+/// client dies, which is the ordinary failure: a wrong password, a refused
+/// certificate, an unreachable gateway. Otherwise as long as it takes — no
+/// clock: a corporate gateway with a slow authentication step is ordinary, and
+/// giving up on a connection that was about to succeed costs the user the zone
+/// (this was two minutes). A client that hangs is ended by stopping the zone.
+fn wait_for_plan(dir: &Path, client: &mut Child) -> Result<openconnect::Plan, String> {
+    let path = dir.join(openconnect::PLAN_FILE);
+    if sys::wait_for_child_entry(&path, client, Path::exists) {
+        return read_plan(&path);
     }
     match client.wait() {
         Ok(status) => Err(format!(
@@ -4316,6 +4513,67 @@ fn wait_for_plan(zone: &Zone, client: &mut Child) -> Result<(), String> {
         )),
         Err(e) => Err(format!("cannot check on openconnect: {e}")),
     }
+}
+
+/// The plan as the client's script wrote it, read as something the client
+/// wrote: no link followed, nothing but a regular file, not much of it, and
+/// nothing it cannot say as a [`openconnect::Plan`].
+fn read_plan(path: &Path) -> Result<openconnect::Plan, String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        // A fifo would hold the uplink up for as long as the client liked.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| format!("cannot open the client's plan {}: {e}", path.display()))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("cannot look at the client's plan: {e}"))?;
+    if !meta.is_file() || meta.len() > PLAN_MAX {
+        return Err(format!(
+            "the client's plan {} is not a plan-sized file",
+            path.display()
+        ));
+    }
+    let mut text = String::new();
+    file.take(PLAN_MAX)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("cannot read the client's plan: {e}"))?;
+    openconnect::Plan::parse(&text)
+}
+
+/// Move the tunnel into the app namespace, then give the app namespace the
+/// plan.
+///
+/// The ORDER is the whole of it: the app namespace configures the interface
+/// from the plan the moment [`tell_the_zone`] wakes it, so the interface has to
+/// be down there first. And the plan it gets is the one parsed here, written
+/// anew — the client's file itself never reaches it. The write is a rename over
+/// a temporary file: a reader sees the whole file or none of it.
+fn hand_over(zone: &Zone, zone_pid: libc::pid_t, plan: &openconnect::Plan) -> Result<(), String> {
+    // The move names the device this uplink made, whatever the plan says; a
+    // plan about another one is a client that did not attach to it.
+    if plan.iface != TUN_IFACE {
+        return Err(format!(
+            "the client reports {} and not the {TUN_IFACE} made for it",
+            plan.iface
+        ));
+    }
+    // A host pid, as on the WireGuard path.
+    let target = zone_pid.to_string();
+    zone.ip(&["link", "set", TUN_IFACE, "netns", target.as_str()])?;
+
+    let path = zone.path(openconnect::PLAN_FILE);
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, plan.to_text())
+        .and_then(|()| fs::rename(&tmp, &path))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    println!(
+        "zone {}: {TUN_IFACE} moved into the app namespace, address {}, mtu {}",
+        zone.name(),
+        plan.address,
+        plan.mtu
+    );
+    Ok(())
 }
 
 /// Create the tunnel interface; the answer says which tool configures it.
@@ -4543,9 +4801,9 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
             (cfg.dns(), None, Mirror::Wg(wgtool.to_path_buf()))
         }
         TOOL_OC => {
-            // The facts come from the file the client's script wrote, and its
-            // existence is what the uplink waited for — so by the time this
-            // byte arrives, the interface is already down here.
+            // The facts come from the file the uplink wrote after the move —
+            // so by the time this byte arrives, the interface is already down
+            // here.
             let path = zone.path(openconnect::PLAN_FILE);
             let plan = fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))
@@ -5614,6 +5872,52 @@ mod tests {
         let accept = rules.find("oifname \"lo\" accept").unwrap();
         assert!(reject < accept, "{rules}");
         assert!(host_address_rules(&[]).is_empty());
+    }
+
+    /// An OpenConnect zone's user namespace gets one id more, the client's,
+    /// from the next subordinate id; every other zone gets exactly the two
+    /// (review 2026-09-27).
+    #[test]
+    fn only_an_openconnect_zone_maps_the_clients_id() {
+        assert_eq!(
+            map_args(42, 100_000, 1000, false).unwrap(),
+            ["42", "0", "100000", "1", "1000", "1000", "1"]
+        );
+        assert_eq!(
+            map_args(42, 100_000, 1000, true).unwrap(),
+            ["42", "0", "100000", "1", "1000", "1000", "1", "1", "100001", "1"]
+        );
+        // A user whose own id is the client's cannot have both.
+        assert!(map_args(42, 100_000, CLIENT_ID, true).is_err());
+        assert!(map_args(42, 100_000, CLIENT_ID, false).is_ok());
+    }
+
+    /// The client's `--script` has to be reachable by an id that owns none
+    /// of the way to it.
+    #[test]
+    fn a_script_under_a_closed_directory_is_not_runnable_by_the_client() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("oc-runnable-{}", std::process::id()));
+        let closed = base.join("closed");
+        fs::create_dir_all(&closed).unwrap();
+        let exe = closed.join("core");
+        fs::write(&exe, b"").unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+        // Whether the temporary directory's own way is open (a nix-shell's is
+        // under a runtime directory that is not) decides the open case.
+        let reachable = runnable_by_anyone(&base);
+        let open = runnable_by_anyone(&exe);
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).unwrap();
+        let shut = runnable_by_anyone(&exe);
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o750)).unwrap();
+        let private = runnable_by_anyone(&exe);
+        let _ = fs::remove_dir_all(&base);
+        assert_eq!(open, reachable);
+        assert!(!shut);
+        assert!(!private);
     }
 
     /// The user's own groups, the line mapped to itself: a range over the

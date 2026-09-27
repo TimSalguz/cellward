@@ -556,9 +556,12 @@ The subtleties that took the most time are commented in detail in
   whole client process stays in the uplink, together with the TLS session and
   the gateway's address, and what moves down is a bare tun. A tun device and the
   descriptor attached to it are separate things, so the client keeps reading and
-  writing packets after the interface has left its namespace — and it may create
-  that tun without root because `TUNSETIFF` asks for `CAP_NET_ADMIN` in the user
-  namespace that owns the network namespace, which is ours;
+  writing packets after the interface has left its namespace. The uplink may
+  create that tun without root because `TUNSETIFF` asks for `CAP_NET_ADMIN` in
+  the user namespace that owns the network namespace, which is ours; the client
+  itself runs as an id of its own with no capabilities at all, and only attaches
+  to a tun the uplink made for it — so a client the gateway subverted cannot
+  unload the uplink's filter or reach into the zone;
 - on top of that topology, and only as insurance against a mistake of ours,
   both namespaces get an **nftables ruleset**: nothing leaves the app namespace
   except through the tunnel, and nothing leaves the uplink except the tunnel's
@@ -566,7 +569,8 @@ The subtleties that took the most time are commented in detail in
   the journal, not the zone — the topology is what carries the weight;
 - the zone holder needs a **double uid mapping**: `0:<subuid>:1` (otherwise
   capabilities are lost on `execve` and the interface cannot be created) plus
-  `<uid>:<uid>:1` (otherwise the program does not see its `$HOME`);
+  `<uid>:<uid>:1` (otherwise the program does not see its `$HOME`); an
+  OpenConnect zone maps one id more, `1:<subuid+1>:1`, for its client;
 - an overlayfs `upperdir` cannot live on an overlayfs — hence the separate
   storage directories;
 - `mount(8)` does not work as non-root even with `CAP_SYS_ADMIN`, so mounting
