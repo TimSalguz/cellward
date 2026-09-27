@@ -1219,9 +1219,9 @@ fn spawn_relay(
     stream: &UnixStream,
     ready: &OwnedFd,
     plan: &GuestPlan,
+    wall: Option<crate::relay::Wall>,
 ) -> io::Result<Child> {
-    let (space_fd, stream_fd, ready_fd) =
-        (space.as_raw_fd(), stream.as_raw_fd(), ready.as_raw_fd());
+    let (stream_fd, ready_fd) = (stream.as_raw_fd(), ready.as_raw_fd());
     let args = crate::relay::Attach {
         stream: stream_fd,
         ready: ready_fd,
@@ -1229,10 +1229,28 @@ fn spawn_relay(
         a6: plan.a6,
         ip: tools.ip.to_path_buf(),
         nft: tools.nft.to_path_buf(),
+        wall,
     }
     .args();
-    let mut cmd = Command::new(tools.core);
+    let mut cmd = in_instance(tools.core, space, &[stream_fd, ready_fd]);
     cmd.arg("frame-relay").args(args).stdin(Stdio::null());
+    cmd.spawn()
+}
+
+/// Our own binary, to be run in the instance's user and network namespaces
+/// as their root (the relay, and stage 4's probe and seal): joined through
+/// the space's pidfd, uid and gid 0 there, no group of the user's — and
+/// then its `exec`, which makes its memory the instance's user namespace's
+/// own (J3 of the design). `keep`: descriptors made inheritable between
+/// fork and exec. Its mount namespace stays the host's, where
+/// `/dev/net/tun` and `/sys/fs/cgroup` are the host's (J5).
+pub fn in_instance(core: &Path, space: &OwnedFd, keep: &[RawFd]) -> Command {
+    let space_fd = space.as_raw_fd();
+    let mut keep_fds: [RawFd; 4] = [-1; 4];
+    for (slot, fd) in keep_fds.iter_mut().zip(keep) {
+        *slot = *fd;
+    }
+    let mut cmd = Command::new(core);
     // SAFETY: between fork and exec only async-signal-safe calls, with plain
     // integers or a null pointer. The child is single-threaded, as joining a
     // user namespace wants.
@@ -1247,7 +1265,7 @@ fn spawn_relay(
             {
                 return Err(io::Error::last_os_error());
             }
-            for fd in [stream_fd, ready_fd] {
+            for fd in keep_fds.into_iter().filter(|fd| *fd >= 0) {
                 if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -1255,7 +1273,51 @@ fn spawn_relay(
             Ok(())
         });
     }
-    cmd.spawn()
+    cmd
+}
+
+/// `frame-relay --probe` in the instance whose space `space` holds its
+/// namespaces (stage 4, `crate::epoch`): its line, or why there is none.
+pub fn probe(core: &Path, nft: &Path, space: &OwnedFd, wall: crate::relay::Wall) -> String {
+    let walled = crate::relay::Walled {
+        nft: nft.to_path_buf(),
+        wall: Some(wall),
+    };
+    let out = in_instance(core, space, &[])
+        .arg("frame-relay")
+        .arg("--probe")
+        .args(walled.args())
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .output();
+    match out {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+        Ok(out) => format!("probe-failed status={}", out.status),
+        Err(e) => format!("probe-failed {e}"),
+    }
+}
+
+/// `frame-relay --seal` in the instance (stage 4, a switch's break): the
+/// tally of what it destroyed, or why it did not seal.
+pub fn seal(core: &Path, nft: &Path, space: &OwnedFd) -> Result<crate::sockdiag::Tally, String> {
+    let walled = crate::relay::Walled {
+        nft: nft.to_path_buf(),
+        wall: None,
+    };
+    let out = in_instance(core, space, &[])
+        .arg("frame-relay")
+        .arg("--seal")
+        .args(walled.args())
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|e| format!("the seal did not start ({e})"))?;
+    if !out.status.success() {
+        return Err(format!("the seal failed ({})", out.status));
+    }
+    Ok(crate::sockdiag::Tally::parse(&String::from_utf8_lossy(
+        &out.stdout,
+    )))
 }
 
 /// An attach that failed at `what`, for the journal.
@@ -1268,8 +1330,10 @@ fn failed(what: &str, e: impl std::fmt::Display) -> NoLink {
 /// `previous`: the last attach's plan, whose addresses are not taken again.
 /// `expect`: the fingerprint the instance was carried by — a return, not the
 /// person's own ask; another one is [`NoLink::Changed`], and nothing is
-/// started. `wake` and `stop`: the keeper's word to give up, heard while it
-/// waits (no clock: the zone answers once its passt is up, or refuses).
+/// started. `wall`: the epoch's wall the relay loads the instance's rules
+/// with (stage 4, `crate::epoch`; none before the instance's first switch).
+/// `wake` and `stop`: the keeper's word to give up, heard while it waits
+/// (no clock: the zone answers once its passt is up, or refuses).
 #[allow(clippy::too_many_arguments)]
 pub fn attach(
     zone_dir: &Path,
@@ -1277,6 +1341,7 @@ pub fn attach(
     space: &OwnedFd,
     previous: Option<GuestPlan>,
     expect: Option<u64>,
+    wall: Option<crate::relay::Wall>,
     tools: &RelayTools<'_>,
     wake: Option<RawFd>,
     stop: &dyn Fn() -> bool,
@@ -1317,7 +1382,7 @@ pub fn attach(
         a6: asked.a6.filter(|_| v6),
     };
     let (ready_r, ready_w) = crate::sys::pipe().map_err(|e| failed("no pipe", e))?;
-    let mut relay = spawn_relay(tools, space, &ours, &ready_w, &plan)
+    let mut relay = spawn_relay(tools, space, &ours, &ready_w, &plan, wall)
         .map_err(|e| failed("the relay did not start", e))?;
     // The relay's now: a copy here would keep its stream and its word open
     // past it.

@@ -527,14 +527,32 @@ pub fn instance(tools: &Tools, running: &crate::instance::Running) -> String {
         .filter(|(_, r)| r.zone == running.network)
         .count()
     });
+    // Its epoch and whether it can be switched live (stage 4,
+    // `crate::epoch`), as its keeper noted them.
+    let epoch = crate::epoch::read(&running.dir).map_or(1, |e| e.n);
+    let live_switch = live_switch(crate::epoch::read_live(&running.dir));
     format!(
         "{{\"id\":{},\"container\":{container},\"network\":{},\"exit\":{exit},\
-         \"why\":{why},\"up\":true,\"pid\":{},\"since\":{since},\"epoch\":1,\
+         \"why\":{why},\"up\":true,\"pid\":{},\"since\":{since},\"epoch\":{epoch},\
          \"pid_namespace\":{pid_namespace},\"build\":{build},\"restart_needed\":{restart_needed},\
-         \"programs\":{launches},\"live_switch\":{{\"available\":false,\"reason\":\"unsupported\"}}}}",
+         \"programs\":{launches},\"live_switch\":{live_switch}}}",
         string(&running.id),
         string(&running.network),
         running.pid
+    )
+}
+
+/// `{available, reason}` of an instance's live switch (stage 4): its
+/// keeper's note ([`crate::epoch::LiveSwitch`]); none — an instance of a
+/// previous build — is `previous-build`.
+pub fn live_switch(live: Option<crate::epoch::LiveSwitch>) -> String {
+    let (available, reason) = match &live {
+        Some(live) => (live.reason().is_none(), live.reason()),
+        None => (false, Some("previous-build")),
+    };
+    format!(
+        "{{\"available\":{available},\"reason\":{}}}",
+        reason.map_or_else(|| "null".to_owned(), string)
     )
 }
 
@@ -904,6 +922,25 @@ mod tests {
         assert_eq!(
             exit_fields(None, "nl"),
             ("\"none\"".to_owned(), "null".to_owned())
+        );
+    }
+
+    /// Stage 4: whether an instance can be switched live, as its keeper
+    /// noted it.
+    #[test]
+    fn an_instances_live_switch_is_its_keepers_note() {
+        use crate::epoch::LiveSwitch;
+        assert_eq!(
+            live_switch(Some(LiveSwitch::Yes)),
+            "{\"available\":true,\"reason\":null}"
+        );
+        assert_eq!(
+            live_switch(Some(LiveSwitch::No("outside".to_owned()))),
+            "{\"available\":false,\"reason\":\"outside\"}"
+        );
+        assert_eq!(
+            live_switch(None),
+            "{\"available\":false,\"reason\":\"previous-build\"}"
         );
     }
 

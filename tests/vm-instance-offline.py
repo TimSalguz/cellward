@@ -76,9 +76,13 @@ with subtest("an offline launch runs in its container's instance: loopback only,
         "offline",
         "vmia",
     ), a
-    # A pid namespace of its own since stage 3 (tests/vm-promise-pidns.py);
-    # no live switch before stage 4.
-    assert a["pid_namespace"] is True and a["live_switch"]["available"] is False, a
+    # A pid namespace of its own since stage 3 (tests/vm-promise-pidns.py).
+    # Changed on purpose in stage 4: a live switch can be made — its keeper
+    # found its unit's cgroup, nft's `socket cgroupv2` and SOCK_DESTROY, and
+    # its one program (started through the user's manager, `keep`) is in its
+    # first epoch — where stage 3 had none at all.
+    assert a["pid_namespace"] is True and a["live_switch"]["available"] is True, a
+    assert a["epoch"] == 1, a
     out = in_c("vmia", "ip -o link show")
     lines = [l for l in out.strip().splitlines() if ": " in l]
     assert len(lines) == 1 and ": lo:" in lines[0], f"an instance with more than lo: {out}"
@@ -93,6 +97,44 @@ with subtest("an offline launch runs in its container's instance: loopback only,
     c = next(c for c in status["containers"] if c["name"] == "vmia")
     assert c["instances"] == ["vmia"], c
     assert any(r["instance"] == "vmia" for r in c["running"]), c
+
+def live_switch_is(id_, available, reason):
+    """Until the instance's keeper notes this (a test's bound)."""
+    for _ in range(120):
+        i = instance(id_)
+        if i and (i["live_switch"]["available"], i["live_switch"]["reason"]) == (available, reason):
+            return
+        machine.sleep(0.5)
+    raise AssertionError(f"{id_}: never {available}/{reason}: {instance(id_)}")
+
+
+# Stage 4 (docs/LEAK-MODEL.md «Смена сети на ходу»): a launch through the
+# user's manager is put into the instance's epoch — the cgroup a live switch
+# moves, whose sockets alone the rules let out after one; a launch from a
+# login session (su here) the kernel does not let move, and while it runs
+# the instance cannot be switched live.
+with subtest("an instance's programs are in its epoch; one from a login session holds the switch"):
+    cg = alice(
+        "systemctl --user show -p ControlGroup --value vpn-zone-container@vmia.service"
+    ).strip()
+    assert cg.endswith("/vpn-zone-container@vmia.service"), cg
+    procs = machine.succeed(f"cat /sys/fs/cgroup{cg}/e1/cgroup.procs").split()
+    comms = [machine.succeed(f"cat /proc/{p}/comm").strip() for p in procs]
+    assert "sleep" in comms, (procs, comms)
+    keeper = machine.succeed(f"cat /sys/fs/cgroup{cg}/infra/cgroup.procs").split()
+    assert keeper and not set(keeper) & set(procs), (keeper, procs)
+    machine.succeed(
+        "su -l alice -c "
+        + shlex.quote(
+            "export XDG_RUNTIME_DIR=/run/user/1000; setsid cellward run offline --container "
+            "vmia -- sleep 4343 </dev/null >/dev/null 2>&1 &"
+        )
+    )
+    live_switch_is("vmia", False, "outside")
+    outsider = machine.succeed("pgrep -xf 'sleep 4343'").strip()
+    assert f"{cg}/e1" not in machine.succeed(f"cat /proc/{outsider}/cgroup"), outsider
+    machine.succeed("pkill -xf 'sleep 4343'")
+    live_switch_is("vmia", True, None)
 
 with subtest("two containers' instances share no /tmp, no abstract socket, no System V IPC"):
     in_c("vmia", "sh -c 'echo a > /tmp/vmia-mark'")

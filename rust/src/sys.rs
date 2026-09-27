@@ -219,8 +219,9 @@ impl Inotify {
         Self::watch_for(dir, libc::IN_CREATE | libc::IN_MOVED_TO)
     }
 
-    /// Watch `dir` for the events of `mask`.
-    fn watch_for(dir: &Path, mask: u32) -> io::Result<Self> {
+    /// Watch `dir` for the events of `mask` — or a file (a cgroup's
+    /// `cgroup.events` for `IN_MODIFY`, `crate::epoch::move_all`).
+    pub(crate) fn watch_for(dir: &Path, mask: u32) -> io::Result<Self> {
         // SAFETY: inotify_init1 takes flags and returns a new descriptor or -1.
         let raw = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
         if raw < 0 {

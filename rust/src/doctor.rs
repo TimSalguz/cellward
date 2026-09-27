@@ -1529,6 +1529,65 @@ pub fn exit_check(exit: Option<crate::instance::Exit>, network: &str) -> Check {
     }
 }
 
+/// Whether an instance's network can be switched live (stage 4 of the
+/// container design, `crate::epoch`), as its keeper noted it: what the
+/// host lacks for it is a warning with its remedy; its kind, or a
+/// previous build's instance, is only said.
+pub fn live_switch_check(live: Option<crate::epoch::LiveSwitch>) -> Check {
+    use crate::epoch::LiveSwitch;
+    let id = "live_switch";
+    match live {
+        Some(LiveSwitch::Yes) => Check::new(
+            id,
+            Level::Ok,
+            "сеть меняется на ходу (cellward container set … network …): программы остаются, их \
+             соединения рвутся",
+        ),
+        None => Check::new(
+            id,
+            Level::Skip,
+            "экземпляр прошлой сборки — сеть меняется только перезапуском",
+        ),
+        Some(LiveSwitch::No(why)) => match why.as_str() {
+            "kind" => Check::new(
+                id,
+                Level::Skip,
+                "экземпляр на одну сеть (основной дом, одноразовый) — сеть не меняется",
+            ),
+            "outside" => Check::new(
+                id,
+                Level::Warn,
+                "программа запущена из сеанса входа (tty, ssh) и не в группе контейнера — пока \
+                 она работает, сеть меняется только перезапуском",
+            ),
+            "cgroup" => Check::new(
+                id,
+                Level::Warn,
+                "у юнита экземпляра нет своей группы cgroup (Delegate) — сеть меняется только \
+                 перезапуском",
+            ),
+            "nft-socket" => Check::new(
+                id,
+                Level::Warn,
+                "nft не принимает «socket cgroupv2» (модуль nft_socket не загружен?) — без стены \
+                 эпох сеть меняется только перезапуском; на NixOS его грузит \
+                 services.cellward.system",
+            ),
+            "sock-destroy" => Check::new(
+                id,
+                Level::Warn,
+                "ядро не рвёт чужие сокеты (CONFIG_INET_DIAG_DESTROY, модули inet_diag, tcp_diag, \
+                 udp_diag) — сеть меняется только перезапуском",
+            ),
+            other => Check::new(
+                id,
+                Level::Warn,
+                format!("сеть меняется только перезапуском ({other})"),
+            ),
+        },
+    }
+}
+
 pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     let Some(pid) = zone_pid(&tools.state, name.as_ref()) else {
         return (
@@ -1724,6 +1783,7 @@ pub fn instance_checks(tools: &Tools, running: &crate::instance::Running, uid: u
         crate::instance::exit_of(&running.dir),
         &running.network,
     ));
+    checks.push(live_switch_check(crate::epoch::read_live(&running.dir)));
     // What it came up with (`instance::SETTINGS`), which the probe judges by.
     let applied =
         fs::read_to_string(running.dir.join(crate::instance::SETTINGS)).unwrap_or_default();
@@ -2050,6 +2110,22 @@ mod tests {
             Level::Warn
         );
         assert_eq!(exit_check(None, "nl").level, Level::Skip);
+    }
+
+    /// Stage 4: what the host lacks for a live switch is a warning with its
+    /// remedy; an instance of one network, or of a previous build, is said.
+    #[test]
+    fn whether_an_instance_can_switch_live_is_a_line_of_its_own() {
+        use crate::epoch::LiveSwitch;
+        let no = |why: &str| live_switch_check(Some(LiveSwitch::No(why.to_owned())));
+        let yes = live_switch_check(Some(LiveSwitch::Yes));
+        assert_eq!((yes.id.as_str(), yes.level), ("live_switch", Level::Ok));
+        assert_eq!(live_switch_check(None).level, Level::Skip);
+        assert_eq!(no("kind").level, Level::Skip);
+        for why in ["outside", "cgroup", "nft-socket", "sock-destroy", "other"] {
+            assert_eq!(no(why).level, Level::Warn, "{why}");
+        }
+        assert!(no("nft-socket").detail.contains("nft_socket"));
     }
 
     #[test]

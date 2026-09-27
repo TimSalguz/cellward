@@ -48,6 +48,11 @@
 //! and no one else's; a launch joins the pid namespace with the others
 //! (`crate::enter`), and its `profile-run` stays as the launch's subreaper
 //! (`crate::profile`).
+//!
+//! Stage 4 (2026-09-27, the live switch): its programs are in a cgroup of
+//! its current epoch below its unit (`crate::epoch`: `epoch` and
+//! `live-switch` in its directory), and its network can be changed while
+//! they run.
 
 use std::fs;
 use std::io;

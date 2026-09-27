@@ -82,10 +82,11 @@
 //!   process is of, by its user namespace. Every launch runs in one but an
 //!   unconfined one; [`init`] is its pid 1 (stage 3): its programs see only
 //!   their own container's processes;
-//! * [`bridge`], [`relay`], [`sockdiag`] — what the later stages build on:
-//!   how a zone carries an instance (`passt --fd` and the relay that pumps
-//!   its frames), and the socket diagnostics a live switch of its network
-//!   will use;
+//! * [`bridge`], [`relay`], [`sockdiag`], [`epoch`] — how a zone carries an
+//!   instance (`passt --fd` and the relay that pumps its frames), and what a
+//!   live switch of its network stands on: the socket diagnostics that
+//!   break its programs' connections and the epoch's wall that mutes every
+//!   socket of the network before;
 //! * [`sys`] — the handful of syscalls more than one of them needs.
 //!
 //! `profile` and `desktop` were Python scripts in `module/`, `wl_sandbox` was a
@@ -116,6 +117,7 @@ pub mod dnsfwd;
 pub mod doctor;
 pub mod egress;
 pub mod enter;
+pub mod epoch;
 pub mod focus;
 pub mod frame;
 pub mod fs_sandbox;

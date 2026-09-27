@@ -6,6 +6,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The epoch wall under a container's live network switch** (2026-09-27,
+  stage 4a of the container-first model; `docs/LEAK-MODEL.md` «Смена сети
+  на ходу»). A container's instance keeps its programs in a cgroup of the
+  current *epoch* below its unit, `vpn-zone-container@<id>.service/e<N>`
+  (the keeper is in `…/infra`): every launch puts its program there
+  (`container-enter`), and a socket's cgroup is fixed at its birth — what
+  the next stage's switch mutes every pre-switch socket by (`socket
+  cgroupv2` in the instance's rules, loaded by its relay from the host's
+  mount namespace; a relay whose walled rules do not load makes no tap).
+  At its start the keeper probes, in the instance's namespaces, whether
+  nft takes `socket cgroupv2` and the kernel destroys sockets
+  (`frame-relay --probe`), and notes whether the instance can be switched
+  live (`live-switch` in its directory). A program launched from a login
+  session (tty, ssh) cannot be moved there by the kernel: it runs as
+  before, and while it does the instance cannot be switched. `status
+  --json`: `instances[].epoch` and `instances[].live_switch` `{available,
+  reason}` (reason `kind`, `cgroup`, `nft-socket`, `sock-destroy`,
+  `outside`, `previous-build`) are real now. `doctor`: a `live_switch`
+  line per instance. The NixOS module loads `nft_socket`, `inet_diag`,
+  `tcp_diag` and `udp_diag` at boot (`module/entry.nix`): an unprivileged
+  user namespace does not always get a module loaded for it.
 - **A container's instance has a pid namespace of its own** (2026-09-27,
   stage 3 of the container-first model; `docs/THREAT-MODEL.md` X4). A
   program of a container sees in `/proc` its own container's processes and

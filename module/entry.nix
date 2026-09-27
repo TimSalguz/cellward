@@ -64,10 +64,20 @@ in
       boot.extraModulePackages = lib.mkIf (cfg.amneziawg && !cfg.enable) [
         config.boot.kernelPackages.amneziawg
       ];
+      # nft_socket and the diag modules: a container's live network switch
+      # (stage 4 of the container design, rust/src/epoch.rs) stands on the
+      # epoch's wall (`socket cgroupv2`) and on destroying sockets
+      # (SOCK_DESTROY). A module is not always loaded on the request of an
+      # unprivileged user namespace (docs/GOTCHAS.md §14), and without them
+      # the switch is refused: loaded at boot.
       boot.kernelModules = lib.optional (cfg.amneziawg && !cfg.enable) "amneziawg" ++ [
         "wireguard"
         "tun"
         "nf_tables"
+        "nft_socket"
+        "inet_diag"
+        "tcp_diag"
+        "udp_diag"
       ];
 
       services.cellward.pipewirePolicy.enable = lib.mkIf config.services.pipewire.wireplumber.enable (

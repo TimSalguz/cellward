@@ -50,6 +50,24 @@
 //! privileges, a seccomp allow-list of what the pump does
 //! (`seccomp::Filter::relay`). Only then does it say it is ready (a byte on
 //! a pipe its keeper waits on), and pump.
+//!
+//! Stage 4 (2026-09-27, the live switch — `crate::epoch`): three more
+//! things, each as the instance's root in its namespaces, as the attach is.
+//!
+//! * `--attach … --wall-level L --wall-cgroup P`: the instance's rules
+//!   carry the epoch's wall (`socket cgroupv2`), and are loaded before the
+//!   tap is made — a relay whose walled rules do not load makes no tap and
+//!   ends: no way out without the wall, once there is one. A tap already
+//!   there (the old way out not gone) is refused.
+//! * `--seal`: a switch's break, between the cut and the next attach, with
+//!   the programs frozen — no tap may be there; every socket that may reach
+//!   out destroyed (`sockdiag::break_all`, programs hear of it at once); the
+//!   rules closed to loopback. The tally on stdout.
+//! * `--probe`: what an instance's keeper asks at its start — does nft take
+//!   `socket cgroupv2` here, does the kernel destroy sockets here; one line
+//!   on stdout ([`crate::epoch::probe_verdict`]). Nothing of the
+//!   namespace's is changed: the probe's table is made and deleted in one
+//!   transaction.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -493,6 +511,80 @@ pub struct Attach {
     /// What configures the tap and loads the instance's rules.
     pub ip: PathBuf,
     pub nft: PathBuf,
+    /// The epoch's wall its rules carry (stage 4, `crate::epoch`): none
+    /// before the instance's first switch.
+    pub wall: Option<Wall>,
+}
+
+/// The epoch's wall an instance's rules carry (`crate::epoch`,
+/// `zone::instance_ruleset`): only a socket born in this cgroup goes out —
+/// `socket cgroupv2 level <level> "<cgroup>"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wall {
+    pub level: u32,
+    /// Absolute, as `/proc/<pid>/cgroup` has it.
+    pub cgroup: String,
+}
+
+impl Wall {
+    /// The wall of `epoch`, from its second on (`Epoch::wall`).
+    pub fn of(epoch: &crate::epoch::Epoch) -> Option<Self> {
+        epoch.wall().map(|(level, cgroup)| Self {
+            level,
+            cgroup: cgroup.to_owned(),
+        })
+    }
+
+    /// The wall `epoch` would have, whichever it is: what the probe loads.
+    pub fn probed(epoch: &crate::epoch::Epoch) -> Self {
+        Self {
+            level: epoch.level(),
+            cgroup: epoch.path.clone(),
+        }
+    }
+
+    /// `--wall-level L --wall-cgroup P`.
+    pub fn args(&self) -> Vec<OsString> {
+        vec![
+            "--wall-level".into(),
+            self.level.to_string().into(),
+            "--wall-cgroup".into(),
+            self.cgroup.clone().into(),
+        ]
+    }
+
+    /// The two flags' values, held to what an epoch can be: an absolute
+    /// cgroup path of plain components ([`crate::epoch::sane_path`]) whose
+    /// depth is the level.
+    fn checked(level: &str, cgroup: &str) -> Result<Self, String> {
+        let level: u32 = level
+            .parse()
+            .map_err(|_| "--wall-level takes a number".to_owned())?;
+        if !crate::epoch::sane_path(cgroup) {
+            return Err("--wall-cgroup is no cgroup's path".to_owned());
+        }
+        let wall = Self {
+            level,
+            cgroup: cgroup.to_owned(),
+        };
+        let depth = cgroup.split('/').filter(|c| !c.is_empty()).count() as u32;
+        if depth != level {
+            return Err(format!(
+                "--wall-level {level} is not the depth of {cgroup} ({depth})"
+            ));
+        }
+        Ok(wall)
+    }
+
+    /// `--wall-level` and `--wall-cgroup` from a command line's values:
+    /// both or neither.
+    fn from_flags(level: Option<String>, cgroup: Option<String>) -> Result<Option<Self>, String> {
+        match (level, cgroup) {
+            (Some(level), Some(cgroup)) => Self::checked(&level, &cgroup).map(Some),
+            (None, None) => Ok(None),
+            _ => Err("--wall-level and --wall-cgroup go together".to_owned()),
+        }
+    }
 }
 
 /// Set a flag's value, once.
@@ -534,6 +626,9 @@ impl Attach {
         out.push(self.ip.clone().into_os_string());
         out.push("--nft".into());
         out.push(self.nft.clone().into_os_string());
+        if let Some(wall) = &self.wall {
+            out.extend(wall.args());
+        }
         out
     }
 
@@ -544,6 +639,7 @@ impl Attach {
     pub fn parse(args: &[OsString]) -> Result<Self, String> {
         let (mut stream, mut ready, mut a4, mut a6, mut ip, mut nft) =
             (None, None, None, None, None, None);
+        let (mut wall_level, mut wall_cgroup): (Option<String>, Option<String>) = (None, None);
         let mut rest = args;
         while let [flag, value, tail @ ..] = rest {
             let flag = flag.to_string_lossy();
@@ -578,6 +674,8 @@ impl Attach {
                 )?,
                 "--ip" => once(&mut ip, absolute(value)?, &flag)?,
                 "--nft" => once(&mut nft, absolute(value)?, &flag)?,
+                "--wall-level" => once(&mut wall_level, text.to_owned(), &flag)?,
+                "--wall-cgroup" => once(&mut wall_cgroup, text.to_owned(), &flag)?,
                 _ => return Err(format!("unknown argument {flag}")),
             }
             rest = tail;
@@ -593,6 +691,7 @@ impl Attach {
         if stream == ready {
             return Err("the stream and the pipe of its word are one descriptor".to_owned());
         }
+        let wall = Wall::from_flags(wall_level, wall_cgroup)?;
         Ok(Self {
             stream,
             ready,
@@ -600,8 +699,62 @@ impl Attach {
             a6,
             ip,
             nft,
+            wall,
         })
     }
+}
+
+/// What `--probe` and `--seal` are given: nft's path, and — for the probe —
+/// the wall it tries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Walled {
+    pub nft: PathBuf,
+    pub wall: Option<Wall>,
+}
+
+impl Walled {
+    /// Its command line after `--probe` or `--seal`.
+    pub fn args(&self) -> Vec<OsString> {
+        let mut out: Vec<OsString> = vec!["--nft".into(), self.nft.clone().into_os_string()];
+        if let Some(wall) = &self.wall {
+            out.extend(wall.args());
+        }
+        out
+    }
+
+    /// [`Walled::args`] read back: every flag once, nft by an absolute path.
+    pub fn parse(args: &[OsString]) -> Result<Self, String> {
+        let mut nft = None;
+        let (mut level, mut cgroup): (Option<String>, Option<String>) = (None, None);
+        let mut rest = args;
+        while let [flag, value, tail @ ..] = rest {
+            let flag = flag.to_string_lossy();
+            let text = value.to_str().unwrap_or("").to_owned();
+            match &*flag {
+                "--nft" => once(&mut nft, absolute(value)?, &flag)?,
+                "--wall-level" => once(&mut level, text, &flag)?,
+                "--wall-cgroup" => once(&mut cgroup, text, &flag)?,
+                _ => return Err(format!("unknown argument {flag}")),
+            }
+            rest = tail;
+        }
+        if let [odd] = rest {
+            return Err(format!("{} without a value", odd.to_string_lossy()));
+        }
+        Ok(Self {
+            nft: nft.ok_or("needs --nft")?,
+            wall: Wall::from_flags(level, cgroup)?,
+        })
+    }
+}
+
+/// Whether the instance's tap is there: the old way out not gone.
+fn tap_there() -> bool {
+    let Ok(name) = std::ffi::CString::new(crate::zone::TUN_IFACE) else {
+        return false;
+    };
+    // SAFETY: a NUL-terminated name, alive for the call.
+    unsafe { libc::if_nametoindex(name.as_ptr()) != 0 }
 }
 
 /// The instance's tap, `awg0` as a zone's tunnel is named — the name the
@@ -691,17 +844,29 @@ fn configure(attach: &Attach) -> Result<(), String> {
 
 /// The instance's rules: out by the tap from this attach's addresses, or
 /// not at all (`zone::instance_ruleset`), in place of any an earlier attach
-/// left. Not loaded — no nft, a kernel without nf_tables — is said loudly,
-/// and the relay goes on: the topology is the wall (stage 2 of the design).
-fn seal(attach: &Attach) {
-    let loaded = crate::zone::instance_ruleset(None, attach.a4, attach.a6)
+/// left. Without the epoch's wall, not loaded — no nft, a kernel without
+/// nf_tables — is said loudly, and the relay goes on: the topology is the
+/// wall (stage 2 of the design). With it (stage 4, after the instance's
+/// first switch), not loaded is the relay's end: the sockets of the epochs
+/// before would go out by the new tap.
+fn seal(attach: &Attach) -> Result<(), String> {
+    let wall = attach.wall.as_ref().map(|w| (w.level, w.cgroup.as_str()));
+    let loaded = crate::zone::instance_ruleset(wall, attach.a4, attach.a6)
         .map(|ruleset| crate::zone::replacing_table(&ruleset))
         .and_then(|ruleset| crate::zone::feed_nft(&attach.nft, &ruleset));
-    if let Err(e) = loaded {
-        eprintln!(
-            "vpn-zone-core frame-relay: the instance's second echelon is OFF ({e}) — its way \
-             out is its tap alone, and nothing insures it against a mistake"
-        );
+    match loaded {
+        Ok(()) => Ok(()),
+        Err(e) if attach.wall.is_some() => Err(format!(
+            "the instance's rules with the epoch's wall did not load ({e}) — no way out \
+             without them"
+        )),
+        Err(e) => {
+            eprintln!(
+                "vpn-zone-core frame-relay: the instance's second echelon is OFF ({e}) — its \
+                 way out is its tap alone, and nothing insures it against a mistake"
+            );
+            Ok(())
+        }
     }
 }
 
@@ -725,6 +890,20 @@ fn attach_main(args: &[OsString]) -> u8 {
             return 2;
         }
     };
+    // One way out at a time: a tap still there is an old one's (G1 of the
+    // container design's live switch).
+    if tap_there() {
+        eprintln!(
+            "vpn-zone-core frame-relay: the instance's tap is still there — its old way out is \
+             not gone; no second one"
+        );
+        return 1;
+    }
+    // The rules before the tap: its first frame meets them.
+    if let Err(e) = seal(&attach) {
+        eprintln!("vpn-zone-core frame-relay: {e}");
+        return 1;
+    }
     let tap = match make_tap() {
         Ok(tap) => tap,
         Err(e) => {
@@ -739,7 +918,6 @@ fn attach_main(args: &[OsString]) -> u8 {
         eprintln!("vpn-zone-core frame-relay: {e} — the instance stays without a way out");
         return 1;
     }
-    seal(&attach);
     if let Err(e) = confine() {
         eprintln!("vpn-zone-core frame-relay: cannot confine itself ({e}) — not relaying");
         return 1;
@@ -768,13 +946,109 @@ fn attach_main(args: &[OsString]) -> u8 {
     }
 }
 
+/// The probe's table in the instance's namespace, made and deleted in one
+/// transaction: what the kernel and nft take is checked — the expression's
+/// module loaded for it, the cgroup's path resolved by nft in this, the
+/// host's, mount namespace (J5) —, and nothing stays.
+pub fn probe_ruleset(wall: &Wall) -> String {
+    let relative = wall.cgroup.trim_start_matches('/');
+    format!(
+        "table inet vzprobe {{\n\tchain output {{\n\t\ttype filter hook output priority \
+         filter; policy accept;\n\t\tsocket cgroupv2 level {} \"{relative}\" accept\n\t}}\n}}\n\
+         delete table inet vzprobe\n",
+        wall.level
+    )
+}
+
+/// `frame-relay --probe --nft P --wall-level L --wall-cgroup C`: whether a
+/// live switch can be made in this namespace — `nft-socket=<yes|no>
+/// destroy=<yes|no>` on stdout, why not on stderr.
+fn probe_main(args: &[OsString]) -> u8 {
+    // SAFETY: prctl with these arguments takes no pointers.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    let (nft, wall) = match Walled::parse(args) {
+        Ok(Walled {
+            nft,
+            wall: Some(wall),
+        }) => (nft, wall),
+        Ok(_) => {
+            eprintln!("vpn-zone-core frame-relay --probe: needs the wall it tries");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("vpn-zone-core frame-relay --probe: {e}");
+            return 2;
+        }
+    };
+    let nft_socket = match crate::zone::feed_nft(&nft, &probe_ruleset(&wall)) {
+        Ok(()) => "yes",
+        Err(e) => {
+            eprintln!(
+                "vpn-zone-core frame-relay --probe: nft takes no `socket cgroupv2` here ({e}) — \
+                 no epoch's wall, no live switch (the module nft_socket?)"
+            );
+            "no"
+        }
+    };
+    let destroy = match crate::sockdiag::destroy_supported() {
+        Ok(()) => "yes",
+        Err(e) => {
+            eprintln!("vpn-zone-core frame-relay --probe: no socket destroyed here: {e}");
+            "no"
+        }
+    };
+    println!("nft-socket={nft_socket} destroy={destroy}");
+    0
+}
+
+/// `frame-relay --seal --nft P`: a switch's break (stage 4), between its cut
+/// and the next attach, with the instance's programs frozen: no tap may be
+/// there; every socket that may reach out destroyed; the rules closed to
+/// loopback. The tally on stdout (`sockdiag::Tally::word`). 1 when a tap is
+/// there or the closed rules do not load.
+fn seal_main(args: &[OsString]) -> u8 {
+    // SAFETY: prctl with these arguments takes no pointers.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    let walled = match Walled::parse(args) {
+        Ok(walled) => walled,
+        Err(e) => {
+            eprintln!("vpn-zone-core frame-relay --seal: {e}");
+            return 2;
+        }
+    };
+    if tap_there() {
+        eprintln!(
+            "vpn-zone-core frame-relay --seal: the instance's tap is still there — its old way \
+             out is not gone"
+        );
+        return 1;
+    }
+    let tally = crate::sockdiag::break_all();
+    for e in &tally.errors {
+        eprintln!("vpn-zone-core frame-relay --seal: {e}");
+    }
+    let closed = crate::zone::replacing_table(&crate::zone::instance_closed_ruleset());
+    if let Err(e) = crate::zone::feed_nft(&walled.nft, &closed) {
+        eprintln!(
+            "vpn-zone-core frame-relay --seal: the closed rules did not load ({e}) — not sealed"
+        );
+        return 1;
+    }
+    println!("{}", tally.word());
+    0
+}
+
 /// `vpn-zone-core frame-relay --tap-fd N --stream-fd M`: confine itself,
 /// then [`pump`] between the two descriptors it inherited until either
 /// ends. 0 when one side ended, 1 on an error, 2 on a bad command line.
-/// `--attach …`: an instance's relay ([`Attach`]).
+/// `--attach …`: an instance's relay ([`Attach`]); `--probe …` and
+/// `--seal …`: the live switch's (stage 4, [`Walled`]).
 pub fn main(args: &[OsString]) -> u8 {
-    if args.first().is_some_and(|a| a == "--attach") {
-        return attach_main(&args[1..]);
+    match args.first().and_then(|a| a.to_str()) {
+        Some("--attach") => return attach_main(&args[1..]),
+        Some("--probe") => return probe_main(&args[1..]),
+        Some("--seal") => return seal_main(&args[1..]),
+        _ => {}
     }
     let (tap, stream) = match parse_args(args) {
         Ok(fds) => fds,
@@ -1139,6 +1413,7 @@ mod tests {
             a6: Some(crate::bridge::a6_from(0xabcd_0000_0000_0001)),
             ip: PathBuf::from("/nix/store/x-iproute2/bin/ip"),
             nft: PathBuf::from("/nix/store/x-nftables/bin/nft"),
+            wall: None,
         };
         let line = attach.args();
         assert_eq!(line[0], "--attach");
@@ -1150,6 +1425,25 @@ mod tests {
         let line = four.args();
         assert!(!line.contains(&OsString::from("--a6")), "{line:?}");
         assert_eq!(Attach::parse(&line[1..]), Ok(four));
+        // With the epoch's wall (stage 4): there and back as well.
+        let epoch = crate::epoch::Epoch::of(
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/\
+             vpn-zone-container@work.service",
+            2,
+        );
+        let walled = Attach {
+            wall: Wall::of(&epoch),
+            ..attach.clone()
+        };
+        assert_eq!(
+            walled.wall,
+            Some(Wall {
+                level: 6,
+                cgroup: epoch.path.clone()
+            })
+        );
+        let line = walled.args();
+        assert_eq!(Attach::parse(&line[1..]), Ok(walled));
         let args = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
         let good = [
             "--stream-fd",
@@ -1293,5 +1587,71 @@ mod tests {
         for &bad in bad_lines {
             assert!(Attach::parse(&args(bad)).is_err(), "{bad:?}");
         }
+        // The wall: both flags, a sane path, its depth as the level.
+        let with = |extra: &[&str]| {
+            let mut line: Vec<&str> = good.to_vec();
+            line.extend_from_slice(extra);
+            args(&line)
+        };
+        assert!(Attach::parse(&with(&["--wall-level", "2", "--wall-cgroup", "/a/e2"])).is_ok());
+        for bad in [
+            &["--wall-level", "2"][..],
+            &["--wall-cgroup", "/a/e2"],
+            &["--wall-level", "3", "--wall-cgroup", "/a/e2"],
+            &["--wall-level", "x", "--wall-cgroup", "/a/e2"],
+            &["--wall-level", "2", "--wall-cgroup", "a/e2"],
+            &["--wall-level", "2", "--wall-cgroup", "/a\"/e2"],
+            &["--wall-level", "3", "--wall-cgroup", "/a/../e2"],
+        ] {
+            assert!(Attach::parse(&with(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    /// `--probe` and `--seal` take nft and, the probe, the wall it tries.
+    #[test]
+    fn the_probes_and_the_seals_command_lines_go_there_and_back() {
+        let walled = Walled {
+            nft: PathBuf::from("/x/nft"),
+            wall: Some(Wall {
+                level: 2,
+                cgroup: "/u/e1".to_owned(),
+            }),
+        };
+        assert_eq!(Walled::parse(&walled.args()), Ok(walled.clone()));
+        let bare = Walled {
+            wall: None,
+            ..walled
+        };
+        assert_eq!(Walled::parse(&bare.args()), Ok(bare));
+        let args = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+        for bad in [
+            &[][..],
+            &["--nft", "nft"],
+            &["--nft", "/x/nft", "--nft", "/y/nft"],
+            &["--nft", "/x/nft", "--wall-level", "2"],
+            &["--nft", "/x/nft", "--other", "1"],
+            &["--nft"],
+        ] {
+            assert!(Walled::parse(&args(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    /// The probe's table is made and deleted in one transaction, with the
+    /// wall's rule on the output hook.
+    #[test]
+    fn the_probe_leaves_nothing_behind() {
+        let text = probe_ruleset(&Wall {
+            level: 6,
+            cgroup: "/user.slice/u/x/app.slice/vpn-zone-container@w.service/e1".to_owned(),
+        });
+        assert!(text.contains(
+            "socket cgroupv2 level 6 \"user.slice/u/x/app.slice/vpn-zone-container@w.service/e1\" \
+             accept"
+        ));
+        assert!(text.contains("hook output"), "{text}");
+        assert!(
+            text.trim_end().ends_with("delete table inet vzprobe"),
+            "{text}"
+        );
     }
 }

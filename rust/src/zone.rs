@@ -1815,6 +1815,8 @@ pub fn run_instance(tools: Tools, home: PathBuf, plan: crate::instance::Plan) ->
         crate::instance::REATTACH,
         crate::instance::RESOLV,
         crate::pw_context::STATE_FILE,
+        crate::epoch::FILE,
+        crate::epoch::LIVE_SWITCH,
     ] {
         let _ = fs::remove_file(dir.join(file));
     }
@@ -1996,7 +1998,11 @@ fn hold_instance(zone: &mut Zone, ids: &Ids, plan: &crate::instance::Plan) -> Re
     // Its way out (stage 2 of the container design): attached before the
     // instance is ready, so that a launch that finds it ready finds it
     // going out — or refused to come up, with the zone's reason.
-    let mut transport = Transport::new(zone, plan, &state, space);
+    // Its epoch wall (stage 4, `crate::epoch`): the cgroup its programs are
+    // put in, and whether it can be switched live — before its way out, whose
+    // relay loads the wall once there is one.
+    let epochs = Epochs::start(zone, &plan.id, &state, space);
+    let mut transport = Transport::new(zone, plan, &state, space, epochs);
     if let Err(e) = transport.first() {
         return give_up(&mut helpers, e);
     }
@@ -2347,6 +2353,8 @@ fn keep(
         .open(zone.path(crate::instance::LOCK))
         .ok();
     let mut members: Vec<(i32, OwnedFd)> = Vec::new();
+    // Its programs outside the current epoch at the last look (stage 4).
+    let mut outside: Vec<i32> = Vec::new();
     let mut armed = false;
     let mut space_gone = false;
     // How the holder ended: KILL passed on from its pid 1 is a kill.
@@ -2428,12 +2436,16 @@ fn keep(
         let ended: Vec<bool> = fds[first_member..].iter().map(|p| p.revents != 0).collect();
         if ended.contains(&true) {
             let mut at = 0;
-            members.retain(|_| {
+            let mut outside_ended = false;
+            members.retain(|(pid, _)| {
                 let gone = ended[at];
                 at += 1;
+                outside_ended |= gone && outside.contains(pid);
                 !gone
             });
-            look |= members.is_empty();
+            // The last program outside the epoch may be gone (stage 4): looked
+            // at again, for the live switch's note.
+            look |= members.is_empty() || outside_ended;
         }
         if !look {
             continue;
@@ -2451,6 +2463,7 @@ fn keep(
                 unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
             }
         }
+        outside = transport.epochs.look(&members);
     };
     WAKE.store(-1, Ordering::SeqCst);
     if doorbell.is_some() {
@@ -2495,6 +2508,139 @@ fn end_programs(userns: (u64, u64), space: libc::pid_t) {
     }
 }
 
+/// The epoch wall of a container instance, as its keeper holds it (stage 4
+/// of the container design of 2026-09-27, `crate::epoch`): the cgroup its
+/// programs are in, and whether it can be switched live — written down for
+/// `status` ([`crate::epoch::LIVE_SWITCH`]) whenever that changes.
+struct Epochs {
+    /// The instance's directory.
+    dir: PathBuf,
+    /// Its current epoch; `None`: no delegated cgroup of its unit's (a keeper
+    /// run by hand) — no epochs and no live switch.
+    now: Option<crate::epoch::Epoch>,
+    /// A named container's instance: one that may change its network. Not
+    /// `<c>:<net>`, `main:<net>` or a throwaway (P7 of the design).
+    kind_ok: bool,
+    /// What its start found: its cgroup, nft's `socket cgroupv2` and the
+    /// kernel's `SOCK_DESTROY` in its namespace — or the first that failed.
+    found: Result<(), &'static str>,
+    /// Its note as last written.
+    noted: Option<crate::epoch::LiveSwitch>,
+}
+
+impl Epochs {
+    /// At the instance's start, its space up: the unit's cgroup found
+    /// (`<unit>/infra` is the keeper's own, `DelegateSubgroup=infra`), its
+    /// first epoch made there and written down for its launches, and the
+    /// relay's probe run in its namespaces (`bridge::probe`). Nothing of it
+    /// is fatal: without it the instance is as in stage 3, and cannot be
+    /// switched live.
+    fn start(zone: &Zone, id: &str, state: &Path, space: i32) -> Self {
+        let dir = zone.dir.clone();
+        let _ = fs::remove_file(dir.join(crate::epoch::FILE));
+        let unit = crate::instance::unit_name(id).and_then(|name| {
+            let own = fs::read_to_string("/proc/self/cgroup").ok()?;
+            crate::epoch::unit_of(&own, &name)
+        });
+        let Some(unit) = unit else {
+            println!(
+                "instance {id}: no delegated cgroup of its unit's — its programs stay where they \
+                 are started, and it cannot change its network while they run"
+            );
+            return Self::noted(dir, id, None, Err("cgroup"));
+        };
+        let first = crate::epoch::Epoch::of(&unit, 1);
+        let made = match crate::epoch::make(&first) {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
+            _ => {
+                crate::epoch::freeze(&first, false).and_then(|()| crate::epoch::write(&dir, &first))
+            }
+        };
+        if let Err(e) = made {
+            eprintln!(
+                "instance {id}: cannot make its programs' cgroup {} ({e}) — it cannot change its \
+                 network while they run",
+                first.path
+            );
+            return Self::noted(dir, id, None, Err("cgroup"));
+        }
+        let probed = match (
+            std::env::current_exe(),
+            sys::pidfd_open(space).filter(|_| crate::instance::space(state, id) == Some(space)),
+        ) {
+            (Ok(core), Some(pidfd)) => {
+                let line = crate::bridge::probe(
+                    &core,
+                    &zone.tools.nft,
+                    &pidfd,
+                    crate::relay::Wall::probed(&first),
+                );
+                println!("instance {id}: its live switch's probe: {line}");
+                crate::epoch::probe_verdict(&line)
+            }
+            _ => Err("cgroup"),
+        };
+        Self::noted(dir, id, Some(first), probed)
+    }
+
+    /// Its note written as its start found it, with no program in yet.
+    fn noted(
+        dir: PathBuf,
+        id: &str,
+        now: Option<crate::epoch::Epoch>,
+        found: Result<(), &'static str>,
+    ) -> Self {
+        let mut epochs = Self {
+            dir,
+            now,
+            kind_ok: !id.contains(':'),
+            found,
+            noted: None,
+        };
+        epochs.note(0);
+        epochs
+    }
+
+    /// The note rewritten when what it says changed: `outside` programs of
+    /// the instance run outside the current epoch.
+    fn note(&mut self, outside: usize) {
+        let live = crate::epoch::live_switch(self.kind_ok, self.found, outside);
+        if self.noted.as_ref() == Some(&live) {
+            return;
+        }
+        if let Err(e) = crate::epoch::write_live(&self.dir, &live) {
+            eprintln!("cannot note whether the instance can be switched live ({e})");
+        }
+        self.noted = Some(live);
+    }
+
+    /// After a look at the instance's programs (`place::members`): those not
+    /// in the current epoch — launched from a login session's scope, which
+    /// the kernel does not let move (`crate::epoch`) —, and the note.
+    fn look(&mut self, members: &[(i32, OwnedFd)]) -> Vec<i32> {
+        let outside: Vec<i32> = match &self.now {
+            Some(epoch) => members
+                .iter()
+                .map(|(pid, _)| *pid)
+                .filter(|pid| {
+                    !epoch.holds(
+                        &fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap_or_default(),
+                    )
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        self.note(outside.len());
+        outside
+    }
+
+    /// The wall the instance's rules carry now (`relay::Wall::of`): none
+    /// before its first switch.
+    fn wall(&self) -> Option<crate::relay::Wall> {
+        self.now.as_ref().and_then(crate::relay::Wall::of)
+    }
+}
+
 /// A container instance's way out, as its keeper holds it (stage 2 of the
 /// container design of 2026-09-27, `crate::bridge`): the link to its zone
 /// while it has one; why not while it has none ([`crate::instance::Exit`],
@@ -2526,10 +2672,18 @@ struct Transport {
     previous: Option<crate::bridge::GuestPlan>,
     /// The zone's directory, watched while the instance is cut from it.
     watch: Option<sys::Inotify>,
+    /// Its epoch wall (stage 4).
+    epochs: Epochs,
 }
 
 impl Transport {
-    fn new(zone: &Zone, plan: &crate::instance::Plan, state: &Path, space: i32) -> Self {
+    fn new(
+        zone: &Zone,
+        plan: &crate::instance::Plan,
+        state: &Path,
+        space: i32,
+        epochs: Epochs,
+    ) -> Self {
         Self {
             id: plan.id.clone(),
             network: plan.network.clone(),
@@ -2544,6 +2698,7 @@ impl Transport {
             zone_pid: None,
             previous: None,
             watch: None,
+            epochs,
         }
     }
 
@@ -2629,6 +2784,7 @@ impl Transport {
             &space,
             self.previous,
             expect,
+            self.epochs.wall(),
             &tools,
             wake,
             &stop,
@@ -7784,12 +7940,22 @@ pub fn instance_ruleset(
         NDP_RULE.to_string(),
         format!("oifname \"{TUN_IFACE}\" ip saddr {a4}{cgroup} accept"),
     ];
+    // Stage 4: `epoch` goes with a live switch, and a switch's epoch is
+    // where the rules say it: its programs' sockets pass, and nothing else
+    // of the instance's does.
     if let Some(a6) = a6 {
         rules.push(format!(
             "oifname \"{TUN_IFACE}\" ip6 saddr {a6}{cgroup} accept"
         ));
     }
     Ok(output_table(&rules))
+}
+
+/// A container instance's ruleset between a switch's cut and its next
+/// attach, and for good after a switch to `offline` (stage 4, `frame-relay
+/// --seal`): loopback, and nothing else.
+pub fn instance_closed_ruleset() -> String {
+    output_table(&["oifname \"lo\" accept".to_string()])
 }
 
 /// The uplink's ruleset: the tunnel's own packets to the endpoint, and nothing

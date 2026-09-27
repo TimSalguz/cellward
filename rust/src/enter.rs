@@ -319,6 +319,25 @@ fn drop_capabilities() {
     }
 }
 
+/// The child's first step (stage 4, `crate::epoch`): itself into the
+/// instance's current epoch, from the host's mount namespace, where
+/// `/sys/fs/cgroup` is — the instance's covers it. What cannot be placed —
+/// the kernel moves no process out of a login session's scope — runs where
+/// it was started: with the network before the instance's first switch (its
+/// keeper notes that the instance cannot be switched while it runs), with
+/// none after it, behind the epoch's wall — which the person is told.
+fn place(id: &str, epoch: &crate::epoch::Epoch) {
+    if let Err(e) = epoch.place_self() {
+        if epoch.wall().is_some() {
+            eprintln!(
+                "контейнер {id}: программа не попала в группу контейнера ({e}) — контейнер уже \
+                 менял сеть на ходу, и у неё не будет выхода в сеть. Запускай его программы с \
+                 рабочего стола, а не из сеанса входа (tty, ssh), или перезапусти контейнер"
+            );
+        }
+    }
+}
+
 /// The child: the instance's mount namespace, a copy of it of its own, the
 /// capabilities kept, the command. Returns only when something failed —
 /// what, for the waiter to say.
@@ -539,6 +558,9 @@ pub fn run(args: &Args) -> u8 {
         ring(&dir);
         return EXIT_NOT_STARTED;
     }
+    // The instance's current epoch (stage 4): read under the lock, which a
+    // switch holds exclusively while it moves to the next.
+    let epoch = crate::epoch::read(&dir);
     // The child's word: nothing (its exec closed the pipe) or why it could
     // not become the launch. And the main program's status, later.
     let pipes = crate::sys::pipe().and_then(|said| crate::sys::pipe().map(|status| (said, status)));
@@ -566,6 +588,9 @@ pub fn run(args: &Args) -> u8 {
         drop(said_r);
         drop(status_r);
         drop(lock);
+        if let Some(epoch) = &epoch {
+            place(&args.instance, epoch);
+        }
         let why = become_the_launch(&space, &args.cmd, &status_w);
         let _ = File::from(said_w).write_all(why.as_bytes());
         // SAFETY: _exit never returns and touches nothing of ours.

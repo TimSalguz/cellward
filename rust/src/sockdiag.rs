@@ -25,7 +25,9 @@
 //! notice at once.
 
 use std::fmt;
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 /// `NETLINK_SOCK_DIAG`, the netlink protocol.
 pub const NETLINK_SOCK_DIAG: i32 = 4;
@@ -258,6 +260,282 @@ pub fn loopback_only(socket: &Socket) -> bool {
     is_loopback(socket.src) && (is_loopback(socket.dst) || socket.dst.is_unspecified())
 }
 
+/// Whether a socket of a dump of `protocol` is destroyed by a switch: not a
+/// TCP listener (the dump leaves them out already; a listener carries no
+/// connection), and not one that stays on the loopback ([`loopback_only`]).
+pub fn to_break(socket: &Socket, protocol: u8) -> bool {
+    !(protocol == IPPROTO_TCP && socket.state == TCP_LISTEN) && !loopback_only(socket)
+}
+
+// --- THE I/O HALF (stage 4, 2026-09-27) ---------------------------------------
+//
+// The netlink socket, in the network namespace of the process that opens it:
+// a container instance's, for its relay (`crate::relay`, `--seal` and
+// `--probe`), the root of the instance's user namespace — `SOCK_DESTROY`
+// wants `CAP_NET_ADMIN` over the namespace's owner.
+
+/// What a switch's break did ([`break_all`]): destroyed TCP and UDP sockets,
+/// those the kernel no longer found by their id (`missed`: gone meanwhile,
+/// or of a `SO_REUSEPORT` group), those it would not destroy
+/// (`unsupported`: no `SOCK_DESTROY` for them), any other refusal
+/// (`failed`), the inodes of every UDP socket seen — what the programs that
+/// still hold one are found by after the switch: such a socket stays
+/// muted by the epoch's wall (`crate::epoch`) —, and what went wrong.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Tally {
+    pub tcp: u32,
+    pub udp: u32,
+    pub missed: u32,
+    pub unsupported: u32,
+    pub failed: u32,
+    pub udp_inodes: Vec<u32>,
+    pub errors: Vec<String>,
+}
+
+impl Tally {
+    /// One line of words: `tcp=N udp=N missed=N unsupported=N failed=N
+    /// udp-inodes=a,b` — what the relay tells the keeper ([`Tally::parse`]).
+    pub fn word(&self) -> String {
+        let inodes: Vec<String> = self.udp_inodes.iter().map(u32::to_string).collect();
+        format!(
+            "tcp={} udp={} missed={} unsupported={} failed={} udp-inodes={}",
+            self.tcp,
+            self.udp,
+            self.missed,
+            self.unsupported,
+            self.failed,
+            inodes.join(",")
+        )
+    }
+
+    /// [`Tally::word`] read back; words it does not know are skipped, and so
+    /// is what `errors` held (said on the relay's stderr, not here).
+    pub fn parse(line: &str) -> Self {
+        let mut tally = Self::default();
+        for word in line.split_whitespace() {
+            let Some((key, value)) = word.split_once('=') else {
+                continue;
+            };
+            let count = || value.parse::<u32>().unwrap_or(0);
+            match key {
+                "tcp" => tally.tcp = count(),
+                "udp" => tally.udp = count(),
+                "missed" => tally.missed = count(),
+                "unsupported" => tally.unsupported = count(),
+                "failed" => tally.failed = count(),
+                "udp-inodes" => {
+                    tally.udp_inodes = value.split(',').filter_map(|n| n.parse().ok()).collect()
+                }
+                _ => {}
+            }
+        }
+        tally
+    }
+}
+
+/// A `NETLINK_SOCK_DIAG` socket in this process's network namespace.
+fn open() -> io::Result<OwnedFd> {
+    // SAFETY: socket(2) takes no pointers and returns a new descriptor or -1.
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            NETLINK_SOCK_DIAG,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the descriptor was just returned to us and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// One request to the kernel.
+fn send(fd: &OwnedFd, msg: &[u8]) -> io::Result<()> {
+    // SAFETY: an all-zero sockaddr_nl is the kernel's address once its
+    // family is set.
+    let mut to: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+    to.nl_family = libc::AF_NETLINK as libc::sa_family_t;
+    loop {
+        // SAFETY: a buffer of the length passed and an address of the size
+        // passed, both alive for the call.
+        let n = unsafe {
+            libc::sendto(
+                fd.as_raw_fd(),
+                msg.as_ptr().cast(),
+                msg.len(),
+                0,
+                std::ptr::from_ref(&to).cast(),
+                std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
+            )
+        };
+        if n >= 0 {
+            return if n as usize == msg.len() {
+                Ok(())
+            } else {
+                Err(io::Error::other("a request sent short"))
+            };
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+/// The kernel's next answer, whole: a netlink socket gives one datagram a
+/// read.
+fn recv(fd: &OwnedFd, buf: &mut [u8]) -> io::Result<Vec<Message>> {
+    loop {
+        // SAFETY: a buffer of the length passed, alive for the call.
+        let n = unsafe { libc::recv(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+        if n < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
+        }
+        if n == 0 {
+            return Err(io::Error::other("the diag socket was closed"));
+        }
+        return parse(&buf[..n as usize])
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+    }
+}
+
+/// Every socket of one family and protocol in `states`.
+fn dump(fd: &OwnedFd, family: u8, protocol: u8, states: u32, seq: u32) -> io::Result<Vec<Socket>> {
+    send(fd, &dump_request(family, protocol, states, seq))?;
+    // A dump comes in datagrams of a few pages; one of 64 KiB takes any.
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut out = Vec::new();
+    loop {
+        for message in recv(fd, &mut buf)? {
+            match message {
+                Message::Socket(socket) => out.push(socket),
+                Message::Done => return Ok(out),
+                Message::Ack(0) => {}
+                Message::Ack(errno) => return Err(io::Error::from_raw_os_error(-errno)),
+            }
+        }
+    }
+}
+
+/// Destroy one socket; the kernel's answer: 0, or the error negative.
+fn destroy(fd: &OwnedFd, socket: &Socket, protocol: u8, seq: u32) -> io::Result<i32> {
+    send(fd, &destroy_request(socket, protocol, seq))?;
+    let mut buf = vec![0u8; 8 * 1024];
+    loop {
+        for message in recv(fd, &mut buf)? {
+            if let Message::Ack(code) = message {
+                return Ok(code);
+            }
+        }
+    }
+}
+
+/// Every socket of this network namespace that may reach out destroyed
+/// ([`to_break`]): TCP in every state but `LISTEN`, UDP in every state,
+/// both families — what `ss -K` does. What cannot be done is counted and
+/// said, never a reason to stop: the epoch's wall holds without it.
+pub fn break_all() -> Tally {
+    let mut tally = Tally::default();
+    let fd = match open() {
+        Ok(fd) => fd,
+        Err(e) => {
+            tally.errors.push(format!("no diag socket ({e})"));
+            return tally;
+        }
+    };
+    let mut seq: u32 = 1;
+    for (protocol, states) in [(IPPROTO_TCP, STATES_BUT_LISTEN), (IPPROTO_UDP, ALL_STATES)] {
+        for family in [AF_INET, AF_INET6] {
+            seq = seq.wrapping_add(1);
+            let sockets = match dump(&fd, family, protocol, states, seq) {
+                Ok(sockets) => sockets,
+                Err(e) => {
+                    tally.errors.push(format!(
+                        "no dump of family {family}, protocol {protocol} ({e})"
+                    ));
+                    continue;
+                }
+            };
+            for socket in sockets.iter().filter(|s| to_break(s, protocol)) {
+                if protocol == IPPROTO_UDP && socket.inode != 0 {
+                    tally.udp_inodes.push(socket.inode);
+                }
+                seq = seq.wrapping_add(1);
+                match destroy(&fd, socket, protocol, seq) {
+                    Ok(0) if protocol == IPPROTO_TCP => tally.tcp += 1,
+                    Ok(0) => tally.udp += 1,
+                    Ok(code) if code == -libc::ENOENT => tally.missed += 1,
+                    Ok(code) if code == -libc::EOPNOTSUPP => tally.unsupported += 1,
+                    Ok(code) => {
+                        tally.failed += 1;
+                        tally.errors.push(format!(
+                            "{}:{} → {}:{}: {}",
+                            socket.src,
+                            socket.sport,
+                            socket.dst,
+                            socket.dport,
+                            io::Error::from_raw_os_error(-code)
+                        ));
+                    }
+                    Err(e) => {
+                        tally.failed += 1;
+                        tally.errors.push(format!("a destroy did not go ({e})"));
+                    }
+                }
+            }
+        }
+    }
+    tally
+}
+
+/// Whether the kernel destroys sockets here (`CONFIG_INET_DIAG_DESTROY`,
+/// default `n` upstream): a destroy of a socket that is not there answers
+/// `ENOENT` where it does, `EOPNOTSUPP` where it does not — for TCP and for
+/// UDP, whose diag modules the request loads.
+pub fn destroy_supported() -> Result<(), String> {
+    let fd = open().map_err(|e| format!("no diag socket ({e})"))?;
+    let mut cookie = [0u8; 8];
+    crate::bridge::random_bytes(&mut cookie).map_err(|e| format!("no random cookie ({e})"))?;
+    let mut id = [0u8; SOCKID_LEN];
+    id[40..48].copy_from_slice(&cookie);
+    let nobody = Socket {
+        family: AF_INET,
+        state: 0,
+        src: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        sport: 0,
+        dst: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        dport: 0,
+        interface: 0,
+        cookie: u64::from_ne_bytes(cookie),
+        uid: 0,
+        inode: 0,
+        id,
+    };
+    for (seq, protocol) in [(1u32, IPPROTO_TCP), (2, IPPROTO_UDP)] {
+        match destroy(&fd, &nobody, protocol, seq) {
+            Ok(code) if code == -libc::ENOENT => {}
+            Ok(code) if code == -libc::EOPNOTSUPP => {
+                return Err(format!(
+                    "protocol {protocol}: the kernel destroys no socket (CONFIG_INET_DIAG_DESTROY)"
+                ))
+            }
+            Ok(code) => {
+                return Err(format!(
+                    "protocol {protocol}: {}",
+                    io::Error::from_raw_os_error(-code)
+                ))
+            }
+            Err(e) => return Err(format!("protocol {protocol}: {e}")),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,5 +733,62 @@ mod tests {
         assert!(!loopback_only(&s("0.0.0.0", "0.0.0.0")));
         assert!(!loopback_only(&s("10.254.1.2", "0.0.0.0")));
         assert!(!loopback_only(&s("fd63:656c:6c77::1", "::")));
+    }
+
+    /// What a switch breaks: every socket that may reach out — not a
+    /// listener, not one that stays on the loopback.
+    #[test]
+    fn a_switch_breaks_what_may_reach_out_and_spares_the_rest() {
+        let s = |state: u8, src: &str, dst: &str| Socket {
+            family: AF_INET,
+            state,
+            src: src.parse().unwrap(),
+            sport: 1,
+            dst: dst.parse().unwrap(),
+            dport: 2,
+            interface: 0,
+            cookie: 0,
+            uid: 0,
+            inode: 7,
+            id: [0; SOCKID_LEN],
+        };
+        assert!(to_break(&s(1, "10.254.1.2", "10.99.0.1"), IPPROTO_TCP));
+        assert!(!to_break(&s(TCP_LISTEN, "0.0.0.0", "0.0.0.0"), IPPROTO_TCP));
+        assert!(!to_break(&s(1, "127.0.0.1", "127.0.0.1"), IPPROTO_TCP));
+        // An unconnected UDP socket bound to every address: it may send.
+        assert!(to_break(&s(7, "0.0.0.0", "0.0.0.0"), IPPROTO_UDP));
+        // State 10 is no listener's for UDP.
+        assert!(to_break(
+            &s(TCP_LISTEN, "10.254.1.2", "0.0.0.0"),
+            IPPROTO_UDP
+        ));
+        assert!(!to_break(&s(7, "127.0.0.53", "0.0.0.0"), IPPROTO_UDP));
+    }
+
+    #[test]
+    fn a_tally_is_said_in_one_line_and_read_back() {
+        let tally = Tally {
+            tcp: 3,
+            udp: 2,
+            missed: 1,
+            unsupported: 0,
+            failed: 0,
+            udp_inodes: vec![4242, 17],
+            errors: vec!["said on stderr".to_owned()],
+        };
+        let word = tally.word();
+        assert_eq!(
+            word,
+            "tcp=3 udp=2 missed=1 unsupported=0 failed=0 udp-inodes=4242,17"
+        );
+        assert_eq!(
+            Tally::parse(&word),
+            Tally {
+                errors: Vec::new(),
+                ..tally
+            }
+        );
+        assert_eq!(Tally::parse(""), Tally::default());
+        assert_eq!(Tally::parse("udp-inodes= odd"), Tally::default());
     }
 }

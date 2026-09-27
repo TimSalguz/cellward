@@ -377,6 +377,11 @@ in
           "wireguard"
           "tun"
           "nf_tables"
+          # A container's live network switch (stage 4).
+          "nft_socket"
+          "inet_diag"
+          "tcp_diag"
+          "udp_diag"
         ]
         && count "amneziawg" a.boot.kernelModules == 1
         && lib.length e.boot.extraModulePackages == 1
