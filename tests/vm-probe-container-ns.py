@@ -151,7 +151,9 @@ with subtest("probe (e): a user-owned pid namespace mounts a procfs of its own")
     words = out.split()
     assert words[0] == "self=1", out
     assert int(words[1]) <= 4, f"more processes than its own in its /proc: {out}"
-    assert words[2] in ("sh", "bash"), out
+    # Its pid 1 is the shell — or `cat`, which bash runs in its own place
+    # as the last command.
+    assert words[2] in ("sh", "bash", "cat"), out
     verdict("procfs in a user-owned pid namespace", "mounts; only its own processes show")
 
 with subtest("probe (f): a delegated unit's program cgroups: made, moved into, frozen, moved, emptied"):
