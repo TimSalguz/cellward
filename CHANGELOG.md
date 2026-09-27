@@ -280,6 +280,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **The compositor's full protocols by origin, not by name** (2026-09-27,
+  `docs/LEAK-MODEL.md` §8). An unconfined launch whose program was called
+  `obs`, `copyq`, `grim` or anything on `wayland-allow` got the raw
+  compositor socket — screen capture, input emulation, the background
+  clipboard — whatever the program really was: a script in `~/.local/bin`
+  or something downloaded under that name got it too, a sandboxed one
+  included. A name now counts only when the launch's program is the one the
+  system's and the user's profiles give under it (`/run/current-system/sw/
+  bin`, `/etc/profiles/per-user/<user>/bin`, `/usr/bin` and the like; not
+  `~/.nix-profile`); a `wayland-allow` line may be an absolute path, which
+  lets that file. Launches into a zone were and are restricted whatever
+  their program.
 - **An OpenConnect zone's client runs without capabilities** (review
   2026-09-27; `docs/LEAK-MODEL.md`, OpenConnect item 15). It ran as the
   zone's uid 0, which owns every namespace of the zone: a client the
