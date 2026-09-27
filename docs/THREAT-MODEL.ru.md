@@ -212,7 +212,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | L4 | Запуски мимо пикера: ярлыки, которые пишут программы, автозапуск, активация по D-Bus | да | ярлыки перехватываются на месте; теневые файлы служб D-Bus | vm28 vm29 vm30 |
 | L5 | Другие запуски мимо пикера (`DBusActivatable` без `Exec`, свои `dbus-1/services` пользователя, привязка клавиши, вызывающая программу, скрипты, другие программы хоста) | нет | перехват — маршрутизация, а не граница; хост доверенный | — |
 | | **Поверхность ядра** | | | |
-| K1 | Системные вызовы из песочницы | частично | блок-список seccomp по образцу Flatpak (TIOCSTI, ptrace, связки ключей, perf, io_uring, userfaultfd, новый API монтирования); вложенные пространства пользователей разрешены | u6 |
+| K1 | Системные вызовы из песочницы | частично | блок-список seccomp по образцу Flatpak (TIOCSTI, ptrace, связки ключей, perf, io_uring, userfaultfd, новый API монтирования); вложенные пространства пользователей разрешены; фильтр не собрался — запуск остановлен, песочницы без фильтра не бывает | u6 |
 | K2 | Системные вызовы программы зоны без песочницы | частично | только фильтр семейств сокетов (N16) и область сигналов (X5); узлы GPU, `fuse` и `ntsync` на месте | — |
 
 Примечания:
@@ -379,7 +379,7 @@ the other"
 - u3 `rust/src/bus_filter.rs`: `only_the_named_portal_interfaces_get_through`, `the_doors_are_known_by_member_and_interface`, `the_programs_own_register_is_refused_after_ours`
 - u4 `rust/src/dbus_wire.rs`: `a_screen_cast_is_not_remembered`; `rust/src/bus_filter.rs`: `the_screen_cast_switch_is_read_for_every_call`, `yes_is_ask_where_the_portal_does_not_know_the_zone`
 - u5 `rust/src/wl_proxy.rs`: `hidden_protocols_are_not_in_the_build`, `a_hidden_global_cannot_be_bound_by_its_number`
-- u6 `rust/tests/seccomp_cli.rs`: `selftest_passes`, `selftest_passes_with_denied_userns`; `rust/tests/fs_sandbox_cli.rs`: `the_filter_reaches_bwrap_on_the_descriptor_it_names`
+- u6 `rust/tests/seccomp_cli.rs`: `selftest_passes`, `selftest_passes_with_denied_userns`; `rust/tests/fs_sandbox_cli.rs`: `the_filter_reaches_bwrap_on_the_descriptor_it_names`; `rust/src/fs_sandbox.rs`: `the_sandboxs_filter_is_a_program_on_a_private_descriptor`, `an_empty_program_is_a_refusal_and_not_a_sandbox_without_a_filter`
 - u7 `rust/src/broker.rs`: `always_is_kept_for_programs_of_the_store_only`, `the_program_asked_about_is_pinned_by_its_path`, `always_is_never_offered_for_what_runs_any_command`
 - u8 `window/src/main.rs`: `a_guarded_window_takes_nothing_until_the_person_is_still`, `a_question_takes_no_answer_typed_on`
 - u9 `rust/src/container.rs`: `a_container_is_never_in_two_networks_at_once`, `a_bound_container_runs_in_its_network_only`

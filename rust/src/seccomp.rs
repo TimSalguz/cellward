@@ -468,9 +468,14 @@ where
 
 /// An unnamed, unlinked file to export the program into.
 fn scratch_file() -> io::Result<File> {
+    // Close-on-exec, as every descriptor Rust opens itself: `fs-sandbox`
+    // builds the program before it starts its bus proxy and filter, and they
+    // have no business with it; bwrap gets its copy by `dup2`, which clears
+    // the flag on the copy (`fs_sandbox::run`).
+    //
     // SAFETY: memfd_create(2) only ever returns a fresh descriptor or -1, and
     // a C-string literal is NUL-terminated by construction.
-    let fd = unsafe { libc::memfd_create(c"vpn-zone-seccomp".as_ptr(), 0) };
+    let fd = unsafe { libc::memfd_create(c"vpn-zone-seccomp".as_ptr(), libc::MFD_CLOEXEC) };
     if fd >= 0 {
         // SAFETY: the descriptor is fresh and owned by nobody else.
         return Ok(unsafe { File::from_raw_fd(fd) });
