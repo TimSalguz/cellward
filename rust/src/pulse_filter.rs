@@ -934,6 +934,9 @@ struct Session {
     /// The source each record stream is linked to, by channel: the server's
     /// word, at its start and at every move let through.
     sources: HashMap<u32, Vec<u8>>,
+    /// The generation of the microphone's setting last looked at
+    /// ([`Session::microphone_taken_away`]).
+    mic_seen: u64,
     /// A cut has been logged on this connection.
     told_cut: bool,
     /// The zone's microphone setting and its question
@@ -1104,15 +1107,33 @@ impl Session {
         Up::Forward(frame)
     }
 
+    /// Why this connection's recording ends now: its program's microphone
+    /// was set to `no` since. Read again only when the setting's files have
+    /// changed.
+    fn microphone_taken_away(&mut self) -> Option<String> {
+        let now = self.mic.generation();
+        if self.mic.watched() && now == self.mic_seen {
+            return None;
+        }
+        self.mic_seen = now;
+        (self.mic.setting(&self.who).0 == crate::microphone::Setting::No).then(|| {
+            "the microphone was taken away from this program — its recording ends".to_owned()
+        })
+    }
+
     fn down(&mut self, frame: &[u8]) -> Down {
         let Some(channel) = channel_of(frame) else {
             return Down::Close("a frame the filter cannot read".to_owned());
         };
         if channel != COMMAND_CHANNEL {
             // Sound the server sends is a record stream's; only one whose
-            // source the server has named and the filter has let through.
+            // source the server has named and the filter has let through —
+            // and while its program may record (`microphone::Policy::watch`).
             return if self.streams.contains_key(&(Kind::Record, channel)) {
-                Down::Forward
+                match self.microphone_taken_away() {
+                    Some(why) => Down::Close(why),
+                    None => Down::Forward,
+                }
             } else {
                 Down::Drop
             };
@@ -1536,6 +1557,7 @@ pub fn run(args: &Args) -> u8 {
         args.kdialog.clone(),
         args.window.clone(),
     ));
+    mic.watch();
     if !mic.has_display() {
         eprintln!(
             "pulse-filter: zone {}: no graphical session (WAYLAND_DISPLAY, DISPLAY) — a microphone \
@@ -2127,6 +2149,60 @@ mod tests {
         assert!(matches!(s.up(&pool), Up::Forward(_)));
         assert!(refused(s.up(&play(INVALID))).contains("-1"));
         assert!(matches!(s.up(&play(7)), Up::Forward(_)));
+    }
+
+    /// A microphone taken away ends the recording going on, not only the
+    /// next one: the setting is read again when its files have changed.
+    #[test]
+    fn a_microphone_taken_away_ends_the_recording() {
+        let base = std::env::temp_dir().join(format!("vz-mic-revoke-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let zone_dir = base.join("state/nl");
+        let config = base.join("config");
+        std::fs::create_dir_all(&zone_dir).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(zone_dir.join(crate::microphone::MARKER), "yes\n").unwrap();
+        let mic = Arc::new(Policy::new(
+            "nl",
+            zone_dir.clone(),
+            config.clone(),
+            base.join("profiles"),
+            PathBuf::from("/nonexistent/kdialog"),
+            PathBuf::new(),
+        ));
+        mic.watch();
+        let mut s = Session {
+            mic: Arc::clone(&mic),
+            who: Who::Main,
+            ..Session::default()
+        };
+        assert!(matches!(s.up(&auth(0)), Up::Forward(_)));
+        let none: &[(&str, &str)] = &[];
+        assert!(matches!(
+            s.up(&record(1, INVALID, None, none, INVALID)),
+            Up::Forward(_)
+        ));
+        assert_eq!(
+            s.down(&record_reply(1, 0, 70, Some("alsa_input.usb-Mic.mono"))),
+            Down::Forward
+        );
+        let data = framed(0, b"a voice");
+        assert_eq!(s.down(&data), Down::Forward);
+        // Taken away: the next packet of sound ends it, once the change is
+        // seen — by its event, not by a clock.
+        let before = mic.generation();
+        std::fs::write(zone_dir.join(crate::microphone::MARKER), "no\n").unwrap();
+        // The test's own patience with the watcher thread, not the filter's.
+        let mut ended = false;
+        for _ in 0..1000 {
+            if mic.generation() != before {
+                ended = matches!(s.down(&data), Down::Close(_));
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(ended, "the recording went on");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
