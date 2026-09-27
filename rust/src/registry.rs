@@ -222,11 +222,52 @@ pub fn note_start(running: &Path, pid: i32, from_zone: bool) -> io::Result<()> {
     sweep_started(running);
     let stamp = crate::sys::process_stamp(pid)
         .ok_or_else(|| io::Error::other(format!("no start time of pid {pid}")))?;
+    // The number came round again: what was recorded under it before is a
+    // launch that is over, and the new note would bring its records back to
+    // life — the picker would start a click into a dead run's network and
+    // container (review 2026-09-27). Its records go first. Before this
+    // launch's own record is written, and under each directory's lock.
+    if recorded_start(running, pid).is_some_and(|old| old != stamp) {
+        forget_pid(running, pid);
+    }
     // Through a temporary: a reader never sees half a number.
     let tmp = dir.join(format!(".{pid}.tmp"));
     let mark = if from_zone { "\nfrom-zone" } else { "" };
     fs::write(&tmp, format!("{stamp}{mark}\n"))?;
     fs::rename(&tmp, dir.join(pid.to_string()))
+}
+
+/// Take every record of `pid` out of the registry: a launch that is over,
+/// whose number another launch has now.
+fn forget_pid(running: &Path, pid: i32) {
+    for dir in dirs(running) {
+        let Ok(_guard) = lock(&dir) else {
+            continue;
+        };
+        for file in files(&dir).into_iter().chain(files(&dir.join(BY_BINARY))) {
+            let Ok(text) = fs::read_to_string(&file) else {
+                continue;
+            };
+            let ours = |line: &str| parse_record(line).is_some_and(|r| r.pid == pid);
+            if !text.lines().any(ours) {
+                continue;
+            }
+            let kept: String = text
+                .lines()
+                .filter(|line| !ours(line))
+                .map(|line| format!("{line}\n"))
+                .collect();
+            let mut tmp = file.as_os_str().to_owned();
+            tmp.push(format!(".{}.forget", std::process::id()));
+            let tmp = PathBuf::from(tmp);
+            if fs::write(&tmp, kept)
+                .and_then(|()| fs::rename(&tmp, &file))
+                .is_err()
+            {
+                let _ = fs::remove_file(&tmp);
+            }
+        }
+    }
 }
 
 /// Drop the start times of launches that are over — and whose records are
@@ -677,6 +718,42 @@ mod tests {
         assert_eq!(sweep_dead(&running, &alive(&[1])), 1);
         assert!(main.join(BY_BINARY).join("steam").exists());
         assert!(!main.join(BY_BINARY).join("firefox").exists());
+    }
+
+    /// A number that comes round again takes the dead launch's records out
+    /// before its own note: they would come back to life with it.
+    #[test]
+    fn a_pid_come_round_again_takes_the_dead_records_out() {
+        let dir = Dir::new("pid-again");
+        let running = dir.0.join("running");
+        let me = std::process::id() as i32;
+        fs::create_dir_all(running.join("work/.by-binary")).unwrap();
+        fs::create_dir_all(running.join(STARTED)).unwrap();
+        fs::write(
+            running.join(STARTED).join(me.to_string()),
+            "1 old-boot\nfrom-zone\n",
+        )
+        .unwrap();
+        fs::write(
+            running.join("work/firefox"),
+            format!("{me} nl work\n1 de work\n"),
+        )
+        .unwrap();
+        fs::write(
+            running.join("work/.by-binary/firefox"),
+            format!("{me} nl work\n"),
+        )
+        .unwrap();
+        note_start(&running, me, false).unwrap();
+        assert_eq!(
+            fs::read_to_string(running.join("work/firefox")).unwrap(),
+            "1 de work\n"
+        );
+        assert_eq!(
+            fs::read_to_string(running.join("work/.by-binary/firefox")).unwrap(),
+            ""
+        );
+        assert!(!recorded(&running, me).unwrap().contains("from-zone"));
     }
 
     #[test]

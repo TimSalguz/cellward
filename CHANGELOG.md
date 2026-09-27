@@ -254,6 +254,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     zone's window (`kill` knows user zones only, and would cut one of the
     same name, or nothing, without a word), and says so when it fails;
   - a grant's path with a line break is refused;
+  - a launch whose pid came round again takes the dead launch's records
+    under that number out of the registry: its start note brought them
+    back to life, and the picker could start a click into a dead run's
+    network and container, even one a zone had asked for;
   - a launcher's `Exec` with the link as an interpreter's code (`perl -e`,
     `python -c`, `node -e`…), after a shell option's value (`bash -o
     pipefail -c %u`), or inside a word with quotes or brackets around it,

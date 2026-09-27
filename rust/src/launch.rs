@@ -1033,6 +1033,11 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
 
     // --- 6. INTO THE REGISTRY AND INTO THE ZONE ---
     let selector = selector_of(&selection, &container.profile);
+    // The start first, outside any directory's lock: a number that came
+    // round again takes the dead launch's records out, under each lock.
+    if let Err(e) = registry::note_start(&running, std::process::id() as i32, from_zone) {
+        eprintln!("реестр запусков {}: {e}", running.display());
+    }
     match registry::lock(&regdir) {
         Ok(_guard) => {
             for file in std::iter::once(&reg).chain(binreg.as_ref()) {
@@ -1044,9 +1049,6 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 ) {
                     eprintln!("реестр запусков {}: {e}", file.display());
                 }
-            }
-            if let Err(e) = registry::note_start(&running, std::process::id() as i32, from_zone) {
-                eprintln!("реестр запусков {}: {e}", running.display());
             }
         }
         Err(e) => eprintln!("реестр запусков {}: {e}", regdir.display()),
