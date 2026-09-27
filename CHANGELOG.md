@@ -105,6 +105,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   instance and of a zone's refusal of its local addresses to the bridge
   (core `nf_tables` only). A VM probe proves on the test kernel and passt
   what the design assumes — see `docs/GOTCHAS.md` §14 for its verdicts.
+- **A container's focus policy** (2026-09-27, the owner: AyuGram in a zone,
+  opening an image in a window of its own, took the focus several times
+  over — Qt makes a new `xdg_activation_v1` token for every
+  `requestActivate()`, each from the serial of the same click, and the
+  compositor honours each). The Wayland proxy sees every request for the
+  focus of the programs in zones and containers, so the policy holds on any
+  compositor: `cellward container set <c> focus input|notify|ask|allow|default`,
+  `programs.cellward.containers.<name>.focus` in Nix, `containers[].focus`
+  (`{value, source}`) in `status --json`. `input`, the default: one input
+  event of the person, one change of the focus — the first `activate` for
+  the serial its token was made from goes up, the rest are dropped without an
+  error; a token made without a serial, or not on the launch's connections
+  (a launcher's), passes once. `notify`: none goes up; the supervisor is asked
+  by a byte on its channel and starts `cellward window-focus --pid <pid>`
+  through `systemd-run --user --wait`, one at a time: a notification
+  "<program> просит внимания" with "Перейти", which focuses the launch's
+  window through niri's or sway's IPC. `ask`: a guarded question in its
+  place. `allow`: as before. The launch passes the policy to
+  `wl-sandbox --focus`; a new setting applies to programs started after it.
+  A new window focused as it opens stays the compositor's policy (niri:
+  `open-focused false`). The proxy's seccomp filter is unchanged; the sway
+  snippet of `desktop.sway.enable` imports `SWAYSOCK` into the user manager.
+  `docs/THREAT-MODEL.md` W17.
+- **`cellward window-focus --pid <pid> [--ask]`**: that notification or
+  question, as the proxy's supervisor starts it.
 - **Buttons, dragging and resizing on the zone's frame** (2026-09-27, stage 3
   of `docs/WINDOW-FRAME.md`). The title strip the Wayland proxy draws gets
   three buttons at its right end: ≡ opens the window menu of that launch, ⇄
@@ -432,6 +457,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   now names its own record to `profile-run` (`--registered <pid>:<start>`),
   and exactly that record — by its pid and its start time — is not counted;
   a pid that came round to another launch still is.
+- **`wl-sandbox` says what a zone's program gets under a compositor without
+  the security context** (found by the W4 test, vm49). It wrote "running …
+  unrestricted" for every launch, while a program in a zone gets no Wayland
+  at all there: the zone shows it no compositor socket but the restricted
+  one. Now the line says so; "unrestricted" is said of unconfined launches
+  only.
 - **Tray icons of today's Electron in zones and containers** (owner
   2026-09-27: Claude Desktop in its own sandbox, closed to the tray, gone).
   Electron now names its icon `org.freedesktop.StatusNotifierItem-<pid>-<n>`

@@ -135,6 +135,7 @@ let
     };
     containers.dev = {
       apps = [ "org.telegram.desktop" ];
+      focus = "notify";
       permissions.paths = [
         "~/.wine"
         "/mnt/games"

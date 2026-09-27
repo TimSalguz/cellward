@@ -684,7 +684,8 @@ programs.cellward = {
       "screencast": { "value": null, "source": "default" },
       "camera": { "value": null, "source": "default" },
       "devices": [ { "value": "security-keys", "source": "local" } ],
-      "links": [ { "scheme": "https", "program": "firefox", "source": "local" } ] }
+      "links": [ { "scheme": "https", "program": "firefox", "source": "local" } ],
+      "focus": { "value": "input", "source": "default" } }
   ]
 }
 ```

@@ -55,7 +55,8 @@
 //!   (`wp_security_context_v1`, `docs/GOTCHAS.md` §7), and [`wl_proxy`], the
 //!   confined process that stands on that socket between the program and the
 //!   compositor (`docs/WINDOW-FRAME.md` §8) and draws the zone's frame
-//!   ([`wl_frame`], its title's text [`wl_title`]);
+//!   ([`wl_frame`], its title's text [`wl_title`]) and holds a container's
+//!   focus policy ([`wl_focus`]);
 //! * [`trust`] — extra root certificates trusted by one container only: the
 //!   bundle bind, the environment and the NSS databases (`docs/CERTIFICATES.md`);
 //! * [`status`] — the machine-readable state (`vpn-zone status --json`), with
@@ -152,6 +153,7 @@ pub mod tools;
 pub mod trust;
 pub mod watch;
 pub mod window;
+pub mod wl_focus;
 pub mod wl_frame;
 pub mod wl_proxy;
 pub mod wl_sandbox;

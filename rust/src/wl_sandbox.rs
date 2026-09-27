@@ -26,7 +26,8 @@
 //!
 //! Usage: `vpn-zone-core wl-sandbox <app-id> [--zone <zone>] [--no-proxy]
 //! [--frame <rrggbb>:<width>:<always|hover|off> --frame-title <text>
-//! --frame-switch <settings dir>] -- <command> [args…]`.
+//! --frame-switch <settings dir>] [--focus input|notify|ask|allow] --
+//! <command> [args…]`.
 //!
 //! **Where it runs.** On the host, before the launch enters its zone
 //! (`docs/LEAK-MODEL.md` §13): a zone does not have the compositor's own
@@ -45,6 +46,8 @@
 //! and with `--frame` it draws the zone's border around the program's
 //! windows (`crate::wl_frame`); `--frame-switch` names the directory whose
 //! `frames` setting hides it, read for every connection (`crate::frame`).
+//! `--focus` is what becomes of the program's asking for the focus
+//! (`crate::wl_focus`; `input` without it).
 //! When the proxy cannot start, the compositor listens on the zone's path
 //! itself, as it did before there was a proxy (with a warning), and when that
 //! cannot be registered either the program is not started at all — never
@@ -66,7 +69,7 @@
 //! Rust unless `wayland-backend/client_system` is enabled, and it is not. The
 //! derivation therefore needs no Wayland `buildInputs`.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -211,6 +214,10 @@ pub struct Args {
     /// with the switch that hides it (`--frame-switch`; without one, nothing
     /// hides it).
     pub frame: Option<crate::frame::Setup>,
+    /// What becomes of the program's asking for the focus (`--focus`,
+    /// `crate::wl_focus`): its container's policy, `input` when not said.
+    /// The proxy's: without one, the compositor's rules alone.
+    pub focus: crate::wl_focus::FocusPolicy,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
 }
@@ -234,6 +241,8 @@ pub enum ArgError {
     /// `--frame` without `<rrggbb>:<width>[:<mode>]`, `--frame-title`
     /// without a text, or `--frame-switch` without a directory.
     BadFrame,
+    /// `--focus` without `input`, `notify`, `ask` or `allow`.
+    BadFocus,
 }
 
 impl fmt::Display for ArgError {
@@ -249,6 +258,7 @@ impl fmt::Display for ArgError {
                 "--frame needs <rrggbb>:<width>[:always|hover|off], --frame-title a text, \
                  --frame-switch a directory"
             ),
+            Self::BadFocus => write!(f, "--focus needs input, notify, ask or allow"),
         }
     }
 }
@@ -258,7 +268,7 @@ impl std::error::Error for ArgError {}
 impl Args {
     /// Parse `<app-id> [--zone <zone>] [--no-proxy] [--frame
     /// <rrggbb>:<w>[:<mode>]] [--frame-title <text>] [--frame-switch <dir>]
-    /// -- cmd...`.
+    /// [--focus <policy>] -- cmd...`.
     ///
     /// The command keeps its `OsString`s: an argument can be a file name handed
     /// over by the launcher through a `%U` field code, and those are bytes, not
@@ -280,6 +290,7 @@ impl Args {
         let mut frame = None;
         let mut title = String::new();
         let mut switch = None;
+        let mut focus = crate::wl_focus::FocusPolicy::default();
         let mut words = argv[..split].iter();
         while let Some(word) = words.next() {
             if word == "--no-proxy" {
@@ -296,6 +307,12 @@ impl Args {
                     .filter(|d| !d.is_empty())
                     .ok_or(ArgError::BadFrame)?;
                 switch = Some(PathBuf::from(dir));
+            } else if word == "--focus" {
+                focus = words
+                    .next()
+                    .and_then(|w| w.to_str())
+                    .and_then(crate::wl_focus::FocusPolicy::parse)
+                    .ok_or(ArgError::BadFocus)?;
             } else if word == "--zone" {
                 let name = words.next().ok_or(ArgError::BadZone)?.to_string_lossy();
                 if !valid_zone_dir(&name) {
@@ -325,6 +342,7 @@ impl Args {
             zone,
             proxy,
             frame,
+            focus,
             cmd,
         })
     }
@@ -377,6 +395,24 @@ impl From<Refused> for String {
 fn not_started() -> u8 {
     no_word();
     EXIT_NOT_STARTED
+}
+
+/// What [`run_plain`] means for this launch, for the line that says it:
+/// unconfined, the compositor's whole socket; in a zone, no Wayland at all —
+/// the zone shows its programs the restricted sockets below [`SOCKET_DIR`]
+/// and not the compositor's own, so the program's `WAYLAND_DISPLAY` names
+/// nothing there (THREAT-MODEL W4, vm49). "Running unrestricted" said of a
+/// zone's program was the opposite of what happened (2026-09-27).
+fn plain_note(zone: &str, program: &OsStr) -> String {
+    let program = program.to_string_lossy();
+    if zone == NO_ZONE {
+        format!("running {program} unrestricted")
+    } else {
+        format!(
+            "running {program} without Wayland: zone {zone} shows its programs no socket of \
+             the compositor's but the restricted one"
+        )
+    }
 }
 
 /// Run without restrictions — before the compositor has said it speaks the
@@ -505,7 +541,10 @@ pub fn run(args: Args) -> u8 {
     // come (`run_plain`, and below).
     take_opened();
     let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) else {
-        eprintln!("wl-sandbox: no XDG_RUNTIME_DIR — running unrestricted");
+        eprintln!(
+            "wl-sandbox: no XDG_RUNTIME_DIR — {}",
+            plain_note(&args.zone, &args.cmd[0])
+        );
         return run_plain(&args.cmd);
     };
     let runtime_dir = PathBuf::from(runtime_dir);
@@ -514,8 +553,8 @@ pub fn run(args: Args) -> u8 {
         Ok(compositor) => compositor,
         Err(why) => {
             eprintln!(
-                "wl-sandbox: {why} — running {} unrestricted",
-                args.cmd[0].to_string_lossy()
+                "wl-sandbox: {why} — {}",
+                plain_note(&args.zone, &args.cmd[0])
             );
             return run_plain(&args.cmd);
         }
@@ -623,7 +662,7 @@ pub fn run(args: Args) -> u8 {
         drop(up.listener);
         let word = opened_for_proxy();
         proxy_speaks = word.is_some();
-        match wl_proxy::start(&listener, &up.path, args.frame.clone(), word) {
+        match wl_proxy::start(&listener, &up.path, args.frame.clone(), word, args.focus) {
             Ok(started) => proxy = Some((started, up.path)),
             Err(e) => {
                 // The second rung: the proxy did not start. The context made
@@ -842,6 +881,42 @@ mod tests {
         ] {
             assert_eq!(Args::parse(&argv(bad)), Err(ArgError::BadZone), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_focus_policy_is_a_word_and_input_without_one() {
+        use crate::wl_focus::FocusPolicy;
+        let a = Args::parse(&argv(&["foot", "--zone", "nl", "--", "foot"])).unwrap();
+        assert_eq!(a.focus, FocusPolicy::Input);
+        for (word, policy) in [
+            ("input", FocusPolicy::Input),
+            ("notify", FocusPolicy::Notify),
+            ("ask", FocusPolicy::Ask),
+            ("allow", FocusPolicy::Allow),
+        ] {
+            let a = Args::parse(&argv(&["foot", "--focus", word, "--", "foot"])).unwrap();
+            assert_eq!(a.focus, policy, "{word}");
+        }
+        // After the separator it is the program's own argument.
+        let a = Args::parse(&argv(&["foot", "--", "foot", "--focus", "allow"])).unwrap();
+        assert_eq!(a.focus, FocusPolicy::Input);
+        for bad in [
+            &["foot", "--focus", "--", "x"][..],
+            &["foot", "--focus", "maybe", "--", "x"],
+            &["foot", "--focus", "", "--", "x"],
+        ] {
+            assert_eq!(Args::parse(&argv(bad)), Err(ArgError::BadFocus), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn running_plain_is_unrestricted_only_outside_a_zone() {
+        let note = plain_note(NO_ZONE, OsStr::new("foot"));
+        assert_eq!(note, "running foot unrestricted");
+        let note = plain_note("work", OsStr::new("foot"));
+        assert!(note.contains("without Wayland"), "{note}");
+        assert!(note.contains("zone work"), "{note}");
+        assert!(!note.contains("unrestricted"), "{note}");
     }
 
     #[test]

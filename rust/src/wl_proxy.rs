@@ -112,6 +112,16 @@
 //! title's memfd, and the bytes are `sendmsg` on the channel. The program
 //! has no way to that channel, nor to the events that make the proxy send
 //! them.
+//!
+//! **The focus** (2026-09-27, `crate::wl_focus`): the launch's container
+//! says what becomes of a program's asking for the focus
+//! (`xdg_activation_v1.activate`) — one change per input event of the
+//! person (`input`, the default), none but through the person (`notify`,
+//! `ask`), or every one (`allow`). Held back under `notify` and `ask`, it is
+//! a byte on the channel ([`ATTENTION`]), which the supervisor answers by
+//! starting `cellward window-focus --pid <its pid>` in a unit of
+//! `systemd --user` ([`focus_argv`]), one at a time, and waiting for it.
+//! The filter is as it was.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -140,6 +150,7 @@ use wl_proxy::state::{State, StateHandler};
 
 use crate::frame::{Frame, Rgb, Setup, TitleMode};
 use crate::sys;
+use crate::wl_focus::{Focus, FocusPolicy};
 use crate::wl_frame::{Ask, Asks, Frames, MAX_FRAMED};
 use crate::wl_title::{Prepared, Text, LOOK};
 
@@ -243,8 +254,9 @@ const MAX_ERROR_TEXT: usize = 1024;
 // --- THE CHANNEL -------------------------------------------------------------
 // One byte per message on a stream socketpair; the upstream descriptor rides
 // on its byte. The supervisor closing its end is "the program has exited".
-// The supervisor answers each CONNECT, in order; MENU and NETWORK it does not
-// answer, so they never come between a CONNECT and its answer's place.
+// The supervisor answers each CONNECT, in order; MENU, NETWORK and ATTENTION
+// it does not answer, so they never come between a CONNECT and its answer's
+// place.
 
 /// Proxy → supervisor: hardened, filter loaded, serving.
 const READY: u8 = b'r';
@@ -265,6 +277,10 @@ const MENU: u8 = b'm';
 /// clicked. For now the menu's restart with a network chosen ([`menu_argv`]).
 /// No answer.
 const NETWORK: u8 = b's';
+/// Proxy → supervisor: a program of the launch asked for the focus, and the
+/// policy held it back (`notify`, `ask`; `crate::wl_focus`): the person is
+/// to be told. One for any number of requests of a round. No answer.
+const ATTENTION: u8 = b'f';
 
 /// The byte of an ask of the frame, on the channel.
 fn ask_byte(ask: Ask) -> u8 {
@@ -333,6 +349,12 @@ pub struct Proxy {
     display: Option<OsString>,
     /// The `systemd-run` starting a window menu, while it runs.
     menu: MenuStart,
+    /// The launch's focus policy (`crate::wl_focus`): whether the proxy's
+    /// [`ATTENTION`] is to be answered, and how.
+    focus: FocusPolicy,
+    /// The `systemd-run --wait` of a notification or a question about the
+    /// focus, for as long as it is up.
+    attention: MenuStart,
 }
 
 /// The signals the supervisor passes on to its launch. The pid of the launch
@@ -423,7 +445,8 @@ impl Signals {
 ///
 /// `frame`: the zone's frame and title, and the directory of the settings
 /// with the switch that hides it (`crate::frame::hidden`), read again for
-/// every connection.
+/// every connection. `focus`: what becomes of a program's asking for the
+/// focus (`crate::wl_focus`).
 ///
 /// Called with the compositor's (unrestricted) connection already closed: the
 /// child inherits nothing of it. It closes every descriptor it did not ask for
@@ -433,6 +456,7 @@ pub fn start(
     upstream: &Path,
     frame: Option<Setup>,
     opened: Option<OwnedFd>,
+    focus: FocusPolicy,
 ) -> Result<Proxy, String> {
     let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
     let listener = zone_listener.try_clone().map_err(|e| format!("dup: {e}"))?;
@@ -461,7 +485,7 @@ pub fn start(
         // A panic ends the proxy here: unwinding further would run the
         // supervisor's code (`wl_sandbox::run`) in this child.
         let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            child(listener, theirs, supervisor, drawing, opened)
+            child(listener, theirs, supervisor, drawing, opened, focus)
         }))
         .unwrap_or(101);
         // _exit: the parent's atexit handlers and buffers are not ours.
@@ -480,6 +504,8 @@ pub fn start(
         frame: frame.map(|setup| setup.switch),
         display,
         menu: MenuStart::default(),
+        focus,
+        attention: MenuStart::default(),
     };
     match proxy.await_ready() {
         Ok(()) => Ok(proxy),
@@ -702,6 +728,7 @@ impl Proxy {
                 Some(pid) => {
                     told.remove(&pid);
                     self.menu.reaped(pid);
+                    self.attention.reaped(pid);
                     if pid == main {
                         *main_status = Some(status);
                     } else if pid == self.pid {
@@ -743,10 +770,13 @@ impl Proxy {
         // supervisor only asks the kernel who connected, it never reads.
         let client = match sys::recv_into_with_fds(channel.as_raw_fd(), &mut byte, 1) {
             Ok((1, mut fds, _)) if byte[0] == CONNECT => fds.pop(),
-            // A click on the frame's ≡ or ⇄: answered with nothing on the
-            // channel (whatever descriptor came with it is closed here).
+            // A click on the frame's ≡ or ⇄, a request for the focus held
+            // back: answered with nothing on the channel (whatever
+            // descriptor came with it is closed here).
             Ok((1, _, _)) => {
-                if let Some(ask) = ask_of(byte[0]) {
+                if byte[0] == ATTENTION {
+                    self.attention();
+                } else if let Some(ask) = ask_of(byte[0]) {
                     self.ask(ask);
                 }
                 return true;
@@ -797,39 +827,82 @@ impl Proxy {
     /// writing the byte in a loop gets one `systemd-run`, not a flood of
     /// them (review 2026-09-27).
     fn ask(&self, ask: Ask) {
-        if self.menu.running() {
+        self.start_unit(&self.menu, "window menu", |tools, manifest| {
+            menu_argv(
+                &tools.systemd_run,
+                &tools.core,
+                manifest,
+                self.display.as_deref(),
+                std::process::id(),
+                ask,
+            )
+        });
+    }
+
+    /// A program of the launch asked for the focus and the policy held it
+    /// back (`crate::wl_focus`): the person is told — `cellward
+    /// window-focus --pid <this process>` in a unit of `systemd --user`,
+    /// as the window menu is ([`focus_argv`]), a question with `ask`. Only
+    /// under `notify` and `ask`: the byte is the proxy's, and a proxy taken
+    /// over by its program could send it under any policy.
+    ///
+    /// One at a time, and for as long as it is up: `systemd-run --wait` stays
+    /// until the notification or the question is gone, and requests
+    /// meanwhile start nothing. A program that asks in a loop gets one
+    /// notification after another, never two at once.
+    fn attention(&self) {
+        if !self.focus.tells() {
+            return;
+        }
+        let ask = self.focus == FocusPolicy::Ask;
+        self.start_unit(&self.attention, "focus notice", |tools, manifest| {
+            focus_argv(
+                &tools.systemd_run,
+                &tools.core,
+                manifest,
+                self.display.as_deref(),
+                std::process::id(),
+                ask,
+            )
+        });
+    }
+
+    /// Start the command `argv` makes of the tools manifest by `starter`,
+    /// unless one it started is not reaped yet. `what`: for the warnings.
+    fn start_unit(
+        &self,
+        starter: &MenuStart,
+        what: &str,
+        argv: impl FnOnce(&crate::tools::Tools, &OsStr) -> Vec<OsString>,
+    ) {
+        if starter.running() {
             return;
         }
         let tools = match crate::tools::Tools::from_env() {
             Ok(tools) => tools,
             Err(e) => {
-                eprintln!("wl-sandbox: no window menu: {e}");
+                eprintln!("wl-sandbox: no {what}: {e}");
                 return;
             }
         };
         let Some(manifest) = std::env::var_os(crate::tools::ENV_VAR) else {
             return;
         };
-        let argv = menu_argv(
-            &tools.systemd_run,
-            &tools.core,
-            &manifest,
-            self.display.as_deref(),
-            std::process::id(),
-            ask,
-        );
+        let argv = argv(&tools, manifest.as_os_str());
         let mask = self.signals.as_ref().map(|s| s.old);
-        if let Err(e) = self.menu.start(&argv, mask.as_ref()) {
-            eprintln!("wl-sandbox: the window menu did not start: {e}");
+        if let Err(e) = starter.start(&argv, mask.as_ref()) {
+            eprintln!("wl-sandbox: the {what} did not start: {e}");
         }
     }
 }
 
-/// The `systemd-run` that starts a window menu of the launch: at most one
-/// at a time, its pid kept until it is reaped ([`Proxy::reap`]). A child of
-/// the supervisor, in the host's network, for as long as `systemd-run`
-/// takes to hand the menu to the manager: `crate::focus` knows it by the
-/// file it runs and does not count it among the launch's.
+/// The `systemd-run` that starts a window menu of the launch — or tells of
+/// a request for the focus: at most one at a time, its pid kept until it is
+/// reaped ([`Proxy::reap`]). A child of the supervisor, in the host's
+/// network, for as long as `systemd-run` takes to hand the menu to the
+/// manager, or, with `--wait`, for as long as the notice is up:
+/// `crate::focus` knows it by the file it runs and does not count it among
+/// the launch's.
 #[derive(Default)]
 struct MenuStart {
     pid: Cell<Option<libc::pid_t>>,
@@ -915,14 +988,80 @@ pub(crate) fn menu_argv(
     pid: u32,
     ask: Ask,
 ) -> Vec<OsString> {
+    let mut verb: Vec<OsString> =
+        vec!["window-menu".into(), "--pid".into(), pid.to_string().into()];
+    if ask == Ask::Network {
+        verb.push("--restart".into());
+    }
+    user_unit_argv(
+        systemd_run,
+        core,
+        manifest,
+        display,
+        &format!("cellward-window-menu-{pid}"),
+        &["--property=KillMode=process"],
+        verb,
+    )
+}
+
+/// The command that tells the person of a request for the focus of the
+/// launch `pid` ([`Proxy::attention`]), as [`menu_argv`] starts the menu —
+/// a unit named after the launch, the manifest and the compositor passed
+/// on, our own binary —, and
+///
+/// * `--wait`: `systemd-run` stays until the unit is gone, which is when the
+///   notification or the question is: the one-at-a-time of [`MenuStart`] is
+///   for as long as it is up, not only while it is handed over;
+/// * no `KillMode=process`: nothing of it is to outlive it.
+///
+/// `ask`: a question (`--ask`) rather than a notification.
+pub(crate) fn focus_argv(
+    systemd_run: &Path,
+    core: &Path,
+    manifest: &OsStr,
+    display: Option<&OsStr>,
+    pid: u32,
+    ask: bool,
+) -> Vec<OsString> {
+    let mut verb: Vec<OsString> = vec![
+        "window-focus".into(),
+        "--pid".into(),
+        pid.to_string().into(),
+    ];
+    if ask {
+        verb.push("--ask".into());
+    }
+    user_unit_argv(
+        systemd_run,
+        core,
+        manifest,
+        display,
+        &format!("cellward-window-focus-{pid}"),
+        &["--wait"],
+        verb,
+    )
+}
+
+/// `systemd-run --user --quiet --collect --unit=<unit> <options…>`, the
+/// tools manifest and the compositor (`display`) in its environment, and
+/// `vpn-zone <verb…>` from the store beside `core`.
+fn user_unit_argv(
+    systemd_run: &Path,
+    core: &Path,
+    manifest: &OsStr,
+    display: Option<&OsStr>,
+    unit: &str,
+    options: &[&str],
+    verb: Vec<OsString>,
+) -> Vec<OsString> {
     let mut argv: Vec<OsString> = vec![
         systemd_run.into(),
         "--user".into(),
         "--quiet".into(),
         "--collect".into(),
-        format!("--unit=cellward-window-menu-{pid}").into(),
-        "--property=KillMode=process".into(),
+        format!("--unit={unit}").into(),
     ];
+    argv.extend(options.iter().copied().map(OsString::from));
     let mut tools = OsString::from(format!("--setenv={}=", crate::tools::ENV_VAR));
     tools.push(manifest);
     argv.push(tools);
@@ -933,12 +1072,7 @@ pub(crate) fn menu_argv(
     }
     argv.push("--".into());
     argv.push(core.with_file_name("vpn-zone").into());
-    argv.push("window-menu".into());
-    argv.push("--pid".into());
-    argv.push(pid.to_string().into());
-    if ask == Ask::Network {
-        argv.push("--restart".into());
-    }
+    argv.extend(verb);
     argv
 }
 
@@ -1071,6 +1205,7 @@ fn child(
     supervisor: libc::pid_t,
     drawing: Option<Drawing>,
     opened: Option<OwnedFd>,
+    focus: FocusPolicy,
 ) -> libc::c_int {
     let opened = opened.map(IntoRawFd::into_raw_fd);
     let border = match confine(&listener, &channel, supervisor, drawing, opened) {
@@ -1083,7 +1218,7 @@ fn child(
     if sys::send_with_fds(channel.as_raw_fd(), &[READY], &[]).is_err() {
         return 1;
     }
-    serve(listener, channel, border)
+    serve(listener, channel, border, focus)
 }
 
 /// The zone's frame as the proxy draws it: the border's width and the
@@ -1418,11 +1553,19 @@ fn title_writer(border: Option<&Border>) -> Option<RawFd> {
 
 /// Serve until the supervisor has said the program is gone and the last
 /// connection has closed. Runs confined; see [`filter`] for what it may call.
-fn serve(listener: UnixListener, channel: UnixStream, border: Option<Border>) -> libc::c_int {
+fn serve(
+    listener: UnixListener,
+    channel: UnixStream,
+    border: Option<Border>,
+    focus: FocusPolicy,
+) -> libc::c_int {
     // "Cannot draw" is said once for the launch, not once per connection.
     let warned = Rc::new(Cell::new(false));
     // What the frames' buttons ask of the supervisor, sent after each round.
     let asks = Rc::new(Asks::default());
+    // The launch's focus policy and what `input` has let through: one for
+    // all its connections (`crate::wl_focus`).
+    let focus = Focus::new(focus);
     let mut listener = Some(listener);
     let mut channel = Some(channel);
     // Accepted, their upstream asked for, in the order asked.
@@ -1493,7 +1636,7 @@ fn serve(listener: UnixListener, channel: UnixStream, border: Option<Border>) ->
                     Answer::Upstream(up, framed) => {
                         if let Some(client) = waiting.pop_front() {
                             let border = border.as_ref().filter(|_| framed);
-                            match Conn::open(client, up, border, &warned, &asks) {
+                            match Conn::open(client, up, border, &warned, &asks, &focus) {
                                 Ok(conn) => conns.push(conn),
                                 Err(e) => eprintln!("wl-sandbox: the Wayland proxy: {e}"),
                             }
@@ -1528,6 +1671,13 @@ fn serve(listener: UnixListener, channel: UnixStream, border: Option<Border>) ->
         for ask in asks.take() {
             if let Some(c) = &channel {
                 let _ = sys::send_with_fds(c.as_raw_fd(), &[ask_byte(ask)], &[]);
+            }
+        }
+        // The requests for the focus held back this round (`notify`,
+        // `ask`): one byte for all of them.
+        if focus.take_wanted() {
+            if let Some(c) = &channel {
+                let _ = sys::send_with_fds(c.as_raw_fd(), &[ATTENTION], &[]);
             }
         }
         conns.retain(Conn::alive);
@@ -1610,6 +1760,7 @@ impl Conn {
         border: Option<&Border>,
         warned: &Rc<Cell<bool>>,
         asks: &Rc<Asks>,
+        focus: &Rc<Focus>,
     ) -> Result<Self, String> {
         let upstream = Rc::new(upstream);
         let state = State::builder(BASELINE)
@@ -1638,6 +1789,7 @@ impl Conn {
         client.display().set_handler(Display {
             closing: closing.clone(),
             frames: frames.clone(),
+            focus: focus.clone(),
         });
         Ok(Self {
             state,
@@ -1789,6 +1941,7 @@ impl StateHandler for Relay {
 struct Display {
     closing: Rc<Cell<bool>>,
     frames: Option<Rc<Frames>>,
+    focus: Rc<Focus>,
 }
 
 impl WlDisplayHandler for Display {
@@ -1797,6 +1950,7 @@ impl WlDisplayHandler for Display {
             closing: self.closing.clone(),
             shown: HashMap::new(),
             frames: self.frames.clone(),
+            focus: self.focus.clone(),
         });
         slf.send_get_registry(registry);
     }
@@ -1819,6 +1973,8 @@ struct Registry {
     shown: HashMap<u32, Shown>,
     /// The border, which watches some of what the program binds.
     frames: Option<Rc<Frames>>,
+    /// The focus policy, which watches `xdg_activation_v1`.
+    focus: Rc<Focus>,
 }
 
 impl WlRegistryHandler for Registry {
@@ -1868,6 +2024,7 @@ impl WlRegistryHandler for Registry {
                     o.set_handler(OpeningWmBase);
                 }
             }
+            self.focus.watch(&id);
             slf.send_bind(name, id);
             return;
         }
@@ -2194,6 +2351,15 @@ mod tests {
         /// The proxy with a frame. What the frame needs is made in the
         /// proxy's thread before its filter, as `confine` does.
         fn with_drawing(tag: &str, drawing: Option<Drawing>) -> Self {
+            Self::with_setup(tag, drawing, FocusPolicy::Input)
+        }
+
+        /// The proxy without a frame, with a focus policy.
+        fn with_focus(tag: &str, focus: FocusPolicy) -> Self {
+            Self::with_setup(tag, None, focus)
+        }
+
+        fn with_setup(tag: &str, drawing: Option<Drawing>, focus: FocusPolicy) -> Self {
             let dir =
                 std::env::temp_dir().join(format!("vz-wl-proxy-test-{tag}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
@@ -2211,7 +2377,7 @@ mod tests {
                 .unwrap()
                 .load()
                 .unwrap();
-                serve(listener, theirs, border)
+                serve(listener, theirs, border, focus)
             });
             let (binds_tx, binds) = mpsc::channel();
             Self {
@@ -2575,7 +2741,7 @@ mod tests {
         let zone_path = dir.join("zone-sock");
         let zone = UnixListener::bind(&zone_path).unwrap();
         // Before any thread: the fork in `start` has to be the only thing.
-        let mut proxy = start(&zone, &up.path, None, None).unwrap();
+        let mut proxy = start(&zone, &up.path, None, None, FocusPolicy::Input).unwrap();
         drop(zone);
         if shared.is_some() {
             await_file(&dir, "connected");
@@ -2705,8 +2871,14 @@ mod tests {
         let (heard, told) = crate::sys::pipe().unwrap();
         crate::wl_sandbox::put_opened(told);
         // Before any thread: the fork in `start` has to be the only thing.
-        let mut proxy =
-            start(&zone, &up.path, None, crate::wl_sandbox::opened_for_proxy()).unwrap();
+        let mut proxy = start(
+            &zone,
+            &up.path,
+            None,
+            crate::wl_sandbox::opened_for_proxy(),
+            FocusPolicy::Input,
+        )
+        .unwrap();
         drop(zone);
         drop(up.listener);
         #[allow(clippy::zombie_processes)]
@@ -2743,7 +2915,7 @@ mod tests {
         };
         let up = Upstream::bind(&dir, 43).unwrap();
         let zone = UnixListener::bind(dir.join("zone-sock")).unwrap();
-        let mut proxy = start(&zone, &up.path, None, None).unwrap();
+        let mut proxy = start(&zone, &up.path, None, None, FocusPolicy::Input).unwrap();
         drop(zone);
         drop(up.listener);
         proxy.take_over();
@@ -2884,6 +3056,16 @@ mod tests {
                     ("wl_seat", 0) => new(args[0], "wl_pointer"),
                     ("wp_fractional_scale_manager_v1", 1) => new(args[0], "wp_fractional_scale_v1"),
                     ("wp_cursor_shape_manager_v1", 1) => new(args[0], "wp_cursor_shape_device_v1"),
+                    ("xdg_activation_v1", 1) => new(args[0], "xdg_activation_token_v1"),
+                    // commit: the token — a string of its own for the whole
+                    // "display", as a compositor makes them, numbered in the
+                    // order made.
+                    ("xdg_activation_token_v1", 3) => {
+                        static MADE: std::sync::atomic::AtomicU32 =
+                            std::sync::atomic::AtomicU32::new(0);
+                        let n = MADE.fetch_add(1, Ordering::SeqCst) + 1;
+                        event(&mut out, object, 0, |a| string(a, &format!("made-{n}")));
+                    }
                     _ => {}
                 }
                 let _ = log.send(Msg {
@@ -3962,6 +4144,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_focus_request_has_a_byte_of_its_own() {
+        for other in [
+            READY,
+            CONNECT,
+            UPSTREAM,
+            UPSTREAM_BARE,
+            REFUSED,
+            MENU,
+            NETWORK,
+        ] {
+            assert_ne!(ATTENTION, other);
+        }
+        assert_eq!(ask_of(ATTENTION), None, "not a click of the frame");
+    }
+
+    /// The notice of a request for the focus through `systemd --user`, as
+    /// the menu: named after the launch, the manifest and the compositor
+    /// passed on, our own binary — and waited for, so that one is up at a
+    /// time for as long as it is up.
+    #[test]
+    fn the_focus_notice_is_started_by_the_user_manager_and_waited_for() {
+        let argv = |ask| -> Vec<String> {
+            focus_argv(
+                Path::new("/s/systemd-run"),
+                Path::new("/nix/store/x-cellward/bin/vpn-zone-core"),
+                OsStr::new("/nix/store/t-tools.json"),
+                Some(OsStr::new("wayland-1")),
+                4242,
+                ask,
+            )
+            .into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+        };
+        assert_eq!(
+            argv(false),
+            [
+                "/s/systemd-run",
+                "--user",
+                "--quiet",
+                "--collect",
+                "--unit=cellward-window-focus-4242",
+                "--wait",
+                "--setenv=VPN_ZONE_TOOLS=/nix/store/t-tools.json",
+                "--setenv=WAYLAND_DISPLAY=wayland-1",
+                "--",
+                "/nix/store/x-cellward/bin/vpn-zone",
+                "window-focus",
+                "--pid",
+                "4242",
+            ]
+        );
+        assert_eq!(argv(true).last().map(String::as_str), Some("--ask"));
+        assert!(!argv(true).iter().any(|a| a.contains("KillMode")));
+    }
+
     /// The menu of the launch through `systemd --user`: named after the
     /// launch, its children kept, the manifest and the compositor passed on,
     /// our own binary from the store; the network is the restart for now.
@@ -4045,6 +4284,177 @@ mod tests {
         let broken = vec![OsString::from("/bin/tr\0ue")];
         assert!(menu.start(&broken, None).is_err());
         assert!(!menu.running());
+    }
+
+    // --- the focus (crate::wl_focus) -----------------------------------------
+
+    const FOCUS_GLOBALS: &[(&str, u32)] = &[
+        ("wl_compositor", 6),
+        ("wl_seat", 7),
+        ("xdg_activation_v1", 1),
+    ];
+
+    /// A string argument of a logged message, from its words.
+    fn string_arg(args: &[u32]) -> String {
+        let len = args[0] as usize;
+        let bytes: Vec<u8> = args[1..].iter().flat_map(|w| w.to_ne_bytes()).collect();
+        String::from_utf8(bytes[..len - 1].to_vec()).unwrap()
+    }
+
+    /// A client of [`FOCUS_GLOBALS`]: registry 2, compositor 4, seat 5,
+    /// xdg_activation_v1 6, a surface 7.
+    fn an_activating_client(client: &mut UnixStream) {
+        request(client, 1, 1, &2u32.to_ne_bytes());
+        request(client, 1, 0, &3u32.to_ne_bytes());
+        await_event(client, 3);
+        request(client, 2, 0, &bind_args(1, "wl_compositor", 4, 4));
+        request(client, 2, 0, &bind_args(2, "wl_seat", 5, 5));
+        request(client, 2, 0, &bind_args(3, "xdg_activation_v1", 1, 6));
+        request(client, 4, 0, &7u32.to_ne_bytes());
+    }
+
+    /// A token as a program makes one — `get_activation_token` as `id`, the
+    /// serial of an input event on seat 5 when there is one, surface 7,
+    /// `commit` — and the string the compositor answers with.
+    fn a_token(client: &mut UnixStream, id: u32, serial: Option<u32>) -> String {
+        request(client, 6, 1, &id.to_ne_bytes());
+        if let Some(serial) = serial {
+            request(client, id, 0, &words(&[serial as i32, 5]));
+        }
+        request(client, id, 2, &7u32.to_ne_bytes());
+        request(client, id, 3, &[]);
+        let events = events_until(client, |o, op, _| o == id && op == 0);
+        string_arg(&events.last().unwrap().2)
+    }
+
+    fn activate(client: &mut UnixStream, token: &str) {
+        let mut args = Vec::new();
+        string(&mut args, token);
+        args.extend_from_slice(&7u32.to_ne_bytes());
+        request(client, 6, 2, &args);
+    }
+
+    /// The tokens of the `activate`s the compositor got, up to a `sync`
+    /// sent after them — the connection's second, its first came before the
+    /// binds: all of them, since the proxy passes requests on in their
+    /// order. Once per connection.
+    fn activated(client: &mut UnixStream, log: &mpsc::Receiver<Msg>) -> Vec<String> {
+        request(client, 1, 0, &20u32.to_ne_bytes());
+        let syncs = Cell::new(0);
+        log_until(log, |m| {
+            if m.iface == "wl_display" && m.opcode == 0 {
+                syncs.set(syncs.get() + 1);
+            }
+            syncs.get() == 2
+        })
+        .iter()
+        .filter(|m| m.iface == "xdg_activation_v1" && m.opcode == 2)
+        .map(|m| string_arg(&m.args))
+        .collect()
+    }
+
+    /// `input`: one `activate` of a click goes up, the next of the same
+    /// serial does not; a new serial is another; a token from outside and one
+    /// made without a serial once each. Nothing is asked of the supervisor.
+    #[test]
+    fn input_passes_one_activate_per_input_event() {
+        let rig = Rig::with_focus("focus-input", FocusPolicy::Input);
+        let (mut client, _compositor, log) = rig.connect_framed(UPSTREAM, FOCUS_GLOBALS);
+        an_activating_client(&mut client);
+        let first = a_token(&mut client, 10, Some(5));
+        let again = a_token(&mut client, 11, Some(5));
+        let later = a_token(&mut client, 12, Some(6));
+        let bare = a_token(&mut client, 13, None);
+        for token in [
+            first.as_str(),
+            again.as_str(),
+            later.as_str(),
+            first.as_str(),
+            "from-a-launcher",
+            "from-a-launcher",
+        ] {
+            activate(&mut client, token);
+        }
+        activate(&mut client, &bare);
+        activate(&mut client, &bare);
+        assert_eq!(
+            activated(&mut client, &log),
+            [
+                first.as_str(),
+                later.as_str(),
+                "from-a-launcher",
+                bare.as_str()
+            ]
+        );
+        // A token the program made on another connection of the launch is
+        // counted with this one's: its click is used up.
+        let (mut other, _compositor2, log2) = rig.connect_framed(UPSTREAM, FOCUS_GLOBALS);
+        an_activating_client(&mut other);
+        let elsewhere = a_token(&mut other, 10, Some(5));
+        activate(&mut other, &elsewhere);
+        let fresh = a_token(&mut other, 11, Some(7));
+        activate(&mut other, &fresh);
+        assert_eq!(activated(&mut other, &log2), [fresh.as_str()]);
+        let channel = rig.channel.as_ref().unwrap();
+        channel.set_nonblocking(true).unwrap();
+        let mut byte = [0u8];
+        assert!((&*channel).read(&mut byte).is_err(), "asked: {byte:?}");
+        channel.set_nonblocking(false).unwrap();
+        drop((client, other));
+        assert_eq!(rig.finish(), 0);
+    }
+
+    /// `notify`: no `activate` goes up, and the supervisor is asked to tell
+    /// the person.
+    #[test]
+    fn notify_sends_the_byte_and_no_activate() {
+        let rig = Rig::with_focus("focus-notify", FocusPolicy::Notify);
+        let (mut client, _compositor, log) = rig.connect_framed(UPSTREAM, FOCUS_GLOBALS);
+        an_activating_client(&mut client);
+        let token = a_token(&mut client, 10, Some(5));
+        activate(&mut client, &token);
+        activate(&mut client, "from-a-launcher");
+        assert!(activated(&mut client, &log).is_empty());
+        let channel = rig.channel.as_ref().unwrap();
+        channel
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut byte = [0u8];
+        (&*channel).read_exact(&mut byte).unwrap();
+        assert_eq!(byte[0], ATTENTION);
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    /// `allow`: every `activate` goes up, as without the proxy.
+    #[test]
+    fn allow_passes_every_activate() {
+        let rig = Rig::with_focus("focus-allow", FocusPolicy::Allow);
+        let (mut client, _compositor, log) = rig.connect_framed(UPSTREAM, FOCUS_GLOBALS);
+        an_activating_client(&mut client);
+        let first = a_token(&mut client, 10, Some(5));
+        let again = a_token(&mut client, 11, Some(5));
+        for token in [
+            first.as_str(),
+            again.as_str(),
+            first.as_str(),
+            "from-a-launcher",
+            "from-a-launcher",
+        ] {
+            activate(&mut client, token);
+        }
+        assert_eq!(
+            activated(&mut client, &log),
+            [
+                first.as_str(),
+                again.as_str(),
+                first.as_str(),
+                "from-a-launcher",
+                "from-a-launcher"
+            ]
+        );
+        drop(client);
+        assert_eq!(rig.finish(), 0);
     }
 
     #[test]

@@ -5,8 +5,8 @@ English: [THREAT-MODEL.md](THREAT-MODEL.md) · Разбор по каналам:
 [PERMISSIONS.md](PERMISSIONS.md) §11, [SYSTEM.md](SYSTEM.md) §10 (по-английски),
 [CERTIFICATES.ru.md](CERTIFICATES.ru.md) §5
 
-**Статус: 2026-09-27.** Описан код на этот день, включая пустой корень клиента OpenConnect и
-свой дом для новой программы.
+**Статус: 2026-09-27.** Описан код на этот день, включая пустой корень клиента OpenConnect,
+свой дом для новой программы и политику фокуса контейнера (W17).
 Этот документ — сводка; LEAK-MODEL — разбор каждого канала. Где они расходятся, решают код и
 CHANGELOG, а один из двух документов надо поправить.
 
@@ -169,6 +169,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | W14 | Трансляция всего экрана показывает окна других зон; рамка называет зону | нет | выбирает человек в диалоге портала; `cellward frame hide` | — |
 | W15 | Буфер обмена и перетаскивание между зонами через окно в фокусе | нет, так задумано | обычные правила фокуса Wayland; чтение в фоне — это W3 | — |
 | W16 | Случайная клавиша отвечает «да» на вопрос, поднятый зоной (микрофон, брокер) | да | окно вопроса ничего не принимает, пока человек 1,5 с в покое с окном в фокусе; Enter — отказ | u8 |
+| W17 | Программа зоны забирает фокус клавиатуры (`xdg_activation_v1`), и нажатия для другого окна уходят ей — пароль, набираемый в браузере; или забирает его снова и снова из одного щелчка | `input` (по умолчанию): один раз на событие ввода человека · `notify`, `ask`: да · `allow`: **нет** · новое окно, получающее фокус при открытии: решает композитор | посредник считает каждый `activate` по серийнику, из которого сделан токен (иначе по строке токена), и пропускает только первый; при `notify` и `ask` не проходит ни один, а фокус переходит через IPC композитора по слову человека | win2 win3 win4 u16 |
 | | **Звук, камера, устройства** | | | |
 | A1 | Звуковой сервер хоста заставляют соединиться наружу или слушать (`LOAD_MODULE` для `module-tunnel-sink`, `module-rtp-send`) | да | фильтр PulseAudio: белый список команд | vm17 u12 |
 | A2 | Запись того, что играет хост (монитор) | pulse: да · PipeWire: герметичная да, обычная и зона — менеджер звука **нет** | фильтр отказывает мониторам и верит слову сервера об источнике; герметичная: ограниченный контекст PipeWire и наша политика WirePlumber | vm17 au1 au2 au5 au6 |
@@ -254,6 +255,15 @@ PulseAudio; дополнительные группы сеанса сняты; �
   Программы одной зоны друг для друга не стены (§5).
 - **W13.** В песочнице обычной зоны `screencast no` не действует; запомнить выбор там тоже
   нельзя.
+- **W17.** Политика — у контейнера (`cellward container set <к> focus`,
+  `containers.<имя>.focus` в Nix), для программ, запущенных после её смены, и держит её
+  посредник: запуск без посредника (`wayland-proxy off`, его запасной путь) живёт по правилам
+  композитора. `input` ведёт ограниченный счёт: программа, которая за несколько секунд жизни
+  токена у композитора (у niri — десять) сделает больше тысячи токенов и попросит столькими же
+  строками, может получить вторую смену фокуса из одного щелчка. Фокус НОВОГО окна при
+  открытии — политика композитора, посредник её не видит: это закрывает правило окна niri
+  `open-focused false`, и для программ вне контейнеров тоже. Вопрос `ask` сам забирает фокус,
+  защищён как W16 (нажатое по инерции теряется и не отвечает).
 - **K1.** Разрешены сознательно: `modify_ldt` (записи LDT у Wine: 16-битные программы; Flatpak
   запрещает его только без `multiarch`, а песочница всегда multiarch),
   `process_vm_readv`/`process_vm_writev` (`ReadProcessMemory` и `WriteProcessMemory` у
@@ -369,7 +379,10 @@ au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's swit
 au4 "the microphone by the container of each client" · au5 "PipeWire restarts: the restricted
 socket comes back, the raw one never" · au6 "an audio manager gets the raw socket, loudly"
 
-`tests/vm-window.nix`: win1 "the focused window's zone and program; the hotkey menu"
+`tests/vm-window.nix`: win1 "the focused window's zone and program; the hotkey menu" ·
+win2 "focus input: asking again after one click moves the focus once" · win3 "focus allow:
+every request of that click moves the focus" · win4 "focus notify: no request moves the
+focus; the person is told" (последние три — в `tests/vm-window-focus.py`)
 
 `tests/vm-system.nix`: sys1 "a service in the zone: the tunnel's network and the tunnel's
 names" · sys2 "a NixOS container in the zone: the same network, no way to change it" ·
@@ -438,3 +451,4 @@ the other"
 - u13 `rust/src/launch.rs`: `a_name_on_the_list_is_only_the_program_the_system_gives_under_it`
 - u14 `rust/src/seccomp.rs`: `the_zone_socket_filter_builds`
 - u15 `rust/src/declared.rs`: `a_link_into_the_store_is_declared`, `a_plain_file_or_a_link_elsewhere_is_not_declared`, `a_held_directory_is_read_as_held`; `rust/tests/vpn_zone_cli.rs`: `a_plain_file_in_declared_is_not_nixs_word`
+- u16 `rust/src/wl_focus.rs`: `one_input_event_is_one_change_of_the_focus`, `a_forgotten_serial_is_still_used_up`, `a_forgotten_token_of_the_launch_is_used_up`; `rust/src/wl_proxy.rs`: `input_passes_one_activate_per_input_event`, `notify_sends_the_byte_and_no_activate`, `allow_passes_every_activate`

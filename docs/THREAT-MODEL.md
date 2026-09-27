@@ -6,7 +6,7 @@
 [SYSTEM.md](SYSTEM.md) §10, [CERTIFICATES.md](CERTIFICATES.md) §5
 
 **Status: 2026-09-27.** It describes the code as of that day, the OpenConnect client's empty
-root and a new program's own home included.
+root, a new program's own home and a container's focus policy (W17) included.
 This page is the summary; LEAK-MODEL is the analysis of each channel. Where the two disagree,
 the code and CHANGELOG decide, and one of them needs fixing.
 
@@ -170,6 +170,7 @@ satellite, when granted.
 | W14 | A whole-screen cast shows other zones' windows; the frame names the zone | no | the person picks in the portal's dialog; `cellward frame hide` | — |
 | W15 | Clipboard and drag-and-drop between zones, through the focused window | no, by design | ordinary Wayland focus rules; reading in the background is W3 | — |
 | W16 | A key typed on answers "yes" to a question a zone raised (microphone, broker) | yes | the question window takes nothing until the person has been still with it focused for 1.5 s; Enter refuses | u8 |
+| W17 | A zone's program takes the keyboard focus (`xdg_activation_v1`), and the keys typed for another window go to it — a password typed into the browser; or takes it again and again from one click | `input` (the default): once per input event of the person · `notify`, `ask`: yes · `allow`: **no** · a new window focused as it opens: the compositor's | the proxy counts each `activate` by the serial its token was made from (else by the token's string) and passes only the first; under `notify` and `ask` none passes, and the focus moves through the compositor's IPC on the person's word | win2 win3 win4 u16 |
 | | **Sound, camera, devices** | | | |
 | A1 | The host's sound server made to connect out or listen (`LOAD_MODULE` of `module-tunnel-sink`, `module-rtp-send`) | yes | the PulseAudio filter: an allow-list of commands | vm17 u12 |
 | A2 | Recording what the host plays (a monitor) | pulse: yes · PipeWire: hermetic yes, ordinary and audio-manager zones **no** | the filter refuses monitors and trusts the server's word on the source; hermetic: a restricted PipeWire context and our WirePlumber policy | vm17 au1 au2 au5 au6 |
@@ -256,6 +257,15 @@ Notes:
   clients try first. Programs of one zone are not walls to each other (§5).
 - **W13.** In a sandbox of an ordinary zone, `screencast no` does not apply; nothing is
   remembered there either.
+- **W17.** The policy is the container's (`cellward container set <c> focus`,
+  `containers.<name>.focus` in Nix), for programs started after it is set, and the proxy's:
+  a launch without the proxy (`wayland-proxy off`, its fallback) has the compositor's rules
+  alone. `input` keeps a bounded count; a program that makes more than a thousand tokens,
+  and asks with as many strings, within the few seconds a compositor keeps a token (niri:
+  ten) can get a second change of the focus out of one click. A NEW window focused as it
+  opens is the compositor's policy, which the proxy does not see: niri's window rule
+  `open-focused false` closes that, for programs outside containers too. The question of
+  `ask` takes the focus itself, guarded as W16 (keys typed on are lost, never answers).
 - **K1.** Allowed on purpose: `modify_ldt` (Wine's LDT entries: 16-bit programs; Flatpak
   refuses it only without `multiarch`, and the sandbox is always multiarch),
   `process_vm_readv`/`process_vm_writev` (wineserver's `ReadProcessMemory` and
@@ -371,7 +381,10 @@ au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's swit
 au4 "the microphone by the container of each client" · au5 "PipeWire restarts: the restricted
 socket comes back, the raw one never" · au6 "an audio manager gets the raw socket, loudly"
 
-`tests/vm-window.nix`: win1 "the focused window's zone and program; the hotkey menu"
+`tests/vm-window.nix`: win1 "the focused window's zone and program; the hotkey menu" ·
+win2 "focus input: asking again after one click moves the focus once" · win3 "focus allow:
+every request of that click moves the focus" · win4 "focus notify: no request moves the
+focus; the person is told" (the last three in `tests/vm-window-focus.py`)
 
 `tests/vm-system.nix`: sys1 "a service in the zone: the tunnel's network and the tunnel's
 names" · sys2 "a NixOS container in the zone: the same network, no way to change it" ·
@@ -440,3 +453,4 @@ Rust tests (`cargo test`):
 - u13 `rust/src/launch.rs`: `a_name_on_the_list_is_only_the_program_the_system_gives_under_it`
 - u14 `rust/src/seccomp.rs`: `the_zone_socket_filter_builds`
 - u15 `rust/src/declared.rs`: `a_link_into_the_store_is_declared`, `a_plain_file_or_a_link_elsewhere_is_not_declared`, `a_held_directory_is_read_as_held`; `rust/tests/vpn_zone_cli.rs`: `a_plain_file_in_declared_is_not_nixs_word`
+- u16 `rust/src/wl_focus.rs`: `one_input_event_is_one_change_of_the_focus`, `a_forgotten_serial_is_still_used_up`, `a_forgotten_token_of_the_launch_is_used_up`; `rust/src/wl_proxy.rs`: `input_passes_one_activate_per_input_event`, `notify_sends_the_byte_and_no_activate`, `allow_passes_every_activate`

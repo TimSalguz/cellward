@@ -38,7 +38,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use crate::json::{self, Value};
 use crate::registry;
@@ -254,9 +254,11 @@ enum Proxied {
 /// window menu of the frame's buttons to the manager (`crate::wl_proxy`):
 /// a child in the host's network running `starter`, the manifest's
 /// `systemd-run` (review 2026-09-27: one at a time, a moment long — and the
-/// menu it starts looks at this launch at that very moment). No process of
-/// a zone is in the host's network, so none of the launch's program is
-/// taken for it; and leaving a child out never makes a network of none.
+/// menu it starts looks at this launch at that very moment) — or, with
+/// `--wait`, for as long as a notice of a request for the focus is up
+/// (`crate::wl_focus`). No process of a zone is in the host's network, so
+/// none of the launch's program is taken for it; and leaving a child out
+/// never makes a network of none.
 fn proxied(state: &Path, core: &Path, starter: Option<&Path>, pid: i32) -> Proxied {
     if comm(pid) != crate::wl_proxy::SUPERVISOR_NAME {
         return Proxied::No;
@@ -1123,6 +1125,274 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
     0
 }
 
+/// What `window-focus` is asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttentionArgs {
+    /// The launch of this pid (`--pid`): its supervisor's, which every window
+    /// of a program behind the Wayland proxy has (`crate::wl_proxy`).
+    pub pid: i32,
+    /// A question (`--ask`) rather than a notification.
+    pub ask: bool,
+}
+
+/// `--pid <pid> [--ask]`.
+pub fn parse_attention_args(args: &[OsString]) -> Result<AttentionArgs, String> {
+    const USAGE: &str = "cellward window-focus --pid <pid> [--ask]";
+    let mut pid = None;
+    let mut ask = false;
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        match word.to_str() {
+            Some("--pid") => {
+                pid = Some(
+                    words
+                        .next()
+                        .and_then(|p| p.to_str())
+                        .and_then(|p| p.parse::<i32>().ok())
+                        .filter(|&p| p > 0)
+                        .ok_or("--pid: нужен номер процесса")?,
+                );
+            }
+            Some("--ask") => ask = true,
+            _ => return Err(format!("{USAGE}, не {}", word.to_string_lossy())),
+        }
+    }
+    Ok(AttentionArgs {
+        pid: pid.ok_or(USAGE)?,
+        ask,
+    })
+}
+
+/// The windows of the process `pid` in `niri msg --json windows`: their ids.
+pub fn windows_of_niri(v: &Value, pid: i32) -> Vec<i64> {
+    v.as_array()
+        .unwrap_or(&[])
+        .iter()
+        .filter(|w| w.get("pid").and_then(Value::as_i64) == Some(i64::from(pid)))
+        .filter_map(|w| w.get("id").and_then(Value::as_i64))
+        .collect()
+}
+
+/// The windows of the process `pid` in `swaymsg -t get_tree`: the ids of the
+/// nodes with that pid, tiled and floating.
+pub fn windows_of_sway(v: &Value, pid: i32) -> Vec<i64> {
+    let mut out = Vec::new();
+    sway_nodes_of(v, i64::from(pid), &mut out);
+    out
+}
+
+fn sway_nodes_of(v: &Value, pid: i64, out: &mut Vec<i64>) {
+    if v.get("pid").and_then(Value::as_i64) == Some(pid) {
+        if let Some(id) = v.get("id").and_then(Value::as_i64) {
+            out.push(id);
+        }
+    }
+    for child in ["nodes", "floating_nodes"]
+        .iter()
+        .filter_map(|k| v.get(k).and_then(Value::as_array))
+        .flatten()
+    {
+        sway_nodes_of(child, pid, out);
+    }
+}
+
+/// Give the focus to a window of the launch `pid` (a window's pid as the
+/// compositor has it) through the compositor's IPC: the newest of them, by
+/// the compositor's numbering — niri does not promise to keep its ids in
+/// order, and at worst it is another window of the same launch.
+pub fn focus_launch(pid: i32) -> Result<(), String> {
+    const NONE: &str = "у программы нет окна";
+    let (program, args): (&str, Vec<String>) = match compositor() {
+        Some(Compositor::Niri) => {
+            let windows = run_json("niri", &["msg", "--json", "windows"])?;
+            let id = windows_of_niri(&windows, pid)
+                .into_iter()
+                .max()
+                .ok_or(NONE)?;
+            (
+                "niri",
+                vec![
+                    "msg".into(),
+                    "action".into(),
+                    "focus-window".into(),
+                    "--id".into(),
+                    id.to_string(),
+                ],
+            )
+        }
+        Some(Compositor::Sway) => {
+            let tree = run_json("swaymsg", &["-t", "get_tree", "-r"])?;
+            let id = windows_of_sway(&tree, pid).into_iter().max().ok_or(NONE)?;
+            ("swaymsg", vec![format!("[con_id={id}] focus")])
+        }
+        None => {
+            return Err(
+                "композитор не отвечает: нужен niri (NIRI_SOCKET) или sway (SWAYSOCK)".to_owned(),
+            )
+        }
+    };
+    let done = Command::new(program)
+        .args(&args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("{program}: {e}"))?;
+    if !done.success() {
+        return Err(format!("{program} {} — не вышло", args.join(" ")));
+    }
+    Ok(())
+}
+
+/// `vpn-zone window-focus --pid <pid> [--ask]`: a program of the launch of
+/// `pid` asked for the focus, and its container's policy held the request
+/// back (`notify`, `ask`; `crate::wl_focus`). The person is told — a
+/// notification «<программа> просит внимания» with «Перейти» — or asked
+/// («Переключить фокус на <программа>?»), and the focus goes to a window of
+/// that launch on their word alone, through the compositor's IPC
+/// ([`focus_launch`]).
+///
+/// Started by the launch's supervisor in a unit of `systemd --user`
+/// (`crate::wl_proxy`), one at a time: the manager's environment has the
+/// compositor's IPC, where the launch's has none — niri gives the manager
+/// its `NIRI_SOCKET` itself, sway's `SWAYSOCK` comes from the module's
+/// snippet or home-manager's sway module. The notification goes with the
+/// program it is about, and nothing is focused for a program that has
+/// ended: the process is held by a pidfd from the start, not by its
+/// number.
+pub fn attention(tools: &Tools, args: &[OsString]) -> u8 {
+    let args = match parse_attention_args(args) {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let Some(target) = crate::sys::pidfd_open(args.pid) else {
+        return 0;
+    };
+    let window = Window {
+        pid: args.pid,
+        ..Window::default()
+    };
+    let launch = launch_with_tools(tools, args.pid);
+    let label = window_name(&tools.state, &window, launch.as_ref());
+    let about = describe(&tools.state, &window, launch.as_ref());
+    let yes = if args.ask {
+        ask_focus(tools, &label, &about)
+    } else {
+        notify_focus(tools, &target, &label, &about)
+    };
+    // Signal 0: whether it is still there, as the same process.
+    if !yes || !crate::sys::pidfd_signal(&target, 0) {
+        return 0;
+    }
+    match focus_launch(args.pid) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("cellward window-focus: {e}");
+            crate::dialog::notify(&tools.notify_send, None, "5000", &label, &e);
+            1
+        }
+    }
+}
+
+/// The notification, with «Перейти»: whether the person chose it before it
+/// closed — and before the program ended, which ends it.
+fn notify_focus(tools: &Tools, target: &OwnedFd, label: &str, about: &str) -> bool {
+    // `-A` waits for the answer and prints the action's name.
+    let child = Command::new(&tools.notify_send)
+        .arg("-a")
+        .arg(crate::dialog::APP)
+        .arg("--action=focus=Перейти")
+        // `--`: a label may start with a dash.
+        .arg("--")
+        .arg(format!("{label} просит внимания"))
+        // The body is markup to most notification daemons.
+        .arg(markup(about))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(child) = child else {
+        return false;
+    };
+    while_alive(target, child)
+        .and_then(|child| child.wait_with_output().ok())
+        .is_some_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "focus")
+}
+
+/// The question: whether the person said to switch. In the launch window as
+/// a guarded question (`crate::window::question`): nothing is taken until
+/// the person has been still with it focused — it takes the focus itself,
+/// and keys typed on, meant for another window, must not answer it; Enter,
+/// the default, leaves the focus where it was. kdialog where there is no
+/// window: its default button leaves it too, and a "switch" sooner than
+/// [`crate::dialog::TOO_FAST`] after its start is taken for a stray key.
+fn ask_focus(tools: &Tools, label: &str, about: &str) -> bool {
+    let question = format!("Переключить фокус на {label}?");
+    let answers = [
+        ("stay", "Не переключать", false),
+        ("focus", "Переключить", false),
+    ];
+    match crate::window::question(
+        &tools.window,
+        crate::dialog::APP,
+        &format!("{question}\n{about}"),
+        None,
+        &answers,
+        None,
+    ) {
+        crate::window::Asked::Chose(tag) => return tag == "focus",
+        crate::window::Asked::NotShown => {}
+        _ => return false,
+    }
+    let asked = std::time::Instant::now();
+    // kdialog shows it in a QLabel, which takes `<` for rich text.
+    let text = format!("{question}\n{about}")
+        .replace('<', "‹")
+        .replace('>', "›")
+        .replace('&', "＆");
+    let answer = Command::new(&tools.kdialog)
+        .args(["--title", crate::dialog::APP, "--yesno"])
+        .arg(text)
+        .args(["--yes-label", "Не переключать", "--no-label", "Переключить"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    answer.is_ok_and(|s| s.code() == Some(1)) && crate::dialog::not_too_soon(asked).is_ok()
+}
+
+/// Wait for `dialog` to end, or for the process `target` to: a notice goes
+/// with the program it is about. The dialog, ended, to be read; `None` when
+/// the program ended first — the dialog is ended then.
+fn while_alive(target: &OwnedFd, mut dialog: Child) -> Option<Child> {
+    let Some(ended) = crate::sys::pidfd_open(dialog.id() as i32) else {
+        // No descriptor to wait on: the dialog alone decides.
+        return Some(dialog);
+    };
+    let pollin = |fd: &OwnedFd| libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let mut fds = [pollin(target), pollin(&ended)];
+    loop {
+        // SAFETY: two valid pollfds for the duration of the call.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if rc < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        break;
+    }
+    if fds[1].revents == 0 && fds[0].revents != 0 {
+        let _ = dialog.kill();
+        let _ = dialog.wait();
+        return None;
+    }
+    Some(dialog)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1420,5 +1690,61 @@ mod tests {
         // Bidi controls are cut: they could make the network read otherwise.
         assert_eq!(shown("a\u{202E}b\u{2066}c"), "abc");
         let _ = fs::remove_dir_all(&state);
+    }
+
+    /// `window-focus`: a launch's pid, and a question by `--ask`; anything
+    /// else is refused, not guessed at.
+    #[test]
+    fn the_focus_notice_takes_a_pid_and_a_question() {
+        let parse = |args: &[&str]| {
+            parse_attention_args(&args.iter().map(OsString::from).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            parse(&["--pid", "4242"]),
+            Ok(AttentionArgs {
+                pid: 4242,
+                ask: false
+            })
+        );
+        assert_eq!(
+            parse(&["--ask", "--pid", "7"]),
+            Ok(AttentionArgs { pid: 7, ask: true })
+        );
+        for bad in [
+            &[][..],
+            &["--ask"],
+            &["--pid"],
+            &["--pid", "0"],
+            &["--pid", "x"],
+            &["--pid", "7", "--restart"],
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// The windows of a launch in what niri and sway say: every one with its
+    /// pid, tiled or floating, and none of another's.
+    #[test]
+    fn the_windows_of_a_launch_are_found_by_its_pid() {
+        let niri = json::parse(
+            r#"[{"id":3,"pid":77,"app_id":"a"},{"id":9,"pid":77,"app_id":"b"},
+                {"id":5,"pid":78},{"id":6,"pid":null}]"#,
+        )
+        .unwrap();
+        assert_eq!(windows_of_niri(&niri, 77), [3, 9]);
+        assert!(windows_of_niri(&niri, 1).is_empty());
+        assert!(windows_of_niri(&Value::Null, 77).is_empty());
+        let sway = json::parse(
+            r#"{"id":1,"type":"root","nodes":[{"id":2,"type":"output","nodes":[
+                {"id":3,"type":"workspace","nodes":[
+                   {"id":10,"type":"con","pid":77,"app_id":"a"},
+                   {"id":11,"type":"con","pid":78}],
+                 "floating_nodes":[{"id":12,"type":"floating_con","pid":77}]}]}],
+               "floating_nodes":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(windows_of_sway(&sway, 77), [10, 12]);
+        assert_eq!(windows_of_sway(&sway, 78), [11]);
+        assert!(windows_of_sway(&sway, 1).is_empty());
     }
 }

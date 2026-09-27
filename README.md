@@ -431,6 +431,7 @@ cellward mode picker|per-zone|both|off         # how launcher entries behave (pe
 cellward default offline|unconfined|<zone>     # what the picker offers an unknown program
 cellward pins / forget <program|--all>         # programs pinned to a container (the network is the container's), and unpinning
 cellward container list|show|set|assign|merge  # containers: network, programs, X11, merging two
+cellward container set <c> focus input|notify|ask|allow|default  # may its programs take the focus: once per click or key (input, the default), a notification, a question, always
 cellward trust add|list|rm <container> …       # a root certificate for one container only
 ```
 
@@ -488,6 +489,25 @@ network chosen, **×** closes the window as its own close button would. Drag
 the strip to move the window, its border or corners to resize it; the button
 under the pointer lights up. The frame is a reminder, not a boundary a
 program cannot fake: the panel's `cellward focused` is the one it cannot.
+
+**The focus.** A program asks the compositor for the focus with
+`xdg_activation_v1`, and the Wayland proxy of a zone sees every such request:
+the container decides what becomes of them (`cellward container set <c> focus`,
+`programs.cellward.containers.<name>.focus`). `input`, the default, lets one
+through per click or key of yours — a program that asks again and again after
+one click (Telegram opening an image) takes the focus once, and keys you type
+into another window stay there; `notify` lets none through and shows "<program>
+просит внимания" with a button to go there; `ask` asks; `allow` lets all
+through. A setting applies to programs started after it. A NEW window taking
+the focus as it opens is the compositor's own rule, which the proxy does not
+see; in niri, for programs outside containers too:
+
+```kdl
+window-rule {
+    match app-id="^com\.ayugram\.desktop$"
+    open-focused false
+}
+```
 
 ## The system tier (optional)
 

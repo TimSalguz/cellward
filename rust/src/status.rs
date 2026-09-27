@@ -681,10 +681,12 @@ pub fn container(tools: &Tools, c: &Container) -> String {
             .map(|i| string(&i.id))
             .collect(),
     );
+    // What becomes of its programs' asking for the focus (`crate::wl_focus`).
+    let focus = sourced_str(c.focus.value.as_str(), c.focus.source);
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
          \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"devices\":{devices},\"links\":{links},\"instances\":{instances}}}",
+         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"devices\":{devices},\"links\":{links},\"focus\":{focus},\"instances\":{instances}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),
