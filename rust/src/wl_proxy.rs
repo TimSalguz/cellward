@@ -1430,6 +1430,25 @@ impl Conn {
     }
 
     fn dispatch(&mut self) {
+        // A client whose writing side is shut reads as nothing for ever, and
+        // the connection polls ready for ever: libwayland takes that for the
+        // end of the client, and so does this (review 2026-09-27: a
+        // half-closed client kept a core of the host busy).
+        let mut byte = 0u8;
+        // SAFETY: a one-byte buffer that outlives the call; the peek takes
+        // nothing off the socket.
+        let peeked = unsafe {
+            libc::recv(
+                self.socket.as_raw_fd(),
+                (&mut byte as *mut u8).cast(),
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        if peeked == 0 {
+            self.closing.set(true);
+            return;
+        }
         if self.state.dispatch_available().is_err() {
             return;
         }
