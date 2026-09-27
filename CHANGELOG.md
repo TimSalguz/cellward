@@ -249,6 +249,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A layer container's grant is bound from where it was checked**
+  (bug hunt 2026-09-27). A granted directory was checked as it resolved,
+  then bound by its path: a program of the container with a grant above
+  it could swap a link in along the way meanwhile, and have a place never
+  granted — the project's state among them — bound in writable. What is
+  given back over the layer is now opened once below the real home
+  through no link (`openat2`, `RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH`),
+  and bound from that descriptor.
 - **A zone's record stream is not moved onto what the host plays** (bug
   hunt 2026-09-27). The sound filter took a record stream's move as the
   server named it, and refused a monitor by its `.monitor` name — which
