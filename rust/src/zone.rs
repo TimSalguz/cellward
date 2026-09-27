@@ -2026,13 +2026,11 @@ fn hold_instance(zone: &mut Zone, ids: &Ids, plan: &crate::instance::Plan) -> Re
     }
 
     let (mut ending, space_gone) = keep(zone, pid, space, userns, &mut helpers, &mut transport);
-    match ending {
-        Ending::Idle => println!("instance {}: its last program ended — it stops", plan.id),
-        Ending::Broken => eprintln!(
+    if ending == Ending::Broken {
+        eprintln!(
             "instance {}: its space ended by itself — its programs are ended with it",
             plan.id
-        ),
-        Ending::Asked | Ending::Killed => {}
+        );
     }
     // An instance ending ends its programs (the design's stop semantics):
     // TERM, and waited for — systemd's own stop timeout is the one clock.
@@ -2045,14 +2043,19 @@ fn hold_instance(zone: &mut Zone, ids: &Ids, plan: &crate::instance::Plan) -> Re
     if !space_gone {
         // SAFETY: kill(2) of our own child, not reaped yet.
         unsafe { libc::kill(pid, libc::SIGTERM) };
-        // A kill's own stop: `cellward container kill` kills the pid 1, then
-        // stops the unit — whose TERM may come before the holder's end.
-        if reap(pid) == KILLED && ending == Ending::Asked {
+        // A kill: `cellward container kill` kills the pid 1, and the ends
+        // of its programs may look like the last one's (an idle end) and
+        // its stop of the unit like a stop, before the holder's end is
+        // seen. The holder's code says it (KILL passed on).
+        if reap(pid) == KILLED && ending != Ending::Broken {
             ending = Ending::Killed;
         }
     }
     let why = match ending {
-        Ending::Idle => "idle",
+        Ending::Idle => {
+            println!("instance {}: its last program ended — it stops", plan.id);
+            "idle"
+        }
         Ending::Asked => "stop",
         Ending::Killed => {
             println!(
