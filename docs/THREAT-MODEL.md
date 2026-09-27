@@ -114,7 +114,7 @@ satellite, when granted.
 | | **Network** | | | |
 | N1 | IPv4 traffic around the tunnel | yes | the app namespace has only `lo` and the tunnel; there is nothing else to route to | C · vm1 vm2 vm8 sm1 sm13 |
 | N2 | IPv6 around the tunnel | yes | the same topology: IPv6 goes into the tunnel when it carries it (WireGuard with a v6 address, OpenConnect when the gateway gives one), and a tunnel without it leaves no v6 default route | C · vm3 vm36 vm37 sm2 sm15 |
-| N3 | The LAN and the host's own addresses, from a tunnel zone | yes | no route to them in the app namespace; the uplink filter lets out only the endpoint | C · br1 sys1; kernel-WireGuard user zone: **no test** |
+| N3 | The LAN and the host's own addresses, from a tunnel zone | yes | no route to them in the app namespace but into the tunnel; the uplink filter lets out only the endpoint | C · vm46 br1 sys1 |
 | N4 | Host loopback services through pasta (port mirroring, gateway mapping) | yes | pasta runs with `-t/-u/-T/-U none` and `--no-map-gw` | vm7 sys9 |
 | N5 | Programs see the route to the endpoint or the tunnel's socket | yes | the tunnel is made in the uplink and moved down; its socket stays in the uplink | C · vm4 sm3 |
 | N6 | A zone program re-routes, adds an interface or unloads the filter | yes | no capabilities, and no rights in the zone's user namespace; a nested one owns only new, empty namespaces | C · vm38 sys2 sys3 |
@@ -130,7 +130,7 @@ satellite, when granted.
 | N16 | A socket family no network namespace holds: `AF_VSOCK` to the host's or a VM's vsock services (a guest's sshd since systemd 256), around the tunnel | yes for 64-bit programs · 32-bit: **no** | a seccomp allow-list of families in every launch into a zone and for the OpenConnect client (`AF_UNIX`, `AF_INET`, `AF_INET6`, `AF_NETLINK`, `AF_PACKET`); x86's 32-bit `socketcall` cannot be filtered by family and passes | vm45 u14 |
 | | **DNS** | | | |
 | D1 | The host's resolver answers over a unix socket (nscd/nsncd, resolved's varlink, avahi) | yes | tmpfs over their directories in every zone (the zone fails if this fails); the zone's own `nsswitch.conf`: `hosts: files dns` | vm9 vm10 vm11 sm6 sys1 |
-| D2 | The host's `resolv.conf` inside a zone | partly | the zone's own file is bound in; a host that replaces its file by rename detaches the bind, but queries still have only the tunnel | vm12; rename: **no test** |
+| D2 | The host's `resolv.conf` inside a zone | partly | the zone's own file is bound in; a host that replaces its file by rename (NetworkManager, resolvconf) detaches the bind, or renames away the link that led to it: the zone then reads the host's file and asks the host's resolvers, through the tunnel, until it restarts; nothing reaches the host's resolver or leaves around the tunnel | vm12 vm47 |
 | D3 | Host network facts over the system bus (`resolve1`, NetworkManager, `hostname1`) or systemd's varlink and dhcpcd's sockets | yes | a system bus proxy per zone; `/run/systemd` covered, with an allow-list bound back | vm13 vm20 vm41 |
 | D4 | The OpenConnect client resolves a name through the host's resolver | yes | the gateway is resolved beforehand and passed with `--resolve`; the client's root has no `/run` at all | C · sm20 |
 | | **OpenConnect: the client and the gateway** | | | |
@@ -155,13 +155,13 @@ satellite, when granted.
 | W1 | Compositor IPC (`niri msg action spawn` runs on the host; the window list; window screenshots) | yes | the runtime directory is sealed; IPC sockets are never bound back; `NIRI_SOCKET`, `SWAYSOCK` and the like removed | vm15 vm16 vm18 |
 | W2 | The raw Wayland socket | yes | only a restricted socket per launch, served by a confined proxy; the compositor's listener is in a directory no zone has | vm15 vm16 |
 | W3 | Screen capture, keyboard and pointer emulation, background clipboard, other windows, through Wayland protocols | yes, with `wp_security_context_v1` | the security context, plus the proxy's fixed hidden list; a hidden global cannot be bound by its number | vm16 u5 |
-| W4 | A compositor without `wp_security_context_v1` (GNOME's Mutter) | degraded, not open | in a zone the raw socket is not there, so there is no Wayland; `unconfined` gets it unrestricted | C · **no test** |
+| W4 | A compositor without `wp_security_context_v1` (GNOME's Mutter; cage in the test) | degraded, not open | in a zone the raw socket is not there, so there is no Wayland; `unconfined` gets it unrestricted | C · vm48 |
 | W5 | The allow-list by binary name (`obs`, `copyq`) unlocks the full protocols | yes | a launch into a zone is always restricted; for `unconfined` a name counts only for the program the system's profiles give under it, or a path entry's file | C (`launch.rs`) · vm43 u13 |
 | W6 | Another process of the zone uses a launch's proxy, or puts its own socket in its place | yes | the proxy passes on only its supervisor's descendants (`SO_PEERPIDFD`); the socket directory is read-only | vm16 |
-| W7 | Compositor or shell IPC outside the runtime directory or over the bus (Wayfire in `/tmp`, quickshell, KWin) | hermetic: yes · ordinary: **no** | hermetic: its own `/tmp`, a runtime directory by allow-list, the filtered bus | C · **no test** |
+| W7 | Compositor or shell IPC that W1's list does not name: outside the runtime directory, in a directory of its own there, or over the bus (Wayfire in `/tmp`, quickshell's directory, KWin's scripting) | hermetic: yes · ordinary: **no** | hermetic: its own `/tmp`, a runtime directory by allow-list, the filtered bus | C · vm49; vm50 shows an ordinary zone reaches all three |
 | W8 | A window draws another zone's frame and title | no | the frame is a label, not a boundary; the trusted one is the panel's (`cellward focused`: window pid → network namespace, from the kernel) | win1 |
 | W9 | The host's X server (every window, key and clipboard) | yes | tmpfs over `/tmp/.X11-unix`, no `DISPLAY`; its abstract socket belongs to the host's network namespace | vm14 vm19 |
-| W10 | One launch's X server, seen from another launch or zone | partly | a satellite per launch; `x11-run` binds its socket in the launch's own `/tmp/.X11-unix`, none abstract; clients of one server see each other | vm16 (own socket); across launches: **no test** |
+| W10 | One launch's X server, seen from another launch or zone | partly | a satellite per launch; `x11-run` binds its socket in the launch's own `/tmp/.X11-unix`, none abstract; the `/proc/<pid>/root` of its processes is closed to another zone by its user namespace and, on Linux 6.12+, to another launch by its Landlock domain, which also keeps the clients off an abstract name another launch took; clients of one server see each other | vm16 vm51 |
 | W11 | The pixels of host X clients, through their MIT-SHM segments | yes | an IPC namespace per zone | vm18 |
 | W12 | The Screenshot portal (non-interactive, no dialog) | hermetic, sandbox: yes · ordinary: **no** | refused by the filter's allow-list | u3 |
 | W13 | A screen cast remembered and restarted without a dialog | hermetic, sandbox: yes · ordinary: **no** | `persist_mode`/`restore_token` pass only with `screencast yes` and a portal that knows the connection by name | u4 |
@@ -237,6 +237,17 @@ Notes:
   not exist yet, other than the entry points made beforehand.
 - **H3.** A program of the same user outside every zone can still write `declared/` and
   `broker-always`. That is the host, a non-goal.
+- **D2.** NetworkManager, `resolvconf` and openresolv write the file anew and rename it into
+  place. With systemd-resolved (NixOS's own layout) the chain of links ends in the zone's
+  tmpfs over resolved's directory, and the zone's file stays, unless the host renames away
+  the link itself. Either way the zone then reads the host's file: the host's resolvers, a
+  fingerprint of its network, and names asked of them through the tunnel. A resolver on the
+  host's loopback is the zone's own loopback there, where nothing answers. vm47 plays both
+  layouts. `doctor` checks only that a nameserver is there.
+- **W10.** Across zones the user namespaces keep `/proc/<pid>/root` closed (X3). Within a zone
+  it is the launch's Landlock domain (X5): on a kernel before 6.12 a program of the zone
+  reaches another launch's X server through its process, and can take the abstract name its
+  clients try first. Programs of one zone are not walls to each other (§5).
 - **W13.** In a sandbox of an ordinary zone, `screencast no` does not apply; nothing is
   remembered there either.
 - **Tested only in a hermetic zone:** the IPC namespace, the own `/dev` and the dropped groups
@@ -260,13 +271,9 @@ Notes:
 These are the gaps. Each is a claim made by construction, or none at all, that no VM or
 smoke test tries to break:
 
-- **N3:** the LAN, for a kernel WireGuard/AmneziaWG user zone (covered for system zones and
-  zones through them);
-- **D2:** the host replacing `resolv.conf` by rename;
-- **W4:** a compositor without the security context gives a zone no Wayland;
-- **W7:** compositor and shell IPC outside the runtime directory;
-- **W10:** one launch's X satellite against another's (ROADMAP: "X11 в зоне против злого соседа");
 - **X4:** `/proc/<pid>/cmdline`, sandboxed and not.
+
+Rows whose "no" is itself tested, so that closing it shows: P1 (vm15) and W7 (vm50).
 
 Rows with Rust tests only and no VM or smoke test: O5, P4, W12, W13, W16, X9, K1, and P3
 apart from DynamicLauncher and the two network portals.
@@ -320,6 +327,12 @@ apart from DynamicLauncher and the two network portals.
 - vm43 "a launch into a zone is restricted whatever its program is called" (in `tests/vm-promise-wayland.py`)
 - vm44 "a zone's program cannot signal the host's processes of the user" (in `tests/vm-promise-signals.py`; skipped before Linux 6.12)
 - vm45 "a zone's program cannot reach the host over vsock" (in `tests/vm-promise-vsock.py`)
+- vm46 "a tunnel zone reaches neither the LAN nor the host's own addresses" (in `tests/vm-promise-lan.py`)
+- vm47 "the host's resolv.conf replaced by rename: the zone's names go only into the tunnel" (in `tests/vm-promise-resolv-rename.py`)
+- vm48 "a compositor without the security context: no Wayland in a zone, all of it unconfined" (in `tests/vm-promise-no-context.py`)
+- vm49 "hermetic zone: a shell's IPC in /tmp, in the runtime directory and on the bus is out of reach" (in `tests/vm-promise-shell-ipc.py`)
+- vm50 "ordinary zone: a shell's IPC in /tmp, in the runtime directory and on the bus stays in reach" (in `tests/vm-promise-shell-ipc.py`)
+- vm51 "one launch's X server: out of reach of another launch and of another zone" (in `tests/vm-promise-x11.py`; its `/proc` and abstract-name parts need Linux 6.12)
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
