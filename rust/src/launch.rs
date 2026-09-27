@@ -402,12 +402,12 @@ fn program_word(cmd: &[OsString]) -> Option<&OsStr> {
             continue;
         }
         if bytes.contains(&b' ') {
-            return Some(word);
+            return Some(word.as_os_str());
         }
         if is_assignment(bytes) {
             continue;
         }
-        return Some(word);
+        return Some(word.as_os_str());
     }
     None
 }
