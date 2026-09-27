@@ -93,6 +93,8 @@ pub struct Args {
     pub nss_home: Option<PathBuf>,
     /// `--certutil PATH`, from the manifest.
     pub certutil: Option<PathBuf>,
+    /// `--bwrap PATH`, from the manifest: the box certutil works in.
+    pub bwrap: Option<PathBuf>,
     /// `--storage PATH`: the container's storage directory, which the zone
     /// covers — given back at `PATH` from the zone's keep
     /// (`home_layer::KEPT_STORAGE`), in this launch's mount namespace only,
@@ -160,7 +162,8 @@ impl Args {
             .position(|a| a == "--")
             .ok_or(ArgError::NoSeparator)?;
         let mut positional = &argv[..split];
-        let (mut cwd, mut trust, mut nss_home, mut certutil) = (None, None, None, None);
+        let (mut cwd, mut trust, mut nss_home, mut certutil, mut bwrap) =
+            (None, None, None, None, None);
         let mut trust_extra = Vec::new();
         let mut share = Vec::new();
         let mut storage = None;
@@ -208,6 +211,7 @@ impl Args {
                 b"--trust" => &mut trust,
                 b"--nss-home" => &mut nss_home,
                 b"--certutil" => &mut certutil,
+                b"--bwrap" => &mut bwrap,
                 _ => break,
             };
             *slot = positional
@@ -234,6 +238,7 @@ impl Args {
             trust,
             nss_home,
             certutil,
+            bwrap,
             storage,
             camera,
             devices,
@@ -802,9 +807,11 @@ pub fn run(args: Args) -> u8 {
             .certutil
             .clone()
             .unwrap_or_else(|| PathBuf::from("certutil"));
+        let bwrap = args.bwrap.clone().unwrap_or_else(|| PathBuf::from("bwrap"));
         let layer = crate::trust::Layer {
             dir,
             certutil: &certutil,
+            bwrap: &bwrap,
             home: &home,
             private: &private,
             extra: &args.trust_extra,

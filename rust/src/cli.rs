@@ -2233,7 +2233,7 @@ fn trust_remove(tools: &Tools, args: &[OsString], all: bool) -> u8 {
     // that launch lay the layer down.
     match &target.home {
         Some(home) => {
-            for warning in crate::trust::sync_home(&tools.certutil, &target.trust_dir(), home) {
+            for warning in crate::trust::sync_home(&tools.certutil, &tools.bwrap, &target.trust_dir(), home) {
                 eprintln!("{warning}");
             }
             println!(
