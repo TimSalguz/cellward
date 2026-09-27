@@ -118,10 +118,12 @@ with subtest("an instance's programs are in its epoch; one from a login session 
         "systemctl --user show -p ControlGroup --value vpn-zone-container@vmia.service"
     ).strip()
     assert cg.endswith("/vpn-zone-container@vmia.service"), cg
-    procs = machine.succeed(f"cat /sys/fs/cgroup{cg}/e1/cgroup.procs").split()
+    # The unit's slice has `\x2d` in its name: quoted for the shell.
+    unit_cg = shlex.quote(f"/sys/fs/cgroup{cg}")
+    procs = machine.succeed(f"cat {unit_cg}/e1/cgroup.procs").split()
     comms = [machine.succeed(f"cat /proc/{p}/comm").strip() for p in procs]
     assert "sleep" in comms, (procs, comms)
-    keeper = machine.succeed(f"cat /sys/fs/cgroup{cg}/infra/cgroup.procs").split()
+    keeper = machine.succeed(f"cat {unit_cg}/infra/cgroup.procs").split()
     assert keeper and not set(keeper) & set(procs), (keeper, procs)
     machine.succeed(
         "su -l alice -c "

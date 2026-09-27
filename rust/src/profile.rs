@@ -132,6 +132,30 @@ pub fn forward_targets(me: libc::pid_t, table: &[(i32, i32)]) -> Vec<i32> {
         .collect()
 }
 
+/// Every process below `me` in a table of `(pid, parent)`, children first:
+/// whom a TERM is passed on to. Since stage 4 of the container design
+/// (`crate::epoch`) a launch's program is not in its launcher's cgroup but in
+/// its instance's epoch, and a stop of the launcher's scope or service — which
+/// TERMed every process in it — reaches the program only through this
+/// process: a shell that dies of the TERM before it passed it on would
+/// leave its children running (red once in CI, `pw-record` under `sh -c`).
+pub fn descendants(me: libc::pid_t, table: &[(i32, i32)]) -> Vec<i32> {
+    let mut out: Vec<i32> = Vec::new();
+    let mut at = 0;
+    let mut parents = vec![me];
+    while at < parents.len() {
+        let parent = parents[at];
+        at += 1;
+        for &(pid, of) in table {
+            if of == parent && pid != me && !out.contains(&pid) {
+                out.push(pid);
+                parents.push(pid);
+            }
+        }
+    }
+    out
+}
+
 /// What `profile-run` was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -1037,10 +1061,19 @@ fn supervise(cmd: &[OsString], mut status: Option<std::os::fd::OwnedFd>) -> u8 {
             continue;
         }
         if sig != libc::SIGCHLD {
-            for child in forward_targets(me, &process_table()) {
-                // SAFETY: kill(2) takes no pointers; a child of ours, not
-                // reaped (only this loop reaps).
-                unsafe { libc::kill(child, sig) };
+            // A TERM ends the launch: the whole tree below, as a stop of the
+            // launcher's scope did (`descendants`); the others go to the
+            // children, which pass them on as they see fit.
+            let table = process_table();
+            let targets = if sig == libc::SIGTERM {
+                descendants(me, &table)
+            } else {
+                forward_targets(me, &table)
+            };
+            for pid in targets {
+                // SAFETY: kill(2) takes no pointers; a process of this
+                // launch's tree in this pid namespace, read just now.
+                unsafe { libc::kill(pid, sig) };
             }
             continue;
         }
@@ -1404,6 +1437,19 @@ mod tests {
         }
         assert!(!FORWARDED.contains(&libc::SIGKILL));
         assert!(!FORWARDED.contains(&libc::SIGCHLD));
+    }
+
+    /// A TERM goes to the launch's whole tree (stage 4): the program is in
+    /// its instance's epoch, out of reach of its launcher's scope's stop —
+    /// the orphan's child as well, never another launch's or a parent.
+    #[test]
+    fn a_term_goes_to_the_whole_tree_below() {
+        let table = [(2, 1), (3, 0), (4, 3), (7, 3), (8, 7), (10, 8), (9, 6)];
+        assert_eq!(descendants(3, &table), [4, 7, 8, 10]);
+        assert_eq!(descendants(7, &table), [8, 10]);
+        assert!(descendants(5, &table).is_empty());
+        // A table that says a process is its own parent is no loop.
+        assert_eq!(descendants(3, &[(3, 3), (4, 3), (4, 4)]), [4]);
     }
 
     fn argv(args: &[&str]) -> Vec<OsString> {

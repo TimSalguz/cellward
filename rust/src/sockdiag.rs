@@ -260,11 +260,21 @@ pub fn loopback_only(socket: &Socket) -> bool {
     is_loopback(socket.src) && (is_loopback(socket.dst) || socket.dst.is_unspecified())
 }
 
+/// The inode of a socket as `/proc/<pid>/fd/<n>` names it (`socket:[N]`):
+/// what a program that still holds a socket of a dump is found by.
+pub fn socket_inode(link: &str) -> Option<u32> {
+    link.strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
+}
+
 /// Whether a socket of a dump of `protocol` is destroyed by a switch: not a
 /// TCP listener (the dump leaves them out already; a listener carries no
 /// connection), and not one that stays on the loopback ([`loopback_only`]).
 pub fn to_break(socket: &Socket, protocol: u8) -> bool {
-    !(protocol == IPPROTO_TCP && socket.state == TCP_LISTEN) && !loopback_only(socket)
+    let listener = protocol == IPPROTO_TCP && socket.state == TCP_LISTEN;
+    !(listener || loopback_only(socket))
 }
 
 // --- THE I/O HALF (stage 4, 2026-09-27) ---------------------------------------
@@ -763,6 +773,14 @@ mod tests {
             IPPROTO_UDP
         ));
         assert!(!to_break(&s(7, "127.0.0.53", "0.0.0.0"), IPPROTO_UDP));
+    }
+
+    #[test]
+    fn a_socket_is_found_by_its_inode_in_a_programs_descriptors() {
+        assert_eq!(socket_inode("socket:[4242]"), Some(4242));
+        assert_eq!(socket_inode("pipe:[4242]"), None);
+        assert_eq!(socket_inode("socket:[x]"), None);
+        assert_eq!(socket_inode("/dev/null"), None);
     }
 
     #[test]

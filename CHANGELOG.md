@@ -20,7 +20,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (`frame-relay --probe`), and notes whether the instance can be switched
   live (`live-switch` in its directory). A program launched from a login
   session (tty, ssh) cannot be moved there by the kernel: it runs as
-  before, and while it does the instance cannot be switched. `status
+  before, and while it does the instance cannot be switched. A program in
+  the epoch is out of reach of its launcher's scope: a stop of that scope
+  (or service) reaches it through the launch's waiter and `profile-run`,
+  which now passes a TERM to the launch's whole tree, not only to its
+  children — a shell that dies of the TERM first no longer leaves its
+  children running. `status
   --json`: `instances[].epoch` and `instances[].live_switch` `{available,
   reason}` (reason `kind`, `cgroup`, `nft-socket`, `sock-destroy`,
   `outside`, `previous-build`) are real now. `doctor`: a `live_switch`
