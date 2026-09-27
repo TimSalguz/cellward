@@ -12,8 +12,8 @@ import shlex
 # The app namespace has lo and the tunnel, and the uplink lets out the
 # tunnel's transport alone: the host's own services, on any of its
 # addresses, and the LAN around the server are not a program's to reach.
-# The server stands for the LAN too — its LAN address answers the host, and
-# must answer a zone only as the tunnel's far end.
+# The server stands for the LAN too: its LAN address must see a zone only
+# as the tunnel's far end. The leak capture on eth1 is armed throughout.
 with subtest("a tunnel zone reaches neither the LAN nor the host's own addresses"):
     first = "tr -s ' ' | cut -d' ' -f4 | cut -d/ -f1"
     machine_ip = machine.succeed(f"ip -4 -o addr show eth1 | head -1 | {first}").strip()
@@ -59,16 +59,15 @@ with subtest("a tunnel zone reaches neither the LAN nor the host's own addresses
     assert "zone-" not in got, f"the zone reached the host's own service: {got}"
     machine.succeed("systemctl stop n3host && rm -f /tmp/n3-got")
 
-    # The LAN by the server's LAN address: the host is seen as itself, the
-    # zone only as the tunnel's address.
+    # The LAN by the server's LAN address: it answers (asked on the server
+    # itself — the host asking would be a flow the leak capture rightly
+    # counts), and it sees the zone only as the tunnel's address.
     server.succeed(
         "systemd-run --unit=n3lan socat "
         f"TCP4-LISTEN:8090,bind={server_ip},fork,reuseaddr "
         "'SYSTEM:echo peer=$SOCAT_PEERADDR'"
     )
-    server.wait_until_succeeds("ss -ltn | grep -q ':8090 '")
-    out = machine.succeed(f"socat -T5 - TCP4:{server_ip}:8090")
-    assert f"peer={machine_ip}" in out, out
+    server.wait_until_succeeds(f"socat -T5 - TCP4:{server_ip}:8090 | grep -q peer={server_ip}")
     out = alice(f"cellward run vmreal -- socat -T10 - TCP4:{server_ip}:8090")
     assert "peer=10.99.0.2" in out, f"the LAN saw the zone as someone else: {out}"
     server.succeed("systemctl stop n3lan")
