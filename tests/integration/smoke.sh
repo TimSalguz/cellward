@@ -737,17 +737,23 @@ echo "ok: без графики выбран unconfined (из памяти с п
 step "Пикер без графики: программе, которой контейнер не выбирали, — свой дом"
 # 2026-09-27: не основной дом (весь настоящий $HOME без песочницы), а свой.
 # Сеть — из памяти (unconfined), контейнер — свой, и запуск обязан пройти.
+# Оболочка — по store-пути: в песочнице нет ни /usr, ни /bin. Признак своего
+# дома — маркер в настоящем, которого там не видно (путь тот же, дом — нет).
 NEWKEY="${PICKKEY}-new"
 printf '%s' unconfined > "$STATE/.last/$NEWKEY"
+: > "$FSMARKER"
 newout=$(env -u WAYLAND_DISPLAY -u DISPLAY -u VPN_ZONE_ASK -u VPN_ZONE_PROFILE \
   -u VPN_ZONE_CURRENT -u VPN_ZONE_DELEGATED VPN_ZONE_TOOLS="$WORK/pick-tools.json" \
   "$PICK_BIN" --label "Новая программа" --id "$NEWKEY" \
-  -- sh -c 'echo В-СВОЁМ-ДОМЕ; echo "$HOME"' 2>"$WORK/pick-new.err") \
+  -- "$FSSH" -c '[ -e "$HOME/vpn-smoke-fs-marker" ] && echo LEAK; echo В-СВОЁМ-ДОМЕ' \
+  2>"$WORK/pick-new.err") \
   || fail "новая программа без графики не запустилась: $(cat "$WORK/pick-new.err")"
+rm -f "$FSMARKER"
 echo "${newout:-<пусто>}"
 echo "$newout" | grep -qx 'В-СВОЁМ-ДОМЕ' || fail "команда не запустилась: $newout"
-[ "$(echo "$newout" | tail -1)" != "$HOME" ] \
-  || fail "новая программа получила настоящий \$HOME: $newout"
+if echo "$newout" | grep -qx 'LEAK'; then
+  fail "новая программа видит настоящий дом"
+fi
 echo "ok: новая программа — в своём доме, не в настоящем"
 
 # --- 6г. Доверенный сертификат — только в своём контейнере -----------------
