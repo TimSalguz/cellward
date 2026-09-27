@@ -249,6 +249,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A sandbox reaches no abstract socket of the outside** (bug hunt
+  2026-09-27). Abstract Unix sockets go by name in the network namespace,
+  not by path: a sandbox in the host's network reached the host's X server
+  by `@/tmp/.X11-unix/X0`, whatever its `/tmp` held — and the refusal of
+  host X11 is a sandbox's invariant. bwrap now starts under a Landlock
+  scope (`LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET`): the sandbox connects to
+  the abstract sockets made inside it, and to none of the outside. Linux
+  6.12 or later; before, fs-sandbox says it cannot.
 - **A launch's own X server is its own** (bug hunt 2026-09-27). An X
   server takes no password from its clients: whoever reaches it sees
   everything its clients show and type. The satellite `x11-run` starts for

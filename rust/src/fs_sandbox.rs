@@ -1527,6 +1527,26 @@ pub fn run(args: Args) -> u8 {
 
     let mut command = Command::new(&args.tools.bwrap);
     command.args(bwrap_args(&layout, &cmd));
+    // No abstract Unix socket of the outside for the sandbox (review
+    // 2026-09-27): those go by name in the network namespace, not by path,
+    // and a sandbox in the host's network reached the host's X server by
+    // `@/tmp/.X11-unix/X0` — the refusal of host X11 is a sandbox's
+    // invariant. Its own, made inside (its satellite), it reaches. Where the
+    // kernel cannot (before Linux 6.12), said so.
+    let scope = crate::sys::abstract_socket_scope();
+    match &scope {
+        Some(fd) => {
+            let fd = fd.as_raw_fd();
+            // SAFETY: between fork and exec: prctl and a system call only.
+            unsafe {
+                command.pre_exec(move || crate::sys::enter_scope(fd));
+            }
+        }
+        None => eprintln!(
+            "fs-sandbox: this kernel cannot keep the sandbox off the abstract sockets of the \
+             outside (Landlock scopes, Linux 6.12) — in the host's network it reaches them"
+        ),
+    }
     if let Some(file) = &program {
         let raw = file.as_raw_fd();
         // SAFETY: the closure runs between fork and exec in the child. It calls

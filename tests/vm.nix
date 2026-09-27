@@ -907,6 +907,21 @@ let
           in_container("vmkind", "direct", "grep -q p $HOME/kind-probe")
           # The old words name the same container; two at once is a refusal.
           alice("cellward run direct --sandbox vmkind -- sh -c 'grep -q p $HOME/kind-probe'")
+          # A sandbox in the host's network reaches no abstract socket of the
+          # outside — the host's X server listens there (review 2026-09-27;
+          # Landlock scopes, Linux 6.12).
+          release = machine.succeed("uname -r").strip()
+          if tuple(int(x) for x in release.split("-")[0].split(".")[:2]) >= (6, 12):
+              alice("systemd-run --user --unit=vmabstract socat ABSTRACT-LISTEN:vz-outside,fork OPEN:/dev/null")
+              machine.wait_until_succeeds("grep -q '@vz-outside' /proc/net/unix")
+              alice("socat -u OPEN:/dev/null ABSTRACT-CONNECT:vz-outside")
+              alice(
+                  "sh -c '! cellward run direct --sandbox vmkind -- "
+                  "socat -u OPEN:/dev/null ABSTRACT-CONNECT:vz-outside'"
+              )
+              alice("systemctl --user stop vmabstract")
+          else:
+              print(f"kernel {release}: no Landlock scopes, the abstract socket check is skipped")
           alice("sh -c '! cellward run direct --profile vmlayer --sandbox vmkind -- true'")
           alice("sh -c '! cellward container create main'")
           out = alice("cellward container show vmmain")

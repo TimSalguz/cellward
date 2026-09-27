@@ -1104,6 +1104,65 @@ pub fn output_by(
     })
 }
 
+/// A Landlock ruleset that restricts nothing but connecting to the abstract
+/// Unix sockets of processes outside the domain it makes (`scoped`,
+/// `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET`, Landlock ABI 6, Linux 6.12).
+/// `None` on a kernel without it.
+pub fn abstract_socket_scope() -> Option<OwnedFd> {
+    #[repr(C)]
+    struct RulesetAttr {
+        handled_access_fs: u64,
+        handled_access_net: u64,
+        scoped: u64,
+    }
+    const CREATE_RULESET_VERSION: u32 = 1;
+    const SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1;
+    // SAFETY: the version query takes no attribute and no size.
+    let abi = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<RulesetAttr>(),
+            0usize,
+            CREATE_RULESET_VERSION,
+        )
+    };
+    if abi < 6 {
+        return None;
+    }
+    let attr = RulesetAttr {
+        handled_access_fs: 0,
+        handled_access_net: 0,
+        scoped: SCOPE_ABSTRACT_UNIX_SOCKET,
+    };
+    // SAFETY: an attribute of the size given, alive for the call.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &attr as *const RulesetAttr,
+            std::mem::size_of::<RulesetAttr>(),
+            0u32,
+        )
+    };
+    let fd = i32::try_from(fd).ok().filter(|fd| *fd >= 0)?;
+    // SAFETY: just returned to us, and nobody else's.
+    Some(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Put the calling process under the ruleset `fd` ([`abstract_socket_scope`]),
+/// with no new privileges, as Landlock requires. For a child between fork
+/// and exec: system calls only.
+pub fn enter_scope(fd: RawFd) -> io::Result<()> {
+    // SAFETY: prctl and a system call on a descriptor, no pointers.
+    unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+            || libc::syscall(libc::SYS_landlock_restrict_self, fd, 0u32) != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 /// Wait, as long as it takes, for the process of a pidfd to exit.
 pub fn pidfd_wait_end(fd: &OwnedFd) {
     use std::os::fd::AsRawFd;
