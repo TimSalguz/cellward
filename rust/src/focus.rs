@@ -868,7 +868,16 @@ pub fn menu(tools: &Tools) -> u8 {
     let menu = crate::window::Menu {
         title: label.clone(),
         notes: vec![describe(&tools.state, &window, launch.as_ref())],
-        actions: menu_entries(&label, launch.as_ref(), &pin),
+        // Not offered for a system zone's window: see "kill-zone" below.
+        actions: menu_entries(&label, launch.as_ref(), &pin)
+            .into_iter()
+            .filter(|(tag, _, _)| {
+                tag != "kill-zone"
+                    || !launch
+                        .as_ref()
+                        .is_some_and(|l| crate::system::run_dir(&l.zone).exists())
+            })
+            .collect(),
         ..Default::default()
     };
     let Some(choice) = ask_menu(tools, &menu) else {
@@ -971,15 +980,31 @@ pub fn menu(tools: &Tools) -> u8 {
         }
         "kill-zone" => {
             let Some(l) = &launch else { return 0 };
+            // A system zone goes by its bare name too, and is no user's to
+            // cut: `kill` knows user zones only, and would have cut one of
+            // the same name, or nothing at all, without a word (review
+            // 2026-09-27).
+            if crate::system::run_dir(&l.zone).exists() {
+                notify(
+                    &label,
+                    &format!("{} — системная зона: оборвать её отсюда нельзя", l.zone),
+                );
+                return 1;
+            }
             if !confirm(format!(
                 "Оборвать сеть {}? Все её программы сразу останутся без сети, зона опустится.",
                 l.zone
             )) {
                 return 0;
             }
-            let _ = Command::new(&tools.runner)
+            let done = Command::new(&tools.runner)
                 .args(["kill", l.zone.as_str()])
                 .status();
+            if !done.as_ref().is_ok_and(|s| s.success()) {
+                let why = done.map_or_else(|e| e.to_string(), |s| s.to_string());
+                notify(&label, &format!("Сеть {} не оборвана ({why})", l.zone));
+                return 1;
+            }
         }
         other => eprintln!("cellward window-menu: неизвестный выбор {other}"),
     }

@@ -2006,6 +2006,10 @@ pub fn set_path(
     until: Option<u64>,
 ) -> Result<PathBuf, String> {
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    // One line a grant: a line break would write two.
+    if path.contains(['\n', '\r']) {
+        return Err("в пути перевод строки".to_owned());
+    }
     let value = expand_home(&tools.home, path);
     // The main home is the real one: there is nothing to grant it.
     if grant && container.home == Home::Main {

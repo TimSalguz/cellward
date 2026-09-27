@@ -250,6 +250,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Fixed
 - **Smaller holes of the same night** (bug hunt 2026-09-27):
+  - the window menu's "cut the network" is not offered for a system
+    zone's window (`kill` knows user zones only, and would cut one of the
+    same name, or nothing, without a word), and says so when it fails;
+  - a grant's path with a line break is refused;
   - a launcher's `Exec` with the link as an interpreter's code (`perl -e`,
     `python -c`, `node -e`…), after a shell option's value (`bash -o
     pipefail -c %u`), or inside a word with quotes or brackets around it,
