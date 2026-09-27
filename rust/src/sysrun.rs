@@ -1824,10 +1824,62 @@ fn seal_mounts(launch: &Launch) -> Result<(), String> {
     }
     // The user zones' state and the project's settings, as in a user zone
     // (`zone::hide_project_state`): the command has the user's home, and from
-    // there could rewrite which namespace the host takes for which zone.
+    // there could rewrite which namespace the host takes for which zone. And
+    // the containers' data, as a user zone covers them from its programs
+    // (`zone::hide_container_storage`): each is an identity of its own, not
+    // this command's. Looked up as the user: this service may not pass
+    // another's home (no DAC capability), and a home of 0700 would have
+    // looked like one with nothing to cover.
     let home = &launch.user.home;
+    let _as_user = UserLookups::enter(&launch.user)?;
     zone::seal_project_state(&home.join(".local/state/vpn-zones"), home, &[])?;
+    for dir in crate::home_layer::STORAGE {
+        let dir = home.join(dir);
+        if zone::dir_there(&dir)? {
+            sys::mount(
+                OsStr::new("tmpfs"),
+                &dir,
+                "tmpfs",
+                libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                "mode=0700,size=16k",
+            )
+            .map_err(|e| format!("cannot cover {}: {e}", dir.display()))?;
+        }
+    }
     Ok(())
+}
+
+/// While it lives, the paths this process looks up are looked up as the
+/// user's (the filesystem uid and gid): what the user may reach, and not
+/// less. The mounts are still this service's to make — `CAP_SYS_ADMIN` is
+/// not one of those a filesystem uid takes away.
+struct UserLookups;
+
+impl UserLookups {
+    fn enter(user: &User) -> Result<Self, String> {
+        // SAFETY: setfs*id(2) take an id and return the previous one; asked
+        // with -1, the current one, unchanged.
+        let now = unsafe {
+            libc::setfsgid(user.gid);
+            libc::setfsuid(user.uid);
+            (libc::setfsuid(u32::MAX), libc::setfsgid(u32::MAX))
+        };
+        let guard = Self;
+        if now != (user.uid as i32, user.gid as i32) {
+            return Err("cannot look at the home as its owner".to_owned());
+        }
+        Ok(guard)
+    }
+}
+
+impl Drop for UserLookups {
+    fn drop(&mut self) {
+        // SAFETY: back to root's, the ids this process has until `drop_to`.
+        unsafe {
+            libc::setfsuid(0);
+            libc::setfsgid(0);
+        }
+    }
 }
 
 /// Bind `source` over wherever `link`'s chain of symlinks ends, creating the

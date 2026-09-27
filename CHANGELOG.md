@@ -249,6 +249,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A system zone's command sees neither the user zones' state nor the
+  containers' data** (bug hunt 2026-09-27). `vpn-zone-sys` covers the
+  project's state and makes its settings read-only, as a user zone does —
+  but it looked at the home as a service with no capability to pass a
+  home of 0700 (NixOS's default), found nothing, and covered nothing: the
+  command, once the user's, read every zone's key and could rewrite the
+  settings. The paths are now looked up as the user's, and a path that
+  cannot be looked at stops the command instead of passing for absent.
+  The containers' storage is covered too.
 - **A zone's words stay words** (a night's hunt, 2026-09-27). A request
   for another network names it by a zone's name only: a network name with
   a line break could have written a rule of its own into `broker-always`
