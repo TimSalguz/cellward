@@ -245,9 +245,13 @@ rzpid = machine.succeed(f"cat {STATE}/vmreal/zone.pid").strip()
 # nobody holds once the zone is killed, and the host's "port unreachable"
 # lands in the leak capture (red once in CI). Its keepalive sent, neither
 # side owes the other anything: waited for as that, by the tunnel's count
-# of what it sent.
+# of what it sent. The zone's tunnel is an amneziawg link, which `wg` does
+# not speak to (red once in CI): the zone's own `awg`, from its unit.
+AWG = re.search(r"--awg (\S+)", alice("systemctl --user cat vpn-zone@vmreal.service")).group(1)
+
+
 def tunnel_sent():
-    return int(in_zone_root(rzpid, "wg show awg0 transfer").split()[2])
+    return int(in_zone_root(rzpid, f"{AWG} show awg0 transfer").split()[2])
 
 
 sent = tunnel_sent()
