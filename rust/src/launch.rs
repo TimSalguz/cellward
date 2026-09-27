@@ -731,8 +731,11 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         .is_some_and(|c| c.x11.value)
         || (zone != UNCONFINED
             && crate::x11::zone_setting(&tools.state, &tools.config, &zone_name).0);
-    if container_x11 && zone != UNCONFINED && selection.sandbox == Sandbox::None && !cmd.is_empty()
-    {
+    let own_x11 = container_x11
+        && zone != UNCONFINED
+        && selection.sandbox == Sandbox::None
+        && !cmd.is_empty();
+    if own_x11 {
         let mut wrapped: Vec<OsString> = vec![
             tools.core.clone().into(),
             "x11-run".into(),
@@ -1174,6 +1177,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 (&selection.sandbox, &selection.container),
                 (Sandbox::None, Container::MainNamed(_))
             ),
+            own_x11,
             camera,
             devices: &device_args,
             storage: storage_dir.as_deref(),
@@ -1287,6 +1291,9 @@ pub struct Entry<'a> {
     /// then not taken for a program of the zone with no container, whose
     /// settings are not its container's (`crate::origin`).
     pub own_mounts: bool,
+    /// An X server of the launch's own (`x11-run`): its sockets' directory
+    /// too (`profile-run --own-x11`).
+    pub own_x11: bool,
     /// The host's cameras let this launch in a zone: bound into its own
     /// mount namespace (`profile-run --camera`).
     pub camera: bool,
@@ -1353,7 +1360,12 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
             ]);
             exec.push(pid.to_string().into());
             exec.push("--".into());
-            if container || entry.own_mounts || entry.camera || !entry.devices.is_empty() {
+            if container
+                || entry.own_mounts
+                || entry.own_x11
+                || entry.camera
+                || !entry.devices.is_empty()
+            {
                 // A slave of the zone's: what the zone binds into its
                 // runtime directory later reaches this launch too (the one
                 // shared mount of the zone, `zone::seal_runtime`), and
@@ -1388,6 +1400,9 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
         exec.push(entry.cwd.into());
         if entry.camera && matches!(entry.network, Network::Zone(_)) {
             exec.push("--camera".into());
+        }
+        if entry.own_x11 && matches!(entry.network, Network::Zone(_)) {
+            exec.push("--own-x11".into());
         }
         if matches!(entry.network, Network::Zone(_)) {
             for device in entry.devices {
@@ -2428,6 +2443,7 @@ mod tests {
             shares: &[],
             storage: None,
             own_mounts: false,
+            own_x11: false,
             camera: false,
             devices: &[],
         }
@@ -2449,6 +2465,20 @@ mod tests {
         let mut e = entry(Network::Unconfined, Path::new(""), false);
         e.own_mounts = true;
         assert_eq!(entry_argv(&e, argv(&["dolphin"])), argv(&["dolphin"]));
+    }
+
+    /// An X server of the launch's own in a zone: its sockets' directory too,
+    /// in a mount namespace of the launch's own (`x11-run`,
+    /// `profile-run --own-x11`) — the zone's is every program of the zone's.
+    #[test]
+    fn an_x_server_of_its_own_has_a_directory_of_its_own() {
+        let mut e = entry(Network::Zone(42), Path::new(""), false);
+        e.own_x11 = true;
+        let line = entry_argv(&e, argv(&["steam"]));
+        let at = |w: &str| line.iter().position(|a| a == w).unwrap();
+        assert!(at("/t/unshare") < at("profile-run"), "{line:?}");
+        assert!(at("profile-run") < at("--own-x11"), "{line:?}");
+        assert!(at("--own-x11") < at("steam"), "{line:?}");
     }
 
     /// A sandbox into a zone: the zone covers container storage, and the

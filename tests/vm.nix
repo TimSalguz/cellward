@@ -483,6 +483,8 @@ let
           pkgs.glib
           # A real compositor for the restricted-Wayland check, headless.
           pkgs.sway
+          # An X client for a launch's own X server (x11-run).
+          (pkgs.xdpyinfo or pkgs.xorg.xdpyinfo)
           pkgs.wayland-utils
           pkgs.dnsutils
           pkgs.tcpdump
@@ -1738,6 +1740,28 @@ let
           zp = machine.succeed(f"cat {STATE}/vmsmoke/zone.pid").strip()
           in_zone(zp, "test ! -e /run/user/1000/vpn-zones/wl-up")
           in_zone(zp, "sh -c 'ls /run/user/1000/vpn-zones/wayland/vmsmoke | grep -q wl-sandbox-'")
+
+          # An X server of the launch's own (docs/HERMETICITY.md §7, A; review
+          # 2026-09-27): the satellite serves a socket x11-run bound itself —
+          # in a /tmp/.X11-unix of the launch alone, and none in the abstract
+          # namespace, which the zone's network namespace shows every program
+          # of the zone. No clock: the program starts once the server answers.
+          alice("cellward x11 vmsmoke on")
+          alice(
+              f"systemd-run --user --unit=vmxhold --setenv=WAYLAND_DISPLAY={display} "
+              "cellward run vmsmoke -- sh -c "
+              "'xdpyinfo > $HOME/vmx-info 2>&1; echo $DISPLAY > $HOME/vmx-display; exec sleep 300'"
+          )
+          machine.wait_until_succeeds("test -s /home/alice/vmx-display", timeout=120)
+          info = machine.succeed("cat /home/alice/vmx-info")
+          assert "name of display" in info, f"no X server answered:\n{info}"
+          xd = machine.succeed("cat /home/alice/vmx-display").strip()
+          assert xd.startswith(":"), xd
+          in_zone(zp, f"test ! -e /tmp/.X11-unix/X{xd[1:]}")
+          in_zone(zp, f"sh -c '! grep -q @/tmp/.X11-unix/X{xd[1:]} /proc/net/unix'")
+          alice("systemctl --user stop vmxhold || true")
+          alice("cellward x11 vmsmoke off")
+          alice("rm -f ~/vmx-info ~/vmx-display")
           # The zone's directory of sockets is read-only in the zone: a
           # program cannot take another launch's socket's place, nor put one
           # of its own there (review 2026-09-25).

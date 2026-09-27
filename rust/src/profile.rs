@@ -95,6 +95,9 @@ pub struct Args {
     pub certutil: Option<PathBuf>,
     /// `--bwrap PATH`, from the manifest: the box certutil works in.
     pub bwrap: Option<PathBuf>,
+    /// `--own-x11`: a `/tmp/.X11-unix` of this launch's own, for the X
+    /// server `x11-run` starts in it.
+    pub own_x11: bool,
     /// `--storage PATH`: the container's storage directory, which the zone
     /// covers — given back at `PATH` from the zone's keep
     /// (`home_layer::KEPT_STORAGE`), in this launch's mount namespace only,
@@ -168,6 +171,7 @@ impl Args {
         let mut share = Vec::new();
         let mut storage = None;
         let mut camera = false;
+        let mut own_x11 = false;
         let mut devices = Vec::new();
         while let Some(flag) = positional.first() {
             if flag == "--device" {
@@ -184,6 +188,11 @@ impl Args {
             }
             if flag == "--camera" {
                 camera = true;
+                positional = &positional[1..];
+                continue;
+            }
+            if flag == "--own-x11" {
+                own_x11 = true;
                 positional = &positional[1..];
                 continue;
             }
@@ -239,6 +248,7 @@ impl Args {
             nss_home,
             certutil,
             bwrap,
+            own_x11,
             storage,
             camera,
             devices,
@@ -762,6 +772,25 @@ pub fn run(args: Args) -> u8 {
     if let Some(path) = &args.storage {
         if let Err(e) = give_storage_back(path) {
             eprintln!("profile-run: {e} — the program is not started");
+            return EXIT_NOT_STARTED;
+        }
+    }
+    // The X server's sockets of this launch's own (`crate::x11`): the zone's
+    // `/tmp/.X11-unix` is every program of the zone's, and an X server shows
+    // whoever reaches it everything its clients show and type. Fatal: that
+    // server would be in all their reach.
+    if args.own_x11 {
+        if let Err(e) = crate::sys::mount(
+            OsStr::new("tmpfs"),
+            Path::new(crate::x11::X11_DIR),
+            "tmpfs",
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            "mode=1777,size=64k",
+        ) {
+            eprintln!(
+                "profile-run: no {} of the launch's own ({e}) — the program is not started",
+                crate::x11::X11_DIR
+            );
             return EXIT_NOT_STARTED;
         }
     }

@@ -249,6 +249,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A launch's own X server is its own** (bug hunt 2026-09-27). An X
+  server takes no password from its clients: whoever reaches it sees
+  everything its clients show and type. The satellite `x11-run` starts for
+  a container with the `x11` permission (or in a zone with `x11 on`) put
+  its socket in the zone's `/tmp/.X11-unix`, and one in the abstract
+  namespace, which the zone's network namespace shows every program of
+  the zone: any other container's program could connect. And x11-run
+  waited for a socket of the display's name to appear — one a program of
+  the zone could have made first. Now x11-run binds the display's socket
+  itself, in a `/tmp/.X11-unix` of the launch's own (`profile-run
+  --own-x11`), and hands it to the satellite (`-listenfd`), which then
+  opens no socket of its own; the program starts once the server answers
+  a connection of x11-run's, with no clock, as before.
 - **A grant taken away is taken from programs that left their launch**
   (bug hunt 2026-09-27). Revoking a container's grant detached it in the
   mount namespaces of its launches' processes and their descendants: a

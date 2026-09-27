@@ -1316,7 +1316,7 @@ fn zone_x11(tools: &Tools, args: &[OsString]) -> u8 {
         return 1;
     };
     let dir = tools.state.join(name);
-    if !dir.is_dir() {
+    if !safe_zone_name(name) || !dir.is_dir() {
         eprintln!("зоны {} нет", name.to_string_lossy());
         return 1;
     }

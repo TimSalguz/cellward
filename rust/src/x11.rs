@@ -12,9 +12,20 @@
 //! pid namespace, so this one supervises: it starts the satellite (which is
 //! told to die with it), starts the program, waits for it, and takes the
 //! satellite down.
+//!
+//! The display's socket is this process's own (review 2026-09-27): bound
+//! here, in the launch's own `/tmp/.X11-unix` (`profile-run --own-x11`), and
+//! handed to the satellite (`-listenfd`) — a name no other program of the
+//! zone took first, where no other can reach it, and no socket in the
+//! abstract namespace, which the zone's network namespace shows every
+//! program of the zone. An X server takes no password from its clients:
+//! whoever reaches it sees everything its clients show and type.
 
 use std::ffi::OsString;
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -84,32 +95,68 @@ impl Args {
     }
 }
 
-/// The first display number with neither a socket nor a lock file.
-pub fn free_display(dir: &Path, lock_dir: &Path) -> Option<u32> {
-    (FIRST..=LAST).find(|n| {
-        std::fs::symlink_metadata(dir.join(format!("X{n}"))).is_err()
-            && std::fs::symlink_metadata(lock_dir.join(format!(".X{n}-lock"))).is_err()
+/// A display of this process's own: the first number with no lock file
+/// whose socket this process could bind — a name nobody holds, bound before
+/// anyone else could take it. The socket, listening.
+pub fn own_display(dir: &Path, lock_dir: &Path) -> Option<(u32, UnixListener)> {
+    (FIRST..=LAST).find_map(|n| {
+        if std::fs::symlink_metadata(lock_dir.join(format!(".X{n}-lock"))).is_ok() {
+            return None;
+        }
+        UnixListener::bind(dir.join(format!("X{n}")))
+            .ok()
+            .map(|listener| (n, listener))
     })
+}
+
+/// Whether an X server answers on `socket`: a connection of our own, and
+/// the first byte of the server's answer to its setup. Waited for as long
+/// as it takes — no clock: on a loaded machine the server comes up late,
+/// and a deadline would start the program without X exactly there. A
+/// server that ends first ends the wait: the listening socket goes with it,
+/// and the connection waiting in it is cut.
+pub fn x_answers(socket: &Path) -> bool {
+    let Ok(mut stream) = UnixStream::connect(socket) else {
+        return false;
+    };
+    // Little-endian, protocol 11.0, no authorisation.
+    let setup = [b'l', 0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    if stream.write_all(&setup).is_err() {
+        return false;
+    }
+    let mut answer = [0u8; 1];
+    matches!(stream.read(&mut answer), Ok(1))
 }
 
 /// Start the satellite, run the program on it, take the satellite down.
 pub fn run(args: Args) -> u8 {
     let dir = Path::new(X11_DIR);
-    let Some(number) = free_display(dir, Path::new("/tmp")) else {
+    let Some((number, listener)) = own_display(dir, Path::new("/tmp")) else {
         eprintln!("x11-run: no free X display — the program starts without X");
         return exec(&args.cmd);
     };
     let display = format!(":{number}");
+    let socket = dir.join(format!("X{number}"));
+    let gone = || {
+        let _ = std::fs::remove_file(&socket);
+    };
+    let fd = listener.as_raw_fd();
     let mut satellite = Command::new(&args.xwayland);
     satellite
         .arg(&display)
+        .arg("-listenfd")
+        .arg(fd.to_string())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // SAFETY: prctl in the child before exec, async-signal-safe and pointer-free:
-    // the satellite dies with this process, whatever kills it.
+    // SAFETY: prctl and fcntl in the child before exec, async-signal-safe:
+    // the satellite dies with this process, whatever kills it, and gets the
+    // display's socket.
     unsafe {
-        satellite.pre_exec(|| {
+        satellite.pre_exec(move || {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }
@@ -120,20 +167,17 @@ pub fn run(args: Args) -> u8 {
                 "x11-run: cannot start {} ({e}) — the program starts without X",
                 args.xwayland.display()
             );
+            gone();
             return exec(&args.cmd);
         }
     };
-    // Waited for as long as it takes, or until the satellite ends without
-    // it: no clock — on a loaded machine the server comes up late, and a
-    // deadline would start the program without X exactly there.
-    let socket = dir.join(format!("X{number}"));
-    let up = crate::sys::wait_for_child_entry(&socket, &mut satellite, |p| {
-        std::fs::symlink_metadata(p).is_ok()
-    });
-    if !up {
-        eprintln!("x11-run: the X server ended before its socket was there — the program starts without it");
+    // The satellite's copy is the only one: if it ends, the socket closes.
+    drop(listener);
+    if !x_answers(&socket) {
+        eprintln!("x11-run: the X server ended before it answered — the program starts without it");
         let _ = satellite.kill();
         let _ = satellite.wait();
+        gone();
         return exec(&args.cmd);
     }
 
@@ -144,6 +188,7 @@ pub fn run(args: Args) -> u8 {
         .status();
     let _ = satellite.kill();
     let _ = satellite.wait();
+    gone();
     match status {
         Ok(status) => {
             use std::os::unix::process::ExitStatusExt;
@@ -188,10 +233,35 @@ mod tests {
         let base = std::env::temp_dir().join(format!("vpn-zone-x11-{}", std::process::id()));
         let sockets = base.join("sockets");
         std::fs::create_dir_all(&sockets).unwrap();
-        assert_eq!(free_display(&sockets, &base), Some(100));
-        std::fs::write(sockets.join("X100"), "").unwrap();
-        std::fs::write(base.join(".X101-lock"), "").unwrap();
-        assert_eq!(free_display(&sockets, &base), Some(102));
+        let (first, _held) = own_display(&sockets, &base).unwrap();
+        assert_eq!(first, 100);
+        // Taken: by a socket (ours, still held, or anybody's file), or a lock.
+        std::fs::write(sockets.join("X101"), "").unwrap();
+        std::fs::write(base.join(".X102-lock"), "").unwrap();
+        assert_eq!(own_display(&sockets, &base).unwrap().0, 103);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// No answer from a socket nobody serves: the wait ends when the
+    /// listening socket does, not by a clock.
+    #[test]
+    fn a_server_that_ends_first_ends_the_wait() {
+        let base = std::env::temp_dir().join(format!("vpn-zone-x11-gone-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let socket = base.join("X100");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let closer = std::thread::spawn(move || drop(listener));
+        closer.join().unwrap();
+        assert!(!x_answers(&socket));
+        let listener = UnixListener::bind(base.join("X101")).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut setup = [0u8; 12];
+            conn.read_exact(&mut setup).unwrap();
+            conn.write_all(&[1]).unwrap();
+        });
+        assert!(x_answers(&base.join("X101")));
+        server.join().unwrap();
         let _ = std::fs::remove_dir_all(&base);
     }
 }
