@@ -766,7 +766,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             eprintln!(
                 "cellward: {} в сети без ограничений — настройки контейнера {name} (камера, \
                  микрофон, устройства, X) здесь не действуют: у программы всё, что у хоста",
-                label
+                label.as_deref().unwrap_or(&name)
             );
         }
     }

@@ -6763,6 +6763,8 @@ fn hide_project_state(zone: &Zone) -> Result<Zone, String> {
         nix_daemon: zone.nix_daemon,
         host_files_writable: zone.host_files_writable,
         audio_manager: zone.audio_manager,
+        protect: zone.protect.clone(),
+        given: zone.given.clone(),
         instance: zone.instance.clone(),
     })
 }
