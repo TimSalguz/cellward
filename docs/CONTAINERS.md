@@ -707,7 +707,7 @@ and `cellward container show <name> --json` print subsets of the same schema.
   links, each `{value, source}`. Set with `cellward container set|devices|
   grant main …` or `programs.cellward.main.*`; a setting it has no word of
   is still its network's, as before, until 2b.
-- **`settings.protected`** (added 2026-09-29, `docs/LEAK-MODEL.md` §32):
+- **`defaults.protected`** (added 2026-09-29, `docs/LEAK-MODEL.md` §32):
   what the person protects in the real home besides the host's own places
   (`cellward protect`, `programs.cellward.protect`), each `{value, source}`.
 - **`networks[].tolerates`** (added 2026-09-28, step 1 of the permission

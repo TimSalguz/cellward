@@ -693,7 +693,7 @@ programs.cellward = {
   ссылки, каждое `{value, source}`. Задаётся через `cellward container
   set|devices|grant main …` или `programs.cellward.main.*`; где своего
   слова нет, пока действует слово сети, как раньше (до шага 2б).
-- **`settings.protected`** (добавлено 2026-09-29, `docs/LEAK-MODEL.md`
+- **`defaults.protected`** (добавлено 2026-09-29, `docs/LEAK-MODEL.md`
   §32): что человек защищает в настоящем доме сверх мест, которые исполняет
   хост (`cellward protect`, `programs.cellward.protect`), каждое `{value,
   source}`.
