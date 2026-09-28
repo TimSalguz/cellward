@@ -495,9 +495,19 @@ mod tests {
             complete(&["vpn-zone", "container", "create", "x", "--home", ""], 6),
             ["private", "layer", "main"]
         );
+        // Since stage 5 of the container design (2026-09-28) a container
+        // has its own hermeticity and host files too: they complete with
+        // `home` (it was `home` alone).
         assert_eq!(
             complete(&["vpn-zone", "container", "set", "work", "h"], 5),
-            ["home"]
+            ["home", "hermetic", "host-files"]
+        );
+        assert_eq!(
+            complete(
+                &["vpn-zone", "container", "set", "work", "host-files", ""],
+                6
+            ),
+            ["default", "read-only", "writable"]
         );
         assert_eq!(complete(&["vpn-zone", "trust", "r"], 3), ["rm", "reset"]);
         assert_eq!(
