@@ -722,6 +722,16 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             return 1;
         }
     }
+    // A locked zone takes a hermetic instance only (review 2026-09-28,
+    // `lock_refusal`): before anything is started — in a dry run too —,
+    // and again once the instance is up (`up_instance`).
+    if let Some(why) = instance_id
+        .as_deref()
+        .and_then(|id| lock_refusal(tools, id, &zone_name))
+    {
+        refuse(tools, &why);
+        return 1;
+    }
 
     // --- 3. THE WRAPPERS ---
     // The app-id is worked out BEFORE anything is prepended to the command:
@@ -1636,6 +1646,111 @@ pub fn no_bridge_refusal(state: &Path, zone: &OsStr) -> Option<String> {
     ))
 }
 
+/// Instance `id`, for a person: its container's name, the id itself for
+/// the main home's and a throwaway's.
+fn instance_shown(id: &str) -> String {
+    crate::instance::container_of(id).unwrap_or(id).to_owned()
+}
+
+/// Whether instance `id` came up hermetic: its note says so
+/// (`instance::SETTINGS`); a note that does not say, or none, is not.
+fn came_up_hermetic(state: &Path, id: &str) -> bool {
+    let note = fs::read_to_string(crate::instance::dir(state, id).join(crate::instance::SETTINGS))
+        .unwrap_or_default();
+    crate::hermetic::applied_in(&note, "hermetic") == Some(true)
+}
+
+/// The network instance `id` runs in now, where it is up.
+fn instance_network(state: &Path, id: &str) -> Option<String> {
+    crate::instance::up(state, id)?;
+    fs::read_to_string(crate::instance::dir(state, id).join(crate::instance::NETWORK))
+        .ok()
+        .map(|text| text.trim().to_owned())
+}
+
+/// Why instance `id` may not take a launch into `zone`, which the person
+/// locked (`cellward lock`), if it may not (review 2026-09-28). The lock is
+/// kept by the broker, the one door out of a hermetic space; an instance
+/// that is not hermetic has `systemd --user` in reach, and a program there
+/// starts anything anywhere without asking — the lock would say what it
+/// does not hold. Judged by what the instance came up with where it runs in
+/// that zone now, by what it would come up with there otherwise.
+pub fn lock_refusal(tools: &Tools, id: &str, zone: &str) -> Option<String> {
+    let dir = tools.state.join(zone);
+    if zone == UNCONFINED || !dir.join(NO_ESCAPE).exists() {
+        return None;
+    }
+    let running = instance_network(&tools.state, id).as_deref() == Some(zone);
+    let hermetic = if running {
+        came_up_hermetic(&tools.state, id)
+    } else {
+        crate::hermetic::value_for(
+            &dir,
+            &tools.config,
+            zone,
+            &crate::instance::who_of(id),
+            "hermetic",
+        )
+        .0
+    };
+    if hermetic {
+        return None;
+    }
+    let shown = instance_shown(id);
+    let how = match crate::instance::who_of(id) {
+        crate::origin::Who::Container(name) => {
+            format!("включи его герметичность: cellward container set {name} hermetic on")
+        }
+        _ => format!("включи герметичность сети: cellward hermetic {zone} on"),
+    };
+    let restart = if running {
+        format!(
+            "; работающий экземпляр держит свою, пока его программы не закрыты: cellward \
+             container stop {id}"
+        )
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "зона {zone} заперта (cellward lock), а контейнер «{shown}» в ней не герметичен: замок \
+         держится только в герметичном — с systemd --user программа запустила бы что угодно \
+         мимо него. Отопри зону (cellward unlock {zone}) или {how}{restart}"
+    ))
+}
+
+/// What a locked zone's lock does not hold (review 2026-09-28,
+/// [`lock_refusal`]): the instances running in `zone` that came up not
+/// hermetic, then the containers bound to it that would come up so there —
+/// each by name, once, with whether it runs. Its own programs launched
+/// there are refused; what runs is named by `cellward lock`, `status`
+/// (`networks[].lock_not_held_by`) and `doctor` (`lock`).
+pub fn lock_not_held_by(tools: &Tools, zone: &str) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    if zone == UNCONFINED {
+        return out;
+    }
+    for i in crate::instance::running(&tools.state) {
+        if i.network == zone && !came_up_hermetic(&tools.state, &i.id) {
+            let name = instance_shown(&i.id);
+            if !out.iter().any(|(n, _)| *n == name) {
+                out.push((name, true));
+            }
+        }
+    }
+    let dir = tools.state.join(zone);
+    let bound = crate::container::Network::Named(zone.to_owned());
+    for c in crate::container::load_all(tools) {
+        if c.network.value != bound || out.iter().any(|(n, _)| *n == c.name) {
+            continue;
+        }
+        let who = crate::origin::Who::Container(c.name.clone());
+        if !crate::hermetic::value_for(&dir, &tools.config, zone, &who, "hermetic").0 {
+            out.push((c.name.clone(), false));
+        }
+    }
+    out
+}
+
 /// Every process's children, by their `PPid`, read once.
 fn process_children() -> std::collections::HashMap<i32, Vec<i32>> {
     let mut children: std::collections::HashMap<i32, Vec<i32>> = Default::default();
@@ -1768,6 +1883,11 @@ fn up_instance(tools: &Tools, id: &str, zone: &OsStr, zone_name: &str) -> Result
     let running = running_in();
     if running != zone_name {
         return Err(elsewhere(running));
+    }
+    // Once more by what it came up with (review 2026-09-28): it may have
+    // come up meanwhile, by another launch, with settings of before.
+    if let Some(why) = lock_refusal(tools, id, zone_name) {
+        return Err(why);
     }
     Ok(())
 }

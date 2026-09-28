@@ -1413,6 +1413,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   lost now and then under load.
 
 ### Changed (read before updating)
+- **The lock binds the containers: a locked zone takes a hermetic
+  instance only** (review 2026-09-28; `docs/PERMISSIONS.md` §11.9,
+  `docs/LEAK-MODEL.md` §29, `docs/THREAT-MODEL.md` L6). `cellward lock
+  <zone>` is kept by the broker, the one door out of a hermetic space, and
+  since stage 5 the spaces are the containers' instances: one that is not
+  hermetic has `systemd --user` in reach and starts anything anywhere
+  around the lock, and nothing checked it. Now a launch into a locked zone
+  (a dry run too), a live switch into it (`locked-target`) and an
+  instance's attach to it — its first, a zone's return, `cellward container
+  reattach` — are refused for an instance that came up, or would come up
+  there, not hermetic, with the way out (`cellward container set <c>
+  hermetic on`, and `cellward container stop <c>` for one that runs).
+  `cellward lock` names the containers running in the zone not hermetic and
+  those bound to it that are not; `status --json` gains
+  `networks[].lock_not_held_by` (names; `[]` all held, `null` unlocked);
+  `doctor` has a zone check `lock` (one running there not hermetic fails,
+  one bound to it warns) — what PERMISSIONS §11.9 promised. **What
+  narrows:** with a locked zone, a container that is not hermetic there
+  (its own `hermetic = false`, or none of its own under `hermetic.default =
+  false` or `cellward hermetic <zone> off`) no longer starts in it; one
+  attached before the lock stays until it is cut, and is named.
 - **A container can refuse its zone's X server: `x11` is on, off or its
   network's** (2026-09-28; `docs/HERMETICITY.md` §7 A,
   `docs/THREAT-MODEL.md` W18). A launch's X server was its container's

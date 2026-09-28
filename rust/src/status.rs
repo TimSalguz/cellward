@@ -178,7 +178,7 @@ pub fn networks(tools: &Tools) -> String {
         // `aliases`: the names it is also read by — `direct`, its name until
         // 2026-09, may still be in a configuration or in Nix.
         "{\"name\":\"unconfined\",\"kind\":\"unconfined\",\"aliases\":[\"direct\"],\"source\":\"default\",\"up\":true,\
-         \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
+         \"locked\":false,\"lock_not_held_by\":null,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
              \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\"microphone\":null,\"screencast\":null,\"audio_manager\":null,\"system_zone\":null,\"frame_color\":null,\"build\":null,\"restart_needed\":null,\"attached\":null,\"bridge\":null}"
             .to_owned(),
     ];
@@ -325,10 +325,23 @@ pub fn networks(tools: &Tools) -> String {
         } else {
             ("[]".to_owned(), "null".to_owned())
         };
+        // What its lock does not hold (review 2026-09-28,
+        // `launch::lock_not_held_by`): the containers running in it or
+        // bound to it that are not hermetic, by name; `null` unlocked.
+        let locked = dir.join(NO_ESCAPE).exists();
+        let lock_not_held_by = if locked {
+            array(
+                crate::launch::lock_not_held_by(tools, &name)
+                    .iter()
+                    .map(|(n, _)| string(n))
+                    .collect(),
+            )
+        } else {
+            "null".to_owned()
+        };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"camera\":{camera},\"microphone\":{microphone},\"screencast\":{screencast},\"audio_manager\":{audio_manager},\"system_zone\":{system_zone},\"frame_color\":{frame_color},\"build\":{build},\"restart_needed\":{restart_needed},\"attached\":{attached},\"bridge\":{bridge}}}",
-            string(&name),
-            dir.join(NO_ESCAPE).exists()
+            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{locked},\"lock_not_held_by\":{lock_not_held_by},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"camera\":{camera},\"microphone\":{microphone},\"screencast\":{screencast},\"audio_manager\":{audio_manager},\"system_zone\":{system_zone},\"frame_color\":{frame_color},\"build\":{build},\"restart_needed\":{restart_needed},\"attached\":{attached},\"bridge\":{bridge}}}",
+            string(&name)
         ));
     }
     if !offline_listed {
@@ -341,7 +354,7 @@ pub fn networks(tools: &Tools) -> String {
             crate::screencast::setting(&tools.state.join("offline"), &tools.config, "offline");
         items.push(format!(
             "{{\"name\":\"offline\",\"kind\":\"offline\",\"aliases\":[],\"source\":\"default\",\"up\":false,\
-             \"locked\":false,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
+             \"locked\":false,\"lock_not_held_by\":null,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
              \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\
              \"microphone\":{},\"screencast\":{},\"audio_manager\":null,\"system_zone\":null,\"frame_color\":{},\"build\":null,\"restart_needed\":null,\"attached\":{},\"bridge\":null}}",
             sourced_str(mic.as_str(), mic_source),

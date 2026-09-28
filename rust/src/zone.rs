@@ -3123,6 +3123,22 @@ impl Transport {
                 self.network
             )));
         }
+        // A locked zone takes a hermetic instance only (review 2026-09-28,
+        // `launch::lock_refusal`): the lock is kept by the broker, the one
+        // door of a hermetic space, and one that came up otherwise has
+        // `systemd --user` in reach. At every attach — its first, a zone's
+        // return, the person's reattach, a switch's —: it stays cut.
+        if zone_dir.join(crate::launch::NO_ESCAPE).exists() {
+            let note =
+                fs::read_to_string(self.dir.join(crate::hermetic::APPLIED)).unwrap_or_default();
+            if crate::hermetic::applied_in(&note, "hermetic") != Some(true) {
+                return Err(NoLink::Failed(format!(
+                    "zone {} is locked, and the lock holds a hermetic instance only — this one \
+                     came up not hermetic",
+                    self.network
+                )));
+            }
+        }
         let space = self
             .space_pidfd()
             .ok_or_else(|| NoLink::Failed("its space is gone".to_owned()))?;
@@ -3480,7 +3496,9 @@ impl Transport {
             ),
             Target::Unconfined | Target::Unknown => Vec::new(),
         };
-        let target_locked = matches!(target, Target::Zone { .. })
+        // `offline` locked too: the broker holds its programs to it as to
+        // a zone's (`launch::lock_refusal`).
+        let target_locked = matches!(target, Target::Offline | Target::Zone { .. })
             && self.state.join(to).join(crate::launch::NO_ESCAPE).exists();
         let facts = crate::switch::Facts {
             from_host,
