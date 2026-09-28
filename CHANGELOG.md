@@ -1407,6 +1407,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   lost now and then under load.
 
 ### Changed (read before updating)
+- **A container can refuse its zone's X server: `x11` is on, off or its
+  network's** (2026-09-28; `docs/HERMETICITY.md` §7 A,
+  `docs/THREAT-MODEL.md` W18). A launch's X server was its container's
+  `x11` OR its zone's (`zoneX11`, `cellward x11 <zone> on`), so a
+  container could not say no to what its zone gave all its programs. Now
+  the container's own word decides both ways, and only a container without
+  one takes its zone's. Nix:
+  `programs.cellward.containers.<name>.permissions.x11` is `nullOr bool`,
+  default `null` (its network's); locally `cellward container set <c> x11
+  default|on|off` (`off` is written now, `default` takes the word back).
+  `status --json`: `containers[].x11` is `{value, source}` with `value`
+  `null` for a container with no word of its own (it was `false` with
+  source `default`) — a reader takes `null` as "the network's". The
+  `zoneX11` warning now says so. **What narrows:** a container declared
+  with an explicit `permissions.x11 = false` — the option's value when not
+  set until now, which meant "none of my own" — refuses its zone's X server
+  from this update; one that needs its zone's X server drops the line
+  (`null`, the new default) or says `true`. One that never set it is
+  `null` and keeps its zone's. A local
+  setting written by `cellward container set <c> x11 off` before this
+  update was no line at all, and stays "the network's".
 - **A throwaway container comes up with the safe settings, whatever its
   network says** (review 2026-09-28; `docs/PERMISSIONS.md` §11.2,
   `docs/THREAT-MODEL.md` H8). The instance of a one-off launch

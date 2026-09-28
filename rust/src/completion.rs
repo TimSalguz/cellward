@@ -350,16 +350,13 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                     && word(2) == "set"
                     && matches!(
                         word(4),
-                        "camera" | "hermetic" | "nix-daemon" | "audio-manager"
+                        "camera" | "hermetic" | "nix-daemon" | "audio-manager" | "x11"
                     ) =>
             {
                 strs(&mut out, &["default", "on", "off"])
             }
             "container" if pos == 5 && word(2) == "set" && word(4) == "host-files" => {
                 strs(&mut out, &["default", "read-only", "writable"])
-            }
-            "container" if pos == 5 && word(2) == "set" && word(4) == "x11" => {
-                strs(&mut out, &["on", "off"])
             }
             "container" if pos == 5 && word(2) == "set" && word(4) == "focus" => {
                 strs(&mut out, &["default", "input", "notify", "ask", "allow"])
@@ -553,7 +550,7 @@ mod tests {
         );
         assert_eq!(
             complete(&["vpn-zone", "container", "set", "work", "x11", ""], 6),
-            ["on", "off"]
+            ["default", "on", "off"]
         );
         assert_eq!(
             complete(&["vpn-zone", "container", "set", "work", "f"], 5),

@@ -1857,6 +1857,45 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
         json.contains("\"x11\":{\"value\":true,\"source\":\"local\"},\"hermetic\":"),
         "{json}"
     );
+    // 2026-09-28: a container's own `off` refuses the zone's X server —
+    // it used to be the container's OR the zone's —; `default` takes its
+    // word back, and the zone's is its again.
+    let out = home.run(&["container", "set", "work", "x11", "off"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["container", "show", "work", "--json"]));
+    assert!(
+        json.contains("\"x11\":{\"value\":false,\"source\":\"local\"}"),
+        "{json}"
+    );
+    let out = home.run_with(&["run", "nl", "--profile", "work", "--", "steam"], &dry);
+    assert!(!stdout(&out).contains("x11-run"), "{}", stdout(&out));
+    let out = home.run(&["container", "set", "work", "x11", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["container", "show", "work", "--json"]));
+    assert!(
+        json.contains("\"x11\":{\"value\":null,\"source\":\"default\"}"),
+        "{json}"
+    );
+    let out = home.run_with(&["run", "nl", "--profile", "work", "--", "steam"], &dry);
+    assert!(stdout(&out).contains("x11-run"), "{}", stdout(&out));
+    // Declared in Nix: `false` refuses the zone's too, and is changed there.
+    let declared = home.root.join("config/declared/containers");
+    fs::create_dir_all(&declared).unwrap();
+    declare(&declared.join("work.conf"), "home = layer\nx11 = false\n");
+    let out = home.run_with(&["run", "nl", "--profile", "work", "--", "steam"], &dry);
+    assert!(!stdout(&out).contains("x11-run"), "{}", stdout(&out));
+    let json = stdout(&home.run(&["container", "show", "work", "--json"]));
+    assert!(
+        json.contains("\"x11\":{\"value\":false,\"source\":\"nix\"}"),
+        "{json}"
+    );
+    assert_eq!(
+        home.run(&["container", "set", "work", "x11", "on"])
+            .status
+            .code(),
+        Some(1)
+    );
+    fs::remove_file(declared.join("work.conf")).unwrap();
     // Hermetic (the prototype): a marker and its JSON.
     let out = home.run(&["hermetic", "nl", "on"]);
     assert!(out.status.success(), "{}", stderr(&out));
