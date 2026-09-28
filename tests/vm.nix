@@ -1951,6 +1951,8 @@ let
           in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.freedesktop.Notifications 4'")
           in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.kde.kwalletd6 4'")
           in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.kde.StatusNotifierItem-1.evil 4'")
+          TRAY_ITEM, PY = "${./vm-tray-item.py}", "${pkgs.python3}/bin/python3"
+          exec(open("${./vm-promise-tray.py}").read())
           exec(open("${./vm-promise-keyring.py}").read())
           # The project's state out of the zone's reach (review 2026-09-25):
           # no zone.pid to rewrite, no raw proxy behind the bus filter, no key;

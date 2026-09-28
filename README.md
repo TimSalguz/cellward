@@ -486,6 +486,16 @@ the strip to move the window, its border or corners to resize it; the button
 under the pointer lights up. The frame is a reminder, not a boundary a
 program cannot fake: the panel's `cellward focused` is the one it cannot.
 
+**The tray icon's mark.** A tray icon of a program in a hermetic zone gets the
+zone's (or the container's) colour on it: a dot in the lower right corner, a
+bar along the bottom, or nothing (`cellward tray badge dot|bar|off`,
+`programs.cellward.tray.badge`); its tooltip gets `<zone> · <container>` as a
+line of its own. The zone's bus filter draws it on the picture the program
+answers the tray with, so it needs no support from the tray; an icon given by
+its name in the theme gets the mark as an overlay, which not every tray
+shows. Like the frame, a reminder: the program cannot take the mark off, but
+it can paint another one into its own picture.
+
 Its look is yours to choose, for programs started after the change (and in
 Nix: `programs.cellward.frame.style`, `.buttons`, `.radius`):
 

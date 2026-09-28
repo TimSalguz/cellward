@@ -751,6 +751,7 @@ let
     "frame.style"
     "frame.buttons"
     "frame.radius"
+    "tray.badge"
     "compositorRestriction.enable"
     "desktop.windowMenu.key"
     "desktop.floatWindows"
@@ -1088,6 +1089,19 @@ in
       description = "Скругление углов окна программы внутри рамки, логические пиксели (0 — квадратные): посредник кладёт поверх углов окна уголки цвета рамки. У бирки (frame.style = \"tag\") углы не скругляются — вокруг нет рамки, с которой уголку слиться. null — не задавать из Nix (тогда cellward frame radius, иначе 0). Действует для программ, запущенных после смены.";
     };
 
+    tray.badge = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "dot"
+          "bar"
+          "off"
+        ]
+      );
+      default = null;
+      example = "bar";
+      description = "Метка цвета зоны (или контейнера — цвет рамки) на значках программ зоны в трее: dot — точка в правом нижнем углу, bar — полоска снизу, off — без метки. Рисует фильтр сессионной шины герметичной зоны, пока значок идёт через него: у обычных зон и запусков unconfined метки нет. Значок, заданный именем из темы, получает метку как наложение (OverlayIconPixmap) — его показывает не всякий трей. В подсказке значка добавляется строка «зона · контейнер». Метка — подсказка, а не граница: программа не уберёт её, но может нарисовать в своём значке другую. null — не задавать из Nix (тогда cellward tray badge, иначе dot). Действует со следующей перерисовки значка.";
+    };
+
     compositorRestriction.enable = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
@@ -1340,6 +1354,9 @@ in
     })
     (lib.mkIf (cfg.frame.buttons != null) {
       ".config/vpn-zones/declared/frame-buttons".text = cfg.frame.buttons;
+    })
+    (lib.mkIf (cfg.tray.badge != null) {
+      ".config/vpn-zones/declared/tray-badge".text = cfg.tray.badge;
     })
     (lib.mkIf (cfg.frame.radius != null) {
       ".config/vpn-zones/declared/frame-radius".text = toString cfg.frame.radius;

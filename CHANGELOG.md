@@ -6,6 +6,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The zone's mark on its programs' tray icons** (owner 2026-09-27: a dot,
+  a bar or a number over the icons that says the container or the zone). A
+  tray host asks a program for its icon over the session bus
+  (`Properties.Get`/`GetAll` on the StatusNotifierItem); in a hermetic zone
+  the question and the answer pass the zone's bus filter, which remembers the
+  question and draws the frame's colour — the container's own, else the
+  zone's — on every picture of the answer: a dot with a ring in the lower
+  right corner, or a bar along the bottom (`cellward tray badge dot|bar|off`,
+  default `dot`; `programs.cellward.tray.badge`; `status --json`
+  `defaults.tray_badge`). An icon given by its name in the theme, which the
+  filter never sees, gets the mark as its overlay (`OverlayIconPixmap`),
+  which KDE draws and some trays do not. The tooltip gets "zone · container"
+  as a line of its own. The answer is parsed bounds-checked like everything
+  else of the program's; one that does not read goes as it is. A number was
+  left out: nothing numbers containers yet.
 - **Looks of the zone's frame** (2026-09-28, `docs/WINDOW-FRAME.md` §8
   «Вид рамки»; the owner, 2026-09-27: the frame is always in view and must
   not strain the eyes; the buttons of the four desktops, all equal; a tag

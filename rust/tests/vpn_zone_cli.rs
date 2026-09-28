@@ -2217,3 +2217,46 @@ fn the_frames_look_goes_to_the_launch_and_the_status() {
         assert!(!home.run(bad).status.success(), "{bad:?}");
     }
 }
+
+#[test]
+fn the_tray_badge_is_a_setting_nix_wins() {
+    let home = Home::new("tray-badge");
+    let out = home.run(&["tray"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("(dot)"), "{}", stdout(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"tray_badge\":{\"value\":\"dot\",\"source\":\"default\"}"),
+        "{json}"
+    );
+    let out = home.run(&["tray", "badge", "bar"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"tray_badge\":{\"value\":\"bar\",\"source\":\"local\"}"),
+        "{json}"
+    );
+    for bad in [&["tray", "badge", "number"][..], &["tray", "colour"]] {
+        assert!(!home.run(bad).status.success(), "{bad:?}");
+    }
+    // Nix wins, and the command does not pretend to change what Nix set.
+    let declared = home.root.join("config/declared");
+    fs::create_dir_all(&declared).unwrap();
+    declare(&declared.join("tray-badge"), "off");
+    let out = home.run(&["tray", "badge", "dot"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"tray_badge\":{\"value\":\"off\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    fs::remove_file(declared.join("tray-badge")).unwrap();
+    let out = home.run(&["tray", "badge", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"tray_badge\":{\"value\":\"dot\",\"source\":\"default\"}"),
+        "{json}"
+    );
+}

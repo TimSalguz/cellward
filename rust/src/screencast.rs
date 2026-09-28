@@ -149,6 +149,12 @@ impl Policy {
         &self.zone
     }
 
+    /// The zone's directory and the config directory as held: where the
+    /// tray icon's mark reads the frame's colours (`crate::tray`).
+    pub fn places(&self) -> (Option<&Path>, Option<&Path>) {
+        (self.zone_dir.as_deref(), self.config.as_deref())
+    }
+
     /// The switch now, and where it comes from.
     pub fn setting(&self) -> (Setting, Source) {
         let Some(config) = &self.config else {

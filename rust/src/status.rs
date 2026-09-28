@@ -103,6 +103,8 @@ pub fn defaults(tools: &Tools) -> String {
     let (frame_buttons, frame_buttons_source) = crate::frame::buttons(&tools.config);
     let (frame_style, frame_style_source) = crate::frame::style(&tools.config);
     let (frame_radius, frame_radius_source) = crate::frame::radius(&tools.config);
+    // The zone's mark on its programs' tray icons (`crate::tray`).
+    let (tray_badge, tray_badge_source) = crate::tray::badge(&tools.config);
     // How long a refused permission is not asked about again.
     let (ask_again, ask_again_source) = crate::grants::ask_again(&tools.config);
     // The waits that end by a clock on purpose (`crate::timings`).
@@ -111,7 +113,7 @@ pub fn defaults(tools: &Tools) -> String {
     format!(
         "{{\"network\":{},\"container\":{},\"launcher_mode\":{},\"compositor_restriction\":{},\
          \"wayland_proxy\":{},\"frames\":{},\"frame_width\":{},\"frame_title\":{},\
-         \"frame_buttons\":{},\"frame_style\":{},\"frame_radius\":{},\
+         \"frame_buttons\":{},\"frame_style\":{},\"frame_radius\":{},\"tray_badge\":{},\
          \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{},\"ask_again\":{},\
          \"question_timeout\":{},\"handshake_check\":{}}}",
         sourced_str(&network, network_source),
@@ -125,6 +127,7 @@ pub fn defaults(tools: &Tools) -> String {
         sourced_str(frame_buttons.as_str(), frame_buttons_source),
         sourced_str(frame_style.as_str(), frame_style_source),
         sourced(frame_radius.to_string(), frame_radius_source),
+        sourced_str(tray_badge.as_str(), tray_badge_source),
         sourced_str(&autostart, autostart_source),
         sourced_str(&user_entries, user_entries_source),
         sourced(hermetic.to_string(), hermetic_source),
