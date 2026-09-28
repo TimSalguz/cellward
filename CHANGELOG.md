@@ -19,8 +19,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   filter never sees, gets the mark as its overlay (`OverlayIconPixmap`),
   which KDE draws and some trays do not. The tooltip gets "zone · container"
   as a line of its own. The answer is parsed bounds-checked like everything
-  else of the program's; one that does not read goes as it is. A number was
-  left out: nothing numbers containers yet.
+  else of the program's; one the filter cannot mark — big-endian, or one that
+  does not read — reaches the tray as an error, not as an icon without its
+  mark. A number was left out: nothing numbers containers yet.
 - **Looks of the zone's frame** (2026-09-28, `docs/WINDOW-FRAME.md` §8
   «Вид рамки»; the owner, 2026-09-27: the frame is always in view and must
   not strain the eyes; the buttons of the four desktops, all equal; a tag

@@ -24,8 +24,10 @@
 //!   an icon unmarked — docs/HERMETICITY.md).
 //!
 //! Not a trust boundary, like the frame (`docs/WINDOW-FRAME.md` §5.9): the
-//! program cannot remove the mark — its answer is rewritten after it — but
-//! it can paint a mark of another colour elsewhere in its own picture. And
+//! program cannot remove the mark — its answer is rewritten after it, and an
+//! answer the filter cannot mark (big-endian, or one that does not read)
+//! reaches the tray as an error, not as an unmarked icon — but it can paint
+//! a mark of another colour elsewhere in its own picture. And
 //! only a hermetic zone's programs have their bus through the filter: an
 //! ordinary zone's and an unconfined launch's icons are unmarked.
 
