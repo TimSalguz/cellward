@@ -34,8 +34,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   asked: `tcp 149.154.167.50:443 (api.telegram.org)`. Written through a
   shared mapping made before the relay seals itself, with no system call
   after it; a record, not a wall — a file that cannot be made or mapped,
-  and the instance's way out is the same. Which program a flow is, is the
-  next step.
+  and the instance's way out is the same. Which program holds each flow is
+  looked up as it is asked, from the host: the instance's sockets
+  (`/proc/<pid>/net/*` of its space), the process that holds each, and the
+  container's launch it belongs to — `tcp 149.154.167.50:443
+  (api.telegram.org) · Telegram`; a flow whose socket is closed by then has
+  no owner, and none is guessed.
 - **The cellward window: the network monitor and the containers**
   (2026-09-28). `cellward-gui containers` (the «Контейнеры cellward»
   entry, and what stillconf opens) and the new `cellward-gui monitor` («Сеть

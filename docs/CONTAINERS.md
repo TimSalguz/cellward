@@ -684,11 +684,14 @@ and `cellward container show <name> --json` print subsets of the same schema.
   network, connections}]}`, `connections` the instance's flows as its relay
   saw them, the latest first — `{proto ("tcp", "udp", "icmp", "icmpv6",
   "igmp" or the number), local_port, remote, remote_port, name, first,
-  last, out_bytes, in_bytes, out_packets, in_packets}`; `name` what the
-  latest DNS answer the instance received said of `remote` (`null`: none
-  seen) — what the answer said, not a proof; `first`/`last` Unix seconds;
-  ports 0 where the protocol has none. `null` for an instance without a
-  table (of an earlier build).
+  last, out_bytes, in_bytes, out_packets, in_packets, owner}`; `name` what
+  the latest DNS answer the instance received said of `remote` (`null`:
+  none seen) — what the answer said, not a proof; `first`/`last` Unix
+  seconds; ports 0 where the protocol has none; `owner` who holds the
+  flow's socket as it is asked — `{pid, process (its comm), program (the
+  launch's key in the registry, or null)}` —, `null` when its socket is
+  closed by then or no process of the instance holds it. `connections` is
+  `null` for an instance without a table (of an earlier build).
 - **`networks[].tolerates`** (added 2026-09-28, step 1 of the permission
   model, `docs/PERMISSIONS.md` §11.14): the ways around a network it
   tolerates for its containers — `{"hermetic", "nix_daemon",

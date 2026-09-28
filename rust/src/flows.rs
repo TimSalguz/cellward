@@ -692,32 +692,80 @@ fn endpoint(addr: &IpAddr, port: u16, proto: u8) -> String {
 }
 
 /// A running instance's flows and names; `None` for one without a table
-/// (of an earlier build, or whose file could not be made).
+/// (of an earlier build, or whose file could not be made). `owners`: each
+/// flow's (`crate::owners`), in the flows' order.
 struct Listed {
     id: String,
     container: Option<String>,
     network: String,
     table: Option<(Vec<Flow>, Vec<Name>)>,
+    owners: Vec<Option<crate::owners::Owner>>,
+    /// The programs' names for the person (`.labels/<key>`).
+    labels: HashMap<String, String>,
 }
 
 fn listed(tools: &crate::tools::Tools) -> Vec<Listed> {
     let mut out: Vec<Listed> = crate::instance::running(&tools.state)
         .into_iter()
-        .map(|i| Listed {
-            container: crate::instance::container_of(&i.id).map(str::to_owned),
-            table: read(&i.dir).map(|(mut flows, names)| {
+        .map(|i| {
+            let container = crate::instance::container_of(&i.id).map(str::to_owned);
+            let table = read(&i.dir).map(|(mut flows, names)| {
                 flows.sort_by(|a, b| {
                     (b.last, b.out_bytes.saturating_add(b.in_bytes))
                         .cmp(&(a.last, a.out_bytes.saturating_add(a.in_bytes)))
                 });
                 (flows, names)
-            }),
-            network: i.network,
-            id: i.id,
+            });
+            let registry = tools
+                .state
+                .join(".running")
+                .join(container.as_deref().unwrap_or(crate::registry::MAIN));
+            let owners = table.as_ref().map_or_else(Vec::new, |(flows, _)| {
+                crate::owners::of(i.pid, &registry, flows)
+            });
+            let labels = owners
+                .iter()
+                .flatten()
+                .filter_map(|o| o.program.clone())
+                .filter_map(|key| {
+                    let label = crate::cli::read_setting(&tools.state.join(".labels").join(&key))?;
+                    Some((key, label))
+                })
+                .collect();
+            Listed {
+                container,
+                table,
+                owners,
+                labels,
+                network: i.network,
+                id: i.id,
+            }
         })
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
+}
+
+/// Who holds a flow, for a person: the program's name, its key, or the
+/// process's; `None` for none found.
+fn who(owner: Option<&crate::owners::Owner>, labels: &HashMap<String, String>) -> Option<String> {
+    let o = owner?;
+    Some(match &o.program {
+        Some(key) => labels.get(key).cloned().unwrap_or_else(|| key.clone()),
+        None => o.process.clone(),
+    })
+}
+
+fn owner_json(owner: Option<&crate::owners::Owner>) -> String {
+    use crate::status::string;
+    owner.map_or("null".to_owned(), |o| {
+        format!(
+            "{{\"pid\":{},\"process\":{},\"program\":{}}}",
+            o.pid,
+            string(&o.process),
+            o.program.as_deref().map_or("null".to_owned(), string)
+        )
+    })
 }
 
 /// The instance's own DNS forwarder (`crate::bridge`): what every name of a
@@ -726,15 +774,16 @@ fn forwarder(addr: &IpAddr) -> bool {
     *addr == IpAddr::V4(crate::bridge::D4) || *addr == IpAddr::V6(crate::bridge::D6)
 }
 
-fn flows_json(flows: &[Flow], names: &[Name]) -> String {
+fn flows_json(flows: &[Flow], names: &[Name], owners: &[Option<crate::owners::Owner>]) -> String {
     use crate::status::string;
     let items: Vec<String> = flows
         .iter()
-        .map(|f| {
+        .enumerate()
+        .map(|(n, f)| {
             format!(
                 "{{\"proto\":{},\"local_port\":{},\"remote\":{},\"remote_port\":{},\
                  \"name\":{},\"first\":{},\"last\":{},\"out_bytes\":{},\"in_bytes\":{},\
-                 \"out_packets\":{},\"in_packets\":{}}}",
+                 \"out_packets\":{},\"in_packets\":{},\"owner\":{}}}",
                 string(&proto_name(f.key.proto)),
                 f.key.lport,
                 string(&f.key.remote.to_string()),
@@ -745,7 +794,8 @@ fn flows_json(flows: &[Flow], names: &[Name]) -> String {
                 f.out_bytes,
                 f.in_bytes,
                 f.out_packets,
-                f.in_packets
+                f.in_packets,
+                owner_json(owners.get(n).and_then(Option::as_ref))
             )
         })
         .collect();
@@ -764,7 +814,7 @@ fn json(rows: &[Listed]) -> String {
                 string(&r.network),
                 r.table
                     .as_ref()
-                    .map_or("null".to_owned(), |(f, n)| flows_json(f, n))
+                    .map_or("null".to_owned(), |(f, n)| flows_json(f, n, &r.owners))
             )
         })
         .collect();
@@ -801,17 +851,19 @@ fn text(rows: &[Listed], now: u32) -> String {
         if flows.is_empty() {
             out.push_str("  соединений не было\n");
         }
-        for f in flows {
+        for (n, f) in flows.iter().enumerate() {
             let name = if forwarder(&f.key.remote) {
                 Some("DNS контейнера")
             } else {
                 name_of(names, &f.key.remote)
             };
+            let holder = who(r.owners.get(n).and_then(Option::as_ref), &r.labels);
             out.push_str(&format!(
-                "  {} {}{} · ↑ {} · ↓ {} · {}\n",
+                "  {} {}{}{} · ↑ {} · ↓ {} · {}\n",
                 proto_name(f.key.proto),
                 endpoint(&f.key.remote, f.key.rport, f.key.proto),
                 name.map_or(String::new(), |n| format!(" ({n})")),
+                holder.map_or(String::new(), |w| format!(" · {w}")),
                 bytes_text(f.out_bytes),
                 bytes_text(f.in_bytes),
                 ago(u64::from(now.saturating_sub(f.last)))
@@ -1025,10 +1077,17 @@ mod tests {
             name: "api.telegram.org".to_owned(),
             at: 80,
         }];
+        let owner = crate::owners::Owner {
+            pid: 4242,
+            process: "telegram-deskto".to_owned(),
+            program: Some("org.telegram.desktop".to_owned()),
+        };
         let rows = vec![Listed {
             id: "work".to_owned(),
             container: Some("work".to_owned()),
             network: "zone".to_owned(),
+            owners: vec![Some(owner), None, None],
+            labels: HashMap::from([("org.telegram.desktop".to_owned(), "Telegram".to_owned())]),
             table: Some((
                 vec![
                     flow("149.154.167.50", 443, 100),
@@ -1041,7 +1100,8 @@ mod tests {
         let t = text(&rows, 160);
         assert!(
             t.contains(
-                "tcp 149.154.167.50:443 (api.telegram.org) · ↑ 2.0 КБ · ↓ 10 Б · 1 мин назад"
+                "tcp 149.154.167.50:443 (api.telegram.org) · Telegram · ↑ 2.0 КБ · ↓ 10 Б · 1 мин \
+                 назад"
             ),
             "{t}"
         );
@@ -1053,7 +1113,14 @@ mod tests {
             j.contains("\"remote\":\"2001:db8::1\",\"remote_port\":8443,\"name\":null"),
             "{j}"
         );
-        assert!(j.contains("\"out_packets\":2,\"in_packets\":1"), "{j}");
+        assert!(
+            j.contains(
+                "\"out_packets\":2,\"in_packets\":1,\"owner\":{\"pid\":4242,\
+                 \"process\":\"telegram-deskto\",\"program\":\"org.telegram.desktop\"}"
+            ),
+            "{j}"
+        );
+        assert!(j.contains("\"owner\":null"), "{j}");
         let none = vec![Listed {
             table: None,
             ..rows.into_iter().next().unwrap()

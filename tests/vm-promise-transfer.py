@@ -175,6 +175,16 @@ def announce(tag, lan_broadcast):
     send(f"broadcast {lan_broadcast}:1716", socket.AF_INET, (lan_broadcast, 1716), bcast)
 
 
+def hold(host, port, log):
+    """A connection kept open, its own port written down."""
+    import time
+    s = socket.create_connection((host, int(port)), timeout=30)
+    with open(log, "w") as f:
+        f.write(f"held {s.getsockname()[1]}\n")
+    while True:
+        time.sleep(3600)
+
+
 globals()[sys.argv[1]](*sys.argv[2:])
 '''
 
@@ -351,7 +361,25 @@ def xf_zone(zone, addr, addr6):
     ]
     assert to(server_ip) and max(f["out_bytes"] for f in to(server_ip)) >= 4194304, c
     assert to("10.99.0.1") and max(f["in_bytes"] for f in to("10.99.0.1")) >= 3145728, c
+    # Who holds a connection (`owners.rs`, looked up from the host as it is
+    # asked): a program of the zone that keeps one open is named.
+    held_log = f"{XF}/hold-{zone}.log"
+    alice(f"rm -f {held_log}")
+    alice(
+        f"systemd-run --user --collect --unit=xfhold-{zone} -E PATH=\"$PATH\" "
+        f"{run} {XF_PY} {XF}/xfer.py hold {server_ip} {XF_PORT} {held_log}"
+    )
+    machine.wait_until_succeeds(f"grep -q '^held ' {held_log}", timeout=90)
+    lport = int(alice(f"cat {held_log}").split()[1])
+    c = json.loads(alice("cellward traffic --connections --json"))
+    held = [
+        f for i in c["instances"] if i["network"] == zone and i["connections"]
+        for f in i["connections"] if (f["proto"], f["local_port"]) == ("tcp", lport)
+    ]
+    assert held and held[0]["owner"], c
+    assert held[0]["owner"]["process"].startswith("python"), held
     print(alice("cellward traffic --connections"))
+    alice(f"systemctl --user stop xfhold-{zone}")
 
     # The server connects to the zone's program through the tunnel: the
     # zone's address ends in the zone's app namespace, where nothing listens

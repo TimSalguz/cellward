@@ -670,11 +670,14 @@ programs.cellward = {
   network, connections}]}`, `connections` — соединения экземпляра, как их
   видела пересылка, последние первыми: `{proto ("tcp", "udp", "icmp",
   "icmpv6", "igmp" или номер), local_port, remote, remote_port, name,
-  first, last, out_bytes, in_bytes, out_packets, in_packets}`; `name` — что
-  последний пришедший экземпляру ответ DNS сказал о `remote` (`null` — такого
-  не было): слова ответа, а не доказательство; `first`/`last` — секунды
-  Unix; порты 0, где у протокола их нет. `null` у экземпляра без таблицы
-  (прошлой сборки).
+  first, last, out_bytes, in_bytes, out_packets, in_packets, owner}`;
+  `name` — что последний пришедший экземпляру ответ DNS сказал о `remote`
+  (`null` — такого не было): слова ответа, а не доказательство;
+  `first`/`last` — секунды Unix; порты 0, где у протокола их нет; `owner` —
+  кто держит сокет потока в момент вопроса: `{pid, process (его comm),
+  program (ключ запуска в реестре или null)}`, `null`, если сокет к тому
+  времени закрыт или его не держит ни один процесс экземпляра.
+  `connections` — `null` у экземпляра без таблицы (прошлой сборки).
 - **`networks[].tolerates`** (добавлено 2026-09-28, шаг 1 модели
   разрешений, `docs/PERMISSIONS.md` §11.14): какие обходы сеть допускает у
   своих контейнеров — `{"hermetic", "nix_daemon", "host_files_writable"}`,
