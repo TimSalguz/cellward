@@ -23,15 +23,16 @@ with subtest(f"a container's /tmp in zone {TMP_ZONE}: shared by its launches: {T
         f"systemd-run --user --unit=tmpfirst-{TMP_ZONE} {run} "
         f"sh -c 'echo first > {probe}; exec sleep 600'"
     )
-    alice(f"{run} sh -c 'test -d /tmp/.X11-unix'")
     if TMP_SHARED:
+        # The X server's sockets: a directory of each launch's own, over the
+        # container's /tmp (a /tmp of the launch's own has none to cover).
+        alice(f"{run} sh -c 'test -d /tmp/.X11-unix'")
         # The second launch of the same container finds the first one's file.
         machine.wait_until_succeeds(
             "su -l alice -c "
             + shlex.quote(f"export XDG_RUNTIME_DIR=/run/user/1000; {run} grep -q first {probe}"),
             timeout=120,
         )
-        # The X server's sockets: a directory of each launch's own.
         alice(f"{run} sh -c 'touch /tmp/.X11-unix/single'")
         alice(f"{run} sh -c '! test -e /tmp/.X11-unix/single'")
     else:
