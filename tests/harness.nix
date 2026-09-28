@@ -415,8 +415,8 @@ in
       (expect "a container that is not bound to offline is said to be" (
         !warnsOf "programs.cellward.containers.dev: сеть offline" hmDeclared.config
       ))
-      (expect "audioManager set, and no word that it is on the way out" (
-        warnsOf "programs.cellward.audioManager устарело" hmDeclared.config
+      (expect "audioManager set, and no word that it no longer holds" (
+        warnsOf "programs.cellward.audioManager не действует" hmDeclared.config
       ))
       # The network's word for its programs' microphone and screen cast
       # (2b of docs/PERMISSIONS.md §11.15, 2026-09-29): gone, and said so.

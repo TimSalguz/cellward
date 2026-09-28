@@ -1806,13 +1806,14 @@ let
           assert out == "none", f"a container not let the cameras reaches them: {out}"
           out = alice(f"cellward run vmherm -- {stat7}").strip()
           assert out == "none", f"the zone's own program reached a camera on the zone's no: {out}"
-          alice("cellward camera vmherm on")
+          alice("! cellward camera vmherm on")
+          alice("cellward container set main camera on")
           out = alice(f"cellward run vmherm -- {stat7}").strip()
-          assert out == "51:7", f"the zone's yes did not reach its next launch: {out}"
+          assert out == "51:7", f"the main home's yes did not reach its next launch: {out}"
           alice("cellward container set vmcam camera off")
           out = alice(f"cellward run vmherm --container vmcam -- {stat7}").strip()
-          assert out == "none", f"the zone's yes overrode a container's no: {out}"
-          alice("cellward camera vmherm default")
+          assert out == "none", f"the main home's yes reached a container's no: {out}"
+          alice("cellward container set main camera default")
           # A camera plugged in while programs run: in neither — the one let
           # the cameras has those that were there when it started (restart
           # the program for a new camera).

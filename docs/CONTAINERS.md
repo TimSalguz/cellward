@@ -709,7 +709,8 @@ and `cellward container show <name> --json` print subsets of the same schema.
   is still its network's, as before, until 2b.
 - **`defaults.permissions`** (added 2026-09-29, 2b of `docs/PERMISSIONS.md`
   §11.15): the template — what the programs of a container with no word of
-  its own get — `{microphone, screencast}`, each `{value, source}`.
+  its own get — `{microphone, screencast, camera, audio_manager}`, each
+  `{value, source}`.
   `networks[].microphone` and `networks[].screencast` show the same: the
   network has no word of its own for its programs any more.
 - **`defaults.protected`** (added 2026-09-29, `docs/LEAK-MODEL.md` §32):

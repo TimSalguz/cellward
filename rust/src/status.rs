@@ -122,7 +122,8 @@ pub fn defaults(tools: &Tools) -> String {
          \"frame_buttons\":{},\"frame_style\":{},\"frame_radius\":{},\"tray_badge\":{},\
          \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{},\"ask_again\":{},\
          \"question_timeout\":{},\"handshake_check\":{},\"protected\":[{}],\
-         \"permissions\":{{\"microphone\":{},\"screencast\":{}}}}}",
+         \"permissions\":{{\"microphone\":{},\"screencast\":{},\"camera\":{},\
+         \"audio_manager\":{}}}}}",
         sourced_str(&network, network_source),
         sourced_str(&container, container_source),
         sourced_str(&mode, mode_source),
@@ -149,6 +150,14 @@ pub fn defaults(tools: &Tools) -> String {
         {
             let (s, src) = crate::permissions::switch(&tools.config, "screencast");
             sourced_str(s.as_str(), src)
+        },
+        {
+            let (on, src) = crate::permissions::flag(&tools.config, "camera");
+            sourced(on.to_string(), src)
+        },
+        {
+            let (on, src) = crate::permissions::flag(&tools.config, "audio_manager");
+            sourced(on.to_string(), src)
         }
     )
 }

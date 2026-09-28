@@ -480,7 +480,7 @@ let
               "systemd-run --user --unit=hostplay2 pw-play --raw --target vm-sink "
               "-P node.name=host-player /dev/urandom"
           )
-          out = alice("cellward audio-manager offline on")
+          out = alice("cellward container set main audio-manager on")
           assert "ВНИМАНИЕ" in out, out
           restart_main()
           keep_main()
@@ -495,9 +495,8 @@ let
           pw = [c for c in checks if c["id"] == "pipewire"]
           assert pw and pw[0]["level"] == "warn" and "МЕНЕДЖЕР ЗВУКА" in pw[0]["detail"], checks
           out = json.loads(alice("cellward status --json"))
-          z = next(n for n in out["networks"] if n["name"] == "offline")
-          assert z["audio_manager"] == {"value": True, "source": "local"}, z
-          alice("cellward audio-manager offline default")
+          assert out["main"]["audio_manager"] == {"value": True, "source": "local"}, out["main"]
+          alice("cellward container set main audio-manager default")
           restart_main()
     '';
   };

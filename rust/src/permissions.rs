@@ -29,6 +29,9 @@ use crate::tools::Tools;
 pub const FILE: &str = "defaults.conf";
 /// The switches (`yes|no|ask`), built-in `ask`.
 pub const SWITCHES: [&str; 2] = ["microphone", "screencast"];
+/// The flags (`on|off`, kept `true|false` as a container's), built-in off:
+/// the cameras, and the host's raw PipeWire (the audio manager).
+pub const FLAGS: [&str; 2] = ["camera", "audio_manager"];
 
 /// The template's word for `key` and whose: Nix's over the local one;
 /// `Err(source)`: a file there that cannot be read (the strictest, then).
@@ -65,6 +68,16 @@ pub fn switch(config: &Path, key: &str) -> (Setting, Source) {
     }
 }
 
+/// The template's on/off flag `key`: off where nobody said, and for a word
+/// that is neither, or a file that cannot be read.
+pub fn flag(config: &Path, key: &str) -> (bool, Source) {
+    match word(config, key) {
+        Ok(Some((w, source))) => (matches!(w.as_str(), "true" | "on"), source),
+        Ok(None) => (false, Source::Default),
+        Err(source) => (false, source),
+    }
+}
+
 /// How much a switch lets through.
 fn openness(setting: Setting) -> u8 {
     match setting {
@@ -75,7 +88,8 @@ fn openness(setting: Setting) -> u8 {
 }
 
 const USAGE: &str = "cellward defaults — разрешения контейнеров без своего слова\n\
-                     cellward defaults set microphone|screencast yes|no|ask|default";
+                     cellward defaults set microphone|screencast yes|no|ask|default\n\
+                     cellward defaults set camera|audio-manager on|off|default";
 
 /// `cellward defaults [set <key> <value>|default]`.
 pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
@@ -85,16 +99,26 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
             print!("{}", shown(&tools.config));
             0
         }
-        ["set", key, value] if SWITCHES.contains(key) => {
-            let value = match *value {
-                "default" => None,
-                v => match Setting::parse(v) {
+        ["set", key, value]
+            if SWITCHES.contains(key) || FLAGS.contains(&key.replace('-', "_").as_str()) =>
+        {
+            let flag = FLAGS.contains(&key.replace('-', "_").as_str());
+            let key = &key.replace('-', "_");
+            let value = match (*value, flag) {
+                ("default", _) => None,
+                ("on", true) => Some("true"),
+                ("off", true) => Some("false"),
+                (v, false) => match Setting::parse(v) {
                     Some(s) => Some(s.as_str()),
                     None => {
                         eprintln!("{USAGE}");
                         return 1;
                     }
                 },
+                _ => {
+                    eprintln!("{USAGE}");
+                    return 1;
+                }
             };
             if matches!(
                 word(&tools.config, key),
@@ -139,6 +163,19 @@ fn shown(config: &Path) -> String {
         };
         out.push_str(&format!("  {key}: {}{from}\n", setting.as_str()));
     }
+    for key in FLAGS {
+        let (on, source) = flag(config, key);
+        let from = match source {
+            Source::Nix => " (Nix)",
+            Source::Local => "",
+            Source::Default => " (умолчание)",
+        };
+        let key = key.replace('_', "-");
+        out.push_str(&format!(
+            "  {key}: {}{from}\n",
+            if on { "on" } else { "off" }
+        ));
+    }
     out
 }
 
@@ -172,6 +209,37 @@ fn network_words(tools: &Tools, marker: &str, declared: &str) -> Vec<(String, Se
             if !text.trim().is_empty() {
                 let value = Setting::parse(text.trim()).unwrap_or(Setting::No);
                 out.push((zone, value));
+            }
+        }
+    }
+    out
+}
+
+/// The networks' own words of before for a flag: the zones named in Nix's
+/// list (`declared/<list>`) on, and each zone's marker (`marker`: `on`, or
+/// any other word off).
+fn network_flags(tools: &Tools, marker: &str, list: &str) -> Vec<(String, Setting)> {
+    let mut out: Vec<(String, Setting)> = Vec::new();
+    if let Ok(text) = crate::declared::read(&tools.config.join(crate::cli::DECLARED_DIR).join(list))
+    {
+        for zone in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            out.push((zone.to_owned(), Setting::Yes));
+        }
+    }
+    for entry in fs::read_dir(&tools.state).into_iter().flatten().flatten() {
+        let zone = entry.file_name().to_string_lossy().into_owned();
+        if zone.starts_with('.') || out.iter().any(|(z, _)| *z == zone) {
+            continue;
+        }
+        if let Ok(text) = fs::read_to_string(entry.path().join(marker)) {
+            let word = text.trim();
+            if !word.is_empty() {
+                let on = if word == "on" {
+                    Setting::Yes
+                } else {
+                    Setting::No
+                };
+                out.push((zone, on));
             }
         }
     }
@@ -234,6 +302,47 @@ pub fn migrate(tools: &Tools) {
         .collect();
     records.push((crate::container::MAIN_RECORD.to_owned(), None));
     let mut said = Vec::new();
+    // The flags as switches of two words: on is `yes`, off is `no` — the
+    // same rule, never wider.
+    for (key, marker_name) in [
+        ("camera", crate::hermetic::CAMERA),
+        ("audio_manager", crate::hermetic::AUDIO_MANAGER),
+    ] {
+        let words = network_flags(tools, marker_name, marker_name);
+        if words.is_empty() {
+            continue;
+        }
+        let template = if flag(&tools.config, key).0 {
+            Setting::Yes
+        } else {
+            Setting::No
+        };
+        let with_own: Vec<(String, Option<String>, bool)> = records
+            .iter()
+            .map(|(name, net)| {
+                // A file that cannot be read is a word not known: kept.
+                let own = !matches!(
+                    crate::container::own_value_in(&tools.config, name, key),
+                    Ok(None)
+                );
+                (name.clone(), net.clone(), own)
+            })
+            .collect();
+        for (record, value) in moves(template, &words, &with_own) {
+            let word = if value == Setting::Yes {
+                "true"
+            } else {
+                "false"
+            };
+            let file = crate::container::policy_dir(tools, &record).join(crate::container::FILE);
+            if let Some(dir) = file.parent() {
+                let _ = fs::create_dir_all(dir);
+            }
+            if crate::container::write_key(&file, key, Some(word), true).is_ok() {
+                said.push(format!("{record}: {key} = {word}"));
+            }
+        }
+    }
     for (key, marker_name, declared) in [
         (
             "microphone",

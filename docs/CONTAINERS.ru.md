@@ -695,7 +695,8 @@ programs.cellward = {
   слова нет, пока действует слово сети, как раньше (до шага 2б).
 - **`defaults.permissions`** (добавлено 2026-09-29, шаг 2б
   `docs/PERMISSIONS.md` §11.15): шаблон — что получают программы
-  контейнера без своего слова, — `{microphone, screencast}`, каждое `{value,
+  контейнера без своего слова, — `{microphone, screencast, camera,
+  audio_manager}`, каждое `{value,
   source}`. `networks[].microphone` и `networks[].screencast` показывают то
   же: своего слова о программах у сети больше нет.
 - **`defaults.protected`** (добавлено 2026-09-29, `docs/LEAK-MODEL.md`

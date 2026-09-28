@@ -29,6 +29,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     - the journal says what moved.
   - `status --json`: `defaults.permissions`; `networks[].microphone` and
     `screencast` show the template.
+  - The same for the cameras and the host's raw PipeWire (the audio
+    manager): `cellward defaults set camera|audio-manager on|off`,
+    `programs.cellward.defaults.permissions.camera|audioManager`; the
+    network's `cellward camera|audio-manager <network>` and
+    `programs.cellward.camera|audioManager` no longer hold. `container set
+    <c> audio-manager on` says loudly what it gives.
 
 ### Added
 - **The main home has a record of its own** (2026-09-29, 2a of

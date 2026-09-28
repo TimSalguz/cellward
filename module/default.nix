@@ -777,6 +777,8 @@ let
     "defaults.container"
     "defaults.permissions.microphone"
     "defaults.permissions.screencast"
+    "defaults.permissions.camera"
+    "defaults.permissions.audioManager"
     "launcher.mode"
     "interception.userEntries"
     "autostart.unassigned"
@@ -914,13 +916,23 @@ in
           type = lib.types.nullOr (lib.types.enum [ "yes" "no" "ask" ]);
           default = null;
           example = "ask";
-          description = "Не действует с 2026-09-29: сеть больше не решает это за свои программы (docs/PERMISSIONS.md §11.15) — defaults.permissions.microphone, containers.<имя>.permissions.microphone, main.permissions.microphone. Прочитано один раз, при переносе в контейнеры: контейнер, привязанный к сети, получил её значение своим. Прежнее описание: Микрофон программ контейнера без своего слова (и настоящего дома без своего): yes, no или ask — спросить при первой записи. Сеть этого больше не решает (docs/PERMISSIONS.md §11.15). Своё слово контейнера — containers.<имя>.permissions.microphone, настоящего дома — main.permissions.microphone; оно берёт верх над этим в обе стороны. null — не задавать из Nix (cellward defaults set microphone …, иначе ask).";
+          description = "Микрофон программ контейнера без своего слова (и настоящего дома без своего): yes, no или ask — спросить при первой записи. Сеть этого больше не решает (docs/PERMISSIONS.md §11.15). Своё слово контейнера — containers.<имя>.permissions.microphone, настоящего дома — main.permissions.microphone; оно берёт верх над этим в обе стороны. null — не задавать из Nix (cellward defaults set microphone …, иначе ask).";
         };
         screencast = lib.mkOption {
           type = lib.types.nullOr (lib.types.enum [ "yes" "no" "ask" ]);
           default = null;
           example = "ask";
-          description = "Не действует с 2026-09-29: сеть больше не решает это за свои программы (docs/PERMISSIONS.md §11.15) — defaults.permissions.screencast, containers.<имя>.permissions.screencast, main.permissions.screencast. Прочитано один раз, при переносе в контейнеры: контейнер, привязанный к сети, получил её значение своим. Прежнее описание: Трансляция экрана через портал у программ контейнера без своего слова: yes, no или ask. Как microphone выше. null — не задавать из Nix (cellward defaults set screencast …, иначе ask).";
+          description = "Трансляция экрана через портал у программ контейнера без своего слова: yes, no или ask. Как microphone выше. null — не задавать из Nix (cellward defaults set screencast …, иначе ask).";
+        };
+        camera = lib.mkOption {
+          type = lib.types.nullOr lib.types.bool;
+          default = null;
+          description = "Видны ли камеры хоста программам контейнера без своего слова. Сеть этого больше не решает; своё слово — containers.<имя>.permissions.camera, main.permissions.camera. null — не задавать из Nix (cellward defaults set camera on|off, иначе нет).";
+        };
+        audioManager = lib.mkOption {
+          type = lib.types.nullOr lib.types.bool;
+          default = null;
+          description = "PipeWire хоста без ограничений программам контейнера без своего слова — только для доверенного микшера; по умолчанию нет. Своё слово — containers.<имя>.permissions.audioManager, main.permissions.audioManager. null — не задавать из Nix (cellward defaults set audio-manager on|off).";
         };
       };
     };
@@ -979,14 +991,14 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "calls" ];
-      description = "Зоны (по имени), программам которых видны камеры хоста (/dev/video*) — тем, у чьего контейнера нет своей настройки камеры (containers.<имя>.permissions.camera). По умолчанию ни одной: у сеанса на камеры есть право, и программа зоны — тот же пользователь, она снимала бы без вопроса. Зона закрывает камеры всем своим программам, запуск, которому они разрешены, открывает их в своём пространстве монтирования. Без пересборки — cellward camera <зона> on (для программ, запущенных после этого; перезапуск зоны не нужен). Звуковые устройства (/dev/snd) зонам не видны никогда: звук — через фильтр pulse и PipeWire. Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Не действует с 2026-09-29: сеть больше не решает это за свои программы (docs/PERMISSIONS.md §11.15) — defaults.permissions.camera, containers.<имя>.permissions.camera, main.permissions.camera. Прочитано один раз, при переносе в контейнеры. Прежнее описание: Зоны (по имени), программам которых видны камеры хоста (/dev/video*) — тем, у чьего контейнера нет своей настройки камеры (containers.<имя>.permissions.camera). По умолчанию ни одной: у сеанса на камеры есть право, и программа зоны — тот же пользователь, она снимала бы без вопроса. Зона закрывает камеры всем своим программам, запуск, которому они разрешены, открывает их в своём пространстве монтирования. Без пересборки — cellward camera <зона> on (для программ, запущенных после этого; перезапуск зоны не нужен). Звуковые устройства (/dev/snd) зонам не видны никогда: звук — через фильтр pulse и PipeWire. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     audioManager = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "mixer" ];
-      description = "Герметичные зоны (по имени), которым вместо ограниченного PipeWire отдаётся pipewire-0 хоста как есть — для микшера или коммутатора (pavucontrol, qpwgraph, EasyEffects). По умолчанию ни одной: такая зона слышит всё, что играет хост, записывает микрофон мимо microphone, двигает и глушит чужие потоки и меняет права других клиентов PipeWire; cellward status и doctor говорят об этом громко. Обычная (негерметичная) зона получает pipewire-0 хоста и без этого — у неё и так systemd --user. Без пересборки — cellward audio-manager <зона> on (со следующего подъёма экземпляров контейнеров этой сети). Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Не действует с 2026-09-29: сеть больше не решает это за свои программы (docs/PERMISSIONS.md §11.15) — defaults.permissions.audioManager, containers.<имя>.permissions.audioManager, main.permissions.audioManager. Прочитано один раз, при переносе в контейнеры. Прежнее описание: Герметичные зоны (по имени), которым вместо ограниченного PipeWire отдаётся pipewire-0 хоста как есть — для микшера или коммутатора (pavucontrol, qpwgraph, EasyEffects). По умолчанию ни одной: такая зона слышит всё, что играет хост, записывает микрофон мимо microphone, двигает и глушит чужие потоки и меняет права других клиентов PipeWire; cellward status и doctor говорят об этом громко. Обычная (негерметичная) зона получает pipewire-0 хоста и без этого — у неё и так systemd --user. Без пересборки — cellward audio-manager <зона> on (со следующего подъёма экземпляров контейнеров этой сети). Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     pipewirePolicy = lib.mkOption {
@@ -1015,7 +1027,7 @@ in
         calls = "yes";
         offline = "no";
       };
-      description = "Может ли программа зоны записывать микрофон (как разрешения в телефоне): имя зоны → yes (без вопроса), no (никогда) или ask — при первой записи программы зоны на хосте спрашивают: разрешить один раз, всегда или отказать. Зона без значения здесь и без своего (cellward microphone <зона> yes|no|ask) — ask; без графической сессии или без ответа за 25 с — отказ. «Всегда» — всей зоне, любой её программе: пишет yes в настройку зоны; для зоны, заданной здесь, его не предлагают. После отказа зону не спрашивают askAgainAfter (по умолчанию 3 минуты). Действует сразу, без перезапуска зоны. Звук, который играет хост (мониторы выходов), зоне не записать никогда. Путь PulseAudio и ограниченный PipeWire герметичной зоны (на нём ask — отказ: там не спрашивают); мимо — сырой pipewire-0 обычной зоны и зоны-менеджера звука (audioManager), а в негерметичной зоне и systemd --user хоста. Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Не действует с 2026-09-29: сеть больше не решает это за свои программы (docs/PERMISSIONS.md §11.15) — defaults.permissions.microphone, containers.<имя>.permissions.microphone, main.permissions.microphone. Прочитано один раз, при переносе в контейнеры: контейнер, привязанный к сети, получил её значение своим. Прежнее описание: Может ли программа зоны записывать микрофон (как разрешения в телефоне): имя зоны → yes (без вопроса), no (никогда) или ask — при первой записи программы зоны на хосте спрашивают: разрешить один раз, всегда или отказать. Зона без значения здесь и без своего (cellward microphone <зона> yes|no|ask) — ask; без графической сессии или без ответа за 25 с — отказ. «Всегда» — всей зоне, любой её программе: пишет yes в настройку зоны; для зоны, заданной здесь, его не предлагают. После отказа зону не спрашивают askAgainAfter (по умолчанию 3 минуты). Действует сразу, без перезапуска зоны. Звук, который играет хост (мониторы выходов), зоне не записать никогда. Путь PulseAudio и ограниченный PipeWire герметичной зоны (на нём ask — отказ: там не спрашивают); мимо — сырой pipewire-0 обычной зоны и зоны-менеджера звука (audioManager), а в негерметичной зоне и systemd --user хоста. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     screencast = lib.mkOption {
@@ -1031,7 +1043,7 @@ in
         calls = "yes";
         offline = "no";
       };
-      description = "Может ли программа зоны транслировать экран через портал: имя зоны → ask (по умолчанию: диалог портала каждый раз, запомнить выбор нельзя), no (каждый вызов портала ScreenCast — отказ с объяснением и строкой в cellward journal) или yes (выбор можно запомнить: следующую трансляцию портал начнёт без диалога). yes действует, только если портал знает зону по имени (xdg-desktop-portal 1.19+, docs/LEAK-MODEL.md §23), иначе — как ask, и в разовом контейнере (--fs-sandbox) тоже как ask. Действует сразу, без перезапуска зоны. Держит фильтр сессионной шины герметичной зоны: программы негерметичной зоны говорят с порталом напрямую, мимо этого переключателя. Без пересборки — cellward screencast <зона> ask|yes|no. Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Не действует с 2026-09-29: сеть больше не решает это за свои программы (docs/PERMISSIONS.md §11.15) — defaults.permissions.screencast, containers.<имя>.permissions.screencast, main.permissions.screencast. Прочитано один раз, при переносе в контейнеры: контейнер, привязанный к сети, получил её значение своим. Прежнее описание: Может ли программа зоны транслировать экран через портал: имя зоны → ask (по умолчанию: диалог портала каждый раз, запомнить выбор нельзя), no (каждый вызов портала ScreenCast — отказ с объяснением и строкой в cellward journal) или yes (выбор можно запомнить: следующую трансляцию портал начнёт без диалога). yes действует, только если портал знает зону по имени (xdg-desktop-portal 1.19+, docs/LEAK-MODEL.md §23), иначе — как ask, и в разовом контейнере (--fs-sandbox) тоже как ask. Действует сразу, без перезапуска зоны. Держит фильтр сессионной шины герметичной зоны: программы негерметичной зоны говорят с порталом напрямую, мимо этого переключателя. Без пересборки — cellward screencast <зона> ask|yes|no. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     askAgainAfter = lib.mkOption {
@@ -1305,9 +1317,15 @@ in
       + "containers.<имя>.permissions.screencast и main.permissions.screencast — своё"
     )
     ++ lib.optional (cfg.audioManager != [ ]) (
-      "programs.cellward.audioManager устарело: PipeWire хоста без ограничений теперь у "
-      + "контейнера — programs.cellward.containers.<имя>.permissions.audioManager (зона "
-      + "остаётся значением по умолчанию для контейнеров без своего)"
+      "programs.cellward.audioManager не действует: PipeWire хоста без ограничений — "
+      + "разрешение программы, сеть его больше не решает (docs/PERMISSIONS.md §11.15) — "
+      + "containers.<имя>.permissions.audioManager, main.permissions.audioManager, "
+      + "defaults.permissions.audioManager"
+    )
+    ++ lib.optional (cfg.camera != [ ]) (
+      "programs.cellward.camera не действует: сеть больше не решает, видны ли её программам "
+      + "камеры (docs/PERMISSIONS.md §11.15) — containers.<имя>.permissions.camera, "
+      + "main.permissions.camera, defaults.permissions.camera"
     )
     ++ lib.optional (cfg.zoneX11 != [ ]) (
       "programs.cellward.zoneX11 устарело: свой X-сервер теперь у контейнера — "
@@ -1509,10 +1527,12 @@ in
     (lib.mkIf (cfg.questionTimeout != null) {
       ".config/vpn-zones/declared/question-timeout".text = cfg.questionTimeout;
     })
-    (lib.mkIf (cfg.defaults.permissions.microphone != null || cfg.defaults.permissions.screencast != null) {
+    (lib.mkIf (lib.any (v: v != null) (lib.attrValues cfg.defaults.permissions)) {
       ".config/vpn-zones/declared/defaults.conf".text = lib.concatStrings (
         lib.optional (cfg.defaults.permissions.microphone != null) "microphone = ${cfg.defaults.permissions.microphone}\n"
         ++ lib.optional (cfg.defaults.permissions.screencast != null) "screencast = ${cfg.defaults.permissions.screencast}\n"
+        ++ lib.optional (cfg.defaults.permissions.camera != null) "camera = ${lib.boolToString cfg.defaults.permissions.camera}\n"
+        ++ lib.optional (cfg.defaults.permissions.audioManager != null) "audio_manager = ${lib.boolToString cfg.defaults.permissions.audioManager}\n"
       );
     })
     (lib.mkIf (cfg.protect != [ ]) {

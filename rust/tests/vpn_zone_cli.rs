@@ -2560,42 +2560,52 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
         ),
         "{json}"
     );
-    // An audio manager: the raw socket, said loudly; in status with its
-    // source.
+    // The cameras and the audio manager (2b of §11.15): no network's word
+    // either — the template's for those with none of their own, a
+    // container's (or the main home's) own over it; the raw socket said
+    // loudly where it is given.
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
         json.contains("\"audio_manager\":{\"value\":false,\"source\":\"default\"}"),
         "{json}"
     );
-    assert!(
-        json.contains("\"microphone\":null,\"screencast\":null,\"audio_manager\":null,"),
-        "{json}"
-    );
-    let out = home.run(&["audio-manager", "nl", "on"]);
+    for key in ["camera", "audio-manager"] {
+        let out = home.run(&[key, "nl", "on"]);
+        assert_eq!(out.status.code(), Some(1), "{key}");
+        let said = stderr(&out);
+        assert!(
+            said.contains(&format!("cellward defaults set {key} on")),
+            "{said}"
+        );
+        assert!(!home.state().join("nl").join(key).exists());
+    }
+    let out = home.run(&["defaults", "set", "audio-manager", "on"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("ВНИМАНИЕ"), "{}", stdout(&out));
-    assert_eq!(
-        fs::read_to_string(home.state().join("nl/audio-manager")).unwrap(),
-        "on"
+    assert!(
+        stdout(&out).contains("audio-manager: on\n"),
+        "{}",
+        stdout(&out)
     );
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
         json.contains("\"audio_manager\":{\"value\":true,\"source\":\"local\"}"),
         "{json}"
     );
-    assert!(!home.run(&["audio-manager", "nl", "yes"]).status.success());
-    declare(&home.root.join("config/declared/audio-manager"), "nl\n");
-    assert!(home
-        .run(&["audio-manager", "nl", "default"])
+    assert!(!home
+        .run(&["defaults", "set", "camera", "yes"])
         .status
         .success());
-    let json = stdout(&home.run(&["status", "--json"]));
-    assert!(
-        json.contains("\"audio_manager\":{\"value\":true,\"source\":\"nix\"}"),
-        "{json}"
-    );
-    fs::remove_file(home.root.join("config/declared/audio-manager")).unwrap();
-    assert!(!home.state().join("nl/audio-manager").exists());
+    assert!(home
+        .run(&["defaults", "set", "audio-manager", "default"])
+        .status
+        .success());
+    let out = home.run(&["container", "set", "main", "audio-manager", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("ВНИМАНИЕ"), "{}", stdout(&out));
+    assert!(home
+        .run(&["container", "set", "main", "audio-manager", "default"])
+        .status
+        .success());
     // The pause after a refusal: a term within 30s…1d, Nix over it.
     let out = home.run(&["ask-again", "10m"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -2663,7 +2673,9 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
              \"handshake_check\":{\"value\":\"6s\",\"source\":\"default\"},\
              \"protected\":[],\
              \"permissions\":{\"microphone\":{\"value\":\"ask\",\"source\":\"default\"},\
-             \"screencast\":{\"value\":\"ask\",\"source\":\"default\"}}}"
+             \"screencast\":{\"value\":\"ask\",\"source\":\"default\"},\
+             \"camera\":{\"value\":false,\"source\":\"default\"},\
+             \"audio_manager\":{\"value\":false,\"source\":\"default\"}}}"
         ),
         "{json}"
     );

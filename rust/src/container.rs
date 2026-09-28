@@ -1563,12 +1563,10 @@ pub fn own_flag_in(config: &Path, name: &str, key: &str) -> Option<(bool, Source
 /// was ignored), a local `on` never opens what the zone's declared `off`
 /// closes.
 pub fn camera_for(zone_dir: &Path, config: &Path, zone: &str, name: &str) -> bool {
-    crate::hermetic::for_container(
-        crate::hermetic::camera(zone_dir, config, zone),
-        own_flag_in(config, name, "camera"),
-        false,
-    )
-    .0
+    // Its own word over the template both ways (§11.15, 2b).
+    own_flag_in(config, name, "camera")
+        .unwrap_or_else(|| crate::hermetic::camera(zone_dir, config, zone))
+        .0
 }
 
 /// Read one container. `None` when it neither exists on disk nor is declared.

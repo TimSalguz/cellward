@@ -148,9 +148,12 @@ fn allowance(
 /// user — it filmed without a question.
 pub const CAMERA: &str = "camera";
 
-/// Whether the zone in `zone_dir` reaches the cameras: `(on, source)`.
-pub fn camera(zone_dir: &Path, config: &Path, zone: &str) -> (bool, Source) {
-    allowance(zone_dir, config, zone, CAMERA, CAMERA, "on")
+/// Whether a program with no word of its container's reaches the cameras:
+/// the template (`crate::permissions`, 2b of `docs/PERMISSIONS.md`
+/// §11.15), whatever network it runs in. The zone's arguments are kept for
+/// the callers' shape.
+pub fn camera(_zone_dir: &Path, config: &Path, _zone: &str) -> (bool, Source) {
+    crate::permissions::flag(config, "camera")
 }
 
 /// Whether a hermetic zone gets the host's raw `pipewire-0` instead of the
@@ -163,10 +166,10 @@ pub fn camera(zone_dir: &Path, config: &Path, zone: &str) -> (bool, Source) {
 /// zone has the raw socket anyway: it has the host's `systemd --user`.
 pub const AUDIO_MANAGER: &str = "audio-manager";
 
-/// Whether the zone in `zone_dir` gets the raw PipeWire socket: `(on,
-/// source)`.
-pub fn audio_manager(zone_dir: &Path, config: &Path, zone: &str) -> (bool, Source) {
-    allowance(zone_dir, config, zone, AUDIO_MANAGER, AUDIO_MANAGER, "on")
+/// Whether a program with no word of its container's gets the raw PipeWire
+/// socket: the template, whatever network it runs in (as [`camera`]).
+pub fn audio_manager(_zone_dir: &Path, config: &Path, _zone: &str) -> (bool, Source) {
+    crate::permissions::flag(config, "audio_manager")
 }
 
 /// Whether the zone in `zone_dir` reaches the Nix daemon: `(on, source)`.
@@ -318,6 +321,10 @@ pub enum Asker {
     /// Nobody's: a throwaway container, or a program whose container is
     /// not known — the safe value.
     Nobody,
+    /// The template's, for a program's permission its container has no word
+    /// of (`crate::permissions`, 2b of `docs/PERMISSIONS.md` §11.15): the
+    /// network has no say in those.
+    Template,
 }
 
 impl Asker {
@@ -327,6 +334,7 @@ impl Asker {
             Self::Container => "container",
             Self::Network => "network",
             Self::Nobody => "nobody",
+            Self::Template => "template",
         }
     }
 }
@@ -392,15 +400,10 @@ pub fn explain(zone_dir: &Path, config: &Path, zone: &str, who: &Who, key: &str)
     };
     let asked = match (own, tolerated) {
         (Some((on, source)), Some(_)) => (on, source, Asker::Container),
-        (own, None) => {
-            let (on, source) = for_container(network, own, safe);
-            let whose = if own == Some((on, source)) {
-                Asker::Container
-            } else {
-                Asker::Network
-            };
-            (on, source, whose)
-        }
+        // A program's permission (the audio manager): its own word over
+        // the template both ways, the network no say (§11.15, 2b).
+        (Some((on, source)), None) => (on, source, Asker::Container),
+        (None, None) => (network.0, network.1, Asker::Template),
         (None, Some(_)) => (network.0, network.1, Asker::Network),
     };
     let value = match tolerated {
@@ -610,26 +613,39 @@ mod tests {
             host_files_writable(&d.zone(), &d.config(), "nl"),
             (false, Source::Local)
         );
-        // The raw PipeWire socket: never by accident.
+        // The raw PipeWire socket: never by accident — and the network's
+        // marker has no say any more, the template does (§11.15, 2b).
         assert_eq!(
             audio_manager(&d.zone(), &d.config(), "nl"),
             (false, Source::Default)
         );
-        d.write("zone/audio-manager", "yes");
+        d.write("zone/audio-manager", "on");
+        assert_eq!(
+            audio_manager(&d.zone(), &d.config(), "nl"),
+            (false, Source::Default)
+        );
+        std::fs::write(
+            d.config().join(crate::permissions::FILE),
+            "audio_manager = yes\n",
+        )
+        .unwrap();
         assert_eq!(
             audio_manager(&d.zone(), &d.config(), "nl"),
             (false, Source::Local)
         );
-        d.write("zone/audio-manager", "on");
+        std::fs::write(
+            d.config().join(crate::permissions::FILE),
+            "audio_manager = true\n",
+        )
+        .unwrap();
         assert_eq!(
             audio_manager(&d.zone(), &d.config(), "nl"),
             (true, Source::Local)
         );
-        d.write("zone/audio-manager", "off");
-        d.declare("audio-manager", "nl\n");
+        d.declare("defaults.conf", "audio_manager = false\n");
         assert_eq!(
             audio_manager(&d.zone(), &d.config(), "nl"),
-            (true, Source::Nix)
+            (false, Source::Nix)
         );
     }
 
@@ -930,7 +946,13 @@ mod tests {
         d.write("zone/hermetic", "off");
         d.write("zone/nix-daemon", "on");
         d.write("zone/host-files", "writable");
-        d.write("zone/audio-manager", "on");
+        // The audio manager is a program's permission: the template's, the
+        // network no say (§11.15, 2b).
+        std::fs::write(
+            d.config().join(crate::permissions::FILE),
+            "audio_manager = true\n",
+        )
+        .unwrap();
         assert_eq!(
             start_settings_for(&d.zone(), &d.config(), "nl", &Who::Main),
             open
@@ -944,7 +966,8 @@ mod tests {
         d.declare("hermetic-default", "off");
         d.declare("nix-daemon", "nl\n");
         d.declare("host-files-writable", "nl\n");
-        d.declare("audio-manager", "nl\n");
+        std::fs::remove_file(d.config().join(crate::permissions::FILE)).unwrap();
+        d.declare("defaults.conf", "audio_manager = true\n");
         assert_eq!(
             start_settings_for(&d.zone(), &d.config(), "nl", &Who::Main),
             open

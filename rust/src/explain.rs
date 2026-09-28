@@ -121,14 +121,11 @@ pub fn rows(tools: &Tools, zone: &str, who: &Who, home: Option<Home>) -> Vec<Row
     // a launch of no container (`launch`, THE CAMERAS).
     let camera = crate::hermetic::camera(&dir, config, zone);
     let own_camera = own("camera");
-    let camera = match record {
-        Some(_) => crate::hermetic::for_container(camera, own_camera, false),
-        None => camera,
-    };
-    let camera_whose = if own_camera == Some(camera) {
-        Asker::Container
-    } else {
-        Asker::Network
+    // Its own word over the template both ways (§11.15, 2b).
+    let (camera, camera_whose) = match (record, own_camera) {
+        (Some(_), Some(own)) => (own, Asker::Container),
+        (Some(_), None) => (camera, Asker::Template),
+        (None, _) => (camera, Asker::Nobody),
     };
     rows.push(Row {
         key: "camera",
@@ -263,6 +260,13 @@ fn why(row: &Row) -> String {
                 format!("своего слова нет, сеть не даёт ({src})")
             }
         }
+        Asker::Template => {
+            if asking {
+                format!("своего слова нет, по умолчанию — да ({src})")
+            } else {
+                format!("своего слова нет, по умолчанию — нет ({src})")
+            }
+        }
     };
     if !asking {
         return asker;
@@ -281,6 +285,7 @@ fn whose_word(whose: Option<Asker>) -> &'static str {
         Some(Asker::Container) => "своё у контейнера",
         Some(Asker::Network) => "как у сети",
         Some(Asker::Nobody) => "ничьё",
+        Some(Asker::Template) => "по умолчанию (cellward defaults)",
         None => "по контейнеру и сети",
     }
 }
