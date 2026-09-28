@@ -24,15 +24,21 @@
 //! files and the audio manager are its container's before they are its
 //! network's — `containers.<n>.permissions.*` in Nix, `cellward container
 //! set <c> hermetic|nix-daemon|host-files|audio-manager` locally. A
-//! container's instance comes up with them ([`start_settings_for`]); the
-//! zone-level settings are what a container without its own takes, and what
-//! a zone's own space (nothing is launched into it since stage 5) is set up
-//! with. The order is the camera's (`container::camera_for`): Nix's word for
-//! the container, then Nix's for the zone — a local word does not override
-//! a declared one to open what it closes, but does to close what it opens
-//! (review 2026-09-28: a local `nix-daemon off` was silently ignored under
-//! the network's declared list) —, then the container's local word, then
-//! the zone's ([`for_container`]).
+//! container's instance comes up with them ([`start_settings_for`]).
+//!
+//! **Asked by the container, tolerated by the network** (step 1 of the
+//! model the owner took on 2026-09-28, `docs/PERMISSIONS.md` §11.14): three
+//! of them are ways around a network, not permissions of a program
+//! ([`BYPASS_KEYS`]) — no hermeticity, the Nix daemon, the host's files
+//! writable. A container asks for one, its network tolerates it, and only
+//! both open it ([`explain`]); a network that does not tolerate one closes
+//! it for every container in it, whatever their own word. The old per-zone
+//! lists and markers say both at once, for compatibility: that the network
+//! tolerates it, and that a container without a word of its own — and the
+//! main home — asks for it. `offline` tolerates none; a zone locked by the
+//! person, no host session. The audio manager stays the container's, by
+//! [`for_container`] as the camera: its container's word, the network's for
+//! one without.
 //!
 //! **Nobody's** (a throwaway container, or a program whose container is not
 //! known): the safe values, whatever its network says (review 2026-09-28,
@@ -265,15 +271,150 @@ pub fn zone_value(zone_dir: &Path, config: &Path, zone: &str, key: &str) -> (boo
     }
 }
 
+/// The settings of [`CONTAINER_KEYS`] that are ways around a network
+/// rather than permissions of a program (review 2026-09-28): not hermetic —
+/// the host's `systemd --user` and session start anything outside the zone,
+/// around its tunnel; the Nix daemon — it fetches in the host's network
+/// whatever a program names; the host's files writable — what is planted
+/// there runs on the host later. A network has a say in them ([`tolerance`]).
+pub const BYPASS_KEYS: [&str; 3] = ["hermetic", "nix_daemon", "host_files_writable"];
+
+/// Whether the setting `key` is a way around a network ([`BYPASS_KEYS`]).
+pub fn is_bypass(key: &str) -> bool {
+    BYPASS_KEYS.contains(&key)
+}
+
+/// Whether the network whose zone directory is `zone_dir` tolerates the
+/// bypass `key` ([`BYPASS_KEYS`]) for its containers, and whence: its own
+/// setting ([`zone_value`]) open — the per-zone lists and markers,
+/// `programs.cellward.nixDaemon` and the like. `offline` tolerates none,
+/// whatever is set for it: a way around no network is a network. A zone
+/// the person locked (`cellward lock`) tolerates no host session: the lock
+/// is kept by the broker, and a program with the host's `systemd --user`
+/// needs no broker. `None`: `key` is no bypass — the network has no say.
+pub fn tolerance(zone_dir: &Path, config: &Path, zone: &str, key: &str) -> Option<(bool, Source)> {
+    if !is_bypass(key) {
+        return None;
+    }
+    if zone == crate::launch::OFFLINE {
+        return Some((false, Source::Default));
+    }
+    if key == "hermetic" && zone_dir.join(crate::launch::NO_ESCAPE).exists() {
+        return Some((false, Source::Local));
+    }
+    let (on, source) = zone_value(zone_dir, config, zone, key);
+    Some((on != safe_value(key), source))
+}
+
+/// Whose word a setting asked for is ([`Explained::asked`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Asker {
+    /// The container's own, from Nix or locally.
+    Container,
+    /// Its network's list or marker, for a container without a word of its
+    /// own and for the main home — step 1's compatibility: what the lists
+    /// gave before is still asked for.
+    Network,
+    /// Nobody's: a throwaway container, or a program whose container is
+    /// not known — the safe value.
+    Nobody,
+}
+
+impl Asker {
+    /// Its word in `explain --json`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Container => "container",
+            Self::Network => "network",
+            Self::Nobody => "nobody",
+        }
+    }
+}
+
+/// How the setting `key` is come to for the programs of someone in a
+/// network ([`explain`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Explained {
+    pub key: &'static str,
+    /// What is asked for, whence, and whose word it is.
+    pub asked: (bool, Source, Asker),
+    /// What the network tolerates ([`tolerance`]); `None` for a setting
+    /// the network has no say in.
+    pub tolerated: Option<(bool, Source)>,
+    /// What the programs get, and the source of the word that decided it.
+    pub value: (bool, Source),
+}
+
+/// The name [`CONTAINER_KEYS`] has for `key`, `'static`; `None` for a key
+/// that is none of them.
+fn known_key(key: &str) -> Option<&'static str> {
+    CONTAINER_KEYS.iter().map(|(k, _)| *k).find(|k| *k == key)
+}
+
+/// How the setting `key` ([`CONTAINER_KEYS`]) is come to for the programs
+/// of `who` in the network whose zone directory is `zone_dir` — what
+/// [`value_for`] gives, with the words it is made of.
+///
+/// - Nobody's (a throwaway container, `:tmp:`, `:fs:`, or a program whose
+///   container is not known): the safe value, whatever the network says
+///   (review 2026-09-28: a throwaway took the network's, so a one-off
+///   launch into a network with the Nix daemon had it too). The
+///   microphone's rule for the unknown is the same in spirit: its `yes` is
+///   `ask` (`microphone::by_container`).
+/// - A way around the network ([`BYPASS_KEYS`]): what is asked for — the
+///   container's own word (Nix's over its local one), else its network's,
+///   which the main home's always is — and open only where the network
+///   tolerates it ([`tolerance`]). A container's own "on" in a network that
+///   does not tolerate it is closed (review 2026-09-28: it opened in any
+///   network, offline and locked ones too); its own "off" closes whatever
+///   the network tolerates.
+/// - Else (the audio manager): its container's by [`for_container`], the
+///   network's for the main home.
+pub fn explain(zone_dir: &Path, config: &Path, zone: &str, who: &Who, key: &str) -> Explained {
+    let key = known_key(key).unwrap_or("");
+    let safe = safe_value(key);
+    let tolerated = tolerance(zone_dir, config, zone, key);
+    if *who == Who::Unknown {
+        return Explained {
+            key,
+            asked: (safe, Source::Default, Asker::Nobody),
+            tolerated,
+            value: (safe, Source::Default),
+        };
+    }
+    let network = zone_value(zone_dir, config, zone, key);
+    let own = match who {
+        Who::Container(name) => container_own(config, name, key),
+        _ => None,
+    };
+    let asked = match (own, tolerated) {
+        (Some((on, source)), Some(_)) => (on, source, Asker::Container),
+        (own, None) => {
+            let (on, source) = for_container(network, own, safe);
+            let whose = if own == Some((on, source)) {
+                Asker::Container
+            } else {
+                Asker::Network
+            };
+            (on, source, whose)
+        }
+        (None, Some(_)) => (network.0, network.1, Asker::Network),
+    };
+    let value = match tolerated {
+        Some((false, source)) if asked.0 != safe => (safe, source),
+        _ => (asked.0, asked.1),
+    };
+    Explained {
+        key,
+        asked,
+        tolerated,
+        value,
+    }
+}
+
 /// The setting `key` for the programs of `who` in the network whose zone
-/// directory is `zone_dir`: a container's by [`for_container`]; the main
-/// home's, the network's; nobody's — a throwaway container (`:tmp:`,
-/// `:fs:`) or a program whose container is not known —, the safe value
-/// whatever the network says (review 2026-09-28: a throwaway took the
-/// network's, so a one-off launch into a network with the Nix daemon, the
-/// host's files or no hermeticity for its containers had them too). The
-/// microphone's rule for the unknown is the same in spirit: its `yes` is
-/// `ask` (`microphone::by_container`).
+/// directory is `zone_dir`, and where the word that decided it is from:
+/// [`explain`]'s value.
 pub fn value_for(
     zone_dir: &Path,
     config: &Path,
@@ -281,15 +422,7 @@ pub fn value_for(
     who: &Who,
     key: &str,
 ) -> (bool, Source) {
-    match who {
-        Who::Container(name) => for_container(
-            zone_value(zone_dir, config, zone, key),
-            container_own(config, name, key),
-            safe_value(key),
-        ),
-        Who::Main => zone_value(zone_dir, config, zone, key),
-        Who::Unknown => (safe_value(key), Source::Default),
-    }
+    explain(zone_dir, config, zone, who, key).value
 }
 
 /// The settings a zone takes when it comes up, by their names in
@@ -747,14 +880,27 @@ mod tests {
             Some((true, Source::Nix))
         );
         // And what an instance of it comes up with in a zone that is
-        // hermetic by default: its own; the main home's, the zone's.
+        // hermetic by default: hermetic — the zone tolerates no host
+        // session (step 1, 2026-09-28) —; in one that does, its own, while
+        // the main home's is the zone's.
         d.write("config/containers/work/container.conf", "");
         d.declare("containers/work.conf", "home = private\nhermetic = false\n");
         let work = Who::Container("work".into());
         let settings = start_settings_for(&d.zone(), &d.config(), "nl", &work);
+        assert_eq!(settings[0], ("hermetic", true));
+        d.declare(
+            "containers/work.conf",
+            "home = private\nnix_daemon = true\n",
+        );
+        d.write("zone/hermetic", "off");
+        let settings = start_settings_for(&d.zone(), &d.config(), "nl", &work);
         assert_eq!(settings[0], ("hermetic", false));
+        assert_eq!(settings[1], ("nix_daemon", false));
+        d.declare("containers/work.conf", "home = private\nhermetic = true\n");
+        let settings = start_settings_for(&d.zone(), &d.config(), "nl", &work);
+        assert_eq!(settings[0], ("hermetic", true));
         let main = start_settings_for(&d.zone(), &d.config(), "nl", &Who::Main);
-        assert_eq!(main[0], ("hermetic", true));
+        assert_eq!(main[0], ("hermetic", false));
         assert_eq!(start_settings(&d.zone(), &d.config(), "nl"), main);
     }
 
@@ -811,6 +957,188 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    /// Step 1 (2026-09-28), every combination for every setting: a
+    /// network — an ordinary zone, one the person locked, `offline` —; its
+    /// word — none, open or closed, locally or from Nix —; a container's own
+    /// word — the same five —; the main home, the container and nobody.
+    /// Against step 0's rule ([`for_container`], the network's for the main
+    /// home) and the model: nothing wider than before; a way around the
+    /// network open only where it is both asked for and tolerated; a
+    /// container's closing word always holds, its opening one wherever the
+    /// network tolerates it; the main home and a container without a word
+    /// of its own get what the lists gave, in a network that is neither
+    /// locked nor `offline`; `offline` opens no way around it at all.
+    #[test]
+    fn a_way_around_the_network_needs_both_words() {
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+        // Declared files as the module's (links into the store), made once
+        // for each text: `nix-store --add` is slow.
+        let mut stored: HashMap<String, PathBuf> = HashMap::new();
+        let mut declare = |path: &Path, text: &str| {
+            let target = stored.entry(text.to_owned()).or_insert_with(|| {
+                let probe = std::env::temp_dir().join(format!(
+                    "vz-both-probe-{}-{}",
+                    std::process::id(),
+                    text.len()
+                ));
+                let _ = std::fs::remove_file(&probe);
+                crate::declared::declare(&probe, text);
+                let target = std::fs::read_link(&probe).unwrap();
+                let _ = std::fs::remove_file(&probe);
+                target
+            });
+            let _ = std::fs::remove_file(path);
+            std::os::unix::fs::symlink(target, path).unwrap();
+        };
+        // A word: none, or (open, from Nix).
+        let words: [Option<(bool, bool)>; 5] = [
+            None,
+            Some((true, false)),
+            Some((false, false)),
+            Some((true, true)),
+            Some((false, true)),
+        ];
+        let base = std::env::temp_dir().join(format!("vz-both-{}", std::process::id()));
+        let zone_dir = base.join("zone");
+        let config = base.join("config");
+        let mut cases = 0;
+        for (key, safe) in CONTAINER_KEYS {
+            for network in ["zone", "locked", "offline"] {
+                let zone = if network == "offline" {
+                    "offline"
+                } else {
+                    "nl"
+                };
+                for zone_word in words {
+                    for own_word in words {
+                        let _ = std::fs::remove_dir_all(&base);
+                        std::fs::create_dir_all(&zone_dir).unwrap();
+                        std::fs::create_dir_all(config.join("declared/containers")).unwrap();
+                        std::fs::create_dir_all(config.join("containers/work")).unwrap();
+                        if network == "locked" {
+                            std::fs::write(zone_dir.join(crate::launch::NO_ESCAPE), "").unwrap();
+                        }
+                        // The network's word, where each setting has it.
+                        let (marker, open_word, closed_word, list) = match key {
+                            "hermetic" => (MARKER, "off", "on", DEFAULT_SETTING),
+                            "nix_daemon" => (NIX_DAEMON, "on", "off", NIX_DAEMON),
+                            "host_files_writable" => (
+                                HOST_FILES,
+                                "writable",
+                                "read-only",
+                                DECLARED_HOST_FILES_WRITABLE,
+                            ),
+                            _ => (AUDIO_MANAGER, "on", "off", AUDIO_MANAGER),
+                        };
+                        match zone_word {
+                            None => {}
+                            Some((open, false)) => std::fs::write(
+                                zone_dir.join(marker),
+                                if open { open_word } else { closed_word },
+                            )
+                            .unwrap(),
+                            Some((open, true)) => {
+                                let text = match (key, open) {
+                                    ("hermetic", true) => "off\n".to_owned(),
+                                    ("hermetic", false) => "on\n".to_owned(),
+                                    // A list names the zones it opens:
+                                    // "closed" is a list without this one.
+                                    (_, true) => format!("de\n{zone}\n"),
+                                    (_, false) => "de\n".to_owned(),
+                                };
+                                declare(&config.join("declared").join(list), &text);
+                            }
+                        }
+                        // The container's own word.
+                        match own_word {
+                            None => {}
+                            Some((open, false)) => std::fs::write(
+                                config.join("containers/work/container.conf"),
+                                format!("{key} = {}\n", open != safe),
+                            )
+                            .unwrap(),
+                            Some((open, true)) => declare(
+                                &config.join("declared/containers/work.conf"),
+                                &format!("home = private\n{key} = {}\n", open != safe),
+                            ),
+                        }
+                        let network_word = zone_value(&zone_dir, &config, zone, key);
+                        let own = container_own(&config, "work", key);
+                        let tolerated = network != "offline"
+                            && !(network == "locked" && key == "hermetic")
+                            && network_word.0 != safe;
+                        for who in [Who::Main, Who::Container("work".into()), Who::Unknown] {
+                            cases += 1;
+                            let got = value_for(&zone_dir, &config, zone, &who, key);
+                            let told = explain(&zone_dir, &config, zone, &who, key);
+                            let before = match &who {
+                                Who::Container(_) => for_container(network_word, own, safe),
+                                Who::Main => network_word,
+                                Who::Unknown => (safe, Source::Default),
+                            };
+                            let case = format!(
+                                "{key} in {network} ({zone_word:?}: {network_word:?}), own \
+                                 {own_word:?} ({own:?}), {who:?}: {got:?}, before {before:?}, \
+                                 {told:?}"
+                            );
+                            assert_eq!(told.value, got, "{case}");
+                            assert_eq!(told.key, key, "{case}");
+                            // Nothing wider than step 0 gave.
+                            if got.0 != safe {
+                                assert_ne!(before.0, safe, "wider than before: {case}");
+                            }
+                            if who == Who::Unknown {
+                                assert_eq!(got, (safe, Source::Default), "{case}");
+                                continue;
+                            }
+                            if !is_bypass(key) {
+                                // A program's own permission: as before.
+                                assert_eq!(got, before, "{case}");
+                                assert_eq!(told.tolerated, None, "{case}");
+                                continue;
+                            }
+                            assert_eq!(told.tolerated.map(|(on, _)| on), Some(tolerated), "{case}");
+                            if !tolerated {
+                                assert_eq!(got.0, safe, "open, not tolerated: {case}");
+                            }
+                            match (&who, own) {
+                                (Who::Container(_), Some((on, _))) => {
+                                    assert_eq!(told.asked.2, Asker::Container, "{case}");
+                                    if on == safe {
+                                        assert_eq!(got.0, safe, "its closing word: {case}");
+                                    } else {
+                                        assert_eq!(got.0 != safe, tolerated, "{case}");
+                                    }
+                                }
+                                _ => {
+                                    // What the lists gave, for whom they
+                                    // spoke: the main home, a container
+                                    // with no word of its own.
+                                    assert_eq!(told.asked.2, Asker::Network, "{case}");
+                                    if network == "zone" {
+                                        assert_eq!(got, before, "the lists' word: {case}");
+                                    } else {
+                                        assert_eq!(
+                                            got.0 != safe,
+                                            tolerated && network_word.0 != safe,
+                                            "{case}"
+                                        );
+                                    }
+                                }
+                            }
+                            if network == "offline" {
+                                assert_eq!(got.0, safe, "a way around offline: {case}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 4 * 3 * 5 * 5 * 3);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Review 2026-09-28: what an instance came up with against what

@@ -232,13 +232,20 @@ Enter запускает только в спросившей зоне; друг
      `defaults.hermetic` и `networks[].hermetic`, у каждого — источник.
      **С 2026-09-28 (этап 5 контейнерного дизайна) — своя у контейнера:**
      `containers.<имя>.permissions.hermetic` в Nix, `cellward container set
-     <к> hermetic default|on|off` локально — слово Nix для контейнера, затем
-     Nix для его сети, затем местное слово контейнера, затем сети, как выше.
-     Экземпляр контейнера поднимается с ней (`instances[].restart_needed`,
-     если она с тех пор изменилась); `hermetic.exceptions` работает, с
-     предупреждением. Так же — Nix-демон, файлы хоста и менеджер звука
-     (`permissions.nixDaemon`, `hostFilesWritable`, `audioManager`;
-     `nix-daemon`, `host-files`, `audio-manager` локально);
+     <к> hermetic default|on|off` локально; слово Nix для контейнера важнее
+     местного. **С шага 1 модели разрешений (2026-09-28, PERMISSIONS
+     §11.14)** без герметичности контейнер только там, где сеть это
+     допускает: негерметичная сеть (её настройка выше) допускает,
+     герметичная — нет; `offline` и запертая зона не допускают никогда.
+     Контейнер без своего слова берёт настройку сети. Экземпляр контейнера
+     поднимается с ней (`instances[].restart_needed`, если она с тех пор
+     изменилась). Так же — Nix-демон и запись файлов хоста
+     (`permissions.nixDaemon`, `hostFilesWritable`; `nix-daemon`,
+     `host-files` локально; сеть — `nixDaemon`, `hostFilesWritable`,
+     `cellward nix-daemon|host-files <зона>`); менеджер звука
+     (`audioManager`, `audio-manager`) — разрешение программы: контейнера,
+     без своего слова — сети. `cellward explain <контейнер>` показывает,
+     что вышло и почему;
   2. разрешения шины — из манифеста программы на Flathub (`finish-args`:
      `--talk-name`, `--own-name`, `--system-talk-name`), когда он есть, чтобы
      фильтр не ломал известные программы; `permissions.dbus` — для остальных;

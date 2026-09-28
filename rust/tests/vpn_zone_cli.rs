@@ -1798,6 +1798,119 @@ fn a_container_has_its_own_zone_level_permissions() {
     );
 }
 
+/// Step 1 of the permission model (2026-09-28): a way around a network is
+/// open where the container asks and the network tolerates it, and
+/// `explain` says whose word decided each setting; `offline` tolerates
+/// none, and is refused them; `status` says what a network tolerates.
+#[test]
+fn explain_says_who_asked_and_what_the_network_tolerates() {
+    let home = Home::new("explain");
+    fs::create_dir_all(home.state().join("nl")).unwrap();
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    fs::create_dir_all(home.state().join("offline")).unwrap();
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+    let ok = |argv: &[&str]| {
+        let out = home.run(argv);
+        assert!(out.status.success(), "{argv:?}: {}", stderr(&out));
+        stdout(&out)
+    };
+    let setting = |argv: &[&str], key: &str| {
+        let json = ok(argv);
+        let at = json
+            .find(&format!("{{\"key\":\"{key}\""))
+            .unwrap_or_else(|| panic!("{key}: {json}"));
+        // Up to the end of its `tolerated`.
+        let rest = &json[at..];
+        let end = rest.find("\"moot\"").unwrap();
+        rest[..end].to_owned()
+    };
+    // Bound to no network and running nowhere: the network is to be named.
+    let out = home.run(&["explain", "work"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("назови её"), "{}", stderr(&out));
+    ok(&["container", "set", "work", "network", "nl"]);
+    // Asked, not tolerated: closed, and said so when it is asked for.
+    let said = ok(&["container", "set", "work", "nix-daemon", "on"]);
+    assert!(
+        said.contains("ВНИМАНИЕ: сеть nl этого не допускает"),
+        "{said}"
+    );
+    assert!(said.contains("cellward nix-daemon nl on"), "{said}");
+    assert_eq!(
+        setting(&["explain", "work", "--json"], "nix_daemon"),
+        "{\"key\":\"nix_daemon\",\"value\":false,\"source\":\"default\",\
+         \"asked\":{\"value\":true,\"source\":\"local\",\"by\":\"container\"},\
+         \"tolerated\":{\"value\":false,\"source\":\"default\",\"refused_by\":\"network\"},"
+    );
+    let text = ok(&["explain", "work"]);
+    assert!(text.contains("Контейнер «work»"), "{text}");
+    assert!(text.contains("в сети nl"), "{text}");
+    assert!(
+        text.contains("контейнер просит (местно), но сеть не допускает (по умолчанию)"),
+        "{text}"
+    );
+    // Tolerated: open.
+    ok(&["nix-daemon", "nl", "on"]);
+    assert_eq!(
+        setting(&["explain", "work", "--json"], "nix_daemon"),
+        "{\"key\":\"nix_daemon\",\"value\":true,\"source\":\"local\",\
+         \"asked\":{\"value\":true,\"source\":\"local\",\"by\":\"container\"},\
+         \"tolerated\":{\"value\":true,\"source\":\"local\",\"refused_by\":null},"
+    );
+    let said = ok(&["container", "set", "work", "nix-daemon", "on"]);
+    assert!(!said.contains("ВНИМАНИЕ"), "{said}");
+    // The main home asks for what the network gives.
+    assert_eq!(
+        setting(&["explain", "main", "nl", "--json"], "nix_daemon"),
+        "{\"key\":\"nix_daemon\",\"value\":true,\"source\":\"local\",\
+         \"asked\":{\"value\":true,\"source\":\"local\",\"by\":\"network\"},\
+         \"tolerated\":{\"value\":true,\"source\":\"local\",\"refused_by\":null},"
+    );
+    assert!(ok(&["explain", "main", "nl"]).contains("Основной дом"));
+    // Offline tolerates none, and is refused them.
+    let json = setting(&["explain", "work", "offline", "--json"], "nix_daemon");
+    assert!(json.contains("\"value\":false"), "{json}");
+    assert!(json.contains("\"refused_by\":\"offline\""), "{json}");
+    for argv in [
+        &["nix-daemon", "offline", "on"][..],
+        &["host-files", "offline", "writable"],
+        &["hermetic", "offline", "off"],
+    ] {
+        let out = home.run(argv);
+        assert_eq!(out.status.code(), Some(1), "{argv:?}");
+        assert!(
+            stderr(&out).contains("offline не допускает обходов сети"),
+            "{argv:?}: {}",
+            stderr(&out)
+        );
+    }
+    // Closing words are taken there as anywhere.
+    ok(&["nix-daemon", "offline", "off"]);
+    ok(&["hermetic", "offline", "on"]);
+    // What each network tolerates.
+    let status = ok(&["status", "--json"]);
+    assert!(
+        status.contains(
+            "\"tolerates\":{\"hermetic\":{\"value\":false,\"source\":\"default\"},\
+             \"nix_daemon\":{\"value\":true,\"source\":\"local\"},\
+             \"host_files_writable\":{\"value\":false,\"source\":\"default\"}}"
+        ),
+        "{status}"
+    );
+    // A program by its container; one of none, as a throwaway's.
+    ok(&["container", "assign", "org.example.Editor", "work"]);
+    assert!(ok(&["explain", "org.example.Editor"]).contains("Контейнер «work»"));
+    let text = ok(&["explain", "org.example.Unknown"]);
+    assert!(text.contains("ни в одном контейнере"), "{text}");
+    assert!(text.contains("offline"), "{text}");
+    // Unconfined: nothing of the container's there.
+    assert!(ok(&["explain", "work", "unconfined"]).contains("unconfined"));
+    assert_eq!(
+        home.run(&["explain", "work", "nowhere"]).status.code(),
+        Some(1)
+    );
+}
+
 /// Review 2026-09-28: a network's `restart_needed` is its running
 /// instances' — what changed since they came up —, not its own space's,
 /// where nothing runs since stage 5.
@@ -1826,11 +1939,30 @@ fn a_networks_restart_needed_is_its_instances() {
     )
     .unwrap();
     networks_say("[]");
+    // Its own asking for the Nix daemon, in a network that does not
+    // tolerate it (step 1 of the permission model, 2026-09-28): nothing
+    // would come up otherwise — said at once.
     let out = home.run(&["container", "set", "work", "nix-daemon", "on"]);
     assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("сеть nl этого не допускает"),
+        "{}",
+        stdout(&out)
+    );
+    networks_say("[]");
+    // Tolerated: it would.
+    let out = home.run(&["nix-daemon", "nl", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
     networks_say("[\"nix_daemon\"]");
+    // Its own "off" holds whatever the network tolerates.
+    let out = home.run(&["container", "set", "work", "nix-daemon", "off"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    networks_say("[]");
     // The network's own word, for a container without one.
     let out = home.run(&["container", "set", "work", "nix-daemon", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    networks_say("[\"nix_daemon\"]");
+    let out = home.run(&["nix-daemon", "nl", "default"]);
     assert!(out.status.success(), "{}", stderr(&out));
     networks_say("[]");
     let out = home.run(&["host-files", "nl", "writable"]);
@@ -1862,26 +1994,49 @@ fn a_locked_zone_refuses_a_container_that_is_not_hermetic() {
     };
     set(&["network", "nl"]);
     set(&["hermetic", "off"]);
+    // The zone tolerates containers without hermeticity (step 1 of the
+    // permission model, 2026-09-28).
+    let out = home.run(&["hermetic", "nl", "off"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let explained = |key: &str| {
+        let json = stdout(&home.run(&["explain", "work", "--json"]));
+        let at = json
+            .find(&format!("{{\"key\":\"{key}\""))
+            .unwrap_or_else(|| panic!("{key}: {json}"));
+        json[at..].split('}').next().unwrap().to_owned()
+    };
+    assert!(
+        explained("hermetic").starts_with("{\"key\":\"hermetic\",\"value\":false"),
+        "{}",
+        explained("hermetic")
+    );
     // Unlocked: it goes.
     let out = launch();
     assert!(out.status.success(), "{}", stderr(&out));
+    // Locked: the zone tolerates no host session any more — it would come
+    // up hermetic there, which the lock says, and holds.
     let out = home.run(&["lock", "nl"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stderr(&out).contains("work"), "{}", stderr(&out));
-    assert!(stderr(&out).contains("hermetic on"), "{}", stderr(&out));
-    let json = stdout(&home.run(&["status", "--json"]));
     assert!(
-        json.contains("\"locked\":true,\"lock_not_held_by\":[\"work\"]"),
-        "{json}"
-    );
-    let out = launch();
-    assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("заперта"), "{}", stderr(&out));
-    assert!(
-        stderr(&out).contains("cellward container set work hermetic on"),
+        stderr(&out).contains("поднимутся в ней герметичными"),
         "{}",
         stderr(&out)
     );
+    assert!(
+        explained("hermetic").starts_with("{\"key\":\"hermetic\",\"value\":true"),
+        "{}",
+        explained("hermetic")
+    );
+    let json = stdout(&home.run(&["explain", "work", "--json"]));
+    assert!(json.contains("\"refused_by\":\"lock\""), "{json}");
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"locked\":true,\"lock_not_held_by\":[]"),
+        "{json}"
+    );
+    let out = launch();
+    assert!(out.status.success(), "{}", stderr(&out));
     // Hermetic: it goes, locked.
     set(&["hermetic", "default"]);
     let out = launch();

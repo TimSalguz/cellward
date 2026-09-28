@@ -697,19 +697,19 @@ let
         type = lib.types.nullOr lib.types.bool;
         default = null;
         example = false;
-        description = "Герметичен ли контейнер: без systemd --user, сессионная шина через фильтр, запуск в других сетях — только через брокер с вопросом, свои /tmp. null — как у его сети (programs.cellward.hermetic.default или cellward hermetic <зона>) или как задано локально (cellward container set <контейнер> hermetic). Значение сети из Nix важнее местной настройки контейнера, если та шире; строже — действует (местное on при hermetic.default = false — герметичен); значение контейнера из Nix — важнее всего. Действует со следующего подъёма экземпляра контейнера (cellward status: restart_needed). См. docs/HERMETICITY.ru.md §7.";
+        description = "Герметичен ли контейнер: без systemd --user, сессионная шина через фильтр, запуск в других сетях — только через брокер с вопросом, свои /tmp. null — как у его сети (programs.cellward.hermetic.default, hermetic.exceptions или cellward hermetic <зона>) или как задано локально (cellward container set <контейнер> hermetic); значение контейнера из Nix важнее местного. Без герметичности контейнер только там, где сеть это допускает (она сама не герметична); offline и запертая зона (cellward lock) не допускают никогда — там он герметичен, что бы ни было задано (cellward explain <контейнер>). Действует со следующего подъёма экземпляра контейнера (cellward status: restart_needed). См. docs/HERMETICITY.ru.md §7.";
       };
       permissions.nixDaemon = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;
         default = null;
         example = true;
-        description = "Виден ли программам контейнера Nix-демон хоста (nix-shell, nix build). По умолчанию нет: демон качает и собирает в сети хоста, мимо VPN, и производная с фиксированным хешем скачает любой адрес, который назовёт программа. null — как у его сети (programs.cellward.nixDaemon, устарело) или как задано локально (cellward container set <контейнер> nix-daemon). Порядок — как у permissions.hermetic. Действует со следующего подъёма экземпляра контейнера.";
+        description = "Виден ли программам контейнера Nix-демон хоста (nix-shell, nix build). По умолчанию нет: демон качает и собирает в сети хоста, мимо VPN, и производная с фиксированным хешем скачает любой адрес, который назовёт программа. null — как у его сети (programs.cellward.nixDaemon) или как задано локально (cellward container set <контейнер> nix-daemon); значение контейнера из Nix важнее местного. Виден только в сетях, которые его допускают (programs.cellward.nixDaemon, cellward nix-daemon <зона> on); offline — никогда. Контейнеру со своим домом (home = \"private\") не виден вовсе. Действует со следующего подъёма экземпляра контейнера.";
       };
       permissions.hostFilesWritable = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;
         default = null;
         example = true;
-        description = "Может ли герметичный контейнер писать туда, что хост исполняет из дома: автозапуск, юниты, ярлыки, конфиги оболочек и композитора, ~/.ssh. По умолчанию только для чтения. null — как у его сети (programs.cellward.hostFilesWritable, устарело) или как задано локально (cellward container set <контейнер> host-files). Порядок — как у permissions.hermetic. Действует со следующего подъёма экземпляра контейнера.";
+        description = "Может ли герметичный контейнер писать туда, что хост исполняет из дома: автозапуск, юниты, ярлыки, конфиги оболочек и композитора, ~/.ssh. По умолчанию только для чтения. null — как у его сети (programs.cellward.hostFilesWritable) или как задано локально (cellward container set <контейнер> host-files); значение контейнера из Nix важнее местного. Только в сетях, которые это допускают (programs.cellward.hostFilesWritable, cellward host-files <зона> writable); offline — никогда. Действует со следующего подъёма экземпляра контейнера.";
       };
       permissions.audioManager = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;
@@ -947,7 +947,7 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "agents" ];
-      description = "Зоны (по имени), программам которых виден Nix-демон хоста (nix-shell, nix build). По умолчанию ни одной: демон качает и собирает в сети хоста, мимо VPN зоны, и производная с фиксированным хешем скачает любой адрес, который назовёт программа, даже из offline-зоны. Без пересборки — cellward nix-daemon <зона> on (со следующего подъёма экземпляров контейнеров этой сети). Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Зоны (по имени), которые допускают Nix-демон хоста (nix-shell, nix build) у своих контейнеров: он виден контейнерам без своей настройки и тем, что его просят (containers.<имя>.permissions.nixDaemon); в сети не из списка его не получит ни один контейнер, даже просящий. По умолчанию ни одной: демон качает и собирает в сети хоста, мимо VPN зоны, и производная с фиксированным хешем скачает любой адрес, который назовёт программа. offline не допускает его никогда, и здесь он ничего не значит. Без пересборки — cellward nix-daemon <зона> on (со следующего подъёма экземпляров контейнеров этой сети). Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     camera = lib.mkOption {
@@ -974,7 +974,7 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "dev" ];
-      description = "Герметичные зоны (по имени), программы которых могут писать туда, что хост потом исполняет из дома: автозапуск, юниты, ярлыки, конфиги оболочек и композитора, ~/.ssh. По умолчанию в герметичной зоне это только для чтения: иначе программа без своего дома подложит хосту код в обход зоны. Точечные файлы, которые home-manager делает ссылками в корне дома (~/.zshrc → store), монтированием не закрыть — их защищает только свой дом контейнера. Без пересборки — cellward host-files <зона> writable. Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Зоны (по имени), которые допускают, чтобы их герметичные контейнеры писали туда, что хост потом исполняет из дома: автозапуск, юниты, ярлыки, конфиги оболочек и композитора, ~/.ssh — те, что без своей настройки, и те, что просят (containers.<имя>.permissions.hostFilesWritable). По умолчанию это только для чтения: иначе программа без своего дома подложит хосту код в обход зоны. offline не допускает никогда. Точечные файлы, которые home-manager делает ссылками в корне дома (~/.zshrc → store), монтированием не закрыть — их защищает только свой дом контейнера. Без пересборки — cellward host-files <зона> writable. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     microphone = lib.mkOption {
@@ -1040,7 +1040,7 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "agents" ];
-      description = "Зоны (по имени), для которых действует обратное hermetic.default: при default = true — зоны без герметичности (например, зона, чьи программы законно зовут systemd-run --user), при false — герметичные. Важнее своей настройки зоны. Требует заданного hermetic.default. Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Зоны (по имени), для которых действует обратное hermetic.default: при default = true — зоны без герметичности (например, зона, чьи программы законно зовут systemd-run --user), при false — герметичные. Негерметичная зона допускает негерметичные контейнеры: такие у неё все без своей настройки и те, что просят (containers.<имя>.permissions.hermetic = false); герметичная не допускает ни одного. offline и запертая зона герметичны всегда. Важнее своей настройки зоны. Требует заданного hermetic.default. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     pathShims.enable = lib.mkOption {
@@ -1206,22 +1206,37 @@ in
   # design, 2026-09-28): a container's own now, containers.<name>.permissions
   # (docs/PERMISSIONS.md §11.2). Still read — what a container without its
   # own takes, at its instance's start —, and said to be on the way out.
-  # hermetic.default stays the default of them all.
+  # hermetic.default stays the default of them all. The ways around a
+  # network (hermetic.exceptions, nixDaemon, hostFilesWritable) are not on
+  # the way out (step 1 of the permission model, 2026-09-28, §11.14): they
+  # are what a network tolerates, and a container's own asking is in force
+  # only where it is tolerated. offline tolerates none.
   warnings =
-    lib.optional (cfg.hermetic.exceptions != [ ]) (
-      "programs.cellward.hermetic.exceptions устарело: герметичность теперь у контейнера — "
-      + "programs.cellward.containers.<имя>.permissions.hermetic (зона остаётся значением "
-      + "по умолчанию для контейнеров без своего)"
+    lib.optional (lib.elem "offline" (cfg.nixDaemon ++ cfg.hostFilesWritable)) (
+      "programs.cellward.nixDaemon, hostFilesWritable: offline не допускает обходов сети "
+      + "никогда — там он ничего не значит; контейнеру, которому это нужно, дай сеть"
     )
-    ++ lib.optional (cfg.nixDaemon != [ ]) (
-      "programs.cellward.nixDaemon устарело: Nix-демон теперь у контейнера — "
-      + "programs.cellward.containers.<имя>.permissions.nixDaemon (зона остаётся значением "
-      + "по умолчанию для контейнеров без своего)"
+    ++ lib.optional (cfg.hermetic.default == true && lib.elem "offline" cfg.hermetic.exceptions) (
+      "programs.cellward.hermetic.exceptions: offline герметичен всегда — исключение для него "
+      + "ничего не значит"
     )
-    ++ lib.optional (cfg.hostFilesWritable != [ ]) (
-      "programs.cellward.hostFilesWritable устарело: запись файлов хоста теперь у "
-      + "контейнера — programs.cellward.containers.<имя>.permissions.hostFilesWritable "
-      + "(зона остаётся значением по умолчанию для контейнеров без своего)"
+    ++ lib.concatLists (
+      lib.mapAttrsToList (
+        name: c:
+        lib.optional
+          (
+            c.network == "offline"
+            && (
+              c.permissions.nixDaemon == true
+              || c.permissions.hostFilesWritable == true
+              || c.permissions.hermetic == false
+            )
+          )
+          (
+            "programs.cellward.containers.${name}: сеть offline не допускает обходов сети "
+            + "(hermetic = false, nixDaemon, hostFilesWritable) — они у него не действуют"
+          )
+      ) cfg.containers
     )
     ++ lib.optional (cfg.audioManager != [ ]) (
       "programs.cellward.audioManager устарело: PipeWire хоста без ограничений теперь у "

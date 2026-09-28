@@ -906,10 +906,11 @@ pub fn run(args: Args) -> u8 {
     // launched into a zone's own namespaces since stage 5 of the container
     // design, and nothing reads it — the last run's goes.
     let _ = fs::remove_file(dir.join("launched-containers"));
-    let (hermetic, _) = crate::hermetic::zone_setting(&dir, &config, &label);
-    let (nix_daemon, _) = crate::hermetic::nix_daemon(&dir, &config, &label);
-    let (host_files_writable, _) = crate::hermetic::host_files_writable(&dir, &config, &label);
-    let (audio_manager, _) = crate::hermetic::audio_manager(&dir, &config, &label);
+    // The main home's settings in this network (`hermetic::value_for`):
+    // its lists, less what it does not tolerate — offline none of the ways
+    // around it, a locked zone no host session.
+    let [hermetic, nix_daemon, host_files_writable, audio_manager] =
+        crate::hermetic::start_settings(&dir, &config, &label).map(|(_, on)| on);
     let zone = Zone {
         dir,
         home,
