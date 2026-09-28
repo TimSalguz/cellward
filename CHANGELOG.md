@@ -39,7 +39,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (`/proc/<pid>/net/*` of its space), the process that holds each, and the
   container's launch it belongs to — `tcp 149.154.167.50:443
   (api.telegram.org) · Telegram`; a flow whose socket is closed by then has
-  no owner, and none is guessed.
+  no owner, and none is guessed. The cellward window's «Сеть» tab lists the
+  latest connections of every running container the same way: which
+  program, to where, how much each way, how long ago.
 - **The cellward window: the network monitor and the containers**
   (2026-09-28). `cellward-gui containers` (the «Контейнеры cellward»
   entry, and what stillconf opens) and the new `cellward-gui monitor` («Сеть

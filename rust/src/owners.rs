@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::flows::{Flow, TCP, UDP};
 
@@ -128,19 +128,40 @@ pub fn socket_of<'a>(socks: &'a [Sock], flow: &Flow) -> Option<&'a Sock> {
         })
 }
 
-/// The processes in the network namespace of process `space`.
-fn in_netns(space: i32) -> Vec<i32> {
-    let Ok(ns) = fs::read_link(format!("/proc/{space}/ns/net")) else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
-        .filter(|pid| fs::read_link(format!("/proc/{pid}/ns/net")).is_ok_and(|l| l == ns))
-        .collect()
+/// The processes the user may look at, each with its network namespace:
+/// looked at once for every instance asked of.
+pub struct Procs(Vec<(i32, PathBuf)>);
+
+impl Procs {
+    pub fn scan() -> Self {
+        let Ok(entries) = fs::read_dir("/proc") else {
+            return Self(Vec::new());
+        };
+        Self(
+            entries
+                .flatten()
+                .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+                .filter_map(|pid| Some((pid, fs::read_link(format!("/proc/{pid}/ns/net")).ok()?)))
+                .collect(),
+        )
+    }
+
+    /// Those in the network namespace of process `space`.
+    fn in_netns(&self, space: i32) -> Vec<i32> {
+        let Some(ns) = self
+            .0
+            .iter()
+            .find(|(pid, _)| *pid == space)
+            .map(|(_, ns)| ns)
+        else {
+            return Vec::new();
+        };
+        self.0
+            .iter()
+            .filter(|(_, n)| n == ns)
+            .map(|(pid, _)| *pid)
+            .collect()
+    }
 }
 
 /// The inode of a socket as `/proc/<pid>/fd/<n>` names it (`socket:[N]`).
@@ -211,13 +232,14 @@ fn program_of(pid: i32, launches: &HashMap<i32, String>) -> Option<String> {
 }
 
 /// The owner of each of `flows` of the instance whose space is process
-/// `space`, by the launches in `registry`: `None` where none is found.
-pub fn of(space: i32, registry: &Path, flows: &[Flow]) -> Vec<Option<Owner>> {
+/// `space`, among `procs`, by the launches in `registry`: `None` where none
+/// is found.
+pub fn of(space: i32, registry: &Path, flows: &[Flow], procs: &Procs) -> Vec<Option<Owner>> {
     let socks = sockets(space);
     if socks.is_empty() {
         return vec![None; flows.len()];
     }
-    let holders = holders(&in_netns(space));
+    let holders = holders(&procs.in_netns(space));
     let launches = launches(registry);
     flows
         .iter()
@@ -371,7 +393,7 @@ mod tests {
         let _ = fs::remove_dir_all(&reg);
         fs::create_dir_all(&reg).unwrap();
         fs::write(reg.join("tester"), format!("{me} offline work\n")).unwrap();
-        let owners = of(me, &reg, std::slice::from_ref(&flow));
+        let owners = of(me, &reg, std::slice::from_ref(&flow), &Procs::scan());
         let owner = owners[0].as_ref().expect("our own socket has an owner");
         assert_eq!(owner.pid, me);
         assert_eq!(owner.program.as_deref(), Some("tester"));

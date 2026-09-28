@@ -13,6 +13,7 @@
 //! path⇥<container>⇥<path>⇥<until: unix seconds, 0 for ever>
 //! network⇥<name>⇥<kind: zone|offline|unconfined>⇥<up: 0|1>⇥<#rrggbb>⇥<locked: 0|1>⇥<tunnel>
 //! instance⇥<id>⇥<container|->⇥<network>⇥<out bytes>⇥<in bytes>⇥<since>
+//! flow⇥<instance id>⇥<proto>⇥<remote>⇥<remote port>⇥<name>⇥<who>⇥<out>⇥<in>⇥<last>
 //! today⇥<container>⇥<network>⇥<out bytes>⇥<in bytes>
 //! month⇥<container>⇥<network>⇥<out bytes>⇥<in bytes>
 //! setting⇥<default|default-profile|mode|wayland-sandbox>⇥<value>⇥<nix|local|default>
@@ -24,12 +25,18 @@
 //! is down, `offline`, `unconfined`).
 //!
 //! The counts are `crate::traffic`'s: an instance's since it came up, and
-//! the summaries of today and of the last 30 days.
+//! the summaries of today and of the last 30 days. A `flow` is one of an
+//! instance's [`FLOWS_SHOWN`] latest connections (`crate::flows`): `name`
+//! what a DNS answer said of the address, `who` the program that holds it
+//! (`crate::owners`), each empty where none; `last` Unix seconds.
 
 use std::ffi::OsStr;
 use std::path::Path;
 
 use crate::container::{Home, Network};
+
+/// How many of each instance's latest connections the panel shows.
+pub const FLOWS_SHOWN: usize = 30;
 use crate::tools::Tools;
 use crate::window::clean;
 
@@ -143,22 +150,27 @@ pub fn data(tools: &Tools) -> String {
         "0",
         "-",
     ]);
+    let procs = crate::owners::Procs::scan();
     for i in crate::instance::running(&tools.state) {
         let container = crate::instance::container_of(&i.id)
             .unwrap_or("-")
             .to_owned();
-        let Some(c) = crate::traffic::read(&i.dir) else {
-            continue;
-        };
-        line(&[
-            "instance",
-            &i.id,
-            &container,
-            &i.network,
-            &c.out_bytes.to_string(),
-            &c.in_bytes.to_string(),
-            &c.since.to_string(),
-        ]);
+        if let Some(c) = crate::traffic::read(&i.dir) {
+            line(&[
+                "instance",
+                &i.id,
+                &container,
+                &i.network,
+                &c.out_bytes.to_string(),
+                &c.in_bytes.to_string(),
+                &c.since.to_string(),
+            ]);
+        }
+        for fields in crate::flows::panel_lines(tools, i, &procs, FLOWS_SHOWN) {
+            let mut all = vec!["flow"];
+            all.extend(fields.iter().map(String::as_str));
+            line(&all);
+        }
     }
     for (kind, days) in [("today", 1), ("month", 30)] {
         for ((who, net), (o, i)) in crate::traffic::used_over(&tools.state, days) {

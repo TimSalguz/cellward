@@ -15,7 +15,10 @@
 //!
 //! **Сеть**: what each running container sends and receives now (the
 //! difference of two readings a second apart), since it came up, today and
-//! over 30 days (`crate::traffic` of vpn-zones), each by its frame's colour.
+//! over 30 days (`crate::traffic` of vpn-zones), each by its frame's colour;
+//! and their latest connections — which program, to where (the name a DNS
+//! answer gave), how much each way, how long ago (`crate::flows`,
+//! `crate::owners`).
 //! **Контейнеры**: the list, and for the one chosen its home, network and
 //! state, its network to change (live, with a word on what that breaks,
 //! when its programs run in another), its granted directories, and what
@@ -68,6 +71,22 @@ struct Inst {
     since: u64,
 }
 
+/// A connection of a running instance.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Conn {
+    instance: String,
+    proto: String,
+    remote: String,
+    port: String,
+    /// What a DNS answer said of the address; empty: none.
+    name: String,
+    /// The program that holds it; empty: none found.
+    who: String,
+    out: u64,
+    inb: u64,
+    last: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Use {
     container: String,
@@ -81,6 +100,7 @@ struct Data {
     containers: Vec<Cont>,
     networks: Vec<Net>,
     instances: Vec<Inst>,
+    flows: Vec<Conn>,
     today: Vec<Use>,
     month: Vec<Use>,
     /// `(name, value, source)`.
@@ -143,6 +163,17 @@ fn parse(text: &str) -> Data {
                 inb: num(inb),
                 since: num(since),
             }),
+            ["flow", id, proto, remote, port, name, who, out, inb, last] => d.flows.push(Conn {
+                instance: (*id).to_owned(),
+                proto: (*proto).to_owned(),
+                remote: (*remote).to_owned(),
+                port: (*port).to_owned(),
+                name: (*name).to_owned(),
+                who: (*who).to_owned(),
+                out: num(out),
+                inb: num(inb),
+                last: num(last),
+            }),
             [kind @ ("today" | "month"), of, network, out, inb] => {
                 let u = Use {
                     container: (*of).to_owned(),
@@ -175,6 +206,31 @@ fn bytes(n: u64) -> String {
         format!("{n} {}", UNITS[0])
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// How long ago, for a person.
+fn ago(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs} с назад"),
+        60..=3599 => format!("{} мин назад", secs / 60),
+        3600..=86399 => format!("{} ч назад", secs / 3600),
+        _ => format!("{} дн назад", secs / 86400),
+    }
+}
+
+/// Where a connection goes, for a person: the name its address was given,
+/// or the address; the port where it has one.
+fn destination(c: &Conn) -> String {
+    let host = if c.name.is_empty() {
+        &c.remote
+    } else {
+        &c.name
+    };
+    match c.proto.as_str() {
+        "tcp" | "udp" if host.contains(':') => format!("[{host}]:{}", c.port),
+        "tcp" | "udp" => format!("{host}:{}", c.port),
+        _ => format!("{host} ({})", c.proto),
     }
 }
 
@@ -1016,11 +1072,60 @@ impl Panel {
         }
         let page = column![
             now,
+            self.view_flows(),
             self.use_rows("Сегодня", &self.data.today),
             self.use_rows("За 30 дней", &self.data.month),
         ]
         .spacing(18);
         scrollable(page).height(Length::Fill).into()
+    }
+
+    /// The latest connections of every running container, the latest first.
+    fn view_flows(&self) -> Element<'_, Msg> {
+        const SHOWN: usize = 40;
+        let mut block = column![text("Соединения").size(17)].spacing(4);
+        if self.data.flows.is_empty() {
+            block = block.push(text("соединений не было").size(13));
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let mut flows: Vec<&Conn> = self.data.flows.iter().collect();
+        flows.sort_by(|a, b| b.last.cmp(&a.last));
+        for c in flows.into_iter().take(SHOWN) {
+            let color = self
+                .data
+                .instances
+                .iter()
+                .find(|i| i.id == c.instance)
+                .map_or(Color::from_rgb8(0x88, 0x88, 0x88), |i| {
+                    self.color_of_instance(i)
+                });
+            let who = if c.who.is_empty() {
+                "—"
+            } else {
+                c.who.as_str()
+            };
+            block = block.push(
+                row![
+                    text("●").size(14).color(color),
+                    text(who).size(14).width(Length::Fixed(180.0)),
+                    text(destination(c))
+                        .size(14)
+                        .width(Length::Fixed(280.0))
+                        .wrapping(iced::widget::text::Wrapping::Glyph),
+                    text(format!("↑ {}", bytes(c.out)))
+                        .size(14)
+                        .width(Length::Fixed(100.0)),
+                    text(format!("↓ {}", bytes(c.inb)))
+                        .size(14)
+                        .width(Length::Fixed(100.0)),
+                    text(ago(now.saturating_sub(c.last))).size(13),
+                ]
+                .spacing(8),
+            );
+        }
+        block.into()
     }
 
     fn view_containers(&self) -> Element<'_, Msg> {
@@ -1771,6 +1876,8 @@ mod tests {
         setting\tdefault\toffline\tdefault\n\
         pin\tfirefox\tFirefox\twork\n\
         instance\twork\twork\tnl\t1500\t3000\t1790000000\n\
+        flow\twork\ttcp\t149.154.167.50\t443\tapi.telegram.org\tTelegram\t2048\t10\t1790000100\n\
+        flow\twork\ticmpv6\t2001:db8::1\t0\t\t\t64\t64\t1790000050\n\
         today\twork\tnl\t1500\t3000\n\
         month\twork\tnl\t9000\t12000\n\
         what\tever\n";
@@ -1810,6 +1917,11 @@ mod tests {
         assert_eq!(zone_name_of("/home/a/nl de.conf"), "nl-de");
         assert_eq!(zone_name_of("x"), "x");
         assert_eq!(d.instances[0].inb, 3000);
+        assert_eq!(d.flows.len(), 2);
+        assert_eq!(d.flows[0].who, "Telegram");
+        assert_eq!(destination(&d.flows[0]), "api.telegram.org:443");
+        assert_eq!(destination(&d.flows[1]), "2001:db8::1 (icmpv6)");
+        assert_eq!(d.flows[1].last, 1790000050);
         assert_eq!(d.today.len(), 1);
         assert_eq!(d.month[0].out, 9000);
         assert_eq!(color_of("#12345"), None);
@@ -1821,5 +1933,7 @@ mod tests {
         assert_eq!(bytes(1536), "1.5 КБ");
         assert_eq!(rate(2048.4), "2.0 КБ/с");
         assert_eq!(rate(-5.0), "0 Б/с");
+        assert_eq!(ago(59), "59 с назад");
+        assert_eq!(ago(3600), "1 ч назад");
     }
 }

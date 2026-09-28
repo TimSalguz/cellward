@@ -705,50 +705,102 @@ struct Listed {
 }
 
 fn listed(tools: &crate::tools::Tools) -> Vec<Listed> {
+    let procs = crate::owners::Procs::scan();
     let mut out: Vec<Listed> = crate::instance::running(&tools.state)
         .into_iter()
-        .map(|i| {
-            let container = crate::instance::container_of(&i.id).map(str::to_owned);
-            let table = read(&i.dir).map(|(mut flows, names)| {
-                flows.sort_by(|a, b| {
-                    (b.last, b.out_bytes.saturating_add(b.in_bytes))
-                        .cmp(&(a.last, a.out_bytes.saturating_add(a.in_bytes)))
-                });
-                (flows, names)
-            });
-            let registry = tools
-                .state
-                .join(".running")
-                .join(container.as_deref().unwrap_or(crate::registry::MAIN));
-            let owners = table.as_ref().map_or_else(Vec::new, |(flows, _)| {
-                crate::owners::of(i.pid, &registry, flows)
-            });
-            let labels = owners
-                .iter()
-                .flatten()
-                .filter_map(|o| o.program.clone())
-                .filter_map(|key| {
-                    let label = crate::cli::read_setting(&tools.state.join(".labels").join(&key))?;
-                    Some((key, label))
-                })
-                .collect();
-            Listed {
-                container,
-                table,
-                owners,
-                labels,
-                network: i.network,
-                id: i.id,
-            }
-        })
+        .map(|i| listed_one(tools, i, &procs, None))
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
 }
 
+/// One running instance's flows, the latest first — its `max` latest, when
+/// given —, with their owners among `procs`.
+fn listed_one(
+    tools: &crate::tools::Tools,
+    i: crate::instance::Running,
+    procs: &crate::owners::Procs,
+    max: Option<usize>,
+) -> Listed {
+    let container = crate::instance::container_of(&i.id).map(str::to_owned);
+    let table = read(&i.dir).map(|(mut flows, names)| {
+        flows.sort_by(|a, b| {
+            (b.last, b.out_bytes.saturating_add(b.in_bytes))
+                .cmp(&(a.last, a.out_bytes.saturating_add(a.in_bytes)))
+        });
+        flows.truncate(max.unwrap_or(usize::MAX));
+        (flows, names)
+    });
+    let registry = tools
+        .state
+        .join(".running")
+        .join(container.as_deref().unwrap_or(crate::registry::MAIN));
+    let owners = table.as_ref().map_or_else(Vec::new, |(flows, _)| {
+        crate::owners::of(i.pid, &registry, flows, procs)
+    });
+    let labels = owners
+        .iter()
+        .flatten()
+        .filter_map(|o| o.program.clone())
+        .filter_map(|key| {
+            let label = crate::cli::read_setting(&tools.state.join(".labels").join(&key))?;
+            Some((key, label))
+        })
+        .collect();
+    Listed {
+        container,
+        table,
+        owners,
+        labels,
+        network: i.network,
+        id: i.id,
+    }
+}
+
+/// The panel's `flow` lines of a running instance (`crate::panel`): its
+/// `max` latest flows, each `[id, proto, remote, remote port, name, who,
+/// out, in, last]` — `name` what a DNS answer said of the address (or the
+/// instance's own DNS), `who` who holds it; empty where none.
+pub fn panel_lines(
+    tools: &crate::tools::Tools,
+    i: crate::instance::Running,
+    procs: &crate::owners::Procs,
+    max: usize,
+) -> Vec<Vec<String>> {
+    let l = listed_one(tools, i, procs, Some(max));
+    let Some((flows, names)) = &l.table else {
+        return Vec::new();
+    };
+    flows
+        .iter()
+        .zip(&l.owners)
+        .map(|(f, owner)| {
+            let name = if forwarder(&f.key.remote) {
+                Some("DNS контейнера")
+            } else {
+                name_of(names, &f.key.remote)
+            };
+            vec![
+                l.id.clone(),
+                proto_name(f.key.proto),
+                f.key.remote.to_string(),
+                f.key.rport.to_string(),
+                name.unwrap_or_default().to_owned(),
+                holder_name(owner.as_ref(), &l.labels).unwrap_or_default(),
+                f.out_bytes.to_string(),
+                f.in_bytes.to_string(),
+                f.last.to_string(),
+            ]
+        })
+        .collect()
+}
+
 /// Who holds a flow, for a person: the program's name, its key, or the
 /// process's; `None` for none found.
-fn who(owner: Option<&crate::owners::Owner>, labels: &HashMap<String, String>) -> Option<String> {
+fn holder_name(
+    owner: Option<&crate::owners::Owner>,
+    labels: &HashMap<String, String>,
+) -> Option<String> {
     let o = owner?;
     Some(match &o.program {
         Some(key) => labels.get(key).cloned().unwrap_or_else(|| key.clone()),
@@ -857,7 +909,7 @@ fn text(rows: &[Listed], now: u32) -> String {
             } else {
                 name_of(names, &f.key.remote)
             };
-            let holder = who(r.owners.get(n).and_then(Option::as_ref), &r.labels);
+            let holder = holder_name(r.owners.get(n).and_then(Option::as_ref), &r.labels);
             out.push_str(&format!(
                 "  {} {}{}{} · ↑ {} · ↓ {} · {}\n",
                 proto_name(f.key.proto),
