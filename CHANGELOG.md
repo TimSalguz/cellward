@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **`cellward version`** (also `--version`): the version and the build — its
+  path in /nix/store, which tells two builds apart; a configurator can ask
+  it instead of guessing from an error.
+- **The notice of zones an update left on the previous build has a button.**
+  «Перезапустить…» asks once more, naming what a restart ends (the programs
+  a previous build launched straight into the zone; containers only lose the
+  network for a moment), then restarts each zone (`cellward restart`). The
+  notice runs in a unit of its own (`cellward-previous-build`), since
+  `watch`, which a timer runs, cannot wait for a button; where that cannot
+  start, the plain notice as before.
 - **`cellward restart <zone>`**: down, then up — how a zone an update left on
   the previous build takes the new one, and the one word the update notice,
   the launch's refusal for such a zone and a configurator's button name. Its

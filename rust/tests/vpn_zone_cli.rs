@@ -2448,3 +2448,15 @@ fn restart_needs_a_zone_by_its_name() {
     assert!(!out.status.success());
     assert!(stderr(&out).contains("не имя зоны"), "{}", stderr(&out));
 }
+
+#[test]
+fn version_names_the_build() {
+    let home = Home::new("version");
+    for word in ["version", "--version"] {
+        let out = home.run(&[word]);
+        assert!(out.status.success(), "{word}: {}", stderr(&out));
+        let text = stdout(&out);
+        assert!(text.starts_with("cellward "), "{word}: {text}");
+        assert!(text.contains('(') && text.trim_end().ends_with(')'), "{word}: {text}");
+    }
+}

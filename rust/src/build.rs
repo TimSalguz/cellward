@@ -105,6 +105,35 @@ pub fn previous_zones(tools: &Tools) -> Vec<String> {
     out
 }
 
+/// The command that shows [`notice`] with its button, in a unit of its own
+/// (`systemd-run --user`): `notify-send` waits for the button, and `watch`,
+/// which a timer runs, must not. One at a time — the unit is named. The CLI
+/// from the store, next to `vpn-zone-core` (`core`), with the tools
+/// manifest: not the profile's `cellward`, which a program with the home
+/// could point elsewhere.
+pub fn notice_argv(
+    systemd_run: &Path,
+    core: &Path,
+    manifest: &std::ffi::OsStr,
+    zones: &[String],
+) -> Vec<std::ffi::OsString> {
+    let mut tools = std::ffi::OsString::from(format!("--setenv={}=", crate::tools::ENV_VAR));
+    tools.push(manifest);
+    let mut argv: Vec<std::ffi::OsString> = vec![
+        systemd_run.into(),
+        "--user".into(),
+        "--quiet".into(),
+        "--collect".into(),
+        "--unit=cellward-previous-build".into(),
+        tools,
+        "--".into(),
+        core.with_file_name("vpn-zone").into(),
+        "_previous-build-notice".into(),
+    ];
+    argv.extend(zones.iter().map(Into::into));
+    argv
+}
+
 /// What the person is told, once per update, when zones are left on the
 /// previous build.
 pub fn notice(zones: &[String]) -> (String, String) {
@@ -130,6 +159,33 @@ pub fn notice(zones: &[String]) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_notice_runs_in_a_unit_of_its_own_from_the_store() {
+        let argv = notice_argv(
+            Path::new("/s/systemd-run"),
+            Path::new("/nix/store/x-cellward/bin/vpn-zone-core"),
+            std::ffi::OsStr::new("/m.json"),
+            &["nl".to_owned(), "de".to_owned()],
+        );
+        let argv: Vec<String> = argv
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv[0], "/s/systemd-run");
+        assert!(argv.contains(&"--unit=cellward-previous-build".to_owned()));
+        let sep = argv.iter().position(|a| a == "--").unwrap();
+        assert_eq!(
+            argv[sep + 1..],
+            [
+                "/nix/store/x-cellward/bin/vpn-zone",
+                "_previous-build-notice",
+                "nl",
+                "de"
+            ]
+        );
+        assert!(argv[..sep].iter().any(|a| a.ends_with("=/m.json")));
+    }
 
     #[test]
     fn a_build_is_its_store_directory() {

@@ -301,7 +301,19 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     let told = fs::read_to_string(&told_file).unwrap_or_default();
     if !previous.is_empty() && told.trim() != installed {
         let (title, body) = crate::build::notice(&previous);
-        crate::dialog::notify(&tools.notify_send, None, "0", &title, &body);
+        // With its button, in a unit of its own (`build::notice_argv`); the
+        // plain notice where that cannot start.
+        let with_button = std::env::var_os(crate::tools::ENV_VAR).is_some_and(|manifest| {
+            let argv =
+                crate::build::notice_argv(&tools.systemd_run, &tools.core, &manifest, &previous);
+            std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .status()
+                .is_ok_and(|s| s.success())
+        });
+        if !with_button {
+            crate::dialog::notify(&tools.notify_send, None, "0", &title, &body);
+        }
         eprintln!("{title}");
         if fs::create_dir_all(&memory_dir).is_ok() {
             let _ = write_memory(&told_file, &format!("{installed}\n"));

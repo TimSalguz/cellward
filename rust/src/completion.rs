@@ -88,6 +88,7 @@ const VERBS: &[&str] = &[
     "down",
     "restart",
     "list",
+    "version",
     "status",
     "run",
     "launch",
