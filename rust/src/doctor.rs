@@ -1770,15 +1770,24 @@ pub fn live_switch_check(live: Option<crate::epoch::LiveSwitch>) -> Check {
 }
 
 pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
+    // Its lock against its containers (review 2026-09-28), up or not: what
+    // is bound to it is named either way.
+    let lock = lock_check(
+        tools
+            .state
+            .join(name)
+            .join(crate::launch::NO_ESCAPE)
+            .exists(),
+        &crate::launch::lock_not_held_by(tools, name),
+    );
     let Some(pid) = zone_pid(&tools.state, name.as_ref()) else {
-        return (
-            false,
-            vec![Check::new(
-                "up",
-                Level::Skip,
-                "зона не поднята — проверяется только поднятая",
-            )],
-        );
+        let mut checks = vec![Check::new(
+            "up",
+            Level::Skip,
+            "зона не поднята — проверяется только поднятая",
+        )];
+        checks.extend(lock);
+        return (false, checks);
     };
     let dir = tools.state.join(name);
     let offline = dir.join("offline").exists();
@@ -1786,6 +1795,7 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
         &dir,
         &crate::build::installed(tools),
     ))];
+    checks.extend(lock);
     if !offline {
         checks.push(bridge_check(
             crate::bridge::carries(&dir),
@@ -1950,6 +1960,56 @@ pub fn instance_root_check(status: Option<&str>, subuid: Option<u64>) -> Check {
             "не прочитать, чей uid у корня экземпляра",
         ),
     }
+}
+
+/// A locked zone's lock against its containers (review 2026-09-28,
+/// `launch::lock_refusal`): it is kept by the broker, the one door of a
+/// hermetic space, and holds only hermetic instances. `tenants`: what it
+/// does not hold (`launch::lock_not_held_by`) — each with whether it runs
+/// there. One that runs fails: the lock does not hold now, its programs
+/// have `systemd --user`. One only bound to it warns: its launch there is
+/// refused. `None` for a zone that is not locked.
+pub fn lock_check(locked: bool, tenants: &[(String, bool)]) -> Option<Check> {
+    if !locked {
+        return None;
+    }
+    let names = |running: bool| -> Vec<String> {
+        tenants
+            .iter()
+            .filter(|(_, r)| *r == running)
+            .map(|(n, _)| printable(n))
+            .collect()
+    };
+    let (running, bound) = (names(true), names(false));
+    Some(if !running.is_empty() {
+        Check::new(
+            "lock",
+            Level::Fail,
+            format!(
+                "замок не держится: в зоне работают не герметичными {} — их программы могут \
+                 запустить что угодно снаружи через systemd --user. Закрой их (cellward \
+                 container stop <контейнер>) и включи герметичность: cellward container set \
+                 <контейнер> hermetic on",
+                running.join(", ")
+            ),
+        )
+    } else if !bound.is_empty() {
+        Check::new(
+            "lock",
+            Level::Warn,
+            format!(
+                "замок держится; не герметичны и привязаны к зоне {} — их запуск в неё \
+                 отказывается (cellward container set <контейнер> hermetic on)",
+                bound.join(", ")
+            ),
+        )
+    } else {
+        Check::new(
+            "lock",
+            Level::Ok,
+            "замок держится: всё, что в зоне работает и к ней привязано, герметично",
+        )
+    })
 }
 
 /// The checks of a running container's instance (`crate::instance`): its
@@ -2322,6 +2382,27 @@ mod tests {
         let _ = beside.wait();
         // A zone whose process is gone has no namespace to look in.
         assert!(programs_in_zone(zone_pid, uid).is_empty());
+    }
+
+    /// Review 2026-09-28: a locked zone's lock against its containers — a
+    /// running one that is not hermetic fails, a bound one warns, none is
+    /// ok; an unlocked zone has no such check.
+    #[test]
+    fn a_locked_zones_containers_that_are_not_hermetic_are_named() {
+        assert_eq!(lock_check(false, &[("work".to_owned(), true)]), None);
+        let ok = lock_check(true, &[]).unwrap();
+        assert_eq!(ok.level, Level::Ok);
+        let bound = lock_check(true, &[("dev".to_owned(), false)]).unwrap();
+        assert_eq!(bound.level, Level::Warn);
+        assert!(bound.detail.contains("dev"), "{}", bound.detail);
+        let both = lock_check(
+            true,
+            &[("work".to_owned(), true), ("dev".to_owned(), false)],
+        )
+        .unwrap();
+        assert_eq!(both.level, Level::Fail);
+        assert!(both.detail.contains("work"), "{}", both.detail);
+        assert!(both.detail.contains("hermetic on"), "{}", both.detail);
     }
 
     #[test]

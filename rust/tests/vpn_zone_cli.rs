@@ -1798,6 +1798,86 @@ fn a_container_has_its_own_zone_level_permissions() {
     );
 }
 
+/// Review 2026-09-28: a locked zone takes a hermetic container only. A
+/// launch of one that is not is refused — in a dry run too —, `lock` names
+/// it, and `status` says it (`networks[].lock_not_held_by`); an instance
+/// that came up not hermetic is judged by what it came up with, whatever
+/// its container says now.
+#[test]
+fn a_locked_zone_refuses_a_container_that_is_not_hermetic() {
+    use vpn_zone::instance;
+    let home = Home::new("lock-hermetic");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+    let launch = || home.run_with(&["run", "nl", "--profile", "work", "--", "steam"], &dry);
+    let set = |args: &[&str]| {
+        let mut argv = vec!["container", "set", "work"];
+        argv.extend(args);
+        let out = home.run(&argv);
+        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
+    };
+    set(&["network", "nl"]);
+    set(&["hermetic", "off"]);
+    // Unlocked: it goes.
+    let out = launch();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = home.run(&["lock", "nl"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("work"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("hermetic on"), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"locked\":true,\"lock_not_held_by\":[\"work\"]"),
+        "{json}"
+    );
+    let out = launch();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("заперта"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("cellward container set work hermetic on"),
+        "{}",
+        stderr(&out)
+    );
+    // Hermetic: it goes, locked.
+    set(&["hermetic", "default"]);
+    let out = launch();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"locked\":true,\"lock_not_held_by\":[]"),
+        "{json}"
+    );
+    // Its instance up in the zone, come up not hermetic: named as running,
+    // and a launch refused though the container is hermetic now.
+    let _bridge = home.instance_is_up("work", "nl");
+    fs::write(
+        instance::dir(&home.state(), "work").join(instance::SETTINGS),
+        "hermetic=false\nnix_daemon=false\nhost_files_writable=false\naudio_manager=false\n",
+    )
+    .unwrap();
+    let out = home.run(&["lock", "nl"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("работают"), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"locked\":true,\"lock_not_held_by\":[\"work\"]"),
+        "{json}"
+    );
+    let out = launch();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("cellward container stop work"),
+        "{}",
+        stderr(&out)
+    );
+    // Unlocked: nothing is said, nothing refused.
+    assert!(home.run(&["unlock", "nl"]).status.success());
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(!json.contains("\"locked\":true"), "{json}");
+}
+
 #[test]
 fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     // docs/HERMETICITY.md §7, A.

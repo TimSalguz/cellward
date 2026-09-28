@@ -533,7 +533,12 @@ this" (a URI, a file handed over by fd, or a launcher id). The host side knows
 the origin container:
 
 - target assigned to the **same** container → start it there, no dialog;
-- a locked container → only the same container;
+- a locked container → only the same container. The lock is the broker's,
+  and holds only a hermetic space — one that is not has `systemd --user` in
+  reach: since 2026-09-28 a launch into a locked zone, a live switch into it
+  and an instance's attach to it are refused for an instance that is not
+  hermetic, and `cellward lock`, `status` (`networks[].lock_not_held_by`)
+  and `doctor` (`lock`) name what runs there or is bound to it that is not;
 - otherwise → the picker, with the origin in the question.
 
 Entry points inside the container: `xdg-open`/`$BROWSER` resolve to the broker
@@ -662,6 +667,11 @@ and `cellward container show <name> --json` print subsets of the same schema.
 - **Every settable value carries its origin**: `{"value": …, "source": "nix" |
   "local" | "default"}`. Runtime facts (`running`, `up`, `handshake_age_s`) are
   plain values.
+- **`networks[].lock_not_held_by`** (added 2026-09-28): for a locked
+  network, the containers its lock does not hold — running in it having
+  come up not hermetic, or bound to it and not hermetic there —, by name
+  (the main home's and a throwaway's instance by its id); `[]` when it
+  holds them all, `null` when the network is not locked.
 - **`networks[].restart_needed`**: for a zone that is up, the names of the
   settings it takes when it comes up (`hermetic`, `nix_daemon`,
   `host_files_writable`, `audio_manager`) whose value now differs
@@ -691,11 +701,11 @@ and `cellward container show <name> --json` print subsets of the same schema.
   },
   "networks": [
     { "name": "unconfined", "kind": "unconfined", "aliases": ["direct"],
-      "source": "default", "up": true, "locked": false, "tunnel_alive": null,
+      "source": "default", "up": true, "locked": false, "lock_not_held_by": null, "tunnel_alive": null,
       "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,
       "interface": null },
     { "name": "nl", "kind": "wireguard", "aliases": [], "source": "local",
-      "up": true, "locked": false, "tunnel_alive": true,
+      "up": true, "locked": false, "lock_not_held_by": null, "tunnel_alive": true,
       "handshake_age_s": 42, "rx_bytes": 1048576, "tx_bytes": 524288,
       "interface": null,
       "hermetic":            { "value": true,  "source": "default" },
@@ -707,7 +717,7 @@ and `cellward container show <name> --json` print subsets of the same schema.
       "frame_color":         { "value": "#4cacd9", "source": "default" },
       "build": "current", "restart_needed": ["nix_daemon"] },
     { "name": "lan", "kind": "host-interface", "aliases": [], "source": "local",
-      "up": false, "locked": false, "tunnel_alive": null,
+      "up": false, "locked": false, "lock_not_held_by": null, "tunnel_alive": null,
       "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,
       "interface": "enp4s0" }
   ],

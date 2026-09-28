@@ -17,7 +17,10 @@ datagram with the address it came from: nothing of before the switch may
 ever arrive from B, nothing may arrive during the gap, and DNS after it asks
 B's side only. A stand-in zone whose bridge holds its answer until the test
 says (vmfake) shows the gap from outside, a failed attach, and the keeper
-killed in the middle.
+killed in the middle. A second container, vmswide (review 2026-09-28), up in
+A with settings wider than B would give it and not hermetic: its switch is
+refused (`settings`, and `locked-target` into B locked), a launch of it into
+A locked too, and `--restart` goes.
 """
 
 import tempfile
@@ -368,6 +371,90 @@ with subtest("switch: no program reaches the control socket, and the broker has 
     )
     i = sw()
     assert (i["network"], i["epoch"]) == ("vmreal", 1), i
+
+with subtest("switch: settings frozen wider than B's, or not hermetic into a locked zone — refused; --restart goes"):
+    # Review 2026-09-28: an instance keeps the settings it came up with, and
+    # a switch would carry them into a network that gives its container
+    # less. A second container, vmswide, up in A with a Nix daemon of its
+    # own; not hermetic — nothing is here (hermetic.default = false in Nix).
+    WD = "vmswide"
+    alice(f"cellward container create {WD} --home layer")
+    alice(f"cellward container set {WD} network vmreal")
+    alice(f"cellward container set {WD} nix-daemon on")
+    alice(
+        f"systemd-run --user --collect --unit=swwide -E PATH=\"$PATH\" "
+        f"cellward run vmreal --container {WD} -- sleep infinity"
+    )
+    for _ in range(240):
+        w = instance(WD)
+        if w and w["exit"] == "through" and w["live_switch"]["available"]:
+            break
+        machine.sleep(0.5)
+    else:
+        raise AssertionError(f"{WD}: never up and switchable: {instance(WD)}")
+    assert w["settings"] == {
+        "hermetic": False,
+        "nix_daemon": True,
+        "host_files_writable": False,
+        "audio_manager": False,
+    }, w
+
+    def set_wide(net, extra=""):
+        return machine.execute(
+            "su -l alice -c "
+            + shlex.quote(
+                f"export XDG_RUNTIME_DIR=/run/user/1000; cellward container set {WD} network "
+                f"{net} --yes {extra} 2>&1"
+            )
+        )
+
+    # Its own word taken back: B would give it no daemon — refused, named.
+    alice(f"cellward container set {WD} nix-daemon default")
+    code, out = set_wide("vmswb")
+    assert code != 0 and "(settings)" in out and "Nix-демон" in out and "--restart" in out, out
+    # As wide as B gives again — but B locked, and it is not hermetic.
+    alice(f"cellward container set {WD} nix-daemon on")
+    alice("cellward lock vmswb")
+    code, out = set_wide("vmswb")
+    assert code != 0 and "(locked-target)" in out and "hermetic on" in out, out
+    alice("cellward unlock vmswb")
+    # Its own zone locked: named by the lock and by status, and a launch of
+    # it into the zone refused.
+    out = alice("cellward lock vmreal 2>&1")
+    assert WD in out and "hermetic on" in out, out
+    net = next(
+        n for n in json.loads(alice("cellward status --json"))["networks"] if n["name"] == "vmreal"
+    )
+    assert WD in net["lock_not_held_by"], net
+    code, out = machine.execute(
+        "su -l alice -c "
+        + shlex.quote(
+            f"export XDG_RUNTIME_DIR=/run/user/1000; cellward run vmreal --container {WD} "
+            "-- true 2>&1"
+        )
+    )
+    assert code != 0 and "заперта" in out and WD in out, out
+    alice("cellward unlock vmreal")
+    w = instance(WD)
+    assert (w["network"], w["exit"], w["epoch"]) == ("vmreal", "through", 1), w
+    kinds = [(e["event"], e.get("why")) for e in journal_of(WD)]
+    for why in ["settings", "locked-target"]:
+        assert ("switch-refused", why) in kinds, kinds
+    # Closed and bound to B: its next start there takes B's settings.
+    alice(f"cellward container set {WD} nix-daemon default")
+    code, out = set_wide("vmswb", "--restart")
+    assert code == 0, out
+    c = next(
+        c for c in json.loads(alice("cellward status --json"))["containers"] if c["name"] == WD
+    )
+    assert c["network"]["value"] == "vmswb", c
+    for _ in range(120):
+        if instance(WD) is None:
+            break
+        machine.sleep(0.5)
+    else:
+        raise AssertionError(f"{WD}: not closed by --restart: {instance(WD)}")
+    alice(f"cellward container rm {WD}")
 
 with subtest("switch: A to B live — programs stay, nothing of A goes on in B, DNS follows"):
     dns_before = server.succeed("cat /tmp/dns.log")

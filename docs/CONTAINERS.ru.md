@@ -651,6 +651,13 @@ programs.cellward = {
 - **У каждого настраиваемого значения указано происхождение**: `{"value": …,
   "source": "nix" | "local" | "default"}`. Факты времени выполнения (`running`,
   `up`, `handshake_age_s`) — простые значения.
+- **`networks[].lock_not_held_by`** (добавлено 2026-09-28): у запертой
+  сети — контейнеры, которых её замок не держит: работают в ней, поднявшись
+  негерметичными, или привязаны к ней и там не герметичны, — по имени
+  (экземпляр основного дома и разовый — по id); `[]`, если держит всех;
+  `null`, если сеть не заперта. Замок — брокера и держит только
+  герметичное пространство: с 2026-09-28 запуск в запертую зону, смена на
+  ходу в неё и подключение к ней отказывают негерметичному экземпляру.
 - **`networks[].restart_needed`**: у поднятой зоны — имена настроек, которые
   она берёт при подъёме (`hermetic`, `nix_daemon`, `host_files_writable`,
   `audio_manager`), у которых значение сейчас не то, с каким она
@@ -680,11 +687,11 @@ programs.cellward = {
   },
   "networks": [
     { "name": "unconfined", "kind": "unconfined", "aliases": ["direct"],
-      "source": "default", "up": true, "locked": false, "tunnel_alive": null,
+      "source": "default", "up": true, "locked": false, "lock_not_held_by": null, "tunnel_alive": null,
       "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,
       "interface": null },
     { "name": "nl", "kind": "wireguard", "aliases": [], "source": "local",
-      "up": true, "locked": false, "tunnel_alive": true,
+      "up": true, "locked": false, "lock_not_held_by": null, "tunnel_alive": true,
       "handshake_age_s": 42, "rx_bytes": 1048576, "tx_bytes": 524288,
       "interface": null,
       "hermetic":            { "value": true,  "source": "default" },
@@ -696,7 +703,7 @@ programs.cellward = {
       "frame_color":         { "value": "#4cacd9", "source": "default" },
       "build": "current", "restart_needed": ["nix_daemon"] },
     { "name": "lan", "kind": "host-interface", "aliases": [], "source": "local",
-      "up": false, "locked": false, "tunnel_alive": null,
+      "up": false, "locked": false, "lock_not_held_by": null, "tunnel_alive": null,
       "handshake_age_s": null, "rx_bytes": null, "tx_bytes": null,
       "interface": "enp4s0" }
   ],
