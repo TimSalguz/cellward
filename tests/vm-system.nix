@@ -403,6 +403,20 @@ let
           )
           machine.fail(as_user("alice", f"vpn-zone-sys sz -- ls /proc/{pid}/root/"))
           machine.fail(as_user("alice", f"vpn-zone-sys sz -- cat /proc/{pid}/environ"))
+          # Nor there by its number at all (stage 5 of the container design,
+          # X4): the command has a pid namespace and a /proc of its own — its
+          # pid 1 and itself, and nobody else's: not the session's processes,
+          # not the service's.
+          machine.fail(as_user("alice", f"vpn-zone-sys sz -- test -e /proc/{pid}"))
+          out = machine.succeed(as_user("alice", "vpn-zone-sys sz -- sh -c 'echo $$; ls /proc'"))
+          first, *rest = out.split()
+          assert first == "2", out
+          pids = sorted(int(p) for p in rest if p.isdigit())
+          assert pids[:2] == [1, 2] and len(pids) <= 4, out
+          # Its end ends what it left: a daemon it forked is gone with it.
+          machine.succeed(as_user("alice", "vpn-zone-sys sz -- sh -c '(sleep 3217 &) ; true'"))
+          # (The bracket keeps the pattern from matching the shell that runs it.)
+          machine.fail("pgrep -f 'slee[p] 3217'")
           # Still alice, still without privileges, still her files.
           out = machine.succeed(as_user("alice", "vpn-zone-sys sz -- sh -c 'id -un; touch ~/in-zone && stat -c %U ~/in-zone'"))
           assert out.split() == ["alice", "alice"], out

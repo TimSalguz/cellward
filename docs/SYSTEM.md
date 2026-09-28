@@ -270,7 +270,14 @@ A system zone's namespace belongs to the host's user namespace; entering it take
   user's groups, gid and uid and sets `NO_NEW_PRIVS`: `sudo` inside would be root in the
   zone's namespace. Last, a user namespace of the command's own, the user mapped onto
   itself: from the host's one, `/proc/<pid>/root` of any process of the session would lead
-  around the empty `/run/user/<uid>` to the sockets it hides (LEAK-MODEL §16).
+  around the empty `/run/user/<uid>` to the sockets it hides (LEAK-MODEL §16). And, since
+  2026-09-28 (stage 5 of the container design, THREAT-MODEL X4), a pid namespace of its
+  own, which that user namespace owns: the process the service waits for forks the
+  namespace's pid 1, which mounts its `/proc` and forks the command — the command sees
+  its own processes, not the host's command lines; pid 1 reaps, ends with the command's
+  code, and its end ends what the command left behind. The terminal's and the service's
+  signals reach the command through the process group; pid 1 passes them on to a command
+  that left it (a shell's job control).
 - **What root does not do:** interpret the request. The command, its directory and its
   environment are applied after the privileges are gone, as the user; the zone's name is
   checked like any zone name before it becomes a path.

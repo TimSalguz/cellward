@@ -12,9 +12,21 @@
 //!                                                 session sockets hidden
 //!                                                 drop to the user, NO_NEW_PRIVS
 //!                                                 a user namespace of its own
-//!                                                 exec the command
+//!                                                 a pid namespace of its own:
+//!                                                 fork ─ its pid 1, its /proc
+//!                                                        fork ─ exec the command
 //!  ◄── EXIT <code>                         wait, answer
 //! ```
+//!
+//! **Its own pid namespace** (stage 5 of the container design, 2026-09-28,
+//! `docs/THREAT-MODEL.md` X4): the command sees its own processes in `/proc`
+//! and nobody else's — not the host's, not the session's command lines. The
+//! process the service waits for waits in turn for the namespace's pid 1
+//! ([`own_pid_namespace`]), which mounts the namespace's `/proc`, forks the
+//! command, reaps, and ends with the command's code; its end ends whatever
+//! the command left. The terminal's and the service's signals go to the
+//! process group, the command included; pid 1 passes them on only to a
+//! command that has left the group (a shell's job control).
 //!
 //! **Why a service at all.** A system zone's namespace belongs to the host's
 //! user namespace; entering it takes `CAP_SYS_ADMIN` there, which no program of
@@ -1742,6 +1754,11 @@ fn become_the_command(launch: &Launch) -> String {
     if let Err(e) = own_user_namespace(&launch.user) {
         return e;
     }
+    // Only the command itself comes back from here; the process the service
+    // waits for, and the namespace's pid 1, end in there.
+    if let Err(e) = own_pid_namespace() {
+        return e;
+    }
     if std::env::set_current_dir(&launch.request.cwd).is_err()
         && std::env::set_current_dir(&launch.user.home).is_err()
     {
@@ -2019,6 +2036,257 @@ fn own_user_namespace(user: &User) -> Result<(), String> {
     Ok(())
 }
 
+/// The signals the command's pid 1 takes ([`console_act`]): what a terminal
+/// and the service end a command with, passed on to one that left the
+/// process group. SIGCHLD with them: pid 1 reaps.
+const PASSED_ON: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT];
+
+/// What the command's pid 1 is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleEvent {
+    /// One of [`PASSED_ON`]. `outside`: from outside the namespace (`si_pid`
+    /// 0 — the terminal, the service); `apart`: the command is no longer in
+    /// pid 1's process group, so what was sent to the group missed it.
+    Signal {
+        sig: libc::c_int,
+        outside: bool,
+        apart: bool,
+    },
+    /// A child reaped, with its code as a shell reports it.
+    Reaped { pid: libc::pid_t, code: u8 },
+}
+
+/// What the command's pid 1 does about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleAct {
+    Nothing,
+    /// Pass the signal on to the command.
+    PassOn(libc::c_int),
+    /// End, with the command's code — and the namespace with it.
+    Exit(u8),
+}
+
+/// The command's pid 1, as a pure function of its command's number and
+/// what happened: the command's end is its end, with the command's code; a
+/// signal from outside is passed on to a command that left the group (the
+/// group's signals reach one that did not by themselves: passed on as
+/// well, it would get each twice); an orphan reaped, or a signal from
+/// inside the namespace, is nothing.
+pub fn console_act(command: libc::pid_t, event: ConsoleEvent) -> ConsoleAct {
+    match event {
+        ConsoleEvent::Reaped { pid, code } if pid == command => ConsoleAct::Exit(code),
+        ConsoleEvent::Reaped { .. } => ConsoleAct::Nothing,
+        ConsoleEvent::Signal {
+            sig,
+            outside: true,
+            apart: true,
+        } => ConsoleAct::PassOn(sig),
+        ConsoleEvent::Signal { .. } => ConsoleAct::Nothing,
+    }
+}
+
+/// [`PASSED_ON`] and SIGCHLD, as a set.
+fn console_set() -> libc::sigset_t {
+    // SAFETY: sigemptyset and sigaddset fill a sigset_t of our own.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for sig in PASSED_ON {
+            libc::sigaddset(&mut set, sig);
+        }
+        libc::sigaddset(&mut set, libc::SIGCHLD);
+        set
+    }
+}
+
+/// A pid namespace of the command's own (stage 5 of the container design,
+/// 2026-09-28; `docs/THREAT-MODEL.md` X4) — made in the command's user
+/// namespace, which owns it — with a `/proc` of its own: the command sees
+/// its own processes and nobody else's. Returns only in the command, with
+/// its signals as they were; the process the service waits for, and the
+/// namespace's pid 1, end in here. Fatal when it cannot be made, as the
+/// user namespace is: a command that sees the host's processes is worse
+/// than no command.
+///
+/// **The three processes.** This one (C) makes the namespace and forks its
+/// pid 1 (I), then only waits for it and ends with its code — the command's:
+/// the service reaps C and answers with that. I mounts the namespace's
+/// `/proc` in a mount namespace of its own, closes everything but the
+/// standard descriptors, forks the command (K) and reaps — every orphan of
+/// the namespace comes to it — until K ends, then ends with K's code; its
+/// end ends whatever K left (`zap_pid_ns_processes`).
+///
+/// **Signals.** The kernel does not deliver to pid 1 of a namespace a
+/// signal it has no handler for, TERM from outside included, so
+/// [`PASSED_ON`] and SIGCHLD are BLOCKED here before the fork and I takes
+/// them with `sigwaitinfo` — never a window of SIG_DFL. C keeps them
+/// blocked: a TERM for the group must not end the waiter before the
+/// command, whose grace the service gives it (`stop_grace`); SIGKILL ends
+/// C and I alike, and I's end the rest. K gets its mask back before its
+/// exec. What the terminal and the service send the process group reaches
+/// K by itself; I passes a signal from outside on only when K has left the
+/// group ([`console_act`]).
+fn own_pid_namespace() -> Result<(), String> {
+    let set = console_set();
+    let old = crate::init::block(&set)
+        .map_err(|e| format!("cannot hold the command's signals for its pid 1: {e}"))?;
+    // SAFETY: unshare takes flags only; the child is single-threaded. The
+    // user namespace made just before owns the new one.
+    if unsafe { libc::unshare(libc::CLONE_NEWPID) } != 0 {
+        let e = io::Error::last_os_error();
+        crate::init::set_mask(&old);
+        return Err(format!(
+            "cannot make a pid namespace for the command ({e}) — it would see the host's \
+             processes"
+        ));
+    }
+    // SAFETY: single-threaded, so the child may allocate before it goes on.
+    let init = unsafe { libc::fork() };
+    if init < 0 {
+        let e = io::Error::last_os_error();
+        crate::init::set_mask(&old);
+        return Err(format!("cannot fork the command's pid 1: {e}"));
+    }
+    if init > 0 {
+        // C: the command's end, through its pid 1, is this process's. The
+        // terminal's stops are the command's: this process only waits, and
+        // stopped it would never reap that end.
+        for sig in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
+            // SAFETY: a standard signal's disposition set to "ignore".
+            unsafe { libc::signal(sig, libc::SIG_IGN) };
+        }
+        let mut status: libc::c_int = 0;
+        loop {
+            // SAFETY: our own child and an out-parameter.
+            let rc = unsafe { libc::waitpid(init, &mut status, 0) };
+            if rc == init {
+                break;
+            }
+            if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                // SAFETY: _exit never returns.
+                unsafe { libc::_exit(127) };
+            }
+        }
+        // SAFETY: _exit never returns and touches nothing of ours.
+        unsafe { libc::_exit(libc::c_int::from(crate::profile::exit_code_of(status))) };
+    }
+    // I: pid 1. Nothing of the command's may read it; its parent's end is
+    // its end.
+    // SAFETY: prctl with these arguments takes no pointers.
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
+    }
+    if let Err(e) = console_proc() {
+        eprintln!("vpn-zone-sys: {e}");
+        // SAFETY: _exit never returns.
+        unsafe { libc::_exit(127) };
+    }
+    // Nothing of the service's in the namespace's pid 1: the command's
+    // three standard descriptors are all it keeps.
+    // SAFETY: close_range takes two numbers and flags; it closes only.
+    unsafe { libc::close_range(3, libc::c_uint::MAX, 0) };
+    // SAFETY: single-threaded, as above.
+    let command = unsafe { libc::fork() };
+    if command < 0 {
+        eprintln!(
+            "vpn-zone-sys: cannot fork the command: {}",
+            io::Error::last_os_error()
+        );
+        // SAFETY: _exit never returns.
+        unsafe { libc::_exit(127) };
+    }
+    if command == 0 {
+        // K: its signals as they were before, and on to its exec.
+        crate::init::set_mask(&old);
+        return Ok(());
+    }
+    loop {
+        // SAFETY: an all-zero siginfo_t is a valid one to be filled.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a sigset_t and a siginfo_t of our own.
+        let sig = unsafe { libc::sigwaitinfo(&set, &mut info) };
+        if sig < 0 {
+            continue;
+        }
+        if sig == libc::SIGCHLD {
+            loop {
+                let mut status: libc::c_int = 0;
+                // SAFETY: `status` is a valid pointer for the duration of the call.
+                let dead = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+                if dead <= 0 {
+                    break;
+                }
+                let code = crate::profile::exit_code_of(status);
+                if let ConsoleAct::Exit(code) =
+                    console_act(command, ConsoleEvent::Reaped { pid: dead, code })
+                {
+                    // SAFETY: _exit never returns; the namespace ends with it.
+                    unsafe { libc::_exit(libc::c_int::from(code)) };
+                }
+            }
+            continue;
+        }
+        // SAFETY: the siginfo_t of a signal sent by kill(2) or the kernel
+        // carries a sender's pid (0 from outside the namespace).
+        let outside = unsafe { info.si_pid() } == 0;
+        // SAFETY: getpgid and getpgrp take a number and nothing.
+        let apart = unsafe { libc::getpgid(command) != libc::getpgrp() };
+        if let ConsoleAct::PassOn(sig) = console_act(
+            command,
+            ConsoleEvent::Signal {
+                sig,
+                outside,
+                apart,
+            },
+        ) {
+            // SAFETY: kill(2) of our own child, not reaped yet.
+            unsafe { libc::kill(command, sig) };
+        }
+    }
+}
+
+/// The command's pid 1's mount namespace, a copy of the command's made
+/// private, with a `/proc` of the pid namespace's own over the host's:
+/// `nosuid`, `nodev`, `noexec`, as the host's is. EPERM is the host's
+/// `/proc` not fully visible (`mount_too_revealing`), said so: the command
+/// is not run with the host's in sight.
+fn console_proc() -> Result<(), String> {
+    // SAFETY: unshare(2) takes no pointers.
+    if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+        return Err(format!(
+            "cannot make a mount namespace for the command's /proc: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    sys::mount(
+        OsStr::new("none"),
+        Path::new("/"),
+        "",
+        libc::MS_REC | libc::MS_PRIVATE,
+        "",
+    )
+    .map_err(|e| format!("cannot make the command's mount tree private: {e}"))?;
+    sys::mount(
+        OsStr::new("proc"),
+        Path::new("/proc"),
+        "proc",
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        "",
+    )
+    .map_err(|e| {
+        if e.raw_os_error() == Some(libc::EPERM) {
+            format!(
+                "cannot mount a /proc of the command's own ({e}): the kernel refuses one where \
+                 the host's /proc is not fully visible (mount_too_revealing) — the command is \
+                 not run with the host's processes in sight"
+            )
+        } else {
+            format!("cannot mount a /proc of the command's own: {e}")
+        }
+    })
+}
+
 /// The account behind a uid, with its groups.
 fn user_of(uid: u32) -> Result<User, String> {
     // SAFETY: passwd is plain data; getpwuid_r fills it or leaves `found` null.
@@ -2136,6 +2404,59 @@ fn connect(path: &str) -> io::Result<OwnedFd> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The command's pid 1 (stage 5 of the container design): the command's
+    /// end is its end, with the command's code; an orphan reaped is nothing;
+    /// a signal from outside is passed on only to a command that left the
+    /// process group — one in it got it itself —, and one from inside never.
+    #[test]
+    fn the_commands_pid_1_ends_with_it_and_passes_on_what_missed_it() {
+        let act = |event| console_act(7, event);
+        assert_eq!(
+            act(ConsoleEvent::Reaped { pid: 9, code: 0 }),
+            ConsoleAct::Nothing
+        );
+        assert_eq!(
+            act(ConsoleEvent::Reaped { pid: 7, code: 3 }),
+            ConsoleAct::Exit(3)
+        );
+        for sig in PASSED_ON {
+            assert_eq!(
+                act(ConsoleEvent::Signal {
+                    sig,
+                    outside: true,
+                    apart: false
+                }),
+                ConsoleAct::Nothing
+            );
+            assert_eq!(
+                act(ConsoleEvent::Signal {
+                    sig,
+                    outside: true,
+                    apart: true
+                }),
+                ConsoleAct::PassOn(sig)
+            );
+            assert_eq!(
+                act(ConsoleEvent::Signal {
+                    sig,
+                    outside: false,
+                    apart: true
+                }),
+                ConsoleAct::Nothing
+            );
+        }
+        // The waited set: the passed-on signals and SIGCHLD, nothing else.
+        let set = console_set();
+        for sig in PASSED_ON.into_iter().chain([libc::SIGCHLD]) {
+            // SAFETY: a sigset_t of our own.
+            assert_eq!(unsafe { libc::sigismember(&set, sig) }, 1, "{sig}");
+        }
+        for sig in [libc::SIGKILL, libc::SIGSTOP, libc::SIGUSR1, libc::SIGTSTP] {
+            // SAFETY: as above.
+            assert_eq!(unsafe { libc::sigismember(&set, sig) }, 0, "{sig}");
+        }
+    }
 
     fn os(words: &[&str]) -> Vec<OsString> {
         words.iter().map(OsString::from).collect()

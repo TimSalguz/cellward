@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A `vpn-zone-sys` command has a pid namespace of its own** (2026-09-28,
+  stage 5 of the container-first model; `docs/THREAT-MODEL.md` X4,
+  `docs/SYSTEM.md` §7). Made in the command's user namespace, with a
+  `/proc` of its own: a console program in a system zone sees its own
+  processes, not the host's or the session's command lines. The namespace's
+  pid 1 reaps, ends with the command's code, and its end ends what the
+  command left; the terminal's and the service's signals reach the command
+  as before (pid 1 passes them on to one that left the process group). A
+  host whose `/proc` is not fully visible (`mount_too_revealing`) refuses
+  the command, and says why.
 - **A container's own hermeticity, Nix daemon, host files and audio
   manager** (2026-09-28, stage 5 of the container-first model;
   `docs/PERMISSIONS.md` §11.2). Nix:
