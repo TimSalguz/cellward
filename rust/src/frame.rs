@@ -791,12 +791,15 @@ mod tests {
         assert_eq!(parse_radius(" 0 "), Some(0));
         assert_eq!(parse_radius("16"), Some(16));
         assert_eq!(parse_radius("1.5"), None);
-        // And a zone's frame is what they say.
+        // And a zone's frame is what they say (the radius's file says -2:
+        // the default).
         let frame = Frame::of_zone(&state, &config, "nl");
         assert_eq!(
             (frame.buttons, frame.style, frame.radius),
-            (ButtonStyle::Macos, Style::Tag, 12)
+            (ButtonStyle::Macos, Style::Tag, 0)
         );
+        fs::write(config.join(RADIUS_SETTING), "9").unwrap();
+        assert_eq!(Frame::of_zone(&state, &config, "nl").radius, 9);
         let _ = fs::remove_dir_all(state.parent().unwrap());
     }
 

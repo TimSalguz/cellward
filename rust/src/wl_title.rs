@@ -2077,8 +2077,11 @@ mod tests {
         // The top left: the window's corner cut off, its inside clear.
         assert_eq!(word(0, 0, 0), opaque);
         assert_eq!(word(0, 7, 7), 0);
-        assert_eq!(word(0, 7, 0), 0, "the top edge beyond the curve");
-        assert_eq!(word(0, 0, 7), 0, "the left edge beyond the curve");
+        // Where the curve meets the image's far edges it touches them: the
+        // last pixel there is next to nothing of the colour.
+        assert!(alpha(0, 7, 0) < 0x10, "the top edge beyond the curve");
+        assert!(alpha(0, 0, 7) < 0x10, "the left edge beyond the curve");
+        assert_eq!(alpha(0, 3, 0), 0xff, "the top edge before it");
         // Along the diagonal, less and less of it.
         let diagonal: Vec<u32> = (0..d).map(|i| alpha(0, i, i)).collect();
         assert!(diagonal.windows(2).all(|p| p[0] >= p[1]), "{diagonal:?}");
