@@ -25,9 +25,9 @@
 //! [`run_plain`] is, the shared "it did not work out" exit of this module.
 //!
 //! Usage: `vpn-zone-core wl-sandbox <app-id> [--zone <zone>] [--no-proxy]
-//! [--frame <rrggbb>:<width>:<always|hover|off> --frame-title <text>
-//! --frame-switch <settings dir>] [--focus input|notify|ask|allow] --
-//! <command> [args…]`.
+//! [--frame <rrggbb>:<width>:<always|hover|off>[:<buttons>:<style>:<radius>]
+//! --frame-title <text> --frame-switch <settings dir>]
+//! [--focus input|notify|ask|allow] -- <command> [args…]`.
 //!
 //! **Where it runs.** On the host, before the launch enters its zone
 //! (`docs/LEAK-MODEL.md` §13): a zone does not have the compositor's own
@@ -209,7 +209,9 @@ pub struct Args {
     /// a program the proxy breaks, and for the test that compares the two.
     pub proxy: bool,
     /// The zone's frame the proxy draws (`--frame <rrggbb>:<width>:<title
-    /// mode>`), the title strip's text (`--frame-title`, cleaned again here:
+    /// mode>[:<buttons>:<style>:<radius>]`, the look after 2026-09-28, said
+    /// only when it is not the default), the title strip's text
+    /// (`--frame-title`, cleaned again here:
     /// no control or bidi characters, bounded) and the settings directory
     /// with the switch that hides it (`--frame-switch`; without one, nothing
     /// hides it).
@@ -238,8 +240,9 @@ pub enum ArgError {
     /// `--zone` without a name, or with one that is not a single path
     /// component.
     BadZone,
-    /// `--frame` without `<rrggbb>:<width>[:<mode>]`, `--frame-title`
-    /// without a text, or `--frame-switch` without a directory.
+    /// `--frame` without `<rrggbb>:<width>[:<mode>[:<buttons>[:<style>
+    /// [:<radius>]]]]`, `--frame-title` without a text, or `--frame-switch`
+    /// without a directory.
     BadFrame,
     /// `--focus` without `input`, `notify`, `ask` or `allow`.
     BadFocus,
@@ -255,8 +258,8 @@ impl fmt::Display for ArgError {
             Self::BadZone => write!(f, "--zone needs a zone name"),
             Self::BadFrame => write!(
                 f,
-                "--frame needs <rrggbb>:<width>[:always|hover|off], --frame-title a text, \
-                 --frame-switch a directory"
+                "--frame needs <rrggbb>:<width>[:always|hover|off[:<buttons>[:full|soft|tag\
+                 [:<radius 0-16>]]]], --frame-title a text, --frame-switch a directory"
             ),
             Self::BadFocus => write!(f, "--focus needs input, notify, ask or allow"),
         }
@@ -943,6 +946,9 @@ mod tests {
                 color: Rgb(255, 0, 128),
                 width: 6,
                 title: TitleMode::Hover,
+                buttons: crate::frame::DEFAULT_BUTTONS,
+                style: crate::frame::DEFAULT_STYLE,
+                radius: crate::frame::DEFAULT_RADIUS,
             }
         );
         assert_eq!(setup.title, "nl · банк", "cleaned again on the way in");
@@ -950,11 +956,31 @@ mod tests {
         // Without a title, a strip without text.
         let a = Args::parse(&argv(&["foot", "--frame", "ff0080:6", "--", "x"])).unwrap();
         assert_eq!(a.frame.unwrap().title, "");
+        // The look in the same argument (2026-09-28).
+        let a = Args::parse(&argv(&[
+            "foot",
+            "--frame",
+            "ff0080:4:always:macos:tag:12",
+            "--",
+            "x",
+        ]))
+        .unwrap();
+        let frame = a.frame.unwrap().frame;
+        assert_eq!(
+            (frame.buttons, frame.style, frame.radius),
+            (
+                crate::frame::ButtonStyle::Macos,
+                crate::frame::Style::Tag,
+                12
+            )
+        );
         for bad in [
             &["foot", "--frame", "--", "x"][..],
             &["foot", "--frame", "red:4", "--", "x"],
             &["foot", "--frame", "ff0080:0", "--", "x"],
             &["foot", "--frame", "ff0080:4:maybe", "--", "x"],
+            &["foot", "--frame", "ff0080:4:always:beos", "--", "x"],
+            &["foot", "--frame", "ff0080:4:always:kde:soft:99", "--", "x"],
             &["foot", "--frame", "ff0080:4", "--frame-title", "--", "x"],
             &[
                 "foot",

@@ -223,10 +223,27 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             }
             "mode" if pos == 2 => strs(&mut out, &["picker", "per-zone", "both", "off"]),
             "wayland-sandbox" if pos == 2 => strs(&mut out, &["on", "off"]),
-            "frame" if pos == 2 => strs(&mut out, &["show", "hide", "width", "title", "color"]),
+            "frame" if pos == 2 => strs(
+                &mut out,
+                &[
+                    "show", "hide", "width", "title", "style", "buttons", "radius", "color",
+                ],
+            ),
             "frame" if pos == 3 && word(2) == "width" => strs(&mut out, &["4"]),
             "frame" if pos == 3 && word(2) == "title" => {
                 strs(&mut out, &["always", "hover", "off"])
+            }
+            "frame" if pos == 3 && word(2) == "style" => {
+                strs(&mut out, &["soft", "full", "tag", "default"])
+            }
+            "frame" if pos == 3 && word(2) == "buttons" => strs(
+                &mut out,
+                &[
+                    "cellward", "gnome", "kde", "macos", "windows", "none", "default",
+                ],
+            ),
+            "frame" if pos == 3 && word(2) == "radius" => {
+                strs(&mut out, &["0", "8", "12", "default"])
             }
             "frame" if pos == 3 && word(2) == "color" => owned(&mut out, &snap.zones),
             "frame" if pos == 4 && word(2) == "color" => strs(&mut out, &["default"]),

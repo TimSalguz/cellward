@@ -1,14 +1,18 @@
 //! The zone frame's settings (`docs/WINDOW-FRAME.md` §0а, §11): the border's
 //! colour per zone and its width, the title strip's mode (always, on hover,
-//! off) and its text, and the switch that hides every frame — for sharing the
-//! screen, where the owner wants windows without it.
+//! off) and its text, the look — the style of the frame (full, soft, a tag),
+//! the look of its buttons and the radius of the window's corners inside it
+//! (2026-09-28, §8 «Вид рамки») —, and the switch that hides every frame —
+//! for sharing the screen, where the owner wants windows without it.
 //!
 //! What draws it is the Wayland proxy (`crate::wl_frame`, the text
 //! `crate::wl_title`); what is read here is handed to it on the command line
 //! of `wl-sandbox` (`--frame`, `--frame-title`), except the switch, which the
 //! supervisor reads again for every connection (`--frame-switch`): a window
 //! opened after `vpn-zone frame hide` comes up without a frame even in a
-//! program started before.
+//! program started before. The look rides in `--frame` too (its last three
+//! fields, said only when one is not the default), so that the launch's line
+//! stays what it was.
 //!
 //! Where a setting comes from, as for the others: Nix (`declared/`) over the
 //! local one, the local one over the default. The switch has no Nix option —
@@ -38,6 +42,15 @@ pub const SWITCH_SETTING: &str = "frames";
 /// The title strip's mode, a setting file of the config directory: `always`,
 /// `hover` or `off`.
 pub const TITLE_SETTING: &str = "frame-title";
+/// The buttons' look, a setting file of the config directory: `cellward`,
+/// `gnome`, `kde`, `macos`, `windows` or `none` ([`ButtonStyle`]).
+pub const BUTTONS_SETTING: &str = "frame-buttons";
+/// The frame's style, a setting file of the config directory: `full`,
+/// `soft` or `tag` ([`Style`]).
+pub const STYLE_SETTING: &str = "frame-style";
+/// The radius of the window's corners inside the frame, a setting file of
+/// the config directory (logical pixels, 0 for square ones).
+pub const RADIUS_SETTING: &str = "frame-radius";
 
 /// The most characters of one part of the title — the zone's name, the
 /// container's — that are drawn; a longer one is cut, with an ellipsis.
@@ -50,6 +63,11 @@ pub const MAX_TITLE_PART: usize = 40;
 pub const DEFAULT_WIDTH: i32 = 4;
 /// Wider than this is not a border any more.
 pub const MAX_WIDTH: i32 = 32;
+/// Square corners unless asked: the owner's windows as they were.
+pub const DEFAULT_RADIUS: i32 = 0;
+/// Rounder than this is not a corner of a window any more: 16 is the most
+/// the owner asked for (2026-09-27, «0–16»).
+pub const MAX_RADIUS: i32 = 16;
 
 /// A colour, 8 bits a channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,8 +114,33 @@ pub fn default_color(zone: &str) -> Rgb {
     hsv((hash % 360) as f64, 0.65, 0.85)
 }
 
+/// RGB to HSV: the hue in degrees (0 up to 360), the saturation and the
+/// value in 0..=1. A grey has hue 0.
+pub(crate) fn to_hsv(Rgb(r8, g8, b8): Rgb) -> (f64, f64, f64) {
+    // Which channel is the largest, by the bytes: no float compared equal.
+    let top = r8.max(g8).max(b8);
+    let (r, g, b) = (
+        f64::from(r8) / 255.0,
+        f64::from(g8) / 255.0,
+        f64::from(b8) / 255.0,
+    );
+    let max = f64::from(top) / 255.0;
+    let d = max - f64::from(r8.min(g8).min(b8)) / 255.0;
+    let h = if d <= 0.0 {
+        0.0
+    } else if top == r8 {
+        60.0 * ((g - b) / d).rem_euclid(6.0)
+    } else if top == g8 {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    let s = if top == 0 { 0.0 } else { d / max };
+    (h.rem_euclid(360.0), s, max)
+}
+
 /// HSV (hue in degrees, the rest in 0..=1) to RGB.
-fn hsv(h: f64, s: f64, v: f64) -> Rgb {
+pub(crate) fn hsv(h: f64, s: f64, v: f64) -> Rgb {
     let c = v * s;
     let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
     let m = v - c;
@@ -222,6 +265,144 @@ pub fn title_mode(config: &Path) -> (TitleMode, Source) {
     (DEFAULT_TITLE, Source::Default)
 }
 
+/// How the frame's buttons look (the owner, 2026-09-27: the four desktops'
+/// looks, all equal, and the one there was): which end of the strip, which
+/// order, what shape, which colours at rest, under the pointer and pressed.
+/// `crate::wl_title::buttons_look` is each one's look; the drawing and the
+/// hit-testing follow it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonStyle {
+    /// Stage 3's: square cells of the frame's colour at the right end.
+    Cellward,
+    /// GNOME's (Adwaita): round buttons on a faint disc, at the right end.
+    Gnome,
+    /// KDE's (Breeze): glyphs alone, a disc under the pointer, at the right.
+    Kde,
+    /// macOS's: the traffic lights at the LEFT end — close red, then yellow,
+    /// then green —, the glyphs showing under the pointer.
+    Macos,
+    /// Windows's: wide rectangles at the right end, close red under the
+    /// pointer.
+    Windows,
+    /// No buttons: the strip (or the tag) with its label alone.
+    None,
+}
+
+/// Stage 3's look stays the default: nothing changes for whoever does not ask.
+pub const DEFAULT_BUTTONS: ButtonStyle = ButtonStyle::Cellward;
+
+impl ButtonStyle {
+    pub const ALL: [ButtonStyle; 6] = [
+        Self::Cellward,
+        Self::Gnome,
+        Self::Kde,
+        Self::Macos,
+        Self::Windows,
+        Self::None,
+    ];
+
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        Self::ALL.into_iter().find(|s| s.as_str() == text)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cellward => "cellward",
+            Self::Gnome => "gnome",
+            Self::Kde => "kde",
+            Self::Macos => "macos",
+            Self::Windows => "windows",
+            Self::None => "none",
+        }
+    }
+}
+
+/// The frame's style (the owner, 2026-09-27: the frame is always in view and
+/// must not strain the eyes; and a tag, «бирка», instead of a frame for whoever
+/// prefers one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Style {
+    /// The zone's colour itself, the border and the title strip: stage 2's
+    /// pixels.
+    Full,
+    /// The zone's colour, calmer: its hue kept, less saturated and a little
+    /// darker, and the border two tones across its width — darker outside,
+    /// the title's tone inside (`crate::wl_title::soft_inner`).
+    Soft,
+    /// No border: a small tab at the top left with the label (and the
+    /// buttons), the rest of the title's row clear and not in the way of the
+    /// pointer.
+    Tag,
+}
+
+/// Soft by default (2026-09-28): around every window, all day, the zone's
+/// colour at full saturation is a lot of colour; the soft tones read as the
+/// same zone at a glance (`docs/WINDOW-FRAME.md` §8 «Вид рамки»).
+pub const DEFAULT_STYLE: Style = Style::Soft;
+
+impl Style {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "full" => Some(Self::Full),
+            "soft" => Some(Self::Soft),
+            "tag" => Some(Self::Tag),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Soft => "soft",
+            Self::Tag => "tag",
+        }
+    }
+}
+
+/// A one-word setting and where it comes from, as the title's mode is read:
+/// Nix, the local file, `default`. A value `parse` refuses is skipped, as if
+/// it were not there.
+fn word_setting<T>(
+    config: &Path,
+    name: &str,
+    parse: impl Fn(&str) -> Option<T>,
+    default: T,
+) -> (T, Source) {
+    let declared = crate::declared::setting(&config.join(DECLARED_DIR).join(name));
+    if let Some(value) = declared.as_deref().and_then(&parse) {
+        return (value, Source::Nix);
+    }
+    if let Some(value) = read_setting(&config.join(name)).as_deref().and_then(&parse) {
+        return (value, Source::Local);
+    }
+    (default, Source::Default)
+}
+
+/// The buttons' look and where it comes from.
+pub fn buttons(config: &Path) -> (ButtonStyle, Source) {
+    word_setting(config, BUTTONS_SETTING, ButtonStyle::parse, DEFAULT_BUTTONS)
+}
+
+/// The frame's style and where it comes from.
+pub fn style(config: &Path) -> (Style, Source) {
+    word_setting(config, STYLE_SETTING, Style::parse, DEFAULT_STYLE)
+}
+
+/// A radius as a setting file or the command line has it: a whole number of
+/// logical pixels, 0 to [`MAX_RADIUS`].
+pub fn parse_radius(text: &str) -> Option<i32> {
+    text.trim()
+        .parse()
+        .ok()
+        .filter(|r| (0..=MAX_RADIUS).contains(r))
+}
+
+/// The radius of the window's corners and where it comes from.
+pub fn radius(config: &Path) -> (i32, Source) {
+    word_setting(config, RADIUS_SETTING, parse_radius, DEFAULT_RADIUS)
+}
+
 /// Whether a character may be drawn in the title: not a control character,
 /// and nothing that reorders or hides text (`crate::focus::reorders` — a
 /// bidi override would make one zone's name read as another's).
@@ -260,12 +441,16 @@ pub fn clean_title(text: &str) -> String {
 }
 
 /// What `wl-sandbox --frame` carries: the colour, the width and the title's
-/// mode, `rrggbb:w:mode`.
+/// mode, and the look — the buttons', the style, the corners' radius —,
+/// `rrggbb:w:mode[:buttons:style:radius]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Frame {
     pub color: Rgb,
     pub width: i32,
     pub title: TitleMode,
+    pub buttons: ButtonStyle,
+    pub style: Style,
+    pub radius: i32,
 }
 
 impl Frame {
@@ -275,6 +460,9 @@ impl Frame {
             color: zone_color(state, config, zone).0,
             width: width(config).0,
             title: title_mode(config).0,
+            buttons: buttons(config).0,
+            style: style(config).0,
+            radius: radius(config).0,
         }
     }
 
@@ -288,16 +476,32 @@ impl Frame {
         frame
     }
 
+    /// `rrggbb:w:mode`, and `:buttons:style:radius` after it when one of
+    /// them is not its default: the launch's line of the common case stays
+    /// the one it was before there were looks.
     pub fn to_arg(self) -> String {
+        let default = (DEFAULT_BUTTONS, DEFAULT_STYLE, DEFAULT_RADIUS);
+        let look = if (self.buttons, self.style, self.radius) == default {
+            String::new()
+        } else {
+            format!(
+                ":{}:{}:{}",
+                self.buttons.as_str(),
+                self.style.as_str(),
+                self.radius
+            )
+        };
         format!(
-            "{}:{}:{}",
+            "{}:{}:{}{look}",
             &self.color.hex()[1..],
             self.width,
             self.title.as_str()
         )
     }
 
-    /// `rrggbb:w:mode`; `rrggbb:w` has the default mode.
+    /// `rrggbb:w[:mode[:buttons[:style[:radius]]]]`: what is left out has its
+    /// default; anything more, or anything that is not what its place says,
+    /// is no frame.
     pub fn parse_arg(text: &str) -> Option<Self> {
         let mut parts = text.split(':');
         let color = Rgb::parse(parts.next()?)?;
@@ -309,6 +513,18 @@ impl Frame {
             None => DEFAULT_TITLE,
             Some(mode) => TitleMode::parse(mode)?,
         };
+        let buttons = match parts.next() {
+            None => DEFAULT_BUTTONS,
+            Some(look) => ButtonStyle::parse(look)?,
+        };
+        let style = match parts.next() {
+            None => DEFAULT_STYLE,
+            Some(style) => Style::parse(style)?,
+        };
+        let radius = match parts.next() {
+            None => DEFAULT_RADIUS,
+            Some(radius) => parse_radius(radius)?,
+        };
         if parts.next().is_some() {
             return None;
         }
@@ -316,6 +532,9 @@ impl Frame {
             color,
             width,
             title,
+            buttons,
+            style,
+            radius,
         })
     }
 }
@@ -448,6 +667,9 @@ mod tests {
             color: Rgb(1, 2, 255),
             width: 6,
             title: TitleMode::Hover,
+            buttons: DEFAULT_BUTTONS,
+            style: DEFAULT_STYLE,
+            radius: DEFAULT_RADIUS,
         };
         assert_eq!(f.to_arg(), "0102ff:6:hover");
         assert_eq!(Frame::parse_arg(&f.to_arg()), Some(f));
@@ -472,6 +694,133 @@ mod tests {
         ] {
             assert_eq!(Frame::parse_arg(bad), None, "{bad:?}");
         }
+    }
+
+    /// The look rides in the same argument: said when one part of it is not
+    /// the default, all three then; read back part by part, what is left out
+    /// its default, nonsense no frame.
+    #[test]
+    fn the_look_goes_there_and_back_in_the_same_argument() {
+        let f = Frame {
+            color: Rgb(0xff, 0, 0xff),
+            width: 4,
+            title: TitleMode::Always,
+            buttons: ButtonStyle::Macos,
+            style: Style::Tag,
+            radius: 12,
+        };
+        assert_eq!(f.to_arg(), "ff00ff:4:always:macos:tag:12");
+        assert_eq!(Frame::parse_arg(&f.to_arg()), Some(f));
+        // One part away from its default is enough to say all three.
+        let full = Frame {
+            buttons: DEFAULT_BUTTONS,
+            style: Style::Full,
+            radius: DEFAULT_RADIUS,
+            ..f
+        };
+        assert_eq!(full.to_arg(), "ff00ff:4:always:cellward:full:0");
+        assert_eq!(Frame::parse_arg(&full.to_arg()), Some(full));
+        for look in ButtonStyle::ALL {
+            let g = Frame { buttons: look, ..f };
+            assert_eq!(Frame::parse_arg(&g.to_arg()), Some(g), "{look:?}");
+        }
+        // Left out: the default.
+        assert_eq!(
+            Frame::parse_arg("ff00ff:4:always:kde"),
+            Some(Frame {
+                buttons: ButtonStyle::Kde,
+                style: DEFAULT_STYLE,
+                radius: DEFAULT_RADIUS,
+                ..f
+            })
+        );
+        assert_eq!(
+            Frame::parse_arg("ff00ff:4:always:kde:full").map(|f| (f.style, f.radius)),
+            Some((Style::Full, DEFAULT_RADIUS))
+        );
+        for bad in [
+            "ff00ff:4:always:mac",
+            "ff00ff:4:always:macos:round",
+            "ff00ff:4:always:macos:tag:17",
+            "ff00ff:4:always:macos:tag:-1",
+            "ff00ff:4:always:macos:tag:3px",
+            "ff00ff:4:always:macos:tag:3:more",
+            "ff00ff:4:always::tag:3",
+        ] {
+            assert_eq!(Frame::parse_arg(bad), None, "{bad:?}");
+        }
+    }
+
+    /// The look's settings: Nix, then the local file, then the default — a
+    /// word that is not one of theirs skipped as if it were not there.
+    #[test]
+    fn the_look_is_nix_then_local_then_the_default() {
+        let (state, config) = dirs("look");
+        let declared = config.join(DECLARED_DIR);
+        assert_eq!(buttons(&config), (ButtonStyle::Cellward, Source::Default));
+        assert_eq!(style(&config), (Style::Soft, Source::Default));
+        assert_eq!(radius(&config), (0, Source::Default));
+        fs::write(config.join(BUTTONS_SETTING), "macos\n").unwrap();
+        fs::write(config.join(STYLE_SETTING), "tag").unwrap();
+        fs::write(config.join(RADIUS_SETTING), "12\n").unwrap();
+        assert_eq!(buttons(&config), (ButtonStyle::Macos, Source::Local));
+        assert_eq!(style(&config), (Style::Tag, Source::Local));
+        assert_eq!(radius(&config), (12, Source::Local));
+        crate::declared::declare(&declared.join(BUTTONS_SETTING), "windows");
+        crate::declared::declare(&declared.join(STYLE_SETTING), "full");
+        crate::declared::declare(&declared.join(RADIUS_SETTING), "16");
+        assert_eq!(buttons(&config), (ButtonStyle::Windows, Source::Nix));
+        assert_eq!(style(&config), (Style::Full, Source::Nix));
+        assert_eq!(radius(&config), (16, Source::Nix));
+        // Not theirs: as if not there.
+        crate::declared::declare(&declared.join(BUTTONS_SETTING), "beos");
+        crate::declared::declare(&declared.join(STYLE_SETTING), "glass");
+        crate::declared::declare(&declared.join(RADIUS_SETTING), "17");
+        assert_eq!(buttons(&config), (ButtonStyle::Macos, Source::Local));
+        assert_eq!(style(&config), (Style::Tag, Source::Local));
+        assert_eq!(radius(&config), (12, Source::Local));
+        fs::write(config.join(RADIUS_SETTING), "-2").unwrap();
+        assert_eq!(radius(&config), (0, Source::Default));
+        // Each word back to itself.
+        for look in ButtonStyle::ALL {
+            assert_eq!(ButtonStyle::parse(look.as_str()), Some(look));
+        }
+        for s in [Style::Full, Style::Soft, Style::Tag] {
+            assert_eq!(Style::parse(&format!(" {}\n", s.as_str())), Some(s));
+        }
+        assert_eq!(parse_radius(" 0 "), Some(0));
+        assert_eq!(parse_radius("16"), Some(16));
+        assert_eq!(parse_radius("1.5"), None);
+        // And a zone's frame is what they say.
+        let frame = Frame::of_zone(&state, &config, "nl");
+        assert_eq!(
+            (frame.buttons, frame.style, frame.radius),
+            (ButtonStyle::Macos, Style::Tag, 12)
+        );
+        let _ = fs::remove_dir_all(state.parent().unwrap());
+    }
+
+    /// HSV there and back: the soft look keeps a colour's hue
+    /// (`crate::wl_title::soft_inner`).
+    #[test]
+    fn a_colour_goes_to_hsv_and_back() {
+        for c in [
+            Rgb(0xff, 0x00, 0xff),
+            Rgb(0x12, 0x34, 0x56),
+            Rgb(0xd9, 0x4c, 0x4c),
+            Rgb(0x80, 0x80, 0x80),
+            Rgb(0, 0, 0),
+            Rgb(0xff, 0xff, 0xff),
+            default_color("nl"),
+            default_color("зона"),
+        ] {
+            let (h, s, v) = to_hsv(c);
+            assert!((0.0..360.0).contains(&h), "{c:?}: {h}");
+            assert!((0.0..=1.0).contains(&s) && (0.0..=1.0).contains(&v));
+            assert_eq!(hsv(h, s, v), c, "{h} {s} {v}");
+        }
+        let (h, s, v) = to_hsv(Rgb(0xff, 0x00, 0xff));
+        assert!((h - 300.0).abs() < 1e-9 && (s - 1.0).abs() < 1e-9 && (v - 1.0).abs() < 1e-9);
     }
 
     #[test]

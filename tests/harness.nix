@@ -114,6 +114,15 @@ let
       agents = "ask";
     };
     askAgainAfter = "10m";
+    # The zone frame's settings, the look of 2026-09-28 among them.
+    frame = {
+      colors.offline = "#808080";
+      width = 6;
+      title = "hover";
+      style = "tag";
+      buttons = "macos";
+      radius = 10;
+    };
     audioManager = [ "mixer" ];
     pipewirePolicy = true;
     desktop = {
