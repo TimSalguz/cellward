@@ -322,7 +322,9 @@ programs — the covers, the private `/tmp` of a hermetic one, `/dev`, the
 helpers —, per container: two containers offline share no `/tmp`, no
 abstract socket, no System V IPC, no loopback. Its start settings
 (hermetic, the Nix daemon, the host's files, the audio manager) are its
-container's over its network's (§9), frozen as it comes up — a live switch
+container's over its network's (§9) — the main home's are the network's, a
+throwaway's the safe ones whatever the network says (hermetic, none of the
+others: review 2026-09-28) —, frozen as it comes up — a live switch
 keeps them, and is refused into a network that would give the container
 less (`settings`; review 2026-09-28) —; the container's other permissions
 (microphone, screen cast, camera, devices, x11) are read at each launch or
@@ -838,7 +840,10 @@ default|on|off`, `host-files default|read-only|writable`. The order is the
 camera's: Nix's word for the container, then Nix's for its network, then
 the container's local word, then its network's — a local word that is
 stricter than the network's declared one wins over it (review 2026-09-28:
-hermetic on, the others off; a looser one does not). An instance comes up with
+hermetic on, the others off; a looser one does not). A throwaway container
+(a one-off, a temporary layer) has no settings of its own and takes none of
+its network's: its instance comes up hermetic, without the Nix daemon, the
+host's files or the audio manager (review 2026-09-28). An instance comes up with
 them; `instances[].restart_needed` names what has changed since. The
 zone-level options `hermetic.exceptions`, `nixDaemon`, `hostFilesWritable`,
 `audioManager` and `zoneX11` still work, as the default of a container
