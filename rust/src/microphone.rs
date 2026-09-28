@@ -400,7 +400,7 @@ pub fn question(zone: &str, who: &Who, program: &str, remember: bool) -> String 
 }
 
 /// The "always" button: whose it is, in its own words.
-pub fn always_label(zone: &str, who: &Who) -> String {
+pub fn always_label(_zone: &str, who: &Who) -> String {
     match who {
         Who::Container(name) => format!("Всегда — контейнеру «{}»", shown_container(name)),
         _ => "Всегда — настоящему дому".to_owned(),
