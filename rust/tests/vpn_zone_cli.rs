@@ -486,7 +486,7 @@ fn an_unconfined_launch_starts_no_zone_and_loses_nothing_on_the_way() {
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
-        stdout(&out).starts_with("зона unconfined, профиль work:"),
+        stdout(&out).starts_with("зона unconfined, контейнер work:"),
         "{}",
         stdout(&out)
     );
