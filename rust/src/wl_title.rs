@@ -87,9 +87,11 @@ pub enum Button {
     /// The launch's window menu: `cellward window-menu --pid`, which the
     /// supervisor starts.
     Menu,
-    /// Another network for the container. For now the program is started
-    /// again with the network chosen (`window-menu --restart`); switching it
-    /// live, without the restart, is to take this button's place later.
+    /// Another network for the container: switched live, its programs
+    /// running on (`window-menu --network`, stage 5 of the container
+    /// design); where its instance cannot be — the main home's, a
+    /// throwaway's — the program is started again with the network chosen,
+    /// as this button did until then.
     Network,
     /// The window's own `close`, as a server-side decoration's would be.
     Close,

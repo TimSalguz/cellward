@@ -360,7 +360,7 @@ of an assigned program:
 ```
 «Firefox» — container firefox · VPN nl · own home
   ▶ Start
-  ⇄ Change the container's network…     (I1: explicit; running programs restart)
+  ⇄ Change the container's network…     (I1: explicit; switched live, programs run on)
   ⧉ Another container…                  (lists containers with their networks)
   ⊕ Merge with another container…
   One-off: throwaway container, offline

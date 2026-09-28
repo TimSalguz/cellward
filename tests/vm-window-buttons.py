@@ -115,7 +115,8 @@ with subtest("the frame's ≡ opens the window menu of that launch"):
     )
     machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
     unit = alice(f"systemctl --user show -p ExecStart cellward-window-menu-{sup}")
-    assert f"window-menu --pid {sup}" in unit and "--restart" not in unit, unit
+    assert f"window-menu --pid {sup}" in unit, unit
+    assert "--restart" not in unit and "--network" not in unit, unit
     machine.sleep(2)
     alice(f"WAYLAND_DISPLAY={display} grim /tmp/frame-buttons-menu.png")
     machine.copy_from_vm("/tmp/frame-buttons-menu.png", "")
@@ -129,10 +130,15 @@ with subtest("the frame's ≡ opens the window menu of that launch"):
     )
     assert node("btn") is not None, "the menu did something"
 
-with subtest("the frame's ⇄ asks for the restart with a network chosen"):
+with subtest("the frame's ⇄ on the main home's program: the restart with a network chosen"):
+    # Since stage 5 of the container design the ⇄ asks for the network
+    # (`--network`): switched live where the launch's container's instance
+    # can be. This one is the main home's (`main:offline`, an instance of
+    # one network): the restart with a network chosen, as the ⇄ was before
+    # (`--restart` until then).
     click(network[0] + button_w // 2, network[1] + title // 2)
     machine.wait_until_succeeds(
-        f"journalctl --no-pager | grep -F 'window-menu --pid {sup} --restart'", timeout=30
+        f"journalctl --no-pager | grep -F 'window-menu --pid {sup} --network'", timeout=30
     )
     # It asks first whether to close the program: not answered — the menu
     # and its question are ended, and the program stays.
@@ -199,4 +205,58 @@ with subtest("the frame's × closes the program, as its own close would"):
         timeout=30,
     )
     machine.wait_until_fails(f"test -e /proc/{sup}", timeout=30)
+
+with subtest("the frame's ⇄ on a container's program: its network, switched live"):
+    # A named container's own instance can have its network switched live
+    # (stage 4's `cellward container set <c> network <net>`): the ⇄ asks
+    # which network, in the launch window's menu — here there is none but
+    # the one it is in, and the restart —, and closed without a choice it
+    # does nothing, the restart neither.
+    alice("cellward container create vmbtnc --home layer")
+    alice(
+        f"systemd-run --user --unit=vmbtn2 --setenv=WAYLAND_DISPLAY={display} "
+        "cellward run offline --container vmbtnc -- foot --app-id btn2"
+    )
+    machine.wait_until_succeeds(
+        f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q '\"app_id\": *\"btn2\"'",
+        timeout=60,
+    )
+    alice(
+        f"SWAYSOCK={swaysock} swaymsg '[app_id=btn2] floating enable, resize set 640 400, "
+        "move position 100 100'"
+    )
+    pointer("move", 5, 5)
+    machine.sleep(2)
+    sup2 = node("btn2")["pid"]
+    x, y, w, h = view("btn2")
+    net2 = cells(x, y, w)[1]
+    click(net2[0] + button_w // 2, net2[1] + title // 2)
+    machine.wait_until_succeeds(
+        f"journalctl --no-pager | grep -F 'window-menu --pid {sup2} --network'", timeout=30
+    )
+    # The switch's way, not the restart's: the menu says it in its unit's
+    # journal before it asks.
+    machine.wait_until_succeeds(
+        "journalctl --no-pager | grep -F 'сеть контейнера «vmbtnc» (без сети) меняется на ходу'",
+        timeout=30,
+    )
+    machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
+    machine.sleep(2)
+    alice(f"WAYLAND_DISPLAY={display} grim /tmp/frame-network-menu.png")
+    machine.copy_from_vm("/tmp/frame-network-menu.png", "")
+    alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
+    machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=15)
+    machine.wait_until_fails(
+        f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active -q "
+        f"cellward-window-menu-{sup2}'",
+        timeout=30,
+    )
+    # Nothing done: the program is there, the instance where it was.
+    assert node("btn2") is not None, "the ⇄ did something"
+    machine.succeed(f"test -e /proc/{sup2}")
+    status = json.loads(alice("cellward status --json"))
+    inst = next(i for i in status["instances"] if i["id"] == "vmbtnc")
+    assert inst["network"] == "offline", inst
+    alice("systemctl --user stop vmbtn2")
+    machine.wait_until_fails(f"test -e /proc/{sup2}", timeout=30)
     alice("systemctl --user stop vmpointer")

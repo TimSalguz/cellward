@@ -598,8 +598,9 @@ pub(crate) struct Frames {
 pub(crate) enum Ask {
     /// The launch's window menu.
     Menu,
-    /// Another network for the container: for now its restart with a
-    /// network chosen; switching it live later takes this ask's place.
+    /// Another network for the container: switched live where its
+    /// instance can be, else its restart with a network chosen (stage 5 of
+    /// the container design).
     Network,
 }
 

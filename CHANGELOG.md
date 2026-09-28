@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The frame's ⇄ switches the container's network live** (2026-09-28,
+  stage 5 of the container-first model; `docs/WINDOW-FRAME.md`). For a
+  program of a named container whose instance runs, the button asks for the
+  network in the launch window's menu (`offline` and the zones, never the
+  one it is in), then — after what a switch breaks and what it cannot — how:
+  «Сменить сейчас», «Сменить и перезапустить программы» or «Другой
+  контейнер…» (a guarded question); `cellward container set <c> network
+  <net> --yes` does it, and the outcome comes as a notification. For the
+  main home, a throwaway container or an instance of one network, the ⇄
+  still closes the program and starts it again with the network chosen.
+  The supervisor now asks `cellward window-menu --pid <pid> --network`;
+  `--restart`, what a supervisor of a previous build sends, is still taken.
+  The frame's own colour and title still show the network the program was
+  launched into.
 - **What a live switch shows** (2026-09-27, stage 4c of the container-first
   model). The GUI's containers menu (`cellward-gui containers`, «⇄ Сменить
   сеть контейнера…») asks, for a container whose programs run in another

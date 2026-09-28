@@ -889,11 +889,16 @@ pub struct MenuArgs {
     /// window's.
     pub pid: Option<i32>,
     /// Straight to "restart with a network chosen" (`--restart`), with no
-    /// menu first: the frame's ⇄, until the network can be switched live.
+    /// menu first: the frame's ⇄ until stage 5 of the container design —
+    /// still taken from a supervisor of a previous build.
     pub restart: bool,
+    /// The frame's ⇄ (`--network`, stage 5 of the container design,
+    /// 2026-09-28): the container's network switched live where its
+    /// instance can be ([`switch_network`]), else the restart as above.
+    pub network: bool,
 }
 
-/// `[--pid <pid>] [--restart]`.
+/// `[--pid <pid>] [--restart|--network]`.
 pub fn parse_menu_args(args: &[OsString]) -> Result<MenuArgs, String> {
     let mut out = MenuArgs::default();
     let mut words = args.iter();
@@ -909,9 +914,10 @@ pub fn parse_menu_args(args: &[OsString]) -> Result<MenuArgs, String> {
                 out.pid = Some(pid);
             }
             Some("--restart") => out.restart = true,
+            Some("--network") => out.network = true,
             _ => {
                 return Err(format!(
-                    "cellward window-menu [--pid <pid>] [--restart], не {}",
+                    "cellward window-menu [--pid <pid>] [--restart|--network], не {}",
                     word.to_string_lossy()
                 ))
             }
@@ -920,7 +926,7 @@ pub fn parse_menu_args(args: &[OsString]) -> Result<MenuArgs, String> {
     Ok(out)
 }
 
-/// `vpn-zone window-menu [--pid <pid>] [--restart]`: what can be done with the
+/// `vpn-zone window-menu [--pid <pid>] [--restart|--network]`: what can be done with the
 /// program of the focused window — for a key binding of the compositor —,
 /// or of the launch of `--pid` — for the frame's buttons, whose window may
 /// not have the focus.
@@ -980,9 +986,18 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
             .collect(),
         ..Default::default()
     };
-    let choice = if args.restart {
-        // The frame's ⇄: the restart with a network chosen — where the menu
-        // would offer it (a program of the registry); still confirmed below.
+    let choice = if args.restart || args.network {
+        // The frame's ⇄ (`--network`, stage 5 of the container design): the
+        // container's network switched live where its instance can be
+        // (`switch_network`), which says what it did. Anywhere else — or
+        // from a supervisor of before (`--restart`), or asked for there —
+        // the restart with a network chosen, where the menu would offer it
+        // (a program of the registry); still confirmed below.
+        if args.network {
+            if let Some(code) = switch_network(tools, &label, launch.as_ref()) {
+                return code;
+            }
+        }
         if !menu.actions.iter().any(|(tag, _, _)| tag == "restart") {
             notify(
                 &label,
@@ -1123,6 +1138,174 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
         other => eprintln!("cellward window-menu: неизвестный выбор {other}"),
     }
     0
+}
+
+/// Where a container's network may be switched live to from `current`
+/// (the frame's ⇄, [`switch_network`]): `offline` and every zone there is
+/// (a directory with its config), never `unconfined` — the host's network
+/// is no instance's way out, only a restart takes a container there — nor
+/// the network it is in.
+pub fn switch_targets(state: &Path, current: &str) -> Vec<String> {
+    let mut out = vec![crate::launch::OFFLINE.to_owned()];
+    for dir in crate::cli::visible_entries(state) {
+        if !dir.join("config.conf").is_file() {
+            continue;
+        }
+        let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name == crate::launch::OFFLINE || crate::launch::is_unconfined_name(name) {
+            continue;
+        }
+        out.push(name.to_owned());
+    }
+    out.retain(|network| network != current);
+    out
+}
+
+/// The container whose network the frame's ⇄ can switch live for this
+/// launch: a named container's own, whose instance runs now — its id is
+/// the container's name. `None` for the main home's, a throwaway's, an
+/// instance of one network (`<c>:<net>`, which never switches) and
+/// anything not in an instance.
+pub fn switchable(
+    launch: Option<&Launch>,
+    running: &[crate::instance::Running],
+) -> Option<(String, String)> {
+    let name = launch?
+        .selector
+        .as_deref()
+        .filter(|s| crate::container::valid_name(s))?;
+    running
+        .iter()
+        .find(|i| i.id == name)
+        .map(|i| (name.to_owned(), i.network.clone()))
+}
+
+/// The frame's ⇄ for a launch whose container's network can be switched
+/// live (stage 5 of the container design, 2026-09-28; the switch is stage
+/// 4's): the network chosen in the launch window's menu — `offline` and the
+/// zones, never the one it is in ([`switch_targets`]) —, then, after what a
+/// switch breaks and what it cannot (`switch::warning`), how: now, with its
+/// programs restarted, or another container (said how). A guarded question,
+/// as every question of the window is: keys typed on, meant for another
+/// window, do not answer it. `cellward container set <c> network <net>
+/// --yes [--restart]` does it — the keeper's preconditions, the lock, the
+/// journal — and the person is told what came of it. `None`: not such a
+/// launch ([`switchable`]), or the person chose the restart instead — the
+/// restart with a network chosen, as the ⇄ was until then.
+fn switch_network(tools: &Tools, label: &str, launch: Option<&Launch>) -> Option<u8> {
+    let (container, current) = switchable(launch, &crate::instance::running(&tools.state))?;
+    let targets = switch_targets(&tools.state, &current);
+    // In the journal of the menu's unit: which way the ⇄ went.
+    eprintln!(
+        "cellward window-menu: {label}: сеть контейнера «{container}» ({}) меняется на ходу",
+        zone_words(&current)
+    );
+    let mut actions: Vec<(String, String, bool)> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, network)| {
+            let shown = match network.as_str() {
+                crate::launch::OFFLINE => "Без сети".to_owned(),
+                zone => format!("Сеть {zone}"),
+            };
+            (format!("net{i}"), shown, false)
+        })
+        .collect();
+    actions.push((
+        "restart".to_owned(),
+        format!("Закрыть «{label}» и запустить снова — выбрать сеть и контейнер…"),
+        true,
+    ));
+    let choose = crate::window::Menu {
+        title: format!("Сеть контейнера «{container}»"),
+        notes: vec![format!(
+            "Сейчас {}. Программы контейнера останутся работать, их соединения разорвутся.",
+            in_net(&current)
+        )],
+        actions,
+        ..Default::default()
+    };
+    // Closed without a choice: nothing is done — not the restart either.
+    let Some(choice) = ask_menu(tools, &choose) else {
+        return Some(0);
+    };
+    if choice == "restart" {
+        return None;
+    }
+    let Some(to) = choice
+        .strip_prefix("net")
+        .and_then(|i| i.parse::<usize>().ok())
+        .and_then(|i| targets.get(i))
+    else {
+        return Some(0);
+    };
+    let warning = crate::switch::warning(&container, &current, to);
+    let how = crate::window::Menu {
+        title: format!("Сеть контейнера «{container}»"),
+        notes: vec![warning.clone()],
+        actions: vec![
+            ("now".to_owned(), "Сменить сейчас".to_owned(), true),
+            (
+                "restart".to_owned(),
+                "Сменить и перезапустить программы".to_owned(),
+                true,
+            ),
+            ("other".to_owned(), "Другой контейнер…".to_owned(), false),
+        ],
+        guard_ms: crate::dialog::TOO_FAST.as_millis() as u64,
+        ..Default::default()
+    };
+    let title = format!("Сеть контейнера «{container}»");
+    let notify = |body: &str| {
+        crate::dialog::notify(&tools.notify_send, None, "8000", &title, body);
+    };
+    let mut args: Vec<&str> = vec![
+        "container",
+        "set",
+        container.as_str(),
+        "network",
+        to.as_str(),
+        "--yes",
+    ];
+    match ask_menu(tools, &how).as_deref() {
+        Some("now") => {}
+        Some("restart") => args.push("--restart"),
+        Some("other") => {
+            notify(
+                "Чтобы в новой сети быть другим, запусти программу в другом контейнере: в окне \
+                 запуска выбери другой контейнер (или «➕ Новый профиль…»).",
+            );
+            return Some(0);
+        }
+        _ => return Some(0),
+    }
+    let done = Command::new(&tools.runner)
+        .args(&args)
+        .stdin(Stdio::null())
+        .output();
+    let out = match done {
+        Ok(out) => out,
+        Err(e) => {
+            notify(&format!(
+                "Сеть не сменена: не запустить {} ({e})",
+                tools.runner.display()
+            ));
+            return Some(1);
+        }
+    };
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    // The warning the command says first was read already, above.
+    let said = text.strip_prefix(warning.as_str()).unwrap_or(&text).trim();
+    if out.status.success() {
+        notify(said);
+        Some(0)
+    } else {
+        notify(&format!("Сеть не сменена. {said}"));
+        Some(1)
+    }
 }
 
 /// What `window-focus` is asked for.
@@ -1490,21 +1673,34 @@ mod tests {
             parse(&["--pid", "4242"]),
             Ok(MenuArgs {
                 pid: Some(4242),
-                restart: false
+                restart: false,
+                network: false
             })
         );
         assert_eq!(
             parse(&["--pid", "4242", "--restart"]),
             Ok(MenuArgs {
                 pid: Some(4242),
-                restart: true
+                restart: true,
+                network: false
             })
         );
         assert_eq!(
             parse(&["--restart"]),
             Ok(MenuArgs {
                 pid: None,
-                restart: true
+                restart: true,
+                network: false
+            })
+        );
+        // The frame's ⇄ since stage 5: the network, switched live where it
+        // can be.
+        assert_eq!(
+            parse(&["--pid", "4242", "--network"]),
+            Ok(MenuArgs {
+                pid: Some(4242),
+                restart: false,
+                network: true
             })
         );
         for bad in [
@@ -1518,6 +1714,59 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// The frame's ⇄ (stage 5): switched live only for a named container
+    /// whose own instance runs — by the instance's id, the container's name
+    /// —, to `offline` or a zone there is, never `unconfined` nor the
+    /// network it is in.
+    #[test]
+    fn the_network_button_switches_a_named_containers_instance() {
+        let running = |id: &str, network: &str| crate::instance::Running {
+            id: id.to_owned(),
+            dir: std::path::PathBuf::new(),
+            pid: 1,
+            network: network.to_owned(),
+        };
+        let launch = |selector: Option<&str>| Launch {
+            zone: "nl".to_owned(),
+            selector: selector.map(str::to_owned),
+            program: Some("tg".to_owned()),
+        };
+        let up = [running("work", "nl"), running("chat:nl", "nl")];
+        assert_eq!(
+            switchable(Some(&launch(Some("work"))), &up),
+            Some(("work".to_owned(), "nl".to_owned()))
+        );
+        // Its instance not running: nothing to switch.
+        assert_eq!(switchable(Some(&launch(Some("work"))), &[]), None);
+        // The main home, a throwaway, an instance of one network, a launch
+        // not known: the restart, as before.
+        for selector in [Some(""), Some("__fs__"), Some("chat"), None] {
+            assert_eq!(
+                switchable(Some(&launch(selector)), &up),
+                None,
+                "{selector:?}"
+            );
+        }
+        assert_eq!(switchable(None, &up), None);
+
+        let state = std::env::temp_dir().join(format!("vz-switch-targets-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        for zone in ["nl", "de", "unconfined", "offline", "noconf"] {
+            fs::create_dir_all(state.join(zone)).unwrap();
+        }
+        for zone in ["nl", "de", "unconfined"] {
+            fs::write(state.join(zone).join("config.conf"), "").unwrap();
+        }
+        fs::create_dir_all(state.join(".instances")).unwrap();
+        let mut from_nl = switch_targets(&state, "nl");
+        from_nl.sort();
+        assert_eq!(from_nl, ["de", "offline"]);
+        let mut from_offline = switch_targets(&state, "offline");
+        from_offline.sort();
+        assert_eq!(from_offline, ["de", "nl"]);
+        let _ = fs::remove_dir_all(&state);
     }
 
     #[test]

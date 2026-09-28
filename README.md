@@ -484,8 +484,10 @@ Wayland proxy draws inside the window: a border of the zone's (or the
 container's) colour and a title strip with `<zone> · <container>`
 (`cellward frame show|hide|width|color|title`). At the right end of the strip
 three buttons: **≡** opens the window menu of that very launch (`cellward
-window-menu --pid`), **⇄** closes the program and starts it again with the
-network chosen, **×** closes the window as its own close button would. Drag
+window-menu --pid`), **⇄** switches the container's network live — its
+programs run on, their connections are broken (for the main home or a
+throwaway container: closes the program and starts it again with the
+network chosen) —, **×** closes the window as its own close button would. Drag
 the strip to move the window, its border or corners to resize it; the button
 under the pointer lights up. The frame is a reminder, not a boundary a
 program cannot fake: the panel's `cellward focused` is the one it cannot.

@@ -274,8 +274,9 @@ const REFUSED: u8 = b'n';
 /// clicked (`crate::wl_frame::Ask`). No answer.
 const MENU: u8 = b'm';
 /// Proxy → supervisor: another network for the launch — the frame's ⇄
-/// clicked. For now the menu's restart with a network chosen ([`menu_argv`]).
-/// No answer.
+/// clicked: its container's network switched live, where its instance can
+/// be, else the menu's restart with a network chosen ([`menu_argv`]). No
+/// answer.
 const NETWORK: u8 = b's';
 /// Proxy → supervisor: a program of the launch asked for the focus, and the
 /// policy held it back (`notify`, `ask`; `crate::wl_focus`): the person is
@@ -978,8 +979,11 @@ impl MenuStart {
 ///   broker runs it — not the profile's `cellward`, a link a program with
 ///   the home could point elsewhere (review 2026-09-25).
 ///
-/// "Another network" is for now the menu's restart with a network chosen
-/// (`--restart`); switching the network live takes its place here later.
+/// "Another network" (`--network`, stage 5 of the container design,
+/// 2026-09-28): the container's network switched live where its instance
+/// can be (`focus::switch_network`, stage 4's switch), else the menu's
+/// restart with a network chosen — what the ⇄ was until then (`--restart`,
+/// which the menu still takes from a supervisor of a previous build).
 pub(crate) fn menu_argv(
     systemd_run: &Path,
     core: &Path,
@@ -991,7 +995,7 @@ pub(crate) fn menu_argv(
     let mut verb: Vec<OsString> =
         vec!["window-menu".into(), "--pid".into(), pid.to_string().into()];
     if ask == Ask::Network {
-        verb.push("--restart".into());
+        verb.push("--network".into());
     }
     user_unit_argv(
         systemd_run,
@@ -4203,7 +4207,8 @@ mod tests {
 
     /// The menu of the launch through `systemd --user`: named after the
     /// launch, its children kept, the manifest and the compositor passed on,
-    /// our own binary from the store; the network is the restart for now.
+    /// our own binary from the store; the network is switched live where it
+    /// can be (`--network`, stage 5), no longer straight to the restart.
     #[test]
     fn the_window_menu_is_started_by_the_user_manager_for_this_launch() {
         let argv = |display: Option<&str>, ask| -> Vec<String> {
@@ -4239,7 +4244,8 @@ mod tests {
         );
         let network = argv(None, Ask::Network);
         assert!(!network.iter().any(|a| a.contains("WAYLAND_DISPLAY")));
-        assert_eq!(network.last().map(String::as_str), Some("--restart"));
+        assert_eq!(network.last().map(String::as_str), Some("--network"));
+        assert!(!network.iter().any(|a| a == "--restart"));
         assert!(!argv(Some(""), Ask::Menu)
             .iter()
             .any(|a| a.contains("WAYLAND_DISPLAY")));
