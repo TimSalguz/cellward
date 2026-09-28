@@ -478,13 +478,27 @@ unknown. Nothing trusts the window's title; the bar line escapes markup.
 **The zone's frame.** Windows of a program in a zone come with a frame the
 Wayland proxy draws inside the window: a border of the zone's (or the
 container's) colour and a title strip with `<zone> · <container>`
-(`cellward frame show|hide|width|color|title`). At the right end of the strip
+(`cellward frame show|hide|width|color|title|style|buttons|radius`). At the right end of the strip
 three buttons: **≡** opens the window menu of that very launch (`cellward
 window-menu --pid`), **⇄** closes the program and starts it again with the
 network chosen, **×** closes the window as its own close button would. Drag
 the strip to move the window, its border or corners to resize it; the button
 under the pointer lights up. The frame is a reminder, not a boundary a
 program cannot fake: the panel's `cellward focused` is the one it cannot.
+
+Its look is yours to choose, for programs started after the change (and in
+Nix: `programs.cellward.frame.style`, `.buttons`, `.radius`):
+
+```sh
+cellward frame style soft|full|tag    # soft (default): the zone's hue, calmer, the border in
+                                      # two tones; full: the zone's colour itself; tag: no
+                                      # border, a small tab at the top left instead
+cellward frame buttons cellward|gnome|kde|macos|windows|none
+                                      # the buttons' look: square cells (default), GNOME's,
+                                      # KDE's, macOS's traffic lights at the left, Windows's
+cellward frame radius 10              # round the window's corners inside the frame (0-16)
+cellward frame                        # what is set now, and where from
+```
 
 **The focus.** A program asks the compositor for the focus with
 `xdg_activation_v1`, and the Wayland proxy of a zone sees every such request:

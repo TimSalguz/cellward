@@ -6,6 +6,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Looks of the zone's frame** (2026-09-28, `docs/WINDOW-FRAME.md` §8
+  «Вид рамки»; the owner, 2026-09-27: the frame is always in view and must
+  not strain the eyes; the buttons of the four desktops, all equal; a tag
+  instead of a frame; windows round inside it).
+  - `cellward frame style soft|full|tag|default` (`programs.cellward.frame.style`,
+    `defaults.frame_style` in `status --json`). `soft`, **the new default**:
+    the zone's hue, less saturated and a little darker (the title and the
+    border's inner ring 62 % of its saturation and 94 % of its brightness,
+    the outer ring 45 % and 80 %), the border two rings nested one in the
+    other — a gradient across its width that meets at the corners on the
+    diagonal, each ring still one stretched pixel, crisp at any scale.
+    `full`: the frame of before, pixel for pixel. `tag`: no border; the
+    title's row stays (the window is shorter by it, as with the strip), clear
+    (ARGB8888), its input region the tag alone — a tab at the top left with
+    `<zone> · <container>` and the buttons, its top corners round —, so a
+    press beside it is not the frame's and moves nothing.
+  - `cellward frame buttons cellward|gnome|kde|macos|windows|none|default`
+    (`programs.cellward.frame.buttons`, `defaults.frame_buttons`):
+    `cellward` (the default) the square cells of before; `gnome` round
+    buttons on a faint disc; `kde` glyphs alone, a disc of the text's colour
+    under the pointer; `macos` the traffic lights at the LEFT end — close
+    red, then yellow, then green —, their glyphs shown while the pointer is
+    on one; `windows` wide rectangles; `none` no buttons. The look decides
+    the end, the order, the cells, the shape, the glyphs and the colours at
+    rest, under the pointer and pressed; where the pointer finds a button
+    follows it. Close is red under the pointer in every look; no hand cursor.
+  - `cellward frame radius <0–16>|default` (`programs.cellward.frame.radius`,
+    `defaults.frame_radius`), 0 by default: the window's corners round
+    inside the frame — four small surfaces of the title's colour over the
+    content's corners, clear inside a quarter circle, drawn at the
+    compositor's scale, clear to input. None on a tag (no border to blend
+    into).
+  - All of them take effect for programs started after the change, and ride
+    in the launch's `wl-sandbox --frame rrggbb:w:mode[:buttons:style:radius]`,
+    said only when one is not the default. The proxy's filter is unchanged.
+    A framed window is about twice the proxy's objects it was, so a
+    connection may have 2048 framed windows at once (was 4096).
 - **A container's focus policy** (2026-09-27, the owner: AyuGram in a zone,
   opening an image in a window of its own, took the focus several times
   over — Qt makes a new `xdg_activation_v1` token for every
@@ -270,6 +307,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and `usb:` for a board a program can reflash.
 
 ### Changed
+- **The zone's frame is softer by default** (2026-09-28): the new `soft`
+  style — the zone's hue, calmer, the border in two tones — for windows of
+  programs started after the update. `cellward frame style full` (or
+  `programs.cellward.frame.style = "full"`) brings back the frame of
+  before, pixel for pixel. The buttons stay as they were unless another look
+  is chosen.
 - **A program seen for the first time is offered a home of its own, not the
   main home** (2026-09-27; the owner's model of 2026-09-17, every program a
   home of its own — `docs/CONTAINERS.md` §12). With `default-profile ask`
