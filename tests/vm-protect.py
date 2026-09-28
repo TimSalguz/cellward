@@ -11,7 +11,7 @@ alice("cellward protect add ~/vmrepo")
 prot_out = alice("cellward protect")
 assert "/home/alice/vmrepo" in prot_out, prot_out
 prot_st = json.loads(alice("cellward status --json"))
-assert {"value": "/home/alice/vmrepo", "source": "local"} in prot_st["settings"]["protected"], prot_st["settings"]
+assert {"value": "/home/alice/vmrepo", "source": "local"} in prot_st["defaults"]["protected"], prot_st["defaults"]
 alice("! cellward protect add /etc/nixos")
 
 alice("cellward container create vmprot --home main")
