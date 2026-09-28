@@ -672,6 +672,18 @@ and `cellward container show <name> --json` print subsets of the same schema.
   come up not hermetic, or bound to it and not hermetic there —, by name
   (the main home's and a throwaway's instance by its id); `[]` when it
   holds them all, `null` when the network is not locked.
+- **`networks[].tolerates`** (added 2026-09-28, step 1 of the permission
+  model, `docs/PERMISSIONS.md` §11.14): the ways around a network it
+  tolerates for its containers — `{"hermetic", "nix_daemon",
+  "host_files_writable"}`, each `{value, source}`, `value` whether it
+  tolerates what the setting opens (for `hermetic`: containers without
+  hermeticity). A container's own asking for one is in force only where it
+  is tolerated. `offline` tolerates none, a locked zone no host session;
+  otherwise it is the network's own setting (`networks[].hermetic`,
+  `nix_daemon`, `host_files_writable`), which a container without a word of
+  its own also takes. `cellward explain <c> [<network>] --json` gives each
+  setting of a container in a network with who asked and what the network
+  tolerates.
 - **`networks[].restart_needed`** (its meaning since 2026-09-28): the
   names of the start settings (`hermetic`, `nix_daemon`,
   `host_files_writable`, `audio_manager`) that changed since the instances
@@ -860,18 +872,26 @@ design, 2026-09-28): `containers[].hermetic`, `nix_daemon`,
 then (`networks[]`). Nix: `containers.<name>.permissions.{hermetic,
 nixDaemon, hostFilesWritable, audioManager}` (`nullOr bool`); locally
 `cellward container set <c> hermetic|nix-daemon|audio-manager
-default|on|off`, `host-files default|read-only|writable`. The order is the
-camera's: Nix's word for the container, then Nix's for its network, then
-the container's local word, then its network's — a local word that is
-stricter than the network's declared one wins over it (review 2026-09-28:
-hermetic on, the others off; a looser one does not). A throwaway container
+default|on|off`, `host-files default|read-only|writable`. The container's word is Nix's
+over its local one. Three of them are ways around the network — no
+hermeticity, the Nix daemon, the host's files writable — and since step 1
+of the permission model (2026-09-28, `docs/PERMISSIONS.md` §11.14) they
+open only where the container asks and its network tolerates
+(`networks[].tolerates`): a container's own `true` in a network that does
+not tolerate it is not in force, its own `false` always is; a container
+without a word of its own asks for what its network's setting says. The
+audio manager's order is the camera's: Nix's word for the container, then
+Nix's for its network, then the container's local word, then its
+network's — a local word stricter than the network's declared one wins
+over it (review 2026-09-28). A throwaway container
 (a one-off, a temporary layer) has no settings of its own and takes none of
 its network's: its instance comes up hermetic, without the Nix daemon, the
 host's files or the audio manager (review 2026-09-28). An instance comes up with
 them; `instances[].restart_needed` names what has changed since. The
-zone-level options `hermetic.exceptions`, `nixDaemon`, `hostFilesWritable`,
-`audioManager` and `zoneX11` still work, as the default of a container
-without its own, and warn.
+zone-level options `hermetic.exceptions`, `nixDaemon` and
+`hostFilesWritable` are what the network tolerates (and what a container
+without a word of its own asks for); `audioManager` and `zoneX11` still
+work, as the default of a container without its own, and warn.
 
 **`uplink_owner`** (`{uid, gid}` or `null`) is for a host egress policy: every
 socket a zone's traffic leaves the host by is pasta's and belongs to the zone's

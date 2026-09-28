@@ -5,7 +5,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed (read before updating)
+- **A way around a network needs the container to ask and the network to
+  tolerate it** (step 1 of the permission model the owner took on
+  2026-09-28, `docs/PERMISSIONS.md` §11.14). No hermeticity (the host's
+  `systemd --user` and session), the Nix daemon and the host's files
+  writable are ways around a network, not permissions of a program. Until
+  now a container's own word opened them in any network — offline, a strict
+  zone, a locked one —, and the network could not say no. Now a network
+  tolerates them by its own setting (`hermetic.exceptions`, `nixDaemon`,
+  `hostFilesWritable`, `cellward hermetic|nix-daemon|host-files <zone>`),
+  and a container's own `on` is in force only where it is tolerated; its
+  own `off` always is. `offline` tolerates none, whatever is set for it
+  (`cellward nix-daemon offline on` and the like are refused, the module
+  warns); a zone locked by the person tolerates no host session. For
+  compatibility the old lists also still ask on behalf of the main home and
+  of a container without a word of its own, so what those get is unchanged;
+  what narrows is a container's own asking in a network that does not
+  tolerate it, and anything in `offline`. `cellward container set <c>
+  hermetic off|nix-daemon on|host-files writable` says when the
+  container's network does not tolerate it. The module no longer calls
+  `hermetic.exceptions`, `nixDaemon` and `hostFilesWritable` deprecated:
+  they are what a network tolerates. The audio manager stays a program's
+  permission, as before.
+
 ### Added
+- **`cellward explain <container|program|main> [<network>] [--json]`**:
+  what the programs of a container (of a program's container, of the main
+  home) get in a network — the ways around the network, the audio manager,
+  X11, the cameras, the microphone and the screen cast —, and whose word
+  decided each: the container's or the network's, from Nix or locally, and
+  what the network tolerates. Made of the same functions a launch and an
+  instance's start read, so it says what is done. A container bound to no
+  network is explained in the one it runs in, or in the one named.
+- **`status --json`: `networks[].tolerates`** — `{hermetic, nix_daemon,
+  host_files_writable}`, each `{value, source}`: whether the network
+  tolerates what the setting opens for its containers (for `hermetic`, no
+  hermeticity).
 - **`cellward version`** (also `--version`): the version and the build — its
   path in /nix/store, which tells two builds apart; a configurator can ask
   it instead of guessing from an error.

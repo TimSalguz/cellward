@@ -8,8 +8,8 @@
 **Status: 2026-09-28.** It describes the code as of that day, the OpenConnect client's empty
 root, a new program's own home, a container's focus policy (W17), a space's `resolv.conf`
 laid again after the host's rename (D2), shells' IPC out of every runtime directory (W7)
-and step 0 of the split between a network's and a container's permissions (N23, W18,
-H7–H9, L6) included.
+and steps 0 and 1 of the split between a network's and a container's permissions (N23,
+W18, H7–H10, L6) included.
 This page is the summary; LEAK-MODEL is the analysis of each channel. Where the two disagree,
 the code and CHANGELOG decide, and one of them needs fixing.
 
@@ -217,6 +217,7 @@ whatever its network gives its containers (2026-09-28, H8).
 | H7 | A container's own word that closes — hermetic on; the Nix daemon, the host's startup files, the raw PipeWire, the cameras off; the microphone or the screen cast `no` rather than `ask` rather than `yes` — ignored because its network's value declared in Nix opens it | yes (review 2026-09-28) | a local word stricter than the network's declared one wins over it, a looser one does not; the container's own declared word wins both ways; `hermetic.default` counts as the network's declared value | u22 |
 | H8 | A throwaway container (a one-off, a temporary layer over the home) or a program whose container is not known takes its network's Nix daemon, host files, audio manager or want of hermeticity | yes (review 2026-09-28) | a throwaway's instance comes up with the safe values whatever its network says (`hermetic::value_for`: hermetic, none of the others); the microphone's `yes` is `ask` for it | u23 |
 | H9 | The Nix daemon given to a program (`nix_daemon`) while the user, or a group of the user's (`@wheel` too), is in nix.conf's `trusted-users`: the daemon obeys a trusted user in all that makes a build — its sandbox off, a substituter or a `post-build-hook` of its own —, so the program can do what the host's root does | **no** — the host's configuration; `doctor` warns | `doctor` reads `/etc/nix/nix.conf` as Nix does (`include`, `!include`, `extra-trusted-users`, `root` unset) and warns (`nix-trusted`) when a running instance, a container's own word or a network gives the daemon and the user is trusted; the way out: the user and its groups out of `trusted-users` (`allowed-users` is enough to build), or the Nix daemon off | u26 |
+| H10 | A container's own word opens a way around its network — no hermeticity (the host's `systemd --user`), the Nix daemon, the host's startup files writable — in a network that does not tolerate it: `offline`, a strict zone, a locked one; the network cannot say no | yes (step 1 of the permission model, 2026-09-28) | a way around the network is open only where the container asks for it and its network tolerates it (`hermetic::explain`); a network tolerates it by its own setting (`hermetic` off, `nixDaemon`, `hostFilesWritable`, the zone's marker), `offline` none whatever is set (refused by the CLI, warned by the module), a locked zone no host session; a container without a word of its own asks for what its network says; `cellward explain` names each decision's words, `status` what a network tolerates (`networks[].tolerates`) | u27 |
 | | **Files and the host's startup files** | | | |
 | F1 | A zone program reads the home (`~/.ssh`, browser profiles, other programs' data) | own home: yes · otherwise **no** | the sandbox: an empty home plus granted paths | sm8 sm10 |
 | F2 | A zone program writes what the host runs later (`~/.bashrc`, autostart, launcher entries, user units, compositor configs, `mimeapps.list`) | hermetic: partly · ordinary: **no** · own home: yes | read-only covers from a list, their parent directories pinned | vm18 |
@@ -519,3 +520,4 @@ Rust tests (`cargo test`):
 - u24 `rust/src/x11.rs`: `a_containers_own_x11_decides_and_off_refuses_the_zones`; `rust/tests/vpn_zone_cli.rs`: `a_container_with_x11_gets_its_own_x_server_in_zones_only`
 - u25 `rust/tests/vpn_zone_cli.rs`: `a_locked_zone_refuses_a_container_that_is_not_hermetic`; `rust/src/doctor.rs`: `a_locked_zones_containers_that_are_not_hermetic_are_named`; `rust/src/switch.rs`: `every_precondition_refuses_alone`
 - u26 `rust/src/doctor.rs`: `nix_confs_trusted_users_are_read_as_nix_reads_them`, `the_nix_daemon_of_a_trusted_user_is_named`
+- u27 `rust/src/hermetic.rs`: `a_way_around_the_network_needs_both_words`; `rust/tests/vpn_zone_cli.rs`: `explain_says_who_asked_and_what_the_network_tolerates`, `a_networks_restart_needed_is_its_instances`

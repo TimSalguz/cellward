@@ -376,11 +376,15 @@ with subtest("switch: settings frozen wider than B's, or not hermetic into a loc
     # Review 2026-09-28: an instance keeps the settings it came up with, and
     # a switch would carry them into a network that gives its container
     # less. A second container, vmswide, up in A with a Nix daemon of its
-    # own; not hermetic — nothing is here (hermetic.default = false in Nix).
+    # own, which A tolerates (step 1 of the permission model, 2026-09-28: a
+    # way around the network needs both); not hermetic — nothing is here
+    # (hermetic.default = false in Nix).
     WD = "vmswide"
     alice(f"cellward container create {WD} --home layer")
     alice(f"cellward container set {WD} network vmreal")
-    alice(f"cellward container set {WD} nix-daemon on")
+    out = alice(f"cellward container set {WD} nix-daemon on")
+    assert "сеть vmreal этого не допускает" in out, out
+    alice("cellward nix-daemon vmreal on")
     alice(
         f"systemd-run --user --collect --unit=swwide -E PATH=\"$PATH\" "
         f"cellward run vmreal --container {WD} -- sleep infinity"
@@ -408,12 +412,16 @@ with subtest("switch: settings frozen wider than B's, or not hermetic into a loc
             )
         )
 
-    # Its own word taken back: B would give it no daemon — refused, named.
-    alice(f"cellward container set {WD} nix-daemon default")
+    # B does not tolerate the daemon it asks for: B would give it none —
+    # refused, named; so with its own word taken back.
     code, out = set_wide("vmswb")
     assert code != 0 and "(settings)" in out and "Nix-демон" in out and "--restart" in out, out
+    alice(f"cellward container set {WD} nix-daemon default")
+    code, out = set_wide("vmswb")
+    assert code != 0 and "(settings)" in out and "Nix-демон" in out, out
     # As wide as B gives again — but B locked, and it is not hermetic.
     alice(f"cellward container set {WD} nix-daemon on")
+    alice("cellward nix-daemon vmswb on")
     alice("cellward lock vmswb")
     code, out = set_wide("vmswb")
     assert code != 0 and "(locked-target)" in out and "hermetic on" in out, out
@@ -442,6 +450,8 @@ with subtest("switch: settings frozen wider than B's, or not hermetic into a loc
         assert ("switch-refused", why) in kinds, kinds
     # Closed and bound to B: its next start there takes B's settings.
     alice(f"cellward container set {WD} nix-daemon default")
+    alice("cellward nix-daemon vmswb default")
+    alice("cellward nix-daemon vmreal default")
     code, out = set_wide("vmswb", "--restart")
     assert code == 0, out
     c = next(

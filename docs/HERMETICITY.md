@@ -246,14 +246,21 @@ becomes a default, with the table above as the list of what the owner accepts.
      `status --json` shows `defaults.hermetic` and `networks[].hermetic`, each
      with its source. **Since 2026-09-28 (stage 5 of the container
      design) a container's own:** `containers.<name>.permissions.hermetic`
-     in Nix, `cellward container set <c> hermetic default|on|off` locally —
-     Nix's word for the container, then Nix's for its network, then the
-     container's local word, then its network's as above. A container's
-     instance comes up with it (`instances[].restart_needed` when it has
-     changed since); `hermetic.exceptions` still works, with a warning. The
-     same goes for the Nix daemon, the host's files and the audio manager
-     (`permissions.nixDaemon`, `hostFilesWritable`, `audioManager`;
-     `nix-daemon`, `host-files`, `audio-manager` locally);
+     in Nix, `cellward container set <c> hermetic default|on|off` locally;
+     Nix's word for the container over its local one. **Since step 1 of
+     the permission model (2026-09-28, PERMISSIONS §11.14)** a container is
+     without hermeticity only where its network tolerates it: a network
+     that is not hermetic (its setting above) does, a hermetic one does not,
+     and `offline` and a locked zone never do. A container without a word of
+     its own takes its network's setting. A container's instance comes up
+     with it (`instances[].restart_needed` when it has changed since). The
+     same goes for the Nix daemon and the host's files
+     (`permissions.nixDaemon`, `hostFilesWritable`; `nix-daemon`,
+     `host-files` locally; the network: `nixDaemon`, `hostFilesWritable`,
+     `cellward nix-daemon|host-files <zone>`); the audio manager
+     (`audioManager`, `audio-manager`) is a program's permission — the
+     container's, its network's without a word of its own. `cellward
+     explain <container>` shows what came of it and why;
   2. bus permissions come from the program's Flathub manifest
      (`finish-args`: `--talk-name`, `--own-name`, `--system-talk-name`) when
      it has one, so that the filter does not break known programs;

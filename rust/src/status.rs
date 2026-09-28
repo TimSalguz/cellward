@@ -331,8 +331,9 @@ pub fn networks(tools: &Tools) -> String {
             "null".to_owned()
         };
         items.push(format!(
-            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{locked},\"lock_not_held_by\":{lock_not_held_by},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"camera\":{camera},\"microphone\":{microphone},\"screencast\":{screencast},\"audio_manager\":{audio_manager},\"system_zone\":{system_zone},\"frame_color\":{frame_color},\"build\":{build},\"restart_needed\":{restart_needed},\"attached\":{attached},\"bridge\":{bridge}}}",
-            string(&name)
+            "{{\"name\":{},\"kind\":\"{kind}\",\"aliases\":[],\"source\":\"{source}\",\"up\":{up},\"locked\":{locked},\"lock_not_held_by\":{lock_not_held_by},\"tunnel_alive\":{alive},{counters},\"interface\":{interface},\"x11\":{x11},\"hermetic\":{hermetic},\"nix_daemon\":{nix_daemon},\"host_files_writable\":{host_files_writable},\"camera\":{camera},\"microphone\":{microphone},\"screencast\":{screencast},\"audio_manager\":{audio_manager},\"system_zone\":{system_zone},\"frame_color\":{frame_color},\"build\":{build},\"restart_needed\":{restart_needed},\"attached\":{attached},\"bridge\":{bridge},\"tolerates\":{}}}",
+            string(&name),
+            tolerates(tools, &dir, &name)
         ));
     }
     if !offline_listed {
@@ -347,14 +348,34 @@ pub fn networks(tools: &Tools) -> String {
             "{{\"name\":\"offline\",\"kind\":\"offline\",\"aliases\":[],\"source\":\"default\",\"up\":false,\
              \"locked\":false,\"lock_not_held_by\":null,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
              \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\
-             \"microphone\":{},\"screencast\":{},\"audio_manager\":null,\"system_zone\":null,\"frame_color\":{},\"build\":null,\"restart_needed\":null,\"attached\":{},\"bridge\":null}}",
+             \"microphone\":{},\"screencast\":{},\"audio_manager\":null,\"system_zone\":null,\"frame_color\":{},\"build\":null,\"restart_needed\":null,\"attached\":{},\"bridge\":null,\"tolerates\":{}}}",
             sourced_str(mic.as_str(), mic_source),
             sourced_str(cast.as_str(), cast_source),
             sourced_str(&color.hex(), source),
-            attached_to(&instances, crate::launch::OFFLINE)
+            attached_to(&instances, crate::launch::OFFLINE),
+            tolerates(tools, &tools.state.join("offline"), "offline")
         ));
     }
     array(items)
+}
+
+/// `networks[].tolerates` (step 1 of the permission model, 2026-09-28,
+/// `hermetic::tolerance`): the ways around a network it tolerates for its
+/// containers, each of `hermetic::BYPASS_KEYS` by its key — `value` whether
+/// it tolerates what the setting opens (for `hermetic`: containers without
+/// hermeticity), and whence. A container's own asking for one is in force
+/// only where it is tolerated; `offline` tolerates none, a locked zone no
+/// host session.
+fn tolerates(tools: &Tools, dir: &std::path::Path, name: &str) -> String {
+    let items: Vec<String> = crate::hermetic::BYPASS_KEYS
+        .iter()
+        .map(|key| {
+            let (on, source) = crate::hermetic::tolerance(dir, &tools.config, name, key)
+                .unwrap_or((false, Source::Default));
+            format!("{}:{}", string(key), sourced(on.to_string(), source))
+        })
+        .collect();
+    format!("{{{}}}", items.join(","))
 }
 
 /// `networks[].restart_needed` (its meaning since 2026-09-28): the start

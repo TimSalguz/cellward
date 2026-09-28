@@ -124,6 +124,12 @@ let
       radius = 10;
     };
     audioManager = [ "mixer" ];
+    # What the networks tolerate (step 1 of the permission model,
+    # 2026-09-28): offline tolerates none, whatever is named.
+    nixDaemon = [
+      "agents"
+      "offline"
+    ];
     pipewirePolicy = true;
     desktop = {
       windowMenu.key = "Mod+Shift+Z";
@@ -156,6 +162,12 @@ let
         "~/.wine"
         "/mnt/games"
       ];
+    };
+    # Bound to offline, which tolerates no way around a network: its asking
+    # is said to do nothing.
+    containers.quiet = {
+      network = "offline";
+      permissions.nixDaemon = true;
     };
   };
 
@@ -389,13 +401,24 @@ in
       dev = hmDeclared.config.home.file.".config/vpn-zones/declared/containers/dev.conf".text;
     in
     lib.all lib.id [
-      (expect "hermetic.exceptions set, and no word that it is on the way out" (
-        warnsOf "programs.cellward.hermetic.exceptions устарело" hmDeclared.config
+      # What a network tolerates (step 1 of the permission model,
+      # 2026-09-28): not on the way out.
+      (expect "hermetic.exceptions set, and a word that it is on the way out" (
+        !warnsOf "programs.cellward.hermetic.exceptions устарело" hmDeclared.config
+      ))
+      (expect "offline in nixDaemon, and no word that it means nothing there" (
+        warnsOf "offline не допускает обходов сети никогда" hmDeclared.config
+      ))
+      (expect "a container bound to offline asks for the Nix daemon, and no word" (
+        warnsOf "programs.cellward.containers.quiet: сеть offline не допускает" hmDeclared.config
+      ))
+      (expect "a container that is not bound to offline is said to be" (
+        !warnsOf "programs.cellward.containers.dev: сеть offline" hmDeclared.config
       ))
       (expect "audioManager set, and no word that it is on the way out" (
         warnsOf "programs.cellward.audioManager устарело" hmDeclared.config
       ))
-      (expect "nixDaemon not set, and yet a word that it is on the way out" (
+      (expect "nixDaemon set, and a word that it is on the way out" (
         !warnsOf "programs.cellward.nixDaemon устарело" hmDeclared.config
       ))
       (expect "a configuration without them warns of their being on the way out" (

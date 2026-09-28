@@ -90,6 +90,7 @@ const VERBS: &[&str] = &[
     "list",
     "version",
     "status",
+    "explain",
     "run",
     "launch",
     "rm",
@@ -280,6 +281,16 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             "trust" if pos == 3 => owned(&mut out, &snap.containers),
             "trust" if pos == 4 && word(2) == "add" => return vec![FILES.to_string()],
             "launch" if pos == 2 => owned(&mut out, &snap.apps),
+            "explain" if pos == 2 => {
+                owned(&mut out, &snap.containers);
+                strs(&mut out, &["main"]);
+            }
+            "explain" if pos == 3 => {
+                strs(&mut out, &["offline"]);
+                owned(&mut out, &snap.zones);
+                strs(&mut out, &["--json"]);
+            }
+            "explain" if pos == 4 => strs(&mut out, &["--json"]),
             "container" if pos == 2 => strs(
                 &mut out,
                 &[
@@ -473,6 +484,18 @@ mod tests {
         }
         // …and only in the zone slot.
         assert!(complete(&["vpn-zone", "down", "nl", ""], 4).is_empty());
+    }
+
+    #[test]
+    fn explain_offers_containers_then_networks() {
+        assert_eq!(
+            complete(&["vpn-zone", "explain", ""], 3),
+            ["dev", "work", "main"]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "explain", "dev", ""], 4),
+            ["offline", "nl", "ru", "--json"]
+        );
     }
 
     #[test]
