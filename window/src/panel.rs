@@ -1091,7 +1091,7 @@ impl Panel {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let mut flows: Vec<&Conn> = self.data.flows.iter().collect();
-        flows.sort_by(|a, b| b.last.cmp(&a.last));
+        flows.sort_by_key(|c| std::cmp::Reverse(c.last));
         for c in flows.into_iter().take(SHOWN) {
             let color = self
                 .data
