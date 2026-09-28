@@ -251,8 +251,11 @@ def xf_announce(prefix, tag):
 
 def xf_heard_after(tag):
     """The host announces itself after `tag` did, and the server hears it:
-    whatever `tag` sent over the LAN would have come before."""
-    xf_announce("cellward run unconfined --", f"after-{tag}")
+    whatever `tag` sent over the LAN would have come before. A plain program
+    of the host's: through `cellward run unconfined` the same interpreter
+    running in a zone at that moment is the launch's conflict warning, which
+    cancels it when its dialog cannot open (red once in CI)."""
+    xf_announce("", f"after-{tag}")
     server.wait_until_succeeds(
         f"grep -qxF '1716 {XF_MIP} cellward-discovery after-{tag}' /tmp/xfer-hear.log",
         timeout=30,
@@ -341,11 +344,10 @@ def xf_zone(zone, addr, addr6):
     leaked = xf_watched(f"xfw-{zone}")
     assert not leaked, f"{zone}: packets on eth1 around the tunnel:\n{leaked}"
     server.succeed(f"systemctl stop xfwg-{zone}")
-    print(f"{zone}'s discovery inside the tunnel, as the server's wg0 saw it:\n"
-          + server.succeed(f"tcpdump -nr /tmp/xfwg-{zone}.pcap 2>/dev/null"))
-    heard = xf_heard_after(zone)
-    assert not heard, f"{zone}'s discovery reached the LAN: {heard}"
-    XF_ROWS.append((f"{zone}: LAN discovery (multicast 53317, broadcast 1716)", "nothing on eth1, the LAN hears nothing", "-", "-"))
+    # What went into the tunnel is the tunnel's: the VPN server's to see, as
+    # everything else a program sends, never the LAN's.
+    tunnel = server.succeed(f"tcpdump -nr /tmp/xfwg-{zone}.pcap 2>/dev/null")
+    print(f"{zone}'s discovery inside the tunnel, as the server's wg0 saw it:\n{tunnel}")
 
     # And from the LAN, by the host's addresses — with the capture off: a
     # LAN flow by nature. The firewall lets the port in (the host's own
@@ -358,6 +360,14 @@ def xf_zone(zone, addr, addr6):
     got = machine.succeed(f"cat {inbox}.log")
     assert "PUT" not in got, f"a file came in to a program of {zone}:\n{got}"
     alice(f"systemctl --user stop xfin-{zone}")
+
+    heard = xf_heard_after(zone)
+    assert not heard, f"{zone}'s discovery reached the LAN: {heard}"
+    carried = "into the tunnel: " + ", ".join(
+        sorted(set(re.findall(r" > (\S+)\.(?:53317|1716):", tunnel)))
+    ) if tunnel.strip() else "not even into the tunnel"
+    XF_ROWS.append((f"{zone}: LAN discovery (multicast 53317, broadcast 1716)",
+                    f"nothing on eth1, the LAN hears nothing; {carried}", "-", "-"))
 
 
 def xf_without_zones():
