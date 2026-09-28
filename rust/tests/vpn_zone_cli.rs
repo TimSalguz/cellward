@@ -1728,6 +1728,76 @@ fn a_containers_focus_policy_goes_to_the_proxy_with_its_source() {
     assert!(line.contains(" --focus allow -- "), "{line}");
 }
 
+/// Stage 5 of the container design (2026-09-28): a container's own
+/// zone-level permissions — hermetic, the Nix daemon, the host's files, the
+/// audio manager — set locally, shown with where they are from (`null`: its
+/// network's), taken back with `default`; a word that is none refused, and
+/// what Nix set changed there.
+#[test]
+fn a_container_has_its_own_zone_level_permissions() {
+    let home = Home::new("permissions");
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+    let show = |name: &str| stdout(&home.run(&["container", "show", name, "--json"]));
+    let json = show("work");
+    for key in [
+        "hermetic",
+        "nix_daemon",
+        "host_files_writable",
+        "audio_manager",
+    ] {
+        assert!(
+            json.contains(&format!(
+                "\"{key}\":{{\"value\":null,\"source\":\"default\"}}"
+            )),
+            "{key}: {json}"
+        );
+    }
+    let out = home.run(&["container", "set", "work", "hermetic", "off"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("следующего подъёма"),
+        "{}",
+        stdout(&out)
+    );
+    let out = home.run(&["container", "set", "work", "host-files", "writable"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = show("work");
+    assert!(
+        json.contains("\"hermetic\":{\"value\":false,\"source\":\"local\"}"),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"host_files_writable\":{\"value\":true,\"source\":\"local\"}"),
+        "{json}"
+    );
+    for bad in [&["host-files", "on"][..], &["nix-daemon", "maybe"]] {
+        let mut argv = vec!["container", "set", "work"];
+        argv.extend(bad);
+        assert_eq!(home.run(&argv).status.code(), Some(1), "{bad:?}");
+    }
+    let out = home.run(&["container", "set", "work", "hermetic", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        show("work").contains("\"hermetic\":{\"value\":null,\"source\":\"default\"}"),
+        "{}",
+        show("work")
+    );
+    let declared = home.root.join("config/declared/containers");
+    fs::create_dir_all(&declared).unwrap();
+    declare(
+        &declared.join("chat.conf"),
+        "home = main\naudio_manager = true\n",
+    );
+    let out = home.run(&["container", "set", "chat", "audio-manager", "off"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
+    assert!(
+        show("chat").contains("\"audio_manager\":{\"value\":true,\"source\":\"nix\"}"),
+        "{}",
+        show("chat")
+    );
+}
+
 #[test]
 fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     // docs/HERMETICITY.md §7, A.

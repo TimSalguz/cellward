@@ -6,6 +6,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A container's own hermeticity, Nix daemon, host files and audio
+  manager** (2026-09-28, stage 5 of the container-first model;
+  `docs/PERMISSIONS.md` §11.2). Nix:
+  `programs.cellward.containers.<name>.permissions.{hermetic, nixDaemon,
+  hostFilesWritable, audioManager}` (`null`: its network's). Locally:
+  `cellward container set <c> hermetic|nix-daemon|audio-manager
+  default|on|off` and `host-files default|read-only|writable`. The order
+  is the camera's: Nix's word for the container, then Nix's for its
+  network, then the container's local word, then its network's; a word
+  that is none, or a file that cannot be read, is the safe value. A
+  container's instance comes up with them (the main home's and a
+  throwaway's take the network's); `status --json` gains
+  `containers[].hermetic`, `nix_daemon`, `host_files_writable` and
+  `audio_manager` (`{value, source}`, `null` for none of its own), and
+  `instances[].restart_needed` names what changed since the instance came
+  up. **Deprecated, with a warning at build time:** the zone-level
+  `programs.cellward.hermetic.exceptions`, `nixDaemon`, `hostFilesWritable`,
+  `audioManager` and `zoneX11` — still read, as the default of a container
+  without its own; `hermetic.default` stays the default of them all.
 - **The frame's ⇄ switches the container's network live** (2026-09-28,
   stage 5 of the container-first model; `docs/WINDOW-FRAME.md`). For a
   program of a named container whose instance runs, the button asks for the

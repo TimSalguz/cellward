@@ -575,6 +575,20 @@ let
       ++ lib.optional (c.permissions.microphone != null) "microphone = ${c.permissions.microphone}"
       ++ lib.optional (c.permissions.screencast != null) "screencast = ${c.permissions.screencast}"
       ++ lib.optional (c.permissions.camera != null) "camera = ${lib.boolToString c.permissions.camera}"
+      # A container's own zone-level permissions (stage 5 of the container
+      # design, rust/src/hermetic.rs CONTAINER_KEYS): only where set.
+      ++ lib.optional (
+        c.permissions.hermetic != null
+      ) "hermetic = ${lib.boolToString c.permissions.hermetic}"
+      ++ lib.optional (
+        c.permissions.nixDaemon != null
+      ) "nix_daemon = ${lib.boolToString c.permissions.nixDaemon}"
+      ++ lib.optional (
+        c.permissions.hostFilesWritable != null
+      ) "host_files_writable = ${lib.boolToString c.permissions.hostFilesWritable}"
+      ++ lib.optional (
+        c.permissions.audioManager != null
+      ) "audio_manager = ${lib.boolToString c.permissions.audioManager}"
       ++ lib.optional (c.focus != null) "focus = ${c.focus}"
       ++ map (device: "device = ${device}") c.permissions.devices
       ++ lib.mapAttrsToList (scheme: app: "link = ${scheme} ${app}") c.links
@@ -675,6 +689,30 @@ let
         default = null;
         example = true;
         description = "Видны ли программам контейнера камеры хоста (/dev/video*, /dev/media*): зона закрывает их всем своим программам, а запуск, которому они разрешены, открывает их в своём пространстве монтирования. null — как у его зоны (programs.cellward.camera) или как задано локально (cellward container set <контейнер> camera). Значение зоны из Nix важнее местной настройки контейнера, значение контейнера из Nix — важнее всего. Действует для программ, запущенных после изменения; камера, подключённая позже, закрыта у всех — перезапустите программу.";
+      };
+      permissions.hermetic = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        example = false;
+        description = "Герметичен ли контейнер: без systemd --user, сессионная шина через фильтр, запуск в других сетях — только через брокер с вопросом, свои /tmp. null — как у его сети (programs.cellward.hermetic.default или cellward hermetic <зона>) или как задано локально (cellward container set <контейнер> hermetic). Значение сети из Nix важнее местной настройки контейнера, значение контейнера из Nix — важнее всего. Действует со следующего подъёма экземпляра контейнера (cellward status: restart_needed). См. docs/HERMETICITY.ru.md §7.";
+      };
+      permissions.nixDaemon = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        example = true;
+        description = "Виден ли программам контейнера Nix-демон хоста (nix-shell, nix build). По умолчанию нет: демон качает и собирает в сети хоста, мимо VPN, и производная с фиксированным хешем скачает любой адрес, который назовёт программа. null — как у его сети (programs.cellward.nixDaemon, устарело) или как задано локально (cellward container set <контейнер> nix-daemon). Порядок — как у permissions.hermetic. Действует со следующего подъёма экземпляра контейнера.";
+      };
+      permissions.hostFilesWritable = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        example = true;
+        description = "Может ли герметичный контейнер писать туда, что хост исполняет из дома: автозапуск, юниты, ярлыки, конфиги оболочек и композитора, ~/.ssh. По умолчанию только для чтения. null — как у его сети (programs.cellward.hostFilesWritable, устарело) или как задано локально (cellward container set <контейнер> host-files). Порядок — как у permissions.hermetic. Действует со следующего подъёма экземпляра контейнера.";
+      };
+      permissions.audioManager = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        example = true;
+        description = "Отдаётся ли герметичному контейнеру pipewire-0 хоста как есть — для микшера или коммутатора (pavucontrol, qpwgraph). По умолчанию нет: такой контейнер слышит всё, что играет хост, записывает микрофон мимо microphone и меняет чужие потоки. null — как у его сети (programs.cellward.audioManager, устарело) или как задано локально (cellward container set <контейнер> audio-manager). Порядок — как у permissions.hermetic. Действует со следующего подъёма экземпляра контейнера.";
       };
       permissions.screencast = lib.mkOption {
         type = lib.types.nullOr (
@@ -1107,6 +1145,38 @@ in
   wayland.windowManager.sway.extraConfig = lib.mkIf (
     cfg.desktop.sway.enable && config.wayland.windowManager.sway.enable
   ) (lib.mkAfter "include ${config.xdg.configHome}/sway/vpn-zones.conf");
+
+  # The zone-level permissions that name zones (stage 5 of the container
+  # design, 2026-09-28): a container's own now, containers.<name>.permissions
+  # (docs/PERMISSIONS.md §11.2). Still read — what a container without its
+  # own takes, at its instance's start —, and said to be on the way out.
+  # hermetic.default stays the default of them all.
+  warnings =
+    lib.optional (cfg.hermetic.exceptions != [ ]) (
+      "programs.cellward.hermetic.exceptions устарело: герметичность теперь у контейнера — "
+      + "programs.cellward.containers.<имя>.permissions.hermetic (зона остаётся значением "
+      + "по умолчанию для контейнеров без своего)"
+    )
+    ++ lib.optional (cfg.nixDaemon != [ ]) (
+      "programs.cellward.nixDaemon устарело: Nix-демон теперь у контейнера — "
+      + "programs.cellward.containers.<имя>.permissions.nixDaemon (зона остаётся значением "
+      + "по умолчанию для контейнеров без своего)"
+    )
+    ++ lib.optional (cfg.hostFilesWritable != [ ]) (
+      "programs.cellward.hostFilesWritable устарело: запись файлов хоста теперь у "
+      + "контейнера — programs.cellward.containers.<имя>.permissions.hostFilesWritable "
+      + "(зона остаётся значением по умолчанию для контейнеров без своего)"
+    )
+    ++ lib.optional (cfg.audioManager != [ ]) (
+      "programs.cellward.audioManager устарело: PipeWire хоста без ограничений теперь у "
+      + "контейнера — programs.cellward.containers.<имя>.permissions.audioManager (зона "
+      + "остаётся значением по умолчанию для контейнеров без своего)"
+    )
+    ++ lib.optional (cfg.zoneX11 != [ ]) (
+      "programs.cellward.zoneX11 устарело: свой X-сервер теперь у контейнера — "
+      + "programs.cellward.containers.<имя>.permissions.x11 (зона остаётся значением по "
+      + "умолчанию для контейнеров без своего)"
+    );
 
   assertions =
     lib.mapAttrsToList (name: _: {

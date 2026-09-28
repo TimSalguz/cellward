@@ -789,6 +789,20 @@ JSON пишется руками, как руками читается мани�
 `~/.local/state/vpn-zones/.instances/` — экземпляров, по ключу, а не зона:
 читатель зон его пропускает (каталог с точкой).
 
+**Свои разрешения уровня зоны у контейнера** (этап 5 контейнерного
+дизайна, 2026-09-28): `containers[].hermetic`, `nix_daemon`,
+`host_files_writable` и `audio_manager`, у каждого `{value, source}`, где
+`value` — `null`, если своего у контейнера нет: тогда — сети
+(`networks[]`). Nix: `containers.<имя>.permissions.{hermetic, nixDaemon,
+hostFilesWritable, audioManager}` (`nullOr bool`); локально `cellward
+container set <к> hermetic|nix-daemon|audio-manager default|on|off`,
+`host-files default|read-only|writable`. Порядок — как у камеры: слово Nix
+для контейнера, затем Nix для его сети, затем местное слово контейнера,
+затем сети. Экземпляр поднимается с ними; что изменилось с тех пор,
+называет `instances[].restart_needed`. Опции зон `hermetic.exceptions`,
+`nixDaemon`, `hostFilesWritable`, `audioManager` и `zoneX11` работают — как
+значение по умолчанию для контейнера без своего — и предупреждают.
+
 **`uplink_owner`** (`{uid, gid}` или `null`) — для политики хоста на выход:
 каждый сокет, которым трафик зоны покидает хост, — сокет pasta и
 принадлежит uid 0 зоны, началу подчинённых диапазонов пользователя, поэтому

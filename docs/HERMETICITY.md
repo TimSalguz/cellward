@@ -240,7 +240,16 @@ becomes a default, with the table above as the list of what the owner accepts.
      anything: the prototype's empty marker, an unreadable one and any other
      content mean on. The holder decides once, when the zone comes up;
      `status --json` shows `defaults.hermetic` and `networks[].hermetic`, each
-     with its source;
+     with its source. **Since 2026-09-28 (stage 5 of the container
+     design) a container's own:** `containers.<name>.permissions.hermetic`
+     in Nix, `cellward container set <c> hermetic default|on|off` locally —
+     Nix's word for the container, then Nix's for its network, then the
+     container's local word, then its network's as above. A container's
+     instance comes up with it (`instances[].restart_needed` when it has
+     changed since); `hermetic.exceptions` still works, with a warning. The
+     same goes for the Nix daemon, the host's files and the audio manager
+     (`permissions.nixDaemon`, `hostFilesWritable`, `audioManager`;
+     `nix-daemon`, `host-files`, `audio-manager` locally);
   2. bus permissions come from the program's Flathub manifest
      (`finish-args`: `--talk-name`, `--own-name`, `--system-talk-name`) when
      it has one, so that the filter does not break known programs;

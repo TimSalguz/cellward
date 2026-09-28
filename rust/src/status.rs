@@ -507,11 +507,14 @@ pub fn instance(tools: &Tools, running: &crate::instance::Running) -> String {
         &crate::build::installed(tools),
     ));
     let pid_namespace = crate::instance::own_pid_namespace(running.pid);
+    // What it came up with against what is set now — for its container's
+    // programs (stage 5: a container's own over its network's).
     let restart_needed = crate::hermetic::restart_needed_of(
         &running.dir,
         &tools.state.join(&running.network),
         &tools.config,
         &running.network,
+        &crate::instance::who_of(&running.id),
     )
     .map(|mut names| {
         if !pid_namespace {
@@ -735,10 +738,25 @@ pub fn container(tools: &Tools, c: &Container) -> String {
     );
     // What becomes of its programs' asking for the focus (`crate::wl_focus`).
     let focus = sourced_str(c.focus.value.as_str(), c.focus.source);
+    // Its own zone-level permissions (stage 5 of the container design,
+    // `hermetic::CONTAINER_KEYS`): each `null` where it has none of its own
+    // — its network's then (`networks[]`), as for the camera. In force from
+    // its instance's next start (`instances[].restart_needed`).
+    let own = crate::hermetic::CONTAINER_KEYS
+        .iter()
+        .map(|(key, _)| {
+            let value = match crate::hermetic::container_own(&tools.config, &c.name, key) {
+                Some((on, source)) => sourced(on.to_string(), source),
+                None => sourced("null".to_owned(), Source::Default),
+            };
+            format!("{}:{value}", string(key))
+        })
+        .collect::<Vec<String>>()
+        .join(",");
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
          \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"devices\":{devices},\"links\":{links},\"focus\":{focus},\"instances\":{instances}}}",
+         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"devices\":{devices},\"links\":{links},\"focus\":{focus},{own},\"instances\":{instances}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),

@@ -2549,6 +2549,34 @@ pub fn set_camera(tools: &Tools, selector: &str, on: Option<bool>) -> Result<(),
     )
 }
 
+/// Give a container its own zone-level permission `key`
+/// (`hermetic::CONTAINER_KEYS`: hermetic, the Nix daemon, the host's files,
+/// the audio manager), or take it back (`None`: its network's), locally —
+/// stage 5 of the container design (2026-09-28). Refused where Nix set it.
+/// In force from its instance's next start: an instance keeps what it came
+/// up with (`hermetic::start_settings_for`).
+pub fn set_permission(
+    tools: &Tools,
+    selector: &str,
+    key: &str,
+    on: Option<bool>,
+) -> Result<(), String> {
+    let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    if crate::hermetic::container_own(&tools.config, &container.name, key)
+        .is_some_and(|(_, source)| source == Source::Nix)
+    {
+        return Err(format!(
+            "{key} контейнера {selector} задан в Nix — меняется там"
+        ));
+    }
+    write_key(
+        &container.policy.join(FILE),
+        key,
+        on.map(|on| if on { "true" } else { "false" }),
+        true,
+    )
+}
+
 /// Give a container a device, or take one back (`add` false), locally. A
 /// device Nix gave is taken back there.
 pub fn set_device(tools: &Tools, selector: &str, word: &str, add: bool) -> Result<(), String> {

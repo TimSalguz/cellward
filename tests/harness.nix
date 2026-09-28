@@ -7,7 +7,7 @@
 # Использование:
 #   nix-instantiate tests/harness.nix -A activationPackage        # только eval
 #   nix-build tests/harness.nix -A scripts.cellward               # адресная сборка
-#   nix-instantiate --eval --strict tests/harness.nix -A oldNames -A singleEntry -A keepOnSwitch
+#   nix-instantiate --eval --strict tests/harness.nix -A oldNames -A singleEntry -A keepOnSwitch -A deprecations
 #   nix-build tests/harness.nix -A zoneHolder \
 #     --argstr username "$(id -un)" --argstr homeDirectory "$HOME"
 {
@@ -136,6 +136,11 @@ let
     containers.dev = {
       apps = [ "org.telegram.desktop" ];
       focus = "notify";
+      # A container's own zone-level permissions (stage 5).
+      permissions.hermetic = false;
+      permissions.nixDaemon = true;
+      permissions.hostFilesWritable = false;
+      permissions.audioManager = true;
       permissions.paths = [
         "~/.wine"
         "/mnt/games"
@@ -360,6 +365,38 @@ in
       (expect "a system zone's tunnel is restarted by a switch" (!s."vpn-zone-system@".restartIfChanged))
       (expect "a system zone's namespace is restarted by a switch" (
         !s."vpn-zone-system-ns@".restartIfChanged
+      ))
+    ];
+
+  # Stage 5 of the container design (2026-09-28): the zone-level permissions
+  # that name zones are said to be on the way out, and each container's own
+  # is written into its declared file; a configuration without them warns
+  # of nothing:
+  #   nix-instantiate --eval --strict tests/harness.nix -A deprecations
+  deprecations =
+    let
+      dev = hmDeclared.config.home.file.".config/vpn-zones/declared/containers/dev.conf".text;
+    in
+    lib.all lib.id [
+      (expect "hermetic.exceptions set, and no word that it is on the way out" (
+        warnsOf "programs.cellward.hermetic.exceptions устарело" hmDeclared.config
+      ))
+      (expect "audioManager set, and no word that it is on the way out" (
+        warnsOf "programs.cellward.audioManager устарело" hmDeclared.config
+      ))
+      (expect "nixDaemon not set, and yet a word that it is on the way out" (
+        !warnsOf "programs.cellward.nixDaemon устарело" hmDeclared.config
+      ))
+      (expect "a configuration without them warns of their being on the way out" (
+        !warnsOf "устарело" hm.config
+      ))
+      (expect "a container's own permissions are not in its declared file" (
+        lib.all (line: lib.hasInfix line dev) [
+          "hermetic = false"
+          "nix_daemon = true"
+          "host_files_writable = false"
+          "audio_manager = true"
+        ]
       ))
     ];
 

@@ -800,6 +800,21 @@ until it is restarted), `null` when it is down (and for `unconfined` and `offlin
 `~/.local/state/vpn-zones/.instances/` is the instances', named by a key and
 not a zone: a reader of zones skips it (a dot directory).
 
+**A container's own zone-level permissions** (stage 5 of the container
+design, 2026-09-28): `containers[].hermetic`, `nix_daemon`,
+`host_files_writable` and `audio_manager`, each `{value, source}` with
+`value` `null` where the container has none of its own — its network's
+then (`networks[]`). Nix: `containers.<name>.permissions.{hermetic,
+nixDaemon, hostFilesWritable, audioManager}` (`nullOr bool`); locally
+`cellward container set <c> hermetic|nix-daemon|audio-manager
+default|on|off`, `host-files default|read-only|writable`. The order is the
+camera's: Nix's word for the container, then Nix's for its network, then
+the container's local word, then its network's. An instance comes up with
+them; `instances[].restart_needed` names what has changed since. The
+zone-level options `hermetic.exceptions`, `nixDaemon`, `hostFilesWritable`,
+`audioManager` and `zoneX11` still work, as the default of a container
+without its own, and warn.
+
 **`uplink_owner`** (`{uid, gid}` or `null`) is for a host egress policy: every
 socket a zone's traffic leaves the host by is pasta's and belongs to the zone's
 uid 0, the start of the user's subordinate ranges, so `meta skuid <uid>` in the

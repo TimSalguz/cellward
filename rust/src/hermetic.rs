@@ -18,12 +18,26 @@
 //! Only `off` switches anything off. An empty marker is what the prototype
 //! wrote for "on", and a file that says something else, or that is there but
 //! cannot be read, is no reason to open a zone.
+//!
+//! **A container's own** (stage 5 of the container design, 2026-09-28;
+//! `docs/PERMISSIONS.md` §11.2): hermeticity, the Nix daemon, the host's
+//! files and the audio manager are its container's before they are its
+//! network's — `containers.<n>.permissions.*` in Nix, `cellward container
+//! set <c> hermetic|nix-daemon|host-files|audio-manager` locally. A
+//! container's instance comes up with them ([`start_settings_for`]); the
+//! zone-level settings are what a container without its own takes, and what
+//! a zone's own space (nothing is launched into it since stage 5) is set up
+//! with. The order is the camera's (`container::camera_for`): Nix's word for
+//! the container, then Nix's for the zone — a local word never overrides a
+//! declared one —, then the container's local word, then the zone's
+//! ([`for_container`]).
 
 use std::io::ErrorKind;
 use std::path::Path;
 
 use crate::cli::{read_setting, DECLARED_DIR};
 use crate::container::Source;
+use crate::origin::Who;
 
 /// The per-zone marker, in the zone's directory: `on`, `off` or empty (on).
 pub const MARKER: &str = "hermetic";
@@ -167,18 +181,99 @@ pub fn host_files_writable(zone_dir: &Path, config: &Path, zone: &str) -> (bool,
 /// those that have changed since (`networks[].restart_needed`).
 pub const APPLIED: &str = "zone.settings";
 
+/// The settings a space takes when it comes up that a container may have
+/// its own of: by their names in `status --json`, in `container.conf` and in
+/// a declared container's file (`<name> = true|false`), each with the value
+/// that is safe — what a word that is neither on nor off, or a file that
+/// cannot be read, is taken for: never an opening.
+pub const CONTAINER_KEYS: [(&str, bool); 4] = [
+    ("hermetic", true),
+    ("nix_daemon", false),
+    ("host_files_writable", false),
+    ("audio_manager", false),
+];
+
+/// A container's own word on the setting `key` ([`CONTAINER_KEYS`]), and
+/// where it is from: Nix's declaration over its local settings
+/// (`container::own_value_in`). `None`: it has none of its own — its
+/// network's then.
+pub fn container_own(config: &Path, name: &str, key: &str) -> Option<(bool, Source)> {
+    let safe = CONTAINER_KEYS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .is_some_and(|(_, safe)| *safe);
+    match crate::container::own_value_in(config, name, key) {
+        Ok(Some((word, source))) => {
+            let on = match word.trim() {
+                "true" | "on" | "yes" => true,
+                "false" | "off" | "no" => false,
+                _ => safe,
+            };
+            Some((on, source))
+        }
+        Ok(None) => None,
+        Err(source) => Some((safe, source)),
+    }
+}
+
+/// A setting for a program of a container, from the zone's (`zone`) and the
+/// container's own (`own`): Nix's word for the container, then Nix's for the
+/// zone — a local word never overrides a declared one —, then the
+/// container's own local word, then the zone's.
+pub fn for_container(zone: (bool, Source), own: Option<(bool, Source)>) -> (bool, Source) {
+    match own {
+        Some((on, Source::Nix)) => (on, Source::Nix),
+        _ if zone.1 == Source::Nix => zone,
+        Some(own) => own,
+        None => zone,
+    }
+}
+
+/// The zone-level setting `key` ([`CONTAINER_KEYS`]) of the zone in
+/// `zone_dir`, by itself.
+pub fn zone_value(zone_dir: &Path, config: &Path, zone: &str, key: &str) -> (bool, Source) {
+    match key {
+        "hermetic" => zone_setting(zone_dir, config, zone),
+        "nix_daemon" => nix_daemon(zone_dir, config, zone),
+        "host_files_writable" => host_files_writable(zone_dir, config, zone),
+        "audio_manager" => audio_manager(zone_dir, config, zone),
+        _ => (false, Source::Default),
+    }
+}
+
+/// The setting `key` for the programs of `who` in the network whose zone
+/// directory is `zone_dir`: a container's by [`for_container`]; the main
+/// home's and nobody's (a throwaway container), the network's.
+pub fn value_for(
+    zone_dir: &Path,
+    config: &Path,
+    zone: &str,
+    who: &Who,
+    key: &str,
+) -> (bool, Source) {
+    let zone_value = zone_value(zone_dir, config, zone, key);
+    match who {
+        Who::Container(name) => for_container(zone_value, container_own(config, name, key)),
+        Who::Main | Who::Unknown => zone_value,
+    }
+}
+
 /// The settings a zone takes when it comes up, by their names in
 /// `status --json`.
 pub fn start_settings(zone_dir: &Path, config: &Path, zone: &str) -> [(&'static str, bool); 4] {
-    [
-        ("hermetic", zone_setting(zone_dir, config, zone).0),
-        ("nix_daemon", nix_daemon(zone_dir, config, zone).0),
-        (
-            "host_files_writable",
-            host_files_writable(zone_dir, config, zone).0,
-        ),
-        ("audio_manager", audio_manager(zone_dir, config, zone).0),
-    ]
+    start_settings_for(zone_dir, config, zone, &Who::Main)
+}
+
+/// The settings a container's instance comes up with for the programs of
+/// `who`, in the network whose zone directory is `zone_dir`
+/// ([`value_for`]), by their names in `status --json`.
+pub fn start_settings_for(
+    zone_dir: &Path,
+    config: &Path,
+    zone: &str,
+    who: &Who,
+) -> [(&'static str, bool); 4] {
+    CONTAINER_KEYS.map(|(key, _)| (key, value_for(zone_dir, config, zone, who, key).0))
 }
 
 /// Note what a zone comes up with ([`APPLIED`]), through a temporary.
@@ -193,17 +288,19 @@ pub fn note_applied(zone_dir: &Path, settings: &[(&str, bool)]) -> std::io::Resu
 /// by name. `None`: not known — no note (a zone a build from before it
 /// started). A setting the note does not name is not counted.
 pub fn restart_needed(zone_dir: &Path, config: &Path, zone: &str) -> Option<Vec<&'static str>> {
-    restart_needed_of(zone_dir, zone_dir, config, zone)
+    restart_needed_of(zone_dir, zone_dir, config, zone, &Who::Main)
 }
 
 /// [`restart_needed`] of what came up with the note in `applied_dir` by the
-/// settings of the zone in `zone_dir`: a container's instance notes them in
-/// its own directory, and they are its network's (`crate::instance`).
+/// settings for the programs of `who` in the network whose zone directory
+/// is `zone_dir`: a container's instance notes them in its own directory,
+/// and they are its container's over its network's ([`start_settings_for`]).
 pub fn restart_needed_of(
     applied_dir: &Path,
     zone_dir: &Path,
     config: &Path,
     zone: &str,
+    who: &Who,
 ) -> Option<Vec<&'static str>> {
     let text = std::fs::read_to_string(applied_dir.join(APPLIED)).ok()?;
     let applied = |name: &str| {
@@ -212,7 +309,7 @@ pub fn restart_needed_of(
             .find(|(k, _)| k.trim() == name)
             .map(|(_, v)| v.trim() == "true")
     };
-    let mut changed: Vec<&'static str> = start_settings(zone_dir, config, zone)
+    let mut changed: Vec<&'static str> = start_settings_for(zone_dir, config, zone, who)
         .into_iter()
         .filter(|(name, now)| applied(name).is_some_and(|then| then != *now))
         .map(|(name, _)| name)
@@ -415,5 +512,102 @@ mod tests {
             Some(vec!["nix_daemon", "camera"])
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Stage 5 (2026-09-28): the order a container's own setting is taken
+    /// in — Nix's word for the container, then Nix's for the zone, then the
+    /// container's local word, then the zone's.
+    #[test]
+    fn a_containers_own_setting_is_taken_in_the_cameras_order() {
+        // Nothing of its own: the zone's, whatever its source.
+        assert_eq!(
+            for_container((true, Source::Default), None),
+            (true, Source::Default)
+        );
+        assert_eq!(
+            for_container((false, Source::Nix), None),
+            (false, Source::Nix)
+        );
+        // Its own local word over the zone's local or default one…
+        assert_eq!(
+            for_container((true, Source::Local), Some((false, Source::Local))),
+            (false, Source::Local)
+        );
+        assert_eq!(
+            for_container((false, Source::Default), Some((true, Source::Local))),
+            (true, Source::Local)
+        );
+        // …but not over the zone's declared one.
+        assert_eq!(
+            for_container((true, Source::Nix), Some((false, Source::Local))),
+            (true, Source::Nix)
+        );
+        // Its own declared word over everything.
+        assert_eq!(
+            for_container((true, Source::Nix), Some((false, Source::Nix))),
+            (false, Source::Nix)
+        );
+        assert_eq!(
+            for_container((false, Source::Default), Some((true, Source::Nix))),
+            (true, Source::Nix)
+        );
+    }
+
+    /// A container's own word as its files say it: the declared one over the
+    /// local one; a word that is neither on nor off the safe value — for
+    /// hermeticity on, for the others off.
+    #[test]
+    fn a_containers_own_word_is_read_safely() {
+        let d = Dirs::new("own");
+        std::fs::create_dir_all(d.config().join("containers/work")).unwrap();
+        std::fs::create_dir_all(d.config().join("declared/containers")).unwrap();
+        assert_eq!(container_own(&d.config(), "work", "hermetic"), None);
+        d.write(
+            "config/containers/work/container.conf",
+            "hermetic = false\nnix_daemon = on\naudio_manager = maybe\n",
+        );
+        assert_eq!(
+            container_own(&d.config(), "work", "hermetic"),
+            Some((false, Source::Local))
+        );
+        assert_eq!(
+            container_own(&d.config(), "work", "nix_daemon"),
+            Some((true, Source::Local))
+        );
+        assert_eq!(
+            container_own(&d.config(), "work", "audio_manager"),
+            Some((false, Source::Local))
+        );
+        d.write(
+            "config/containers/work/container.conf",
+            "hermetic = maybe\n",
+        );
+        assert_eq!(
+            container_own(&d.config(), "work", "hermetic"),
+            Some((true, Source::Local))
+        );
+        // Declared: a file of the module's kind (with its `home`).
+        d.declare(
+            "containers/work.conf",
+            "home = private\nhermetic = true\nhost_files_writable = true\n",
+        );
+        assert_eq!(
+            container_own(&d.config(), "work", "hermetic"),
+            Some((true, Source::Nix))
+        );
+        assert_eq!(
+            container_own(&d.config(), "work", "host_files_writable"),
+            Some((true, Source::Nix))
+        );
+        // And what an instance of it comes up with in a zone that is
+        // hermetic by default: its own; the main home's, the zone's.
+        d.write("config/containers/work/container.conf", "");
+        d.declare("containers/work.conf", "home = private\nhermetic = false\n");
+        let work = Who::Container("work".into());
+        let settings = start_settings_for(&d.zone(), &d.config(), "nl", &work);
+        assert_eq!(settings[0], ("hermetic", false));
+        let main = start_settings_for(&d.zone(), &d.config(), "nl", &Who::Main);
+        assert_eq!(main[0], ("hermetic", true));
+        assert_eq!(start_settings(&d.zone(), &d.config(), "nl"), main);
     }
 }

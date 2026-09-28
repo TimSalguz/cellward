@@ -1831,11 +1831,17 @@ pub fn run_instance(tools: Tools, home: PathBuf, plan: crate::instance::Plan) ->
         eprintln!("instance {id}: cannot write {} ({e})", resolv.display());
         return 1;
     }
-    // The network's zone-level settings, frozen for the instance's life: its
-    // covers and helpers are made by them once, and `status --json` names
-    // what has changed since (`restart_needed`).
-    let settings =
-        crate::hermetic::start_settings(&state.join(&plan.network), &config, &plan.network);
+    // The zone-level settings, frozen for the instance's life: its covers
+    // and helpers are made by them once, and `status --json` names what has
+    // changed since (`restart_needed`). Its container's own over its
+    // network's (stage 5 of the container design, 2026-09-28): the main
+    // home's and a throwaway's are the network's.
+    let settings = crate::hermetic::start_settings_for(
+        &state.join(&plan.network),
+        &config,
+        &plan.network,
+        &plan.who,
+    );
     let applied: String = settings
         .iter()
         .map(|(name, on)| format!("{name}={on}\n"))
