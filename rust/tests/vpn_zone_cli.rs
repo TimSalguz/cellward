@@ -2457,6 +2457,9 @@ fn version_names_the_build() {
         assert!(out.status.success(), "{word}: {}", stderr(&out));
         let text = stdout(&out);
         assert!(text.starts_with("cellward "), "{word}: {text}");
-        assert!(text.contains('(') && text.trim_end().ends_with(')'), "{word}: {text}");
+        assert!(
+            text.contains('(') && text.trim_end().ends_with(')'),
+            "{word}: {text}"
+        );
     }
 }
