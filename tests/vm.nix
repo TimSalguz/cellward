@@ -504,6 +504,11 @@ let
         ];
         environment.pathsToLink = [ "/share/dbus-1" ];
 
+        # A program here that takes files from the server
+        # (tests/vm-promise-transfer.py): open, so that a refusal to one in
+        # a zone is the zone's and not the firewall's.
+        networking.firewall.allowedTCPPorts = [ 8094 ];
+
         virtualisation.cores = 4;
         virtualisation.memorySize = 2048;
       };
@@ -538,11 +543,16 @@ let
         networking.firewall.allowedUDPPorts = [
           51820
           51821
+          # A LAN peer's discovery: LocalSend's multicast, KDE Connect's
+          # broadcast (tests/vm-promise-transfer.py).
+          1716
+          53317
         ];
         # The responders a host-interface zone talks to directly, on eth1:
-        # over IPv4 and over IPv6.
+        # over IPv4 and over IPv6; and the file upload endpoint.
         networking.firewall.allowedTCPPorts = [
           8090
+          8093
           8095
         ];
         # Services listen on the tunnel address only; the firewall must not
@@ -1381,6 +1391,7 @@ let
           machine.succeed("nft delete table inet vzowner")
 
       exec(open("${./vm-promise-resolv-rename.py}").read())
+      exec(open("${./vm-promise-transfer.py}").read())
 
       # --- The obfuscated tunnel: AmneziaWG as a real user runs it ----------
       # Everything so far was wire-compatible with plain WireGuard. This zone
