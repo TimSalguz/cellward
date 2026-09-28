@@ -193,15 +193,21 @@ pub const CONTAINER_KEYS: [(&str, bool); 4] = [
     ("audio_manager", false),
 ];
 
+/// The safe value of the setting `key` ([`CONTAINER_KEYS`]): hermetic on,
+/// the others off; a key that is none of them, off.
+pub fn safe_value(key: &str) -> bool {
+    CONTAINER_KEYS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .is_some_and(|(_, safe)| *safe)
+}
+
 /// A container's own word on the setting `key` ([`CONTAINER_KEYS`]), and
 /// where it is from: Nix's declaration over its local settings
 /// (`container::own_value_in`). `None`: it has none of its own — its
 /// network's then.
 pub fn container_own(config: &Path, name: &str, key: &str) -> Option<(bool, Source)> {
-    let safe = CONTAINER_KEYS
-        .iter()
-        .find(|(k, _)| *k == key)
-        .is_some_and(|(_, safe)| *safe);
+    let safe = safe_value(key);
     match crate::container::own_value_in(config, name, key) {
         Ok(Some((word, source))) => {
             let on = match word.trim() {
@@ -282,6 +288,40 @@ pub fn note_applied(zone_dir: &Path, settings: &[(&str, bool)]) -> std::io::Resu
     let tmp = zone_dir.join(format!("{APPLIED}.new"));
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, zone_dir.join(APPLIED))
+}
+
+/// What a note of the settings a space came up with ([`APPLIED`], its
+/// text) says of the setting `name`: `None` where it names it not, or in
+/// a word that is neither `true` nor `false`.
+pub fn applied_in(note: &str, name: &str) -> Option<bool> {
+    note.lines()
+        .filter_map(|line| line.split_once('='))
+        .find(|(key, _)| key.trim() == name)
+        .and_then(|(_, value)| match value.trim() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+}
+
+/// The settings an instance came up with (`note`, the text of its
+/// [`APPLIED`]) that are wider than `target` — what another network would
+/// give its container ([`start_settings_for`]): open where the target's is
+/// the safe value ([`CONTAINER_KEYS`]). They are frozen for the instance's
+/// life (its covers and helpers are made by them once), so a live switch
+/// would carry them into a network that gives less (review 2026-09-28,
+/// `crate::switch`). One the note does not name, or names in a word that
+/// is none, is taken as open: a note that cannot say is no reason to
+/// switch.
+pub fn wider_than(note: &str, target: &[(&'static str, bool)]) -> Vec<&'static str> {
+    target
+        .iter()
+        .filter(|(name, now)| {
+            let safe = safe_value(name);
+            *now == safe && applied_in(note, name) != Some(safe)
+        })
+        .map(|(name, _)| *name)
+        .collect()
 }
 
 /// Which settings of a running zone differ now from those it came up with,
@@ -609,5 +649,72 @@ mod tests {
         let main = start_settings_for(&d.zone(), &d.config(), "nl", &Who::Main);
         assert_eq!(main[0], ("hermetic", true));
         assert_eq!(start_settings(&d.zone(), &d.config(), "nl"), main);
+    }
+
+    /// Review 2026-09-28: what an instance came up with against what
+    /// another network would give it — named where it is open and the
+    /// other network's is closed, never where the other is as open or
+    /// more; a setting the note does not say, or says in no word, is open.
+    #[test]
+    fn frozen_settings_wider_than_a_networks_are_named() {
+        let closed = [
+            ("hermetic", true),
+            ("nix_daemon", false),
+            ("host_files_writable", false),
+            ("audio_manager", false),
+        ];
+        let open = [
+            ("hermetic", false),
+            ("nix_daemon", true),
+            ("host_files_writable", true),
+            ("audio_manager", true),
+        ];
+        let safe = "hermetic=true\nnix_daemon=false\nhost_files_writable=false\n\
+                    audio_manager=false\n";
+        let wide = "hermetic=false\nnix_daemon=true\nhost_files_writable=true\n\
+                    audio_manager=true\n";
+        // Safe settings are wider than nothing.
+        assert!(wider_than(safe, &closed).is_empty());
+        assert!(wider_than(safe, &open).is_empty());
+        // Open ones: wider than a closed target, not than an open one.
+        assert_eq!(
+            wider_than(wide, &closed),
+            vec![
+                "hermetic",
+                "nix_daemon",
+                "host_files_writable",
+                "audio_manager"
+            ]
+        );
+        assert!(wider_than(wide, &open).is_empty());
+        // Each alone.
+        for (i, (name, _)) in closed.iter().enumerate() {
+            let mut target = closed;
+            let note: String = safe
+                .lines()
+                .map(|line| {
+                    if line.starts_with(&format!("{name}=")) {
+                        format!("{name}={}\n", !safe_value(name))
+                    } else {
+                        format!("{line}\n")
+                    }
+                })
+                .collect();
+            assert_eq!(wider_than(&note, &target), vec![*name], "{note}");
+            target[i].1 = !target[i].1;
+            assert!(wider_than(&note, &target).is_empty(), "{note}");
+        }
+        // Not said, or said in no word: open.
+        assert_eq!(wider_than("", &closed).len(), 4);
+        assert_eq!(
+            wider_than(
+                "hermetic=yes\nnix_daemon=false\nhost_files_writable=false\naudio_manager=false\n",
+                &closed
+            ),
+            vec!["hermetic"]
+        );
+        assert_eq!(applied_in("hermetic = true\n", "hermetic"), Some(true));
+        assert_eq!(applied_in("hermetic=maybe\n", "hermetic"), None);
+        assert_eq!(applied_in("", "hermetic"), None);
     }
 }

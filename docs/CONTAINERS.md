@@ -320,9 +320,13 @@ throwaway sandbox, one per launch. An instance is set up by the same code
 as a zone's space, with loopback alone, and holds what a zone holds for its
 programs — the covers, the private `/tmp` of a hermetic one, `/dev`, the
 helpers —, per container: two containers offline share no `/tmp`, no
-abstract socket, no System V IPC, no loopback. Its settings are the offline
-network's zone-level ones, frozen as it comes up; the container's own
-(microphone, screen cast, camera, devices, x11) are read as for a zone.
+abstract socket, no System V IPC, no loopback. Its start settings
+(hermetic, the Nix daemon, the host's files, the audio manager) are its
+container's over its network's (§9), frozen as it comes up — a live switch
+keeps them, and is refused into a network that would give the container
+less (`settings`; review 2026-09-28) —; the container's other permissions
+(microphone, screen cast, camera, devices, x11) are read at each launch or
+request.
 
 It is kept by `vpn-zone-core container-holder <id>` (`rust/src/zone.rs`,
 `run_instance`) for as long as it has programs — known by their user
@@ -772,6 +776,8 @@ version 1 unchanged): the containers' running instances (§3.6), each
   "exit": "none", "why": "offline", "up": true, "pid": 4321,
   "since": "2026-09-27T12:00:00Z", "epoch": 1, "pid_namespace": true,
   "build": "current", "restart_needed": [], "programs": 2,
+  "settings": { "hermetic": true, "nix_daemon": false,
+                "host_files_writable": false, "audio_manager": false },
   "live_switch": { "available": true, "reason": null },
   "switch": { "state": "idle", "from": null, "to": null } }
 ```
@@ -795,7 +801,16 @@ its first switch or a zone's return; its programs' cgroup
 network can be switched live now — `reason` `kind` (an instance of one
 network), `cgroup` (no delegated cgroup), `nft-socket`, `sock-destroy` (the
 host lacks them), `outside` (a program launched from a login session runs),
-`previous-build`; `switch` is a switch under way or failed — `state`
+`previous-build` — the instance's own; what depends on the network asked
+for is said by the refusal itself: `settings` (its start settings are
+wider than the new network would give its container: review 2026-09-28),
+`locked-target` (the new network is locked and the instance is not
+hermetic), `search`, `zone-down`, `unconfined`; `settings` (added
+2026-09-28) is `{hermetic, nix_daemon, host_files_writable,
+audio_manager}` as the instance came up (`true`/`false`, `null` where its
+note does not say; `null` without a note) — what a reader compares with
+the settings the new network gives (`containers[]`, `networks[]`) to say
+before a switch whether it will be refused; `switch` is a switch under way or failed — `state`
 `cutting`, `attaching` or `failed`, with `from` and `to`, `idle` otherwise;
 `why` may also be `switching` and `switch-failed`. With it:
 `containers[].instances` (the ids of a container's running instances),

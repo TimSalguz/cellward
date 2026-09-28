@@ -3460,6 +3460,26 @@ impl Transport {
         self.epochs.look(members);
         let target = self.target(to);
         let container = crate::instance::container_of(&self.id).map(str::to_owned);
+        // P9, P10 (review 2026-09-28): the settings it came up with, frozen
+        // for its life, against what the network asked for would give its
+        // container at a start there — the switch keeps the ones it has —;
+        // and a locked zone takes a hermetic instance only.
+        use crate::switch::Target;
+        let note = fs::read_to_string(self.dir.join(crate::hermetic::APPLIED)).unwrap_or_default();
+        let wider = match &target {
+            Target::Offline | Target::Zone { .. } => crate::hermetic::wider_than(
+                &note,
+                &crate::hermetic::start_settings_for(
+                    &self.state.join(to),
+                    &self.config,
+                    to,
+                    &crate::instance::who_of(&self.id),
+                ),
+            ),
+            Target::Unconfined | Target::Unknown => Vec::new(),
+        };
+        let target_locked = matches!(target, Target::Zone { .. })
+            && self.state.join(to).join(crate::launch::NO_ESCAPE).exists();
         let facts = crate::switch::Facts {
             from_host,
             declared: container
@@ -3476,6 +3496,9 @@ impl Transport {
                     .exists(),
             target: &target,
             search_now: &self.search,
+            wider: &wider,
+            target_locked,
+            hermetic: crate::hermetic::applied_in(&note, "hermetic") == Some(true),
         };
         if let Some(refusal) = crate::switch::refusal(&facts) {
             println!(
