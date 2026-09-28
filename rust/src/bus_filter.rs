@@ -112,6 +112,9 @@ const MAX_CONNECTIONS: usize = 64;
 /// A tray host's questions to a connection's icon that the filter keeps
 /// until they are answered (`ItemCalls`).
 const MAX_ITEM_CALLS: usize = 256;
+/// Tray icons' names one connection owns on the host under a name of its
+/// own (`tray_name_up`); past these, as they are.
+const MAX_TRAY_NAMES: usize = 16;
 /// Links the filter opens: at most this many in a minute.
 const MAX_OPENS_PER_MINUTE: usize = 10;
 /// The longest link it opens.
@@ -716,6 +719,9 @@ struct Conn {
     /// What a tray host asked the program's icon (`crate::tray`): the one
     /// direction sees the question, the other the answer.
     items: Mutex<ItemCalls>,
+    /// Its tray icons' names: the one the program asked for, and the one it
+    /// owns on the host (`tray_name_up`).
+    tray_names: Mutex<Vec<(String, String)>>,
 }
 
 /// A tray host's questions to the program's icon, by who asked and its
@@ -759,7 +765,48 @@ impl Conn {
             registry: Mutex::new(Registration::default()),
             settled: Condvar::new(),
             items: Mutex::new(ItemCalls::default()),
+            tray_names: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The name on the host of the tray icon's name `asked`, made the first
+    /// time: `asked` with the connection's unique name after it — unique on
+    /// the host, and still the tray's prefix. `None` before the bus named the
+    /// connection, or past [`MAX_TRAY_NAMES`].
+    fn tray_name_for(&self, asked: &str) -> Option<String> {
+        let mut names = self.tray_names.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, host)) = names.iter().find(|(a, _)| a == asked) {
+            return Some(host.clone());
+        }
+        let unique = self
+            .unique
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        let host = tray_host_name(asked, &unique)?;
+        if names.len() >= MAX_TRAY_NAMES {
+            return None;
+        }
+        names.push((asked.to_owned(), host.clone()));
+        Some(host)
+    }
+
+    /// The host's name of an icon's name the program asked for, if made.
+    fn tray_host_of(&self, asked: &str) -> Option<String> {
+        let names = self.tray_names.lock().unwrap_or_else(|e| e.into_inner());
+        names
+            .iter()
+            .find(|(a, _)| a == asked)
+            .map(|(_, h)| h.clone())
+    }
+
+    /// The name the program asked for, of a host's name made for it.
+    fn tray_asked_of(&self, host: &str) -> Option<String> {
+        let names = self.tray_names.lock().unwrap_or_else(|e| e.into_inner());
+        names
+            .iter()
+            .find(|(_, h)| h == host)
+            .map(|(a, _)| a.clone())
     }
 
     fn send(&self, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
@@ -1350,6 +1397,86 @@ fn rewritten(msg: &[u8], h: &Header, remember: bool) -> Option<Result<Vec<u8>, w
     }))
 }
 
+/// A tray icon's name on the host: the one asked for, `-c` and the
+/// connection's unique name with what a bus name element cannot hold made
+/// `_` (`:1.234` → `-c1_234`). `None` for a name that would be too long.
+pub fn tray_host_name(asked: &str, unique: &str) -> Option<String> {
+    let tag: String = unique
+        .trim_start_matches(':')
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let name = format!("{asked}-c{tag}");
+    (!tag.is_empty() && name.len() <= 255).then_some(name)
+}
+
+/// Tray icons' names (2026-09-28). A program in a container with a pid
+/// namespace of its own — a hermetic instance, a sandbox — owns
+/// `org.kde.StatusNotifierItem-<pid>-<n>` with the pid it sees, and the
+/// programs of two containers see the same pids: the second one's name was
+/// taken, and it had no icon in the tray. The name is owned on the host with
+/// the connection's unique name after it ([`tray_host_name`]); the tray host
+/// is told that one (`RegisterStatusNotifierItem`), and the program sees the
+/// name it asked for in the bus's signals ([`tray_name_down`]). Its own
+/// `ReleaseName`, `NameHasOwner` and `GetNameOwner` of it go up by the
+/// host's name too. `None`: not such a call — it goes as it is.
+fn tray_name_up(conn: &Conn, msg: &[u8], h: &Header) -> Option<Vec<u8>> {
+    if h.kind != wire::METHOD_CALL || h.unix_fds != 0 {
+        return None;
+    }
+    let member = h.member.as_deref()?;
+    let to_bus = h.destination.as_deref() == Some("org.freedesktop.DBus")
+        && h.interface
+            .as_deref()
+            .is_none_or(|i| i == "org.freedesktop.DBus")
+        && matches!(
+            member,
+            "RequestName" | "ReleaseName" | "NameHasOwner" | "GetNameOwner"
+        );
+    let to_watcher = member == "RegisterStatusNotifierItem"
+        && matches!(
+            h.interface.as_deref(),
+            Some("org.kde.StatusNotifierWatcher" | "org.freedesktop.StatusNotifierWatcher")
+        );
+    if !to_bus && !to_watcher {
+        return None;
+    }
+    let mut args = wire::plain_args(msg, h).ok()?;
+    let Some(wire::Arg::Str(name)) = args.first() else {
+        return None;
+    };
+    let host = if member == "RequestName" && wire::is_tray_name(name) {
+        conn.tray_name_for(name)?
+    } else {
+        conn.tray_host_of(name)?
+    };
+    args[0] = wire::Arg::Str(host);
+    Some(wire::with_body(h, &wire::plain_body(&args)))
+}
+
+/// The bus's signals of a tray icon's name the connection owns under the
+/// host's ([`tray_name_up`]) — `NameAcquired`, `NameLost`,
+/// `NameOwnerChanged` — with the name the program asked for.
+fn tray_name_down(conn: &Conn, msg: &[u8], h: &Header) -> Option<Vec<u8>> {
+    if h.kind != wire::SIGNAL
+        || h.unix_fds != 0
+        || h.sender.as_deref() != Some("org.freedesktop.DBus")
+        || !matches!(
+            h.member.as_deref(),
+            Some("NameAcquired" | "NameLost" | "NameOwnerChanged")
+        )
+    {
+        return None;
+    }
+    let mut args = wire::plain_args(msg, h).ok()?;
+    let Some(wire::Arg::Str(name)) = args.first() else {
+        return None;
+    };
+    let asked = conn.tray_asked_of(name)?;
+    args[0] = wire::Arg::Str(asked);
+    Some(wire::with_body(h, &wire::plain_body(&args)))
+}
+
 /// `upstream` as `/proc/self/fd/N/<name>`, N a descriptor of its directory
 /// kept for the life of the process.
 fn held_upstream(upstream: &Path) -> io::Result<PathBuf> {
@@ -1447,6 +1574,11 @@ fn client_to_bus(
                     Cast::Refuse(why) => error_reply(conn, ctx, &h, NOT_ALLOWED, &why)?,
                     cast => {
                         let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
+                        // A tray icon's name: the host's own (`tray_name_up`).
+                        if let Some(message) = tray_name_up(conn, &msg, &h) {
+                            send_all(up, &message, &raw)?;
+                            continue;
+                        }
                         match rewritten(&msg, &h, cast == Cast::Remember) {
                             // Passed on without what would point the host's
                             // daemon at the network or at an application, or
@@ -1525,7 +1657,12 @@ fn bus_to_client(upstream: &UnixStream, conn: &Conn, ctx: &Ctx) -> io::Result<()
                 }
             }
             let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
-            conn.send(&msg, &raw)?;
+            // A tray icon's name the program owns under the host's: the one
+            // it asked for (`tray_name_down`).
+            match tray_name_down(conn, &msg, &h) {
+                Some(message) => conn.send(&message, &raw)?,
+                None => conn.send(&msg, &raw)?,
+            }
         }
     }
     Ok(())
@@ -2734,6 +2871,173 @@ mod tests {
         assert_eq!(h.serial, 2);
         assert!(s.bus.quiet(HELD));
         assert_eq!(s.portal(), None);
+    }
+
+    /// A call of the program's to the bus with one string (and maybe a
+    /// number) for its arguments.
+    fn name_call(
+        serial: u32,
+        dest: &str,
+        iface: &str,
+        member: &str,
+        name: &str,
+        flags: Option<u32>,
+    ) -> Vec<u8> {
+        let mut args = vec![wire::Arg::Str(name.to_owned())];
+        if let Some(flags) = flags {
+            args.push(wire::Arg::U32(flags));
+        }
+        let signature = if flags.is_some() { "su" } else { "s" };
+        wire::message(
+            wire::METHOD_CALL,
+            0,
+            serial,
+            &[
+                Field::Path("/org/freedesktop/DBus"),
+                Field::Interface(iface),
+                Field::Member(member),
+                Field::Destination(dest),
+                Field::Signature(signature),
+            ],
+            &wire::plain_body(&args),
+        )
+    }
+
+    /// A signal of the bus's about a name, to the program's connection.
+    fn name_signal(serial: u32, member: &str, args: &[&str]) -> Vec<u8> {
+        let args: Vec<wire::Arg> = args
+            .iter()
+            .map(|a| wire::Arg::Str((*a).to_owned()))
+            .collect();
+        let signature = "s".repeat(args.len());
+        wire::message(
+            wire::SIGNAL,
+            wire::NO_REPLY_EXPECTED,
+            serial,
+            &[
+                Field::Path("/org/freedesktop/DBus"),
+                Field::Interface("org.freedesktop.DBus"),
+                Field::Member(member),
+                Field::Destination(":1.42"),
+                Field::Sender("org.freedesktop.DBus"),
+                Field::Signature(&signature),
+            ],
+            &wire::plain_body(&args),
+        )
+    }
+
+    fn first_string(msg: &[u8], h: &Header) -> String {
+        match wire::plain_args(msg, h).unwrap().first() {
+            Some(wire::Arg::Str(s)) => s.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 2026-09-28: a tray icon's name, which the programs of two containers
+    /// ask for alike (each its own pid namespace), is owned on the host with
+    /// the connection's unique name after it; the tray host is told that
+    /// one, and the program sees the name it asked for in the bus's signals.
+    /// Other names, and other calls, go as they are.
+    #[test]
+    fn a_tray_icons_name_is_owned_on_the_host_as_the_connections() {
+        const ITEM: &str = "org.kde.StatusNotifierItem-13-1";
+        const HOST: &str = "org.kde.StatusNotifierItem-13-1-c1_42";
+        let mut s = Served::start("traynames", None, |c| c);
+        let mut first = AUTH.to_vec();
+        first.extend(hello(1));
+        s.program.send(&first, &[]);
+        s.authenticated();
+        let (_, h, _) = s.bus.message();
+        assert_eq!(h.serial, 1);
+        s.bus.send(&reply_to(1, "org.freedesktop.DBus"), &[]);
+        let (_, h, _) = s.program.message();
+        assert_eq!(h.reply_serial, Some(1));
+        let bus = "org.freedesktop.DBus";
+        // Its name, owned as the connection's on the host.
+        s.program
+            .send(&name_call(2, bus, bus, "RequestName", ITEM, Some(4)), &[]);
+        let (msg, h, _) = s.bus.message();
+        assert_eq!(h.member.as_deref(), Some("RequestName"));
+        assert_eq!(
+            wire::plain_args(&msg, &h).unwrap(),
+            vec![wire::Arg::Str(HOST.to_owned()), wire::Arg::U32(4)]
+        );
+        // The bus's word of it: the name it asked for.
+        s.bus.send(&name_signal(8001, "NameAcquired", &[HOST]), &[]);
+        let (msg, h, _) = s.program.message();
+        assert_eq!(h.member.as_deref(), Some("NameAcquired"));
+        assert_eq!(first_string(&msg, &h), ITEM);
+        s.bus.send(
+            &name_signal(8002, "NameOwnerChanged", &[HOST, "", ":1.42"]),
+            &[],
+        );
+        let (msg, h, _) = s.program.message();
+        assert_eq!(
+            wire::plain_args(&msg, &h).unwrap(),
+            vec![
+                wire::Arg::Str(ITEM.to_owned()),
+                wire::Arg::Str(String::new()),
+                wire::Arg::Str(":1.42".to_owned())
+            ]
+        );
+        // The tray host is told the host's name.
+        let watcher = "org.kde.StatusNotifierWatcher";
+        s.program.send(
+            &name_call(
+                3,
+                watcher,
+                watcher,
+                "RegisterStatusNotifierItem",
+                ITEM,
+                None,
+            ),
+            &[],
+        );
+        let (msg, h, _) = s.bus.message();
+        assert_eq!(first_string(&msg, &h), HOST);
+        // An object path for the service, and another name: as they are.
+        s.program.send(
+            &name_call(
+                4,
+                watcher,
+                watcher,
+                "RegisterStatusNotifierItem",
+                "/StatusNotifierItem",
+                None,
+            ),
+            &[],
+        );
+        let (msg, h, _) = s.bus.message();
+        assert_eq!(first_string(&msg, &h), "/StatusNotifierItem");
+        s.program.send(
+            &name_call(5, bus, bus, "RequestName", "org.example.Other", Some(0)),
+            &[],
+        );
+        let (msg, h, _) = s.bus.message();
+        assert_eq!(first_string(&msg, &h), "org.example.Other");
+        s.bus.send(
+            &name_signal(8003, "NameAcquired", &["org.example.Other"]),
+            &[],
+        );
+        let (msg, h, _) = s.program.message();
+        assert_eq!(first_string(&msg, &h), "org.example.Other");
+        // Given up by the name it asked for: the host's goes.
+        s.program
+            .send(&name_call(6, bus, bus, "ReleaseName", ITEM, None), &[]);
+        let (msg, h, _) = s.bus.message();
+        assert_eq!(first_string(&msg, &h), HOST);
+    }
+
+    /// The host's name: the unique name made a bus name element's, and
+    /// none that would be too long.
+    #[test]
+    fn a_tray_icons_host_name_is_a_bus_name() {
+        assert_eq!(
+            tray_host_name("org.freedesktop.StatusNotifierItem-2-1", ":1.1234").as_deref(),
+            Some("org.freedesktop.StatusNotifierItem-2-1-c1_1234")
+        );
+        assert_eq!(tray_host_name("a", ":"), None);
+        assert_eq!(tray_host_name(&"a".repeat(250), ":1.2"), None);
     }
 
     /// The serial of ours passes xdg-dbus-proxy, which closes a connection
