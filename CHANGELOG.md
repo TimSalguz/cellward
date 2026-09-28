@@ -582,6 +582,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and `usb:` for a board a program can reflash.
 
 ### Changed
+- **A network's start settings are said to take effect at its
+  containers' next start, and `networks[].restart_needed` is its
+  instances'** (review 2026-09-28; `docs/CONTAINERS.md` §9). `cellward
+  hermetic|nix-daemon|host-files|audio-manager <zone> …` said the change
+  "takes effect after restarting the zone" (and `hermetic --default` "when
+  the zone next comes up"): since stage 5 no program runs in a zone's own
+  space, and each container's instance takes the network's settings as it
+  comes up. They say now «со следующего подъёма экземпляров контейнеров
+  этой сети (работающий держит свои: cellward container stop <к>)», zone
+  up or not, and so do the module's descriptions of `nixDaemon` and
+  `audioManager`. `status --json` `networks[].restart_needed` changes its
+  meaning: the start settings changed since the instances running in the
+  network came up — the union of their `instances[].restart_needed`
+  without `pid_namespace` —, `[]` when none changed or nothing runs,
+  `null` only for `unconfined` (and an `offline` not used yet). It was the
+  zone's own space's, in force after the zone's restart, `null` for a zone
+  that was down. A configurator that offered "restart the zone" for it
+  offers "restart the containers" (`cellward container stop <c>`) now.
 - **One vocabulary for containers in every window and message**
   (2026-09-28, the container-first model; `docs/PERMISSIONS.md` §11). The
   launch window, the picker's kdialog menus, the containers, settings and

@@ -181,10 +181,12 @@ pub fn host_files_writable(zone_dir: &Path, config: &Path, zone: &str) -> (bool,
     )
 }
 
-/// Below a zone's state directory: the settings it came up with, one
-/// `<name>=<true|false>` a line, written by its holder before the zone is
-/// up. They are in force until it comes up again; `status --json` names
-/// those that have changed since (`networks[].restart_needed`).
+/// Below a zone's state directory, and an instance's: the settings it came
+/// up with, one `<name>=<true|false>` a line, written by its holder before
+/// it is up. They are in force until it comes up again; `status --json`
+/// names those that have changed since (`instances[].restart_needed`, and
+/// for a network those of the instances running in it:
+/// `networks[].restart_needed`, review 2026-09-28).
 pub const APPLIED: &str = "zone.settings";
 
 /// The settings a space takes when it comes up that a container may have
@@ -350,9 +352,11 @@ pub fn wider_than(note: &str, target: &[(&'static str, bool)]) -> Vec<&'static s
         .collect()
 }
 
-/// Which settings of a running zone differ now from those it came up with,
-/// by name. `None`: not known — no note (a zone a build from before it
-/// started). A setting the note does not name is not counted.
+/// Which settings of a running zone's own space differ now from those it
+/// came up with, by name. `None`: not known — no note (a zone a build from
+/// before it started). A setting the note does not name is not counted.
+/// Nothing is launched into that space since stage 5; `status` names the
+/// instances' ([`restart_needed_of`]).
 pub fn restart_needed(zone_dir: &Path, config: &Path, zone: &str) -> Option<Vec<&'static str>> {
     restart_needed_of(zone_dir, zone_dir, config, zone, &Who::Main)
 }
