@@ -672,12 +672,17 @@ and `cellward container show <name> --json` print subsets of the same schema.
   come up not hermetic, or bound to it and not hermetic there —, by name
   (the main home's and a throwaway's instance by its id); `[]` when it
   holds them all, `null` when the network is not locked.
-- **`networks[].restart_needed`**: for a zone that is up, the names of the
-  settings it takes when it comes up (`hermetic`, `nix_daemon`,
-  `host_files_writable`, `audio_manager`) whose value now differs
-  from the one it came up with — in force after `cellward down <zone> &&
-  cellward up <zone>`; `[]` when all are in force; `null` when the zone is
-  down, or was started by a build from before the note (`build: "previous"`).
+- **`networks[].restart_needed`** (its meaning since 2026-09-28): the
+  names of the start settings (`hermetic`, `nix_daemon`,
+  `host_files_writable`, `audio_manager`) that changed since the instances
+  running in the network came up — the union of their
+  `instances[].restart_needed` without `pid_namespace`, each name once; in
+  force for an instance at its next start (`cellward container stop <c>`,
+  not a restart of the zone); `[]` when none changed or nothing runs;
+  `null` for `unconfined` (and `offline` before it is first used). Until
+  2026-09-28 it was the zone's own space's —
+  in force after `cellward down <zone> && cellward up <zone>`, `null` for a
+  zone that was down —, and since stage 5 no program runs in that space.
 
 ```json
 {

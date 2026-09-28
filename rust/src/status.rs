@@ -212,19 +212,10 @@ pub fn networks(tools: &Tools) -> String {
         } else {
             "null".to_owned()
         };
-        // What it came up with and is set otherwise now — in force from its
-        // next start (`hermetic::APPLIED`); `null` down, or not known.
-        let restart_needed = if up {
-            crate::hermetic::restart_needed(&dir, &tools.config, &name).map_or(
-                "null".to_owned(),
-                |names| {
-                    let names: Vec<String> = names.into_iter().map(string).collect();
-                    format!("[{}]", names.join(","))
-                },
-            )
-        } else {
-            "null".to_owned()
-        };
+        // What its containers' instances came up with and would not now
+        // (review 2026-09-28, `network_restart_needed`): since stage 5 no
+        // program runs in a zone's own space, and it was the zone's.
+        let restart_needed = network_restart_needed(tools, &instances, &dir, &name);
         let mirror = if up && kind != "offline" {
             fs::read_to_string(dir.join("status")).ok()
         } else {
@@ -364,6 +355,35 @@ pub fn networks(tools: &Tools) -> String {
         ));
     }
     array(items)
+}
+
+/// `networks[].restart_needed` (its meaning since 2026-09-28): the start
+/// settings changed since the instances running in the network came up —
+/// each instance's `restart_needed` (`hermetic::restart_needed_of`, its
+/// container's over the network's), the names of all of them, each once;
+/// `[]` when none has changed, or nothing runs. Until 2026-09-28 it was the
+/// zone's own space's, in force after the zone's restart — and since stage
+/// 5 no program runs in that space: what a network's setting changes is
+/// taken by each instance as it next comes up (`cellward container stop
+/// <c>`), and a restart of the zone changes nothing for them.
+fn network_restart_needed(
+    tools: &Tools,
+    instances: &[crate::instance::Running],
+    dir: &std::path::Path,
+    name: &str,
+) -> String {
+    let mut names: Vec<&'static str> = Vec::new();
+    for i in instances.iter().filter(|i| i.network == name) {
+        let who = crate::instance::who_of(&i.id);
+        for changed in crate::hermetic::restart_needed_of(&i.dir, dir, &tools.config, name, &who)
+            .unwrap_or_default()
+        {
+            if !names.contains(&changed) {
+                names.push(changed);
+            }
+        }
+    }
+    array(names.into_iter().map(string).collect())
 }
 
 /// One system zone (`docs/SYSTEM.md` §8): the same counters as a network,
