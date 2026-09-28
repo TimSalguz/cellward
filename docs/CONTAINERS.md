@@ -574,6 +574,7 @@ and `cellward container show <name> --json` print subsets of the same schema.
     "frames": { "value": true, "source": "default" },
     "frame_width": { "value": 4, "source": "default" },
     "frame_title": { "value": "always", "source": "default" },
+    "tray_badge": { "value": "dot", "source": "default" },
     "autostart_unassigned": { "value": "ask", "source": "default" },
     "user_entries": { "value": "take-over", "source": "default" },
     "hermetic": { "value": true, "source": "default" }

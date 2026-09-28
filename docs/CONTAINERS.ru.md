@@ -562,6 +562,7 @@ programs.cellward = {
     "frames": { "value": true, "source": "default" },
     "frame_width": { "value": 4, "source": "default" },
     "frame_title": { "value": "always", "source": "default" },
+    "tray_badge": { "value": "dot", "source": "default" },
     "autostart_unassigned": { "value": "offline", "source": "default" },
     "user_entries": { "value": "take-over", "source": "default" },
     "hermetic": { "value": false, "source": "default" }

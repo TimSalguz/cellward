@@ -748,6 +748,7 @@ let
     "frame.colors"
     "frame.width"
     "frame.title"
+    "tray.badge"
     "compositorRestriction.enable"
     "desktop.windowMenu.key"
     "desktop.floatWindows"
@@ -1049,6 +1050,19 @@ in
       description = "Полоса заголовка «зона · контейнер» цвета зоны вдоль верха окон программ зон (docs/WINDOW-FRAME.md §0а). always — всегда, внутри окна: программе достаётся высота меньше на полосу; hover — поверх верха содержимого, выезжает, когда указатель у верхнего края окна, места не занимает; off — только обводка. В fullscreen полосы нет в любом режиме. null — не задавать из Nix (тогда cellward frame title, иначе always). Действует для программ, запущенных после смены.";
     };
 
+    tray.badge = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "dot"
+          "bar"
+          "off"
+        ]
+      );
+      default = null;
+      example = "bar";
+      description = "Метка цвета зоны (или контейнера — цвет рамки) на значках программ зоны в трее: dot — точка в правом нижнем углу, bar — полоска снизу, off — без метки. Рисует фильтр сессионной шины герметичной зоны, пока значок идёт через него: у обычных зон и запусков unconfined метки нет. Значок, заданный именем из темы, получает метку как наложение (OverlayIconPixmap) — его показывает не всякий трей. В подсказке значка добавляется строка «зона · контейнер». Метка — подсказка, а не граница: программа не уберёт её, но может нарисовать в своём значке другую. null — не задавать из Nix (тогда cellward tray badge, иначе dot). Действует со следующей перерисовки значка.";
+    };
+
     compositorRestriction.enable = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
@@ -1295,6 +1309,9 @@ in
     })
     (lib.mkIf (cfg.frame.title != null) {
       ".config/vpn-zones/declared/frame-title".text = cfg.frame.title;
+    })
+    (lib.mkIf (cfg.tray.badge != null) {
+      ".config/vpn-zones/declared/tray-badge".text = cfg.tray.badge;
     })
     (lib.mkIf (cfg.compositorRestriction.enable != null) {
       ".config/vpn-zones/declared/wayland-sandbox".text = if cfg.compositorRestriction.enable then "on" else "off";

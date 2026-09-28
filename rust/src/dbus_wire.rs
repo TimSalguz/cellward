@@ -591,6 +591,307 @@ pub fn sanitized_screencast_sources(msg: &[u8], h: &Header, remember: bool) -> R
     Ok(w.buf)
 }
 
+// --- TRAY ICONS ----------------------------------------------------------------
+
+/// A tray icon's interface: the KDE spelling and the freedesktop one.
+pub const ITEM_INTERFACES: [&str; 2] = [
+    "org.kde.StatusNotifierItem",
+    "org.freedesktop.StatusNotifierItem",
+];
+
+/// The most pictures one property carries that the filter reads.
+const MAX_PICTURES: usize = 64;
+
+/// What a tray host asked a program's icon for: all its properties, or one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ItemAsk {
+    All,
+    One(String),
+}
+
+/// A call from the bus asking a tray icon's properties
+/// (`org.freedesktop.DBus.Properties.Get`/`GetAll` on [`ITEM_INTERFACES`]),
+/// and which. Anything else, or a call that does not read: `None`.
+pub fn item_properties_call(msg: &[u8], h: &Header) -> Option<ItemAsk> {
+    if h.kind != METHOD_CALL || h.interface.as_deref() != Some("org.freedesktop.DBus.Properties") {
+        return None;
+    }
+    let mut r = Reader {
+        buf: msg,
+        pos: h.body_offset,
+        little: h.little,
+    };
+    let ask = match (h.member.as_deref()?, h.signature.as_deref()?) {
+        ("GetAll", "s") => ItemAsk::All,
+        ("Get", "ss") => {
+            let interface = r.string().ok()?;
+            let property = r.string().ok()?;
+            return ITEM_INTERFACES
+                .contains(&interface.as_str())
+                .then_some(ItemAsk::One(property));
+        }
+        _ => return None,
+    };
+    let interface = r.string().ok()?;
+    ITEM_INTERFACES.contains(&interface.as_str()).then_some(ask)
+}
+
+/// A picture of a tray icon: width, height, ARGB32 in network byte order.
+pub type Picture = (i32, i32, Vec<u8>);
+
+/// What the filter does to a tray icon's answer (`crate::tray`): draws on
+/// each picture, gives an icon with no pictures of its own an overlay, and
+/// adds to the tooltip's text.
+pub struct ItemMarks<'a> {
+    pub picture: &'a dyn Fn(i32, i32, &mut [u8]),
+    pub overlay: Option<Picture>,
+    pub tooltip: &'a dyn Fn(&str) -> String,
+}
+
+fn read_pictures(r: &mut Reader<'_>) -> Result<Vec<Picture>> {
+    let len = r.u32()? as usize;
+    r.align(8)?;
+    let end = r
+        .pos
+        .checked_add(len)
+        .filter(|&e| e <= r.buf.len())
+        .ok_or(WireError("pictures run past the end"))?;
+    let mut out = Vec::new();
+    while r.pos < end {
+        if out.len() == MAX_PICTURES {
+            return Err(WireError("too many pictures"));
+        }
+        r.align(8)?;
+        let width = r.u32()? as i32;
+        let height = r.u32()? as i32;
+        let n = r.u32()? as usize;
+        let bytes = r.take(n)?.to_vec();
+        out.push((width, height, bytes));
+    }
+    if r.pos != end {
+        return Err(WireError("pictures end inside a picture"));
+    }
+    Ok(out)
+}
+
+fn write_pictures(w: &mut Writer, pictures: &[Picture]) {
+    w.u32(0);
+    let len_at = w.buf.len() - 4;
+    // An array of structs is padded to its elements' alignment, empty or not.
+    w.align(8);
+    let start = w.buf.len();
+    for (width, height, bytes) in pictures {
+        w.align(8);
+        w.u32(*width as u32);
+        w.u32(*height as u32);
+        w.u32(bytes.len() as u32);
+        w.buf.extend_from_slice(bytes);
+    }
+    let len = (w.buf.len() - start) as u32;
+    w.buf[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
+}
+
+fn marked_pictures(mut pictures: Vec<Picture>, marks: &ItemMarks<'_>) -> Vec<Picture> {
+    for (width, height, bytes) in &mut pictures {
+        (marks.picture)(*width, *height, bytes);
+    }
+    pictures
+}
+
+/// A property the filter writes again, read and marked.
+enum Marked {
+    Pictures(Vec<Picture>),
+    /// `(sa(iiay)ss)`: icon name, pictures, title, text.
+    Tip(String, Vec<Picture>, String, String),
+}
+
+/// One property's value marked, or `None` for one left as it is. `r` is at
+/// the value, and past it after the call either way.
+fn marked_value(
+    name: &str,
+    sig: &str,
+    r: &mut Reader<'_>,
+    marks: &ItemMarks<'_>,
+    has_pictures: bool,
+) -> Result<Option<Marked>> {
+    match (name, sig) {
+        ("IconPixmap" | "AttentionIconPixmap", "a(iiay)") => {
+            let pictures = read_pictures(r)?;
+            if pictures.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(Marked::Pictures(marked_pictures(pictures, marks))))
+        }
+        ("OverlayIconPixmap", "a(iiay)") => {
+            let pictures = read_pictures(r)?;
+            // The program's own overlay stays; an icon with pictures of its
+            // own is marked on them.
+            match marks.overlay.as_ref() {
+                Some(overlay) if pictures.is_empty() && !has_pictures => {
+                    Ok(Some(Marked::Pictures(vec![overlay.clone()])))
+                }
+                _ => Ok(None),
+            }
+        }
+        ("ToolTip", "(sa(iiay)ss)") => {
+            r.align(8)?;
+            let icon = r.string()?;
+            let pictures = read_pictures(r)?;
+            let title = r.string()?;
+            let text = r.string()?;
+            Ok(Some(Marked::Tip(
+                icon,
+                marked_pictures(pictures, marks),
+                title,
+                (marks.tooltip)(&text),
+            )))
+        }
+        _ => {
+            let used = r.skip(sig.as_bytes(), 1)?;
+            if used != sig.len() {
+                return Err(WireError("a property holds more than one type"));
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Write a marked value where `w` is: its alignment is relative to the
+/// body, which starts 8-aligned in the message, so it is right in the
+/// message too.
+fn write_marked(w: &mut Writer, m: &Marked) {
+    match m {
+        Marked::Pictures(pictures) => write_pictures(w, pictures),
+        Marked::Tip(icon, pictures, title, text) => {
+            w.align(8);
+            w.string(icon);
+            write_pictures(w, pictures);
+            w.string(title);
+            w.string(text);
+        }
+    }
+}
+
+/// A program's answer to a tray host's [`ItemAsk`] with the zone's mark on
+/// it (`crate::tray`): the new body, little-endian, or `None` when there is
+/// nothing to mark — or the answer is big-endian, or an error, which pass
+/// as they are.
+pub fn marked_item_reply(
+    msg: &[u8],
+    h: &Header,
+    ask: &ItemAsk,
+    marks: &ItemMarks<'_>,
+) -> Result<Option<Vec<u8>>> {
+    if h.kind != METHOD_RETURN || !h.little {
+        return Ok(None);
+    }
+    let mut r = Reader {
+        buf: msg,
+        pos: h.body_offset,
+        little: true,
+    };
+    match ask {
+        ItemAsk::One(name) => {
+            if h.signature.as_deref() != Some("v") {
+                return Ok(None);
+            }
+            let sig = r.signature()?;
+            // Alone, an overlay cannot tell whether the icon has pictures
+            // of its own: the mark goes on both — the same colour on the
+            // same corner, one mark to the eye.
+            let Some(value) = marked_value(name, &sig, &mut r, marks, false)? else {
+                return Ok(None);
+            };
+            if r.pos != msg.len() {
+                return Err(WireError("more after the property"));
+            }
+            let mut w = Writer { buf: Vec::new() };
+            w.signature(&sig);
+            write_marked(&mut w, &value);
+            Ok(Some(w.buf))
+        }
+        ItemAsk::All => {
+            if h.signature.as_deref() != Some("a{sv}") {
+                return Ok(None);
+            }
+            let len = r.u32()? as usize;
+            r.align(8)?;
+            let end = r
+                .pos
+                .checked_add(len)
+                .filter(|&e| e <= msg.len())
+                .ok_or(WireError("properties run past the end"))?;
+            // First every entry: where it is, its name and signature, and
+            // whether the icon has pictures of its own.
+            struct Entry {
+                start: usize,
+                value: usize,
+                end: usize,
+                name: String,
+                sig: String,
+            }
+            let mut entries = Vec::new();
+            let mut has_pictures = false;
+            while r.pos < end {
+                r.align(8)?;
+                let start = r.pos;
+                let name = r.string()?;
+                let sig = r.signature()?;
+                let value = r.pos;
+                if name == "IconPixmap" && sig == "a(iiay)" {
+                    has_pictures = !read_pictures(&mut r)?.is_empty();
+                } else {
+                    let used = r.skip(sig.as_bytes(), 1)?;
+                    if used != sig.len() {
+                        return Err(WireError("a property holds more than one type"));
+                    }
+                }
+                entries.push(Entry {
+                    start,
+                    value,
+                    end: r.pos,
+                    name,
+                    sig,
+                });
+            }
+            if r.pos != end || end != msg.len() {
+                return Err(WireError("more after the properties"));
+            }
+            let mut w = Writer { buf: Vec::new() };
+            w.u32(0);
+            let len_at = w.buf.len() - 4;
+            w.align(8);
+            let start = w.buf.len();
+            let mut changed = false;
+            for e in &entries {
+                let mut v = Reader {
+                    buf: msg,
+                    pos: e.value,
+                    little: true,
+                };
+                w.align(8);
+                match marked_value(&e.name, &e.sig, &mut v, marks, has_pictures)? {
+                    Some(value) => {
+                        changed = true;
+                        w.string(&e.name);
+                        w.signature(&e.sig);
+                        write_marked(&mut w, &value);
+                    }
+                    // Copied as it came: it starts 8-aligned here as there,
+                    // so everything in it keeps its alignment.
+                    None => w.buf.extend_from_slice(&msg[e.start..e.end]),
+                }
+            }
+            if !changed {
+                return Ok(None);
+            }
+            let len = (w.buf.len() - start) as u32;
+            w.buf[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
+            Ok(Some(w.buf))
+        }
+    }
+}
+
 // --- WRITING ------------------------------------------------------------------
 
 /// A little-endian message under construction.
@@ -1152,5 +1453,270 @@ mod tests {
         assert_eq!(complete_type_len(b"a{sv}x", 0).unwrap(), 5);
         assert_eq!(complete_type_len(b"(ia(s))", 0).unwrap(), 7);
         assert!(complete_type_len(b"(ii", 0).is_err());
+    }
+
+    // --- tray icons ------------------------------------------------------
+
+    /// A 2×2 picture, every pixel `px`.
+    fn picture(px: [u8; 4]) -> Picture {
+        (2, 2, px.repeat(4))
+    }
+
+    /// A host's `GetAll`/`Get` on an item.
+    fn item_call(member: &str, args: &[&str]) -> (Vec<u8>, Header) {
+        let mut w = Writer { buf: Vec::new() };
+        for a in args {
+            w.string(a);
+        }
+        let sig = "s".repeat(args.len());
+        let msg = message(
+            METHOD_CALL,
+            0,
+            7,
+            &[
+                Field::Path("/StatusNotifierItem"),
+                Field::Interface("org.freedesktop.DBus.Properties"),
+                Field::Member(member),
+                Field::Signature(&sig),
+            ],
+            &w.buf,
+        );
+        let h = parse_header(&msg).unwrap();
+        (msg, h)
+    }
+
+    fn reply(sig: &str, body: &[u8]) -> (Vec<u8>, Header) {
+        let msg = message(
+            METHOD_RETURN,
+            0,
+            9,
+            &[
+                Field::ReplySerial(7),
+                Field::Destination(":1.44"),
+                Field::Signature(sig),
+            ],
+            body,
+        );
+        let h = parse_header(&msg).unwrap();
+        (msg, h)
+    }
+
+    /// An item's `GetAll` answer as Electron gives it: an odd-length name
+    /// first, so that the entries after it test the alignment.
+    fn all_properties(pictures: &[Picture], tip: &str) -> Vec<u8> {
+        let mut w = Writer { buf: Vec::new() };
+        w.u32(0);
+        let len_at = w.buf.len() - 4;
+        w.align(8);
+        let start = w.buf.len();
+        for (key, value) in [
+            ("Category", "ApplicationStatus"),
+            ("Id", "chrome_status_icon_1"),
+        ] {
+            w.align(8);
+            w.string(key);
+            w.signature("s");
+            w.string(value);
+        }
+        w.align(8);
+        w.string("IconPixmap");
+        w.signature("a(iiay)");
+        write_pictures(&mut w, pictures);
+        w.align(8);
+        w.string("OverlayIconPixmap");
+        w.signature("a(iiay)");
+        write_pictures(&mut w, &[]);
+        w.align(8);
+        w.string("ToolTip");
+        w.signature("(sa(iiay)ss)");
+        w.align(8);
+        w.string("");
+        write_pictures(&mut w, &[]);
+        w.string("Claude");
+        w.string(tip);
+        let len = (w.buf.len() - start) as u32;
+        w.buf[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
+        w.buf
+    }
+
+    /// Read a rewritten `a{sv}` back: each name with its pictures (for
+    /// `a(iiay)`) or its tooltip text.
+    fn read_back(msg: &[u8]) -> Vec<(String, Vec<Picture>, Option<String>)> {
+        let h = parse_header(msg).unwrap();
+        let mut r = Reader {
+            buf: msg,
+            pos: h.body_offset,
+            little: true,
+        };
+        let len = r.u32().unwrap() as usize;
+        r.align(8).unwrap();
+        let end = r.pos + len;
+        let mut out = Vec::new();
+        while r.pos < end {
+            r.align(8).unwrap();
+            let name = r.string().unwrap();
+            let sig = r.signature().unwrap();
+            match sig.as_str() {
+                "a(iiay)" => out.push((name, read_pictures(&mut r).unwrap(), None)),
+                "(sa(iiay)ss)" => {
+                    r.align(8).unwrap();
+                    r.string().unwrap();
+                    read_pictures(&mut r).unwrap();
+                    r.string().unwrap();
+                    out.push((name, Vec::new(), Some(r.string().unwrap())));
+                }
+                other => {
+                    r.skip(other.as_bytes(), 1).unwrap();
+                    out.push((name, Vec::new(), None));
+                }
+            }
+        }
+        assert_eq!(r.pos, msg.len());
+        out
+    }
+
+    fn mark_first_pixel(_: i32, _: i32, px: &mut [u8]) {
+        px[..4].copy_from_slice(&[0xff, 1, 2, 3]);
+    }
+
+    fn zone_line(own: &str) -> String {
+        format!("{own}|zone · box")
+    }
+
+    fn marks(overlay: Option<Picture>) -> ItemMarks<'static> {
+        ItemMarks {
+            picture: &mark_first_pixel,
+            overlay,
+            tooltip: &zone_line,
+        }
+    }
+
+    #[test]
+    fn a_hosts_question_to_an_icon_is_known() {
+        let (msg, h) = item_call("GetAll", &["org.kde.StatusNotifierItem"]);
+        assert_eq!(item_properties_call(&msg, &h), Some(ItemAsk::All));
+        let (msg, h) = item_call("Get", &["org.freedesktop.StatusNotifierItem", "IconPixmap"]);
+        assert_eq!(
+            item_properties_call(&msg, &h),
+            Some(ItemAsk::One("IconPixmap".into()))
+        );
+        let (msg, h) = item_call("GetAll", &["org.mpris.MediaPlayer2"]);
+        assert_eq!(item_properties_call(&msg, &h), None);
+        let (msg, h) = item_call("Set", &["org.kde.StatusNotifierItem", "x"]);
+        assert_eq!(item_properties_call(&msg, &h), None);
+    }
+
+    #[test]
+    fn every_picture_of_an_icon_is_marked_and_the_rest_kept() {
+        let body = all_properties(
+            &[picture([0xff, 9, 9, 9]), picture([0x80, 7, 7, 7])],
+            "3 new",
+        );
+        let (msg, h) = reply("a{sv}", &body);
+        let new = marked_item_reply(&msg, &h, &ItemAsk::All, &marks(Some(picture([1, 1, 1, 1]))))
+            .unwrap()
+            .expect("marked");
+        let out = message(
+            METHOD_RETURN,
+            0,
+            9,
+            &[Field::ReplySerial(7), Field::Signature("a{sv}")],
+            &new,
+        );
+        let props = read_back(&out);
+        let names: Vec<&str> = props.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Category",
+                "Id",
+                "IconPixmap",
+                "OverlayIconPixmap",
+                "ToolTip"
+            ]
+        );
+        let icon = &props[2].1;
+        assert_eq!(icon.len(), 2);
+        for (w, h, px) in icon {
+            assert_eq!((*w, *h), (2, 2));
+            assert_eq!(&px[..4], &[0xff, 1, 2, 3], "the mark");
+            assert_eq!(px.len(), 16);
+        }
+        assert_eq!(
+            &icon[1].2[4..8],
+            &[0x80, 7, 7, 7],
+            "the rest of the picture"
+        );
+        // Pictures of its own: no overlay made for it.
+        assert!(props[3].1.is_empty());
+        assert_eq!(props[4].2.as_deref(), Some("3 new|zone · box"));
+    }
+
+    #[test]
+    fn an_icon_by_name_gets_the_overlay() {
+        let body = all_properties(&[], "");
+        let (msg, h) = reply("a{sv}", &body);
+        let overlay = picture([0xff, 5, 5, 5]);
+        let new = marked_item_reply(&msg, &h, &ItemAsk::All, &marks(Some(overlay.clone())))
+            .unwrap()
+            .expect("marked");
+        let out = message(METHOD_RETURN, 0, 9, &[Field::Signature("a{sv}")], &new);
+        let props = read_back(&out);
+        assert!(props[2].1.is_empty(), "no pictures made up");
+        assert_eq!(props[3].1, vec![overlay]);
+    }
+
+    #[test]
+    fn one_property_is_marked_as_a_variant() {
+        let mut w = Writer { buf: Vec::new() };
+        w.signature("a(iiay)");
+        write_pictures(&mut w, &[picture([0xff, 9, 9, 9])]);
+        let (msg, h) = reply("v", &w.buf);
+        let ask = ItemAsk::One("IconPixmap".into());
+        let new = marked_item_reply(&msg, &h, &ask, &marks(None))
+            .unwrap()
+            .expect("marked");
+        let out = message(METHOD_RETURN, 0, 9, &[Field::Signature("v")], &new);
+        let h = parse_header(&out).unwrap();
+        let mut r = Reader {
+            buf: &out,
+            pos: h.body_offset,
+            little: true,
+        };
+        assert_eq!(r.signature().unwrap(), "a(iiay)");
+        let pictures = read_pictures(&mut r).unwrap();
+        assert_eq!(&pictures[0].2[..4], &[0xff, 1, 2, 3]);
+        assert_eq!(r.pos, out.len());
+        // Another property, or another answer, passes as it is.
+        let ask = ItemAsk::One("Title".into());
+        let mut w = Writer { buf: Vec::new() };
+        w.signature("s");
+        w.string("Claude");
+        let (msg, h) = reply("v", &w.buf);
+        assert_eq!(
+            marked_item_reply(&msg, &h, &ask, &marks(None)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_lying_icon_answer_is_an_error_not_a_panic() {
+        let mut body = all_properties(&[picture([0xff, 9, 9, 9])], "x");
+        // The array says it is longer than the message.
+        body[0] = 0xff;
+        body[1] = 0xff;
+        let (msg, h) = reply("a{sv}", &body);
+        assert!(marked_item_reply(&msg, &h, &ItemAsk::All, &marks(None)).is_err());
+        // A picture that says it has more bytes than there are.
+        let mut w = Writer { buf: Vec::new() };
+        w.signature("a(iiay)");
+        w.u32(20);
+        w.align(8);
+        w.u32(2);
+        w.u32(2);
+        w.u32(4096);
+        let (msg, h) = reply("v", &w.buf);
+        let ask = ItemAsk::One("IconPixmap".into());
+        assert!(marked_item_reply(&msg, &h, &ask, &marks(None)).is_err());
     }
 }
