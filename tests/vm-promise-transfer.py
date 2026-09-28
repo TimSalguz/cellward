@@ -191,10 +191,15 @@ XF_BCAST = str(ipaddress.ip_interface(machine.succeed(
     "ip -4 -o addr show eth1 | head -1 | tr -s ' ' | cut -d' ' -f4"
 ).strip()).network.broadcast_address)
 # What the machine's eth1 may carry while a zone moves files: towards the
-# server, the tunnel's UDP alone; and no discovery datagram to anyone.
+# server, the tunnel's UDP alone; and no discovery datagram to anyone. The
+# host's own neighbour discovery with the server is its link's upkeep, as ARP
+# is (no zone has a link on eth1): the host's IPv6 push to the server leaves
+# a neighbour entry that the kernel probes with a unicast solicitation five
+# seconds later (red once in CI, inside the zone's window).
 XF_FILTER = (
     f"(host {server_ip} or host {server_ip6} or (udp and (port 53317 or port 1716))) "
-    "and not arp and not (udp and port 51820)"
+    "and not arp and not (udp and port 51820) "
+    "and not (icmp6 and (ip6[40] == 135 or ip6[40] == 136))"
 )
 
 
@@ -211,8 +216,10 @@ def xf_peers(method, path):
     return [f[2] for f in xf_log() if f[:2] == [method, path]]
 
 
-def xf_same(a, b):
-    return ipaddress.ip_address(a.split("%")[0]) == ipaddress.ip_address(b.split("%")[0])
+def xf_server_addrs():
+    """The server's own addresses on the LAN, both families."""
+    out = server.succeed("ip -o addr show dev eth1 scope global | tr -s ' ' | cut -d' ' -f4 | cut -d/ -f1")
+    return {ipaddress.ip_address(a) for a in out.split()}
 
 
 def xf_push(target, name):
@@ -397,7 +404,12 @@ def xf_without_zones():
         code, said = xf_push(target, "push")
         assert code == 0, f"the server could not send to the host's program at {target}: {said}"
         peer = re.search(r"peer=(\S+) sha256=(\S+)", said)
-        assert peer and xf_same(peer.group(1), source) and peer.group(2) == XF_PUSH, said
+        # The server's address of that family on the LAN: the one its kernel
+        # chose, if it has more than one.
+        assert peer and peer.group(2) == XF_PUSH, said
+        seen = ipaddress.ip_address(peer.group(1))
+        assert seen in xf_server_addrs() and seen.version == ipaddress.ip_address(source).version, said
+        source = str(seen)
         assert xf_sha(machine, f"{inbox}/push.bin") == XF_PUSH
         machine.succeed(f"rm -f {inbox}/push.bin")
         XF_ROWS.append((f"unconfined: the server sends to a host program at {target}", "works", source, "equal"))
