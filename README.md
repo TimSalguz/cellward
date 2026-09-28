@@ -409,6 +409,7 @@ cellward doctor [<zone>] [--json]              # what is really closed, checked 
 cellward explain <container> [<network>] [--json]  # what its programs get in a network, and whose word decided it
 cellward traffic [--json] [--watch]            # what each running container sent and received
 cellward traffic --days <N> [--json]           # what each container used, by network, over N days
+cellward traffic --connections [--json]        # whom each running container reached, and how much
 cellward journal [--json] [<N>]                # unconfined launches and the broker's decisions
 cellward kill <zone>                           # cut a zone off now: its programs killed, the zone down
 cellward container stop|kill <container>       # end a container's instance: its programs closed / killed at once

@@ -68,6 +68,13 @@
 //!   on stdout ([`crate::epoch::probe_verdict`]). Nothing of the
 //!   namespace's is changed: the probe's table is made and deleted in one
 //!   transaction.
+//!
+//! The network monitor (2026-09-28): every frame is counted into the
+//! instance's `traffic` file (`--tally-fd`, `crate::traffic`), and noted in
+//! its table of flows and names (`--flows-fd`, `crate::flows`) — both shared
+//! mappings made before the seal, written with no system call after it
+//! ([`Notes`]). A record, not the wall: a file it cannot map, and it relays
+//! all the same.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -167,15 +174,41 @@ pub enum End {
 /// Both descriptors are made non-blocking — their open file descriptions,
 /// which the caller should not share with anyone who expects otherwise.
 pub fn pump(tap: BorrowedFd<'_>, stream: BorrowedFd<'_>) -> io::Result<End> {
-    pump_counted(tap, stream, None)
+    pump_counted(tap, stream, &mut Notes::default())
 }
 
-/// [`pump`], every frame counted into `tally` (`crate::traffic`): out, as it
-/// is read from the tap; in, as the tap takes it.
+/// What the relay notes of every frame, each when it has it: its count
+/// (`crate::traffic`), its flow and a DNS answer's names (`crate::flows`).
+#[derive(Default)]
+pub struct Notes<'a> {
+    pub tally: Option<&'a crate::traffic::Tally>,
+    pub flows: Option<&'a mut crate::flows::Table>,
+}
+
+impl Notes<'_> {
+    /// A whole frame: `outbound` read from the tap, else taken by it.
+    fn frame(&mut self, frame: &[u8], outbound: bool) {
+        if let Some(tally) = self.tally {
+            if outbound {
+                tally.outbound(frame.len());
+            } else {
+                tally.inbound(frame.len());
+            }
+        }
+        if let Some(flows) = self.flows.as_deref_mut() {
+            if let Some(seen) = crate::flows::frame(frame, outbound) {
+                flows.note(&seen, crate::flows::now());
+            }
+        }
+    }
+}
+
+/// [`pump`], every frame noted (`notes`): out, as it is read from the tap;
+/// in, as the tap takes it.
 pub fn pump_counted(
     tap: BorrowedFd<'_>,
     stream: BorrowedFd<'_>,
-    tally: Option<&crate::traffic::Tally>,
+    notes: &mut Notes<'_>,
 ) -> io::Result<End> {
     let (tap, stream) = (tap.as_raw_fd(), stream.as_raw_fd());
     set_nonblocking(tap)?;
@@ -237,17 +270,17 @@ pub fn pump_counted(
                 return Ok(End::StreamClosed);
             }
             let open = fill_down(stream, &mut down, &mut end)?;
-            tap_full = !deliver(tap, &down, &mut start, end, tally)?;
+            tap_full = !deliver(tap, &down, &mut start, end, notes)?;
             if !open {
                 return Ok(End::StreamClosed);
             }
         }
         if tap_full && at_tap & (libc::POLLOUT | gone) != 0 {
-            tap_full = !deliver(tap, &down, &mut start, end, tally)?;
+            tap_full = !deliver(tap, &down, &mut start, end, notes)?;
         }
         if tap_open && at_tap & (libc::POLLIN | gone) != 0 {
             // Not reading it, and it hung up: nothing more comes from it.
-            tap_open = read_tap && fill_up(tap, &mut frame, &mut up, up_sent, tally)?;
+            tap_open = read_tap && fill_up(tap, &mut frame, &mut up, up_sent, notes)?;
         }
         if up_sent < up.len() {
             flush(stream, &mut up, &mut up_sent)?;
@@ -343,7 +376,7 @@ fn deliver(
     buf: &[u8],
     start: &mut usize,
     end: usize,
-    tally: Option<&crate::traffic::Tally>,
+    notes: &mut Notes<'_>,
 ) -> io::Result<bool> {
     while let Some(len) = decode(&buf[*start..end])? {
         let from = *start + LEN_BYTES;
@@ -351,9 +384,7 @@ fn deliver(
             None => return Ok(false),
             Some(n) if n == len => {
                 *start = from + len;
-                if let Some(tally) = tally {
-                    tally.inbound(len);
-                }
+                notes.frame(&buf[from..from + len], false);
             }
             Some(n) => {
                 return Err(io::Error::other(format!(
@@ -371,7 +402,7 @@ fn fill_up(
     frame: &mut [u8],
     up: &mut Vec<u8>,
     sent: usize,
-    tally: Option<&crate::traffic::Tally>,
+    notes: &mut Notes<'_>,
 ) -> io::Result<bool> {
     while up.len() - sent < WINDOW {
         match read_some(tap, frame)? {
@@ -379,9 +410,7 @@ fn fill_up(
             // is refused as one.
             Got::Bytes(n) => {
                 encode(&frame[..n], up)?;
-                if let Some(tally) = tally {
-                    tally.outbound(n);
-                }
+                notes.frame(&frame[..n], true);
             }
             Got::WouldBlock => return Ok(true),
             Got::Eof => return Ok(false),
@@ -549,6 +578,9 @@ pub struct Attach {
     /// The instance's counters' file (`crate::traffic`), which it counts
     /// every frame into; none, and it counts nothing.
     pub tally: Option<RawFd>,
+    /// The instance's flows' file (`crate::flows`), which it notes every
+    /// frame's flow in; none, and it notes none.
+    pub flows: Option<RawFd>,
 }
 
 /// The epoch's wall an instance's rules carry (`crate::epoch`,
@@ -668,6 +700,10 @@ impl Attach {
             out.push("--tally-fd".into());
             out.push(tally.to_string().into());
         }
+        if let Some(flows) = self.flows {
+            out.push("--flows-fd".into());
+            out.push(flows.to_string().into());
+        }
         out
     }
 
@@ -678,7 +714,7 @@ impl Attach {
     pub fn parse(args: &[OsString]) -> Result<Self, String> {
         let (mut stream, mut ready, mut a4, mut a6, mut ip, mut nft) =
             (None, None, None, None, None, None);
-        let mut tally: Option<RawFd> = None;
+        let (mut tally, mut flows): (Option<RawFd>, Option<RawFd>) = (None, None);
         let (mut wall_level, mut wall_cgroup): (Option<String>, Option<String>) = (None, None);
         let mut rest = args;
         while let [flag, value, tail @ ..] = rest {
@@ -719,6 +755,11 @@ impl Attach {
                     fd.ok_or("--tally-fd takes a descriptor above 2")?,
                     &flag,
                 )?,
+                "--flows-fd" => once(
+                    &mut flows,
+                    fd.ok_or("--flows-fd takes a descriptor above 2")?,
+                    &flag,
+                )?,
                 "--wall-level" => once(&mut wall_level, text.to_owned(), &flag)?,
                 "--wall-cgroup" => once(&mut wall_cgroup, text.to_owned(), &flag)?,
                 _ => return Err(format!("unknown argument {flag}")),
@@ -733,9 +774,12 @@ impl Attach {
         else {
             return Err("needs --stream-fd, --ready-fd, --a4, --ip and --nft".to_owned());
         };
-        if stream == ready || tally.is_some_and(|t| t == stream || t == ready) {
+        let fds = [Some(stream), Some(ready), tally, flows];
+        let given: Vec<RawFd> = fds.iter().flatten().copied().collect();
+        if (1..given.len()).any(|i| given[..i].contains(&given[i])) {
             return Err(
-                "the stream, the pipe of its word and the counters are one descriptor".to_owned(),
+                "the stream, the pipe of its word, the counters and the flows share a descriptor"
+                    .to_owned(),
             );
         }
         let wall = Wall::from_flags(wall_level, wall_cgroup)?;
@@ -748,6 +792,7 @@ impl Attach {
             nft,
             wall,
             tally,
+            flows,
         })
     }
 }
@@ -980,6 +1025,18 @@ fn attach_main(args: &[OsString]) -> u8 {
             }
         }
     });
+    // Its table of flows (`crate::flows`), the same way; its index grows
+    // by the allocator, which the filter lets it (`brk`, `mmap`).
+    let mut flows = attach.flows.and_then(|fd| {
+        let file = adopt(fd).ok()?;
+        match crate::flows::Table::map(file.as_fd(), true) {
+            Ok(flows) => Some(flows),
+            Err(e) => {
+                eprintln!("vpn-zone-core frame-relay: no table of flows ({e}) — relaying unnoted");
+                None
+            }
+        }
+    });
     if let Err(e) = confine() {
         eprintln!("vpn-zone-core frame-relay: cannot confine itself ({e}) — not relaying");
         return 1;
@@ -992,7 +1049,11 @@ fn attach_main(args: &[OsString]) -> u8 {
     if fs::File::from(ready).write_all(b"1").is_err() {
         return 1;
     }
-    match pump_counted(tap.as_fd(), stream.as_fd(), tally.as_ref()) {
+    let mut notes = Notes {
+        tally: tally.as_ref(),
+        flows: flows.as_mut(),
+    };
+    match pump_counted(tap.as_fd(), stream.as_fd(), &mut notes) {
         Ok(End::StreamClosed) => 0,
         Ok(End::TapClosed) => {
             eprintln!("vpn-zone-core frame-relay: the tap ended");
@@ -1343,7 +1404,11 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         let pump = std::thread::spawn(move || {
-            let end = pump_counted(tap.as_fd(), stream.as_fd(), Some(&tally));
+            let mut notes = Notes {
+                tally: Some(&tally),
+                flows: None,
+            };
+            let end = pump_counted(tap.as_fd(), stream.as_fd(), &mut notes);
             tally.close();
             end
         });
@@ -1364,6 +1429,63 @@ mod tests {
         let counts = crate::traffic::read(&dir).unwrap();
         assert_eq!((counts.out_frames, counts.out_bytes), (3, 60 + 760 + 1460));
         assert_eq!((counts.in_frames, counts.in_bytes), (2, 3000));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Every frame's flow noted (`crate::flows`): by the instance's side of
+    /// it, the two ways one flow.
+    #[test]
+    fn every_frames_flow_is_noted() {
+        let dir = std::env::temp_dir().join(format!("vz-relay-flows-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = crate::flows::create(&dir).unwrap();
+        let (tap, tap_peer) = seqpacket_pair();
+        let (stream, mut stream_peer) = UnixStream::pair().unwrap();
+        stream_peer
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let pump = std::thread::spawn(move || {
+            let mut flows = crate::flows::Table::map(file.as_fd(), true).unwrap();
+            let mut notes = Notes {
+                tally: None,
+                flows: Some(&mut flows),
+            };
+            let end = pump_counted(tap.as_fd(), stream.as_fd(), &mut notes);
+            flows.close();
+            end
+        });
+        let tcp = |src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16| {
+            let mut f = vec![0u8; 12];
+            f.extend_from_slice(&[0x08, 0x00, 0x45, 0, 0, 40, 0, 0, 0x40, 0, 64, 6, 0, 0]);
+            f.extend_from_slice(&src);
+            f.extend_from_slice(&dst);
+            f.extend_from_slice(&sport.to_be_bytes());
+            f.extend_from_slice(&dport.to_be_bytes());
+            f.extend_from_slice(&[0; 16]);
+            f
+        };
+        let out = tcp([10, 254, 0, 2], [203, 0, 113, 7], 40000, 443);
+        send_packet(&tap_peer, &out).unwrap();
+        assert_eq!(read_frame(&mut stream_peer).as_ref(), Some(&out));
+        let back = tcp([203, 0, 113, 7], [10, 254, 0, 2], 443, 40000);
+        stream_peer.write_all(&framed(&[back.clone()])).unwrap();
+        assert_eq!(recv_packet(&tap_peer).as_ref(), Some(&back));
+        drop(stream_peer);
+        assert_eq!(pump.join().unwrap().unwrap(), End::StreamClosed);
+        let (flows, _) = crate::flows::read(&dir).unwrap();
+        assert_eq!(flows.len(), 1, "{flows:?}");
+        let f = &flows[0];
+        let remote = "203.0.113.7".parse::<std::net::IpAddr>().unwrap();
+        assert_eq!(
+            (f.key.remote, f.key.rport, f.key.lport),
+            (remote, 443, 40000)
+        );
+        assert_eq!((f.out_packets, f.in_packets), (1, 1));
+        assert_eq!(
+            (f.out_bytes, f.in_bytes),
+            (out.len() as u64, back.len() as u64)
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1516,6 +1638,7 @@ mod tests {
             nft: PathBuf::from("/nix/store/x-nftables/bin/nft"),
             wall: None,
             tally: None,
+            flows: None,
         };
         let line = attach.args();
         assert_eq!(line[0], "--attach");
@@ -1557,6 +1680,24 @@ mod tests {
         for fd in [7, 8] {
             let line = Attach {
                 tally: Some(fd),
+                ..attach.clone()
+            }
+            .args();
+            assert!(Attach::parse(&line[1..]).is_err(), "{fd}");
+        }
+        // With its flows' table too: there and back; never another of its
+        // descriptors.
+        let noted = Attach {
+            tally: Some(9),
+            flows: Some(10),
+            ..attach.clone()
+        };
+        let line = noted.args();
+        assert_eq!(Attach::parse(&line[1..]), Ok(noted));
+        for fd in [7, 8, 9] {
+            let line = Attach {
+                tally: Some(9),
+                flows: Some(fd),
                 ..attach.clone()
             }
             .args();

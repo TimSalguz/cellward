@@ -2929,6 +2929,9 @@ struct Transport {
     /// Its counters' file (`crate::traffic`), made anew as it comes up:
     /// every relay of its attaches counts into it.
     tally: Option<File>,
+    /// Its flows' file (`crate::flows`), the same way: every relay of its
+    /// attaches notes its frames' flows in it.
+    flows: Option<File>,
 }
 
 /// How a live switch ended ([`Transport::switch`]).
@@ -2975,6 +2978,15 @@ impl Transport {
                 )
             })
             .ok();
+        let flows = crate::flows::create(&zone.dir)
+            .map_err(|e| {
+                eprintln!(
+                    "instance {}: no table of its connections ({e}) — its way out is the \
+                     same, unnoted",
+                    plan.id
+                )
+            })
+            .ok();
         Self {
             id: plan.id.clone(),
             network: plan.network.clone(),
@@ -2994,6 +3006,7 @@ impl Transport {
             search: Vec::new(),
             lock,
             tally,
+            flows,
         }
     }
 
@@ -3169,6 +3182,7 @@ impl Transport {
             ip: &self.ip,
             nft: &self.nft,
             tally: self.tally.as_ref().map(AsRawFd::as_raw_fd),
+            flows: self.flows.as_ref().map(AsRawFd::as_raw_fd),
         };
         let stop = || ASKED_TO_STOP.load(Ordering::SeqCst);
         let link = crate::bridge::attach(

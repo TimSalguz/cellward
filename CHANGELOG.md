@@ -24,6 +24,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   not as a pale one that looked unavailable.
 
 ### Added
+- **`cellward traffic --connections [--json]`: whom each running container
+  reached** (2026-09-28, stage 2 of the network monitor). The frame relay
+  reads every frame's headers and keeps the instance's flows in a file of
+  its own (`flows`, the user's alone): protocol, the instance's port, the
+  other end's address and port, bytes and packets each way, first and last
+  seen — up to 4096, the one seen longest ago giving way. A DNS answer that
+  passes is read too, and each address it gives is shown with the name
+  asked: `tcp 149.154.167.50:443 (api.telegram.org)`. Written through a
+  shared mapping made before the relay seals itself, with no system call
+  after it; a record, not a wall — a file that cannot be made or mapped,
+  and the instance's way out is the same. Which program a flow is, is the
+  next step.
 - **The cellward window: the network monitor and the containers**
   (2026-09-28). `cellward-gui containers` (the «Контейнеры cellward»
   entry, and what stillconf opens) and the new `cellward-gui monitor` («Сеть

@@ -1987,6 +1987,85 @@ fn traffic_says_what_an_instance_sent_and_received() {
     tally.close();
 }
 
+/// Stage 2 of the network monitor: `traffic --connections` says whom an
+/// instance reached, as its relay noted it (`vpn_zone::flows`), with the
+/// name a DNS answer gave for the address.
+#[test]
+fn traffic_connections_says_whom_an_instance_reached() {
+    use std::os::fd::AsFd;
+    use vpn_zone::{flows, instance};
+    let home = Home::new("tcon");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    let json = stdout(&home.run(&["traffic", "--connections", "--json"]));
+    assert!(json.contains("\"instances\":[]"), "{json}");
+    let _bridge = home.instance_is_up("work", "nl");
+    let json = stdout(&home.run(&["traffic", "--connections", "--json"]));
+    assert!(json.contains("\"connections\":null"), "{json}");
+    let file = flows::create(&instance::dir(&home.state(), "work")).unwrap();
+    let mut table = flows::Table::map(file.as_fd(), true).unwrap();
+    let key = flows::Key {
+        proto: flows::TCP,
+        lport: 40000,
+        remote: "192.0.2.10".parse().unwrap(),
+        rport: 443,
+    };
+    for (outbound, len) in [(true, 1500), (false, 3000)] {
+        let seen = flows::Seen {
+            key,
+            outbound,
+            len,
+            dns: None,
+        };
+        table.note(&seen, flows::now());
+    }
+    // An answer of the forwarder's: 192.0.2.10 is example.org.
+    let mut answer = vec![0x12, 0x34, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0];
+    answer.extend_from_slice(b"\x07example\x03org\x00\x00\x01\x00\x01");
+    answer.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 10]);
+    let dns = flows::Seen {
+        key: flows::Key {
+            proto: flows::UDP,
+            lport: 5353,
+            remote: "10.254.255.253".parse().unwrap(),
+            rport: 53,
+        },
+        outbound: false,
+        len: 90,
+        dns: Some(&answer),
+    };
+    table.note(&dns, flows::now());
+    let json = stdout(&home.run(&["traffic", "--connections", "--json"]));
+    assert!(
+        json.contains(
+            "{\"proto\":\"tcp\",\"local_port\":40000,\"remote\":\"192.0.2.10\",\
+             \"remote_port\":443,\"name\":\"example.org\","
+        ),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"out_bytes\":1500,\"in_bytes\":3000,\"out_packets\":1,\"in_packets\":1"),
+        "{json}"
+    );
+    let text = stdout(&home.run(&["traffic", "--connections"]));
+    assert!(text.contains("work · nl:"), "{text}");
+    assert!(
+        text.contains("tcp 192.0.2.10:443 (example.org) · ↑ 1.5 КБ · ↓ 2.9 КБ"),
+        "{text}"
+    );
+    assert!(
+        text.contains("udp 10.254.255.253:53 (DNS контейнера)"),
+        "{text}"
+    );
+    // Not with the others' flags.
+    for other in [&["--watch"][..], &["--days", "1"][..]] {
+        let mut args = vec!["traffic", "--connections"];
+        args.extend_from_slice(other);
+        assert_eq!(home.run(&args).status.code(), Some(1), "{other:?}");
+    }
+    table.close();
+}
+
 /// Review 2026-09-28: a network's `restart_needed` is its running
 /// instances' — what changed since they came up —, not its own space's,
 /// where nothing runs since stage 5.

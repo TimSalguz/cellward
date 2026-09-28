@@ -679,6 +679,16 @@ and `cellward container show <name> --json` print subsets of the same schema.
   frames; `since` in Unix seconds); `null` for an instance without counters
   (one of an earlier build). `cellward traffic --json` gives the same per
   running instance, with its container and network.
+- **`cellward traffic --connections --json`** (added 2026-09-28, stage 2 of
+  the network monitor): `{schema_version, instances: [{id, container,
+  network, connections}]}`, `connections` the instance's flows as its relay
+  saw them, the latest first — `{proto ("tcp", "udp", "icmp", "icmpv6",
+  "igmp" or the number), local_port, remote, remote_port, name, first,
+  last, out_bytes, in_bytes, out_packets, in_packets}`; `name` what the
+  latest DNS answer the instance received said of `remote` (`null`: none
+  seen) — what the answer said, not a proof; `first`/`last` Unix seconds;
+  ports 0 where the protocol has none. `null` for an instance without a
+  table (of an earlier build).
 - **`networks[].tolerates`** (added 2026-09-28, step 1 of the permission
   model, `docs/PERMISSIONS.md` §11.14): the ways around a network it
   tolerates for its containers — `{"hermetic", "nix_daemon",

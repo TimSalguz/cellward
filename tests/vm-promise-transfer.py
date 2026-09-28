@@ -338,6 +338,20 @@ def xf_zone(zone, addr, addr6):
     assert mine, t
     assert max(c["out_bytes"] for c in mine) >= 4194304, t
     assert max(c["in_bytes"] for c in mine) >= 3145728, t
+    # Whom it reached (stage 2, `cellward traffic --connections`): the
+    # server by its LAN address with the upload out, by its tunnel address
+    # with the download in — each a TCP flow to XF_PORT.
+    c = json.loads(alice("cellward traffic --connections --json"))
+    flows = [
+        f for i in c["instances"] if i["network"] == zone and i["connections"]
+        for f in i["connections"]
+    ]
+    to = lambda ip: [
+        f for f in flows if (f["proto"], f["remote"], f["remote_port"]) == ("tcp", ip, XF_PORT)
+    ]
+    assert to(server_ip) and max(f["out_bytes"] for f in to(server_ip)) >= 4194304, c
+    assert to("10.99.0.1") and max(f["in_bytes"] for f in to("10.99.0.1")) >= 3145728, c
+    print(alice("cellward traffic --connections"))
 
     # The server connects to the zone's program through the tunnel: the
     # zone's address ends in the zone's app namespace, where nothing listens

@@ -489,6 +489,7 @@ fn text(rows: &[Row]) -> String {
 
 const USAGE: &str = "cellward traffic [--json] [--watch]\n\
                      cellward traffic --days <N> [--json]\n\
+                     cellward traffic --connections [--json]\n\
                      cellward traffic --record";
 
 /// `cellward traffic [--json] [--watch]`: what each running instance sent
@@ -498,11 +499,13 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     let mut json_out = false;
     let mut watch = false;
     let mut days: Option<u64> = None;
+    let mut connections = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.to_str() {
             Some("--json") => json_out = true,
             Some("--watch") => watch = true,
+            Some("--connections") => connections = true,
             Some("--record") => {
                 return match record(tools) {
                     Ok(()) => 0,
@@ -531,6 +534,13 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             }
         }
+    }
+    if connections {
+        if watch || days.is_some() {
+            eprintln!("{USAGE}");
+            return 1;
+        }
+        return crate::flows::run(tools, json_out);
     }
     if let Some(n) = days {
         let (from, total) = over_days(&tools.state, n, now_secs());

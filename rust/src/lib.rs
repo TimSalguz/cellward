@@ -121,6 +121,7 @@ pub mod egress;
 pub mod enter;
 pub mod epoch;
 pub mod explain;
+pub mod flows;
 pub mod focus;
 pub mod frame;
 pub mod fs_sandbox;
