@@ -199,6 +199,18 @@ def journal_of(id_):
     ]
 
 
+def reset_b_peer():
+    """B's peer on the server made anew once B is down: a session the server
+    still holds knocks at B's last address with handshakes (148 bytes, every
+    5 s, for a minute and a half), which the host answers "port
+    unreachable" — nothing of B's, but noise in the leak capture
+    (vm-zone-killed.py does the same for A)."""
+    server.succeed(
+        f"wg set wg0 peer '{bpub}' remove && "
+        f"wg set wg0 peer '{bpub}' allowed-ips 10.99.0.3/32,fd99::3/128"
+    )
+
+
 def ask_control(id_, line, prefix=""):
     ctl = f"{STATE}/.instances/{ikey(id_)}/control"
     return alice(f"{prefix}{PY} /tmp/swhelper.py ask {ctl} {shlex.quote(line)}")
@@ -448,6 +460,7 @@ with subtest("switch: back to B from a cut instance; B stopped while bound — n
     launch("swnofb", "vmswb", f"{PY} /tmp/swhelper.py udp 10.99.0.1 7300 nofb")
     server.wait_until_succeeds(f"grep -q '10.99.0.3 nofb-' {LOGS}", timeout=60)
     alice("cellward down vmswb")
+    reset_b_peer()
     i = wait_sw(lambda i: i["why"] == "zone-down", "cut by B's end")
     assert (i["network"], i["exit"]) == ("vmswb", "none"), i
     nofb = len(logged("nofb-", "10.99.0.3"))
@@ -507,5 +520,9 @@ with subtest("switch: cleaned up"):
     alice(f"rm -rf {STATE}/vmfake")
     machine.succeed("rm -f /tmp/vmfake-release")
     alice(f"cellward container rm {SW} || true")
-    alice("cellward down vmswb || true")
+    # The server's listeners first, B after them, and B's peer made anew
+    # last (red once in CI, 2026-09-28: the server's session with the
+    # stopped B knocked at its last address into the leak capture).
     server.succeed("systemctl stop swtcp swudp swudp6 || true")
+    alice("cellward down vmswb || true")
+    reset_b_peer()
