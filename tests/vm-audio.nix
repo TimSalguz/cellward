@@ -299,14 +299,14 @@ let
           assert out.strip() == "0", f"the zone recorded the host's sound: {out}"
 
       with subtest("the microphone as the zone's switch says"):
-          alice("cellward microphone offline no")
+          alice("cellward defaults set microphone no")
           machine.sleep(3)
           assert "vm-mic" not in nodes(zone_dump())
           out = zone(
               "sh -c 'timeout 5 pw-record --raw --target vm-mic -P node.name=vz-mic - | wc -c'"
           )
           assert out.strip() == "0", f"recorded with the microphone off: {out}"
-          alice("cellward microphone offline yes")
+          alice("cellward defaults set microphone yes")
           for _ in range(30):
               if "vm-mic" in nodes(zone_dump()):
                   break
@@ -340,7 +340,7 @@ let
               machine.sleep(1)
           else:
               raise Exception("the recording was never linked")
-          alice("cellward microphone offline no")
+          alice("cellward defaults set microphone no")
           for _ in range(30):
               if not linked(host_dump(), "vm-mic", "vz-rec"):
                   break
@@ -354,14 +354,14 @@ let
           # The key outlives the zone's helper: WirePlumber keeps it. The
           # helper publishes this run's value before the socket goes out.
           mic_key = f"pw-metadata -n vpn-zones 0 vpn-zones.microphone.{APP}"
-          alice("cellward microphone offline yes")
+          alice("cellward defaults set microphone yes")
           machine.wait_until_succeeds(
               "su -l alice -c " + shlex.quote("XDG_RUNTIME_DIR=/run/user/1000 " + mic_key)
               + " | grep -q \"value:'yes'\"",
               timeout=30,
           )
           restart_main()
-          alice("cellward microphone offline no")
+          alice("cellward defaults set microphone no")
           out = alice(mic_key)
           assert "value:'yes'" in out, f"no stale yes to test against: {out}"
           # Recorded from the first moment the zone's socket answers.
@@ -381,7 +381,7 @@ let
           # no, the main home's programs do not, and a container's no stands
           # against the network's yes. A client is held until its key comes,
           # so it sees at once what its container may.
-          alice("cellward microphone offline no")
+          alice("cellward defaults set microphone no")
           alice("cellward container create vmpwmic --home layer")
           alice("cellward container set vmpwmic microphone yes")
           # Its own instance, kept up, and its PipeWire context handed over
@@ -435,11 +435,11 @@ let
           assert "vpn-zones.microphone-by-client.instance:vmpwmic" in meta, meta
           # Nor any request for a key: each went with its answer.
           assert "vpn-zones.microphone.pending." not in meta, meta
-          alice("cellward microphone offline yes")
+          alice("cellward defaults set microphone yes")
           alice("cellward container set vmpwmic microphone no")
           out = in_container(record.format("vz-cno"))
           assert out.strip() == "0", f"the zone's yes overrode a container's no: {out}"
-          alice("cellward microphone offline no")
+          alice("cellward defaults set microphone no")
           alice("systemctl --user stop vzkeepc || true")
           machine.wait_until_fails(
               f"test -e {STATE}/.instances/{key('vmpwmic')}/ready", timeout=60

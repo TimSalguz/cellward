@@ -418,6 +418,17 @@ in
       (expect "audioManager set, and no word that it is on the way out" (
         warnsOf "programs.cellward.audioManager устарело" hmDeclared.config
       ))
+      # The network's word for its programs' microphone and screen cast
+      # (2b of docs/PERMISSIONS.md §11.15, 2026-09-29): gone, and said so.
+      (expect "microphone set, and no word that it no longer holds" (
+        warnsOf "programs.cellward.microphone не действует" hmDeclared.config
+      ))
+      (expect "screencast set, and no word that it no longer holds" (
+        warnsOf "programs.cellward.screencast не действует" hmDeclared.config
+      ))
+      (expect "a configuration without them says they no longer hold" (
+        !warnsOf "не действует" hm.config
+      ))
       (expect "nixDaemon set, and a word that it is on the way out" (
         !warnsOf "programs.cellward.nixDaemon устарело" hmDeclared.config
       ))

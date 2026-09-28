@@ -143,6 +143,7 @@ pub mod openconnect;
 pub mod origin;
 pub mod owners;
 pub mod panel;
+pub mod permissions;
 pub mod picker;
 pub mod place;
 pub mod profile;

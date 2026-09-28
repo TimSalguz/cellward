@@ -127,9 +127,13 @@ impl Setting {
     }
 }
 
-/// The zone's setting and where it comes from.
-pub fn setting(zone_dir: &Path, config: &Path, zone: &str) -> (Setting, Source) {
-    zone_switch(Some(zone_dir), config, zone, MARKER, DECLARED)
+/// What a program with no word of its container's gets, and whose word
+/// that is: the template (`crate::permissions`, 2b of
+/// `docs/PERMISSIONS.md` §11.15) — whatever network it runs in, which has
+/// no say about its programs. The zone's arguments are kept for the
+/// callers' shape.
+pub fn setting(_zone_dir: &Path, config: &Path, _zone: &str) -> (Setting, Source) {
+    crate::permissions::switch(config, "microphone")
 }
 
 /// A container's own `yes|no|ask` switch `key` (`microphone =`,
@@ -148,66 +152,41 @@ pub fn container_setting(config: &Path, name: &str) -> Option<(Setting, Source)>
     container_switch(config, name, "microphone")
 }
 
-/// How much a switch lets through: `no` least, `ask` more, `yes` most.
-fn openness(setting: Setting) -> u8 {
-    match setting {
-        Setting::No => 0,
-        Setting::Ask => 1,
-        Setting::Yes => 2,
-    }
-}
-
-/// A container's own switch `own` over its zone's `zone` — the microphone's
-/// and the screen cast's order: Nix's word for the container, then Nix's
-/// for the zone, then the container's local one, then the zone's. A local
-/// word does not override a declared one to open more — but does to open
-/// less: `no` rather than `ask` rather than `yes` (review 2026-09-28: a
-/// local `no` was ignored under the zone's declared `yes`). Where it is as
-/// open as the declared one, the declared one is named (and "always" is
-/// not offered: `verdict`).
-pub fn container_over_zone(
-    zone: (Setting, Source),
-    own: Option<(Setting, Source)>,
-) -> (Setting, Source) {
-    match own {
-        Some(own @ (_, Source::Nix)) => own,
-        Some(own) if zone.1 == Source::Nix && openness(own.0) < openness(zone.0) => own,
-        _ if zone.1 == Source::Nix => zone,
-        Some(own) => own,
-        None => zone,
-    }
-}
-
-/// A switch for a program of `who`, the zone's being `zone_setting`, and
-/// where it comes from (`docs/PERMISSIONS.md` §11.10) — the microphone's and
-/// the screen cast's rule. For a container: [`container_over_zone`], its own
-/// being `key` in its settings, the zone's `ask` where neither says. For the
-/// zone's own programs, the zone's. For one whose container is not known,
-/// the zone's — but never `yes`: a program that left its container's launch
-/// must not get the zone's "yes" that its container may have been refused;
-/// it is asked.
+/// A switch for a program of `who`, the template's being `template`, and
+/// where it comes from (`docs/PERMISSIONS.md` §11.15, 2b) — the
+/// microphone's and the screen cast's rule: its container's own word (Nix's
+/// over its local one), the main home's own record's for the main home
+/// (`container::MAIN_RECORD`), else the template — a default, not a
+/// ceiling: the own word is taken over it both ways. For a program whose
+/// container is not known, the template — but never `yes`: a program that
+/// left its container's launch must not get a "yes" its container may have
+/// been refused; it is asked.
 pub fn by_container(
-    zone_setting: (Setting, Source),
+    template: (Setting, Source),
     config: &Path,
     key: &str,
     who: &Who,
 ) -> (Setting, Source) {
+    let own = |name: &str| container_switch(config, name, key);
     match who {
-        // The main home's own record (`container::MAIN_RECORD`, 2a of
-        // `docs/PERMISSIONS.md` §11.15) as a container's; none of its own, the
-        // zone's as before.
-        Who::Main => container_over_zone(
-            zone_setting,
-            container_switch(config, crate::container::MAIN_RECORD, key),
-        ),
-        Who::Unknown => match zone_setting {
+        Who::Main => own(crate::container::MAIN_RECORD).unwrap_or(template),
+        Who::Container(name) => own(name).unwrap_or(template),
+        Who::Unknown => match template {
             (Setting::Yes, source) => (Setting::Ask, source),
             other => other,
         },
-        Who::Container(name) => {
-            container_over_zone(zone_setting, container_switch(config, name, key))
-        }
     }
+}
+
+/// Whether `who`'s own word for `key` is Nix's: what "always" would not
+/// change, and is not offered for.
+pub fn own_is_nix(config: &Path, key: &str, who: &Who) -> bool {
+    let name = match who {
+        Who::Main => crate::container::MAIN_RECORD,
+        Who::Container(name) => name.as_str(),
+        Who::Unknown => return true,
+    };
+    container_switch(config, name, key).is_some_and(|(_, source)| source == Source::Nix)
 }
 
 /// The microphone for a program of `who` in `zone` ([`by_container`]).
@@ -390,12 +369,12 @@ fn shown_container(name: &str) -> String {
 /// said to be the whole container's (or zone's), not the named program's.
 pub fn question(zone: &str, who: &Who, program: &str, remember: bool) -> String {
     let from = match who {
-        Who::Main => format!("Программа из зоны «{zone}» (без контейнера)"),
+        Who::Main => format!("Программа настоящего дома (сеть «{zone}»)"),
         Who::Container(name) => format!(
-            "Программа из контейнера «{}» (зона «{zone}»)",
+            "Программа из контейнера «{}» (сеть «{zone}»)",
             shown_container(name)
         ),
-        Who::Unknown => format!("Программа из зоны «{zone}» (её контейнер не известен)"),
+        Who::Unknown => format!("Программа сети «{zone}» (её контейнер не известен)"),
     };
     let always = match (remember, who) {
         (false, _) | (true, Who::Unknown) => String::new(),
@@ -408,9 +387,8 @@ pub fn question(zone: &str, who: &Who, program: &str, remember: bool) -> String 
             )
         }
         (true, Who::Main) => format!(
-            "«{}» — это любой программе зоны «{zone}», кроме контейнеров со своей \
-             настройкой, без вопросов, пока это не отменить (cellward microphone {zone} \
-             ask).\n\n",
+            "«{}» — это любой программе настоящего дома, в любой сети, без вопросов, пока \
+             это не отменить (cellward container set main microphone ask).\n\n",
             always_label(zone, who)
         ),
     };
@@ -425,7 +403,7 @@ pub fn question(zone: &str, who: &Who, program: &str, remember: bool) -> String 
 pub fn always_label(zone: &str, who: &Who) -> String {
     match who {
         Who::Container(name) => format!("Всегда — контейнеру «{}»", shown_container(name)),
-        _ => format!("Всегда — всей зоне «{zone}»"),
+        _ => "Всегда — настоящему дому".to_owned(),
     }
 }
 
@@ -709,9 +687,15 @@ impl Policy {
     /// would belong.
     pub fn decide(&self, program: &str, who: &Who) -> Verdict {
         let (setting, source) = self.setting(who);
+        // "Always" is offered unless the word it would override is Nix's:
+        // the template is a default, not a ceiling (§11.15, 2b).
+        let own_nix = self
+            .files
+            .as_ref()
+            .is_some_and(|f| own_is_nix(&f.config, "microphone", who));
         let verdict = match verdict(setting, source, self.display) {
-            Verdict::Ask { remember } => Verdict::Ask {
-                remember: remember && *who != Who::Unknown,
+            Verdict::Ask { .. } => Verdict::Ask {
+                remember: !own_nix && *who != Who::Unknown,
             },
             other => other,
         };
@@ -915,12 +899,16 @@ impl Policy {
             return Ok(());
         };
         match who {
-            Who::Main => match f.place(&self.zone) {
-                Some((_, dir)) => {
-                    std::fs::write(dir.join(MARKER), "yes").map_err(|e| e.to_string())
+            // The main home's own record (§11.15, 2a), in every network.
+            Who::Main => {
+                let file =
+                    crate::container::policy_dir_in(&f.config, crate::container::MAIN_RECORD)
+                        .join(crate::container::FILE);
+                if let Some(dir) = file.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
                 }
-                None => Err("сеть экземпляра сейчас не известна".to_owned()),
-            },
+                crate::container::write_key(&file, "microphone", Some(Setting::Yes.as_str()), true)
+            }
             Who::Container(name) => {
                 // Under the lock `container rm` removes under: an answer that
                 // comes while its container is being removed does not bring
@@ -1106,87 +1094,66 @@ mod tests {
         }
     }
 
-    /// Ask by default; the zone's marker over it; Nix over both; anything
-    /// that is not one of the three words is no.
+    /// 2b of §11.15: the template decides — `ask` by default, the local
+    /// template over it, Nix's over both; a network's marker of before has
+    /// no say; anything that is not one of the three words is no.
     #[test]
-    fn nix_wins_over_the_marker_and_the_marker_over_ask() {
+    fn the_template_decides_and_the_network_does_not() {
         let d = Dirs::new("precedence");
         assert_eq!(d.setting(), (Setting::Ask, Source::Default));
-        d.write("state/nl/microphone", "");
-        assert_eq!(d.setting(), (Setting::Ask, Source::Default));
         d.write("state/nl/microphone", "yes\n");
+        assert_eq!(d.setting(), (Setting::Ask, Source::Default));
+        d.write("config/defaults.conf", "microphone = yes\n");
         assert_eq!(d.setting(), (Setting::Yes, Source::Local));
-        d.write("state/nl/microphone", "no");
+        d.write("config/defaults.conf", "microphone = on\n");
         assert_eq!(d.setting(), (Setting::No, Source::Local));
-        d.write("state/nl/microphone", "ask");
-        assert_eq!(d.setting(), (Setting::Ask, Source::Local));
-        d.write("state/nl/microphone", "on");
-        assert_eq!(d.setting(), (Setting::No, Source::Local));
-        // Another zone's line is not this zone's.
-        d.declare("microphone", "de yes\nnlx yes\n");
-        assert_eq!(d.setting(), (Setting::No, Source::Local));
-        d.write("state/nl/microphone", "yes");
-        d.declare("microphone", "de yes\nnl no\n");
+        d.write("config/defaults.conf", "microphone = yes\n");
+        d.declare("defaults.conf", "microphone = no\n");
         assert_eq!(d.setting(), (Setting::No, Source::Nix));
-        d.declare("microphone", "nl ask\n");
-        assert_eq!(d.setting(), (Setting::Ask, Source::Nix));
-        d.declare("microphone", "nl maybe\n");
-        assert_eq!(d.setting(), (Setting::No, Source::Nix));
+        d.declare("defaults.conf", "screencast = yes\n");
+        assert_eq!(d.setting(), (Setting::Yes, Source::Local));
         // A declared file that is there and cannot be read: no.
-        crate::declared::declare_unreadable(&d.config().join("declared/microphone"));
+        crate::declared::declare_unreadable(&d.config().join("declared/defaults.conf"));
         assert_eq!(d.setting(), (Setting::No, Source::Nix));
-        // A plain file where Nix's link was is nobody's word: the marker's.
-        std::fs::remove_file(d.config().join("declared/microphone")).unwrap();
-        d.write("config/declared/microphone", "nl no\n");
-        assert_eq!(d.setting(), (Setting::Yes, Source::Local));
     }
 
-    /// Review 2026-09-28: an instance's filter reads the network the
-    /// instance is in now — after a live switch the new one's word, Nix's
-    /// included, never the old one's; while the network cannot be known at
-    /// the moment, `no`.
+    /// An instance's filter reads the template whatever network the
+    /// instance is in now (2b of §11.15: the network has no say); while the
+    /// network cannot be known at the moment, `no`, as before.
     #[test]
-    fn an_instances_filter_follows_the_network_it_is_in_now() {
+    fn an_instances_filter_reads_the_template_in_any_network() {
         let d = Dirs::new("follows");
         std::fs::create_dir_all(d.base.join("state/de")).unwrap();
         std::fs::create_dir_all(d.base.join("instance")).unwrap();
         let network = d.base.join("instance/network");
         d.write("instance/network", "nl\n");
-        d.write("state/nl/microphone", "yes");
+        d.write("state/nl/microphone", "no");
         d.write("state/de/microphone", "no");
+        d.write("config/defaults.conf", "microphone = yes\n");
         let nobody = PathBuf::from("/nonexistent/kdialog");
         let mic = d
-            .policy(nobody.clone(), false, Duration::ZERO)
+            .policy(nobody, false, Duration::ZERO)
             .following(Some(network));
         let work = Who::Container("work".to_owned());
         assert_eq!(mic.setting(&work), (Setting::Yes, Source::Local));
         assert_eq!(mic.zone(), "nl");
         d.write("instance/network", "de\n");
-        assert_eq!(mic.setting(&work), (Setting::No, Source::Local));
+        assert_eq!(mic.setting(&work), (Setting::Yes, Source::Local));
         assert_eq!(mic.zone(), "de");
-        d.declare("microphone", "nl yes\n");
-        assert_eq!(mic.setting(&work), (Setting::No, Source::Local));
-        d.declare("microphone", "de yes\n");
-        assert_eq!(mic.setting(&work), (Setting::Yes, Source::Nix));
         d.write("instance/network", "");
         assert_eq!(mic.setting(&work), NETWORK_NOT_KNOWN);
-        assert_eq!(mic.zone(), "nl");
-        // A zone's own filter, told no file: its zone, as ever.
-        d.write("instance/network", "de\n");
-        let zone = d.policy(nobody, false, Duration::ZERO);
-        assert_eq!(zone.zone(), "nl");
-        assert_eq!(zone.setting(&work), (Setting::Yes, Source::Local));
     }
 
     /// The restricted PipeWire of an instance (`pw_context::InstanceMic`)
     /// the same way.
     #[test]
-    fn an_instances_pipewire_follows_the_network_it_is_in_now() {
+    fn an_instances_pipewire_reads_the_template_in_any_network() {
         use crate::pw_context::MicSource;
         let d = Dirs::new("pw-follows");
         std::fs::create_dir_all(d.base.join("state/de")).unwrap();
-        d.write("state/nl/microphone", "yes");
+        d.write("state/nl/microphone", "no");
         d.write("state/de/microphone", "no");
+        d.write("config/defaults.conf", "microphone = yes\n");
         d.write("network", "nl\n");
         let mic = crate::pw_context::InstanceMic {
             zone: "nl".to_owned(),
@@ -1198,10 +1165,8 @@ mod tests {
         };
         assert_eq!(mic.setting(), Setting::Yes);
         d.write("network", "de\n");
-        assert_eq!(mic.setting(), Setting::No);
-        assert_eq!(mic.setting_for(&Who::Main), Setting::No);
-        d.write("network", "nl\n");
         assert_eq!(mic.setting(), Setting::Yes);
+        assert_eq!(mic.setting_for(&Who::Main), Setting::Yes);
         d.write("network", "");
         assert_eq!(mic.setting(), Setting::No);
     }
@@ -1252,16 +1217,21 @@ mod tests {
         let long = shown_program(&"a".repeat(500));
         assert_eq!(long.chars().count(), SHOWN_NAME + 1);
         let q = question("nl", &Who::Main, "zoom\n\nЗона: host", true);
-        assert!(q.contains("зоны «nl»"), "{q}");
+        assert!(q.contains("Программа настоящего дома (сеть «nl»)"), "{q}");
         assert!(
             q.contains("«zoom  Зона: host» — это её собственные слова"),
             "{q}"
         );
-        // "Always" is the zone's, and the text says so where it is offered.
+        // "Always" is the main home's, in every network, and the text says
+        // so where it is offered.
         assert!(
             q.contains(
-                "«Всегда — всей зоне «nl»» — это любой программе зоны «nl», кроме контейнеров"
+                "«Всегда — настоящему дому» — это любой программе настоящего дома, в любой сети"
             ),
+            "{q}"
+        );
+        assert!(
+            q.contains("cellward container set main microphone ask"),
             "{q}"
         );
         let q = question("nl", &Who::Main, "zoom", false);
@@ -1271,35 +1241,46 @@ mod tests {
     #[test]
     fn once_always_and_deny_as_the_person_answers() {
         let d = Dirs::new("answers");
-        let marker = d.zone().join(MARKER);
+        let record = d.config().join("containers/main/container.conf");
         // Once: this stream, nothing written.
         let p = d.policy(d.kdialog("once", "exit 0"), true, TIMEOUT);
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
         assert!(p.ask("app", &Who::Main, true, |a| a));
-        assert!(!marker.exists());
+        assert!(!record.exists());
         // Deny.
         let p = d.policy(d.kdialog("deny", "exit 2"), true, TIMEOUT);
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
         assert!(!p.ask("app", &Who::Main, true, |a| a));
-        assert!(!marker.exists());
-        // Always: yes in the marker, and the next stream is not asked about.
+        assert!(!record.exists());
+        // Always: yes in the main home's own record (§11.15, 2a) — in every
+        // network —, and the next stream is not asked about.
         let p = d.policy(d.kdialog("always", "exit 1"), true, TIMEOUT);
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
         assert!(p.ask("app", &Who::Main, true, |a| a));
-        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "yes");
+        let conf = std::fs::read_to_string(&record).unwrap();
+        assert!(conf.contains("microphone = yes"), "{conf}");
+        assert!(!d.zone().join(MARKER).exists());
         assert_eq!(p.decide("app", &Who::Main), Verdict::Allow);
-        // Nix says ask: "always" is not offered, and its button is a no.
-        std::fs::remove_file(&marker).unwrap();
-        d.declare("microphone", "nl ask\n");
+        // Its own word declared in Nix: "always" is not offered, and its
+        // button is a no.
+        std::fs::remove_file(&record).unwrap();
+        d.declare("containers/main.conf", "home = main\nmicrophone = ask\n");
         let p = d.policy(d.kdialog("two", "exit 1"), true, TIMEOUT);
         assert_eq!(
             p.decide("app", &Who::Main),
             Verdict::Ask { remember: false }
         );
         assert!(!p.ask("app", &Who::Main, false, |a| a));
-        assert!(!marker.exists());
+        assert!(!record.exists());
+        // A template declared in Nix is a default, not a ceiling: "always"
+        // is offered over it.
+        std::fs::remove_file(d.config().join("declared/containers/main.conf")).unwrap();
+        d.declare("defaults.conf", "microphone = ask\n");
+        let p = d.policy(d.kdialog("three", "exit 2"), true, TIMEOUT);
+        assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
+        assert!(!p.ask("app", &Who::Main, true, |a| a));
         let journal = d.journal();
-        assert_eq!(journal.matches("\"event\":\"microphone\"").count(), 4);
+        assert_eq!(journal.matches("\"event\":\"microphone\"").count(), 5);
         assert!(journal.contains("\"decision\":\"refused\",\"why\":\"человек отказал\""));
     }
 
@@ -1360,9 +1341,9 @@ mod tests {
         assert!(why.contains("недавно отказал"), "{why}");
         assert!(!asked.exists());
         // The switch itself still decides: yes lets it through at once.
-        d.write("state/nl/microphone", "yes");
+        d.write("config/defaults.conf", "microphone = yes\n");
         assert_eq!(p.decide("app", &Who::Main), Verdict::Allow);
-        std::fs::remove_file(d.zone().join(MARKER)).unwrap();
+        std::fs::remove_file(d.config().join("defaults.conf")).unwrap();
         // Once the quiet is over, the zone is asked again.
         let p = d
             .policy(kdialog, true, TIMEOUT)
@@ -1492,19 +1473,19 @@ mod tests {
         assert!(p.ask("app", &Who::Main, true, |a| a));
     }
 
-    /// A container's own setting (`docs/PERMISSIONS.md` §11.10): Nix's
-    /// word for the container, then Nix's for the zone, then the
-    /// container's local one, then the zone's marker. A container with
-    /// none of its own is the zone's.
+    /// A container's own word over the template, both ways (2b of §11.15);
+    /// Nix's word for the container over its local one; a word that is none
+    /// of the three, or a file that cannot be read, `no`.
     #[test]
-    fn a_container_has_its_own_setting_and_nix_is_never_overridden() {
+    fn a_container_has_its_own_setting_and_its_nix_word_is_never_overridden() {
         let d = Dirs::new("container");
         let work = Who::Container("work".into());
         let setting = |who: &Who| setting_for(&d.zone(), &d.config(), "nl", who);
         assert_eq!(setting(&work), (Setting::Ask, Source::Default));
         d.write("state/nl/microphone", "yes");
+        assert_eq!(setting(&work), (Setting::Ask, Source::Default));
+        d.write("config/defaults.conf", "microphone = yes\n");
         assert_eq!(setting(&work), (Setting::Yes, Source::Local));
-        // Its own local word over the zone's marker.
         std::fs::create_dir_all(d.config().join("containers/work")).unwrap();
         d.write("config/containers/work/container.conf", "microphone = no\n");
         assert_eq!(setting(&work), (Setting::No, Source::Local));
@@ -1514,88 +1495,70 @@ mod tests {
             "microphone = maybe\n",
         );
         assert_eq!(setting(&work), (Setting::No, Source::Local));
-        // Nix's word for the zone over the container's local one.
+        // The template in Nix is a default, not a ceiling.
+        d.declare("defaults.conf", "microphone = no\n");
         d.write(
             "config/containers/work/container.conf",
             "microphone = yes\n",
         );
-        d.declare("microphone", "nl no\n");
-        assert_eq!(setting(&work), (Setting::No, Source::Nix));
-        // …but a local word that lets less through wins (review
-        // 2026-09-28): `ask` under the zone's declared `yes`, `no` under
-        // its `ask`; one as open as the declared one names Nix.
-        d.declare("microphone", "nl yes\n");
-        assert_eq!(setting(&work), (Setting::Yes, Source::Nix));
-        d.write(
-            "config/containers/work/container.conf",
-            "microphone = ask\n",
-        );
-        assert_eq!(setting(&work), (Setting::Ask, Source::Local));
-        d.declare("microphone", "nl ask\n");
-        assert_eq!(setting(&work), (Setting::Ask, Source::Nix));
-        d.write("config/containers/work/container.conf", "microphone = no\n");
-        assert_eq!(setting(&work), (Setting::No, Source::Local));
-        d.write(
-            "config/containers/work/container.conf",
-            "microphone = yes\n",
-        );
-        d.declare("microphone", "nl no\n");
-        // Nix's word for the container over everything.
+        assert_eq!(setting(&work), (Setting::Yes, Source::Local));
+        assert_eq!(setting(&Who::Main), (Setting::No, Source::Nix));
+        // Nix's word for the container over its local one.
         d.declare("containers/work.conf", "home = private\nmicrophone = ask\n");
         assert_eq!(setting(&work), (Setting::Ask, Source::Nix));
         // An old module's file of another container is not this one's.
-        d.declare("containers/work.conf", "microphone = yes\n");
-        assert_eq!(setting(&work), (Setting::No, Source::Nix));
+        d.declare("containers/work.conf", "microphone = no\n");
+        assert_eq!(setting(&work), (Setting::Yes, Source::Local));
         // A settings file that cannot be read: no.
-        std::fs::remove_file(d.config().join("declared/microphone")).unwrap();
         std::fs::remove_file(d.config().join("containers/work/container.conf")).unwrap();
         std::fs::create_dir(d.config().join("containers/work/container.conf")).unwrap();
         assert_eq!(setting(&work), (Setting::No, Source::Local));
     }
 
-    /// Review 2026-09-28, every combination of the zone's word and source
-    /// and the container's own: a local word under a declared zone's lets
-    /// less through or is not taken; the container's declared word, both
-    /// ways; over a local or default zone, the container's own.
+    /// 2b of §11.15, every combination: a container's own word — Nix's or
+    /// local — is taken over the template both ways; without one, the
+    /// template; for a program of no known container, the template but
+    /// never `yes`.
     #[test]
-    fn a_local_word_closes_under_nix_and_never_opens() {
+    fn the_own_word_is_over_the_template_both_ways() {
+        let base = std::env::temp_dir().join(format!("vpn-zone-mic-tpl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let config = base.join("config");
+        let record = config.join("containers").join("work");
+        std::fs::create_dir_all(&record).unwrap();
         let settings = [Setting::No, Setting::Ask, Setting::Yes];
         let sources = [Source::Nix, Source::Local, Source::Default];
-        for zone_setting in settings {
-            for zone_source in sources {
-                let zone = (zone_setting, zone_source);
-                let mut owns: Vec<Option<(Setting, Source)>> = vec![None];
+        for tpl in settings {
+            for tpl_source in sources {
+                let template = (tpl, tpl_source);
+                let _ = std::fs::remove_file(record.join(crate::container::FILE));
+                let who = Who::Container("work".into());
+                assert_eq!(
+                    by_container(template, &config, "microphone", &who),
+                    template
+                );
+                let unknown = by_container(template, &config, "microphone", &Who::Unknown);
+                let expected = if tpl == Setting::Yes {
+                    Setting::Ask
+                } else {
+                    tpl
+                };
+                assert_eq!(unknown, (expected, tpl_source));
                 for own in settings {
-                    owns.push(Some((own, Source::Nix)));
-                    owns.push(Some((own, Source::Local)));
-                }
-                for own in owns {
-                    let got = container_over_zone(zone, own);
-                    let case = format!("zone {zone:?}, own {own:?}: {got:?}");
-                    match own {
-                        None => assert_eq!(got, zone, "{case}"),
-                        Some(own @ (_, Source::Nix)) => assert_eq!(got, own, "{case}"),
-                        Some(own) if zone_source == Source::Nix => {
-                            let expected = if openness(own.0) < openness(zone_setting) {
-                                own
-                            } else {
-                                zone
-                            };
-                            assert_eq!(got, expected, "{case}");
-                            assert!(
-                                openness(got.0) <= openness(zone_setting),
-                                "a local word opened: {case}"
-                            );
-                            assert!(
-                                openness(got.0) <= openness(own.0),
-                                "a local word did not close: {case}"
-                            );
-                        }
-                        Some(own) => assert_eq!(got, own, "{case}"),
-                    }
+                    std::fs::write(
+                        record.join(crate::container::FILE),
+                        format!("microphone = {}\n", own.as_str()),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        by_container(template, &config, "microphone", &who),
+                        (own, Source::Local),
+                        "template {template:?}, own {own:?}"
+                    );
                 }
             }
         }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// "Always" for a program of a container is the container's: its
@@ -1632,7 +1595,7 @@ mod tests {
     #[test]
     fn a_program_of_no_known_container_is_asked_and_never_for_always() {
         let d = Dirs::new("unknown");
-        d.write("state/nl/microphone", "yes");
+        d.write("config/defaults.conf", "microphone = yes\n");
         let asked = d.base.join("asked");
         let kdialog = d.kdialog("always", &format!("touch {}; exit 1", asked.display()));
         let p = d.policy(kdialog, true, TIMEOUT);
@@ -1652,7 +1615,7 @@ mod tests {
         // Nobody to ask: refused.
         let p = d.policy(d.kdialog("once", "exit 0"), false, TIMEOUT);
         assert!(matches!(p.decide("app", &Who::Unknown), Verdict::Refuse(_)));
-        d.write("state/nl/microphone", "no");
+        d.write("config/defaults.conf", "microphone = no\n");
         assert!(matches!(p.decide("app", &Who::Unknown), Verdict::Refuse(_)));
     }
 
@@ -1662,7 +1625,7 @@ mod tests {
         let work = Who::Container("work".into());
         let q = question("nl", &work, "zoom", true);
         assert!(
-            q.starts_with("Программа из контейнера «work» (зона «nl»)"),
+            q.starts_with("Программа из контейнера «work» (сеть «nl»)"),
             "{q}"
         );
         assert!(
@@ -1679,18 +1642,14 @@ mod tests {
         // A container's name is shown with no markup.
         let q = question("nl", &Who::Container("<b>x</b>".into()), "zoom", false);
         assert!(q.contains("«‹b›x‹/b›»"), "{q}");
-        assert_eq!(always_label("nl", &Who::Main), "Всегда — всей зоне «nl»");
+        assert_eq!(always_label("nl", &Who::Main), "Всегда — настоящему дому");
     }
 
     /// For the whole zone at once — the restricted PipeWire of a zone's own
-    /// space (`pw_context::ZoneMic`) —: the zone's own setting. Until stage
-    /// 5 of the container design it was made stricter by every container
-    /// launched into the zone since it came up (`strictest_running`, and
-    /// this test said so); no container is launched into a zone's own
-    /// namespaces any more — its programs are in its instance, whose helpers
-    /// go by its container — so a container's word does not count here.
+    /// space (`pw_context::ZoneMic`) —: the template (2b of §11.15); a
+    /// container's word does not count here.
     #[test]
-    fn the_whole_zone_is_as_strict_as_its_own_setting() {
+    fn the_whole_zone_reads_the_template() {
         use crate::pw_context::MicSource;
         let d = Dirs::new("strictest");
         let mic = crate::pw_context::ZoneMic {
@@ -1698,7 +1657,7 @@ mod tests {
             zone_dir: d.zone(),
             config: d.config(),
         };
-        d.write("state/nl/microphone", "yes");
+        d.write("config/defaults.conf", "microphone = yes\n");
         assert_eq!(mic.setting(), Setting::Yes);
         std::fs::create_dir_all(d.config().join("containers/quiet")).unwrap();
         d.write(
@@ -1706,7 +1665,7 @@ mod tests {
             "microphone = no\n",
         );
         assert_eq!(mic.setting(), Setting::Yes);
-        d.write("state/nl/microphone", "ask");
+        d.write("config/defaults.conf", "microphone = ask\n");
         assert_eq!(mic.setting(), Setting::Ask);
     }
 }

@@ -75,19 +75,23 @@ pub const INTERFACE: &str = "org.freedesktop.portal.ScreenCast";
 /// must not wash the journal's history out. stderr gets every one.
 const QUIET: Duration = Duration::from_secs(10);
 
-/// The zone's setting and where it comes from.
-pub fn setting(zone_dir: &Path, config: &Path, zone: &str) -> (Setting, Source) {
-    crate::microphone::zone_switch(Some(zone_dir), config, zone, MARKER, DECLARED)
+/// What a program with no word of its container's gets: the template
+/// (`crate::permissions`, 2b of `docs/PERMISSIONS.md` §11.15) — whatever
+/// network it runs in. The zone's arguments are kept for the callers'
+/// shape.
+pub fn setting(_zone_dir: &Path, config: &Path, _zone: &str) -> (Setting, Source) {
+    crate::permissions::switch(config, "screencast")
 }
 
 /// What a refused call is told, and the journal says: why.
 pub fn refusal(zone: &str, who: &Who, source: Source) -> String {
     let whose = match who {
         Who::Container(name) => format!(
-            "контейнера «{}» (зона «{zone}»)",
+            "контейнера «{}» (сеть «{zone}»)",
             crate::broker::shown_word(name)
         ),
-        _ => format!("зоны «{zone}»"),
+        Who::Main => format!("настоящего дома (сеть «{zone}»)"),
+        Who::Unknown => format!("программы неизвестного контейнера (сеть «{zone}»)"),
     };
     match source {
         Source::Nix => format!("трансляция экрана выключена для {whose} (задано в Nix)"),
@@ -217,10 +221,10 @@ impl Policy {
             // Nix may have said "no" there.
             return (Setting::No, Source::Nix);
         };
-        let Some((zone, zone_dir)) = self.place() else {
+        if self.place().is_none() {
             return crate::microphone::NETWORK_NOT_KNOWN;
-        };
-        crate::microphone::zone_switch(zone_dir.as_deref(), config, &zone, MARKER, DECLARED)
+        }
+        crate::permissions::switch(config, "screencast")
     }
 
     /// Whose program the peer of a connection is (`crate::origin`). The
@@ -267,7 +271,7 @@ impl Policy {
         let short = match (source, who) {
             (Source::Nix, _) => "выключена в Nix",
             (_, Who::Container(_)) => "выключена настройкой контейнера",
-            _ => "выключена настройкой зоны",
+            _ => "выключена настройкой",
         };
         let container = match who {
             Who::Main => String::new(),
@@ -326,82 +330,69 @@ mod tests {
         }
     }
 
-    /// The microphone's rules under the screen cast's names: ask by default,
-    /// the zone's marker over it, Nix over both, anything else is no — and
-    /// the one does not read the other's files.
+    /// The template under the screen cast's name (2b of §11.15): ask by
+    /// default, the local template over it, Nix over both, anything else
+    /// is no — the microphone's key is not read, nor a network's marker.
     #[test]
-    fn nix_wins_over_the_marker_and_the_marker_over_ask() {
+    fn the_template_decides_and_the_network_does_not() {
         let d = Dirs::new("precedence");
         let read = || setting(&d.base.join("state/nl"), &d.base.join("config"), "nl");
         assert_eq!(read(), (Setting::Ask, Source::Default));
-        d.write("state/nl/microphone", "yes");
-        d.declare("microphone", "nl no\n");
-        assert_eq!(read(), (Setting::Ask, Source::Default));
-        d.write("state/nl/screencast", "yes\n");
-        assert_eq!(read(), (Setting::Yes, Source::Local));
-        d.write("state/nl/screencast", "sure");
-        assert_eq!(read(), (Setting::No, Source::Local));
         d.write("state/nl/screencast", "yes");
-        d.declare("screencast", "de no\nnl ask\n");
+        d.write("config/defaults.conf", "microphone = yes\n");
+        assert_eq!(read(), (Setting::Ask, Source::Default));
+        d.write("config/defaults.conf", "screencast = yes\n");
+        assert_eq!(read(), (Setting::Yes, Source::Local));
+        d.write("config/defaults.conf", "screencast = sure\n");
+        assert_eq!(read(), (Setting::No, Source::Local));
+        d.declare("defaults.conf", "screencast = ask\n");
         assert_eq!(read(), (Setting::Ask, Source::Nix));
-        d.declare("screencast", "nl maybe\n");
-        assert_eq!(read(), (Setting::No, Source::Nix));
     }
 
-    /// The filter reads through what it held at its start: the paths may be
-    /// covered afterwards (here: the directory moved away and another put in
-    /// its place), and the switch is still the zone's own, read afresh.
+    /// The filter reads through what it held at its start: the config
+    /// directory may be covered afterwards (here: moved away and another put
+    /// in its place), and the template is still read afresh from the held
+    /// one; with none held, Nix's `no`.
     #[test]
     fn the_filter_reads_through_what_it_held() {
         let d = Dirs::new("held");
         let p = d.policy();
         assert_eq!(p.setting(), (Setting::Ask, Source::Default));
-        std::fs::rename(d.base.join("state/nl"), d.base.join("state/moved")).unwrap();
-        std::fs::create_dir_all(d.base.join("state/nl")).unwrap();
-        d.write("state/nl/screencast", "yes");
-        d.write("state/moved/screencast", "no");
+        std::fs::rename(d.base.join("config"), d.base.join("moved")).unwrap();
+        std::fs::create_dir_all(d.base.join("config")).unwrap();
+        d.write("config/defaults.conf", "screencast = yes\n");
+        d.write("moved/defaults.conf", "screencast = no\n");
         assert_eq!(p.setting(), (Setting::No, Source::Local));
-        d.write("state/moved/screencast", "yes");
+        d.write("moved/defaults.conf", "screencast = yes\n");
         assert_eq!(p.setting(), (Setting::Yes, Source::Local));
-        // What it could not hold is a file that cannot be read: no.
-        let lost = Policy::hold("nl", &d.base.join("state/none"), &d.base.join("config"));
-        assert_eq!(lost.setting(), (Setting::No, Source::Local));
-        d.declare("screencast", "nl yes\n");
-        assert_eq!(lost.setting(), (Setting::Yes, Source::Nix));
-        let blind = Policy::hold("nl", &d.base.join("state/moved"), &d.base.join("nowhere"));
+        let blind = Policy::hold("nl", &d.base.join("state/nl"), &d.base.join("nowhere"));
         assert_eq!(blind.setting(), (Setting::No, Source::Nix));
     }
 
-    /// Review 2026-09-28: an instance's filter reads the switch of the
-    /// network the instance is in now — through what it held: the state
-    /// directory, and the `network` file the keeper rewrites in place; one
-    /// it could not hold, or that names no network, is `no`.
+    /// An instance's filter reads the template in whatever network the
+    /// instance is in now (2b of §11.15); the network it follows is still
+    /// told, and one it could not hold, or that names none, is `no`.
     #[test]
-    fn an_instances_filter_follows_the_network_it_is_in_now() {
+    fn an_instances_filter_reads_the_template_in_any_network() {
         let d = Dirs::new("follows");
         std::fs::create_dir_all(d.base.join("state/de")).unwrap();
         std::fs::create_dir_all(d.base.join("instance")).unwrap();
         d.write("instance/network", "nl\n");
-        d.write("state/nl/screencast", "yes");
-        d.write("state/de/screencast", "no");
+        d.write("state/nl/screencast", "no");
+        d.write("config/defaults.conf", "screencast = yes\n");
         let p = d
             .policy()
             .following(Some(d.base.join("instance/network").as_path()));
         assert_eq!(p.setting(), (Setting::Yes, Source::Local));
         assert_eq!(p.zone(), "nl");
         d.write("instance/network", "de\n");
-        assert_eq!(p.setting(), (Setting::No, Source::Local));
+        assert_eq!(p.setting(), (Setting::Yes, Source::Local));
         assert_eq!(p.zone(), "de");
         assert_eq!(
             p.refused(&Who::Main, Source::Local),
-            "трансляция экрана выключена для зоны «de»"
+            "трансляция экрана выключена для настоящего дома (сеть «de»)"
         );
-        // Held: another file put in its place is not read.
-        std::fs::rename(d.base.join("instance"), d.base.join("moved")).unwrap();
-        std::fs::create_dir_all(d.base.join("instance")).unwrap();
-        d.write("instance/network", "nl\n");
-        assert_eq!(p.zone(), "de");
-        d.write("moved/network", "");
+        d.write("instance/network", "");
         assert_eq!(p.setting(), crate::microphone::NETWORK_NOT_KNOWN);
         let lost = d
             .policy()
@@ -417,7 +408,10 @@ mod tests {
         let d = Dirs::new("journal");
         let p = d.policy();
         let why = p.refused(&Who::Main, Source::Local);
-        assert_eq!(why, "трансляция экрана выключена для зоны «nl»");
+        assert_eq!(
+            why,
+            "трансляция экрана выключена для настоящего дома (сеть «nl»)"
+        );
         assert!(p
             .refused(&Who::Main, Source::Nix)
             .ends_with("(задано в Nix)"));
@@ -426,7 +420,7 @@ mod tests {
         assert_eq!(journal.matches("\"event\":\"screencast\"").count(), 1);
         assert!(
             journal.contains(
-                "\"zone\":\"nl\",\"container\":\"\",\"decision\":\"refused\",\"why\":\"выключена настройкой зоны\""
+                "\"zone\":\"nl\",\"container\":\"\",\"decision\":\"refused\",\"why\":\"выключена настройкой\""
             ),
             "{journal}"
         );
@@ -439,7 +433,7 @@ mod tests {
         let d = Dirs::new("container");
         let p = d.policy();
         let work = Who::Container("work".into());
-        d.write("state/nl/screencast", "yes");
+        d.write("config/defaults.conf", "screencast = yes\n");
         assert_eq!(p.setting_for(&work), (Setting::Yes, Source::Local));
         std::fs::create_dir_all(d.base.join("config/containers/work")).unwrap();
         d.write("config/containers/work/container.conf", "screencast = no\n");
@@ -451,7 +445,7 @@ mod tests {
         assert_eq!(p.setting_for(&work), (Setting::Yes, Source::Local));
         assert_eq!(
             p.refused(&work, Source::Local),
-            "трансляция экрана выключена для контейнера «work» (зона «nl»)"
+            "трансляция экрана выключена для контейнера «work» (сеть «nl»)"
         );
     }
 }

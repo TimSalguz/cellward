@@ -409,7 +409,6 @@ let
           };
           # The microphone declared for one zone: Nix's word over the zone's
           # own, asserted in the hermetic subtest.
-          programs.cellward.microphone.vmherm = "no";
           # A container declared in Nix: bound to direct, trusting a CA made
           # at build time. What the module writes, the runtime obeys and the
           # CLI refuses to change is asserted below.
@@ -1346,11 +1345,11 @@ let
           told = [e for e in events if e["event"] == "microphone"]
           assert told and told[-1]["zone"] == "vmsmoke" and told[-1]["decision"] == "refused", events
           assert "графической" in told[-1]["why"], told
-          alice("cellward microphone vmsmoke no")
+          alice("cellward defaults set microphone no")
           out = mic()
           assert "mic refused" in out, f"microphone=no was not refused: {out}"
           machine.fail("grep -q '^5 mic' /tmp/pulse-seen")
-          alice("cellward microphone vmsmoke yes")
+          alice("cellward defaults set microphone yes")
           status = json.loads(alice("cellward status --json"))
           zone = next(n for n in status["networks"] if n["name"] == "vmsmoke")
           assert zone["microphone"] == {"value": "yes", "source": "local"}, zone
@@ -1372,7 +1371,7 @@ let
           # connection ends before its reply or its sound reach the zone.
           machine.succeed("grep -qx '5 default' /tmp/pulse-seen")
           assert "conn2 closed 0" in out, f"a monitor's sound reached the zone: {out}"
-          alice("cellward microphone vmsmoke default")
+          alice("cellward defaults set microphone default")
           # The microphone by container (docs/PERMISSIONS.md §11.10): the
           # filter knows a program's container by the launch it descends
           # from and decides by that container's own setting — two
@@ -1392,11 +1391,11 @@ let
           out = mic()
           assert "mic refused" in out, f"the zone's own program got a container's yes: {out}"
           # The zone says yes: the container's own no still stands.
-          alice("cellward microphone vmsmoke yes")
+          alice("cellward defaults set microphone yes")
           out = mic_in("vmmicno")
           assert "mic refused" in out, f"the zone's yes overrode a container's no: {out}"
           assert "mic heard" in mic(), "the zone's own program lost the zone's yes"
-          alice("cellward microphone vmsmoke default")
+          alice("cellward defaults set microphone default")
           # None of its own: the container is the zone's again.
           alice("cellward container set vmmicyes microphone default")
           out = mic_in("vmmicyes")
@@ -1628,13 +1627,12 @@ let
           zone = next(n for n in out["networks"] if n["name"] == "vmherm")
           assert zone["nix_daemon"] == {"value": False, "source": "default"}, zone
           assert zone["host_files_writable"] == {"value": False, "source": "default"}, zone
-          # The microphone Nix declared for it: its own setting does not
-          # override that.
-          assert zone["microphone"] == {"value": "no", "source": "nix"}, zone
-          alice("cellward microphone vmherm yes")
+          # The network has no word for its programs' microphone any more
+          # (2b of docs/PERMISSIONS.md §11.15): the old verb says what to use.
+          alice("! cellward microphone vmherm yes")
+          alice("cellward container set main microphone no")
           out = json.loads(alice("cellward status --json"))
-          zone = next(n for n in out["networks"] if n["name"] == "vmherm")
-          assert zone["microphone"] == {"value": "no", "source": "nix"}, zone
+          assert out["main"]["microphone"] == {"value": "no", "source": "local"}, out["main"]
           # …and the running filter goes by it too (below): a sound server
           # for the zone to come up with.
           alice("systemd-run --user --unit=fakepulseherm ${pkgs.python3}/bin/python3 ${fakePulse}")
@@ -1675,9 +1673,9 @@ let
           # server.
           machine.succeed("rm -f /tmp/pulse-seen")
           out = in_zone(hp, "${pkgs.python3}/bin/python3 ${pulseMic}")
-          assert "mic refused" in out, f"Nix's no did not hold against the zone's yes: {out}"
+          assert "mic refused" in out, f"the main home's no did not hold: {out}"
           machine.fail("grep -q '^5 mic' /tmp/pulse-seen")
-          alice("cellward microphone vmherm default")
+          alice("cellward container set main microphone default")
           alice("systemctl --user stop fakepulseherm.service")
           # The session bus proxy holds the host's unfiltered bus: through
           # its /proc/<pid>/root the zone would have it all. It lives in the

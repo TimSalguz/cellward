@@ -121,7 +121,8 @@ pub fn defaults(tools: &Tools) -> String {
          \"wayland_proxy\":{},\"frames\":{},\"frame_width\":{},\"frame_title\":{},\
          \"frame_buttons\":{},\"frame_style\":{},\"frame_radius\":{},\"tray_badge\":{},\
          \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{},\"ask_again\":{},\
-         \"question_timeout\":{},\"handshake_check\":{},\"protected\":[{}]}}",
+         \"question_timeout\":{},\"handshake_check\":{},\"protected\":[{}],\
+         \"permissions\":{{\"microphone\":{},\"screencast\":{}}}}}",
         sourced_str(&network, network_source),
         sourced_str(&container, container_source),
         sourced_str(&mode, mode_source),
@@ -140,7 +141,15 @@ pub fn defaults(tools: &Tools) -> String {
         sourced_str(&crate::grants::term_text(ask_again), ask_again_source),
         sourced_str(&question.text(), question_source),
         sourced_str(&handshake.text(), handshake_source),
-        protected.join(",")
+        protected.join(","),
+        {
+            let (s, src) = crate::permissions::switch(&tools.config, "microphone");
+            sourced_str(s.as_str(), src)
+        },
+        {
+            let (s, src) = crate::permissions::switch(&tools.config, "screencast");
+            sourced_str(s.as_str(), src)
+        }
     )
 }
 

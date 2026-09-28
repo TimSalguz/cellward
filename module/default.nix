@@ -775,6 +775,8 @@ let
     "enable"
     "defaults.network"
     "defaults.container"
+    "defaults.permissions.microphone"
+    "defaults.permissions.screencast"
     "launcher.mode"
     "interception.userEntries"
     "autostart.unassigned"
@@ -906,6 +908,20 @@ in
         default = null;
         example = "own";
         description = "Контейнер для запусков по умолчанию: ask, main, own (свой дом у каждой программы) или имя контейнера. null — не задавать из Nix.";
+      };
+      permissions = {
+        microphone = lib.mkOption {
+          type = lib.types.nullOr (lib.types.enum [ "yes" "no" "ask" ]);
+          default = null;
+          example = "ask";
+          description = "Не действует с 2026-09-29: сеть больше не решает это за свои программы (docs/PERMISSIONS.md §11.15) — defaults.permissions.microphone, containers.<имя>.permissions.microphone, main.permissions.microphone. Прочитано один раз, при переносе в контейнеры: контейнер, привязанный к сети, получил её значение своим. Прежнее описание: Микрофон программ контейнера без своего слова (и настоящего дома без своего): yes, no или ask — спросить при первой записи. Сеть этого больше не решает (docs/PERMISSIONS.md §11.15). Своё слово контейнера — containers.<имя>.permissions.microphone, настоящего дома — main.permissions.microphone; оно берёт верх над этим в обе стороны. null — не задавать из Nix (cellward defaults set microphone …, иначе ask).";
+        };
+        screencast = lib.mkOption {
+          type = lib.types.nullOr (lib.types.enum [ "yes" "no" "ask" ]);
+          default = null;
+          example = "ask";
+          description = "Не действует с 2026-09-29: сеть больше не решает это за свои программы (docs/PERMISSIONS.md §11.15) — defaults.permissions.screencast, containers.<имя>.permissions.screencast, main.permissions.screencast. Прочитано один раз, при переносе в контейнеры: контейнер, привязанный к сети, получил её значение своим. Прежнее описание: Трансляция экрана через портал у программ контейнера без своего слова: yes, no или ask. Как microphone выше. null — не задавать из Nix (cellward defaults set screencast …, иначе ask).";
+        };
       };
     };
 
@@ -1276,6 +1292,18 @@ in
           )
       ) cfg.containers
     )
+    ++ lib.optional (cfg.microphone != { }) (
+      "programs.cellward.microphone не действует: сеть больше не решает, записывают ли её "
+      + "программы микрофон (docs/PERMISSIONS.md §11.15) — "
+      + "programs.cellward.defaults.permissions.microphone для всех без своего слова, "
+      + "containers.<имя>.permissions.microphone и main.permissions.microphone — своё"
+    )
+    ++ lib.optional (cfg.screencast != { }) (
+      "programs.cellward.screencast не действует: сеть больше не решает трансляцию экрана "
+      + "своих программ (docs/PERMISSIONS.md §11.15) — "
+      + "programs.cellward.defaults.permissions.screencast для всех без своего слова, "
+      + "containers.<имя>.permissions.screencast и main.permissions.screencast — своё"
+    )
     ++ lib.optional (cfg.audioManager != [ ]) (
       "programs.cellward.audioManager устарело: PipeWire хоста без ограничений теперь у "
       + "контейнера — programs.cellward.containers.<имя>.permissions.audioManager (зона "
@@ -1480,6 +1508,12 @@ in
     })
     (lib.mkIf (cfg.questionTimeout != null) {
       ".config/vpn-zones/declared/question-timeout".text = cfg.questionTimeout;
+    })
+    (lib.mkIf (cfg.defaults.permissions.microphone != null || cfg.defaults.permissions.screencast != null) {
+      ".config/vpn-zones/declared/defaults.conf".text = lib.concatStrings (
+        lib.optional (cfg.defaults.permissions.microphone != null) "microphone = ${cfg.defaults.permissions.microphone}\n"
+        ++ lib.optional (cfg.defaults.permissions.screencast != null) "screencast = ${cfg.defaults.permissions.screencast}\n"
+      );
     })
     (lib.mkIf (cfg.protect != [ ]) {
       ".config/vpn-zones/declared/protect".text = lib.concatMapStrings (p: "${p}\n") cfg.protect;

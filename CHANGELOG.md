@@ -5,6 +5,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- **The network no longer decides whether its programs record the
+  microphone or cast the screen** (2026-09-29, 2b of
+  `docs/PERMISSIONS.md` §11.15).
+  - What decides is the program's container's own word — or the main home's
+    own record's.
+  - Otherwise the template (`cellward defaults set microphone|screencast
+    yes|no|ask`, `programs.cellward.defaults.permissions.*`), else `ask`.
+  - The template is a default, not a ceiling: a container's word is taken
+    over it both ways. "Always" is offered unless the container's own word
+    is Nix's.
+  - "Always" for a program of the real home writes the main home's record,
+    in every network, not a network-wide yes.
+  - `cellward microphone|screencast <network> …` say what to use instead.
+    `programs.cellward.microphone` and `screencast` warn that they no longer
+    hold.
+  - Once, the networks' words of before become containers' own, never wider:
+    - a container bound to a network takes its word where it differs from
+      the template;
+    - the main home and the unbound containers take the narrowest of all
+      networks' words, where it is narrower than the template;
+    - the journal says what moved.
+  - `status --json`: `defaults.permissions`; `networks[].microphone` and
+    `screencast` show the template.
+
 ### Added
 - **The main home has a record of its own** (2026-09-29, 2a of
   `docs/PERMISSIONS.md` §11.15). Its permissions are set as a container's —

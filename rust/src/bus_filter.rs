@@ -3314,14 +3314,14 @@ mod tests {
         let got = s.through(&select_sources(10, ":1.7"));
         assert_eq!(remembers(&got), (false, false));
         // yes: remembered, the token passed.
-        d.write("state/nl/screencast", "yes");
+        d.write("config/defaults.conf", "screencast = yes\n");
         let got = s.through(&select_sources(11, ":1.7"));
         assert_eq!(remembers(&got), (true, true));
         // Other calls of the interface pass as they are.
         let got = s.through(&method(12, ":1.7", SCREENCAST, "CreateSession", 0));
         assert_eq!(wire::parse_header(&got).unwrap().serial, 12);
         // no: refused, whatever the call.
-        d.write("state/nl/screencast", "no");
+        d.write("config/defaults.conf", "screencast = no\n");
         for (serial, member) in [(13, "CreateSession"), (14, "Start")] {
             s.program
                 .send(&method(serial, PORTAL, SCREENCAST, member, 0), &[]);
@@ -3340,11 +3340,11 @@ mod tests {
         assert!(s.bus.quiet(HELD), "a refused call went up");
         // Once in the journal for the three: at most a line per ten seconds.
         assert_eq!(d.journal().matches("\"event\":\"screencast\"").count(), 1);
-        // Nix over the zone's own word, at once.
-        d.declare("screencast", "nl ask\n");
+        // Nix's template over the local one, at once (2b of §11.15).
+        d.declare("defaults.conf", "screencast = ask\n");
         let got = s.through(&select_sources(16, ":1.7"));
         assert_eq!(remembers(&got), (false, false));
-        d.declare("screencast", "nl no\n");
+        d.declare("defaults.conf", "screencast = no\n");
         s.program.send(&select_sources(17, ":1.7"), &[]);
         let (msg, h, _) = s.program.message();
         assert_eq!(h.reply_serial, Some(17));
@@ -3360,7 +3360,7 @@ mod tests {
     #[test]
     fn yes_is_ask_where_the_portal_does_not_know_the_zone() {
         let d = ZoneDirs::new("unknown");
-        d.write("state/nl/screencast", "yes");
+        d.write("config/defaults.conf", "screencast = yes\n");
         // No id at all.
         let policy = d.policy();
         let mut s = Served::start("cast-anon", None, |c| Ctx {
@@ -3408,7 +3408,7 @@ mod tests {
     #[test]
     fn a_container_casts_as_its_own_switch_says() {
         let d = ZoneDirs::new("container");
-        d.write("state/nl/screencast", "yes");
+        d.write("config/defaults.conf", "screencast = yes\n");
         fs::create_dir_all(d.base.join("config/containers/work")).unwrap();
         d.write("config/containers/work/container.conf", "screencast = no\n");
         let policy = d.policy();
@@ -3422,7 +3422,7 @@ mod tests {
         let (msg, h, _) = s.program.message();
         assert_eq!((h.kind, h.reply_serial), (wire::ERROR, Some(10)));
         let text = wire::body_string(&msg, &h).unwrap();
-        assert!(text.contains("контейнера «work» (зона «nl»)"), "{text}");
+        assert!(text.contains("контейнера «work» (сеть «nl»)"), "{text}");
         assert!(
             d.journal().contains("\"container\":\"work\""),
             "{}",
@@ -3443,7 +3443,7 @@ mod tests {
     #[test]
     fn a_container_with_a_name_of_its_own_keeps_its_own_choice() {
         let d = ZoneDirs::new("container-named");
-        d.write("state/nl/screencast", "ask");
+        d.write("config/defaults.conf", "screencast = ask\n");
         fs::create_dir_all(d.base.join("config/containers/work")).unwrap();
         d.write(
             "config/containers/work/container.conf",

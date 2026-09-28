@@ -501,6 +501,9 @@ pub fn migrate(tools: &Tools) {
         for line in migrate_pins(tools) {
             eprintln!("cellward: {line}");
         }
+        // The networks' words for the programs become containers' own
+        // (2b of docs/PERMISSIONS.md §11.15), once.
+        crate::permissions::migrate(tools);
     }
 }
 
@@ -1809,7 +1812,7 @@ pub fn load_all(tools: &Tools) -> Vec<Container> {
 }
 
 /// [`load_all`] without the move: for the move itself.
-fn load_all_quiet(tools: &Tools) -> Vec<Container> {
+pub(crate) fn load_all_quiet(tools: &Tools) -> Vec<Container> {
     names_in(&tools.config, &tools.profiles)
         .iter()
         .filter_map(|n| load_quiet(tools, n))

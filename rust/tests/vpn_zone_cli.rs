@@ -2492,8 +2492,9 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     assert!(!home.run(&["nix-daemon", "nl", "yes"]).status.success());
     assert!(home.run(&["nix-daemon", "nl", "default"]).status.success());
     assert!(home.run(&["host-files", "nl", "default"]).status.success());
-    // The microphone: ask by default, the zone's marker, Nix over it; the
-    // host's own network has none to set.
+    // The microphone and the screen cast (2b of docs/PERMISSIONS.md
+    // §11.15): the network has no word for its programs any more — status
+    // shows the template for it, and the old verb says what to use.
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
         json.contains("\"microphone\":{\"value\":\"ask\",\"source\":\"default\"}"),
@@ -2503,18 +2504,64 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
         json.contains("\"camera\":null,\"microphone\":null,"),
         "{json}"
     );
-    let out = home.run(&["microphone", "nl", "no"]);
+    for key in ["microphone", "screencast"] {
+        let out = home.run(&[key, "nl", "no"]);
+        assert_eq!(out.status.code(), Some(1), "{key}");
+        let said = stderr(&out);
+        assert!(
+            said.contains(&format!("cellward container set main {key} no")),
+            "{said}"
+        );
+        assert!(
+            said.contains(&format!("cellward defaults set {key} no")),
+            "{said}"
+        );
+        assert!(!home.state().join("nl").join(key).exists());
+    }
+    let out = home.run(&["defaults", "set", "microphone", "no"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("недоступен"), "{}", stdout(&out));
-    // Said for what it is: the switch of pulse and of the zone's restricted
-    // PipeWire; the zone is hermetic here and no audio manager, so nothing
-    // goes around it — neither the raw pipewire-0 nor systemd --user.
-    assert!(stdout(&out).contains("(pulse)"), "{}", stdout(&out));
-    assert!(stdout(&out).contains("PipeWire зоны"), "{}", stdout(&out));
-    assert!(!stdout(&out).contains("pipewire-0"), "{}", stdout(&out));
-    assert!(!stdout(&out).contains("systemd --user"), "{}", stdout(&out));
-    // An audio manager: the raw socket, said loudly, and named as what goes
-    // around the microphone's switch; in status with its source.
+    assert!(
+        stdout(&out).contains("microphone: no\n"),
+        "{}",
+        stdout(&out)
+    );
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"microphone\":{\"value\":\"no\",\"source\":\"local\"}"),
+        "{json}"
+    );
+    assert!(!home
+        .run(&["defaults", "set", "microphone", "maybe"])
+        .status
+        .success());
+    fs::create_dir_all(home.root.join("config/declared")).unwrap();
+    declare(
+        &home.root.join("config/declared/defaults.conf"),
+        "screencast = ask\n",
+    );
+    let out = home.run(&["defaults", "set", "screencast", "no"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("задан в Nix"), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"screencast\":{\"value\":\"ask\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    fs::remove_file(home.root.join("config/declared/defaults.conf")).unwrap();
+    assert!(home
+        .run(&["defaults", "set", "microphone", "default"])
+        .status
+        .success());
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains(
+            "\"microphone\":{\"value\":\"ask\",\"source\":\"default\"},\
+             \"screencast\":{\"value\":\"ask\",\"source\":\"default\"}"
+        ),
+        "{json}"
+    );
+    // An audio manager: the raw socket, said loudly; in status with its
+    // source.
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
         json.contains("\"audio_manager\":{\"value\":false,\"source\":\"default\"}"),
@@ -2531,24 +2578,12 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
         fs::read_to_string(home.state().join("nl/audio-manager")).unwrap(),
         "on"
     );
-    let out = home.run(&["microphone", "nl", "no"]);
-    assert!(
-        stdout(&out).contains("сырой pipewire-0"),
-        "{}",
-        stdout(&out)
-    );
-    assert!(
-        stdout(&out).contains("audio-manager nl off"),
-        "{}",
-        stdout(&out)
-    );
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
         json.contains("\"audio_manager\":{\"value\":true,\"source\":\"local\"}"),
         "{json}"
     );
     assert!(!home.run(&["audio-manager", "nl", "yes"]).status.success());
-    fs::create_dir_all(home.root.join("config/declared")).unwrap();
     declare(&home.root.join("config/declared/audio-manager"), "nl\n");
     assert!(home
         .run(&["audio-manager", "nl", "default"])
@@ -2561,76 +2596,6 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     );
     fs::remove_file(home.root.join("config/declared/audio-manager")).unwrap();
     assert!(!home.state().join("nl/audio-manager").exists());
-    assert_eq!(
-        fs::read_to_string(home.state().join("nl/microphone")).unwrap(),
-        "no"
-    );
-    let json = stdout(&home.run(&["status", "--json"]));
-    assert!(
-        json.contains("\"microphone\":{\"value\":\"no\",\"source\":\"local\"}"),
-        "{json}"
-    );
-    assert!(!home.run(&["microphone", "nl", "maybe"]).status.success());
-    assert!(!home.run(&["microphone", "nowhere", "yes"]).status.success());
-    fs::create_dir_all(home.root.join("config/declared")).unwrap();
-    declare(&home.root.join("config/declared/microphone"), "nl yes\n");
-    let out = home.run(&["microphone", "nl", "ask"]);
-    assert!(stdout(&out).contains("задано в Nix"), "{}", stdout(&out));
-    let json = stdout(&home.run(&["status", "--json"]));
-    assert!(
-        json.contains("\"microphone\":{\"value\":\"yes\",\"source\":\"nix\"}"),
-        "{json}"
-    );
-    fs::remove_file(home.root.join("config/declared/microphone")).unwrap();
-    assert!(home.run(&["microphone", "nl", "default"]).status.success());
-    assert!(!home.state().join("nl/microphone").exists());
-    // The screen cast: ask by default, the zone's marker, Nix over it —
-    // next to the microphone in status; the host's own network has none.
-    let json = stdout(&home.run(&["status", "--json"]));
-    assert!(
-        json.contains(
-            "\"microphone\":{\"value\":\"ask\",\"source\":\"default\"},\
-             \"screencast\":{\"value\":\"ask\",\"source\":\"default\"}"
-        ),
-        "{json}"
-    );
-    let out = home.run(&["screencast", "nl", "no"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("недоступна"), "{}", stdout(&out));
-    assert_eq!(
-        fs::read_to_string(home.state().join("nl/screencast")).unwrap(),
-        "no"
-    );
-    let json = stdout(&home.run(&["status", "--json"]));
-    assert!(
-        json.contains("\"screencast\":{\"value\":\"no\",\"source\":\"local\"}"),
-        "{json}"
-    );
-    // yes, in a hermetic zone: said to need the portal to know the zone,
-    // and to be ask in a file sandbox.
-    let out = home.run(&["screencast", "nl", "yes"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("запомнить"), "{}", stdout(&out));
-    assert!(
-        stdout(&out).contains("знает зону по имени"),
-        "{}",
-        stdout(&out)
-    );
-    assert!(!stdout(&out).contains("не герметична"), "{}", stdout(&out));
-    assert!(!home.run(&["screencast", "nl", "maybe"]).status.success());
-    assert!(!home.run(&["screencast", "nowhere", "yes"]).status.success());
-    assert!(!home.run(&["screencast", "nl"]).status.success());
-    declare(&home.root.join("config/declared/screencast"), "nl ask\n");
-    let out = home.run(&["screencast", "nl", "no"]);
-    assert!(stdout(&out).contains("задано в Nix"), "{}", stdout(&out));
-    let json = stdout(&home.run(&["status", "--json"]));
-    assert!(
-        json.contains("\"screencast\":{\"value\":\"ask\",\"source\":\"nix\"}"),
-        "{json}"
-    );
-    fs::remove_file(home.root.join("config/declared/screencast")).unwrap();
-    assert!(home.run(&["screencast", "nl", "default"]).status.success());
-    assert!(!home.state().join("nl/screencast").exists());
     // The pause after a refusal: a term within 30s…1d, Nix over it.
     let out = home.run(&["ask-again", "10m"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -2696,22 +2661,12 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
              \"ask_again\":{\"value\":\"3m\",\"source\":\"default\"},\
              \"question_timeout\":{\"value\":\"2m\",\"source\":\"default\"},\
              \"handshake_check\":{\"value\":\"6s\",\"source\":\"default\"},\
-             \"protected\":[]}"
+             \"protected\":[],\
+             \"permissions\":{\"microphone\":{\"value\":\"ask\",\"source\":\"default\"},\
+             \"screencast\":{\"value\":\"ask\",\"source\":\"default\"}}}"
         ),
         "{json}"
     );
-    // A zone that is not hermetic: its "no" is said to be no boundary
-    // against systemd --user, which records on the host and writes the
-    // setting.
-    let out = home.run(&["microphone", "nl", "no"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("systemd --user"), "{}", stdout(&out));
-    assert!(home.run(&["microphone", "nl", "default"]).status.success());
-    // Nor is its screen cast switch: no filter reads it there.
-    let out = home.run(&["screencast", "nl", "no"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("не герметична"), "{}", stdout(&out));
-    assert!(home.run(&["screencast", "nl", "default"]).status.success());
     // A local default, and a zone that follows it again.
     let out = home.run(&["hermetic", "--default", "on"]);
     assert!(out.status.success(), "{}", stderr(&out));
