@@ -1469,7 +1469,9 @@ mod tests {
         send_packet(&tap_peer, &out).unwrap();
         assert_eq!(read_frame(&mut stream_peer).as_ref(), Some(&out));
         let back = tcp([203, 0, 113, 7], [10, 254, 0, 2], 443, 40000);
-        stream_peer.write_all(&framed(&[back.clone()])).unwrap();
+        stream_peer
+            .write_all(&framed(std::slice::from_ref(&back)))
+            .unwrap();
         assert_eq!(recv_packet(&tap_peer).as_ref(), Some(&back));
         drop(stream_peer);
         assert_eq!(pump.join().unwrap().unwrap(), End::StreamClosed);
