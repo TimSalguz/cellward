@@ -9,7 +9,10 @@ import json
 with subtest("hermetic zone: a tray icon carries the zone's mark (vm53)"):
     item = "org.kde.StatusNotifierItem-4343-1"
     alice("cellward frame color vmherm '#3366ff'")
-    in_zone(hp, f"setsid -f sh -c '{PY} {TRAY_ITEM} {item} </dev/null >/dev/null 2>&1'")
+    # The redirections on setsid itself: a `sh -c` in between would keep the
+    # driver's pipe open for as long as the item runs, and the call would
+    # never return (docs/GOTCHAS.md, "a background process in a VM test").
+    in_zone(hp, f"sh -c 'setsid -f {PY} {TRAY_ITEM} {item} </dev/null >/dev/null 2>&1'")
     ask = (
         f"busctl --user --timeout=5 --json=short call {item} /StatusNotifierItem "
         "org.freedesktop.DBus.Properties GetAll s org.kde.StatusNotifierItem"
