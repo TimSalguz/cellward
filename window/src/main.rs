@@ -27,13 +27,15 @@
 //! open in another network (or belongs to one) cannot go with a different
 //! network: it is shown greyed out with the reason, and the choice skips it.
 //!
-//! The window's height fits what it shows. It opens at a guess, measures
-//! its lists once they are laid out — what is in view of each and all of it
-//! — and asks once for the height that shows them whole, no taller than
-//! most of its screen: no empty band under a short list, no scroll bar on a
-//! list that would fit (`Window::measured`). Nothing it shows changes height
-//! afterwards: the name of a new container is typed next to the buttons,
-//! and "Секунду…" of a menu stands beside its close button.
+//! The window's height fits what it shows. It opens at a guess made a
+//! little too tall, measures its lists once they are laid out — what is in
+//! view of each and all of it — and asks for the height that shows them
+//! whole, no taller than most of its screen: no empty band under a short
+//! list, no scroll bar on a list that would fit (`Window::measured`; asked
+//! again while the compositor answers with another size, a few times).
+//! Nothing it shows changes height afterwards: the name of a new container
+//! is typed next to the buttons, and "Секунду…" of a menu stands beside its
+//! close button.
 
 use std::io::Read;
 
@@ -217,6 +219,10 @@ enum Msg {
     Armed(u64),
     /// A part of the window as it came out laid out.
     Measured(Measure, Size),
+    /// The size the fit asks for, as high as the screen lets it be.
+    Fit(Size),
+    /// The window's inside has this size now: the compositor's word.
+    Resized(Size),
 }
 
 struct Window {
@@ -244,8 +250,15 @@ struct Window {
     page: Option<Size>,
     views: [Option<f32>; 3],
     contents: [Option<f32>; 3],
-    /// The fit was asked for: it is asked once.
+    /// The fit was worked out: it is, once.
     fitted: bool,
+    /// The size the fit asked for, until the window has it, and how many
+    /// times it was asked. The compositor may answer the first time with
+    /// the size it maps the window at, and not at all where the size is its
+    /// own to decide (a tiled window): asked again when it answers with
+    /// another, a few times.
+    want: Option<Size>,
+    asked: u8,
 }
 
 /// Why a container cannot go with this network, if it cannot.
@@ -287,6 +300,8 @@ impl Window {
             views: [None; 3],
             contents: [None; 3],
             fitted: false,
+            want: None,
+            asked: 0,
             req,
         }
     }
@@ -483,7 +498,22 @@ impl Window {
             Msg::Armed(holds) => self.armed |= holds == self.holds && self.focused,
             Msg::Measured(what, size) => {
                 if let Some(fit) = self.measured(what, size) {
-                    return resize_to(fit);
+                    return fit_to_screen(fit);
+                }
+            }
+            Msg::Fit(size) => {
+                self.want = Some(size);
+                self.asked = 1;
+                return resize(size);
+            }
+            Msg::Resized(size) => {
+                if let Some(want) = self.want {
+                    if (size.height - want.height).abs() < 1.0 {
+                        self.want = None;
+                    } else if self.asked < 3 {
+                        self.asked += 1;
+                        return resize(want);
+                    }
                 }
             }
             Msg::Press => {}
@@ -833,6 +863,7 @@ impl Window {
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Msg::Press),
             iced::Event::Window(iced::window::Event::Focused) => Some(Msg::Focus(true)),
             iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::Focus(false)),
+            iced::Event::Window(iced::window::Event::Resized(size)) => Some(Msg::Resized(size)),
             _ => None,
         })
     }
@@ -857,15 +888,25 @@ fn measured_page<'a>(page: impl Into<Element<'a, Msg>>) -> Element<'a, Msg> {
         .into()
 }
 
-/// The window resized to `size` — no taller than most of its screen, where
+/// `Msg::Fit` of `size`, no taller than most of the window's screen where
 /// the screen is known.
-fn resize_to(size: Size) -> Task<Msg> {
+fn fit_to_screen(size: Size) -> Task<Msg> {
     iced::window::latest().and_then(move |id| {
-        iced::window::monitor_size(id).then(move |screen| {
+        iced::window::monitor_size(id).map(move |screen| {
             let height = screen.map_or(size.height, |s| size.height.min(s.height * 0.9));
-            iced::window::resize(id, Size::new(size.width, height.max(MIN_HEIGHT)))
+            Msg::Fit(Size::new(size.width, height.max(MIN_HEIGHT)))
         })
     })
+}
+
+/// The window asked to have this size.
+///
+/// On Wayland only a smaller size is taken: iced keeps drawing at the size
+/// the window had until the compositor says another, and the compositor
+/// takes no window larger than what is drawn — so the window opens at a
+/// guess made to be generous (`first_size`), and the fit mostly shrinks it.
+fn resize(size: Size) -> Task<Msg> {
+    iced::window::latest().and_then(move |id| iced::window::resize(id, size))
 }
 
 /// `Msg::Armed(holds)` after `guard` milliseconds: slept on a thread of its
@@ -888,20 +929,22 @@ fn arm_after(guard: u64, holds: u64) -> Task<Msg> {
 }
 
 /// The size the window opens at, before it measures itself: the width of its
-/// kind, and a height guessed from what it shows — lines of text at about
-/// the width they wrap at, at the sizes they are drawn (a line is 1.3 of its
-/// size in iced), with the paddings and the spaces between. The fit corrects
-/// the guess (`Window::measured`); a close one only keeps the window from
-/// jumping away from the middle of the screen, where it was placed.
+/// kind, and a height guessed from what it shows — lines of text at the
+/// sizes they are drawn (a line is 1.3 of its size in iced), with the
+/// paddings and the spaces between. Where a text wraps is guessed short, by
+/// fewer characters a line than fit: the guess is to be a little too tall,
+/// since the fit shrinks a window surely and grows it only where the
+/// compositor lets it (`resize`). A close one keeps the window from moving
+/// far from the middle of the screen, where it was placed.
 fn first_size(req: &Request) -> Size {
     let lines = |text: &str, per_line: usize| text.chars().count().div_ceil(per_line).max(1) as f32;
-    let command = if req.command.is_empty() { 0.0 } else { 180.0 };
+    let command = if req.command.is_empty() { 0.0 } else { 184.0 };
     let (width, height) = if req.mode == "menu" {
-        let notes: f32 = req.notes.iter().map(|n| lines(n, 64) * 18.2 + 4.0).sum();
+        let notes: f32 = req.notes.iter().map(|n| lines(n, 56) * 18.2 + 4.0).sum();
         let entries: f32 = req
             .actions
             .iter()
-            .map(|(_, label, _)| lines(label, 56) * 19.5 + 16.0)
+            .map(|(_, label, _)| lines(label, 50) * 19.5 + 16.0)
             .sum();
         let width = if req.command.is_empty() { 560.0 } else { 640.0 };
         // Padding, title, notes, command, entries, the close button, and
@@ -914,7 +957,7 @@ fn first_size(req: &Request) -> Size {
                 .map(|i| lines(&i.label, per_line) * 18.2 + 10.0)
                 .sum()
         };
-        let list = rows(&req.nets, 36).max(rows(&req.containers, 55));
+        let list = rows(&req.nets, 28).max(rows(&req.containers, 45)) + 12.0;
         let notes = req.notes.len() as f32 * 31.0;
         let rule = if req.rule.is_some() { 33.0 } else { 0.0 };
         // Padding, title, notes, command, the columns' headings and
@@ -1320,6 +1363,27 @@ mod tests {
             .collect();
         let long = parse_request(&format!("title\tt\nnet\tnl\tnl\t\n{rows}"));
         assert_eq!(first_size(&long), Size::new(840.0, 640.0));
+    }
+
+    /// The fit is asked again while the compositor answers with another
+    /// size — the one it maps a window at —, a few times, and not after the
+    /// window has it.
+    #[test]
+    fn the_fit_is_asked_again_a_few_times() {
+        let mut w = Window::new(parse_request(REQUEST));
+        let fit = Size::new(840.0, 450.0);
+        let other = Size::new(840.0, 413.0);
+        let _ = w.update(Msg::Resized(other));
+        assert_eq!((w.want, w.asked), (None, 0), "nothing asked before the fit");
+        let _ = w.update(Msg::Fit(fit));
+        assert_eq!((w.want, w.asked), (Some(fit), 1));
+        let _ = w.update(Msg::Resized(other));
+        let _ = w.update(Msg::Resized(other));
+        assert_eq!(w.asked, 3);
+        let _ = w.update(Msg::Resized(other));
+        assert_eq!(w.asked, 3, "asked no more");
+        let _ = w.update(Msg::Resized(fit));
+        assert_eq!(w.want, None, "the window has it");
     }
 
     #[test]
