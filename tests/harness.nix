@@ -148,6 +148,8 @@ let
       # A container's own zone-level permissions (stage 5).
       permissions.hermetic = false;
       permissions.nixDaemon = true;
+      # Its own "no" to the zone's X server (2026-09-28): written, not left out.
+      permissions.x11 = false;
       permissions.hostFilesWritable = false;
       permissions.audioManager = true;
       permissions.paths = [
@@ -405,7 +407,11 @@ in
           "nix_daemon = true"
           "host_files_writable = false"
           "audio_manager = true"
+          "x11 = false"
         ]
+      ))
+      (expect "a container with no word of its own on x11 has one in its declared file" (
+        !lib.hasInfix "x11 =" hmDeclared.config.home.file.".config/vpn-zones/declared/containers/work.conf".text
       ))
     ];
 

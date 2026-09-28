@@ -58,6 +58,17 @@ pub fn zone_setting(state: &Path, config: &Path, zone: &str) -> (bool, crate::co
     }
 }
 
+/// Whether a launch gets an X server of its own: its container's word
+/// (`own`, `container.x11`) where it has one — `off` refuses the zone's
+/// too —, the zone's (`zone`, [`zone_setting`]) where it has none or the
+/// launch has no container. Until 2026-09-28 it was the container's OR the
+/// zone's, and a container could not refuse the X server its zone gave all
+/// its programs (`zoneX11`): one X server shows every client the others'
+/// windows, keys and clipboard.
+pub fn effective(own: Option<bool>, zone: bool) -> bool {
+    own.unwrap_or(zone)
+}
+
 /// Where X servers put their sockets.
 pub const X11_DIR: &str = "/tmp/.X11-unix";
 /// The displays a satellite may take: `:100`…`:499`, like the sandbox's.
@@ -280,6 +291,18 @@ mod tests {
 
     fn argv(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
+    }
+
+    /// Review 2026-09-28: a container's own word, both ways, over its
+    /// zone's; none of its own, the zone's.
+    #[test]
+    fn a_containers_own_x11_decides_and_off_refuses_the_zones() {
+        assert!(effective(Some(true), false));
+        assert!(effective(Some(true), true));
+        assert!(!effective(Some(false), true));
+        assert!(!effective(Some(false), false));
+        assert!(effective(None, true));
+        assert!(!effective(None, false));
     }
 
     #[test]

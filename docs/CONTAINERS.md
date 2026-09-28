@@ -617,7 +617,7 @@ programs.cellward = {
     apps = [ "firefox" "org.telegram.desktop" ];
     permissions = {
       paths = [ ];                       # e.g. [ "~/.wine" ] — private homes only
-      x11 = false;
+      x11 = null;                        # null: its network's; false refuses the zone's X server too
     };
     trust = {                            # CERTIFICATES.md
       certificates = [ ./certs/some-root-ca.pem ];
@@ -726,7 +726,7 @@ and `cellward container show <name> --json` print subsets of the same schema.
       "trust": [ { "sha256": "…", "subject": "CN=…",
                    "not_after": "2030-01-01T00:00:00Z", "source": "nix" } ],
       "running": [ { "app": "firefox", "pid": 1234, "network": "nl" } ],
-      "x11": { "value": false, "source": "default" },
+      "x11": { "value": null, "source": "default" },
       "frame_color": { "value": null, "source": "default" },
       "microphone": { "value": null, "source": "default" },
       "screencast": { "value": null, "source": "default" },
@@ -828,6 +828,15 @@ up without a bridge (a previous build's: a launch into it is refused
 until it is restarted), `null` when it is down (and for `unconfined` and `offline`). State under
 `~/.local/state/vpn-zones/.instances/` is the instances', named by a key and
 not a zone: a reader of zones skips it (a dot directory).
+
+**A container's own X server** (2026-09-28): `containers[].x11` is
+`{value, source}` with `value` `true`, `false` or `null` — none of its own,
+its network's then (`networks[].x11`); `false` refuses the network's X
+server too. Until 2026-09-28 `value` was `false` with source `default` for
+a container without a word, and the X server was the container's OR the
+zone's; a reader must take `null` as "the network's". Nix:
+`containers.<name>.permissions.x11` (`nullOr bool`, default `null`);
+locally `cellward container set <c> x11 default|on|off`.
 
 **A container's own zone-level permissions** (stage 5 of the container
 design, 2026-09-28): `containers[].hermetic`, `nix_daemon`,

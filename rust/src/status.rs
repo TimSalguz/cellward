@@ -803,7 +803,12 @@ pub fn container(tools: &Tools, c: &Container) -> String {
         sourced_str(compositor, wayland_source),
         trust(tools, c),
         running(tools, c),
-        sourced(c.x11.value.to_string(), c.x11.source)
+        // Its own word, `null` for none — its network's then (`networks[]`),
+        // 2026-09-28: an `off` of its own refuses the zone's X server.
+        match &c.x11 {
+            Some(x11) => sourced(x11.value.to_string(), x11.source),
+            None => sourced("null".to_owned(), Source::Default),
+        }
     )
 }
 

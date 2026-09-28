@@ -570,7 +570,9 @@ let
       ++ map (app: "app = ${app}") c.apps
       ++ lib.optional (c.trust.certificates != [ ]) "trust = ${trustDir name c.trust.certificates}"
       ++ map (path: "path = ${path}") c.permissions.paths
-      ++ lib.optional c.permissions.x11 "x11 = true"
+      # Its own word both ways (2026-09-28): false refuses its zone's X
+      # server (zoneX11) too; null, none of its own — the zone's.
+      ++ lib.optional (c.permissions.x11 != null) "x11 = ${lib.boolToString c.permissions.x11}"
       ++ lib.optional (c.frameColor != null) "frame_color = ${c.frameColor}"
       ++ lib.optional (c.permissions.microphone != null) "microphone = ${c.permissions.microphone}"
       ++ lib.optional (c.permissions.screencast != null) "screencast = ${c.permissions.screencast}"
@@ -648,9 +650,10 @@ let
         description = "Может ли программа контейнера забрать фокус клавиатуры (xdg-activation: просьба активировать окно; посредник Wayland видит каждую такую просьбу): input — один раз на щелчок или клавишу человека (первая просьба с серийным номером этого события проходит, повторные — нет), notify — ни одна не проходит, вместо неё уведомление «<программа> просит внимания» с кнопкой «Перейти», ask — вопрос «Переключить фокус на <программа>?», allow — все проходят, как без посредника. null — input или как задано локально (cellward container set <контейнер> focus). Фокус нового окна при открытии решает композитор (у niri — правило окна open-focused). Действует для программ, запущенных после изменения.";
       };
       permissions.x11 = lib.mkOption {
-        type = lib.types.bool;
-        default = false;
-        description = "Свой X-сервер (xwayland-satellite) для программ контейнера в зонах. X-сервер хоста из зон недоступен всегда: он показывает каждому клиенту окна, ввод и буфер обмена всех остальных. См. docs/HERMETICITY.ru.md §7.";
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        example = false;
+        description = "Свой X-сервер (xwayland-satellite) для программ контейнера в зонах: true — есть, false — нет, даже если его даёт сеть (programs.cellward.zoneX11, cellward x11 <зона>), null — как у сети или как задано локально (cellward container set <контейнер> x11 default|on|off). До 2026-09-28 false значило «своего нет» и X-сервер сети всё равно был. X-сервер хоста из зон недоступен всегда: он показывает каждому клиенту окна, ввод и буфер обмена всех остальных. Действует для программ, запущенных после изменения. См. docs/HERMETICITY.ru.md §7.";
       };
       permissions.microphone = lib.mkOption {
         type = lib.types.nullOr (
@@ -937,7 +940,7 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "games" ];
-      description = "Зоны (по имени), программы которых получают свой X-сервер (xwayland-satellite) — для X11-only программ вроде Steam без контейнеров. X-сервер хоста из зон недоступен всегда. Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Устарело: containers.<имя>.permissions.x11. Зоны (по имени), программы которых получают свой X-сервер (xwayland-satellite) — для X11-only программ вроде Steam без контейнеров; значение по умолчанию для контейнеров без своего: контейнер с permissions.x11 = false X-сервера и здесь не получает. X-сервер хоста из зон недоступен всегда. Сами зоны в Nix не описываются: здесь только имена.";
     };
 
     nixDaemon = lib.mkOption {
@@ -1228,7 +1231,8 @@ in
     ++ lib.optional (cfg.zoneX11 != [ ]) (
       "programs.cellward.zoneX11 устарело: свой X-сервер теперь у контейнера — "
       + "programs.cellward.containers.<имя>.permissions.x11 (зона остаётся значением по "
-      + "умолчанию для контейнеров без своего)"
+      + "умолчанию для контейнеров без своего, null; false у контейнера отказывается и от "
+      + "X-сервера зоны)"
     );
 
   assertions =

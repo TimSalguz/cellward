@@ -238,8 +238,11 @@ pub struct Container {
     /// The end of the term of those `paths` that have one, in unix seconds.
     pub expires: Vec<(PathBuf, u64)>,
     /// An X server of its own in a zone (`docs/HERMETICITY.md` §7, A): the
-    /// host's is never reachable from a zone.
-    pub x11: Sourced<bool>,
+    /// host's is never reachable from a zone. Its own word, `on` or `off`;
+    /// `None` — its network's (`zoneX11`, `cellward x11 <zone>`): since
+    /// 2026-09-28 an `off` of its own refuses the zone's X server too
+    /// (`x11::effective`), where it used to be "not mine, the zone's then".
+    pub x11: Option<Sourced<bool>>,
     /// The colour of its windows' frame (`#rrggbb`); none of its own is the
     /// zone's (`docs/PERMISSIONS.md` §11.10).
     pub frame_color: Option<Sourced<String>>,
@@ -1648,6 +1651,8 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         }
     }
 
+    // Its own word, or none — its network's then. A word that is neither on
+    // nor off is off: no X server by a typo.
     let flag = |conf: &[(String, String)]| {
         values(conf, "x11")
             .last()
@@ -1664,10 +1669,6 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
                 value,
                 source: Source::Local,
             })
-        })
-        .unwrap_or(Sourced {
-            value: false,
-            source: Source::Default,
         });
 
     let color = |conf: &[(String, String)]| {
@@ -2444,10 +2445,16 @@ pub fn write_network_in(config: &Path, name: &str, network: &str) -> Result<(), 
     )
 }
 
-/// Give a container an X server of its own in zones, or take it away, locally.
-pub fn set_x11(tools: &Tools, selector: &str, on: bool) -> Result<(), String> {
+/// Give a container an X server of its own in zones (`Some(true)`), refuse
+/// its zone's (`Some(false)`), or take its word back (`None`: its
+/// network's), locally.
+pub fn set_x11(tools: &Tools, selector: &str, on: Option<bool>) -> Result<(), String> {
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
-    if container.x11.source == Source::Nix {
+    if container
+        .x11
+        .as_ref()
+        .is_some_and(|x11| x11.source == Source::Nix)
+    {
         return Err(format!(
             "x11 контейнера {selector} задан в Nix — меняется там"
         ));
@@ -2455,7 +2462,7 @@ pub fn set_x11(tools: &Tools, selector: &str, on: bool) -> Result<(), String> {
     write_key(
         &container.policy.join(FILE),
         "x11",
-        on.then_some("true"),
+        on.map(|on| if on { "true" } else { "false" }),
         true,
     )
 }
@@ -3476,10 +3483,7 @@ mod tests {
             declared_trust: Vec::new(),
             paths: Vec::new(),
             expires: Vec::new(),
-            x11: Sourced {
-                value: false,
-                source: Source::Default,
-            },
+            x11: None,
             frame_color: None,
             microphone: None,
             screencast: None,
