@@ -876,6 +876,14 @@ pub fn container(tools: &Tools, c: &Container) -> String {
     )
 }
 
+/// The main home's own record (`container::MAIN_RECORD`, 2a of
+/// `docs/PERMISSIONS.md` §11.15), in a container's shape: `home` "main",
+/// `network` "ask" — it has none, a space in each —, and its permissions.
+pub fn main_record(tools: &Tools) -> String {
+    container::load(tools, container::MAIN_RECORD)
+        .map_or("null".to_owned(), |c| container(tools, &c))
+}
+
 pub fn containers(tools: &Tools) -> String {
     array(
         container::load_all(tools)
@@ -1035,10 +1043,11 @@ pub fn document(tools: &Tools) -> String {
         format!("{{\"uid\":{uid},\"gid\":{gid}}}")
     });
     format!(
-        "{{\"schema_version\":{SCHEMA_VERSION},\"defaults\":{},\"networks\":{},\"containers\":{},\"apps\":{},\"system_networks\":{},\"uplink_owner\":{uplink_owner},\"instances\":{}}}",
+        "{{\"schema_version\":{SCHEMA_VERSION},\"defaults\":{},\"networks\":{},\"containers\":{},\"main\":{},\"apps\":{},\"system_networks\":{},\"uplink_owner\":{uplink_owner},\"instances\":{}}}",
         defaults(tools),
         networks(tools),
         containers(tools),
+        main_record(tools),
         apps(tools),
         system_networks(),
         instances(tools)

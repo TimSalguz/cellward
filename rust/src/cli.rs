@@ -2075,6 +2075,13 @@ fn container_create(tools: &Tools, name: &OsStr, home: crate::container::Home) -
 /// declared — the module would make it again.
 fn container_remove(tools: &Tools, name: &OsStr) -> u8 {
     let text = name.to_string_lossy();
+    if text == crate::container::MAIN_RECORD {
+        eprintln!(
+            "настоящий дом не удаляется; его разрешения возвращаются к умолчанию: cellward \
+             container set main <настройка> default"
+        );
+        return 1;
+    }
     let Some(c) = crate::container::load(tools, &text) else {
         eprintln!("контейнера {text} нет");
         return 1;

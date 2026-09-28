@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **The main home has a record of its own** (2026-09-29, 2a of
+  `docs/PERMISSIONS.md` §11.15). Its permissions are set as a container's —
+  `cellward container set main microphone no`, `container devices main
+  add usb:…`, `container grant main <protected path>`, or
+  `programs.cellward.main.*` — and hold in every network it runs in: a
+  space of its own in each, one set of permissions. The microphone, the
+  screen cast, the cameras, the devices, X, the focus and the requests for
+  a way around the network read it; where it has no word, its network's
+  holds, as before. `status --json` has it as `main`. No network, kind of
+  home, removal or merge for it.
+
 ### Security
 - **A container of the real home no longer writes what the host runs or
   trusts** (2026-09-29, `docs/LEAK-MODEL.md` §32). An independent review

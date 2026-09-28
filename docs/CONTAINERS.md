@@ -700,6 +700,16 @@ and `cellward container show <name> --json` print subsets of the same schema.
   registry, `~<process>` for a process of no launch of the container's,
   `?` for traffic whose program was not found. `connections` is
   `null` for an instance without a table (of an earlier build).
+- **`main`** (added 2026-09-29, 2a of `docs/PERMISSIONS.md` §11.15): the
+  main home's own record, in a container's shape — `name` "main", `home`
+  "main", `network` "ask" (it has none: a space of its own in each
+  network, one set of permissions), and its permissions, devices, focus,
+  links, each `{value, source}`. Set with `cellward container set|devices|
+  grant main …` or `programs.cellward.main.*`; a setting it has no word of
+  is still its network's, as before, until 2b.
+- **`settings.protected`** (added 2026-09-29, `docs/LEAK-MODEL.md` §32):
+  what the person protects in the real home besides the host's own places
+  (`cellward protect`, `programs.cellward.protect`), each `{value, source}`.
 - **`networks[].tolerates`** (added 2026-09-28, step 1 of the permission
   model, `docs/PERMISSIONS.md` §11.14): the ways around a network it
   tolerates for its containers — `{"hermetic", "nix_daemon",

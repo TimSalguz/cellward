@@ -1809,12 +1809,17 @@ fn instance_zone(tools: Tools, home: PathBuf, plan: &crate::instance::Plan, appl
         .into_iter()
         .map(|(p, _)| p)
         .collect();
-    // What its container is given (the main home is given nothing).
+    // What its container is given; the main home's own record's for the
+    // main home (`container::MAIN_RECORD`, 2a of `docs/PERMISSIONS.md`
+    // §11.15): the writing of what the person protects.
     let given = match &plan.who {
         crate::origin::Who::Container(name) => {
             crate::container::given_paths_in(&config, &home, name)
         }
-        _ => Vec::new(),
+        crate::origin::Who::Main => {
+            crate::container::given_paths_in(&config, &home, crate::container::MAIN_RECORD)
+        }
+        crate::origin::Who::Unknown => Vec::new(),
     };
     Zone {
         name: OsString::from(&plan.id),

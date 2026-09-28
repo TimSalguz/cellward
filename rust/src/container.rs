@@ -1574,17 +1574,30 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
     load_quiet(tools, selector)
 }
 
+/// The main home's own record (`docs/PERMISSIONS.md` §11.15, 2a): the
+/// permissions of the real home's programs, whatever network they run in —
+/// a space of its own in each (`main:<network>`), one set of permissions,
+/// no network of its own. Kept as a container's record is
+/// (`containers/main`, `declared/main.conf`), under a name no container can
+/// have ([`reserved_name`]).
+pub const MAIN_RECORD: &str = "main";
+
 /// [`load`] without the move: for the move itself.
 fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
-    let name = canonical(tools, selector)?;
+    let main = selector == MAIN_RECORD;
+    let name = if main {
+        MAIN_RECORD.to_owned()
+    } else {
+        canonical(tools, selector)?
+    };
     let name = name.as_str();
     let dir = data_dir(tools, name);
     let policy = policy_dir(tools, name);
     let declared = read_declared(tools, name);
     // A container is its data, its policy or its declaration: a program with
     // its storage in reach removing the data directory must not make its
-    // network binding disappear with it.
-    if !dir.is_dir() && !policy.is_dir() && declared.is_none() {
+    // network binding disappear with it. The main home's record always is.
+    if !main && !dir.is_dir() && !policy.is_dir() && declared.is_none() {
         return None;
     }
     let local = fs::read_to_string(policy.join(FILE))
@@ -1593,6 +1606,7 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
     let declared_conf = declared.as_ref().map(|(conf, _)| conf.as_slice());
 
     let (home, home_source) = match declared.as_ref().and_then(|(_, home)| *home) {
+        _ if main => (Home::Main, Source::Default),
         Some(home) => (home, Source::Nix),
         None => match values(&local, "home").last().and_then(Home::parse) {
             Some(home) => (home, Source::Local),
@@ -1601,6 +1615,7 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
     };
 
     let network = declared_conf
+        .filter(|_| !main)
         .and_then(|conf| values(conf, "network").last().and_then(Network::parse))
         .map(|value| Sourced {
             value,
@@ -1609,6 +1624,7 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         .or_else(|| {
             values(&local, "network")
                 .last()
+                .filter(|_| !main)
                 .and_then(Network::parse)
                 .map(|value| Sourced {
                     value,
@@ -2230,6 +2246,9 @@ pub fn merge(
     into: &str,
     allow_new_certificates: bool,
 ) -> Result<MergeReport, String> {
+    if from == MAIN_RECORD || into == MAIN_RECORD {
+        return Err("настоящий дом ни с чем не объединяется".to_owned());
+    }
     let a = load(tools, from).ok_or_else(|| format!("контейнера {from} нет"))?;
     let b = load(tools, into).ok_or_else(|| format!("контейнера {into} нет"))?;
     if a.selector() == b.selector() {
@@ -2446,6 +2465,13 @@ pub fn declared_owner(tools: &Tools, app: &str) -> Option<String> {
 /// two networks at once is exactly what binding exists to prevent
 /// (`docs/CONTAINERS.md` I2).
 pub fn set_network(tools: &Tools, selector: &str, network: &Network) -> Result<(), String> {
+    if selector == MAIN_RECORD {
+        return Err(
+            "у настоящего дома нет своей сети: она выбирается при запуске, в каждой сети у \
+             него своё пространство"
+                .to_owned(),
+        );
+    }
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
     if container.network.source == Source::Nix {
         return Err(format!(
@@ -2735,6 +2761,9 @@ fn set_switch(
 /// them. The data of the old kind go aside at the next launch
 /// ([`prepare_data`]), nothing is erased.
 pub fn set_home(tools: &Tools, selector: &str, home: Home) -> Result<(), String> {
+    if selector == MAIN_RECORD {
+        return Err("настоящий дом и есть настоящий дом: его вид не меняется".to_owned());
+    }
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
     if container.home_source == Source::Nix {
         return Err(format!(

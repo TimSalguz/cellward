@@ -89,19 +89,21 @@ pub fn rows(tools: &Tools, zone: &str, who: &Who, home: Option<Home>) -> Vec<Row
             moot,
         });
     }
-    let own = |key: &str| match who {
-        Who::Container(name) => crate::container::own_flag_in(config, name, key),
-        _ => None,
+    // Whose record: a container's, or the main home's own
+    // (`container::MAIN_RECORD`, 2a of `docs/PERMISSIONS.md` §11.15).
+    let record = match who {
+        Who::Container(name) => Some(name.as_str()),
+        Who::Main => Some(crate::container::MAIN_RECORD),
+        Who::Unknown => None,
     };
+    let own = |key: &str| record.and_then(|name| crate::container::own_flag_in(config, name, key));
     // X11: the container's own word, both ways, else its network's
     // (`x11::effective`), as a launch reads them.
     let zone_x11 = crate::x11::zone_setting(&tools.state, config, zone);
-    let own_x11 = match who {
-        Who::Container(name) => crate::container::load(tools, name)
-            .and_then(|c| c.x11)
-            .map(|x11| (x11.value, x11.source)),
-        _ => None,
-    };
+    let own_x11 = record
+        .and_then(|name| crate::container::load(tools, name))
+        .and_then(|c| c.x11)
+        .map(|x11| (x11.value, x11.source));
     let (x11, x11_whose) = match own_x11 {
         Some(own) => (own, Asker::Container),
         None => (zone_x11, Asker::Network),
@@ -119,9 +121,9 @@ pub fn rows(tools: &Tools, zone: &str, who: &Who, home: Option<Home>) -> Vec<Row
     // a launch of no container (`launch`, THE CAMERAS).
     let camera = crate::hermetic::camera(&dir, config, zone);
     let own_camera = own("camera");
-    let camera = match who {
-        Who::Container(_) => crate::hermetic::for_container(camera, own_camera, false),
-        _ => camera,
+    let camera = match record {
+        Some(_) => crate::hermetic::for_container(camera, own_camera, false),
+        None => camera,
     };
     let camera_whose = if own_camera == Some(camera) {
         Asker::Container

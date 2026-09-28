@@ -1987,6 +1987,35 @@ fn traffic_says_what_an_instance_sent_and_received() {
     tally.close();
 }
 
+/// The main home's own record (`docs/PERMISSIONS.md` §11.15, 2a): its
+/// permissions set and shown as a container's, in status as `main`; no
+/// network, no kind of home, not removed, not merged.
+#[test]
+fn the_main_home_has_a_record_of_its_own() {
+    let home = Home::new("mainrec");
+    let status = stdout(&home.run(&["status", "--json"]));
+    assert!(status.contains("\"main\":{\"name\":\"main\""), "{status}");
+    let out = home.run(&["container", "set", "main", "microphone", "no"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let conf = fs::read_to_string(home.root.join("config/containers/main/container.conf")).unwrap();
+    assert!(conf.contains("microphone = no"), "{conf}");
+    let out = home.run(&["container", "devices", "main", "add", "serial"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let shown = stdout(&home.run(&["container", "show", "main", "--json"]));
+    assert!(shown.contains("serial"), "{shown}");
+    for bad in [
+        &["container", "set", "main", "network", "offline"][..],
+        &["container", "set", "main", "home", "private"][..],
+        &["container", "rm", "main"][..],
+        &["container", "merge", "main", "work"][..],
+    ] {
+        assert_eq!(home.run(bad).status.code(), Some(1), "{bad:?}");
+    }
+    // Not a container of the list.
+    let list = stdout(&home.run(&["container", "list", "--json"]));
+    assert!(!list.contains("\"name\":\"main\""), "{list}");
+}
+
 /// What no container of the real home writes (`cellward protect`,
 /// 2026-09-29): added, shown, in status; refused outside the home; Nix's not
 /// taken off here; given to write to a container of the real home — what is

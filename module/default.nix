@@ -600,6 +600,11 @@ let
   # overlay — прежнее слово для layer.
   homeKind = home: if home == "overlay" then "layer" else home;
 
+  # A path of programs.cellward.protect, one below or above one: what a
+  # container of the real home may be given to write (rust/src/protect.rs).
+  inProtect =
+    v: lib.any (p: v == p || lib.hasPrefix "${p}/" v || lib.hasPrefix "${v}/" p) cfg.protect;
+
   allApps = lib.concatMap (c: c.apps) (lib.attrValues cfg.containers);
   duplicateApps = lib.filter (app: lib.count (x: x == app) allApps > 1) (lib.unique allApps);
 
@@ -807,6 +812,7 @@ let
     "desktop.niri.includeInConfig"
     "desktop.sway.enable"
     "containers"
+    "main"
   ];
 
   # --- desktop: the window menu's key and our windows' rule ----------------
@@ -1216,6 +1222,13 @@ in
       default = { };
       description = "Контейнеры: дом, сеть, программы, доверенные сертификаты (docs/CONTAINERS.ru.md). Состояние с источником каждого значения — `cellward status --json`.";
     };
+
+    main = lib.mkOption {
+      type = lib.types.nullOr (lib.types.submodule containerModule);
+      default = null;
+      example = lib.literalExpression "{ permissions.microphone = \"yes\"; permissions.devices = [ \"usb:1ea7:0907\" ]; }";
+      description = "Разрешения настоящего дома («основной»): те же, что у контейнера (permissions.*, focus, frameColor, trust, links), одни во всех сетях — в каждой сети у него своё пространство, а разрешения общие (docs/PERMISSIONS.md §11.15). Своей сети и программ у него нет: home, network и apps здесь не задаются. permissions.paths — запись в защищённое (programs.cellward.protect). Без пересборки — cellward container set|devices|grant main …";
+    };
   };
 
   config = lib.mkIf config.programs.cellward.enable {
@@ -1296,9 +1309,19 @@ in
       message = "programs.cellward.containers.${name}.links: схема ссылки — латиница, цифры, + . - (https, tg…); программа — id ярлыка без пути и пробелов (firefox)";
     }) cfg.containers
     ++ lib.mapAttrsToList (name: c: {
-      assertion = c.home != "main" || (c.permissions.paths == [ ] && c.trust.certificates == [ ]);
-      message = "programs.cellward.containers.${name}: основному дому (home = \"main\") выдавать нечего и своих сертификатов у него нет — он и так настоящий, а сертификат лёг бы в настоящий дом";
+      assertion = c.home != "main" || (lib.all inProtect c.permissions.paths && c.trust.certificates == [ ]);
+      message = "programs.cellward.containers.${name}: настоящему дому (home = \"main\") выдаётся только запись в защищённое (paths из programs.cellward.protect), и своих сертификатов у него нет — сертификат лёг бы в настоящий дом";
     }) cfg.containers
+    ++ lib.optionals (cfg.main != null) [
+      {
+        assertion = cfg.main.network == null && cfg.main.apps == [ ];
+        message = "programs.cellward.main: у настоящего дома нет своей сети и своих программ — сеть выбирается при запуске, программы закрепляются в окне запуска";
+      }
+      {
+        assertion = lib.all inProtect cfg.main.permissions.paths && cfg.main.trust.certificates == [ ];
+        message = "programs.cellward.main: выдаётся только запись в защищённое (paths из programs.cellward.protect), и своих сертификатов у настоящего дома нет";
+      }
+    ]
     ++ lib.mapAttrsToList (name: c: {
       assertion = lib.all (
         v: !(lib.hasInfix "\n" v) && (lib.hasPrefix "/" v || lib.hasPrefix "~/" v)
@@ -1494,6 +1517,16 @@ in
     (lib.mapAttrs' (
       name: c: lib.nameValuePair ".config/vpn-zones/declared/containers/${name}.conf" { text = renderContainer name c; }
     ) cfg.containers)
+    (lib.mkIf (cfg.main != null) {
+      ".config/vpn-zones/declared/containers/main.conf".text = renderContainer "main" (
+        cfg.main
+        // {
+          home = "main";
+          network = null;
+          apps = [ ];
+        }
+      );
+    })
   ];
 
   # Каталоги данных объявленных контейнеров: без них запуск в слое отказался

@@ -193,7 +193,13 @@ pub fn by_container(
     who: &Who,
 ) -> (Setting, Source) {
     match who {
-        Who::Main => zone_setting,
+        // The main home's own record (`container::MAIN_RECORD`, 2a of
+        // `docs/PERMISSIONS.md` §11.15) as a container's; none of its own, the
+        // zone's as before.
+        Who::Main => container_over_zone(
+            zone_setting,
+            container_switch(config, crate::container::MAIN_RECORD, key),
+        ),
         Who::Unknown => match zone_setting {
             (Setting::Yes, source) => (Setting::Ask, source),
             other => other,
@@ -1018,6 +1024,28 @@ impl Policy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The main home's own record (§11.15, 2a): its word over the network's
+    /// as a container's is; none of its own — the network's, as before.
+    #[test]
+    fn the_main_home_has_a_word_of_its_own() {
+        let base = std::env::temp_dir().join(format!("vpn-zone-mic-main-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let config = base.join("config");
+        let zone = (Setting::Yes, Source::Local);
+        assert_eq!(by_container(zone, &config, "microphone", &Who::Main), zone);
+        let record = config
+            .join("containers")
+            .join(crate::container::MAIN_RECORD);
+        std::fs::create_dir_all(&record).unwrap();
+        std::fs::write(record.join(crate::container::FILE), "microphone = no\n").unwrap();
+        assert_eq!(
+            by_container(zone, &config, "microphone", &Who::Main),
+            (Setting::No, Source::Local)
+        );
+        assert_eq!(by_container(zone, &config, "screencast", &Who::Main), zone);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     struct Dirs {
         base: PathBuf,

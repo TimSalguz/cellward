@@ -778,7 +778,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // — by its container's setting, the zone's for a launch with none.
     let camera = zone != UNCONFINED && {
         let zone_dir = tools.state.join(&zone_name);
-        match container_name(&selection) {
+        match record_name(&selection) {
             Some(name) => crate::container::camera_for(&zone_dir, &tools.config, &zone_name, &name),
             None => crate::hermetic::camera(&zone_dir, &tools.config, &zone_name).0,
         }
@@ -789,7 +789,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // zone's `/dev` has none, and this launch gets the given ones bound in,
     // in its own mount namespace (`profile-run --device`), checking each
     // once more there. None for a launch with no container.
-    let devices: Vec<crate::devices::Pass> = match container_name(&selection) {
+    let devices: Vec<crate::devices::Pass> = match record_name(&selection) {
         Some(name) if zone != UNCONFINED => {
             let grants: Vec<crate::devices::Grant> = crate::container::load(tools, &name)
                 .map(|c| {
@@ -824,7 +824,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // own word first, both ways (`x11::effective`, 2026-09-28): its `off`
     // refuses the zone's X server, which it could not before.
     let container_x11 = crate::x11::effective(
-        container_name(&selection)
+        record_name(&selection)
             .and_then(|name| crate::container::load(tools, &name))
             .and_then(|c| c.x11.map(|x11| x11.value)),
         zone != UNCONFINED && crate::x11::zone_setting(&tools.state, &tools.config, &zone_name).0,
@@ -909,7 +909,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         // What becomes of the program's asking for the focus
         // (`crate::wl_focus`): its container's policy. `input`, the
         // default, is wl-sandbox's own and not said.
-        let focus = crate::wl_focus::of_launch(tools, container_name(&selection).as_deref());
+        let focus = crate::wl_focus::of_launch(tools, record_name(&selection).as_deref());
         if focus != crate::wl_focus::FocusPolicy::Input {
             wrap.push("--focus".into());
             wrap.push(focus.as_str().into());
@@ -2014,6 +2014,20 @@ pub fn container_name(selection: &Selection) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Whose record of permissions a launch takes: its container's, or the main
+/// home's own ([`crate::container::MAIN_RECORD`], `docs/PERMISSIONS.md`
+/// §11.15, 2a) for a launch into the real home with no container. `None`
+/// for a throwaway one: the safe values.
+pub fn record_name(selection: &Selection) -> Option<String> {
+    container_name(selection).or_else(|| {
+        matches!(
+            (&selection.sandbox, &selection.container),
+            (Sandbox::None, Container::Main)
+        )
+        .then(|| crate::container::MAIN_RECORD.to_owned())
+    })
 }
 
 /// One launch, one container (`docs/PERMISSIONS.md` §11.7): the name —

@@ -385,7 +385,10 @@ pub fn explain(zone_dir: &Path, config: &Path, zone: &str, who: &Who, key: &str)
     let network = zone_value(zone_dir, config, zone, key);
     let own = match who {
         Who::Container(name) => container_own(config, name, key),
-        _ => None,
+        // The main home's own record (§11.15, 2a): its word, as a
+        // container's; none — the network's, as before.
+        Who::Main => container_own(config, crate::container::MAIN_RECORD, key),
+        Who::Unknown => None,
     };
     let asked = match (own, tolerated) {
         (Some((on, source)), Some(_)) => (on, source, Asker::Container),
