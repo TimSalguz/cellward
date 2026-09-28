@@ -898,6 +898,93 @@ pub fn marked_item_reply(
     }
 }
 
+// --- TRAY ICONS' NAMES --------------------------------------------------------
+
+/// A well-known name a tray icon owns: `org.kde.StatusNotifierItem-<pid>-<n>`
+/// or `org.freedesktop.StatusNotifierItem-…` (`crate::zone::TRAY_ITEM_NAMES`).
+pub fn is_tray_name(name: &str) -> bool {
+    name.starts_with("org.kde.StatusNotifierItem-")
+        || name.starts_with("org.freedesktop.StatusNotifierItem-")
+}
+
+/// An argument of a body of strings and numbers only ([`plain_args`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Arg {
+    Str(String),
+    U32(u32),
+}
+
+/// The arguments of a body of strings (`s`) and uint32s (`u`) only, at most
+/// four: the bus's name calls and signals (`RequestName` `su`,
+/// `NameOwnerChanged` `sss`) and a tray watcher's `RegisterStatusNotifierItem`
+/// (`s`). Anything else, or a body that does not read, is an error.
+pub fn plain_args(msg: &[u8], h: &Header) -> Result<Vec<Arg>> {
+    let sig = h.signature.as_deref().unwrap_or("");
+    if sig.is_empty() || sig.len() > 4 || !sig.bytes().all(|c| c == b's' || c == b'u') {
+        return Err(WireError("not a body of strings and numbers"));
+    }
+    let mut r = Reader {
+        buf: msg,
+        pos: h.body_offset,
+        little: h.little,
+    };
+    sig.bytes()
+        .map(|c| {
+            if c == b's' {
+                r.string().map(Arg::Str)
+            } else {
+                r.u32().map(Arg::U32)
+            }
+        })
+        .collect()
+}
+
+/// The body of [`plain_args`], written back.
+pub fn plain_body(args: &[Arg]) -> Vec<u8> {
+    let mut w = Writer { buf: Vec::new() };
+    for arg in args {
+        match arg {
+            Arg::Str(s) => w.string(s),
+            Arg::U32(v) => w.u32(*v),
+        }
+    }
+    w.buf
+}
+
+/// The message of `h` again with `body` (of the same signature) for its
+/// body: every field of its header kept, written little-endian.
+pub fn with_body(h: &Header, body: &[u8]) -> Vec<u8> {
+    let mut fields = Vec::new();
+    if let Some(v) = h.path.as_deref() {
+        fields.push(Field::Path(v));
+    }
+    if let Some(v) = h.interface.as_deref() {
+        fields.push(Field::Interface(v));
+    }
+    if let Some(v) = h.member.as_deref() {
+        fields.push(Field::Member(v));
+    }
+    if let Some(v) = h.error_name.as_deref() {
+        fields.push(Field::ErrorName(v));
+    }
+    if let Some(v) = h.reply_serial {
+        fields.push(Field::ReplySerial(v));
+    }
+    if let Some(v) = h.destination.as_deref() {
+        fields.push(Field::Destination(v));
+    }
+    if let Some(v) = h.sender.as_deref() {
+        fields.push(Field::Sender(v));
+    }
+    if let Some(v) = h.signature.as_deref() {
+        fields.push(Field::Signature(v));
+    }
+    if h.unix_fds != 0 {
+        fields.push(Field::UnixFds(h.unix_fds));
+    }
+    message(h.kind, h.flags, h.serial, &fields, body)
+}
+
 // --- WRITING ------------------------------------------------------------------
 
 /// A little-endian message under construction.
@@ -1611,6 +1698,87 @@ mod tests {
             overlay,
             tooltip: &zone_line,
         }
+    }
+
+    /// A body of strings and numbers read, written back, and put in the
+    /// message with every field of its header; a big-endian one read as
+    /// well; any other body refused.
+    #[test]
+    fn a_plain_body_is_read_and_written_back() {
+        let args = vec![
+            Arg::Str("org.kde.StatusNotifierItem-2-1".into()),
+            Arg::U32(4),
+        ];
+        let msg = message(
+            METHOD_CALL,
+            0,
+            9,
+            &[
+                Field::Path("/org/freedesktop/DBus"),
+                Field::Interface("org.freedesktop.DBus"),
+                Field::Member("RequestName"),
+                Field::Destination("org.freedesktop.DBus"),
+                Field::Sender(":1.3"),
+                Field::Signature("su"),
+            ],
+            &plain_body(&args),
+        );
+        let h = parse_header(&msg).unwrap();
+        assert_eq!(plain_args(&msg, &h).unwrap(), args);
+        let longer = vec![
+            Arg::Str("org.kde.StatusNotifierItem-2-1-c1_77".into()),
+            Arg::U32(4),
+        ];
+        let again = with_body(&h, &plain_body(&longer));
+        let h2 = parse_header(&again).unwrap();
+        assert_eq!(plain_args(&again, &h2).unwrap(), longer);
+        assert_eq!(
+            (
+                h2.serial,
+                h2.member.as_deref(),
+                h2.sender.as_deref(),
+                h2.destination.as_deref()
+            ),
+            (
+                9,
+                Some("RequestName"),
+                Some(":1.3"),
+                Some("org.freedesktop.DBus")
+            )
+        );
+        assert_eq!(message_len(&again).unwrap(), Some(again.len()));
+        // Big-endian: the same arguments.
+        let mut big = vec![b'B', METHOD_CALL, 0, 1];
+        let body_be = {
+            let mut b = Vec::new();
+            b.extend_from_slice(&3u32.to_be_bytes());
+            b.extend_from_slice(b"abc\0");
+            b.extend_from_slice(&7u32.to_be_bytes());
+            b
+        };
+        big.extend_from_slice(&(body_be.len() as u32).to_be_bytes());
+        big.extend_from_slice(&5u32.to_be_bytes());
+        let mut fields = Vec::new();
+        fields.extend_from_slice(&[8, 1, b'g', 0, 2, b's', b'u', 0]);
+        big.extend_from_slice(&(fields.len() as u32).to_be_bytes());
+        big.extend_from_slice(&fields);
+        while big.len() % 8 != 0 {
+            big.push(0);
+        }
+        big.extend_from_slice(&body_be);
+        let h = parse_header(&big).unwrap();
+        assert_eq!(
+            plain_args(&big, &h).unwrap(),
+            vec![Arg::Str("abc".into()), Arg::U32(7)]
+        );
+        // Not strings and numbers only.
+        let h = Header {
+            signature: Some("a{sv}".into()),
+            ..h
+        };
+        assert!(plain_args(&big, &h).is_err());
+        assert!(is_tray_name("org.freedesktop.StatusNotifierItem-5-1"));
+        assert!(!is_tray_name("org.kde.StatusNotifierWatcher"));
     }
 
     #[test]

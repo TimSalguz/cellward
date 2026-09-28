@@ -13,6 +13,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   profile, and a profile's `exec` lines run on the host, outside every zone.
   An ordinary zone had it bound with the rest of the runtime directory; a
   hermetic one never did. `doctor` names it if it sees it.
+### Fixed
+- **Two containers' tray icons no longer take each other's place**
+  (2026-09-28). A program owns its tray icon's name,
+  `org.kde.StatusNotifierItem-<pid>-<n>`, with the pid it sees — and with a
+  pid namespace for each instance and each sandbox, the programs of two
+  containers see the same pids: the second one's name was taken, and it had
+  no icon (Claude Desktop beside Discord, for one). The bus filter of a
+  hermetic instance or a sandbox now owns such a name on the host with the
+  connection's unique name after it (`…-13-1-c1_234`), tells the tray host
+  that one when the program registers its icon, and shows the program the
+  name it asked for in the bus's `NameAcquired`, `NameLost` and
+  `NameOwnerChanged`. Ordinary zones have the host's bus unfiltered and keep
+  the program's own name.
 
 ### Changed (read before updating)
 - **A way around a network needs the container to ask and the network to
