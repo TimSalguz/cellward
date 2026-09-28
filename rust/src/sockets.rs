@@ -1189,7 +1189,7 @@ fn runtime_verdict(rest: &Path, full: &Path, ctx: &Context) -> Option<Verdict> {
         });
     }
     if rest.starts_with(crate::fs_sandbox::SCRATCH_SUBDIR) {
-        return Some(Verdict::Own("песочницы зоны"));
+        return Some(Verdict::Own("контейнеров зоны со своим домом"));
     }
     None
 }
@@ -1219,7 +1219,7 @@ fn describe(p: &Path) -> &'static str {
     } else if s.contains("/tmux-") {
         "сервер tmux: `run-shell` исполняет команду на хосте, в его сети (§15)"
     } else if s.contains("vpn-fs-sandbox") {
-        "фильтр шины чужой песочницы: шина от имени чужой программы (§15)"
+        "фильтр шины чужого контейнера: шина от имени чужой программы (§15)"
     } else if any(&["docker", "podman", "containerd"]) {
         "контейнерный движок: контейнер в сети хоста"
     } else if any(&["libvirt", "virtqemud", "incus", "lxd"]) {

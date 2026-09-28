@@ -1287,7 +1287,10 @@ pub fn context_check(current_zone: Option<&str>, in_sandbox: bool) -> Check {
         (Some(zone), true) => Check::new(
             "context",
             Level::Warn,
-            format!("эта команда запущена в зоне «{zone}» и в песочнице: сеть и файлы — не хоста"),
+            format!(
+                "эта команда запущена в зоне «{zone}» и в контейнере со своим домом: сеть и \
+                 файлы — не хоста"
+            ),
         ),
         (Some(zone), false) => Check::new(
             "context",
@@ -1297,7 +1300,7 @@ pub fn context_check(current_zone: Option<&str>, in_sandbox: bool) -> Check {
         (None, true) => Check::new(
             "context",
             Level::Warn,
-            "эта команда запущена в песочнице: файлы хоста ей не видны",
+            "эта команда запущена в контейнере со своим домом: файлы хоста ей не видны",
         ),
         (None, false) => Check::new("context", Level::Ok, "запущено на хосте"),
     }
@@ -1649,7 +1652,7 @@ pub fn live_switch_check(live: Option<crate::epoch::LiveSwitch>) -> Check {
             "kind" => Check::new(
                 id,
                 Level::Skip,
-                "экземпляр на одну сеть (основной дом, одноразовый) — сеть не меняется",
+                "экземпляр на одну сеть (основной дом, разовый) — сеть не меняется",
             ),
             "outside" => Check::new(
                 id,

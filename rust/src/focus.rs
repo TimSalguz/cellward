@@ -1275,7 +1275,7 @@ fn switch_network(tools: &Tools, label: &str, launch: Option<&Launch>) -> Option
         Some("other") => {
             notify(
                 "Чтобы в новой сети быть другим, запусти программу в другом контейнере: в окне \
-                 запуска выбери другой контейнер (или «➕ Новый профиль…»).",
+                 запуска выбери другой контейнер (или «Новый контейнер со своим домом…»).",
             );
             return Some(0);
         }
@@ -1927,12 +1927,12 @@ mod tests {
         };
         assert_eq!(
             describe(&state, &w, Some(&launch)),
-            "Огненный <лис>: без ограничений, контейнер: песочница work"
+            "Огненный <лис>: без ограничений, контейнер: work — свой дом"
         );
         // Markup is escaped for the bar: waybar parses it.
         assert_eq!(
             bar_line(&state, Some(&w), Some(&launch)),
-            "{\"text\":\"без ограничений · песочница work\",\"tooltip\":\"Огненный &lt;лис&gt;: без ограничений, контейнер: песочница work\",\"class\":\"zone-unconfined\"}"
+            "{\"text\":\"без ограничений · work — свой дом\",\"tooltip\":\"Огненный &lt;лис&gt;: без ограничений, контейнер: work — свой дом\",\"class\":\"zone-unconfined\"}"
         );
         // Nothing but the app id: shown without its line break.
         assert!(describe(&state, &w, None).starts_with("«firefox»: "));

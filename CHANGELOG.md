@@ -551,6 +551,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and `usb:` for a board a program can reflash.
 
 ### Changed
+- **One vocabulary for containers in every window and message**
+  (2026-09-28, the container-first model; `docs/PERMISSIONS.md` §11). The
+  launch window, the picker's kdialog menus, the containers, settings and
+  delete dialogs, notifications and terminal messages say «контейнер» and
+  name the kind of its home; «профиль» and «песочница» are gone from them.
+  The commands `cellward profile|sandbox` and the flags `--profile`,
+  `--sandbox`, `--fs-sandbox`, `--tmp-profile` stay, as the old words. The
+  container column reads «Основной дом — общий с системой», «Свой
+  контейнер — постоянный дом только этой программы», «Разовый контейнер —
+  пустой дом, стирается при выходе», «Контейнер «<имя>» — свой дом» (or
+  «— слой над домом», «— основной дом», the kind the container has),
+  «Временный слой над домом — видит ваш дом, изменения сотрутся, когда
+  выйдет последняя программа», «Новый контейнер со своим домом…» and «Новый
+  контейнер — слой над домом…»: the two throwaway kinds are told apart by
+  what the program sees. The kdialog menu says the same, and its "always"
+  rows are those words with «— всегда». The short label — the frame's
+  title, `cellward focused`, «сейчас: …» of the network menu, the broker's
+  question — is «основной», «свой», «разовый», «временный» or «<имя> —
+  <вид дома>». The launcher entry «Удалить профиль (контейнер)» is «Удалить
+  контейнер (слой над домом)». A status bar's style or a script that
+  matched the old words (`focused --bar`, the `VPN_ZONE_DRYRUN` line, now
+  «зона …, контейнер …:») needs the new ones.
 - **Nothing is launched into a zone's own namespaces** (2026-09-28, stage
   5 of the container-first model; `docs/LEAK-MODEL.md` §30). A zone is
   transport: every launch into a network runs in its container's instance.

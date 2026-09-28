@@ -147,10 +147,10 @@ and must never change.
 The move happens once, in `sync`, under its lock, before any entry is written
 with the new key: for every old key that no entry owns losslessly, if exactly
 one entry maps to it, `.pinned`, `.pinnedprofile`, `.last`, `.lastprofile`,
-`.labels`, the file permissions and the own sandbox `app-<key>` (with the
-selectors naming it) move to the new key — never over something already there.
+`.labels`, the file permissions and the program's own container `app-<key>`
+(with the selectors naming it) move to the new key — never over something already there.
 If several entries shared it, nobody can tell whose memory it was: the choices
-are dropped and asked again; a shared sandbox home is data and stays. Keys
+are dropped and asked again; a shared container's home is data and stays. Keys
 declared in Nix (`containers.<name>.apps`) and given to `cellward container
 assign` and `cellward launch` go through the same function.
 
