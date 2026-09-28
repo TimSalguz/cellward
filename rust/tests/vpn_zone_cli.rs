@@ -1969,6 +1969,21 @@ fn traffic_says_what_an_instance_sent_and_received() {
         "{status}"
     );
     assert_eq!(home.run(&["traffic", "--bogus"]).status.code(), Some(1));
+    // Recorded into today's summary, twice: the second adds only what came
+    // since; `--days` says it.
+    assert!(home.run(&["traffic", "--record"]).status.success());
+    tally.outbound(500);
+    assert!(home.run(&["traffic", "--record"]).status.success());
+    let json = stdout(&home.run(&["traffic", "--days", "1", "--json"]));
+    assert!(
+        json.contains(
+            "{\"container\":\"work\",\"network\":\"nl\",\"out_bytes\":2000,\"in_bytes\":3000}"
+        ),
+        "{json}"
+    );
+    let text = stdout(&home.run(&["traffic", "--days", "7"]));
+    assert!(text.contains("work · nl: ↑ 2.0 КБ · ↓ 2.9 КБ"), "{text}");
+    assert_eq!(home.run(&["traffic", "--days", "0"]).status.code(), Some(1));
     tally.close();
 }
 

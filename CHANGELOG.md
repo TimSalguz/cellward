@@ -15,9 +15,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   [--watch]` says it per running instance with its container and network,
   `status --json` has it as `instances[].traffic` (`null` for an instance
   of an earlier build). An instance whose counters cannot be made has its
-  way out all the same, uncounted. History by day and network, with the
-  retention the owner chose (30 days of the raw journal, a year of
-  summaries), is the next stage.
+  way out all the same, uncounted. **History by day:** `cellward watch`
+  (the tunnel watch's timer, every minute) adds what each container did
+  since its last look to the day's summary by container and network
+  (`netlog/days/<YYYY-MM-DD>` of the state directory, the local calendar),
+  summaries older than a year go, and `cellward traffic --days <N> [--json]`
+  says the use over the last N days. The raw journal of connections (30
+  days, as the owner chose) comes with per-program accounting.
 
 ### Security
 - **kanshi's IPC is out of every zone's runtime directory** (2026-09-28,

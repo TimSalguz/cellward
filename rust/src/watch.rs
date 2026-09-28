@@ -320,6 +320,13 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
         }
     }
 
+    // What the containers sent and received since the last look, into
+    // today's summary (`crate::traffic`, the history of the network
+    // monitor): the monitor always runs, and this is its clock.
+    if let Err(e) = crate::traffic::record(tools) {
+        eprintln!("cellward watch: traffic summaries not recorded ({e})");
+    }
+
     if json {
         let items: Vec<String> = rows
             .iter()

@@ -194,6 +194,198 @@ pub fn read(dir: &Path) -> Option<Counts> {
     Some(counts)
 }
 
+// --- HISTORY ----------------------------------------------------------------
+
+/// Below the state directory (out of every zone's reach, as the rest of
+/// it): the history of what the containers sent and received
+/// (`docs/FIREWALL.md` §7).
+pub const NETLOG: &str = "netlog";
+/// One file a day in it, `<YYYY-MM-DD>` by the local calendar: a line per
+/// container and network — `<container>\t<network>\t<out>\t<in>`, bytes.
+const DAYS: &str = "days";
+/// The counts seen at the last record, a line per instance:
+/// `<id>\t<since>\t<out>\t<in>`.
+const LAST: &str = "last";
+/// How many days of summaries are kept (the owner, 2026-09-28: a year).
+pub const KEEP_DAYS: u64 = 365;
+
+/// What an instance did since the counts `last` of the same counting
+/// (`since`): its counts less them — all of them, the counting begun anew
+/// (the instance came up again) or never seen before.
+pub fn delta(last: Option<(u64, u64, u64)>, now: Counts) -> (u64, u64) {
+    match last {
+        Some((since, out, inb)) if since == now.since => (
+            now.out_bytes.saturating_sub(out),
+            now.in_bytes.saturating_sub(inb),
+        ),
+        _ => (now.out_bytes, now.in_bytes),
+    }
+}
+
+/// The local calendar's date of Unix time `secs`, `YYYY-MM-DD`.
+pub fn local_date(secs: u64) -> String {
+    let t = libc::time_t::try_from(secs).unwrap_or(0);
+    // SAFETY: an all-zero tm is a valid one to fill.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: valid pointers to a time and a tm of ours.
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return "1970-01-01".to_owned();
+    }
+    format!(
+        "{:04}-{:02}-{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday
+    )
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Lines of tab-separated fields, each with `n` of them; others skipped.
+fn lines_of(text: &str, n: usize) -> Vec<Vec<&str>> {
+    text.lines()
+        .map(|l| l.split('\t').collect::<Vec<&str>>())
+        .filter(|f| f.len() == n)
+        .collect()
+}
+
+/// A day's summary: `(container, network) → (out, in)`.
+type Day = std::collections::BTreeMap<(String, String), (u64, u64)>;
+
+fn read_day(path: &Path) -> Day {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut day = Day::new();
+    for f in lines_of(&text, 4) {
+        if let (Ok(out), Ok(inb)) = (f[2].parse::<u64>(), f[3].parse::<u64>()) {
+            let e = day.entry((f[0].to_owned(), f[1].to_owned())).or_default();
+            e.0 = e.0.saturating_add(out);
+            e.1 = e.1.saturating_add(inb);
+        }
+    }
+    day
+}
+
+fn write_atomically(path: &Path, text: &str) -> io::Result<()> {
+    let tmp = path.with_extension("new");
+    std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path))
+}
+
+/// Add what the running instances did since the last record to today's
+/// summary (`state/netlog/days/<today>`), by container and network — the
+/// network each runs in now —, and drop the days older than [`KEEP_DAYS`].
+/// Run with the tunnel watch, every minute (`crate::watch`): an instance
+/// that ends between two records takes its last minute with it.
+pub fn record(tools: &Tools) -> io::Result<()> {
+    let rows = rows(tools);
+    record_rows(&tools.state, &rows, now_secs())
+}
+
+fn record_rows(state: &Path, rows: &[Row], now: u64) -> io::Result<()> {
+    let base = state.join(NETLOG);
+    let days = base.join(DAYS);
+    std::fs::create_dir_all(&days)?;
+    let last_text = std::fs::read_to_string(base.join(LAST)).unwrap_or_default();
+    let last: std::collections::HashMap<&str, (u64, u64, u64)> = lines_of(&last_text, 4)
+        .into_iter()
+        .filter_map(|f| {
+            Some((
+                f[0],
+                (f[1].parse().ok()?, f[2].parse().ok()?, f[3].parse().ok()?),
+            ))
+        })
+        .collect();
+    let today = days.join(local_date(now));
+    let mut day = read_day(&today);
+    let mut seen = String::new();
+    for r in rows {
+        let Some(c) = r.counts else { continue };
+        let (out, inb) = delta(last.get(r.id.as_str()).copied(), c);
+        if out > 0 || inb > 0 {
+            let who = r.container.clone().unwrap_or_else(|| r.id.clone());
+            let e = day.entry((who, r.network.clone())).or_default();
+            e.0 = e.0.saturating_add(out);
+            e.1 = e.1.saturating_add(inb);
+        }
+        seen.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            r.id, c.since, c.out_bytes, c.in_bytes
+        ));
+    }
+    let text: String = day
+        .iter()
+        .map(|((who, net), (out, inb))| format!("{who}\t{net}\t{out}\t{inb}\n"))
+        .collect();
+    write_atomically(&today, &text)?;
+    write_atomically(&base.join(LAST), &seen)?;
+    // The summaries past their keep.
+    let oldest = local_date(now.saturating_sub(KEEP_DAYS * 86_400));
+    for entry in std::fs::read_dir(&days)?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.len() == 10 && name.as_str() < oldest.as_str() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
+}
+
+/// What each container sent and received in each network over the last
+/// `n` days, today included, from the summaries.
+fn over_days(state: &Path, n: u64, now: u64) -> (String, Day) {
+    let days = state.join(NETLOG).join(DAYS);
+    let from = local_date(now.saturating_sub(n.saturating_sub(1) * 86_400));
+    let mut total = Day::new();
+    for entry in std::fs::read_dir(&days).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.len() != 10 || name.as_str() < from.as_str() {
+            continue;
+        }
+        for (k, (out, inb)) in read_day(&entry.path()) {
+            let e = total.entry(k).or_default();
+            e.0 = e.0.saturating_add(out);
+            e.1 = e.1.saturating_add(inb);
+        }
+    }
+    (from, total)
+}
+
+fn days_json(n: u64, from: &str, total: &Day) -> String {
+    let items: Vec<String> = total
+        .iter()
+        .map(|((who, net), (out, inb))| {
+            format!(
+                "{{\"container\":{},\"network\":{},\"out_bytes\":{out},\"in_bytes\":{inb}}}",
+                string(who),
+                string(net)
+            )
+        })
+        .collect();
+    format!(
+        "{{\"schema_version\":{},\"days\":{n},\"from\":{},\"containers\":[{}]}}",
+        crate::status::SCHEMA_VERSION,
+        string(from),
+        items.join(",")
+    )
+}
+
+fn days_text(n: u64, from: &str, total: &Day) -> String {
+    if total.is_empty() {
+        return format!("с {from} ({n} дн.) ничего не записано\n");
+    }
+    let mut out = format!("с {from} ({n} дн.):\n");
+    for ((who, net), (o, i)) in total {
+        out.push_str(&format!(
+            "{who} · {net}: ↑ {} · ↓ {}\n",
+            bytes_text(*o),
+            bytes_text(*i)
+        ));
+    }
+    out
+}
+
 /// One running instance's line of `cellward traffic`.
 struct Row {
     id: String,
@@ -289,7 +481,9 @@ fn text(rows: &[Row]) -> String {
     out
 }
 
-const USAGE: &str = "cellward traffic [--json] [--watch]";
+const USAGE: &str = "cellward traffic [--json] [--watch]\n\
+                     cellward traffic --days <N> [--json]\n\
+                     cellward traffic --record";
 
 /// `cellward traffic [--json] [--watch]`: what each running instance sent
 /// and received since it came up; with `--watch`, again every second — a
@@ -297,15 +491,49 @@ const USAGE: &str = "cellward traffic [--json] [--watch]";
 pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     let mut json_out = false;
     let mut watch = false;
-    for arg in args {
+    let mut days: Option<u64> = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
         match arg.to_str() {
             Some("--json") => json_out = true,
             Some("--watch") => watch = true,
+            Some("--record") => {
+                return match record(tools) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        eprintln!("cellward traffic: не записать итоги ({e})");
+                        1
+                    }
+                }
+            }
+            Some("--days") => {
+                match rest
+                    .next()
+                    .and_then(|v| v.to_str())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .filter(|n| (1..=KEEP_DAYS).contains(n))
+                {
+                    Some(n) => days = Some(n),
+                    None => {
+                        eprintln!("--days: от 1 до {KEEP_DAYS}");
+                        return 1;
+                    }
+                }
+            }
             _ => {
                 eprintln!("{USAGE}");
                 return 1;
             }
         }
+    }
+    if let Some(n) = days {
+        let (from, total) = over_days(&tools.state, n, now_secs());
+        if json_out {
+            println!("{}", days_json(n, &from, &total));
+        } else {
+            print!("{}", days_text(n, &from, &total));
+        }
+        return 0;
     }
     loop {
         let rows = rows(tools);
@@ -386,6 +614,68 @@ mod tests {
         assert!(read(&d).is_none());
         assert!(read(&d.join("nowhere")).is_none());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Recorded twice a minute apart: the second adds only what was done
+    /// since; an instance come up again counts from its new start; days
+    /// past the keep go; `--days` sums the days it covers.
+    #[test]
+    fn a_record_adds_what_was_done_since_the_last() {
+        let state = dir("record");
+        let row = |id: &str, net: &str, since: u64, out: u64, inb: u64| Row {
+            id: id.to_owned(),
+            container: Some(id.to_owned()),
+            network: net.to_owned(),
+            counts: Some(Counts {
+                out_bytes: out,
+                in_bytes: inb,
+                since,
+                ..Counts::default()
+            }),
+        };
+        let noon = 1_790_000_000; // a day in 2026
+        let today = local_date(noon);
+        record_rows(&state, &[row("work", "nl", 100, 1000, 5000)], noon).unwrap();
+        record_rows(&state, &[row("work", "nl", 100, 1500, 9000)], noon + 60).unwrap();
+        let day = read_day(&state.join(NETLOG).join(DAYS).join(&today));
+        assert_eq!(day.get(&("work".into(), "nl".into())), Some(&(1500, 9000)));
+        // Came up again: its counts from zero, all of them new.
+        record_rows(&state, &[row("work", "de", 200, 300, 400)], noon + 120).unwrap();
+        let day = read_day(&state.join(NETLOG).join(DAYS).join(&today));
+        assert_eq!(day.get(&("work".into(), "de".into())), Some(&(300, 400)));
+        assert_eq!(day.get(&("work".into(), "nl".into())), Some(&(1500, 9000)));
+        // An old day goes; a recent one stays and is summed.
+        let days = state.join(NETLOG).join(DAYS);
+        std::fs::write(days.join("2000-01-01"), "work\tnl\t1\t1\n").unwrap();
+        let yesterday = local_date(noon - 86_400);
+        std::fs::write(days.join(&yesterday), "work\tnl\t7\t3\n").unwrap();
+        record_rows(&state, &[], noon + 180).unwrap();
+        assert!(!days.join("2000-01-01").exists());
+        let (from, total) = over_days(&state, 2, noon);
+        assert_eq!(from, yesterday);
+        assert_eq!(
+            total.get(&("work".into(), "nl".into())),
+            Some(&(1507, 9003))
+        );
+        let (_, one) = over_days(&state, 1, noon);
+        assert_eq!(one.get(&("work".into(), "nl".into())), Some(&(1500, 9000)));
+        assert!(days_json(2, &from, &total).contains(
+            "{\"container\":\"work\",\"network\":\"nl\",\"out_bytes\":1507,\"in_bytes\":9003}"
+        ));
+        crate::json::parse(&days_json(2, &from, &total)).unwrap();
+        assert_eq!(
+            delta(
+                Some((5, 10, 10)),
+                Counts {
+                    since: 5,
+                    out_bytes: 4,
+                    in_bytes: 20,
+                    ..Counts::default()
+                }
+            ),
+            (0, 10)
+        );
+        let _ = std::fs::remove_dir_all(&state);
     }
 
     #[test]

@@ -292,7 +292,7 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 strs(&mut out, &["--json"]);
             }
             "explain" if pos == 4 => strs(&mut out, &["--json"]),
-            "traffic" => strs(&mut out, &["--json", "--watch"]),
+            "traffic" => strs(&mut out, &["--json", "--watch", "--days"]),
             "container" if pos == 2 => strs(
                 &mut out,
                 &[
