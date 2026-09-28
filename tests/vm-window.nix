@@ -174,7 +174,8 @@ let
               f"systemd-run --user --unit=vmpanel --setenv=WAYLAND_DISPLAY={display} "
               "cellward-gui monitor"
           )
-          machine.wait_until_succeeds("pgrep -f 'vpn-zone-window panel'", timeout=30)
+          # `[v]`: the test's own shell has the words on its command line.
+          machine.wait_until_succeeds("pgrep -f '[v]pn-zone-window panel'", timeout=30)
           machine.sleep(3)
           alice(f"WAYLAND_DISPLAY={display} grim /tmp/panel-network.png")
           machine.copy_from_vm("/tmp/panel-network.png", "")
@@ -183,7 +184,7 @@ let
           alice(f"WAYLAND_DISPLAY={display} grim /tmp/panel-containers.png")
           machine.copy_from_vm("/tmp/panel-containers.png", "")
           alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
-          machine.wait_until_fails("pgrep -f 'vpn-zone-window panel'", timeout=15)
+          machine.wait_until_fails("pgrep -f '[v]pn-zone-window panel'", timeout=15)
           # The data it reads.
           out = alice("cellward _panel")
           assert "network\toffline\toffline\t1\t" in out, out
