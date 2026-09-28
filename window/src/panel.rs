@@ -249,42 +249,38 @@ struct Panel {
 }
 
 /// Run `cellward <args>` off the window's threads; its output, or why not.
-fn cellward(
-    path: PathBuf,
-    args: Vec<String>,
-) -> impl std::future::Future<Output = Result<String, String>> {
-    async move {
-        let (done, over) = iced::futures::channel::oneshot::channel();
-        std::thread::spawn(move || {
-            let result = match Command::new(&path)
-                .args(&args)
-                .stdin(Stdio::null())
-                .output()
-            {
-                Ok(out) => {
-                    let said = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr)
-                    )
-                    .trim()
-                    .to_owned();
-                    if out.status.success() {
-                        Ok(said)
-                    } else {
-                        Err(said)
-                    }
+async fn cellward(path: PathBuf, args: Vec<String>) -> Result<String, String> {
+    let (done, over) = iced::futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let result = match Command::new(&path)
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+        {
+            Ok(out) => {
+                let said = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                )
+                .trim()
+                .to_owned();
+                if out.status.success() {
+                    Ok(said)
+                } else {
+                    Err(said)
                 }
-                Err(e) => Err(format!("cellward не запустился: {e}")),
-            };
-            let _ = done.send(result);
-        });
-        over.await
-            .unwrap_or_else(|_| Err("cellward не ответил".to_owned()))
-    }
+            }
+            Err(e) => Err(format!("cellward не запустился: {e}")),
+        };
+        let _ = done.send(result);
+    });
+    over.await
+        .unwrap_or_else(|_| Err("cellward не ответил".to_owned()))
 }
 
-/// `cellward _panel`, without its stderr in the way: the lines alone.
+/// `cellward _panel`: its lines — a line of anything else it says is
+/// skipped by [`parse`].
 fn load(path: PathBuf) -> Task<Msg> {
     Task::perform(cellward(path, vec!["_panel".to_owned()]), Msg::Loaded)
 }
@@ -371,12 +367,34 @@ impl Panel {
         Task::perform(cellward(self.cellward.clone(), args), Msg::Done)
     }
 
+    /// What `cellward explain` says of the container `name`: in the
+    /// network it runs in, or is bound to; one that asks on every launch and
+    /// runs nowhere has none to be explained in — said so.
     fn explain(&self, name: String) -> Task<Msg> {
+        let asks = self
+            .data
+            .containers
+            .iter()
+            .any(|c| c.name == name && c.network == "ask");
+        let mut args = vec!["explain".to_owned(), name.clone()];
+        match self.running(&name) {
+            Some(i) => args.push(i.network.clone()),
+            None if asks => {
+                return Task::done(Msg::Explained(
+                    name,
+                    Ok(
+                        "Сеть спрашивают при запуске, а разрешения зависят от сети: выбери сеть \
+                        контейнера выше — или запусти его — и они будут здесь."
+                            .to_owned(),
+                    ),
+                ))
+            }
+            None => {}
+        }
         let path = self.cellward.clone();
-        Task::perform(
-            cellward(path, vec!["explain".to_owned(), name.clone()]),
-            move |r| Msg::Explained(name.clone(), r),
-        )
+        Task::perform(cellward(path, args), move |r| {
+            Msg::Explained(name.clone(), r)
+        })
     }
 
     fn update(&mut self, msg: Msg) -> Task<Msg> {
@@ -821,7 +839,7 @@ impl Panel {
         for n in &self.data.networks {
             let label = match n.kind.as_str() {
                 "offline" => "Без сети".to_owned(),
-                "unconfined" => "Хоста".to_owned(),
+                "unconfined" => "Без ограничений".to_owned(),
                 _ if n.up => n.name.clone(),
                 _ => format!("{} (опущена)", n.name),
             };
