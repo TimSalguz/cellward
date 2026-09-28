@@ -1545,6 +1545,9 @@ pub fn system_checks(tools: &Tools, uid: u32) -> Vec<Check> {
     ] {
         checks.push(file_check(id, path, what));
     }
+    // The Nix daemon and `trusted-users` (review 2026-09-28): root on the
+    // host for whatever has the daemon.
+    checks.push(nix_trusted(tools, uid));
     checks
 }
 
@@ -2192,6 +2195,214 @@ pub fn pipewire_check(
     })
 }
 
+/// Where the Nix daemon reads its settings: `$NIX_CONF_DIR/nix.conf`, and
+/// the daemon's `NIX_CONF_DIR` is its unit's — `/etc/nix` everywhere we
+/// know of.
+pub const NIX_CONF: &str = "/etc/nix/nix.conf";
+
+/// How deep nix.conf's `include`s are followed: a loop ends here.
+const NIX_CONF_DEPTH: u32 = 16;
+
+/// The daemon's `trusted-users` by nix.conf's text (`text`, the file at
+/// `path`), read the way Nix reads it (`AbstractConfig::applyConfig`): a
+/// `#` begins a comment; a line is `<name> = <value>`, `include <path>` or
+/// `!include <path>` (a missing file is no error), the path relative to
+/// the including file's directory and read in place; a later `<name> =`
+/// replaces what came before, `extra-<name> =` adds to it; unset, `root`.
+/// `read` gives a file's text (`None`: it is not there, or cannot be read).
+/// `None`: the file, or a file it includes without `!`, cannot be read —
+/// who is trusted is not known.
+pub fn nix_trusted_users(
+    text: &str,
+    path: &Path,
+    read: &dyn Fn(&Path) -> Option<String>,
+) -> Option<Vec<String>> {
+    let mut users = vec!["root".to_owned()];
+    apply_nix_conf(text, path, read, &mut users, 0)?;
+    Some(users)
+}
+
+fn apply_nix_conf(
+    text: &str,
+    path: &Path,
+    read: &dyn Fn(&Path) -> Option<String>,
+    users: &mut Vec<String>,
+    depth: u32,
+) -> Option<()> {
+    if depth > NIX_CONF_DEPTH {
+        return None;
+    }
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or_default();
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        match tokens.as_slice() {
+            [] => {}
+            [word, file] if *word == "include" || *word == "!include" => {
+                let included = dir.join(file);
+                match read(&included) {
+                    Some(text) => apply_nix_conf(&text, &included, read, users, depth + 1)?,
+                    None if *word == "!include" => {}
+                    None => return None,
+                }
+            }
+            ["trusted-users", "=", value @ ..] => {
+                *users = value.iter().map(|v| (*v).to_owned()).collect();
+            }
+            ["extra-trusted-users", "=", value @ ..] => {
+                users.extend(value.iter().map(|v| (*v).to_owned()));
+            }
+            _ => {}
+        }
+    }
+    Some(())
+}
+
+/// Which entry of `trusted` (nix.conf's `trusted-users`) names the user
+/// `user`, whose groups are `groups` (ids: the primary one and the
+/// supplementary ones) — `*`, the user's name, or `@<group>` of a group
+/// the user is in (`group_id` finds a group's id by its name). `None`: none.
+pub fn trusted_by(
+    trusted: &[String],
+    user: &str,
+    groups: &[u32],
+    group_id: &dyn Fn(&str) -> Option<u32>,
+) -> Option<String> {
+    trusted
+        .iter()
+        .find(|entry| match entry.strip_prefix('@') {
+            Some(group) => group_id(group).is_some_and(|gid| groups.contains(&gid)),
+            None => *entry == "*" || *entry == user,
+        })
+        .cloned()
+}
+
+/// The user's name and the ids of every group they are in — the primary
+/// one and the supplementary ones, as NSS lists them (`getgrouplist`).
+fn account_of(uid: u32) -> Option<(String, Vec<u32>)> {
+    // SAFETY: passwd is plain data; getpwuid_r fills it or leaves `found` null.
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf: Vec<libc::c_char> = vec![0; 16 * 1024];
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: every pointer is to a local that outlives the call.
+    let rc = unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut found) };
+    if rc != 0 || found.is_null() {
+        return None;
+    }
+    // SAFETY: getpwuid_r succeeded, so the name points into `buf`.
+    let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }.to_owned();
+    let mut size: libc::c_int = 64;
+    loop {
+        let mut list: Vec<libc::gid_t> = vec![0; usize::try_from(size).unwrap_or(64)];
+        let mut count = size;
+        // SAFETY: a name, a buffer and its length in `count`.
+        let rc =
+            unsafe { libc::getgrouplist(name.as_ptr(), pwd.pw_gid, list.as_mut_ptr(), &mut count) };
+        if rc >= 0 {
+            list.truncate(usize::try_from(count).unwrap_or(0));
+            return Some((name.into_string().ok()?, list));
+        }
+        if count <= size || count > 65_536 {
+            return None;
+        }
+        size = count;
+    }
+}
+
+/// Review 2026-09-28: the Nix daemon given to a program is root on the host
+/// when the user is one of the daemon's `trusted-users` — a trusted user
+/// sets what the daemon builds with: its sandbox off, a `post-build-hook`,
+/// a substituter of its own, a derivation of any builder. `holders`: what
+/// has the daemon (running containers, containers with it of their own,
+/// zones); `trusted`: which entry of `trusted-users` names the user
+/// (`Some(None)`: none), `None` where nix.conf cannot be read; `user`, the
+/// user's name.
+pub fn nix_trusted_check(holders: &[String], trusted: Option<Option<String>>, user: &str) -> Check {
+    let id = "nix-trusted";
+    if holders.is_empty() {
+        return Check::new(
+            id,
+            Level::Ok,
+            "Nix-демон хоста не виден ни одному контейнеру и ни одной зоне",
+        );
+    }
+    let holders = holders.join(", ");
+    match trusted {
+        Some(None) => Check::new(
+            id,
+            Level::Ok,
+            format!(
+                "Nix-демон хоста виден ({holders}), но {user} не в trusted-users ({NIX_CONF}): \
+                 демон собирает для него без прав root"
+            ),
+        ),
+        Some(Some(entry)) => Check::new(
+            id,
+            Level::Warn,
+            format!(
+                "Nix-демон хоста виден ({holders}), а {user} в trusted-users ({NIX_CONF}: \
+                 {entry}): программа с Nix-демоном может то же, что root хоста — выключить \
+                 песочницу сборки, подставить свой кэш или хук после сборки. Выход: убрать \
+                 {user} и его группы из trusted-users — или выключить Nix-демон \
+                 (cellward container set <контейнер> nix-daemon off, cellward nix-daemon \
+                 <зона> off)"
+            ),
+        ),
+        None => Check::new(
+            id,
+            Level::Warn,
+            format!(
+                "Nix-демон хоста виден ({holders}), а {NIX_CONF} не прочитать: не узнать, в \
+                 trusted-users ли {user} — если да, программа с Nix-демоном может то же, что \
+                 root хоста"
+            ),
+        ),
+    }
+}
+
+/// What has the host's Nix daemon, for [`nix_trusted_check`]: the running
+/// instances that came up with it, the containers with it of their own, the
+/// zones that give it to their containers without their own.
+fn nix_daemon_holders(tools: &Tools) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |what: String| {
+        if !out.contains(&what) {
+            out.push(what);
+        }
+    };
+    for i in crate::instance::running(&tools.state) {
+        let note = fs::read_to_string(i.dir.join(crate::instance::SETTINGS)).unwrap_or_default();
+        if crate::hermetic::applied_in(&note, "nix_daemon") == Some(true) {
+            push(format!("контейнер {}", printable(&i.id)));
+        }
+    }
+    for name in crate::container::names_in(&tools.config, &tools.profiles) {
+        if crate::hermetic::container_own(&tools.config, &name, "nix_daemon")
+            .is_some_and(|(on, _)| on)
+        {
+            push(format!("контейнер {}", printable(&name)));
+        }
+    }
+    for zone in all_zones(tools) {
+        if crate::hermetic::nix_daemon(&tools.state.join(&zone), &tools.config, &zone).0 {
+            push(format!("зона {}", printable(&zone)));
+        }
+    }
+    out
+}
+
+/// [`nix_trusted_check`] for this host and user.
+fn nix_trusted(tools: &Tools, uid: u32) -> Check {
+    let holders = nix_daemon_holders(tools);
+    let (user, groups) =
+        account_of(uid).unwrap_or_else(|| (std::env::var("USER").unwrap_or_default(), Vec::new()));
+    let read = |path: &Path| fs::read_to_string(path).ok();
+    let trusted = read(Path::new(NIX_CONF))
+        .and_then(|text| nix_trusted_users(&text, Path::new(NIX_CONF), &read))
+        .map(|list| trusted_by(&list, &user, &groups, &crate::egress::group_id));
+    nix_trusted_check(&holders, trusted, &printable(&user))
+}
+
 /// The names of every zone on disk, `offline` included.
 fn all_zones(tools: &Tools) -> Vec<String> {
     let mut names: Vec<String> = visible_entries(&tools.state)
@@ -2382,6 +2593,168 @@ mod tests {
         let _ = beside.wait();
         // A zone whose process is gone has no namespace to look in.
         assert!(programs_in_zone(zone_pid, uid).is_empty());
+    }
+
+    /// Review 2026-09-28: nix.conf's `trusted-users` as Nix reads it —
+    /// includes in place, a later assignment over an earlier one, `extra-`
+    /// adding, `root` unset —, and who it names: the user, `*`, a group the
+    /// user is in.
+    #[test]
+    fn nix_confs_trusted_users_are_read_as_nix_reads_them() {
+        let files: HashMap<&str, &str> = [
+            (
+                "/etc/nix/extra.conf",
+                "extra-trusted-users = @wheel # the admins
+",
+            ),
+            (
+                "/etc/nix/sub/deep.conf",
+                "trusted-users = deep
+",
+            ),
+            (
+                "/etc/nix/loop.conf",
+                "include loop.conf
+",
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let read = |path: &Path| {
+            files
+                .get(path.to_str().unwrap_or(""))
+                .map(|t| (*t).to_owned())
+        };
+        let conf = Path::new("/etc/nix/nix.conf");
+        let users = |text: &str| nix_trusted_users(text, conf, &read);
+        assert_eq!(users(""), Some(vec!["root".to_owned()]));
+        assert_eq!(
+            users(
+                "# trusted-users = alice
+build-users-group = nixbld
+"
+            ),
+            Some(vec!["root".to_owned()])
+        );
+        assert_eq!(
+            users(
+                "trusted-users = root alice
+"
+            ),
+            Some(vec!["root".to_owned(), "alice".to_owned()])
+        );
+        assert_eq!(
+            users(
+                "trusted-users = root
+include extra.conf
+"
+            ),
+            Some(vec!["root".to_owned(), "@wheel".to_owned()])
+        );
+        // A later assignment replaces what came before, an include too.
+        assert_eq!(
+            users(
+                "trusted-users = alice
+include sub/deep.conf
+"
+            ),
+            Some(vec!["deep".to_owned()])
+        );
+        assert_eq!(
+            users(
+                "extra-trusted-users = alice
+trusted-users = bob
+"
+            ),
+            Some(vec!["bob".to_owned()])
+        );
+        // A missing file: no matter with `!`, not known without.
+        assert_eq!(
+            users(
+                "!include missing.conf
+trusted-users = root
+"
+            ),
+            Some(vec!["root".to_owned()])
+        );
+        assert_eq!(
+            users(
+                "include missing.conf
+"
+            ),
+            None
+        );
+        // An include that includes itself ends.
+        assert_eq!(
+            users(
+                "include loop.conf
+"
+            ),
+            None
+        );
+        // `name=value` without spaces is no setting to Nix.
+        assert_eq!(
+            users(
+                "trusted-users=alice
+"
+            ),
+            Some(vec!["root".to_owned()])
+        );
+        let group_id = |name: &str| match name {
+            "wheel" => Some(10),
+            "users" => Some(100),
+            _ => None,
+        };
+        let list = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            trusted_by(&list(&["root"]), "alice", &[100, 10], &group_id),
+            None
+        );
+        assert_eq!(
+            trusted_by(&list(&["root", "alice"]), "alice", &[100], &group_id),
+            Some("alice".to_owned())
+        );
+        assert_eq!(
+            trusted_by(&list(&["root", "@wheel"]), "alice", &[100, 10], &group_id),
+            Some("@wheel".to_owned())
+        );
+        assert_eq!(
+            trusted_by(&list(&["root", "@wheel"]), "alice", &[100], &group_id),
+            None
+        );
+        assert_eq!(
+            trusted_by(&list(&["@nosuch", "*"]), "alice", &[100], &group_id),
+            Some("*".to_owned())
+        );
+    }
+
+    /// Review 2026-09-28: the Nix daemon with the user trusted warns, with
+    /// the way out; without the daemon, or not trusted, it is ok; nix.conf
+    /// that cannot be read warns where the daemon is given.
+    #[test]
+    fn the_nix_daemon_of_a_trusted_user_is_named() {
+        let none: [String; 0] = [];
+        let some = ["контейнер work".to_owned(), "зона nl".to_owned()];
+        assert_eq!(
+            nix_trusted_check(&none, Some(Some("@wheel".to_owned())), "alice").level,
+            Level::Ok
+        );
+        assert_eq!(
+            nix_trusted_check(&some, Some(None), "alice").level,
+            Level::Ok
+        );
+        let warn = nix_trusted_check(&some, Some(Some("@wheel".to_owned())), "alice");
+        assert_eq!(warn.level, Level::Warn);
+        for part in [
+            "@wheel",
+            "root",
+            "trusted-users",
+            "nix-daemon off",
+            "контейнер work",
+        ] {
+            assert!(warn.detail.contains(part), "{part}: {}", warn.detail);
+        }
+        assert_eq!(nix_trusted_check(&some, None, "alice").level, Level::Warn);
     }
 
     /// Review 2026-09-28: a locked zone's lock against its containers — a
