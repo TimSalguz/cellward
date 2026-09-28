@@ -7,8 +7,9 @@
 
 **Status: 2026-09-28.** It describes the code as of that day, the OpenConnect client's empty
 root, a new program's own home, a container's focus policy (W17), a space's `resolv.conf`
-laid again after the host's rename (D2) and shells' IPC out of every runtime directory (W7)
-included.
+laid again after the host's rename (D2), shells' IPC out of every runtime directory (W7)
+and step 0 of the split between a network's and a container's permissions (N23, W18,
+H7–H9, L6) included.
 This page is the summary; LEAK-MODEL is the analysis of each channel. Where the two disagree,
 the code and CHANGELOG decide, and one of them needs fixing.
 
@@ -207,7 +208,7 @@ whatever its network gives its containers (2026-09-28, H8).
 | X9 | `TIOCSTI` into the host terminal a program was started from | sandbox: yes · zone: **no** | seccomp in the sandbox; a zone program keeps that terminal, and the kernel's `legacy_tiocsti` decides | u6 |
 | X10 | Another container's loopback services, abstract sockets, System V IPC and `/tmp` (a container reaching another) | yes · `/tmp` in an ordinary network: **no** (X1) | each container runs in its own instance: network, IPC and mount namespaces of its own — offline since stage 1 of the container design, in a zone since stage 2 (2026-09-27); since stage 5 (2026-09-28) never in a zone's own namespaces: a launch into a zone of a previous build still running (no bridge) is refused with its restart, and `doctor` names what a previous build left running there | vm53 vm54 vm66 vm68 vm84 |
 | | **Helpers outside the zone** | | | |
-| H1 | The Nix daemon: a fixed-output build fetches any URL from the host's network | yes, unless `nix-daemon on` | hidden in every zone and always in the OpenConnect uplink; system tier: hidden from containers and `vpn-zone-sys`, optional for services | vm18 vm20 sm16 sys2 |
+| H1 | The Nix daemon: a fixed-output build fetches any URL from the host's network (and, the user trusted by the daemon, anything root does: H9) | yes, unless `nix-daemon on` | hidden in every zone and always in the OpenConnect uplink; system tier: hidden from containers and `vpn-zone-sys`, optional for services | vm18 vm20 sm16 sys2 |
 | H2 | The system tier's service (add a system zone, run in one, around the zone's tunnel) | yes | `/run/vpn-zones` hidden in user zones; `VZP1` accepted only from a zone's root; per-zone user lists | br2 sys5 |
 | H3 | cellward's own state and settings (every zone's key, `zone.pid`, the instances' `.instances/` with their control sockets, the registry, raw sockets behind the filters, `broker-always`, `declared/`) | yes | tmpfs over `~/.local/state/vpn-zones` in every zone and every container's instance — an instance keeps its own throwaway layer and never the registry; `~/.config/vpn-zones` and `~/.local/share/vpn-zones` read-only | vm18 sm10 vm56 |
 | H4 | Other containers' data | yes | container storage is covered in zones; a launch gets back its own | vm33 vm18 |
@@ -215,6 +216,7 @@ whatever its network gives its containers (2026-09-28, H8).
 | H6 | A file in `declared/` speaks in Nix's name (a file chooser a zone's program steers, a program of the host): `hermetic-default off`, a container bound to `unconfined`, the CLI refusing to change it | yes | a declaration counts only when the file, every link followed, is in the Nix store, as home-manager's links are; a plain file or a link elsewhere is ignored with a warning, and the local value or the default applies | vm46 u15 |
 | H7 | A container's own word that closes — hermetic on; the Nix daemon, the host's startup files, the raw PipeWire, the cameras off; the microphone or the screen cast `no` rather than `ask` rather than `yes` — ignored because its network's value declared in Nix opens it | yes (review 2026-09-28) | a local word stricter than the network's declared one wins over it, a looser one does not; the container's own declared word wins both ways; `hermetic.default` counts as the network's declared value | u22 |
 | H8 | A throwaway container (a one-off, a temporary layer over the home) or a program whose container is not known takes its network's Nix daemon, host files, audio manager or want of hermeticity | yes (review 2026-09-28) | a throwaway's instance comes up with the safe values whatever its network says (`hermetic::value_for`: hermetic, none of the others); the microphone's `yes` is `ask` for it | u23 |
+| H9 | The Nix daemon given to a program (`nix_daemon`) while the user, or a group of the user's (`@wheel` too), is in nix.conf's `trusted-users`: the daemon obeys a trusted user in all that makes a build — its sandbox off, a substituter or a `post-build-hook` of its own —, so the program can do what the host's root does | **no** — the host's configuration; `doctor` warns | `doctor` reads `/etc/nix/nix.conf` as Nix does (`include`, `!include`, `extra-trusted-users`, `root` unset) and warns (`nix-trusted`) when a running instance, a container's own word or a network gives the daemon and the user is trusted; the way out: the user and its groups out of `trusted-users` (`allowed-users` is enough to build), or the Nix daemon off | u26 |
 | | **Files and the host's startup files** | | | |
 | F1 | A zone program reads the home (`~/.ssh`, browser profiles, other programs' data) | own home: yes · otherwise **no** | the sandbox: an empty home plus granted paths | sm8 sm10 |
 | F2 | A zone program writes what the host runs later (`~/.bashrc`, autostart, launcher entries, user units, compositor configs, `mimeapps.list`) | hermetic: partly · ordinary: **no** · own home: yes | read-only covers from a list, their parent directories pinned | vm18 |
@@ -516,3 +518,4 @@ Rust tests (`cargo test`):
 - u23 `rust/src/hermetic.rs`: `a_throwaway_comes_up_safe_whatever_its_network_says`
 - u24 `rust/src/x11.rs`: `a_containers_own_x11_decides_and_off_refuses_the_zones`; `rust/tests/vpn_zone_cli.rs`: `a_container_with_x11_gets_its_own_x_server_in_zones_only`
 - u25 `rust/tests/vpn_zone_cli.rs`: `a_locked_zone_refuses_a_container_that_is_not_hermetic`; `rust/src/doctor.rs`: `a_locked_zones_containers_that_are_not_hermetic_are_named`; `rust/src/switch.rs`: `every_precondition_refuses_alone`
+- u26 `rust/src/doctor.rs`: `nix_confs_trusted_users_are_read_as_nix_reads_them`, `the_nix_daemon_of_a_trusted_user_is_named`
