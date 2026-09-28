@@ -683,6 +683,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A single-instance program started again in its container raises its
+  first copy instead of starting a second one on the same profile** (owner
+  2026-09-27: two Claude Desktops ran in one own sandbox). Every sandbox
+  launch had a `/tmp` of its own, and Electron and Chromium find their first
+  copy by a socket there: the second found nothing, took the profile's lock
+  for a stale one and ran on the profile the first had open. In its
+  container's instance a sandbox now takes the container's `/tmp`, shared by
+  the container's launches and no one else's; its X server's sockets stay
+  its own (a tmpfs on `/tmp/.X11-unix`), and a display is chosen whose lock
+  is not in the shared `/tmp`. An unconfined launch keeps a `/tmp` of its
+  own — its outside is the host's.
 - **A container's commands act on that container only** (review
   2026-09-28). `cellward container stop|kill|reattach <c>`, `container set
   <c> network <n> --restart` and the frame's «Сменить и перезапустить

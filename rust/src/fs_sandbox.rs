@@ -270,6 +270,10 @@ pub struct Args {
     /// one. Its programs are the zone to the portal
     /// (`desktop::zone_app_id`, LEAK-MODEL §23).
     pub zone: Option<String>,
+    /// `--share-tmp on`: the launch runs in its container's instance, whose
+    /// `/tmp` is the container's own — the sandbox takes it instead of a
+    /// tmpfs of its own ([`Layout::share_tmp`]).
+    pub share_tmp: bool,
     pub tools: Tools,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
@@ -335,6 +339,7 @@ impl Args {
         let mut bind_paths: Vec<PathBuf> = Vec::new();
         let mut x11 = false;
         let mut camera = false;
+        let mut share_tmp = false;
         let mut devices = Vec::new();
         let mut zone: Option<String> = None;
         let mut app_id: Option<OsString> = None;
@@ -375,6 +380,7 @@ impl Args {
                 }
                 "--x11" => x11 = value == "on",
                 "--camera" => camera = value == "on",
+                "--share-tmp" => share_tmp = value == "on",
                 // Only a node of the kinds a grant gives: nothing else.
                 "--device" => {
                     let path = PathBuf::from(value);
@@ -403,6 +409,7 @@ impl Args {
             bind_paths,
             x11,
             camera,
+            share_tmp,
             devices,
             zone,
             tools,
@@ -557,6 +564,17 @@ pub struct Layout {
     /// sandbox without its filter is not started at all (`seccomp_program`),
     /// so there is no list without `--seccomp` to build.
     pub seccomp_fd: libc::c_int,
+    /// `/tmp` is the one the sandbox is started in — its container's
+    /// instance's, shared by every launch of the container — and not a tmpfs
+    /// of its own (owner 2026-09-27: two Claude Desktops in one sandbox).
+    /// A single-instance program (Electron, Chromium: a socket in `/tmp`,
+    /// linked from the profile) started again finds the first copy there and
+    /// hands it the window; with a `/tmp` per launch it found nothing, took
+    /// the profile's lock for a stale one and ran a second copy on the same
+    /// profile. The X server's sockets stay the launch's own: a tmpfs of its
+    /// own on `/tmp/.X11-unix` (THREAT-MODEL W10). Only in an instance — an
+    /// unconfined launch's `/tmp` is the host's.
+    pub share_tmp: bool,
 }
 
 fn push(v: &mut Vec<OsString>, s: &str) {
@@ -675,8 +693,14 @@ pub fn bwrap_args(layout: &Layout, cmd: &[OsString]) -> Vec<OsString> {
     }
     push(&mut a, "--proc");
     push(&mut a, "/proc");
-    push(&mut a, "--tmpfs");
-    push(&mut a, "/tmp");
+    if layout.share_tmp {
+        bind_same(&mut a, "--bind", Path::new("/tmp"));
+        push(&mut a, "--tmpfs");
+        push(&mut a, "/tmp/.X11-unix");
+    } else {
+        push(&mut a, "--tmpfs");
+        push(&mut a, "/tmp");
+    }
 
     // --- HOME ---
     if layout.perms.home {
@@ -1482,9 +1506,13 @@ pub fn run(args: Args) -> u8 {
                 let chosen = (0..DISPLAY_SPAN)
                     .map(|i| pick_display(seed.wrapping_add(i)))
                     .find(|d| {
-                        d[1..]
-                            .parse::<u32>()
-                            .is_ok_and(|n| !crate::x11::abstract_name_taken(n))
+                        d[1..].parse::<u32>().is_ok_and(|n| {
+                            !crate::x11::abstract_name_taken(n)
+                                // In a shared /tmp another launch's server
+                                // keeps its lock there.
+                                && !(args.share_tmp
+                                    && Path::new(&format!("/tmp/.X{n}-lock")).exists())
+                        })
                     })
                     .unwrap_or_else(|| pick_display(seed));
                 let mut wrapped: Vec<OsString> = vec![
@@ -1571,6 +1599,7 @@ pub fn run(args: Args) -> u8 {
         flatpak_info: info,
         display,
         seccomp_fd: SECCOMP_FD,
+        share_tmp: args.share_tmp,
     };
 
     let mut command = Command::new(&args.tools.bwrap);
@@ -2031,6 +2060,7 @@ mod tests {
             flatpak_info: PathBuf::from("/tmp/sb/flatpak-info"),
             display: None,
             seccomp_fd: SECCOMP_FD,
+            share_tmp: false,
         }
     }
 
@@ -2219,6 +2249,34 @@ mod tests {
                 "--",
                 "prog",
             ]
+        );
+    }
+
+    /// In its container's instance the sandbox takes the container's /tmp —
+    /// where a single-instance program finds its first copy — but keeps its
+    /// X server's sockets to itself (`Layout::share_tmp`).
+    #[test]
+    fn in_an_instance_the_containers_tmp_is_shared_but_not_its_x_sockets() {
+        let l = Layout {
+            share_tmp: true,
+            ..layout()
+        };
+        let got = strs(&bwrap_args(&l, &argv(&["prog"])));
+        let at = got
+            .windows(3)
+            .position(|w| w == ["--bind", "/tmp", "/tmp"])
+            .expect("the instance's /tmp");
+        assert_eq!(got[at + 3..at + 5], ["--tmpfs", "/tmp/.X11-unix"]);
+        assert!(!got.windows(2).any(|w| w == ["--tmpfs", "/tmp"]));
+        let own = strs(&bwrap_args(&layout(), &argv(&["prog"])));
+        assert!(own.windows(2).any(|w| w == ["--tmpfs", "/tmp"]));
+        assert!(!own.windows(3).any(|w| w == ["--bind", "/tmp", "/tmp"]));
+        let a = Args::parse(&argv(&["app", "--share-tmp", "on", "--", "prog"])).unwrap();
+        assert!(a.share_tmp);
+        assert!(
+            !Args::parse(&argv(&["app", "--", "prog"]))
+                .unwrap()
+                .share_tmp
         );
     }
 

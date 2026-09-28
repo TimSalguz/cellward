@@ -956,6 +956,14 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             wrapped.push("--zone".into());
             wrapped.push(zone.clone());
         }
+        // In its container's instance, the container's /tmp — shared by its
+        // launches, so that a single-instance program started again finds
+        // the first copy (`fs_sandbox::Layout::share_tmp`). Never outside
+        // one: an unconfined launch's /tmp is the host's.
+        if instance_id.is_some() {
+            wrapped.push("--share-tmp".into());
+            wrapped.push("on".into());
+        }
         wrapped.push("--".into());
         wrapped.extend(cmd);
         cmd = wrapped;

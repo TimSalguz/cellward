@@ -1292,6 +1292,7 @@ let
           alice("cellward run vmreal --profile vmlayer -- sh -c 'echo zl > $HOME/zone-layer-probe'")
           machine.succeed("grep -q zl /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/zone-layer-probe")
           machine.fail("test -e /home/alice/zone-layer-probe")
+      exec(open("${./vm-promise-shared-tmp.py}").read())
 
       with subtest("the tunnel is a real amneziawg link, not the wireguard fallback"):
           out = in_zone(rzpid, "ip -d link show awg0")
