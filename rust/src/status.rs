@@ -552,15 +552,42 @@ pub fn instance(tools: &Tools, running: &crate::instance::Running) -> String {
     let epoch = crate::epoch::read(&running.dir).map_or(1, |e| e.n);
     let live_switch = live_switch(crate::epoch::read_live(&running.dir));
     let switch = switch_state(crate::instance::switch_of(&running.dir));
+    // The settings it came up with (review 2026-09-28), frozen for its life:
+    // a live switch into a network that would give its container less is
+    // refused (`crate::switch`, `settings`), and a reader can say so before.
+    let settings = settings_json(
+        fs::read_to_string(running.dir.join(crate::instance::SETTINGS))
+            .ok()
+            .as_deref(),
+    );
     format!(
         "{{\"id\":{},\"container\":{container},\"network\":{},\"exit\":{exit},\
          \"why\":{why},\"up\":true,\"pid\":{},\"since\":{since},\"epoch\":{epoch},\
          \"pid_namespace\":{pid_namespace},\"build\":{build},\"restart_needed\":{restart_needed},\
-         \"programs\":{launches},\"live_switch\":{live_switch},\"switch\":{switch}}}",
+         \"settings\":{settings},\"programs\":{launches},\"live_switch\":{live_switch},\
+         \"switch\":{switch}}}",
         string(&running.id),
         string(&running.network),
         running.pid
     )
+}
+
+/// `{hermetic, nix_daemon, host_files_writable, audio_manager}` an
+/// instance came up with, by its note (`instance::SETTINGS`): each `true`
+/// or `false`, `null` where the note does not say; `null` without a note.
+pub fn settings_json(note: Option<&str>) -> String {
+    let Some(note) = note else {
+        return "null".to_owned();
+    };
+    let fields: Vec<String> = crate::hermetic::CONTAINER_KEYS
+        .iter()
+        .map(|(key, _)| {
+            let value = crate::hermetic::applied_in(note, key)
+                .map_or_else(|| "null".to_owned(), |on| on.to_string());
+            format!("{}:{value}", string(key))
+        })
+        .collect();
+    format!("{{{}}}", fields.join(","))
 }
 
 /// `{state, from, to}` of a live switch under way or failed (stage 4,
@@ -1004,6 +1031,20 @@ mod tests {
                 "de".to_owned()
             ))),
             "{\"state\":\"failed\",\"from\":\"nl\",\"to\":\"de\"}"
+        );
+    }
+
+    /// Review 2026-09-28: the settings an instance came up with, as its
+    /// note says them.
+    #[test]
+    fn an_instances_frozen_settings_are_its_note() {
+        assert_eq!(settings_json(None), "null");
+        assert_eq!(
+            settings_json(Some(
+                "hermetic=true\nnix_daemon=false\naudio_manager=maybe\n"
+            )),
+            "{\"hermetic\":true,\"nix_daemon\":false,\"host_files_writable\":null,\
+             \"audio_manager\":null}"
         );
     }
 
