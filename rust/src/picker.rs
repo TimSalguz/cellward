@@ -793,6 +793,11 @@ fn menu_zones(state: &Path) -> Vec<MenuZone> {
 /// pinned one — the menu disagreed with what actually happened.
 ///
 /// By the selector alone; [`container_label_in`] knows the kind of its home.
+///
+/// The word "контейнер" is the one every place that shows this puts in front
+/// of it ("контейнер: …", "сеть · …"), so the label is what is left: the
+/// launch window's words without it — «основной», «свой», «разовый», or a
+/// name with the kind of its home.
 pub fn container_label(selector: &str) -> String {
     label_of(selector, None)
 }
@@ -807,19 +812,16 @@ fn label_of(selector: &str, home: Option<crate::container::Home>) -> String {
     use crate::container::Home;
     match selector {
         "" | MAIN => "основной".to_owned(),
-        THROWAWAY => "разовая песочница".to_owned(),
+        THROWAWAY => "разовый".to_owned(),
         other => {
             let (name, home) = match other.strip_prefix(SANDBOX_PREFIX) {
                 Some(name) => (name, Some(Home::Private)),
                 None => (other, home),
             };
             match home {
-                Some(Home::Private) | None if name.starts_with("app-") => {
-                    "своя песочница".to_owned()
-                }
-                Some(Home::Private) => format!("песочница {name}"),
-                Some(Home::Main) => format!("основной {name}"),
-                Some(Home::Layer) | None => name.to_owned(),
+                Some(Home::Private) | None if name.starts_with("app-") => "свой".to_owned(),
+                Some(home) => format!("{name} — {}", home.label()),
+                None => name.to_owned(),
             }
         }
     }
@@ -865,39 +867,41 @@ pub fn profile_menu(
     pinned_profile: &str,
     current_zone: &str,
 ) -> Vec<Row> {
+    use crate::container::Home;
     let mut menu = vec![
-        row("", "Основной (общий с системой)"),
-        row("pinmain", "Основной — всегда"),
+        row("", "Основной дом: общий с системой"),
+        row("pinmain", "Основной дом — всегда"),
         // A home of the program's own: permanent, but nobody else's. It differs
-        // from a named sandbox only in that the name is picked automatically —
-        // it is "an isolated profile by default", which can later be merged
-        // with another program by choosing a shared named sandbox.
+        // from a named container with a home of its own only in that the name
+        // is picked automatically — it is "an isolated home by default", which
+        // can later be merged with another program by choosing a shared one.
         row(
             "__ownsb__",
-            "🔒 Своя песочница: постоянный дом только этой программы",
+            "🔒 Свой контейнер: постоянный дом только этой программы",
         ),
-        row("pin:__ownsb__", "🔒 Своя песочница — всегда"),
-        row(THROWAWAY, "🔒 Разовая песочница: стирается при выходе"),
-        row("pin:__fs__", "🔒 Разовая песочница — всегда"),
+        row("pin:__ownsb__", "🔒 Свой контейнер — всегда"),
+        row(
+            THROWAWAY,
+            "🔒 Разовый контейнер: пустой дом, стирается при выходе",
+        ),
+        row("pin:__fs__", "🔒 Разовый контейнер — всегда"),
     ];
     // Containers with a home of their own: shared by everything started into
     // the same one, so two programs can work together without seeing your
     // files.
     for name in sandboxes {
-        menu.push((name.clone(), format!("🔒 Песочница «{name}»")));
-        menu.push((
-            format!("pin:{name}"),
-            format!("🔒 Песочница «{name}» — всегда"),
-        ));
+        let shown = format!("🔒 Контейнер «{name}»: {}", Home::Private.label());
+        menu.push((name.clone(), shown.clone()));
+        menu.push((format!("pin:{name}"), format!("{shown} — всегда")));
     }
-    menu.push(row("__newsb__", "🔒➕ Новая песочница…"));
+    menu.push(row("__newsb__", "🔒➕ Новый контейнер со своим домом…"));
 
     for profile in profiles {
         let name = &profile.name;
         let shown = if profile.main {
-            format!("⚠ Основной «{name}» (весь настоящий дом)")
+            format!("⚠ Контейнер «{name}»: {}", Home::Main.label())
         } else {
-            name.clone()
+            format!("Контейнер «{name}»: {}", Home::Layer.label())
         };
         if !profile.busy_in.is_empty() && profile.busy_in != current_zone && !profile.main {
             menu.push((
@@ -910,20 +914,21 @@ pub fn profile_menu(
         menu.push((format!("pin:{name}"), format!("{shown} — всегда")));
     }
 
-    // Throwaway containers that are open right now — so a program can be put
+    // Temporary layers that are open right now — so a program can be put
     // into one that is already running (a shared one-off session) instead of
     // starting yet another.
     for join in tmp_joins {
         menu.push((
             format!("{TMPJOIN_PREFIX}{}", join.dir),
-            format!("🗑 К открытому временному:{}", join.who),
+            format!("🗑 К открытому временному слою:{}", join.who),
         ));
     }
     menu.push(row(
         TMP,
-        "🗑 Новый временный (сотрётся, когда выйдет последняя программа)",
+        "🗑 Временный слой над домом: видит ваш дом, изменения сотрутся, когда выйдет \
+         последняя программа",
     ));
-    menu.push(row("__new__", "➕ Новый профиль…"));
+    menu.push(row("__new__", "➕ Новый контейнер — слой над домом…"));
     if !pinned_profile.is_empty() {
         menu.push(row("unpinprof", "↺ Спрашивать контейнер снова"));
     }
@@ -970,6 +975,7 @@ pub fn window_containers(
     tmp_joins: &[TmpJoinRow],
     current: &str,
 ) -> Vec<window::Item> {
+    use crate::container::Home;
     let item = |tag: &str, label: &str| window::Item {
         tag: tag.to_owned(),
         label: label.to_owned(),
@@ -977,12 +983,15 @@ pub fn window_containers(
     };
     let own = own_name(key);
     let mut items = vec![
-        item("", "Основной (общий с системой)"),
+        item("", "Основной дом — общий с системой"),
         item(
             "__ownsb__",
-            "Своя песочница — постоянный дом только этой программы",
+            "Свой контейнер — постоянный дом только этой программы",
         ),
-        item(THROWAWAY, "Разовая песочница — стирается при выходе"),
+        item(
+            THROWAWAY,
+            "Разовый контейнер — пустой дом, стирается при выходе",
+        ),
     ];
     for row in sandboxes {
         if row.name == own {
@@ -993,17 +1002,19 @@ pub fn window_containers(
             }
             continue;
         }
-        let mut it = item(&row.name, &format!("Песочница «{}»", row.name));
+        let label = format!("Контейнер «{}» — {}", row.name, Home::Private.label());
+        let mut it = item(&row.name, &label);
         it.busy = Some(row.busy_in.clone()).filter(|z| !z.is_empty());
         it.bound = Some(row.bound.clone()).filter(|z| !z.is_empty());
         items.push(it);
     }
     for profile in profiles {
-        let label = if profile.main {
-            format!("Основной «{}» — весь настоящий дом", profile.name)
+        let home = if profile.main {
+            Home::Main
         } else {
-            format!("Профиль {}", profile.name)
+            Home::Layer
         };
+        let label = format!("Контейнер «{}» — {}", profile.name, home.label());
         let mut it = item(&profile.name, &label);
         // The main home is one identity in every network: never "busy".
         it.busy = Some(profile.busy_in.clone()).filter(|z| !z.is_empty() && !profile.main);
@@ -1013,17 +1024,18 @@ pub fn window_containers(
     for join in tmp_joins {
         items.push(item(
             &format!("{TMPJOIN_PREFIX}{}", join.dir),
-            &format!("К открытому временному:{}", join.who),
+            &format!("К открытому временному слою:{}", join.who),
         ));
     }
     items.push(item(
         TMP,
-        "Новый временный — сотрётся, когда выйдет последняя программа",
+        "Временный слой над домом — видит ваш дом, изменения сотрутся, когда выйдет \
+         последняя программа",
     ));
-    let mut new_sandbox = item("__newsb__", "Новая песочница…");
+    let mut new_sandbox = item("__newsb__", "Новый контейнер со своим домом…");
     new_sandbox.new = true;
     items.push(new_sandbox);
-    let mut new_profile = item("__new__", "Новый профиль…");
+    let mut new_profile = item("__new__", "Новый контейнер — слой над домом…");
     new_profile.new = true;
     items.push(new_profile);
 
@@ -1833,7 +1845,10 @@ fn zone_request(
     req.containers.retain(|c| !c.new);
     for c in &mut req.containers {
         if c.tag == "__ownsb__" {
-            c.label = format!("🔒 Песочница «app-{key}»");
+            c.label = format!(
+                "🔒 Контейнер «app-{key}» — {}",
+                crate::container::Home::Private.label()
+            );
         }
     }
     req.asker = Some(asker.to_owned());
@@ -1913,9 +1928,9 @@ fn autostart(
     }
     if plan.container_guessed {
         lines.push(format!(
-            "контейнер не выбран — запущена в своём доме ({}). Назначить: cellward container \
-             assign {key} <контейнер>",
-            container_label_in(tools, &plan.container.selector())
+            "контейнер не выбран — запущена в своём контейнере «{}». Назначить: cellward \
+             container assign {key} <контейнер>",
+            plan.container.selector()
         ));
     }
     // A home of its own that has never been started asks for file access in
@@ -2123,11 +2138,12 @@ fn ask_profile(
 
     let mut argv: Vec<OsString> = vec![
         "--title".into(),
-        format!("Профиль для «{label}»").into(),
+        format!("Контейнер для «{label}»").into(),
         "--default".into(),
         memory.last_choice().unwrap_or("__ownsb__").into(),
         "--menu".into(),
-        "В каком профиле открыть? Профиль хранит настройки, сессии и логины отдельно от системных"
+        "В каком контейнере открыть? Контейнер хранит настройки, сессии и логины отдельно от \
+         основного дома"
             .into(),
     ];
     push_rows(
@@ -2193,9 +2209,9 @@ fn apply_profile_choice(
                     &tools.kdialog,
                     [
                         "--title",
-                        "Новая песочница",
+                        "Новый контейнер со своим домом",
                         "--inputbox",
-                        "Название песочницы. У неё будет свой пустой дом, общий для всех программ, которые ты в ней запустишь.",
+                        "Название контейнера. У него будет свой пустой дом, общий для всех программ, которые ты в нём запустишь.",
                         "",
                     ],
                 )?,
@@ -2212,8 +2228,8 @@ fn apply_profile_choice(
                     &tools.notify_send,
                     None,
                     "8000",
-                    "Песочница не создана",
-                    &format!("{why}. Программа запущена в своей песочнице — без дома системы."),
+                    "Контейнер не создан",
+                    &format!("{why}. Программа запущена в своём контейнере — без дома системы."),
                 );
                 return apply_profile_choice(
                     tools,
@@ -2248,9 +2264,9 @@ fn apply_profile_choice(
                     &tools.kdialog,
                     [
                         "--title",
-                        "Новый профиль",
+                        "Новый контейнер — слой над домом",
                         "--inputbox",
-                        "Название профиля (буквы, цифры, дефис):",
+                        "Название контейнера (буквы, цифры, дефис):",
                         "",
                     ],
                 )?,
@@ -2269,8 +2285,8 @@ fn apply_profile_choice(
                     &tools.notify_send,
                     None,
                     "8000",
-                    "Профиль не создан",
-                    &format!("{why}. Программа запущена в своей песочнице — без дома системы."),
+                    "Контейнер не создан",
+                    &format!("{why}. Программа запущена в своём контейнере — без дома системы."),
                 );
                 return apply_profile_choice(
                     tools,
@@ -3330,16 +3346,18 @@ mod tests {
     fn the_container_in_force_is_named_the_way_the_user_chose_it() {
         assert_eq!(container_label(""), "основной");
         assert_eq!(container_label(MAIN), "основной");
-        assert_eq!(container_label(THROWAWAY), "разовая песочница");
-        assert_eq!(container_label("sb:app-firefox"), "своя песочница");
-        assert_eq!(container_label("sb:work"), "песочница work");
+        assert_eq!(container_label(THROWAWAY), "разовый");
+        assert_eq!(container_label("sb:app-firefox"), "свой");
+        assert_eq!(container_label("sb:work"), "work — свой дом");
         assert_eq!(container_label("work"), "work");
         // A program's own container is one by its name, whatever the prefix.
-        assert_eq!(container_label("app-firefox"), "своя песочница");
+        assert_eq!(container_label("app-firefox"), "свой");
+        // A named one by its name and the kind of its home — the launch
+        // window's words.
         use crate::container::Home;
-        assert_eq!(label_of("dev", Some(Home::Private)), "песочница dev");
-        assert_eq!(label_of("files", Some(Home::Main)), "основной files");
-        assert_eq!(label_of("work", Some(Home::Layer)), "work");
+        assert_eq!(label_of("dev", Some(Home::Private)), "dev — свой дом");
+        assert_eq!(label_of("files", Some(Home::Main)), "files — основной дом");
+        assert_eq!(label_of("work", Some(Home::Layer)), "work — слой над домом");
     }
 
     #[test]
@@ -3392,22 +3410,71 @@ mod tests {
                 "__new__",
             ]
         );
-        assert_eq!(text_of(&menu, "общая"), "🔒 Песочница «общая»");
+        // One vocabulary with the launch window: a container, by its name
+        // and the kind of its home; the two throwaway kinds by what the
+        // program sees.
+        assert_eq!(text_of(&menu, ""), "Основной дом: общий с системой");
+        assert_eq!(text_of(&menu, "pinmain"), "Основной дом — всегда");
+        assert_eq!(
+            text_of(&menu, "__ownsb__"),
+            "🔒 Свой контейнер: постоянный дом только этой программы"
+        );
+        assert_eq!(
+            text_of(&menu, "pin:__ownsb__"),
+            "🔒 Свой контейнер — всегда"
+        );
+        assert_eq!(
+            text_of(&menu, "__fs__"),
+            "🔒 Разовый контейнер: пустой дом, стирается при выходе"
+        );
+        assert_eq!(
+            text_of(&menu, "pin:__fs__"),
+            "🔒 Разовый контейнер — всегда"
+        );
+        assert_eq!(text_of(&menu, "общая"), "🔒 Контейнер «общая»: свой дом");
+        assert_eq!(
+            text_of(&menu, "pin:общая"),
+            "🔒 Контейнер «общая»: свой дом — всегда"
+        );
+        assert_eq!(
+            text_of(&menu, "__newsb__"),
+            "🔒➕ Новый контейнер со своим домом…"
+        );
         // The main home says what it is, and is never "busy": it is one
         // identity in every network.
+        assert_eq!(text_of(&menu, "files"), "⚠ Контейнер «files»: основной дом");
         assert_eq!(
-            text_of(&menu, "files"),
-            "⚠ Основной «files» (весь настоящий дом)"
+            text_of(&menu, "pin:files"),
+            "⚠ Контейнер «files»: основной дом — всегда"
         );
-        assert_eq!(text_of(&menu, "work"), "work — занят сетью de");
-        assert_eq!(text_of(&menu, "личное"), "личное");
+        assert_eq!(
+            text_of(&menu, "work"),
+            "Контейнер «work»: слой над домом — занят сетью de"
+        );
+        assert_eq!(
+            text_of(&menu, "pin:work"),
+            "Контейнер «work»: слой над домом — всегда"
+        );
+        assert_eq!(
+            text_of(&menu, "личное"),
+            "Контейнер «личное»: слой над домом"
+        );
         assert_eq!(
             text_of(&menu, "tmpjoin:/tmp/vpn-profile-abc"),
-            "🗑 К открытому временному: firefox telegram"
+            "🗑 К открытому временному слою: firefox telegram"
+        );
+        assert_eq!(
+            text_of(&menu, "__tmp__"),
+            "🗑 Временный слой над домом: видит ваш дом, изменения сотрутся, когда выйдет \
+             последняя программа"
+        );
+        assert_eq!(
+            text_of(&menu, "__new__"),
+            "➕ Новый контейнер — слой над домом…"
         );
         // Busy in the network we are about to use is not "busy" at all.
         let menu = profile_menu(&[], &profiles, &[], "", "de");
-        assert_eq!(text_of(&menu, "work"), "work");
+        assert_eq!(text_of(&menu, "work"), "Контейнер «work»: слой над домом");
         // The way back out of a container pin, when there is one.
         let menu = profile_menu(&[], &[], &[], "work", "nl");
         assert_eq!(text_of(&menu, "unpinprof"), "↺ Спрашивать контейнер снова");
@@ -3654,6 +3721,61 @@ mod tests {
                 assert_eq!(parsed.sandbox, Sandbox::Throwaway, "«{tag}»");
             }
         }
+    }
+
+    /// The launch window's container column in the menu's words: a
+    /// container by its name and the kind of its home, the two throwaway
+    /// kinds by what the program sees.
+    #[test]
+    fn the_window_names_a_container_by_the_kind_of_its_home() {
+        let row = |name: &str, main: bool| ProfileRow {
+            name: name.to_owned(),
+            main,
+            ..ProfileRow::default()
+        };
+        let joins = vec![TmpJoinRow {
+            dir: "/tmp/vpn-profile-abc".to_owned(),
+            who: " firefox".to_owned(),
+        }];
+        let items = window_containers(
+            "firefox",
+            &[row("общая", false)],
+            &[row("банк", false), row("files", true)],
+            &joins,
+            "",
+        );
+        let labels: Vec<(&str, &str)> = items
+            .iter()
+            .map(|i| (i.tag.as_str(), i.label.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("", "Основной дом — общий с системой"),
+                (
+                    "__ownsb__",
+                    "Свой контейнер — постоянный дом только этой программы"
+                ),
+                (
+                    "__fs__",
+                    "Разовый контейнер — пустой дом, стирается при выходе"
+                ),
+                ("общая", "Контейнер «общая» — свой дом"),
+                ("банк", "Контейнер «банк» — слой над домом"),
+                ("files", "Контейнер «files» — основной дом"),
+                (
+                    "tmpjoin:/tmp/vpn-profile-abc",
+                    "К открытому временному слою: firefox"
+                ),
+                (
+                    "__tmp__",
+                    "Временный слой над домом — видит ваш дом, изменения сотрутся, когда \
+                     выйдет последняя программа"
+                ),
+                ("__newsb__", "Новый контейнер со своим домом…"),
+                ("__new__", "Новый контейнер — слой над домом…"),
+            ]
+        );
     }
 
     /// A remembered choice that is no longer offered starts the question on

@@ -1350,8 +1350,8 @@ pub fn run(args: Args) -> u8 {
         Ok(program) => program,
         Err(why) => {
             eprintln!(
-                "fs-sandbox: фильтр seccomp {why} — запуск остановлен: без фильтра песочница \
-                 не запускается"
+                "fs-sandbox: фильтр seccomp {why} — запуск остановлен: без фильтра свой дом \
+                 контейнера не запускается"
             );
             return EXIT_NOT_STARTED;
         }

@@ -50,11 +50,11 @@ Consequences, in order of importance:
 | `unconfined` | nothing | nothing (host network) |
 | `offline` | a zone with a marker, created on demand | everything network, incl. host resolvers |
 | layer container (`home = layer`, was "profile") | `~/.local/state/vpn-profiles/<name>/` (data), `~/.config/vpn-zones/containers/<name>/` (policy) | the whole home, under its layer (`<name>/home/upper`); a granted path (`container grant`) is written in the real home; mounts below the home read-only unless granted; other containers' storage not seen (`crate::home_layer`, 2026-09-26 — before, only `.config`, `.local/share`, `.cache`, `.mozilla`, `.pki` were layered, and the rest of the home was written through) |
-| throwaway container | `~/.local/state/vpn-zones/.throwaway/vpn-profile-*` | same, erased after the last tenant |
+| temporary layer over the home | `~/.local/state/vpn-zones/.throwaway/vpn-profile-*` | same, erased after the last tenant |
 | container of a home of its own (`home = private`, was "named sandbox") | `~/.local/state/vpn-profiles/<name>/home` (data — the one data directory of every container, 2026-09-26; before, `vpn-sandboxes/<name>`), `~/.config/vpn-zones/containers/<name>/` (policy: `perms`, `paths`, `container.conf`, `trust/`) | whole home, bus, runtime dir, seccomp, X11 |
 | container of the main home (`home = main`) | its policy only | nothing of the home: a network, programs and permissions of its own under a name |
-| per-app sandbox | a named sandbox called `app-<key>` | same |
-| throwaway sandbox | tmpfs | same, erased on exit |
+| the program's own container | a container of a home of its own called `app-<key>` | same |
+| throwaway container | an empty home in tmpfs | same, erased on exit |
 | compositor restriction | `wl-sandbox`, on by default | screen capture, input emulation, background clipboard |
 
 What the picker remembers is per program: `.pinned`/`.last` (network) and

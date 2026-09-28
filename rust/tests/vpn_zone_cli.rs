@@ -392,7 +392,7 @@ fn a_launch_is_wrapped_in_the_compositor_restriction_by_default() {
     // restricted socket goes into (LEAK-MODEL §13).
     assert!(
         line.starts_with(&format!(
-            "зона nl, профиль основной: /nonexistent/vpn-zone-core wl-sandbox firefox --zone {key} --frame "
+            "зона nl, контейнер основной: /nonexistent/vpn-zone-core wl-sandbox firefox --zone {key} --frame "
         )),
         "{line}"
     );
@@ -417,7 +417,7 @@ fn a_launch_is_wrapped_in_the_compositor_restriction_by_default() {
     );
     assert_eq!(
         stdout(&out).trim(),
-        "зона unconfined, профиль основной: firefox"
+        "зона unconfined, контейнер основной: firefox"
     );
     // The allowlist likewise: obs is let through unconfined only.
     fs::create_dir_all(home.root.join("config")).unwrap();
@@ -470,7 +470,7 @@ fn an_unconfined_launch_starts_no_zone_and_loses_nothing_on_the_way() {
     assert!(!stderr(&out).contains("systemctl"), "{}", stderr(&out));
     let line = stdout(&out);
     assert!(
-        line.starts_with("зона unconfined, профиль основной:"),
+        line.starts_with("зона unconfined, контейнер основной:"),
         "{line}"
     );
     assert!(
@@ -2190,10 +2190,7 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
         "{line}"
     );
     let line = stdout(&home.run_with(&["run", "nl", "--fs-sandbox", "--", "foot"], &dry));
-    assert!(
-        line.contains("--frame-title nl · разовая песочница "),
-        "{line}"
-    );
+    assert!(line.contains("--frame-title nl · разовый "), "{line}");
     // No border for the host's own session: it is no zone.
     let line = stdout(&home.run_with(&["run", "unconfined", "--", "foot"], &dry));
     assert!(!line.contains("--frame"), "{line}");

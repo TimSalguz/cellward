@@ -397,7 +397,7 @@ mod tests {
             ],
             containers: vec![Item {
                 tag: "work".to_owned(),
-                label: "Профиль work".to_owned(),
+                label: "Контейнер «work» — слой над домом".to_owned(),
                 busy: Some("nl".to_owned()),
                 ..Item::default()
             }],
@@ -409,7 +409,8 @@ mod tests {
             render(&req),
             "title\tЗапуск: Fire fox\nnote\tуже работает\n\
              net\tnl\tVPN: nl\tselected\nnet\tde\tVPN: de\tdead\n\
-             container\twork\tПрофиль work\tbusy=nl\npin-net\t1\npin-container\t0\n"
+             container\twork\tКонтейнер «work» — слой над домом\tbusy=nl\n\
+             pin-net\t1\npin-container\t0\n"
         );
     }
 

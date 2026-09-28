@@ -1976,7 +1976,7 @@ pub fn forbidden_path(home: &Path, path: &Path) -> Option<String> {
             .any(|root| path.starts_with(root) && path.as_path() != Path::new(root));
         return (!data_disk).then(|| {
             format!(
-                "выдаются только каталоги дома и дисков ({}): в остальных местах стены песочницы",
+                "выдаются только каталоги дома и дисков ({}): в остальных местах стены контейнера",
                 GRANT_ROOTS.join(", ")
             )
         });
@@ -2003,7 +2003,7 @@ pub fn forbidden_path(home: &Path, path: &Path) -> Option<String> {
         if path.starts_with(&executed) || executed.starts_with(&path) {
             return Some(format!(
                 "это место хост исполняет сам ({}): ярлык, автозапуск, юнит, PATH или \
-                 конфиг, запускающий команды, — выдача дала бы песочнице выход наружу",
+                 конфиг, запускающий команды, — выдача дала бы контейнеру выход наружу",
                 executed.display()
             ));
         }

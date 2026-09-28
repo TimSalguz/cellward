@@ -593,7 +593,7 @@ fn asking_again_drops_the_container_pin_and_asks_the_container() {
         asked[0]
     );
     assert!(
-        asked[1].contains(&"Профиль для «firefox»".to_owned()),
+        asked[1].contains(&"Контейнер для «firefox»".to_owned()),
         "{:?}",
         asked[1]
     );
@@ -899,8 +899,8 @@ fn a_container_chosen_for_unconfined_is_not_dropped() {
 fn a_new_container_is_created_from_the_dialog_and_used() {
     let home = Home::new("new-profile");
     home.zone("nl");
-    // "Новый профиль…", the name (with what has to be cleaned out of it), then
-    // the network.
+    // "Новый контейнер — слой над домом…", the name (with what has to be
+    // cleaned out of it), then the network.
     home.answers(&["__chooseprofile__", "__new__", "-моё имя", "nl"]);
     let out = home.run(&pick("firefox"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -1254,7 +1254,7 @@ fn the_launch_window_asks_both_questions_at_once() {
     assert!(told.contains("net\tnl\tVPN: nl\t"), "{told}");
     assert!(told.contains("container\t__ownsb__\t"), "{told}");
     assert!(
-        told.contains("container\t__newsb__\tНовая песочница…\tnew\n"),
+        told.contains("container\t__newsb__\tНовый контейнер со своим домом…\tnew\n"),
         "{told}"
     );
     // "Always" is a checkbox, not a second row per choice.
@@ -1423,8 +1423,13 @@ fn a_choice_for_a_zone_is_the_window_only_and_comes_back_on_stdout() {
         nets.last().unwrap().starts_with("net\tunconfined\t"),
         "{nets:?}"
     );
-    // No new container to name in a window that came up by itself.
+    // No new container to name in a window that came up by itself; the
+    // program's own container by its name and the kind of its home.
     assert!(!told.contains("\tnew\n"), "{told}");
+    assert!(
+        told.contains("container\t__ownsb__\t🔒 Контейнер «app-firefox» — свой дом\t"),
+        "{told}"
+    );
     assert!(
         told.contains("pin-net\t0\n") && told.contains("pins\t0\n"),
         "{told}"

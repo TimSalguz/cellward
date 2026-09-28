@@ -12,17 +12,18 @@ warning), and `github:TimSalguz/vpn-zones` redirects here.
 [launcher entries](docs/LAUNCHERS.md), [per-container certificates](docs/CERTIFICATES.md),
 [zone hermeticity](docs/HERMETICITY.md)
 
-Launch programs with a choice of network, data container and sandbox — straight
-from the app's launcher entry. The user tier runs entirely as your user: root is
-not needed either to create a zone or to launch, and no system configuration
-changes are required. An optional [system tier](#the-system-tier-optional) — a
-NixOS module — holds zones from boot for services, NixOS containers and the
-text console, and can close the host's own network to everything outside a zone.
+Launch programs with a choice of network and container — the program's home —
+straight from the app's launcher entry. The user tier runs entirely as your
+user: root is not needed either to create a zone or to launch, and no system
+configuration changes are required. An optional
+[system tier](#the-system-tier-optional) — a NixOS module — holds zones from
+boot for services, NixOS containers and the text console, and can close the
+host's own network to everything outside a zone.
 
 You click a launcher entry — it asks which network to run in (through which VPN,
-without VPN, or with no network at all) and in which environment (shared with
-the system, a separate data container, or a sandbox). The choice is remembered
-and can be pinned.
+without VPN, or with no network at all) and in which container (the main home
+shared with the system, a home of the program's own, or a layer over the home).
+The choice is remembered and can be pinned.
 
 ## What it does
 
@@ -50,15 +51,17 @@ another program) goes through the broker, which asks which network, and
 remembers "Always" for a program you trust. `cellward hermetic <zone> off`
 gives a zone the host's session back.
 
-**Data.** Five modes:
+**Data.** A container is the program's home; the launch window offers these
+(its words are Russian for now):
 
-| mode | program's home | what it sees |
+| in the launch window | program's home | what it sees |
 |---|---|---|
-| main | your real `$HOME` | everything as usual |
-| container | overlayfs on top of the XDG directories | sees your settings, writes to a layer |
-| per-app sandbox | persistent, this program only | nothing of yours |
-| named sandbox | persistent, shared | programs launched in it |
-| throwaway sandbox | tmpfs, wiped on exit | nothing of yours |
+| the main home, shared with the system | your real `$HOME` | everything as usual |
+| its own container | persistent, this program only | nothing of yours |
+| a container with a home of its own | persistent, shared by the container's programs | nothing of yours but the directories granted |
+| a container that is a layer over the home | a layer over the whole real home | your home; writes go to its layer |
+| a throwaway container | empty (tmpfs), wiped on exit | nothing of yours |
+| a temporary layer over the home | a layer over the home in `/tmp`, wiped when the last program exits | your home; what is written is wiped |
 
 The container exists first and foremost to break up singletons: without it, a
 browser launched a second time simply hands its window to the already running
@@ -186,9 +189,10 @@ before the rename; the old names still work, through
 `lib.mkRenamedOptionModule`, with a warning on every use.
 
 After a rebuild, the launcher gets the entries "Add VPN zone", "Remove VPN
-zone", "Cut off a VPN zone", "Create container", "Remove profile (container)",
-"cellward containers" (a window with every container, its network, programs and
-granted directories), "cellward settings" and "Reset app networks".
+zone", "Cut off a VPN zone", "Create container", "Remove container (a layer
+over the home)", "cellward containers" (a window with every container, its
+network, programs and granted directories), "cellward settings" and "Reset app
+networks".
 
 What should always be so can be declared instead of clicked — containers, their
 networks and programs, the defaults:
@@ -414,10 +418,9 @@ cellward window-menu                           # its menu: pin the network, rest
 cellward window-menu --pid <pid> [--restart]   # the same menu for the launch of <pid> (what the frame's ≡ opens)
 cellward launch <id> [-- args]                 # a launcher entry through the picker (key bindings)
 cellward run <zone> -- firefox                 # run in a zone
-cellward run <zone> --profile work -- firefox  # + data container
-cellward run <zone> --sandbox work -- firefox  # + named sandbox
-cellward run <zone> --fs-sandbox -- firefox    # + throwaway sandbox
-cellward run <zone> --tmp-profile -- firefox   # one-off container
+cellward run <zone> --container work -- firefox  # + a container (--profile, --sandbox: the old words)
+cellward run <zone> --fs-sandbox -- firefox    # + a throwaway container: an empty home
+cellward run <zone> --tmp-profile -- firefox   # + a temporary layer over the home
 
 cellward profile create|list|rm <name>
 cellward sandbox create|list|rm <name>

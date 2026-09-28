@@ -321,12 +321,12 @@ fn removing_containers_offers_all_of_them_at_once_only_when_there_are_several() 
     let asked = home.asked();
     assert!(said(&asked[0], "сейчас открыт в сети nl"), "{:?}", asked[0]);
     assert!(
-        said(&asked[0], "⚠ Удалить ВСЕ профили (2)"),
+        said(&asked[0], "⚠ Удалить ВСЕ контейнеры со слоем над домом (2)"),
         "{:?}",
         asked[0]
     );
     assert!(
-        said(&asked[1], "Удалить ВСЕ профили (2)?"),
+        said(&asked[1], "Удалить ВСЕ контейнеры со слоем над домом (2)?"),
         "{:?}",
         asked[1]
     );
@@ -337,7 +337,7 @@ fn removing_containers_offers_all_of_them_at_once_only_when_there_are_several() 
             vec!["container", "rm", "личное"]
         ]
     );
-    assert!(said(&home.notified()[0], "Профили удалены"));
+    assert!(said(&home.notified()[0], "Контейнеры удалены"));
 }
 
 #[test]

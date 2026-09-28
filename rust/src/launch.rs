@@ -243,9 +243,9 @@ impl fmt::Display for ArgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingZone => write!(f, "нужно имя"),
-            Self::MissingProfile => write!(f, "нужно имя профиля"),
+            Self::MissingProfile => write!(f, "нужно имя контейнера (--profile)"),
             Self::MissingJoinDir => write!(f, "нужен каталог временного контейнера"),
-            Self::MissingSandbox => write!(f, "нужно имя песочницы"),
+            Self::MissingSandbox => write!(f, "нужно имя контейнера (--sandbox)"),
             Self::MissingContainer => write!(f, "нужно имя контейнера"),
         }
     }
@@ -1182,12 +1182,15 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             .chain(cmd.iter())
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        let profile = if container.profile.is_empty() {
+        let shown_container = if container.profile.is_empty() {
             "основной".to_owned()
         } else {
             container.profile.to_string_lossy().into_owned()
         };
-        println!("зона {zone_name}, профиль {profile}: {}", shown.join(" "));
+        println!(
+            "зона {zone_name}, контейнер {shown_container}: {}",
+            shown.join(" ")
+        );
         return 0;
     }
 
@@ -1859,8 +1862,8 @@ pub fn resolve_selection(tools: &Tools, selection: Selection) -> Result<Selectio
         }
         _ => {
             return Err(
-                "один запуск — один контейнер: слой (--profile, --tmp-profile) и песочница \
-                 (--sandbox, --fs-sandbox) вместе больше не собираются"
+                "один запуск — один контейнер: слой над домом (--profile, --tmp-profile) и \
+                 свой дом (--sandbox, --fs-sandbox) вместе больше не собираются"
                     .to_owned(),
             )
         }
@@ -1877,8 +1880,8 @@ pub fn resolve_selection(tools: &Tools, selection: Selection) -> Result<Selectio
     let home = match crate::container::load(tools, &name) {
         Some(c) if sandbox_asked && c.home != Home::Private => {
             return Err(format!(
-                "«{name}» — не песочница, а {}: запуск песочницы в нём остановлен. \
-                 Запустить в нём: --container {name}",
+                "«{name}» — не контейнер со своим домом, а {}: запуск со своим домом \
+                 (--sandbox) в нём остановлен. Запустить в нём: --container {name}",
                 c.home.label()
             ))
         }
@@ -2574,7 +2577,7 @@ mod tests {
         for layer_or_main in ["work", "files"] {
             assert!(resolve(&["nl", "--sandbox", layer_or_main, "--", "x"])
                 .unwrap_err()
-                .contains("не песочница"));
+                .contains("не контейнер со своим домом"));
         }
         assert_eq!(
             resolve(&["nl", "--container", "files", "--", "x"]),
