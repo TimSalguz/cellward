@@ -1576,7 +1576,9 @@ pub fn main() -> ExitCode {
             if launch::has_display() {
                 match ask_window(&tools, &key, &label, &default, &memory) {
                     Some(Some((zone, container))) => {
-                        return launch_asked(&tools, &key, &zone, &container, &args.cmd, &memory)
+                        return launch_asked(
+                            &tools, &key, &label, &zone, &container, &args.cmd, &memory,
+                        )
                     }
                     Some(None) => return ExitCode::SUCCESS,
                     None => {}
@@ -1705,7 +1707,15 @@ pub fn main() -> ExitCode {
         None => container,
     };
 
-    launch_asked(&tools, &key, &zone_choice, &container, &args.cmd, &memory)
+    launch_asked(
+        &tools,
+        &key,
+        &label,
+        &zone_choice,
+        &container,
+        &args.cmd,
+        &memory,
+    )
 }
 
 /// How long the window a zone's program brought up starts nothing: the
@@ -2435,24 +2445,31 @@ fn launch(
 }
 
 /// [`launch`] of an answer the person gave, watched for a hand-over when
-/// [`watch_handover`] says so: the program is then started as a child
-/// instead of in place. Gone with success without ever opening a window (the
-/// Wayland proxy's word, [`opened_or_ended`]) — however long that took: it
-/// handed the launch to the copy that runs, and [`HANDOVER`] remembers that —
-/// the next click on it while it runs raises that copy with no question, as
-/// every click on a running program did before. A window of its own: the
-/// picker leaves, and the program goes on without it. No proxy on the way
-/// (no word to come): the picker leaves, and learns nothing.
+/// [`watch_handover`] says so, and in a graphical session for a launch that
+/// does not start (2026-09-28: one from a menu that ended before its
+/// program showed nothing at all — the error was in the session's log): the
+/// program is then started as a child instead of in place. Gone with
+/// success without ever opening a window (the Wayland proxy's word,
+/// [`opened_or_ended`]) — however long that took: it handed the launch to
+/// the copy that runs, and [`HANDOVER`] remembers that — the next click on
+/// it while it runs raises that copy with no question, as every click on a
+/// running program did before. Not started ([`EXIT_NOT_STARTED`], or the
+/// launch's word of it with why), or gone with a failure before any window:
+/// the person is told. A window of its own:
+/// the picker leaves, and the program goes on without it. No proxy on the
+/// way (no word to come): the picker leaves, and learns nothing.
 fn launch_asked(
     tools: &Tools,
     key: &str,
+    label: &str,
     zone_choice: &str,
     container: &Container,
     cmd: &[OsString],
     memory: &Memory,
 ) -> ExitCode {
     let in_zone = std::env::var_os(launch::ENV_CURRENT).is_some_and(|v| !v.is_empty());
-    if !watch_handover(memory, zone_choice, in_zone) {
+    let handover = watch_handover(memory, zone_choice, in_zone);
+    if !handover && (in_zone || !launch::has_display()) {
         return launch(tools, key, zone_choice, container, cmd);
     }
     let argv = launch_argv(tools, key, zone_choice, container, cmd);
@@ -2496,15 +2513,57 @@ fn launch_asked(
         // A window of its own: no hand-over. The picker leaves, the program
         // goes on without it.
         Heard::Opened | Heard::Nothing => return ExitCode::SUCCESS,
+        Heard::NotStarted(why) => {
+            tell_not_started(tools, label, &why);
+            return ExitCode::from(EXIT_NOT_STARTED);
+        }
         Heard::Ended(status) => status,
     };
     // Gone without ever opening a window, with success: it handed the launch
     // over to the copy that runs — remembered, however long that took.
-    if status.success() {
+    if handover && status.success() {
         let dir = tools.state.join(HANDOVER);
         let _ = fs::create_dir_all(&dir).and_then(|()| fs::write(dir.join(key), ""));
     }
+    if status.code() == Some(i32::from(EXIT_NOT_STARTED)) {
+        tell_not_started(tools, label, NOT_STARTED_UNSAID);
+    } else if !status.success() {
+        // Gone with a failure before any window: a program of a home of its
+        // own that is not there (bwrap's own failure is 1), one that fell
+        // over at its start — nothing on the screen said so either.
+        use std::os::unix::process::ExitStatusExt;
+        let how = match (status.code(), status.signal()) {
+            (Some(code), _) => format!("код {code}"),
+            (None, Some(signal)) => format!("сигнал {signal}"),
+            (None, None) => status.to_string(),
+        };
+        tell_not_started(
+            tools,
+            label,
+            &format!(
+                "закрылась, не открыв окна ({how}) — причина в журнале сеанса (journalctl \
+                 --user -e)"
+            ),
+        );
+    }
     ExitCode::from(status.code().map_or(1, |c| c as u8))
+}
+
+/// Why a launch did not start, when nothing on the way said it.
+const NOT_STARTED_UNSAID: &str = "запуск закончился, не начав программу (код 127) — причина в \
+                                  журнале сеанса (journalctl --user -e)";
+
+/// A launch the person asked for that did not start, said to them: a
+/// notification that stays until it is read.
+fn tell_not_started(tools: &Tools, label: &str, why: &str) {
+    eprintln!("vpn-zone-pick: «{label}» не запущена: {why}");
+    crate::dialog::notify(
+        &tools.notify_send,
+        Some("critical"),
+        "0",
+        &format!("«{label}» не запущена"),
+        why,
+    );
 }
 
 /// What [`opened_or_ended`] heard first.
@@ -2514,6 +2573,9 @@ enum Heard {
     /// Nobody will say: the launch went without the Wayland proxy
     /// ([`crate::wl_sandbox::WORD_NONE`]).
     Nothing,
+    /// The launch ended before its program started, and said why
+    /// ([`crate::wl_sandbox::WORD_NOT_STARTED`]).
+    NotStarted(String),
     /// The launch ended, no window opened.
     Ended(std::process::ExitStatus),
 }
@@ -2551,6 +2613,7 @@ fn opened_or_ended(heard: &OwnedFd, child: &mut std::process::Child) -> Heard {
             let n = unsafe { libc::read(heard.as_raw_fd(), byte.as_mut_ptr().cast(), 1) };
             return match (n, byte[0]) {
                 (1, crate::wl_sandbox::WORD_OPENED) => Heard::Opened,
+                (1, crate::wl_sandbox::WORD_NOT_STARTED) => Heard::NotStarted(why_of(heard)),
                 (1, _) => Heard::Nothing,
                 // The end of the pipe with no word: nobody holds it any more
                 // — the launch is ending (its descriptors close a moment
@@ -2569,6 +2632,30 @@ fn opened_or_ended(heard: &OwnedFd, child: &mut std::process::Child) -> Heard {
                 Err(_) => Heard::Nothing,
             };
         }
+    }
+}
+
+/// The rest of a [`crate::wl_sandbox::WORD_NOT_STARTED`]: written with the
+/// word in one write, so all there now — read without waiting, since other
+/// holders of the pipe (the Wayland proxy) may keep it open.
+fn why_of(heard: &OwnedFd) -> String {
+    let fd = heard.as_raw_fd();
+    // SAFETY: fcntl on our own descriptor.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+    let mut why = vec![0u8; crate::wl_sandbox::WHY_MAX];
+    // SAFETY: a valid descriptor and a buffer of ours of this length.
+    let n = unsafe { libc::read(fd, why.as_mut_ptr().cast(), why.len()) };
+    why.truncate(usize::try_from(n).unwrap_or(0));
+    let why = String::from_utf8_lossy(&why).trim().to_owned();
+    if why.is_empty() {
+        NOT_STARTED_UNSAID.to_owned()
+    } else {
+        why
     }
 }
 
@@ -2634,6 +2721,68 @@ mod tests {
     }
 
     // --- ARGUMENTS -----------------------------------------------------------
+
+    /// 2026-09-28: what the picker hears of a launch it watches — its word
+    /// that it did not start, with the whole of why, while another holder
+    /// (the Wayland proxy) keeps the pipe open; its end with nothing said;
+    /// a window.
+    #[test]
+    fn a_launch_that_did_not_start_is_heard_with_why() {
+        let say = |told: &OwnedFd, word: &[u8]| {
+            // SAFETY: a valid descriptor and a buffer of ours.
+            let n = unsafe { libc::write(told.as_raw_fd(), word.as_ptr().cast(), word.len()) };
+            assert_eq!(usize::try_from(n).unwrap(), word.len());
+        };
+        let (heard, told) = crate::sys::pipe().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let mut word = vec![crate::wl_sandbox::WORD_NOT_STARTED];
+        word.extend_from_slice("в контейнере нет программы steam".as_bytes());
+        say(&told, &word);
+        match opened_or_ended(&heard, &mut child) {
+            Heard::NotStarted(why) => assert_eq!(why, "в контейнере нет программы steam"),
+            _ => panic!("not heard as not started"),
+        }
+        drop(told);
+        let _ = child.kill();
+        let _ = child.wait();
+        // Ended, nothing said: its status.
+        let (heard, told) = crate::sys::pipe().unwrap();
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 127"])
+            .spawn()
+            .unwrap();
+        drop(told);
+        match opened_or_ended(&heard, &mut child) {
+            Heard::Ended(status) => assert_eq!(status.code(), Some(127)),
+            _ => panic!("not heard as ended"),
+        }
+        // A window.
+        let (heard, told) = crate::sys::pipe().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        say(&told, &[crate::wl_sandbox::WORD_OPENED]);
+        assert!(matches!(opened_or_ended(&heard, &mut child), Heard::Opened));
+        let _ = child.kill();
+        let _ = child.wait();
+        // A word with nothing after it: why is the unsaid one.
+        let (heard, told) = crate::sys::pipe().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        say(&told, &[crate::wl_sandbox::WORD_NOT_STARTED]);
+        match opened_or_ended(&heard, &mut child) {
+            Heard::NotStarted(why) => assert_eq!(why, NOT_STARTED_UNSAID),
+            _ => panic!("not heard as not started"),
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 
     #[test]
     fn the_autostart_flag_is_taken_before_the_command() {

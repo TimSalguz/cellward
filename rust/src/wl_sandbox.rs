@@ -111,6 +111,11 @@ pub const OPENED_FD: RawFd = 9;
 /// the way to say it. The end of the pipe with neither is the launch's end.
 pub const WORD_OPENED: u8 = b'w';
 pub const WORD_NONE: u8 = b'n';
+/// And the launch ends before its program started ([`not_started_word`]):
+/// the word, then why, for a person — UTF-8, at most [`WHY_MAX`] bytes, in
+/// the same write (atomic below `PIPE_BUF`).
+pub const WORD_NOT_STARTED: u8 = b'x';
+pub const WHY_MAX: usize = 1024;
 
 /// The pipe of [`ENV_OPENED_FD`], once taken ([`take_opened`]).
 static OPENED: std::sync::Mutex<Option<OwnedFd>> = std::sync::Mutex::new(None);
@@ -174,6 +179,34 @@ pub fn no_word() {
             )
         };
     }
+}
+
+/// The launch will not start its program: said on the picker's pipe with
+/// why ([`WORD_NOT_STARTED`]), and the pipe gone. `true` when it was heard
+/// — the picker then tells the person (2026-09-28: a launch from a menu
+/// that did not start showed nothing at all); `false` when nobody listens:
+/// no pipe, or its reader gone — after a window, a word said is nobody's
+/// (EPIPE; the runtime ignores SIGPIPE).
+pub fn not_started_word(why: &str) -> bool {
+    let Some(fd) = OPENED.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+        return false;
+    };
+    let mut end = why.len().min(WHY_MAX);
+    while !why.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut word = Vec::with_capacity(end + 1);
+    word.push(WORD_NOT_STARTED);
+    word.extend_from_slice(&why.as_bytes()[..end]);
+    // SAFETY: our own descriptor and a buffer of ours of this length.
+    let n = unsafe {
+        libc::write(
+            std::os::fd::AsRawFd::as_raw_fd(&fd),
+            word.as_ptr().cast(),
+            word.len(),
+        )
+    };
+    usize::try_from(n).is_ok_and(|n| n == word.len())
 }
 
 fn pipe_of_env() -> Option<OwnedFd> {
@@ -395,8 +428,11 @@ impl From<Refused> for String {
 /// more than the restricted socket once there could be one (review
 /// 2026-09-27: every such step fell back to the unrestricted socket, and a
 /// program of the same user could make a fork fail on purpose).
-fn not_started() -> u8 {
-    no_word();
+fn not_started(what: &str) -> u8 {
+    not_started_word(&format!(
+        "ограниченный доступ к экрану для программы не подготовить ({what}) — без него она не \
+         запускается"
+    ));
     EXIT_NOT_STARTED
 }
 
@@ -578,7 +614,7 @@ pub fn run(args: Args) -> u8 {
                 "wl-sandbox: cannot create {} ({e}) — the program is not started",
                 dir.display()
             );
-            return not_started();
+            return not_started(&format!("{}: {e}", dir.display()));
         }
     }
     // A leftover from an earlier run that happened to have this pid would make
@@ -594,7 +630,7 @@ pub fn run(args: Args) -> u8 {
                 "wl-sandbox: cannot create {} ({e}) — the program is not started",
                 sock_path.display()
             );
-            return not_started();
+            return not_started(&format!("{}: {e}", sock_path.display()));
         }
     };
 
@@ -632,7 +668,7 @@ pub fn run(args: Args) -> u8 {
             );
             let _ = fs::remove_file(&sock_path);
             forget_upstream(&upstream);
-            return not_started();
+            return not_started(&format!("pipe: {e}"));
         }
     };
 
@@ -648,7 +684,7 @@ pub fn run(args: Args) -> u8 {
             Refused::Nested => run_plain(&args.cmd),
             Refused::Other(why) => {
                 eprintln!("wl-sandbox: {why} — the program is not started");
-                not_started()
+                not_started(&why)
             }
         };
     }
@@ -771,7 +807,7 @@ pub fn run(args: Args) -> u8 {
             proxy.kill();
             let _ = fs::remove_file(path);
         }
-        return not_started();
+        return not_started("fork");
     }
 
     let status = match proxy {
@@ -799,8 +835,23 @@ pub fn run(args: Args) -> u8 {
             status
         }
     };
-    exit_code_of(status)
+    let code = exit_code_of(status);
+    // The launch's next steps ended before the program started — the
+    // container's instance did not take it, `profile-run` found no such
+    // program: said where a picker still listens, which it does only while
+    // no window has opened.
+    if code == EXIT_NOT_STARTED {
+        not_started_word(NOT_STARTED_INSIDE);
+    }
+    code
 }
+
+/// Why a launch ended before its program started, when the steps after
+/// `wl-sandbox` did not say: they are in the container's instance, and
+/// what they printed is in the session's log.
+const NOT_STARTED_INSIDE: &str = "запуск закончился, не начав программу: в контейнере её не \
+                                  нашлось или контейнер её не пустил (код 127) — причина в \
+                                  журнале сеанса (journalctl --user -e)";
 
 #[cfg(test)]
 mod tests {
@@ -846,6 +897,38 @@ mod tests {
             Args::parse(&argv(&["", "--", "firefox"])),
             Err(ArgError::MissingAppId)
         );
+    }
+
+    /// 2026-09-28: a launch that will not start its program says so on
+    /// the picker's pipe, with why — cut on a character's edge at
+    /// [`WHY_MAX`] —, and the pipe is gone after it; with nobody to hear
+    /// (no pipe, its reader gone) it is not heard.
+    #[test]
+    fn a_launch_not_started_says_why_once() {
+        use std::os::fd::AsRawFd;
+        let (heard, told) = crate::sys::pipe().unwrap();
+        put_opened(told);
+        let long = "я".repeat(WHY_MAX);
+        assert!(not_started_word(&long));
+        let mut buf = vec![0u8; 4 * WHY_MAX];
+        // SAFETY: a valid descriptor and a buffer of ours of this length.
+        let n = unsafe { libc::read(heard.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+        buf.truncate(usize::try_from(n).unwrap());
+        assert_eq!(buf[0], WORD_NOT_STARTED);
+        let why = std::str::from_utf8(&buf[1..]).unwrap();
+        assert!(
+            why.len() <= WHY_MAX && why.len() + 2 > WHY_MAX,
+            "{}",
+            why.len()
+        );
+        assert!(why.chars().all(|c| c == 'я'));
+        // Said once: the pipe went with it.
+        assert!(!not_started_word("again"));
+        // Its reader gone: nobody hears it.
+        let (heard, told) = crate::sys::pipe().unwrap();
+        put_opened(told);
+        drop(heard);
+        assert!(!not_started_word("nobody"));
     }
 
     #[test]

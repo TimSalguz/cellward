@@ -140,6 +140,23 @@ let
           machine.sleep(1)
           machine.fail("test -e /tmp/started")
 
+      # A launch from the window that does not start (2026-09-28): the
+      # picker watches it and tells the person — before, it ended with a
+      # line in the session's log and nothing on the screen. No notification
+      # daemon here: the picker's own line in its unit's log is looked at.
+      with subtest("a launch from the window that does not start is said"):
+          alice(
+              f"systemd-run --user --unit=vmpickfail --setenv=WAYLAND_DISPLAY={display} "
+              "vpn-zone-pick --label 'Нет такой' --id vmnosuch -- /nonexistent/vmnosuch"
+          )
+          machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
+          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Return")
+          machine.wait_until_succeeds(
+              "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u vmpickfail' "
+              "| grep -q '«Нет такой» не запущена'",
+              timeout=90,
+          )
+
       def find(node, app_id):
           if node.get("app_id") == app_id:
               return node
