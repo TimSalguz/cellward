@@ -185,7 +185,11 @@ with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
 xf_first = "tr -s ' ' | cut -d' ' -f4 | cut -d/ -f1"
 XF_MIP = machine.succeed(f"ip -4 -o addr show eth1 | head -1 | {xf_first}").strip()
 XF_MIP6 = machine.succeed(f"ip -6 -o addr show eth1 scope global | head -1 | {xf_first}").strip()
-XF_BCAST = re.search(r" brd (\S+)", machine.succeed("ip -4 -o addr show eth1 | head -1")).group(1)
+# The LAN's own broadcast address, from its prefix: the test network gives
+# eth1 its address without one (`brd`).
+XF_BCAST = str(ipaddress.ip_interface(machine.succeed(
+    "ip -4 -o addr show eth1 | head -1 | tr -s ' ' | cut -d' ' -f4"
+).strip()).network.broadcast_address)
 # What the machine's eth1 may carry while a zone moves files: towards the
 # server, the tunnel's UDP alone; and no discovery datagram to anyone.
 XF_FILTER = (
