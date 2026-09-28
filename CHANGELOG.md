@@ -746,6 +746,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A live switch no longer carries an instance's start settings into a
+  network that would give its container less** (review 2026-09-28;
+  `docs/LEAK-MODEL.md` §29, `docs/THREAT-MODEL.md` N23). An instance's
+  hermeticity, Nix daemon, host files and audio manager are frozen as it
+  comes up — its covers and helpers are made by them once — and a switch
+  kept them: a container with the Nix daemon of network A had it in B,
+  where containers have none. The switch is refused now (`settings`, each
+  setting named) when any of them is open where the new network would give
+  the container the safe value (`hermetic::wider_than`); `--restart` still
+  closes the programs, and the instance comes up in the new network with its
+  settings. A switch into a locked zone is refused for an instance that came
+  up not hermetic (`locked-target`). `status --json` gains
+  `instances[].settings` — the settings the instance came up with —, so a
+  configurator can say before a switch whether it will be refused.
 - **Two launches of one container at once both start.** Both found the
   container's storage directory missing in the zone's cover and made it; the
   second got "File exists" and was not started (seen in a VM check,

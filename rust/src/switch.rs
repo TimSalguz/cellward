@@ -66,6 +66,18 @@ pub struct Facts<'a> {
     pub target: &'a Target,
     /// P5: the search domains its programs have now.
     pub search_now: &'a [String],
+    /// P9 (review 2026-09-28): the settings the instance came up with that
+    /// are wider than those the network asked for would give its container
+    /// (`hermetic::wider_than`). They are frozen for its life — its covers
+    /// and helpers are made by them once —, and would go with it into a
+    /// network that gives less: a container with the Nix daemon of one
+    /// network's would keep it in one whose containers have none.
+    pub wider: &'a [&'static str],
+    /// P10 (review 2026-09-28): the network asked for is a zone locked by
+    /// the person (`cellward lock`) — which holds a hermetic instance only.
+    pub target_locked: bool,
+    /// P10: the instance came up hermetic (its note says so).
+    pub hermetic: bool,
 }
 
 /// Why a switch was refused: a word for the journal and the command line,
@@ -85,6 +97,18 @@ fn refused(code: &'static str, why: impl Into<String>) -> Option<Refusal> {
         code,
         text: format!("{} — {RESTART}", why.into()),
     })
+}
+
+/// A setting an instance came up with (`hermetic::CONTAINER_KEYS`), open,
+/// for a person — and what the network asked for would give instead.
+pub fn wider_text(name: &str) -> &'static str {
+    match name {
+        "hermetic" => "не герметичен (там был бы герметичен)",
+        "nix_daemon" => "с Nix-демоном хоста (там — без него)",
+        "host_files_writable" => "пишет файлы хоста (там — только чтение)",
+        "audio_manager" => "с PipeWire хоста без ограничений (там — с ограниченным)",
+        _ => "с настройкой, которой там нет",
+    }
 }
 
 /// Why this switch may not be made, or `None` when it may — P1 to P8 of the
@@ -149,6 +173,25 @@ pub fn refusal(f: &Facts<'_>) -> Option<Refusal> {
         return refused(
             "locked",
             "его сеть заперта (cellward lock): программам из неё в другие сети нельзя",
+        );
+    }
+    if f.target_locked && !f.hermetic {
+        return refused(
+            "locked-target",
+            "новая сеть заперта (cellward lock), а экземпляр контейнера поднят не \
+             герметичным: замок держится только в герметичном — включи герметичность \
+             (cellward container set <контейнер> hermetic on)",
+        );
+    }
+    if !f.wider.is_empty() {
+        let named: Vec<&str> = f.wider.iter().copied().map(wider_text).collect();
+        return refused(
+            "settings",
+            format!(
+                "экземпляр контейнера поднят с настройками шире, чем дала бы ему новая сеть: \
+                 {} — их берут при подъёме, на ходу они не сужаются",
+                named.join(", ")
+            ),
         );
     }
     match live.reason() {
@@ -345,6 +388,9 @@ mod tests {
             locked: false,
             target,
             search_now: &[],
+            wider: &[],
+            target_locked: false,
+            hermetic: true,
         }
     }
 
@@ -414,6 +460,44 @@ mod tests {
         assert_eq!(code(facts(&b, Some(&nft))), Some("cannot"));
         let kind = LiveSwitch::No("kind".to_owned());
         assert_eq!(code(facts(&b, Some(&kind))), Some("kind"));
+        // P9: settings frozen wider than the target's; P10: a locked target
+        // and an instance that is not hermetic — a hermetic one goes in.
+        assert_eq!(
+            code(Facts {
+                wider: &["nix_daemon"],
+                ..facts(&b, Some(&yes))
+            }),
+            Some("settings")
+        );
+        assert_eq!(
+            code(Facts {
+                wider: &["hermetic"],
+                ..facts(&Target::Offline, Some(&yes))
+            }),
+            Some("settings")
+        );
+        assert_eq!(
+            code(Facts {
+                target_locked: true,
+                hermetic: false,
+                ..facts(&b, Some(&yes))
+            }),
+            Some("locked-target")
+        );
+        assert_eq!(
+            code(Facts {
+                target_locked: true,
+                ..facts(&b, Some(&yes))
+            }),
+            None
+        );
+        assert_eq!(
+            code(Facts {
+                hermetic: false,
+                ..facts(&b, Some(&yes))
+            }),
+            None
+        );
         let with_search = zone(&["corp.example"]);
         assert_eq!(code(facts(&with_search, Some(&yes))), Some("search"));
         // The same search lists: taken.
@@ -432,6 +516,33 @@ mod tests {
         })
         .unwrap();
         assert!(r.text.contains("--restart"), "{}", r.text);
+        // Each wider setting named for the person, with the way out.
+        let r = refusal(&Facts {
+            wider: &[
+                "hermetic",
+                "nix_daemon",
+                "host_files_writable",
+                "audio_manager",
+            ],
+            ..facts(&b, Some(&yes))
+        })
+        .unwrap();
+        for part in [
+            "не герметичен",
+            "Nix-демоном",
+            "файлы хоста",
+            "PipeWire",
+            "--restart",
+        ] {
+            assert!(r.text.contains(part), "{part}: {}", r.text);
+        }
+        let r = refusal(&Facts {
+            target_locked: true,
+            hermetic: false,
+            ..facts(&b, Some(&yes))
+        })
+        .unwrap();
+        assert!(r.text.contains("hermetic on"), "{}", r.text);
     }
 
     /// A program noted outside that has ended since is not held against the
@@ -464,6 +575,9 @@ mod tests {
             locked: true,
             target: &with_search,
             search_now: &[],
+            wider: &["nix_daemon"],
+            target_locked: true,
+            hermetic: false,
         };
         assert_eq!(refusal(&f).map(|r| r.code), Some("from-host"));
     }
