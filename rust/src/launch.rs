@@ -924,6 +924,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 named.as_deref(),
                 label.as_deref(),
                 &tools.kdialog,
+                &tools.window,
             );
         }
         let mut wrapped: Vec<OsString> = vec![

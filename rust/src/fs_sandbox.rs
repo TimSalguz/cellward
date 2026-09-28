@@ -477,19 +477,79 @@ impl Perms {
     }
 }
 
+/// The question of [`ask_permissions`] in the cellward window's checklist
+/// (`vpn-zone-window checklist`, 2026-09-28: guarded, as the launch
+/// window's questions), `None` where it cannot be shown — kdialog asks then.
+/// Closed, Esc or «ничего», or the window killed: nothing allowed.
+fn ask_in_window(window: &Path, shown: &str, question: &str) -> Option<Perms> {
+    use std::io::Write;
+    if window.as_os_str().is_empty() {
+        return None;
+    }
+    let clean = crate::window::clean;
+    let mut request = format!(
+        "title\t{}\nnote\t{}\nguard\t{}\n",
+        clean(&format!("Доступ к файлам: {shown}")),
+        clean(question),
+        crate::dialog::TOO_FAST.as_millis()
+    );
+    for (tag, label, danger) in PERM_CHOICES {
+        request.push_str(&format!(
+            "check\t{tag}\t{label}\t{}\n",
+            if danger { "danger" } else { "" }
+        ));
+    }
+    let mut child = Command::new(window)
+        .arg("checklist")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(request.as_bytes());
+    }
+    let out = child.wait_with_output().ok()?;
+    match out.status.code() {
+        Some(0) => Some(Perms::parse(&String::from_utf8_lossy(&out.stdout))),
+        Some(3) => None,
+        _ => Some(Perms::default()),
+    }
+}
+
+/// What the question offers, in its order: `(token, label, opens much)`.
+const PERM_CHOICES: [(&str, &str, bool); 5] = [
+    ("downloads", "Загрузки (~/Downloads)", false),
+    ("documents", "Документы (~/Documents)", false),
+    ("pictures", "Изображения (~/Pictures)", false),
+    (
+        "x11",
+        "Свой X-сервер (нужен Wine и старым программам)",
+        false,
+    ),
+    (
+        "home",
+        "ВЕСЬ домашний каталог — файловой изоляции не будет",
+        true,
+    ),
+];
+
 /// Ask the user, once per program (or once per named sandbox), what the sandbox
 /// may show.
 ///
 /// The dialog texts stay in Russian on purpose: they are read by the user at his
 /// desktop, and this project's i18n (ROADMAP M6) has not happened yet. Cancelling
 /// means "nothing allowed" — the safe answer.
-fn ask_permissions(kdialog: &Path, shown: &str) -> Perms {
+fn ask_permissions(window: &Path, kdialog: &Path, shown: &str) -> Perms {
     // The program's name goes into the BODY, not only the title: with two
     // programs starting at once there are two of these dialogs on the screen,
     // and the body is what the user actually reads before answering.
     let question = format!(
         "Что показать программе «{shown}»? Ничего не отмечай — и она не увидит НИЧЕГО из твоих файлов: нужное сможет получить только через диалог выбора файла, по одному."
     );
+    if let Some(perms) = ask_in_window(window, shown, &question) {
+        return perms;
+    }
     let out = Command::new(kdialog)
         .arg("--title")
         .arg(format!("Доступ к файлам: {shown}"))
@@ -1308,6 +1368,7 @@ pub fn settle_permissions(
     sandbox: Option<&str>,
     label: Option<&str>,
     kdialog: &Path,
+    window: &Path,
 ) {
     crate::container::migrate_home(home);
     let (perm_file, _) = perm_paths(home, app_id, sandbox);
@@ -1321,7 +1382,7 @@ pub fn settle_permissions(
         }
     }
     let perms = if has_graphics() {
-        ask_permissions(kdialog, label.unwrap_or(app_id))
+        ask_permissions(window, kdialog, label.unwrap_or(app_id))
     } else {
         Perms::default()
     };
@@ -1377,7 +1438,9 @@ pub fn run(args: Args) -> u8 {
     let mut asked = None;
     if !perm_file.is_file() {
         let perms = if has_graphics() {
+            // In the zone, where the cellward window is not at hand: kdialog.
             ask_permissions(
+                Path::new(""),
                 &args.tools.kdialog,
                 args.label.as_deref().unwrap_or(&args.app_id),
             )

@@ -197,6 +197,33 @@ let
           out = alice("cellward _panel")
           assert "network\toffline\toffline\t1\t" in out, out
 
+      # The question of what a program with a home of its own may see
+      # (2026-09-28): the window's checklist, guarded — a screenshot, and
+      # Esc is «nothing» (exit 1).
+      with subtest("the file access question is the window's checklist"):
+          tools = alice(
+              "grep -m1 -o '/nix/store/[^ \"]*-vpn-zone-tools.json' "
+              "$(readlink -f $(command -v cellward))"
+          ).strip()
+          win = machine.succeed(f"grep -o '\"window\": *\"[^\"]*\"' {tools}").strip().split('"')[3]
+          machine.succeed(
+              "printf 'title\\tДоступ к файлам: Проба\\nnote\\tЧто показать программе?\\n"
+              "guard\\t1500\\ncheck\\tdownloads\\tЗагрузки (~/Downloads)\\t\\n"
+              "check\\thome\\tВЕСЬ домашний каталог\\tdanger\\n' > /tmp/checklist.req"
+          )
+          alice(
+              f"systemd-run --user --unit=vmchecklist --setenv=WAYLAND_DISPLAY={display} "
+              f"-p StandardInput=file:/tmp/checklist.req {win} checklist"
+          )
+          machine.wait_until_succeeds("pgrep -f '[v]pn-zone-window checklist'", timeout=30)
+          machine.sleep(3)
+          alice(f"WAYLAND_DISPLAY={display} grim /tmp/checklist.png")
+          machine.copy_from_vm("/tmp/checklist.png", "")
+          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
+          machine.wait_until_fails("pgrep -f '[v]pn-zone-window checklist'", timeout=15)
+          code = alice("systemctl --user show -p ExecMainStatus --value vmchecklist || true").strip()
+          assert code in ("1", ""), code
+
       def find(node, app_id):
           if node.get("app_id") == app_id:
               return node

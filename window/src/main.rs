@@ -38,6 +38,7 @@
 
 use std::io::Read;
 
+mod checklist;
 mod panel;
 
 use iced::keyboard::{self, key, Key};
@@ -835,6 +836,14 @@ fn main() -> iced::Result {
     // The cellward window (`panel.rs`): the containers and the network
     // monitor, which `cellward-gui` opens.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // A question with boxes to tick (`checklist.rs`): what a program with a
+    // home of its own may see, asked at its first launch.
+    if args.first().map(String::as_str) == Some("checklist") {
+        return checklist::run().map_err(|e| {
+            eprintln!("vpn-zone-window checklist: {e}");
+            std::process::exit(EXIT_NOT_SHOWN)
+        });
+    }
     if args.first().map(String::as_str) == Some("panel") {
         // One that cannot be shown says so as the launch window does: the
         // caller asks the old way.

@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- **What a program with a home of its own may see is asked in the cellward
+  window** (2026-09-28), not in kdialog's checklist: the same boxes —
+  Downloads, Documents, Pictures, an X server of its own, the whole home
+  (marked as opening much) —, guarded as the launch window's questions are:
+  nothing is taken, no tick and no button, until the person has been still
+  with it focused, and every key or press starts that again. Esc or
+  «Ничего» allows nothing, as before. kdialog still asks where the window
+  cannot open, and in a zone.
+
 ### Added
 - **The cellward window: the network monitor and the containers**
   (2026-09-28). `cellward-gui containers` (the «Контейнеры cellward»
