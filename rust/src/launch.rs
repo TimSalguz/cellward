@@ -1111,6 +1111,32 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             }
         }
     }
+    // And the other way round (review 2026-09-28): the main home unconfined
+    // is a host process, and the copy of the application in an instance of
+    // the real home keeps a lock that names a pid of the instance's
+    // namespace — on the host nobody, or somebody else: Chromium takes it for
+    // a stale lock, deletes it and opens the profile the other copy has open
+    // (`main_home_in_instance`). Only the host's side of cellward can see
+    // both; a program started on the host past cellward is not seen here
+    // (LEAK-MODEL §28).
+    if instance_id.is_none() && main_home && appid_env.is_some() && !dryrun {
+        if let Some(word) = program_word(&selection.cmd) {
+            if let Some((pid, id, network)) = main_home_in_instance(tools, word) {
+                refuse(
+                    tools,
+                    &format!(
+                        "«{}» уже работает с основным домом в контейнере «{id}» (pid {pid}). \
+                         У контейнера своё пространство процессов, и замок профиля, которым \
+                         программа вроде браузера не даёт открыть его дважды, с хоста не \
+                         виден: эта программа открыла бы тот же профиль. Закрой ту программу — \
+                         или запусти эту там же, в сети «{network}»",
+                        basename(word).to_string_lossy()
+                    ),
+                );
+                return 1;
+            }
+        }
+    }
 
     // --- 5. THE ZONE AND THE INSTANCE ---
     let network = match &instance_id {
@@ -2247,10 +2273,78 @@ pub fn rival(
 /// id): a terminal's `cellward run nl -- sh` is no single-instance program,
 /// and the user's shells are everywhere.
 fn main_home_rival(state: &Path, id: &str, word: &OsStr) -> Option<i32> {
+    let (exe, uid, skip) = rival_marks(word);
+    // The target instance's user namespace, while it is up: what is in it
+    // or below it shares its pid namespace.
+    let target = crate::instance::up(state, id)
+        .and_then(|pid| crate::place::ns_key(Path::new(&format!("/proc/{pid}/ns/user"))));
+    let inside = |pid: i32| target.is_some_and(|key| crate::place::chain_of(pid).contains(&key));
+    rival(&seen_processes(), uid, exe, basename(word), &skip, &inside)
+}
+
+/// The main-home guard the other way round (review 2026-09-28): a process
+/// of the user's running the program `word` starts, in the pid namespace of
+/// a running instance that has the real home ([`shares_main_home`]) — its
+/// host pid, the instance's id and its network. An unconfined launch of the
+/// main home is a host process, and the copy in the instance keeps a lock
+/// that names a pid of the instance's namespace: on the host nobody, or
+/// somebody else — Chromium takes it for a stale lock, deletes it and opens
+/// the profile the other copy has open. Instances with a home of their own
+/// run their own profile; one of an earlier build, with no pid namespace of
+/// its own, writes host pids into its locks.
+fn main_home_in_instance(tools: &Tools, word: &OsStr) -> Option<(i32, String, String)> {
+    let home_of = |name: &str| crate::container::load(tools, name).map(|c| c.home);
+    let targets: Vec<((u64, u64), crate::instance::Running)> =
+        crate::instance::running(&tools.state)
+            .into_iter()
+            .filter(|i| crate::instance::own_pid_namespace(i.pid))
+            .filter(|i| shares_main_home(&i.id, &home_of))
+            .filter_map(|i| {
+                let key = crate::place::ns_key(Path::new(&format!("/proc/{}/ns/user", i.pid)))?;
+                Some((key, i))
+            })
+            .collect();
+    if targets.is_empty() {
+        return None;
+    }
+    let (exe, uid, skip) = rival_marks(word);
+    let within = |pid: i32| {
+        let chain = crate::place::chain_of(pid);
+        targets.iter().find(|(key, _)| chain.contains(key))
+    };
+    // `rival` finds one outside what it is told is inside: here, outside
+    // every other place than these instances.
+    let pid = rival(&seen_processes(), uid, exe, basename(word), &skip, &|pid| {
+        within(pid).is_none()
+    })?;
+    let (_, instance) = within(pid)?;
+    Some((pid, instance.id.clone(), instance.network.clone()))
+}
+
+/// Whether instance `id` has the real home: the built-in main's
+/// (`main:<network>`), a main-home container's that asks its network
+/// (`<c>:<network>`: no other container's id has one), or a named
+/// container's whose home is the main one (`home_of`). One that cannot be
+/// read any more — removed while its instance runs — is taken for one that
+/// has it: a refusal is undone by closing a program, a profile opened twice
+/// is not. A throwaway's is a layer or a sandbox of its own.
+fn shares_main_home(id: &str, home_of: &dyn Fn(&str) -> Option<crate::container::Home>) -> bool {
+    if id.starts_with(crate::instance::TMP_PREFIX) || id.starts_with(crate::instance::FS_PREFIX) {
+        return false;
+    }
+    match id.split_once(':') {
+        Some(_) => true,
+        None => home_of(id).is_none_or(|home| home == crate::container::Home::Main),
+    }
+}
+
+/// What the main-home guards know the program `word` by, and whom they
+/// never take for it: its file — only when the file is the program's own: a
+/// name that resolves to a file of another name is a multicall binary's
+/// (coreutils, busybox), which every other command of it runs too —, the
+/// user's uid, and this launch with its parents.
+fn rival_marks(word: &OsStr) -> (Option<(u64, u64)>, u32, Vec<i32>) {
     use std::os::unix::fs::MetadataExt;
-    // By its file only when the file is the program's own: a name that
-    // resolves to a file of another name is a multicall binary's
-    // (coreutils, busybox), which every other command of it runs too.
     let exe = resolve_program(word, std::env::var_os("PATH").as_deref())
         .filter(|path| path.file_name() == Some(basename(word)))
         .and_then(|path| fs::metadata(path).ok())
@@ -2261,12 +2355,13 @@ fn main_home_rival(state: &Path, id: &str, word: &OsStr) -> Option<i32> {
     let skip = crate::sys::pidfd_open(me)
         .map(|fd| crate::sys::ancestors(me, &fd))
         .unwrap_or_else(|| vec![me]);
-    // The target instance's user namespace, while it is up: what is in it
-    // or below it shares its pid namespace.
-    let target = crate::instance::up(state, id)
-        .and_then(|pid| crate::place::ns_key(Path::new(&format!("/proc/{pid}/ns/user"))));
-    let inside = |pid: i32| target.is_some_and(|key| crate::place::chain_of(pid).contains(&key));
-    let seen: Vec<Seen> = fs::read_dir("/proc")
+    (exe, uid, skip)
+}
+
+/// Every process of the host's `/proc`, as [`rival`] reads them.
+fn seen_processes() -> Vec<Seen> {
+    use std::os::unix::fs::MetadataExt;
+    fs::read_dir("/proc")
         .into_iter()
         .flatten()
         .flatten()
@@ -2296,8 +2391,7 @@ fn main_home_rival(state: &Path, id: &str, word: &OsStr) -> Option<i32> {
                 name,
             })
         })
-        .collect();
-    rival(&seen, uid, exe, basename(word), &skip, &inside)
+        .collect()
 }
 
 /// The real path of the program a command word starts: the word itself when
@@ -2864,6 +2958,47 @@ mod tests {
             rival(&firefox_picker, 1000, Some((1, 7)), firefox, &skip, &inside),
             None
         );
+        // The other way round (review 2026-09-28): an unconfined launch
+        // finds the copy in an instance of the real home, and nothing on
+        // the host.
+        let in_instance = |pid: i32| pid != 30;
+        assert_eq!(
+            rival(&host, 1000, Some((1, 7)), firefox, &skip, &in_instance),
+            Some(30)
+        );
+        let on_host_only: Vec<Seen> = host.iter().filter(|s| s.pid != 30).cloned().collect();
+        assert_eq!(
+            rival(
+                &on_host_only,
+                1000,
+                Some((1, 7)),
+                firefox,
+                &skip,
+                &in_instance
+            ),
+            None
+        );
+    }
+
+    /// Which instances have the real home (review 2026-09-28): the main's,
+    /// a main-home container's by its id or its home, and one whose
+    /// container cannot be read; not a private or a layered home's, nor a
+    /// throwaway's.
+    #[test]
+    fn an_instance_of_the_real_home_is_known_by_its_id_or_its_container() {
+        use crate::container::Home;
+        let home_of = |name: &str| match name {
+            "work" => Some(Home::Private),
+            "layered" => Some(Home::Layer),
+            "shared" => Some(Home::Main),
+            _ => None,
+        };
+        for id in ["main:nl", "main:offline", "shared:nl", "shared", "gone"] {
+            assert!(shares_main_home(id, &home_of), "{id}");
+        }
+        for id in ["work", "layered", ":tmp:vpn-profile-x", ":fs:box"] {
+            assert!(!shares_main_home(id, &home_of), "{id}");
+        }
     }
 
     #[test]

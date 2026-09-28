@@ -1300,6 +1300,53 @@ pub fn parent_of(pid: i32) -> Option<i32> {
         .and_then(|v| v.trim().parse().ok())
 }
 
+/// Whether process `pid` is stopped by a signal — `T` in its status: a
+/// terminal's `^Z`, a SIGSTOP —, and not held by a tracer (`t`), which a
+/// SIGCONT does not move.
+pub fn stopped_by_signal(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|l| l.strip_prefix("State:"))
+                .map(|v| v.trim_start().starts_with('T'))
+        })
+        .unwrap_or(false)
+}
+
+/// A process that has ended and is not reaped yet — `pid`, held by `fd` —:
+/// its parent continued (SIGCONT, through a pidfd) when a signal stopped
+/// it, so that it reaps it. Whether one was.
+///
+/// Review 2026-09-28: a container's instance's pid 1 ends only once every
+/// process of its pid namespace is reaped, and a launch's `profile-run` is
+/// the child of a process outside it — the launch's waiter
+/// (`crate::enter`), or the supervisor that adopted it once the waiter was
+/// gone. A terminal's `^Z` stops them all; the program ended then was a
+/// zombie under a stopped parent, and the instance could not end until
+/// `fg`. Continued, the launch sees its program's end, as `fg` would let
+/// it — and nothing else happens: that parent is the launch's, and waits.
+pub fn continue_reaper(pid: i32, fd: &OwnedFd) -> bool {
+    let Some(parent) = parent_of(pid).filter(|&p| p > 1) else {
+        return false;
+    };
+    // Still that process, unreaped — a zombie takes a signal 0 —: the
+    // number read was its own, not a later holder's.
+    if !pidfd_signal(fd, 0) || !stopped_by_signal(parent) {
+        return false;
+    }
+    let Some(parent_fd) = pidfd_open(parent) else {
+        return false;
+    };
+    // Held, and still its parent: a parent that ended meanwhile would have
+    // handed it to another, and its number may be somebody else's now.
+    if parent_of(pid) != Some(parent) || !pidfd_signal(fd, 0) {
+        return false;
+    }
+    pidfd_signal(&parent_fd, libc::SIGCONT)
+}
+
 /// The children of `pid`, by the `PPid` of every process.
 ///
 /// A number read here stays the child's for as long as `pid` has not reaped
@@ -1431,6 +1478,46 @@ mod process_tree {
         let orphan_fd = pidfd_open(orphan).unwrap();
         assert!(!descends_from(orphan, &orphan_fd, me));
         assert!(pidfd_signal(&orphan_fd, libc::SIGKILL));
+    }
+
+    /// Review 2026-09-28: a program killed under a parent a signal stopped
+    /// (`^Z`) stays its zombie until that parent goes on — continued by
+    /// `continue_reaper`, and only then.
+    #[test]
+    fn a_zombie_under_a_stopped_parent_has_its_parent_continued() {
+        use std::io::BufRead;
+        let mut shell = std::process::Command::new("sh")
+            .args(["-c", "sleep 60 </dev/null >/dev/null 2>&1 & echo $!; wait"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(shell.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let pid: i32 = line.trim().parse().unwrap();
+        let fd = pidfd_open(pid).unwrap();
+        let parent = shell.id() as i32;
+        assert_eq!(parent_of(pid), Some(parent));
+        // Running, and its parent too: nothing to continue.
+        assert!(!continue_reaper(pid, &fd));
+        // SAFETY: kill(2) of our own child, not reaped yet.
+        unsafe { libc::kill(parent, libc::SIGSTOP) };
+        let mut status = 0;
+        // SAFETY: waitpid(2) of our own child, for its stop only.
+        let stopped = unsafe { libc::waitpid(parent, &mut status, libc::WUNTRACED) };
+        assert_eq!(stopped, parent);
+        assert!(libc::WIFSTOPPED(status));
+        assert!(stopped_by_signal(parent));
+        assert!(pidfd_signal(&fd, libc::SIGKILL));
+        pidfd_wait_end(&fd);
+        // Ended, and nobody has reaped it.
+        assert!(pidfd_signal(&fd, 0));
+        assert!(continue_reaper(pid, &fd));
+        // The shell goes on, reaps it (`wait`) and ends.
+        let _ = shell.wait();
+        assert!(!pidfd_signal(&fd, 0));
+        assert!(!continue_reaper(pid, &fd));
     }
 
     #[test]

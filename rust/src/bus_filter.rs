@@ -167,6 +167,11 @@ pub struct ZoneArgs {
     pub dir: PathBuf,
     pub config: PathBuf,
     pub profiles: Option<PathBuf>,
+    /// `--network-file`: a container's instance's `network` file — the
+    /// switch read is the network's the instance is in now
+    /// (`screencast::Policy::following`), and a connection made after a
+    /// live switch goes to the portal as the new one's (`Ctx::app_for`).
+    pub network: Option<PathBuf>,
 }
 
 impl Args {
@@ -174,6 +179,7 @@ impl Args {
         let (mut listen, mut upstream, mut opener, mut via_broker) = (None, None, None, None);
         let (mut portal_app, mut applications) = (None, None);
         let (mut zone, mut zone_dir, mut config, mut profiles) = (None, None, None, None);
+        let mut network = None;
         let mut container = None;
         let mut it = argv.iter();
         while let Some(flag) = it.next() {
@@ -206,6 +212,7 @@ impl Args {
                 Some("--zone-dir") => zone_dir = Some(value),
                 Some("--config") => config = Some(value),
                 Some("--profiles") => profiles = Some(value),
+                Some("--network-file") => network = Some(value),
                 Some("--container") => {
                     container = Some(crate::origin::Who::from_word(&value.to_string_lossy()))
                 }
@@ -218,11 +225,13 @@ impl Args {
                 dir,
                 config,
                 profiles,
+                network,
             }),
-            (None, None, None) if profiles.is_none() => None,
+            (None, None, None) if profiles.is_none() && network.is_none() => None,
             _ => {
                 return Err(
-                    "--zone, --zone-dir and --config go together (and --profiles with them)"
+                    "--zone, --zone-dir and --config go together (and --profiles and \
+                     --network-file with them)"
                         .to_owned(),
                 )
             }
@@ -638,9 +647,17 @@ impl Ctx {
     /// The id a connection of `who` is registered with: its container's
     /// (`desktop::container_app_id`) where the portal can take it — the
     /// entry is there —, else the zone's (`portal_app`). A container whose
-    /// entry sync has not written yet goes as the zone, as before.
+    /// entry sync has not written yet goes as the zone, as before. An
+    /// instance's filter (`--network-file`): the zone's id is the one of the
+    /// network the instance is in now — a connection made after a live
+    /// switch is not the old network's to the portal (review 2026-09-28);
+    /// one made before keeps what it was registered with.
     fn app_for(&self, who: &crate::origin::Who) -> Option<String> {
         let zone = self.portal_app.clone()?;
+        let zone = match self.screencast.as_ref().filter(|p| p.follows()) {
+            Some(policy) => crate::desktop::zone_app_id(&policy.zone()),
+            None => zone,
+        };
         if let (crate::origin::Who::Container(name), Some(dir)) = (who, &self.applications) {
             if dir
                 .join(crate::desktop::container_entry_file(name))
@@ -1051,10 +1068,9 @@ pub fn run(args: &Args) -> u8 {
     // The zone's directories for its screen cast switch, held before the
     // socket appears: the holder waits for the socket and then covers the
     // project's state in this very mount namespace.
-    let screencast = args
-        .zone
-        .as_ref()
-        .map(|z| crate::screencast::Policy::hold(&z.name, &z.dir, &z.config));
+    let screencast = args.zone.as_ref().map(|z| {
+        crate::screencast::Policy::hold(&z.name, &z.dir, &z.config).following(z.network.as_deref())
+    });
     let _ = fs::remove_file(&args.listen);
     let listener = match UnixListener::bind(&args.listen) {
         Ok(l) => l,
@@ -2655,11 +2671,29 @@ mod tests {
                 dir: PathBuf::from("/s/nl"),
                 config: PathBuf::from("/c"),
                 profiles: None,
+                network: None,
             })
         );
         assert!(args(&["--zone", "nl"]).is_err());
         assert!(args(&["--zone-dir", "/s/nl", "--config", "/c"]).is_err());
         assert!(args(&["--zone", "", "--zone-dir", "/s/nl", "--config", "/c"]).is_err());
+        // An instance's: the network it is in now, beside them — never alone.
+        let followed = args(&[
+            "--zone",
+            "nl",
+            "--zone-dir",
+            "/s/nl",
+            "--config",
+            "/c",
+            "--network-file",
+            "/s/.instances/i/network",
+        ])
+        .unwrap();
+        assert_eq!(
+            followed.zone.and_then(|z| z.network),
+            Some(PathBuf::from("/s/.instances/i/network"))
+        );
+        assert!(args(&["--network-file", "/s/.instances/i/network"]).is_err());
     }
 
     // --- THE SCREEN CAST SWITCH ----------------------------------------------

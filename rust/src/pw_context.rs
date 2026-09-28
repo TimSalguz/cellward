@@ -719,6 +719,10 @@ pub struct Args {
     /// `--userns <dev>:<ino>`: the instance's user namespace, which a client
     /// of it is in or below.
     pub userns: Option<(u64, u64)>,
+    /// `--network-file <path>`: the instance's `network` file — its
+    /// microphone is the setting of the network it is in now
+    /// (`microphone::zone_now`), not only `--zone`'s.
+    pub network: Option<PathBuf>,
 }
 
 impl Args {
@@ -735,6 +739,7 @@ impl Args {
         let mut state_dir = None;
         let mut container = None;
         let mut userns = None;
+        let mut network = None;
         let mut it = args.iter();
         while let Some(flag) = it.next() {
             let value = it
@@ -784,6 +789,7 @@ impl Args {
                     )
                 }
                 Some("--state-dir") => state_dir = Some(path),
+                Some("--network-file") => network = Some(path),
                 Some("--container") => {
                     container = Some(crate::origin::Who::from_word(&value.to_string_lossy()))
                 }
@@ -810,6 +816,7 @@ impl Args {
             state_dir,
             container,
             userns,
+            network,
         })
     }
 }
@@ -869,18 +876,41 @@ impl MicSource for ZoneMic {
 /// the instance is one container, so its setting is that container's in
 /// the network — for the whole instance at once and for each client alike;
 /// a client of the daemon is the instance's when its process is in the
-/// instance's user namespace or below it.
+/// instance's user namespace or below it. Its network is the one the
+/// instance is in now, when told its `network` file (a live switch moves
+/// it, review 2026-09-28).
 pub struct InstanceMic {
     pub zone: String,
     pub zone_dir: PathBuf,
     pub config: PathBuf,
     pub who: crate::origin::Who,
     pub userns: Option<(u64, u64)>,
+    /// The instance's `network` file (`--network-file`).
+    pub network: Option<PathBuf>,
+}
+
+impl InstanceMic {
+    /// The setting for a program of `who` in the network the instance is in
+    /// now (`microphone::zone_now`); one not known at the moment is `no`.
+    fn now_for(&self, who: &crate::origin::Who) -> Setting {
+        let Some(zone) = crate::microphone::zone_now(&self.zone, self.network.as_deref()) else {
+            return crate::microphone::NETWORK_NOT_KNOWN.0;
+        };
+        let dir = if zone == self.zone {
+            Some(self.zone_dir.clone())
+        } else {
+            self.zone_dir.parent().map(|state| state.join(&zone))
+        };
+        match dir {
+            Some(dir) => crate::microphone::setting_for(&dir, &self.config, &zone, who).0,
+            None => crate::microphone::NETWORK_NOT_KNOWN.0,
+        }
+    }
 }
 
 impl MicSource for InstanceMic {
     fn setting(&self) -> Setting {
-        crate::microphone::setting_for(&self.zone_dir, &self.config, &self.zone, &self.who).0
+        self.now_for(&self.who)
     }
 
     fn client(&self, pid: i32) -> Option<crate::origin::Who> {
@@ -892,7 +922,7 @@ impl MicSource for InstanceMic {
     }
 
     fn setting_for(&self, who: &crate::origin::Who) -> Setting {
-        crate::microphone::setting_for(&self.zone_dir, &self.config, &self.zone, who).0
+        self.now_for(who)
     }
 }
 
@@ -1538,6 +1568,7 @@ pub fn run(args: &Args) -> u8 {
             config: args.config.clone(),
             who: who.clone(),
             userns: args.userns,
+            network: args.network.clone(),
         }),
         None => Box::new(ZoneMic {
             zone: args.zone.clone(),
@@ -1850,6 +1881,13 @@ mod tests {
         let parsed = Args::parse(&args(&full)).unwrap();
         assert_eq!(parsed.instance, 77);
         assert_eq!(parsed.zone, "nl");
+        assert_eq!(parsed.network, None);
+        let mut with = full.to_vec();
+        with.extend(["--network-file", "/i/network"]);
+        assert_eq!(
+            Args::parse(&args(&with)).unwrap().network,
+            Some(PathBuf::from("/i/network"))
+        );
         for i in (0..full.len()).step_by(2) {
             let mut less = full.to_vec();
             less.drain(i..i + 2);

@@ -20,7 +20,9 @@
 //! zone. For `ask` the filter holds that one request — the connection's other
 //! commands go on — until the answer, and then passes it or answers it
 //! `ERROR`/`ACCESS`. The zone in the question is the filter's own, the one it
-//! was started for; nothing a program says names it. The program's name in
+//! was started for — a container's instance's, the network the instance is
+//! in now, which a live switch changes ([`zone_now`], review 2026-09-28);
+//! nothing a program says names it. The program's name in
 //! the question is its own word (its properties) and is shown as that,
 //! cleaned (`shown_program`).
 //!
@@ -179,6 +181,41 @@ pub fn by_container(
 /// The microphone for a program of `who` in `zone` ([`by_container`]).
 pub fn setting_for(zone_dir: &Path, config: &Path, zone: &str, who: &Who) -> (Setting, Source) {
     by_container(setting(zone_dir, config, zone), config, "microphone", who)
+}
+
+/// A switch whose network cannot be known at the moment ([`zone_now`]):
+/// Nix's `no` — never the word of the network the instance came up in, and
+/// no local word over it.
+pub const NETWORK_NOT_KNOWN: (Setting, Source) = (Setting::No, Source::Nix);
+
+/// The network a container's instance is in now: its `network` file
+/// (`instance::NETWORK`), which a live switch rewrites in place (stage 4 of
+/// the container design, `zone::Transport::switch_taken`). `None` while it
+/// holds no network's name.
+pub fn network_now(file: &Path) -> Option<String> {
+    let read = || {
+        let text = std::fs::read_to_string(file).ok()?;
+        let word = text.trim();
+        crate::instance::valid_network(word).then(|| word.to_owned())
+    };
+    // Rewritten in place — it is bound into the instance, and a new file
+    // renamed over it would leave the old one there —: an empty read may be
+    // the moment between its truncation and its write. One look more.
+    read().or_else(read)
+}
+
+/// The zone whose zone-level switches (the microphone, the screen cast) a
+/// helper reads now: the one it was started for (`zone`); an instance's
+/// helper, told its `network` file, the network the instance is in NOW —
+/// review 2026-09-28: after a live switch the helpers went on reading the
+/// network the instance had come up in, and a container with no word of its
+/// own recorded in the new network by the old one's `yes`. `None`: not
+/// known at the moment ([`NETWORK_NOT_KNOWN`]).
+pub fn zone_now(zone: &str, network: Option<&Path>) -> Option<String> {
+    match network {
+        None => Some(zone.to_owned()),
+        Some(file) => network_now(file),
+    }
 }
 
 /// A zone's `yes|no|ask` switch by the microphone's rules — the screen
@@ -369,6 +406,23 @@ struct Files {
     config: PathBuf,
     /// `~/.local/state/vpn-profiles`: whether a container is still one.
     profiles: PathBuf,
+    /// A container's instance's `network` file ([`Policy::following`]):
+    /// the zone is the network the instance is in now, its directory the
+    /// one of that name beside `zone_dir`.
+    network: Option<PathBuf>,
+}
+
+impl Files {
+    /// The zone whose setting is read now, and its directory ([`zone_now`]);
+    /// `None`: not known at the moment.
+    fn place(&self, zone: &str) -> Option<(String, PathBuf)> {
+        let now = zone_now(zone, self.network.as_deref())?;
+        if now == zone {
+            return Some((now, self.zone_dir.clone()));
+        }
+        let dir = self.zone_dir.parent()?.join(&now);
+        Some((now, dir))
+    }
 }
 
 /// What the filter of one zone knows to decide by. One per filter process,
@@ -431,6 +485,7 @@ impl Policy {
                 zone_dir,
                 config,
                 profiles,
+                network: None,
             }),
             fixed: Setting::No,
             kdialog,
@@ -487,7 +542,11 @@ impl Policy {
     /// had (review 2026-09-27: it ended only the next one) —, and looks at
     /// the generation with every packet of sound, reading the setting again
     /// only when it moved. The zone's marker, Nix's words, and the
-    /// containers' own settings, new containers' included.
+    /// containers' own settings, new containers' included. An instance's
+    /// filter ([`Policy::following`]) watches its `network` file too — a
+    /// live switch is a change of the setting, and a stream the new network
+    /// does not allow ends at once — and the directory of the network it is
+    /// in now, added with every change.
     pub fn watch(self: &std::sync::Arc<Self>) {
         let Some(files) = &self.files else {
             return;
@@ -505,20 +564,32 @@ impl Policy {
         // SAFETY: just returned to us, and nobody else's.
         let fd = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) };
         let containers = files.config.join(crate::container::POLICY_DIR);
-        let fixed = [
+        let fixed: Vec<PathBuf> = [
             files.zone_dir.clone(),
             files.config.clone(),
             files.config.join(DECLARED_DIR),
             files.config.join(crate::container::DECLARED),
             containers.clone(),
-        ];
+        ]
+        .into_iter()
+        .chain(files.network.clone())
+        .collect();
+        let (network, state) = (
+            files.network.clone(),
+            files.zone_dir.parent().map(Path::to_path_buf),
+        );
         let add = move |fd: &std::os::fd::OwnedFd| {
             use std::os::fd::AsRawFd;
             use std::os::unix::ffi::OsStrExt;
             let own = std::fs::read_dir(&containers)
                 .map(|e| e.flatten().map(|e| e.path()).collect::<Vec<_>>())
                 .unwrap_or_default();
-            for dir in fixed.iter().chain(&own) {
+            let now = network
+                .as_deref()
+                .and_then(network_now)
+                .zip(state.as_ref())
+                .map(|(now, state)| state.join(now));
+            for dir in fixed.iter().chain(&own).chain(&now) {
                 let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
                     continue;
                 };
@@ -562,8 +633,24 @@ impl Policy {
         });
     }
 
-    pub fn zone(&self) -> &str {
-        &self.zone
+    /// A container's instance's filter: its zone is the network the
+    /// instance is in now, read from its `network` file for every look
+    /// ([`zone_now`]) — the one it was started for only until a live switch.
+    pub fn following(mut self, network: Option<PathBuf>) -> Self {
+        if let Some(files) = self.files.as_mut() {
+            files.network = network;
+        }
+        self
+    }
+
+    /// The zone the filter decides for now: the one it was started for, or
+    /// an instance's network now ([`Policy::following`]) — that one while
+    /// the network is not known at the moment.
+    pub fn zone(&self) -> String {
+        self.files
+            .as_ref()
+            .and_then(|f| zone_now(&self.zone, f.network.as_deref()))
+            .unwrap_or_else(|| self.zone.clone())
     }
 
     pub fn has_display(&self) -> bool {
@@ -571,10 +658,14 @@ impl Policy {
     }
 
     /// The setting for a program of `who` now, and where it comes from
-    /// ([`setting_for`]).
+    /// ([`setting_for`]); a network not known at the moment is Nix's `no`
+    /// ([`NETWORK_NOT_KNOWN`]).
     pub fn setting(&self, who: &Who) -> (Setting, Source) {
         match &self.files {
-            Some(f) => setting_for(&f.zone_dir, &f.config, &self.zone, who),
+            Some(f) => match f.place(&self.zone) {
+                Some((zone, dir)) => setting_for(&dir, &f.config, &zone, who),
+                None => NETWORK_NOT_KNOWN,
+            },
             None => (self.fixed, Source::Default),
         }
     }
@@ -670,12 +761,13 @@ impl Policy {
         }
         let _close = Close(&self.asking);
         let remember = remember && *who != Who::Unknown;
-        let text = question(&self.zone, who, program, remember);
+        let zone = self.zone();
+        let text = question(&zone, who, program, remember);
         let title = match who {
             Who::Container(name) => format!("Микрофон — контейнер «{}»", shown_container(name)),
-            _ => format!("Микрофон — зона «{}»", self.zone),
+            _ => format!("Микрофон — зона «{zone}»"),
         };
-        let always = always_label(&self.zone, who);
+        let always = always_label(&zone, who);
         let asked = Instant::now();
         // In the launch window first, guarded (`window::question`): counted
         // from when the question can be seen, not from its start — a loaded
@@ -791,7 +883,12 @@ impl Policy {
             return Ok(());
         };
         match who {
-            Who::Main => std::fs::write(f.zone_dir.join(MARKER), "yes").map_err(|e| e.to_string()),
+            Who::Main => match f.place(&self.zone) {
+                Some((_, dir)) => {
+                    std::fs::write(dir.join(MARKER), "yes").map_err(|e| e.to_string())
+                }
+                None => Err("сеть экземпляра сейчас не известна".to_owned()),
+            },
             Who::Container(name) => {
                 // Under the lock `container rm` removes under: an answer that
                 // comes while its container is being removed does not bring
@@ -830,10 +927,8 @@ impl Policy {
             Who::Main => String::new(),
             _ => format!(", container {container}"),
         };
-        eprintln!(
-            "pulse-filter: zone {}{whose}: microphone for «{program}» {decision}: {why}",
-            self.zone
-        );
+        let zone = self.zone();
+        eprintln!("pulse-filter: zone {zone}{whose}: microphone for «{program}» {decision}: {why}");
         let Some(state) = &self.journal else {
             return;
         };
@@ -848,7 +943,7 @@ impl Policy {
             state,
             "microphone",
             &[
-                ("zone", self.zone.as_str()),
+                ("zone", zone.as_str()),
                 ("container", container.as_str()),
                 ("program", program.as_str()),
                 ("decision", decision),
@@ -990,6 +1085,71 @@ mod tests {
         std::fs::remove_file(d.config().join("declared/microphone")).unwrap();
         d.write("config/declared/microphone", "nl no\n");
         assert_eq!(d.setting(), (Setting::Yes, Source::Local));
+    }
+
+    /// Review 2026-09-28: an instance's filter reads the network the
+    /// instance is in now — after a live switch the new one's word, Nix's
+    /// included, never the old one's; while the network cannot be known at
+    /// the moment, `no`.
+    #[test]
+    fn an_instances_filter_follows_the_network_it_is_in_now() {
+        let d = Dirs::new("follows");
+        std::fs::create_dir_all(d.base.join("state/de")).unwrap();
+        std::fs::create_dir_all(d.base.join("instance")).unwrap();
+        let network = d.base.join("instance/network");
+        d.write("instance/network", "nl\n");
+        d.write("state/nl/microphone", "yes");
+        d.write("state/de/microphone", "no");
+        let nobody = PathBuf::from("/nonexistent/kdialog");
+        let mic = d
+            .policy(nobody.clone(), false, Duration::ZERO)
+            .following(Some(network));
+        let work = Who::Container("work".to_owned());
+        assert_eq!(mic.setting(&work), (Setting::Yes, Source::Local));
+        assert_eq!(mic.zone(), "nl");
+        d.write("instance/network", "de\n");
+        assert_eq!(mic.setting(&work), (Setting::No, Source::Local));
+        assert_eq!(mic.zone(), "de");
+        d.declare("microphone", "nl yes\n");
+        assert_eq!(mic.setting(&work), (Setting::No, Source::Local));
+        d.declare("microphone", "de yes\n");
+        assert_eq!(mic.setting(&work), (Setting::Yes, Source::Nix));
+        d.write("instance/network", "");
+        assert_eq!(mic.setting(&work), NETWORK_NOT_KNOWN);
+        assert_eq!(mic.zone(), "nl");
+        // A zone's own filter, told no file: its zone, as ever.
+        d.write("instance/network", "de\n");
+        let zone = d.policy(nobody, false, Duration::ZERO);
+        assert_eq!(zone.zone(), "nl");
+        assert_eq!(zone.setting(&work), (Setting::Yes, Source::Local));
+    }
+
+    /// The restricted PipeWire of an instance (`pw_context::InstanceMic`)
+    /// the same way.
+    #[test]
+    fn an_instances_pipewire_follows_the_network_it_is_in_now() {
+        use crate::pw_context::MicSource;
+        let d = Dirs::new("pw-follows");
+        std::fs::create_dir_all(d.base.join("state/de")).unwrap();
+        d.write("state/nl/microphone", "yes");
+        d.write("state/de/microphone", "no");
+        d.write("network", "nl\n");
+        let mic = crate::pw_context::InstanceMic {
+            zone: "nl".to_owned(),
+            zone_dir: d.zone(),
+            config: d.config(),
+            who: Who::Container("work".to_owned()),
+            userns: None,
+            network: Some(d.base.join("network")),
+        };
+        assert_eq!(mic.setting(), Setting::Yes);
+        d.write("network", "de\n");
+        assert_eq!(mic.setting(), Setting::No);
+        assert_eq!(mic.setting_for(&Who::Main), Setting::No);
+        d.write("network", "nl\n");
+        assert_eq!(mic.setting(), Setting::Yes);
+        d.write("network", "");
+        assert_eq!(mic.setting(), Setting::No);
     }
 
     #[test]

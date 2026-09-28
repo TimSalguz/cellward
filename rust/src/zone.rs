@@ -2666,19 +2666,33 @@ fn answer_request(
 /// (`crate::place::members`). No clock: a program that does not end is
 /// ended by systemd's stop timeout of the unit — the one clock (O10 of the
 /// design): its KILL reaches the pid 1, and the kernel ends the rest.
+///
+/// One that has ended and is still listed is a zombie nobody has reaped:
+/// its end is had, and it is not waited for again — it was, in a busy
+/// loop, until its parent reaped it. A launch's `profile-run` is the child
+/// of a process outside the instance (its waiter, `crate::enter`), which a
+/// terminal's `^Z` stops with it: that parent is continued to reap it
+/// (`sys::continue_reaper`, review 2026-09-28) — the instance's pid 1 ends
+/// only once every process of its namespace is reaped.
 fn end_programs(userns: (u64, u64), space: libc::pid_t) {
     // SAFETY: getpid(2) takes no arguments and cannot fail.
     let keeper = unsafe { libc::getpid() };
     loop {
-        let found = crate::place::members(userns, Some(keeper), Some(space));
-        if found.is_empty() {
+        let (ended, live): (Vec<_>, Vec<_>) =
+            crate::place::members(userns, Some(keeper), Some(space))
+                .into_iter()
+                .partition(|(_, fd)| sys::pidfd_wait(fd, std::time::Duration::ZERO));
+        for (pid, fd) in &ended {
+            sys::continue_reaper(*pid, fd);
+        }
+        if live.is_empty() {
             return;
         }
-        for (_, fd) in &found {
+        for (_, fd) in &live {
             sys::pidfd_signal(fd, libc::SIGTERM);
             sys::pidfd_signal(fd, libc::SIGCONT);
         }
-        for (_, fd) in &found {
+        for (_, fd) in &live {
             sys::pidfd_wait_end(fd);
         }
     }
@@ -3159,17 +3173,20 @@ impl Transport {
         self.zone_back(wake);
     }
 
-    /// The zone may be back. Stage 4 (O3 of the design): with its epochs
-    /// whole and every program in the current one, attached again as a new
-    /// epoch, whatever the zone came back as — every socket of before muted
-    /// by the wall and broken, as in a switch to the same network. Else, as
-    /// in stage 2: attached again when it is the one that carried the
-    /// instance (its fingerprint); left cut, until the person says, when it
-    /// is another — never moved to another exit as a side effect.
+    /// The zone may be back: attached again when it is the one that carried
+    /// the instance (its fingerprint, as in stage 2); left cut, until the
+    /// person says, when it is another — never moved to another exit as a
+    /// side effect (I1, THREAT-MODEL N9). Stage 4 (O3 of the design): with
+    /// its epochs whole and every program in the current one, attached as a
+    /// new epoch — every socket of before muted by the wall and broken, as
+    /// in a switch to the same network. Until the review of 2026-09-28 such
+    /// an instance was attached whatever the zone came back as: a zone
+    /// re-created with another provider, or its config edited, took every
+    /// container it had carried out through the new exit without a word of
+    /// the person's.
     fn zone_back(&mut self, wake: RawFd) {
         use crate::bridge::NoLink;
-        let renewable = self.epochs.renewable();
-        if self.link.is_some() || self.offline() || (self.why == "zone-changed" && !renewable) {
+        if self.link.is_some() || self.offline() || self.why == "zone-changed" {
             return;
         }
         let zone_dir = self.state.join(&self.network);
@@ -3181,12 +3198,13 @@ impl Transport {
         if Some(now) == self.zone_pid || !crate::bridge::carries(&zone_dir) {
             return;
         }
-        if renewable {
+        if self.epochs.renewable() {
             println!(
-                "instance {}: zone {} is back — a new epoch, then attached",
+                "instance {}: zone {} is back — a new epoch, then attached if it is the one \
+                 that carried it",
                 self.id, self.network
             );
-            self.renew_and_attach(wake);
+            self.renew_and_attach(wake, self.fp);
             return;
         }
         match self.attach(self.fp, Some(wake)) {
@@ -3194,17 +3212,7 @@ impl Transport {
                 "instance {}: zone {} is back as it was — attached again",
                 self.id, self.network
             ),
-            Err(NoLink::Changed(fp)) => {
-                self.why = "zone-changed";
-                self.watch = None;
-                self.note();
-                eprintln!(
-                    "instance {}: zone {} came back as another one (fingerprint {fp:016x}) — \
-                     it stays cut; `cellward container reattach` attaches it",
-                    self.id, self.network
-                );
-                self.journal("cut", &[("why", "zone-changed")]);
-            }
+            Err(NoLink::Changed(fp)) => self.zone_changed(fp),
             Err(NoLink::Stopped) => {}
             Err(NoLink::Failed(e)) => {
                 self.why = "attach-failed";
@@ -3212,6 +3220,21 @@ impl Transport {
                 eprintln!("instance {}: not attached again: {e}", self.id);
             }
         }
+    }
+
+    /// The zone came back as another one (fingerprint `fp`): the instance
+    /// stays cut, and its zone is no longer watched — only the person's
+    /// `cellward container reattach` attaches it.
+    fn zone_changed(&mut self, fp: u64) {
+        self.why = "zone-changed";
+        self.watch = None;
+        self.note();
+        eprintln!(
+            "instance {}: zone {} came back as another one (fingerprint {fp:016x}) — it stays \
+             cut; `cellward container reattach` attaches it",
+            self.id, self.network
+        );
+        self.journal("cut", &[("why", "zone-changed")]);
     }
 
     /// The person's word (`cellward container reattach`): its mark taken
@@ -3225,7 +3248,7 @@ impl Transport {
             return;
         }
         if self.epochs.renewable() {
-            self.renew_and_attach(wake);
+            self.renew_and_attach(wake, None);
             return;
         }
         match self.attach(None, Some(wake)) {
@@ -3324,15 +3347,23 @@ impl Transport {
     }
 
     /// A new epoch, then the attach — as one, under the instance's lock: a
-    /// zone's return, the person's `reattach` (stage 4). Its journal:
-    /// `reattach` with the epoch; what failed leaves it cut.
-    fn renew_and_attach(&mut self, wake: RawFd) {
+    /// zone's return, the person's `reattach` (stage 4). `expect`: the
+    /// fingerprint the zone must have (a zone's return, [`Transport::
+    /// zone_back`]) — another one leaves the instance cut, in its new epoch,
+    /// with nothing attached (`bridge::attach` refuses it before its relay
+    /// starts); `None`: the zone as it is now (the person's word). The new
+    /// epoch comes first all the same: the zone's answer that tells its
+    /// fingerprint is the attach itself, and no way out is attached before
+    /// the wall of a new epoch. Its journal: `reattach` with the epoch; what
+    /// failed leaves it cut.
+    fn renew_and_attach(&mut self, wake: RawFd, expect: Option<u64>) {
+        use crate::bridge::NoLink;
         let done = self.with_lock(|t| {
             let tally = t
                 .renew(wake)
-                .map_err(|(phase, why)| format!("{}: {why}", phase.word()))?;
-            t.attach(None, Some(wake)).map_err(|e| e.to_string())?;
-            Ok::<_, String>(tally)
+                .map_err(|(phase, why)| NoLink::Failed(format!("{}: {why}", phase.word())))?;
+            t.attach(expect, Some(wake))?;
+            Ok::<_, NoLink>(tally)
         });
         match done {
             Ok(tally) => {
@@ -3347,10 +3378,9 @@ impl Transport {
                     ],
                 );
             }
+            Err(_) if ASKED_TO_STOP.load(Ordering::SeqCst) => {}
+            Err(NoLink::Changed(fp)) => self.zone_changed(fp),
             Err(e) => {
-                if ASKED_TO_STOP.load(Ordering::SeqCst) {
-                    return;
-                }
                 self.why = "attach-failed";
                 self.note();
                 eprintln!("instance {}: not attached again: {e}", self.id);
@@ -4569,7 +4599,10 @@ fn start_proxy(
 
 /// What an instance's helpers on the host are told of it (`crate::instance`):
 /// whose its programs are (`--container`) and their user namespace
-/// (`--userns`) — its sockets are bound into its space alone. Nothing for a
+/// (`--userns`) — its sockets are bound into its space alone —, and its
+/// `network` file (`--network-file`): the zone whose microphone setting
+/// counts is the network it is in now, which a live switch changes (review
+/// 2026-09-28; `--zone` is only the one it came up in). Nothing for a
 /// zone's.
 fn instance_helper_args(zone: &Zone) -> Vec<OsString> {
     let Some(instance) = &zone.instance else {
@@ -4578,6 +4611,8 @@ fn instance_helper_args(zone: &Zone) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("--container"),
         OsString::from(instance.who.word()),
+        OsString::from("--network-file"),
+        zone.path(crate::instance::NETWORK).into_os_string(),
     ];
     if let Some(key) = instance.userns {
         args.push(OsString::from("--userns"));
@@ -4795,11 +4830,22 @@ fn start_session_filter(zone: &Zone) {
         .arg("--zone-dir")
         .arg(zone.settings_dir())
         // An instance's filter is told whose its programs are: the instance
-        // is the container, and no registry is read for it.
+        // is the container, and no registry is read for it. And its
+        // `network` file, held with the rest before the covering: the screen
+        // cast switch read, and the zone's id a new connection goes to the
+        // portal with, are the network's it is in now — a live switch
+        // changes it (review 2026-09-28).
         .args(
             zone.instance
                 .as_ref()
-                .map(|instance| ["--container".to_owned(), instance.who.word()])
+                .map(|instance| {
+                    [
+                        OsString::from("--container"),
+                        OsString::from(instance.who.word()),
+                        OsString::from("--network-file"),
+                        zone.path(crate::instance::NETWORK).into_os_string(),
+                    ]
+                })
                 .into_iter()
                 .flatten(),
         )
@@ -9183,9 +9229,16 @@ mod tests {
         assert!(work.keeps().is_empty());
         assert_eq!(
             instance_helper_args(&work),
-            ["--container", "work", "--userns", "4:4026532000"]
-                .map(OsString::from)
-                .to_vec()
+            [
+                "--container",
+                "work",
+                "--network-file",
+                "/h/.local/state/vpn-zones/nl/network",
+                "--userns",
+                "4:4026532000"
+            ]
+            .map(OsString::from)
+            .to_vec()
         );
         // A throwaway keeps its own layer, writable, and nothing else.
         let tmp = zone_for(Some(info(

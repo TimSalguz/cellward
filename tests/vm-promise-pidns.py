@@ -14,7 +14,8 @@ else, in the instance's namespace. Each "not seen" is paired with the same
 look on the host, where it is seen. Then the instance's pid namespace in
 use: its stop ends its programs with no timeout reached, `cellward container
 kill` ends one that ignores TERM, a daemon forked twice stays in its launch's
-tree, and an orphan the instance's pid 1 adopted is reaped and counted.
+tree, an orphan the instance's pid 1 adopted is reaped and counted, and a
+launch its terminal stopped (`^Z`) holds up no kill.
 """
 
 # Every command line in /proc, NUL-separated: a process that ends between the
@@ -24,7 +25,7 @@ SCAN = "sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null; true'"
 # Each marked process is a sleep of a duration of its own, looked for by it:
 # NixOS's coreutils is one binary that goes by argv[0], so `exec -a <name>
 # sleep` runs no sleep at all (red once in CI).
-A, B, HOST, STUBBORN, DAEMON, ORPHAN, D = (
+A, B, HOST, STUBBORN, DAEMON, ORPHAN, D, E = (
     "600.301",
     "600.302",
     "600.303",
@@ -32,6 +33,7 @@ A, B, HOST, STUBBORN, DAEMON, ORPHAN, D = (
     "600.305",
     "600.306",
     "600.307",
+    "600.308",
 )
 
 
@@ -185,6 +187,24 @@ with subtest("an orphan pid 1 adopts is reaped, and counted as a program"):
         timeout=60,
     )
 
+with subtest("a launch its terminal stopped holds up no kill"):
+    # Review 2026-09-28: `^Z` stops the whole launch, its waiter on the host
+    # too — the parent of the instance's profile-run. Killed, profile-run
+    # stayed a zombie under a stopped parent, the instance's pid 1 never
+    # ended (the kernel waits for every process of the namespace to be
+    # reaped), and `cellward kill` waited for it for good. The stopped
+    # parent is continued now, and reaps it.
+    alice("cellward container create vmpe --home layer")
+    keep("vmpe", "vmpe-stopped", E)
+    machine.succeed("pkill -STOP -u alice -f '[c]ontainer-enter --instance vmpe '")
+    machine.succeed(f"pkill -STOP -u alice -xf '{exactly(E)}'")
+    out = alice("timeout 60 cellward container kill vmpe")
+    assert "убито программ" in out, out
+    machine.wait_until_fails(seek(E), timeout=30)
+    machine.wait_until_fails("pgrep -u alice -f '[c]ontainer-enter --instance vmpe '", timeout=30)
+    assert instance("vmpe") is None
+    assert any(e.get("why") == "kill" for e in events("instance-stop", "vmpe"))
+
 alice("systemctl --user stop vmx4-host")
-for c in ["vmpa", "vmpb", "vmpc", "vmpd"]:
+for c in ["vmpa", "vmpb", "vmpc", "vmpd", "vmpe"]:
     alice(f"cellward container rm {c}")

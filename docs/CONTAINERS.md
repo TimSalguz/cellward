@@ -175,7 +175,11 @@ unreachable default routes are left, the programs go on with no way out.
 The zone back as it was — the same config and resolvers, by a fingerprint
 the zone's answer carries — attaches them again, with new addresses; back
 as another one, they stay cut until `cellward container reattach <c>`:
-never moved to another exit as a side effect (I1). A zone started by a
+never moved to another exit as a side effect (I1). Since stage 4 the
+same zone back attaches an instance as a new epoch (every socket of
+before muted); another one attaches none, whether or not a new epoch can
+be made (for a while stage 4 attached such an instance to any zone that
+came back; review 2026-09-28). A zone started by a
 previous build that an update left running has no `bridge.sock`: a launch
 into it is refused, and the refusal names the way out — the zone's restart
 (stage 5, 2026-09-28; until then it went into the zone's own namespaces,
@@ -326,7 +330,11 @@ namespace, the instance's or one below it — and ends with the last of them;
 a throwaway's layer and records go with it. Stopped (`cellward container
 stop <c>`, a logout), it ends its programs: TERM, and systemd's stop timeout
 for one that does not end. `cellward container kill <c>` freezes and kills
-them at once.
+them at once. Both name a container — its instance, or one per network of
+a main-home container —, never a network: a container may have a zone's
+name, and another container's instance in that zone is not its own
+(review 2026-09-28; `cellward kill <zone>` is the one that ends every
+instance a zone carries).
 
 **Into a zone, the same** (stage 2, 2026-09-27; §3.3): the waiter is given
 `--network <zone>` and refuses an instance that runs in another network. The

@@ -24,7 +24,10 @@
 //! descriptors of the zone's directory, the config directory and the state
 //! directory (for the journal) from before that ([`Policy::hold`]), and reads
 //! through them. One that could not be held is a file that cannot be read:
-//! `no`.
+//! `no`. A container's instance's filter holds its `network` file too
+//! ([`Policy::following`]): the switch is the one of the network the
+//! instance is in now — a live switch changes it (review 2026-09-28) —, its
+//! directory reached through the state directory held.
 //!
 //! **By container** (owner, 2026-09-26; `docs/PERMISSIONS.md` §11.10): a
 //! program of a container casts as the container's own setting says
@@ -103,6 +106,10 @@ pub struct Policy {
     config: Option<PathBuf>,
     /// The state directory: the journal.
     journal: Option<PathBuf>,
+    /// A container's instance's filter ([`Policy::following`]): its
+    /// `network` file, held as the others are — `Some(None)` when it could
+    /// not be, and the network is never known.
+    network: Option<Option<PathBuf>>,
     /// The last journal line.
     last_told: Mutex<Option<Instant>>,
 }
@@ -131,27 +138,78 @@ impl Policy {
                 .parent()
                 .and_then(|state| crate::sys::open_dir(state).ok())
                 .map(|fd| PathBuf::from(format!("/proc/self/fd/{}", fd.into_raw_fd()))),
+            network: None,
             last_told: Mutex::new(None),
         }
     }
 
-    pub fn zone(&self) -> &str {
-        &self.zone
+    /// A container's instance's filter: its switch is the one of the
+    /// network the instance is in now (`microphone::zone_now`), read
+    /// through its `network` file — held now, before the space covers it —
+    /// and the state directory held already; the zone it was started for
+    /// only until a live switch (review 2026-09-28). A file that could not
+    /// be held is a network never known: `no`.
+    pub fn following(mut self, network: Option<&Path>) -> Self {
+        let Some(file) = network else {
+            return self;
+        };
+        let held = match std::fs::File::open(file) {
+            Ok(held) => Some(PathBuf::from(format!(
+                "/proc/self/fd/{}",
+                held.into_raw_fd()
+            ))),
+            Err(e) => {
+                eprintln!(
+                    "bus-filter: zone {}: cannot open {} ({e}) — the network is not known: the \
+                     screen cast is refused",
+                    self.zone,
+                    file.display()
+                );
+                None
+            }
+        };
+        self.network = Some(held);
+        self
     }
 
-    /// The switch now, and where it comes from.
+    /// Whether it is an instance's, following its network.
+    pub fn follows(&self) -> bool {
+        self.network.is_some()
+    }
+
+    /// The zone whose switch is read now, and its directory as held; `None`:
+    /// the network is not known at the moment.
+    fn place(&self) -> Option<(String, Option<PathBuf>)> {
+        let network = match &self.network {
+            None => None,
+            Some(held) => Some(held.as_deref()?),
+        };
+        let zone = crate::microphone::zone_now(&self.zone, network)?;
+        if zone == self.zone {
+            return Some((zone, self.zone_dir.clone()));
+        }
+        let dir = self.journal.as_ref().map(|state| state.join(&zone));
+        Some((zone, dir))
+    }
+
+    /// The zone the filter decides for now ([`Policy::following`]); the one
+    /// it was started for while the network is not known.
+    pub fn zone(&self) -> String {
+        self.place()
+            .map_or_else(|| self.zone.clone(), |(zone, _)| zone)
+    }
+
+    /// The switch now, and where it comes from; a network not known at the
+    /// moment is Nix's `no` (`microphone::NETWORK_NOT_KNOWN`).
     pub fn setting(&self) -> (Setting, Source) {
         let Some(config) = &self.config else {
             // Nix may have said "no" there.
             return (Setting::No, Source::Nix);
         };
-        crate::microphone::zone_switch(
-            self.zone_dir.as_deref(),
-            config,
-            &self.zone,
-            MARKER,
-            DECLARED,
-        )
+        let Some((zone, zone_dir)) = self.place() else {
+            return crate::microphone::NETWORK_NOT_KNOWN;
+        };
+        crate::microphone::zone_switch(zone_dir.as_deref(), config, &zone, MARKER, DECLARED)
     }
 
     /// Whose program the peer of a connection is (`crate::origin`). The
@@ -182,8 +240,9 @@ impl Policy {
     /// in `cellward journal`, there at most one line per [`QUIET`]. The text
     /// for the program.
     pub fn refused(&self, who: &Who, source: Source) -> String {
-        let why = refusal(&self.zone, who, source);
-        eprintln!("bus-filter: zone {}: screen cast refused: {why}", self.zone);
+        let zone = self.zone();
+        let why = refusal(&zone, who, source);
+        eprintln!("bus-filter: zone {zone}: screen cast refused: {why}");
         let Some(state) = &self.journal else {
             return why;
         };
@@ -208,7 +267,7 @@ impl Policy {
             state,
             "screencast",
             &[
-                ("zone", self.zone.as_str()),
+                ("zone", zone.as_str()),
                 ("container", container.as_str()),
                 ("decision", "refused"),
                 ("why", short),
@@ -300,6 +359,45 @@ mod tests {
         assert_eq!(lost.setting(), (Setting::Yes, Source::Nix));
         let blind = Policy::hold("nl", &d.base.join("state/moved"), &d.base.join("nowhere"));
         assert_eq!(blind.setting(), (Setting::No, Source::Nix));
+    }
+
+    /// Review 2026-09-28: an instance's filter reads the switch of the
+    /// network the instance is in now — through what it held: the state
+    /// directory, and the `network` file the keeper rewrites in place; one
+    /// it could not hold, or that names no network, is `no`.
+    #[test]
+    fn an_instances_filter_follows_the_network_it_is_in_now() {
+        let d = Dirs::new("follows");
+        std::fs::create_dir_all(d.base.join("state/de")).unwrap();
+        std::fs::create_dir_all(d.base.join("instance")).unwrap();
+        d.write("instance/network", "nl\n");
+        d.write("state/nl/screencast", "yes");
+        d.write("state/de/screencast", "no");
+        let p = d
+            .policy()
+            .following(Some(d.base.join("instance/network").as_path()));
+        assert_eq!(p.setting(), (Setting::Yes, Source::Local));
+        assert_eq!(p.zone(), "nl");
+        d.write("instance/network", "de\n");
+        assert_eq!(p.setting(), (Setting::No, Source::Local));
+        assert_eq!(p.zone(), "de");
+        assert_eq!(
+            p.refused(&Who::Main, Source::Local),
+            "трансляция экрана выключена для зоны «de»"
+        );
+        // Held: another file put in its place is not read.
+        std::fs::rename(d.base.join("instance"), d.base.join("moved")).unwrap();
+        std::fs::create_dir_all(d.base.join("instance")).unwrap();
+        d.write("instance/network", "nl\n");
+        assert_eq!(p.zone(), "de");
+        d.write("moved/network", "");
+        assert_eq!(p.setting(), crate::microphone::NETWORK_NOT_KNOWN);
+        let lost = d
+            .policy()
+            .following(Some(d.base.join("none/network").as_path()));
+        assert_eq!(lost.setting(), crate::microphone::NETWORK_NOT_KNOWN);
+        // A zone's own filter follows nothing.
+        assert_eq!(d.policy().following(None).zone(), "nl");
     }
 
     /// A refusal is said in the journal — at most one line per ten seconds.

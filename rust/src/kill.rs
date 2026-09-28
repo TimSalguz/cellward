@@ -176,8 +176,9 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     let Some(zone) = zone_pid(&tools.state, name) else {
         // No zone of that name up: a container's instances, or — `offline`
         // — every instance with no network.
-        if !instances_named(&tools.state, &text).is_empty() {
-            return instances(tools, &text, true);
+        let found = instances_named(&tools.state, &text);
+        if !found.is_empty() {
+            return end_found(tools, &text, found, true);
         }
         eprintln!("зона {text} не поднята: сети у её программ уже нет");
         return EXIT_NOT_UP;
@@ -263,17 +264,38 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     }
 }
 
-/// The running instances `name` names: the instance of that id, a
-/// container's (its own, and one per network of a container of the main
-/// home), or — a network's name — every instance in that network: `offline`
-/// every one with no network, a zone's every one it carries (stage 2).
+/// The running instances `name` names for `cellward kill <name>`: the
+/// instance of that id, a container's (its own, and one per network of a
+/// container of the main home), or — a network's name — every instance in
+/// that network: `offline` every one with no network, a zone's every one it
+/// carries (stage 2).
 pub fn instances_named(state: &Path, name: &str) -> Vec<crate::instance::Running> {
     crate::instance::running(state)
         .into_iter()
-        .filter(|i| {
-            i.id == name || crate::instance::container_of(&i.id) == Some(name) || i.network == name
-        })
+        .filter(|i| names(i, name, true))
         .collect()
+}
+
+/// The running instances of container `name` — the instance of that id, or
+/// its container's —, never those of a network of that name: what
+/// `cellward container stop|kill|reattach <c>` and `container set <c>
+/// network <n> --restart` act on. A container may have a zone's name
+/// (`work`, even `offline`); matched by network too, a command about the
+/// container ended every other container's programs in that zone (review
+/// 2026-09-28).
+pub fn container_instances(state: &Path, name: &str) -> Vec<crate::instance::Running> {
+    crate::instance::running(state)
+        .into_iter()
+        .filter(|i| names(i, name, false))
+        .collect()
+}
+
+/// Whether `name` names instance `i`: by its id or its container's name —
+/// and, with `networks`, by the network it runs in.
+fn names(i: &crate::instance::Running, name: &str, networks: bool) -> bool {
+    i.id == name
+        || crate::instance::container_of(&i.id) == Some(name)
+        || (networks && i.network == name)
 }
 
 /// The name of process `pid` (its `comm`), for the list of what was killed.
@@ -312,12 +334,17 @@ fn freeze_members(userns: (u64, u64), spare: i32) -> (Vec<Target>, Option<String
     (held, Some(why))
 }
 
-/// `cellward container stop|kill <name>` (and `cellward kill <name>` for
-/// one that is no zone up): the instances `name` names
-/// ([`instances_named`]) stopped — with `kill`, their programs frozen and
-/// killed first, all at once, rather than asked to end.
+/// `cellward container stop|kill <name>`: the instances of container
+/// `name` ([`container_instances`]) stopped — with `kill`, their programs
+/// frozen and killed first, all at once, rather than asked to end.
 pub fn instances(tools: &Tools, name: &str, kill: bool) -> u8 {
-    let found = instances_named(&tools.state, name);
+    end_found(tools, name, container_instances(&tools.state, name), kill)
+}
+
+/// The instances `found` stopped, `name` being what the person named them
+/// by: [`instances`], and `cellward kill <name>` for a name that is no zone
+/// up ([`instances_named`]).
+fn end_found(tools: &Tools, name: &str, found: Vec<crate::instance::Running>, kill: bool) -> u8 {
     if found.is_empty() {
         eprintln!("у «{name}» нет запущенного экземпляра контейнера — останавливать нечего");
         return EXIT_NOT_UP;
@@ -438,12 +465,63 @@ fn kill_namespace(
         return Vec::new();
     }
     // Its end waited for: the kernel ends it once everything in its
-    // namespace is gone — then its keeper tells the kill from the stop that
-    // follows (`zone::hold_instance`). Held up only by a launch's waiter
-    // that does not reap its child: stopped by its terminal (`^Z`), it holds
-    // a zombie of the namespace until it goes on.
-    crate::sys::pidfd_wait_end(&init);
+    // namespace is gone and reaped — then its keeper tells the kill from the
+    // stop that follows (`zone::hold_instance`).
+    wait_namespace_end(&init, &listed);
     listed
+}
+
+/// Until `init` — an instance's pid 1, killed — has ended. Meanwhile each
+/// program of `listed` that ends has its reaper continued when a signal
+/// stopped it (`sys::continue_reaper`): a launch's `profile-run` is the
+/// child of its waiter, a host process outside the namespace
+/// (`crate::enter`) — or of the supervisor that adopted it —, and a
+/// terminal's `^Z` stops them all. Killed then, it stayed a zombie under a
+/// stopped parent, pid 1 never ended (the kernel's `zap_pid_ns_processes`
+/// waits for every process of the namespace to be reaped), and `cellward
+/// kill <zone>` hung here before the zone itself was frozen, killed or
+/// stopped (review 2026-09-28). No clock: each end is an event of a pidfd.
+/// A parent stopped only after its child's end was seen, or held by a
+/// tracer, still holds it up — until `fg`, or the tracer lets go.
+fn wait_namespace_end(init: &OwnedFd, listed: &[Target]) {
+    use std::os::fd::AsRawFd;
+    let mut open: Vec<&Target> = listed.iter().collect();
+    loop {
+        let mut fds: Vec<libc::pollfd> = std::iter::once(init)
+            .chain(open.iter().map(|t| &t.fd))
+            .map(|fd| libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect();
+        // SAFETY: a valid array of pollfd and its length.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        if rc < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            // Nothing to watch the programs by: pid 1's end alone.
+            crate::sys::pidfd_wait_end(init);
+            return;
+        }
+        if fds[0].revents != 0 {
+            return;
+        }
+        let mut still: Vec<&Target> = Vec::with_capacity(open.len());
+        for (target, polled) in open.into_iter().zip(&fds[1..]) {
+            if polled.revents == 0 {
+                still.push(target);
+            } else if crate::sys::continue_reaper(target.pid, &target.fd) {
+                eprintln!(
+                    "{} ({}): программу держал остановленный (^Z) запуск — он продолжен, \
+                     чтобы её подобрать",
+                    target.name, target.pid
+                );
+            }
+        }
+        open = still;
+    }
 }
 
 #[cfg(test)]
@@ -466,6 +544,37 @@ mod tests {
             unit
         ));
         assert_eq!(cgroup_of("1:name=systemd:/x\n"), None);
+    }
+
+    /// A container's commands act on its own instances only; `cellward
+    /// kill <name>` on a network's too (review 2026-09-28: a container
+    /// named as a zone ended every program of that zone).
+    #[test]
+    fn a_container_is_not_named_by_a_network_of_its_name() {
+        let running = |id: &str, network: &str| crate::instance::Running {
+            id: id.to_owned(),
+            dir: PathBuf::from("/nonexistent"),
+            pid: 1,
+            network: network.to_owned(),
+        };
+        let own = running("work", "de");
+        let carried = running("personal", "work");
+        let main = running("main:work", "work");
+        let ask = running("work:nl", "nl");
+        for (i, by_container) in [
+            (&own, true),
+            (&carried, false),
+            (&main, false),
+            (&ask, true),
+        ] {
+            assert_eq!(names(i, "work", false), by_container, "{}", i.id);
+            assert!(names(i, "work", true), "{}", i.id);
+        }
+        let offline = running("mail", "offline");
+        assert!(!names(&offline, "offline", false));
+        assert!(names(&offline, "offline", true));
+        assert!(names(&main, "main:work", false));
+        assert!(!names(&main, "main", false));
     }
 
     #[test]

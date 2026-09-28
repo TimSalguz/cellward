@@ -58,15 +58,6 @@ def in_i_q(cmd):
     return in_placed_q("vmbr", "vmreal", cmd)
 
 
-BR_CORE = alice("command -v vpn-zone-core").strip()
-
-
-def in_inst_cmd_outside(cmd):
-    """A launch into vmbr as one from a login session makes it: the kernel
-    does not let its program into the instance's epoch."""
-    return f"{BR_CORE} container-enter --instance vmbr --network vmreal -- {cmd}"
-
-
 def a4_of():
     out = in_i("ip -4 -o addr show dev awg0")
     return re.search(r"inet (10\.254\.\d+\.\d+)/16", out).group(1)
@@ -157,26 +148,20 @@ with subtest("the zone back as it was: attached again, with new addresses"):
     # socket of before behind the wall, as in a switch to the same network.
     assert instance("vmbr")["epoch"] == 2, instance("vmbr")
 
-# Changed on purpose in stage 4: a zone that comes back as another one
-# attaches an instance that can make a new epoch as well (the zone's
-# fingerprint decided before); one that cannot — a program of it launched
-# from a login session, outside its epoch — stays cut until the person says,
-# as in stage 2.
-with subtest("the zone back as another one: cut until the person says, when no new epoch can be made"):
-    machine.succeed(
-        "su -l alice -c "
-        + shlex.quote(
-            "export XDG_RUNTIME_DIR=/run/user/1000; setsid "
-            + in_inst_cmd_outside("sleep 4747")
-            + " </dev/null >/dev/null 2>&1 &"
-        )
-    )
+# Stage 2's rule, through stage 4 too (review 2026-09-28): a zone that comes
+# back as another one attaches nothing by itself. For a while stage 4
+# attached an instance that could make a new epoch whatever the zone came
+# back as, and this subtest tested the rule only for one that could not (a
+# program of it launched from a login session, outside its epoch); now the
+# instance as it runs from the desktop — a new epoch can be made — makes
+# one, stays cut in it, and only the person's word attaches it.
+with subtest("the zone back as another one: cut until the person says"):
     for _ in range(120):
-        if instance("vmbr")["live_switch"]["reason"] == "outside":
+        if instance("vmbr")["live_switch"]["available"]:
             break
         machine.sleep(0.5)
     else:
-        raise AssertionError(f"never outside: {instance('vmbr')}")
+        raise AssertionError(f"no new epoch can be made: {instance('vmbr')}")
     alice("cellward down vmreal")
     wait_exit("vmbr", "none", "zone-down")
     alice(f"printf '# another config\\n' >> {STATE}/vmreal/config.conf")
@@ -184,17 +169,14 @@ with subtest("the zone back as another one: cut until the person says, when no n
     wait_exit("vmbr", "none", "zone-changed")
     links = in_i("ip -o link show")
     assert len(links.strip().splitlines()) == 1, links
-    # The program from the login session gone, a new epoch can be made: the
-    # person's word attaches the instance as one.
-    machine.succeed("pkill -xf 'sleep 4747'")
-    for _ in range(120):
-        if instance("vmbr")["live_switch"]["available"]:
-            break
-        machine.sleep(0.5)
+    in_i("sh -c '! timeout 5 socat -T3 - TCP:10.99.0.1:8080'")
+    # Its new epoch was made (the zone's answer that told the fingerprint
+    # comes with the attach, and no attach before a new epoch's wall).
+    assert instance("vmbr")["epoch"] == 3, instance("vmbr")
     out = alice("cellward container reattach vmbr")
     assert "vmbr" in out, out
     wait_exit("vmbr", "through", None)
-    assert instance("vmbr")["epoch"] == 3, instance("vmbr")
+    assert instance("vmbr")["epoch"] == 4, instance("vmbr")
     machine.wait_until_succeeds(
         in_i_q("socat -T5 - TCP:10.99.0.1:8080 | grep -q peer=10.99.0.2"), timeout=60
     )
@@ -206,7 +188,7 @@ with subtest("the zone back as another one: cut until the person says, when no n
     assert ("cut", "zone-down") in kinds and ("cut", "zone-changed") in kinds, kinds
     assert ("reattach", None) in kinds and ("attach", None) in kinds, kinds
     epochs = {e.get("epoch") for e in events if e["event"] == "reattach"}
-    assert {"2", "3"} <= epochs, events
+    assert {"2", "4"} <= epochs and "3" not in epochs, events
 
 with subtest("a launch into the zone runs in its container's instance, not in the zone"):
     # The main home's, `main:vmreal`: its own network namespace, the tap,

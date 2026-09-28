@@ -368,6 +368,10 @@ pub struct Args {
     /// in it or below it is not known (the socket is bound into the
     /// instance alone: a second look).
     pub userns: Option<(u64, u64)>,
+    /// `--network-file <path>`: the instance's `network` file — the zone
+    /// whose microphone setting counts is the network the instance is in
+    /// now (`microphone::Policy::following`), not only `--zone`.
+    pub network: Option<PathBuf>,
 }
 
 impl Args {
@@ -385,6 +389,7 @@ impl Args {
         let mut window = PathBuf::new();
         let mut container = None;
         let mut userns = None;
+        let mut network = None;
         let mut it = args.iter();
         while let Some(flag) = it.next() {
             let value = it
@@ -408,6 +413,7 @@ impl Args {
                 Some("--profiles") => profiles = Some(path),
                 Some("--kdialog") => kdialog = Some(path),
                 Some("--window") => window = path,
+                Some("--network-file") => network = Some(path),
                 Some("--container") => {
                     container = Some(Who::from_word(&value.to_string_lossy()));
                 }
@@ -433,6 +439,7 @@ impl Args {
             window,
             container,
             userns,
+            network,
         })
     }
 }
@@ -1576,16 +1583,20 @@ pub fn run(args: &Args) -> u8 {
         }
     };
     let _ = fs::set_permissions(&args.listen, fs::Permissions::from_mode(0o600));
-    // The zone is this filter's, fixed here; the setting is read for every
-    // record stream.
-    let mic = Arc::new(Policy::new(
-        &args.zone,
-        args.zone_dir.clone(),
-        args.config.clone(),
-        args.profiles.clone(),
-        args.kdialog.clone(),
-        args.window.clone(),
-    ));
+    // The zone is this filter's, fixed here — an instance's, the network it
+    // is in now (`--network-file`: a live switch moves it); the setting is
+    // read for every record stream.
+    let mic = Arc::new(
+        Policy::new(
+            &args.zone,
+            args.zone_dir.clone(),
+            args.config.clone(),
+            args.profiles.clone(),
+            args.kdialog.clone(),
+            args.window.clone(),
+        )
+        .following(args.network.clone()),
+    );
     mic.watch();
     if !mic.has_display() {
         eprintln!(

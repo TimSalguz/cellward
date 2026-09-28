@@ -624,6 +624,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A container's commands act on that container only** (review
+  2026-09-28). `cellward container stop|kill|reattach <c>`, `container set
+  <c> network <n> --restart` and the frame's «Сменить и перезапустить
+  программы» matched instances by their network too: a container named as
+  a zone (`work`, even `offline`) stopped, killed or re-attached every other
+  container's instance in that zone, the main home's included. They match
+  the container's own instances now (`kill::container_instances`);
+  `cellward kill <name>` still ends a network's.
+- **`cellward kill` and an instance's stop no longer hang on a launch
+  stopped by its terminal** (review 2026-09-28). An instance's pid 1 ends
+  only once every process of its pid namespace is reaped, and a launch's
+  `profile-run` is the child of its waiter, a host process; after `^Z` the
+  killed program stayed a zombie under a stopped parent, `cellward kill
+  <zone>` waited for it before the zone itself was frozen, killed or
+  stopped, and the keeper's stop waited until systemd's timeout (and spun
+  meanwhile). Such a stopped parent is now continued (SIGCONT) to reap it
+  (`sys::continue_reaper`); an ended program is not waited for again.
+- **A zone that comes back as another one never re-attaches a container**
+  (review 2026-09-28; `docs/THREAT-MODEL.md` N9, N21). Since stage 4 an
+  instance that could make a new epoch was attached to whatever zone came
+  back: `cellward rm nl; cellward add nl other.conf; cellward up nl` (or
+  an edited config) took every container nl carried out through the new
+  provider without a word of the person's. The zone's fingerprint decides
+  again, as a new epoch: the same zone attaches it, another leaves it cut
+  until `cellward container reattach`.
+- **After a live switch the microphone and the screen cast go by the new
+  network** (review 2026-09-28; `docs/LEAK-MODEL.md` §29). An instance's
+  sound filter, PipeWire context and bus filter kept reading the network
+  the instance came up in — a container with no word of its own recorded
+  in the new network by the old one's `yes`, even over the new one's Nix
+  `no`, and `restart_needed` did not say so. They are told the instance's
+  `network` file (`--network-file`) and read the network it is in now for
+  every decision; a record stream the new network does not allow ends at
+  once, and a new connection goes to the portal as the new network's zone.
+- **An unconfined launch of the main home is refused while the application
+  runs in an instance of the real home** (review 2026-09-28;
+  `docs/LEAK-MODEL.md` §28). Since stage 3 the copy in the instance keeps a
+  pid lock (`SingletonLock`) naming a pid of its own namespace, which a
+  host Chromium took for a stale one — it deleted the lock and opened the
+  profile the other copy had open. The guard ran only for a launch into an
+  instance; now the other way round too (`launch::main_home_in_instance`).
+  A program started on the host past cellward is still not checked.
 - **A throwaway container is erased when its last program exits, on a
   Wayland desktop too** (2026-09-27). `profile-run` left its own pid out of
   "is anybody else still in here?", but the registry holds the launcher's

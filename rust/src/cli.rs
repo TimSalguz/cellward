@@ -2387,13 +2387,14 @@ fn launch_entry(tools: &Tools, args: &[OsString]) -> u8 {
 // --- CONTAINERS --------------------------------------------------------------
 
 /// `vpn-zone container …`: containers as identities (`docs/CONTAINERS.md`).
-/// `cellward container reattach <c>`: each running instance `c` names
-/// (`kill::instances_named`) asked to attach to its zone as the zone is now
-/// — its mark left in its directory, its keeper's doorbell rung. What comes
+/// `cellward container reattach <c>`: each running instance of container
+/// `c` (`kill::container_instances` — never another container's in a
+/// network of that name) asked to attach to its zone as the zone is now —
+/// its mark left in its directory, its keeper's doorbell rung. What comes
 /// of it the keeper says in the journal and in `status`: an instance still
 /// attached stays as it is, and a zone that is down attaches nothing.
 fn container_reattach(tools: &Tools, name: &str) -> u8 {
-    let found = crate::kill::instances_named(&tools.state, name);
+    let found = crate::kill::container_instances(&tools.state, name);
     if found.is_empty() {
         eprintln!("у «{name}» нет запущенного экземпляра контейнера");
         return 1;
