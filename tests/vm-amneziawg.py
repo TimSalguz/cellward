@@ -68,11 +68,13 @@ with subtest("cellward add vmawg: a config with real obfuscation parameters"):
 
 # Armed before the zone comes up, so the very first junk packet is under
 # watch: towards the server, only the obfuscated tunnel's own UDP may
-# ever appear on the wire.
+# ever appear on the wire. Not IGMP: the server's membership reports to
+# 224.0.0.22 — its multicast listener of the file transfer test leaving —
+# match `host`, and carry nothing (red once in CI, 2026-09-28).
 with subtest("leak watch armed for the obfuscated tunnel"):
     machine.succeed(
         "systemd-run --unit=leakawg tcpdump -n --immediate-mode -i eth1 "
-        f"-w /tmp/leak-awg.pcap 'host {server_ip} and not arp "
+        f"-w /tmp/leak-awg.pcap 'host {server_ip} and not arp and not igmp "
         "and not (udp and port 51821)'"
     )
     machine.wait_until_succeeds(

@@ -199,7 +199,7 @@ XF_BCAST = str(ipaddress.ip_interface(machine.succeed(
 # seconds later (red once in CI, inside the zone's window).
 XF_FILTER = (
     f"(host {server_ip} or host {server_ip6} or (udp and (port 53317 or port 1716))) "
-    "and not arp and not (udp and port 51820) "
+    "and not arp and not igmp and not (udp and port 51820) "
     "and not (icmp6 and (ip6[40] == 135 or ip6[40] == 136))"
 )
 

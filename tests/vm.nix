@@ -1104,7 +1104,7 @@ let
           machine.succeed(
               "systemd-run --unit=leakwatch tcpdump -n --immediate-mode -i eth1 "
               f"-w /tmp/leak.pcap '(host {server_ip} or host {server_ip6}) and not arp "
-              "and not (udp and port 51820)'"
+              "and not igmp and not (udp and port 51820)'"
           )
           machine.wait_until_succeeds(
               "journalctl -u leakwatch | grep -q 'listening on eth1'"
