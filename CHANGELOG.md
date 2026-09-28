@@ -19,8 +19,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   filter never sees, gets the mark as its overlay (`OverlayIconPixmap`),
   which KDE draws and some trays do not. The tooltip gets "zone · container"
   as a line of its own. The answer is parsed bounds-checked like everything
-  else of the program's; one that does not read goes as it is. A number was
-  left out: nothing numbers containers yet.
+  else of the program's; one the filter cannot mark — big-endian, or one that
+  does not read — reaches the tray as an error, not as an icon without its
+  mark. A number was left out: nothing numbers containers yet.
 - **A container's focus policy** (2026-09-27, the owner: AyuGram in a zone,
   opening an image in a window of its own, took the focus several times
   over — Qt makes a new `xdg_activation_v1` token for every

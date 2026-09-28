@@ -1499,9 +1499,11 @@ fn bus_to_client(upstream: &UnixStream, conn: &Conn, ctx: &Ctx) -> io::Result<()
 
 /// The program's answer to a tray host's question about its icon, with the
 /// zone's mark drawn on it (`crate::tray`): the whole message to send in its
-/// place, or `None` — not such an answer, the badge off, or an answer the
-/// filter cannot read, which goes as it is (the icon is the program's own
-/// either way; nothing of the host's is at stake).
+/// place, or `None` — not such an answer, or the badge off. An answer the
+/// filter cannot mark (big-endian, or one that does not read) goes to the
+/// host as an error in its place: an icon without its mark is what the mark
+/// is there to prevent, and a program that answers so has no icon
+/// (independent review 2026-09-28).
 fn marked_reply(conn: &Conn, ctx: &Ctx, msg: &[u8], h: &Header) -> Option<Vec<u8>> {
     if h.kind != wire::METHOD_RETURN {
         return None;
@@ -1535,8 +1537,22 @@ fn marked_reply(conn: &Conn, ctx: &Ctx, msg: &[u8], h: &Header) -> Option<Vec<u8
         Ok(Some(body)) => body,
         Ok(None) => return None,
         Err(e) => {
-            eprintln!("bus-filter: a tray icon's answer does not read ({e}) — passed as it is");
-            return None;
+            eprintln!("bus-filter: a tray icon's answer cannot be marked ({e}) — refused");
+            let mut fields = vec![Field::ErrorName("org.freedesktop.DBus.Error.Failed")];
+            if let Some(serial) = h.reply_serial {
+                fields.push(Field::ReplySerial(serial));
+            }
+            if let Some(destination) = h.destination.as_deref() {
+                fields.push(Field::Destination(destination));
+            }
+            fields.push(Field::Signature("s"));
+            return Some(wire::message(
+                wire::ERROR,
+                h.flags,
+                h.serial,
+                &fields,
+                &body::string("the icon's answer was refused by the zone's bus filter"),
+            ));
         }
     };
     let mut fields = Vec::new();

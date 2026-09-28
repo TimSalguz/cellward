@@ -774,16 +774,22 @@ fn write_marked(w: &mut Writer, m: &Marked) {
 
 /// A program's answer to a tray host's [`ItemAsk`] with the zone's mark on
 /// it (`crate::tray`): the new body, little-endian, or `None` when there is
-/// nothing to mark — or the answer is big-endian, or an error, which pass
-/// as they are.
+/// nothing to mark. An answer the filter cannot mark — big-endian (its
+/// untouched properties could not be copied into a little-endian body), or
+/// one that does not read — is an error: the caller refuses it rather than
+/// pass an icon without its mark (independent review 2026-09-28: a
+/// big-endian answer was a way to drop the mark).
 pub fn marked_item_reply(
     msg: &[u8],
     h: &Header,
     ask: &ItemAsk,
     marks: &ItemMarks<'_>,
 ) -> Result<Option<Vec<u8>>> {
-    if h.kind != METHOD_RETURN || !h.little {
+    if h.kind != METHOD_RETURN {
         return Ok(None);
+    }
+    if !h.little {
+        return Err(WireError("a big-endian answer is not marked"));
     }
     let mut r = Reader {
         buf: msg,
@@ -1697,6 +1703,19 @@ mod tests {
             marked_item_reply(&msg, &h, &ask, &marks(None)).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn a_big_endian_icon_answer_is_refused_not_passed() {
+        let body = all_properties(&[picture([0xff, 9, 9, 9])], "x");
+        let (mut msg, _) = reply("a{sv}", &body);
+        // Only the endianness byte: the parse of the header reads it first.
+        msg[0] = b'B';
+        let h = Header {
+            little: false,
+            ..parse_header(&reply("a{sv}", &body).0).unwrap()
+        };
+        assert!(marked_item_reply(&msg, &h, &ItemAsk::All, &marks(None)).is_err());
     }
 
     #[test]
