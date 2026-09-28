@@ -538,6 +538,48 @@ window-rule {
 }
 ```
 
+### Moving files between machines
+
+A program in a zone reaches the world through the zone's tunnel and nothing
+else, both ways. For a file sent to another machine or taken from it, that
+means the following (the VM test vm87 checks each point with a file of a few
+megabytes and its sha256 on both ends):
+
+- **Works: sending and fetching through the tunnel.** An upload to a server, a
+  download from it, a sync that connects out. The other side sees the VPN's
+  address: the tunnel's own when that side is the VPN server itself, the
+  provider's exit address otherwise. It never sees your machine's. The address
+  of a machine on your own LAN goes into the tunnel like any other: it reaches
+  that machine only when the machine is the VPN server (as in the test). Behind
+  a provider's VPN it does not reach your LAN at all.
+- **Does not work: anything coming in.** Nothing connects to a program that
+  listens in a zone: not a machine on the LAN, by your machine's LAN address,
+  and not the tunnel's far end, by the zone's address. A zone has no inbound,
+  and that is fail-closed on purpose. An inbound port declared for a service in
+  a zone is a ROADMAP item ("входящие для службы в зоне") and is not
+  implemented.
+- **Does not work: finding peers on the LAN.** Multicast and broadcast (mDNS,
+  the announcements of LocalSend and KDE Connect, Warpinator, Syncthing's local
+  discovery) never reach the LAN from a zone (THREAT-MODEL N3). Such a program
+  in a zone neither finds its peers nor is found by them.
+- **`offline`:** nothing moves, either way.
+- **Two containers with homes of their own** on one machine see neither each
+  other's home nor `/tmp`. A file passes between them only through what both
+  are given: a directory granted to both, or a file you pick for one of them
+  in the file chooser.
+
+What to do instead:
+
+- **LAN file sharing** (LocalSend, KDE Connect, a share on the LAN): run that
+  program `unconfined`. It is then on your LAN like any program of the host,
+  and outside the VPN.
+- **Receiving through the VPN:** until inbound for a service in a zone exists,
+  use a relay that both sides connect out to: a file server, a cloud folder, a
+  transfer tool with a relay of its own (magic-wormhole, croc), or Syncthing
+  with its relays.
+- **Between two containers:** grant both the same directory,
+  `cellward container grant <container> <dir>`.
+
 ## The system tier (optional)
 
 Everything above is the user tier: a session, your user, no root. The system

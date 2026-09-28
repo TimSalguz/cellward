@@ -6,6 +6,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A VM test of moving files between two machines, with zones and without**
+  (2026-09-28, vm87, `tests/vm-promise-transfer.py`; README «Moving files
+  between machines»; `docs/THREAT-MODEL.md` N3 and a new row N22). A random
+  file of a few megabytes, its sha256 compared on both ends. Unconfined: up
+  to the server and down from it by the LAN addresses, a push from the server
+  to a program of the host that listens, and the host's LAN discovery
+  (LocalSend's multicast, KDE Connect's broadcast) heard by the server. From
+  an ordinary zone and from a hermetic one with a tunnel of its own: up and
+  down through the tunnel only (the server sees the tunnel's address, eth1
+  carries the tunnel's UDP alone), nothing connects in to a program that
+  listens in the zone (from the LAN or through the tunnel: a zone has no
+  inbound), and none of its discovery reaches the LAN. Offline: nothing
+  moves. Two containers with homes of their own see neither each other's
+  home nor `/tmp`, and a file passes between them through a directory
+  granted to both.
 - **A `vpn-zone-sys` command has a pid namespace of its own** (2026-09-28,
   stage 5 of the container-first model; `docs/THREAT-MODEL.md` X4,
   `docs/SYSTEM.md` §7). Made in the command's user namespace, with a
