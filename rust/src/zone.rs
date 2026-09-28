@@ -335,7 +335,10 @@ pub fn compositor_private(name: &str) -> bool {
 ///   shell's own handler;
 /// * `ironbar-ipc.sock`: ironbar's;
 /// * `eww-server_*`: eww's daemon — its variables go into the commands its
-///   widgets run.
+///   widgets run;
+/// * `fr.emersion.kanshi.<display>`: kanshi's varlink socket (2026-09-28) —
+///   `kanshictl switch` takes a profile, and a profile's `exec` lines run on
+///   the host.
 ///
 /// A named list, as [`compositor_private`] is: a shell that keeps its IPC
 /// elsewhere, or on the session bus (KWin's scripting, AGS 1), is not
@@ -346,6 +349,7 @@ pub fn shell_private(name: &str) -> bool {
         || name == "astal"
         || name == "ironbar-ipc.sock"
         || name.starts_with("eww-server_")
+        || name.starts_with("fr.emersion.kanshi.")
 }
 
 /// Is this entry of the host's runtime directory bound into a zone?
@@ -9660,6 +9664,7 @@ mod tests {
             "astal",
             "ironbar-ipc.sock",
             "eww-server_5f1c0a8e2b",
+            "fr.emersion.kanshi.wayland-1",
         ] {
             assert!(shell_private(name), "{name}");
             for raw in [false, true] {
@@ -9672,6 +9677,8 @@ mod tests {
             "astal.conf",
             "eww",
             "ironbar",
+            "kanshi",
+            "fr.emersion.kanshi",
             "bus",
             "doc",
         ] {

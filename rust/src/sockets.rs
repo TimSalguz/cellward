@@ -1097,8 +1097,8 @@ fn runtime_verdict(rest: &Path, full: &Path, ctx: &Context) -> Option<Verdict> {
     // directory, an ordinary one's too.
     if crate::zone::shell_private(&first) {
         return Some(Verdict::Closed(
-            "IPC оболочки хоста (quickshell, AGS/Astal, ironbar, eww): её функции, вплоть до \
-             запуска процесса на хосте (§13)",
+            "IPC оболочки хоста (quickshell, AGS/Astal, ironbar, eww, kanshi): её функции, \
+             вплоть до запуска процесса на хосте (§13)",
         ));
     }
     if first.starts_with("pipewire-") && first.ends_with("-manager") {
@@ -1818,6 +1818,7 @@ mod tests {
             // A shell's own IPC (W7): no zone gets it, an ordinary one neither.
             "/run/user/1000/quickshell/by-id/abc/ipc.sock",
             "/run/user/1000/ironbar-ipc.sock",
+            "/run/user/1000/fr.emersion.kanshi.wayland-1",
             "/run/user/1000/pipewire-0-manager",
             "/run/user/1000/pulse/native",
             "/run/vpn-zones/sysrun.sock",
