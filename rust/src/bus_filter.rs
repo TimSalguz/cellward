@@ -3037,7 +3037,11 @@ mod tests {
             Some("org.freedesktop.StatusNotifierItem-2-1-c1_1234")
         );
         assert_eq!(tray_host_name("a", ":"), None);
-        assert_eq!(tray_host_name(&"a".repeat(250), ":1.2"), None);
+        assert_eq!(
+            tray_host_name(&"a".repeat(250), ":1.2").map(|n| n.len()),
+            Some(255)
+        );
+        assert_eq!(tray_host_name(&"a".repeat(251), ":1.2"), None);
     }
 
     /// The serial of ours passes xdg-dbus-proxy, which closes a connection

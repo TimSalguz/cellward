@@ -12,16 +12,41 @@ with subtest("hermetic zone: a tray icon carries the zone's mark (vm53)"):
     # The redirections on setsid itself: a `sh -c` in between would keep the
     # driver's pipe open for as long as the item runs, and the call would
     # never return (docs/GOTCHAS.md, "a background process in a VM test").
-    in_zone(hp, f"sh -c 'setsid -f {PY} {TRAY_ITEM} {item} </dev/null >/dev/null 2>&1'")
-    ask = (
-        f"busctl --user --timeout=5 --json=short call {item} /StatusNotifierItem "
-        "org.freedesktop.DBus.Properties GetAll s org.kde.StatusNotifierItem"
+    # Two programs asking for the same name — what the programs of two
+    # containers do, each seeing its own pids (2026-09-28): each owns it on
+    # the host with its connection's unique name after it, and the plain
+    # name is nobody's.
+    for _ in range(2):
+        in_zone(hp, f"sh -c 'setsid -f {PY} {TRAY_ITEM} {item} </dev/null >/dev/null 2>&1'")
+    owned = (
+        "busctl --user list --acquired --no-legend "
+        f"| grep -o '^{item}-c[0-9_]*' | sort -u"
     )
     machine.wait_until_succeeds(
         "su -l alice -c "
-        + shlex.quote(f"export XDG_RUNTIME_DIR=/run/user/1000; {ask} >/dev/null"),
+        + shlex.quote(f"export XDG_RUNTIME_DIR=/run/user/1000; [ $({owned} | wc -l) -eq 2 ]"),
         timeout=60,
     )
+    names = alice(owned).split()
+    assert len(names) == 2 and all(n.startswith(f"{item}-c") for n in names), names
+    machine.fail(
+        "su -l alice -c "
+        + shlex.quote(f"export XDG_RUNTIME_DIR=/run/user/1000; busctl --user status {item}")
+    )
+
+    def ask_of(name):
+        return (
+            f"busctl --user --timeout=5 --json=short call {name} /StatusNotifierItem "
+            "org.freedesktop.DBus.Properties GetAll s org.kde.StatusNotifierItem"
+        )
+
+    for name in names:
+        machine.wait_until_succeeds(
+            "su -l alice -c "
+            + shlex.quote(f"export XDG_RUNTIME_DIR=/run/user/1000; {ask_of(name)} >/dev/null"),
+            timeout=60,
+        )
+    ask = ask_of(names[0])
 
     def props():
         return json.loads(alice(ask))["data"][0]
