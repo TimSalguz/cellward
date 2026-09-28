@@ -683,6 +683,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **Two launches of one container at once both start.** Both found the
+  container's storage directory missing in the zone's cover and made it; the
+  second got "File exists" and was not started (seen in a VM check,
+  2026-09-28 — two programs of one container autostarted at login could hit
+  it). Made by the other launch is as good, as long as it is a directory.
 - **A single-instance program started again in its container raises its
   first copy instead of starting a second one on the same profile** (owner
   2026-09-27: two Claude Desktops ran in one own sandbox). Every sandbox

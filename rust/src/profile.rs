@@ -423,7 +423,17 @@ fn give_storage_back(path: &Path) -> Result<(), String> {
         ));
     }
     if fs::symlink_metadata(path).is_err() {
-        fs::create_dir(path).map_err(|e| format!("cannot make {}: {e}", path.display()))?;
+        // Two launches of one container at once both find it missing and
+        // both make it (the VM check of 2026-09-28 saw the second one not
+        // started): made by the other one is as good — a directory, not
+        // whatever else might be there.
+        if let Err(e) = fs::create_dir(path) {
+            let made = e.kind() == std::io::ErrorKind::AlreadyExists
+                && fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
+            if !made {
+                return Err(format!("cannot make {}: {e}", path.display()));
+            }
+        }
     }
     crate::sys::mount(kept.as_os_str(), path, "", libc::MS_BIND | libc::MS_REC, "")
         .map_err(|e| format!("cannot give {} back: {e}", path.display()))
