@@ -675,6 +675,21 @@ fn two_entries_for_one_binary_see_each_other() {
     assert!(err.contains("уже запущена в сети «de»"), "{err}");
     assert!(err.contains("окно ОТКРОЕТСЯ"), "{err}");
 
+    // In a graphical session the person is asked; a question that cannot
+    // be put (no kdialog here) stops the launch, and says why — before, it
+    // ended with success and nothing to show (2026-09-28).
+    let out = home.run_with(
+        &["run", "nl", "--", "firefox", "--private-window"],
+        &[
+            ("VPN_ZONE_APPID", "firefox-private"),
+            ("WAYLAND_DISPLAY", "wayland-test"),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(127), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("спросить не вышло"), "{err}");
+    assert!(err.contains("не открылось"), "{err}");
+
     // The same binary in the SAME network is no conflict at all.
     fs::write(
         index.join("firefox"),

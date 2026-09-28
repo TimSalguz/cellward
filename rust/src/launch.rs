@@ -1049,7 +1049,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             .replace("{busy}", &busy)
             .replace("{zone}", &zone_name);
         if has_display() {
-            let ok = Command::new(&tools.kdialog)
+            let answer = Command::new(&tools.kdialog)
                 .arg("--title")
                 .arg("Программа уже запущена в другой сети")
                 .arg("--dontagain")
@@ -1060,12 +1060,28 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 .arg("--warningcontinuecancel")
                 .arg(&message)
                 .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success());
-            if !ok {
-                // Cancelled — or kdialog is not there at all. Either way this
-                // launch is over, and quietly: the user just said no.
-                return 0;
+                .status();
+            match answer {
+                Ok(status) if status.success() => {}
+                // Cancelled: the person said no — over, and quietly.
+                Ok(status) if status.code() == Some(KDIALOG_CANCEL) => return 0,
+                // Not asked at all: kdialog could not be started, or ended
+                // without an answer. The launch does not go on unasked — and
+                // says so where it is seen: a launch from a menu has no
+                // terminal, and "nothing happened" was all it showed.
+                other => {
+                    let why = match other {
+                        Ok(status) => format!("окно вопроса закрылось без ответа ({status})"),
+                        Err(e) => format!("окно вопроса не открылось ({e})"),
+                    };
+                    return not_started(
+                        tools,
+                        &shown,
+                        &format!(
+                            "{shown} уже запущена в сети «{busy}», а спросить не вышло: {why}"
+                        ),
+                    );
+                }
             }
         } else {
             // No dialog to show from a terminal: warn and go on. Cancelling the
@@ -2054,6 +2070,29 @@ pub fn prepare_selection(tools: &Tools, selection: &Selection) -> Result<(), Str
 
 /// Say no, where the person can see it: a dialog when there is a graphical
 /// session (a launcher entry's stderr is read by nobody), and stderr always.
+/// What kdialog's `--warningcontinuecancel` and its kin say for "cancel"
+/// (and for the window closed).
+const KDIALOG_CANCEL: i32 = 2;
+
+/// A launch that ends before its program started, for a reason the person
+/// should see ([`EXIT_NOT_STARTED`]): said on stderr, and — a launch from a
+/// menu has no terminal to say it on — to the picker that watches it
+/// (`wl_sandbox::not_started_word`), or, with none, in a notification that
+/// stays until it is read, in a graphical session.
+fn not_started(tools: &Tools, program: &str, why: &str) -> u8 {
+    eprintln!("{why}");
+    if !crate::wl_sandbox::not_started_word(why) && has_display() {
+        crate::dialog::notify(
+            &tools.notify_send,
+            Some("critical"),
+            "0",
+            &format!("{program} не запущена"),
+            why,
+        );
+    }
+    EXIT_NOT_STARTED
+}
+
 fn refuse(tools: &Tools, why: &str) {
     eprintln!("{why}");
     if has_display() {

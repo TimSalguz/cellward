@@ -42,6 +42,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   host_files_writable}`, each `{value, source}`: whether the network
   tolerates what the setting opens for its containers (for `hermetic`, no
   hermeticity).
+- **A launch from a menu that does not start says so** (2026-09-28). The
+  picker watches every launch it starts in a graphical session — before,
+  only those that could hand over to a running copy — until the program's
+  first window or the launch's end. A launch that ends before its program
+  started, or with a failure before any window, is now a notification that
+  stays until it is read («… не запущена»), with why where a step on the way
+  knows it: the launch's own refusals, `wl-sandbox` that could not make the
+  restricted socket, the steps in the container's instance (code 127). They
+  say it on the picker's pipe (a new word, `x` and the text); before, the
+  person saw nothing and the reason was in the session's log. The question
+  «уже запущена в другой сети» that could not be put (no kdialog, killed)
+  no longer counts as the person's cancel: the launch stops as not started,
+  and says why. Launches without the Wayland proxy on the way are not
+  watched past the picker, as before.
 - **`cellward version`** (also `--version`): the version and the build — its
   path in /nix/store, which tells two builds apart; a configurator can ask
   it instead of guessing from an error.
