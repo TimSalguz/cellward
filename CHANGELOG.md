@@ -736,6 +736,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **A program's LAN discovery no longer goes into the tunnel.** An IPv4
+  multicast of a program in a container's instance (mDNS, LocalSend, KDE
+  Connect, SSDP) went into the tunnel, where the VPN's provider read the
+  announcements, a device's name among them (the file transfer test, vm87).
+  The instance has an unreachable route for 224.0.0.0/4 now: a send fails at
+  once. It never went around the tunnel.
 - **Two launches of one container at once both start.** Both found the
   container's storage directory missing in the zone's cover and made it; the
   second got "File exists" and was not started (seen in a VM check,

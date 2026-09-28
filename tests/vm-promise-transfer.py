@@ -182,6 +182,7 @@ with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
     f.write(XF_HELPER)
     xf_helper_host = f.name
 
+GROUP4_TEXT = "224.0.0.167"
 xf_first = "tr -s ' ' | cut -d' ' -f4 | cut -d/ -f1"
 XF_MIP = machine.succeed(f"ip -4 -o addr show eth1 | head -1 | {xf_first}").strip()
 XF_MIP6 = machine.succeed(f"ip -6 -o addr show eth1 scope global | head -1 | {xf_first}").strip()
@@ -348,6 +349,9 @@ def xf_zone(zone, addr, addr6):
     # everything else a program sends, never the LAN's.
     tunnel = server.succeed(f"tcpdump -nr /tmp/xfwg-{zone}.pcap 2>/dev/null")
     print(f"{zone}'s discovery inside the tunnel, as the server's wg0 saw it:\n{tunnel}")
+    # Multicast does not even go into the tunnel: an instance has an
+    # unreachable route for it (zone.rs `instance_ground`, 2026-09-28).
+    assert GROUP4_TEXT not in tunnel, f"{zone}'s multicast went into the tunnel:\n{tunnel}"
 
     # And from the LAN, by the host's addresses — with the capture off: a
     # LAN flow by nature. The firewall lets the port in (the host's own
