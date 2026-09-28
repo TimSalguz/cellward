@@ -38,6 +38,8 @@
 
 use std::io::Read;
 
+mod panel;
+
 use iced::keyboard::{self, key, Key};
 use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length, Size, Subscription, Task};
@@ -829,6 +831,12 @@ fn main() -> iced::Result {
     // starts a thread.
     if let Some(fonts) = option_env!("VPN_ZONE_WINDOW_FONTS") {
         std::env::set_var("FONTCONFIG_FILE", fonts);
+    }
+    // The cellward window (`panel.rs`): the containers and the network
+    // monitor, which `cellward-gui` opens.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("panel") {
+        return panel::run(&args[1..]);
     }
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {

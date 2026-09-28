@@ -6,6 +6,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The cellward window: the network monitor and the containers**
+  (2026-09-28). `cellward-gui containers` (the «Контейнеры cellward»
+  entry, and what stillconf opens) and the new `cellward-gui monitor` («Сеть
+  cellward») open one window on the launch window's toolkit instead of a
+  chain of kdialog menus. **Сеть:** what each running container sends and
+  receives now, since it came up, today and over 30 days, each in its
+  frame's colour. **Контейнеры:** the list; for the one chosen its home,
+  network and state, its network to change (live, saying what that breaks,
+  when its programs run in another), its granted directories to take back
+  or grant (with a term), stop, merge (with the certificates' question),
+  remove, and what `cellward explain` says of its permissions. It reads
+  `cellward _panel` every second and acts through `cellward`'s own verbs,
+  which refuse as they do in a terminal; ←/→ switch the tab, ↑/↓ choose a
+  container, Esc closes. Where the window cannot open, the kdialog menus
+  are still there.
+
+### Added
 - **What each container sends and receives: `cellward traffic`**
   (2026-09-28, stage 1 of the network monitor, `docs/FIREWALL.md` §9). The
   frame relay between an instance and its zone counts every frame, out and

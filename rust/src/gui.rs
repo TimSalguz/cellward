@@ -47,6 +47,7 @@ cellward-gui — графические ярлыки cellward (kdialog над ce
   cellward-gui settings     сеть/контейнер по умолчанию, ярлыки, замки
   cellward-gui forget       забыть закреплённые сети программ
   cellward-gui containers   сеть контейнера, объединение, выданные каталоги
+  cellward-gui monitor      что отдают и принимают контейнеры: сейчас, за день, за месяц
   cellward-gui kill         оборвать зону: убить её программы и опустить
 
 Эти же действия есть в CLI: cellward add|rm|profile|default|mode|forget|kill.
@@ -79,6 +80,7 @@ pub fn main() -> ExitCode {
         b"settings" => settings(&tools),
         b"forget" => forget(&tools),
         b"containers" => containers(&tools),
+        b"monitor" => monitor(&tools),
         b"kill" => kill(&tools),
         _ => {
             eprintln!("неизвестная команда: {}", verb.to_string_lossy());
@@ -602,8 +604,50 @@ fn profile_rm(tools: &Tools) -> u8 {
 /// a home of its own a directory or take it back (`docs/CONTAINERS.md` §3.4,
 /// §3.5). Every change goes through the CLI, which refuses what is declared in
 /// Nix and says why; the dialog shows that text.
+/// The cellward window's panel at `tab` (`vpn-zone-window panel`, on the
+/// toolkit of the launch window, 2026-09-28): its containers and its
+/// network monitor, from `cellward _panel` and through `cellward`'s verbs.
+/// `true` once it was shown and closed; `false` when it could not be — no
+/// window, or one that could not show (exit status 3) — and the caller asks
+/// the old way.
+fn panel(tools: &Tools, tab: &str) -> bool {
+    if tools.window.as_os_str().is_empty() {
+        return false;
+    }
+    let status = Command::new(&tools.window)
+        .arg("panel")
+        .arg("--cellward")
+        .arg(&tools.runner)
+        .arg("--tab")
+        .arg(tab)
+        .arg("--dirs")
+        .arg(&tools.kdialog)
+        .stdin(Stdio::null())
+        .status();
+    matches!(status, Ok(s) if s.code() != Some(3))
+}
+
+/// The network monitor: the panel's tab; with no window, said so.
+fn monitor(tools: &Tools) -> u8 {
+    if panel(tools, "network") {
+        return 0;
+    }
+    dialog::message(
+        &tools.kdialog,
+        [
+            "--error",
+            "Окно cellward не открылось. То же в терминале: cellward traffic --watch; \
+             за дни — cellward traffic --days 30",
+        ],
+    );
+    1
+}
+
 fn containers(tools: &Tools) -> u8 {
     use crate::container::{Home, Network};
+    if panel(tools, "containers") {
+        return 0;
+    }
     let all = crate::container::load_all(tools);
     if all.is_empty() {
         dialog::message(

@@ -1785,9 +1785,19 @@ in
 
   xdg.desktopEntries."vpn-zone-containers" = {
     name = "Контейнеры cellward";
-    comment = "Сеть контейнера, объединение двух контейнеров, выданные каталоги";
+    comment = "Сеть контейнера, объединение двух контейнеров, выданные каталоги, расход";
     exec = guiExec "containers";
     icon = "folder-network";
+    terminal = false;
+    type = "Application";
+    categories = [ "Network" ];
+  };
+
+  xdg.desktopEntries."vpn-zone-monitor" = {
+    name = "Сеть cellward";
+    comment = "Что отдают и принимают контейнеры: сейчас, за день, за месяц";
+    exec = guiExec "monitor";
+    icon = "network-transmit-receive";
     terminal = false;
     type = "Application";
     categories = [ "Network" ];

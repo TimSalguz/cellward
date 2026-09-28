@@ -254,7 +254,7 @@ fn lines_of(text: &str, n: usize) -> Vec<Vec<&str>> {
 }
 
 /// A day's summary: `(container, network) → (out, in)`.
-type Day = std::collections::BTreeMap<(String, String), (u64, u64)>;
+pub type Day = std::collections::BTreeMap<(String, String), (u64, u64)>;
 
 fn read_day(path: &Path) -> Day {
     let text = std::fs::read_to_string(path).unwrap_or_default();
@@ -350,6 +350,12 @@ fn over_days(state: &Path, n: u64, now: u64) -> (String, Day) {
         }
     }
     (from, total)
+}
+
+/// What each container used in each network over the last `days` days,
+/// today included: `(container, network) → (out, in)`.
+pub fn used_over(state: &Path, days: u64) -> Day {
+    over_days(state, days, now_secs()).1
 }
 
 fn days_json(n: u64, from: &str, total: &Day) -> String {

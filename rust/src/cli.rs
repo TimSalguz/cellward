@@ -83,6 +83,8 @@ pub fn main() -> ExitCode {
         b"status" => status(&tools, rest),
         b"explain" => crate::explain::run(&tools, rest),
         b"traffic" => crate::traffic::run(&tools, rest),
+        // The cellward window's panel reads this (`crate::panel`).
+        b"_panel" => crate::panel::run(&tools),
         b"lock" => set_lock(&tools, rest, true),
         b"x11" => zone_x11(&tools, rest),
         b"hermetic" => zone_hermetic(&tools, rest),
