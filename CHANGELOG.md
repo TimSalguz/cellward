@@ -35,11 +35,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   shared mapping made before the relay seals itself, with no system call
   after it; a record, not a wall — a file that cannot be made or mapped,
   and the instance's way out is the same. Which program holds each flow is
-  looked up as it is asked, from the host: the instance's sockets
-  (`/proc/<pid>/net/*` of its space), the process that holds each, and the
-  container's launch it belongs to — `tcp 149.154.167.50:443
-  (api.telegram.org) · Telegram`; a flow whose socket is closed by then has
-  no owner, and none is guessed. The cellward window's «Сеть» tab lists the
+  found from the host at its first packet: the relay says a word on a pipe
+  for every new flow, and the instance's keeper looks up the instance's
+  sockets (`/proc/<pid>/net/*` of its space), the process that holds each,
+  and the container's launch it belongs to, while the socket is fresh — a
+  short connection too — and keeps it in the instance's `owners` file —
+  `tcp 149.154.167.50:443 (api.telegram.org) · Telegram`. A flow it found
+  none for is looked up again as it is asked; none is guessed. The cellward window's «Сеть» tab lists the
   latest connections of every running container the same way: which
   program, to where, how much each way, how long ago.
 - **The cellward window: the network monitor and the containers**

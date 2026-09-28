@@ -2932,6 +2932,10 @@ struct Transport {
     /// Its flows' file (`crate::flows`), the same way: every relay of its
     /// attaches notes its frames' flows in it.
     flows: Option<File>,
+    /// The pipe its relays say a new flow on (read end, write end), and
+    /// what looks up the new flows' owners (`crate::owners::Keeper`).
+    news: Option<(OwnedFd, OwnedFd)>,
+    owners: crate::owners::Keeper,
 }
 
 /// How a live switch ended ([`Transport::switch`]).
@@ -2987,6 +2991,9 @@ impl Transport {
                 )
             })
             .ok();
+        // The owners its keeper finds, anew with the table (`crate::owners`).
+        let _ = fs::remove_file(zone.dir.join(crate::owners::FILE));
+        let news = flows.as_ref().and_then(|_| sys::pipe_nonblocking().ok());
         Self {
             id: plan.id.clone(),
             network: plan.network.clone(),
@@ -3007,6 +3014,8 @@ impl Transport {
             lock,
             tally,
             flows,
+            news,
+            owners: crate::owners::Keeper::default(),
         }
     }
 
@@ -3183,6 +3192,7 @@ impl Transport {
             nft: &self.nft,
             tally: self.tally.as_ref().map(AsRawFd::as_raw_fd),
             flows: self.flows.as_ref().map(AsRawFd::as_raw_fd),
+            news: self.news.as_ref().map(|(_, w)| w.as_raw_fd()),
         };
         let stop = || ASKED_TO_STOP.load(Ordering::SeqCst);
         let link = crate::bridge::attach(
@@ -3701,7 +3711,7 @@ impl Transport {
 
     /// What the keeper polls for it, in the order [`Transport::handle`]
     /// reads them back: the link's request and relay, the zone's
-    /// directory while cut.
+    /// directory while cut, and — last — the relays' word on new flows.
     fn polled(&self) -> Vec<libc::pollfd> {
         let mut out = Vec::new();
         if let Some(link) = &self.link {
@@ -3723,7 +3733,28 @@ impl Transport {
                 revents: 0,
             });
         }
+        if let Some((news, _)) = &self.news {
+            out.push(libc::pollfd {
+                fd: news.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
         out
+    }
+
+    /// A relay said it saw new flows: its words emptied, and the new flows'
+    /// owners looked up while their sockets are fresh (`crate::owners`).
+    fn heard_news(&mut self) {
+        if let Some((news, _)) = &self.news {
+            let mut buf = [0u8; 256];
+            // SAFETY: read(2) into a buffer of the length passed; the pipe
+            // is non-blocking.
+            while unsafe { libc::read(news.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
+        }
+        let container = crate::instance::container_of(&self.id).unwrap_or(crate::registry::MAIN);
+        let registry = self.state.join(".running").join(container);
+        self.owners.heard(&self.dir, self.space, &registry);
     }
 
     /// What happened to it ([`Transport::polled`]'s answers): the zone's
@@ -3732,6 +3763,11 @@ impl Transport {
     /// relay's end come at nearly one moment, in either order); the zone's
     /// directory changed — perhaps back.
     fn handle(&mut self, polled: &[libc::pollfd], wake: RawFd) {
+        // The relays' word, the last of what it polls: heard first, before
+        // a cut or a zone's return changes what is polled.
+        if self.news.is_some() && polled.last().is_some_and(|p| p.revents != 0) {
+            self.heard_news();
+        }
         let mut at = 0;
         if let Some(link) = &self.link {
             let control = polled.get(at).map_or(0, |p| p.revents);

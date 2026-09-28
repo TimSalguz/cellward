@@ -361,6 +361,9 @@ def xf_zone(zone, addr, addr6):
     ]
     assert to(server_ip) and max(f["out_bytes"] for f in to(server_ip)) >= 4194304, c
     assert to("10.99.0.1") and max(f["in_bytes"] for f in to("10.99.0.1")) >= 3145728, c
+    # curl is gone by now: its owner was found by the instance's keeper at
+    # the flow's first packet, as the relay said it saw it (`owners.rs`).
+    assert any(f["owner"] and f["owner"]["process"] == "curl" for f in to(server_ip)), c
     # Who holds a connection (`owners.rs`, looked up from the host as it is
     # asked): a program of the zone that keeps one open is named.
     held_log = f"{XF}/hold-{zone}.log"

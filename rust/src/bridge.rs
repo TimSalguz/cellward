@@ -1022,6 +1022,9 @@ pub struct RelayTools<'a> {
     /// Its flows' file (`crate::flows`), which the relay notes every
     /// frame's flow in; none, and it notes none.
     pub flows: Option<RawFd>,
+    /// The write end of its keeper's pipe for new flows
+    /// (`crate::owners::Keeper`); none, and the relay says nothing.
+    pub news: Option<RawFd>,
 }
 
 /// A container instance's way out through a zone.
@@ -1233,8 +1236,9 @@ fn relay_ready(
 /// namespace's owner, may read it, and it makes itself not dumpable first
 /// thing (`crate::relay`). Its stream and its word's pipe by their numbers,
 /// made inheritable between fork and exec; the instance's counters' file
-/// (`crate::traffic`) and flows' file (`crate::flows`) too, when it has
-/// them — four at most, what [`in_instance`] keeps.
+/// (`crate::traffic`), flows' file (`crate::flows`) and its keeper's pipe
+/// for new flows too, when it has them — five at most, what
+/// [`in_instance`] keeps.
 fn spawn_relay(
     tools: &RelayTools<'_>,
     space: &OwnedFd,
@@ -1244,7 +1248,7 @@ fn spawn_relay(
     wall: Option<crate::relay::Wall>,
 ) -> io::Result<Child> {
     let (stream_fd, ready_fd) = (stream.as_raw_fd(), ready.as_raw_fd());
-    let (tally, flows) = (tools.tally, tools.flows);
+    let (tally, flows, news) = (tools.tally, tools.flows, tools.news);
     let args = crate::relay::Attach {
         stream: stream_fd,
         ready: ready_fd,
@@ -1255,11 +1259,13 @@ fn spawn_relay(
         wall,
         tally,
         flows,
+        news,
     }
     .args();
     let mut keep = vec![stream_fd, ready_fd];
     keep.extend(tally);
     keep.extend(flows);
+    keep.extend(news);
     let mut cmd = in_instance(tools.core, space, &keep);
     cmd.arg("frame-relay").args(args).stdin(Stdio::null());
     cmd.spawn()
@@ -1274,7 +1280,7 @@ fn spawn_relay(
 /// `/dev/net/tun` and `/sys/fs/cgroup` are the host's (J5).
 pub fn in_instance(core: &Path, space: &OwnedFd, keep: &[RawFd]) -> Command {
     let space_fd = space.as_raw_fd();
-    let mut keep_fds: [RawFd; 4] = [-1; 4];
+    let mut keep_fds: [RawFd; 6] = [-1; 6];
     for (slot, fd) in keep_fds.iter_mut().zip(keep) {
         *slot = *fd;
     }

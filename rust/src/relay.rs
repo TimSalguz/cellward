@@ -178,11 +178,15 @@ pub fn pump(tap: BorrowedFd<'_>, stream: BorrowedFd<'_>) -> io::Result<End> {
 }
 
 /// What the relay notes of every frame, each when it has it: its count
-/// (`crate::traffic`), its flow and a DNS answer's names (`crate::flows`).
+/// (`crate::traffic`), its flow and a DNS answer's names (`crate::flows`);
+/// and a word on `news` for a new flow — a byte on a pipe its keeper reads
+/// (`crate::owners::Keeper`), never waited for: a full pipe already has
+/// the keeper's attention.
 #[derive(Default)]
 pub struct Notes<'a> {
     pub tally: Option<&'a crate::traffic::Tally>,
     pub flows: Option<&'a mut crate::flows::Table>,
+    pub news: Option<BorrowedFd<'a>>,
 }
 
 impl Notes<'_> {
@@ -196,8 +200,12 @@ impl Notes<'_> {
             }
         }
         if let Some(flows) = self.flows.as_deref_mut() {
-            if let Some(seen) = crate::flows::frame(frame, outbound) {
-                flows.note(&seen, crate::flows::now());
+            let fresh = crate::flows::frame(frame, outbound)
+                .is_some_and(|seen| flows.note(&seen, crate::flows::now()));
+            if let Some(news) = self.news.filter(|_| fresh) {
+                // SAFETY: one byte from a live buffer; the pipe is the
+                // keeper's, non-blocking.
+                unsafe { libc::write(news.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
             }
         }
     }
@@ -581,6 +589,9 @@ pub struct Attach {
     /// The instance's flows' file (`crate::flows`), which it notes every
     /// frame's flow in; none, and it notes none.
     pub flows: Option<RawFd>,
+    /// A pipe to its keeper, a byte for every new flow
+    /// (`crate::owners::Keeper`); none, and it says nothing.
+    pub news: Option<RawFd>,
 }
 
 /// The epoch's wall an instance's rules carry (`crate::epoch`,
@@ -704,6 +715,10 @@ impl Attach {
             out.push("--flows-fd".into());
             out.push(flows.to_string().into());
         }
+        if let Some(news) = self.news {
+            out.push("--news-fd".into());
+            out.push(news.to_string().into());
+        }
         out
     }
 
@@ -714,7 +729,8 @@ impl Attach {
     pub fn parse(args: &[OsString]) -> Result<Self, String> {
         let (mut stream, mut ready, mut a4, mut a6, mut ip, mut nft) =
             (None, None, None, None, None, None);
-        let (mut tally, mut flows): (Option<RawFd>, Option<RawFd>) = (None, None);
+        let (mut tally, mut flows, mut news): (Option<RawFd>, Option<RawFd>, Option<RawFd>) =
+            (None, None, None);
         let (mut wall_level, mut wall_cgroup): (Option<String>, Option<String>) = (None, None);
         let mut rest = args;
         while let [flag, value, tail @ ..] = rest {
@@ -760,6 +776,11 @@ impl Attach {
                     fd.ok_or("--flows-fd takes a descriptor above 2")?,
                     &flag,
                 )?,
+                "--news-fd" => once(
+                    &mut news,
+                    fd.ok_or("--news-fd takes a descriptor above 2")?,
+                    &flag,
+                )?,
                 "--wall-level" => once(&mut wall_level, text.to_owned(), &flag)?,
                 "--wall-cgroup" => once(&mut wall_cgroup, text.to_owned(), &flag)?,
                 _ => return Err(format!("unknown argument {flag}")),
@@ -774,11 +795,12 @@ impl Attach {
         else {
             return Err("needs --stream-fd, --ready-fd, --a4, --ip and --nft".to_owned());
         };
-        let fds = [Some(stream), Some(ready), tally, flows];
+        let fds = [Some(stream), Some(ready), tally, flows, news];
         let given: Vec<RawFd> = fds.iter().flatten().copied().collect();
         if (1..given.len()).any(|i| given[..i].contains(&given[i])) {
             return Err(
-                "the stream, the pipe of its word, the counters and the flows share a descriptor"
+                "the stream, the pipe of its word, the counters, the flows and the news share a \
+                 descriptor"
                     .to_owned(),
             );
         }
@@ -793,6 +815,7 @@ impl Attach {
             wall,
             tally,
             flows,
+            news,
         })
     }
 }
@@ -1049,9 +1072,12 @@ fn attach_main(args: &[OsString]) -> u8 {
     if fs::File::from(ready).write_all(b"1").is_err() {
         return 1;
     }
+    // Its word to its keeper on a new flow: a descriptor it only writes.
+    let news = attach.news.and_then(|fd| adopt(fd).ok());
     let mut notes = Notes {
         tally: tally.as_ref(),
         flows: flows.as_mut(),
+        news: news.as_ref().map(AsFd::as_fd),
     };
     match pump_counted(tap.as_fd(), stream.as_fd(), &mut notes) {
         Ok(End::StreamClosed) => 0,
@@ -1406,7 +1432,7 @@ mod tests {
         let pump = std::thread::spawn(move || {
             let mut notes = Notes {
                 tally: Some(&tally),
-                flows: None,
+                ..Notes::default()
             };
             let end = pump_counted(tap.as_fd(), stream.as_fd(), &mut notes);
             tally.close();
@@ -1440,6 +1466,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let file = crate::flows::create(&dir).unwrap();
+        let (news_r, news_w) = crate::sys::pipe_nonblocking().unwrap();
         let (tap, tap_peer) = seqpacket_pair();
         let (stream, mut stream_peer) = UnixStream::pair().unwrap();
         stream_peer
@@ -1448,8 +1475,9 @@ mod tests {
         let pump = std::thread::spawn(move || {
             let mut flows = crate::flows::Table::map(file.as_fd(), true).unwrap();
             let mut notes = Notes {
-                tally: None,
                 flows: Some(&mut flows),
+                news: Some(news_w.as_fd()),
+                ..Notes::default()
             };
             let end = pump_counted(tap.as_fd(), stream.as_fd(), &mut notes);
             flows.close();
@@ -1488,6 +1516,11 @@ mod tests {
             (f.out_bytes, f.in_bytes),
             (out.len() as u64, back.len() as u64)
         );
+        // One new flow, one word to the keeper — the answer to it is no new one.
+        let mut said = [0u8; 8];
+        // SAFETY: read(2) into a buffer of the length passed.
+        let n = unsafe { libc::read(news_r.as_raw_fd(), said.as_mut_ptr().cast(), said.len()) };
+        assert_eq!(n, 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1641,6 +1674,7 @@ mod tests {
             wall: None,
             tally: None,
             flows: None,
+            news: None,
         };
         let line = attach.args();
         assert_eq!(line[0], "--attach");
@@ -1692,6 +1726,7 @@ mod tests {
         let noted = Attach {
             tally: Some(9),
             flows: Some(10),
+            news: Some(11),
             ..attach.clone()
         };
         let line = noted.args();

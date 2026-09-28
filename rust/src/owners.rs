@@ -16,13 +16,22 @@
 //! process gone, leave their flow without an owner: the record says so, and
 //! guesses nothing. ICMP (a ping socket) is not matched. Nothing here
 //! decides — the wall is the instance's rules.
+//!
+//! **At the first packet** ([`Keeper`]). The relay says a word on a pipe
+//! for every new flow it notes (`frame-relay --news-fd`); the instance's
+//! keeper wakes on it, looks the new flows' owners up while their sockets
+//! are fresh — a short connection too, gone a moment later —, and appends
+//! them to the instance's [`FILE`]. A reader takes an owner from there
+//! first, and looks up now only the flows it has none for.
 
-use std::collections::HashMap;
-use std::fs;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::flows::{Flow, TCP, UDP};
+use crate::flows::{Flow, Key, TCP, UDP};
 
 /// A socket of the instance's network namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +139,7 @@ pub fn socket_of<'a>(socks: &'a [Sock], flow: &Flow) -> Option<&'a Sock> {
 
 /// The processes the user may look at, each with its network namespace:
 /// looked at once for every instance asked of.
+#[derive(Default)]
 pub struct Procs(Vec<(i32, PathBuf)>);
 
 impl Procs {
@@ -173,7 +183,7 @@ fn socket_inode(link: &str) -> Option<u64> {
 }
 
 /// Which of `pids` holds each socket: its inode → the pid (the first found).
-fn holders(pids: &[i32]) -> HashMap<u64, i32> {
+fn holders_of(pids: &[i32]) -> HashMap<u64, i32> {
     let mut out = HashMap::new();
     for pid in pids {
         let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
@@ -239,12 +249,22 @@ pub fn of(space: i32, registry: &Path, flows: &[Flow], procs: &Procs) -> Vec<Opt
     if socks.is_empty() {
         return vec![None; flows.len()];
     }
-    let holders = holders(&procs.in_netns(space));
+    let holders = holders_of(&procs.in_netns(space));
+    owned(&socks, &holders, registry, flows)
+}
+
+/// [`of`], its sockets and their holders looked at already.
+fn owned(
+    socks: &[Sock],
+    holders: &HashMap<u64, i32>,
+    registry: &Path,
+    flows: &[Flow],
+) -> Vec<Option<Owner>> {
     let launches = launches(registry);
     flows
         .iter()
         .map(|f| {
-            let pid = *holders.get(&socket_of(&socks, f)?.inode)?;
+            let pid = *holders.get(&socket_of(socks, f)?.inode)?;
             // The container's own word: nothing of it said to a terminal as
             // a control character.
             let process = fs::read_to_string(format!("/proc/{pid}/comm"))
@@ -262,6 +282,161 @@ pub fn of(space: i32, registry: &Path, flows: &[Flow], procs: &Procs) -> Vec<Opt
             })
         })
         .collect()
+}
+
+// --- AT THE FIRST PACKET ----------------------------------------------------
+
+/// The owners' file in an instance's directory: a line per flow whose owner
+/// its keeper found — `<proto>⇥<own port>⇥<remote>⇥<remote port>⇥<first
+/// seen>⇥<pid>⇥<process>⇥<program or ->`.
+pub const FILE: &str = "owners";
+
+/// A flow as the owners' file names it: its key, and when it was first seen
+/// (ports are used again).
+pub type Seen = (Key, u32);
+
+fn line_of(seen: &Seen, o: &Owner) -> String {
+    let (k, first) = seen;
+    format!(
+        "{}\t{}\t{}\t{}\t{first}\t{}\t{}\t{}\n",
+        k.proto,
+        k.lport,
+        k.remote,
+        k.rport,
+        o.pid,
+        o.process.replace(['\t', '\n'], "?"),
+        o.program.as_deref().unwrap_or("-")
+    )
+}
+
+/// The owners' file read: each flow's owner (a later line over an earlier).
+pub fn read(dir: &Path) -> HashMap<Seen, Owner> {
+    let text = fs::read_to_string(dir.join(FILE)).unwrap_or_default();
+    text.lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split('\t').collect();
+            let [proto, lport, remote, rport, first, pid, process, program] = f.as_slice() else {
+                return None;
+            };
+            let key = Key {
+                proto: proto.parse().ok()?,
+                lport: lport.parse().ok()?,
+                remote: remote.parse().ok()?,
+                rport: rport.parse().ok()?,
+            };
+            let owner = Owner {
+                pid: pid.parse().ok()?,
+                process: (*process).to_owned(),
+                program: (*program != "-").then(|| (*program).to_owned()),
+            };
+            Some(((key, first.parse().ok()?), owner))
+        })
+        .collect()
+}
+
+/// An instance's keeper's part: the owners of its new flows, looked up as
+/// the relay says it saw them.
+#[derive(Default)]
+pub struct Keeper {
+    /// The flows' table, mapped to read (the keeper made the file).
+    table: Option<crate::flows::Table>,
+    /// The flows already looked at, found or not.
+    known: HashSet<Seen>,
+    /// Those found, as the file has them.
+    found: HashMap<Seen, Owner>,
+    /// The lines in the file.
+    lines: usize,
+    procs: Procs,
+}
+
+impl Keeper {
+    /// The relay said it saw new flows: those not looked at yet looked up
+    /// now, in the instance's directory `dir`, of its space `space`, by
+    /// the launches in `registry`; what is found appended to [`FILE`].
+    pub fn heard(&mut self, dir: &Path, space: i32, registry: &Path) {
+        if self.table.is_none() {
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(dir.join(crate::flows::FILE));
+            self.table = file
+                .ok()
+                .and_then(|f| crate::flows::Table::map(std::os::fd::AsFd::as_fd(&f), false).ok());
+        }
+        let Some(table) = &self.table else {
+            return;
+        };
+        let flows = table.flows();
+        let fresh: Vec<Flow> = flows
+            .iter()
+            .filter(|f| !self.known.contains(&(f.key, f.first)))
+            .cloned()
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+        let socks = sockets(space);
+        let mut holders = holders_of(&self.procs.in_netns(space));
+        // A socket no process known to hold: a process new since the last
+        // look — every process looked at again, once.
+        let unheld = fresh
+            .iter()
+            .any(|f| socket_of(&socks, f).is_some_and(|s| !holders.contains_key(&s.inode)));
+        if unheld {
+            self.procs = Procs::scan();
+            holders = holders_of(&self.procs.in_netns(space));
+        }
+        let owners = owned(&socks, &holders, registry, &fresh);
+        let mut text = String::new();
+        for (f, owner) in fresh.iter().zip(owners) {
+            let seen = (f.key, f.first);
+            self.known.insert(seen);
+            if let Some(o) = owner {
+                text.push_str(&line_of(&seen, &o));
+                self.found.insert(seen, o);
+            }
+        }
+        // Past twice what the table holds: what left it is forgotten, and
+        // the file written anew with the rest — at most a table's worth, so
+        // the next time is a table's worth of lines away.
+        self.lines += text.lines().count();
+        let most = 2 * crate::flows::SLOTS;
+        if self.lines > most || self.known.len() > most {
+            let now: HashSet<Seen> = flows.iter().map(|f| (f.key, f.first)).collect();
+            self.known.retain(|s| now.contains(s));
+            self.found.retain(|s, _| now.contains(s));
+            self.rewrite(dir);
+        } else if !text.is_empty() {
+            let _ = append(dir, &text);
+        }
+    }
+
+    fn rewrite(&mut self, dir: &Path) {
+        let text: String = self.found.iter().map(|(s, o)| line_of(s, o)).collect();
+        let tmp = dir.join(format!(".{FILE}.new"));
+        let _ = fs::remove_file(&tmp);
+        let written = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(text.as_bytes()))
+            .and_then(|()| fs::rename(&tmp, dir.join(FILE)));
+        if written.is_ok() {
+            self.lines = self.found.len();
+        }
+    }
+}
+
+fn append(dir: &Path, text: &str) -> std::io::Result<()> {
+    OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir.join(FILE))?
+        .write_all(text.as_bytes())
 }
 
 #[cfg(test)]
@@ -368,6 +543,50 @@ mod tests {
         assert_eq!(parent_in("garbage"), None);
     }
 
+    /// The keeper, told of a new flow, finds its owner — a process it did
+    /// not know yet — and writes it down; a reader takes it from there. Told
+    /// again, it writes nothing twice.
+    #[test]
+    fn the_keeper_writes_down_a_new_flows_owner() {
+        use std::os::fd::AsFd;
+        let me = std::process::id() as i32;
+        let dir = std::env::temp_dir().join(format!("vz-keeper-{me}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("registry")).unwrap();
+        fs::write(dir.join("registry/tester"), format!("{me} offline work\n")).unwrap();
+        let file = crate::flows::create(&dir).unwrap();
+        let mut table = crate::flows::Table::map(file.as_fd(), true).unwrap();
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let key = Key {
+            proto: UDP,
+            lport: socket.local_addr().unwrap().port(),
+            remote: "127.0.0.2".parse().unwrap(),
+            rport: 9,
+        };
+        let seen = crate::flows::Seen {
+            key,
+            outbound: true,
+            len: 60,
+            dns: None,
+        };
+        assert!(table.note(&seen, 100), "a new flow");
+        assert!(!table.note(&seen, 101), "the same flow again");
+        let mut keeper = Keeper::default();
+        keeper.heard(&dir, me, &dir.join("registry"));
+        let kept = read(&dir);
+        let owner = kept
+            .get(&(key, 100))
+            .expect("the new flow's owner written down");
+        assert_eq!(owner.pid, me);
+        assert_eq!(owner.program.as_deref(), Some("tester"));
+        keeper.heard(&dir, me, &dir.join("registry"));
+        let text = fs::read_to_string(dir.join(FILE)).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        drop(socket);
+        table.close();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// This test's own process: its sockets found, its socket's holder is
     /// itself, and a launch among its parents names its program.
     #[test]
@@ -399,5 +618,77 @@ mod tests {
         assert_eq!(owner.program.as_deref(), Some("tester"));
         drop(listener);
         let _ = fs::remove_dir_all(&reg);
+    }
+
+    /// The keeper's part: a new flow's owner found as the relay says it saw
+    /// it, kept in the owners' file, read back; a word with nothing new
+    /// adds nothing.
+    #[test]
+    fn the_keeper_keeps_a_new_flows_owner() {
+        use std::os::fd::AsFd;
+        let me = std::process::id() as i32;
+        let dir = std::env::temp_dir().join(format!("vz-keeper-{me}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("reg")).unwrap();
+        fs::write(dir.join("reg/tester"), format!("{me} offline work\n")).unwrap();
+        let file = crate::flows::create(&dir).unwrap();
+        let mut table = crate::flows::Table::map(file.as_fd(), true).unwrap();
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let key = Key {
+            proto: UDP,
+            lport: socket.local_addr().unwrap().port(),
+            remote: "127.0.0.3".parse().unwrap(),
+            rport: 53,
+        };
+        let seen = crate::flows::Seen {
+            key,
+            outbound: true,
+            len: 80,
+            dns: None,
+        };
+        assert!(table.note(&seen, 500), "a new flow");
+        assert!(!table.note(&seen, 501), "the same flow");
+        let mut keeper = Keeper::default();
+        keeper.heard(&dir, me, &dir.join("reg"));
+        let kept = read(&dir);
+        let owner = kept.get(&(key, 500)).expect("its owner kept");
+        assert_eq!((owner.pid, owner.program.as_deref()), (me, Some("tester")));
+        let before = fs::read_to_string(dir.join(FILE)).unwrap();
+        keeper.heard(&dir, me, &dir.join("reg"));
+        assert_eq!(fs::read_to_string(dir.join(FILE)).unwrap(), before);
+        drop(socket);
+        table.close();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A line of the owners' file there and back; one of another shape
+    /// skipped.
+    #[test]
+    fn an_owners_line_reads_back() {
+        let seen = (
+            Key {
+                proto: TCP,
+                lport: 40000,
+                remote: "2001:db8::1".parse().unwrap(),
+                rport: 443,
+            },
+            1790000000,
+        );
+        let owner = Owner {
+            pid: 42,
+            process: "tab\there".to_owned(),
+            program: None,
+        };
+        let me = std::process::id();
+        let dir = std::env::temp_dir().join(format!("vz-owners-line-{me}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let text = format!("{}what\tever\n", line_of(&seen, &owner));
+        fs::write(dir.join(FILE), text).unwrap();
+        let kept = read(&dir);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[&seen].process, "tab?here");
+        assert_eq!(kept[&seen].program, None);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

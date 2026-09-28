@@ -467,8 +467,8 @@ impl Table {
     }
 
     /// A frame seen, at `now`: its flow's slot made or brought up to date,
-    /// and a DNS answer's names noted.
-    pub fn note(&mut self, seen: &Seen<'_>, now: u32) {
+    /// and a DNS answer's names noted. Whether its flow is a new one.
+    pub fn note(&mut self, seen: &Seen<'_>, now: u32) -> bool {
         let fresh = !self.index.contains_key(&seen.key);
         let i = self.slot_for(seen.key);
         let s = Self::slot(i);
@@ -509,6 +509,7 @@ impl Table {
                 self.note_name(addr, &name, now);
             }
         }
+        fresh
     }
 
     fn note_name(&mut self, addr: IpAddr, name: &str, now: u32) {
@@ -735,8 +736,15 @@ fn listed_one(
         .state
         .join(".running")
         .join(container.as_deref().unwrap_or(crate::registry::MAIN));
-    let owners = table.as_ref().map_or_else(Vec::new, |(flows, _)| {
-        crate::owners::of(i.pid, &registry, flows, procs)
+    // Its keeper's, found at each flow's first packet; else looked up now.
+    let kept = crate::owners::read(&i.dir);
+    let owners: Vec<_> = table.as_ref().map_or_else(Vec::new, |(flows, _)| {
+        let now = crate::owners::of(i.pid, &registry, flows, procs);
+        flows
+            .iter()
+            .zip(now)
+            .map(|(f, now)| kept.get(&(f.key, f.first)).cloned().or(now))
+            .collect()
     });
     let labels = owners
         .iter()

@@ -207,6 +207,20 @@ pub fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
+/// [`pipe`], both ends non-blocking: a word its writer never waits to say,
+/// and its reader empties without waiting.
+pub fn pipe_nonblocking() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds: [libc::c_int; 2] = [0; 2];
+    // SAFETY: `fds` is a valid array of two ints for the duration of the call.
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: pipe2 has just handed us these two descriptors and nothing else
+    // owns them.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
 /// An inotify watch on one directory for what appears in it.
 pub struct Inotify {
     fd: OwnedFd,
