@@ -2805,8 +2805,8 @@ let
           assert "true" in out, out
           alice("systemctl --user unset-environment WAYLAND_DISPLAY")
           alice("cellward down vmherm")
-          # An ordinary zone: the sandbox's own proxy over the host's bus, the
-          # filter in front of it — the link opens in THAT zone.
+          # An ordinary zone — a throwaway sandbox's instance hermetic all
+          # the same (2026-09-28) —: the link opens in THAT zone.
           out = alice(f"WAYLAND_DISPLAY=wayland-vmtest cellward run vmsmoke --fs-sandbox -- {portal} ''' 'https://example.test/from-ordinary' '@a{{sv}} {{}}'")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
           machine.wait_until_succeeds("grep -q from-ordinary /home/alice/opened-urls", timeout=30)

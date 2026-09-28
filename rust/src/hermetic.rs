@@ -33,6 +33,10 @@
 //! (review 2026-09-28: a local `nix-daemon off` was silently ignored under
 //! the network's declared list) —, then the container's local word, then
 //! the zone's ([`for_container`]).
+//!
+//! **Nobody's** (a throwaway container, or a program whose container is not
+//! known): the safe values, whatever its network says (review 2026-09-28,
+//! [`value_for`]) — a one-off launch is no container anything was given to.
 
 use std::io::ErrorKind;
 use std::path::Path;
@@ -261,7 +265,13 @@ pub fn zone_value(zone_dir: &Path, config: &Path, zone: &str, key: &str) -> (boo
 
 /// The setting `key` for the programs of `who` in the network whose zone
 /// directory is `zone_dir`: a container's by [`for_container`]; the main
-/// home's and nobody's (a throwaway container), the network's.
+/// home's, the network's; nobody's — a throwaway container (`:tmp:`,
+/// `:fs:`) or a program whose container is not known —, the safe value
+/// whatever the network says (review 2026-09-28: a throwaway took the
+/// network's, so a one-off launch into a network with the Nix daemon, the
+/// host's files or no hermeticity for its containers had them too). The
+/// microphone's rule for the unknown is the same in spirit: its `yes` is
+/// `ask` (`microphone::by_container`).
 pub fn value_for(
     zone_dir: &Path,
     config: &Path,
@@ -269,14 +279,14 @@ pub fn value_for(
     who: &Who,
     key: &str,
 ) -> (bool, Source) {
-    let zone_value = zone_value(zone_dir, config, zone, key);
     match who {
         Who::Container(name) => for_container(
-            zone_value,
+            zone_value(zone_dir, config, zone, key),
             container_own(config, name, key),
             safe_value(key),
         ),
-        Who::Main | Who::Unknown => zone_value,
+        Who::Main => zone_value(zone_dir, config, zone, key),
+        Who::Unknown => (safe_value(key), Source::Default),
     }
 }
 
@@ -742,6 +752,61 @@ mod tests {
         let main = start_settings_for(&d.zone(), &d.config(), "nl", &Who::Main);
         assert_eq!(main[0], ("hermetic", true));
         assert_eq!(start_settings(&d.zone(), &d.config(), "nl"), main);
+    }
+
+    /// Review 2026-09-28: a throwaway container's instance (nobody's) comes
+    /// up with the safe values in a network that gives its containers
+    /// everything — declared or local —, and the main home's with the
+    /// network's.
+    #[test]
+    fn a_throwaway_comes_up_safe_whatever_its_network_says() {
+        let d = Dirs::new("throwaway");
+        let safe = [
+            ("hermetic", true),
+            ("nix_daemon", false),
+            ("host_files_writable", false),
+            ("audio_manager", false),
+        ];
+        let open = [
+            ("hermetic", false),
+            ("nix_daemon", true),
+            ("host_files_writable", true),
+            ("audio_manager", true),
+        ];
+        // Locally.
+        d.write("zone/hermetic", "off");
+        d.write("zone/nix-daemon", "on");
+        d.write("zone/host-files", "writable");
+        d.write("zone/audio-manager", "on");
+        assert_eq!(
+            start_settings_for(&d.zone(), &d.config(), "nl", &Who::Main),
+            open
+        );
+        assert_eq!(
+            start_settings_for(&d.zone(), &d.config(), "nl", &Who::Unknown),
+            safe
+        );
+        // Declared in Nix.
+        std::fs::remove_file(d.zone().join("hermetic")).unwrap();
+        d.declare("hermetic-default", "off");
+        d.declare("nix-daemon", "nl\n");
+        d.declare("host-files-writable", "nl\n");
+        d.declare("audio-manager", "nl\n");
+        assert_eq!(
+            start_settings_for(&d.zone(), &d.config(), "nl", &Who::Main),
+            open
+        );
+        assert_eq!(
+            start_settings_for(&d.zone(), &d.config(), "nl", &Who::Unknown),
+            safe
+        );
+        for (key, value) in safe {
+            assert_eq!(
+                value_for(&d.zone(), &d.config(), "nl", &Who::Unknown, key),
+                (value, Source::Default),
+                "{key}"
+            );
+        }
     }
 
     /// Review 2026-09-28: what an instance came up with against what
