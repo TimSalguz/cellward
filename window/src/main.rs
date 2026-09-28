@@ -27,22 +27,19 @@
 //! open in another network (or belongs to one) cannot go with a different
 //! network: it is shown greyed out with the reason, and the choice skips it.
 //!
-//! The window's height fits what it shows. It opens at a guess made a
-//! little too tall, measures its lists once they are laid out — what is in
-//! view of each and all of it — and asks for the height that shows them
-//! whole, no taller than most of its screen: no empty band under a short
-//! list, no scroll bar on a list that would fit (`Window::measured`; asked
-//! again while the compositor answers with another size, a few times).
-//! Nothing it shows changes height afterwards: the name of a new container
-//! is typed next to the buttons, and "Секунду…" of a menu stands beside its
-//! close button.
+//! The window opens at the height of what it shows (`fitted_size`): its page
+//! laid out by iced itself, with the fonts it draws in, before the window
+//! is made — no empty band under a short list, no scroll bar on a list that
+//! fits, up to a height most screens have (a longer list scrolls). Nothing
+//! it shows changes that height afterwards: the name of a new container is
+//! typed beside the buttons, and a question's "Секунду…" stands beside its
+//! close button. A window is not resized once open: on Wayland iced goes on
+//! drawing at the size it had, and the compositor scales that to the new one.
 
 use std::io::Read;
 
 use iced::keyboard::{self, key, Key};
-use iced::widget::{
-    button, checkbox, column, container, row, scrollable, sensor, text, text_input,
-};
+use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length, Size, Subscription, Task};
 
 /// One row of a column, as the picker sent it.
@@ -161,41 +158,6 @@ enum Pane {
     Container,
 }
 
-/// A list of the window that scrolls when it is longer than its place.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum List {
-    /// The menu's notes.
-    Notes,
-    /// The launch window's columns.
-    Nets,
-    Containers,
-}
-
-impl List {
-    fn of(pane: Pane) -> Self {
-        match pane {
-            Pane::Net => Self::Nets,
-            Pane::Container => Self::Containers,
-        }
-    }
-}
-
-/// What the window measures of itself to fit its height (`Window::measured`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Measure {
-    /// The whole page: the window's inside, as it was laid out.
-    Page,
-    /// As much of a list as its place shows…
-    View(List),
-    /// …and all of it.
-    Content(List),
-}
-
-/// The height the window never fits below, and the one it does not grow past
-/// by itself (less where the screen is smaller: `resize_to`).
-const MIN_HEIGHT: f32 = 160.0;
-const MAX_HEIGHT: f32 = 760.0;
-
 #[derive(Debug, Clone)]
 enum Msg {
     /// A menu entry, by its index.
@@ -217,12 +179,6 @@ enum Msg {
     /// The guard's time is over, if nothing came since this count of
     /// holds: taking a choice is possible.
     Armed(u64),
-    /// A part of the window as it came out laid out.
-    Measured(Measure, Size),
-    /// The size the fit asks for, as high as the screen lets it be.
-    Fit(Size),
-    /// The window's inside has this size now: the compositor's word.
-    Resized(Size),
 }
 
 struct Window {
@@ -245,20 +201,9 @@ struct Window {
     /// then — its guard is counted from when the person can see it, and a
     /// window that never gets the focus never takes a choice.
     focused: bool,
-    /// What was measured for the fit: the page, and each list's place and
-    /// length (by `List as usize`).
-    page: Option<Size>,
-    views: [Option<f32>; 3],
-    contents: [Option<f32>; 3],
-    /// The fit was worked out: it is, once.
-    fitted: bool,
-    /// The size the fit asked for, until the window has it, and how many
-    /// times it was asked. The compositor may answer the first time with
-    /// the size it maps the window at, and not at all where the size is its
-    /// own to decide (a tiled window): asked again when it answers with
-    /// another, a few times.
-    want: Option<Size>,
-    asked: u8,
+    /// Laid out to be measured (`fitted_size`): every list whole, at its own
+    /// height, rather than in a place that scrolls.
+    measuring: bool,
 }
 
 /// Why a container cannot go with this network, if it cannot.
@@ -296,51 +241,23 @@ impl Window {
             armed: req.guard == 0,
             holds: 0,
             focused: false,
-            page: None,
-            views: [None; 3],
-            contents: [None; 3],
-            fitted: false,
-            want: None,
-            asked: 0,
+            measuring: false,
             req,
+        }
+    }
+
+    /// A list in a place of its own that scrolls when it is longer — or,
+    /// measuring, the list whole.
+    fn list_view<'a>(&self, rows: impl Into<Element<'a, Msg>>) -> Element<'a, Msg> {
+        if self.measuring {
+            rows.into()
+        } else {
+            scrollable(rows).height(Length::Fill).into()
         }
     }
 
     fn menu(&self) -> bool {
         self.req.mode == "menu"
-    }
-
-    /// The lists this window shows.
-    fn lists(&self) -> &'static [List] {
-        if self.menu() {
-            &[List::Notes]
-        } else {
-            &[List::Nets, List::Containers]
-        }
-    }
-
-    /// A measure taken; the size that shows every list whole once all of
-    /// them are in. The page grows by what its longest list lacks, or
-    /// shrinks by what it leaves over — as laid out, not guessed from the
-    /// fonts. Asked once: `None` before and after.
-    fn measured(&mut self, what: Measure, size: Size) -> Option<Size> {
-        match what {
-            Measure::Page => self.page = Some(size),
-            Measure::View(list) => self.views[list as usize] = Some(size.height),
-            Measure::Content(list) => self.contents[list as usize] = Some(size.height),
-        }
-        if self.fitted {
-            return None;
-        }
-        let page = self.page?;
-        let mut lack = f32::NEG_INFINITY;
-        for list in self.lists() {
-            let i = *list as usize;
-            lack = lack.max(self.contents[i]? - self.views[i]?);
-        }
-        self.fitted = true;
-        let height = (page.height + lack).ceil().clamp(MIN_HEIGHT, MAX_HEIGHT);
-        ((height - page.height).abs() >= 1.0).then_some(Size::new(page.width, height))
     }
 
     fn net_tag(&self) -> &str {
@@ -496,26 +413,6 @@ impl Window {
             Msg::Rule(v) => self.rule = v && self.req.rule.is_some(),
             // Armed by the last guard started, and only with the focus.
             Msg::Armed(holds) => self.armed |= holds == self.holds && self.focused,
-            Msg::Measured(what, size) => {
-                if let Some(fit) = self.measured(what, size) {
-                    return fit_to_screen(fit);
-                }
-            }
-            Msg::Fit(size) => {
-                self.want = Some(size);
-                self.asked = 1;
-                return resize(size);
-            }
-            Msg::Resized(size) => {
-                if let Some(want) = self.want {
-                    if (size.height - want.height).abs() < 1.0 {
-                        self.want = None;
-                    } else if self.asked < 3 {
-                        self.asked += 1;
-                        return resize(want);
-                    }
-                }
-            }
             Msg::Press => {}
             // Losing the focus disarms; getting it starts the guard — the
             // first time too: nothing counts from the window's start.
@@ -687,7 +584,7 @@ impl Window {
             heading.to_owned()
         })
         .size(16);
-        column![title, list_view(List::of(pane), list)]
+        column![title, self.list_view(list)]
             .spacing(6)
             .width(Length::FillPortion(1))
             .into()
@@ -709,7 +606,7 @@ impl Window {
                     .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
             );
         }
-        page = page.push(list_view(List::Notes, notes));
+        page = page.push(self.list_view(notes));
         if !self.req.command.is_empty() {
             page = page.push(self.command_view());
         }
@@ -731,7 +628,7 @@ impl Window {
         }
         page = page.push(list);
         // "Секунду…" beside the close button, not a line of its own: the
-        // notes above keep the height the window was fitted to.
+        // window keeps the height it opened at.
         let wait = if self.armed { "" } else { "Секунду…" };
         page = page.push(
             row![
@@ -743,7 +640,7 @@ impl Window {
             ]
             .align_y(Alignment::Center),
         );
-        measured_page(page)
+        page.into()
     }
 
     fn view(&self) -> Element<'_, Msg> {
@@ -784,7 +681,12 @@ impl Window {
         if !self.req.command.is_empty() {
             page = page.push(self.command_view());
         }
-        page = page.push(row![left, right].spacing(16).height(Length::Fill));
+        let lists = if self.measuring {
+            Length::Shrink
+        } else {
+            Length::Fill
+        };
+        page = page.push(row![left, right].spacing(16).height(lists));
         if let Some(rule) = &self.req.rule {
             page = page.push(checkbox(self.rule).label(rule).on_toggle(Msg::Rule));
         }
@@ -804,8 +706,8 @@ impl Window {
             .padding([6, 14])
             .style(button::secondary)
             .on_press(Msg::Cancel);
-        // The name of a new container beside the buttons that start it: the
-        // same height as they are, so the lists above keep their place.
+        // The name of a new container beside the buttons that start it, at
+        // their height: the lists above keep their place.
         let lead: Element<'_, Msg> = if self.naming() {
             text_input("Название контейнера (буквы, цифры, дефис)", &self.name)
                 .id(NAME_FIELD)
@@ -823,7 +725,7 @@ impl Window {
                 .spacing(10)
                 .align_y(Alignment::Center),
         );
-        measured_page(page)
+        page.into()
     }
 
     /// The command a zone's program asks to run: apart from the notes, the
@@ -863,50 +765,9 @@ impl Window {
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Msg::Press),
             iced::Event::Window(iced::window::Event::Focused) => Some(Msg::Focus(true)),
             iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::Focus(false)),
-            iced::Event::Window(iced::window::Event::Resized(size)) => Some(Msg::Resized(size)),
             _ => None,
         })
     }
-}
-
-/// A list in a place of its own that scrolls when it is longer, measured for
-/// the fit: the place as it is, and the list whole — the container between
-/// them lays the list out loose, at its own height rather than the place's.
-fn list_view<'a>(list: List, rows: impl Into<Element<'a, Msg>>) -> Element<'a, Msg> {
-    let rows: Element<'a, Msg> = sensor(rows)
-        .on_show(move |size| Msg::Measured(Measure::Content(list), size))
-        .into();
-    sensor(scrollable(container(rows)).height(Length::Fill))
-        .on_show(move |size| Msg::Measured(Measure::View(list), size))
-        .into()
-}
-
-/// The page, measured for the fit: the window's inside as it was laid out.
-fn measured_page<'a>(page: impl Into<Element<'a, Msg>>) -> Element<'a, Msg> {
-    sensor(page)
-        .on_show(|size| Msg::Measured(Measure::Page, size))
-        .into()
-}
-
-/// `Msg::Fit` of `size`, no taller than most of the window's screen where
-/// the screen is known.
-fn fit_to_screen(size: Size) -> Task<Msg> {
-    iced::window::latest().and_then(move |id| {
-        iced::window::monitor_size(id).map(move |screen| {
-            let height = screen.map_or(size.height, |s| size.height.min(s.height * 0.9));
-            Msg::Fit(Size::new(size.width, height.max(MIN_HEIGHT)))
-        })
-    })
-}
-
-/// The window asked to have this size.
-///
-/// On Wayland only a smaller size is taken: iced keeps drawing at the size
-/// the window had until the compositor says another, and the compositor
-/// takes no window larger than what is drawn — so the window opens at a
-/// guess made to be generous (`first_size`), and the fit mostly shrinks it.
-fn resize(size: Size) -> Task<Msg> {
-    iced::window::latest().and_then(move |id| iced::window::resize(id, size))
 }
 
 /// `Msg::Armed(holds)` after `guard` milliseconds: slept on a thread of its
@@ -928,46 +789,33 @@ fn arm_after(guard: u64, holds: u64) -> Task<Msg> {
     )
 }
 
-/// The size the window opens at, before it measures itself: the width of its
-/// kind, and a height guessed from what it shows — lines of text at the
-/// sizes they are drawn (a line is 1.3 of its size in iced), with the
-/// paddings and the spaces between. Where a text wraps is guessed short, by
-/// fewer characters a line than fit: the guess is to be a little too tall,
-/// since the fit shrinks a window surely and grows it only where the
-/// compositor lets it (`resize`). A close one keeps the window from moving
-/// far from the middle of the screen, where it was placed.
-fn first_size(req: &Request) -> Size {
-    let lines = |text: &str, per_line: usize| text.chars().count().div_ceil(per_line).max(1) as f32;
-    let command = if req.command.is_empty() { 0.0 } else { 184.0 };
-    let (width, height) = if req.mode == "menu" {
-        let notes: f32 = req.notes.iter().map(|n| lines(n, 56) * 18.2 + 4.0).sum();
-        let entries: f32 = req
-            .actions
-            .iter()
-            .map(|(_, label, _)| lines(label, 50) * 19.5 + 16.0)
-            .sum();
-        let width = if req.command.is_empty() { 560.0 } else { 640.0 };
-        // Padding, title, notes, command, entries, the close button, and
-        // the spaces between them.
-        (width, 32.0 + 26.0 + notes + command + entries + 30.0 + 40.0)
-    } else {
-        let rows = |items: &[Item], per_line: usize| -> f32 {
-            items
-                .iter()
-                .map(|i| lines(&i.label, per_line) * 18.2 + 10.0)
-                .sum()
-        };
-        let list = rows(&req.nets, 28).max(rows(&req.containers, 45)) + 12.0;
-        let notes = req.notes.len() as f32 * 31.0;
-        let rule = if req.rule.is_some() { 33.0 } else { 0.0 };
-        // Padding, title, notes, command, the columns' headings and
-        // checkboxes, the longer list, the rule, the buttons, the spaces.
-        (
-            840.0,
-            32.0 + 26.0 + notes + command + 56.0 + list + rule + 30.0 + 24.0,
-        )
+/// The heights a window opens at no lower than, and no higher than: most
+/// screens have the latter free under a panel. A longer list scrolls.
+const MIN_HEIGHT: f32 = 160.0;
+const MAX_HEIGHT: f32 = 640.0;
+
+/// The size the window opens at: the width of its kind, and the height of
+/// its page laid out by iced — every list whole, at its own height, with
+/// the renderer and the fonts the window draws with (the font system is one
+/// for the process, set up once) — within `MIN_HEIGHT` and `MAX_HEIGHT`.
+fn fitted_size(req: &Request) -> Size {
+    let width = match (req.mode == "menu", req.command.is_empty()) {
+        (true, true) => 560.0,
+        (true, false) => 640.0,
+        (false, _) => 840.0,
     };
-    Size::new(width, height.clamp(MIN_HEIGHT, 640.0))
+    let mut window = Window::new(req.clone());
+    window.measuring = true;
+    let mut page = window.view();
+    let mut tree = iced::advanced::widget::Tree::new(&page);
+    let renderer = iced::Renderer::new(iced::Font::default(), iced::Pixels(16.0));
+    let limits = iced::advanced::layout::Limits::new(Size::ZERO, Size::new(width, f32::INFINITY));
+    let height = page
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &limits)
+        .size()
+        .height;
+    Size::new(width, height.ceil().clamp(MIN_HEIGHT, MAX_HEIGHT))
 }
 
 /// The exit status of a window that could not be shown at all: the caller
@@ -996,7 +844,7 @@ fn main() -> iced::Result {
     if empty {
         std::process::exit(1);
     }
-    let size = first_size(&req);
+    let size = fitted_size(&req);
     let title = if req.title.is_empty() {
         "Запуск".to_owned()
     } else {
@@ -1279,111 +1127,41 @@ mod tests {
         assert!(!w.armed);
     }
 
-    /// The height fits what the window shows once every list is measured: a
-    /// menu gives back what its notes leave over, the launch window takes
-    /// what its longer list lacks — and it is asked for once.
+    /// The window opens at the height of what it shows: every entry and row
+    /// counts, a new container's name adds none, and a list longer than a
+    /// screen stops at the most a window opens at — it scrolls.
     #[test]
-    fn the_height_fits_the_lists_once_they_are_measured() {
-        let mut menu = Window::new(parse_request(
-            "mode\tmenu\ntitle\tFoot\nnote\tFoot: без сети\naction\tclose\tЗакрыть\tdanger\n",
-        ));
-        let notes = List::Notes;
-        assert_eq!(menu.measured(Measure::Page, Size::new(560.0, 420.0)), None);
-        assert_eq!(
-            menu.measured(Measure::View(notes), Size::new(528.0, 190.0)),
-            None
-        );
-        // 420 − 190 + 18.5, up to a whole pixel.
-        assert_eq!(
-            menu.measured(Measure::Content(notes), Size::new(120.0, 18.5)),
-            Some(Size::new(560.0, 249.0))
-        );
-        assert_eq!(
-            menu.measured(Measure::Page, Size::new(560.0, 249.0)),
-            None,
-            "asked once"
-        );
+    fn the_window_opens_at_the_height_of_what_it_shows() {
+        let menu = |entries: usize| {
+            let actions: String = (0..entries)
+                .map(|i| format!("action\ta{i}\tЗакрыть «Foot»\tdanger\n"))
+                .collect();
+            parse_request(&format!(
+                "mode\tmenu\ntitle\tFoot\nnote\tFoot: без сети, контейнер: основной\n{actions}"
+            ))
+        };
+        let (one, three) = (fitted_size(&menu(1)), fitted_size(&menu(3)));
+        assert!(one.height < three.height, "{one:?} {three:?}");
+        assert!(three.height < 420.0, "the old fixed height: {three:?}");
+        assert!(one.width > 559.0 && one.width < 561.0, "{one:?}");
 
-        let mut launch = Window::new(parse_request(REQUEST));
-        let (nets, containers) = (List::Nets, List::Containers);
-        for (what, height) in [
-            (Measure::Page, 400.0),
-            (Measure::View(nets), 200.0),
-            (Measure::View(containers), 200.0),
-            (Measure::Content(nets), 120.0),
-        ] {
-            assert_eq!(launch.measured(what, Size::new(840.0, height)), None);
-        }
-        assert_eq!(
-            launch.measured(Measure::Content(containers), Size::new(460.0, 260.0)),
-            Some(Size::new(840.0, 460.0))
-        );
-
-        // Lists that fit as they are: nothing to ask. One longer than any
-        // screen: no taller than the most the window grows to — it scrolls.
-        let mut fits = Window::new(parse_request(REQUEST));
-        let mut long = Window::new(parse_request(REQUEST));
-        for (what, height) in [
-            (Measure::Page, 400.0),
-            (Measure::View(nets), 200.0),
-            (Measure::View(containers), 200.0),
-            (Measure::Content(nets), 150.0),
-        ] {
-            let _ = fits.measured(what, Size::new(840.0, height));
-            let _ = long.measured(what, Size::new(840.0, height));
-        }
-        assert_eq!(
-            fits.measured(Measure::Content(containers), Size::new(460.0, 200.0)),
-            None
-        );
-        assert!(fits.fitted);
-        assert_eq!(
-            long.measured(Measure::Content(containers), Size::new(460.0, 5000.0)),
-            Some(Size::new(840.0, MAX_HEIGHT))
-        );
-    }
-
-    /// The size it opens at is a guess from what it shows: a short menu
-    /// opens short, a list longer than a screen no taller than 640.
-    #[test]
-    fn the_first_size_is_guessed_from_what_is_shown() {
-        let menu = parse_request(
-            "mode\tmenu\ntitle\tFoot\nnote\tFoot: без сети, контейнер: основной\n\
-             action\tpin\tВсегда запускать «Foot» в основном доме без сети\t\n\
-             action\trestart\tЗакрыть «Foot» и запустить снова — выбрать сеть и контейнер…\tdanger\n\
-             action\tclose\tЗакрыть «Foot»\tdanger\n",
-        );
-        let size = first_size(&menu);
+        let launch = fitted_size(&parse_request(REQUEST));
+        let naming = REQUEST
+            .replace("\tselected\n", "\t\n")
+            .replace("\tnew\n", "\tnew,selected\n");
+        let named = fitted_size(&parse_request(&naming));
+        assert!(Window::new(parse_request(&naming)).naming());
+        // Up to the rounding to a whole pixel.
         assert!(
-            size.width > 559.0 && size.width < 561.0 && (230.0..300.0).contains(&size.height),
-            "{size:?}"
+            (launch.height - named.height).abs() < 1.5,
+            "the name's field changes the height: {launch:?} {named:?}"
         );
+
         let rows: String = (0..60)
             .map(|i| format!("container\tc{i}\tКонтейнер «c{i}» — свой дом\t\n"))
             .collect();
         let long = parse_request(&format!("title\tt\nnet\tnl\tnl\t\n{rows}"));
-        assert_eq!(first_size(&long), Size::new(840.0, 640.0));
-    }
-
-    /// The fit is asked again while the compositor answers with another
-    /// size — the one it maps a window at —, a few times, and not after the
-    /// window has it.
-    #[test]
-    fn the_fit_is_asked_again_a_few_times() {
-        let mut w = Window::new(parse_request(REQUEST));
-        let fit = Size::new(840.0, 450.0);
-        let other = Size::new(840.0, 413.0);
-        let _ = w.update(Msg::Resized(other));
-        assert_eq!((w.want, w.asked), (None, 0), "nothing asked before the fit");
-        let _ = w.update(Msg::Fit(fit));
-        assert_eq!((w.want, w.asked), (Some(fit), 1));
-        let _ = w.update(Msg::Resized(other));
-        let _ = w.update(Msg::Resized(other));
-        assert_eq!(w.asked, 3);
-        let _ = w.update(Msg::Resized(other));
-        assert_eq!(w.asked, 3, "asked no more");
-        let _ = w.update(Msg::Resized(fit));
-        assert_eq!(w.want, None, "the window has it");
+        assert_eq!(fitted_size(&long), Size::new(840.0, MAX_HEIGHT));
     }
 
     #[test]

@@ -13,8 +13,11 @@ publish = false
 [dependencies]
 # Software rendering (tiny-skia) only: the window opens at every launch, and a
 # GPU context costs more than the window itself. The system's colour scheme
-# decides light or dark (linux-theme-detection).
+# decides light or dark (linux-theme-detection). `advanced`: the page is laid
+# out once before the window is made, to open it at the height it needs
+# (`fitted_size`) — no crate more.
 iced = { version = "0.14", default-features = false, features = [
+    "advanced",
     "tiny-skia",
     "crisp",
     "thread-pool",

@@ -574,10 +574,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   matched the old words (`focused --bar`, the `VPN_ZONE_DRYRUN` line, now
   «зона …, контейнер …:») needs the new ones.
 - **The launch window and the window menu fit what they show** (2026-09-28).
-  The window opens at a guess and, once its lists are laid out, asks once
-  for the height that shows them whole — measured, no taller than 90% of its
-  screen: no empty band between the menu's status line and its entries, none
-  under a short list, no scroll bar on a list that would fit. The container
+  The window had a fixed size; it now opens at the height of what it shows —
+  its page laid out by iced before the window is made, with the fonts it
+  draws in, every list whole, up to 640 logical pixels (a longer list
+  scrolls): no empty band between the menu's status line and its entries,
+  none under a short list, no scroll bar on a list that fits. The container
   column is wider than the network column; the name of a new container is
   typed beside the buttons that start it, and a question's «Секунду…» stands
   beside its close button, so nothing changes the height afterwards. Keys
