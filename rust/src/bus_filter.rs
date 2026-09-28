@@ -3330,7 +3330,7 @@ mod tests {
             assert_eq!(h.error_name.as_deref(), Some(NOT_ALLOWED));
             let text = wire::body_string(&msg, &h).unwrap();
             assert!(
-                text.contains("трансляция экрана выключена для зоны «nl»"),
+                text.contains("трансляция экрана выключена для настоящего дома (сеть «nl»)"),
                 "{text}"
             );
         }

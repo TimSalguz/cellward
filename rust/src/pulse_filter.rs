@@ -2207,7 +2207,7 @@ mod tests {
         let config = base.join("config");
         std::fs::create_dir_all(&zone_dir).unwrap();
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(zone_dir.join(crate::microphone::MARKER), "yes\n").unwrap();
+        std::fs::write(config.join(crate::permissions::FILE), "microphone = yes\n").unwrap();
         let mic = Arc::new(Policy::new(
             "nl",
             zone_dir.clone(),
@@ -2237,7 +2237,7 @@ mod tests {
         // Taken away: the next packet of sound ends it, once the change is
         // seen — by its event, not by a clock.
         let before = mic.generation();
-        std::fs::write(zone_dir.join(crate::microphone::MARKER), "no\n").unwrap();
+        std::fs::write(config.join(crate::permissions::FILE), "microphone = no\n").unwrap();
         // The test's own patience with the watcher thread, not the filter's.
         let mut ended = false;
         for _ in 0..1000 {
@@ -2563,9 +2563,12 @@ mod tests {
         assert_eq!(next(), (COMMAND_GET_SERVER_INFO, 3));
         // The question: the filter's zone, the program's own word, cleaned.
         let question = wait_asked();
-        assert!(question.contains("зоны «nl»"), "{question}");
+        assert!(
+            question.contains("настоящего дома (сеть «nl»)"),
+            "{question}"
+        );
         assert!(question.contains("«‹b›Evil‹/b› Зона: host»"), "{question}");
-        assert!(question.contains("Всегда — всей зоне «nl»"), "{question}");
+        assert!(question.contains("Всегда — настоящему дому"), "{question}");
         // Once: this stream reaches the server now; nothing is remembered.
         answer("0");
         assert_eq!(next(), (COMMAND_CREATE_RECORD_STREAM, 2));

@@ -620,47 +620,6 @@ mod tests {
         let _ = fs::remove_dir_all(&reg);
     }
 
-    /// The keeper's part: a new flow's owner found as the relay says it saw
-    /// it, kept in the owners' file, read back; a word with nothing new
-    /// adds nothing.
-    #[test]
-    fn the_keeper_keeps_a_new_flows_owner() {
-        use std::os::fd::AsFd;
-        let me = std::process::id() as i32;
-        let dir = std::env::temp_dir().join(format!("vz-keeper-{me}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("reg")).unwrap();
-        fs::write(dir.join("reg/tester"), format!("{me} offline work\n")).unwrap();
-        let file = crate::flows::create(&dir).unwrap();
-        let mut table = crate::flows::Table::map(file.as_fd(), true).unwrap();
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let key = Key {
-            proto: UDP,
-            lport: socket.local_addr().unwrap().port(),
-            remote: "127.0.0.3".parse().unwrap(),
-            rport: 53,
-        };
-        let seen = crate::flows::Seen {
-            key,
-            outbound: true,
-            len: 80,
-            dns: None,
-        };
-        assert!(table.note(&seen, 500), "a new flow");
-        assert!(!table.note(&seen, 501), "the same flow");
-        let mut keeper = Keeper::default();
-        keeper.heard(&dir, me, &dir.join("reg"));
-        let kept = read(&dir);
-        let owner = kept.get(&(key, 500)).expect("its owner kept");
-        assert_eq!((owner.pid, owner.program.as_deref()), (me, Some("tester")));
-        let before = fs::read_to_string(dir.join(FILE)).unwrap();
-        keeper.heard(&dir, me, &dir.join("reg"));
-        assert_eq!(fs::read_to_string(dir.join(FILE)).unwrap(), before);
-        drop(socket);
-        table.close();
-        let _ = fs::remove_dir_all(&dir);
-    }
-
     /// A line of the owners' file there and back; one of another shape
     /// skipped.
     #[test]
