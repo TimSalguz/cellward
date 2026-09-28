@@ -582,19 +582,19 @@ pub struct Layout {
 }
 
 /// Whether the `/tmp` a sandbox starts in is its instance's own: the
-/// keeper's mark (`zone::PRIVATE_TMP_INSIDE`) in the runtime directory, in a
-/// directory that is not ours — a program, which runs as us, can make
-/// neither. Anything else, a mark of ours among it, is the host's `/tmp`.
-fn tmp_is_the_instances(runtime: &Path) -> bool {
+/// keeper's mark (`zone::PRIVATE_TMP_MARK`) in it, a file that is not ours,
+/// in a sticky `/tmp` — a program, which runs as us, can neither make one
+/// nor replace one there. Anything else, a mark of ours among it, is the
+/// host's `/tmp`.
+fn tmp_is_the_instances(mark: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let mark = runtime.join(crate::zone::PRIVATE_TMP_INSIDE);
-    let Some(dir) = mark.parent() else {
+    let Some(tmp) = mark.parent() else {
         return false;
     };
     // SAFETY: getuid takes nothing and cannot fail.
     let me = unsafe { libc::getuid() };
-    fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() != me)
-        && fs::symlink_metadata(&mark).is_ok_and(|m| m.is_file() && m.uid() != me)
+    fs::symlink_metadata(tmp).is_ok_and(|m| m.is_dir() && m.permissions().mode() & 0o1000 != 0)
+        && fs::symlink_metadata(mark).is_ok_and(|m| m.is_file() && m.uid() != me)
 }
 
 fn push(v: &mut Vec<OsString>, s: &str) {
@@ -1333,7 +1333,8 @@ pub fn run(args: Args) -> u8 {
     };
     let runtime = runtime_dir();
     // The container's /tmp only where it is the instance's own (`Layout::share_tmp`).
-    let share_tmp = args.share_tmp && tmp_is_the_instances(&runtime);
+    let share_tmp =
+        args.share_tmp && tmp_is_the_instances(Path::new(crate::zone::PRIVATE_TMP_MARK));
 
     // --- SECCOMP ---
     // First, before anything is asked or started: no filter, no sandbox
@@ -2296,11 +2297,12 @@ mod tests {
         // The keeper's mark, absent or ours, is no mark: the host's /tmp.
         let dir = std::env::temp_dir().join(format!("vz-share-tmp-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        assert!(!tmp_is_the_instances(&dir));
-        let mark = dir.join(crate::zone::PRIVATE_TMP_INSIDE);
-        fs::create_dir_all(mark.parent().unwrap()).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o1777)).unwrap();
+        let mark = dir.join(".cellward-private-tmp");
+        assert!(!tmp_is_the_instances(&mark));
         fs::write(&mark, "").unwrap();
-        assert!(!tmp_is_the_instances(&dir), "a mark of our own");
+        assert!(!tmp_is_the_instances(&mark), "a mark of our own");
         let _ = fs::remove_dir_all(&dir);
         let a = Args::parse(&argv(&["app", "--share-tmp", "on", "--", "prog"])).unwrap();
         assert!(a.share_tmp);

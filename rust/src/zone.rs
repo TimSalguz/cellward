@@ -5344,15 +5344,10 @@ fn private_tmp(zone: &Zone) -> Result<(), String> {
             )
         })?;
     }
-    // Said where the programs read it and cannot forge it (see the
-    // constant). Not fatal: without the mark a sandbox keeps a /tmp of its
-    // own, as before.
-    let mark = host_runtime_dir(zone).join(PRIVATE_TMP_INSIDE);
-    let marked = mark
-        .parent()
-        .map_or(Ok(()), fs::create_dir_all)
-        .and_then(|()| touch(&mark));
-    if let Err(e) = marked {
+    // Said where the programs see it and cannot forge it (see the constant).
+    // Not fatal: without the mark a sandbox keeps a /tmp of its own, as
+    // before.
+    if let Err(e) = touch(Path::new(PRIVATE_TMP_MARK)) {
         eprintln!(
             "zone {}: cannot mark its /tmp as its own ({e}) — its sandboxes keep one each",
             zone.name()
@@ -5368,13 +5363,16 @@ fn private_tmp(zone: &Zone) -> Result<(), String> {
 /// What [`private_tmp`] covers.
 const PRIVATE_TMP: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
 
-/// Where the programs of a zone or an instance read that their `/tmp` is
-/// their own ([`private_tmp`]): `cellward/private-tmp` in their runtime
-/// directory — its own tmpfs —, in the keeper's directory there, which they
-/// cannot write, so they cannot make one. A sandbox takes such a `/tmp` for
-/// the container's launches to share (`fs_sandbox::Layout::share_tmp`); a
-/// `/tmp` that is the host's (an ordinary zone's) it never does.
-pub const PRIVATE_TMP_INSIDE: &str = "cellward/private-tmp";
+/// How the programs of a zone or an instance see that their `/tmp` is their
+/// own ([`private_tmp`]): this file in it, the keeper's — its root's, in a
+/// sticky `/tmp`, so a program, which runs as the user, can neither make one
+/// nor replace it; in the host's `/tmp` a program could only make one of
+/// its own, which is no mark. A sandbox takes such a `/tmp` for the
+/// container's launches to share (`fs_sandbox::Layout::share_tmp`); a `/tmp`
+/// that is the host's (an ordinary zone's) it never does. In `/tmp` itself
+/// and not in the runtime directory: a launch's view of that one is its own
+/// (the VM check of 2026-09-28 found a mark there unseen).
+pub const PRIVATE_TMP_MARK: &str = "/tmp/.cellward-private-tmp";
 
 /// Where a zone keeps the host's devtmpfs: below a directory of the zone's
 /// own `/dev` that only the zone's root enters (0700) — no program of the
