@@ -61,8 +61,9 @@
 //! at a new scale.
 //!
 //! **Buttons, moving, resizing** (stage 3, 2026-09-27; §5.4, §5.5, §5.11).
-//! At the look's end of the title strip (`crate::wl_title::LOOK`: today the
-//! right end, menu ≡, network ⇄, close ×) the buttons are a subsurface of
+//! At the look's end of the title strip (`crate::wl_title::buttons_look`:
+//! stage 3's at the right end, menu ≡, network ⇄, close ×; macOS's at the
+//! left) the buttons are a subsurface of
 //! the strip, like the text — placed anew with the strip at every resize,
 //! hidden with it (mode `hover`, fullscreen), and not there when the strip
 //! is too narrow for them ([`title_layout`]). The pointer over the frame is
@@ -80,6 +81,22 @@
 //! `cellward window-menu` for the launch. Only what the compositor sends
 //! reaches this: the program cannot name the proxy's surfaces, nor send the
 //! events of a pointer. No double click (it would take a clock).
+//!
+//! **Looks** (2026-09-28, `crate::wl_title::Look`). The style: `full` is
+//! the above, the zone's colour itself; `soft` its calmer tones, the border
+//! two rings of strips nested one in the other ([`ring_strips`]: darker
+//! outside, the title's tone inside); `tag` no border at all — the title's
+//! row stays, clear (an ARGB pixel of nothing) and clear to the pointer too:
+//! its input region is the tag alone, a tab at its left end with the label
+//! and the buttons ([`crate::wl_title::tag_layout`]) —, so a press beside
+//! the tag is not the frame's and moves nothing. The buttons' end, order,
+//! cells and margin are the look's, and so is where the pointer finds them
+//! ([`title_layout`], `ButtonsLook::at`). Round corners: four small
+//! surfaces over the corners of the program's content ([`corner_rects`]),
+//! the title's colour where the corner is cut off and clear inside a
+//! quarter circle, drawn at the scale like the text; clear to input (an
+//! empty input region: a click there is the program's). Not with the tag:
+//! without a border there is nothing for them to blend into.
 //!
 //! **Scale.** The strips are a single pixel stretched to a size in logical
 //! pixels: at any scale, fractional included, the compositor fills whole
@@ -217,7 +234,7 @@ use wl_proxy::protocols::ObjectInterface;
 
 use crate::frame::TitleMode;
 use crate::wl_proxy::Border;
-use crate::wl_title::{Button, ButtonsLook, End, Lease, Lit, Pixels, StripWidth, Text, LOOK};
+use crate::wl_title::{Button, ButtonsLook, End, Lease, Lit, Look, Pixels, Square, Text};
 
 // --- THE ARITHMETIC ---------------------------------------------------------
 // What the frame takes of a window is its [`Insets`]: the border all round,
@@ -344,25 +361,34 @@ pub(crate) fn strips(g: Rect, i: Insets) -> [Rect; 4] {
 
 /// Where the title strip is, over the program's geometry `g`: in the room
 /// the insets keep for it, above `g`; or, `over` the content (hover), along
-/// the top of `g` — never taller than `g`. `None`: no strip.
+/// the top of `g` — never taller than `g` — when there is a frame (a
+/// border) to have it. `None`: no strip.
 pub(crate) fn title_strip(g: Rect, i: Insets, over: bool) -> Option<Rect> {
-    // How wide, the look says: all of the window's width (a tag look would
-    // take only its label's, `crate::wl_title::Look`).
-    let w = match LOOK.strip {
-        StripWidth::Full => g.w,
-    };
+    title_row(g, i, over && i.border > 0)
+}
+
+/// Where the tag's row is (`crate::wl_title::Look::tag`): as the title
+/// strip, but the tag has no border to go by — it is the whole frame, and
+/// `over` the content whenever the frame lays it there.
+pub(crate) fn tag_row(g: Rect, i: Insets, over: bool) -> Option<Rect> {
+    title_row(g, i, over)
+}
+
+/// The row along the top of `g`, the window's whole width: in the title's
+/// room, or over the content.
+fn title_row(g: Rect, i: Insets, over: bool) -> Option<Rect> {
     if i.title > 0 {
         Some(Rect {
             x: g.x,
             y: g.y.saturating_sub(i.title),
-            w,
+            w: g.w,
             h: i.title,
         })
-    } else if over && i.border > 0 {
+    } else if over {
         Some(Rect {
             x: g.x,
             y: g.y,
-            w,
+            w: g.w,
             h: TITLE_HEIGHT.min(g.h),
         })
     } else {
@@ -383,10 +409,13 @@ pub(crate) struct TitleLayout {
 }
 
 /// [`TitleLayout`] of a strip `w` wide, with the buttons of `look` at its
-/// end: the text keeps [`TITLE_PAD`] clear of them.
+/// end, the look's margin between them and the end: the text keeps
+/// [`TITLE_PAD`] clear of them.
 pub(crate) fn title_layout(w: i32, look: &ButtonsLook) -> TitleLayout {
     let row = look.width_all();
-    if row <= 0 || w < row.saturating_add(TITLE_PAD.saturating_mul(2)) {
+    let margin = look.margin.max(0);
+    let taken = row.saturating_add(margin);
+    if row <= 0 || w < taken.saturating_add(TITLE_PAD.saturating_mul(2)) {
         return TitleLayout {
             text_x: TITLE_PAD,
             room: w,
@@ -396,15 +425,81 @@ pub(crate) fn title_layout(w: i32, look: &ButtonsLook) -> TitleLayout {
     match look.end {
         End::Right => TitleLayout {
             text_x: TITLE_PAD,
-            room: w - row,
-            buttons: Some(w - row),
+            room: w - taken,
+            buttons: Some(w - taken),
         },
         End::Left => TitleLayout {
-            text_x: row + TITLE_PAD,
-            room: w - row,
-            buttons: Some(0),
+            text_x: taken + TITLE_PAD,
+            room: w - taken,
+            buttons: Some(margin),
         },
     }
+}
+
+/// The strips of a border of rings `widths` wide (from the outside in)
+/// around the program's geometry `g` and the title's room above it: each
+/// ring's four, in the order of [`strips`], the outermost ring's first.
+/// Each ring hugs the ones inside it, so they tile the band of the whole
+/// border without overlapping, and meet at each corner on its diagonal —
+/// the outer ring's top strip takes the corner's outer part, the inner
+/// ring's the inner. One ring of the whole width is [`strips`] exactly.
+pub(crate) fn ring_strips(g: Rect, i: Insets, widths: &[i32]) -> Vec<Rect> {
+    let mut rest: i32 = widths
+        .iter()
+        .map(|w| (*w).max(0))
+        .fold(0, i32::saturating_add);
+    let mut out = Vec::with_capacity(widths.len() * 4);
+    for &w in widths {
+        let w = w.max(0);
+        rest = rest.saturating_sub(w);
+        // Inside this ring: the program, the title's room, the rings
+        // further in.
+        let inside = geometry_up(
+            g,
+            Insets {
+                border: rest,
+                title: i.title,
+            },
+        );
+        out.extend(strips(
+            inside,
+            Insets {
+                border: w,
+                title: 0,
+            },
+        ));
+    }
+    out
+}
+
+/// The edges a press at (`x`, `y`) on `strip` — a strip of any ring of the
+/// border, on its `side` — resizes: as [`edges`] says of the same point of
+/// the whole border's strip of that side, `outer` ([`strips`]). Every ring
+/// of a side resizes alike, and a corner is a corner of the window.
+pub(crate) fn ring_edges(side: Side, strip: Rect, outer: Rect, border: i32, x: f64, y: f64) -> u32 {
+    let x = x + f64::from(strip.x) - f64::from(outer.x);
+    let y = y + f64::from(strip.y) - f64::from(outer.y);
+    edges(side, outer, border, x, y)
+}
+
+/// Where the round corners go over the program's geometry `g`: squares of
+/// `radius` in its four corners — top left, top right, bottom left, bottom
+/// right, as `crate::wl_title::render_corners` draws them —, smaller on a
+/// window too small for them (never over its middle). `None`: no room for
+/// any.
+pub(crate) fn corner_rects(g: Rect, radius: i32) -> Option<[Rect; 4]> {
+    let r = radius.min(g.w / 2).min(g.h / 2);
+    if r <= 0 {
+        return None;
+    }
+    let (right, bottom) = (g.x.saturating_add(g.w - r), g.y.saturating_add(g.h - r));
+    let at = |x: i32, y: i32| Rect { x, y, w: r, h: r };
+    Some([
+        at(g.x, g.y),
+        at(right, g.y),
+        at(g.x, bottom),
+        at(right, bottom),
+    ])
 }
 
 /// A strip of the border, by the side it is on — in the order of
@@ -498,10 +593,11 @@ pub(crate) fn cursor_for(hit: Hit) -> WpCursorShapeDeviceV1Shape {
     }
 }
 
-/// The format of the frame's buffers, as the look keeps its pixels.
-fn shm_format() -> WlShmFormat {
-    match LOOK.pixels {
+/// The format of a buffer of the frame, as the look keeps its pixels.
+fn shm_format(pixels: Pixels) -> WlShmFormat {
+    match pixels {
         Pixels::Opaque => WlShmFormat::XRGB8888,
+        Pixels::Alpha => WlShmFormat::ARGB8888,
     }
 }
 
@@ -567,10 +663,15 @@ pub(crate) struct Frames {
     width: i32,
     /// The title strip's mode, the launch's.
     mode: TitleMode,
-    /// The colour, a 3×3 XRGB8888 square in a sealed memfd, made before the
-    /// proxy confined itself (`wl_proxy::pixel`): the same for every
-    /// connection of the launch — one zone, one colour.
+    /// The look — the style, the buttons, the round corners —, the
+    /// launch's.
+    look: Look,
+    /// The colours, a 3×3 square each in a sealed memfd, made before the
+    /// proxy confined itself (`wl_proxy::pixels`): the same for every
+    /// connection of the launch — one zone, one colour, its tones.
     pixel: Rc<OwnedFd>,
+    /// What each square of it is ([`Look::squares`]): its buffer's format.
+    squares: Vec<Square>,
     /// The title's line and the memfd of its pixels (`crate::wl_title`), the
     /// launch's too. `None`: the strip goes without its text.
     text: Option<Rc<Text>>,
@@ -634,8 +735,10 @@ impl Asks {
 /// hold, so `wl_proxy`'s cap on the program's objects does not count them:
 /// three objects of the program (a surface, its xdg_surface, a toplevel)
 /// and a commit without a buffer make about twenty in the compositor
-/// (review 2026-09-25). `wl_proxy` counts these at every dispatch and ends
-/// a connection with too many ([`MAX_FRAMED`]).
+/// (review 2026-09-25); with the looks of 2026-09-28 — the soft border's
+/// eight strips, the buttons, four round corners and their buffers — about
+/// fifty. `wl_proxy` counts these at every dispatch and ends a connection
+/// with too many ([`MAX_FRAMED`]).
 struct Framed(Rc<Cell<usize>>);
 
 impl Framed {
@@ -653,8 +756,11 @@ impl Drop for Framed {
 
 /// Framed windows one connection may have at once: a program shows a few,
 /// a big one a few dozen. Past this it is refused like one with too many
-/// objects — never served without a frame.
-pub(crate) const MAX_FRAMED: usize = 4096;
+/// objects — never served without a frame. 2048 since 2026-09-28 (4096
+/// before): a frame is about twice the objects it was, and what a program
+/// can make the compositor hold this way stays near the 100 000 of its own
+/// it may make.
+pub(crate) const MAX_FRAMED: usize = 2048;
 
 #[derive(Default)]
 struct Own {
@@ -670,14 +776,15 @@ struct Own {
     /// For the cursor over the frame, when the compositor offers it; without
     /// it the cursor over the frame is whatever it was.
     cursor_shape: Option<Rc<WpCursorShapeManagerV1>>,
-    buffer: Option<Rc<WlBuffer>>,
+    /// A buffer of each square of the colours' memfd, in its order.
+    pixels: Vec<Rc<WlBuffer>>,
     /// The pool of the title's pixels: the launch's memfd, this connection's
     /// pool of it.
     text_pool: Option<Rc<WlShmPool>>,
 }
 
-/// The colour's buffer: a square of this side, in XRGB8888 (`wl_proxy::pixel`
-/// makes it).
+/// A colour's buffer: a square of this side, in XRGB8888 — ARGB8888 for the
+/// clear one (`wl_proxy::pixels` makes them).
 pub(crate) const PIXEL_SIDE: i32 = 3;
 pub(crate) const PIXEL_BYTES: i32 = PIXEL_SIDE * PIXEL_SIDE * 4;
 
@@ -735,7 +842,9 @@ impl Frames {
         let frames = Rc::new(Self {
             width: border.width,
             mode: border.title,
+            look: border.look,
             pixel: border.pixel.clone(),
+            squares: border.squares.clone(),
             text: border.text.clone(),
             own: RefCell::default(),
             scale: Cell::new(crate::wl_title::MIN_SCALE),
@@ -791,21 +900,33 @@ impl Frames {
         }
     }
 
-    /// The registry has been answered: make the one buffer every strip
-    /// shows, and the pool the title's text comes from.
+    /// The registry has been answered: make a buffer of each colour the
+    /// strips show (in `full`, the one of stage 2), and the pool the title's
+    /// text comes from.
     fn finish(&self) {
         let mut own = self.own.borrow_mut();
         own.complete = true;
         let Some(shm) = own.shm.clone() else {
             return;
         };
-        let pool = shm.new_send_create_pool(&self.pixel, PIXEL_BYTES);
+        let count = i32::try_from(self.squares.len()).unwrap_or(0);
+        let pool = shm.new_send_create_pool(&self.pixel, PIXEL_BYTES.saturating_mul(count));
         quiet(&*pool);
-        let buffer =
-            pool.new_send_create_buffer(0, PIXEL_SIDE, PIXEL_SIDE, PIXEL_SIDE * 4, shm_format());
-        quiet(&*buffer);
+        own.pixels = (0..count)
+            .zip(&self.squares)
+            .map(|(k, square)| {
+                let buffer = pool.new_send_create_buffer(
+                    PIXEL_BYTES * k,
+                    PIXEL_SIDE,
+                    PIXEL_SIDE,
+                    PIXEL_SIDE * 4,
+                    shm_format(square.pixels()),
+                );
+                quiet(&*buffer);
+                buffer
+            })
+            .collect();
         pool.send_destroy();
-        own.buffer = Some(buffer);
         if let Some(text) = &self.text {
             let pool = shm.new_send_create_pool(&text.fd, text.pool_size());
             quiet(&*pool);
@@ -820,7 +941,7 @@ impl Frames {
         let missing: Vec<&str> = [
             ("wl_compositor", own.compositor.is_some()),
             ("wl_subcompositor", own.subcompositor.is_some()),
-            ("wl_shm", own.buffer.is_some()),
+            ("wl_shm", !own.pixels.is_empty()),
             ("wp_viewporter", own.viewporter.is_some()),
         ]
         .into_iter()
@@ -835,7 +956,17 @@ impl Frames {
         missing.is_empty()
     }
 
-    /// The four strips of a new bordered window, above `top` (the program's
+    /// The border's width in this look: none for the tag.
+    fn border_width(&self) -> i32 {
+        if self.look.tag() {
+            0
+        } else {
+            self.width
+        }
+    }
+
+    /// The strips of a new bordered window, four a ring of the look's
+    /// ([`Look::rings`]; none for the tag), above `top` (the program's
     /// topmost layer on `root`). Attached, not committed: they show with the
     /// first layout, which the program's commit applies.
     fn make_strips(
@@ -845,22 +976,24 @@ impl Frames {
         me: &Weak<RefCell<Window>>,
     ) -> Option<Vec<Strip>> {
         let own = self.own.borrow();
-        let (Some(compositor), Some(subcompositor), Some(viewporter), Some(buffer)) = (
+        let (Some(compositor), Some(subcompositor), Some(viewporter), false) = (
             &own.compositor,
             &own.subcompositor,
             &own.viewporter,
-            &own.buffer,
+            own.pixels.is_empty(),
         ) else {
             return None;
         };
-        let strips = Side::ALL
-            .into_iter()
-            .map(|side| {
+        let rings = self.look.rings(self.border_width());
+        let mut strips = Vec::with_capacity(rings.len() * 4);
+        for (ring, &(_, square)) in rings.iter().enumerate() {
+            let buffer = own.pixels.get(square)?;
+            for side in Side::ALL {
                 let surface = compositor.new_send_create_surface();
                 quiet(&*surface);
                 surface.set_handler(Mine {
                     window: me.clone(),
-                    part: Part::Border(side),
+                    part: Part::Border(side, ring),
                 });
                 let sub = subcompositor.new_send_get_subsurface(&surface, root);
                 quiet(&*sub);
@@ -871,13 +1004,13 @@ impl Frames {
                 viewport.send_set_source(one, one, one, one);
                 sub.send_place_above(top);
                 attach_pixel(&surface, buffer);
-                Strip {
+                strips.push(Strip {
                     surface,
                     sub,
                     viewport,
-                }
-            })
-            .collect();
+                });
+            }
+        }
         Some(strips)
     }
 
@@ -885,7 +1018,14 @@ impl Frames {
     /// stretched like a strip of the border (not attached yet: a hover strip
     /// starts hidden), and the text and the buttons subsurfaces of it — so
     /// that they go where the strip goes, and are hidden with it. The
-    /// buttons are drawn with the text's font, and are there only with it.
+    /// buttons are drawn with the text's font, and are there only with it
+    /// (and with a look that has some).
+    ///
+    /// The tag's row (`Look::tag`) is the clear square stretched, and takes
+    /// the pointer only where the tag is: its input region. The tag itself
+    /// is the text's image (`crate::wl_title::render_tag`), over it at its
+    /// left end; beside it a press is not the frame's — no move, no enter —
+    /// but what is under: the program's CSD shadow, or another window.
     fn make_title(
         self: &Rc<Self>,
         root: &Rc<WlSurface>,
@@ -893,11 +1033,12 @@ impl Frames {
         me: &Weak<RefCell<Window>>,
     ) -> Option<TitleParts> {
         let own = self.own.borrow();
+        let tag = self.text.as_ref().and_then(|text| text.tag());
         let (Some(compositor), Some(subcompositor), Some(viewporter), Some(buffer)) = (
             &own.compositor,
             &own.subcompositor,
             &own.viewporter,
-            &own.buffer,
+            own.pixels.get(self.look.title_square(tag.is_some())),
         ) else {
             return None;
         };
@@ -918,6 +1059,16 @@ impl Frames {
         quiet(&*view);
         let one = Fixed::from_i32_saturating(1);
         view.send_set_source(one, one, one, one);
+        if let Some(tag) = tag {
+            // The row's input region: the tag, and nothing of the clear
+            // rest (the compositor clips it to the row). Applied with the
+            // strip's first commit.
+            let region = compositor.new_send_create_region();
+            quiet(&*region);
+            region.send_add(0, 0, tag.width, TITLE_HEIGHT);
+            surface.send_set_input_region(Some(&region));
+            region.send_destroy();
+        }
         let (text, buttons) = match (&self.text, &own.text_pool) {
             (Some(text), Some(pool)) => {
                 let text_surface = own_surface(Part::Text);
@@ -935,14 +1086,31 @@ impl Frames {
                     });
                     fraction
                 });
-                // The buttons: the row at its logical size, whatever scale
-                // it is drawn at; placed by the strip's layout.
-                let buttons_surface = own_surface(Part::Buttons);
-                let buttons_sub = subcompositor.new_send_get_subsurface(&buttons_surface, &surface);
-                quiet(&*buttons_sub);
-                let buttons_view = viewporter.new_send_get_viewport(&buttons_surface);
-                quiet(&*buttons_view);
-                buttons_view.send_set_destination(LOOK.buttons.width_all(), TITLE_HEIGHT);
+                // The buttons, when the look has any: the row at its
+                // logical size, whatever scale it is drawn at; placed by the
+                // strip's layout.
+                let row = self.look.buttons.width_all();
+                let buttons = (row > 0).then(|| {
+                    let buttons_surface = own_surface(Part::Buttons);
+                    let buttons_sub =
+                        subcompositor.new_send_get_subsurface(&buttons_surface, &surface);
+                    quiet(&*buttons_sub);
+                    let buttons_view = viewporter.new_send_get_viewport(&buttons_surface);
+                    quiet(&*buttons_view);
+                    buttons_view.send_set_destination(row, TITLE_HEIGHT);
+                    ButtonParts {
+                        text: text.clone(),
+                        pool: pool.clone(),
+                        surface: buttons_surface,
+                        sub: buttons_sub,
+                        view: buttons_view,
+                        scale: self.scale.get(),
+                        at: None,
+                        lit: None,
+                        current: None,
+                        retired: Vec::new(),
+                    }
+                });
                 (
                     Some(TextParts {
                         text: text.clone(),
@@ -958,18 +1126,7 @@ impl Frames {
                         shown: 0,
                         x: TITLE_PAD,
                     }),
-                    Some(ButtonParts {
-                        text: text.clone(),
-                        pool: pool.clone(),
-                        surface: buttons_surface,
-                        sub: buttons_sub,
-                        view: buttons_view,
-                        scale: self.scale.get(),
-                        at: None,
-                        lit: None,
-                        current: None,
-                        retired: Vec::new(),
-                    }),
+                    buttons,
                 )
             }
             _ => (None, None),
@@ -982,6 +1139,80 @@ impl Frames {
             shown: false,
             text,
             buttons,
+        })
+    }
+
+    /// The round corners of a new window (`Look::corners`), above `top` —
+    /// under the title, which is placed above `top` before them and so ends
+    /// above them: a hover strip lies over the top corners. Clear to input.
+    /// Their scale is the text's when the window has one (`fractional`
+    /// false), else their own: a `wp_fractional_scale_v1` of the first.
+    /// None without the title's memfd (no font: no corners either).
+    fn make_corners(
+        self: &Rc<Self>,
+        root: &Rc<WlSurface>,
+        top: &Rc<WlSurface>,
+        me: &Weak<RefCell<Window>>,
+        fractional: bool,
+    ) -> Option<CornerParts> {
+        let own = self.own.borrow();
+        let (Some(compositor), Some(subcompositor), Some(viewporter), Some(text), Some(pool)) = (
+            &own.compositor,
+            &own.subcompositor,
+            &own.viewporter,
+            &self.text,
+            &own.text_pool,
+        ) else {
+            return None;
+        };
+        let pieces: Vec<Strip> = (0..4)
+            .map(|_| {
+                let surface = compositor.new_send_create_surface();
+                quiet(&*surface);
+                surface.set_handler(Mine {
+                    window: me.clone(),
+                    part: Part::Corner,
+                });
+                let sub = subcompositor.new_send_get_subsurface(&surface, root);
+                quiet(&*sub);
+                sub.send_place_above(top);
+                let viewport = viewporter.new_send_get_viewport(&surface);
+                quiet(&*viewport);
+                // An empty input region: a click on the window's corner is
+                // the program's, as without them.
+                let region = compositor.new_send_create_region();
+                quiet(&*region);
+                surface.send_set_input_region(Some(&region));
+                region.send_destroy();
+                Strip {
+                    surface,
+                    sub,
+                    viewport,
+                }
+            })
+            .collect();
+        let fraction = if fractional {
+            own.fractional.as_ref().map(|manager| {
+                let fraction = manager.new_send_get_fractional_scale(&pieces[0].surface);
+                quiet(&*fraction);
+                fraction.set_handler(Scale {
+                    f: self.clone(),
+                    window: me.clone(),
+                });
+                fraction
+            })
+        } else {
+            None
+        };
+        Some(CornerParts {
+            text: text.clone(),
+            pool: pool.clone(),
+            pieces,
+            fraction,
+            scale: self.scale.get(),
+            laid: None,
+            current: Vec::new(),
+            retired: Vec::new(),
         })
     }
 }
@@ -1057,22 +1288,28 @@ impl WlCallbackHandler for OwnSync {
 }
 
 /// What one of the proxy's surfaces is, for the input that comes to it and
-/// for its scale: a strip of the border (the top one brings a hover title
-/// out, each resizes the window by its edge), or the title strip, its text
-/// and its buttons.
+/// for its scale: a strip of the border — its side, and its ring from the
+/// outside in (the top ones bring a hover title out, each resizes the
+/// window by its edge) —, the title strip, its text and its buttons, or a
+/// round corner (it takes no input).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Part {
-    Border(Side),
+    Border(Side, usize),
     Title,
     Text,
     Buttons,
+    Corner,
 }
 
 impl Part {
-    /// Part of the title strip, and drawn at a scale: the text and the
-    /// buttons (the strip itself is one stretched pixel).
+    /// Drawn at a scale, or the parent of what is: the title strip, its
+    /// text and buttons, the round corners (the border is one stretched
+    /// pixel).
     fn titled(self) -> bool {
-        matches!(self, Part::Title | Part::Text | Part::Buttons)
+        matches!(
+            self,
+            Part::Title | Part::Text | Part::Buttons | Part::Corner
+        )
     }
 }
 
@@ -1083,8 +1320,8 @@ struct Mine {
 }
 
 impl WlSurfaceHandler for Mine {
-    /// The integer scale, `wl_compositor` v6: the text's and the buttons'
-    /// where the compositor offers no fractional one.
+    /// The integer scale, `wl_compositor` v6: the text's, the buttons' and
+    /// the corners' where the compositor offers no fractional one.
     fn handle_preferred_buffer_scale(&mut self, _slf: &Rc<WlSurface>, factor: i32) {
         if !self.part.titled() {
             return;
@@ -1212,19 +1449,20 @@ fn attach_whole(surface: &Rc<WlSurface>, buffer: &Rc<WlBuffer>, width: i32, heig
     }
 }
 
-/// A buffer of the title's memfd made of `drawn`'s region at `offset`:
-/// its hold on the region goes with it ([`TextBuffer`]).
-fn memfd_buffer(pool: &Rc<WlShmPool>, drawn: crate::wl_title::Drawn, offset: i32) -> Rc<WlBuffer> {
-    let buffer = pool.new_send_create_buffer(
-        offset,
-        drawn.width,
-        drawn.height,
-        drawn.width * 4,
-        shm_format(),
-    );
+/// A buffer of the title's memfd, `width` × `height` at `offset`, in the
+/// format of `pixels`: its hold on the region (`lease`) goes with it
+/// ([`TextBuffer`]).
+fn memfd_buffer(
+    pool: &Rc<WlShmPool>,
+    (width, height): (i32, i32),
+    offset: i32,
+    lease: Lease,
+    pixels: Pixels,
+) -> Rc<WlBuffer> {
+    let buffer = pool.new_send_create_buffer(offset, width, height, width * 4, shm_format(pixels));
     quiet(&*buffer);
     buffer.set_handler(TextBuffer {
-        lease: Some(drawn.lease),
+        lease: Some(lease),
         retired: false,
         destroyed: false,
     });
@@ -1238,6 +1476,12 @@ fn retire(current: &mut Option<Rc<WlBuffer>>, retired: &mut Vec<Rc<WlBuffer>>) {
     if let Some(old) = current.take() {
         retired.push(old);
     }
+    sweep(retired);
+}
+
+/// Every buffer of `retired` is not attached any more: those the
+/// compositor has released are destroyed, the rest when it does.
+fn sweep(retired: &mut Vec<Rc<WlBuffer>>) {
     retired.retain(|buffer| {
         let Ok(mut h) = buffer.try_get_handler_mut::<TextBuffer>() else {
             return false;
@@ -1290,7 +1534,8 @@ impl TextParts {
             return false;
         };
         let (width, height, offset) = (drawn.width, drawn.height, drawn.offset);
-        let buffer = memfd_buffer(&self.pool, drawn, offset);
+        let pixels = self.text.pixels();
+        let buffer = memfd_buffer(&self.pool, (width, height), offset, drawn.lease, pixels);
         attach_whole(&self.surface, &buffer, width, height);
         retire(&mut self.current, &mut self.retired);
         self.current = Some(buffer);
@@ -1321,11 +1566,17 @@ impl TextParts {
     /// included); committed (cached) when that changed what it shows. Its
     /// place is the strip's state, applied with the strip.
     fn fit(&mut self, x: i32, room: i32) {
+        let shown = text_shown(room, self.text.width());
+        self.place(x, shown);
+    }
+
+    /// Put the line's image at `x` on the strip, `shown` logical pixels of
+    /// it (the tag's: as much of it as the row has room for).
+    fn place(&mut self, x: i32, shown: i32) {
         if x != self.x {
             self.sub.send_set_position(x, 0);
             self.x = x;
         }
-        let shown = text_shown(room, self.text.width());
         if shown == self.shown && (shown <= 0 || self.drawn.is_some()) {
             return;
         }
@@ -1354,7 +1605,8 @@ impl TextParts {
     }
 }
 
-/// The buttons on a title strip (§5.11): the row of [`LOOK`] at the scale
+/// The buttons on a title strip (§5.11): the row of the launch's look
+/// (`Text::look`) at the scale
 /// the compositor prefers, in the image of the state it is in — at rest, a
 /// button under the pointer, a button pressed. Another state is another
 /// buffer of the same region of the memfd, drawn once for the scale; the
@@ -1386,9 +1638,15 @@ impl ButtonParts {
         };
         let (width, height) = (drawn.width, drawn.height);
         let image = width.saturating_mul(height).saturating_mul(4);
-        let variant = i32::try_from(LOOK.buttons.variant(self.lit)).unwrap_or(0);
+        let variant = i32::try_from(self.text.look().buttons.variant(self.lit)).unwrap_or(0);
         let offset = drawn.offset.saturating_add(image.saturating_mul(variant));
-        let buffer = memfd_buffer(&self.pool, drawn, offset);
+        let buffer = memfd_buffer(
+            &self.pool,
+            (width, height),
+            offset,
+            drawn.lease,
+            Pixels::Opaque,
+        );
         attach_whole(&self.surface, &buffer, width, height);
         retire(&mut self.current, &mut self.retired);
         self.current = Some(buffer);
@@ -1449,6 +1707,120 @@ impl ButtonParts {
     }
 }
 
+/// The window's round corners (`Look::corners`): four subsurfaces of the
+/// program's root over the corners of its content ([`corner_rects`]), each
+/// a buffer of the region of the title's memfd that holds the four at the
+/// scale — the title's colour where the window's corner is cut off, clear
+/// inside the quarter circle —, the viewport giving it its logical size.
+/// Synchronized, like the strips: their place and size go with the
+/// program's commit; a new scale shows at once (desync, commit, sync).
+struct CornerParts {
+    text: Rc<Text>,
+    pool: Rc<WlShmPool>,
+    /// Top left, top right, bottom left, bottom right.
+    pieces: Vec<Strip>,
+    /// Their own scale, when the window has no text to take it from.
+    fraction: Option<Rc<WpFractionalScaleV1>>,
+    /// The scale asked for (120ths).
+    scale: u32,
+    /// The side they are laid at, logical pixels; `None`: not laid (a
+    /// window too small for them).
+    laid: Option<i32>,
+    /// The buffers attached, one a corner; none before the first layout.
+    current: Vec<Rc<WlBuffer>>,
+    retired: Vec<Rc<WlBuffer>>,
+}
+
+impl CornerParts {
+    /// Attach the four at `self.scale` and commit each (cached: the root's
+    /// commit applies them). False when there is nothing to draw them in.
+    fn draw(&mut self) -> bool {
+        let Some(drawn) = self.text.corners_at(self.scale) else {
+            return false;
+        };
+        let (width, height) = (drawn.width, drawn.height);
+        let image = width.saturating_mul(height).saturating_mul(4);
+        let old = std::mem::take(&mut self.current);
+        for (corner, piece) in (0i32..).zip(&self.pieces) {
+            let offset = drawn.offset.saturating_add(image.saturating_mul(corner));
+            let buffer = memfd_buffer(
+                &self.pool,
+                (width, height),
+                offset,
+                drawn.lease.another(),
+                Pixels::Alpha,
+            );
+            attach_whole(&piece.surface, &buffer, width, height);
+            piece.surface.send_commit();
+            self.current.push(buffer);
+        }
+        self.retired.extend(old);
+        sweep(&mut self.retired);
+        true
+    }
+
+    /// Lay them over the corners of `g` at `radius` (cached, applied with
+    /// the program's commit), drawn the first time; a window too small for
+    /// them has none.
+    fn lay(&mut self, g: Rect, radius: i32) {
+        let Some(rects) = corner_rects(g, radius) else {
+            if !self.current.is_empty() {
+                for piece in &self.pieces {
+                    piece.surface.send_attach(None, 0, 0);
+                    piece.surface.send_commit();
+                }
+                self.retired.append(&mut self.current);
+                sweep(&mut self.retired);
+            }
+            self.laid = None;
+            return;
+        };
+        for (piece, r) in self.pieces.iter().zip(rects) {
+            piece.sub.send_set_position(r.x, r.y);
+            piece.viewport.send_set_destination(r.w, r.h);
+            piece.surface.send_commit();
+        }
+        self.laid = Some(rects[0].w);
+        if self.current.is_empty() {
+            self.draw();
+        }
+    }
+
+    /// Drawn anew at `scale` when they are laid. Whether they were.
+    fn rescale(&mut self, scale: u32) -> bool {
+        if self.scale == scale && (self.laid.is_none() || !self.current.is_empty()) {
+            return false;
+        }
+        self.scale = scale;
+        self.laid.is_some() && self.draw()
+    }
+
+    /// Show what is pending of them now, as `TitleParts::apply_now` the
+    /// title: each desynchronized for its own commit, and synchronized
+    /// again at once.
+    fn apply_now(&self) {
+        for piece in &self.pieces {
+            piece.sub.send_set_desync();
+            piece.surface.send_commit();
+            piece.sub.send_set_sync();
+        }
+    }
+
+    fn destroy(mut self) {
+        if let Some(fraction) = &self.fraction {
+            fraction.send_destroy();
+        }
+        for piece in &self.pieces {
+            piece.viewport.send_destroy();
+            piece.sub.send_destroy();
+            piece.surface.send_destroy();
+        }
+        let mut all = std::mem::take(&mut self.current);
+        all.append(&mut self.retired);
+        destroy_buffers(None, all);
+    }
+}
+
 /// One xdg_surface of the program, toplevel or not. Weak references to the
 /// program's objects: their handlers hold this, and a cycle would keep a
 /// closed window's objects for the connection's life.
@@ -1460,7 +1832,10 @@ struct Window {
     toplevel: Option<Weak<XdgToplevel>>,
     /// The launch's title mode.
     mode: TitleMode,
-    /// Decided once, when the proxy knows whether it can draw.
+    /// The launch's look.
+    look: Look,
+    /// Decided once, when the proxy knows whether it can draw: whether the
+    /// window has a frame (a border, or in the tag look the tag alone).
     bordered: Option<bool>,
     /// The program's geometry, and what the compositor was last told.
     geometry: Option<Rect>,
@@ -1469,8 +1844,11 @@ struct Window {
     sent_min: Option<(i32, i32)>,
     max: Option<(i32, i32)>,
     sent_max: Option<(i32, i32)>,
+    /// The border's strips, four a ring (none in the tag look: the frame
+    /// has been made all the same).
     strips: Option<Vec<Strip>>,
     title: Option<TitleParts>,
+    corners: Option<CornerParts>,
     /// Counted among the connection's framed windows while it has strips.
     counted: Option<Framed>,
     /// Fullscreen, as of the configure the program acked last: its next
@@ -1497,6 +1875,7 @@ impl Window {
         root: &Rc<WlSurface>,
         me: Weak<RefCell<Window>>,
         mode: TitleMode,
+        look: Look,
     ) -> Self {
         Self {
             me,
@@ -1504,6 +1883,7 @@ impl Window {
             root: Rc::downgrade(root),
             toplevel: None,
             mode,
+            look,
             bordered: None,
             geometry: None,
             sent_geometry: None,
@@ -1513,6 +1893,7 @@ impl Window {
             sent_max: None,
             strips: None,
             title: None,
+            corners: None,
             counted: None,
             fullscreen: false,
             next_fullscreen: false,
@@ -1523,33 +1904,34 @@ impl Window {
         }
     }
 
-    /// The border's width for this window now: 0 for anything but a
-    /// toplevel, and until the proxy knows whether it can draw.
-    fn border(&mut self, f: &Frames) -> i32 {
+    /// Whether this window has a frame now: not anything but a toplevel,
+    /// nor until the proxy knows whether it can draw.
+    fn framed(&mut self, f: &Frames) -> bool {
         if self.toplevel.is_none() {
-            return 0;
+            return false;
         }
         if self.bordered.is_none() && f.own.borrow().complete {
             self.bordered = Some(f.can_draw());
         }
-        if self.bordered == Some(true) {
-            f.width
-        } else {
-            0
-        }
+        self.bordered == Some(true)
     }
 
     /// What the frame takes of the window in a state `fullscreen` or not:
-    /// the border, and the title strip when it takes room — always, not
-    /// in fullscreen.
+    /// the border (none in the tag look), and the title strip — or the tag's
+    /// row — when it takes room: always, not in fullscreen.
     fn insets(&mut self, f: &Frames, fullscreen: bool) -> Insets {
-        let border = self.border(f);
-        let title = if border > 0 && self.mode == TitleMode::Always && !fullscreen {
+        if !self.framed(f) {
+            return Insets::default();
+        }
+        let title = if self.mode == TitleMode::Always && !fullscreen {
             TITLE_HEIGHT
         } else {
             0
         };
-        Insets { border, title }
+        Insets {
+            border: f.border_width(),
+            title,
+        }
     }
 
     /// The insets of the state the program's next commit is of.
@@ -1597,7 +1979,7 @@ impl Window {
                 }
             }
         }
-        if i.border <= 0 {
+        if !self.framed(f) {
             return;
         }
         if self.strips.is_none() {
@@ -1623,20 +2005,58 @@ impl Window {
         // out of fullscreen before the program acks that
         // ([`Self::title_wanted`]).
         let over = self.mode != TitleMode::Off;
-        let strip = title_strip(area, i, over);
+        let strip = if self.look.tag() {
+            tag_row(area, i, over)
+        } else {
+            title_strip(area, i, over)
+        };
         if self.laid == Some((area, i, strip)) {
             // Nothing moves; whether the strip shows may still change (the
             // program acked fullscreen, or its end).
             self.show_title(false);
             return;
         }
-        for (s, r) in strips.iter().zip(self::strips(area, i)) {
+        let widths: Vec<i32> = self
+            .look
+            .rings(i.border)
+            .into_iter()
+            .map(|(w, _)| w)
+            .collect();
+        for (s, r) in strips.iter().zip(ring_strips(area, i, &widths)) {
             s.sub.send_set_position(r.x, r.y);
             s.viewport.send_set_destination(r.w, r.h);
             s.surface.send_commit();
         }
         self.laid = Some((area, i, strip));
         self.lay_title(f, root, top, strip);
+        self.lay_corners(f, root, top, area);
+    }
+
+    /// The round corners over `area`'s, before the program's commit: made
+    /// the first time, after the title (so, under it).
+    fn lay_corners(
+        &mut self,
+        f: &Rc<Frames>,
+        root: &Rc<WlSurface>,
+        top: &Rc<WlSurface>,
+        area: Rect,
+    ) {
+        let radius = self.look.corners();
+        if radius <= 0 {
+            return;
+        }
+        if self.corners.is_none() {
+            // Their own scale only when there is no text to take it from.
+            let fractional = self
+                .title
+                .as_ref()
+                .and_then(|t| t.text.as_ref())
+                .is_some_and(|text| text.fraction.is_some());
+            self.corners = f.make_corners(root, top, &self.me, !fractional);
+        }
+        if let Some(corners) = &mut self.corners {
+            corners.lay(area, radius);
+        }
     }
 
     /// Whether the title strip shows now: it is laid somewhere; in mode
@@ -1700,48 +2120,67 @@ impl Window {
         if t.shown != want {
             t.show(want);
         }
-        // The buttons at the look's end when there is room for them, the
-        // text in what is left.
-        let layout = title_layout(r.w, &LOOK.buttons);
-        if let Some(buttons) = &mut t.buttons {
-            buttons.fit(layout.buttons);
-        }
-        if let Some(text) = &mut t.text {
-            text.fit(layout.text_x, layout.room);
+        let row = self.look.buttons.width_all();
+        let tag = t.text.as_ref().and_then(|text| text.text.tag());
+        if let Some(tag) = tag {
+            // The tag at the row's left end, as much of it as the row has
+            // room for; its buttons on it where they fit whole.
+            if let Some(buttons) = &mut t.buttons {
+                buttons.fit(tag.buttons.filter(|&x| x.saturating_add(row) <= r.w));
+            }
+            if let Some(text) = &mut t.text {
+                text.place(0, tag.width.min(r.w).max(0));
+            }
+        } else {
+            // The buttons at the look's end when there is room for them,
+            // the text in what is left.
+            let layout = title_layout(r.w, &self.look.buttons);
+            if let Some(buttons) = &mut t.buttons {
+                buttons.fit(layout.buttons);
+            }
+            if let Some(text) = &mut t.text {
+                text.fit(layout.text_x, layout.room);
+            }
         }
         t.surface.send_commit();
     }
 
-    /// The compositor prefers `scale` (120ths) for the title's text: it and
-    /// the buttons beside it are drawn at it, and shown now.
+    /// The compositor prefers `scale` (120ths) for the title's text: it,
+    /// the buttons beside it and the round corners are drawn at it, and
+    /// shown now.
     fn rescale(&mut self, scale: u32) {
         let scale = crate::wl_title::clamp_scale(scale);
-        let Some(t) = &mut self.title else {
-            return;
-        };
-        let mut drawn = false;
-        if let Some(text) = &mut t.text {
-            if text.scale != scale || text.drawn.is_none() {
-                text.scale = scale;
-                drawn |= text.shown > 0 && text.draw();
+        if let Some(t) = &mut self.title {
+            let mut drawn = false;
+            if let Some(text) = &mut t.text {
+                if text.scale != scale || text.drawn.is_none() {
+                    text.scale = scale;
+                    drawn |= text.shown > 0 && text.draw();
+                }
+            }
+            if let Some(buttons) = &mut t.buttons {
+                drawn |= buttons.rescale(scale);
+            }
+            if drawn {
+                t.apply_now();
             }
         }
-        if let Some(buttons) = &mut t.buttons {
-            drawn |= buttons.rescale(scale);
-        }
-        if drawn {
-            t.apply_now();
+        if let Some(corners) = &mut self.corners {
+            if corners.rescale(scale) {
+                corners.apply_now();
+            }
         }
     }
 
-    /// `wl_surface.preferred_buffer_scale` of the text: its scale where the
-    /// compositor offers no fractional one.
+    /// `wl_surface.preferred_buffer_scale` of the text (or the corners): its
+    /// scale where the compositor offers no fractional one.
     fn integer_scale(&mut self, factor: i32) {
         let fractional = self
             .title
             .as_ref()
             .and_then(|t| t.text.as_ref())
-            .is_some_and(|text| text.fraction.is_some());
+            .is_some_and(|text| text.fraction.is_some())
+            || self.corners.as_ref().is_some_and(|c| c.fraction.is_some());
         if !fractional {
             self.rescale(u32::try_from(factor.clamp(1, 4)).unwrap_or(1) * 120);
         }
@@ -1767,21 +2206,33 @@ impl Window {
     }
 
     /// What a point (`x`, `y`, surface-local) on the frame's `part` is for
-    /// ([`Hit`]): the title moves the window, the border resizes it, a
-    /// button is a button of the look's row — and nothing while the
-    /// compositor has the window fullscreen (there is nothing to move it
-    /// to), nor before the frame is laid out.
+    /// ([`Hit`]): the title (or the tag) moves the window, the border — any
+    /// ring of it — resizes it, a button is a button of the look's row; a
+    /// round corner nothing (it takes no input anyway) — and nothing while
+    /// the compositor has the window fullscreen (there is nothing to move
+    /// it to), nor before the frame is laid out.
     fn hit(&self, part: Part, x: f64, y: f64) -> Hit {
         let Some((area, i, _)) = self.laid else {
             return Hit::Nothing;
         };
         match part {
-            Part::Buttons => LOOK.buttons.at(x, y).map_or(Hit::Nothing, Hit::Button),
+            Part::Buttons => self.look.buttons.at(x, y).map_or(Hit::Nothing, Hit::Button),
+            Part::Corner => Hit::Nothing,
             _ if self.next_fullscreen => Hit::Nothing,
             Part::Title | Part::Text => Hit::Title,
-            Part::Border(side) => {
-                let strip = strips(area, i)[side.index()];
-                Hit::Edge(edges(side, strip, i.border, x, y))
+            Part::Border(side, ring) => {
+                let widths: Vec<i32> = self
+                    .look
+                    .rings(i.border)
+                    .into_iter()
+                    .map(|(w, _)| w)
+                    .collect();
+                let Some(&strip) = ring_strips(area, i, &widths).get(ring * 4 + side.index())
+                else {
+                    return Hit::Nothing;
+                };
+                let outer = strips(area, i)[side.index()];
+                Hit::Edge(ring_edges(side, strip, outer, i.border, x, y))
             }
         }
     }
@@ -1851,14 +2302,19 @@ impl Window {
         }
     }
 
-    /// Put the strips and the title on top of the root's stack again, above
-    /// `top`.
+    /// Put the strips, the title and the round corners on top of the root's
+    /// stack again, above `top`. Each goes right above `top`, so the last
+    /// placed is the lowest of them: the corners under the title — a hover
+    /// strip lies over the top corners.
     fn raise(&self, top: &Rc<WlSurface>) {
         for strip in self.strips.iter().flatten() {
             strip.sub.send_place_above(top);
         }
         if let Some(t) = &self.title {
             t.sub.send_place_above(top);
+        }
+        for piece in self.corners.iter().flat_map(|c| &c.pieces) {
+            piece.sub.send_place_above(top);
         }
     }
 
@@ -1873,6 +2329,9 @@ impl Window {
         }
         if let Some(t) = self.title.take() {
             t.destroy();
+        }
+        if let Some(corners) = self.corners.take() {
+            corners.destroy();
         }
         self.counted = None;
         self.laid = None;
@@ -2176,8 +2635,9 @@ impl XdgWmBaseHandler for WmBase {
         slf.send_get_xdg_surface(id, surface);
         // Only a surface whose commits pass here can have its geometry kept
         // for its commit; any other (none should be) is passed on as it is.
-        let mode = self.f.mode;
-        let window = Rc::new_cyclic(|me| RefCell::new(Window::new(id, surface, me.clone(), mode)));
+        let (mode, look) = (self.f.mode, self.f.look);
+        let window =
+            Rc::new_cyclic(|me| RefCell::new(Window::new(id, surface, me.clone(), mode, look)));
         let attached = match surface.try_get_handler_mut::<Surface>() {
             Ok(mut h) => {
                 h.window = Some(window.clone());
@@ -2866,9 +3326,12 @@ enum Spot {
 fn spot(surface: &Rc<WlSurface>) -> Option<(Rc<RefCell<Window>>, Spot)> {
     if let Ok(own) = surface.try_get_handler_ref::<Mine>() {
         let spot = match own.part {
-            Part::Border(Side::Top) => Spot::Top,
-            Part::Border(_) => Spot::Side,
+            Part::Border(Side::Top, _) => Spot::Top,
+            Part::Border(..) => Spot::Side,
             Part::Title | Part::Text | Part::Buttons => Spot::Top,
+            // Never entered (no input region): as a side, it changes
+            // nothing of a hover strip.
+            Part::Corner => Spot::Side,
         };
         return own.window.upgrade().map(|w| (w, spot));
     }
@@ -3573,6 +4036,7 @@ impl WlDataDeviceHandler for DataDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wl_title::LOOK;
 
     const R: Rect = Rect {
         x: 26,
@@ -3997,5 +4461,252 @@ mod tests {
             asks.push(Ask::Menu);
         }
         assert_eq!(asks.take().len(), MAX_ASKS);
+    }
+
+    /// Each look's buttons at its end of the strip, its margin between them
+    /// and the end, the text in the rest with its pads; macOS's at the left,
+    /// the text after them. Where the pointer finds a button is the look's
+    /// cell there.
+    #[test]
+    fn each_look_lays_its_buttons_out_at_its_end() {
+        use crate::frame::ButtonStyle;
+        use crate::wl_title::buttons_look;
+        let w = 640;
+        for style in ButtonStyle::ALL {
+            let look = buttons_look(style);
+            let row = look.width_all();
+            let layout = title_layout(w, &look);
+            if row == 0 {
+                assert_eq!(layout.buttons, None, "{style:?}");
+                assert_eq!((layout.text_x, layout.room), (TITLE_PAD, w));
+                continue;
+            }
+            let at = layout.buttons.unwrap();
+            match look.end {
+                End::Right => {
+                    assert_eq!(at + row + look.margin, w, "{style:?}: at the right end");
+                    assert_eq!(layout.text_x, TITLE_PAD);
+                    // The text stops a pad before the buttons.
+                    let shown = text_shown(layout.room, 1000);
+                    assert_eq!(layout.text_x + shown + TITLE_PAD, at, "{style:?}");
+                }
+                End::Left => {
+                    assert_eq!(style, ButtonStyle::Macos);
+                    assert_eq!(at, look.margin, "at the left end");
+                    assert_eq!(layout.text_x, look.margin + row + TITLE_PAD);
+                    assert_eq!(layout.text_x + text_shown(layout.room, 1000) + TITLE_PAD, w);
+                }
+            }
+            // A point of the strip on the row's surface: the look's cell,
+            // close where the look has it.
+            let on_row = |strip_x: f64| look.at(strip_x - f64::from(at), 10.0);
+            let close = look
+                .order
+                .iter()
+                .position(|b| b.button == Button::Close)
+                .unwrap();
+            let middle = f64::from(at) + f64::from(look.width) * (close as f64 + 0.5);
+            assert_eq!(on_row(middle), Some(Button::Close), "{style:?}");
+            assert_eq!(on_row(f64::from(at) - 0.5), None, "{style:?}: the strip's");
+            assert_eq!(on_row(f64::from(at + row)), None, "{style:?}: the strip's");
+            if style == ButtonStyle::Macos {
+                assert_eq!(close, 0, "close first, at the left");
+            } else {
+                assert_eq!(close, 2, "close last, at the right");
+            }
+            // Too narrow for the row, its margin and a little to drag by:
+            // none.
+            let least = row + look.margin + 2 * TITLE_PAD;
+            assert!(title_layout(least, &look).buttons.is_some());
+            assert_eq!(title_layout(least - 1, &look).buttons, None);
+        }
+    }
+
+    /// The soft border's rings: the outer one around the inner one around
+    /// the program and the title; together they tile the band exactly, each
+    /// ring's corners on the diagonal; one ring is the border of before.
+    #[test]
+    fn the_rings_of_a_border_tile_its_band() {
+        for i in [
+            B,
+            BT,
+            Insets {
+                border: 6,
+                title: 0,
+            },
+            Insets {
+                border: 5,
+                title: TITLE_HEIGHT,
+            },
+        ] {
+            // One ring: `strips` exactly — `full` keeps its pixels.
+            assert_eq!(ring_strips(R, i, &[i.border]), strips(R, i).to_vec());
+            let widths = [i.border / 2, i.border - i.border / 2];
+            let parts = ring_strips(R, i, &widths);
+            assert_eq!(parts.len(), 8);
+            let up = geometry_up(R, i);
+            let mut all = parts.clone();
+            all.extend(title_strip(R, i, false));
+            let area: i64 = all.iter().map(|r| r.w as i64 * r.h as i64).sum();
+            assert_eq!(
+                area,
+                up.w as i64 * up.h as i64 - R.w as i64 * R.h as i64,
+                "{i:?}"
+            );
+            let overlap = |a: &Rect, r: &Rect| {
+                a.x < r.x + r.w && a.x + a.w > r.x && a.y < r.y + r.h && a.y + a.h > r.y
+            };
+            for (n, r) in all.iter().enumerate() {
+                assert!(
+                    r.x >= up.x && r.y >= up.y && r.x + r.w <= up.x + up.w,
+                    "{r:?}"
+                );
+                assert!(!overlap(r, &R), "{r:?} over the program");
+                for other in &all[n + 1..] {
+                    assert!(!overlap(r, other), "{r:?} over {other:?}");
+                }
+            }
+            // The outer ring along the outside, the inner one hugging the
+            // program (and the title).
+            assert_eq!((parts[0].x, parts[0].y), (up.x, up.y));
+            assert_eq!(parts[0].h, widths[0]);
+            assert_eq!(parts[4].y + parts[4].h, R.y - i.title, "{i:?}");
+            assert_eq!(parts[6].x + parts[6].w, R.x);
+            // The top left corner: the outer ring's where either distance
+            // from the outside is within it — on the diagonal.
+            let inner_top = parts[4];
+            assert_eq!(inner_top.x, up.x + widths[0]);
+            assert_eq!(inner_top.y, up.y + widths[0]);
+        }
+    }
+
+    /// Any ring of a side resizes by that side's edge, and near a corner of
+    /// the window by both — measured on the whole border, whichever ring the
+    /// pointer is on.
+    #[test]
+    fn every_ring_of_the_border_resizes_as_the_border() {
+        let i = Insets {
+            border: 6,
+            title: TITLE_HEIGHT,
+        };
+        let parts = ring_strips(R, i, &[3, 3]);
+        let whole = strips(R, i);
+        for side in Side::ALL {
+            let outer = whole[side.index()];
+            for ring in 0..2 {
+                let strip = parts[ring * 4 + side.index()];
+                // The same point of the screen on either ring's strip.
+                let e = |x: f64, y: f64| ring_edges(side, strip, outer, i.border, x, y);
+                let middle = (f64::from(strip.w) / 2.0, f64::from(strip.h) / 2.0);
+                let own = edges(
+                    side,
+                    outer,
+                    i.border,
+                    f64::from(outer.w) / 2.0,
+                    f64::from(outer.h) / 2.0,
+                );
+                assert_eq!(e(middle.0, middle.1), own, "{side:?} ring {ring}");
+                // Its first pixel: a corner.
+                let first = e(0.5, 0.5);
+                assert_ne!(first, own, "{side:?} ring {ring}: no corner at its start");
+                assert_eq!(first & own, own);
+            }
+        }
+        // One ring: exactly `edges`.
+        let [top, _, left, _] = strips(R, BT);
+        assert_eq!(
+            ring_edges(Side::Top, top, top, 4, 3.0, 2.0),
+            EDGE_TOP | EDGE_LEFT
+        );
+        assert_eq!(ring_edges(Side::Left, left, left, 4, 1.0, 200.0), EDGE_LEFT);
+    }
+
+    /// The round corners: squares of the radius in the program's corners,
+    /// smaller on a small window, none on one too small.
+    #[test]
+    fn the_round_corners_lie_in_the_windows_corners() {
+        let [tl, tr, bl, br] = corner_rects(R, 12).unwrap();
+        assert_eq!(
+            tl,
+            Rect {
+                x: 26,
+                y: 23,
+                w: 12,
+                h: 12
+            }
+        );
+        assert_eq!(
+            tr,
+            Rect {
+                x: 26 + 640 - 12,
+                y: 23,
+                w: 12,
+                h: 12
+            }
+        );
+        assert_eq!(
+            bl,
+            Rect {
+                x: 26,
+                y: 23 + 480 - 12,
+                w: 12,
+                h: 12
+            }
+        );
+        assert_eq!(
+            br,
+            Rect {
+                x: 26 + 640 - 12,
+                y: 23 + 480 - 12,
+                w: 12,
+                h: 12
+            }
+        );
+        // Each inside the program's geometry, in its corner.
+        for r in [tl, tr, bl, br] {
+            assert!(r.x >= R.x && r.y >= R.y && r.x + r.w <= R.x + R.w && r.y + r.h <= R.y + R.h);
+        }
+        let small = Rect { w: 10, h: 30, ..R };
+        assert_eq!(
+            corner_rects(small, 12).unwrap()[3].w,
+            5,
+            "half the window at most"
+        );
+        assert_eq!(corner_rects(Rect { w: 1, ..R }, 12), None);
+        assert_eq!(corner_rects(R, 0), None);
+    }
+
+    /// The tag's row: the title's, but a frame without a border still lays
+    /// it over the content (hover); the title strip there needs a border.
+    #[test]
+    fn the_tags_row_is_there_without_a_border() {
+        let none = Insets::default();
+        assert_eq!(title_strip(R, none, true), None, "no frame, no strip");
+        assert_eq!(
+            tag_row(R, none, true),
+            Some(Rect {
+                x: 26,
+                y: 23,
+                w: 640,
+                h: TITLE_HEIGHT
+            })
+        );
+        assert_eq!(tag_row(R, none, false), None);
+        let room = Insets {
+            border: 0,
+            title: TITLE_HEIGHT,
+        };
+        assert_eq!(tag_row(R, room, false), title_strip(R, room, false));
+        assert_eq!(tag_row(R, room, true).unwrap().y, 23 - TITLE_HEIGHT);
+        // The tag look takes the row's height of the window and no border.
+        assert_eq!(
+            geometry_up(R, room),
+            Rect {
+                x: 26,
+                y: 3,
+                w: 640,
+                h: 500
+            }
+        );
     }
 }

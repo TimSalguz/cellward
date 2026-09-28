@@ -2291,3 +2291,152 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
         assert!(!home.run(bad).status.success(), "{bad:?}");
     }
 }
+
+#[test]
+fn the_frames_look_goes_to_the_launch_and_the_status() {
+    // docs/WINDOW-FRAME.md §8 «Вид рамки» (2026-09-28): the style, the
+    // buttons' look and the corners' radius, as the width and the title —
+    // Nix over the local setting over the default, in `status --json` with
+    // their source, and to the proxy in the launch's `--frame`, said only
+    // when one is not the default.
+    let home = Home::new("frame-look");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+    let colour = vpn_zone::frame::default_color("nl").hex()[1..].to_owned();
+
+    let json = stdout(&home.run(&["status", "--json"]));
+    for field in [
+        "\"frame_buttons\":{\"value\":\"cellward\",\"source\":\"default\"}",
+        "\"frame_style\":{\"value\":\"soft\",\"source\":\"default\"}",
+        "\"frame_radius\":{\"value\":0,\"source\":\"default\"}",
+    ] {
+        assert!(json.contains(field), "{field}: {json}");
+    }
+    let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+    assert!(
+        line.contains(&format!("--frame {colour}:4:always --frame-title")),
+        "{line}"
+    );
+
+    for (setting, value) in [("style", "tag"), ("buttons", "macos"), ("radius", "12")] {
+        let out = home.run(&["frame", setting, value]);
+        assert!(out.status.success(), "{setting}: {}", stderr(&out));
+    }
+    let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+    assert!(
+        line.contains(&format!("--frame {colour}:4:always:macos:tag:12 ")),
+        "{line}"
+    );
+    let json = stdout(&home.run(&["status", "--json"]));
+    for field in [
+        "\"frame_buttons\":{\"value\":\"macos\",\"source\":\"local\"}",
+        "\"frame_style\":{\"value\":\"tag\",\"source\":\"local\"}",
+        "\"frame_radius\":{\"value\":12,\"source\":\"local\"}",
+    ] {
+        assert!(json.contains(field), "{field}: {json}");
+    }
+    // The summary names them.
+    let summary = stdout(&home.run(&["frame"]));
+    assert!(
+        summary.contains("(tag)") && summary.contains("(macos)"),
+        "{summary}"
+    );
+
+    // Nix wins, and the command does not pretend to change what Nix set.
+    let declared = home.root.join("config/declared");
+    fs::create_dir_all(&declared).unwrap();
+    declare(&declared.join("frame-style"), "full");
+    declare(&declared.join("frame-buttons"), "windows");
+    declare(&declared.join("frame-radius"), "8");
+    let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+    assert!(
+        line.contains(&format!("--frame {colour}:4:always:windows:full:8 ")),
+        "{line}"
+    );
+    let json = stdout(&home.run(&["status", "--json"]));
+    for field in [
+        "\"frame_buttons\":{\"value\":\"windows\",\"source\":\"nix\"}",
+        "\"frame_style\":{\"value\":\"full\",\"source\":\"nix\"}",
+        "\"frame_radius\":{\"value\":8,\"source\":\"nix\"}",
+    ] {
+        assert!(json.contains(field), "{field}: {json}");
+    }
+    for change in [
+        &["frame", "style", "soft"][..],
+        &["frame", "buttons", "default"],
+        &["frame", "radius", "4"],
+    ] {
+        let out = home.run(change);
+        assert!(!out.status.success(), "{change:?}");
+        assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
+    }
+    for name in ["frame-style", "frame-buttons", "frame-radius"] {
+        fs::remove_file(declared.join(name)).unwrap();
+    }
+    // Back to the defaults: the launch's line as it was.
+    for setting in ["style", "buttons", "radius"] {
+        let out = home.run(&["frame", setting, "default"]);
+        assert!(out.status.success(), "{setting}: {}", stderr(&out));
+    }
+    let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+    assert!(
+        line.contains(&format!("--frame {colour}:4:always --frame-title")),
+        "{line}"
+    );
+
+    // Nonsense is refused.
+    for bad in [
+        &["frame", "style", "glass"][..],
+        &["frame", "style"],
+        &["frame", "buttons", "beos"],
+        &["frame", "radius", "17"],
+        &["frame", "radius", "-1"],
+        &["frame", "radius", "round"],
+    ] {
+        assert!(!home.run(bad).status.success(), "{bad:?}");
+    }
+}
+
+#[test]
+fn the_tray_badge_is_a_setting_nix_wins() {
+    let home = Home::new("tray-badge");
+    let out = home.run(&["tray"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("(dot)"), "{}", stdout(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"tray_badge\":{\"value\":\"dot\",\"source\":\"default\"}"),
+        "{json}"
+    );
+    let out = home.run(&["tray", "badge", "bar"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"tray_badge\":{\"value\":\"bar\",\"source\":\"local\"}"),
+        "{json}"
+    );
+    for bad in [&["tray", "badge", "number"][..], &["tray", "colour"]] {
+        assert!(!home.run(bad).status.success(), "{bad:?}");
+    }
+    // Nix wins, and the command does not pretend to change what Nix set.
+    let declared = home.root.join("config/declared");
+    fs::create_dir_all(&declared).unwrap();
+    declare(&declared.join("tray-badge"), "off");
+    let out = home.run(&["tray", "badge", "dot"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"tray_badge\":{\"value\":\"off\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    fs::remove_file(declared.join("tray-badge")).unwrap();
+    let out = home.run(&["tray", "badge", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"tray_badge\":{\"value\":\"dot\",\"source\":\"default\"}"),
+        "{json}"
+    );
+}

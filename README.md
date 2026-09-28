@@ -482,7 +482,7 @@ unknown. Nothing trusts the window's title; the bar line escapes markup.
 **The zone's frame.** Windows of a program in a zone come with a frame the
 Wayland proxy draws inside the window: a border of the zone's (or the
 container's) colour and a title strip with `<zone> · <container>`
-(`cellward frame show|hide|width|color|title`). At the right end of the strip
+(`cellward frame show|hide|width|color|title|style|buttons|radius`). At the right end of the strip
 three buttons: **≡** opens the window menu of that very launch (`cellward
 window-menu --pid`), **⇄** switches the container's network live — its
 programs run on, their connections are broken (for the main home or a
@@ -491,6 +491,30 @@ network chosen) —, **×** closes the window as its own close button would. Dra
 the strip to move the window, its border or corners to resize it; the button
 under the pointer lights up. The frame is a reminder, not a boundary a
 program cannot fake: the panel's `cellward focused` is the one it cannot.
+
+**The tray icon's mark.** A tray icon of a program in a hermetic zone gets the
+zone's (or the container's) colour on it: a dot in the lower right corner, a
+bar along the bottom, or nothing (`cellward tray badge dot|bar|off`,
+`programs.cellward.tray.badge`); its tooltip gets `<zone> · <container>` as a
+line of its own. The zone's bus filter draws it on the picture the program
+answers the tray with, so it needs no support from the tray; an icon given by
+its name in the theme gets the mark as an overlay, which not every tray
+shows. Like the frame, a reminder: the program cannot take the mark off, but
+it can paint another one into its own picture.
+
+Its look is yours to choose, for programs started after the change (and in
+Nix: `programs.cellward.frame.style`, `.buttons`, `.radius`):
+
+```sh
+cellward frame style soft|full|tag    # soft (default): the zone's hue, calmer, the border in
+                                      # two tones; full: the zone's colour itself; tag: no
+                                      # border, a small tab at the top left instead
+cellward frame buttons cellward|gnome|kde|macos|windows|none
+                                      # the buttons' look: square cells (default), GNOME's,
+                                      # KDE's, macOS's traffic lights at the left, Windows's
+cellward frame radius 10              # round the window's corners inside the frame (0-16)
+cellward frame                        # what is set now, and where from
+```
 
 **The focus.** A program asks the compositor for the focus with
 `xdg_activation_v1`, and the Wayland proxy of a zone sees every such request:

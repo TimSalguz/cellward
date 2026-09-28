@@ -140,6 +140,14 @@ let
                   return found
           return None
 
+      # The zone's frame in the checks below is the `full` style
+      # (rust/src/wl_title.rs, Look): the zone's colour itself, one colour to
+      # the border's edges — the pixels stages 2 and 3 were checked by. The
+      # default since 2026-09-28 is `soft`, two calmer tones;
+      # tests/vm-window-looks.py shows it next to this one, and the other
+      # looks. Read at launch, like the width.
+      alice("cellward frame style full")
+
       # The hotkey menu (docs/WINDOW-FRAME.md §7б): a program in a zone opens a
       # window; `focused` finds its launch through the compositor's IPC — the
       # pid of the window, up its parents to the registry —, and `window-menu`
@@ -458,6 +466,11 @@ let
           machine.succeed(f"kill -TERM {sup}")
           machine.wait_until_fails(f"test -e /proc/{daemon}", timeout=30)
           machine.wait_until_fails(f"test -e /proc/{sup}", timeout=30)
+
+      # The frame's looks (docs/WINDOW-FRAME.md §8, «Вид рамки»): the soft
+      # style next to the full one, round corners, the tag, and each look of
+      # the buttons — a screenshot of each in the output.
+      exec(open("${./vm-window-looks.py}").read())
     '';
   };
 in

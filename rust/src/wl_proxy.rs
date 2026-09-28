@@ -85,7 +85,7 @@
 //!
 //! **The zone's border** (stage 2, `crate::wl_frame`). With a frame the proxy
 //! draws a border of the zone's colour around every toplevel: the colour is
-//! one pixel in a sealed memfd made before the filter is loaded ([`pixel`])
+//! one pixel in a sealed memfd made before the filter is loaded ([`pixels`])
 //! — the filter still has no `memfd_create`, and the proxy never maps it —,
 //! handed to the compositor with each connection's `wl_shm`. The supervisor
 //! answers each connection with the border or without ([`UPSTREAM`],
@@ -112,6 +112,13 @@
 //! title's memfd, and the bytes are `sendmsg` on the channel. The program
 //! has no way to that channel, nor to the events that make the proxy send
 //! them.
+//!
+//! **The look** (2026-09-28, `crate::wl_title::Look`): the style, the
+//! buttons' look and the round corners, from the launch's `--frame`. The
+//! colours' memfd holds a square of each colour the look shows (the soft
+//! style's two tones, the tag's clear one; `full`'s is stage 2's one
+//! pixel); the round corners are drawn into the title's memfd, which is made
+//! for them even with the title off. The filter is as it was.
 //!
 //! **The focus** (2026-09-27, `crate::wl_focus`): the launch's container
 //! says what becomes of a program's asking for the focus
@@ -148,11 +155,11 @@ use wl_proxy::protocols::xdg_shell::xdg_wm_base::{XdgWmBase, XdgWmBaseHandler};
 use wl_proxy::protocols::ObjectInterface;
 use wl_proxy::state::{State, StateHandler};
 
-use crate::frame::{Frame, Rgb, Setup, TitleMode};
+use crate::frame::{Frame, Setup, TitleMode};
 use crate::sys;
 use crate::wl_focus::{Focus, FocusPolicy};
 use crate::wl_frame::{Ask, Asks, Frames, MAX_FRAMED};
-use crate::wl_title::{Prepared, Text, LOOK};
+use crate::wl_title::{Look, Prepared, Square, Text};
 
 /// The proxy's process name (`/proc/<pid>/comm`, 15 bytes at most).
 pub const PROCESS_NAME: &str = "vz-wl-proxy";
@@ -462,13 +469,17 @@ pub fn start(
     let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
     let listener = zone_listener.try_clone().map_err(|e| format!("dup: {e}"))?;
     // The font, read here: the proxy opens nothing. Only when there is a
-    // title to draw.
-    let drawing = frame.as_ref().map(|setup| Drawing {
-        frame: setup.frame,
-        font: (setup.frame.title != TitleMode::Off && !setup.title.is_empty())
-            .then(read_font)
-            .flatten(),
-        title: setup.title.clone(),
+    // title to draw — or round corners, whose pixels go where the title's
+    // do (`prepare_border`).
+    let drawing = frame.as_ref().map(|setup| {
+        let wanted = setup.frame.title != TitleMode::Off || Look::of(&setup.frame).corners() > 0;
+        Drawing {
+            frame: setup.frame,
+            font: (wanted && !setup.title.is_empty())
+                .then(read_font)
+                .flatten(),
+            title: setup.title.clone(),
+        }
     });
     // SAFETY: getpid takes nothing and cannot fail.
     let supervisor = unsafe { libc::getpid() };
@@ -1226,21 +1237,30 @@ fn child(
 }
 
 /// The zone's frame as the proxy draws it: the border's width and the
-/// colour's one pixel ([`pixel`]); the title's mode and, when there is a font
-/// to draw it with, its text ([`title_memfd`]).
+/// colours' pixels ([`pixels`]: the zone's colour, its tones, a clear one);
+/// the title's mode and, when there is a font to draw it with, its text
+/// ([`title_memfd`]); the look (2026-09-28: the style, the buttons, the
+/// round corners — `crate::wl_title::Look`).
 pub(crate) struct Border {
     pub width: i32,
     pub pixel: Rc<OwnedFd>,
+    /// What each square of `pixel` is, in its order.
+    pub squares: Vec<Square>,
     pub title: TitleMode,
     pub text: Option<Rc<Text>>,
+    pub look: Look,
 }
 
 /// Everything of the frame that has to be made before the filter: the
-/// pixel, and the title's line and memfd. `None` when the pixel cannot be
-/// made (no frame then, and it is said); a title that cannot be made is a
-/// strip without its text.
+/// pixels, and the title's line and memfd — which holds the round corners'
+/// pixels too, so it is made for them even with the title off. `None` when
+/// the pixels cannot be made (no frame then, and it is said); a title that
+/// cannot be made is a strip without its text (and without buttons and
+/// round corners).
 fn prepare_border(drawing: Drawing) -> Option<Border> {
-    let pixel = match pixel(drawing.frame.color) {
+    let look = Look::of(&drawing.frame);
+    let squares = look.squares(drawing.frame.color);
+    let pixel = match pixels(&squares) {
         Ok(fd) => fd,
         Err(e) => {
             eprintln!("wl-sandbox: cannot make the border's colour ({e}) — windows go without it");
@@ -1249,12 +1269,12 @@ fn prepare_border(drawing: Drawing) -> Option<Border> {
     };
     let text = drawing
         .font
-        .filter(|_| drawing.frame.title != TitleMode::Off)
-        .and_then(|font| Prepared::new(font, &drawing.title))
+        .filter(|_| drawing.frame.title != TitleMode::Off || look.corners() > 0)
+        .and_then(|font| Prepared::with_look(font, &drawing.title, look))
         .and_then(|prepared| match title_memfd(prepared.memfd_size()) {
             Ok((memfd, writer)) => Some(Rc::new(Text::new(
                 prepared,
-                drawing.frame.color,
+                look.title_color(drawing.frame.color),
                 memfd,
                 writer,
             ))),
@@ -1266,13 +1286,15 @@ fn prepare_border(drawing: Drawing) -> Option<Border> {
     Some(Border {
         width: drawing.frame.width,
         pixel: Rc::new(pixel),
+        squares,
         title: drawing.frame.title,
         text,
+        look,
     })
 }
 
 /// The title's pixels for the compositor (`crate::wl_title`): a memfd of
-/// `size` bytes, sealed against shrinking and growing like [`pixel`]'s, and a
+/// `size` bytes, sealed against shrinking and growing like [`pixels`]', and a
 /// second descriptor of it the proxy writes with (`pwrite` — the filter has
 /// no `fcntl(F_DUPFD)` to make one later). Never mapped here.
 fn title_memfd(size: usize) -> io::Result<(OwnedFd, OwnedFd)> {
@@ -1281,23 +1303,29 @@ fn title_memfd(size: usize) -> io::Result<(OwnedFd, OwnedFd)> {
     Ok((fd, writer))
 }
 
-/// The border's colour for the compositor: a 3×3 square of XRGB8888 pixels
-/// (`wl_frame::PIXEL_SIDE`: the strips show its middle one) in a memfd,
-/// sealed against shrinking (a compositor maps it; a pool that shrank under
-/// it would be a SIGBUS there) and growing, and the seals themselves sealed.
-/// Not against writing: libwayland-server maps a pool writable, and a write
-/// seal would make the compositor refuse it. Nobody but the proxy and the
-/// compositor ever has it. Made before the filter is loaded — the filter has
-/// no `memfd_create` — and never mapped here: written with `write`.
-fn pixel(color: Rgb) -> io::Result<OwnedFd> {
-    let bytes = LOOK
-        .pixels
-        .word(color)
-        .repeat((crate::wl_frame::PIXEL_BYTES / 4) as usize);
+/// The border's colours for the compositor: a 3×3 square of pixels
+/// (`wl_frame::PIXEL_SIDE`: the strips show its middle one) of each of
+/// `squares`, one after the other — `full`'s one square is stage 2's pixel,
+/// byte for byte —, in a memfd, sealed against shrinking (a compositor maps
+/// it; a pool that shrank under it would be a SIGBUS there) and growing,
+/// and the seals themselves sealed. Not against writing: libwayland-server
+/// maps a pool writable, and a write seal would make the compositor refuse
+/// it. Nobody but the proxy and the compositor ever has it. Made before the
+/// filter is loaded — the filter has no `memfd_create` — and never mapped
+/// here: written with `write`, never again (`pwrite64` is not allowed on it).
+fn pixels(squares: &[Square]) -> io::Result<OwnedFd> {
+    let per = (crate::wl_frame::PIXEL_BYTES / 4) as usize;
+    let bytes: Vec<u8> = squares.iter().flat_map(|s| s.word().repeat(per)).collect();
     sealed_memfd(c"vz-frame", &bytes, bytes.len())
 }
 
-/// A memfd of `size` bytes beginning with `bytes`, sealed as [`pixel`] says.
+/// One colour's square, as stage 2 made it.
+#[cfg(test)]
+fn pixel(color: crate::frame::Rgb) -> io::Result<OwnedFd> {
+    pixels(&[Square::Color(color)])
+}
+
+/// A memfd of `size` bytes beginning with `bytes`, sealed as [`pixels`] says.
 fn sealed_memfd(name: &std::ffi::CStr, bytes: &[u8], size: usize) -> io::Result<OwnedFd> {
     // SAFETY: memfd_create reads a NUL-terminated name that outlives the
     // call; the descriptor it returns is owned by nobody else.
@@ -2125,6 +2153,7 @@ fn outq(fd: RawFd) -> libc::c_int {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::{ButtonStyle, Rgb, Style};
     use std::io::{Read, Write};
     use std::sync::mpsc;
 
@@ -2337,6 +2366,8 @@ mod tests {
         }
 
         /// The proxy with the zone's border and no title: `(width, colour)`.
+        /// In the `full` style — stage 2's one colour, what the wire tests
+        /// of the border check (the soft and the tag looks have their own).
         fn with_border(tag: &str, border: Option<(i32, Rgb)>) -> Self {
             Self::with_drawing(
                 tag,
@@ -2345,6 +2376,9 @@ mod tests {
                         color,
                         width,
                         title: TitleMode::Off,
+                        buttons: ButtonStyle::Cellward,
+                        style: Style::Full,
+                        radius: 0,
                     },
                     title: String::new(),
                     font: None,
@@ -3051,6 +3085,7 @@ mod tests {
                         new(id, &String::from_utf8(bytes).unwrap());
                     }
                     ("wl_compositor", 0) => new(args[0], "wl_surface"),
+                    ("wl_compositor", 1) => new(args[0], "wl_region"),
                     ("wl_subcompositor", 1) => new(args[0], "wl_subsurface"),
                     ("wp_viewporter", 1) => new(args[0], "wp_viewport"),
                     ("wl_shm", 0) => new(args[0], "wl_shm_pool"),
@@ -3484,12 +3519,28 @@ mod tests {
         font
     }
 
+    /// The frame with a title, in the look of stage 3 (`full`, `cellward`):
+    /// what the wire tests of the title and the buttons check.
     fn titled(mode: TitleMode, font: Option<Vec<u8>>) -> Drawing {
+        looked(mode, font, ButtonStyle::Cellward, Style::Full, 0)
+    }
+
+    /// The frame with a title in a look of its own.
+    fn looked(
+        mode: TitleMode,
+        font: Option<Vec<u8>>,
+        buttons: ButtonStyle,
+        style: Style,
+        radius: i32,
+    ) -> Drawing {
         Drawing {
             frame: Frame {
                 color: Rgb(0xff, 0, 0x80),
                 width: 4,
                 title: mode,
+                buttons,
+                style,
+                radius,
             },
             title: "nl · основной".to_owned(),
             font,
@@ -4586,5 +4637,320 @@ mod tests {
             assert!(refused, "{what} was allowed");
         }
         assert!(fine, "memory, TIOCOUTQ or the title's pwrite was refused");
+    }
+
+    // --- the looks (crate::wl_title::Look, 2026-09-28) ------------------------
+
+    /// The messages of `got` up to the program's first commit of a window,
+    /// and the window's objects: its xdg_surface and its root surface.
+    fn first_commit(log: &mpsc::Receiver<Msg>) -> (Vec<Msg>, u32, u32) {
+        let mut got = log_until(log, |m| m.iface == "xdg_wm_base" && m.opcode == 2);
+        let (xdg, root) = (got.last().unwrap().args[0], got.last().unwrap().args[1]);
+        got.extend(log_until(log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        }));
+        (got, xdg, root)
+    }
+
+    fn all(got: &[Msg], iface: &str, opcode: u32) -> Vec<Msg> {
+        got.iter()
+            .filter(|m| m.iface == iface && m.opcode == opcode)
+            .cloned()
+            .collect()
+    }
+
+    /// Where a subsurface was put last, and what a surface was attached
+    /// first.
+    fn placed(got: &[Msg], sub: u32) -> Option<Vec<i32>> {
+        got.iter()
+            .rev()
+            .find(|m| m.iface == "wl_subsurface" && m.opcode == 1 && m.object == sub)
+            .map(|m| signed(&m.args))
+    }
+
+    fn attached(got: &[Msg], surface: u32) -> Option<u32> {
+        got.iter()
+            .find(|m| m.iface == "wl_surface" && m.opcode == 1 && m.object == surface)
+            .map(|m| m.args[0])
+    }
+
+    /// A buffer as it was made: `[offset, width, height, stride, format]`.
+    fn made(got: &[Msg], buffer: u32) -> Vec<u32> {
+        got.iter()
+            .find(|m| m.iface == "wl_shm_pool" && m.opcode == 0 && m.args[0] == buffer)
+            .map(|m| m.args[1..].to_vec())
+            .unwrap_or_else(|| panic!("buffer {buffer} not made: {got:#?}"))
+    }
+
+    /// The soft style on the wire: the border two rings of strips, eight on
+    /// the program's surface — the outer ring of the colour's outer tone,
+    /// the inner of the title's —, each a square of one pool, opaque; the
+    /// two as wide as the border, the geometry grown as by `full`'s.
+    #[test]
+    fn the_soft_border_is_two_rings_of_two_tones() {
+        let drawing = looked(TitleMode::Off, None, ButtonStyle::Cellward, Style::Soft, 0);
+        let rig = Rig::with_drawing("soft", Some(drawing));
+        let (mut client, _compositor, log) = rig.connect_framed(UPSTREAM, FRAME_GLOBALS);
+        a_window(&mut client);
+        let (got, _, root) = first_commit(&log);
+        // Two squares in one pool: the title's tone, then the outer one.
+        let pool = all(&got, "wl_shm", 0);
+        assert_eq!(pool.len(), 1, "{got:#?}");
+        assert_eq!(pool[0].args[1], 72);
+        let buffers = all(&got, "wl_shm_pool", 0);
+        assert_eq!(buffers.len(), 2);
+        assert_eq!(buffers[0].args[1..], [0, 3, 3, 12, 1]);
+        assert_eq!(buffers[1].args[1..], [36, 3, 3, 12, 1]);
+        let (inner, outer) = (buffers[0].args[0], buffers[1].args[0]);
+        // The geometry and the minimum, as with one colour.
+        assert_eq!(all(&got, "xdg_surface", 3)[0].args, [6, 16, 308, 208]);
+        assert_eq!(all(&got, "xdg_toplevel", 8)[0].args, [108, 58]);
+        // Eight strips: the outer ring's four, then the inner ring's.
+        let subs = all(&got, "wl_subcompositor", 1);
+        assert_eq!(subs.len(), 8, "{subs:?}");
+        assert!(subs.iter().all(|m| m.args[2] == root));
+        for (n, m) in subs.iter().enumerate() {
+            let want = if n < 4 { outer } else { inner };
+            assert_eq!(attached(&got, m.args[1]), Some(want), "strip {n}");
+        }
+        let sizes: Vec<Vec<i32>> = all(&got, "wp_viewport", 2)
+            .iter()
+            .map(|m| signed(&m.args))
+            .collect();
+        assert_eq!(
+            sizes,
+            [
+                [308, 2],
+                [308, 2],
+                [2, 204],
+                [2, 204],
+                [304, 2],
+                [304, 2],
+                [2, 200],
+                [2, 200]
+            ]
+        );
+        let places: Vec<Vec<i32>> = subs
+            .iter()
+            .map(|m| placed(&got, m.args[0]).unwrap())
+            .collect();
+        assert_eq!(
+            places,
+            [
+                [6, 16],
+                [6, 222],
+                [6, 18],
+                [312, 18],
+                [8, 18],
+                [8, 220],
+                [8, 20],
+                [310, 20]
+            ]
+        );
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    /// The tag on the wire: no border — the geometry grown by the row alone,
+    /// the program told what is left of the height —, the row one subsurface
+    /// of the program's showing the clear square, and its input region the
+    /// tag alone: the label and the buttons, not the row's width. The tag's
+    /// image at its left end is see-through (ARGB), its buttons on it at its
+    /// right end. No round corners on a tag, though asked for.
+    #[test]
+    fn the_tag_takes_its_row_and_the_pointer_only_on_the_tag() {
+        let font = test_font();
+        let with_text = font.is_some();
+        let drawing = looked(
+            TitleMode::Always,
+            font,
+            ButtonStyle::Cellward,
+            Style::Tag,
+            8,
+        );
+        let rig = Rig::with_drawing("tag", Some(drawing));
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, TITLE_GLOBALS);
+        a_window(&mut client);
+        let (got, xdg, root) = first_commit(&log);
+        assert_eq!(
+            signed(&all(&got, "xdg_surface", 3)[0].args),
+            [10, 0, 300, 220]
+        );
+        assert_eq!(all(&got, "xdg_toplevel", 8)[0].args, [100, 70]);
+        // The colour and a clear square, ARGB.
+        let buffers = all(&got, "wl_shm_pool", 0);
+        assert_eq!(buffers[0].args[1..], [0, 3, 3, 12, 1]);
+        assert_eq!(buffers[1].args[1..], [36, 3, 3, 12, 0]);
+        let (colour, clear) = (buffers[0].args[0], buffers[1].args[0]);
+        // The row alone on the program's surface: no strips, no corners.
+        let subs = all(&got, "wl_subcompositor", 1);
+        let on_root: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == root).collect();
+        assert_eq!(on_root.len(), 1, "{subs:?}");
+        let (row_sub, row) = (on_root[0].args[0], on_root[0].args[1]);
+        assert_eq!(placed(&got, row_sub), Some(vec![10, 0]));
+        let input = got
+            .iter()
+            .find(|m| m.iface == "wl_surface" && m.opcode == 5 && m.object == row);
+        if with_text {
+            assert_eq!(attached(&got, row), Some(clear), "the row not clear");
+            // Its input region: a rectangle at its left end, the tag's.
+            let region = input.expect("no input region on the row").args[0];
+            let adds: Vec<Vec<i32>> = got
+                .iter()
+                .filter(|m| m.iface == "wl_region" && m.opcode == 1 && m.object == region)
+                .map(|m| signed(&m.args))
+                .collect();
+            assert_eq!(adds.len(), 1, "{adds:?}");
+            let tag_w = adds[0][2];
+            assert_eq!((adds[0][0], adds[0][1], adds[0][3]), (0, 0, 20));
+            assert!((72 + 16 + 20..300).contains(&tag_w), "{tag_w}");
+            // The tag's image, and its buttons on it.
+            let on_row: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == row).collect();
+            assert_eq!(on_row.len(), 2, "the tag and its buttons: {subs:?}");
+            let (tag_sub, tag) = (on_row[0].args[0], on_row[0].args[1]);
+            assert_eq!(placed(&got, tag_sub), Some(vec![0, 0]));
+            let image = made(&got, attached(&got, tag).expect("the tag not drawn"));
+            assert_eq!(image[1..], [tag_w as u32, 20, 4 * tag_w as u32, 0]);
+            let buttons_sub = on_row[1].args[0];
+            let at = placed(&got, buttons_sub).expect("the buttons not placed");
+            assert_eq!(at[0] + 72 + crate::wl_title::TAG_ROUND, tag_w);
+        } else {
+            // Without a font there is no tag to draw: the row of the colour,
+            // taking the pointer.
+            assert_eq!(attached(&got, row), Some(colour));
+            assert!(input.is_none());
+        }
+        // The compositor sizes the window: the program is told less the row.
+        let toplevel = all(&got, "xdg_surface", 1)[0].args[0];
+        let mut out = Vec::new();
+        event(&mut out, toplevel, 0, |a| {
+            a.extend_from_slice(&words(&[800, 600, 0]))
+        });
+        event(&mut out, xdg, 0, |a| {
+            a.extend_from_slice(&5u32.to_ne_bytes())
+        });
+        compositor.write_all(&out).unwrap();
+        let events = events_until(&mut client, |o, op, _| o == 8 && op == 0);
+        let configure = events
+            .iter()
+            .find(|(o, op, _)| *o == 9 && *op == 0)
+            .expect("no configure");
+        assert_eq!(configure.2[..2], [800, 580]);
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    /// Round corners on the wire: four subsurfaces of the program's, one in
+    /// each corner of its geometry, the radius square, each a see-through
+    /// buffer of the four drawn at the scale, clear to input (an empty
+    /// region), laid before the program's commit. No title here: they take
+    /// the scale themselves, and a new one draws them again and shows them
+    /// at once.
+    #[test]
+    fn round_corners_lie_in_the_windows_corners_clear_to_input() {
+        let font = test_font();
+        let with_text = font.is_some();
+        let drawing = looked(TitleMode::Off, font, ButtonStyle::Cellward, Style::Full, 8);
+        let rig = Rig::with_drawing("round", Some(drawing));
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, TITLE_GLOBALS);
+        a_window(&mut client);
+        let (got, _, root) = first_commit(&log);
+        let subs = all(&got, "wl_subcompositor", 1);
+        let on_root: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == root).collect();
+        if !with_text {
+            // Their pixels live in the title's memory: none without a font.
+            assert_eq!(on_root.len(), 4, "{subs:?}");
+            drop(client);
+            assert_eq!(rig.finish(), 0);
+            return;
+        }
+        assert_eq!(on_root.len(), 8, "four strips, four corners: {subs:?}");
+        let corners: Vec<(u32, u32)> = on_root[4..]
+            .iter()
+            .map(|m| (m.args[0], m.args[1]))
+            .collect();
+        let places: Vec<Vec<i32>> = corners
+            .iter()
+            .map(|&(sub, _)| placed(&got, sub).unwrap())
+            .collect();
+        assert_eq!(places, [[10, 20], [302, 20], [10, 212], [302, 212]]);
+        let commits: Vec<u32> = all(&got, "wl_surface", 6)
+            .iter()
+            .map(|m| m.object)
+            .collect();
+        let mut offsets = Vec::new();
+        for &(_, surface) in &corners {
+            // Clear to input: a region with nothing in it.
+            let region = got
+                .iter()
+                .find(|m| m.iface == "wl_surface" && m.opcode == 5 && m.object == surface)
+                .expect("no input region")
+                .args[0];
+            assert!(
+                !got.iter()
+                    .any(|m| m.iface == "wl_region" && m.opcode == 1 && m.object == region),
+                "input on a corner"
+            );
+            // 8 × 8 logical, an ARGB buffer of 8 × 8 at 1.
+            let view = all(&got, "wp_viewporter", 1)
+                .into_iter()
+                .find(|m| m.args[1] == surface)
+                .unwrap()
+                .args[0];
+            let size = got
+                .iter()
+                .find(|m| m.iface == "wp_viewport" && m.opcode == 2 && m.object == view)
+                .map(|m| signed(&m.args));
+            assert_eq!(size, Some(vec![8, 8]));
+            let buffer = made(&got, attached(&got, surface).expect("not drawn"));
+            assert_eq!(buffer[1..], [8, 8, 32, 0]);
+            offsets.push(buffer[0]);
+            assert!(commits.contains(&surface), "not committed");
+        }
+        // Four images of one region, one after the other.
+        assert!(
+            offsets.windows(2).all(|o| o[1] == o[0] + 8 * 8 * 4),
+            "{offsets:?}"
+        );
+        assert_eq!(*commits.last().unwrap(), root, "the program's is the last");
+        // Their own scale: 1.5, drawn again at 12 × 12 and shown at once.
+        let fraction = all(&got, "wp_fractional_scale_manager_v1", 1)
+            .into_iter()
+            .find(|m| m.args[1] == corners[0].1)
+            .expect("no scale of their own")
+            .args[0];
+        let mut out = Vec::new();
+        event(&mut out, fraction, 0, |a| {
+            a.extend_from_slice(&180u32.to_ne_bytes())
+        });
+        compositor.write_all(&out).unwrap();
+        let last = corners[3].0;
+        let got = log_until(&log, |m| {
+            m.iface == "wl_subsurface" && m.opcode == 4 && m.object == last
+        });
+        let redrawn: Vec<Vec<u32>> = all(&got, "wl_shm_pool", 0)
+            .iter()
+            .map(|m| m.args[2..].to_vec())
+            .collect();
+        assert_eq!(redrawn, vec![vec![12, 12, 48, 0]; 4]);
+        for &(sub, surface) in &corners {
+            let order: Vec<(String, u32)> = got
+                .iter()
+                .filter(|m| m.object == sub || m.object == surface)
+                .map(|m| (m.iface.clone(), m.opcode))
+                .collect();
+            let at = |what: (&str, u32)| order.iter().rposition(|o| (o.0.as_str(), o.1) == what);
+            let (desync, commit, sync) = (
+                at(("wl_subsurface", 5)),
+                at(("wl_surface", 6)),
+                at(("wl_subsurface", 4)),
+            );
+            assert!(
+                desync.is_some() && desync < commit && commit < sync,
+                "not shown at once: {order:?}"
+            );
+        }
+        drop(client);
+        assert_eq!(rig.finish(), 0);
     }
 }

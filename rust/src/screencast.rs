@@ -199,6 +199,17 @@ impl Policy {
             .map_or_else(|| self.zone.clone(), |(zone, _)| zone)
     }
 
+    /// The zone decided for now, its directory as held, and the config
+    /// directory: where the tray icon's mark reads the frame's colours
+    /// (`crate::tray`) — for an instance, the network it is in now; the one
+    /// the filter was started for while that is not known.
+    pub fn places(&self) -> (String, Option<PathBuf>, Option<&Path>) {
+        let (zone, dir) = self
+            .place()
+            .unwrap_or_else(|| (self.zone.clone(), self.zone_dir.clone()));
+        (zone, dir, self.config.as_deref())
+    }
+
     /// The switch now, and where it comes from; a network not known at the
     /// moment is Nix's `no` (`microphone::NETWORK_NOT_KNOWN`).
     pub fn setting(&self) -> (Setting, Source) {

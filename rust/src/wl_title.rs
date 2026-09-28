@@ -38,10 +38,18 @@
 //! too. A region holds the row of buttons at one scale in every state at
 //! once ([`ButtonsLook::variants`]: at rest, each one under the pointer,
 //! each one pressed), one image under the other: a button lit or pressed is
-//! another buffer of the region, not a new raster. How they look — which
-//! end, which order, the glyphs, the shape, the colours at rest, under the
-//! pointer and pressed — is one value, [`LOOK`]; the drawing here and the
-//! hit-testing in `crate::wl_frame` follow whatever it says.
+//! another buffer of the region, not a new raster.
+//!
+//! **The look** (2026-09-28, §8 «Вид рамки»): how the frame looks is one
+//! value, [`Look`], made of the launch's settings (`crate::frame::Frame`):
+//! the style — `full`, the zone's colour itself; `soft`, its calmer tones
+//! and a border of two ([`soft_inner`], [`soft_outer`]); `tag`, no border and
+//! a small tab with the label ([`tag_layout`], [`render_tag`]) —, the
+//! buttons' look ([`buttons_look`]: which end, which order, the glyphs, the
+//! shape, the colours at rest, under the pointer and pressed) and the radius
+//! of the window's corners inside the frame ([`render_corners`], in
+//! [`SLOTS`] regions of their own too). The drawing here and the layout and
+//! the hit-testing in `crate::wl_frame` follow whatever it says.
 
 #![forbid(unsafe_code)]
 
@@ -53,7 +61,7 @@ use std::rc::Rc;
 
 use ab_glyph::{point, Font, FontVec, GlyphId, PxScale, ScaleFont};
 
-use crate::frame::Rgb;
+use crate::frame::{ButtonStyle, Frame, Rgb, Style, MAX_RADIUS};
 
 /// The font the package was built with (`package.nix`), if it was.
 pub const FONT: Option<&str> = option_env!("VPN_ZONE_FRAME_FONT");
@@ -98,7 +106,7 @@ pub enum Button {
 }
 
 /// A colour of the look, made from the frame's own (the zone's, or the
-/// container's).
+/// container's; in the soft style its tone, [`Look::title_color`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Paint {
     /// The frame's colour itself.
@@ -132,10 +140,24 @@ impl Paint {
 /// How a button is filled with its colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
-    /// The whole of its cell, edge to edge: square buttons side by side
-    /// (the Windows-like row). Round ones — Adwaita's and Breeze's circles,
-    /// macOS's traffic lights — come with their looks.
+    /// The whole of its cell, edge to edge: buttons side by side, square-ish
+    /// (cellward's 24 × 20) or wide (Windows's 32 × 20).
     Cell,
+    /// A disc this many logical pixels across in the middle of its cell, on
+    /// the strip's colour: Adwaita's and Breeze's round buttons, macOS's
+    /// traffic lights. The whole cell is the button all the same (the
+    /// pointer hits cells, [`ButtonsLook::at`]): beside the disc is not the
+    /// title yet.
+    Circle(i32),
+}
+
+/// When a button's glyph shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Glyphs {
+    Always,
+    /// While the pointer is on one of the buttons — on every one of them
+    /// then: macOS's traffic lights, plain discs until the pointer comes.
+    Lit,
 }
 
 /// Which end of the title strip the buttons are at.
@@ -164,11 +186,16 @@ pub struct ButtonsLook {
     /// The buttons from left to right.
     pub order: &'static [ButtonLook],
     /// One button's width, logical pixels: a whole number of pixels at the
-    /// usual scales (1.25, 1.5, 1.75, 2), like the strip's height.
+    /// usual scales (1.25, 1.5, 1.75, 2) — a multiple of 4 —, like the
+    /// strip's height.
     pub width: i32,
     /// The glyphs' size (ab_glyph's scale, as the text's [`FONT_PX`]).
     pub size: f32,
     pub shape: Shape,
+    /// The strip between the row and its end, logical pixels: still the
+    /// title, to drag the window by.
+    pub margin: i32,
+    pub glyphs: Glyphs,
 }
 
 /// Which button is lit, and whether it is pressed or only under the pointer.
@@ -214,6 +241,14 @@ impl ButtonsLook {
         }
     }
 
+    /// Whether the glyphs show in the image `variant`.
+    pub fn glyphs_in(&self, variant: usize) -> bool {
+        match self.glyphs {
+            Glyphs::Always => true,
+            Glyphs::Lit => variant != 0,
+        }
+    }
+
     /// The paint of each button in the image `variant`.
     fn paints(&self, variant: usize) -> Vec<Paint> {
         let n = self.order.len();
@@ -233,93 +268,460 @@ impl ButtonsLook {
     }
 }
 
-/// How the frame's pixels are kept.
+/// How a buffer of the frame keeps its pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pixels {
     /// XRGB8888, opaque: nothing of what lies under a part of the frame
     /// shows through it — the program's CSD shadow, or a strip it drew there
-    /// itself (`docs/WINDOW-FRAME.md` §5.9). A look with round corners or a
-    /// tag (see [`Look`]) needs alpha, ARGB8888, and gives that up.
+    /// itself (`docs/WINDOW-FRAME.md` §5.9). The border, the title strip,
+    /// its text and its buttons.
     Opaque,
+    /// ARGB8888, premultiplied (as `wl_shm` has it): see-through where it is
+    /// clear, and so what lies under shows — the tag's round corners and the
+    /// clear rest of its row, the window's round corners. §5.9's price, paid
+    /// only where a look asks for it: the frame is not a trust boundary.
+    Alpha,
 }
 
-impl Pixels {
-    /// One pixel of `color`, as the memfds hold it.
-    pub fn word(self, color: Rgb) -> [u8; 4] {
+/// One pixel of the pixel memfd's squares (`crate::wl_proxy::pixels`): a
+/// colour, opaque, or nothing at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Square {
+    Color(Rgb),
+    Clear,
+}
+
+impl Square {
+    /// The pixel, as the memfd holds it (native-endian).
+    pub fn word(self) -> [u8; 4] {
         match self {
-            Self::Opaque => color.xrgb8888(),
+            Self::Color(color) => color.xrgb8888(),
+            Self::Clear => [0; 4],
+        }
+    }
+
+    pub fn pixels(self) -> Pixels {
+        match self {
+            Self::Color(_) => Pixels::Opaque,
+            Self::Clear => Pixels::Alpha,
         }
     }
 }
 
-/// How much of the window's width the title strip takes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StripWidth {
-    /// All of it, between the side strips.
-    Full,
+/// A pixel of `color` covering `alpha` (0 to 1) of it, ARGB8888: the colour
+/// premultiplied by the alpha, as `wl_shm` (and every compositor) reads it —
+/// a straight one would come out brighter than it is at the edges.
+pub fn premultiplied(color: Rgb, alpha: f32) -> [u8; 4] {
+    let a = alpha.clamp(0.0, 1.0);
+    let byte = |c: u8| (f32::from(c) * a).round() as u32;
+    let word = (((a * 255.0).round() as u32) << 24)
+        | (byte(color.0) << 16)
+        | (byte(color.1) << 8)
+        | byte(color.2);
+    word.to_ne_bytes()
 }
 
-/// How the frame looks. The owner wants several looks to choose from later
-/// (2026-09-27): GNOME's (Adwaita), KDE's (Breeze), macOS's (the traffic
-/// lights at the left end) and Windows's (square buttons at the right, close
-/// red under the pointer); more of the border itself — a gradient, a softer
-/// default that does not strain the eyes (the width is a setting already);
-/// and a tag ("бирка") instead of a frame: no border, a strip only as wide as
-/// its label, a round tab at the top left, the rest of the row see-through.
-/// A look is then another value of this and a setting to choose it
-/// (`cellward frame …`, Nix, `status --json`); the drawing, the layout and
-/// the hit-testing follow the value — a see-through part must not take the
-/// pointer, nor start a move. Today there is one, [`LOOK`], and the border
-/// has nothing of its own in it yet: its one colour is the frame's.
+/// How the frame looks (the owner, 2026-09-27: GNOME's buttons, KDE's,
+/// macOS's traffic lights at the left end and Windows's, all equal; a softer
+/// frame that does not strain the eyes; a tag, «бирка», instead of a frame;
+/// windows round inside it). One value, the launch's ([`Look::of`]): the
+/// drawing, the layout and the hit-testing follow it — a clear part of the
+/// look does not take the pointer, nor start a move.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Look {
-    pub pixels: Pixels,
-    pub strip: StripWidth,
+    /// `full`, `soft` or `tag` (`crate::frame::Style`): the colours
+    /// ([`Look::squares`], [`Look::title_color`]), the border's rings
+    /// ([`Look::rings`]), and whether the title is a strip or a tag.
+    pub style: Style,
     pub buttons: ButtonsLook,
+    /// The window's corners inside the frame, logical pixels: 0 square
+    /// ([`Look::corners`]).
+    pub radius: i32,
 }
 
-/// Red under the pointer for "close", as desktops have it; a deeper red
-/// pressed.
+/// Red under the pointer for "close", as desktops have it (Adwaita's
+/// `red_3`); a deeper red pressed (its `red_5`).
 const CLOSE_HOVER: Rgb = Rgb(0xe0, 0x1b, 0x24);
 const CLOSE_PRESS: Rgb = Rgb(0xa5, 0x1d, 0x2d);
+/// Breeze's "negative" red, and deeper.
+const BREEZE_RED: Rgb = Rgb(0xda, 0x44, 0x53);
+const BREEZE_RED_PRESS: Rgb = Rgb(0xa8, 0x33, 0x40);
+/// macOS's traffic lights, and each one deeper, pressed.
+const MAC_RED: Rgb = Rgb(0xff, 0x5f, 0x57);
+const MAC_RED_PRESS: Rgb = Rgb(0xbf, 0x47, 0x41);
+const MAC_YELLOW: Rgb = Rgb(0xfe, 0xbc, 0x2e);
+const MAC_YELLOW_PRESS: Rgb = Rgb(0xbe, 0x8d, 0x22);
+const MAC_GREEN: Rgb = Rgb(0x28, 0xc8, 0x40);
+const MAC_GREEN_PRESS: Rgb = Rgb(0x1e, 0x96, 0x30);
+/// Windows 11's close under the pointer, and deeper.
+const WIN_RED: Rgb = Rgb(0xc4, 0x2b, 0x1c);
+const WIN_RED_PRESS: Rgb = Rgb(0x9b, 0x22, 0x16);
 
-/// The look there is: square buttons at the right end — menu, network,
-/// close —, the frame's colour at rest, a shade of it under the pointer and a
-/// stronger one pressed; close red. 24 wide: 30, 36, 42, 48 pixels at the
-/// usual scales.
-pub const LOOK: Look = Look {
-    pixels: Pixels::Opaque,
-    strip: StripWidth::Full,
-    buttons: ButtonsLook {
-        end: End::Right,
-        order: &[
-            ButtonLook {
-                button: Button::Menu,
-                glyph: '≡',
-                rest: Paint::Frame,
-                hover: Paint::Shade(22),
-                press: Paint::Shade(38),
-            },
-            ButtonLook {
-                button: Button::Network,
-                glyph: '⇄',
-                rest: Paint::Frame,
-                hover: Paint::Shade(22),
-                press: Paint::Shade(38),
-            },
-            ButtonLook {
-                button: Button::Close,
-                glyph: '×',
-                rest: Paint::Frame,
-                hover: Paint::Fixed(CLOSE_HOVER),
-                press: Paint::Fixed(CLOSE_PRESS),
-            },
-        ],
-        width: 24,
-        size: 16.0,
-        shape: Shape::Cell,
-    },
+/// A button of the look: what it does, its glyph, its three paints.
+const fn button(
+    button: Button,
+    glyph: char,
+    rest: Paint,
+    hover: Paint,
+    press: Paint,
+) -> ButtonLook {
+    ButtonLook {
+        button,
+        glyph,
+        rest,
+        hover,
+        press,
+    }
+}
+
+/// Stage 3's buttons (`cellward`): square cells at the right end — menu,
+/// network, close —, the frame's colour at rest, a shade of it under the
+/// pointer and a stronger one pressed; close red. 24 wide: 30, 36, 42, 48
+/// pixels at the usual scales.
+pub const CELLWARD: ButtonsLook = ButtonsLook {
+    end: End::Right,
+    order: &[
+        button(
+            Button::Menu,
+            '≡',
+            Paint::Frame,
+            Paint::Shade(22),
+            Paint::Shade(38),
+        ),
+        button(
+            Button::Network,
+            '⇄',
+            Paint::Frame,
+            Paint::Shade(22),
+            Paint::Shade(38),
+        ),
+        button(
+            Button::Close,
+            '×',
+            Paint::Frame,
+            Paint::Fixed(CLOSE_HOVER),
+            Paint::Fixed(CLOSE_PRESS),
+        ),
+    ],
+    width: 24,
+    size: 16.0,
+    shape: Shape::Cell,
+    margin: 0,
+    glyphs: Glyphs::Always,
 };
+
+/// GNOME's (Adwaita's window controls): round buttons at the right end, each
+/// glyph on a faint disc of a shade of the strip, a stronger one under the
+/// pointer and pressed; close red under the pointer.
+pub const GNOME: ButtonsLook = ButtonsLook {
+    end: End::Right,
+    order: &[
+        button(
+            Button::Menu,
+            '≡',
+            Paint::Shade(10),
+            Paint::Shade(20),
+            Paint::Shade(32),
+        ),
+        button(
+            Button::Network,
+            '⇄',
+            Paint::Shade(10),
+            Paint::Shade(20),
+            Paint::Shade(32),
+        ),
+        button(
+            Button::Close,
+            '×',
+            Paint::Shade(10),
+            Paint::Fixed(CLOSE_HOVER),
+            Paint::Fixed(CLOSE_PRESS),
+        ),
+    ],
+    width: 24,
+    size: 13.0,
+    shape: Shape::Circle(16),
+    margin: 4,
+    glyphs: Glyphs::Always,
+};
+
+/// KDE's (Breeze's decoration): glyphs alone on the strip at rest; under the
+/// pointer a disc of the text's own colour with the glyph turned over on it,
+/// pressed a lighter one; close a red disc.
+pub const KDE: ButtonsLook = ButtonsLook {
+    end: End::Right,
+    order: &[
+        button(
+            Button::Menu,
+            '≡',
+            Paint::Frame,
+            Paint::Shade(82),
+            Paint::Shade(60),
+        ),
+        button(
+            Button::Network,
+            '⇄',
+            Paint::Frame,
+            Paint::Shade(82),
+            Paint::Shade(60),
+        ),
+        button(
+            Button::Close,
+            '×',
+            Paint::Frame,
+            Paint::Fixed(BREEZE_RED),
+            Paint::Fixed(BREEZE_RED_PRESS),
+        ),
+    ],
+    width: 24,
+    size: 13.0,
+    shape: Shape::Circle(18),
+    margin: 4,
+    glyphs: Glyphs::Always,
+};
+
+/// macOS's traffic lights at the LEFT end: close red, then the menu yellow,
+/// then the network green, small discs whose glyphs show while the pointer
+/// is on one of them; pressed, deeper. Close is red under the pointer as it
+/// is at rest.
+pub const MACOS: ButtonsLook = ButtonsLook {
+    end: End::Left,
+    order: &[
+        button(
+            Button::Close,
+            '×',
+            Paint::Fixed(MAC_RED),
+            Paint::Fixed(MAC_RED),
+            Paint::Fixed(MAC_RED_PRESS),
+        ),
+        button(
+            Button::Menu,
+            '≡',
+            Paint::Fixed(MAC_YELLOW),
+            Paint::Fixed(MAC_YELLOW),
+            Paint::Fixed(MAC_YELLOW_PRESS),
+        ),
+        button(
+            Button::Network,
+            '⇄',
+            Paint::Fixed(MAC_GREEN),
+            Paint::Fixed(MAC_GREEN),
+            Paint::Fixed(MAC_GREEN_PRESS),
+        ),
+    ],
+    width: 20,
+    size: 10.0,
+    shape: Shape::Circle(12),
+    margin: 4,
+    glyphs: Glyphs::Lit,
+};
+
+/// Windows's caption buttons: wide rectangles at the right end, a faint
+/// shade under the pointer, close red.
+pub const WINDOWS: ButtonsLook = ButtonsLook {
+    end: End::Right,
+    order: &[
+        button(
+            Button::Menu,
+            '≡',
+            Paint::Frame,
+            Paint::Shade(14),
+            Paint::Shade(26),
+        ),
+        button(
+            Button::Network,
+            '⇄',
+            Paint::Frame,
+            Paint::Shade(14),
+            Paint::Shade(26),
+        ),
+        button(
+            Button::Close,
+            '×',
+            Paint::Frame,
+            Paint::Fixed(WIN_RED),
+            Paint::Fixed(WIN_RED_PRESS),
+        ),
+    ],
+    width: 32,
+    size: 12.0,
+    shape: Shape::Cell,
+    margin: 0,
+    glyphs: Glyphs::Always,
+};
+
+/// No buttons: an empty row, laid nowhere.
+pub const NO_BUTTONS: ButtonsLook = ButtonsLook {
+    end: End::Right,
+    order: &[],
+    width: 24,
+    size: 16.0,
+    shape: Shape::Cell,
+    margin: 0,
+    glyphs: Glyphs::Always,
+};
+
+/// The buttons' look a setting names.
+pub fn buttons_look(style: ButtonStyle) -> ButtonsLook {
+    match style {
+        ButtonStyle::Cellward => CELLWARD,
+        ButtonStyle::Gnome => GNOME,
+        ButtonStyle::Kde => KDE,
+        ButtonStyle::Macos => MACOS,
+        ButtonStyle::Windows => WINDOWS,
+        ButtonStyle::None => NO_BUTTONS,
+    }
+}
+
+/// Stage 3's look, `full` with `cellward`'s buttons and square corners: the
+/// one the proxy's wire tests and the VM's old pixel checks are of.
+pub const LOOK: Look = Look {
+    style: Style::Full,
+    buttons: CELLWARD,
+    radius: 0,
+};
+
+/// The soft style's tone of the title strip, the tag-less border's inner
+/// ring and the round corners: the frame's colour with its hue kept, its
+/// saturation to 62 % and its brightness to 94 %. The default colours
+/// (`crate::frame::default_color`: saturation 0.65, brightness 0.85) come to
+/// 0.40 and 0.80 — the same zone at a glance, a calmer patch to have in view
+/// all day.
+pub fn soft_inner(frame: Rgb) -> Rgb {
+    tone(frame, 0.62, 0.94)
+}
+
+/// The soft style's outer ring: less saturated and darker still (45 %,
+/// 80 %), so that the border fades toward whatever is around the window
+/// instead of ending in a hard edge of colour.
+pub fn soft_outer(frame: Rgb) -> Rgb {
+    tone(frame, 0.45, 0.80)
+}
+
+fn tone(frame: Rgb, saturation: f64, value: f64) -> Rgb {
+    let (h, s, v) = crate::frame::to_hsv(frame);
+    crate::frame::hsv(h, s * saturation, v * value)
+}
+
+impl Look {
+    /// The launch's look, as its settings have it.
+    pub fn of(frame: &Frame) -> Self {
+        Self {
+            style: frame.style,
+            buttons: buttons_look(frame.buttons),
+            radius: frame.radius.clamp(0, MAX_RADIUS),
+        }
+    }
+
+    /// The tag instead of a frame: no border, a tab with the label.
+    pub fn tag(&self) -> bool {
+        self.style == Style::Tag
+    }
+
+    /// The radius of the round corners drawn over the window's: none in the
+    /// tag look — they are the border's colour laid over the program's
+    /// corners, and without a border there is nothing for them to blend into.
+    pub fn corners(&self) -> i32 {
+        if self.tag() {
+            0
+        } else {
+            self.radius.clamp(0, MAX_RADIUS)
+        }
+    }
+
+    /// The title strip's colour (the tag's, the buttons' [`Paint::Frame`],
+    /// the round corners'), on a frame of colour `frame`.
+    pub fn title_color(&self, frame: Rgb) -> Rgb {
+        match self.style {
+            Style::Soft => soft_inner(frame),
+            Style::Full | Style::Tag => frame,
+        }
+    }
+
+    /// The squares of the pixel memfd, in order: the title's colour first —
+    /// `full`'s one square is stage 2's pixel, byte for byte —, then the
+    /// soft border's outer tone, or the tag's clear row.
+    pub fn squares(&self, frame: Rgb) -> Vec<Square> {
+        match self.style {
+            Style::Full => vec![Square::Color(frame)],
+            Style::Soft => vec![
+                Square::Color(soft_inner(frame)),
+                Square::Color(soft_outer(frame)),
+            ],
+            Style::Tag => vec![Square::Color(frame), Square::Clear],
+        }
+    }
+
+    /// The border of `width` as rings, from the outside in: each one's
+    /// width and the square it shows. `soft`: the outer tone over the outer
+    /// half, the title's tone inside it — two rings nested one in the other
+    /// meet at every corner on its diagonal, as a gradient across the width
+    /// would, which a strip of one stretched pixel cannot. `tag`: none.
+    pub fn rings(&self, width: i32) -> Vec<(i32, usize)> {
+        let width = width.max(0);
+        match self.style {
+            Style::Full => vec![(width, 0)],
+            Style::Soft if width >= 2 => vec![(width / 2, 1), (width - width / 2, 0)],
+            Style::Soft => vec![(width, 0)],
+            Style::Tag => Vec::new(),
+        }
+    }
+
+    /// The square the title strip shows: its colour; the clear one in the
+    /// tag look with its tag drawn (the tag is the text's image,
+    /// [`render_tag`]) — without a font to draw it, the strip of the colour.
+    pub fn title_square(&self, tag_drawn: bool) -> usize {
+        if self.tag() && tag_drawn {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+/// The tag's top corners, logical pixels: a tab, not a box.
+pub const TAG_ROUND: i32 = 6;
+
+/// Where things are on the tag, logical pixels from its left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TagLayout {
+    /// The tag's width.
+    pub width: i32,
+    /// Where its text begins.
+    pub text_x: i32,
+    /// Where its buttons begin; `None` without buttons.
+    pub buttons: Option<i32>,
+}
+
+/// The tag of a line `text` wide with the buttons of `look`: the line
+/// between its pads and the row at the look's end of it, clear of the round
+/// corners ([`TAG_ROUND`]) — the row's cells are square, and would square
+/// the tab's corner off.
+pub fn tag_layout(text: i32, look: &ButtonsLook) -> TagLayout {
+    let text = text.max(0);
+    let row = look.width_all();
+    let label = PAD.saturating_add(text).saturating_add(PAD);
+    if row <= 0 {
+        return TagLayout {
+            width: label,
+            text_x: PAD,
+            buttons: None,
+        };
+    }
+    let end = look.margin.max(TAG_ROUND);
+    match look.end {
+        End::Right => TagLayout {
+            width: label.saturating_add(row).saturating_add(end),
+            text_x: PAD,
+            buttons: Some(label),
+        },
+        End::Left => TagLayout {
+            width: end.saturating_add(row).saturating_add(label),
+            text_x: end.saturating_add(row).saturating_add(PAD),
+            buttons: Some(end),
+        },
+    }
+}
 
 /// The line laid out at scale 1: each glyph and its pen position.
 pub struct Line {
@@ -422,23 +824,19 @@ fn blend(bg: Rgb, fg: Rgb, c: f32) -> Rgb {
     Rgb(mix(bg.0, fg.0, c), mix(bg.1, fg.1, c), mix(bg.2, fg.2, c))
 }
 
-/// The line at `scale`: its size in device pixels and XRGB8888 pixels
-/// (native-endian words), `ink` on `bg`, opaque — like the border, nothing of
-/// what lies under the strip shows through (§5.9).
-pub fn render(font: &FontVec, line: &Line, scale: u32, bg: Rgb) -> (i32, i32, Vec<u8>) {
-    let scale = clamp_scale(scale);
-    let s = scale as f32 / 120.0;
-    let (w, h) = (device(line.width, scale), device(HEIGHT, scale));
+/// How much of the glyphs of `line` at `scale` covers each pixel of an image
+/// `w` × `h`, the line's pen starting `x0` device pixels in; its box
+/// (ascent to descent) in the middle of the strip, on a whole pixel.
+fn line_coverage(font: &FontVec, line: &Line, scale: u32, w: i32, h: i32, x0: f32) -> Vec<f32> {
+    let s = clamp_scale(scale) as f32 / 120.0;
     let (wu, hu) = (w.max(0) as usize, h.max(0) as usize);
     let mut coverage = vec![0f32; wu * hu];
     let px = PxScale::from(FONT_PX * s);
     let scaled = font.as_scaled(px);
-    // The line's box (ascent to descent) in the middle of the strip, on a
-    // whole pixel.
     let baseline =
         ((h as f32 - (scaled.ascent() - scaled.descent())) / 2.0 + scaled.ascent()).round();
     for (id, x) in &line.glyphs {
-        let glyph = id.with_scale_and_position(px, point(x * s, baseline));
+        let glyph = id.with_scale_and_position(px, point(x0 + x * s, baseline));
         let Some(outline) = font.outline_glyph(glyph) else {
             continue;
         };
@@ -452,19 +850,104 @@ pub fn render(font: &FontVec, line: &Line, scale: u32, bg: Rgb) -> (i32, i32, Ve
             }
         });
     }
+    coverage
+}
+
+/// The line at `scale`: its size in device pixels and XRGB8888 pixels
+/// (native-endian words), `ink` on `bg`, opaque — like the border, nothing of
+/// what lies under the strip shows through (§5.9).
+pub fn render(font: &FontVec, line: &Line, scale: u32, bg: Rgb) -> (i32, i32, Vec<u8>) {
+    let scale = clamp_scale(scale);
+    let (w, h) = (device(line.width, scale), device(HEIGHT, scale));
+    let coverage = line_coverage(font, line, scale, w, h, 0.0);
     let fg = ink(bg);
-    let mut pixels = Vec::with_capacity(wu * hu * 4);
+    let mut pixels = Vec::with_capacity(coverage.len() * 4);
     for c in coverage {
-        pixels.extend_from_slice(&LOOK.pixels.word(blend(bg, fg, c)));
+        pixels.extend_from_slice(&blend(bg, fg, c).xrgb8888());
     }
     (w, h, pixels)
+}
+
+/// How much of the pixel (`x`, `y`) of an image `w` wide is inside it with
+/// its top corners rounded by `r` device pixels: 1 but near those corners.
+fn tab_alpha(x: i32, y: i32, w: i32, r: f32) -> f32 {
+    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+    if py >= r {
+        return 1.0;
+    }
+    let cx = if px < r {
+        r
+    } else if px > w as f32 - r {
+        w as f32 - r
+    } else {
+        return 1.0;
+    };
+    let d = ((px - cx).powi(2) + (py - r).powi(2)).sqrt();
+    (r - d + 0.5).clamp(0.0, 1.0)
+}
+
+/// The tag at `scale` ([`Look::tag`], [`tag_layout`]): the line on `bg`
+/// between its pads, room for the buttons (their own surface lies over it),
+/// the top corners round ([`TAG_ROUND`]) and clear outside them —
+/// ARGB8888, premultiplied. Its size in device pixels, and the pixels.
+pub fn render_tag(
+    font: &FontVec,
+    line: &Line,
+    look: &ButtonsLook,
+    scale: u32,
+    bg: Rgb,
+) -> (i32, i32, Vec<u8>) {
+    let scale = clamp_scale(scale);
+    let tag = tag_layout(line.width, look);
+    let (w, h) = (device(tag.width, scale), device(HEIGHT, scale));
+    let coverage = line_coverage(font, line, scale, w, h, device(tag.text_x, scale) as f32);
+    let fg = ink(bg);
+    let r = TAG_ROUND as f32 * scale as f32 / 120.0;
+    let mut pixels = Vec::with_capacity(coverage.len() * 4);
+    let mut covered = coverage.into_iter();
+    for y in 0..h {
+        for x in 0..w {
+            let c = covered.next().unwrap_or(0.0);
+            pixels.extend_from_slice(&premultiplied(blend(bg, fg, c), tab_alpha(x, y, w, r)));
+        }
+    }
+    (w, h, pixels)
+}
+
+/// The window's round corners at `scale` ([`Look::corners`]): four images of
+/// `radius` logical pixels square — the top left, the top right, the bottom
+/// left, the bottom right corner of the window —, `color` where the
+/// window's corner is cut off and clear inside the quarter circle, whose
+/// edge is smoothed over a device pixel. ARGB8888, premultiplied. The side
+/// of one image in device pixels, and the pixels of all four one after the
+/// other.
+pub fn render_corners(radius: i32, scale: u32, color: Rgb) -> (i32, i32, Vec<u8>) {
+    let d = device(radius, scale);
+    let r = d as f32;
+    let side = d.max(0) as usize;
+    let mut pixels = Vec::with_capacity(4 * side * side * 4);
+    for (right, bottom) in [(false, false), (true, false), (false, true), (true, true)] {
+        // The circle's centre: the corner of the image nearest the window's
+        // middle.
+        let (cx, cy) = (if right { 0.0 } else { r }, if bottom { 0.0 } else { r });
+        for y in 0..d {
+            for x in 0..d {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let dist = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+                pixels.extend_from_slice(&premultiplied(color, (dist - r + 0.5).clamp(0.0, 1.0)));
+            }
+        }
+    }
+    (d, d, pixels)
 }
 
 /// The row of buttons at `scale` as `look` has it, on the frame's colour
 /// `frame`: the size of one image in device pixels and XRGB8888 pixels of
 /// every image one under the other ([`ButtonsLook::variants`]). `glyphs`:
 /// each button's glyph in `font`, in the look's order. A glyph is centred
-/// in its cell on a whole pixel, so that it is as crisp as the text.
+/// in its cell on a whole pixel, so that it is as crisp as the text; a disc
+/// ([`Shape::Circle`]) in the middle of its cell, its edge smoothed over a
+/// device pixel into the strip's colour.
 pub fn render_buttons(
     font: &FontVec,
     glyphs: &[GlyphId],
@@ -509,8 +992,23 @@ pub fn render_buttons(
             }
         });
     }
+    // How much of a pixel of cell `i` its colour covers: all of it, or the
+    // share inside its disc.
+    let filled = |i: usize, x: usize, y: usize| -> f32 {
+        match look.shape {
+            Shape::Cell => 1.0,
+            Shape::Circle(across) => {
+                let cx = (edges[i] + edges[i + 1]) as f32 / 2.0;
+                let cy = h as f32 / 2.0;
+                let r = across as f32 * s / 2.0;
+                let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+                (r - d + 0.5).clamp(0.0, 1.0)
+            }
+        }
+    };
     let mut pixels = Vec::with_capacity(look.variants() * wu * hu * 4);
     for variant in 0..look.variants() {
+        let shown = look.glyphs_in(variant);
         // Each cell's colour in this image, and its glyph's.
         let colours: Vec<(Rgb, Rgb)> = look
             .paints(variant)
@@ -523,61 +1021,92 @@ pub fn render_buttons(
         for y in 0..hu {
             for (x, &cell) in cell_of.iter().enumerate() {
                 let Some(&(bg, fg)) = colours.get(cell) else {
-                    pixels.extend_from_slice(&LOOK.pixels.word(frame));
+                    pixels.extend_from_slice(&frame.xrgb8888());
                     continue;
                 };
-                let c = match look.shape {
-                    Shape::Cell => coverage[y * wu + x],
-                };
-                pixels.extend_from_slice(&LOOK.pixels.word(blend(bg, fg, c)));
+                let under = blend(frame, bg, filled(cell, x, y));
+                let c = if shown { coverage[y * wu + x] } else { 0.0 };
+                pixels.extend_from_slice(&blend(under, fg, c).xrgb8888());
             }
         }
     }
     (w, h, pixels)
 }
 
-/// The font, the line and the buttons' glyphs, before the proxy confines
-/// itself: what its memfd has to hold is known from them.
+/// The width of the line's image, logical pixels: the line, or the tag
+/// around it in the tag look.
+fn image_width(line: &Line, look: &Look) -> i32 {
+    if look.tag() {
+        tag_layout(line.width, &look.buttons).width
+    } else {
+        line.width
+    }
+}
+
+/// The font, the line, the buttons' glyphs and the look, before the proxy
+/// confines itself: what its memfd has to hold is known from them.
 pub struct Prepared {
     font: FontVec,
     line: Line,
-    /// Each button's glyph, in [`LOOK`]'s order.
+    /// Each button's glyph, in the look's order.
     glyphs: Vec<GlyphId>,
+    look: Look,
 }
 
 impl Prepared {
-    /// `None` when the font is not a font, or the text draws nothing.
+    /// With stage 3's look ([`LOOK`]). `None` when the font is not a font,
+    /// or the text draws nothing.
     pub fn new(font: Vec<u8>, text: &str) -> Option<Self> {
+        Self::with_look(font, text, LOOK)
+    }
+
+    /// With the launch's look.
+    pub fn with_look(font: Vec<u8>, text: &str, look: Look) -> Option<Self> {
         let font = FontVec::try_from_vec(font).ok()?;
         let line = lay_out(&font, text);
-        let glyphs = LOOK
+        let glyphs = look
             .buttons
             .order
             .iter()
             .map(|b| font.glyph_id(b.glyph))
             .collect();
-        (line.width > 0).then_some(Self { font, line, glyphs })
+        (line.width > 0).then_some(Self {
+            font,
+            line,
+            glyphs,
+            look,
+        })
     }
 
-    /// Bytes of one region of the line: the line at [`MAX_SCALE`].
+    /// Bytes of one region of the line: the line (or the tag) at
+    /// [`MAX_SCALE`].
     fn slot_bytes(&self) -> usize {
-        device(self.line.width, MAX_SCALE) as usize * device(HEIGHT, MAX_SCALE) as usize * 4
+        device(image_width(&self.line, &self.look), MAX_SCALE) as usize
+            * device(HEIGHT, MAX_SCALE) as usize
+            * 4
     }
 
     /// Bytes of one region of the buttons: every image of the row at
     /// [`MAX_SCALE`].
     fn button_bytes(&self) -> usize {
-        let look = &LOOK.buttons;
+        let look = &self.look.buttons;
         look.variants()
             * device(look.width_all(), MAX_SCALE) as usize
             * device(HEIGHT, MAX_SCALE) as usize
             * 4
     }
 
+    /// Bytes of one region of the round corners: the four at
+    /// [`MAX_SCALE`]; none with square ones.
+    fn corner_bytes(&self) -> usize {
+        let d = device(self.look.corners(), MAX_SCALE) as usize;
+        4 * d * d * 4
+    }
+
     /// The memfd's size: [`SLOTS`] regions of the line, then [`SLOTS`] of
-    /// the buttons.
+    /// the buttons, then [`SLOTS`] of the corners.
     pub fn memfd_size(&self) -> usize {
-        (self.slot_bytes() + self.button_bytes()) * SLOTS
+        (self.slot_bytes() + self.button_bytes() + self.corner_bytes()) * SLOTS
     }
 }
 
@@ -621,20 +1150,23 @@ impl Regions {
     }
 }
 
-/// The launch's title: the line, the buttons, the frame's colour, and the
-/// memfd their pixels go to.
+/// The launch's title: the line, the buttons, the round corners, the frame's
+/// colour and look, and the memfd their pixels go to.
 pub struct Text {
     font: FontVec,
     line: Line,
     glyphs: Vec<GlyphId>,
     bg: Rgb,
+    look: Look,
     /// The memfd, to write the pixels with.
     file: File,
     /// The same memfd (another descriptor), for the pools.
     pub fd: Rc<OwnedFd>,
-    /// The line's regions, first in the memfd, and the buttons' after them.
+    /// The line's regions, first in the memfd, the buttons' after them, the
+    /// corners' last.
     title: Regions,
     buttons: Regions,
+    corners: Regions,
     clock: Cell<u64>,
 }
 
@@ -648,6 +1180,12 @@ impl Lease {
         count.set(count.get().saturating_add(1));
         Self(count.clone())
     }
+
+    /// Another hold on the same region: for another buffer of it (the four
+    /// round corners are four buffers of one region).
+    pub fn another(&self) -> Self {
+        Self::new(&self.0)
+    }
 }
 
 impl Drop for Lease {
@@ -656,9 +1194,9 @@ impl Drop for Lease {
     }
 }
 
-/// The line (or the buttons) drawn at a scale, where it is in the memfd —
-/// of the buttons, the first image, the others after it, `width` ×
-/// `height` pixels each.
+/// The line (or the buttons, or the corners) drawn at a scale, where it is
+/// in the memfd — of the buttons and the corners, the first image, the
+/// others after it, `width` × `height` pixels each.
 pub struct Drawn {
     pub offset: i32,
     pub width: i32,
@@ -671,19 +1209,22 @@ pub struct Drawn {
 
 impl Text {
     /// `memfd` of [`Prepared::memfd_size`] bytes, and a second descriptor of
-    /// it for writing.
+    /// it for writing. `bg`: the title's colour ([`Look::title_color`]).
     pub fn new(prepared: Prepared, bg: Rgb, memfd: OwnedFd, writer: OwnedFd) -> Self {
         let title = Regions::new(0, prepared.slot_bytes());
         let buttons = Regions::new(title.bytes(), prepared.button_bytes());
+        let corners = Regions::new(title.bytes() + buttons.bytes(), prepared.corner_bytes());
         Self {
             font: prepared.font,
             line: prepared.line,
             glyphs: prepared.glyphs,
             bg,
+            look: prepared.look,
             file: File::from(writer),
             fd: Rc::new(memfd),
             title,
             buttons,
+            corners,
             clock: Cell::new(0),
         }
     }
@@ -694,22 +1235,50 @@ impl Text {
         self.file.as_raw_fd()
     }
 
-    /// The line's width, logical pixels.
+    /// The look it draws.
+    pub fn look(&self) -> &Look {
+        &self.look
+    }
+
+    /// The width of the line's image, logical pixels: the line, or the tag.
     pub fn width(&self) -> i32 {
-        self.line.width
+        image_width(&self.line, &self.look)
+    }
+
+    /// Where things are on the tag, in the tag look.
+    pub fn tag(&self) -> Option<TagLayout> {
+        self.look
+            .tag()
+            .then(|| tag_layout(self.line.width, &self.look.buttons))
+    }
+
+    /// How the line's image keeps its pixels: with the tag's round corners
+    /// clear, or opaque.
+    pub fn pixels(&self) -> Pixels {
+        if self.look.tag() {
+            Pixels::Alpha
+        } else {
+            Pixels::Opaque
+        }
     }
 
     /// The pool's size: the whole memfd.
     pub fn pool_size(&self) -> i32 {
-        i32::try_from(self.title.bytes() + self.buttons.bytes()).unwrap_or(i32::MAX)
+        i32::try_from(self.title.bytes() + self.buttons.bytes() + self.corners.bytes())
+            .unwrap_or(i32::MAX)
     }
 
-    /// The line at `scale`, drawn if it is not yet: in a region nobody holds,
-    /// the one asked for longest ago. `None` when nothing is drawn at all
-    /// and nothing can be (every region held, or the write failed).
+    /// The line at `scale` — the tag with it, in the tag look —, drawn if it
+    /// is not yet: in a region nobody holds, the one asked for longest ago.
+    /// `None` when nothing is drawn at all and nothing can be (every region
+    /// held, or the write failed).
     pub fn at(&self, scale: u32) -> Option<Drawn> {
         self.region_at(&self.title, scale, |scale| {
-            render(&self.font, &self.line, scale, self.bg)
+            if self.look.tag() {
+                render_tag(&self.font, &self.line, &self.look.buttons, scale, self.bg)
+            } else {
+                render(&self.font, &self.line, scale, self.bg)
+            }
         })
     }
 
@@ -718,7 +1287,20 @@ impl Text {
     /// 4` bytes after `offset`.
     pub fn buttons_at(&self, scale: u32) -> Option<Drawn> {
         self.region_at(&self.buttons, scale, |scale| {
-            render_buttons(&self.font, &self.glyphs, &LOOK.buttons, scale, self.bg)
+            render_buttons(&self.font, &self.glyphs, &self.look.buttons, scale, self.bg)
+        })
+    }
+
+    /// The round corners at `scale`, all four, as [`Text::at`] the line:
+    /// corner `k` ([`render_corners`]' order) is `k × width × height × 4`
+    /// bytes after `offset`. `None` with square corners.
+    pub fn corners_at(&self, scale: u32) -> Option<Drawn> {
+        let radius = self.look.corners();
+        if radius <= 0 {
+            return None;
+        }
+        self.region_at(&self.corners, scale, |scale| {
+            render_corners(radius, scale, self.bg)
         })
     }
 
@@ -1074,5 +1656,528 @@ mod tests {
             assert_eq!(word(1, 0, 0), colour(Paint::Shade(22).on(frame)));
             assert_eq!(word(0, 0, 0), colour(frame));
         }
+    }
+
+    /// Every look of the buttons (the owner, 2026-09-27: GNOME's, KDE's,
+    /// macOS's and Windows's, all equal, and the one there was): its end,
+    /// its order, a cell each for the pointer, close red under it.
+    #[test]
+    fn every_look_has_its_end_its_order_and_close_red_under_the_pointer() {
+        use crate::frame::ButtonStyle;
+        let order =
+            |look: &ButtonsLook| -> Vec<Button> { look.order.iter().map(|b| b.button).collect() };
+        let right = [Button::Menu, Button::Network, Button::Close];
+        for (style, end, width) in [
+            (ButtonStyle::Cellward, End::Right, 24),
+            (ButtonStyle::Gnome, End::Right, 24),
+            (ButtonStyle::Kde, End::Right, 24),
+            (ButtonStyle::Macos, End::Left, 20),
+            (ButtonStyle::Windows, End::Right, 32),
+        ] {
+            let look = buttons_look(style);
+            assert_eq!(look.end, end, "{style:?}");
+            assert_eq!(look.width, width, "{style:?}");
+            // A whole number of pixels at 1.25 and 1.75, like the strip.
+            assert_eq!(look.width % 4, 0, "{style:?}");
+            assert_eq!(look.margin % 4, 0, "{style:?}");
+            if style == ButtonStyle::Macos {
+                // The traffic lights: close red first, then yellow, then
+                // green, at the left end.
+                assert_eq!(order(&look), [Button::Close, Button::Menu, Button::Network]);
+                let lights: Vec<Paint> = look.order.iter().map(|b| b.rest).collect();
+                assert_eq!(
+                    lights,
+                    [
+                        Paint::Fixed(MAC_RED),
+                        Paint::Fixed(MAC_YELLOW),
+                        Paint::Fixed(MAC_GREEN)
+                    ]
+                );
+                assert_eq!(look.glyphs, Glyphs::Lit);
+            } else {
+                assert_eq!(order(&look), right, "{style:?}");
+                assert_eq!(look.glyphs, Glyphs::Always);
+            }
+            // A point is the button of its cell, in the look's order.
+            for (i, b) in look.order.iter().enumerate() {
+                let x0 = f64::from(width) * i as f64;
+                assert_eq!(look.at(x0, 0.0), Some(b.button), "{style:?}");
+                assert_eq!(look.at(x0 + f64::from(width) - 0.5, 19.5), Some(b.button));
+            }
+            assert_eq!(look.at(f64::from(look.width_all()), 10.0), None);
+            assert_eq!(look.at(-0.5, 10.0), None);
+            assert_eq!(look.at(1.0, 20.0), None);
+            // Close red under the pointer, whatever the frame's colour; the
+            // others not; pressed another colour than lit.
+            for frame in [
+                Rgb(0xff, 0, 0xff),
+                Rgb(0x20, 0x30, 0x40),
+                Rgb(0xf0, 0xf0, 0xe0),
+            ] {
+                for b in look.order {
+                    let Rgb(r, g, bl) = b.hover.on(frame);
+                    let red = r >= 190 && g <= 100 && bl <= 100;
+                    assert_eq!(
+                        red,
+                        b.button == Button::Close,
+                        "{style:?} {b:?} on {frame:?}"
+                    );
+                    assert_ne!(b.press.on(frame), b.hover.on(frame), "{style:?} {b:?}");
+                }
+            }
+            assert_eq!(look.variants(), 7);
+        }
+        // None: no row at all.
+        let none = buttons_look(ButtonStyle::None);
+        assert_eq!((none.width_all(), none.variants()), (0, 1));
+        assert_eq!(none.at(0.0, 0.0), None);
+        // Stage 3's look is cellward's.
+        assert_eq!(LOOK.buttons, CELLWARD);
+        assert_eq!(buttons_look(crate::frame::DEFAULT_BUTTONS), CELLWARD);
+    }
+
+    /// Every look's row drawn in every state at the usual scales: a cell of
+    /// the whole colour, or a disc of it on the strip's colour; a glyph in
+    /// each cell — macOS's only while one of them is lit, on all of them
+    /// then —; and close red under the pointer.
+    #[test]
+    fn every_look_draws_its_buttons_in_every_state() {
+        use crate::frame::ButtonStyle;
+        let Some(bytes) = font() else { return };
+        let frame = Rgb(0xff, 0x00, 0xff);
+        for style in ButtonStyle::ALL {
+            let look = Look {
+                buttons: buttons_look(style),
+                ..LOOK
+            };
+            let prepared =
+                Prepared::with_look(bytes.clone(), "nl · основной", look).expect("a font");
+            assert!(
+                prepared.glyphs.iter().all(|g| g.0 != 0),
+                "{style:?}: {:?}",
+                prepared.glyphs
+            );
+            let row = &look.buttons;
+            if row.order.is_empty() {
+                continue;
+            }
+            for scale in [120, 180] {
+                let (w, h, pixels) =
+                    render_buttons(&prepared.font, &prepared.glyphs, row, scale, frame);
+                assert_eq!(
+                    (w, h),
+                    (device(row.width_all(), scale), device(HEIGHT, scale))
+                );
+                assert_eq!(pixels.len(), row.variants() * (w * h * 4) as usize);
+                let word = |v: usize, x: i32, y: i32| {
+                    let at = ((v as i32 * h + y) * w + x) as usize * 4;
+                    let [b, g, r, _]: [u8; 4] = pixels[at..at + 4].try_into().unwrap();
+                    Rgb(r, g, b)
+                };
+                let cell = |i: usize| {
+                    (
+                        device(row.width * i as i32, scale),
+                        device(row.width * (i as i32 + 1), scale),
+                    )
+                };
+                // Pixels of cell `i` in image `v` that are `colour` exactly.
+                let count = |v: usize, i: usize, colour: Rgb| {
+                    let (x0, x1) = cell(i);
+                    (x0..x1)
+                        .flat_map(|x| (0..h).map(move |y| (x, y)))
+                        .filter(|&(x, y)| word(v, x, y) == colour)
+                        .count()
+                };
+                // Most of a disc is its colour: the glyph on it and its
+                // smoothed edge are not a third of it.
+                let disc = |across: i32| {
+                    let r = f64::from(device(across, scale)) / 2.0;
+                    (std::f64::consts::PI * r * r * 0.3) as usize
+                };
+                for v in 0..row.variants() {
+                    for (i, paint) in row.paints(v).iter().enumerate() {
+                        let (x0, x1) = cell(i);
+                        let bg = paint.on(frame);
+                        match row.shape {
+                            Shape::Cell => {
+                                assert_eq!(word(v, x0, 0), bg, "{style:?} {scale} {v}");
+                            }
+                            Shape::Circle(across) => {
+                                assert_eq!(word(v, x0, 0), frame, "{style:?}: the cell's corner");
+                                let n = count(v, i, bg);
+                                assert!(
+                                    n >= disc(across),
+                                    "{style:?} {scale} {v} {i}: {n} of {bg:?}"
+                                );
+                            }
+                        }
+                        // Nothing on the top and bottom rows but the colour
+                        // and the strip's.
+                        for x in x0..x1 {
+                            for y in [0, h - 1] {
+                                let p = word(v, x, y);
+                                assert!(p == bg || p == frame, "{style:?} {v} ({x}, {y}): {p:?}");
+                            }
+                        }
+                    }
+                }
+                // The glyphs: in every image, or (macOS) only in the lit
+                // ones — where every cell differs from the image at rest.
+                for i in 0..row.order.len() {
+                    let (x0, x1) = cell(i);
+                    let differs =
+                        |v: usize| (x0..x1).any(|x| (0..h).any(|y| word(v, x, y) != word(0, x, y)));
+                    let inked = |v: usize| {
+                        let bg = row.paints(v)[i].on(frame);
+                        let fg = ink(bg);
+                        let d = |a: Rgb, b: Rgb| {
+                            (i32::from(a.0) - i32::from(b.0)).abs()
+                                + (i32::from(a.1) - i32::from(b.1)).abs()
+                                + (i32::from(a.2) - i32::from(b.2)).abs()
+                        };
+                        (x0..x1)
+                            .flat_map(|x| (0..h).map(move |y| (x, y)))
+                            .filter(|&(x, y)| d(word(v, x, y), fg) * 2 < d(bg, fg))
+                            .count()
+                    };
+                    match row.glyphs {
+                        Glyphs::Always => {
+                            for v in 0..row.variants() {
+                                assert!(
+                                    inked(v) > 0,
+                                    "{style:?} {scale}: no glyph in {i}, image {v}"
+                                );
+                            }
+                        }
+                        Glyphs::Lit => {
+                            assert_eq!(inked(0), 0, "{style:?}: a glyph at rest in {i}");
+                            for v in 1..row.variants() {
+                                assert!(differs(v), "{style:?}: no glyph in {i}, image {v}");
+                            }
+                        }
+                    }
+                }
+                // Close under the pointer: its red, most of its cell or of its
+                // disc.
+                let at = row
+                    .order
+                    .iter()
+                    .position(|b| b.button == Button::Close)
+                    .unwrap();
+                let lit = row.variant(Some(Lit {
+                    button: Button::Close,
+                    pressed: false,
+                }));
+                let red = row.order[at].hover.on(frame);
+                let least = match row.shape {
+                    Shape::Cell => (device(row.width, scale) * h / 2) as usize,
+                    Shape::Circle(across) => disc(across),
+                };
+                let n = count(lit, at, red);
+                assert!(n >= least, "{style:?}: close lit, {n} of {red:?}");
+            }
+        }
+    }
+
+    /// The soft style's tones: the zone's hue, less saturated and a little
+    /// darker, the outer ring more so; the title's tone still reads its ink.
+    #[test]
+    fn the_soft_tones_keep_the_zones_hue() {
+        let magenta = Rgb(0xff, 0x00, 0xff);
+        // What tests/vm-window-looks.py looks for on the screen.
+        assert_eq!(soft_inner(magenta), Rgb(240, 91, 240));
+        assert_eq!(soft_outer(magenta), Rgb(204, 112, 204));
+        assert_eq!(ink(soft_inner(magenta)), NEAR_BLACK);
+        for zone in ["nl", "de", "work", "offline", "зона"] {
+            let c = crate::frame::default_color(zone);
+            let (h, s, v) = crate::frame::to_hsv(c);
+            for (tone, less) in [(soft_inner(c), 0.62), (soft_outer(c), 0.45)] {
+                let (th, ts, tv) = crate::frame::to_hsv(tone);
+                let turn = (th - h).abs().min(360.0 - (th - h).abs());
+                assert!(turn < 4.0, "{zone}: hue {h} → {th}");
+                assert!((ts - s * less).abs() < 0.03, "{zone}: {ts} {s}");
+                assert!(tv < v && ts < s, "{zone}: {tone:?} of {c:?}");
+            }
+            assert_ne!(soft_inner(c), soft_outer(c));
+        }
+        // A grey stays a grey.
+        assert_eq!(soft_inner(Rgb(0x80, 0x80, 0x80)), Rgb(0x78, 0x78, 0x78));
+    }
+
+    /// Each style's colours and rings: `full` one ring of the colour itself
+    /// (stage 2's one square), `soft` two tones nested, the outer half
+    /// darker, `tag` none and a clear square for its row.
+    #[test]
+    fn each_style_has_its_squares_and_rings() {
+        let c = Rgb(0x12, 0x80, 0xc0);
+        let full = LOOK;
+        let soft = Look {
+            style: Style::Soft,
+            ..LOOK
+        };
+        let tag = Look {
+            style: Style::Tag,
+            radius: 8,
+            ..LOOK
+        };
+        assert_eq!(full.squares(c), [Square::Color(c)]);
+        assert_eq!(full.rings(6), [(6, 0)]);
+        assert_eq!((full.title_color(c), full.title_square(true)), (c, 0));
+        assert_eq!(
+            soft.squares(c),
+            [Square::Color(soft_inner(c)), Square::Color(soft_outer(c))]
+        );
+        assert_eq!(soft.rings(6), [(3, 1), (3, 0)]);
+        assert_eq!(soft.rings(4), [(2, 1), (2, 0)]);
+        assert_eq!(soft.rings(5), [(2, 1), (3, 0)], "the inner one the wider");
+        assert_eq!(soft.rings(1), [(1, 0)]);
+        assert_eq!(soft.title_color(c), soft_inner(c));
+        assert_eq!(tag.squares(c), [Square::Color(c), Square::Clear]);
+        assert!(tag.rings(6).is_empty());
+        assert_eq!((tag.title_square(true), tag.title_square(false)), (1, 0));
+        // Round corners, but not on a tag.
+        assert_eq!(tag.corners(), 0);
+        assert_eq!(Look { radius: 8, ..soft }.corners(), 8);
+        assert_eq!(Look { radius: 99, ..soft }.corners(), MAX_RADIUS);
+        // The pixels: opaque, or nothing at all; premultiplied in between.
+        assert_eq!(u32::from_ne_bytes(Square::Color(c).word()), 0xff12_80c0);
+        assert_eq!(Square::Clear.word(), [0; 4]);
+        assert_eq!(Square::Clear.pixels(), Pixels::Alpha);
+        assert_eq!(u32::from_ne_bytes(premultiplied(c, 1.0)), 0xff12_80c0);
+        assert_eq!(u32::from_ne_bytes(premultiplied(c, 0.0)), 0);
+        assert_eq!(
+            u32::from_ne_bytes(premultiplied(Rgb(200, 100, 0), 0.5)),
+            0x8064_3200
+        );
+        // A look of the settings.
+        let frame = crate::frame::Frame {
+            color: c,
+            width: 4,
+            title: crate::frame::TitleMode::Always,
+            buttons: crate::frame::ButtonStyle::Macos,
+            style: Style::Soft,
+            radius: 12,
+        };
+        assert_eq!(
+            Look::of(&frame),
+            Look {
+                style: Style::Soft,
+                buttons: MACOS,
+                radius: 12
+            }
+        );
+    }
+
+    /// The tag: the label between its pads and the row at the look's end,
+    /// clear of the round corners; without buttons, the label alone.
+    #[test]
+    fn the_tag_is_its_label_and_its_buttons() {
+        let text = 100;
+        let t = tag_layout(text, &CELLWARD);
+        assert_eq!(
+            t,
+            TagLayout {
+                width: PAD + text + PAD + 72 + TAG_ROUND,
+                text_x: PAD,
+                buttons: Some(PAD + text + PAD),
+            }
+        );
+        let m = tag_layout(text, &MACOS);
+        assert_eq!(
+            m.buttons,
+            Some(TAG_ROUND),
+            "the lights first, clear of the corner"
+        );
+        assert_eq!(m.text_x, TAG_ROUND + 60 + PAD);
+        assert_eq!(m.width, m.text_x + text + PAD);
+        let g = tag_layout(text, &GNOME);
+        assert_eq!(g.width, PAD + text + PAD + 72 + TAG_ROUND.max(GNOME.margin));
+        assert_eq!(
+            tag_layout(text, &NO_BUTTONS),
+            TagLayout {
+                width: PAD + text + PAD,
+                text_x: PAD,
+                buttons: None
+            }
+        );
+        // The row never over a round corner.
+        for look in [CELLWARD, GNOME, KDE, MACOS, WINDOWS] {
+            let t = tag_layout(text, &look);
+            let b = t.buttons.unwrap();
+            assert!(
+                b >= TAG_ROUND && b + look.width_all() <= t.width - TAG_ROUND,
+                "{look:?}"
+            );
+        }
+    }
+
+    /// The tag's image: its colour, the text on it, the top corners round
+    /// and clear outside, the bottom ones square; premultiplied.
+    #[test]
+    fn the_tag_is_drawn_with_round_top_corners() {
+        let Some(bytes) = font() else { return };
+        let look = Look {
+            style: Style::Tag,
+            ..LOOK
+        };
+        let prepared = Prepared::with_look(bytes, "nl · основной", look).expect("a font");
+        let bg = Rgb(0xff, 0x00, 0xff);
+        for scale in [120, 180] {
+            let (w, h, pixels) =
+                render_tag(&prepared.font, &prepared.line, &look.buttons, scale, bg);
+            let tag = tag_layout(prepared.line.width, &look.buttons);
+            assert_eq!((w, h), (device(tag.width, scale), device(HEIGHT, scale)));
+            assert_eq!(pixels.len(), (w * h * 4) as usize);
+            let word = |x: i32, y: i32| {
+                let at = ((y * w + x) * 4) as usize;
+                u32::from_ne_bytes(pixels[at..at + 4].try_into().unwrap())
+            };
+            let opaque = u32::from_ne_bytes(bg.xrgb8888());
+            assert_eq!(word(0, 0), 0, "the top left corner clear");
+            assert_eq!(word(w - 1, 0), 0, "the top right corner clear");
+            assert_eq!(word(0, h - 1), opaque, "the bottom square");
+            assert_eq!(word(w - 1, h - 1), opaque);
+            assert_eq!(word(w / 2, 0), opaque, "the top edge between the corners");
+            // Round: part of a pixel along the curve.
+            let r = device(TAG_ROUND, scale);
+            assert!((0..r).any(|x| (0..r).any(|y| {
+                let a = word(x, y) >> 24;
+                a > 0 && a < 0xff
+            })));
+            // Premultiplied: no channel above its alpha.
+            for y in 0..h {
+                for x in 0..w {
+                    let [b, g, r, a] = word(x, y).to_le_bytes();
+                    assert!(r <= a && g <= a && b <= a, "({x}, {y})");
+                }
+            }
+            // The text, after the pad: its ink there, and not in the pad.
+            let fg = u32::from_ne_bytes(ink(bg).xrgb8888());
+            let inked: Vec<i32> = (0..w)
+                .filter(|&x| (0..h).any(|y| word(x, y) == fg))
+                .collect();
+            assert!(!inked.is_empty(), "scale {scale}: no text");
+            assert!(inked[0] >= device(tag.text_x, scale) - 1, "{inked:?}");
+        }
+    }
+
+    /// The window's round corners: the colour where the window's corner is
+    /// cut off, clear inside the quarter circle, each of the four a mirror
+    /// of the first; the radius in device pixels at the scale.
+    #[test]
+    fn the_round_corners_are_clear_inside_their_quarter_circle() {
+        let c = Rgb(240, 91, 240);
+        let (d, d2, pixels) = render_corners(8, 120, c);
+        assert_eq!((d, d2), (8, 8));
+        assert_eq!(pixels.len(), 4 * 8 * 8 * 4);
+        let word = |k: i32, x: i32, y: i32| {
+            let at = (((k * d + y) * d + x) * 4) as usize;
+            u32::from_ne_bytes(pixels[at..at + 4].try_into().unwrap())
+        };
+        let alpha = |k: i32, x: i32, y: i32| word(k, x, y) >> 24;
+        let opaque = u32::from_ne_bytes(c.xrgb8888());
+        // The top left: the window's corner cut off, its inside clear.
+        assert_eq!(word(0, 0, 0), opaque);
+        assert_eq!(word(0, 7, 7), 0);
+        // Where the curve meets the image's far edges it touches them: the
+        // last pixel there is next to nothing of the colour.
+        assert!(alpha(0, 7, 0) < 0x10, "the top edge beyond the curve");
+        assert!(alpha(0, 0, 7) < 0x10, "the left edge beyond the curve");
+        assert_eq!(alpha(0, 3, 0), 0xff, "the top edge before it");
+        // Along the diagonal, less and less of it.
+        let diagonal: Vec<u32> = (0..d).map(|i| alpha(0, i, i)).collect();
+        assert!(diagonal.windows(2).all(|p| p[0] >= p[1]), "{diagonal:?}");
+        assert!(
+            diagonal.iter().any(|&a| a > 0 && a < 0xff),
+            "no smoothing: {diagonal:?}"
+        );
+        // The others are its mirrors: top right, bottom left, bottom right.
+        for y in 0..d {
+            for x in 0..d {
+                assert_eq!(word(1, x, y), word(0, d - 1 - x, y), "top right ({x}, {y})");
+                assert_eq!(word(2, x, y), word(0, x, d - 1 - y), "bottom left");
+                assert_eq!(word(3, x, y), word(0, d - 1 - x, d - 1 - y), "bottom right");
+            }
+        }
+        // At 1.5: 12 pixels, the same shape.
+        let (d, _, pixels) = render_corners(8, 180, c);
+        assert_eq!((d, pixels.len()), (12, 4 * 12 * 12 * 4));
+        // None at 0.
+        assert_eq!(render_corners(0, 120, c).2.len(), 0);
+    }
+
+    /// The corners' regions: after the line's and the buttons', written as
+    /// drawn; none with square corners, nor in the tag look.
+    #[test]
+    fn the_corners_have_regions_of_their_own() {
+        let Some(bytes) = font() else { return };
+        let dir = std::env::temp_dir().join(format!("vz-corners-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let text_of = |look: Look, name: &str| {
+            let prepared = Prepared::with_look(bytes.clone(), "nl · основной", look).unwrap();
+            let size = prepared.memfd_size();
+            let path = dir.join(name);
+            let file = File::create(&path).unwrap();
+            file.set_len(size as u64).unwrap();
+            let writer = OwnedFd::from(File::options().write(true).open(&path).unwrap());
+            (
+                Text::new(prepared, Rgb(240, 91, 240), OwnedFd::from(file), writer),
+                path,
+                size,
+            )
+        };
+        let round = Look {
+            style: Style::Soft,
+            radius: 8,
+            ..LOOK
+        };
+        let (text, path, size) = text_of(round, "round");
+        assert_eq!(text.pool_size() as usize, size);
+        let corners = text.corners_at(180).unwrap();
+        assert_eq!((corners.width, corners.height), (12, 12));
+        assert!(corners.offset as usize >= text.title.bytes() + text.buttons.bytes());
+        let (_, _, want) = render_corners(8, 180, Rgb(240, 91, 240));
+        assert!(
+            corners.offset as usize + want.len() <= size,
+            "past the memfd"
+        );
+        let mut got = vec![0u8; want.len()];
+        File::open(&path)
+            .unwrap()
+            .read_exact_at(&mut got, corners.offset as u64)
+            .unwrap();
+        assert_eq!(got, want);
+        // Another hold on it: the region stays held while either is alive.
+        let again = corners.lease.another();
+        drop(corners);
+        assert!(text
+            .corners
+            .slots
+            .borrow()
+            .iter()
+            .any(|s| s.scale == 180 && s.leases.get() == 1));
+        drop(again);
+        assert!(text
+            .corners
+            .slots
+            .borrow()
+            .iter()
+            .all(|s| s.leases.get() == 0));
+        // Square: nothing; a tag: nothing, and its line is the tag, clear
+        // at the corners.
+        let (square, _, _) = text_of(LOOK, "square");
+        assert!(square.corners_at(120).is_none());
+        let tag = Look {
+            style: Style::Tag,
+            radius: 8,
+            ..LOOK
+        };
+        let (tagged, _, _) = text_of(tag, "tag");
+        assert!(tagged.corners_at(120).is_none());
+        assert_eq!(tagged.pixels(), Pixels::Alpha);
+        assert_eq!(tagged.width(), tagged.tag().unwrap().width);
+        let line = tagged.at(120).unwrap();
+        assert_eq!(line.width, device(tagged.width(), 120));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

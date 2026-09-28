@@ -42,14 +42,17 @@
 //! switch** (`crate::screencast`): with `--zone`, each call of the ScreenCast
 //! portal is judged by the switch of the connection's container as it is at
 //! that call (`screencast_verdict`) — whose program connected is looked at
-//! once, when it connects (`crate::origin`).
+//! once, when it connects (`crate::origin`). **The tray icon's mark**
+//! (`crate::tray`), with `--zone` too: a tray host's question about the
+//! program's icon is remembered on its way in, and the program's answer to
+//! it goes up with the zone's colour drawn on the icon (`marked_reply`).
 //!
 //! Every byte comes from the sandboxed program, so the parsing is
 //! `crate::dbus_wire`'s, bounds-checked throughout; a message that does not
 //! parse ends the connection. The filter dies with the sandbox launcher
 //! (`PR_SET_PDEATHSIG`); a link it opened lives on in its own unit.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -106,6 +109,9 @@ const MAX_AUTH_BYTES: usize = 16 * 1024;
 /// against each other, and exhausting it, are not a goal
 /// (`docs/THREAT-MODEL.md` §5, X8); a cgroup per launch would be the identity.
 const MAX_CONNECTIONS: usize = 64;
+/// A tray host's questions to a connection's icon that the filter keeps
+/// until they are answered (`ItemCalls`).
+const MAX_ITEM_CALLS: usize = 256;
 /// Links the filter opens: at most this many in a minute.
 const MAX_OPENS_PER_MINUTE: usize = 10;
 /// The longest link it opens.
@@ -707,6 +713,39 @@ struct Conn {
     /// it connected: the screen cast is decided by its container. The zone's
     /// own for a filter with no zone to read (a sandbox's).
     who: crate::origin::Who,
+    /// What a tray host asked the program's icon (`crate::tray`): the one
+    /// direction sees the question, the other the answer.
+    items: Mutex<ItemCalls>,
+}
+
+/// A tray host's questions to the program's icon, by who asked and its
+/// serial, until the program answers them. Bounded: questions that are never
+/// answered — a program gone quiet — push out the oldest.
+#[derive(Default)]
+struct ItemCalls {
+    asked: HashMap<(String, u32), wire::ItemAsk>,
+    order: VecDeque<(String, u32)>,
+}
+
+impl ItemCalls {
+    fn ask(&mut self, from: &str, serial: u32, ask: wire::ItemAsk) {
+        if self.asked.len() >= MAX_ITEM_CALLS {
+            if let Some(old) = self.order.pop_front() {
+                self.asked.remove(&old);
+            }
+        }
+        let key = (from.to_owned(), serial);
+        if self.asked.insert(key.clone(), ask).is_none() {
+            self.order.push_back(key);
+        }
+    }
+
+    fn answered(&mut self, to: &str, serial: u32) -> Option<wire::ItemAsk> {
+        let key = (to.to_owned(), serial);
+        let ask = self.asked.remove(&key)?;
+        self.order.retain(|k| *k != key);
+        Some(ask)
+    }
 }
 
 impl Conn {
@@ -719,6 +758,7 @@ impl Conn {
             began: AtomicBool::new(false),
             registry: Mutex::new(Registration::default()),
             settled: Condvar::new(),
+            items: Mutex::new(ItemCalls::default()),
         }
     }
 
@@ -1387,6 +1427,12 @@ fn client_to_bus(
             if conn.holds(&h) {
                 conn.settle(client.as_raw_fd());
             }
+            // The program's answer to a tray host, with the zone's mark.
+            if let Some(message) = marked_reply(conn, ctx, &msg, &h) {
+                let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
+                send_all(up, &message, &raw)?;
+                continue;
+            }
             match door(&h) {
                 // The descriptors of an answered call are dropped — closed.
                 Some(which @ (Door::Network | Door::Proxy)) => answer_value(conn, ctx, &h, which)?,
@@ -1466,11 +1512,96 @@ fn bus_to_client(upstream: &UnixStream, conn: &Conn, ctx: &Ctx) -> io::Result<()
             if conn.answered(ctx, &msg, &h) {
                 continue;
             }
+            // A tray host asking the program's icon: its answer is marked
+            // on the way back (`marked_reply`). Only where there is a zone.
+            if ctx.screencast.is_some() {
+                if let (Some(ask), Some(from)) =
+                    (wire::item_properties_call(&msg, &h), h.sender.as_deref())
+                {
+                    conn.items
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .ask(from, h.serial, ask);
+                }
+            }
             let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
             conn.send(&msg, &raw)?;
         }
     }
     Ok(())
+}
+
+/// The program's answer to a tray host's question about its icon, with the
+/// zone's mark drawn on it (`crate::tray`): the whole message to send in its
+/// place, or `None` — not such an answer, or the badge off. An answer the
+/// filter cannot mark (big-endian, or one that does not read) goes to the
+/// host as an error in its place: an icon without its mark is what the mark
+/// is there to prevent, and a program that answers so has no icon
+/// (independent review 2026-09-28).
+fn marked_reply(conn: &Conn, ctx: &Ctx, msg: &[u8], h: &Header) -> Option<Vec<u8>> {
+    if h.kind != wire::METHOD_RETURN {
+        return None;
+    }
+    let policy = ctx.screencast.as_ref()?;
+    let ask = conn
+        .items
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .answered(h.destination.as_deref()?, h.reply_serial?)?;
+    let (zone, zone_dir, config) = policy.places();
+    let config = config?;
+    let (badge, _) = crate::tray::badge(config);
+    if badge == crate::tray::Badge::Off {
+        return None;
+    }
+    let color = crate::tray::color(zone_dir.as_deref(), config, &zone, &conn.who);
+    let label = crate::tray::label(&zone, &conn.who);
+    let picture = move |width: i32, height: i32, px: &mut [u8]| {
+        crate::tray::mark(width, height, px, color, badge);
+    };
+    let tooltip = |own: &str| crate::tray::tooltip_text(own, &label);
+    let side = crate::tray::OVERLAY_SIDE;
+    let marks = wire::ItemMarks {
+        picture: &picture,
+        overlay: Some((side, side, crate::tray::overlay(color, badge))),
+        tooltip: &tooltip,
+    };
+    let body = match wire::marked_item_reply(msg, h, &ask, &marks) {
+        Ok(Some(body)) => body,
+        Ok(None) => return None,
+        Err(e) => {
+            eprintln!("bus-filter: a tray icon's answer cannot be marked ({e}) — refused");
+            let mut fields = vec![Field::ErrorName("org.freedesktop.DBus.Error.Failed")];
+            if let Some(serial) = h.reply_serial {
+                fields.push(Field::ReplySerial(serial));
+            }
+            if let Some(destination) = h.destination.as_deref() {
+                fields.push(Field::Destination(destination));
+            }
+            fields.push(Field::Signature("s"));
+            return Some(wire::message(
+                wire::ERROR,
+                h.flags,
+                h.serial,
+                &fields,
+                &body::string("the icon's answer was refused by the zone's bus filter"),
+            ));
+        }
+    };
+    let mut fields = Vec::new();
+    if let Some(serial) = h.reply_serial {
+        fields.push(Field::ReplySerial(serial));
+    }
+    if let Some(destination) = h.destination.as_deref() {
+        fields.push(Field::Destination(destination));
+    }
+    if let Some(signature) = h.signature.as_deref() {
+        fields.push(Field::Signature(signature));
+    }
+    if h.unix_fds != 0 {
+        fields.push(Field::UnixFds(h.unix_fds));
+    }
+    Some(wire::message(h.kind, h.flags, h.serial, &fields, &body))
 }
 
 /// Answer a call the way the portal would: the request's handle, then its

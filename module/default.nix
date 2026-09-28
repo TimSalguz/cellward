@@ -790,6 +790,10 @@ let
     "frame.colors"
     "frame.width"
     "frame.title"
+    "frame.style"
+    "frame.buttons"
+    "frame.radius"
+    "tray.badge"
     "compositorRestriction.enable"
     "desktop.windowMenu.key"
     "desktop.floatWindows"
@@ -1091,6 +1095,55 @@ in
       description = "Полоса заголовка «зона · контейнер» цвета зоны вдоль верха окон программ зон (docs/WINDOW-FRAME.md §0а). always — всегда, внутри окна: программе достаётся высота меньше на полосу; hover — поверх верха содержимого, выезжает, когда указатель у верхнего края окна, места не занимает; off — только обводка. В fullscreen полосы нет в любом режиме. null — не задавать из Nix (тогда cellward frame title, иначе always). Действует для программ, запущенных после смены.";
     };
 
+    frame.style = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "soft"
+          "full"
+          "tag"
+        ]
+      );
+      default = null;
+      example = "tag";
+      description = "Вид рамки (docs/WINDOW-FRAME.md §8 «Вид рамки»). soft — мягкие тона цвета зоны (тот же оттенок, меньше насыщенности), обводка в два тона: темнее снаружи, тон заголовка внутри — рамка всегда на виду и не режет глаз; full — сам цвет зоны, как было до 2026-09-28; tag — без обводки, только бирка «зона · контейнер» с кнопками сверху слева, остальная полоса прозрачная и не мешает указателю (программе достаётся высота меньше на полосу, как с заголовком). null — не задавать из Nix (тогда cellward frame style, иначе soft). Действует для программ, запущенных после смены.";
+    };
+
+    frame.buttons = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "cellward"
+          "gnome"
+          "kde"
+          "macos"
+          "windows"
+          "none"
+        ]
+      );
+      default = null;
+      example = "macos";
+      description = "Вид кнопок заголовка рамки (≡ меню окна, ⇄ другая сеть, × закрыть): cellward — свои квадратные справа; gnome — круглые, как в GNOME (Adwaita); kde — как в KDE (Breeze): значки, круг под указателем; macos — светофор СЛЕВА (закрыть красная, затем жёлтая и зелёная, значки при наведении); windows — прямоугольные справа; none — без кнопок. «Закрыть» под указателем красная в любом виде. null — не задавать из Nix (тогда cellward frame buttons, иначе cellward). Действует для программ, запущенных после смены.";
+    };
+
+    frame.radius = lib.mkOption {
+      type = lib.types.nullOr (lib.types.ints.between 0 16);
+      default = null;
+      example = 10;
+      description = "Скругление углов окна программы внутри рамки, логические пиксели (0 — квадратные): посредник кладёт поверх углов окна уголки цвета рамки. У бирки (frame.style = \"tag\") углы не скругляются — вокруг нет рамки, с которой уголку слиться. null — не задавать из Nix (тогда cellward frame radius, иначе 0). Действует для программ, запущенных после смены.";
+    };
+
+    tray.badge = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "dot"
+          "bar"
+          "off"
+        ]
+      );
+      default = null;
+      example = "bar";
+      description = "Метка цвета зоны (или контейнера — цвет рамки) на значках программ зоны в трее: dot — точка в правом нижнем углу, bar — полоска снизу, off — без метки. Рисует фильтр сессионной шины герметичной зоны, пока значок идёт через него: у обычных зон и запусков unconfined метки нет. Значок, заданный именем из темы, получает метку как наложение (OverlayIconPixmap) — его показывает не всякий трей. В подсказке значка добавляется строка «зона · контейнер». Метка — подсказка, а не граница: программа не уберёт её, но может нарисовать в своём значке другую. null — не задавать из Nix (тогда cellward tray badge, иначе dot). Действует со следующей перерисовки значка.";
+    };
+
     compositorRestriction.enable = lib.mkOption {
       type = lib.types.nullOr lib.types.bool;
       default = null;
@@ -1369,6 +1422,18 @@ in
     })
     (lib.mkIf (cfg.frame.title != null) {
       ".config/vpn-zones/declared/frame-title".text = cfg.frame.title;
+    })
+    (lib.mkIf (cfg.frame.style != null) {
+      ".config/vpn-zones/declared/frame-style".text = cfg.frame.style;
+    })
+    (lib.mkIf (cfg.frame.buttons != null) {
+      ".config/vpn-zones/declared/frame-buttons".text = cfg.frame.buttons;
+    })
+    (lib.mkIf (cfg.tray.badge != null) {
+      ".config/vpn-zones/declared/tray-badge".text = cfg.tray.badge;
+    })
+    (lib.mkIf (cfg.frame.radius != null) {
+      ".config/vpn-zones/declared/frame-radius".text = toString cfg.frame.radius;
     })
     (lib.mkIf (cfg.compositorRestriction.enable != null) {
       ".config/vpn-zones/declared/wayland-sandbox".text = if cfg.compositorRestriction.enable then "on" else "off";
