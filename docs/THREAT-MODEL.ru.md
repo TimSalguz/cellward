@@ -5,8 +5,10 @@ English: [THREAT-MODEL.md](THREAT-MODEL.md) · Разбор по каналам:
 [PERMISSIONS.md](PERMISSIONS.md) §11, [SYSTEM.md](SYSTEM.md) §10 (по-английски),
 [CERTIFICATES.ru.md](CERTIFICATES.ru.md) §5
 
-**Статус: 2026-09-27.** Описан код на этот день, включая пустой корень клиента OpenConnect,
-свой дом для новой программы и политику фокуса контейнера (W17).
+**Статус: 2026-09-28.** Описан код на этот день, включая пустой корень клиента OpenConnect,
+свой дом для новой программы, политику фокуса контейнера (W17), свой `resolv.conf`
+пространства, заново положенный после переименования хостом (D2), и IPC оболочек вне
+runtime-каталога любой зоны (W7).
 Этот документ — сводка; LEAK-MODEL — разбор каждого канала. Где они расходятся, решают код и
 CHANGELOG, а один из двух документов надо поправить.
 
@@ -135,7 +137,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | N21 | Смена сети побочным действием: программа зоны или экземпляра, брокер, запуск, возвращение зоны или изменение Nix переводят контейнер в другую сеть | да | единственная дверь — управляющий сокет экземпляра: он отвечает только собеседнику из пространства пользователя хоста и закрыт в каждой зоне и экземпляре; у брокера такого глагола нет; вернувшаяся зона подключает экземпляр, только если это та же зона (её отпечаток: конфиг и резолверы; новой эпохой), никогда другая — другая ждёт `cellward container reattach` (N9); сеть, заданная в Nix, меняется там | vm76 vm77 u18 |
 | | **DNS** | | | |
 | D1 | Резолвер хоста отвечает по unix-сокету (nscd/nsncd, varlink resolved, avahi) | да | tmpfs поверх их каталогов в каждой зоне (не вышло — зона не поднимается); свой `nsswitch.conf` зоны: `hosts: files dns` | vm9 vm10 vm11 sm6 sys1 |
-| D2 | `resolv.conf` хоста внутри зоны | частично | свой файл зоны привязан поверх; хост, заменяющий файл переименованием (NetworkManager, resolvconf), отцепляет привязку или убирает ссылку, которая к ней вела: зона тогда читает файл хоста и спрашивает резолверы хоста — через туннель, до своего перезапуска; до резолвера хоста и мимо туннеля не доходит ничего | vm12 vm48 |
+| D2 | `resolv.conf` хоста внутри зоны или экземпляра контейнера, после того как хост заменил свой файл переименованием (NetworkManager, resolvconf, openresolv) | да · между переименованием хостом и новой укладкой: **нет** (только через туннель) | свой файл пространства (и его `nsswitch.conf`) привязан на само имя `/etc/resolv.conf`, а не туда, куда ведут его ссылки (2026-09-28): переименование дальше по цепочке хоста его не трогает; замена самого имени его отцепляет, и пространство, следящее за `/etc` (inotify, без таймера), кладёт его туда снова — его `/etc` общий, каждый запуск — подчинённая копия, так что и программа, запущенная до переименования, получает его; до резолвера хоста и мимо туннеля не доходит ничего; `doctor` сверяет серверы имён, которые видит пространство, с данными ему | vm12 vm48 vm85 vm86 u19 |
 | D3 | Сведения о сети хоста по системной шине (`resolve1`, NetworkManager, `hostname1`) или через varlink systemd и сокет dhcpcd | да | прокси системной шины на зону; `/run/systemd` накрыт, назад — по списку разрешённого | vm13 vm20 vm41 |
 | D4 | Клиент OpenConnect резолвит имя резолвером хоста | да | шлюз резолвится заранее и передаётся через `--resolve`; в корне клиента `/run` нет вовсе | У · sm20 |
 | | **OpenConnect: клиент и шлюз** | | | |
@@ -163,7 +165,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 | W4 | Композитор без `wp_security_context_v1` (Mutter в GNOME; в тесте — cage) | деградация, не дыра | в зоне сырого сокета нет, значит, нет и Wayland; `unconfined` получает его без ограничений | У · vm49 |
 | W5 | Список разрешённых по имени бинаря (`obs`, `copyq`) открывает полные протоколы | да | запуск в зону ограничен всегда; для `unconfined` имя действует только для программы, которую под ним дают профили системы, или файла строки с путём | У (`launch.rs`) · vm43 u13 |
 | W6 | Другой процесс зоны пользуется посредником запуска или кладёт свой сокет на его место | да | посредник пропускает только потомков своего надзирателя (`SO_PEERPIDFD`); каталог сокетов только для чтения | vm16 |
-| W7 | IPC композитора или оболочки, которых нет в списке W1: вне runtime-каталога, в своём каталоге внутри него или по шине (Wayfire в `/tmp`, каталог quickshell, скрипты KWin) | герметичная: да · обычная: **нет** | герметичная: свой `/tmp`, runtime-каталог по списку разрешённого, фильтр шины | У · vm50; vm51 показывает, что обычная зона достаёт все три |
+| W7 | IPC композитора или оболочки, которых нет в списке W1: вне runtime-каталога, в своём каталоге внутри него или по шине (Wayfire в `/tmp`, каталог quickshell, скрипты KWin) | герметичная: да · обычная: runtime-каталог да, `/tmp` и шина **нет** | герметичная: свой `/tmp`, runtime-каталог по списку разрешённого, фильтр шины; каждая зона и экземпляр (2026-09-28): свой IPC оболочек не попадает в runtime-каталог по списку имён (`quickshell/`, `astal/`, `ironbar-ipc.sock`, `eww-server_*`), `WAYFIRE_SOCKET` снят из окружения запуска; обычная зона по замыслу делит с хостом `/tmp` (сокет Wayfire — по его пути) и всю шину | У · vm50 u20; vm51 показывает, что обычная зона не видит каталога оболочки и не знает сокета Wayfire, но по-прежнему достаёт Wayfire в `/tmp` и KWin по шине |
 | W8 | Окно рисует рамку и заголовок чужой зоны | нет | рамка — метка, не граница; доверенная метка — у панели (`cellward focused`: pid окна → его сетевое пространство, слово ядра) | win1 |
 | W9 | X-сервер хоста (все окна, клавиши и буфер) | да | tmpfs поверх `/tmp/.X11-unix`, без `DISPLAY`; его абстрактный сокет — в сетевом пространстве хоста | vm14 vm19 |
 | W10 | X-сервер одного запуска виден из другого запуска или зоны | частично | спутник на запуск; `x11-run` биндит его сокет в собственный `/tmp/.X11-unix` запуска, абстрактного нет; `/proc/<pid>/root` его процессов закрыт другой зоне её пространством пользователей, а другому запуску — на Linux 6.12+ — его доменом Landlock, который и не пускает клиентов на абстрактное имя, занятое другим запуском; клиенты одного сервера видят друг друга | vm16 vm52 |
@@ -247,12 +249,25 @@ PulseAudio; дополнительные группы сеанса сняты; �
   и `broker-always`. Это хост — не цель. С 2026-09-27 то, что она пишет в `declared/`, не слово
   Nix (H6); убрать ссылку home-manager или перевести её на другой файл store она всё ещё может.
 - **D2.** NetworkManager, `resolvconf` и openresolv пишут файл заново и переименовывают его на
-  место. С systemd-resolved (раскладка самой NixOS) цепочка ссылок кончается в tmpfs зоны
-  поверх каталога resolved, и файл зоны остаётся — если только хост не уберёт
-  переименованием саму ссылку. В обоих случаях зона после этого читает файл хоста: его
-  резолверы (отпечаток его сети), и имена спрашиваются у них через туннель. Резолвер на
-  loopback хоста для зоны — её собственный loopback, там никто не отвечает. vm48 проигрывает
-  обе раскладки. `doctor` проверяет только, что nameserver есть.
+  место, а ядро снимает все монтирования на старом имени во всех чужих пространствах
+  монтирования. До 2026-09-28 файл пространства привязывался туда, где кончалась цепочка
+  ссылок, и уходил с любым переименованием на ней; пространство тогда читало файл хоста до
+  своего перезапуска: резолверы хоста (отпечаток его сети), имена у них — через туннель
+  (резолвер на loopback хоста для пространства — его собственный loopback, там никто не
+  отвечает). Теперь (`rust/src/rebind.rs`) файл прикреплён к самому имени `/etc/resolv.conf`
+  (`move_mount`, не проходя ссылку), и отцепляет его только замена самого имени; процесс
+  пространства следит за `/etc` и по этому событию кладёт файл снова. **Окно** — от
+  переименования хостом до новой укладки, одно пробуждение и одно монтирование: запрос имени,
+  попавший в него, уходит к резолверам хоста через туннель, как раньше, — мимо туннеля нет.
+  Имя, которое хост удалил и ещё не создал заново, оставляет пространство без `resolv.conf`
+  (glibc спрашивает свой loopback), пока хост его не создаст. Раскладку, которую
+  переименование не трогает вовсе, — свой `/etc` пространства из ссылок на `/etc` хоста, —
+  взвесили и отвергли: она ломает то, что читает ссылки `/etc` (часовой пояс по цели
+  `/etc/localtime`), замораживает `/etc/static` на поколении подъёма и теряет то, что хост
+  добавит позже, и каждое требует своего наблюдателя, который, отстав, ошибается в открытую
+  сторону. `doctor` (`resolv`) сверяет серверы имён, которые видит пространство, с данными ему
+  и называет выход — перезапуск. Потребителей системного уровня
+  (`/etc/netns/vz-<имя>/resolv.conf`, их привязывает systemd) это не касается.
 - **W10.** Между зонами `/proc/<pid>/root` закрывают пространства пользователей (X3). Внутри
   зоны — домен Landlock запуска (X5): на ядре до 6.12 программа зоны достаёт X-сервер другого
   запуска через его процесс и может занять абстрактное имя, куда его клиенты идут первыми.
@@ -357,10 +372,10 @@ PulseAudio; дополнительные группы сеанса сняты; �
 - vm45 "a zone's program cannot reach the host over vsock" (в `tests/vm-promise-vsock.py`)
 - vm46 "declared: a plain file or a link out of the store is not Nix's word" (в `tests/vm-promise-declared.py`)
 - vm47 "a tunnel zone reaches neither the LAN nor the host's own addresses" (в `tests/vm-promise-lan.py`)
-- vm48 "the host's resolv.conf replaced by rename: the zone's names go only into the tunnel" (в `tests/vm-promise-resolv-rename.py`)
+- vm48 "the host's resolv.conf replaced by rename: its own laid again in the zone and the instance, names through the tunnel's DNS" (в `tests/vm-promise-resolv-rename.py`, как и vm85, vm86)
 - vm49 "a compositor without the security context: no Wayland in a zone, all of it unconfined" (в `tests/vm-promise-no-context.py`)
 - vm50 "hermetic zone: a shell's IPC in /tmp, in the runtime directory and on the bus is out of reach" (в `tests/vm-promise-shell-ipc.py`)
-- vm51 "ordinary zone: a shell's IPC in /tmp, in the runtime directory and on the bus stays in reach" (в `tests/vm-promise-shell-ipc.py`)
+- vm51 "ordinary zone: a shell's directory out of reach and WAYFIRE_SOCKET gone; /tmp and the bus still in reach" (в `tests/vm-promise-shell-ipc.py`)
 - vm52 "one launch's X server: out of reach of another launch and of another zone" (в `tests/vm-promise-x11.py`; части про `/proc` и абстрактное имя — с Linux 6.12)
 - vm53 "an offline launch runs in its container's instance: loopback only, apart" (в `tests/vm-instance-offline.py`, как и vm54–vm59)
 - vm54 "two containers' instances share no /tmp, no abstract socket, no System V IPC"
@@ -394,6 +409,8 @@ PulseAudio; дополнительные группы сеанса сняты; �
 - vm82 "switch: the keeper killed in the middle — the instance and its programs gone"
 - vm83 "an instance's programs are in its epoch; one from a login session holds the switch" (в `tests/vm-instance-offline.py`)
 - vm84 "doctor: no program in a zone's own namespaces, and one put there is named" (в `tests/vm-instance-bridge.py`)
+- vm85 "the host's resolv.conf a plain file: bound on the name, laid again after the rename"
+- vm86 "doctor: the nameservers an instance sees are its own; the host's in their stead fail, with the way out"
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·
@@ -477,3 +494,5 @@ the other"
 - u16 `rust/src/wl_focus.rs`: `one_input_event_is_one_change_of_the_focus`, `a_forgotten_serial_is_still_used_up`, `a_forgotten_token_of_the_launch_is_used_up`; `rust/src/wl_proxy.rs`: `input_passes_one_activate_per_input_event`, `notify_sends_the_byte_and_no_activate`, `allow_passes_every_activate`
 - u17 `rust/src/init.rs`: `a_stop_from_outside_ends_the_space_then_pid_1`, `a_stop_from_inside_is_nothing`, `the_space_ending_by_itself_is_a_failure`; `rust/src/profile.rs`: `the_subreaper_says_the_main_programs_end_once`, `a_signal_goes_to_the_program_and_the_orphans_it_adopted`; `rust/src/enter.rs`: `the_main_programs_status_is_read_back`; `rust/src/place.rs`: `an_orphan_pid_1_adopted_is_a_program`; `rust/src/launch.rs`: `the_main_home_guard_finds_the_program_outside_the_instance`, `an_instance_of_the_real_home_is_known_by_its_id_or_its_container`; `rust/src/doctor.rs`: `an_instances_programs_see_its_processes_alone`; `rust/src/dbus_wire.rs`: `no_hint_carries_a_pid`; `rust/src/sys.rs`: `a_zombie_under_a_stopped_parent_has_its_parent_continued`; `rust/src/kill.rs`: `a_container_is_not_named_by_a_network_of_its_name`
 - u18 `rust/src/switch.rs`: `every_precondition_refuses_alone`, `the_look_now_decides_whether_a_program_is_outside`, `every_failure_after_the_cut_ends_offline_and_never_on_the_old_network`, `a_request_is_its_word_and_a_network`; `rust/src/epoch.rs`: `the_wall_stands_from_the_second_epoch_on`, `a_process_is_in_its_epoch_by_its_cgroup_line`, `whether_it_can_be_switched_says_the_first_reason`; `rust/src/zone.rs`: `an_instance_goes_out_from_its_own_address_only`, `a_switchs_break_closes_an_instance_to_loopback`; `rust/src/sockdiag.rs`: `a_switch_breaks_what_may_reach_out_and_spares_the_rest`; `rust/src/relay.rs`: `the_probe_leaves_nothing_behind`; `rust/src/registry.rs`: `a_switch_moves_the_records_of_its_network_only`; `rust/src/profile.rs`: `a_term_goes_to_the_whole_tree_below`; `rust/src/microphone.rs`: `an_instances_filter_follows_the_network_it_is_in_now`, `an_instances_pipewire_follows_the_network_it_is_in_now`; `rust/src/screencast.rs`: `an_instances_filter_follows_the_network_it_is_in_now`; `rust/src/bus_filter.rs`: `an_app_id_is_checked_and_passed`
+- u19 `rust/src/rebind.rs`: `a_name_is_laid_when_it_leads_to_the_spaces_own_file`, `the_spaces_own_file_is_a_regular_file_and_not_a_link`, `an_event_concerns_the_name_it_is_about_and_no_other`, `the_hosts_rename_over_the_name_wakes_the_watch`; `rust/src/doctor.rs`: `a_space_sees_the_nameservers_it_was_given_or_fails`
+- u20 `rust/src/zone.rs`: `no_zone_gets_a_shells_ipc`; `rust/src/sockets.rs`: `what_the_project_promises_closed_fails_and_the_rest_warns`

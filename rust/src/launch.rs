@@ -77,11 +77,19 @@ pub const ENV_UNASKED: &str = "VPN_ZONE_UNASKED";
 /// Environment variables that name a compositor's IPC socket — a way to have
 /// the compositor spawn a process on the host. Dropped from launches into a
 /// zone, where the sockets are not either (`docs/LEAK-MODEL.md` §13).
-pub const COMPOSITOR_IPC_VARS: [&str; 4] = [
+///
+/// Wayfire's (`docs/THREAT-MODEL.md` W7, 2026-09-28): `WAYFIRE_SOCKET`, where
+/// its IPC plugin listens — by default in `/tmp`, which an ordinary zone
+/// shares with the host (LEAK-MODEL §9, §15): its programs are no longer told
+/// where it is, and a hermetic zone's `/tmp` is its own. `_WAYFIRE_SOCKET` is
+/// the path Wayfire is told to make it at, and names it as well.
+pub const COMPOSITOR_IPC_VARS: [&str; 6] = [
     "NIRI_SOCKET",
     "SWAYSOCK",
     "I3SOCK",
     "HYPRLAND_INSTANCE_SIGNATURE",
+    "WAYFIRE_SOCKET",
+    "_WAYFIRE_SOCKET",
 ];
 
 /// Marker file of a locked ("no escape") zone.

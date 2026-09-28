@@ -644,16 +644,19 @@ fn cstring(bytes: &[u8]) -> io::Result<CString> {
 
 /// Where a path really ends once every symlink on the way has been followed.
 ///
-/// Two callers need this and both need it for the same reason: `mount(2)`
-/// resolves symlinks in its TARGET, and on NixOS `/etc/resolv.conf` is a chain
-/// of them (`/etc/static/resolv.conf` → `/run/systemd/resolve/stub-resolv.conf`).
-/// So the zone's bind mount does not land where it says it does, and the
-/// filesystem sandbox has to pass in a file that is not where it looks like it
-/// is. (`docs/GOTCHAS.md` §3)
+/// `mount(2)` resolves symlinks in its TARGET, and on NixOS `/etc/resolv.conf`
+/// is a chain of them (`/etc/static/resolv.conf` →
+/// `/run/systemd/resolve/stub-resolv.conf`): the filesystem sandbox on the
+/// host has to pass in a file that is not where it looks like it is, the
+/// trust layer binds each bundle where its links end, and a zone reads the
+/// host's `nsswitch.conf` from where it really is. A zone's own
+/// `resolv.conf` and `nsswitch.conf` are no longer bound where the chain
+/// ends but over the name itself (`crate::rebind`, D2, 2026-09-28): a rename
+/// down the chain took them away. (`docs/GOTCHAS.md` §3)
 ///
 /// `fs::canonicalize` cannot do this: it insists that every component exists,
 /// and the interesting case is exactly the one where the last link dangles —
-/// the zone has just covered the directory it points into with a tmpfs. A chain
+/// a zone has covered the directory it points into with a tmpfs. A chain
 /// that leads nowhere therefore comes back as the path it leads to, not as an
 /// error; whether anything is there is the caller's question to ask.
 ///

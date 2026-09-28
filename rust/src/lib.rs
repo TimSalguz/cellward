@@ -28,7 +28,9 @@
 //! * [`zone`] — the life cycle of a zone: the user namespace with its double
 //!   mapping, the net+mount namespace, pasta, the tunnel, DNS and the state
 //!   mirror. This is what `vpn-zone@<name>.service` starts
-//!   (`docs/GOTCHAS.md` §1–§4);
+//!   (`docs/GOTCHAS.md` §1–§4); [`rebind`] keeps a space's own
+//!   `resolv.conf` and `nsswitch.conf` over the host's when the host
+//!   replaces them (`docs/THREAT-MODEL.md` D2);
 //! * [`container`] — containers as identities: the network a data container or
 //!   a named sandbox is bound to, the programs assigned to it, and where each
 //!   of those settings comes from (`docs/CONTAINERS.md`);
@@ -141,6 +143,7 @@ pub mod place;
 pub mod profile;
 pub mod pulse_filter;
 pub mod pw_context;
+pub mod rebind;
 pub mod registry;
 pub mod relay;
 pub mod screencast;

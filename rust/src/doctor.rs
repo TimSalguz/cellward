@@ -33,6 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read};
+use std::net::IpAddr;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -295,6 +296,53 @@ pub fn resolv_check(text: Option<&str>) -> Check {
     }
 }
 
+/// [`resolv_check`], held to the nameservers the space was given
+/// (`docs/THREAT-MODEL.md` D2, 2026-09-28): a zone's are the tunnel's, an
+/// instance's the constant forwarders its zone's passt answers. Others seen
+/// are the host's file in its stead — replaced by the host and not laid over
+/// again (`crate::rebind`): names asked of the host's resolvers, through the
+/// tunnel, a fingerprint of the host's network on the VPN's side. A failure,
+/// with `way_out`. None seen, or no file: as [`resolv_check`] says.
+pub fn own_resolv_check(text: Option<&str>, given: &[IpAddr], way_out: &str) -> Check {
+    let Some(seen) = text.map(nameservers).filter(|s| !s.is_empty()) else {
+        return resolv_check(text);
+    };
+    let parsed: Vec<Option<IpAddr>> = seen.iter().map(|s| s.parse().ok()).collect();
+    let expected: Vec<Option<IpAddr>> = given.iter().copied().map(Some).collect();
+    if parsed == expected {
+        return Check::new(
+            "resolv",
+            Level::Ok,
+            format!("серверы имён: {} — свои", seen.join(", ")),
+        );
+    }
+    let given: Vec<String> = given.iter().map(ToString::to_string).collect();
+    Check::new(
+        "resolv",
+        Level::Fail,
+        format!(
+            "серверы имён: {} — не те, что даны ({}): вместо своего resolv.conf виден файл \
+             хоста, и имена уходят через туннель к резолверам сети хоста — {way_out}",
+            seen.join(", "),
+            given.join(", ")
+        ),
+    )
+}
+
+/// `--nameservers=a,b` for a space's probe ([`own_resolv_check`]): the
+/// nameservers of the `resolv.conf` it was given, read from its directory
+/// on the host. `None` when there is none, it names none, or one of them is
+/// not an address: then the probe only looks that there is one.
+fn nameservers_arg(file: &Path) -> Option<String> {
+    let text = fs::read_to_string(file).ok()?;
+    let servers: Vec<IpAddr> = nameservers(&text)
+        .iter()
+        .map(|s| s.parse().ok())
+        .collect::<Option<_>>()?;
+    let listed: Vec<String> = servers.iter().map(ToString::to_string).collect();
+    (!listed.is_empty()).then(|| format!("--nameservers={}", listed.join(",")))
+}
+
 /// Sockets of the host's resolvers: must not be visible in a zone.
 pub const RESOLVER_SOCKETS: [&str; 5] = [
     "/run/nscd/socket",
@@ -381,8 +429,10 @@ fn reachable(path: &Path, slow: &crate::sockets::Slow) -> bool {
 /// host's sockets promised out of the zone's reach, by identity,
 /// `crate::sockets::parse_closed`), and for a container's instance
 /// `--host-pidns=pid:[…]` (the host's pid namespace: the X4 check,
-/// [`pid_namespace_check`]). Anything else is ignored: the two sides may be
-/// different builds for a moment after an update.
+/// [`pid_namespace_check`]), and `--nameservers=<address>,…` (those its
+/// `resolv.conf` was given: the D2 check, [`own_resolv_check`]). Anything
+/// else is ignored: the two sides may be different builds for a moment after
+/// an update.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProbeArgs {
     pub uid: u32,
@@ -398,6 +448,11 @@ pub struct ProbeArgs {
     /// `/proc` is looked at (X4). `None`: a zone's, which has none of its
     /// own.
     pub host_pidns: Option<String>,
+    /// The nameservers the space was given (`--nameservers=a,b`, D2): what
+    /// its `/etc/resolv.conf` must name — the tunnel's, an instance's
+    /// forwarders. `None`: not said (an offline zone has no file of its own,
+    /// an older doctor does not say), and only their presence is looked at.
+    pub nameservers: Option<Vec<IpAddr>>,
 }
 
 impl ProbeArgs {
@@ -423,6 +478,13 @@ impl ProbeArgs {
                     }
                     if let Some(ns) = arg.strip_prefix("--host-pidns=") {
                         parsed.host_pidns = Some(ns.to_owned()).filter(|n| n.starts_with("pid:["));
+                    }
+                    if let Some(list) = arg.strip_prefix("--nameservers=") {
+                        // One that is not an address and the list is not
+                        // the space's: none, rather than a wrong one.
+                        let servers: Option<Vec<IpAddr>> =
+                            list.split(',').map(|s| s.parse().ok()).collect();
+                        parsed.nameservers = servers.filter(|s| !s.is_empty());
                     }
                     if let Some(list) = arg.strip_prefix("--closed=") {
                         parsed.closed = crate::sockets::parse_closed(list);
@@ -468,7 +530,23 @@ pub fn probe(args: &ProbeArgs, groups_shed: bool) -> Vec<Check> {
         None => checks.push(Check::new("route6", Level::Ok, "IPv6 в зоне нет")),
     }
     checks.push(nsswitch_check(read("/etc/nsswitch.conf").as_deref()));
-    checks.push(resolv_check(read("/etc/resolv.conf").as_deref()));
+    let resolv = read("/etc/resolv.conf");
+    checks.push(match &args.nameservers {
+        // What it was given, held to (D2): the way out is the space's
+        // restart — an instance's, or the zone's.
+        Some(given) => {
+            let way_out = match (&args.host_pidns, &args.zone) {
+                (None, Some(zone)) => {
+                    format!("перезапусти зону: cellward down {zone}, cellward up {zone}")
+                }
+                _ => "перезапусти контейнер: cellward container stop <контейнер>, затем запусти \
+                      программу снова"
+                    .to_owned(),
+            };
+            own_resolv_check(resolv.as_deref(), given, &way_out)
+        }
+        None => resolv_check(resolv.as_deref()),
+    });
     let mountinfo = read("/proc/self/mountinfo").unwrap_or_default();
     let slow = crate::sockets::Slow::new(&mountinfo);
     let present: Vec<&str> = RESOLVER_SOCKETS
@@ -548,7 +626,8 @@ pub fn probe(args: &ProbeArgs, groups_shed: bool) -> Vec<Check> {
     checks.push(listed_channel_check(
         "compositor-ipc",
         &ipc,
-        "IPC композитора: запуск процесса на хосте (`niri msg action spawn`) (§13)",
+        "IPC композитора или оболочки: запуск процесса на хосте (`niri msg action spawn`, \
+         `qs ipc call`) (§13)",
     ));
     checks
 }
@@ -645,7 +724,9 @@ pub fn compositor_entries(runtime: &Path) -> (Vec<String>, Vec<String>) {
     for entry in fs::read_dir(runtime).into_iter().flatten().flatten() {
         let bytes = entry.file_name().as_bytes().to_vec();
         let name = String::from_utf8_lossy(&bytes);
-        if name.ends_with(".lock") || !crate::zone::compositor_private(&name) {
+        // A shell's own IPC with the compositor's (W7, 2026-09-28).
+        let private = crate::zone::compositor_private(&name) || crate::zone::shell_private(&name);
+        if name.ends_with(".lock") || !private {
             continue;
         }
         if name.starts_with("wayland-") {
@@ -1733,6 +1814,10 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     if !closed.is_empty() {
         probe_args.push(format!("--closed={closed}"));
     }
+    // The tunnel's resolvers it was given (D2); an offline zone has none.
+    if let Some(given) = nameservers_arg(&dir.join(crate::zone::RESOLV)).filter(|_| !offline) {
+        probe_args.push(given);
+    }
     // `--keep-caps`, as a launch enters: the probe sheds the session's groups
     // in the zone's user namespace, as `profile-run` does, and then every
     // capability (`as_a_program`). The environment is not passed: the probe
@@ -1920,6 +2005,11 @@ pub fn instance_checks(tools: &Tools, running: &crate::instance::Running, uid: u
     // the host's pid namespace.
     if let Ok(host) = fs::read_link("/proc/self/ns/pid") {
         probe_args.push(format!("--host-pidns={}", host.to_string_lossy()));
+    }
+    // The forwarders its keeper wrote into its `resolv.conf` (D2): what its
+    // programs must read, the host's file never.
+    if let Some(given) = nameservers_arg(&running.dir.join(crate::instance::RESOLV)) {
+        probe_args.push(given);
     }
     let mut command = Command::new(&tools.core);
     command
@@ -2430,6 +2520,64 @@ mod tests {
             ["10.0.0.1", "::1"]
         );
         assert_eq!(resolv_check(Some("search x\n")).level, Level::Warn);
+    }
+
+    /// D2 (2026-09-28): the nameservers a space sees are the ones it was
+    /// given, or the host's file is in their stead — a failure that names
+    /// the way out. The doctor's word goes to the probe as addresses only.
+    #[test]
+    fn a_space_sees_the_nameservers_it_was_given_or_fails() {
+        let forwarders: Vec<IpAddr> = vec![
+            "10.254.255.253".parse().unwrap(),
+            "fd63:656c:6c77::53".parse().unwrap(),
+        ];
+        let own = "nameserver 10.254.255.253\nnameserver fd63:656c:6c77:0::53\nsearch corp\n";
+        let check = own_resolv_check(Some(own), &forwarders, "перезапусти");
+        assert_eq!(check.level, Level::Ok, "{}", check.detail);
+        let host = "nameserver 192.168.1.1\nnameserver 127.0.0.53\noptions edns0\n";
+        let check = own_resolv_check(Some(host), &forwarders, "перезапусти зону");
+        assert_eq!(check.level, Level::Fail);
+        assert!(check.detail.contains("192.168.1.1"), "{}", check.detail);
+        assert!(
+            check.detail.contains("перезапусти зону"),
+            "{}",
+            check.detail
+        );
+        // One of them only, or in another order: not what was given either.
+        let one = "nameserver 10.254.255.253\n";
+        assert_eq!(
+            own_resolv_check(Some(one), &forwarders, "w").level,
+            Level::Fail
+        );
+        // No file, or no server in it: as before, names do not resolve.
+        assert_eq!(own_resolv_check(None, &forwarders, "w").level, Level::Warn);
+        assert_eq!(
+            own_resolv_check(Some("search x\n"), &forwarders, "w").level,
+            Level::Warn
+        );
+
+        let dir = std::env::temp_dir().join(format!("vz-doctor-ns-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("resolv.conf");
+        fs::write(&file, own).unwrap();
+        let arg = nameservers_arg(&file).unwrap();
+        assert_eq!(arg, "--nameservers=10.254.255.253,fd63:656c:6c77::53");
+        let parsed = ProbeArgs::parse(&[OsString::from("1000"), OsString::from(&arg)]).unwrap();
+        assert_eq!(parsed.nameservers, Some(forwarders));
+        // What is not an address is not taken — none rather than a wrong list.
+        fs::write(&file, "nameserver 10.0.0.1\nnameserver bogus\n").unwrap();
+        assert_eq!(nameservers_arg(&file), None);
+        assert_eq!(nameservers_arg(&dir.join("none")), None);
+        for bad in [
+            "--nameservers=",
+            "--nameservers=10.0.0.1,x",
+            "--nameservers=a b",
+        ] {
+            let parsed = ProbeArgs::parse(&[OsString::from("1000"), OsString::from(bad)]).unwrap();
+            assert_eq!(parsed.nameservers, None, "{bad}");
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

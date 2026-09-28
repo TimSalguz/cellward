@@ -177,13 +177,15 @@ const READY: &str = "ready";
 const PASTA_DONE: &str = "pasta.done";
 const STATUS: &str = "status";
 const STATUS_TMP: &str = "status.tmp";
-const RESOLV: &str = "resolv.conf";
-/// What the zone's own resolv.conf is bound over. A path and not a file name:
-/// on NixOS it is a chain of symlinks and the mount lands at the end of it
-/// (`sys::link_target`).
+/// The zone's own resolv.conf, in its directory: what the doctor holds the
+/// file its probe reads to (D2).
+pub(crate) const RESOLV: &str = "resolv.conf";
+/// What the zone's own resolv.conf is bound over: the name itself, a chain of
+/// symlinks on NixOS or not (`crate::rebind`, D2 — until 2026-09-28 the
+/// mount went where the chain ended, `sys::link_target`).
 const ETC_RESOLV: &str = "/etc/resolv.conf";
 /// The zone's own copy of the NSS configuration, and what it is bound over
-/// (a symlink chain on NixOS, like resolv.conf).
+/// (the name itself, like resolv.conf).
 const NSSWITCH: &str = "nsswitch.conf";
 const ETC_NSSWITCH: &str = "/etc/nsswitch.conf";
 /// Directories holding a unix socket through which a daemon in the HOST's
@@ -318,6 +320,34 @@ pub fn compositor_private(name: &str) -> bool {
         || name == "i3"
 }
 
+/// Entries of the runtime directory that are a desktop shell's own IPC, which
+/// no zone gets either (`docs/THREAT-MODEL.md` W7, 2026-09-28): a hermetic
+/// one never did (its runtime directory is an allow-list), an ordinary one
+/// had them bound back with the rest. What they answer is the shell's, and
+/// the shell runs on the host, outside every zone — what it is asked to do
+/// it does there, in the host's network, a program started included:
+///
+/// * `quickshell/`: Quickshell's instances (`by-id/`, `by-pid/`, `by-path/`),
+///   each with its `ipc.sock` — `qs ipc call` runs the functions the shell's
+///   configuration exposes (noctalia, DankMaterialShell, caelestia are
+///   Quickshell configurations);
+/// * `astal/`: Astal's and AGS's instances, `<name>.sock` — a request to the
+///   shell's own handler;
+/// * `ironbar-ipc.sock`: ironbar's;
+/// * `eww-server_*`: eww's daemon — its variables go into the commands its
+///   widgets run.
+///
+/// A named list, as [`compositor_private`] is: a shell that keeps its IPC
+/// elsewhere, or on the session bus (KWin's scripting, AGS 1), is not
+/// covered by it — an ordinary zone has the whole bus by design
+/// (`docs/LEAK-MODEL.md` §1); a hermetic one is the zone for that.
+pub fn shell_private(name: &str) -> bool {
+    name == "quickshell"
+        || name == "astal"
+        || name == "ironbar-ipc.sock"
+        || name.starts_with("eww-server_")
+}
+
 /// Is this entry of the host's runtime directory bound into a zone?
 ///
 /// A hermetic zone keeps what [`RUNTIME_KEPT`] names and nothing else — the
@@ -327,14 +357,15 @@ pub fn compositor_private(name: &str) -> bool {
 /// PipeWire restarts and makes its socket anew (the watcher asks this too).
 /// An ordinary zone keeps everything — its session bus and `systemd --user`
 /// are open by design (`docs/LEAK-MODEL.md` §1), and so the raw `pipewire-0`
-/// — except [`compositor_private`]. [`OURS`] is bound piece by piece, never
-/// as it is.
+/// — except [`compositor_private`] and [`shell_private`]. [`OURS`] is bound
+/// piece by piece, never as it is.
 pub fn runtime_entry_kept(name: &str, hermetic: bool, raw_pipewire: bool) -> bool {
     // `pulse`: never the host's — the zone gets the filter's socket there.
     // PipeWire's manager socket, `pipewire-0-manager`, never: it is the
     // unrestricted one, meant for the session manager — every client killed,
     // every stream moved (review 2026-09-25, third round).
     if compositor_private(name)
+        || shell_private(name)
         || name == OURS
         || name == "pulse"
         || (name.starts_with("pipewire-") && name.ends_with("-manager"))
@@ -4345,6 +4376,8 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
         hide_first(group)?;
     }
     // And no NSS module talking to a daemon of the host's, as in the zone.
+    // Not kept over the name after the host replaces it (`rebind::keep`):
+    // nothing here looks a name up — the client has a root of its own.
     own_nsswitch(zone);
     // Nor anything else of the host's a client has no business with: the
     // system bus (resolve1 looks names up in the host's network), the
@@ -7431,12 +7464,25 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // hostname. The policy "an unknown program gets no network" is only true
     // once these are gone.
     // The system's own services under /run first — before the resolvers,
-    // whose directory is below /run/systemd, and before resolv.conf is bound
-    // at the end of its chain there.
+    // whose directory is below /run/systemd.
     seal_run().map_err(|e| format!("zone {}: {e}", zone.name()))?;
     hide_host_resolvers(zone)?;
+    // The space's `/etc` a shared mount of its own before anything is laid
+    // in it (`crate::rebind`, D2): its own `nsswitch.conf` and `resolv.conf`,
+    // laid there again when the host replaces them, reach every launch's
+    // copy. Not fatal: without it a re-lay reaches the space and the
+    // launches made after it, and one before goes on with the host's file —
+    // names still only through the tunnel.
+    if let Err(e) = crate::rebind::share(Path::new("/etc")) {
+        eprintln!(
+            "zone {}: /etc not shared with its launches ({e}) — a resolv.conf the host \
+             replaces is laid again for the launches made after it only",
+            zone.name()
+        );
+    }
     // The same hole closed as a class rather than by a list of sockets.
-    own_nsswitch(zone);
+    // Kept over the name from the end of the setup (`rebind::keep`).
+    let mut owns: Vec<crate::rebind::Own> = own_nsswitch(zone).into_iter().collect();
     // resolve1 is on the system bus too, and NetworkManager tells a program
     // which networks the machine is really on.
     seal_system_bus(zone)?;
@@ -7518,13 +7564,16 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
             // can be switched live to a zone, and its programs find the
             // ground a zone's taps stand on — the constant forwarders in
             // the file they read, the unreachable defaults.
-            instance_ground(zone)?;
+            owns.push(instance_ground(zone)?);
             if let Err(e) = note_network_inside(zone) {
                 eprintln!(
                     "instance {}: its programs cannot read which network it is in ({e})",
                     zone.name()
                 );
             }
+            // Its files kept over the host's names (D2) before a launch can
+            // come: the space is ready once this is said.
+            crate::rebind::keep(format!("instance {}", zone.name()), owns);
             let done = zone.path(crate::instance::SPACE_READY);
             touch(&done).map_err(|e| format!("cannot create {}: {e}", done.display()))?;
             println!(
@@ -7534,6 +7583,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
             );
             return Ok(());
         }
+        crate::rebind::keep(format!("zone {}", zone.name()), owns);
         touch(&zone.path(READY)).map_err(|e| format!("cannot create {READY}: {e}"))?;
         println!("zone {}: no network (loopback only)", zone.name());
         return Ok(());
@@ -7643,7 +7693,12 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
         );
     }
     fs::write(zone.path(RESOLV), &text).map_err(|e| format!("cannot write {RESOLV}: {e}"))?;
-    bind_resolv(zone)?;
+    owns.push(bind_resolv(zone)?);
+    // Kept over the host's names (D2). Nothing is launched into a zone's own
+    // namespaces since stage 5 — its bridge's passt is told its resolvers
+    // (`--dns-host`) and reads none —, but the doctor's probe and a program
+    // a previous build left here read the file: the zone's, then too.
+    crate::rebind::keep(format!("zone {}", zone.name()), owns);
 
     // The bridge (`crate::bridge`, stage 2 of the container design of
     // 2026-09-27): what carries a container's instance out through this
@@ -7744,8 +7799,9 @@ fn note_network_inside(zone: &Zone) -> Result<(), String> {
 /// once instead of waiting for a route —, and the `resolv.conf` its keeper
 /// wrote (`bridge::resolv_text`: the constant forwarders, never a real
 /// resolver) bound over the system's: the keeper rewrites it in place with
-/// each attach, and programs see the new text in the same file.
-fn instance_ground(zone: &Zone) -> Result<(), String> {
+/// each attach, and programs see the new text in the same file. The file
+/// comes back for the space to keep over the name (`rebind::keep`, D2).
+fn instance_ground(zone: &Zone) -> Result<crate::rebind::Own, String> {
     let unreachable = [
         "route",
         "add",
@@ -7767,30 +7823,26 @@ fn instance_ground(zone: &Zone) -> Result<(), String> {
 }
 
 /// The space's `resolv.conf` (its directory's [`RESOLV`]) bound over the
-/// file `/etc/resolv.conf` leads to.
+/// name `/etc/resolv.conf` itself, and returned for the space to keep there
+/// (`rebind::keep`).
 ///
-/// WHERE the mount lands is not /etc/resolv.conf. `mount(2)` follows the
-/// symlinks in its target, and on NixOS that path is a chain ending in
-/// /run/systemd/resolve/stub-resolv.conf — inside the tmpfs that has just
-/// hidden the host's resolved. The last link then dangles, so the file has
-/// to be created before anything can be mounted over it; the old code
-/// mounted onto whatever the chain happened to point at and would have
-/// failed here with a bare ENOENT.
-fn bind_resolv(zone: &Zone) -> Result<(), String> {
-    let resolv = zone.path(RESOLV);
-    let target = sys::link_target(Path::new(ETC_RESOLV));
-    if !target.exists() {
-        if let Some(dir) = target.parent() {
-            fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        }
-        touch(&target).map_err(|e| format!("cannot create {}: {e}", target.display()))?;
-    }
-    sys::mount(resolv.as_os_str(), &target, "", libc::MS_BIND, "").map_err(|e| {
-        format!(
-            "cannot bind-mount {RESOLV} over {ETC_RESOLV} ({}): {e}",
-            target.display()
-        )
-    })
+/// ON THE NAME, NOT WHERE IT LEADS (`crate::rebind`, `docs/THREAT-MODEL.md`
+/// D2, 2026-09-28). `mount(2)` follows the symlinks of its target, and on
+/// NixOS that path is a chain ending in /run/systemd/resolve/stub-resolv.conf
+/// — inside the tmpfs that has just hidden the host's resolved, where the
+/// last link dangles: the bind used to be made there, over a file created
+/// for it (`sys::link_target`). A host that renamed anything along its chain
+/// then took the space's file away. Attached without following
+/// (`move_mount`), it covers the name whatever the host made it — a link, a
+/// plain file, a link that leads nowhere in here —, and only a replacement
+/// of the name itself detaches it: that one the space lays over again. A
+/// host with no `/etc/resolv.conf` at all fails the space, as it always did.
+fn bind_resolv(zone: &Zone) -> Result<crate::rebind::Own, String> {
+    let own = crate::rebind::Own::open(&zone.path(RESOLV), Path::new(ETC_RESOLV))
+        .map_err(|e| format!("cannot open its {RESOLV}: {e}"))?;
+    own.lay()
+        .map_err(|e| format!("cannot bind {RESOLV} over {ETC_RESOLV}: {e}"))?;
+    Ok(own)
 }
 
 /// A zone's bridge, once the zone is set up (`crate::bridge`, stage 2 of
@@ -8321,27 +8373,44 @@ fn hide_host_resolvers(zone: &Zone) -> Result<(), String> {
 /// Not fatal, and deliberately so, like the nftables echelon: the sockets are
 /// already hidden, so a failure here costs the class-wide insurance, not the
 /// zone's hermeticity — and it has to be impossible to miss in the journal.
-fn own_nsswitch(zone: &Zone) {
+///
+/// Bound on the name `/etc/nsswitch.conf` itself, not where its links lead
+/// (`crate::rebind`, `docs/THREAT-MODEL.md` D2, 2026-09-28): NixOS replaces
+/// `/etc/static` with every switch, and a bind at the end of the chain was
+/// left behind by the first one. The zone's copy comes back for the space
+/// to keep over the name (`rebind::keep`); `None` when there is none.
+fn own_nsswitch(zone: &Zone) -> Option<crate::rebind::Own> {
+    // The host's text, wherever its links lead: what the copy is made of.
     let target = sys::link_target(Path::new(ETC_NSSWITCH));
     let Ok(host) = fs::read_to_string(&target) else {
         // No nsswitch.conf at all: glibc's built-in default has no daemon
         // module for hosts, and there is nothing to bind over.
-        return;
+        return None;
     };
     let path = zone.path(NSSWITCH);
     let result = fs::write(&path, zone_nsswitch(&host))
         .map_err(|e| format!("cannot write {NSSWITCH}: {e}"))
         .and_then(|()| {
-            sys::mount(path.as_os_str(), &target, "", libc::MS_BIND, "")
-                .map_err(|e| format!("cannot bind it over {}: {e}", target.display()))
+            crate::rebind::Own::open(&path, Path::new(ETC_NSSWITCH))
+                .map_err(|e| format!("cannot open {NSSWITCH}: {e}"))
+        })
+        .and_then(|own| match own.lay() {
+            Ok(_) => Ok(own),
+            Err(e) => Err(format!("cannot bind it over {ETC_NSSWITCH}: {e}")),
         });
     match result {
-        Ok(()) => println!("zone {}: hosts in nsswitch.conf is files dns", zone.name()),
-        Err(e) => eprintln!(
-            "zone {}: the zone's own nsswitch.conf is OFF ({e}) — the host's resolver sockets \
-             are hidden, but a new NSS module talking to a host daemon would not be",
-            zone.name()
-        ),
+        Ok(own) => {
+            println!("zone {}: hosts in nsswitch.conf is files dns", zone.name());
+            Some(own)
+        }
+        Err(e) => {
+            eprintln!(
+                "zone {}: the zone's own nsswitch.conf is OFF ({e}) — the host's resolver \
+                 sockets are hidden, but a new NSS module talking to a host daemon would not be",
+                zone.name()
+            );
+            None
+        }
     }
 }
 
@@ -9498,6 +9567,35 @@ mod tests {
         }
         // A name that only looks like niri's is not hidden by accident.
         assert!(runtime_entry_kept("niri-config.kdl", false, false));
+    }
+
+    /// W7 (2026-09-28): a shell's own IPC in the runtime directory is out of
+    /// every zone's, an ordinary one's too — and only what is named.
+    #[test]
+    fn no_zone_gets_a_shells_ipc() {
+        for name in [
+            "quickshell",
+            "astal",
+            "ironbar-ipc.sock",
+            "eww-server_5f1c0a8e2b",
+        ] {
+            assert!(shell_private(name), "{name}");
+            for raw in [false, true] {
+                assert!(!runtime_entry_kept(name, false, raw), "{name}");
+                assert!(!runtime_entry_kept(name, true, raw), "{name}");
+            }
+        }
+        for name in [
+            "quickshell-cache",
+            "astal.conf",
+            "eww",
+            "ironbar",
+            "bus",
+            "doc",
+        ] {
+            assert!(!shell_private(name), "{name}");
+        }
+        assert!(runtime_entry_kept("quickshell-cache", false, false));
     }
 
     #[test]
