@@ -148,15 +148,44 @@ pub fn container_setting(config: &Path, name: &str) -> Option<(Setting, Source)>
     container_switch(config, name, "microphone")
 }
 
+/// How much a switch lets through: `no` least, `ask` more, `yes` most.
+fn openness(setting: Setting) -> u8 {
+    match setting {
+        Setting::No => 0,
+        Setting::Ask => 1,
+        Setting::Yes => 2,
+    }
+}
+
+/// A container's own switch `own` over its zone's `zone` — the microphone's
+/// and the screen cast's order: Nix's word for the container, then Nix's
+/// for the zone, then the container's local one, then the zone's. A local
+/// word does not override a declared one to open more — but does to open
+/// less: `no` rather than `ask` rather than `yes` (review 2026-09-28: a
+/// local `no` was ignored under the zone's declared `yes`). Where it is as
+/// open as the declared one, the declared one is named (and "always" is
+/// not offered: `verdict`).
+pub fn container_over_zone(
+    zone: (Setting, Source),
+    own: Option<(Setting, Source)>,
+) -> (Setting, Source) {
+    match own {
+        Some(own @ (_, Source::Nix)) => own,
+        Some(own) if zone.1 == Source::Nix && openness(own.0) < openness(zone.0) => own,
+        _ if zone.1 == Source::Nix => zone,
+        Some(own) => own,
+        None => zone,
+    }
+}
+
 /// A switch for a program of `who`, the zone's being `zone_setting`, and
 /// where it comes from (`docs/PERMISSIONS.md` §11.10) — the microphone's and
-/// the screen cast's rule. For a container: Nix's word for the container,
-/// then Nix's for the zone — a local setting never overrides a declared one
-/// —, then the container's own local one (`key` in its settings), then the
-/// zone's local one, then `ask`. For the zone's own programs, the zone's.
-/// For one whose container is not known, the zone's — but never `yes`: a
-/// program that left its container's launch must not get the zone's "yes"
-/// that its container may have been refused; it is asked.
+/// the screen cast's rule. For a container: [`container_over_zone`], its own
+/// being `key` in its settings, the zone's `ask` where neither says. For the
+/// zone's own programs, the zone's. For one whose container is not known,
+/// the zone's — but never `yes`: a program that left its container's launch
+/// must not get the zone's "yes" that its container may have been refused;
+/// it is asked.
 pub fn by_container(
     zone_setting: (Setting, Source),
     config: &Path,
@@ -169,12 +198,9 @@ pub fn by_container(
             (Setting::Yes, source) => (Setting::Ask, source),
             other => other,
         },
-        Who::Container(name) => match container_switch(config, name, key) {
-            Some(own @ (_, Source::Nix)) => own,
-            _ if zone_setting.1 == Source::Nix => zone_setting,
-            Some(own) => own,
-            None => zone_setting,
-        },
+        Who::Container(name) => {
+            container_over_zone(zone_setting, container_switch(config, name, key))
+        }
     }
 }
 
@@ -1467,6 +1493,25 @@ mod tests {
         );
         d.declare("microphone", "nl no\n");
         assert_eq!(setting(&work), (Setting::No, Source::Nix));
+        // …but a local word that lets less through wins (review
+        // 2026-09-28): `ask` under the zone's declared `yes`, `no` under
+        // its `ask`; one as open as the declared one names Nix.
+        d.declare("microphone", "nl yes\n");
+        assert_eq!(setting(&work), (Setting::Yes, Source::Nix));
+        d.write(
+            "config/containers/work/container.conf",
+            "microphone = ask\n",
+        );
+        assert_eq!(setting(&work), (Setting::Ask, Source::Local));
+        d.declare("microphone", "nl ask\n");
+        assert_eq!(setting(&work), (Setting::Ask, Source::Nix));
+        d.write("config/containers/work/container.conf", "microphone = no\n");
+        assert_eq!(setting(&work), (Setting::No, Source::Local));
+        d.write(
+            "config/containers/work/container.conf",
+            "microphone = yes\n",
+        );
+        d.declare("microphone", "nl no\n");
         // Nix's word for the container over everything.
         d.declare("containers/work.conf", "home = private\nmicrophone = ask\n");
         assert_eq!(setting(&work), (Setting::Ask, Source::Nix));
@@ -1478,6 +1523,51 @@ mod tests {
         std::fs::remove_file(d.config().join("containers/work/container.conf")).unwrap();
         std::fs::create_dir(d.config().join("containers/work/container.conf")).unwrap();
         assert_eq!(setting(&work), (Setting::No, Source::Local));
+    }
+
+    /// Review 2026-09-28, every combination of the zone's word and source
+    /// and the container's own: a local word under a declared zone's lets
+    /// less through or is not taken; the container's declared word, both
+    /// ways; over a local or default zone, the container's own.
+    #[test]
+    fn a_local_word_closes_under_nix_and_never_opens() {
+        let settings = [Setting::No, Setting::Ask, Setting::Yes];
+        let sources = [Source::Nix, Source::Local, Source::Default];
+        for zone_setting in settings {
+            for zone_source in sources {
+                let zone = (zone_setting, zone_source);
+                let mut owns: Vec<Option<(Setting, Source)>> = vec![None];
+                for own in settings {
+                    owns.push(Some((own, Source::Nix)));
+                    owns.push(Some((own, Source::Local)));
+                }
+                for own in owns {
+                    let got = container_over_zone(zone, own);
+                    let case = format!("zone {zone:?}, own {own:?}: {got:?}");
+                    match own {
+                        None => assert_eq!(got, zone, "{case}"),
+                        Some(own @ (_, Source::Nix)) => assert_eq!(got, own, "{case}"),
+                        Some(own) if zone_source == Source::Nix => {
+                            let expected = if openness(own.0) < openness(zone_setting) {
+                                own
+                            } else {
+                                zone
+                            };
+                            assert_eq!(got, expected, "{case}");
+                            assert!(
+                                openness(got.0) <= openness(zone_setting),
+                                "a local word opened: {case}"
+                            );
+                            assert!(
+                                openness(got.0) <= openness(own.0),
+                                "a local word did not close: {case}"
+                            );
+                        }
+                        Some(own) => assert_eq!(got, own, "{case}"),
+                    }
+                }
+            }
+        }
     }
 
     /// "Always" for a program of a container is the container's: its

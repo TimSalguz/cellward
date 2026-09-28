@@ -836,7 +836,9 @@ nixDaemon, hostFilesWritable, audioManager}` (`nullOr bool`); locally
 `cellward container set <c> hermetic|nix-daemon|audio-manager
 default|on|off`, `host-files default|read-only|writable`. The order is the
 camera's: Nix's word for the container, then Nix's for its network, then
-the container's local word, then its network's. An instance comes up with
+the container's local word, then its network's — a local word that is
+stricter than the network's declared one wins over it (review 2026-09-28:
+hermetic on, the others off; a looser one does not). An instance comes up with
 them; `instances[].restart_needed` names what has changed since. The
 zone-level options `hermetic.exceptions`, `nixDaemon`, `hostFilesWritable`,
 `audioManager` and `zoneX11` still work, as the default of a container

@@ -823,7 +823,9 @@ hostFilesWritable, audioManager}` (`nullOr bool`); локально `cellward
 container set <к> hermetic|nix-daemon|audio-manager default|on|off`,
 `host-files default|read-only|writable`. Порядок — как у камеры: слово Nix
 для контейнера, затем Nix для его сети, затем местное слово контейнера,
-затем сети. Экземпляр поднимается с ними; что изменилось с тех пор,
+затем сети — местное слово строже объявленного для сети берёт верх над ним
+(ревью 2026-09-28: герметичность вкл., остальное выкл.; шире — нет).
+Экземпляр поднимается с ними; что изменилось с тех пор,
 называет `instances[].restart_needed`. Опции зон `hermetic.exceptions`,
 `nixDaemon`, `hostFilesWritable`, `audioManager` и `zoneX11` работают — как
 значение по умолчанию для контейнера без своего — и предупреждают.

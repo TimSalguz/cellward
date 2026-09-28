@@ -1397,6 +1397,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   lost now and then under load.
 
 ### Changed (read before updating)
+- **A container's local word that closes now wins over its network's word
+  declared in Nix** (review 2026-09-28; `docs/PERMISSIONS.md` §11.2,
+  §11.10, `docs/THREAT-MODEL.md` H7). The network's value declared in Nix
+  beat the container's local one both ways: `cellward container set <c>
+  nix-daemon off` was silently ignored while the network was in
+  `programs.cellward.nixDaemon`, and so were a local `camera off` under
+  `programs.cellward.camera`, a local `microphone no` under the zone's
+  declared `yes`, and a local `hermetic on` under `hermetic.default =
+  false`. Now a local word that is stricter — hermetic on; the Nix daemon,
+  the host's files, the audio manager and the camera off; the microphone and
+  the screen cast `no` rather than `ask` rather than `yes` — wins; a looser
+  one still loses to Nix, and the container's own word declared in Nix
+  still wins both ways. **What narrows:** a container whose local settings
+  say less than its network's declaration now gets less — look at
+  `cellward container show <c> --json` (`hermetic`, `nix_daemon`,
+  `host_files_writable`, `audio_manager`, `camera`, `microphone`,
+  `screencast`) before updating. The start settings take effect at the
+  instance's next start, the camera at the next launch, the microphone and
+  the screen cast at once.
 - **The network is the container's, not the program's** (`rust/src/picker.rs`,
   `container::migrate_pins`, `focus::Pin`; `docs/PERMISSIONS.md` §11.8).
   A program pinned to a network (`.pinned/<program>`) while its container
