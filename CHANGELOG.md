@@ -14,6 +14,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   with it focused, and every key or press starts that again. Esc or
   «Ничего» allows nothing, as before. kdialog still asks where the window
   cannot open, and in a zone.
+- **«Программа уже запущена в другой сети» is asked in the cellward window**
+  (2026-09-28), guarded as its other questions: «Не запускать» first (the
+  safe answer, Enter's), «Запустить всё равно», and «Запускать и больше не
+  спрашивать» for that program — kept where kdialog kept its own «не
+  спрашивать больше» (`~/.config/vpn-zonesrc`), so an answer given in either
+  holds for both. kdialog asks where the window cannot open.
+- The cellward window shows the value that is chosen as a bright button,
+  not as a pale one that looked unavailable.
 
 ### Added
 - **The cellward window: the network monitor and the containers**

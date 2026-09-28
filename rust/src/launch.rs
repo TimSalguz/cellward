@@ -1049,7 +1049,37 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             .replace("{app}", &shown)
             .replace("{busy}", &busy)
             .replace("{zone}", &zone_name);
-        if has_display() {
+        let remembered_key = format!("conflict-{}", appname.to_string_lossy());
+        let asked_in_window =
+            if has_display() && !conflict_remembered(&conflict_file(tools), &remembered_key) {
+                // In the cellward window first, guarded (`window::question`):
+                // not going on is the safe answer, and the first.
+                let always = format!("Запускать и больше не спрашивать для «{shown}»");
+                crate::window::question(
+                    &tools.window,
+                    "Программа уже запущена в другой сети",
+                    &message,
+                    None,
+                    &[
+                        ("cancel", "Не запускать", false),
+                        ("go", "Запустить всё равно", false),
+                        ("always", always.as_str(), false),
+                    ],
+                    None,
+                )
+            } else {
+                crate::window::Asked::NotShown
+            };
+        match &asked_in_window {
+            crate::window::Asked::Chose(tag) if tag == "go" => {}
+            crate::window::Asked::Chose(tag) if tag == "always" => {
+                remember_conflict(&conflict_file(tools), &remembered_key);
+            }
+            crate::window::Asked::NotShown => {}
+            // «Не запускать», closed: the person said no — over, quietly.
+            _ => return 0,
+        }
+        if has_display() && asked_in_window == crate::window::Asked::NotShown {
             let answer = Command::new(&tools.kdialog)
                 .arg("--title")
                 .arg("Программа уже запущена в другой сети")
@@ -2071,6 +2101,38 @@ pub fn prepare_selection(tools: &Tools, selection: &Selection) -> Result<(), Str
 
 /// Say no, where the person can see it: a dialog when there is a graphical
 /// session (a launcher entry's stderr is read by nobody), and stderr always.
+/// kdialog's memory of the conflict question's "не спрашивать больше"
+/// (`--dontagain vpn-zonesrc:<key>`): `~/.config/vpn-zonesrc`, group
+/// `[Notification Messages]`, `<key>=false` — what KMessageBox writes for a
+/// question not to be shown again. The window's «больше не спрашивать» is
+/// kept there too, so that either one's answer holds for both.
+fn conflict_file(tools: &Tools) -> PathBuf {
+    tools.home.join(".config/vpn-zonesrc")
+}
+
+fn conflict_remembered(file: &Path, key: &str) -> bool {
+    fs::read_to_string(file)
+        .is_ok_and(|text| text.lines().any(|l| l.trim() == format!("{key}=false")))
+}
+
+fn remember_conflict(path: &Path, key: &str) {
+    const GROUP: &str = "[Notification Messages]";
+    let text = fs::read_to_string(&path).unwrap_or_default();
+    let line = format!("{key}=false");
+    let new = match text.find(GROUP) {
+        Some(at) => {
+            let end = at + GROUP.len();
+            format!("{}\n{line}{}", &text[..end], &text[end..])
+        }
+        None if text.is_empty() => format!("{GROUP}\n{line}\n"),
+        None => format!("{}\n{GROUP}\n{line}\n", text.trim_end()),
+    };
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = fs::write(path, new);
+}
+
 /// What kdialog's `--warningcontinuecancel` and its kin say for "cancel"
 /// (and for the window closed).
 const KDIALOG_CANCEL: i32 = 2;
@@ -2683,6 +2745,30 @@ pub fn restrict_compositor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The conflict question's "не спрашивать больше", kdialog's way: kept
+    /// in its group, read back, and the window's written where kdialog
+    /// reads it — a file of other groups kept.
+    #[test]
+    fn the_conflict_questions_memory_is_kdialogs() {
+        let dir = std::env::temp_dir().join(format!("vz-conflict-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let file = dir.join("vpn-zonesrc");
+        assert!(!conflict_remembered(&file, "conflict-firefox"));
+        remember_conflict(&file, "conflict-firefox");
+        assert!(conflict_remembered(&file, "conflict-firefox"));
+        assert!(!conflict_remembered(&file, "conflict-steam"));
+        fs::write(&file, "[Other]\na=1\n").unwrap();
+        remember_conflict(&file, "conflict-steam");
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(text.contains("[Other]\na=1"), "{text}");
+        assert!(conflict_remembered(&file, "conflict-steam"), "{text}");
+        remember_conflict(&file, "conflict-tg");
+        let text = fs::read_to_string(&file).unwrap();
+        assert_eq!(text.matches("[Notification Messages]").count(), 1, "{text}");
+        assert!(conflict_remembered(&file, "conflict-tg"), "{text}");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// A manifest whose home, state, containers and config are below `base`.
     fn tools_in(base: &Path) -> Tools {

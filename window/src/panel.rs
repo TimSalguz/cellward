@@ -308,6 +308,9 @@ enum Msg {
     TabStep(i32),
     /// ↑/↓ in the containers: the one before or after the chosen one.
     Step(i32),
+    /// The choice that is already made, pressed: nothing — it is shown
+    /// bright, as chosen, and not as a button that cannot be pressed.
+    Nothing,
     /// `cellward <verb> <zone>`: up, down, restart, check, lock, unlock.
     ZoneDo(String, &'static str),
     KillAsk(String),
@@ -732,6 +735,7 @@ impl Panel {
                 self.pending = None;
                 Task::none()
             }
+            Msg::Nothing => Task::none(),
             Msg::Done(result) => {
                 self.busy = false;
                 self.said = Some(result);
@@ -1120,7 +1124,11 @@ impl Panel {
                     } else {
                         button::secondary
                     })
-                    .on_press_maybe((idle && !current).then(|| Msg::SetNetwork(name.clone()))),
+                    .on_press_maybe(if current {
+                        Some(Msg::Nothing)
+                    } else {
+                        idle.then(|| Msg::SetNetwork(name.clone()))
+                    }),
             );
         }
         page = page.push(text("Сеть контейнера").size(16));
@@ -1577,7 +1585,11 @@ impl Panel {
                     } else {
                         button::secondary
                     })
-                    .on_press_maybe((idle && !current).then(|| Msg::SetSetting(name, tag.clone()))),
+                    .on_press_maybe(if current {
+                        Some(Msg::Nothing)
+                    } else {
+                        idle.then(|| Msg::SetSetting(name, tag.clone()))
+                    }),
             );
         }
         let mut block = column![text(title).size(16)].spacing(6);
