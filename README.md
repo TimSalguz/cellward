@@ -557,7 +557,9 @@ megabytes and its sha256 on both ends):
   implemented.
 - **Does not work: finding peers on the LAN.** Multicast and broadcast (mDNS,
   the announcements of LocalSend and KDE Connect, Warpinator, Syncthing's local
-  discovery) never reach the LAN from a zone (THREAT-MODEL N3). Such a program
+  discovery) never reach the LAN from a zone (THREAT-MODEL N3). An IPv4
+  multicast or a broadcast to the LAN's address goes into the tunnel like any
+  other packet, so the VPN's side may see it; your LAN does not. Such a program
   in a zone neither finds its peers nor is found by them.
 - **`offline`:** nothing moves, either way.
 - **Two containers with homes of their own** on one machine see neither each

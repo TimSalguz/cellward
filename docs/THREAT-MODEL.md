@@ -119,7 +119,7 @@ satellite, when granted.
 | | **Network** | | | |
 | N1 | IPv4 traffic around the tunnel | yes | the app namespace has only `lo` and the tunnel; there is nothing else to route to | C · vm1 vm2 vm8 sm1 sm13 |
 | N2 | IPv6 around the tunnel | yes | the same topology: IPv6 goes into the tunnel when it carries it (WireGuard with a v6 address, OpenConnect when the gateway gives one), and a tunnel without it leaves no v6 default route | C · vm3 vm36 vm37 sm2 sm15 |
-| N3 | The LAN and the host's own addresses, from a tunnel zone; the LAN's discovery (a multicast or a broadcast: mDNS, LocalSend, KDE Connect) | yes | no route to them in the app namespace but into the tunnel, and no interface on the LAN for a multicast or a broadcast; the uplink filter lets out only the endpoint | C · vm47 vm87 br1 sys1 |
+| N3 | The LAN and the host's own addresses, from a tunnel zone; the LAN's discovery (a multicast or a broadcast: mDNS, LocalSend, KDE Connect) | yes | no route to them in the app namespace but into the tunnel, and no interface on the LAN for a multicast or a broadcast (an IPv4 one goes into the tunnel, like any packet); the uplink filter lets out only the endpoint | C · vm47 vm87 br1 sys1 |
 | N4 | Host loopback services through pasta (port mirroring, gateway mapping) | yes | pasta runs with `-t/-u/-T/-U none` and `--no-map-gw` | vm7 sys9 |
 | N5 | Programs see the route to the endpoint or the tunnel's socket | yes | the tunnel is made in the uplink and moved down; its socket stays in the uplink | C · vm4 sm3 |
 | N6 | A zone program re-routes, adds an interface or unloads the filter | yes | no capabilities, and no rights in the zone's user namespace; a nested one owns only new, empty namespaces | C · vm38 sys2 sys3 |
