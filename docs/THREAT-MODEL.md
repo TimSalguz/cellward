@@ -112,6 +112,10 @@ host's startup files read-only, unless `host-files writable`.
 seccomp; a bus filter and proxy of its own; a `machine-id` of its own; X11 only as its own
 satellite, when granted.
 
+**A throwaway container** (a one-off with an empty home, a temporary layer over the home)
+is hermetic, without the Nix daemon, the host's startup files writable or the raw PipeWire,
+whatever its network gives its containers (2026-09-28, H8).
+
 ## 4. The table
 
 | ID | Threat | Protected | By what | Proof |
@@ -209,6 +213,7 @@ satellite, when granted.
 | H5 | Programs outside every zone reach the network | only with the system tier's egress policy | nftables by socket owner (`enforce`, `strict`) | sys7 sys8 ho1 |
 | H6 | A file in `declared/` speaks in Nix's name (a file chooser a zone's program steers, a program of the host): `hermetic-default off`, a container bound to `unconfined`, the CLI refusing to change it | yes | a declaration counts only when the file, every link followed, is in the Nix store, as home-manager's links are; a plain file or a link elsewhere is ignored with a warning, and the local value or the default applies | vm46 u15 |
 | H7 | A container's own word that closes — hermetic on; the Nix daemon, the host's startup files, the raw PipeWire, the cameras off; the microphone or the screen cast `no` rather than `ask` rather than `yes` — ignored because its network's value declared in Nix opens it | yes (review 2026-09-28) | a local word stricter than the network's declared one wins over it, a looser one does not; the container's own declared word wins both ways; `hermetic.default` counts as the network's declared value | u22 |
+| H8 | A throwaway container (a one-off, a temporary layer over the home) or a program whose container is not known takes its network's Nix daemon, host files, audio manager or want of hermeticity | yes (review 2026-09-28) | a throwaway's instance comes up with the safe values whatever its network says (`hermetic::value_for`: hermetic, none of the others); the microphone's `yes` is `ask` for it | u23 |
 | | **Files and the host's startup files** | | | |
 | F1 | A zone program reads the home (`~/.ssh`, browser profiles, other programs' data) | own home: yes · otherwise **no** | the sandbox: an empty home plus granted paths | sm8 sm10 |
 | F2 | A zone program writes what the host runs later (`~/.bashrc`, autostart, launcher entries, user units, compositor configs, `mimeapps.list`) | hermetic: partly · ordinary: **no** · own home: yes | read-only covers from a list, their parent directories pinned | vm18 |
@@ -505,3 +510,4 @@ Rust tests (`cargo test`):
 - u20 `rust/src/zone.rs`: `no_zone_gets_a_shells_ipc`; `rust/src/sockets.rs`: `what_the_project_promises_closed_fails_and_the_rest_warns`
 - u21 `rust/src/switch.rs`: `every_precondition_refuses_alone`; `rust/src/hermetic.rs`: `frozen_settings_wider_than_a_networks_are_named`; `rust/src/status.rs`: `an_instances_frozen_settings_are_its_note`
 - u22 `rust/src/hermetic.rs`: `a_containers_own_setting_is_taken_in_the_cameras_order`, `a_local_word_closes_under_nix_and_never_opens`; `rust/src/microphone.rs`: `a_local_word_closes_under_nix_and_never_opens`, `a_container_has_its_own_setting_and_nix_is_never_overridden`; `rust/src/container.rs`: `a_containers_camera_is_its_own_and_nix_is_not_overridden`
+- u23 `rust/src/hermetic.rs`: `a_throwaway_comes_up_safe_whatever_its_network_says`

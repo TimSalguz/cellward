@@ -1413,6 +1413,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   lost now and then under load.
 
 ### Changed (read before updating)
+- **A throwaway container comes up with the safe settings, whatever its
+  network says** (review 2026-09-28; `docs/PERMISSIONS.md` §11.2,
+  `docs/THREAT-MODEL.md` H8). The instance of a one-off launch
+  (`--fs-sandbox`, «Разовый контейнер») or of a temporary layer over the
+  home (`--tmp-profile`, «Временный слой над домом») — `:fs:` and `:tmp:` —
+  took its network's hermeticity, Nix daemon, host files and audio manager:
+  a one-off launch into a network whose containers had the Nix daemon had
+  it too, and one into a network that is not hermetic had `systemd --user`.
+  It is hermetic now, without the Nix daemon, the host's files or the audio
+  manager, as the microphone's rule already made the unknown program's `yes`
+  an `ask`. **What narrows:** a throwaway launch into a network that is not
+  hermetic (`hermetic.default = false`, `cellward hermetic <zone> off`) is
+  hermetic now — no `systemd --user`, a filtered session bus, its own
+  `/tmp`; one that needs the host's Nix daemon or files needs a container.
+  The main home's instance still takes the network's settings.
 - **A container's local word that closes now wins over its network's word
   declared in Nix** (review 2026-09-28; `docs/PERMISSIONS.md` §11.2,
   §11.10, `docs/THREAT-MODEL.md` H7). The network's value declared in Nix

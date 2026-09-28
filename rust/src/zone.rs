@@ -1866,7 +1866,9 @@ pub fn run_instance(tools: Tools, home: PathBuf, plan: crate::instance::Plan) ->
     // and helpers are made by them once, and `status --json` names what has
     // changed since (`restart_needed`). Its container's own over its
     // network's (stage 5 of the container design, 2026-09-28): the main
-    // home's and a throwaway's are the network's.
+    // home's are the network's, a throwaway's the safe ones (review
+    // 2026-09-28, `hermetic::value_for`); a live switch keeps them, and is
+    // refused into a network that would give less (`switch`, `settings`).
     let settings = crate::hermetic::start_settings_for(
         &state.join(&plan.network),
         &config,
