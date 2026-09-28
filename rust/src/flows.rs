@@ -909,7 +909,8 @@ mod tests {
         ip6.extend_from_slice(&"fd63::2".parse::<Ipv6Addr>().unwrap().octets());
         ip6.extend_from_slice(&"2001:db8::1".parse::<Ipv6Addr>().unwrap().octets());
         ip6.extend_from_slice(&ports(5000, 4433, &[]));
-        let s6 = frame(&eth(0x86dd, &ip6), true).unwrap();
+        let v6 = eth(0x86dd, &ip6);
+        let s6 = frame(&v6, true).unwrap();
         assert_eq!((s6.key.proto, s6.key.rport), (UDP, 4433));
         // Not IP, or cut short: nothing.
         assert!(frame(&eth(0x0806, &[0; 28]), true).is_none());
