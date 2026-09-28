@@ -7819,6 +7819,23 @@ fn instance_ground(zone: &Zone) -> Result<crate::rebind::Own, String> {
     }
     let six: Vec<&str> = std::iter::once("-6").chain(unreachable).collect();
     let _ = zone.ip_quiet(&six);
+    // IPv4 multicast nowhere (the file transfer test, vm87, 2026-09-28): a
+    // program's LAN discovery — mDNS, LocalSend, KDE Connect, SSDP — went
+    // into the tunnel, where the VPN's provider read the announcements, a
+    // device's name among them. A route more specific than any tap's default
+    // wins under every attach, and a send fails at once. IPv6 multicast has
+    // no route in here already. Not fatal: without it the announcements go
+    // into the tunnel, never around it.
+    if zone
+        .ip_quiet(&["route", "add", "unreachable", "224.0.0.0/4"])
+        .is_err()
+    {
+        eprintln!(
+            "instance {}: no unreachable route for multicast — a program's LAN discovery goes \
+             into the tunnel",
+            zone.name()
+        );
+    }
     bind_resolv(zone)
 }
 
