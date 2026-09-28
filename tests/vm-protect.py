@@ -25,9 +25,14 @@ alice(f"{PROT} sh -c 'test ! -e /home/alice/.cache/nix/host-made && touch /home/
 machine.succeed("test ! -e /home/alice/.cache/nix/c-made")
 
 
-def prot_up():
-    st = json.loads(alice("cellward status --json"))
-    return any(i.get("id") == "vmprot" for i in st.get("instances", []))
+def prot_gone():
+    """Its instance down: what it came up with is what it keeps."""
+    machine.wait_until_fails(
+        "su -l alice -c "
+        + shlex.quote("export XDG_RUNTIME_DIR=/run/user/1000; cellward status --json")
+        + " | grep -q '\"id\":\"vmprot\"'",
+        timeout=60,
+    )
 
 
 # Given — from its next start; the host's own places never.
@@ -35,14 +40,14 @@ alice("cellward container grant vmprot ~/vmrepo")
 alice("! cellward container grant vmprot ~/.gitconfig")
 alice("! cellward container grant vmprot ~/Documents")
 alice("cellward container stop vmprot || true")
-retry(lambda _: not prot_up(), timeout=60)
+prot_gone()
 alice(f"{PROT} touch /home/alice/vmrepo/x")
 machine.succeed("test -e /home/alice/vmrepo/x")
 alice(f"{PROT} sh -c '! sh -c \"echo x >> /home/alice/.gitconfig\"'")
 
 alice("cellward container revoke vmprot ~/vmrepo")
 alice("cellward container stop vmprot || true")
-retry(lambda _: not prot_up(), timeout=60)
+prot_gone()
 alice(f"{PROT} sh -c '! touch /home/alice/vmrepo/y'")
 alice("cellward container stop vmprot || true")
 alice("cellward protect rm ~/vmrepo && rm -rf ~/vmrepo ~/.cache/nix/host-made")
