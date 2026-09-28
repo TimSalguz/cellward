@@ -326,6 +326,10 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     if let Err(e) = crate::traffic::record(tools) {
         eprintln!("cellward watch: traffic summaries not recorded ({e})");
     }
+    // What each connection did, and each program's day (`crate::connlog`).
+    if let Err(e) = crate::connlog::record(tools) {
+        eprintln!("cellward watch: the connections' journal not recorded ({e})");
+    }
 
     if json {
         let items: Vec<String> = rows

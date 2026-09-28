@@ -401,6 +401,8 @@ cellward explain <контейнер> [<сеть>] [--json]  # что получ
 cellward traffic [--json] [--watch]            # сколько отдал и принял каждый работающий контейнер
 cellward traffic --days <N> [--json]           # расход по контейнерам и сетям за N дней
 cellward traffic --connections [--json]        # с кем соединялся каждый работающий контейнер и сколько
+cellward traffic --programs [--days <N>] [--json]  # расход по программам контейнеров
+cellward netlog [keep <дни>|cap <размер>]      # сколько хранить журнал соединений (30 дней, 1G)
 cellward journal [--json] [<N>]                # запуски без ограничений и решения брокера
 cellward kill <зона>                           # оборвать зону сейчас: программы убиты, зона опущена
 cellward container stop|kill <контейнер>       # закончить экземпляр контейнера: программы закрыты / убиты сразу

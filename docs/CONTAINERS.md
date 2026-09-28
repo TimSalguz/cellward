@@ -691,7 +691,14 @@ and `cellward container show <name> --json` print subsets of the same schema.
   flow's socket at its first packet (the instance's keeper, as its relay
   says it saw a new flow), or else holds it as it is asked — `{pid,
   process (its comm), program (the launch's key in the registry, or
-  null)}` —, `null` when none was found. `connections` is
+  null)}` —, `null` when none was found.
+- **`cellward traffic --programs [--days <N>] --json`** (added 2026-09-28):
+  `{schema_version, days, from, programs: [{container, program, out_bytes,
+  in_bytes}]}` — what each program of each container sent and received
+  over the last N days (1: today), from the connections' journal written
+  every minute by `cellward watch`; `program` the launch's key in the
+  registry, `~<process>` for a process of no launch of the container's,
+  `?` for traffic whose program was not found. `connections` is
   `null` for an instance without a table (of an earlier build).
 - **`networks[].tolerates`** (added 2026-09-28, step 1 of the permission
   model, `docs/PERMISSIONS.md` §11.14): the ways around a network it

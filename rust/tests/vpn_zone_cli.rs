@@ -1987,6 +1987,51 @@ fn traffic_says_what_an_instance_sent_and_received() {
     tally.close();
 }
 
+/// The connections' journal's keep and cap (`cellward netlog`): set, shown,
+/// refused outside their bounds, back to the default; `traffic --programs`
+/// with nothing recorded.
+#[test]
+fn netlog_keeps_what_the_person_chose() {
+    let home = Home::new("nlog");
+    let shown = stdout(&home.run(&["netlog"]));
+    assert!(
+        shown.contains("30 дн. (умолчание)") && shown.contains("1.0 ГБ (умолчание)"),
+        "{shown}"
+    );
+    assert!(home.run(&["netlog", "keep", "90"]).status.success());
+    assert!(home.run(&["netlog", "cap", "512M"]).status.success());
+    let shown = stdout(&home.run(&["netlog"]));
+    assert!(
+        shown.contains("хранится 90 дн.\n") && shown.contains("не больше 512.0 МБ —"),
+        "{shown}"
+    );
+    for bad in [
+        &["keep", "0"][..],
+        &["keep", "x"],
+        &["cap", "10K"],
+        &["cap", "1X"],
+    ] {
+        let mut args = vec!["netlog"];
+        args.extend_from_slice(bad);
+        assert_eq!(home.run(&args).status.code(), Some(1), "{bad:?}");
+    }
+    assert!(home.run(&["netlog", "keep", "default"]).status.success());
+    assert!(stdout(&home.run(&["netlog"])).contains("30 дн. (умолчание)"));
+    let json = stdout(&home.run(&["traffic", "--programs", "--json"]));
+    assert!(
+        json.contains("\"days\":1,") && json.contains("\"programs\":[]"),
+        "{json}"
+    );
+    let text = stdout(&home.run(&["traffic", "--programs", "--days", "7"]));
+    assert!(text.contains("ничего не записано"), "{text}");
+    assert_eq!(
+        home.run(&["traffic", "--programs", "--watch"])
+            .status
+            .code(),
+        Some(1)
+    );
+}
+
 /// Stage 2 of the network monitor: `traffic --connections` says whom an
 /// instance reached, as its relay noted it (`vpn_zone::flows`), with the
 /// name a DNS answer gave for the address.

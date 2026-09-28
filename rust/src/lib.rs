@@ -107,6 +107,7 @@ pub mod bus_filter;
 pub mod cli;
 pub mod completion;
 pub mod config;
+pub mod connlog;
 pub mod console;
 pub mod container;
 pub mod dbus_wire;

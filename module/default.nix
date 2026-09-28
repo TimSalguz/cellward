@@ -783,6 +783,8 @@ let
     "screencast"
     "askAgainAfter"
     "questionTimeout"
+    "netlog.keepDays"
+    "netlog.maxSize"
     "handshakeCheckAfter"
     "hermetic.default"
     "hermetic.exceptions"
@@ -1021,6 +1023,21 @@ in
       default = null;
       example = "never";
       description = "Сколько вопрос брокера (окно запуска из зоны, «открыть в другой сети?») ждёт ответа, прежде чем закрыться отказом: 30s…1d или never — без срока. Вопрос открыт один: пока он ждёт, следующие получают отказ, а не встают в очередь. null — не задавать из Nix (тогда cellward question-timeout <срок>, иначе 2m). Действует со следующего вопроса.";
+    };
+
+    netlog = {
+      keepDays = lib.mkOption {
+        type = lib.types.nullOr (lib.types.ints.between 1 3650);
+        default = null;
+        example = 90;
+        description = "Сколько дней хранить журнал соединений контейнеров (с кем соединялась каждая программа, сколько туда и оттуда; ~/.local/state/vpn-zones/netlog/raw). Итоги по дням хранятся год независимо от этого. null — не задавать из Nix (тогда cellward netlog keep <дни>, иначе 30).";
+      };
+      maxSize = lib.mkOption {
+        type = lib.types.nullOr (lib.types.strMatching "[0-9]+ *([KMGT](i?B)?|B)?");
+        default = null;
+        example = "2G";
+        description = "Сколько места журнал соединений может занять (не меньше 1M): сверх — уходят самые старые дни, а день, который один дорос до предела, дальше не пишется. Что наступит раньше — срок keepDays или этот предел, — то и срабатывает. null — не задавать из Nix (тогда cellward netlog cap <размер>, иначе 1G).";
+      };
     };
 
     handshakeCheckAfter = lib.mkOption {
@@ -1432,6 +1449,12 @@ in
     })
     (lib.mkIf (cfg.questionTimeout != null) {
       ".config/vpn-zones/declared/question-timeout".text = cfg.questionTimeout;
+    })
+    (lib.mkIf (cfg.netlog.keepDays != null) {
+      ".config/vpn-zones/declared/netlog-keep".text = toString cfg.netlog.keepDays;
+    })
+    (lib.mkIf (cfg.netlog.maxSize != null) {
+      ".config/vpn-zones/declared/netlog-cap".text = cfg.netlog.maxSize;
     })
     (lib.mkIf (cfg.handshakeCheckAfter != null) {
       ".config/vpn-zones/declared/handshake-check".text = cfg.handshakeCheckAfter;

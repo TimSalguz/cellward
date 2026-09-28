@@ -695,17 +695,18 @@ fn endpoint(addr: &IpAddr, port: u16, proto: u8) -> String {
 /// A running instance's flows and names; `None` for one without a table
 /// (of an earlier build, or whose file could not be made). `owners`: each
 /// flow's (`crate::owners`), in the flows' order.
-struct Listed {
-    id: String,
-    container: Option<String>,
-    network: String,
-    table: Option<(Vec<Flow>, Vec<Name>)>,
-    owners: Vec<Option<crate::owners::Owner>>,
+pub(crate) struct Listed {
+    pub(crate) id: String,
+    pub(crate) container: Option<String>,
+    pub(crate) network: String,
+    pub(crate) table: Option<(Vec<Flow>, Vec<Name>)>,
+    pub(crate) owners: Vec<Option<crate::owners::Owner>>,
     /// The programs' names for the person (`.labels/<key>`).
-    labels: HashMap<String, String>,
+    pub(crate) labels: HashMap<String, String>,
 }
 
-fn listed(tools: &crate::tools::Tools) -> Vec<Listed> {
+/// Every running instance's flows (`listed_one`), by id.
+pub(crate) fn listed(tools: &crate::tools::Tools) -> Vec<Listed> {
     let procs = crate::owners::Procs::scan();
     let mut out: Vec<Listed> = crate::instance::running(&tools.state)
         .into_iter()
@@ -805,7 +806,7 @@ pub fn panel_lines(
 
 /// Who holds a flow, for a person: the program's name, its key, or the
 /// process's; `None` for none found.
-fn holder_name(
+pub(crate) fn holder_name(
     owner: Option<&crate::owners::Owner>,
     labels: &HashMap<String, String>,
 ) -> Option<String> {
@@ -830,7 +831,7 @@ fn owner_json(owner: Option<&crate::owners::Owner>) -> String {
 
 /// The instance's own DNS forwarder (`crate::bridge`): what every name of a
 /// container is asked of.
-fn forwarder(addr: &IpAddr) -> bool {
+pub(crate) fn forwarder(addr: &IpAddr) -> bool {
     *addr == IpAddr::V4(crate::bridge::D4) || *addr == IpAddr::V6(crate::bridge::D6)
 }
 
