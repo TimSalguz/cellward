@@ -352,6 +352,11 @@ pub fn programs_over(state: &Path, n: u64, now: u64) -> (String, Programs) {
     (from, total)
 }
 
+/// What each program of each container used today.
+pub fn used_today(state: &Path) -> Programs {
+    programs_over(state, 1, now_secs()).1
+}
+
 /// A program as the summaries name it, for a person: its label, its key, a
 /// process's name, or «не найдена».
 pub fn program_text(state: &Path, program: &str) -> String {

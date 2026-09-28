@@ -101,6 +101,9 @@ struct Data {
     networks: Vec<Net>,
     instances: Vec<Inst>,
     flows: Vec<Conn>,
+    /// What each program of each container used today: `(container,
+    /// program, out, in)`.
+    programs: Vec<(String, String, u64, u64)>,
     today: Vec<Use>,
     month: Vec<Use>,
     /// `(name, value, source)`.
@@ -174,6 +177,10 @@ fn parse(text: &str) -> Data {
                 inb: num(inb),
                 last: num(last),
             }),
+            ["program", of, name, out, inb] => {
+                d.programs
+                    .push(((*of).to_owned(), (*name).to_owned(), num(out), num(inb)))
+            }
             [kind @ ("today" | "month"), of, network, out, inb] => {
                 let u = Use {
                     container: (*of).to_owned(),
@@ -1073,11 +1080,45 @@ impl Panel {
         let page = column![
             now,
             self.view_flows(),
+            self.view_programs(),
             self.use_rows("Сегодня", &self.data.today),
             self.use_rows("За 30 дней", &self.data.month),
         ]
         .spacing(18);
         scrollable(page).height(Length::Fill).into()
+    }
+
+    /// What each program used today, the most first.
+    fn view_programs(&self) -> Element<'_, Msg> {
+        const SHOWN: usize = 20;
+        let mut block = column![text("Программы сегодня").size(17)].spacing(4);
+        if self.data.programs.is_empty() {
+            block = block.push(text("ничего не записано").size(13));
+        }
+        let mut rows: Vec<_> = self.data.programs.iter().collect();
+        rows.sort_by_key(|(_, _, o, i)| std::cmp::Reverse(o.saturating_add(*i)));
+        for (of, name, out, inb) in rows.into_iter().take(SHOWN) {
+            let color = self
+                .data
+                .containers
+                .iter()
+                .find(|c| c.name == *of)
+                .and_then(|c| c.color)
+                .unwrap_or(Color::from_rgb8(0x88, 0x88, 0x88));
+            block = block.push(
+                row![
+                    text("●").size(14).color(color),
+                    text(name.as_str()).size(14).width(Length::Fixed(260.0)),
+                    text(of.as_str()).size(14).width(Length::Fixed(200.0)),
+                    text(format!("↑ {}", bytes(*out)))
+                        .size(14)
+                        .width(Length::Fixed(120.0)),
+                    text(format!("↓ {}", bytes(*inb))).size(14),
+                ]
+                .spacing(8),
+            );
+        }
+        block.into()
     }
 
     /// The latest connections of every running container, the latest first.
@@ -1878,6 +1919,7 @@ mod tests {
         instance\twork\twork\tnl\t1500\t3000\t1790000000\n\
         flow\twork\ttcp\t149.154.167.50\t443\tapi.telegram.org\tTelegram\t2048\t10\t1790000100\n\
         flow\twork\ticmpv6\t2001:db8::1\t0\t\t\t64\t64\t1790000050\n\
+        program\twork\tTelegram\t4096\t8192\n\
         today\twork\tnl\t1500\t3000\n\
         month\twork\tnl\t9000\t12000\n\
         what\tever\n";
@@ -1922,6 +1964,10 @@ mod tests {
         assert_eq!(destination(&d.flows[0]), "api.telegram.org:443");
         assert_eq!(destination(&d.flows[1]), "2001:db8::1 (icmpv6)");
         assert_eq!(d.flows[1].last, 1790000050);
+        assert_eq!(
+            d.programs,
+            vec![("work".to_owned(), "Telegram".to_owned(), 4096, 8192)]
+        );
         assert_eq!(d.today.len(), 1);
         assert_eq!(d.month[0].out, 9000);
         assert_eq!(color_of("#12345"), None);

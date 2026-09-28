@@ -16,6 +16,7 @@
 //! flow⇥<instance id>⇥<proto>⇥<remote>⇥<remote port>⇥<name>⇥<who>⇥<out>⇥<in>⇥<last>
 //! today⇥<container>⇥<network>⇥<out bytes>⇥<in bytes>
 //! month⇥<container>⇥<network>⇥<out bytes>⇥<in bytes>
+//! program⇥<container>⇥<program, for a person>⇥<out bytes>⇥<in bytes>
 //! setting⇥<default|default-profile|mode|wayland-sandbox>⇥<value>⇥<nix|local|default>
 //! pin⇥<program's key>⇥<its name>⇥<the container it goes to, or empty>
 //! ```
@@ -28,7 +29,9 @@
 //! the summaries of today and of the last 30 days. A `flow` is one of an
 //! instance's [`FLOWS_SHOWN`] latest connections (`crate::flows`): `name`
 //! what a DNS answer said of the address, `who` the program that holds it
-//! (`crate::owners`), each empty where none; `last` Unix seconds.
+//! (`crate::owners`), each empty where none; `last` Unix seconds. A
+//! `program` is what a program of a container used today, from the
+//! connections' journal (`crate::connlog`).
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -176,6 +179,10 @@ pub fn data(tools: &Tools) -> String {
         for ((who, net), (o, i)) in crate::traffic::used_over(&tools.state, days) {
             line(&[kind, &who, &net, &o.to_string(), &i.to_string()]);
         }
+    }
+    for ((who, program), (o, i)) in crate::connlog::used_today(&tools.state) {
+        let name = crate::connlog::program_text(&tools.state, &program);
+        line(&["program", &who, &name, &o.to_string(), &i.to_string()]);
     }
     for (name, fallback) in [
         ("default", "offline"),

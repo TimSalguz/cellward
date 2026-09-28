@@ -36,7 +36,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and no more than 1 GiB by default, whichever comes first, the oldest day
   going first — `cellward netlog keep <days>|cap <size>`, or
   `programs.cellward.netlog.keepDays` / `maxSize`; the programs' summaries
-  a year.
+  a year. The cellward window's «Сеть» tab shows today's programs, the
+  most first.
 - **`cellward traffic --connections [--json]`: whom each running container
   reached** (2026-09-28, stage 2 of the network monitor). The frame relay
   reads every frame's headers and keeps the instance's flows in a file of
