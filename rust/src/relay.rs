@@ -167,6 +167,16 @@ pub enum End {
 /// Both descriptors are made non-blocking — their open file descriptions,
 /// which the caller should not share with anyone who expects otherwise.
 pub fn pump(tap: BorrowedFd<'_>, stream: BorrowedFd<'_>) -> io::Result<End> {
+    pump_counted(tap, stream, None)
+}
+
+/// [`pump`], every frame counted into `tally` (`crate::traffic`): out, as it
+/// is read from the tap; in, as the tap takes it.
+pub fn pump_counted(
+    tap: BorrowedFd<'_>,
+    stream: BorrowedFd<'_>,
+    tally: Option<&crate::traffic::Tally>,
+) -> io::Result<End> {
     let (tap, stream) = (tap.as_raw_fd(), stream.as_raw_fd());
     set_nonblocking(tap)?;
     set_nonblocking(stream)?;
@@ -227,17 +237,17 @@ pub fn pump(tap: BorrowedFd<'_>, stream: BorrowedFd<'_>) -> io::Result<End> {
                 return Ok(End::StreamClosed);
             }
             let open = fill_down(stream, &mut down, &mut end)?;
-            tap_full = !deliver(tap, &down, &mut start, end)?;
+            tap_full = !deliver(tap, &down, &mut start, end, tally)?;
             if !open {
                 return Ok(End::StreamClosed);
             }
         }
         if tap_full && at_tap & (libc::POLLOUT | gone) != 0 {
-            tap_full = !deliver(tap, &down, &mut start, end)?;
+            tap_full = !deliver(tap, &down, &mut start, end, tally)?;
         }
         if tap_open && at_tap & (libc::POLLIN | gone) != 0 {
             // Not reading it, and it hung up: nothing more comes from it.
-            tap_open = read_tap && fill_up(tap, &mut frame, &mut up, up_sent)?;
+            tap_open = read_tap && fill_up(tap, &mut frame, &mut up, up_sent, tally)?;
         }
         if up_sent < up.len() {
             flush(stream, &mut up, &mut up_sent)?;
@@ -328,12 +338,23 @@ fn fill_down(stream: RawFd, down: &mut [u8], end: &mut usize) -> io::Result<bool
 /// Write every whole frame at the front of `buf[*start..end]` to the tap,
 /// one `write` each. False when the tap takes no more for now; an impossible
 /// length or a frame taken in part is an error.
-fn deliver(tap: RawFd, buf: &[u8], start: &mut usize, end: usize) -> io::Result<bool> {
+fn deliver(
+    tap: RawFd,
+    buf: &[u8],
+    start: &mut usize,
+    end: usize,
+    tally: Option<&crate::traffic::Tally>,
+) -> io::Result<bool> {
     while let Some(len) = decode(&buf[*start..end])? {
         let from = *start + LEN_BYTES;
         match write_some(tap, &buf[from..from + len], false)? {
             None => return Ok(false),
-            Some(n) if n == len => *start = from + len,
+            Some(n) if n == len => {
+                *start = from + len;
+                if let Some(tally) = tally {
+                    tally.inbound(len);
+                }
+            }
             Some(n) => {
                 return Err(io::Error::other(format!(
                     "the tap took {n} bytes of a frame of {len}"
@@ -345,12 +366,23 @@ fn deliver(tap: RawFd, buf: &[u8], start: &mut usize, end: usize) -> io::Result<
 }
 
 /// Read frames off the tap while the window has room. False once it ended.
-fn fill_up(tap: RawFd, frame: &mut [u8], up: &mut Vec<u8>, sent: usize) -> io::Result<bool> {
+fn fill_up(
+    tap: RawFd,
+    frame: &mut [u8],
+    up: &mut Vec<u8>,
+    sent: usize,
+    tally: Option<&crate::traffic::Tally>,
+) -> io::Result<bool> {
     while up.len() - sent < WINDOW {
         match read_some(tap, frame)? {
             // A read that filled the buffer was longer than any frame, and
             // is refused as one.
-            Got::Bytes(n) => encode(&frame[..n], up)?,
+            Got::Bytes(n) => {
+                encode(&frame[..n], up)?;
+                if let Some(tally) = tally {
+                    tally.outbound(n);
+                }
+            }
             Got::WouldBlock => return Ok(true),
             Got::Eof => return Ok(false),
         }
@@ -514,6 +546,9 @@ pub struct Attach {
     /// The epoch's wall its rules carry (stage 4, `crate::epoch`): none
     /// before the instance's first switch.
     pub wall: Option<Wall>,
+    /// The instance's counters' file (`crate::traffic`), which it counts
+    /// every frame into; none, and it counts nothing.
+    pub tally: Option<RawFd>,
 }
 
 /// The epoch's wall an instance's rules carry (`crate::epoch`,
@@ -629,6 +664,10 @@ impl Attach {
         if let Some(wall) = &self.wall {
             out.extend(wall.args());
         }
+        if let Some(tally) = self.tally {
+            out.push("--tally-fd".into());
+            out.push(tally.to_string().into());
+        }
         out
     }
 
@@ -639,6 +678,7 @@ impl Attach {
     pub fn parse(args: &[OsString]) -> Result<Self, String> {
         let (mut stream, mut ready, mut a4, mut a6, mut ip, mut nft) =
             (None, None, None, None, None, None);
+        let mut tally: Option<RawFd> = None;
         let (mut wall_level, mut wall_cgroup): (Option<String>, Option<String>) = (None, None);
         let mut rest = args;
         while let [flag, value, tail @ ..] = rest {
@@ -674,6 +714,11 @@ impl Attach {
                 )?,
                 "--ip" => once(&mut ip, absolute(value)?, &flag)?,
                 "--nft" => once(&mut nft, absolute(value)?, &flag)?,
+                "--tally-fd" => once(
+                    &mut tally,
+                    fd.ok_or("--tally-fd takes a descriptor above 2")?,
+                    &flag,
+                )?,
                 "--wall-level" => once(&mut wall_level, text.to_owned(), &flag)?,
                 "--wall-cgroup" => once(&mut wall_cgroup, text.to_owned(), &flag)?,
                 _ => return Err(format!("unknown argument {flag}")),
@@ -688,8 +733,10 @@ impl Attach {
         else {
             return Err("needs --stream-fd, --ready-fd, --a4, --ip and --nft".to_owned());
         };
-        if stream == ready {
-            return Err("the stream and the pipe of its word are one descriptor".to_owned());
+        if stream == ready || tally.is_some_and(|t| t == stream || t == ready) {
+            return Err(
+                "the stream, the pipe of its word and the counters are one descriptor".to_owned(),
+            );
         }
         let wall = Wall::from_flags(wall_level, wall_cgroup)?;
         Ok(Self {
@@ -700,6 +747,7 @@ impl Attach {
             ip,
             nft,
             wall,
+            tally,
         })
     }
 }
@@ -918,6 +966,20 @@ fn attach_main(args: &[OsString]) -> u8 {
         eprintln!("vpn-zone-core frame-relay: {e} — the instance stays without a way out");
         return 1;
     }
+    // Its counters (`crate::traffic`), mapped while it may still make the
+    // call: counting takes none. None, or a file it cannot map: it relays
+    // all the same, and counts nothing — the counts are a record, not the
+    // wall.
+    let tally = attach.tally.and_then(|fd| {
+        let file = adopt(fd).ok()?;
+        match crate::traffic::Tally::map(file.as_fd(), true) {
+            Ok(tally) => Some(tally),
+            Err(e) => {
+                eprintln!("vpn-zone-core frame-relay: no counters ({e}) — relaying uncounted");
+                None
+            }
+        }
+    });
     if let Err(e) = confine() {
         eprintln!("vpn-zone-core frame-relay: cannot confine itself ({e}) — not relaying");
         return 1;
@@ -930,7 +992,7 @@ fn attach_main(args: &[OsString]) -> u8 {
     if fs::File::from(ready).write_all(b"1").is_err() {
         return 1;
     }
-    match pump(tap.as_fd(), stream.as_fd()) {
+    match pump_counted(tap.as_fd(), stream.as_fd(), tally.as_ref()) {
         Ok(End::StreamClosed) => 0,
         Ok(End::TapClosed) => {
             eprintln!("vpn-zone-core frame-relay: the tap ended");
@@ -1266,6 +1328,45 @@ mod tests {
         assert_eq!(recv_packet(&tap_peer), None, "the tap's end did not follow");
     }
 
+    /// Every frame counted (`crate::traffic`): out as it leaves the tap,
+    /// in as the tap takes it, by the frame's own length.
+    #[test]
+    fn every_frame_is_counted_both_ways() {
+        let dir = std::env::temp_dir().join(format!("vz-relay-tally-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = crate::traffic::create(&dir).unwrap();
+        let tally = crate::traffic::Tally::map(file.as_fd(), true).unwrap();
+        let (tap, tap_peer) = seqpacket_pair();
+        let (stream, mut stream_peer) = UnixStream::pair().unwrap();
+        stream_peer
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let pump = std::thread::spawn(move || {
+            let end = pump_counted(tap.as_fd(), stream.as_fd(), Some(&tally));
+            tally.close();
+            end
+        });
+        let out: Vec<Vec<u8>> = (0..3).map(|n| frame(n, 60 + n as usize * 700)).collect();
+        for f in &out {
+            send_packet(&tap_peer, f).unwrap();
+        }
+        for f in &out {
+            assert_eq!(read_frame(&mut stream_peer).as_ref(), Some(f));
+        }
+        let back: Vec<Vec<u8>> = (10..12).map(|n| frame(n, 1500)).collect();
+        stream_peer.write_all(&framed(&back)).unwrap();
+        for f in &back {
+            assert_eq!(recv_packet(&tap_peer).as_ref(), Some(f));
+        }
+        drop(stream_peer);
+        assert_eq!(pump.join().unwrap().unwrap(), End::StreamClosed);
+        let counts = crate::traffic::read(&dir).unwrap();
+        assert_eq!((counts.out_frames, counts.out_bytes), (3, 60 + 760 + 1460));
+        assert_eq!((counts.in_frames, counts.in_bytes), (2, 3000));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A stream that takes nothing stops the reading of the tap — the
     /// sender runs into a full queue long before megabytes have gone — and
     /// nothing is lost: every frame arrives, in order, once it is read.
@@ -1414,6 +1515,7 @@ mod tests {
             ip: PathBuf::from("/nix/store/x-iproute2/bin/ip"),
             nft: PathBuf::from("/nix/store/x-nftables/bin/nft"),
             wall: None,
+            tally: None,
         };
         let line = attach.args();
         assert_eq!(line[0], "--attach");
@@ -1444,6 +1546,22 @@ mod tests {
         );
         let line = walled.args();
         assert_eq!(Attach::parse(&line[1..]), Ok(walled));
+        // With its counters: there and back; never one of its other
+        // descriptors.
+        let counted = Attach {
+            tally: Some(9),
+            ..attach.clone()
+        };
+        let line = counted.args();
+        assert_eq!(Attach::parse(&line[1..]), Ok(counted));
+        for fd in [7, 8] {
+            let line = Attach {
+                tally: Some(fd),
+                ..attach.clone()
+            }
+            .args();
+            assert!(Attach::parse(&line[1..]).is_err(), "{fd}");
+        }
         let args = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
         let good = [
             "--stream-fd",
