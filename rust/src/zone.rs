@@ -2926,6 +2926,9 @@ struct Transport {
     /// The instance's lock, a descriptor of its own: taken exclusively for
     /// a new epoch — a launch holds it shared until its program is placed.
     lock: Option<File>,
+    /// Its counters' file (`crate::traffic`), made anew as it comes up:
+    /// every relay of its attaches counts into it.
+    tally: Option<File>,
 }
 
 /// How a live switch ended ([`Transport::switch`]).
@@ -2961,6 +2964,17 @@ impl Transport {
             .mode(0o600)
             .open(zone.path(crate::instance::LOCK))
             .ok();
+        // What it sends and receives, counted from now (stage 1 of the
+        // network monitor). None: its way out is the same, uncounted.
+        let tally = crate::traffic::create(&zone.dir)
+            .map_err(|e| {
+                eprintln!(
+                    "instance {}: no counters of its traffic ({e}) — its way out is the \
+                     same, uncounted",
+                    plan.id
+                )
+            })
+            .ok();
         Self {
             id: plan.id.clone(),
             network: plan.network.clone(),
@@ -2979,6 +2993,7 @@ impl Transport {
             epochs,
             search: Vec::new(),
             lock,
+            tally,
         }
     }
 
@@ -3153,6 +3168,7 @@ impl Transport {
             core: &core,
             ip: &self.ip,
             nft: &self.nft,
+            tally: self.tally.as_ref().map(AsRawFd::as_raw_fd),
         };
         let stop = || ASKED_TO_STOP.load(Ordering::SeqCst);
         let link = crate::bridge::attach(

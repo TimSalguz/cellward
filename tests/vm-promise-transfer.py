@@ -330,6 +330,15 @@ def xf_zone(zone, addr, addr6):
     assert xf_peers("GET", f"/down.bin?from={zone}") == [addr], xf_log()
     XF_ROWS.append((f"{zone}: download from 10.99.0.1", "works", addr, "equal"))
 
+    # What the instance sent and received (stage 1 of the network monitor,
+    # `cellward traffic`, 2026-09-28): the files at least, each way — the
+    # relay counts every frame, the files' and their packets' headers.
+    t = json.loads(alice("cellward traffic --json"))
+    mine = [i["traffic"] for i in t["instances"] if i["network"] == zone and i["traffic"]]
+    assert mine, t
+    assert max(c["out_bytes"] for c in mine) >= 4194304, t
+    assert max(c["in_bytes"] for c in mine) >= 3145728, t
+
     # The server connects to the zone's program through the tunnel: the
     # zone's address ends in the zone's app namespace, where nothing listens
     # — the instance's passt takes nothing in.

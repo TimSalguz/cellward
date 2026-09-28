@@ -1016,6 +1016,9 @@ pub struct RelayTools<'a> {
     pub core: &'a Path,
     pub ip: &'a Path,
     pub nft: &'a Path,
+    /// The instance's counters' file (`crate::traffic`), which the relay
+    /// counts every frame into; none, and it counts nothing.
+    pub tally: Option<RawFd>,
 }
 
 /// A container instance's way out through a zone.
@@ -1226,7 +1229,8 @@ fn relay_ready(
 /// instance's user namespace's own (J3 of the design): only the user, that
 /// namespace's owner, may read it, and it makes itself not dumpable first
 /// thing (`crate::relay`). Its stream and its word's pipe by their numbers,
-/// made inheritable between fork and exec.
+/// made inheritable between fork and exec; the instance's counters' file
+/// (`crate::traffic`) too, when it has one.
 fn spawn_relay(
     tools: &RelayTools<'_>,
     space: &OwnedFd,
@@ -1236,6 +1240,7 @@ fn spawn_relay(
     wall: Option<crate::relay::Wall>,
 ) -> io::Result<Child> {
     let (stream_fd, ready_fd) = (stream.as_raw_fd(), ready.as_raw_fd());
+    let tally = tools.tally;
     let args = crate::relay::Attach {
         stream: stream_fd,
         ready: ready_fd,
@@ -1244,9 +1249,12 @@ fn spawn_relay(
         ip: tools.ip.to_path_buf(),
         nft: tools.nft.to_path_buf(),
         wall,
+        tally,
     }
     .args();
-    let mut cmd = in_instance(tools.core, space, &[stream_fd, ready_fd]);
+    let mut keep = vec![stream_fd, ready_fd];
+    keep.extend(tally);
+    let mut cmd = in_instance(tools.core, space, &keep);
     cmd.arg("frame-relay").args(args).stdin(Stdio::null());
     cmd.spawn()
 }

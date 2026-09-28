@@ -614,12 +614,15 @@ pub fn instance(tools: &Tools, running: &crate::instance::Running) -> String {
             .ok()
             .as_deref(),
     );
+    // What it sent and received since it came up (stage 1 of the network
+    // monitor, `crate::traffic`): `null` for one without counters.
+    let traffic = crate::traffic::status_json(&running.dir);
     format!(
         "{{\"id\":{},\"container\":{container},\"network\":{},\"exit\":{exit},\
          \"why\":{why},\"up\":true,\"pid\":{},\"since\":{since},\"epoch\":{epoch},\
          \"pid_namespace\":{pid_namespace},\"build\":{build},\"restart_needed\":{restart_needed},\
          \"settings\":{settings},\"programs\":{launches},\"live_switch\":{live_switch},\
-         \"switch\":{switch}}}",
+         \"switch\":{switch},\"traffic\":{traffic}}}",
         string(&running.id),
         string(&running.network),
         running.pid

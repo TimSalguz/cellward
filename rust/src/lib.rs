@@ -159,6 +159,7 @@ pub mod system;
 pub mod sysuplink;
 pub mod timings;
 pub mod tools;
+pub mod traffic;
 pub mod tray;
 pub mod trust;
 pub mod watch;

@@ -1926,6 +1926,52 @@ fn explain_says_who_asked_and_what_the_network_tolerates() {
     );
 }
 
+/// Stage 1 of the network monitor (2026-09-28): what a running instance
+/// sent and received, as its relay counted it, in `traffic` and in
+/// `status`; an instance without counters is said to have none.
+#[test]
+fn traffic_says_what_an_instance_sent_and_received() {
+    use std::os::fd::AsFd;
+    use vpn_zone::{instance, traffic};
+    // A short tag: the zone's bridge socket is made below it (SUN_LEN).
+    let home = Home::new("trf");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    let out = home.run(&["traffic"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("ни один экземпляр"),
+        "{}",
+        stdout(&out)
+    );
+    let _bridge = home.instance_is_up("work", "nl");
+    let json = stdout(&home.run(&["traffic", "--json"]));
+    assert!(
+        json.contains("\"id\":\"work\"") && json.contains("\"traffic\":null"),
+        "{json}"
+    );
+    let file = traffic::create(&instance::dir(&home.state(), "work")).unwrap();
+    let tally = traffic::Tally::map(file.as_fd(), true).unwrap();
+    tally.outbound(1500);
+    tally.inbound(3000);
+    let json = stdout(&home.run(&["traffic", "--json"]));
+    assert!(
+        json.contains(
+            "\"traffic\":{\"out_bytes\":1500,\"out_frames\":1,\"in_bytes\":3000,\"in_frames\":1,"
+        ),
+        "{json}"
+    );
+    let text = stdout(&home.run(&["traffic"]));
+    assert!(text.contains("work · nl: ↑ 1.5 КБ · ↓ 2.9 КБ"), "{text}");
+    let status = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        status.contains("\"traffic\":{\"out_bytes\":1500,"),
+        "{status}"
+    );
+    assert_eq!(home.run(&["traffic", "--bogus"]).status.code(), Some(1));
+    tally.close();
+}
+
 /// Review 2026-09-28: a network's `restart_needed` is its running
 /// instances' — what changed since they came up —, not its own space's,
 /// where nothing runs since stage 5.

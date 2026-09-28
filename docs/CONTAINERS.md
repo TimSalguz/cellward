@@ -672,6 +672,13 @@ and `cellward container show <name> --json` print subsets of the same schema.
   come up not hermetic, or bound to it and not hermetic there —, by name
   (the main home's and a throwaway's instance by its id); `[]` when it
   holds them all, `null` when the network is not locked.
+- **`instances[].traffic`** (added 2026-09-28, stage 1 of the network
+  monitor, `docs/FIREWALL.md`): what the instance sent and received through
+  its zone since it came up, as its relay counted every frame —
+  `{out_bytes, out_frames, in_bytes, in_frames, since}` (bytes of Ethernet
+  frames; `since` in Unix seconds); `null` for an instance without counters
+  (one of an earlier build). `cellward traffic --json` gives the same per
+  running instance, with its container and network.
 - **`networks[].tolerates`** (added 2026-09-28, step 1 of the permission
   model, `docs/PERMISSIONS.md` §11.14): the ways around a network it
   tolerates for its containers — `{"hermetic", "nix_daemon",

@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **What each container sends and receives: `cellward traffic`**
+  (2026-09-28, stage 1 of the network monitor, `docs/FIREWALL.md` §9). The
+  frame relay between an instance and its zone counts every frame, out and
+  in, into a file of the instance's (`traffic`) through a shared mapping —
+  no system call per frame, nothing its seccomp filter does not let;
+  counting runs always, as the owner chose. `cellward traffic [--json]
+  [--watch]` says it per running instance with its container and network,
+  `status --json` has it as `instances[].traffic` (`null` for an instance
+  of an earlier build). An instance whose counters cannot be made has its
+  way out all the same, uncounted. History by day and network, with the
+  retention the owner chose (30 days of the raw journal, a year of
+  summaries), is the next stage.
+
 ### Security
 - **kanshi's IPC is out of every zone's runtime directory** (2026-09-28,
   `docs/THREAT-MODEL.md` W7). kanshi's varlink socket,
