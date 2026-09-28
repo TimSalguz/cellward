@@ -2117,7 +2117,7 @@ fn conflict_remembered(file: &Path, key: &str) -> bool {
 
 fn remember_conflict(path: &Path, key: &str) {
     const GROUP: &str = "[Notification Messages]";
-    let text = fs::read_to_string(&path).unwrap_or_default();
+    let text = fs::read_to_string(path).unwrap_or_default();
     let line = format!("{key}=false");
     let new = match text.find(GROUP) {
         Some(at) => {

@@ -155,12 +155,15 @@ let
               f"systemd-run --user --unit=vmpickfail --setenv=WAYLAND_DISPLAY={display} "
               "vpn-zone-pick --label 'Нет такой' --id vmnosuch -- /nonexistent/vmnosuch"
           )
+          # By the picker's name, not its unit: a line it writes as it ends
+          # may reach the journal after the unit is gone, without the unit's
+          # name on it (red once in CI).
           machine.wait_until_succeeds(
-              "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u vmpickfail' "
+              "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -t vpn-zone-pick' "
               "| grep -q '«Нет такой» не запущена'",
               timeout=90,
           )
-          said = alice("journalctl --user -u vmpickfail -o cat")
+          said = alice("journalctl --user -t vpn-zone-pick -o cat")
           assert "код 127" in said or "в контейнере её не" in said, said
           machine.fail("pgrep -x vpn-zone-window")
           alice("cellward container unassign vmnosuch")
