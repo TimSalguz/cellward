@@ -1292,6 +1292,7 @@ let
           alice("cellward run vmreal --profile vmlayer -- sh -c 'echo zl > $HOME/zone-layer-probe'")
           machine.succeed("grep -q zl /home/alice/.local/state/vpn-profiles/vmlayer/home/upper/zone-layer-probe")
           machine.fail("test -e /home/alice/zone-layer-probe")
+      TMP_ZONE, TMP_SANDBOX, TMP_SHARED = "vmreal", "vmsb", False
       exec(open("${./vm-promise-shared-tmp.py}").read())
 
       with subtest("the tunnel is a real amneziawg link, not the wireguard fallback"):
@@ -1976,6 +1977,9 @@ let
           in_zone(hp, f"sh -c '! busctl --user --timeout=5 {own} org.kde.StatusNotifierItem-1.evil 4'")
           TRAY_ITEM, PY = "${./vm-tray-item.py}", "${pkgs.python3}/bin/python3"
           exec(open("${./vm-promise-tray.py}").read())
+          alice("cellward sandbox create vmhsb")
+          TMP_ZONE, TMP_SANDBOX, TMP_SHARED = "vmherm", "vmhsb", True
+          exec(open("${./vm-promise-shared-tmp.py}").read())
           exec(open("${./vm-promise-keyring.py}").read())
           # The project's state out of the zone's reach (review 2026-09-25):
           # no zone.pid to rewrite, no raw proxy behind the bus filter, no key;

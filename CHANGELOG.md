@@ -690,10 +690,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   copy by a socket there: the second found nothing, took the profile's lock
   for a stale one and ran on the profile the first had open. In its
   container's instance a sandbox now takes the container's `/tmp`, shared by
-  the container's launches and no one else's; its X server's sockets stay
-  its own (a tmpfs on `/tmp/.X11-unix`), and a display is chosen whose lock
-  is not in the shared `/tmp`. An unconfined launch keeps a `/tmp` of its
-  own — its outside is the host's.
+  the container's launches and no one else's — where that `/tmp` is the
+  instance's own, a hermetic one's, which its keeper marks in a place the
+  programs cannot write; its X server's sockets stay its own (a tmpfs on
+  `/tmp/.X11-unix`), and a display is chosen whose lock is not in the shared
+  `/tmp`. An ordinary zone's instance and an unconfined launch have the
+  host's `/tmp`, and there a sandbox keeps a tmpfs of its own, as before.
 - **A container's commands act on that container only** (review
   2026-09-28). `cellward container stop|kill|reattach <c>`, `container set
   <c> network <n> --restart` and the frame's «Сменить и перезапустить

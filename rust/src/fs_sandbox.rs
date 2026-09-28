@@ -572,9 +572,29 @@ pub struct Layout {
     /// hands it the window; with a `/tmp` per launch it found nothing, took
     /// the profile's lock for a stale one and ran a second copy on the same
     /// profile. The X server's sockets stay the launch's own: a tmpfs of its
-    /// own on `/tmp/.X11-unix` (THREAT-MODEL W10). Only in an instance — an
-    /// unconfined launch's `/tmp` is the host's.
+    /// own on `/tmp/.X11-unix` (THREAT-MODEL W10). Only where the `/tmp` is
+    /// the instance's own — a hermetic one's, which its keeper marks
+    /// ([`tmp_is_the_instances`]): an ordinary zone's instance, and an
+    /// unconfined launch, have the host's, and there a sandbox keeps a tmpfs
+    /// of its own as before (found by the VM test of 2026-09-28, which saw a
+    /// throwaway sandbox of an ordinary zone read the host's `/tmp`).
     pub share_tmp: bool,
+}
+
+/// Whether the `/tmp` a sandbox starts in is its instance's own: the
+/// keeper's mark (`zone::PRIVATE_TMP_INSIDE`) in the runtime directory, in a
+/// directory that is not ours — a program, which runs as us, can make
+/// neither. Anything else, a mark of ours among it, is the host's `/tmp`.
+fn tmp_is_the_instances(runtime: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let mark = runtime.join(crate::zone::PRIVATE_TMP_INSIDE);
+    let Some(dir) = mark.parent() else {
+        return false;
+    };
+    // SAFETY: getuid takes nothing and cannot fail.
+    let me = unsafe { libc::getuid() };
+    fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() != me)
+        && fs::symlink_metadata(&mark).is_ok_and(|m| m.is_file() && m.uid() != me)
 }
 
 fn push(v: &mut Vec<OsString>, s: &str) {
@@ -1312,6 +1332,8 @@ pub fn run(args: Args) -> u8 {
         return EXIT_NOT_STARTED;
     };
     let runtime = runtime_dir();
+    // The container's /tmp only where it is the instance's own (`Layout::share_tmp`).
+    let share_tmp = args.share_tmp && tmp_is_the_instances(&runtime);
 
     // --- SECCOMP ---
     // First, before anything is asked or started: no filter, no sandbox
@@ -1507,11 +1529,11 @@ pub fn run(args: Args) -> u8 {
                     .map(|i| pick_display(seed.wrapping_add(i)))
                     .find(|d| {
                         d[1..].parse::<u32>().is_ok_and(|n| {
-                            !crate::x11::abstract_name_taken(n)
-                                // In a shared /tmp another launch's server
-                                // keeps its lock there.
-                                && !(args.share_tmp
-                                    && Path::new(&format!("/tmp/.X{n}-lock")).exists())
+                            // In a shared /tmp another launch's server keeps
+                            // its lock there too.
+                            let locked =
+                                share_tmp && Path::new(&format!("/tmp/.X{n}-lock")).exists();
+                            !(crate::x11::abstract_name_taken(n) || locked)
                         })
                     })
                     .unwrap_or_else(|| pick_display(seed));
@@ -1599,7 +1621,7 @@ pub fn run(args: Args) -> u8 {
         flatpak_info: info,
         display,
         seccomp_fd: SECCOMP_FD,
-        share_tmp: args.share_tmp,
+        share_tmp,
     };
 
     let mut command = Command::new(&args.tools.bwrap);
@@ -2271,6 +2293,15 @@ mod tests {
         let own = strs(&bwrap_args(&layout(), &argv(&["prog"])));
         assert!(own.windows(2).any(|w| w == ["--tmpfs", "/tmp"]));
         assert!(!own.windows(3).any(|w| w == ["--bind", "/tmp", "/tmp"]));
+        // The keeper's mark, absent or ours, is no mark: the host's /tmp.
+        let dir = std::env::temp_dir().join(format!("vz-share-tmp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(!tmp_is_the_instances(&dir));
+        let mark = dir.join(crate::zone::PRIVATE_TMP_INSIDE);
+        fs::create_dir_all(mark.parent().unwrap()).unwrap();
+        fs::write(&mark, "").unwrap();
+        assert!(!tmp_is_the_instances(&dir), "a mark of our own");
+        let _ = fs::remove_dir_all(&dir);
         let a = Args::parse(&argv(&["app", "--share-tmp", "on", "--", "prog"])).unwrap();
         assert!(a.share_tmp);
         assert!(
