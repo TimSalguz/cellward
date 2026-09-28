@@ -1808,11 +1808,12 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     // Nothing launched into its own namespaces (stage 5): looked at before
     // the probe goes in, which is a process of the user's there itself.
     checks.push(zone_programs_check(&programs_in_zone(pid, uid)));
-    // What the zone is to be, read as its holder reads it: the probe judges
-    // the host's bus and the Nix daemon by it.
-    let (hermetic, _) = crate::hermetic::zone_setting(&dir, &tools.config, name);
-    let (nix_daemon, _) = crate::hermetic::nix_daemon(&dir, &tools.config, name);
-    let (audio_manager, _) = crate::hermetic::audio_manager(&dir, &tools.config, name);
+    // What the zone is to be, read as its holder reads it (the main home's
+    // settings in it, `hermetic::start_settings`: its own, less what it does
+    // not tolerate — offline no way around it): the probe judges the host's
+    // bus and the Nix daemon by it.
+    let [hermetic, nix_daemon, _, audio_manager] =
+        crate::hermetic::start_settings(&dir, &tools.config, name).map(|(_, on)| on);
     let mut probe_args = vec![uid.to_string(), format!("--zone={name}")];
     if hermetic {
         probe_args.push("--hermetic".to_owned());
