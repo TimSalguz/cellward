@@ -16,6 +16,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   notice runs in a unit of its own (`cellward-previous-build`), since
   `watch`, which a timer runs, cannot wait for a button; where that cannot
   start, the plain notice as before.
+- **`doctor` warns when the Nix daemon is given to a trusted user**
+  (review 2026-09-28; `docs/PERMISSIONS.md` §11.2, `docs/THREAT-MODEL.md`
+  H9). If the user, or a group of the user's (`@wheel` too), is in
+  nix.conf's `trusted-users`, the daemon obeys them in all that makes a
+  build — its sandbox off, a substituter or a `post-build-hook` of their
+  own —, and a program with the Nix daemon can do what the host's root
+  does, not only fetch around the tunnel. A new system check `nix-trusted`
+  reads `/etc/nix/nix.conf` as Nix does (`include`, `!include`,
+  `extra-trusted-users`, `root` when unset) and warns when a running
+  instance, a container's own word or a network gives the daemon and the
+  user is trusted, with the way out: the user and its groups out of
+  `trusted-users` (`allowed-users` is enough to build), or the Nix daemon
+  off (`cellward container set <c> nix-daemon off`, `cellward nix-daemon
+  <zone> off`).
 - **`cellward restart <zone>`**: down, then up — how a zone an update left on
   the previous build takes the new one, and the one word the update notice,
   the launch's refusal for such a zone and a configurator's button name. Its
