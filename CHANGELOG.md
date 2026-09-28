@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Security
+- **kanshi's IPC is out of every zone's runtime directory** (2026-09-28,
+  `docs/THREAT-MODEL.md` W7). kanshi's varlink socket,
+  `$XDG_RUNTIME_DIR/fr.emersion.kanshi.<display>`, joins the shells' list
+  (`zone::shell_private`): `kanshictl switch <profile>` makes kanshi apply a
+  profile, and a profile's `exec` lines run on the host, outside every zone.
+  An ordinary zone had it bound with the rest of the runtime directory; a
+  hermetic one never did. `doctor` names it if it sees it.
+
 ### Changed (read before updating)
 - **A way around a network needs the container to ask and the network to
   tolerate it** (step 1 of the permission model the owner took on

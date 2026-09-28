@@ -865,8 +865,9 @@ fullscreen, не подтверждённый программой, полосу
 **IPC оболочек в runtime-каталоге** (2026-09-28, THREAT-MODEL W7): свои
 каталоги и сокеты оболочек — `quickshell/` (Quickshell: noctalia,
 DankMaterialShell, caelestia; `qs ipc call` исполняет функции её
-конфигурации), `astal/` (Astal и AGS), `ironbar-ipc.sock`, `eww-server_*` — в
-runtime-каталог зоны и экземпляра не попадают, и обычной зоны тоже, ни при
+конфигурации), `astal/` (Astal и AGS), `ironbar-ipc.sock`, `eww-server_*`, `fr.emersion.kanshi.<дисплей>` (varlink
+kanshi: `kanshictl switch` включает профиль, а строки `exec` профиля
+исполняются на хосте) — в runtime-каталог зоны и экземпляра не попадают, и обычной зоны тоже, ни при
 подъёме, ни потом (наблюдатель их не биндит; `zone::shell_private`). `doctor`
 называет их, если увидит (`compositor-ipc`, перечень сокетов — `fail`).
 
