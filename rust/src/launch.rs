@@ -22,10 +22,12 @@
 //!  5. the launch registry says whether this program is already running in
 //!     ANOTHER network — the "I thought I was on the VPN" warning;
 //!  6. the zone is started if it was down, we write ourselves into the registry
-//!     and `execvp` into `nsenter` — offline, into the container's instance
-//!     (`crate::instance`, since stage 1 of the container design of
-//!     2026-09-27): its unit is started if it was down, and the last word is
-//!     `container-enter`, which finds it again by its id.
+//!     and `execvp` into the container's instance (`crate::instance`, the
+//!     container design of 2026-09-27): its unit is started if it was down,
+//!     and the last word is `container-enter`, which finds it again by its
+//!     id. Never into the zone's own namespaces (stage 5, 2026-09-28): a zone
+//!     is transport, and one that cannot carry the instance — of a previous
+//!     build — is refused with the way out, its restart.
 //!
 //! **`direct` takes the same road**, minus the zone. It used to be a special
 //! case of the picker, which simply became the command — and with that the
@@ -649,9 +651,11 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         return 1;
     }
 
-    // The zone with no network is created on demand, here as in the picker:
-    // `vpn-zone run offline -- …` by hand used to find no zone at all when the
-    // picker had never made one.
+    // The network with no network has a directory of its own, made on demand
+    // here as in the picker: where its settings are kept, and its instances
+    // read them (`zone::InstanceInfo::network_dir`). Never started as a zone
+    // since stage 1 of the container design: nothing is launched into a
+    // zone's own namespaces.
     if zone == OFFLINE {
         ensure_offline_zone(&tools.state);
     }
@@ -684,10 +688,12 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // started for it any more.
     // Stage 2 (2026-09-27): into a zone too — its instance's way out is a
     // passt the zone runs for it, and nothing of the zone's own namespaces is
-    // the program's. A zone of a previous build (no bridge: an update left it
-    // running) is entered as before, and the person told how to change that.
-    let legacy = zone_takes_its_own(&tools.state, &zone);
-    let instance_id: Option<String> = if zone == UNCONFINED || legacy {
+    // the program's. Stage 5 (2026-09-28): ONLY so. A zone of a previous
+    // build (no bridge: an update left it running) used to be entered as
+    // before, into its own namespaces; now no launch goes there at all, and
+    // one into such a zone is refused with the way out — its restart
+    // (`up_instance`). Every network but `unconfined` is an instance's.
+    let instance_id: Option<String> = if zone == UNCONFINED {
         None
     } else {
         match instance_of(tools, &selection, &container, &zone_name) {
@@ -698,18 +704,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             }
         }
     };
-    if legacy {
-        eprintln!(
-            "зона {zone_name} поднята прошлой сборкой: программа запускается в пространстве \
-             самой зоны, как раньше, — без своего сетевого пространства контейнера. \
-             Перезапусти зону (cellward down {zone_name}; cellward up {zone_name}), и контейнеры \
-             в ней получат свои"
-        );
-    }
-    // A container whose launches still run in the zone's own namespaces — of
-    // before the switch-over, or into the zone of a previous build — is not
-    // started in its instance beside them: two worlds of one home and one
-    // profile (`docs/CONTAINERS.md` I2, stage 2's form of it).
+    // A container whose launches still run in the zone's own namespaces —
+    // started there by a previous build, before the update — is not started
+    // in its instance beside them: two worlds of one home and one profile
+    // (`docs/CONTAINERS.md` I2, stage 2's form of it).
     if let (Some(_), Some(name)) = (&instance_id, container_name(&selection)) {
         if let Some(why) = zone_launches_refusal(tools, &name, &zone_name) {
             refuse(tools, &why);
@@ -1114,43 +1112,25 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
     }
 
-    // --- 5. THE ZONE ITSELF ---
-    let network = if zone == UNCONFINED {
+    // --- 5. THE ZONE AND THE INSTANCE ---
+    let network = match &instance_id {
         // Nothing to start and nothing to enter: the host's own network.
-        Network::Unconfined
-    } else if let Some(id) = &instance_id {
+        None => Network::Unconfined,
         // The container's instance, up and ready in this network — its zone
         // and it started when they are not (`Type=notify`: `systemctl start`
         // returns when it is ready or failed; no clock of ours). Not in a dry
-        // run: nothing is started for one.
-        if !dryrun {
-            if let Err(why) = up_instance(tools, id, &zone, &zone_name) {
-                eprintln!("{why}");
-                return 1;
+        // run: nothing is started for one. Refused where the person sees it
+        // (stage 5): a zone of a previous build is no longer entered in its
+        // stead, and a shortcut's stderr is read by nobody.
+        Some(id) => {
+            if !dryrun {
+                if let Err(why) = up_instance(tools, id, &zone, &zone_name) {
+                    refuse(tools, &why);
+                    return 1;
+                }
             }
+            Network::Instance
         }
-        Network::Instance
-    } else {
-        // Up and READY, not just up: a zone still being set up is not entered
-        // (`cli::zone_up`).
-        let mut pid = cli::zone_up(&tools.state, &zone);
-        if pid.is_none() {
-            // The shortcut may well have been clicked while the zone was down —
-            // or while it was still coming up. Starting it is the expected
-            // behaviour, not an error (a zone that is starting is left to it),
-            // and a failure here is deliberately ignored, because the check
-            // below says the same thing in words a user can act on.
-            // Returns once the zone is ready or failed (`Type=notify`,
-            // `cli::started_up`): no clock of ours — and says so while it
-            // waits (`cli::start_zone`).
-            let _ = cli::start_zone(tools, &zone, true);
-            pid = cli::zone_up(&tools.state, &zone);
-        }
-        let Some(pid) = pid else {
-            eprintln!("зона {zone_name} не поднимается");
-            return 1;
-        };
-        Network::Zone(pid)
     };
 
     if dryrun {
@@ -1190,14 +1170,6 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             }
         }
         Err(e) => eprintln!("реестр запусков {}: {e}", regdir.display()),
-    }
-    // The containers launched into a zone since it came up: what decides for
-    // all its programs at once counts theirs after the launch is over — a
-    // daemon outlives it (`origin::LAUNCHED`).
-    if let (Network::Zone(_), Some(name)) = (network, container_name(&selection)) {
-        if let Err(e) = crate::origin::note_launched(&tools.state, &zone_name, &name) {
-            eprintln!("учёт контейнеров зоны {zone_name}: {e}");
-        }
     }
     // Nothing of a zone around this one: on the record, with who and what.
     if network == Network::Unconfined {
@@ -1256,7 +1228,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         std::env::set_var("IBUS_USE_PORTAL", "1");
     }
 
-    // The caller's working directory, which `nsenter` would otherwise lose. A
+    // The caller's working directory, which entering a space would lose. A
     // directory that has been removed under us is no reason not to start:
     // `profile-run` falls back to `$HOME` anyway.
     let cwd = std::env::current_dir().unwrap_or_else(|_| tools.home.clone());
@@ -1281,7 +1253,6 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     };
     let exec = entry_argv(
         &Entry {
-            nsenter: &tools.nsenter,
             unshare: &tools.unshare,
             core: &tools.core,
             systemctl: &tools.systemctl,
@@ -1304,10 +1275,6 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             certutil: &tools.certutil,
             bwrap: &tools.bwrap,
             shares: &shares,
-            own_mounts: matches!(
-                (&selection.sandbox, &selection.container),
-                (Sandbox::None, Container::MainNamed(_))
-            ),
             own_x11,
             camera,
             devices: &device_args,
@@ -1316,7 +1283,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         cmd,
     );
     // Only `direct` with no container can get here with nothing at all: into a
-    // zone an empty command is `nsenter`'s own shell, which is a perfectly good
+    // space an empty command is a shell there, which is a perfectly good
     // thing to want, but the host has no such fallback.
     if exec.is_empty() {
         eprintln!("нечего запускать");
@@ -1336,32 +1303,11 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
     };
 
-    // A zone is a network namespace of its own, and ours is the host's here: a
-    // launch from inside a zone was handed outwards in step 1. A zone process
-    // in OUR namespace is not the zone — `zone.pid` naming some other process
-    // —, and entering it would start the program in the host's network under
-    // the zone's name. Checked last, as close to the `exec` as it gets.
-    if let Network::Zone(pid) = network {
-        // What profile-run will check from inside: the zone's network as it is
-        // now, not as a number will say later.
-        match fs::read_link(format!("/proc/{pid}/ns/net")) {
-            Ok(ns) => std::env::set_var(crate::profile::ENV_EXPECT_NETNS, ns),
-            Err(e) => {
-                eprintln!("зона {zone_name}: её процесс не прочитать ({e}) — запуск остановлен");
-                return 1;
-            }
-        }
-        if in_our_network(pid) {
-            refuse(
-                tools,
-                &format!(
-                    "Зона {zone_name} указывает на процесс в сети хоста — запуск остановлен. \
-                     Перезапусти зону: cellward down {zone_name}, затем cellward up {zone_name}"
-                ),
-            );
-            return 1;
-        }
-    }
+    // A launch into a zone's own namespaces used to be checked here, as close
+    // to the `exec` as it gets: its zone process in OUR network namespace was
+    // not the zone. No launch goes there since stage 5; an instance's network
+    // is checked by `container-enter`, from its pid 1, and by `profile-run`
+    // from inside (`profile::ENV_EXPECT_NETNS`).
 
     // The picker's pipe, given on to `wl-sandbox` alone, as the very last
     // thing before its exec (`wl_sandbox::pass_opened_on`): nothing this
@@ -1377,9 +1323,6 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
 /// Where a launch runs, as far as its command line is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Network {
-    /// A zone that is up; the pid of its APP namespace, the one `nsenter`
-    /// targets.
-    Zone(i32),
     /// A container's instance that is up (`crate::instance`), entered by
     /// `container-enter`, which finds it again by its id
     /// (`Entry::instance`) — never by a number handed down.
@@ -1391,7 +1334,6 @@ pub enum Network {
 /// Everything the last command line of a launch depends on.
 #[derive(Debug, Clone, Copy)]
 pub struct Entry<'a> {
-    pub nsenter: &'a Path,
     pub unshare: &'a Path,
     pub core: &'a Path,
     /// What starts an instance that stopped between this launch's look and
@@ -1424,22 +1366,16 @@ pub struct Entry<'a> {
     /// Paths of the real home granted to a layer container
     /// (`container grant`): written through its layer (`--share`).
     pub shares: &'a [PathBuf],
-    /// The container's storage directory, for a launch into a zone: the zone
-    /// covers container storage, and `profile-run --storage` gives this one
-    /// directory back in the launch's own mount namespace, from the zone's
-    /// keep (`home_layer::KEPT_STORAGE`).
+    /// The container's storage directory, for a launch into an instance:
+    /// the instance covers container storage, and `profile-run --storage`
+    /// gives this one directory back in the launch's own mount namespace,
+    /// from the instance's keep (`home_layer::KEPT_STORAGE`).
     pub storage: Option<&'a Path>,
-    /// A mount namespace of its own in a zone even with nothing to mount: a
-    /// container of the main home. Its programs are told from the zone's own
-    /// by it — one that leaves its launch (a daemon that forked twice) is
-    /// then not taken for a program of the zone with no container, whose
-    /// settings are not its container's (`crate::origin`).
-    pub own_mounts: bool,
     /// An X server of the launch's own (`x11-run`): its sockets' directory
     /// too (`profile-run --own-x11`).
     pub own_x11: bool,
-    /// The host's cameras let this launch in a zone: bound into its own
-    /// mount namespace (`profile-run --camera`).
+    /// The host's cameras let this launch in an instance: bound into its
+    /// own mount namespace (`profile-run --camera`).
     pub camera: bool,
     /// The devices its container is given, as `profile-run --device` takes
     /// them (`devices::Pass::arg`): bound into its own mount namespace.
@@ -1451,15 +1387,15 @@ pub struct Entry<'a> {
 ///
 /// A pure function, because every word of it was paid for:
 ///
-/// * **into a zone**: `nsenter --preserve-credentials --keep-caps -U -n -m -t
-///   <pid>` — without `--keep-caps` CapEff is zeroed on entering the zone's
-///   user namespace, and there is nothing left to mount a layer with
-///   (`docs/GOTCHAS.md` §1) nor to shed the session's groups with
-///   (`profile::run`). A container then gets a mount namespace of its own
-///   (`unshare --mount`), so its layers are seen by this launch only and not
-///   by the whole zone — a slave of the zone's, which gets what the zone
-///   binds into its runtime directory later; a container of the main home
-///   too, with nothing mounted (`Entry::own_mounts`);
+/// * **into a container's instance** (every network but `unconfined`, since
+///   stage 5 of the container design of 2026-09-27): `vpn-zone-core
+///   container-enter --instance <id>` (`crate::enter`), which joins the
+///   instance's namespaces from its pid 1 and gives the launch a mount
+///   namespace of its own, a slave of the instance's, with the capabilities
+///   `profile-run` mounts the container with and sheds the session's groups
+///   with (`docs/GOTCHAS.md` §1). Never a zone's own namespaces any more:
+///   `nsenter` into a zone's app namespace was the way until stage 5, and a
+///   zone of a previous build is now refused instead (`run`);
 /// * **`direct` with a container**: there is no zone to borrow a user namespace
 ///   from, so `unshare` makes one — `--map-current-user` maps the user onto
 ///   itself (the program keeps its uid and sees `$HOME` as usual) and
@@ -1473,22 +1409,22 @@ pub struct Entry<'a> {
 ///
 /// **Everything that enters a namespace ends in `profile-run --cwd`**, the
 /// main profile included (with an empty layer directory, which stacks
-/// nothing). `nsenter` does `chdir("/")` when it joins a mount namespace — a
-/// terminal started into a zone opened in `/` — and `--wd` is no cure: with a
-/// container the overlay is mounted over `$HOME` after `nsenter`, so the chdir
-/// has to come after the mounts, and even without one a directory that does
-/// not exist in the zone's mount tree would make `nsenter` refuse to start the
-/// program at all. `profile-run` makes the chdir after mounting and falls back
-/// to `$HOME` and `/`. (`docs/GOTCHAS.md` §1)
+/// nothing). Joining a mount namespace leaves a process in `/` — a terminal
+/// started into a zone opened in `/` when `nsenter` did it — and a chdir
+/// before the mounts is no cure: with a container the overlay is mounted over
+/// `$HOME` afterwards, so the chdir has to come after the mounts, and a
+/// directory that does not exist in the space's mount tree must not stop the
+/// launch. `profile-run` makes the chdir after mounting and falls back to
+/// `$HOME` and `/`. (`docs/GOTCHAS.md` §1)
 pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
     // Something has to be mounted for this launch: a container's layer, or
     // the trust layer's bundle.
     let container =
         !entry.dir.as_os_str().is_empty() || entry.trust.is_some() || entry.storage.is_some();
     let mut exec: Vec<OsString> = Vec::new();
-    // Into a space of ours — a zone's, an instance's —, with its own `/dev`
-    // and covers: what `profile-run` gives the launch from there.
-    let in_space = matches!(entry.network, Network::Zone(_) | Network::Instance);
+    // Into a space of ours — an instance's —, with its own `/dev` and
+    // covers: what `profile-run` gives the launch from there.
+    let in_space = entry.network == Network::Instance;
     // Does the program end up in a mount namespace other than ours?
     let entered = container || in_space;
     // A throwaway container's instance erases it when its last program ends
@@ -1510,40 +1446,6 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
             exec.push("--systemctl".into());
             exec.push(entry.systemctl.into());
             exec.push("--".into());
-        }
-        Network::Zone(pid) => {
-            exec.push(entry.nsenter.into());
-            exec.push("--preserve-credentials".into());
-            // Always, a container or not: `profile-run` sheds the session's
-            // groups with them before the program starts (`profile::run`).
-            exec.push("--keep-caps".into());
-            exec.extend([
-                "-U".into(),
-                "-n".into(),
-                "-m".into(),
-                "-i".into(),
-                "-t".into(),
-            ]);
-            exec.push(pid.to_string().into());
-            exec.push("--".into());
-            if container
-                || entry.own_mounts
-                || entry.own_x11
-                || entry.camera
-                || !entry.devices.is_empty()
-            {
-                // A slave of the zone's: what the zone binds into its
-                // runtime directory later reaches this launch too (the one
-                // shared mount of the zone, `zone::seal_runtime`), and
-                // nothing this launch mounts goes back.
-                exec.push(entry.unshare.into());
-                exec.extend([
-                    "--mount".into(),
-                    "--propagation".into(),
-                    "slave".into(),
-                    "--".into(),
-                ]);
-            }
         }
         Network::Unconfined if container => {
             exec.push(entry.unshare.into());
@@ -1666,18 +1568,25 @@ fn instance_of(
     Ok(id)
 }
 
-/// Whether a launch into `zone` takes the zone's own namespaces, as before
-/// stage 2 of the container design (2026-09-27): a zone that is up and
-/// carries no instance — its holder of a previous build, which an update
-/// left running (`X-SwitchMethod=keep-old`), with no bridge
-/// (`bridge::carries`: by the socket's presence, never by a build's name).
-/// A zone that is down is started by this build, and carries them;
-/// `offline` and `unconfined` are no zones.
-pub fn zone_takes_its_own(state: &Path, zone: &OsStr) -> bool {
-    zone != OsStr::new(OFFLINE)
-        && zone != OsStr::new(UNCONFINED)
-        && cli::zone_up(state, zone).is_some()
-        && !crate::bridge::carries(&state.join(zone))
+/// Why a launch cannot run in an instance through `zone`, which is up: it
+/// carries none — no bridge (`bridge::carries`: by the socket's presence,
+/// never by a build's name). Its holder of a previous build, which an update
+/// left running (`X-SwitchMethod=keep-old`), or one whose bridge did not
+/// open. Until stage 5 of the container design (2026-09-28) such a zone was
+/// entered in the instance's stead, into its own namespaces; now nothing is
+/// launched there at all, and the person is told the way out — the zone's
+/// restart, which this build's holder comes up from. `None`: it carries.
+pub fn no_bridge_refusal(state: &Path, zone: &OsStr) -> Option<String> {
+    if crate::bridge::carries(&state.join(zone)) {
+        return None;
+    }
+    let zone = zone.to_string_lossy();
+    Some(format!(
+        "зона {zone} не везёт контейнеры: она поднята прошлой сборкой или её мост не \
+         открылся (journalctl --user -u 'vpn-zone@{zone}.service'). В пространство самой \
+         зоны программы больше не запускаются — перезапусти её: cellward down {zone}; \
+         cellward up {zone}"
+    ))
 }
 
 /// Every process's children, by their `PPid`, read once.
@@ -1794,12 +1703,8 @@ fn up_instance(tools: &Tools, id: &str, zone: &OsStr, zone_name: &str) -> Result
         if pid.is_none() {
             return Err(format!("зона {zone_name} не поднимается"));
         }
-        if !crate::bridge::carries(&tools.state.join(zone)) {
-            return Err(format!(
-                "зона {zone_name} не везёт контейнеры (journalctl --user -u \
-                 'vpn-zone@{zone_name}.service') — перезапусти её: cellward down {zone_name}, \
-                 cellward up {zone_name}"
-            ));
+        if let Some(why) = no_bridge_refusal(&tools.state, zone) {
+            return Err(why);
         }
     }
     if crate::instance::up(&tools.state, id).is_none() {
@@ -1980,12 +1885,6 @@ pub fn prepare_selection(tools: &Tools, selection: &Selection) -> Result<(), Str
     crate::container::prepare_data(&container)
 }
 
-/// Is the process `pid` in our network namespace?
-fn in_our_network(pid: i32) -> bool {
-    let ns = |p: &str| fs::read_link(format!("/proc/{p}/ns/net")).ok();
-    ns(&pid.to_string()).is_some_and(|theirs| Some(theirs) == ns("self"))
-}
-
 /// Say no, where the person can see it: a dialog when there is a graphical
 /// session (a launcher entry's stderr is read by nobody), and stderr always.
 fn refuse(tools: &Tools, why: &str) {
@@ -2061,9 +1960,11 @@ fn run_locked(current: &OsStr, argv: &[OsString]) -> u8 {
     EXIT_NOT_STARTED
 }
 
-/// The zone with no network: a directory with the `offline` marker and nothing
-/// else — there is no config to keep, it is an empty namespace
-/// (`docs/GOTCHAS.md` §2).
+/// The network with no network: a directory with the `offline` marker and
+/// nothing else — there is no config to keep (`docs/GOTCHAS.md` §2). It
+/// holds the network's settings (hermetic, microphone, …), which its
+/// instances come up with; since stage 1 of the container design no zone is
+/// started from it for a launch.
 pub fn ensure_offline_zone(state: &Path) {
     let dir = state.join(OFFLINE);
     if !dir.is_dir() {
@@ -3131,12 +3032,10 @@ mod tests {
 
     fn entry<'a>(network: Network, dir: &'a Path, ephemeral: bool) -> Entry<'a> {
         Entry {
-            nsenter: Path::new("/t/nsenter"),
             unshare: Path::new("/t/unshare"),
             core: Path::new("/t/core"),
             systemctl: Path::new("/t/systemctl"),
             zone: OsStr::new(match network {
-                Network::Zone(_) => "nl",
                 Network::Instance => OFFLINE,
                 Network::Unconfined => UNCONFINED,
             }),
@@ -3154,55 +3053,57 @@ mod tests {
             bwrap: Path::new("/t/bwrap"),
             shares: &[],
             storage: None,
-            own_mounts: false,
             own_x11: false,
             camera: false,
             devices: &[],
         }
     }
 
-    /// A container of the main home into a zone: nothing to mount, and a
-    /// mount namespace of its own all the same — the zone's own is its
-    /// programs' with no container (`crate::origin`). Outside a zone it
-    /// takes none: there is no zone's own to be told from.
+    /// A container of the main home: nothing to mount, and a mount
+    /// namespace of its own all the same. Into a zone it used to be asked
+    /// for (`own_mounts`, `unshare --mount`), so that its programs were told
+    /// from the zone's own; an instance's launch has one from
+    /// `container-enter` whatever it mounts, and nothing goes into a zone's
+    /// namespaces since stage 5 — the flag went with them. Outside any
+    /// space it takes none.
     #[test]
-    fn a_container_of_the_main_home_takes_a_mount_namespace_in_a_zone() {
-        let mut e = entry(Network::Zone(42), Path::new(""), false);
-        e.own_mounts = true;
+    fn a_container_of_the_main_home_takes_a_mount_namespace_in_an_instance() {
+        let e = entry(Network::Instance, Path::new(""), false);
         let line = entry_argv(&e, argv(&["dolphin"]));
         let at = |w: &str| line.iter().position(|a| a == w).unwrap();
-        assert!(at("/t/nsenter") < at("/t/unshare"), "{line:?}");
-        assert!(at("/t/unshare") < at("profile-run"), "{line:?}");
-        assert_eq!(line[at("/t/unshare") + 1], "--mount");
-        let mut e = entry(Network::Unconfined, Path::new(""), false);
-        e.own_mounts = true;
+        assert_eq!(line[0], os("/t/core"));
+        assert!(at("container-enter") < at("profile-run"), "{line:?}");
+        assert!(!line.contains(&os("/t/unshare")), "{line:?}");
+        let e = entry(Network::Unconfined, Path::new(""), false);
         assert_eq!(entry_argv(&e, argv(&["dolphin"])), argv(&["dolphin"]));
     }
 
-    /// An X server of the launch's own in a zone: its sockets' directory too,
-    /// in a mount namespace of the launch's own (`x11-run`,
-    /// `profile-run --own-x11`) — the zone's is every program of the zone's.
+    /// An X server of the launch's own in an instance: its sockets'
+    /// directory too, in a mount namespace of the launch's own (`x11-run`,
+    /// `profile-run --own-x11`) — the instance's is every program of the
+    /// instance's. (Into a zone until stage 5, the same through `unshare`.)
     #[test]
     fn an_x_server_of_its_own_has_a_directory_of_its_own() {
-        let mut e = entry(Network::Zone(42), Path::new(""), false);
+        let mut e = entry(Network::Instance, Path::new(""), false);
         e.own_x11 = true;
         let line = entry_argv(&e, argv(&["steam"]));
         let at = |w: &str| line.iter().position(|a| a == w).unwrap();
-        assert!(at("/t/unshare") < at("profile-run"), "{line:?}");
+        assert!(at("container-enter") < at("profile-run"), "{line:?}");
         assert!(at("profile-run") < at("--own-x11"), "{line:?}");
         assert!(at("--own-x11") < at("steam"), "{line:?}");
     }
 
-    /// A sandbox into a zone: the zone covers container storage, and the
-    /// launch gets its own directory back — in a mount namespace of its own,
-    /// never in the zone's, where every other program would see it.
+    /// A sandbox into an instance: the instance covers container storage,
+    /// and the launch gets its own directory back — in a mount namespace of
+    /// its own, never in the instance's. (Into a zone until stage 5, where
+    /// every other program of the zone would have seen it.)
     #[test]
     fn a_containers_storage_comes_back_in_its_own_namespace() {
-        let mut e = entry(Network::Zone(42), Path::new(""), false);
+        let mut e = entry(Network::Instance, Path::new(""), false);
         e.storage = Some(Path::new("/home/u/.local/state/vpn-sandboxes/work"));
         let line = entry_argv(&e, argv(&["firefox"]));
         let at = |w: &str| line.iter().position(|a| a == w).unwrap();
-        assert!(at("/t/unshare") < at("profile-run"), "{line:?}");
+        assert!(at("container-enter") < at("profile-run"), "{line:?}");
         let s = at("--storage");
         assert_eq!(line[s + 1], "/home/u/.local/state/vpn-sandboxes/work");
     }
@@ -3211,28 +3112,24 @@ mod tests {
     fn trust_alone_is_enough_to_take_a_mount_namespace() {
         // A named sandbox has no overlay directory, but its certificates still
         // need a bundle bound in a namespace of this launch's own — never in
-        // the zone's, where the container next door would see it.
-        let mut e = entry(Network::Zone(42), Path::new(""), false);
+        // the space's, where the next launch would see it. An instance's
+        // launch has one from `container-enter` (a zone's took `unshare`
+        // until stage 5).
+        let mut e = entry(Network::Instance, Path::new(""), false);
         e.trust = Some(Path::new("/s/sb/work/trust"));
         e.nss_home = Some(Path::new("/s/sb/work/home"));
         let line = entry_argv(&e, argv(&["firefox"]));
         assert_eq!(
             line,
             argv(&[
-                "/t/nsenter",
-                "--preserve-credentials",
-                "--keep-caps",
-                "-U",
-                "-n",
-                "-m",
-                "-i",
-                "-t",
-                "42",
-                "--",
-                "/t/unshare",
-                "--mount",
-                "--propagation",
-                "slave",
+                "/t/core",
+                "container-enter",
+                "--instance",
+                "work",
+                "--network",
+                "offline",
+                "--systemctl",
+                "/t/systemctl",
                 "--",
                 "/t/core",
                 "profile-run",
@@ -3247,7 +3144,7 @@ mod tests {
                 "--nss-home",
                 "/s/sb/work/home",
                 "",
-                "nl",
+                "offline",
                 "0",
                 "/r/.running/work",
                 "--",
@@ -3267,32 +3164,33 @@ mod tests {
     }
 
     #[test]
-    fn into_a_zone_without_a_container_still_restores_the_working_directory() {
-        // No layer to stack, but `nsenter` has left us in `/`: `profile-run`
-        // with an empty directory stacks nothing and makes the chdir.
+    fn into_an_instance_without_a_container_still_restores_the_working_directory() {
+        // No layer to stack, but joining a mount namespace has left us in
+        // `/`: `profile-run` with an empty directory stacks nothing and makes
+        // the chdir. (Into a zone's own namespaces until stage 5, through
+        // `nsenter`, which did the same.)
         let line = entry_argv(
-            &entry(Network::Zone(42), Path::new(""), false),
+            &entry(Network::Instance, Path::new(""), false),
             argv(&["firefox", "%u"]),
         );
         assert_eq!(
             line,
             argv(&[
-                "/t/nsenter",
-                "--preserve-credentials",
-                "--keep-caps",
-                "-U",
-                "-n",
-                "-m",
-                "-i",
-                "-t",
-                "42",
+                "/t/core",
+                "container-enter",
+                "--instance",
+                "work",
+                "--network",
+                "offline",
+                "--systemctl",
+                "/t/systemctl",
                 "--",
                 "/t/core",
                 "profile-run",
                 "--cwd",
                 "/home/u/src",
                 "",
-                "nl",
+                "offline",
                 "0",
                 "/r/.running/work",
                 "--",
@@ -3300,47 +3198,34 @@ mod tests {
                 "%u"
             ])
         );
-        // Not `nsenter --wd`: that chdir would come before the overlay, and a
-        // directory missing from the zone's mount tree would stop the launch.
+        // No chdir before the mounts: a directory missing from the space's
+        // mount tree would stop the launch.
         assert!(!line.iter().any(|a| a.to_string_lossy().starts_with("--wd")));
     }
 
+    /// Stage 5 of the container design (2026-09-28): a network is never
+    /// entered through a zone's own namespaces — no `nsenter` into its app
+    /// namespace and no `unshare` below it, a container or not; only
+    /// `container-enter`, by the instance's id. (What this test was, "into a
+    /// zone with a container keeps the caps and takes a mount namespace",
+    /// `container-enter` does now: `enter.rs` raises the capabilities for
+    /// `profile-run`, in a mount namespace of the launch's own.)
     #[test]
-    fn into_a_zone_with_a_container_keeps_the_caps_and_takes_a_mount_namespace() {
-        let line = entry_argv(
-            &entry(Network::Zone(42), Path::new("/p/work"), false),
-            argv(&["firefox"]),
-        );
-        assert_eq!(
-            line,
-            argv(&[
-                "/t/nsenter",
-                "--preserve-credentials",
-                "--keep-caps",
-                "-U",
-                "-n",
-                "-m",
-                "-i",
-                "-t",
-                "42",
-                "--",
-                "/t/unshare",
-                "--mount",
-                "--propagation",
-                "slave",
-                "--",
-                "/t/core",
-                "profile-run",
-                "--cwd",
-                "/home/u/src",
-                "/p/work",
-                "nl",
-                "0",
-                "/r/.running/work",
-                "--",
-                "firefox"
-            ])
-        );
+    fn a_launch_never_enters_a_zones_own_namespaces() {
+        for dir in ["", "/p/work"] {
+            let line = entry_argv(
+                &entry(Network::Instance, Path::new(dir), false),
+                argv(&["firefox"]),
+            );
+            assert_eq!(line[0], os("/t/core"), "{line:?}");
+            assert_eq!(line[1], os("container-enter"), "{line:?}");
+            for word in ["nsenter", "/t/unshare", "-t"] {
+                assert!(!line.contains(&os(word)), "{word}: {line:?}");
+            }
+            let at = |w: &str| line.iter().position(|a| a == w).unwrap();
+            assert!(at("container-enter") < at("profile-run"), "{line:?}");
+            assert_eq!(line[at("profile-run") + 3], os(dir), "{line:?}");
+        }
     }
 
     #[test]
@@ -3411,18 +3296,20 @@ mod tests {
             pid: 4242,
             start: 777,
         };
-        let mut e = entry(Network::Zone(42), Path::new("/s/.tmp/vpn-profile-x"), true);
+        // Into `unconfined`, the one network with no instance to erase it
+        // (a zone's until stage 5).
+        let mut e = entry(Network::Unconfined, Path::new("/tmp/vpn-profile-x"), true);
         e.registered = Some(me);
         let line = entry_argv(&e, argv(&["firefox"]));
         let at = |w: &str| line.iter().position(|a| a == w).unwrap();
         assert!(at("profile-run") < at("--registered"), "{line:?}");
         assert_eq!(line[at("--registered") + 1], "4242:777");
-        assert!(at("--registered") < at("/s/.tmp/vpn-profile-x"), "{line:?}");
+        assert!(at("--registered") < at("/tmp/vpn-profile-x"), "{line:?}");
         let parsed = crate::profile::Args::parse(&line[at("profile-run") + 1..]).unwrap();
         assert_eq!(parsed.registered, Some(me));
         assert!(parsed.ephemeral);
 
-        let mut e = entry(Network::Zone(42), Path::new("/p/work"), false);
+        let mut e = entry(Network::Unconfined, Path::new("/p/work"), false);
         e.registered = Some(me);
         let line = entry_argv(&e, argv(&["firefox"]));
         assert!(!line.contains(&os("--registered")), "{line:?}");
@@ -3470,37 +3357,27 @@ mod tests {
     }
 
     /// Stage 2 (2026-09-27): a zone that is up and has no bridge — of a
-    /// previous build — is entered as before; one with its socket, and one
-    /// that is down (this build will start it), carry the launch's instance.
+    /// previous build — was entered as before, into its own namespaces.
+    /// Stage 5 (2026-09-28): it is refused, and the refusal says the way out,
+    /// its restart; one with its socket carries the launch's instance. By
+    /// the socket's presence, as before: a file of that name is no bridge.
     #[test]
-    fn a_zone_of_a_previous_build_is_entered_as_before() {
+    fn a_zone_of_a_previous_build_is_refused_with_its_restart() {
         let state = std::env::temp_dir().join(format!("vz-legacy-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);
         let zone = state.join("nl");
         fs::create_dir_all(&zone).unwrap();
-        // Down: this build starts it, and it carries.
-        assert!(!zone_takes_its_own(&state, OsStr::new("nl")));
-        let me = std::process::id();
-        fs::write(zone.join("zone.pid"), format!("{me}\n")).unwrap();
-        fs::write(
-            zone.join("zone.start"),
-            format!("{}\n", crate::sys::process_stamp(me as i32).unwrap()),
-        )
-        .unwrap();
-        fs::write(zone.join("ready"), "").unwrap();
-        // Up, and no bridge: a previous build's.
-        assert!(zone_takes_its_own(&state, OsStr::new("nl")));
+        let why = no_bridge_refusal(&state, OsStr::new("nl")).unwrap();
+        assert!(why.contains("не везёт контейнеры"), "{why}");
+        assert!(why.contains("cellward down nl; cellward up nl"), "{why}");
         // A file of that name is no bridge.
         fs::write(zone.join(crate::bridge::SOCKET), "").unwrap();
-        assert!(zone_takes_its_own(&state, OsStr::new("nl")));
+        assert!(no_bridge_refusal(&state, OsStr::new("nl")).is_some());
         fs::remove_file(zone.join(crate::bridge::SOCKET)).unwrap();
         let bridge =
             std::os::unix::net::UnixListener::bind(zone.join(crate::bridge::SOCKET)).unwrap();
-        assert!(!zone_takes_its_own(&state, OsStr::new("nl")));
+        assert_eq!(no_bridge_refusal(&state, OsStr::new("nl")), None);
         drop(bridge);
-        // No zones at all.
-        assert!(!zone_takes_its_own(&state, OsStr::new(OFFLINE)));
-        assert!(!zone_takes_its_own(&state, OsStr::new(UNCONFINED)));
         let _ = fs::remove_dir_all(&state);
     }
 
@@ -3564,16 +3441,17 @@ mod tests {
         }
     }
 
-    /// Cameras let a launch into a zone: a mount namespace of its own, and
-    /// `profile-run --camera` binds them in there. Outside a zone they are
-    /// the host's anyway.
+    /// Cameras let a launch into an instance: a mount namespace of its own,
+    /// and `profile-run --camera` binds them in there. Outside any space
+    /// they are the host's anyway. (Into a zone until stage 5, the same
+    /// through `unshare`.)
     #[test]
     fn a_launch_let_the_cameras_uncovers_them_in_its_own_namespace() {
-        let mut e = entry(Network::Zone(42), Path::new(""), false);
+        let mut e = entry(Network::Instance, Path::new(""), false);
         e.camera = true;
         let line = entry_argv(&e, argv(&["cheese"]));
         let at = |w: &str| line.iter().position(|a| a == w).unwrap();
-        assert!(at("/t/unshare") < at("profile-run"), "{line:?}");
+        assert!(at("container-enter") < at("profile-run"), "{line:?}");
         assert!(at("profile-run") < at("--camera"), "{line:?}");
         let mut e = entry(Network::Unconfined, Path::new(""), false);
         e.camera = true;

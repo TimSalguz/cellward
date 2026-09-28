@@ -1484,9 +1484,10 @@ pub fn build_check(age: crate::build::Age) -> Check {
 
 /// Whether a zone that is up carries containers' instances (stage 2 of the
 /// container design): its bridge's socket and its refusal of its own
-/// addresses to the bridge. A zone of a previous build has neither — its
-/// launches take its own namespaces, as before, and a restart gives it
-/// both; a socket without the refusal carries nothing (fail-closed).
+/// addresses to the bridge. A zone of a previous build has neither — a
+/// launch into it is refused (stage 5: never into its own namespaces), and a
+/// restart gives it both; a socket without the refusal carries nothing
+/// (fail-closed).
 pub fn bridge_check(socket: bool, ruled: bool) -> Check {
     match (socket, ruled) {
         (true, true) => Check::new(
@@ -1503,10 +1504,106 @@ pub fn bridge_check(socket: bool, ruled: bool) -> Check {
         (false, _) => Check::new(
             "bridge",
             Level::Warn,
-            "зона прошлой сборки: запуски в неё идут в её собственное пространство — \
+            "зона прошлой сборки: не везёт контейнеры, и запуски в неё отказывают — \
              перезапусти её (cellward down, cellward up)",
         ),
     }
+}
+
+/// The most programs [`zone_programs_check`] names one by one.
+const PROGRAMS_NAMED: usize = 8;
+
+/// Whether nothing runs in a zone's own namespaces (stage 5 of the container
+/// design, 2026-09-28): the processes [`programs_in_zone`] found there,
+/// `(pid, name)`. A zone is transport; its programs are in their containers'
+/// instances. One found is a program a previous build launched there before
+/// the update, or a person's `nsenter`: in the zone's network, with no
+/// container, no network namespace and no pid namespace of its own — a
+/// warning with the way out, not a failure: the zone still covers its space
+/// (`zone::zone_setup`).
+pub fn zone_programs_check(found: &[(i32, String)]) -> Check {
+    if found.is_empty() {
+        return Check::new(
+            "programs",
+            Level::Ok,
+            "в пространстве самой зоны программ нет: они в своих контейнерах",
+        );
+    }
+    let named: Vec<String> = found
+        .iter()
+        .take(PROGRAMS_NAMED)
+        .map(|(pid, name)| format!("{} ({pid})", printable(name)))
+        .collect();
+    let more = if found.len() > PROGRAMS_NAMED {
+        format!(" и ещё {}", found.len() - PROGRAMS_NAMED)
+    } else {
+        String::new()
+    };
+    Check::new(
+        "programs",
+        Level::Warn,
+        format!(
+            "в пространстве самой зоны работают программы: {}{more} — их запустила прошлая \
+             сборка (или nsenter), и у них нет своего контейнера, своей сети и своего \
+             пространства процессов. Закрой их и запусти снова: они запустятся в своих \
+             контейнерах",
+            named.join(", ")
+        ),
+    )
+}
+
+/// The user's processes in the app namespace of the zone whose process is
+/// `zone_pid`, but for the zone's own — that process and what it started (the
+/// bus filter it runs in its space, its bridge's passts, the tools it runs):
+/// `(pid, name)`, by pid ([`zone_programs_check`]). Only `uid`'s: a program
+/// runs as the user; the zone's own ids are subordinate ones. Each read while
+/// the process is held (`sys::descends_from`), so that no number is taken for
+/// another's.
+pub fn programs_in_zone(zone_pid: i32, uid: u32) -> Vec<(i32, String)> {
+    let net = |pid: i32| fs::read_link(format!("/proc/{pid}/ns/net")).ok();
+    let Some(zone_net) = net(zone_pid) else {
+        return Vec::new();
+    };
+    let real_uid = |pid: i32| {
+        fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()?
+            .lines()
+            .find_map(|l| l.strip_prefix("Uid:"))
+            .and_then(|v| v.split_whitespace().next())
+            .and_then(|v| v.parse::<u32>().ok())
+    };
+    let mut found: Vec<(i32, String)> = Vec::new();
+    for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if pid == zone_pid || real_uid(pid) != Some(uid) {
+            continue;
+        }
+        let Some(pidfd) = crate::sys::pidfd_open(pid) else {
+            continue;
+        };
+        if net(pid).as_ref() != Some(&zone_net) {
+            continue;
+        }
+        if crate::sys::descends_from(pid, &pidfd, zone_pid) {
+            continue;
+        }
+        let name = fs::read_to_string(format!("/proc/{pid}/comm"))
+            .map(|n| n.trim().to_owned())
+            .unwrap_or_default();
+        // Still the process whose namespace was read.
+        if crate::sys::pidfd_wait(&pidfd, std::time::Duration::ZERO) {
+            continue;
+        }
+        found.push((pid, name));
+    }
+    found.sort();
+    found
 }
 
 /// An instance's way out as its keeper noted it (stage 2): through its
@@ -1611,6 +1708,9 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
             dir.join(crate::bridge::RULE_MARK).exists(),
         ));
     }
+    // Nothing launched into its own namespaces (stage 5): looked at before
+    // the probe goes in, which is a process of the user's there itself.
+    checks.push(zone_programs_check(&programs_in_zone(pid, uid)));
     // What the zone is to be, read as its holder reads it: the probe judges
     // the host's bus and the Nix daemon by it.
     let (hermetic, _) = crate::hermetic::zone_setting(&dir, &tools.config, name);
@@ -2088,6 +2188,48 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// Stage 5 (2026-09-28): a program in a zone's own namespaces is named,
+    /// with the way out; none is ok. And the look itself, on a "zone" that
+    /// is a child of ours in our own namespaces: the zone's process is not
+    /// its program, a sibling of it is — and only the user's.
+    #[test]
+    fn a_program_in_a_zones_own_namespaces_is_named() {
+        assert_eq!(zone_programs_check(&[]).level, Level::Ok);
+        let found: Vec<(i32, String)> = (1..=10).map(|p| (p, format!("app{p}"))).collect();
+        let check = zone_programs_check(&found);
+        assert_eq!(check.level, Level::Warn);
+        assert!(check.detail.contains("app1 (1)"), "{}", check.detail);
+        assert!(check.detail.contains("app8 (8)"), "{}", check.detail);
+        assert!(!check.detail.contains("app9"), "{}", check.detail);
+        assert!(check.detail.contains("и ещё 2"), "{}", check.detail);
+        assert!(check.detail.contains("Закрой их"), "{}", check.detail);
+        // A "zone" of two sleepers in our namespaces: the one is its own
+        // process, the other a program of ours beside it — found, and not
+        // the zone's process itself; this process and its tree are found
+        // too, as programs there (they are in its network namespace).
+        // SAFETY: getuid(2) takes no arguments and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let mut zone = Command::new("sleep").arg("60").spawn().unwrap();
+        let mut beside = Command::new("sleep").arg("60").spawn().unwrap();
+        let zone_pid = zone.id() as i32;
+        let found = programs_in_zone(zone_pid, uid);
+        assert!(found.iter().all(|(p, _)| *p != zone_pid), "{found:?}");
+        assert!(
+            found.iter().any(|(p, _)| *p == beside.id() as i32),
+            "{found:?}"
+        );
+        // Another user's processes are nobody's programs here.
+        assert!(programs_in_zone(zone_pid, uid.wrapping_add(1))
+            .iter()
+            .all(|(p, _)| *p != beside.id() as i32));
+        let _ = zone.kill();
+        let _ = beside.kill();
+        let _ = zone.wait();
+        let _ = beside.wait();
+        // A zone whose process is gone has no namespace to look in.
+        assert!(programs_in_zone(zone_pid, uid).is_empty());
+    }
 
     #[test]
     fn a_zones_bridge_and_an_instances_exit_are_named() {

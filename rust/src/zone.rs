@@ -870,9 +870,11 @@ pub fn run(args: Args) -> u8 {
     let dir = home.join(STATE_SUBDIR).join(&args.name);
     let config = home.join(CONFIG_SUBDIR);
     let label = args.name.to_string_lossy().into_owned();
-    // A new zone: no container has been launched into it yet — the programs
-    // of the last one's are not in this one (`origin::LAUNCHED`).
-    let _ = fs::remove_file(dir.join(crate::origin::LAUNCHED));
+    // The list of containers launched into the zone since it came up
+    // (`launched-containers`), which a previous build kept: nothing is
+    // launched into a zone's own namespaces since stage 5 of the container
+    // design, and nothing reads it — the last run's goes.
+    let _ = fs::remove_file(dir.join("launched-containers"));
     let (hermetic, _) = crate::hermetic::zone_setting(&dir, &config, &label);
     let (nix_daemon, _) = crate::hermetic::nix_daemon(&dir, &config, &label);
     let (host_files_writable, _) = crate::hermetic::host_files_writable(&dir, &config, &label);
@@ -7726,8 +7728,9 @@ fn bind_resolv(zone: &Zone) -> Result<(), String> {
 /// bound — the user's, 0600: the instance's keeper, the user, asks — and
 /// what it carries with: the resolvers its `resolv_conf` names (those this
 /// zone's own programs ask), its search domains, whether it has IPv6, and
-/// its fingerprint. `None`: no socket, said — a launch into the zone takes
-/// its own namespaces then, as into a zone of a previous build. Without the
+/// its fingerprint. `None`: no socket, said — a launch into the zone is
+/// refused then, as into a zone of a previous build (stage 5: never into
+/// the zone's own namespaces). Without the
 /// rule or passt's group the socket is there and refuses every request
 /// with the reason: fail-closed, and the person is told why.
 fn open_bridge(
@@ -7785,7 +7788,7 @@ fn open_bridge(
         Ok(listener) => listener,
         Err(e) => {
             eprintln!(
-                "zone {}: no bridge ({e}) — a launch into it takes the zone's own namespaces",
+                "zone {}: no bridge ({e}) — a launch into it is refused",
                 zone.name()
             );
             return None;

@@ -220,42 +220,6 @@ pub fn zone_switch(
     }
 }
 
-/// How strict a setting is: `no` over `ask` over `yes`.
-fn strictness(setting: Setting) -> u8 {
-    match setting {
-        Setting::Yes => 0,
-        Setting::Ask => 1,
-        Setting::No => 2,
-    }
-}
-
-/// The strictest setting among the programs of `zone` now: the zone's own
-/// programs' (always there to be), and that of every container whose
-/// programs may be in the zone (`origin::containers_in`: a live launch, or
-/// one since the zone came up — a daemon outlives its launch). A throwaway
-/// container has no setting of its own: the zone's is its. For a path that
-/// decides for the whole zone at once — the restricted PipeWire
-/// (`crate::pw_context`) — until it knows its clients' containers: a
-/// container's "no" is not passed there by its zone's "yes" either.
-pub fn strictest_running(zone_dir: &Path, config: &Path, profiles: &Path, zone: &str) -> Setting {
-    let mut strictest = setting(zone_dir, config, zone).0;
-    let Some(state) = zone_dir.parent() else {
-        return Setting::No;
-    };
-    let places = crate::origin::Places {
-        state,
-        config,
-        profiles,
-    };
-    for name in crate::origin::containers_in(places, zone) {
-        let own = setting_for(zone_dir, config, zone, &Who::Container(name)).0;
-        if strictness(own) > strictness(strictest) {
-            strictest = own;
-        }
-    }
-    strictest
-}
-
 /// What becomes of a record stream, by the setting alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -1440,32 +1404,31 @@ mod tests {
         assert_eq!(always_label("nl", &Who::Main), "Всегда — всей зоне «nl»");
     }
 
-    /// For the whole zone at once: the zone's own setting, made stricter by
-    /// every container launched into the zone since it came up.
+    /// For the whole zone at once — the restricted PipeWire of a zone's own
+    /// space (`pw_context::ZoneMic`) —: the zone's own setting. Until stage
+    /// 5 of the container design it was made stricter by every container
+    /// launched into the zone since it came up (`strictest_running`, and
+    /// this test said so); no container is launched into a zone's own
+    /// namespaces any more — its programs are in its instance, whose helpers
+    /// go by its container — so a container's word does not count here.
     #[test]
-    fn the_whole_zone_is_as_strict_as_its_strictest_container() {
+    fn the_whole_zone_is_as_strict_as_its_own_setting() {
+        use crate::pw_context::MicSource;
         let d = Dirs::new("strictest");
-        let strictest =
-            || strictest_running(&d.zone(), &d.config(), &d.base.join("profiles"), "nl");
+        let mic = crate::pw_context::ZoneMic {
+            zone: "nl".to_owned(),
+            zone_dir: d.zone(),
+            config: d.config(),
+        };
         d.write("state/nl/microphone", "yes");
-        assert_eq!(strictest(), Setting::Yes);
+        assert_eq!(mic.setting(), Setting::Yes);
         std::fs::create_dir_all(d.config().join("containers/quiet")).unwrap();
         d.write(
             "config/containers/quiet/container.conf",
             "microphone = no\n",
         );
-        // Not in the zone: not counted.
-        assert_eq!(strictest(), Setting::Yes);
-        crate::origin::note_launched(&d.base.join("state"), "nl", "quiet").unwrap();
-        assert_eq!(strictest(), Setting::No);
-        // A container with none of its own is the zone's.
-        crate::origin::note_launched(&d.base.join("state"), "nl", "plain").unwrap();
-        d.write(
-            "config/containers/quiet/container.conf",
-            "microphone = yes\n",
-        );
-        assert_eq!(strictest(), Setting::Yes);
+        assert_eq!(mic.setting(), Setting::Yes);
         d.write("state/nl/microphone", "ask");
-        assert_eq!(strictest(), Setting::Ask);
+        assert_eq!(mic.setting(), Setting::Ask);
     }
 }

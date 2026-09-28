@@ -177,9 +177,12 @@ the zone's answer carries — attaches them again, with new addresses; back
 as another one, they stay cut until `cellward container reattach <c>`:
 never moved to another exit as a side effect (I1). A zone started by a
 previous build that an update left running has no `bridge.sock`: a launch
-into it takes the zone's own namespaces as before, with a notice to restart
-the zone. Each zone needs a third subordinate id for the bridge (a user's
-range of at least four with the instances' root).
+into it is refused, and the refusal names the way out — the zone's restart
+(stage 5, 2026-09-28; until then it went into the zone's own namespaces,
+with a notice). Nothing is launched into a zone's own namespaces any more:
+a zone is transport. `cellward doctor` names what a previous build left
+running there (`programs`). Each zone needs a third subordinate id for the
+bridge (a user's range of at least four with the instances' root).
 
 **Extra routes** (`routes`) sit beside the one network — the typical one is the
 LAN next to a tunnel. Each is a named, explicit exception: a rule in the
@@ -792,8 +795,8 @@ same), `attached` on the `offline` network (the ids of the instances
 with no network) and, since stage 2, on every zone (the ids of the
 instances going out through it now; `[]` when it is down), and `bridge` on
 every zone: `true` when it is up and carries instances, `false` when it is
-up without a bridge (a previous build's: its launches take its own
-namespaces), `null` when it is down (and for `unconfined` and `offline`). State under
+up without a bridge (a previous build's: a launch into it is refused
+until it is restarted), `null` when it is down (and for `unconfined` and `offline`). State under
 `~/.local/state/vpn-zones/.instances/` is the instances', named by a key and
 not a zone: a reader of zones skips it (a dot directory).
 

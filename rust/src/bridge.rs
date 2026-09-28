@@ -593,8 +593,9 @@ pub fn local_addresses(json: &str) -> Option<Vec<IpAddr>> {
 
 /// Whether a zone that is up carries container instances: its socket is
 /// there. A zone of a previous build — one an update left running — has
-/// none, and a launch into it goes into the zone's own namespaces as before
-/// (`launch::run`): the socket's presence says so, never a build's name.
+/// none, and a launch into it is refused with its restart (`launch::
+/// no_bridge_refusal`; into the zone's own namespaces until stage 5): the
+/// socket's presence says so, never a build's name.
 pub fn carries(zone_dir: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
     fs::symlink_metadata(zone_dir.join(SOCKET)).is_ok_and(|m| m.file_type().is_socket())

@@ -455,6 +455,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and `usb:` for a board a program can reflash.
 
 ### Changed
+- **Nothing is launched into a zone's own namespaces** (2026-09-28, stage
+  5 of the container-first model; `docs/LEAK-MODEL.md` §30). A zone is
+  transport: every launch into a network runs in its container's instance.
+  **A launch into a zone a previous build started** (no bridge) **is now
+  refused** with the way out, the zone's restart (`cellward down <zone>;
+  cellward up <zone>`) — until now it went into the zone's own namespaces,
+  with a notice. A failure to bring an instance up is now said in a window
+  too, not only on stderr. `cellward doctor <zone>` has a new check,
+  `programs`: the user's processes in the zone's app namespace that are not
+  the zone's own — what a previous build launched there before the update —
+  named, with the way out. Gone with the path: the last check before the
+  `exec` that a zone's process is not in the host's network (nothing is
+  entered by a zone's number any more), the list of containers launched
+  into a zone (`launched-containers`, removed at the zone's next start) and
+  the helpers' recognition of a zone's program by the launch it descends
+  from: a zone's own helpers take a program in the zone's own mount
+  namespace for the zone's own and anything else for unknown, and a zone's
+  restricted PipeWire decides for the whole zone by the zone's own
+  microphone setting. A zone still covers its own space and runs its
+  helpers, for what a previous build left there.
 - **An instance's end is its programs' end, through its pid namespace**
   (2026-09-27, stage 3). Stopping an instance (`systemctl --user stop`,
   logging out, `cellward container stop`) asks its programs to end (TERM)

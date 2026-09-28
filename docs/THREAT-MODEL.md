@@ -90,7 +90,9 @@ It is shown as `host-interface` everywhere.
 
 **Every zone gets:** an app namespace with `lo` and the tunnel — since 2026-09-27 a launch
 runs beside it, in its container's instance, whose only way out is the zone's bridge
-(N17), and whose pid namespace is its own (X4); the nftables insurance; the host's resolvers hidden, and its own `resolv.conf` and `nsswitch.conf`; its own runtime
+(N17), and whose pid namespace is its own (X4) — since 2026-09-28 (stage 5) never in the
+zone's own namespaces, and a zone that cannot carry the instance (a previous build's) is
+refused until restarted; the nftables insurance; the host's resolvers hidden, and its own `resolv.conf` and `nsswitch.conf`; its own runtime
 directory without the raw Wayland socket or compositor IPC; Wayland only through a
 restricted socket; no host X server; a filtered system bus and an allow-list over `/run/systemd`; its own
 `/dev` and devpts; its own IPC namespace; the Nix daemon and the system tier's socket hidden;
@@ -188,13 +190,13 @@ satellite, when granted.
 | X1 | The host's `/tmp` and `/dev/shm`: listening sockets (tmux `run-shell`, a VPN client's IPC, single-instance sockets), other sandboxes' bus filters | hermetic: yes · ordinary: **no** (`doctor` names them) | its own `/tmp`, `/var/tmp`, `/dev/shm`; the filters moved into the runtime directory | vm19 |
 | X2 | The host's abstract unix sockets | yes | they belong to the network namespace — every container's instance has one of its own, offline and in a zone (2026-09-27); a sandbox in the host's network: a Landlock scope (Linux 6.12+) | vm19 vm32 vm54 vm66 |
 | X3 | `/proc/<pid>/root`, `cwd`, `fd`, `environ` of the host's session processes | yes | the kernel's ptrace rules across user namespaces; `vpn-zone-sys` gets a user namespace of its own; a container's instance cannot even name a host process: its pid namespace (X4) | vm15 vm17 vm18 sys4 vm70 |
-| X4 | `/proc/<pid>/cmdline` of host processes and of other containers' (which zones and containers are in use, the arguments, URLs and paths programs were given), and `/proc/<pid>/net` of any of them (their network's sockets and addresses: no ptrace check guards it) | yes: every container's instance, offline and in a zone; the sandbox · **no**: `unconfined`, a launch into a zone of a previous build (no bridge), an instance an earlier build started (until restarted: `doctor`, `restart_needed`) | each container's instance has a pid namespace of its own (stage 3 of the container design, 2026-09-27): its pid 1 mounts the namespace's own `/proc`, and every launch into the instance joins it — a program sees its own container's processes and no one else's, neither the host's nor another container's; the sandbox has its own. An instance's `/sys/fs/cgroup`, which names every unit and scope, is covered. Global counters (`/proc/loadavg`, `/proc/stat`) and a pid a program is told (`WAYLAND_DISPLAY` names the supervisor's) stay | C · vm70 vm71 vm44 sm28 u17 |
+| X4 | `/proc/<pid>/cmdline` of host processes and of other containers' (which zones and containers are in use, the arguments, URLs and paths programs were given), and `/proc/<pid>/net` of any of them (their network's sockets and addresses: no ptrace check guards it) | yes: every container's instance, offline and in a zone; the sandbox · **no**: `unconfined`, a program a previous build launched into a zone's own namespaces before the update (`doctor`: `programs`; nothing is launched there since stage 5), an instance an earlier build started (until restarted: `doctor`, `restart_needed`) | each container's instance has a pid namespace of its own (stage 3 of the container design, 2026-09-27): its pid 1 mounts the namespace's own `/proc`, and every launch into the instance joins it — a program sees its own container's processes and no one else's, neither the host's nor another container's; the sandbox has its own. An instance's `/sys/fs/cgroup`, which names every unit and scope, is covered. Global counters (`/proc/loadavg`, `/proc/stat`) and a pid a program is told (`WAYLAND_DISPLAY` names the supervisor's) stay | C · vm70 vm71 vm44 sm28 u17 |
 | X5 | Signals to the host's processes of the same user (killing the compositor) | yes (Linux 6.12+) | each launch into a zone is a Landlock domain of its own with `LANDLOCK_SCOPE_SIGNAL`: it signals itself and what it starts, nothing else — another launch of the same container neither; the sandbox and, since stage 3 of the container design (2026-09-27), a container's instance also cannot name host pids: a host number means nobody, or somebody else, in their pid namespace (X4) | vm44 vm69 |
 | X6 | The host's System V IPC and POSIX message queues | yes | an IPC namespace per zone, per uplink, per sandbox and per container's instance | vm18 sm16 vm54 |
 | X7 | The session's supplementary groups (docker, libvirt, input) | yes | dropped for zone programs | vm18 |
 | X8 | Exhausting memory, CPU or processes | no | limits per zone are planned (ROADMAP §17) | — |
 | X9 | `TIOCSTI` into the host terminal a program was started from | sandbox: yes · zone: **no** | seccomp in the sandbox; a zone program keeps that terminal, and the kernel's `legacy_tiocsti` decides | u6 |
-| X10 | Another container's loopback services, abstract sockets, System V IPC and `/tmp` (a container reaching another) | yes · `/tmp` in an ordinary network: **no** (X1) | each container runs in its own instance: network, IPC and mount namespaces of its own — offline since stage 1 of the container design, in a zone since stage 2 (2026-09-27); a launch into a zone of a previous build still running (no bridge) takes the zone's own, with a notice | vm53 vm54 vm66 vm68 |
+| X10 | Another container's loopback services, abstract sockets, System V IPC and `/tmp` (a container reaching another) | yes · `/tmp` in an ordinary network: **no** (X1) | each container runs in its own instance: network, IPC and mount namespaces of its own — offline since stage 1 of the container design, in a zone since stage 2 (2026-09-27); since stage 5 (2026-09-28) never in a zone's own namespaces: a launch into a zone of a previous build still running (no bridge) is refused with its restart, and `doctor` names what a previous build left running there | vm53 vm54 vm66 vm68 vm84 |
 | | **Helpers outside the zone** | | | |
 | H1 | The Nix daemon: a fixed-output build fetches any URL from the host's network | yes, unless `nix-daemon on` | hidden in every zone and always in the OpenConnect uplink; system tier: hidden from containers and `vpn-zone-sys`, optional for services | vm18 vm20 sm16 sys2 |
 | H2 | The system tier's service (add a system zone, run in one, around the zone's tunnel) | yes | `/run/vpn-zones` hidden in user zones; `VZP1` accepted only from a zone's root; per-zone user lists | br2 sys5 |
@@ -379,7 +381,7 @@ apart from DynamicLauncher and the two network portals.
 - vm65 "the zone back as another one: cut until the person says"
 - vm66 "a launch into the zone runs in its container's instance, not in the zone"
 - vm67 "the instance ends with its program, and its zone's passt with it"
-- vm68 "a zone of a previous build (no bridge): entered as before, and the person told"
+- vm68 "a zone of a previous build (no bridge): refused, and the person told its restart"
 - vm69 "a program sees another launch of its container, and cannot signal it (X5)" (skipped before Linux 6.12)
 - vm70 "an instance's program sees its own container's processes, no one else's" (in `tests/vm-promise-pidns.py`, as are vm71–vm75)
 - vm71 "a host process's /proc/<pid>/net is out of an instance's reach"
@@ -395,6 +397,7 @@ apart from DynamicLauncher and the two network portals.
 - vm81 "switch: B back — a new epoch; a socket of the one before stays mute"
 - vm82 "switch: the keeper killed in the middle — the instance and its programs gone"
 - vm83 "an instance's programs are in its epoch; one from a login session holds the switch" (in `tests/vm-instance-offline.py`)
+- vm84 "doctor: no program in a zone's own namespaces, and one put there is named" (in `tests/vm-instance-bridge.py`)
 
 `tests/vm-audio.nix`: au1 "the zone's pipewire-0 is the restricted one, never the host's" ·
 au2 "a sink's monitor records nothing" · au3 "the microphone as the zone's switch says" ·

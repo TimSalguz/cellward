@@ -95,6 +95,29 @@ impl Home {
         fs::write(dir.join("ready"), "").unwrap();
     }
 
+    /// Instance `id` up and ready in `network` — its space this very test
+    /// process, as `zone_is_up` makes a zone of it — and the zone carrying
+    /// it: its bridge's socket, held by the listener returned (stage 5 of
+    /// the container design: a launch into a zone runs in its container's
+    /// instance, never in the zone's own namespaces). A launch then goes
+    /// all the way to exec'ing the manifest's `vpn-zone-core`, which does
+    /// not exist.
+    fn instance_is_up(&self, id: &str, network: &str) -> std::os::unix::net::UnixListener {
+        use vpn_zone::instance;
+        let dir = instance::dir(&self.state(), id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(instance::ID), format!("{id}\n")).unwrap();
+        fs::write(dir.join(instance::NETWORK), format!("{network}\n")).unwrap();
+        let me = std::process::id();
+        fs::write(dir.join(instance::PID), format!("{me}\n")).unwrap();
+        let stamp = vpn_zone::sys::process_stamp(me as i32).unwrap();
+        fs::write(dir.join(instance::START), format!("{stamp}\n")).unwrap();
+        fs::write(dir.join(instance::READY), "").unwrap();
+        let socket = self.state().join(network).join(vpn_zone::bridge::SOCKET);
+        let _ = fs::remove_file(&socket);
+        std::os::unix::net::UnixListener::bind(socket).unwrap()
+    }
+
     fn run(&self, args: &[&str]) -> Output {
         self.run_with(args, &[])
     }
@@ -357,14 +380,20 @@ fn a_launch_is_wrapped_in_the_compositor_restriction_by_default() {
     // screen capture and the background clipboard reads are quietly back.
     let home = Home::new("wrap");
     home.zone_is_up("nl");
+    // Its sockets by the instance's key: a launch into a zone runs in its
+    // container's instance — the main home's here (stage 2 of the container
+    // design), and only there since stage 5 (by the zone's name before).
+    let key = vpn_zone::instance::key("main:nl");
 
     let out = home.run_with(&["run", "nl", "--", "firefox"], &[("VPN_ZONE_DRYRUN", "1")]);
     assert!(out.status.success(), "{}", stderr(&out));
     let line = stdout(&out);
-    // Outermost, on the host, and named by the zone whose directory the
+    // Outermost, on the host, and named by the space whose directory the
     // restricted socket goes into (LEAK-MODEL §13).
     assert!(
-        line.starts_with("зона nl, профиль основной: /nonexistent/vpn-zone-core wl-sandbox firefox --zone nl --frame "),
+        line.starts_with(&format!(
+            "зона nl, профиль основной: /nonexistent/vpn-zone-core wl-sandbox firefox --zone {key} --frame "
+        )),
         "{line}"
     );
     // With the zone's border (docs/WINDOW-FRAME.md §0а): its colour and
@@ -378,7 +407,7 @@ fn a_launch_is_wrapped_in_the_compositor_restriction_by_default() {
     assert!(out.status.success(), "{}", stderr(&out));
     let out = home.run_with(&["run", "nl", "--", "firefox"], &[("VPN_ZONE_DRYRUN", "1")]);
     assert!(
-        stdout(&out).contains("wl-sandbox firefox --zone nl --"),
+        stdout(&out).contains(&format!("wl-sandbox firefox --zone {key} --")),
         "{}",
         stdout(&out)
     );
@@ -396,7 +425,7 @@ fn a_launch_is_wrapped_in_the_compositor_restriction_by_default() {
     assert!(out.status.success(), "{}", stderr(&out));
     let out = home.run_with(&["run", "nl", "--", "obs"], &[("VPN_ZONE_DRYRUN", "1")]);
     assert!(
-        stdout(&out).contains("wl-sandbox obs --zone nl --"),
+        stdout(&out).contains(&format!("wl-sandbox obs --zone {key} --")),
         "{}",
         stdout(&out)
     );
@@ -610,10 +639,14 @@ fn two_entries_for_one_binary_see_each_other() {
     // network — and the warning used to stay silent.
     //
     // Not a dry run: a dry run says nothing about conflicts on purpose. The
-    // launch goes all the way to exec'ing the manifest's nsenter, which does
-    // not exist — so it fails AFTER the warning, which is what is looked at.
+    // launch goes all the way to exec'ing the manifest's `vpn-zone-core`,
+    // which does not exist — so it fails AFTER the warning, which is what is
+    // looked at. (Into the main home's instance, faked up: nothing is
+    // launched into a zone's own namespaces since stage 5 — the manifest's
+    // nsenter it went to until then.)
     let home = Home::new("by-binary");
     home.zone_is_up("nl");
+    let _instance = home.instance_is_up("main:nl", "nl");
     let index = home.state().join(".running/__main__/.by-binary");
     fs::create_dir_all(&index).unwrap();
     fs::write(index.join("steam"), format!("{} de \n", std::process::id())).unwrap();
@@ -667,6 +700,8 @@ fn a_launch_asked_for_from_a_zone_is_marked_and_its_id_is_a_file_name() {
     // not the user's own (the picker does not follow it without asking).
     let home = Home::new("from-zone");
     home.zone_is_up("nl");
+    // Into the main home's instance, faked up, as far as the exec (stage 5).
+    let _instance = home.instance_is_up("main:nl", "nl");
     let _ = home.run_with(
         &["run", "nl", "--", "true"],
         &[
@@ -746,35 +781,53 @@ fn only_a_throwaway_container_of_ours_can_be_joined() {
 
 /// Stage 2 of the container design (2026-09-27): a launch into a zone that
 /// carries instances — its bridge's socket there — runs in its container's
-/// instance (the Wayland sockets by the instance's key, no word of an old
-/// zone); one into a zone of a previous build, as before, and the person is
-/// told how to change that.
+/// instance (the Wayland sockets by the instance's key). Stage 5
+/// (2026-09-28): only there. One into a zone of a previous build — up, no
+/// bridge — went into the zone's own namespaces, with a notice, and this test
+/// said so; now it is refused, and the refusal says the way out, the zone's
+/// restart. A dry run starts and asks nothing, as before: its line is the
+/// instance's either way.
 #[test]
 fn a_launch_into_a_zone_runs_in_its_containers_instance() {
     let home = Home::new("into-instance");
     home.zone_is_up("nl");
     fs::write(home.state().join("nl/config.conf"), "[Interface]\n").unwrap();
+    let key = vpn_zone::instance::key("main:nl");
     let dry = [("VPN_ZONE_DRYRUN", "1")];
     let out = home.run_with(&["run", "nl", "--", "foot"], &dry);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
-        stdout(&out).contains("wl-sandbox foot --zone nl "),
+        stdout(&out).contains(&format!("wl-sandbox foot --zone {key} ")),
         "{}",
         stdout(&out)
     );
-    assert!(stderr(&out).contains("прошлой сборкой"), "{}", stderr(&out));
+    assert!(!stdout(&out).contains("--zone nl "), "{}", stdout(&out));
+    // For real: refused, the zone's own namespaces never entered.
+    let out = home.run(&["run", "nl", "--", "foot"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("не везёт контейнеры"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("cellward down nl; cellward up nl"),
+        "{}",
+        stderr(&out)
+    );
+    // Nothing was put on the record: the launch never came to it.
+    assert!(!home.state().join(".running/__main__/foot").exists());
     let socket = home.state().join("nl").join(vpn_zone::bridge::SOCKET);
     let bridge = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let out = home.run_with(&["run", "nl", "--", "foot"], &dry);
     assert!(out.status.success(), "{}", stderr(&out));
-    let key = vpn_zone::instance::key("main:nl");
     assert!(
         stdout(&out).contains(&format!("wl-sandbox foot --zone {key} ")),
         "{}",
         stdout(&out)
     );
     assert!(
-        !stderr(&out).contains("прошлой сборкой"),
+        !stderr(&out).contains("не везёт контейнеры"),
         "{}",
         stderr(&out)
     );
@@ -786,15 +839,21 @@ fn a_zone_whose_process_is_in_our_network_is_not_entered() {
     // `zone.pid` of a stopped zone stays behind, and its number comes round to
     // another process. Here it names this test itself — the host's network:
     // entering it would start the program on the host under the zone's name.
+    // Until stage 5 of the container design a last check before the `exec`
+    // refused that ("указывает на процесс в сети хоста"); since then nothing
+    // enters a zone's namespaces at all — the launch runs in an instance,
+    // whose way out only a bridge the zone serves gives, and such a "zone"
+    // serves none: refused before anything is started.
     let home = Home::new("zone-is-host");
     home.zone_is_up("nl");
     let out = home.run(&["run", "nl", "--", "true"]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(
-        stderr(&out).contains("указывает на процесс в сети хоста"),
+        stderr(&out).contains("не везёт контейнеры"),
         "{}",
         stderr(&out)
     );
+    assert!(!home.state().join(".instances").exists());
 }
 
 #[test]
@@ -1009,7 +1068,12 @@ fn the_journal_reads_for_a_person_and_for_a_program() {
 fn a_container_is_never_in_two_networks_at_once() {
     // docs/CONTAINERS.md I2: even an unbound container, while its programs run.
     let home = Home::new("two-networks");
-    home.zone_is_up("nl");
+    // The zone is there, not up: a record of a container in an up zone whose
+    // process is this very test would be a launch in the zone's own
+    // namespaces (`launch::zone_launches_refusal`), which the launch into
+    // its instance refuses — no longer skipped for a zone of a previous
+    // build since stage 5, and not what this test is about.
+    fs::create_dir_all(home.state().join("nl")).unwrap();
     fs::create_dir_all(home.root.join("profiles/work")).unwrap();
     let reg = home.state().join(".running/work/firefox");
     fs::create_dir_all(reg.parent().unwrap()).unwrap();
@@ -1616,7 +1680,13 @@ fn a_containers_focus_policy_goes_to_the_proxy_with_its_source() {
         "{json}"
     );
     let line = stdout(&home.run_with(&["run", "nl", "--profile", "work", "--", "tg"], &dry));
-    assert!(line.contains("wl-sandbox tg --zone nl "), "{line}");
+    // By its instance's key: the container's own (stage 5: nothing by the
+    // zone's name).
+    let key = vpn_zone::instance::key("work");
+    assert!(
+        line.contains(&format!("wl-sandbox tg --zone {key} ")),
+        "{line}"
+    );
     assert!(!line.contains("--focus"), "{line}");
 
     let out = home.run(&["container", "set", "work", "focus", "notify"]);
@@ -2039,8 +2109,11 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
     // launch knows it.
     assert!(
         line.contains(&format!(
-            "wl-sandbox foot --zone nl --frame {}:4:always --frame-title nl · основной \
+            "wl-sandbox foot --zone {} --frame {}:4:always --frame-title nl · основной \
              --frame-switch {} -- foot",
+            // The sockets by the instance's key (stage 5: nothing by the
+            // zone's name); the title still names the zone.
+            vpn_zone::instance::key("main:nl"),
             &default[1..],
             home.root.join("config").display()
         )),

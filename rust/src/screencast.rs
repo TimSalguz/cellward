@@ -29,9 +29,13 @@
 //! **By container** (owner, 2026-09-26; `docs/PERMISSIONS.md` §11.10): a
 //! program of a container casts as the container's own setting says
 //! (`screencast =` in its settings), by the microphone's rule
-//! (`microphone::by_container`); the filter knows the container of each
-//! connection by the launch its program descends from (`crate::origin`),
-//! looked at once, when it connects. A container's `yes` keeps its choice
+//! (`microphone::by_container`). A container's instance's filter is told
+//! its container (`--container`): the instance is the container. A zone's
+//! own filter takes a connection from the zone's own mount namespace for the
+//! zone's own and any other for nobody's (`crate::origin`) — no container's
+//! program is in a zone's own space since stage 5 of the container design
+//! (2026-09-28); until then it was the container of the launch its program
+//! descended from. A container's `yes` keeps its choice
 //! under the container's own name with the portal (`cellward.c.<id>`,
 //! `desktop::container_app_id`, registered by the bus filter where sync has
 //! written its entry); kept under the zone's, it would be every container's
@@ -97,11 +101,8 @@ pub struct Policy {
     /// for one that could not be opened.
     zone_dir: Option<PathBuf>,
     config: Option<PathBuf>,
-    /// The state directory: the journal, the registry of launches.
+    /// The state directory: the journal.
     journal: Option<PathBuf>,
-    /// The containers' data (`~/.local/state/vpn-profiles`), which the zone
-    /// covers too: whether a container is still one.
-    profiles: Option<PathBuf>,
     /// The last journal line.
     last_told: Mutex<Option<Instant>>,
 }
@@ -110,7 +111,7 @@ impl Policy {
     /// Hold the zone's directories now, before the zone covers them. The
     /// descriptors stay open for the life of the process: the filter is not
     /// dumpable, so nobody else in the zone reaches them through `/proc`.
-    pub fn hold(zone: &str, zone_dir: &Path, config: &Path, profiles: Option<&Path>) -> Self {
+    pub fn hold(zone: &str, zone_dir: &Path, config: &Path) -> Self {
         let held = |dir: &Path| match crate::sys::open_dir(dir) {
             Ok(fd) => Some(PathBuf::from(format!("/proc/self/fd/{}", fd.into_raw_fd()))),
             Err(e) => {
@@ -130,17 +131,6 @@ impl Policy {
                 .parent()
                 .and_then(|state| crate::sys::open_dir(state).ok())
                 .map(|fd| PathBuf::from(format!("/proc/self/fd/{}", fd.into_raw_fd()))),
-            profiles: profiles.and_then(|dir| match crate::sys::open_dir(dir) {
-                Ok(fd) => Some(PathBuf::from(format!("/proc/self/fd/{}", fd.into_raw_fd()))),
-                Err(e) => {
-                    eprintln!(
-                        "bus-filter: zone {zone}: cannot open {} ({e}) — a container is known \
-                         by its settings or its declaration alone",
-                        dir.display()
-                    );
-                    None
-                }
-            }),
             last_told: Mutex::new(None),
         }
     }
@@ -164,25 +154,18 @@ impl Policy {
         )
     }
 
-    /// Whose program the peer of a connection is (`crate::origin`), read
-    /// through what was held. The filter lives in the zone's own mount
-    /// namespace: its own is the zone's.
+    /// Whose program the peer of a connection is (`crate::origin`). The
+    /// filter lives in the zone's own mount namespace: its own is the
+    /// zone's, anything else nobody's — no container's program is in a
+    /// zone's own space since stage 5 of the container design (2026-09-28);
+    /// until then it was its launch's, by the registry read through what
+    /// was held. A filter with no zone's directories held knows nobody.
     pub fn who(&self, peer: &crate::origin::Peer) -> Who {
-        let (Some(state), Some(config)) = (&self.journal, &self.config) else {
+        if self.journal.is_none() || self.config.is_none() {
             return Who::Unknown;
-        };
-        // No data directory held: a container is known by its policy or
-        // its declaration alone.
-        let places = crate::origin::Places {
-            state,
-            config,
-            profiles: self
-                .profiles
-                .as_deref()
-                .unwrap_or(Path::new("/nonexistent")),
-        };
+        }
         let own = std::fs::read_link("/proc/self/ns/mnt").ok();
-        crate::origin::of_peer_in(places, &self.zone, peer, own.as_deref())
+        crate::origin::of_peer_in(peer, own.as_deref())
     }
 
     /// The switch for a program of `who` now, and where it comes from
@@ -263,12 +246,7 @@ mod tests {
             crate::declared::declare(&self.base.join("config/declared").join(name), text);
         }
         fn policy(&self) -> Policy {
-            Policy::hold(
-                "nl",
-                &self.base.join("state/nl"),
-                &self.base.join("config"),
-                None,
-            )
+            Policy::hold("nl", &self.base.join("state/nl"), &self.base.join("config"))
         }
     }
 
@@ -316,21 +294,11 @@ mod tests {
         d.write("state/moved/screencast", "yes");
         assert_eq!(p.setting(), (Setting::Yes, Source::Local));
         // What it could not hold is a file that cannot be read: no.
-        let lost = Policy::hold(
-            "nl",
-            &d.base.join("state/none"),
-            &d.base.join("config"),
-            None,
-        );
+        let lost = Policy::hold("nl", &d.base.join("state/none"), &d.base.join("config"));
         assert_eq!(lost.setting(), (Setting::No, Source::Local));
         d.declare("screencast", "nl yes\n");
         assert_eq!(lost.setting(), (Setting::Yes, Source::Nix));
-        let blind = Policy::hold(
-            "nl",
-            &d.base.join("state/moved"),
-            &d.base.join("nowhere"),
-            None,
-        );
+        let blind = Policy::hold("nl", &d.base.join("state/moved"), &d.base.join("nowhere"));
         assert_eq!(blind.setting(), (Setting::No, Source::Nix));
     }
 

@@ -148,8 +148,10 @@ pub struct Args {
     /// screen cast switch the filter reads for every call of the portal's
     /// ScreenCast (`crate::screencast`), its state directory and
     /// `~/.config/vpn-zones`. None: every cast asks, as before the switch.
-    /// With it, `--profiles`: the containers' data, by which a container is
-    /// known to be one (`crate::origin`).
+    /// With it, `--profiles`: the containers' data, by which a container was
+    /// known to be one (`crate::origin`) — taken and no longer read since
+    /// stage 5 of the container design: a zone's own filter knows no
+    /// container's program, and the holder still says it.
     pub zone: Option<ZoneArgs>,
     /// `--container <word>`: a container's instance's filter
     /// (`crate::instance`) — every connection is that container's
@@ -1049,9 +1051,10 @@ pub fn run(args: &Args) -> u8 {
     // The zone's directories for its screen cast switch, held before the
     // socket appears: the holder waits for the socket and then covers the
     // project's state in this very mount namespace.
-    let screencast = args.zone.as_ref().map(|z| {
-        crate::screencast::Policy::hold(&z.name, &z.dir, &z.config, z.profiles.as_deref())
-    });
+    let screencast = args
+        .zone
+        .as_ref()
+        .map(|z| crate::screencast::Policy::hold(&z.name, &z.dir, &z.config));
     let _ = fs::remove_file(&args.listen);
     let listener = match UnixListener::bind(&args.listen) {
         Ok(l) => l,
@@ -2685,7 +2688,6 @@ mod tests {
                 "nl",
                 &self.base.join("state/nl"),
                 &self.base.join("config"),
-                None,
             )
         }
 

@@ -1497,15 +1497,12 @@ fn who_is(client: &UnixStream, args: &Args) -> Who {
             .is_none_or(|key| crate::place::chain_of(peer.pid).contains(&key) && peer.alive());
         return if inside { who.clone() } else { Who::Unknown };
     }
+    // A zone's own filter: the zone's own programs, in its own mount
+    // namespace — no container's since stage 5 (`crate::origin`).
     let Some(state) = args.zone_dir.parent() else {
         return Who::Unknown;
     };
-    let places = crate::origin::Places {
-        state,
-        config: &args.config,
-        profiles: &args.profiles,
-    };
-    crate::origin::of_peer(places, &args.zone, &peer)
+    crate::origin::of_peer(state, &args.zone, &peer)
 }
 
 fn serve(client: UnixStream, upstream: &PathBuf, mic: Arc<Policy>, who: Who) -> io::Result<()> {

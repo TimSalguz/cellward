@@ -301,8 +301,8 @@ pub fn networks(tools: &Tools) -> String {
         // of the container design), what `offline` is now; those a zone
         // carries now, their exit through it (stage 2) — none while it is
         // down. And whether it can carry them at all: its bridge is there
-        // (`false`: a zone of a previous build, whose launches take its own
-        // namespaces), `null` down.
+        // (`false`: a zone of a previous build, into which a launch is
+        // refused until it is restarted — stage 5), `null` down.
         let (attached, bridge) = if name == crate::launch::OFFLINE {
             (attached_to(&instances, &name), "null".to_owned())
         } else if up {
@@ -405,8 +405,8 @@ pub fn system_networks() -> String {
 /// The live launches of a container: `{app, pid, network, instance}` — the
 /// instance a launch runs in (`crate::instance`: offline since stage 1 of
 /// the container design, in a zone since stage 2), `null` for one that is
-/// not in one: unconfined, or in a zone's own namespaces (a zone of a
-/// previous build).
+/// not in one: unconfined, or in a zone's own namespaces (launched there by
+/// a previous build; nothing is since stage 5).
 fn running(tools: &Tools, c: &Container) -> String {
     let records = container::live_records(tools, c);
     let asks = c.network.value == container::Network::Ask;

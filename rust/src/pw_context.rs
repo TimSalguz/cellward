@@ -56,14 +56,18 @@
 //! global of its registry with the pid the daemon read from the kernel
 //! (`pipewire.sec.pid`) and a serial no other client ever has
 //! (`object.serial`); a client whose process is in the zone's network
-//! namespace is the zone's, and whose program it is is looked at once, by the
-//! launch it descends from (`crate::origin`, as the sound filter does). The
-//! pid is the daemon's word, not a pidfd: the daemon registers a client at
-//! its first properties, when the program chooses — one that connected from
-//! a child that has since exited could, in principle, have its number taken
-//! by a process of another container of the zone first (between containers
-//! of one zone the microphone is a setting, not a wall; the sound filter has
-//! the kernel's pidfd, `SO_PEERPIDFD`, and no such gap). Its
+//! namespace is the zone's, and whose program it is is looked at once
+//! (`crate::origin`, as the sound filter does): a container's instance's
+//! helper is told its container, and a client of it is one when its process
+//! is in the instance's user namespace or below; a zone's own helper takes a
+//! client in the zone's own mount namespace for the zone's own and anything
+//! else for nobody's — no container's program is in a zone's own space
+//! since stage 5 of the container design (2026-09-28). The pid is the
+//! daemon's word, not a pidfd: the daemon registers a client at its first
+//! properties, when the program chooses — one that connected from a child
+//! that has since exited could, in principle, have its number taken by
+//! another process first (the sound filter has the kernel's pidfd,
+//! `SO_PEERPIDFD`, and no such gap). Its
 //! setting is published as [`CLIENT_MICROPHONE_KEY`]`<serial>` = `yes` or
 //! `no`, removed with the client; [`BY_CLIENT_KEY`]`<zone>` = the serial of
 //! this helper's own client tells the policy that this helper does so, and
@@ -74,8 +78,10 @@
 //! setting of an unknown one. No clock: a client is let go by its key, or by
 //! the zone's when this helper's client is gone. For
 //! a policy of before, the zone's key [`MICROPHONE_KEY`]`<zone>` stays: the
-//! strictest of the zone and of every container launched into it since it
-//! came up. All of them are published as soon as the metadata is bound,
+//! setting of the space's programs as a whole — the container's for an
+//! instance, the zone's own for a zone (until stage 5 the strictest of the
+//! zone and of every container launched into it since it came up). All of
+//! them are published as soon as the metadata is bound,
 //! again right before the socket is handed out (on the same connection, so
 //! WirePlumber has them before any client of the zone — a key outlives a
 //! helper, and an earlier run's `yes` must not decide), whenever the
@@ -123,7 +129,7 @@ pub const POLICY_KEY: &str = "vpn-zones.policy";
 /// another shape is no policy.
 pub const POLICY_VERSION: &str = "1";
 /// The zone's microphone in it, `<prefix><zone>` = `yes` | `no`: the
-/// strictest of the zone and its containers, for a policy that decides by
+/// setting of the space's programs as a whole, for a policy that decides by
 /// the zone alone.
 pub const MICROPHONE_KEY: &str = "vpn-zones.microphone.";
 /// Each client's own, `<prefix><object.serial>` = `yes` | `no`: by the
@@ -819,25 +825,22 @@ pub trait MicSource {
     fn setting_for(&self, who: &crate::origin::Who) -> Setting;
 }
 
-/// The zone's microphone for this helper: for the whole zone the strictest
-/// of it and of every container launched into it (`crate::microphone::
-/// strictest_running`) — what a policy that knows only the zone decides by
-/// —, and for each client by the container of the process that connected.
+/// A zone's own microphone for this helper: the zone's own setting, for the
+/// whole zone and for each client of it — a program in the zone's own mount
+/// namespace is the zone's own, anything else nobody's (`crate::origin`).
+/// Until stage 5 of the container design (2026-09-28) the whole zone was the
+/// strictest of it and of every container launched into it since it came
+/// up, and a client its launch's container; no container's program is in a
+/// zone's own space any more.
 pub struct ZoneMic {
     pub zone: String,
     pub zone_dir: PathBuf,
     pub config: PathBuf,
-    pub profiles: PathBuf,
 }
 
 impl MicSource for ZoneMic {
     fn setting(&self) -> Setting {
-        crate::microphone::strictest_running(
-            &self.zone_dir,
-            &self.config,
-            &self.profiles,
-            &self.zone,
-        )
+        crate::microphone::setting(&self.zone_dir, &self.config, &self.zone).0
     }
 
     fn client(&self, pid: i32) -> Option<crate::origin::Who> {
@@ -854,12 +857,7 @@ impl MicSource for ZoneMic {
         if Some(own) != net(holder) || !peer.alive() {
             return None;
         }
-        let places = crate::origin::Places {
-            state,
-            config: &self.config,
-            profiles: &self.profiles,
-        };
-        Some(crate::origin::of_peer(places, &self.zone, &peer))
+        Some(crate::origin::of_peer(state, &self.zone, &peer))
     }
 
     fn setting_for(&self, who: &crate::origin::Who) -> Setting {
@@ -1545,7 +1543,6 @@ pub fn run(args: &Args) -> u8 {
             zone: args.zone.clone(),
             zone_dir: args.zone_dir.clone(),
             config: args.config.clone(),
-            profiles: args.profiles.clone(),
         }),
     };
     let app_id = args.app_id.clone().unwrap_or_else(|| args.zone.clone());

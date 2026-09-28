@@ -309,12 +309,12 @@ fn origin_of(state: &Path, stream: &UnixStream) -> (Origin, Option<Peer>) {
 }
 
 /// The container of `zone` the peer is a program of (`docs/PERMISSIONS.md`
-/// §11.9, `crate::origin`): `Some(name)` for a program of a named container,
-/// `Some("")` for one of the zone's own or of the main profile, `None` when
-/// nothing is known (a throwaway or temporary container, a daemon that left
-/// its launch's tree into a namespace of its own).
+/// §11.9, `crate::origin`): `Some("")` for one of the zone's own — in its
+/// own mount namespace —, `None` when nothing is known. No container's
+/// program is in a zone's own namespaces since stage 5 of the container
+/// design (2026-09-28): a container's is its instance's (`Origin::Instance`).
 fn container_of(tools: &Tools, zone: &str, peer: Option<&Peer>) -> Option<String> {
-    match crate::origin::of_peer(crate::origin::Places::of(tools), zone, peer?) {
+    match crate::origin::of_peer(&tools.state, zone, peer?) {
         crate::origin::Who::Main => Some(String::new()),
         crate::origin::Who::Container(name) => Some(name),
         crate::origin::Who::Unknown => None,
@@ -1428,9 +1428,13 @@ fn ask_window(
 /// comes in from the host (`nsenter`), and an orphan goes to the host's
 /// reaper, never to the zone's process. Read while the process is held.
 ///
-/// For the zones' own namespaces only — launches of a zone of a previous
-/// build (stage 2 of the container design); zones have no pid namespace, so
-/// every number here is the host's. A container's instance is never asked
+/// For the zones' own namespaces only — where nothing is launched since
+/// stage 5 of the container design (2026-09-28): a program a previous build
+/// launched there before the update, a person's `nsenter`. A filter of this
+/// build says the zone's own or nobody's (`crate::origin`); one of a
+/// previous build, in a zone an update left running, what it said before.
+/// Zones have no pid namespace, so every number here is the host's. A
+/// container's instance is never asked
 /// this: its programs are known by their user namespace (`crate::place`),
 /// and the container a link is for is the instance's, whatever its filter
 /// says (J2 of the design). There the rule above would not even hold: an

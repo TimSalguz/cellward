@@ -250,7 +250,12 @@ with subtest("the instance ends with its program, and its zone's passt with it")
     machine.wait_until_fails(f'test -n "$({ZONE_PASSTS})"', timeout=30)
     alice("cellward container rm vmbr")
 
-with subtest("a zone of a previous build (no bridge): entered as before, and the person told"):
+with subtest("a zone of a previous build (no bridge): refused, and the person told its restart"):
+    # Stage 5 of the container design (2026-09-28): nothing is launched into
+    # a zone's own namespaces. Until then this launch went there, into the
+    # zone's own network namespace, with a notice (stage 2, and this
+    # subtest said so); now it is refused, and the refusal names the way
+    # out — the zone's restart.
     alice(f"rm {STATE}/vmreal/bridge.sock")
     code, out = machine.execute(
         "su -l alice -c "
@@ -259,14 +264,48 @@ with subtest("a zone of a previous build (no bridge): entered as before, and the
             "cellward run vmreal -- readlink /proc/self/ns/net 2>&1"
         )
     )
-    assert code == 0 and "прошлой сборкой" in out, out
+    assert code != 0 and "не везёт контейнеры" in out, out
+    assert "cellward down vmreal; cellward up vmreal" in out, out
     zone_ns = machine.succeed(
         f"readlink /proc/$(cat {STATE}/vmreal/zone.pid)/ns/net"
     ).strip()
-    assert zone_ns in out, (zone_ns, out)
+    assert zone_ns not in out, (zone_ns, out)
     status = json.loads(alice("cellward status --json"))
     net = next(n for n in status["networks"] if n["name"] == "vmreal")
     assert net["bridge"] is False, net
+
+with subtest("doctor: no program in a zone's own namespaces, and one put there is named"):
+    def zone_programs():
+        out = json.loads(alice("cellward doctor vmreal --json"))
+        zone = next(z for z in out["zones"] if z["name"] == "vmreal")
+        return next(c for c in zone["checks"] if c["id"] == "programs")
+
+    found = zone_programs()
+    assert found["level"] == "ok", found
+    # One there as a previous build's launch put it — or a person's nsenter:
+    # in the zone's app namespace, no descendant of the zone's process.
+    zp = machine.succeed(f"cat {STATE}/vmreal/zone.pid").strip()
+    alice(
+        "systemd-run --user --unit=vmlegacy nsenter --preserve-credentials "
+        f"-U -n -m -t {zp} -- sleep 3600"
+    )
+    machine.wait_until_succeeds(
+        "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 cellward doctor vmreal --json' "
+        "| grep -q '\"id\":\"programs\",\"level\":\"warn\"'",
+        timeout=60,
+    )
+    found = zone_programs()
+    assert "Закрой их" in found["detail"], found
+    legacy = alice("systemctl --user show -p MainPID --value vmlegacy").strip()
+    assert f"({legacy})" in found["detail"], (legacy, found)
+    alice("systemctl --user stop vmlegacy")
+    machine.wait_until_succeeds(
+        "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 cellward doctor vmreal --json' "
+        "| grep -q '\"id\":\"programs\",\"level\":\"ok\"'",
+        timeout=60,
+    )
+
+with subtest("the zone of a previous build restarted: it carries instances again"):
     # Restarted, it carries instances again — and a launch goes out through
     # it, which is also the tunnel's first handshake since the restart (the
     # checks after this file want one: WireGuard makes none with nothing
