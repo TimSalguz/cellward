@@ -876,6 +876,15 @@ fn set_lock(tools: &Tools, args: &[OsString], locked: bool) -> u8 {
     0
 }
 
+/// When a network's start setting (hermetic, the Nix daemon, the host's
+/// files, the audio manager) is in force, said after it is changed: since
+/// stage 5 (2026-09-28) no program runs in a zone's own space, and a
+/// container's instance takes its settings as it comes up — a restart of
+/// the zone changes nothing for it (review 2026-09-28: the messages still
+/// said so). For the containers without their own.
+pub const AT_INSTANCE_START: &str = "; со следующего подъёма экземпляров контейнеров этой сети \
+                                     (работающий держит свои: cellward container stop <к>)";
+
 /// `vpn-zone hermetic <zone> default|on|off` and
 /// `vpn-zone hermetic --default on|off`: `docs/HERMETICITY.md` §7 C — the
 /// runtime directory closed, the session bus filtered, the broker as the way
@@ -901,7 +910,7 @@ fn zone_hermetic(tools: &Tools, args: &[OsString]) -> u8 {
             return 1;
         }
         println!(
-            "зоны без своей настройки {}герметичны — подействует на зону при её следующем подъёме",
+            "сети без своей настройки {}герметичны{AT_INSTANCE_START}",
             if on == "on" { "" } else { "не " }
         );
         return 0;
@@ -919,12 +928,7 @@ fn zone_hermetic(tools: &Tools, args: &[OsString]) -> u8 {
         eprintln!("зона {name} — исключение в Nix (hermetic.exceptions) и меняется там");
         return 1;
     }
-    let up = zone_pid(&tools.state, OsStr::new(&*name)).is_some();
-    let restart = if up {
-        format!(" — подействует после перезапуска зоны: cellward down {name} && cellward up {name}")
-    } else {
-        String::new()
-    };
+    let restart = AT_INSTANCE_START;
     let written = match value.to_str() {
         Some(v @ ("on" | "off")) => fs::write(&marker, v.as_bytes()),
         Some("default") => match fs::remove_file(&marker) {
@@ -1066,10 +1070,10 @@ fn zone_allowance(tools: &Tools, args: &[OsString], switch: &Switch) -> u8 {
         crate::container::Source::Nix => format!(" (задано в Nix: {})", switch.nix),
         crate::container::Source::Default => " (умолчание)".to_owned(),
     };
-    let restart = if switch.at_start && zone_pid(&tools.state, OsStr::new(&*name)).is_some() {
-        format!(" — подействует после перезапуска зоны: cellward down {name} && cellward up {name}")
+    let restart = if switch.at_start {
+        AT_INSTANCE_START
     } else {
-        String::new()
+        ""
     };
     let said = if on { switch.said_on } else { switch.said_off };
     println!("зона {name}: {said}{from}{restart}");

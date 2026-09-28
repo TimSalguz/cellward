@@ -1798,6 +1798,44 @@ fn a_container_has_its_own_zone_level_permissions() {
     );
 }
 
+/// Review 2026-09-28: a network's `restart_needed` is its running
+/// instances' — what changed since they came up —, not its own space's,
+/// where nothing runs since stage 5.
+#[test]
+fn a_networks_restart_needed_is_its_instances() {
+    use vpn_zone::instance;
+    let home = Home::new("restart-needed");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+    let networks_say = |what: &str| {
+        let json = stdout(&home.run(&["status", "--json"]));
+        assert!(
+            json.contains(&format!("\"restart_needed\":{what},\"attached\"")),
+            "{what}: {json}"
+        );
+    };
+    // Nothing runs in it: nothing to restart, whatever its own space says.
+    networks_say("[]");
+    let _bridge = home.instance_is_up("work", "nl");
+    fs::write(
+        instance::dir(&home.state(), "work").join(instance::SETTINGS),
+        "hermetic=true\nnix_daemon=false\nhost_files_writable=false\naudio_manager=false\n",
+    )
+    .unwrap();
+    networks_say("[]");
+    let out = home.run(&["container", "set", "work", "nix-daemon", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    networks_say("[\"nix_daemon\"]");
+    // The network's own word, for a container without one.
+    let out = home.run(&["container", "set", "work", "nix-daemon", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    networks_say("[]");
+    let out = home.run(&["host-files", "nl", "writable"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    networks_say("[\"host_files_writable\"]");
+}
+
 /// Review 2026-09-28: a locked zone takes a hermetic container only. A
 /// launch of one that is not is refused — in a dry run too —, `lock` names
 /// it, and `status` says it (`networks[].lock_not_held_by`); an instance
@@ -1979,7 +2017,14 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     // Hermetic (the prototype): a marker and its JSON.
     let out = home.run(&["hermetic", "nl", "on"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("перезапуска"), "{}", stdout(&out));
+    // Changed on purpose (review 2026-09-28): a restart of the zone changes
+    // nothing for its containers — their instances take it as they come up.
+    assert!(
+        stdout(&out).contains("следующего подъёма экземпляров контейнеров"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(!stdout(&out).contains("перезапуска"), "{}", stdout(&out));
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
         json.contains("\"hermetic\":{\"value\":true,\"source\":\"local\"},\"nix_daemon\":"),
@@ -1988,6 +2033,11 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     // What the zone is let besides: a marker each, and its JSON.
     let out = home.run(&["nix-daemon", "nl", "on"]);
     assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("cellward container stop"),
+        "{}",
+        stdout(&out)
+    );
     let out = home.run(&["host-files", "nl", "writable"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let json = stdout(&home.run(&["status", "--json"]));
