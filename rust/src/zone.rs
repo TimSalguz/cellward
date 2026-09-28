@@ -7822,10 +7822,12 @@ fn instance_ground(zone: &Zone) -> Result<crate::rebind::Own, String> {
     // IPv4 multicast nowhere (the file transfer test, vm87, 2026-09-28): a
     // program's LAN discovery — mDNS, LocalSend, KDE Connect, SSDP — went
     // into the tunnel, where the VPN's provider read the announcements, a
-    // device's name among them. A route more specific than any tap's default
-    // wins under every attach, and a send fails at once. IPv6 multicast has
-    // no route in here already. Not fatal: without it the announcements go
-    // into the tunnel, never around it.
+    // device's name among them. This route stops a socket that leaves the
+    // interface to the table; one that names its interface skips the table
+    // and reaches the tap, and the zone's own route stops what passt relays
+    // (`default_into_tunnel`). IPv6 multicast has no route in here already.
+    // Not fatal: without it the announcements go into the tunnel, never
+    // around it.
     if zone
         .ip_quiet(&["route", "add", "unreachable", "224.0.0.0/4"])
         .is_err()
@@ -8107,7 +8109,26 @@ fn configure_oc(zone: &Zone, plan: &openconnect::Plan) -> Result<(), String> {
 /// tunnel. For OpenConnect that is also where the gateway's split-include list
 /// goes: a zone routes everything, or it is not a zone.
 fn default_into_tunnel(zone: &Zone) -> Result<(), String> {
-    zone.ip(&["route", "replace", "default", "dev", TUN_IFACE])
+    zone.ip(&["route", "replace", "default", "dev", TUN_IFACE])?;
+    // IPv4 multicast nowhere (vm87, 2026-09-28): an instance's LAN discovery
+    // — mDNS, LocalSend, KDE Connect, SSDP — reaches this namespace through
+    // its tap and passt, and passt sent it on into the tunnel, where the
+    // VPN's provider read the announcements, a device's name among them. The
+    // instance's own route (`instance_ground`) does not hold it: a socket
+    // that names its interface (`IP_MULTICAST_IF`, as those programs do)
+    // skips the routing table. passt names none, so this route does. Not
+    // fatal: without it the announcements go into the tunnel, never around.
+    if zone
+        .ip_quiet(&["route", "replace", "unreachable", "224.0.0.0/4"])
+        .is_err()
+    {
+        eprintln!(
+            "zone {}: no unreachable route for multicast — its instances' LAN discovery goes \
+             into the tunnel",
+            zone.name()
+        );
+    }
+    Ok(())
 }
 
 /// Ping without raw sockets: the kernel's ICMP echo sockets, for the user's
