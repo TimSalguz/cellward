@@ -207,7 +207,7 @@ mod tests {
             PathBuf::from("/home/a/repo"),
             PathBuf::from("/home/a/.config/noctalia"),
         ];
-        let given = vec![
+        let given = [
             PathBuf::from("/home/a"),
             PathBuf::from("/home/a/.config/noctalia/colors"),
         ];
