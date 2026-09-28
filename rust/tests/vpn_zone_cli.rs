@@ -1804,7 +1804,9 @@ fn a_container_has_its_own_zone_level_permissions() {
 #[test]
 fn a_networks_restart_needed_is_its_instances() {
     use vpn_zone::instance;
-    let home = Home::new("restart-needed");
+    // A short tag: the zone's bridge socket is made below it (SUN_LEN; red
+    // once in CI, 2026-09-28).
+    let home = Home::new("rneed");
     home.zone_is_up("nl");
     fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
     fs::create_dir_all(home.root.join("profiles/work")).unwrap();
@@ -1844,7 +1846,9 @@ fn a_networks_restart_needed_is_its_instances() {
 #[test]
 fn a_locked_zone_refuses_a_container_that_is_not_hermetic() {
     use vpn_zone::instance;
-    let home = Home::new("lock-hermetic");
+    // A short tag: the zone's bridge socket is made below it (SUN_LEN; red
+    // once in CI, 2026-09-28).
+    let home = Home::new("lockh");
     home.zone_is_up("nl");
     fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
     fs::create_dir_all(home.root.join("profiles/work")).unwrap();
