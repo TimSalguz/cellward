@@ -28,9 +28,11 @@
 //! zone-level settings are what a container without its own takes, and what
 //! a zone's own space (nothing is launched into it since stage 5) is set up
 //! with. The order is the camera's (`container::camera_for`): Nix's word for
-//! the container, then Nix's for the zone — a local word never overrides a
-//! declared one —, then the container's local word, then the zone's
-//! ([`for_container`]).
+//! the container, then Nix's for the zone — a local word does not override
+//! a declared one to open what it closes, but does to close what it opens
+//! (review 2026-09-28: a local `nix-daemon off` was silently ignored under
+//! the network's declared list) —, then the container's local word, then
+//! the zone's ([`for_container`]).
 
 use std::io::ErrorKind;
 use std::path::Path;
@@ -223,12 +225,22 @@ pub fn container_own(config: &Path, name: &str, key: &str) -> Option<(bool, Sour
 }
 
 /// A setting for a program of a container, from the zone's (`zone`) and the
-/// container's own (`own`): Nix's word for the container, then Nix's for the
-/// zone — a local word never overrides a declared one —, then the
-/// container's own local word, then the zone's.
-pub fn for_container(zone: (bool, Source), own: Option<(bool, Source)>) -> (bool, Source) {
+/// container's own (`own`), whose safe value is `safe` ([`safe_value`]):
+/// Nix's word for the container, then Nix's for the zone, then the
+/// container's own local word, then the zone's. A local word does not
+/// override a declared one to open what it closes — but does to close what
+/// it opens: Nix is a frame, and a container that asks for less than its
+/// network's declared value is given less (review 2026-09-28; a local
+/// `nix-daemon off` was silently ignored while the network was in Nix's
+/// `nixDaemon`). Where both say the same, the declared one is named.
+pub fn for_container(
+    zone: (bool, Source),
+    own: Option<(bool, Source)>,
+    safe: bool,
+) -> (bool, Source) {
     match own {
         Some((on, Source::Nix)) => (on, Source::Nix),
+        Some((on, source)) if zone.1 == Source::Nix && on == safe && zone.0 != safe => (on, source),
         _ if zone.1 == Source::Nix => zone,
         Some(own) => own,
         None => zone,
@@ -259,7 +271,11 @@ pub fn value_for(
 ) -> (bool, Source) {
     let zone_value = zone_value(zone_dir, config, zone, key);
     match who {
-        Who::Container(name) => for_container(zone_value, container_own(config, name, key)),
+        Who::Container(name) => for_container(
+            zone_value,
+            container_own(config, name, key),
+            safe_value(key),
+        ),
         Who::Main | Who::Unknown => zone_value,
     }
 }
@@ -556,41 +572,118 @@ mod tests {
 
     /// Stage 5 (2026-09-28): the order a container's own setting is taken
     /// in — Nix's word for the container, then Nix's for the zone, then the
-    /// container's local word, then the zone's.
+    /// container's local word, then the zone's; and (review 2026-09-28) a
+    /// local word that closes what the zone's declared one opens wins.
+    /// `true` safe is hermeticity's, `false` safe the others'.
     #[test]
     fn a_containers_own_setting_is_taken_in_the_cameras_order() {
         // Nothing of its own: the zone's, whatever its source.
         assert_eq!(
-            for_container((true, Source::Default), None),
+            for_container((true, Source::Default), None, true),
             (true, Source::Default)
         );
         assert_eq!(
-            for_container((false, Source::Nix), None),
+            for_container((false, Source::Nix), None, false),
             (false, Source::Nix)
         );
         // Its own local word over the zone's local or default one…
         assert_eq!(
-            for_container((true, Source::Local), Some((false, Source::Local))),
+            for_container((true, Source::Local), Some((false, Source::Local)), true),
             (false, Source::Local)
         );
         assert_eq!(
-            for_container((false, Source::Default), Some((true, Source::Local))),
+            for_container((false, Source::Default), Some((true, Source::Local)), false),
             (true, Source::Local)
         );
-        // …but not over the zone's declared one.
+        // …but not over the zone's declared one to open: not hermetic under
+        // a declared "hermetic", the Nix daemon under a declared "none"…
         assert_eq!(
-            for_container((true, Source::Nix), Some((false, Source::Local))),
+            for_container((true, Source::Nix), Some((false, Source::Local)), true),
             (true, Source::Nix)
         );
-        // Its own declared word over everything.
         assert_eq!(
-            for_container((true, Source::Nix), Some((false, Source::Nix))),
+            for_container((false, Source::Nix), Some((true, Source::Local)), false),
+            (false, Source::Nix)
+        );
+        // …while to close, it does (changed on purpose, review 2026-09-28:
+        // this was the zone's declared "on"): hermetic under a declared
+        // "off", no Nix daemon under the network's `nixDaemon` list.
+        assert_eq!(
+            for_container((false, Source::Nix), Some((true, Source::Local)), true),
+            (true, Source::Local)
+        );
+        assert_eq!(
+            for_container((true, Source::Nix), Some((false, Source::Local)), false),
+            (false, Source::Local)
+        );
+        // The same word as the declared one: the declared one is named.
+        assert_eq!(
+            for_container((true, Source::Nix), Some((true, Source::Local)), true),
+            (true, Source::Nix)
+        );
+        assert_eq!(
+            for_container((false, Source::Nix), Some((false, Source::Local)), false),
+            (false, Source::Nix)
+        );
+        // Its own declared word over everything, both ways.
+        assert_eq!(
+            for_container((true, Source::Nix), Some((false, Source::Nix)), true),
             (false, Source::Nix)
         );
         assert_eq!(
-            for_container((false, Source::Default), Some((true, Source::Nix))),
+            for_container((false, Source::Default), Some((true, Source::Nix)), false),
             (true, Source::Nix)
         );
+        assert_eq!(
+            for_container((true, Source::Nix), Some((false, Source::Nix)), false),
+            (false, Source::Nix)
+        );
+    }
+
+    /// Review 2026-09-28, every combination: the zone's value and source,
+    /// the container's own (none, or a value from Nix or locally), for a
+    /// setting whose safe value is on and for one whose safe value is off.
+    #[test]
+    fn a_local_word_closes_under_nix_and_never_opens() {
+        let sources = [Source::Nix, Source::Local, Source::Default];
+        for safe in [true, false] {
+            for zone_on in [true, false] {
+                for zone_source in sources {
+                    let zone = (zone_on, zone_source);
+                    let mut owns: Vec<Option<(bool, Source)>> = vec![None];
+                    for on in [true, false] {
+                        owns.push(Some((on, Source::Nix)));
+                        owns.push(Some((on, Source::Local)));
+                    }
+                    for own in owns {
+                        let got = for_container(zone, own, safe);
+                        let case = format!("safe {safe}, zone {zone:?}, own {own:?}: {got:?}");
+                        match own {
+                            // Nothing of its own: the zone's.
+                            None => assert_eq!(got, zone, "{case}"),
+                            // Its own declared word, both ways.
+                            Some((on, Source::Nix)) => assert_eq!(got, (on, Source::Nix), "{case}"),
+                            // Under a declared zone: closes, never opens.
+                            Some((on, source)) if zone_source == Source::Nix => {
+                                if on == safe && zone_on != safe {
+                                    assert_eq!(got, (on, source), "{case}");
+                                } else {
+                                    assert_eq!(got, zone, "{case}");
+                                }
+                                if zone_on == safe {
+                                    assert_eq!(got.0, safe, "a local word opened: {case}");
+                                }
+                                if on == safe {
+                                    assert_eq!(got.0, safe, "a local word did not close: {case}");
+                                }
+                            }
+                            // Over a local or default zone: its own word.
+                            Some(own) => assert_eq!(got, own, "{case}"),
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// A container's own word as its files say it: the declared one over the

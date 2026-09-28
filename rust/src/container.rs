@@ -1523,16 +1523,18 @@ pub fn own_flag_in(config: &Path, name: &str, key: &str) -> Option<(bool, Source
 
 /// Whether a launch of the container `name` into the zone in `zone_dir`
 /// reaches the host's cameras (`docs/PERMISSIONS.md` §11.10): Nix's word for
-/// the container, then Nix's for the zone — a local word never overrides a
-/// declared one —, then the container's own, then the zone's.
+/// the container, then Nix's for the zone, then the container's own, then
+/// the zone's (`hermetic::for_container`, off the safe value) — a local
+/// `off` closes what the zone's declared `on` opens (review 2026-09-28: it
+/// was ignored), a local `on` never opens what the zone's declared `off`
+/// closes.
 pub fn camera_for(zone_dir: &Path, config: &Path, zone: &str, name: &str) -> bool {
-    let zone_setting = crate::hermetic::camera(zone_dir, config, zone);
-    match own_flag_in(config, name, "camera") {
-        Some((on, Source::Nix)) => on,
-        _ if zone_setting.1 == Source::Nix => zone_setting.0,
-        Some((on, _)) => on,
-        None => zone_setting.0,
-    }
+    crate::hermetic::for_container(
+        crate::hermetic::camera(zone_dir, config, zone),
+        own_flag_in(config, name, "camera"),
+        false,
+    )
+    .0
 }
 
 /// Read one container. `None` when it neither exists on disk nor is declared.
@@ -3645,7 +3647,8 @@ mod tests {
     }
 
     /// The camera of a launch: the container's own word, the zone's where
-    /// it has none, Nix's over either's local one.
+    /// it has none, Nix's over either's local one — but a local "off"
+    /// under the zone's declared "on" (review 2026-09-28).
     #[test]
     fn a_containers_camera_is_its_own_and_nix_is_not_overridden() {
         let base = std::env::temp_dir().join(format!("vz-camera-{}", std::process::id()));
@@ -3664,9 +3667,16 @@ mod tests {
         fs::write(zone.join(crate::hermetic::CAMERA), "off").unwrap();
         fs::write(&conf, "camera = true\n").unwrap();
         assert!(camera_for(&zone, &config, "nl", "work"));
-        // Nix's word for the zone over the container's local one.
+        // Nix's word for the zone over the container's local one that
+        // would add nothing…
         crate::declared::declare(&config.join("declared/camera"), "nl\n");
+        assert!(camera_for(&zone, &config, "nl", "work"));
+        // …and not over one that closes (changed on purpose, review
+        // 2026-09-28: the zone's declared "on" was taken here): the
+        // container asked for less than its network gives.
         fs::write(&conf, "camera = false\n").unwrap();
+        assert!(!camera_for(&zone, &config, "nl", "work"));
+        fs::write(&conf, "").unwrap();
         assert!(camera_for(&zone, &config, "nl", "work"));
         // Nix's for the container over everything.
         crate::declared::declare(
