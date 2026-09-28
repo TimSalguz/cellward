@@ -1477,8 +1477,11 @@ fn zone_x11(tools: &Tools, args: &[OsString]) -> u8 {
                 eprintln!("не записать {}: {e}", marker.display());
                 return 1;
             }
+            // The default of a container without its own word: one that
+            // said `off` refuses it (2026-09-28, `x11::effective`).
             println!(
-                "у программ зоны {name} свой X-сервер (xwayland-satellite); X-сервер хоста по-прежнему недоступен"
+                "у программ зоны {name} свой X-сервер (xwayland-satellite) — кроме контейнеров \
+                 со своим x11 off; X-сервер хоста по-прежнему недоступен"
             );
             0
         }
@@ -1490,7 +1493,7 @@ fn zone_x11(tools: &Tools, args: &[OsString]) -> u8 {
                 eprintln!("x11 зоны {name} задан в Nix (zoneX11) — выключается там");
                 return 1;
             }
-            println!("у программ зоны {name} X нет");
+            println!("у программ зоны {name} X нет — кроме контейнеров со своим x11 on");
             0
         }
         _ => {
