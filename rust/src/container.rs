@@ -423,6 +423,34 @@ fn read_declared_in(config: &Path, name: &str) -> Option<(Conf, Option<Home>)> {
     None
 }
 
+/// The paths container `name` is given, from the config directory alone —
+/// its Nix declaration's, and its own grants that are not over —: for its
+/// instance's holder, which has no `Tools`. A given path of the real home
+/// that is protected is the container's to write (`crate::protect`).
+pub fn given_paths_in(config: &Path, home: &Path, name: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = read_declared_in(config, name)
+        .map(|(conf, _)| {
+            values(&conf, "path")
+                .map(|p| expand_home(home, p))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Ok(text) = fs::read_to_string(policy_dir_in(config, name).join(PATHS_FILE)) {
+        let now = now();
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let (path, until) = grant_line(line);
+            if path.is_empty() || until.is_some_and(|u| u <= now) {
+                continue;
+            }
+            let path = expand_home(home, path);
+            if !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
 /// Where the data of a container live, whatever its kind.
 pub fn data_dir(tools: &Tools, name: &str) -> PathBuf {
     tools.profiles.join(name)
@@ -2001,8 +2029,13 @@ pub fn forbidden_path(home: &Path, path: &Path) -> Option<String> {
     }
     // What the host runs by itself, outside any zone and sandbox: a file
     // written there by a sandboxed program is code the session starts for it.
-    for executed in HOST_RUNS {
-        let executed = home.join(executed);
+    // This list, and every place a hermetic container keeps read-only
+    // (`zone::host_run_places`) — one set, whatever grants.
+    let places = HOST_RUNS
+        .iter()
+        .map(|p| home.join(p))
+        .chain(crate::zone::host_run_places(home));
+    for executed in places {
         if path.starts_with(&executed) || executed.starts_with(&path) {
             return Some(format!(
                 "это место хост исполняет сам ({}): ярлык, автозапуск, юнит, PATH или \
@@ -2029,11 +2062,24 @@ pub fn set_path(
         return Err("в пути перевод строки".to_owned());
     }
     let value = expand_home(&tools.home, path);
-    // The main home is the real one: there is nothing to grant it.
-    if grant && container.home == Home::Main {
+    // The main home is the real one: there is nothing to grant it — but
+    // the writing of a protected path (`crate::protect`, 2026-09-29), from
+    // its instance's next start, and for good: a term would need the path
+    // made read-only again under running programs.
+    if grant
+        && container.home == Home::Main
+        && !crate::protect::in_list(&tools.config, &tools.home, &value)
+    {
         return Err(format!(
-            "{selector} — основной дом: он и так настоящий, выдавать нечего"
+            "{selector} — настоящий дом: он и так виден, выдать можно только запись в \
+             защищённое вами (cellward protect)"
         ));
+    }
+    if grant && container.home == Home::Main && until.is_some() {
+        return Err(
+            "запись в защищённое выдаётся без срока: снять её — cellward container revoke"
+                .to_owned(),
+        );
     }
     // A layer sees the whole real home and writes its own layer: a grant is
     // a path of the home it writes through, into the real one. Outside the

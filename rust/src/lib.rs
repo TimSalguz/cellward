@@ -146,6 +146,7 @@ pub mod panel;
 pub mod picker;
 pub mod place;
 pub mod profile;
+pub mod protect;
 pub mod pulse_filter;
 pub mod pw_context;
 pub mod rebind;

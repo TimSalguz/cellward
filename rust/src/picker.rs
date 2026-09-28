@@ -687,11 +687,13 @@ pub fn profile_pin_is_valid(pinned: &str, profile_exists: impl Fn(&str) -> bool)
 /// text shown next to it.
 pub type Row = (String, String);
 
-/// The unconfined choice, said the way it is: nothing of a zone stands
-/// between the program and the host.
+/// The unconfined choice, said the way it is: nothing stands between the
+/// program and the host — no VPN, and none of its container's settings
+/// (review 2026-09-28: the camera, the microphone, the devices, X are the
+/// host's there).
 pub const UNCONFINED_ROW: (&str, &str) = (
     crate::launch::UNCONFINED,
-    "Без ограничений — сеть хоста, без VPN и без изоляции зоны",
+    "Без ограничений — сеть хоста без VPN и без изоляции: камера, микрофон, устройства открыты",
 );
 
 fn row(tag: &str, text: impl Into<String>) -> Row {

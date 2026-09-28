@@ -110,12 +110,18 @@ pub fn defaults(tools: &Tools) -> String {
     // The waits that end by a clock on purpose (`crate::timings`).
     let (question, question_source) = crate::timings::QUESTION.read(&tools.config);
     let (handshake, handshake_source) = crate::timings::HANDSHAKE_CHECK.read(&tools.config);
+    // What the person protects in the real home besides the host's own
+    // places (`crate::protect`), each `{value, source}`.
+    let protected: Vec<String> = crate::protect::listed(&tools.config, &tools.home)
+        .iter()
+        .map(|(path, source)| sourced_str(&path.to_string_lossy(), *source))
+        .collect();
     format!(
         "{{\"network\":{},\"container\":{},\"launcher_mode\":{},\"compositor_restriction\":{},\
          \"wayland_proxy\":{},\"frames\":{},\"frame_width\":{},\"frame_title\":{},\
          \"frame_buttons\":{},\"frame_style\":{},\"frame_radius\":{},\"tray_badge\":{},\
          \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{},\"ask_again\":{},\
-         \"question_timeout\":{},\"handshake_check\":{}}}",
+         \"question_timeout\":{},\"handshake_check\":{},\"protected\":[{}]}}",
         sourced_str(&network, network_source),
         sourced_str(&container, container_source),
         sourced_str(&mode, mode_source),
@@ -133,7 +139,8 @@ pub fn defaults(tools: &Tools) -> String {
         sourced(hermetic.to_string(), hermetic_source),
         sourced_str(&crate::grants::term_text(ask_again), ask_again_source),
         sourced_str(&question.text(), question_source),
-        sourced_str(&handshake.text(), handshake_source)
+        sourced_str(&handshake.text(), handshake_source),
+        protected.join(",")
     )
 }
 

@@ -412,6 +412,7 @@ cellward traffic --days <N> [--json]           # what each container used, by ne
 cellward traffic --connections [--json]        # whom each running container reached, and how much
 cellward traffic --programs [--days <N>] [--json]  # what each program used, by container
 cellward netlog [keep <days>|cap <size>]       # how long the connections' journal is kept (30 days, 1G)
+cellward protect [add|rm <path>]               # what no container of the real home writes (the config repo…)
 cellward journal [--json] [<N>]                # unconfined launches and the broker's decisions
 cellward kill <zone>                           # cut a zone off now: its programs killed, the zone down
 cellward container stop|kill <container>       # end a container's instance: its programs closed / killed at once

@@ -1778,6 +1778,7 @@ let
           in_zone(hp, "sh -c '! mkdir -p /home/alice/.config/wireplumber/wireplumber.conf.d'")
           in_zone(hp, "sh -c '! mkdir -p /home/alice/.local/share/wireplumber/scripts/vpn-zones'")
           alice("touch ~/.local/share/wireplumber/from-host && rm ~/.local/share/wireplumber/from-host")
+          exec(open("${./vm-protect.py}").read())
           def nodes(*paths):
               """What each path is to a program: its device's number, or
               none — nothing there, or the empty stand-in of a node given

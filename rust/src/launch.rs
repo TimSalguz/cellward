@@ -757,6 +757,20 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     );
     let mut cmd = selection.cmd.clone();
 
+    // Unconfined, a container is its home and nothing else (review
+    // 2026-09-28): its camera, microphone, devices and X settings are the
+    // host's there. Said, until the host's network is a network of the
+    // container's own space like any other.
+    if zone == UNCONFINED {
+        if let Some(name) = container_name(&selection) {
+            eprintln!(
+                "cellward: {} в сети без ограничений — настройки контейнера {name} (камера, \
+                 микрофон, устройства, X) здесь не действуют: у программы всё, что у хоста",
+                label
+            );
+        }
+    }
+
     // --- THE CAMERAS ---
     // The host's cameras for this launch (`docs/PERMISSIONS.md` §11.10): the
     // zone's `/dev` has none, and a launch they are let gets them bound in,

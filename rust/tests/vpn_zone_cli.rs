@@ -1987,6 +1987,62 @@ fn traffic_says_what_an_instance_sent_and_received() {
     tally.close();
 }
 
+/// What no container of the real home writes (`cellward protect`,
+/// 2026-09-29): added, shown, in status; refused outside the home; Nix's not
+/// taken off here; given to write to a container of the real home — what is
+/// listed only, and for good.
+#[test]
+fn protect_lists_what_no_container_writes() {
+    let home = Home::new("prot");
+    let root = home.root.display().to_string();
+    assert!(home.run(&["protect", "add", "~/repo"]).status.success());
+    let shown = stdout(&home.run(&["protect"]));
+    assert!(shown.contains(&format!("{root}/repo\n")), "{shown}");
+    let status = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        status.contains(&format!(
+            "\"protected\":[{{\"value\":\"{root}/repo\",\"source\":\"local\"}}]"
+        )),
+        "{status}"
+    );
+    for bad in ["/etc/nixos", "~", "~/../x"] {
+        assert_eq!(
+            home.run(&["protect", "add", bad]).status.code(),
+            Some(1),
+            "{bad}"
+        );
+    }
+    let declared = home.root.join("config/declared");
+    fs::create_dir_all(&declared).unwrap();
+    declare(&declared.join("protect"), "~/nixrepo\n");
+    let shown = stdout(&home.run(&["protect"]));
+    assert!(shown.contains(&format!("{root}/nixrepo (Nix)")), "{shown}");
+    assert_eq!(
+        home.run(&["protect", "rm", "~/nixrepo"]).status.code(),
+        Some(1)
+    );
+    // Given to a container of the real home: what is listed, for good.
+    let out = home.run(&["container", "create", "real", "--home", "main"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    fs::create_dir_all(home.root.join("repo")).unwrap();
+    let out = home.run(&["container", "grant", "real", "~/repo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("с его следующего подъёма"),
+        "{}",
+        stdout(&out)
+    );
+    for bad in [&["~/Documents"][..], &["~/repo", "--for", "2h"][..]] {
+        let mut args = vec!["container", "grant", "real"];
+        args.extend_from_slice(bad);
+        assert_eq!(home.run(&args).status.code(), Some(1), "{bad:?}");
+    }
+    let out = home.run(&["container", "revoke", "real", "~/repo"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.run(&["protect", "rm", "~/repo"]).status.success());
+    assert!(!stdout(&home.run(&["protect"])).contains(&format!("{root}/repo\n")));
+}
+
 /// The connections' journal's keep and cap (`cellward netlog`): set, shown,
 /// refused outside their bounds, back to the default; `traffic --programs`
 /// with nothing recorded.
@@ -2610,7 +2666,8 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
             "\"hermetic\":{\"value\":true,\"source\":\"default\"},\
              \"ask_again\":{\"value\":\"3m\",\"source\":\"default\"},\
              \"question_timeout\":{\"value\":\"2m\",\"source\":\"default\"},\
-             \"handshake_check\":{\"value\":\"6s\",\"source\":\"default\"}}"
+             \"handshake_check\":{\"value\":\"6s\",\"source\":\"default\"},\
+             \"protected\":[]}"
         ),
         "{json}"
     );

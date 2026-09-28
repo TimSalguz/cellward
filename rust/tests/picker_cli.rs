@@ -830,7 +830,7 @@ fn the_unconfined_choice_goes_through_run_like_any_other_network() {
     let menu = &home.asked()[0];
     assert!(
         menu.iter()
-            .any(|a| a == "Без ограничений — сеть хоста, без VPN и без изоляции зоны"),
+            .any(|a| a == "Без ограничений — сеть хоста без VPN и без изоляции: камера, микрофон, устройства открыты"),
         "{menu:?}"
     );
     assert!(!menu.iter().any(|a| a == "direct"), "{menu:?}");

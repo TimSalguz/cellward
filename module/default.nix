@@ -785,6 +785,7 @@ let
     "questionTimeout"
     "netlog.keepDays"
     "netlog.maxSize"
+    "protect"
     "handshakeCheckAfter"
     "hermetic.default"
     "hermetic.exceptions"
@@ -1023,6 +1024,13 @@ in
       default = null;
       example = "never";
       description = "Сколько вопрос брокера (окно запуска из зоны, «открыть в другой сети?») ждёт ответа, прежде чем закрыться отказом: 30s…1d или never — без срока. Вопрос открыт один: пока он ждёт, следующие получают отказ, а не встают в очередь. null — не задавать из Nix (тогда cellward question-timeout <срок>, иначе 2m). Действует со следующего вопроса.";
+    };
+
+    protect = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "~/Configurations/my-machine" ];
+      description = "Что из настоящего дома не пишет ни один контейнер, кроме тех, кому это явно выдано (cellward container grant или paths контейнера): прежде всего репозиторий конфигурации машины — кто пишет в него, тот при следующей пересборке получает root. Пути внутри дома, ~/… или абсолютные. То, что исполняет сам хост (автозапуск, службы, оболочки, git, ~/bin, конфигурации панелей, терминалов и редакторов), защищено всегда и сюда не пишется. Действует в герметичных контейнерах с настоящим домом, с их следующего подъёма. Без пересборки — cellward protect add|rm <путь>.";
     };
 
     netlog = {
@@ -1449,6 +1457,9 @@ in
     })
     (lib.mkIf (cfg.questionTimeout != null) {
       ".config/vpn-zones/declared/question-timeout".text = cfg.questionTimeout;
+    })
+    (lib.mkIf (cfg.protect != [ ]) {
+      ".config/vpn-zones/declared/protect".text = lib.concatMapStrings (p: "${p}\n") cfg.protect;
     })
     (lib.mkIf (cfg.netlog.keepDays != null) {
       ".config/vpn-zones/declared/netlog-keep".text = toString cfg.netlog.keepDays;

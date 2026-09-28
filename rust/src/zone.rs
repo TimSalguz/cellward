@@ -755,6 +755,11 @@ struct Zone {
     /// The host's raw PipeWire socket in a hermetic zone
     /// (`hermetic::audio_manager`); off by default: the restricted one.
     audio_manager: bool,
+    /// What the person protects besides the host's own places
+    /// (`crate::protect`), absolute; and what the container is given —
+    /// a protected path given is its to write.
+    protect: Vec<PathBuf>,
+    given: Vec<PathBuf>,
     /// Not a zone but a container's instance (`crate::instance`, the
     /// container design of 2026-09-27): the same space for its programs —
     /// every cover, the helpers, its own `/dev` —, set up by the same code,
@@ -915,6 +920,10 @@ pub fn run(args: Args) -> u8 {
     // around it, a locked zone no host session.
     let [hermetic, nix_daemon, host_files_writable, audio_manager] =
         crate::hermetic::start_settings(&dir, &config, &label).map(|(_, on)| on);
+    let protect = crate::protect::listed(&config, &home)
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
     let zone = Zone {
         dir,
         home,
@@ -924,6 +933,8 @@ pub fn run(args: Args) -> u8 {
         nix_daemon,
         host_files_writable,
         audio_manager,
+        protect,
+        given: Vec::new(),
         instance: None,
     };
 
@@ -1057,6 +1068,22 @@ fn prepare_host(zone: &Zone, label: &str) {
                     .mode(0o700)
                     .create(&path);
             }
+        }
+        // The Nix client's cache, which a container's own goes over.
+        let nix_cache = zone.home.join(NIX_CACHE);
+        if fs::symlink_metadata(&nix_cache).is_err() {
+            use std::os::unix::fs::DirBuilderExt;
+            let _ = fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&nix_cache);
+        }
+        // And the space's own, in its directory.
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let _ = fs::DirBuilder::new()
+                .mode(0o700)
+                .create(zone.dir.join(NIX_CACHE_OWN));
         }
         // The associations too, empty where there are none: a file a program
         // of the zone made would be the host's choice of what opens links.
@@ -1777,6 +1804,18 @@ fn frozen(text: &str, name: &str) -> bool {
 /// settings `applied` (the text of [`crate::instance::SETTINGS`]).
 fn instance_zone(tools: Tools, home: PathBuf, plan: &crate::instance::Plan, applied: &str) -> Zone {
     let state = home.join(STATE_SUBDIR);
+    let config = home.join(CONFIG_SUBDIR);
+    let protect = crate::protect::listed(&config, &home)
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    // What its container is given (the main home is given nothing).
+    let given = match &plan.who {
+        crate::origin::Who::Container(name) => {
+            crate::container::given_paths_in(&config, &home, name)
+        }
+        _ => Vec::new(),
+    };
     Zone {
         name: OsString::from(&plan.id),
         dir: crate::instance::dir(&state, &plan.id),
@@ -1785,6 +1824,8 @@ fn instance_zone(tools: Tools, home: PathBuf, plan: &crate::instance::Plan, appl
         nix_daemon: frozen(applied, "nix_daemon"),
         host_files_writable: frozen(applied, "host_files_writable"),
         audio_manager: frozen(applied, "audio_manager"),
+        protect,
+        given,
         instance: Some(InstanceInfo {
             id: plan.id.clone(),
             network: plan.network.clone(),
@@ -6391,7 +6432,82 @@ const HOST_RUNS_IN_ZONES: &[&str] = &[
     ".xinitrc",
     ".pam_environment",
     ".inputrc",
+    // Git on the host — stillconf commits with it: its config names the
+    // hooks, pagers and editors it runs (review 2026-09-28).
+    ".gitconfig",
+    ".local/share/gh/extensions",
+    // What the host's PATH and toolchains run, and Python's user site: a
+    // `.pth` file there runs in every Python of the host.
+    "bin",
+    ".cargo/bin",
+    ".cargo/config.toml",
+    ".cargo/config",
+    ".rustup",
+    ".local/lib",
+    ".npmrc",
+    // Credential helpers the host's tools run (`exec` of a kube config,
+    // `credential_process` of AWS).
+    ".kube/config",
+    ".aws/config",
+    // The session's shells, panels and daemons: what they run on a click,
+    // a notification, a new monitor.
+    ".config/noctalia",
+    ".config/quickshell",
+    ".config/waybar",
+    ".config/ags",
+    ".config/eww",
+    ".config/mako",
+    ".config/dunst",
+    ".config/swaync",
+    ".config/fuzzel",
+    ".config/rofi",
+    ".config/swaylock",
+    ".config/swayidle",
+    ".config/kanshi",
+    ".config/wlogout",
+    ".config/wayfire.ini",
+    ".config/dconf",
+    ".local/share/gnome-shell/extensions",
+    // Terminals and what they start.
+    ".config/kitty",
+    ".config/alacritty",
+    ".config/foot",
+    ".config/wezterm",
+    ".config/ghostty",
+    ".tmux.conf",
+    ".config/tmux",
+    ".config/starship.toml",
+    // Editors: their configs and plugins are code.
+    ".vimrc",
+    ".vim",
+    ".config/nvim",
+    ".local/share/nvim",
+    ".emacs",
+    ".emacs.d",
+    ".config/emacs",
+    ".config/helix",
+    ".vscode/extensions",
 ];
+
+/// Where the Nix client keeps its caches below the home: what it evaluated,
+/// keyed by the flake's inputs, and what it fetched. A program of a
+/// container that wrote there would hand the host's next `nix build` of the
+/// same flake an answer of its making — a derivation of its own for the
+/// system. A container that sees the real home gets a cache of its own
+/// over it ([`protect_host_files`]).
+const NIX_CACHE: &str = ".cache/nix";
+/// The space's own, in its directory.
+const NIX_CACHE_OWN: &str = "nix-cache";
+
+/// Every place the host runs or trusts below `home`, which a hermetic
+/// container that sees the real home does not write (`crate::protect`).
+pub(crate) fn host_run_places(home: &Path) -> Vec<PathBuf> {
+    ENTRY_POINTS
+        .iter()
+        .chain(HOST_RUNS_IN_ZONES)
+        .map(|p| home.join(p))
+        .collect()
+}
 
 /// What the host runs from the home, read-only in a hermetic zone (owner,
 /// 2026-09-25; `docs/LEAK-MODEL.md` §9): without a sandbox a program has the
@@ -6408,30 +6524,63 @@ const HOST_RUNS_IN_ZONES: &[&str] = &[
 /// Fatal when a real one cannot be made read-only.
 fn protect_host_files(zone: &Zone) -> Result<(), String> {
     pin_parents(zone)?;
+    // What the person protects too (`crate::protect`), less what the
+    // container is given of it — at or below a given path —, and the given
+    // paths below a protected one written through its cover. The places the
+    // host runs are never given this way, whatever a declaration says: to
+    // write them a container needs `host-files writable`.
+    let places: Vec<PathBuf> = host_run_places(&zone.home)
+        .into_iter()
+        .chain(zone.protect.iter().cloned())
+        .collect();
+    let (lifted, through) = crate::protect::lifted(&zone.protect, &zone.given);
+    let host = host_run_places(&zone.home);
+    let through: Vec<PathBuf> = through
+        .into_iter()
+        .filter(|g| !host.iter().any(|h| g.starts_with(h) || h.starts_with(g)))
+        .collect();
+    let kept: Vec<(PathBuf, OwnedFd)> = through
+        .iter()
+        .filter(|p| fs::symlink_metadata(p).is_ok_and(|m| !m.file_type().is_symlink()))
+        .map(|p| {
+            sys::clone_tree(p)
+                .map(|tree| (p.clone(), tree))
+                .map_err(|e| format!("cannot take hold of {}: {e}", p.display()))
+        })
+        .collect::<Result<_, _>>()?;
     let mut covered = 0;
     let mut links = Vec::new();
-    for entry in ENTRY_POINTS.iter().chain(HOST_RUNS_IN_ZONES) {
-        let path = zone.home.join(entry);
-        match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.file_type().is_symlink() => links.push(*entry),
+    for path in places.iter().filter(|p| !lifted.contains(p)) {
+        match fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => links.push(path.display().to_string()),
             Ok(_) => {
-                sys::mount(
-                    path.as_os_str(),
-                    &path,
-                    "",
-                    libc::MS_BIND | libc::MS_REC,
-                    "",
-                )
-                .and_then(|()| sys::remount_read_only(&path))
-                .map_err(|e| format!("cannot make {} read-only: {e}", path.display()))?;
+                sys::mount(path.as_os_str(), path, "", libc::MS_BIND | libc::MS_REC, "")
+                    .and_then(|()| sys::remount_read_only(path))
+                    .map_err(|e| format!("cannot make {} read-only: {e}", path.display()))?;
                 covered += 1;
             }
             Err(_) => {}
         }
     }
+    for (path, tree) in &kept {
+        sys::attach_tree(tree, path)
+            .map_err(|e| format!("cannot give {} back to write: {e}", path.display()))?;
+    }
+    // The Nix client's cache: the space's own over the host's.
+    let nix_cache = zone.home.join(NIX_CACHE);
+    let own = zone.dir.join(NIX_CACHE_OWN);
+    if nix_cache.is_dir() && own.is_dir() {
+        sys::mount(own.as_os_str(), &nix_cache, "", libc::MS_BIND, "")
+            .map_err(|e| format!("cannot give it a Nix cache of its own: {e}"))?;
+    }
     println!(
-        "zone {}: {covered} of the host's startup places read-only{}",
+        "zone {}: {covered} of the host's startup places read-only{}{}",
         zone.name(),
+        if lifted.is_empty() && kept.is_empty() {
+            String::new()
+        } else {
+            format!("; given to write: {}", lifted.len() + kept.len())
+        },
         if links.is_empty() {
             String::new()
         } else {
@@ -6460,6 +6609,7 @@ fn pin_parents(zone: &Zone) -> Result<(), String> {
         .chain(READ_ONLY_IN_ZONES.iter())
         .chain(crate::home_layer::STORAGE.iter())
         .map(|p| zone.home.join(p))
+        .chain(zone.protect.iter().cloned())
         .collect();
     places.extend(input_method_places(&zone.home));
     // The state directory: a zone's is its directory's parent, an
@@ -9412,6 +9562,33 @@ mod tests {
         assert!(!frozen("hermetic=yes\n", "hermetic"));
     }
 
+    /// The places the host runs, each once, and what the review of
+    /// 2026-09-28 found open among them.
+    #[test]
+    fn the_host_runs_places_are_listed_once() {
+        let all: Vec<&str> = ENTRY_POINTS
+            .iter()
+            .chain(HOST_RUNS_IN_ZONES)
+            .copied()
+            .collect();
+        for (i, p) in all.iter().enumerate() {
+            assert!(!all[..i].contains(p), "{p} twice");
+            assert!(!p.starts_with('/') && !p.contains(".."), "{p}");
+        }
+        for p in [
+            ".gitconfig",
+            "bin",
+            ".cargo/bin",
+            ".local/lib",
+            ".config/noctalia",
+        ] {
+            assert!(all.contains(&p), "{p}");
+        }
+        let places = host_run_places(Path::new("/h"));
+        assert!(places.contains(&PathBuf::from("/h/.gitconfig")));
+        assert!(!places.contains(&PathBuf::from("/h/.cache/nix")));
+    }
+
     fn zone_for(instance: Option<InstanceInfo>) -> Zone {
         Zone {
             name: OsString::from("nl"),
@@ -9422,6 +9599,8 @@ mod tests {
             nix_daemon: false,
             host_files_writable: false,
             audio_manager: false,
+            protect: Vec::new(),
+            given: Vec::new(),
             instance,
         }
     }

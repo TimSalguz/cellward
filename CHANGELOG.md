@@ -5,6 +5,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Security
+- **A container of the real home no longer writes what the host runs or
+  trusts** (2026-09-29, `docs/LEAK-MODEL.md` §32). An independent review
+  found more of it writable in a hermetic container that sees the real
+  home:
+  - `~/.gitconfig`;
+  - `~/bin`, `~/.cargo/bin`, `~/.rustup`, Python's user site
+    (`~/.local/lib`), `~/.npmrc`;
+  - the credential helpers of `~/.kube/config` and `~/.aws/config`;
+  - the session's shells and panels (noctalia, quickshell, waybar,
+    mako…), terminals, and editors with their plugins.
+
+  All of it is read-only there now, as autostart and the shells' rc files
+  were.
+
+  The Nix client's cache (`~/.cache/nix`), whose evaluations the host's
+  next `nix build` of the same flake would take as its own, is the
+  container's own.
+
+  The person's list comes on top: `cellward protect add <path>` or
+  `programs.cellward.protect`, first of all for the machine's
+  configuration repository, whose next rebuild is root's. A path of it can
+  be given to write to a container (`cellward container grant`), from its
+  next start; the places the host runs never are.
+
+  Grants to containers with a home of their own are refused by the same
+  list, which was a separate one and lagging.
+- The launch window says what «Без ограничений» is: the host's network
+  without VPN and without isolation — the camera, the microphone and the
+  devices open. A container's settings of those do not hold there, and a
+  launch says so.
+
 ### Changed
 - **What a program with a home of its own may see is asked in the cellward
   window** (2026-09-28), not in kdialog's checklist: the same boxes —
