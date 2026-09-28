@@ -683,6 +683,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   told by its launch, not taken for the zone's own programs.
 
 ### Fixed
+- **The host's `resolv.conf` replaced by rename no longer shows through a
+  zone or an instance** (2026-09-28, `docs/THREAT-MODEL.md` D2,
+  `rust/src/rebind.rs`). NetworkManager, openresolv and resolvconf rename
+  a new file over `/etc/resolv.conf`, and the kernel detaches every mount
+  on the old name: a zone then read the host's file until it restarted —
+  the tunnel's DNS no longer asked, names sent through the tunnel to the
+  host's resolvers (a fingerprint of the host's network), `127.0.0.1` the
+  zone's own loopback. A space's own `resolv.conf` and `nsswitch.conf` are
+  now attached to the name itself (`move_mount` without following the
+  link), not where its chain of links ends, so a rename further down the
+  chain (resolvconf's `/run/resolvconf`, NixOS's `/etc/static`) does not
+  reach them; a replacement of the name itself is caught by the space's
+  process (inotify on `/etc`, no timer), which lays its file there again.
+  The space's `/etc` is a shared mount of its own and every launch a slave
+  copy, so a program launched before the rename, and a sandbox's `/etc`,
+  get the file laid again too. What is left: the moment between the host's
+  rename and the re-lay, in which a lookup asks the host's resolvers
+  through the tunnel, never around it. Inside a space `/etc/resolv.conf` is
+  now a plain file, not a link. **`cellward doctor`**: the `resolv` check
+  of a zone with a tunnel and of every instance holds the nameservers the
+  space sees to the ones it was given (the doctor passes them to the probe
+  as `--nameservers=a,b`); others are `fail`, with the way out — the
+  zone's or the container's restart. VM tests vm48 (proving the fix now),
+  vm85, vm86.
+- **An ordinary zone no longer gets a desktop shell's IPC, nor
+  `WAYFIRE_SOCKET`** (2026-09-28, `docs/THREAT-MODEL.md` W7). Shells'
+  directories and sockets in the runtime directory — `quickshell/`
+  (noctalia, DankMaterialShell, caelestia), `astal/` (Astal, AGS),
+  `ironbar-ipc.sock`, `eww-server_*` — stay out of every zone's and
+  instance's runtime directory, as the compositors' IPC does, created
+  before it came up or later; `doctor` names them where it sees them
+  (`compositor-ipc`, and `fail` in the socket inventory).
+  `WAYFIRE_SOCKET` and `_WAYFIRE_SOCKET` are dropped from a launch into a
+  zone with `NIRI_SOCKET` and the rest. Still open in an ordinary zone, by
+  its design: Wayfire's socket by its path in the `/tmp` it shares with the
+  host, and the whole session bus (KWin's scripting) — a hermetic zone
+  closes both. vm51 checks the closed doors and still shows the open ones.
 - **A container's commands act on that container only** (review
   2026-09-28). `cellward container stop|kill|reattach <c>`, `container set
   <c> network <n> --restart` and the frame's «Сменить и перезапустить

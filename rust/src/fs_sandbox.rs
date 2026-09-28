@@ -809,10 +809,15 @@ pub fn bwrap_args(layout: &Layout, cmd: &[OsString]) -> Vec<OsString> {
 /// `/run/systemd/resolve`, which is not passed in — that file has to be named
 /// explicitly or the sandbox resolves nothing at all.
 ///
-/// Inside a zone the chain ends at the resolv.conf the zone bound there, i.e.
-/// at the servers of the tunnel; the socket that used to sit beside it is gone,
-/// covered by the zone's tmpfs. Nothing to bind then means exactly that:
-/// `None`, and `bwrap` is not asked for a source that is not there.
+/// Inside a zone or a container's instance the name itself is the space's
+/// own file, bound over it whatever the host made it (`crate::rebind`, D2,
+/// 2026-09-28): not a link any more, it comes in with `/etc` (bwrap binds
+/// recursively), and a copy of the space's own laid there again after the
+/// host replaced the name reaches the sandbox too — its `/etc` is a slave of
+/// the space's. The directory the host's chain led into is covered by the
+/// space's tmpfs, its resolver's socket with it. Nothing to bind then means
+/// exactly that: `None`, and `bwrap` is not asked for a source that is not
+/// there.
 fn resolv_file() -> Option<PathBuf> {
     let target = crate::sys::link_target(Path::new("/etc/resolv.conf"));
     (!target.starts_with("/etc") && target.is_file()).then_some(target)

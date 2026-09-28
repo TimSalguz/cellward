@@ -62,20 +62,51 @@ with subtest("hermetic zone: a shell's IPC in /tmp, in the runtime directory and
     machine.fail("grep -q from-hermetic /tmp/wayfire-got /tmp/shell-got")
     machine.fail(f"grep -q loadScript {KWIN_GOT}")
 
-# The other side of the row, said by a test: an ordinary zone shares the
-# host's /tmp, binds the host's runtime directory in but for the
-# compositors' sockets, and has the whole session bus (P1). Each door here
-# is open to it.
-with subtest("ordinary zone: a shell's IPC in /tmp, in the runtime directory and on the bus stays in reach"):
-    out = alice(f"WAYFIRE_SOCKET={WAYFIRE} cellward run vmsmoke -- sh -c {TRY} sh ordinary")
-    print(out)
-    assert "WAYFIRE-REACHED" in out and "SHELL-REACHED" in out, out
-    machine.wait_until_succeeds(
-        "grep -q from-ordinary /tmp/wayfire-got && grep -q from-ordinary /tmp/shell-got"
+# The ordinary zone (2026-09-28): the two doors of W7 that are no business
+# of an ordinary zone's are closed — the shell's directory in the runtime
+# directory is out of its instance's, made before it came up or after, and
+# a launch is not told where Wayfire listens (WAYFIRE_SOCKET, and the
+# _WAYFIRE_SOCKET Wayfire is told, dropped). What stays, said by a test: an
+# ordinary zone shares the host's /tmp (§9, §15), where Wayfire's socket
+# still is by its path, and has the whole session bus (P1).
+with subtest("ordinary zone: a shell's directory out of reach and WAYFIRE_SOCKET gone; /tmp and the bus still in reach"):
+    out = alice(
+        f"WAYFIRE_SOCKET={WAYFIRE} _WAYFIRE_SOCKET={WAYFIRE} "
+        f"cellward run vmsmoke -- sh -c {TRY} sh ordinary"
     )
+    print(out)
+    assert "WF=" in out.splitlines(), f"a launch is told where Wayfire listens:\n{out}"
+    assert "SHELL-REACHED" not in out, out
+    machine.fail("grep -q from-ordinary /tmp/shell-got")
+    alice(
+        f"_WAYFIRE_SOCKET={WAYFIRE} cellward run vmsmoke -- "
+        "sh -c 'test -z \"$_WAYFIRE_SOCKET\" && test ! -e /run/user/1000/quickshell'"
+    )
+    # A shell's directory made while the instance runs is not bound in by
+    # its runtime watch either (Astal's, AGS's).
+    alice(
+        "systemd-run --user --collect --unit=w7keep cellward run vmsmoke -- sleep 5151"
+    )
+    machine.wait_until_succeeds("pgrep -u alice -xf '(/[^ ]*/)?sleep 5151'", timeout=60)
+    alice(
+        "mkdir -p /run/user/1000/astal && systemd-run --user --unit=fakeastal "
+        "socat UNIX-LISTEN:/run/user/1000/astal/vmtest.sock,fork "
+        "OPEN:/tmp/astal-got,creat,append"
+    )
+    machine.wait_until_succeeds("test -S /run/user/1000/astal/vmtest.sock", timeout=30)
+    alice(
+        "cellward run vmsmoke -- sh -c "
+        "'test ! -e /run/user/1000/astal && test ! -e /run/user/1000/quickshell'"
+    )
+    alice("systemctl --user stop w7keep fakeastal")
+    machine.fail("test -s /tmp/astal-got")
+    # Still in reach, by design of an ordinary zone: Wayfire's socket by its
+    # path in the shared /tmp, and KWin on the whole bus.
+    assert "WAYFIRE-REACHED" in out, out
+    machine.wait_until_succeeds("grep -q from-ordinary /tmp/wayfire-got")
     machine.wait_until_succeeds(f"grep -q loadScript {KWIN_GOT}", timeout=10)
     alice("cellward down vmsmoke")
 
 alice("systemctl --user stop fakewayfire fakeshell fakekwin")
-alice(f"rm -rf /run/user/1000/quickshell {KWIN_GOT}")
-machine.succeed("rm -f /tmp/wayfire-got /tmp/shell-got")
+alice(f"rm -rf /run/user/1000/quickshell /run/user/1000/astal {KWIN_GOT}")
+machine.succeed("rm -f /tmp/wayfire-got /tmp/shell-got /tmp/astal-got")
