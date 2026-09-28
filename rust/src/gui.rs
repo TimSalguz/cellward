@@ -73,15 +73,17 @@ pub fn main() -> ExitCode {
     };
 
     let code = match verb.as_bytes() {
-        b"add" => add(&tools),
-        b"remove" => remove(&tools),
-        b"profile-add" => profile_add(&tools),
-        b"profile-rm" => profile_rm(&tools),
-        b"settings" => settings(&tools),
-        b"forget" => forget(&tools),
+        // The cellward window's tab (`panel`), or the kdialog menus where
+        // it cannot open.
+        b"add" => panel_or(&tools, "zones", add),
+        b"remove" => panel_or(&tools, "zones", remove),
+        b"profile-add" => panel_or(&tools, "containers", profile_add),
+        b"profile-rm" => panel_or(&tools, "containers", profile_rm),
+        b"settings" => panel_or(&tools, "settings", settings),
+        b"forget" => panel_or(&tools, "settings", forget),
         b"containers" => containers(&tools),
         b"monitor" => monitor(&tools),
-        b"kill" => kill(&tools),
+        b"kill" => panel_or(&tools, "zones", kill),
         _ => {
             eprintln!("неизвестная команда: {}", verb.to_string_lossy());
             print!("{USAGE}");
@@ -625,6 +627,16 @@ fn panel(tools: &Tools, tab: &str) -> bool {
         .stdin(Stdio::null())
         .status();
     matches!(status, Ok(s) if s.code() != Some(3))
+}
+
+/// The panel's `tab`, or `old` — the kdialog menus of the same — where the
+/// window cannot open.
+fn panel_or(tools: &Tools, tab: &str, old: fn(&Tools) -> u8) -> u8 {
+    if panel(tools, tab) {
+        0
+    } else {
+        old(tools)
+    }
 }
 
 /// The network monitor: the panel's tab; with no window, said so.

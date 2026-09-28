@@ -1,7 +1,8 @@
-//! `vpn-zone-window panel --cellward <cellward> [--tab network|containers]
-//! [--dirs <kdialog>]` — the cellward window (2026-09-28): the network
-//! monitor and the containers, on the toolkit of the launch window, in
-//! place of the chains of kdialog menus `cellward-gui` was.
+//! `vpn-zone-window panel --cellward <cellward>
+//! [--tab network|containers|zones|settings] [--dirs <kdialog>]` — the
+//! cellward window (2026-09-28): the network monitor, the containers, the
+//! zones and the settings, on the toolkit of the launch window, in place of
+//! the chains of kdialog menus `cellward-gui` was.
 //!
 //! It keeps nothing of the project's and decides nothing: every second it
 //! reads `cellward _panel` again (the contract is `rust/src/panel.rs` of
@@ -9,7 +10,8 @@
 //! verbs — `container set … network`, `container stop`, `container grant`,
 //! `container revoke`, `container merge`, `container rm` —, which check and
 //! refuse as they do from a terminal; what they say is shown. `--dirs`: the
-//! kdialog it chooses a directory to grant with — a file dialog, not a menu.
+//! kdialog it chooses a directory to grant, or a zone's config, with — a
+//! file dialog, not a menu.
 //!
 //! **Сеть**: what each running container sends and receives now (the
 //! difference of two readings a second apart), since it came up, today and
@@ -17,7 +19,12 @@
 //! **Контейнеры**: the list, and for the one chosen its home, network and
 //! state, its network to change (live, with a word on what that breaks,
 //! when its programs run in another), its granted directories, and what
-//! `cellward explain` says of its permissions.
+//! `cellward explain` says of its permissions; a new container.
+//! **Зоны**: each zone up or down, its tunnel as the watch last found it,
+//! locked or not — to bring up, down, restart, check, lock, cut off, remove;
+//! a new zone from its config. **Настройки**: the network and the container
+//! a program is first offered, the launchers' mode, the screen's and the
+//! input's guard, and the programs pinned to a container, to forget.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -25,7 +32,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use iced::keyboard::{self, key, Key};
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Color, Element, Length, Size, Subscription, Task};
 
 /// A container, as `cellward _panel` says it.
@@ -45,6 +52,10 @@ struct Net {
     kind: String,
     up: bool,
     color: Option<Color>,
+    locked: bool,
+    /// What the tunnel watch last found: `alive`, `idle`, `dead`,
+    /// `suspect`, `unknown`; `-` not looked at.
+    tunnel: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -72,6 +83,10 @@ struct Data {
     instances: Vec<Inst>,
     today: Vec<Use>,
     month: Vec<Use>,
+    /// `(name, value, source)`.
+    settings: Vec<(String, String, String)>,
+    /// `(key, name, container)`.
+    pins: Vec<(String, String, String)>,
 }
 
 fn color_of(hex: &str) -> Option<Color> {
@@ -103,12 +118,23 @@ fn parse(text: &str) -> Data {
                     c.paths.push(((*path).to_owned(), num(until)));
                 }
             }
-            ["network", name, kind, up, color] => d.networks.push(Net {
+            ["network", name, kind, up, color, locked, tunnel] => d.networks.push(Net {
                 name: (*name).to_owned(),
                 kind: (*kind).to_owned(),
                 up: *up == "1",
                 color: color_of(color),
+                locked: *locked == "1",
+                tunnel: (*tunnel).to_owned(),
             }),
+            ["setting", name, value, source] => d.settings.push((
+                (*name).to_owned(),
+                (*value).to_owned(),
+                (*source).to_owned(),
+            )),
+            ["pin", key, name, to] => {
+                d.pins
+                    .push(((*key).to_owned(), (*name).to_owned(), (*to).to_owned()))
+            }
             ["instance", id, of, network, out, inb, since] => d.instances.push(Inst {
                 id: (*id).to_owned(),
                 container: (*of).to_owned(),
@@ -180,6 +206,46 @@ fn network_text(network: &str) -> String {
 enum Tab {
     Network,
     Containers,
+    Zones,
+    Settings,
+}
+
+const TABS: [Tab; 4] = [Tab::Network, Tab::Containers, Tab::Zones, Tab::Settings];
+
+/// The name a zone made of this config is offered: the file's without
+/// `.conf`, anything but letters, digits, `_` and `-` a dash —
+/// `gui::suggested_zone_name` of vpn-zones.
+fn zone_name_of(conf: &str) -> String {
+    let base = conf.rsplit('/').next().unwrap_or(conf);
+    let base = base.strip_suffix(".conf").unwrap_or(base);
+    base.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// A tunnel, for a person.
+fn tunnel_text(net: &Net) -> String {
+    let state = if net.up {
+        "поднята"
+    } else {
+        "опущена"
+    };
+    let tunnel = match net.tunnel.as_str() {
+        "alive" => " · туннель жив",
+        "idle" => " · туннель молчит (без трафика)",
+        "dead" => " · туннель не отвечает",
+        "suspect" => " · туннель под сомнением",
+        "unknown" => " · туннель ещё не проверен",
+        _ => "",
+    };
+    let lock = if net.locked { " · заперта" } else { "" };
+    format!("{state}{tunnel}{lock}")
 }
 
 /// What waits for the person's word before it is done.
@@ -196,6 +262,22 @@ enum Pending {
     /// And to the other's root certificates (`container merge --yes`).
     MergeCertificates(String, String),
     Remove,
+    /// A zone to cut off: its programs killed at once.
+    Kill(String),
+    /// A zone to remove, its config's copy with it.
+    RemoveZone(String),
+    /// A zone to make of this config, by this name.
+    AddZone {
+        conf: String,
+        name: String,
+    },
+    /// A container to make.
+    NewContainer {
+        name: String,
+        home: &'static str,
+    },
+    /// Every program's pin forgotten.
+    ForgetAll,
 }
 
 #[derive(Debug, Clone)]
@@ -222,10 +304,29 @@ enum Msg {
     Done(Result<String, String>),
     MergeDone(String, Result<String, String>),
     Escape,
-    /// ←/→: the other tab.
-    OtherTab,
+    /// ←/→: the tab before or after.
+    TabStep(i32),
     /// ↑/↓ in the containers: the one before or after the chosen one.
     Step(i32),
+    /// `cellward <verb> <zone>`: up, down, restart, check, lock, unlock.
+    ZoneDo(String, &'static str),
+    KillAsk(String),
+    KillGo,
+    RemoveZoneAsk(String),
+    RemoveZoneGo,
+    AddZoneAsk,
+    ConfChosen(Option<String>),
+    ZoneName(String),
+    AddZoneGo,
+    NewContainerAsk,
+    NewName(String),
+    NewHome(&'static str),
+    NewContainerGo,
+    /// `cellward <setting> <value>`.
+    SetSetting(&'static str, String),
+    Forget(String),
+    ForgetAllAsk,
+    ForgetAllGo,
 }
 
 struct Panel {
@@ -277,6 +378,52 @@ async fn cellward(path: PathBuf, args: Vec<String>) -> Result<String, String> {
     });
     over.await
         .unwrap_or_else(|_| Err("cellward не ответил".to_owned()))
+}
+
+/// `cellward` once for each command line, in turn, while each is done: what
+/// they said, or at the first refusal what it said.
+async fn cellward_all(path: PathBuf, all: Vec<Vec<String>>) -> Result<String, String> {
+    let mut said = Vec::new();
+    for args in all {
+        match cellward(path.clone(), args).await {
+            Ok(t) => said.push(t),
+            Err(t) => {
+                said.push(t);
+                return Err(said.join("\n").trim().to_owned());
+            }
+        }
+    }
+    Ok(said.join("\n").trim().to_owned())
+}
+
+/// A zone's config to make a zone of, chosen in the file dialog of `dirs`.
+fn choose_conf(dirs: PathBuf) -> Task<Msg> {
+    Task::perform(
+        async move {
+            let (done, over) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_owned());
+                let chosen = Command::new(&dirs)
+                    .args([
+                        "--title",
+                        "Конфиг VPN",
+                        "--getopenfilename",
+                        home.as_str(),
+                        "*.conf|Конфигурация WireGuard, AmneziaWG, OpenConnect (*.conf)",
+                    ])
+                    .stdin(Stdio::null())
+                    .stderr(Stdio::null())
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                    .filter(|d| !d.is_empty());
+                let _ = done.send(chosen);
+            });
+            over.await.ok().flatten()
+        },
+        Msg::ConfChosen,
+    )
 }
 
 /// `cellward _panel`: its lines — a line of anything else it says is
@@ -594,13 +741,106 @@ impl Panel {
                 }
                 Task::batch(tasks)
             }
-            Msg::OtherTab => {
-                self.tab = match self.tab {
-                    Tab::Network => Tab::Containers,
-                    Tab::Containers => Tab::Network,
-                };
+            Msg::TabStep(by) => {
+                if self.pending.is_some() {
+                    return Task::none();
+                }
+                let at = TABS.iter().position(|t| *t == self.tab).unwrap_or(0) as i32;
+                let next = (at + by).rem_euclid(TABS.len() as i32) as usize;
+                self.tab = TABS[next];
                 Task::none()
             }
+            Msg::ZoneDo(zone, verb) => self.act(vec![verb.to_owned(), zone]),
+            Msg::KillAsk(zone) => {
+                self.pending = Some(Pending::Kill(zone));
+                Task::none()
+            }
+            Msg::KillGo => match self.pending.clone() {
+                Some(Pending::Kill(zone)) => self.act(vec!["kill".into(), zone]),
+                _ => Task::none(),
+            },
+            Msg::RemoveZoneAsk(zone) => {
+                self.pending = Some(Pending::RemoveZone(zone));
+                Task::none()
+            }
+            Msg::RemoveZoneGo => match self.pending.clone() {
+                Some(Pending::RemoveZone(zone)) => self.act(vec!["rm".into(), zone]),
+                _ => Task::none(),
+            },
+            Msg::AddZoneAsk => match self.dirs.clone() {
+                Some(dirs) => choose_conf(dirs),
+                None => {
+                    self.said = Some(Err(
+                        "выбрать файл нечем — в терминале: cellward add <имя> <файл.conf>"
+                            .to_owned(),
+                    ));
+                    Task::none()
+                }
+            },
+            Msg::ConfChosen(Some(conf)) => {
+                let name = zone_name_of(&conf);
+                self.pending = Some(Pending::AddZone { conf, name });
+                Task::none()
+            }
+            Msg::ConfChosen(None) => Task::none(),
+            Msg::ZoneName(typed) => {
+                if let Some(Pending::AddZone { name, .. }) = &mut self.pending {
+                    *name = typed;
+                }
+                Task::none()
+            }
+            Msg::AddZoneGo => {
+                let Some(Pending::AddZone { conf, name }) = self.pending.clone() else {
+                    return Task::none();
+                };
+                self.busy = true;
+                self.said = None;
+                self.pending = None;
+                let all = vec![
+                    vec!["add".to_owned(), name.clone(), conf],
+                    vec!["up".to_owned(), name],
+                    vec!["sync".to_owned()],
+                ];
+                Task::perform(cellward_all(self.cellward.clone(), all), Msg::Done)
+            }
+            Msg::NewContainerAsk => {
+                self.pending = Some(Pending::NewContainer {
+                    name: String::new(),
+                    home: "private",
+                });
+                Task::none()
+            }
+            Msg::NewName(typed) => {
+                if let Some(Pending::NewContainer { name, .. }) = &mut self.pending {
+                    *name = typed;
+                }
+                Task::none()
+            }
+            Msg::NewHome(which) => {
+                if let Some(Pending::NewContainer { home, .. }) = &mut self.pending {
+                    *home = which;
+                }
+                Task::none()
+            }
+            Msg::NewContainerGo => match self.pending.clone() {
+                Some(Pending::NewContainer { name, home }) if !name.trim().is_empty() => {
+                    self.act(vec![
+                        "container".into(),
+                        "create".into(),
+                        name.trim().to_owned(),
+                        "--home".into(),
+                        home.to_owned(),
+                    ])
+                }
+                _ => Task::none(),
+            },
+            Msg::SetSetting(name, value) => self.act(vec![name.to_owned(), value]),
+            Msg::Forget(key) => self.act(vec!["forget".into(), key]),
+            Msg::ForgetAllAsk => {
+                self.pending = Some(Pending::ForgetAll);
+                Task::none()
+            }
+            Msg::ForgetAllGo => self.act(vec!["forget".into(), "--all".into()]),
             Msg::Step(by) => {
                 if self.tab != Tab::Containers || self.pending.is_some() {
                     return Task::none();
@@ -669,6 +909,8 @@ impl Panel {
         let top = row![
             tab("Сеть", Tab::Network),
             tab("Контейнеры", Tab::Containers),
+            tab("Зоны", Tab::Zones),
+            tab("Настройки", Tab::Settings),
             container(text(note).size(13)).width(Length::Fill),
             button(text("Закрыть  Esc").size(14))
                 .padding([6, 14])
@@ -680,8 +922,29 @@ impl Panel {
         let body = match self.tab {
             Tab::Network => self.view_network(),
             Tab::Containers => self.view_containers(),
+            Tab::Zones => self.view_zones(),
+            Tab::Settings => self.view_settings(),
         };
-        column![top, body].spacing(12).padding(16).into()
+        let mut page = column![top].spacing(12).padding(16);
+        // What the last action said, whichever tab it was in.
+        if let Some(said) = &self.said {
+            let (mark, what, color) = match said {
+                Ok(t) => ("✓", t.as_str(), Color::from_rgb8(0x2e, 0x9d, 0x55)),
+                Err(t) => ("⚠", t.as_str(), Color::from_rgb8(0xd0, 0x3a, 0x3a)),
+            };
+            let what = if what.is_empty() {
+                "готово"
+            } else {
+                what
+            };
+            page = page.push(
+                text(format!("{mark} {what}"))
+                    .size(13)
+                    .color(color)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            );
+        }
+        page.push(body).into()
     }
 
     fn use_rows<'a>(&'a self, title: &'a str, uses: &'a [Use]) -> Element<'a, Msg> {
@@ -790,7 +1053,19 @@ impl Panel {
                 .on_press(Msg::Select(c.name.clone())),
             );
         }
+        list = list.push(
+            button(text("Новый контейнер…").size(13))
+                .padding([4, 10])
+                .style(button::secondary)
+                .on_press_maybe((!self.busy).then_some(Msg::NewContainerAsk)),
+        );
         let left = container(scrollable(list).height(Length::Fill)).width(Length::FillPortion(2));
+        if let Some(block) = self.pending.as_ref().and_then(|p| self.view_general(p)) {
+            return row![left, container(block).width(Length::FillPortion(5))]
+                .spacing(16)
+                .height(Length::Fill)
+                .into();
+        }
         let right = container(scrollable(self.view_chosen()).height(Length::Fill))
             .width(Length::FillPortion(5));
         row![left, right].spacing(16).height(Length::Fill).into()
@@ -816,21 +1091,11 @@ impl Panel {
             })
             .size(14),
         );
-        if let Some(said) = &self.said {
-            let (mark, what, color) = match said {
-                Ok(t) => ("✓", t.as_str(), Color::from_rgb8(0x2e, 0x9d, 0x55)),
-                Err(t) => ("⚠", t.as_str(), Color::from_rgb8(0xd0, 0x3a, 0x3a)),
-            };
-            page = page.push(
-                text(format!("{mark} {what}"))
-                    .size(13)
-                    .color(color)
-                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-            );
-        }
         if let Some(pending) = &self.pending {
-            page = page.push(self.view_pending(c, pending));
-            return page.into();
+            if let Some(block) = self.view_pending(c, pending) {
+                page = page.push(block);
+                return page.into();
+            }
         }
         let idle = !self.busy;
         // Its network.
@@ -935,7 +1200,7 @@ impl Panel {
         page.into()
     }
 
-    fn view_pending<'a>(&'a self, c: &'a Cont, pending: &'a Pending) -> Element<'a, Msg> {
+    fn view_pending<'a>(&'a self, c: &'a Cont, pending: &'a Pending) -> Option<Element<'a, Msg>> {
         let cancel = button(text("Отмена  Esc").size(13))
             .padding([4, 10])
             .style(button::secondary)
@@ -1047,26 +1312,388 @@ impl Panel {
             ]
             .spacing(8)
             .into(),
+            _ => return None,
         };
-        container(block)
-            .padding(10)
-            .width(Length::Fill)
-            .style(container::bordered_box)
-            .into()
+        Some(
+            container(block)
+                .padding(10)
+                .width(Length::Fill)
+                .style(container::bordered_box)
+                .into(),
+        )
+    }
+
+    /// What waits for a word outside one container: a zone's cut or
+    /// removal, a new zone, a new container, every pin forgotten.
+    fn view_general<'a>(&'a self, pending: &'a Pending) -> Option<Element<'a, Msg>> {
+        let cancel = button(text("Отмена  Esc").size(13))
+            .padding([4, 10])
+            .style(button::secondary)
+            .on_press(Msg::Cancel);
+        let go = |label: &'static str, msg: Option<Msg>, danger: bool| {
+            button(text(label).size(13))
+                .padding([4, 10])
+                .style(if danger {
+                    button::danger
+                } else {
+                    button::primary
+                })
+                .on_press_maybe(msg)
+        };
+        let question = |t: String| {
+            text(t)
+                .size(14)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+        };
+        let block: Element<'a, Msg> = match pending {
+            Pending::Kill(zone) => column![
+                question(format!(
+                    "Оборвать зону «{zone}»? Все её программы — удалённый доступ, браузеры, \
+                     всё, что в ней запущено, — будут заморожены и убиты, несохранённое \
+                     пропадёт."
+                )),
+                row![go("Оборвать", Some(Msg::KillGo), true), cancel].spacing(6)
+            ]
+            .spacing(8)
+            .into(),
+            Pending::RemoveZone(zone) => column![
+                question(format!(
+                    "Удалить зону «{zone}»? Она будет остановлена и удалена вместе с копией \
+                     конфига — в нём приватный ключ. Программы, закреплённые за ней, снова \
+                     начнут спрашивать сеть."
+                )),
+                row![go("Удалить", Some(Msg::RemoveZoneGo), true), cancel].spacing(6)
+            ]
+            .spacing(8)
+            .into(),
+            Pending::AddZone { conf, name } => column![
+                question(format!(
+                    "Зона из «{conf}». Как её назвать? Имя попадёт в ярлыки и окна."
+                )),
+                text_input("имя зоны: буквы, цифры, _ и -", name)
+                    .on_input(Msg::ZoneName)
+                    .on_submit(Msg::AddZoneGo)
+                    .size(14)
+                    .padding(6),
+                row![
+                    go(
+                        "Создать и поднять",
+                        (!name.trim().is_empty()).then_some(Msg::AddZoneGo),
+                        false
+                    ),
+                    cancel
+                ]
+                .spacing(6)
+            ]
+            .spacing(8)
+            .into(),
+            Pending::NewContainer { name, home } => {
+                let kind = |label: &'static str, which: &'static str| {
+                    button(text(label).size(13))
+                        .padding([4, 10])
+                        .style(if *home == which {
+                            button::primary
+                        } else {
+                            button::secondary
+                        })
+                        .on_press(Msg::NewHome(which))
+                };
+                column![
+                    question(
+                        "Новый контейнер: имя и дом. Свой дом — пустой, программа не видит \
+                         настоящего; слой — видит настоящий дом, а пишет в свой слой; \
+                         настоящий дом — сам дом, со своими сетью и разрешениями."
+                            .to_owned()
+                    ),
+                    text_input("имя: буквы, цифры, дефис", name)
+                        .on_input(Msg::NewName)
+                        .on_submit(Msg::NewContainerGo)
+                        .size(14)
+                        .padding(6),
+                    row![
+                        kind("Свой дом", "private"),
+                        kind("Слой над домом", "layer"),
+                        kind("Настоящий дом", "main"),
+                    ]
+                    .spacing(6),
+                    row![
+                        go(
+                            "Создать",
+                            (!name.trim().is_empty()).then_some(Msg::NewContainerGo),
+                            false
+                        ),
+                        cancel
+                    ]
+                    .spacing(6)
+                ]
+                .spacing(8)
+                .into()
+            }
+            Pending::ForgetAll => column![
+                question(
+                    "Забыть контейнер у всех закреплённых программ? Он снова будет \
+                     спрашиваться при запуске; сети контейнеров останутся их."
+                        .to_owned()
+                ),
+                row![go("Забыть у всех", Some(Msg::ForgetAllGo), true), cancel].spacing(6)
+            ]
+            .spacing(8)
+            .into(),
+            _ => return None,
+        };
+        Some(
+            container(block)
+                .padding(10)
+                .width(Length::Fill)
+                .style(container::bordered_box)
+                .into(),
+        )
+    }
+
+    fn view_zones(&self) -> Element<'_, Msg> {
+        let mut page = column![].spacing(10);
+        if let Some(block) = self.pending.as_ref().and_then(|p| self.view_general(p)) {
+            page = page.push(block);
+        }
+        let idle = !self.busy && self.pending.is_none();
+        page = page.push(
+            button(text("Добавить зону из конфига…").size(13))
+                .padding([4, 10])
+                .style(button::secondary)
+                .on_press_maybe(idle.then_some(Msg::AddZoneAsk)),
+        );
+        let act = |label: &'static str, msg: Msg, danger: bool| {
+            button(text(label).size(13))
+                .padding([4, 10])
+                .style(if danger {
+                    button::danger
+                } else {
+                    button::secondary
+                })
+                .on_press_maybe(idle.then_some(msg))
+        };
+        for n in &self.data.networks {
+            if n.kind == "unconfined" {
+                continue;
+            }
+            let color = n.color.unwrap_or(Color::from_rgb8(0x88, 0x88, 0x88));
+            let title = if n.kind == "offline" {
+                "offline (без сети)".to_owned()
+            } else {
+                n.name.clone()
+            };
+            let state = if n.kind == "offline" {
+                if n.locked {
+                    "заперта".to_owned()
+                } else {
+                    String::new()
+                }
+            } else {
+                tunnel_text(n)
+            };
+            let mut buttons = row![].spacing(6);
+            if n.kind == "zone" {
+                if n.up {
+                    buttons = buttons
+                        .push(act("Опустить", Msg::ZoneDo(n.name.clone(), "down"), false))
+                        .push(act(
+                            "Перезапустить",
+                            Msg::ZoneDo(n.name.clone(), "restart"),
+                            false,
+                        ))
+                        .push(act(
+                            "Проверить туннель",
+                            Msg::ZoneDo(n.name.clone(), "check"),
+                            false,
+                        ));
+                } else {
+                    buttons =
+                        buttons.push(act("Поднять", Msg::ZoneDo(n.name.clone(), "up"), false));
+                }
+            }
+            buttons = buttons.push(if n.locked {
+                act("Отпереть", Msg::ZoneDo(n.name.clone(), "unlock"), false)
+            } else {
+                act("Запереть", Msg::ZoneDo(n.name.clone(), "lock"), false)
+            });
+            if n.up {
+                buttons = buttons.push(act("Оборвать…", Msg::KillAsk(n.name.clone()), true));
+            }
+            if n.kind == "zone" {
+                buttons = buttons.push(act("Удалить…", Msg::RemoveZoneAsk(n.name.clone()), true));
+            }
+            page = page.push(
+                column![
+                    row![
+                        text("●").size(14).color(color),
+                        text(title).size(15).width(Length::Fixed(220.0)),
+                        text(state).size(13),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                    buttons,
+                ]
+                .spacing(4),
+            );
+        }
+        page = page.push(
+            text(
+                "Запертая зона не выпускает свои программы в другие сети. Оборвать — убить все \
+                 программы зоны сразу и опустить её.",
+            )
+            .size(12),
+        );
+        scrollable(page).height(Length::Fill).into()
+    }
+
+    fn setting(&self, name: &str) -> (String, String) {
+        self.data
+            .settings
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, v, s)| (v.clone(), s.clone()))
+            .unwrap_or_default()
+    }
+
+    /// One setting's choices, the current one marked; one set in Nix is
+    /// changed there — said, and not offered.
+    fn setting_row<'a>(
+        &'a self,
+        title: &'a str,
+        name: &'static str,
+        choices: Vec<(String, String)>,
+    ) -> Element<'a, Msg> {
+        let (value, source) = self.setting(name);
+        let declared = source == "nix";
+        let idle = !self.busy && self.pending.is_none() && !declared;
+        let mut buttons = column![].spacing(4);
+        for (tag, label) in choices {
+            let current = tag == value;
+            buttons = buttons.push(
+                button(text(label).size(13))
+                    .padding([4, 10])
+                    .style(if current {
+                        button::primary
+                    } else {
+                        button::secondary
+                    })
+                    .on_press_maybe((idle && !current).then(|| Msg::SetSetting(name, tag.clone()))),
+            );
+        }
+        let mut block = column![text(title).size(16)].spacing(6);
+        if declared {
+            block = block.push(text("задано в Nix — меняется там").size(12));
+        }
+        block.push(buttons).into()
+    }
+
+    fn view_settings(&self) -> Element<'_, Msg> {
+        let mut page = column![].spacing(16);
+        if let Some(block) = self.pending.as_ref().and_then(|p| self.view_general(p)) {
+            page = page.push(block);
+        }
+        let mut nets = vec![
+            (
+                "offline".to_owned(),
+                "Без сети — безопасно для незнакомой программы".to_owned(),
+            ),
+            (
+                "unconfined".to_owned(),
+                "Без ограничений (сеть хоста)".to_owned(),
+            ),
+        ];
+        for n in self.data.networks.iter().filter(|n| n.kind == "zone") {
+            nets.push((n.name.clone(), format!("VPN: {}", n.name)));
+        }
+        page = page.push(self.setting_row(
+            "Сеть, которую предлагать программе, запущенной впервые",
+            "default",
+            nets,
+        ));
+        let mut homes = vec![
+            ("ask".to_owned(), "Спрашивать каждый раз".to_owned()),
+            ("main".to_owned(), "Всегда основной дом".to_owned()),
+            (
+                "own".to_owned(),
+                "У каждой программы свой контейнер".to_owned(),
+            ),
+        ];
+        for c in &self.data.containers {
+            homes.push((c.name.clone(), format!("Всегда «{}»", c.name)));
+        }
+        page = page.push(self.setting_row("Контейнер по умолчанию", "default-profile", homes));
+        let (mode, _) = self.setting("mode");
+        let mut modes = vec![
+            (
+                "picker".to_owned(),
+                "Один ярлык, спрашивает сеть при запуске".to_owned(),
+            ),
+            ("off".to_owned(), "Не трогать ярлыки".to_owned()),
+        ];
+        if mode == "per-zone" || mode == "both" {
+            modes.push((mode.clone(), format!("{mode} (устарел, будет убран)")));
+        }
+        page = page.push(self.setting_row("Ярлыки программ", "mode", modes));
+        page = page.push(self.setting_row(
+            "Экран и ввод: отбирать ли у программ захват экрана, чтение буфера в фоне и \
+             эмуляцию ввода",
+            "wayland-sandbox",
+            vec![
+                (
+                    "on".to_owned(),
+                    "Отбирать — программа видит только свои окна".to_owned(),
+                ),
+                ("off".to_owned(), "Не отбирать".to_owned()),
+            ],
+        ));
+        let idle = !self.busy && self.pending.is_none();
+        let mut pins = column![text("Закреплённые программы").size(16)].spacing(4);
+        if self.data.pins.is_empty() {
+            pins = pins.push(text("нет — контейнер спрашивается при каждом запуске").size(13));
+        }
+        for (key, name, to) in &self.data.pins {
+            let to = if to.is_empty() { "—" } else { to.as_str() };
+            pins = pins.push(
+                row![
+                    text(format!("{name} → {to}")).size(13).width(Length::Fill),
+                    button(text("Забыть").size(13))
+                        .padding([3, 8])
+                        .style(button::secondary)
+                        .on_press_maybe(idle.then(|| Msg::Forget(key.clone()))),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        if !self.data.pins.is_empty() {
+            pins = pins.push(
+                button(text("Забыть у всех…").size(13))
+                    .padding([4, 10])
+                    .style(button::danger)
+                    .on_press_maybe(idle.then_some(Msg::ForgetAllAsk)),
+            );
+        }
+        page = page.push(pins);
+        scrollable(page).height(Length::Fill).into()
     }
 
     fn subscription(&self) -> Subscription<Msg> {
-        iced::event::listen_with(|event, _status, _window| match event {
+        iced::event::listen_with(|event, status, _window| match event {
             iced::Event::Keyboard(keyboard::Event::KeyPressed {
                 key: Key::Named(named),
                 ..
-            }) => match named {
-                key::Named::Escape => Some(Msg::Escape),
-                key::Named::ArrowLeft | key::Named::ArrowRight => Some(Msg::OtherTab),
-                key::Named::ArrowUp => Some(Msg::Step(-1)),
-                key::Named::ArrowDown => Some(Msg::Step(1)),
-                _ => None,
-            },
+            }) => {
+                // An arrow a field took (a name being typed) is the field's.
+                let free = status == iced::event::Status::Ignored;
+                match named {
+                    key::Named::Escape => Some(Msg::Escape),
+                    key::Named::ArrowLeft if free => Some(Msg::TabStep(-1)),
+                    key::Named::ArrowRight if free => Some(Msg::TabStep(1)),
+                    key::Named::ArrowUp if free => Some(Msg::Step(-1)),
+                    key::Named::ArrowDown if free => Some(Msg::Step(1)),
+                    _ => None,
+                }
+            }
             _ => None,
         })
     }
@@ -1084,6 +1711,8 @@ pub fn run(args: &[String]) -> iced::Result {
             "--cellward" => cellward = Some(PathBuf::from(value)),
             "--dirs" if !value.is_empty() => dirs = Some(PathBuf::from(value)),
             "--tab" if value == "containers" => tab = Tab::Containers,
+            "--tab" if value == "zones" => tab = Tab::Zones,
+            "--tab" if value == "settings" => tab = Tab::Settings,
             _ => {}
         }
     }
@@ -1124,8 +1753,11 @@ mod tests {
         path\twork\t/home/a/share\t0\n\
         path\tnobody\t/x\t0\n\
         container\tbank\tprivate\task\t#808080\n\
-        network\tnl\tzone\t1\t#3366ff\n\
-        network\toffline\toffline\t1\t#808080\n\
+        network\tnl\tzone\t1\t#3366ff\t0\talive\n\
+        network\toffline\toffline\t1\t#808080\t1\t-\n\
+        network\told\tzone\t1\t#808080\n\
+        setting\tdefault\toffline\tdefault\n\
+        pin\tfirefox\tFirefox\twork\n\
         instance\twork\twork\tnl\t1500\t3000\t1790000000\n\
         today\twork\tnl\t1500\t3000\n\
         month\twork\tnl\t9000\t12000\n\
@@ -1142,8 +1774,29 @@ mod tests {
             d.containers[0].color,
             Some(Color::from_rgb8(0x33, 0x66, 0xff))
         );
+        // A network line of the old shape is skipped, not misread.
         assert_eq!(d.networks.len(), 2);
-        assert!(d.networks[0].up);
+        assert!(d.networks[0].up && !d.networks[0].locked);
+        assert!(d.networks[1].locked);
+        assert_eq!(tunnel_text(&d.networks[0]), "поднята · туннель жив");
+        assert_eq!(
+            d.settings,
+            vec![(
+                "default".to_owned(),
+                "offline".to_owned(),
+                "default".to_owned()
+            )]
+        );
+        assert_eq!(
+            d.pins,
+            vec![(
+                "firefox".to_owned(),
+                "Firefox".to_owned(),
+                "work".to_owned()
+            )]
+        );
+        assert_eq!(zone_name_of("/home/a/nl de.conf"), "nl-de");
+        assert_eq!(zone_name_of("x"), "x");
         assert_eq!(d.instances[0].inb, 3000);
         assert_eq!(d.today.len(), 1);
         assert_eq!(d.month[0].out, 9000);

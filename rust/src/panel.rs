@@ -11,11 +11,17 @@
 //! ```text
 //! container⇥<name>⇥<home: private|layer|main>⇥<network|ask>⇥<#rrggbb>
 //! path⇥<container>⇥<path>⇥<until: unix seconds, 0 for ever>
-//! network⇥<name>⇥<kind: zone|offline|unconfined>⇥<up: 0|1>⇥<#rrggbb>
+//! network⇥<name>⇥<kind: zone|offline|unconfined>⇥<up: 0|1>⇥<#rrggbb>⇥<locked: 0|1>⇥<tunnel>
 //! instance⇥<id>⇥<container|->⇥<network>⇥<out bytes>⇥<in bytes>⇥<since>
 //! today⇥<container>⇥<network>⇥<out bytes>⇥<in bytes>
 //! month⇥<container>⇥<network>⇥<out bytes>⇥<in bytes>
+//! setting⇥<default|default-profile|mode|wayland-sandbox>⇥<value>⇥<nix|local|default>
+//! pin⇥<program's key>⇥<its name>⇥<the container it goes to, or empty>
 //! ```
+//!
+//! `<tunnel>`: what the tunnel watch last found (`crate::watch`): `alive`,
+//! `idle`, `dead`, `suspect`, `unknown`, or `-` — not looked at (a zone that
+//! is down, `offline`, `unconfined`).
 //!
 //! The counts are `crate::traffic`'s: an instance's since it came up, and
 //! the summaries of today and of the last 30 days.
@@ -86,6 +92,27 @@ pub fn data(tools: &Tools) -> String {
             line(&["path", &c.name, &path, &until.to_string()]);
         }
     }
+    let locked = |zone: &str| {
+        if tools
+            .state
+            .join(zone)
+            .join(crate::launch::NO_ESCAPE)
+            .exists()
+        {
+            "1"
+        } else {
+            "0"
+        }
+    };
+    let tunnel = |zone: &str, up: bool| {
+        if !up {
+            return "-";
+        }
+        std::fs::read_to_string(tools.state.join(crate::watch::WATCH_DIR).join(zone))
+            .ok()
+            .and_then(|t| crate::watch::parse_memory(&t))
+            .map_or("unknown", |(_, v)| v.as_str())
+    };
     for zone in zones(&tools.state) {
         let up = crate::cli::zone_pid(&tools.state, OsStr::new(&zone)).is_some();
         line(&[
@@ -94,6 +121,8 @@ pub fn data(tools: &Tools) -> String {
             "zone",
             if up { "1" } else { "0" },
             &color(&zone),
+            locked(&zone),
+            tunnel(&zone, up),
         ]);
     }
     line(&[
@@ -102,6 +131,8 @@ pub fn data(tools: &Tools) -> String {
         "offline",
         "1",
         &color(crate::launch::OFFLINE),
+        locked(crate::launch::OFFLINE),
+        "-",
     ]);
     line(&[
         "network",
@@ -109,6 +140,8 @@ pub fn data(tools: &Tools) -> String {
         "unconfined",
         "1",
         &color(crate::launch::UNCONFINED),
+        "0",
+        "-",
     ]);
     for i in crate::instance::running(&tools.state) {
         let container = crate::instance::container_of(&i.id)
@@ -131,6 +164,23 @@ pub fn data(tools: &Tools) -> String {
         for ((who, net), (o, i)) in crate::traffic::used_over(&tools.state, days) {
             line(&[kind, &who, &net, &o.to_string(), &i.to_string()]);
         }
+    }
+    for (name, fallback) in [
+        ("default", "offline"),
+        ("default-profile", "ask"),
+        ("mode", "picker"),
+        ("wayland-sandbox", "on"),
+    ] {
+        let (value, source) = crate::cli::setting(tools, name)
+            .unwrap_or_else(|| (fallback.to_owned(), crate::container::Source::Default));
+        line(&["setting", name, &value, source.as_str()]);
+    }
+    let profile_pins = tools.state.join(".pinnedprofile");
+    for key in crate::gui::pinned_keys(&tools.state.join(".pinned"), &profile_pins) {
+        let label = crate::cli::read_setting(&tools.state.join(".labels").join(&key))
+            .unwrap_or_else(|| key.clone());
+        let to = crate::cli::read_setting(&profile_pins.join(&key)).unwrap_or_default();
+        line(&["pin", &key, &label, &to]);
     }
     out
 }

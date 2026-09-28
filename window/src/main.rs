@@ -836,7 +836,12 @@ fn main() -> iced::Result {
     // monitor, which `cellward-gui` opens.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("panel") {
-        return panel::run(&args[1..]);
+        // One that cannot be shown says so as the launch window does: the
+        // caller asks the old way.
+        return panel::run(&args[1..]).map_err(|e| {
+            eprintln!("vpn-zone-window panel: {e}");
+            std::process::exit(EXIT_NOT_SHOWN)
+        });
     }
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {

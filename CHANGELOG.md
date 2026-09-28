@@ -20,7 +20,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `cellward _panel` every second and acts through `cellward`'s own verbs,
   which refuse as they do in a terminal; ←/→ switch the tab, ↑/↓ choose a
   container, Esc closes. Where the window cannot open, the kdialog menus
-  are still there.
+  are still there. **Зоны:** each zone up or down, its tunnel as the watch
+  last found it, locked or not — bring up, down, restart, check, lock,
+  cut off, remove; a new zone from its config. **Настройки:** the network
+  and the container a new program is offered, the launchers' mode, the
+  screen and input guard, and the pinned programs to forget. Every entry
+  of `cellward-gui` (add, remove, kill, create or remove a container,
+  settings, forget) now opens its tab of the window.
 
 ### Added
 - **What each container sends and receives: `cellward traffic`**
