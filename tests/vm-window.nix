@@ -126,6 +126,15 @@ let
           machine.sleep(1)
           alice(f"WAYLAND_DISPLAY={display} grim /tmp/launch-window-keys.png")
           machine.copy_from_vm("/tmp/launch-window-keys.png", "")
+          # A new container (the seventh row, «Новый контейнер со своим
+          # домом…»): its name is typed beside the buttons, and the lists
+          # keep the height the window fitted itself to.
+          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 7")
+          machine.sleep(1)
+          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 proba")
+          machine.sleep(1)
+          alice(f"WAYLAND_DISPLAY={display} grim /tmp/launch-window-name.png")
+          machine.copy_from_vm("/tmp/launch-window-name.png", "")
           alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
           machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=15)
           machine.sleep(1)
