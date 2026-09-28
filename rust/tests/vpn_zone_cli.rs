@@ -811,7 +811,7 @@ fn a_launch_into_a_zone_runs_in_its_containers_instance() {
         stderr(&out)
     );
     assert!(
-        stderr(&out).contains("cellward down nl; cellward up nl"),
+        stderr(&out).contains("cellward restart nl"),
         "{}",
         stderr(&out)
     );
@@ -2436,4 +2436,15 @@ fn the_tray_badge_is_a_setting_nix_wins() {
         json.contains("\"tray_badge\":{\"value\":\"dot\",\"source\":\"default\"}"),
         "{json}"
     );
+}
+
+#[test]
+fn restart_needs_a_zone_by_its_name() {
+    let home = Home::new("restart-name");
+    let out = home.run(&["restart"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("нужно имя"), "{}", stderr(&out));
+    let out = home.run(&["restart", "-bad"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("не имя зоны"), "{}", stderr(&out));
 }

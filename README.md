@@ -248,7 +248,7 @@ programs.cellward.screencast.calls = "yes";      # yes | no | ask
 `nixos-rebuild`) leaves a running zone, the broker's socket and a system
 zone's tunnel as they are: the programs in the zone keep their network, and
 new launches already go through the new `cellward`. A zone takes the new
-build when it is restarted (`cellward down <zone>; cellward up <zone>`), at a
+build when it is restarted (`cellward restart <zone>`), at a
 moment that suits you — until then the holder's own fixes do not apply to it.
 `cellward status --json` (`"build": "current" | "previous"`) and `cellward
 doctor` show which zones are left on the previous build, and the tunnel watch

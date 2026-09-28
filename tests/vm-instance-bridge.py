@@ -247,7 +247,7 @@ with subtest("a zone of a previous build (no bridge): refused, and the person to
         )
     )
     assert code != 0 and "не везёт контейнеры" in out, out
-    assert "cellward down vmreal; cellward up vmreal" in out, out
+    assert "cellward restart vmreal" in out, out
     zone_ns = machine.succeed(
         f"readlink /proc/$(cat {STATE}/vmreal/zone.pid)/ns/net"
     ).strip()

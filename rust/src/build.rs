@@ -120,8 +120,9 @@ pub fn notice(zones: &[String]) -> (String, String) {
         .join(", ");
     let body = format!(
         "{list}: обновление их не тронуло — сеть у программ не прервалась. Новая сборка \
-         и её исправления придут в зону, когда вы её перезапустите: cellward down <зона>; \
-         cellward up <зона> — в удобный момент, программы зоны на это время потеряют сеть."
+         и её исправления придут в зону, когда вы её перезапустите: cellward restart <зона> \
+         — в удобный момент; контейнеры зоны на это время потеряют сеть и подключатся \
+         снова."
     );
     (title, body)
 }
@@ -161,7 +162,7 @@ mod tests {
     fn the_notice_names_the_zones_and_how_to_restart() {
         let (title, body) = notice(&["nl".to_owned()]);
         assert!(title.contains("«nl»"), "{title}");
-        assert!(body.contains("cellward down <зона>"), "{body}");
+        assert!(body.contains("cellward restart <зона>"), "{body}");
         let (title, body) = notice(&["a".to_owned(), "b".to_owned()]);
         assert!(title.starts_with("Зоны"), "{title}");
         assert!(body.starts_with("«a», «b»"), "{body}");

@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **`cellward restart <zone>`**: down, then up — how a zone an update left on
+  the previous build takes the new one, and the one word the update notice,
+  the launch's refusal for such a zone and a configurator's button name. Its
+  containers are cut for the moment and attached again as it comes back,
+  their programs running on; what a previous build launched into the zone's
+  own namespaces loses it. A zone that is down is just brought up.
 - **A VM test of moving files between two machines, with zones and without**
   (2026-09-28, vm87, `tests/vm-promise-transfer.py`; README «Moving files
   between machines»; `docs/THREAT-MODEL.md` N3 and a new row N22). A random

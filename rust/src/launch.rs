@@ -1629,8 +1629,7 @@ pub fn no_bridge_refusal(state: &Path, zone: &OsStr) -> Option<String> {
     Some(format!(
         "зона {zone} не везёт контейнеры: она поднята прошлой сборкой или её мост не \
          открылся (journalctl --user -u 'vpn-zone@{zone}.service'). В пространство самой \
-         зоны программы больше не запускаются — перезапусти её: cellward down {zone}; \
-         cellward up {zone}"
+         зоны программы больше не запускаются — перезапусти её: cellward restart {zone}"
     ))
 }
 
@@ -3523,7 +3522,7 @@ mod tests {
         fs::create_dir_all(&zone).unwrap();
         let why = no_bridge_refusal(&state, OsStr::new("nl")).unwrap();
         assert!(why.contains("не везёт контейнеры"), "{why}");
-        assert!(why.contains("cellward down nl; cellward up nl"), "{why}");
+        assert!(why.contains("cellward restart nl"), "{why}");
         // A file of that name is no bridge.
         fs::write(zone.join(crate::bridge::SOCKET), "").unwrap();
         assert!(no_bridge_refusal(&state, OsStr::new("nl")).is_some());
