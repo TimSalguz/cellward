@@ -335,9 +335,11 @@ let
   # A D-Bus-activatable program (docs/CONTAINERS.md §5.3): a launcher entry
   # with DBusActivatable=true and the session service file that starts it.
   # Started, it records the network it sees and exits — it never takes its
-  # name, so the activation itself times out, which is fine.
+  # name, so the activation itself times out, which is fine. In the home:
+  # offline tolerates no host session (step 1 of the permission model,
+  # 2026-09-28), so its instance is hermetic, with a /tmp of its own.
   vmActivatableRun = pkgs.writeShellScript "vm-activatable" ''
-    ${pkgs.iproute2}/bin/ip -o link show > /tmp/vmactivated
+    ${pkgs.iproute2}/bin/ip -o link show > "$HOME/vmactivated"
   '';
   vmActivatable = pkgs.runCommand "vpn-zones-vm-activatable" { } ''
     mkdir -p "$out/share/applications" "$out/share/dbus-1/services"
@@ -1119,7 +1121,7 @@ let
           alice("cellward container set vmmainoff network offline")
           alice(f"mkdir -p {STATE}/.pinnedprofile")
           alice(f"printf vmmainoff > {STATE}/.pinnedprofile/{APP}")
-          machine.succeed("rm -f /tmp/vmactivated")
+          machine.succeed("rm -f /home/alice/vmactivated")
           alice("cellward sync")
           out = alice(f"cat /home/alice/.local/share/dbus-1/services/{APP}.service")
           assert f"vpn-zone-pick --id {APP} --" in out, out
@@ -1128,8 +1130,8 @@ let
               f"${pkgs.glib.bin}/bin/gdbus call --session --timeout 5 --dest {APP} "
               f"--object-path /org/vpnzones/VmActivatable --method org.freedesktop.DBus.Peer.Ping || true"
           )
-          machine.wait_until_succeeds("test -s /tmp/vmactivated", timeout=60)
-          out = machine.succeed("cat /tmp/vmactivated")
+          machine.wait_until_succeeds("test -s /home/alice/vmactivated", timeout=60)
+          out = machine.succeed("cat /home/alice/vmactivated")
           lines = [l for l in out.strip().splitlines() if ": " in l]
           assert len(lines) == 1 and ": lo:" in lines[0], f"activation ran outside the zone: {out}"
           alice("cellward mode off")
