@@ -609,7 +609,7 @@ programs.cellward = {
     apps = [ "firefox" "org.telegram.desktop" ];
     permissions = {
       paths = [ ];                       # напр. [ "~/.wine" ] — только своему дому
-      x11 = false;
+      x11 = null;                        # null — как у сети; false — и от X-сервера зоны отказ
     };
     trust = {                            # CERTIFICATES.ru.md
       certificates = [ ./certs/some-root-ca.pem ];
@@ -715,7 +715,7 @@ programs.cellward = {
       "trust": [ { "sha256": "…", "subject": "CN=…",
                    "not_after": "2030-01-01T00:00:00Z", "source": "nix" } ],
       "running": [ { "app": "firefox", "pid": 1234, "network": "nl" } ],
-      "x11": { "value": false, "source": "default" },
+      "x11": { "value": null, "source": "default" },
       "frame_color": { "value": null, "source": "default" },
       "microphone": { "value": null, "source": "default" },
       "screencast": { "value": null, "source": "default" },
@@ -815,6 +815,15 @@ host_files_writable, audio_manager}`, с которыми экземпляр п�
 лежит (и у `unconfined` и `offline`). Состояние в
 `~/.local/state/vpn-zones/.instances/` — экземпляров, по ключу, а не зона:
 читатель зон его пропускает (каталог с точкой).
+
+**Свой X-сервер контейнера** (2026-09-28): `containers[].x11` —
+`{value, source}`, где `value` — `true`, `false` или `null`: своего нет,
+тогда — сети (`networks[].x11`); `false` отказывается и от X-сервера сети.
+До 2026-09-28 у контейнера без своего слова было `false` с источником
+`default`, а X-сервер был «контейнера ИЛИ зоны»; `null` читатель понимает
+как «как у сети». Nix: `containers.<имя>.permissions.x11` (`nullOr bool`,
+по умолчанию `null`); локально `cellward container set <к> x11
+default|on|off`.
 
 **Свои разрешения уровня зоны у контейнера** (этап 5 контейнерного
 дизайна, 2026-09-28): `containers[].hermetic`, `nix_daemon`,
