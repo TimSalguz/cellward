@@ -573,6 +573,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   контейнер (слой над домом)». A status bar's style or a script that
   matched the old words (`focused --bar`, the `VPN_ZONE_DRYRUN` line, now
   «зона …, контейнер …:») needs the new ones.
+- **The launch window and the window menu fit what they show** (2026-09-28).
+  The window opens at a guess and, once its lists are laid out, asks once
+  for the height that shows them whole — measured, no taller than 90% of its
+  screen: no empty band between the menu's status line and its entries, none
+  under a short list, no scroll bar on a list that would fit. The container
+  column is wider than the network column; the name of a new container is
+  typed beside the buttons that start it, and a question's «Секунду…» stands
+  beside its close button, so nothing changes the height afterwards. Keys
+  work as before.
 - **Nothing is launched into a zone's own namespaces** (2026-09-28, stage
   5 of the container-first model; `docs/LEAK-MODEL.md` §30). A zone is
   transport: every launch into a network runs in its container's instance.
