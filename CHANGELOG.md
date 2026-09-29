@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **The main-home guard** (2026-09-29, the owner, with zen): a copy of the
+  program in a container with a home of its own no longer refuses a launch
+  of the real home's — it runs its own profile; and two launches answered at
+  once no longer both pass: each notes where it goes under one lock per
+  program (`<state>/.main-home/`), before its zone and instance come up, and
+  the next one sees the note.
+
 ### Security
 - **The Wayland proxy in namespaces of its own** (2026-09-29, the owner:
   the proxy reads the program's messages and is to be isolated better): a
