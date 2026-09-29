@@ -1246,58 +1246,36 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
 
     // The real home in a pid namespace of the instance's own (stage 3,
     // `docs/THREAT-MODEL.md` X4): an application of the main home that runs
-    // elsewhere already is not started beside it (`main_home_rival`).
+    // elsewhere already is not started beside it — into an instance while it
+    // runs outside (`main_home_rival`), and the other way round (review
+    // 2026-09-28): the main home unconfined is a host process, and the copy
+    // of the application in an instance of the real home keeps a lock that
+    // names a pid of the instance's namespace — on the host nobody, or
+    // somebody else: Chromium takes it for a stale lock, deletes it and
+    // opens the profile the other copy has open (`main_home_in_instance`).
+    // Only the host's side of cellward can see both; a program started on
+    // the host past cellward is not seen here (LEAK-MODEL §28). Under one
+    // lock per program, and noted before the zone and the instance come up
+    // (`main_home_guard`): two launches answered at once both passed the
+    // look while neither program ran yet (owner, 2026-09-29).
     let main_home = matches!(
         (&selection.sandbox, &selection.container),
         (Sandbox::None, Container::Main | Container::MainNamed(_))
     );
-    if let Some(id) = instance_id
-        .as_deref()
+    // Kept until the `exec` — the note lives on with the pid — or taken back
+    // by the launch that gives up on the way.
+    let _main_home_note = match program_word(&selection.cmd)
         .filter(|_| main_home && appid_env.is_some() && !dryrun)
     {
-        if let Some(word) = program_word(&selection.cmd) {
-            if let Some(pid) = main_home_rival(&tools.state, id, word) {
-                refuse(
-                    tools,
-                    &format!(
-                        "«{}» уже работает с настоящим домом вне контейнера «{id}» (pid {pid}). \
-                         У контейнера своё пространство процессов, и замок профиля, которым \
-                         программа вроде браузера не даёт открыть его дважды, сквозь него не \
-                         виден: второй процесс открыл бы тот же профиль. Закрой ту программу — \
-                         или запусти эту в контейнере со своим домом",
-                        basename(word).to_string_lossy()
-                    ),
-                );
+        None => None,
+        Some(word) => match main_home_guard(tools, instance_id.as_deref(), &zone_name, word) {
+            Ok(note) => note,
+            Err(why) => {
+                refuse(tools, &why);
                 return 1;
             }
-        }
-    }
-    // And the other way round (review 2026-09-28): the main home unconfined
-    // is a host process, and the copy of the application in an instance of
-    // the real home keeps a lock that names a pid of the instance's
-    // namespace — on the host nobody, or somebody else: Chromium takes it for
-    // a stale lock, deletes it and opens the profile the other copy has open
-    // (`main_home_in_instance`). Only the host's side of cellward can see
-    // both; a program started on the host past cellward is not seen here
-    // (LEAK-MODEL §28).
-    if instance_id.is_none() && main_home && appid_env.is_some() && !dryrun {
-        if let Some(word) = program_word(&selection.cmd) {
-            if let Some((pid, id, network)) = main_home_in_instance(tools, word) {
-                refuse(
-                    tools,
-                    &format!(
-                        "«{}» уже работает с настоящим домом в контейнере «{id}» (pid {pid}). \
-                         У контейнера своё пространство процессов, и замок профиля, которым \
-                         программа вроде браузера не даёт открыть его дважды, с хоста не \
-                         виден: эта программа открыла бы тот же профиль. Закрой ту программу — \
-                         или запусти эту там же, в сети «{network}»",
-                        basename(word).to_string_lossy()
-                    ),
-                );
-                return 1;
-            }
-        }
-    }
+        },
+    };
 
     // --- 5. THE ZONE AND THE INSTANCE ---
     let network = match &instance_id {
@@ -2670,25 +2648,277 @@ pub fn rival(
         .map(|s| s.pid)
 }
 
+/// Both main-home guards for a launch of the real home's copy of the
+/// program `word` into `place` (an instance's id; `None` — unconfined, on
+/// the host) in network `network`: the refusal's words, or this launch's
+/// note ([`MainHomeNote`]) — `None` when it could not be written, which only
+/// takes the race back (the look was made).
+///
+/// Under one lock per program ([`MAIN_HOME_DIR`]), from the look until the
+/// note is written: a launch looks at the processes AND at the notes of
+/// launches still on their way — their zone and instance coming up, the
+/// program not running yet —, so two launches answered at once no longer
+/// both pass (owner, 2026-09-29: two pickers, one network, two containers,
+/// «Да» in both). The lock is let go before a refusal is shown, and a
+/// launch never waits for more than another's look and note.
+fn main_home_guard(
+    tools: &Tools,
+    place: Option<&str>,
+    network: &str,
+    word: &OsStr,
+) -> Result<Option<MainHomeNote>, String> {
+    let name = main_home_name(word);
+    let program = basename(word).to_string_lossy().into_owned();
+    let me = std::process::id() as i32;
+    let lock = if name.is_empty() {
+        None
+    } else {
+        match main_home_lock(&tools.state, &name) {
+            Ok(lock) => Some(lock),
+            Err(e) => {
+                eprintln!("замок запусков с настоящим домом: {e}");
+                None
+            }
+        }
+    };
+    let notes = if lock.is_some() {
+        main_home_notes(&tools.state, &name, me)
+    } else {
+        Vec::new()
+    };
+    match place {
+        Some(id) => {
+            let seen =
+                main_home_rival(tools, id, word).or_else(|| noted_rival(&notes, id).map(|n| n.pid));
+            if let Some(pid) = seen {
+                return Err(format!(
+                    "«{program}» уже работает с настоящим домом вне контейнера «{id}» (pid {pid}). \
+                     У контейнера своё пространство процессов, и замок профиля, которым \
+                     программа вроде браузера не даёт открыть его дважды, сквозь него не \
+                     виден: второй процесс открыл бы тот же профиль. Закрой ту программу — \
+                     или запусти эту в контейнере со своим домом"
+                ));
+            }
+        }
+        None => {
+            // A noted launch into an instance whose pid namespace is ours
+            // (one of an earlier build) sees the host's locks: no rival. One
+            // not up yet is on its way, from this build: its own.
+            let noted = || {
+                notes.iter().find(|n| {
+                    !n.place.is_empty()
+                        && crate::instance::up(&tools.state, &n.place)
+                            .is_none_or(crate::instance::own_pid_namespace)
+                })
+            };
+            let seen = main_home_in_instance(tools, word)
+                .or_else(|| noted().map(|n| (n.pid, n.place.clone(), n.network.clone())));
+            if let Some((pid, id, network)) = seen {
+                return Err(format!(
+                    "«{program}» уже работает с настоящим домом в контейнере «{id}» (pid {pid}). \
+                     У контейнера своё пространство процессов, и замок профиля, которым \
+                     программа вроде браузера не даёт открыть его дважды, с хоста не \
+                     виден: эта программа открыла бы тот же профиль. Закрой ту программу — \
+                     или запусти эту там же, в сети «{network}»"
+                ));
+            }
+        }
+    }
+    if lock.is_none() {
+        return Ok(None);
+    }
+    match write_main_home_note(&tools.state, &name, me, place.unwrap_or_default(), network) {
+        Ok(note) => Ok(Some(note)),
+        Err(e) => {
+            eprintln!("отметка запуска с настоящим домом: {e}");
+            Ok(None)
+        }
+    }
+}
+
+/// Where the main-home guards keep, per program, their lock
+/// (`<name>.lock`) and the notes of launches (`<name>/<pid>`): in the
+/// state directory, the user's own.
+pub const MAIN_HOME_DIR: &str = ".main-home";
+
+/// The file name the guards know a program by: its basename, every byte
+/// but `[A-Za-z0-9_+-]` and a dot after the first as `%XX` — never `.`,
+/// `..` nor a hidden name. Empty for an empty word: nothing to note.
+fn main_home_name(word: &OsStr) -> String {
+    let mut out = String::new();
+    for (i, b) in basename(word).as_bytes().iter().enumerate() {
+        if b.is_ascii_alphanumeric() || b"_+-".contains(b) || (*b == b'.' && i > 0) {
+            out.push(*b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The guards' lock for one program. Opened close-on-exec (std's way), so
+/// it could never outlive the launch into the program even if kept.
+fn main_home_lock(state: &Path, name: &str) -> std::io::Result<fs::File> {
+    use std::os::fd::AsRawFd;
+    let dir = state.join(MAIN_HOME_DIR);
+    fs::create_dir_all(&dir)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("{name}.lock")))?;
+    // SAFETY: a valid open descriptor; LOCK_EX blocks until the lock is ours.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+/// A launch of the real home's copy of a program on its way: until the
+/// program runs, only this says where it goes. Named by the launch's pid,
+/// which stays the program's through the `exec`; its start time tells a
+/// number that came round again from it. A launch that gives up takes it
+/// back ([`Drop`]); one that exec'd keeps it for as long as it lives.
+pub struct MainHomeNote(PathBuf);
+
+impl Drop for MainHomeNote {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// A live note of another launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Noted {
+    pub pid: i32,
+    /// The instance's id; empty — the host.
+    pub place: String,
+    pub network: String,
+}
+
+/// Write this launch's note, whole or not at all (through a temporary).
+fn write_main_home_note(
+    state: &Path,
+    name: &str,
+    pid: i32,
+    place: &str,
+    network: &str,
+) -> std::io::Result<MainHomeNote> {
+    let dir = state.join(MAIN_HOME_DIR).join(name);
+    fs::create_dir_all(&dir)?;
+    let stamp = crate::sys::process_stamp(pid)
+        .ok_or_else(|| std::io::Error::other(format!("no start time of pid {pid}")))?;
+    let tmp = dir.join(format!(".{pid}.tmp"));
+    let path = dir.join(pid.to_string());
+    fs::write(&tmp, main_home_note_text(&stamp, place, network))?;
+    fs::rename(&tmp, &path)?;
+    Ok(MainHomeNote(path))
+}
+
+fn main_home_note_text(stamp: &str, place: &str, network: &str) -> String {
+    format!("{stamp}\n{place}\n{network}\n")
+}
+
+/// `(stamp, place, network)` of a note; `None` for one a crash left half.
+fn parse_main_home_note(text: &str) -> Option<(&str, &str, &str)> {
+    let mut lines = text.lines();
+    let stamp = lines.next().filter(|s| !s.is_empty())?;
+    let place = lines.next()?;
+    let network = lines.next()?;
+    Some((stamp, place, network))
+}
+
+/// The live notes of program `name` but `me`'s, by pid; dead ones — gone,
+/// a number that came round again, half-written — are swept. The caller
+/// holds [`main_home_lock`].
+fn main_home_notes(state: &Path, name: &str, me: i32) -> Vec<Noted> {
+    let dir = state.join(MAIN_HOME_DIR).join(name);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if pid == me {
+            continue;
+        }
+        let text = fs::read_to_string(entry.path()).unwrap_or_default();
+        match parse_main_home_note(&text) {
+            Some((stamp, place, network))
+                if crate::sys::process_stamp(pid).as_deref() == Some(stamp) =>
+            {
+                out.push(Noted {
+                    pid,
+                    place: place.to_owned(),
+                    network: network.to_owned(),
+                })
+            }
+            _ => {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+    out.sort_by_key(|n| n.pid);
+    out
+}
+
+/// The first noted launch that a launch into `place` (empty — the host)
+/// must not run beside: one going anywhere else. Into the same instance,
+/// or the host beside the host, the program sees its own lock.
+pub fn noted_rival<'a>(notes: &'a [Noted], place: &str) -> Option<&'a Noted> {
+    notes.iter().find(|n| n.place != place)
+}
+
 /// A process of the user's running the program `word` starts, outside
-/// instance `id` — its pid (the main-home guard, stage 3 of the container
-/// design). Two pid namespaces sharing the real home cannot see each other's
-/// pid lock files: Chromium's `SingletonLock`, Firefox's `lock`, wineserver's
-/// name a pid, and a pid of another namespace is nobody (or somebody else)
-/// in this one — a second browser would take the profile the first one has
-/// open. So a launch of the main home into an instance is refused while the
-/// program runs outside it: on the host, in a zone's own namespaces, in
-/// another instance. Asked for applications only (a launch with an app's
-/// id): a terminal's `cellward run nl -- sh` is no single-instance program,
-/// and the user's shells are everywhere.
-fn main_home_rival(state: &Path, id: &str, word: &OsStr) -> Option<i32> {
+/// instance `id` and outside every instance with a home of its own — its pid
+/// (the main-home guard, stage 3 of the container design). Two pid
+/// namespaces sharing the real home cannot see each other's pid lock files:
+/// Chromium's `SingletonLock`, Firefox's `lock`, wineserver's name a pid, and
+/// a pid of another namespace is nobody (or somebody else) in this one — a
+/// second browser would take the profile the first one has open. So a
+/// launch of the main home into an instance is refused while the program
+/// runs outside it: on the host, in a zone's own namespaces, in another
+/// instance of the real home. Not beside a copy in an instance of a
+/// container with a home of its own ([`shares_main_home`]): that one runs
+/// its own profile (owner, 2026-09-29 — zen in «свой» refused zen in the
+/// main). Asked for applications only (a launch with an app's id): a
+/// terminal's `cellward run nl -- sh` is no single-instance program, and the
+/// user's shells are everywhere.
+fn main_home_rival(tools: &Tools, id: &str, word: &OsStr) -> Option<i32> {
     let (exe, uid, skip) = rival_marks(word);
+    let key_of = |pid: i32| crate::place::ns_key(Path::new(&format!("/proc/{pid}/ns/user")));
     // The target instance's user namespace, while it is up: what is in it
     // or below it shares its pid namespace.
-    let target = crate::instance::up(state, id)
-        .and_then(|pid| crate::place::ns_key(Path::new(&format!("/proc/{pid}/ns/user"))));
-    let inside = |pid: i32| target.is_some_and(|key| crate::place::chain_of(pid).contains(&key));
+    let target = crate::instance::up(&tools.state, id).and_then(key_of);
+    // Instances with a home of their own — never by a namespace that is
+    // ours (then everything would be «inside» one and nothing found).
+    let home_of = |name: &str| crate::container::load(tools, name).map(|c| c.home);
+    let ours = crate::place::ns_key(Path::new("/proc/self/ns/user"));
+    let own_homes: Vec<(u64, u64)> = crate::instance::running(&tools.state)
+        .into_iter()
+        .filter(|i| i.id != id && !shares_main_home(&i.id, &home_of))
+        .filter_map(|i| key_of(i.pid))
+        .filter(|key| Some(*key) != ours)
+        .collect();
+    let inside = |pid: i32| not_a_rival(&crate::place::chain_of(pid), target, &own_homes);
     rival(&seen_processes(), uid, exe, basename(word), &skip, &inside)
+}
+
+/// Whether a process whose user namespaces are `chain` (nearest first) is
+/// no rival of a main-home launch: in the target instance, or in one with a
+/// home of its own.
+pub fn not_a_rival(
+    chain: &[(u64, u64)],
+    target: Option<(u64, u64)>,
+    own_homes: &[(u64, u64)],
+) -> bool {
+    target.is_some_and(|key| chain.contains(&key))
+        || own_homes.iter().any(|key| chain.contains(key))
 }
 
 /// The main-home guard the other way round (review 2026-09-28): a process
@@ -3432,6 +3662,77 @@ mod tests {
         for id in ["work", "layered", ":tmp:vpn-profile-x", ":fs:box"] {
             assert!(!shares_main_home(id, &home_of), "{id}");
         }
+    }
+
+    /// A copy of the program in an instance with a home of its own runs its
+    /// own profile (owner, 2026-09-29: zen in «свой» refused zen in the
+    /// main): no rival, as a copy in the target instance is none. On the host
+    /// or in another instance of the real home: a rival.
+    #[test]
+    fn a_copy_with_a_home_of_its_own_is_no_rival() {
+        let (host, target, own, other) = ((1, 1), (1, 10), (1, 20), (1, 30));
+        assert!(not_a_rival(&[target, host], Some(target), &[own]));
+        assert!(not_a_rival(&[own, host], Some(target), &[own]));
+        assert!(!not_a_rival(&[host], Some(target), &[own]));
+        assert!(!not_a_rival(&[other, host], Some(target), &[own]));
+        // The target not up yet: only the homes of their own are known.
+        assert!(!not_a_rival(&[host], None, &[own]));
+        assert!(not_a_rival(&[own, host], None, &[own]));
+        assert!(!not_a_rival(&[], None, &[]));
+    }
+
+    /// A main-home launch on its way is noted before its program runs (owner,
+    /// 2026-09-29: two pickers answered at once both passed the look): other
+    /// launches see the note; one into the same place is no rival; a launch
+    /// does not see its own; one that gives up takes it back; a note of a
+    /// number that came round again, or half a note, is swept. A program's
+    /// name is never a hidden nor a parent directory's.
+    #[test]
+    fn a_main_home_launch_on_its_way_is_noted() {
+        let state = std::env::temp_dir().join(format!("vz-main-home-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        let me = std::process::id() as i32;
+        let other = me + 1;
+        let note = write_main_home_note(&state, "zen", me, "main:nl", "nl").unwrap();
+        let notes = main_home_notes(&state, "zen", other);
+        assert_eq!(
+            notes,
+            vec![Noted {
+                pid: me,
+                place: "main:nl".into(),
+                network: "nl".into()
+            }]
+        );
+        assert_eq!(noted_rival(&notes, "").map(|n| n.pid), Some(me));
+        assert_eq!(noted_rival(&notes, "work:nl").map(|n| n.pid), Some(me));
+        assert_eq!(noted_rival(&notes, "main:nl"), None);
+        assert!(main_home_notes(&state, "zen", me).is_empty());
+        drop(note);
+        assert!(main_home_notes(&state, "zen", other).is_empty());
+
+        let dir = state.join(MAIN_HOME_DIR).join("zen");
+        fs::write(
+            dir.join(me.to_string()),
+            main_home_note_text("1 another-boot", "", "nl"),
+        )
+        .unwrap();
+        fs::write(dir.join("1"), "half").unwrap();
+        assert!(main_home_notes(&state, "zen", other).is_empty());
+        assert!(!dir.join(me.to_string()).exists() && !dir.join("1").exists());
+
+        // The lock is one per program and can be taken again once let go.
+        drop(main_home_lock(&state, "zen").unwrap());
+        drop(main_home_lock(&state, "zen").unwrap());
+
+        assert_eq!(
+            main_home_name(OsStr::new("/nix/store/x-zen/bin/zen")),
+            "zen"
+        );
+        assert_eq!(main_home_name(OsStr::new("zen-beta.bin")), "zen-beta.bin");
+        assert_eq!(main_home_name(OsStr::new(".hidden")), "%2Ehidden");
+        assert_eq!(main_home_name(OsStr::new("..")), "%2E.");
+        assert_eq!(main_home_name(OsStr::new("зен")), "%D0%B7%D0%B5%D0%BD");
+        let _ = fs::remove_dir_all(&state);
     }
 
     #[test]
