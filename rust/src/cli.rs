@@ -729,9 +729,23 @@ fn up(tools: &Tools, args: &[OsString]) -> u8 {
     let Some(name) = required_zone(args, 0, "нужно имя") else {
         return 1;
     };
+    let name_text = name.to_string_lossy();
+    // A network whose login is asked takes it in the connect window first
+    // (`crate::connect`, `Login = ask`); any other is started as it was.
+    if crate::connect::asks_login(&tools.state, &name_text).is_some() {
+        return match crate::connect::bring_up(tools, &name_text, crate::connect::Wants::Person) {
+            Ok(()) => {
+                println!("зона {name_text} поднята");
+                0
+            }
+            Err(why) => {
+                eprintln!("{why}");
+                1
+            }
+        };
+    }
     // Returns when the zone is ready or its start failed (`started_up`).
     let code = start_zone(tools, name, false);
-    let name_text = name.to_string_lossy();
     if code == 0 && started_up(&tools.state, name) {
         println!("зона {name_text} поднята");
         0
@@ -2717,15 +2731,11 @@ fn container_switch(
     // (`crate::connect`); the container stays where it is meanwhile, and
     // stays there when the person says no.
     if to != crate::launch::OFFLINE && zone_up(&tools.state, OsStr::new(to)).is_none() {
-        if let Err(why) = crate::connect::consent(tools, to, crate::connect::Wants::Container(name))
+        if let Err(why) =
+            crate::connect::bring_up(tools, to, crate::connect::Wants::Container(name))
         {
-            eprintln!("{why}");
+            eprintln!("{why} — сеть не менялась");
             return 1;
-        }
-        let code = start_zone(tools, OsStr::new(to), false);
-        if code != 0 {
-            eprintln!("зона {to} не поднялась — сеть не менялась");
-            return code;
         }
     }
     let answers = match ask_switch(&instance.dir, to) {

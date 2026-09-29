@@ -281,6 +281,7 @@ AuthGroup  = Employees                ; the "realm"/"domain" dropdown, if the se
 ServerCert = pin-sha256:HXXQ…=        ; pin the certificate; without it, the system CA store
                                       ; (pin-sha256: or sha256: — never sha1:)
 PasswordFile = /home/alice/.config/vpn-zones/secrets/work.pass
+                                      ; or instead: Login = ask — asked in a window
 MTU        = 1300                     ; optional, wins over what the gateway offers
 Args       = --no-dtls --os=linux-64  ; optional, from an allowlist
 ```
@@ -344,6 +345,19 @@ your login opens, not the machine's boot. Showing a terminal running
 all — but then the zone is brought up by a person rather than by our code, and
 both the certificate pin and the allowlist are bypassed: the two things the
 format exists for.
+
+**Done (2026-09-29): `Login = ask`** instead of `PasswordFile`. When the zone
+is to come up — a program launched into it, a container moved there,
+`cellward up` — the connect window asks for the user, the group, the password
+and, if the gateway wants one, a one-time code. The answers never touch a
+disk: they reach the zone's holder over a socket of your runtime directory
+that only that zone's unit is served on, and the client on its stdin; with a
+code, `--non-inter` is dropped so the gateway's second prompt reads it, and a
+prompt beyond those finds the input closed and fails. The user and the group
+are remembered for next time; the password only if you tick «Запомнить пароль»,
+in the session keyring (`secret-tool`); the code never. A refused login shows
+the form again with what went wrong. Such a network asks before it connects by
+default (`cellward connection <network> auto|ask|manual`).
 
 `ServerCert` is what a corporate CA the system does not know needs; a gateway
 with a publicly trusted certificate needs none. `openconnect` itself also

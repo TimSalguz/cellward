@@ -1992,10 +1992,13 @@ fn up_instance(
     if zone_name != OFFLINE {
         let mut pid = cli::zone_up(&tools.state, zone);
         if pid.is_none() {
-            crate::connect::consent(tools, zone_name, crate::connect::Wants::Program(program))?;
-            // Returns once the zone is ready or failed (`Type=notify`), and
-            // says so while it waits (`cli::start_zone`).
-            let _ = cli::start_zone(tools, zone, true);
+            // Asked where the network asks, its login taken where it asks
+            // one, started — ready or failed (`Type=notify`) when it returns.
+            crate::connect::bring_up(
+                tools,
+                &zone.to_string_lossy(),
+                crate::connect::Wants::Program(program),
+            )?;
             pid = cli::zone_up(&tools.state, zone);
         }
         if pid.is_none() {

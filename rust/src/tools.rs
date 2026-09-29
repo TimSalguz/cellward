@@ -102,11 +102,14 @@ pub struct Tools {
     /// `busctl`: the broker asks the portal backend's window of choice which
     /// program opens a link (`crate::links`).
     pub busctl: PathBuf,
+    /// `secret-tool` (libsecret): a network's remembered password in the
+    /// session's keyring (`crate::connect`), handed to it on stdin.
+    pub secret_tool: PathBuf,
 }
 
 /// The keys of the manifest, in the order they are reported. Kept next to the
 /// struct so that `module/default.nix` and this file can be diffed by eye.
-const KEYS: [&str; 23] = [
+const KEYS: [&str; 24] = [
     "home",
     "state",
     "profiles",
@@ -130,6 +133,7 @@ const KEYS: [&str; 23] = [
     "opener",
     "window",
     "busctl",
+    "secret-tool",
 ];
 
 /// Why the manifest could not be used. Every variant names the file: when this
@@ -221,6 +225,7 @@ impl Tools {
             opener: take("opener")?,
             window: take("window")?,
             busctl: take("busctl")?,
+            secret_tool: take("secret-tool")?,
         })
     }
 

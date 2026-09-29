@@ -166,6 +166,10 @@ pub struct OcConfig {
     /// Absolute path of a file holding the password on its first line. Checked
     /// for being nobody else's business; read as late as possible.
     pub password_file: Option<PathBuf>,
+    /// `Login = ask`: the login is asked when the zone starts — the connect
+    /// window's form (`crate::connect`, `docs/PERMISSIONS.md` §11.16) —,
+    /// never stored in a file. Not with `PasswordFile`.
+    pub login: bool,
     /// `MTU =` in the config, which wins over what the gateway offers.
     pub mtu: Option<u32>,
     /// Extra flags from `Args =`, each one from [`ALLOWED_ARGS`].
@@ -199,6 +203,10 @@ pub enum ConfigError {
         uid: u32,
     },
     PasswordFileEmpty(String),
+    /// `Login =` other than `ask`.
+    BadLogin(String),
+    /// `Login = ask` and a `PasswordFile` both: one or the other.
+    LoginAndPasswordFile,
     /// A flag that is not on the allowlist, or one written as two words.
     ForbiddenArg(String),
 }
@@ -239,6 +247,14 @@ impl fmt::Display for ConfigError {
                 write!(f, "PasswordFile = {path} belongs to uid {uid}, not to you")
             }
             Self::PasswordFileEmpty(p) => write!(f, "PasswordFile = {p} is empty"),
+            Self::BadLogin(v) => write!(
+                f,
+                "Login = {v}: the only value is ask — the login asked when the zone starts"
+            ),
+            Self::LoginAndPasswordFile => write!(
+                f,
+                "Login = ask and PasswordFile both: the login is asked, or its password read                  from the file — one of them"
+            ),
             Self::ForbiddenArg(a) => write!(
                 f,
                 "Args: {a} is not allowed — only these flags are, and a value has to be \
@@ -296,6 +312,7 @@ impl OcConfig {
                 "authgroup",
                 "servercert",
                 "passwordfile",
+                "login",
                 "mtu",
                 "args",
             ]
@@ -336,6 +353,15 @@ impl OcConfig {
             None => None,
         };
 
+        let login = match section.get("Login") {
+            Some(v) if v.eq_ignore_ascii_case("ask") => true,
+            Some(v) => return Err(ConfigError::BadLogin(v.to_string())),
+            None => false,
+        };
+        if login && password_file.is_some() {
+            return Err(ConfigError::LoginAndPasswordFile);
+        }
+
         let extra = match section.get("Args") {
             Some(args) => check_args(args)?,
             None => Vec::new(),
@@ -349,6 +375,7 @@ impl OcConfig {
             authgroup: section.get("AuthGroup").map(str::to_string),
             server_cert,
             password_file,
+            login,
             mtu,
             extra,
         })
@@ -1071,6 +1098,29 @@ mod tests {
             split_server("vpn.example.org:https"),
             Err(ConfigError::BadPort(_))
         ));
+    }
+
+    /// `Login = ask`: the login is asked when the zone starts — not with a
+    /// password file, and no other value.
+    #[test]
+    fn the_login_is_asked_or_read_from_a_file_never_both() {
+        let cfg = config("[OpenConnect]\nServer = a.b\nUser = ivan\nLogin = ask\n").unwrap();
+        assert!(cfg.login && cfg.password_file.is_none());
+        assert_eq!(cfg.user.as_deref(), Some("ivan"));
+        assert!(!config("[OpenConnect]\nServer = a.b\n").unwrap().login);
+        assert!(
+            config("[OpenConnect]\nServer = a.b\nlogin = ASK\n")
+                .unwrap()
+                .login
+        );
+        assert_eq!(
+            config("[OpenConnect]\nServer = a.b\nLogin = always\n"),
+            Err(ConfigError::BadLogin("always".to_string()))
+        );
+        assert_eq!(
+            config("[OpenConnect]\nServer = a.b\nLogin = ask\nPasswordFile = /run/x\n"),
+            Err(ConfigError::LoginAndPasswordFile)
+        );
     }
 
     #[test]

@@ -312,6 +312,9 @@ let
       # Выбор программы для ссылки из зоны: окно бэкенда портала
       # (AppChooser), зовёт брокер (rust/src/links.rs).
       busctl = "${pkgs.systemd}/bin/busctl";
+      # Запомненный пароль сети — в связке ключей сеанса (Secret Service),
+      # docs/PERMISSIONS.md §11.16: пароль ему — на stdin.
+      secret-tool = "${pkgs.libsecret}/bin/secret-tool";
       # awg/wg/pasta/nft/openconnect здесь намеренно НЕТ: их зовёт только
       # держатель зоны, и получает он их флагами ExecStart своего юнита.
       # Дублировать пути в двух местах — значит однажды поменять их в одном.

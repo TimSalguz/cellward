@@ -154,6 +154,7 @@ exit "$code""#,
             // here expects.
             ("window", format!("{bin}/vpn-zone-window")),
             ("busctl", format!("{bin}/busctl")),
+            ("secret-tool", "/nonexistent/secret-tool".to_owned()),
         ] {
             json.push_str(&format!("  \"{key}\": \"{value}\",\n"));
         }

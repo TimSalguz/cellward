@@ -39,6 +39,7 @@
 use std::io::Read;
 
 mod checklist;
+mod login;
 mod panel;
 
 use iced::keyboard::{self, key, Key};
@@ -879,6 +880,14 @@ fn main() -> iced::Result {
     if args.first().map(String::as_str) == Some("checklist") {
         return checklist::run().map_err(|e| {
             eprintln!("vpn-zone-window checklist: {e}");
+            std::process::exit(EXIT_NOT_SHOWN)
+        });
+    }
+    // The connect window's login form (`login.rs`): what a network's
+    // gateway asks for before the network comes up.
+    if args.first().map(String::as_str) == Some("login") {
+        return login::run().map_err(|e| {
+            eprintln!("vpn-zone-window login: {e}");
             std::process::exit(EXIT_NOT_SHOWN)
         });
     }

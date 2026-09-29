@@ -30,6 +30,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
+- **The OpenConnect login asked in a window** (2026-09-30, ROADMAP M4,
+  docs/PERMISSIONS.md §11.16): `Login = ask` in `[OpenConnect]` instead of
+  `PasswordFile`. When the zone is to come up — a launch into it, a
+  container moved there, `cellward up` — the connect window's form
+  (`vpn-zone-window login`, its fields dead until it has been focused and
+  still) asks for the user, the group, the password and a one-time code.
+  The answers reach the zone's holder over
+  `$XDG_RUNTIME_DIR/vpn-zones/login/<network>.sock`, served only to the
+  unit `vpn-zone@<network>.service` (by its peer's cgroup), and the client
+  on stdin: the code as the line after the password, `--non-inter` dropped
+  with one. The user and the group are kept in the network's `login` file;
+  the password, where «Запомнить пароль» is ticked, in the session's keyring
+  through `secret-tool` (a new tool of the manifest, `libsecret`); the code
+  never. A refused login shows the form again with what went wrong. Such a
+  network asks before it connects by default.
 - **A network's «Подключение»** (2026-09-29, docs/PERMISSIONS.md §11.16):
   `cellward connection <network> auto|ask|manual|default` (Nix
   `programs.cellward.connection.<network>`). `auto`, the default, is as

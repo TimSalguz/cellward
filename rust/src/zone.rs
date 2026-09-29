@@ -4079,6 +4079,10 @@ pub struct OcZone {
     /// filter would not let a lookup out even if it had one. The client is then
     /// told the answer with `--resolve`, so it never asks either.
     pub addr: IpAddr,
+    /// The login the connect window took (`Login = ask`, `crate::connect`):
+    /// taken over its socket while still in the host's namespaces, handed
+    /// to the client on its standard input.
+    pub login: Option<crate::connect::Login>,
 }
 
 impl Backend {
@@ -4654,6 +4658,14 @@ fn prepare_openconnect(zone: &Zone, ini: &WgConfig) -> Result<Backend, String> {
     // before it is handed to the client (`spawn_openconnect`).
     cfg.check_password_file()
         .map_err(|e| format!("{CONFIG}: {e}"))?;
+    // A login asked when the zone starts (`Login = ask`): taken now, over the
+    // socket of the user's runtime directory whoever started the zone holds
+    // (`connect::Offer`) — here, before a namespace of the zone exists.
+    let login = if cfg.login {
+        Some(crate::connect::fetch_login(&zone.name())?)
+    } else {
+        None
+    };
 
     let addr = match cfg.server_literal() {
         Some(addr) => addr,
@@ -4694,7 +4706,7 @@ fn prepare_openconnect(zone: &Zone, ini: &WgConfig) -> Result<Backend, String> {
     // A plan left over from a previous run would make the uplink believe the
     // tunnel is already up the moment it looks.
     let _ = fs::remove_file(zone.path(openconnect::PLAN_FILE));
-    Ok(Backend::Oc(Box::new(OcZone { cfg, addr })))
+    Ok(Backend::Oc(Box::new(OcZone { cfg, addr, login })))
 }
 
 // --- PROCESS 3: THE UPLINK ---------------------------------------------------
@@ -7551,7 +7563,10 @@ fn real_program(program: &Path) -> Result<PathBuf, String> {
 ///   arrives — keeps meaning what it says.
 /// * `--non-inter` because a zone is started by a systemd unit and there is no
 ///   terminal to ask anything on; a prompt would hang the zone instead of
-///   failing it.
+///   failing it. Not with a one-time code of the connect window's login
+///   (`Login = ask`): the gateway's second prompt reads it from standard
+///   input, the line after the password — and a prompt past those finds the
+///   input closed, and fails.
 /// * `--no-external-auth` so that authentication never tries to open a browser
 ///   OUTSIDE the zone — the exact move `docs/LEAK-MODEL.md` spends a section on.
 /// * No `--disable-ipv6` (it was there until 2026-09-27): IPv6 the gateway
@@ -7563,6 +7578,8 @@ fn real_program(program: &Path) -> Result<PathBuf, String> {
 /// * `--passwd-on-stdin` with the password written on one line and the pipe
 ///   closed. Not a command-line argument: `/proc/<pid>/cmdline` is world
 ///   readable, and not an environment variable either, for the same reason.
+///   The password is the file's (`PasswordFile`) or the login's; the login's
+///   user and group, where given, come before the config's.
 ///
 /// And the environment is BUILT rather than inherited
 /// ([`crate::openconnect::client_env`]): `openconnect` honours `https_proxy`
@@ -7574,7 +7591,24 @@ fn real_program(program: &Path) -> Result<PathBuf, String> {
 /// past the tun it was given and the directory `dir`.
 fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, String> {
     let cfg = &oc.cfg;
-    let password = cfg.read_password().map_err(|e| format!("{CONFIG}: {e}"))?;
+    let login = oc.login.as_ref();
+    let (password, code) = match login {
+        Some(login) => (
+            Some(login.password.clone()),
+            Some(login.code.clone()).filter(|code| !code.is_empty()),
+        ),
+        None => (
+            cfg.read_password().map_err(|e| format!("{CONFIG}: {e}"))?,
+            None,
+        ),
+    };
+    let given = |value: &str| Some(value.to_owned()).filter(|v| !v.is_empty());
+    let user = login
+        .and_then(|l| given(&l.user))
+        .or_else(|| cfg.user.clone());
+    let group = login
+        .and_then(|l| given(&l.group))
+        .or_else(|| cfg.authgroup.clone());
 
     // `openconnect` runs its `--script` through `/bin/sh -c`, so the string is
     // shell-parsed. Store paths never contain anything a shell would look at,
@@ -7610,18 +7644,20 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
         .arg(TUN_IFACE)
         .arg("--script")
         .arg(format!("{exe} oc-script"))
-        .arg("--non-inter")
         .arg("--no-external-auth");
+    if code.is_none() {
+        cmd.arg("--non-inter");
+    }
     if cfg.server_literal().is_none() {
         cmd.arg(format!("--resolve={}:{}", cfg.server, oc.addr));
     }
     if let Some(pin) = &cfg.server_cert {
         cmd.arg(format!("--servercert={pin}"));
     }
-    if let Some(user) = &cfg.user {
+    if let Some(user) = &user {
         cmd.arg(format!("--user={user}"));
     }
-    if let Some(group) = &cfg.authgroup {
+    if let Some(group) = &group {
         cmd.arg(format!("--authgroup={group}"));
     }
     if password.is_some() {
@@ -7772,10 +7808,15 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
             let _ = child.wait();
             return Err("openconnect was given no stdin to read the password from".to_string());
         };
-        // One line, then EOF: `--non-inter` means nothing else will be asked.
-        let written = stdin
-            .write_all(password.as_bytes())
-            .and_then(|()| stdin.write_all(b"\n"));
+        // One line, then EOF: `--non-inter` means nothing else will be asked
+        // — or, with a one-time code, its line after the password's, for the
+        // gateway's second prompt.
+        let mut lines = format!("{password}\n");
+        if let Some(code) = &code {
+            lines.push_str(code);
+            lines.push('\n');
+        }
+        let written = stdin.write_all(lines.as_bytes());
         drop(stdin);
         if let Err(e) = written {
             let _ = child.kill();
@@ -10577,6 +10618,7 @@ networks:  files
         let backend = Backend::Oc(Box::new(OcZone {
             cfg: OcConfig::parse(b"[OpenConnect]\nServer = vpn.example.org:4443\n").unwrap(),
             addr: "198.51.100.7".parse().unwrap(),
+            login: None,
         }));
         // No port in the rule, and that is the one place this backend is wider
         // than WireGuard's: DTLS goes to a UDP port the server picks, and the

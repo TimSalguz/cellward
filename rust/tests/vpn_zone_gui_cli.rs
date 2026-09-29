@@ -112,6 +112,7 @@ exit "${RUNNER_EXIT:-0}""#,
             ("opener", "/nonexistent/xdg-open".to_owned()),
             ("window", "/nonexistent/vpn-zone-window".to_owned()),
             ("busctl", "/nonexistent/busctl".to_owned()),
+            ("secret-tool", "/nonexistent/secret-tool".to_owned()),
         ] {
             json.push_str(&format!("  \"{key}\": \"{value}\",\n"));
         }
