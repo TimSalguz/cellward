@@ -15,7 +15,10 @@
 //! network while it is open: a network that is down has no route out, so
 //! nothing goes anywhere meanwhile. «Не подключать», a closed question, or
 //! no way to ask at all: the network stays down, and the launch is refused
-//! where the person sees it — never a silent end.
+//! where the person sees it — never a silent end. Connected after the
+//! person answered — the question, the form —: a notification says so
+//! (step 3), once per network, from the launch that asked; the person who
+//! waited for it is told the wait is over, whatever window is in front.
 //!
 //! **The login** never touches a disk. The form's answers come back on the
 //! window's standard output; they go to the zone's holder on a socket of the
@@ -216,12 +219,14 @@ fn lock(dir: &Path) -> Result<fs::File, String> {
 }
 
 /// What bringing a network up takes, apart: asking, logging in, starting,
-/// and whether it is up — the real ones ([`Real`]), or a test's.
+/// whether it is up, and saying it is — the real ones ([`Real`]), or a
+/// test's.
 trait Steps {
     fn ask(&self, zone: &str, mode: Mode, wants: Wants<'_>) -> bool;
     fn log_in(&self, zone: &str, asked: (Mode, Wants<'_>), cfg: &OcConfig) -> bool;
     fn start(&self, zone: &str, wants: Wants<'_>);
     fn up(&self, zone: &str) -> bool;
+    fn connected(&self, zone: &str, wants: Wants<'_>);
 }
 
 struct Real<'a>(&'a Tools);
@@ -244,6 +249,28 @@ impl Steps for Real<'_> {
 
     fn up(&self, zone: &str) -> bool {
         crate::cli::zone_up(&self.0.state, OsStr::new(zone)).is_some()
+    }
+
+    fn connected(&self, zone: &str, wants: Wants<'_>) {
+        let (title, body) = connected_text(zone, wants);
+        // A unit of its own, not a child: the launch goes on into the
+        // program at once — a notification daemon slow to answer holds
+        // nothing up, and the instance the launch becomes has no stray
+        // child to reap.
+        let _ = Command::new(&self.0.systemd_run)
+            .args(["--user", "--collect", "--quiet", "--no-block"])
+            .arg(format!("--description={}: {title}", crate::dialog::APP))
+            .arg("--")
+            .arg(&self.0.notify_send)
+            .args(["-a", crate::dialog::APP, "-t", "5000"])
+            // `--`: a network's name may start with a dash.
+            .arg("--")
+            .arg(title)
+            .arg(body)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
@@ -288,7 +315,8 @@ fn bring_up_with(
 
 /// Under the network's question lock: up meanwhile — yes; refused since
 /// `seen` — that refusal; else the person's, written for the launches that
-/// wait for it.
+/// wait for it. Connected after the person answered: said so, the lock
+/// given back first — the launches that waited go on meanwhile.
 fn decide(
     tools: &Tools,
     zone: &str,
@@ -297,7 +325,7 @@ fn decide(
     (login, steps): (Option<&OcConfig>, &impl Steps),
 ) -> Result<(), String> {
     let dir = tools.state.join(zone);
-    let _lock = lock(&dir)?;
+    let held = lock(&dir)?;
     if steps.up(zone) {
         return Ok(());
     }
@@ -307,15 +335,19 @@ fn decide(
             return Err(refusal(zone, mode, wants));
         }
     }
-    let yes = match login {
+    // Whether the person answered something: the form, the question — not
+    // the person connecting a network with nothing to ask, who is told by
+    // what they ran.
+    let (yes, answered) = match login {
         // The form is the question: «Подключить» there is the yes.
-        Some(cfg) => steps.log_in(zone, (mode, wants), cfg),
+        Some(cfg) => (steps.log_in(zone, (mode, wants), cfg), true),
         None => {
-            let yes = matches!(wants, Wants::Person) || steps.ask(zone, mode, wants);
+            let person = matches!(wants, Wants::Person);
+            let yes = person || steps.ask(zone, mode, wants);
             if yes {
                 steps.start(zone, wants);
             }
-            yes
+            (yes, !person)
         }
     };
     let up = yes && steps.up(zone);
@@ -323,11 +355,28 @@ fn decide(
     if let Err(e) = write_answer(&dir, seq, up) {
         eprintln!("cellward: ответ о подключении сети {zone} не записан: {e}");
     }
+    drop(held);
     match (up, yes) {
-        (true, _) => Ok(()),
+        (true, _) => {
+            if answered {
+                steps.connected(zone, wants);
+            }
+            Ok(())
+        }
         (false, true) => Err(failed(zone, wants)),
         (false, false) => Err(refusal(zone, mode, wants)),
     }
+}
+
+/// The notification that the network is connected: its title, and what
+/// goes on now.
+fn connected_text(zone: &str, wants: Wants<'_>) -> (String, String) {
+    let body = match wants {
+        Wants::Program(program) => format!("«{program}» запускается."),
+        Wants::Container(container) => format!("Контейнер «{container}» переходит в неё."),
+        Wants::Person => String::new(),
+    };
+    (format!("Сеть {zone} подключена"), body)
 }
 
 /// What the person is told when the network was not connected: refused.
@@ -881,6 +930,7 @@ mod tests {
         asked: Cell<u32>,
         logins: Cell<u32>,
         starts: Cell<u32>,
+        told: Cell<u32>,
     }
 
     impl Fake {
@@ -892,6 +942,7 @@ mod tests {
                 asked: Cell::new(0),
                 logins: Cell::new(0),
                 starts: Cell::new(0),
+                told: Cell::new(0),
             }
         }
     }
@@ -917,6 +968,10 @@ mod tests {
 
         fn up(&self, _: &str) -> bool {
             self.up.get()
+        }
+
+        fn connected(&self, _: &str, _: Wants<'_>) {
+            self.told.set(self.told.get() + 1);
         }
     }
 
@@ -991,23 +1046,29 @@ mod tests {
         let fake = Fake::new(false, true);
         assert!(bring_up_with(&t, "work", program, &fake).is_ok());
         assert_eq!((fake.asked.get(), fake.starts.get()), (0, 1), "auto starts");
+        assert_eq!(fake.told.get(), 0, "nobody waited on a question: no notice");
         set(&t.state, &t.config, "work", Some(Mode::Ask)).unwrap();
         let fake = Fake::new(false, true);
         let refused = bring_up_with(&t, "work", program, &fake).unwrap_err();
         assert!(refused.contains("«Firefox» не запущена"), "{refused}");
         assert_eq!((fake.asked.get(), fake.starts.get()), (1, 0));
+        assert_eq!(fake.told.get(), 0, "refused: no notice");
         let fake = Fake::new(true, true);
         assert!(bring_up_with(&t, "work", program, &fake).is_ok());
         assert_eq!((fake.asked.get(), fake.starts.get()), (1, 1));
+        assert_eq!(fake.told.get(), 1, "agreed and up: the person is told");
         assert_eq!(last_answer(&t.state.join("work")), Some((2, true)));
-        // Agreed, and it did not come up: said so.
+        // Agreed, and it did not come up: said so — not "connected".
         let fake = Fake::new(true, false);
         let failed = bring_up_with(&t, "work", program, &fake).unwrap_err();
         assert!(failed.contains("зона work не поднимается"), "{failed}");
-        // The person connecting it: no question.
+        assert_eq!(fake.told.get(), 0);
+        // The person connecting it: no question, and no notice — what they
+        // ran says it.
         let fake = Fake::new(false, true);
         assert!(bring_up_with(&t, "work", Wants::Person, &fake).is_ok());
         assert_eq!((fake.asked.get(), fake.starts.get()), (0, 1));
+        assert_eq!(fake.told.get(), 0);
         // Manual: asked too, and a refusal says how to connect it.
         set(&t.state, &t.config, "work", Some(Mode::Manual)).unwrap();
         let fake = Fake::new(false, true);
@@ -1040,6 +1101,9 @@ mod tests {
         assert!(decide(&t, "work", wants, 5, (None, &fake)).is_ok());
         assert_eq!(fake.asked.get(), 1);
         assert_eq!(last_answer(&dir), Some((6, true)));
+        // Up since: the next one takes it, and the notice was the asker's.
+        assert!(decide(&t, "work", wants, 6, (None, &fake)).is_ok());
+        assert_eq!((fake.asked.get(), fake.told.get()), (1, 1));
     }
 
     /// A network whose login is asked takes it in the form, whatever its
@@ -1056,9 +1120,20 @@ mod tests {
         let fake = Fake::new(true, true);
         assert!(bring_up_with(&t, "work", Wants::Person, &fake).is_ok());
         assert_eq!((fake.asked.get(), fake.logins.get()), (0, 1));
+        assert_eq!(fake.told.get(), 1, "the person waited on the form");
         let fake = Fake::new(false, true);
         let refused = bring_up_with(&t, "work", Wants::Program("Wine"), &fake).unwrap_err();
         assert!(refused.contains("«Wine» не запущена"), "{refused}");
+    }
+
+    #[test]
+    fn the_notice_says_the_network_and_what_goes_on() {
+        let (title, body) = connected_text("work", Wants::Program("Firefox"));
+        assert_eq!(title, "Сеть work подключена");
+        assert_eq!(body, "«Firefox» запускается.");
+        let (_, body) = connected_text("work", Wants::Container("банк"));
+        assert_eq!(body, "Контейнер «банк» переходит в неё.");
+        assert!(connected_text("work", Wants::Person).1.is_empty());
     }
 
     #[test]

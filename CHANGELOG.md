@@ -30,6 +30,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
+- **«Сеть … подключена»** (2026-09-30, docs/PERMISSIONS.md §11.16, step
+  3): a notification once a network the person was asked about — the
+  question of `ask`/`manual`, the login form — is up; one per network,
+  from the launch that asked, not from each that waited for its answer.
+  None for a quiet `auto` start. Sent by a unit of its own
+  (`systemd-run --user --no-block`): the launch goes on into the program
+  at once.
 - **The OpenConnect login asked in a window** (2026-09-30, ROADMAP M4,
   docs/PERMISSIONS.md §11.16): an `[OpenConnect]` network without a
   `PasswordFile` asks its login — no key to write for it, and no value a

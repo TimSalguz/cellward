@@ -657,6 +657,12 @@ let
               "| grep -q '\"app_id\": *\"conn\"'",
               timeout=90,
           )
+          # The person who agreed is told it is connected (step 3): a
+          # notification in a unit of its own — no daemon here, so its start
+          # is what is looked for.
+          machine.wait_until_succeeds(
+              "journalctl --no-pager | grep -F 'cellward: Сеть de подключена'", timeout=30
+          )
           alice("systemctl --user stop connect-agreed || true")
           alice("cellward down de")
           alice("cellward connection de default")

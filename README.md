@@ -358,7 +358,8 @@ prompt beyond those finds the input closed and fails. The user and the group
 are remembered for next time; the password only if you tick «Запомнить пароль»,
 in the session keyring (`secret-tool`); the code never. A refused login shows
 the form again with what went wrong. Such a network asks before it connects by
-default (`cellward connection <network> auto|ask|manual`).
+default (`cellward connection <network> auto|ask|manual`); once it is up after
+you answered, a notification says so.
 
 `ServerCert` is what a corporate CA the system does not know needs; a gateway
 with a publicly trusted certificate needs none. `openconnect` itself also

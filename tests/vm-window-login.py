@@ -2,10 +2,10 @@
 (docs/PERMISSIONS.md §11.16, step 2): a real ocserv on the machine that asks
 a password and then a one-time code (TOTP); an OpenConnect zone without a
 `PasswordFile`, so its login is asked; a launch into it brings the connect
-window's form. A wrong
-password: the form again, with what went wrong. The right one and the code:
-the zone comes up with them, the program runs — and the password is on no
-disk and on no command line.
+window's form. A wrong password: the form again, with what went wrong. The
+right one and the code: the zone comes up with them, the program runs, the
+person is told it is connected — and the password is on no disk and on no
+command line.
 
 Executed by the main test script with exec(), in its globals: machine,
 alice, display, swaysock, find.
@@ -121,6 +121,15 @@ with subtest("a network that asks its login: the form, then the zone with it"):
     code = machine.succeed(f"oathtool --totp {OTP_SECRET}").strip()
     type_into_the_form(PASSWORD, code)
     machine.wait_until_succeeds(listed("ocfoot"), timeout=120)
+    # The person is told it is connected (step 3), once: the refused try
+    # was no connection. A unit of its own — no daemon here, so its start is
+    # what is looked for.
+    connected = (
+        "journalctl --no-pager | grep -F 'cellward: Сеть ocwork подключена' "
+        "| grep -cF Started"
+    )
+    machine.wait_until_succeeds(connected, timeout=30)
+    assert machine.succeed(connected).strip() == "1", machine.succeed(connected)
     status = json.loads(alice("cellward status --json"))
     work = next(n for n in status["networks"] if n["name"] == "ocwork")
     assert work["up"] and work["connection"] == {"value": "ask", "source": "default"}, work
