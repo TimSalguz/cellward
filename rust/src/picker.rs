@@ -1153,6 +1153,18 @@ fn ask_window(
     }
     let shared = !reply.pin_container && shared_default(memory, &container, None);
     let container = settle_network(tools, key, container, &reply.net, reply.pin_net, shared);
+    // The preset's offers ticked: the chosen container's words — one that
+    // keeps words, named or the program's own.
+    let keeps = container.selector();
+    if !reply.offers.is_empty()
+        && !container.is_throwaway_container()
+        && crate::container::valid_name(&keeps)
+        && keeps != crate::container::OPEN_RECORD
+    {
+        for line in crate::presets::apply(tools, &keeps, key, &reply.offers) {
+            eprintln!("vpn-zone-pick: {line}");
+        }
+    }
     Some(Some((reply.net, container)))
 }
 
@@ -1331,6 +1343,16 @@ fn window_request(
         // network is its own once chosen.
         pin_net: false,
         pin_container: !memory.pinned_profile.is_empty(),
+        // What the program's preset only offers its container (step 3 of
+        // `docs/PERMISSIONS.md` §11.15): a checkbox each, unticked.
+        offers: crate::presets::for_key(&tools.config, key)
+            .map(|preset| {
+                crate::presets::offered(&preset)
+                    .iter()
+                    .map(|item| (item.line(), item.text()))
+                    .collect()
+            })
+            .unwrap_or_default(),
         ..window::Request::default()
     };
     if let Some(running) = &memory.running {
@@ -1873,6 +1895,8 @@ fn zone_request(
         None => format!("Запрос из сети «{zone}»"),
     };
     req.notes.clear();
+    // A window a zone brought up gives no permission: none offered.
+    req.offers.clear();
     let asker = if req.nets.iter().any(|n| n.tag == zone) {
         zone
     } else {

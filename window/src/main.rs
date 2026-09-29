@@ -89,6 +89,10 @@ struct Request {
     /// `rule⇥<text>`: a checkbox of its own, unticked — a container's rule
     /// for links; answered `rule⇥0|1`.
     rule: Option<String>,
+    /// `offer⇥<line>⇥<text>`: what the program's preset offers its
+    /// container, each a checkbox, unticked (step 3 of vpn-zones'
+    /// `docs/PERMISSIONS.md` §11.15); a ticked one answered `offer⇥<line>`.
+    offers: Vec<(String, String)>,
 }
 
 fn parse_item(fields: &[&str]) -> Option<Item> {
@@ -145,6 +149,9 @@ fn parse_request(text: &str) -> Request {
                     .map(|v| v.to_string())
                     .filter(|v| !v.is_empty())
             }
+            "offer" if fields.len() >= 3 && !fields[1].is_empty() => req
+                .offers
+                .push((fields[1].to_owned(), fields[2].to_owned())),
             _ => {}
         }
     }
@@ -170,6 +177,8 @@ enum Msg {
     PinNet(bool),
     PinContainer(bool),
     Rule(bool),
+    /// An offer of the preset, by its index, ticked or not.
+    Offer(usize, bool),
     Name(String),
     Launch,
     Cancel,
@@ -195,6 +204,8 @@ struct Window {
     pin_container: bool,
     /// The request's rule ticked.
     rule: bool,
+    /// The request's offers ticked, one each.
+    offered: Vec<bool>,
     name: String,
     /// False while the request's guard runs.
     armed: bool,
@@ -236,6 +247,7 @@ impl Window {
             pin_net: req.pin_net,
             pin_container: req.pin_container,
             rule: false,
+            offered: vec![false; req.offers.len()],
             pane: Pane::Net,
             net,
             container,
@@ -341,6 +353,11 @@ impl Window {
         if self.req.rule.is_some() {
             out.push_str(&format!("rule\t{}\n", u8::from(self.rule)));
         }
+        for ((line, _), ticked) in self.req.offers.iter().zip(&self.offered) {
+            if *ticked {
+                out.push_str(&format!("offer\t{line}\n"));
+            }
+        }
         out
     }
 
@@ -414,6 +431,11 @@ impl Window {
             Msg::PinNet(v) => self.pin_net = v && !self.req.no_pins,
             Msg::PinContainer(v) => self.pin_container = v && !self.req.no_pins,
             Msg::Rule(v) => self.rule = v && self.req.rule.is_some(),
+            Msg::Offer(i, v) => {
+                if let Some(ticked) = self.offered.get_mut(i) {
+                    *ticked = v;
+                }
+            }
             // Armed by the last guard started, and only with the focus.
             Msg::Armed(holds) => self.armed |= holds == self.holds && self.focused,
             Msg::Press => {}
@@ -692,6 +714,22 @@ impl Window {
         page = page.push(row![left, right].spacing(16).height(lists));
         if let Some(rule) = &self.req.rule {
             page = page.push(checkbox(self.rule).label(rule).on_toggle(Msg::Rule));
+        }
+        if !self.req.offers.is_empty() {
+            let mut offers =
+                column![
+                    text("Заготовка программы предлагает её контейнеру — только отмеченное:")
+                        .size(14)
+                ]
+                .spacing(4);
+            for (i, (_, label)) in self.req.offers.iter().enumerate() {
+                offers = offers.push(
+                    checkbox(self.offered.get(i).copied().unwrap_or(false))
+                        .label(label.as_str())
+                        .on_toggle(move |v| Msg::Offer(i, v)),
+                );
+            }
+            page = page.push(offers);
         }
         let label = if !self.armed {
             "Секунду…".to_owned()
@@ -1080,6 +1118,27 @@ mod tests {
         ));
         let _ = plain.update(Msg::Rule(true));
         assert!(!plain.answer().contains("rule"));
+    }
+
+    /// A preset's offers: unticked, each answered only when ticked; a line
+    /// with no text is none.
+    #[test]
+    fn a_presets_offers_are_unticked_and_answered_when_ticked() {
+        let text = "title\tt\nnet\tnl\tnl\tselected\ncontainer\t__ownsb__\tСвой\tselected\n\
+                    offer\tcamera=on\tкамеры\noffer\tfolder=~/Downloads\tпапка ~/Downloads\n\
+                    offer\t\tничего\n";
+        let req = parse_request(text);
+        assert_eq!(req.offers.len(), 2);
+        let mut w = Window::new(req);
+        assert!(!w.answer().contains("offer"));
+        let _ = w.update(Msg::Offer(1, true));
+        let _ = w.update(Msg::Offer(7, true));
+        assert!(
+            w.answer().ends_with("offer\tfolder=~/Downloads\n"),
+            "{}",
+            w.answer()
+        );
+        assert!(!w.answer().contains("camera"));
     }
 
     /// In a zone's window Enter starts only in the network that asks; digits

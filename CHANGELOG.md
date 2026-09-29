@@ -20,6 +20,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     the real one.
   - `programs.cellward.programs.<id>` in Nix replaces the built-in preset
     whole.
+  - The launch window shows what a preset offers as checkboxes, unticked
+    (step 3b); what is ticked becomes the chosen container's own words.
+    Only what the preset offers counts; a window a program in a network
+    brought up offers nothing.
 - **The host's own network, `host`** (2026-09-29, 2e of
   `docs/PERMISSIONS.md` §11.15): no VPN, and the program in its container
   all the same.

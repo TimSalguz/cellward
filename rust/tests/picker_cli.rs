@@ -1226,6 +1226,37 @@ fn an_assigned_autostart_starts_where_it_was_put_and_says_nothing() {
     );
 }
 
+/// Step 3 (2026-09-29): what the program's preset only offers is a
+/// checkbox each in the window, unticked; what is ticked becomes the words
+/// of the container chosen — the program's own, made with the preset's safe
+/// part. A line the preset does not offer is nothing.
+#[test]
+fn the_window_offers_what_the_preset_offers_and_ticked_is_given() {
+    let home = Home::new("offers");
+    home.zone("nl");
+    home.window(
+        "net\tnl\ncontainer\t__ownsb__\npin-net\t0\npin-container\t0\n\
+         offer\tcamera=on\noffer\tnix_daemon=on\n",
+        0,
+    );
+    let out = home.run(&["--id", "vesktop", "--", "vesktop"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let told = home.read("window.in").unwrap();
+    assert!(told.contains("offer\tcamera=on\tкамеры\n"), "{told}");
+    assert!(
+        !told.contains("offer\tmicrophone"),
+        "given by itself: {told}"
+    );
+    let record = fs::read_to_string(
+        home.path("config")
+            .join("containers/app-vesktop/container.conf"),
+    )
+    .unwrap();
+    assert!(record.contains("camera = true"), "{record}");
+    assert!(record.contains("microphone = ask"), "{record}");
+    assert!(!record.contains("nix_daemon"), "not offered: {record}");
+}
+
 #[test]
 fn the_launch_window_asks_both_questions_at_once() {
     let home = Home::new("window");

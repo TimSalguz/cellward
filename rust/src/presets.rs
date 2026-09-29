@@ -435,6 +435,57 @@ pub fn seed(tools: &Tools, container: &str, key: &str) -> Vec<String> {
     written
 }
 
+/// What the launch window's person ticked of `key`'s preset's offers
+/// ([`offered`]), made `container`'s own words — the container made first,
+/// with its preset's safe part ([`seed`]), when it is not there yet. Only a
+/// line the preset offers counts: an answer is not a request. What was
+/// given, and what could not be, for a person.
+pub fn apply(tools: &Tools, container: &str, key: &str, ticked: &[String]) -> Vec<String> {
+    let Some(preset) = for_key(&tools.config, key) else {
+        return Vec::new();
+    };
+    let offers = offered(&preset);
+    let chosen: Vec<Item> = ticked
+        .iter()
+        .filter_map(|line| Item::parse(line))
+        .filter(|item| offers.contains(item))
+        .collect();
+    if chosen.is_empty() {
+        return Vec::new();
+    }
+    if crate::container::load(tools, container).is_none() {
+        if let Err(e) = crate::container::create(tools, container, crate::container::Home::Private)
+        {
+            return vec![format!("контейнер {container} не создан — {e}")];
+        }
+        seed(tools, container, key);
+    }
+    let mut said = Vec::new();
+    for item in chosen {
+        use crate::container as c;
+        let done = match &item {
+            Item::Camera => c::set_camera(tools, container, Some(true)),
+            Item::Microphone(s) => c::set_microphone(tools, container, Some(*s)),
+            Item::Screencast(s) => c::set_screencast(tools, container, Some(*s)),
+            Item::X11 => c::set_x11(tools, container, Some(true)),
+            Item::Device(word) => c::set_device(tools, container, word, true),
+            Item::Folder(path) => c::set_path(tools, container, path, true, None).map(|_| ()),
+            Item::Session => c::set_permission(tools, container, "hermetic", Some(false)),
+            Item::NixDaemon => c::set_permission(tools, container, "nix_daemon", Some(true)),
+            Item::HostFilesWritable => {
+                c::set_permission(tools, container, "host_files_writable", Some(true))
+            }
+            Item::AudioManager => c::set_permission(tools, container, "audio_manager", Some(true)),
+            Item::Home(home) => c::set_home(tools, container, *home),
+        };
+        said.push(match done {
+            Ok(()) => format!("{} — дано контейнеру {container}", item.text()),
+            Err(e) => format!("{} — не дано: {e}", item.text()),
+        });
+    }
+    said
+}
+
 const USAGE: &str = "cellward presets [<программа>] [--json] — что программе нужно по заготовке";
 
 /// `cellward presets [<key>] [--json]`.

@@ -25,6 +25,9 @@
 //! cmd⇥<word>                          (the zone's command, a word each)
 //! rule⇥<text>                         (a checkbox of its own: a container's
 //!                                      rule for links, `crate::links`)
+//! offer⇥<line>⇥<text>                 (what the program's preset offers its
+//!                                      container, `crate::presets`: a
+//!                                      checkbox each, unticked)
 //! ```
 //!
 //! Flags, comma-separated: `selected`; `dead` (the tunnel does not answer);
@@ -40,6 +43,7 @@
 //! pin-net⇥0|1
 //! pin-container⇥0|1
 //! rule⇥0|1                            (where the request had one)
+//! offer⇥<line>                        (each offer ticked)
 //! ```
 //!
 //! The same window is the hotkey menu of a running program
@@ -91,6 +95,9 @@ pub struct Request {
     /// A checkbox of its own, unticked: the rule a link's program would be
     /// kept by (`crate::links`) — what it says.
     pub rule: Option<String>,
+    /// What the program's preset offers its container (`crate::presets`):
+    /// `(line, text)`, a checkbox each, unticked.
+    pub offers: Vec<(String, String)>,
 }
 
 /// The hotkey menu: entries to choose one of.
@@ -276,6 +283,8 @@ pub struct Reply {
     pub pin_container: bool,
     /// The request's rule ticked.
     pub rule: bool,
+    /// The offers ticked, by their lines.
+    pub offers: Vec<String>,
 }
 
 /// A field as the format can carry it: tabs and line breaks become spaces.
@@ -347,6 +356,9 @@ pub fn render(req: &Request) -> String {
     if let Some(rule) = &req.rule {
         out.push_str(&format!("rule\t{}\n", clean(rule)));
     }
+    for (line, text) in &req.offers {
+        out.push_str(&format!("offer\t{}\t{}\n", clean(line), clean(text)));
+    }
     out
 }
 
@@ -364,6 +376,7 @@ pub fn parse_reply(text: &str) -> Option<Reply> {
             "pin-net" => reply.pin_net = value == "1",
             "pin-container" => reply.pin_container = value == "1",
             "rule" => reply.rule = value == "1",
+            "offer" if !value.is_empty() => reply.offers.push(value.to_owned()),
             _ => {}
         }
     }
@@ -500,7 +513,8 @@ mod tests {
     #[test]
     fn an_answer_needs_a_network_and_a_container() {
         let reply = parse_reply(
-            "net\tnl\ncontainer\t__newsb__\nname\tобщая\npin-net\t1\npin-container\t0\nrule\t1\n",
+            "net\tnl\ncontainer\t__newsb__\nname\tобщая\npin-net\t1\npin-container\t0\nrule\t1\n\
+             offer\tcamera=on\noffer\t\n",
         )
         .unwrap();
         assert_eq!(
@@ -512,6 +526,7 @@ mod tests {
                 pin_net: true,
                 pin_container: false,
                 rule: true,
+                offers: vec!["camera=on".to_owned()],
             }
         );
         // The main container is the empty tag — present, and empty.
