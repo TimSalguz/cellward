@@ -266,6 +266,8 @@ pub fn run() -> iced::Result {
     .window(iced::window::Settings {
         size: Size::new(600.0, height.clamp(260.0, 600.0)),
         position: iced::window::Position::Centered,
+        // A fixed size: floated by the compositor itself, as a dialog.
+        resizable: false,
         #[cfg(target_os = "linux")]
         platform_specific: iced::window::settings::PlatformSpecific {
             application_id: "vpn-zone-window".to_owned(),

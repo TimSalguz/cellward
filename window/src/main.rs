@@ -932,6 +932,11 @@ fn main() -> iced::Result {
     .window(iced::window::Settings {
         size,
         position: iced::window::Position::Centered,
+        // Its size is its own (it is never resized once open): a fixed size
+        // — the minimum the maximum — is what niri and sway float by
+        // themselves, no window rule needed (docs/PERMISSIONS.md §11.15,
+        // step 6).
+        resizable: false,
         // The name a compositor's window rule matches — to float it in a
         // tiling one, say. Without it the window has no app id at all.
         #[cfg(target_os = "linux")]
