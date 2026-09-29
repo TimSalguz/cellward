@@ -408,6 +408,9 @@ pub fn question(zone: &str, who: &Who, program: &str, remember: bool) -> String 
     )
 }
 
+/// Microphones offered at most, when one is chosen (`Policy::choose_source`).
+const MAX_SOURCES: usize = 8;
+
 /// The key of a container's record under which a program the person said
 /// no to is written, a line each (the owner, docs/PERMISSIONS.md §11.15: it
 /// is not asked again until that is changed in the window's ☰).
@@ -549,6 +552,9 @@ pub struct Policy {
     /// (none: not known) — not asked again: no answer, closed, too soon, or
     /// a refusal that could not be written.
     refused_now: Mutex<HashSet<Option<String>>>,
+    /// The compositor the last question was shown on (its launch's, when
+    /// its supervisor named it): the choice of a microphone comes there.
+    shown_on: Mutex<Option<std::ffi::OsString>>,
     /// The last journal line for a refusal nobody was asked about.
     last_told: Mutex<Option<Instant>>,
     /// How many times the files the setting is read from have changed
@@ -593,6 +599,7 @@ impl Policy {
             journal,
             asking: AtomicBool::new(false),
             refused_now: Mutex::default(),
+            shown_on: Mutex::default(),
             last_told: Mutex::new(None),
             generation: AtomicU64::new(0),
             watched: AtomicBool::new(false),
@@ -613,6 +620,7 @@ impl Policy {
             journal: None,
             asking: AtomicBool::new(false),
             refused_now: Mutex::default(),
+            shown_on: Mutex::default(),
             last_told: Mutex::new(None),
             generation: AtomicU64::new(0),
             // Nothing to watch: nothing changes.
@@ -874,6 +882,7 @@ impl Policy {
                 OnWindow::Elsewhere(on) => display = on,
             }
         }
+        *self.shown_on.lock().unwrap_or_else(|e| e.into_inner()) = display.clone();
         let left = self.timeout.saturating_sub(asked.elapsed());
         // In the launch window next, guarded (`window::question`): counted
         // from when the question can be seen, not from its start — a loaded
@@ -946,6 +955,50 @@ impl Policy {
         let answer = considered(answer_of(code, remember), asked.elapsed(), self.too_fast);
         let allowed = self.settle(program, who, key, &answer);
         then(allowed)
+    }
+
+    /// Which microphone a program just allowed gets, where there is more
+    /// than one (`options`, as the person reads them): asked in the launch
+    /// window, on the compositor the question was shown on, guarded — "as
+    /// the system has it" first, Enter's. `None`: that one — chosen, closed
+    /// or not answered.
+    pub fn choose_source(&self, program: &str, options: &[String]) -> Option<usize> {
+        let mut answers = vec![(
+            "default".to_owned(),
+            "Как в системе (по умолчанию)".to_owned(),
+            false,
+        )];
+        for (i, option) in options.iter().enumerate().take(MAX_SOURCES) {
+            answers.push((format!("source{i}"), shown_program(option), false));
+        }
+        let answers: Vec<(&str, &str, bool)> = answers
+            .iter()
+            .map(|(tag, label, danger)| (tag.as_str(), label.as_str(), *danger))
+            .collect();
+        let display = self
+            .shown_on
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let text = format!(
+            "Программе «{}» разрешён микрофон. Какой ей отдать?",
+            shown_program(program)
+        );
+        match crate::window::question_on(
+            &self.window,
+            display.as_deref(),
+            "Микрофон — какой?",
+            &text,
+            None,
+            &answers,
+            Some(self.timeout),
+        ) {
+            crate::window::Asked::Chose(tag) => tag
+                .strip_prefix("source")
+                .and_then(|n| n.parse::<usize>().ok())
+                .filter(|i| *i < options.len()),
+            _ => None,
+        }
     }
 
     /// Close the open question without asking (it could not be asked).

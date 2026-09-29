@@ -22,6 +22,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
+- **Which microphone** (2026-09-29): allowed, with more than one
+  microphone on the host, the person is asked which one — «Как в системе»
+  first; the real stream is made on the one chosen. The list is the host
+  server's sources that are no monitor, asked for by the filter itself.
 - **"Ask again" in the window's ☰**: «Снова спрашивать о сети / о
   микрофоне для «…»» takes the program's "no" out of its container's record.
 - **The microphone is silent until it is allowed** (2026-09-29, the owner's

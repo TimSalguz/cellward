@@ -1062,6 +1062,9 @@ struct Ghost {
 enum Own {
     /// A silent stream's real one, by the program's channel.
     Link(u32),
+    /// The server's sources, for the person to choose a microphone among
+    /// (`Session::capture`).
+    Sources,
     /// Nothing: its answer is dropped.
     Discard,
 }
@@ -1150,6 +1153,76 @@ fn now_timeval() -> [u8; 9] {
     out[0] = TAG_TIMEVAL;
     out[1..5].copy_from_slice(&(now.as_secs() as u32).to_be_bytes());
     out[5..9].copy_from_slice(&now.subsec_micros().to_be_bytes());
+    out
+}
+
+/// The sources a `GET_SOURCE_INFO_LIST` reply names that are no monitor —
+/// each its name and its description —, read by the connection's `version`
+/// as the servers write them (PulseAudio `source_fill_tagstruct`,
+/// pipewire-pulse `fill_source_info`). What cannot be read ends the list.
+fn capture_sources(frame: &[u8], version: u32) -> Vec<(Vec<u8>, String)> {
+    let payload = &frame[DESCRIPTOR..];
+    let Some(items) = parse(payload) else {
+        return Vec::new();
+    };
+    let is = |i: usize, tag: u8| matches!(items.get(i).map(|v| &v.value), Some(Value::Other(t)) if *t == tag);
+    let mut out = Vec::new();
+    let mut at = 2;
+    while at < items.len() {
+        let (Some(_), Some(Some(name)), Some(description)) = (
+            u32_at(&items, at),
+            str_at(&items, at + 1),
+            str_at(&items, at + 2),
+        ) else {
+            break;
+        };
+        if !is(at + 3, TAG_SAMPLE_SPEC) || !is(at + 4, TAG_CHANNEL_MAP) {
+            break;
+        }
+        let monitor_of = u32_at(&items, at + 8);
+        // Index, name, description, spec, map, module, volume, mute,
+        // monitor of, its name, latency, driver, flags.
+        at += 13;
+        if version >= 13 {
+            // Properties, configured latency.
+            at += 2;
+        }
+        if version >= 15 {
+            // Base volume, state, volume steps, card.
+            at += 4;
+        }
+        if version >= 16 {
+            let Some(ports) = u32_at(&items, at).and_then(|p| usize::try_from(p).ok()) else {
+                break;
+            };
+            if ports > items.len() {
+                break;
+            }
+            let per = 3 + usize::from(version >= 24) + if version >= 34 { 2 } else { 0 };
+            // The count, the ports, the active port.
+            at += 1 + per * ports + 1;
+        }
+        if version >= 21 {
+            let Some(item) = items.get(at) else {
+                break;
+            };
+            let formats = match payload.get(item.span.clone()) {
+                Some([TAG_U8, n]) => usize::from(*n),
+                _ => break,
+            };
+            at += 1 + formats;
+        }
+        if at > items.len() {
+            break;
+        }
+        if monitor_of == Some(INVALID) && !names_a_monitor(name) && !looks_like_index(name) {
+            let description = description
+                .map(|d| String::from_utf8_lossy(d).into_owned())
+                .filter(|d| !d.trim().is_empty())
+                .unwrap_or_else(|| String::from_utf8_lossy(name).into_owned());
+            out.push((name.to_vec(), description));
+        }
+    }
     out
 }
 
@@ -1245,6 +1318,10 @@ struct Session {
     /// The filter's own requests to the server, by their tags.
     own: HashMap<u32, Own>,
     own_made: u32,
+    /// The server's sources that are no monitor — each its name and its
+    /// description —, as the filter last asked: the microphones a program
+    /// allowed may get (`capture_sources`).
+    capture: Vec<(Vec<u8>, String)>,
 }
 
 impl Session {
@@ -1662,7 +1739,7 @@ impl Session {
     /// its buffer, its corking, its rate, the format fixed to what it asked
     /// for (not the source's) —, or `None` when it is gone or no longer
     /// silent.
-    fn link(&mut self, channel: u32) -> Option<Vec<u8>> {
+    fn link(&mut self, channel: u32, source: Option<&[u8]>) -> Option<Vec<u8>> {
         let g = self.ghosts.get(&channel)?;
         if g.link != Link::Silent {
             return None;
@@ -1687,12 +1764,41 @@ impl Session {
             tag,
             corked: g.corked,
         };
-        Some(frame)
+        // The microphone the person chose, by its name — never a monitor
+        // nor a number: the server's word on it is checked all the same.
+        let Some(name) = source.filter(|n| {
+            !n.is_empty() && !n.contains(&0) && !names_a_monitor(n) && !looks_like_index(n)
+        }) else {
+            return Some(frame);
+        };
+        set_u32(&mut frame, &items[4], INVALID);
+        let payload = &frame[DESCRIPTOR..];
+        let named = &items[5].span;
+        let mut out = payload[..named.start].to_vec();
+        out.push(TAG_STRING);
+        out.extend_from_slice(name);
+        out.push(0);
+        out.extend_from_slice(&payload[named.end..]);
+        Some(frame_of(COMMAND_CHANNEL, &out))
+    }
+
+    /// The filter's own request for the server's sources (`Own::Sources`).
+    fn sources_request(&mut self) -> Vec<u8> {
+        let tag = self.own_tag(Own::Sources);
+        command_frame(COMMAND_GET_SOURCE_INFO_LIST, tag, &[])
     }
 
     /// The server's answer to a request of the filter's own; what to send
     /// the server after it, if anything.
     fn own_answer(&mut self, own: Own, command: u32, frame: &[u8]) -> Option<Vec<u8>> {
+        if own == Own::Sources {
+            self.capture = if command == COMMAND_REPLY {
+                capture_sources(frame, self.version)
+            } else {
+                Vec::new()
+            };
+            return None;
+        }
         let Own::Link(client) = own else {
             return None;
         };
@@ -2067,6 +2173,10 @@ fn pump_up(
                 to_client.send(&reply, &[])?;
                 silence(channel, to_client, session);
                 if let Some((program, remember)) = ask {
+                    // The microphones to choose among, by the time the
+                    // person allows.
+                    let sources = lock(session).sources_request();
+                    to_server.send(&sources, &[])?;
                     self::ask(channel, program, remember, to_server, session);
                 }
             }
@@ -2149,13 +2259,21 @@ fn ask(
                 launch,
                 key.as_deref(),
                 |allowed| {
-                    let mut s = lock(&session);
-                    if allowed {
-                        s.link(channel)
-                    } else {
-                        s.mic_denied = true;
-                        None
+                    if !allowed {
+                        lock(&session).mic_denied = true;
+                        return None;
                     }
+                    // Which microphone, where there is more than one: asked
+                    // while the zone's question is still open.
+                    let capture = lock(&session).capture.clone();
+                    let source = if capture.len() > 1 {
+                        let shown: Vec<String> = capture.iter().map(|(_, d)| d.clone()).collect();
+                        mic.choose_source(&program, &shown)
+                            .map(|i| capture[i].0.clone())
+                    } else {
+                        None
+                    };
+                    lock(&session).link(channel, source.as_deref())
                 },
             );
             // The connection may be gone by now: then this fails, and there
@@ -3352,7 +3470,7 @@ mod tests {
             3,
             &[V::L(channel), V::B(true)],
         )));
-        let made = s.link(channel).expect("its real stream");
+        let made = s.link(channel, None).expect("its real stream");
         let (command, tag) = command_of(&made).unwrap();
         assert_eq!(command, COMMAND_CREATE_RECORD_STREAM);
         assert!(tag >= OWN_TAGS);
@@ -3360,7 +3478,7 @@ mod tests {
         assert_eq!(items[7].value, Value::Bool(true), "corked");
         assert!(items[11..14].iter().all(|i| i.value == Value::Bool(false)));
         assert_eq!(u32_at(&items, 8), Some(3840));
-        assert!(s.link(channel).is_none(), "made once");
+        assert!(s.link(channel, None).is_none(), "made once");
         // Uncorked meanwhile: told to the real stream after its reply.
         answer_ok(s.up(&packet(
             COMMAND_CORK_RECORD_STREAM,
@@ -3470,7 +3588,7 @@ mod tests {
             panic!("not silent");
         };
         s.mic.abandon();
-        let made = s.link(channel).unwrap();
+        let made = s.link(channel, None).unwrap();
         let tag = command_of(&made).unwrap().1;
         answer_ok(s.up(&packet(COMMAND_DELETE_RECORD_STREAM, 3, &[V::L(channel)])));
         let Down::Own(Some(delete)) = s.down(&record_reply(tag, 4, 70, Some("alsa_input.x")))
@@ -3487,7 +3605,7 @@ mod tests {
         let Up::Ghost { channel, .. } = s.up(&record(5, INVALID, None, none, INVALID)) else {
             panic!("not silent");
         };
-        let made = s.link(channel).unwrap();
+        let made = s.link(channel, None).unwrap();
         let tag = command_of(&made).unwrap().1;
         let Down::Own(Some(_)) = s.down(&record_reply(tag, 6, 71, Some("x.monitor"))) else {
             panic!("not deleted");
@@ -3507,6 +3625,151 @@ mod tests {
             s.up(&record(1, INVALID, None, none, INVALID)),
             Up::Ghost { ask: None, .. }
         ));
+    }
+
+    /// One source of a `GET_SOURCE_INFO_LIST` reply at protocol 35, as the
+    /// servers write it: `monitor_of` INVALID for a microphone.
+    fn source_info(index: u32, name: &str, description: &str, monitor_of: u32) -> Vec<u8> {
+        let mut p = payload(&[
+            V::L(index),
+            V::S(Some(name)),
+            V::S(Some(description)),
+            V::Spec,
+            V::Map,
+            V::L(INVALID),
+            V::CVol,
+            V::B(false),
+            V::L(monitor_of),
+            V::S(None),
+            V::Usec,
+            V::S(Some("PipeWire")),
+            V::L(0),
+            V::P(&[("device.class", "sound")]),
+            V::Usec,
+        ]);
+        p.extend_from_slice(&[TAG_VOLUME, 0, 1, 0, 0]);
+        p.extend(payload(&[
+            V::L(0),
+            V::L(65537),
+            V::L(INVALID),
+            // One port: name, description, priority, available,
+            // availability group, type.
+            V::L(1),
+            V::S(Some("analog-input")),
+            V::S(Some("Mic")),
+            V::L(100),
+            V::L(2),
+            V::S(None),
+            V::L(0),
+            V::S(Some("analog-input")),
+        ]));
+        // One format: PCM.
+        p.extend_from_slice(&[
+            TAG_U8,
+            1,
+            TAG_FORMAT_INFO,
+            TAG_U8,
+            1,
+            TAG_PROPLIST,
+            TAG_STRING_NULL,
+        ]);
+        p
+    }
+
+    /// The microphones to choose among: the sources the server lists that
+    /// are no monitor, by their names and descriptions; a list the filter
+    /// cannot read ends where it stops being readable.
+    #[test]
+    fn the_microphones_are_the_sources_that_are_no_monitor() {
+        let mut p = payload(&[V::L(COMMAND_REPLY), V::L(9)]);
+        p.extend(source_info(
+            40,
+            "alsa_input.pci.analog-stereo",
+            "Встроенный",
+            INVALID,
+        ));
+        p.extend(source_info(
+            41,
+            "alsa_output.pci.analog-stereo.monitor",
+            "Монитор",
+            7,
+        ));
+        p.extend(source_info(42, "bluez_input.headset", "", INVALID));
+        p.extend(source_info(43, "0x10", "Число", INVALID));
+        let reply = framed(COMMAND_CHANNEL, &p);
+        let got = capture_sources(&reply, 35);
+        assert_eq!(
+            got,
+            vec![
+                (
+                    b"alsa_input.pci.analog-stereo".to_vec(),
+                    "Встроенный".to_owned()
+                ),
+                (
+                    b"bluez_input.headset".to_vec(),
+                    "bluez_input.headset".to_owned()
+                ),
+            ]
+        );
+        // A source that is not read as one: the sources read before stay,
+        // nothing after.
+        let mut odd = p.clone();
+        odd.extend(payload(&[
+            V::L(44),
+            V::S(Some("alsa_input.odd")),
+            V::S(Some("?")),
+            V::L(0),
+        ]));
+        odd.extend(source_info(45, "alsa_input.after", "После", INVALID));
+        assert_eq!(capture_sources(&framed(COMMAND_CHANNEL, &odd), 35), got);
+        assert!(capture_sources(&framed(COMMAND_CHANNEL, &p[..12]), 35).is_empty());
+        // The filter's own request, its answer the filter's.
+        let mut s = with_mic(Setting::Ask, true);
+        let request = s.sources_request();
+        let (command, tag) = command_of(&request).unwrap();
+        assert_eq!(command, COMMAND_GET_SOURCE_INFO_LIST);
+        let mut answer = payload(&[V::L(COMMAND_REPLY), V::L(tag)]);
+        answer.extend(source_info(40, "alsa_input.x", "Икс", INVALID));
+        assert_eq!(s.down(&framed(COMMAND_CHANNEL, &answer)), Down::Own(None));
+        assert_eq!(
+            s.capture,
+            vec![(b"alsa_input.x".to_vec(), "Икс".to_owned())]
+        );
+    }
+
+    /// The microphone chosen goes into the real stream's request by name —
+    /// a monitor or a number never does.
+    #[test]
+    fn the_chosen_microphone_is_the_real_streams() {
+        let mut s = with_mic(Setting::Ask, true);
+        let none: &[(&str, &str)] = &[];
+        let Up::Ghost { channel, .. } = s.up(&record(2, INVALID, None, none, INVALID)) else {
+            panic!("not silent");
+        };
+        s.mic.abandon();
+        let made = s.link(channel, Some(b"alsa_input.usb-Mic.mono")).unwrap();
+        let items = parse(&made[DESCRIPTOR..]).expect("a request the server reads");
+        assert_eq!(u32_at(&items, 4), Some(INVALID));
+        assert_eq!(
+            str_at(&items, 5),
+            Some(Some(&b"alsa_input.usb-Mic.mono"[..]))
+        );
+        assert!(record_refused(&items[2..]).is_none());
+        assert_eq!(
+            items.len(),
+            parse(&record(2, INVALID, None, none, INVALID)[DESCRIPTOR..])
+                .unwrap()
+                .len()
+        );
+        for (tag, bad) in (3..).zip([&b"x.monitor"[..], b"7", b""]) {
+            s.mic_denied = true;
+            let Up::Ghost { channel, .. } = s.up(&record(tag, INVALID, None, none, INVALID)) else {
+                panic!("not silent");
+            };
+            let made = s.link(channel, Some(bad)).unwrap();
+            let items = parse(&made[DESCRIPTOR..]).unwrap();
+            assert_eq!(str_at(&items, 5), Some(None), "{bad:?}");
+        }
     }
 
     fn answer_ok(up: Up) {
@@ -3587,7 +3850,14 @@ mod tests {
         // The server gets the rest of the connection's commands, not the
         // silent stream.
         let mut frames = Frames::new(&seen);
-        let mut next = || command_of(&frames.next().unwrap().unwrap().0).unwrap();
+        // The filter's own asking for the microphones (a silent stream's
+        // question) is not the program's.
+        let mut next = || loop {
+            let seen = command_of(&frames.next().unwrap().unwrap().0).unwrap();
+            if seen.0 != COMMAND_GET_SOURCE_INFO_LIST || seen.1 < OWN_TAGS {
+                break seen;
+            }
+        };
         assert_eq!(next(), (COMMAND_AUTH, 0));
         assert_eq!(next(), (COMMAND_SET_CLIENT_NAME, 1));
         assert_eq!(next(), (COMMAND_GET_SERVER_INFO, 3));
