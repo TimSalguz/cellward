@@ -1077,7 +1077,7 @@ fn kill_refuses_what_is_not_a_zone_of_its_own() {
     for name in ["unconfined", "direct"] {
         let out = home.run(&["kill", name]);
         assert_eq!(out.status.code(), Some(3), "{name}");
-        assert!(stderr(&out).contains("сеть хоста"), "{}", stderr(&out));
+        assert!(stderr(&out).contains("без изоляции"), "{}", stderr(&out));
     }
     assert_eq!(home.run(&["kill"]).status.code(), Some(3));
     let out = home.run(&["kill", "nl"]);
@@ -1715,7 +1715,7 @@ fn watch_announces_a_dead_tunnel_once_and_its_recovery() {
     let bar = stdout(&home.run(&["status", "--bar"]));
     assert_eq!(
         bar.trim(),
-        "{\"text\":\"nl ⚠1\",\"tooltip\":\"cellward: поднятые зоны\\nБез ограничений (⚠) сейчас: firefox\",\"class\":\"up\",\"unconfined\":1}"
+        "{\"text\":\"nl ⚠1\",\"tooltip\":\"cellward: поднятые зоны\\nБез изоляции (⚠) сейчас: firefox\",\"class\":\"up\",\"unconfined\":1}"
     );
     fs::remove_file(&reg).unwrap();
 
