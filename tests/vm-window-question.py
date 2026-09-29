@@ -105,6 +105,16 @@ with subtest("the network question is a panel on the program's window; a hasty c
     x, y, w, h, before = ask_window("askq", "192.0.2.10")
     at, box = await_panel("question-panel", before, x, y, w)
     x0, y0, x1, y1 = box
+    # The proxy that shows it is in namespaces of its own, its root empty
+    # (rust/src/wl_proxy.rs `isolate`).
+    tree = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r"))
+    sup = find(tree, "askq")["pid"]
+    proxy = machine.succeed(f"pgrep -P {sup} -x vz-wl-proxy").split()[0]
+    for ns in ["user", "net", "mnt", "ipc", "uts"]:
+        own = machine.succeed(f"readlink /proc/{proxy}/ns/{ns}").strip()
+        its = machine.succeed(f"readlink /proc/{sup}/ns/{ns}").strip()
+        assert own != its, (ns, own, its)
+    assert machine.succeed(f"ls -A /proc/{proxy}/root/").strip() == "", "the host's tree"
     # Under the title strip, in the window's middle.
     assert y0 >= y + width + title - 1, (box, y)
     assert abs((x0 + x1) / 2 - (x + w / 2)) <= 4, (box, x, w)

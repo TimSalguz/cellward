@@ -56,7 +56,15 @@
 //!   launch's own connections only, since nobody else's are taken (§3.2);
 //!   out of descriptors, accepting rests a while and is tried again;
 //! * it dies with its supervisor (`PR_SET_PDEATHSIG`): a window's pid
-//!   upstream is the supervisor's, and never a dead one's.
+//!   upstream is the supervisor's, and never a dead one's;
+//! * namespaces of its own (2026-09-29, the owner: the proxy isolated
+//!   better — it reads the program's messages): a user namespace whose one
+//!   uid is the user's, and in it mount, network, IPC and UTS namespaces,
+//!   its root an empty read-only tmpfs, its capabilities there dropped
+//!   ([`isolate`]). What the filter lets through sees nothing of the host —
+//!   no file, no network interface, no System V IPC; the descriptors it was
+//!   handed keep working. Where user namespaces are not given, it goes on
+//!   without, and says so.
 //!
 //! **Fail-closed.** The proxy dying takes the program's display with it; the
 //! program is never handed the compositor's socket instead. When it cannot
@@ -1723,6 +1731,12 @@ fn confine(
     let name = std::ffi::CString::new(PROCESS_NAME).map_err(|e| e.to_string())?;
     // SAFETY: PR_SET_NAME reads a NUL-terminated string that outlives the call.
     unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr(), 0, 0, 0) };
+    // First: its maps are written while its /proc files are still its own
+    // (not dumpable, they are root's). An extra wall: without it the proxy
+    // is what it was before it.
+    if let Err(e) = isolate() {
+        eprintln!("wl-sandbox: the Wayland proxy runs without namespaces of its own ({e})");
+    }
     // SAFETY: prctl with these arguments takes no pointers.
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
         return Err(format!("PR_SET_DUMPABLE: {}", io::Error::last_os_error()));
@@ -1759,6 +1773,98 @@ fn confine(
         .and_then(|f| f.load())
         .map_err(|e| format!("seccomp: {e}"))?;
     Ok(border)
+}
+
+/// Namespaces of the proxy's own, in its fresh single-threaded child
+/// before the filter: a user namespace (its one uid and gid the user's, no
+/// supplementary groups), and owned by it mount, network, IPC and UTS
+/// namespaces; the root an empty tmpfs, read-only, the host's tree detached
+/// (`pivot_root(".", ".")`); every capability in the namespace dropped.
+/// The parent-death signal stays: the new namespace is a child of the old,
+/// owned by the same user, so the credentials' change keeps it.
+fn isolate() -> Result<(), String> {
+    fn check(what: &str, rc: libc::c_int) -> Result<(), String> {
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(format!("{what}: {}", io::Error::last_os_error()))
+        }
+    }
+    // SAFETY: getuid and getgid take nothing and cannot fail.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let flags = libc::CLONE_NEWUSER
+        | libc::CLONE_NEWNS
+        | libc::CLONE_NEWNET
+        | libc::CLONE_NEWIPC
+        | libc::CLONE_NEWUTS;
+    // SAFETY: unshare takes flags only.
+    check("unshare", unsafe { libc::unshare(flags) })?;
+    let write = |file: &str, text: String| {
+        fs::write(format!("/proc/self/{file}"), text).map_err(|e| format!("{file}: {e}"))
+    };
+    write("setgroups", "deny".to_owned())?;
+    write("uid_map", format!("{uid} {uid} 1"))?;
+    write("gid_map", format!("{gid} {gid} 1"))?;
+    let mount = |source: &std::ffi::CStr,
+                 target: &std::ffi::CStr,
+                 fstype: Option<&std::ffi::CStr>,
+                 flags: libc::c_ulong,
+                 data: Option<&std::ffi::CStr>| {
+        // SAFETY: NUL-terminated strings that outlive the call, or null.
+        unsafe {
+            libc::mount(
+                source.as_ptr(),
+                target.as_ptr(),
+                fstype.map_or(std::ptr::null(), std::ffi::CStr::as_ptr),
+                flags,
+                data.map_or(std::ptr::null(), |d| d.as_ptr().cast()),
+            )
+        }
+    };
+    check(
+        "private /",
+        mount(c"none", c"/", None, libc::MS_REC | libc::MS_PRIVATE, None),
+    )?;
+    // The empty root: a tmpfs over /proc — there on every Linux —, then
+    // made the root, the host's tree under it detached.
+    check(
+        "tmpfs",
+        mount(
+            c"vz-wl-proxy",
+            c"/proc",
+            Some(c"tmpfs"),
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            Some(c"size=4k,mode=0555"),
+        ),
+    )?;
+    // SAFETY: NUL-terminated paths that outlive the calls.
+    unsafe {
+        check("chdir", libc::chdir(c"/proc".as_ptr()))?;
+        check(
+            "pivot_root",
+            libc::syscall(libc::SYS_pivot_root, c".".as_ptr(), c".".as_ptr()) as libc::c_int,
+        )?;
+        check("detach", libc::umount2(c".".as_ptr(), libc::MNT_DETACH))?;
+        check("chdir /", libc::chdir(c"/".as_ptr()))?;
+    }
+    check(
+        "read-only /",
+        mount(
+            c"none",
+            c"/",
+            None,
+            libc::MS_REMOUNT
+                | libc::MS_BIND
+                | libc::MS_RDONLY
+                | libc::MS_NOSUID
+                | libc::MS_NODEV
+                | libc::MS_NOEXEC,
+            None,
+        ),
+    )?;
+    // No capability left, in this namespace either.
+    crate::enter::drop_capabilities();
+    Ok(())
 }
 
 /// Close every descriptor but `keep`. `close_range(2)`: one call per gap,
@@ -5627,5 +5733,51 @@ mod tests {
         assert_eq!(heard, [0, 5], "the program saw the panel's input");
         drop(client);
         assert_eq!(rig.finish(), 0);
+    }
+
+    /// The proxy's own namespaces (`isolate`): after them nothing of the
+    /// host's tree is there — the root empty —, and a descriptor it had
+    /// still works. Where namespaces are not given (a runner that forbids
+    /// them), there is nothing to check here; the VM test checks them.
+    #[test]
+    fn the_proxy_sees_nothing_of_the_host() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        // SAFETY: a fork in a test: the child calls `isolate`, looks, and
+        // leaves with _exit; glibc's fork leaves its allocator usable.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let code = match isolate() {
+                Err(_) => 2,
+                Ok(()) => {
+                    let empty = fs::read_dir("/").is_ok_and(|d| d.count() == 0);
+                    let gone = fs::metadata("/etc").is_err() && fs::metadata("/nix").is_err();
+                    let works = (&theirs).write_all(b"x").is_ok();
+                    if empty && gone && works {
+                        0
+                    } else {
+                        1
+                    }
+                }
+            };
+            // SAFETY: always sound.
+            unsafe { libc::_exit(code) };
+        }
+        drop(theirs);
+        let mut status = 0;
+        // SAFETY: our own child, and a valid pointer.
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        let code = libc::WEXITSTATUS(status);
+        if code == 2 {
+            eprintln!("no namespaces of its own here — nothing to check");
+            return;
+        }
+        assert_eq!(
+            code, 0,
+            "the host's tree is still there, or the descriptor broke"
+        );
+        let mut byte = [0u8];
+        (&ours).read_exact(&mut byte).unwrap();
+        assert_eq!(&byte, b"x");
     }
 }

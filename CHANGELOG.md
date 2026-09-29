@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Security
+- **The Wayland proxy in namespaces of its own** (2026-09-29, the owner:
+  the proxy reads the program's messages and is to be isolated better): a
+  user namespace whose one uid is the user's, and in it mount, network, IPC
+  and UTS namespaces; its root an empty read-only tmpfs, its capabilities
+  there dropped — on top of its seccomp allow-list. Where user namespaces
+  are not given, it runs as before and says so.
+
 ### Added
 - **The network question on the program's own window** (2026-09-29, the
   owner's decision): a panel under the window's title, drawn by the

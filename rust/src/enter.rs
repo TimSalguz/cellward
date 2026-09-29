@@ -305,7 +305,7 @@ fn raise_ambient() -> io::Result<()> {
 }
 
 /// Every capability dropped, and none kept for an exec.
-fn drop_capabilities() {
+pub(crate) fn drop_capabilities() {
     let mut header = CapHeader {
         version: CAP_VERSION_3,
         pid: 0,
