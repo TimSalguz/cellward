@@ -217,13 +217,19 @@ let
               timeout=timeout,
           )
 
-      def answer_in_the_window(key):
+      def answer_in_the_window(downs):
+          """The question's answer `downs` below the first: the highlight
+          moved there (each key starts the window's guard again, digits
+          choose nothing), and Enter once the guard is over — a "yes" sooner
+          is taken for a slip."""
           machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=60)
-          # Past the guard: a "yes" sooner is taken for a slip.
           machine.sleep(3)
           user(f"WAYLAND_DISPLAY={display} grim /tmp/camera-question.png")
           machine.copy_from_vm("/tmp/camera-question.png", "")
-          user(f"WAYLAND_DISPLAY={display} wtype -s 400 -k {key} -k Return")
+          if downs:
+              user(f"WAYLAND_DISPLAY={display} wtype -s 300 " + " ".join(["-k Down"] * downs))
+          machine.sleep(3)
+          user(f"WAYLAND_DISPLAY={display} wtype -k Return")
           machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=30)
 
       with subtest("asked: allowed, the real camera comes into the same stream"):
@@ -240,7 +246,7 @@ let
               "cellward run offline -- python3 /etc/vm-camera/client.py /dev/video0 real 90"
           )
           # «Разрешить, пока работает», the second answer.
-          answer_in_the_window(2)
+          answer_in_the_window(1)
           unit_says("vmcamask", "real: a frame of the camera after")
           print(user("journalctl --user -u vmcamask --no-pager | grep real: || true"))
           machine.fail("grep -rq '^cam_deny' /home/alice/.config/vpn-zones/")
@@ -251,7 +257,7 @@ let
               "cellward run offline -- python3 /etc/vm-camera/client.py /dev/video0 block 25"
           )
           # «Отказать», the first.
-          answer_in_the_window(1)
+          answer_in_the_window(0)
           unit_says("vmcamno", "block: 25 black frames")
           machine.succeed("grep -rq '^cam_deny' /home/alice/.config/vpn-zones/")
           # Again: no question, black.
