@@ -107,6 +107,14 @@ pub fn defaults(tools: &Tools) -> String {
     // "niri" — niri's own, which `frame_niri_radius` says as it is read
     // now (0: niri's config sets none, or there is none).
     let (frame_outer, frame_outer_source) = crate::frame::outer_radius(&tools.config);
+    // The frame in fullscreen (2026-09-29): its width — a number, or
+    // "same" —, its title's mode, the zone's label on the way in (seconds,
+    // 0 none), the fullscreen buttons, and a double click on the title.
+    let (fs_width, fs_width_source) = crate::frame::fullscreen_width(&tools.config);
+    let (fs_title, fs_title_source) = crate::frame::fullscreen_title(&tools.config);
+    let (fs_notice, fs_notice_source) = crate::frame::fullscreen_notice(&tools.config);
+    let (fs_button, fs_button_source) = crate::frame::fullscreen_button(&tools.config);
+    let (double_click, double_click_source) = crate::frame::double_click(&tools.config);
     let radius_json = |r: crate::frame::Radius| match r {
         crate::frame::Radius::Px(px) => px.to_string(),
         crate::frame::Radius::Niri(_) => string("niri"),
@@ -135,7 +143,9 @@ pub fn defaults(tools: &Tools) -> String {
         "{{\"network\":{},\"container\":{},\"launcher_mode\":{},\"compositor_restriction\":{},\
          \"wayland_proxy\":{},\"frames\":{},\"frame_width\":{},\"frame_title\":{},\
          \"frame_buttons\":{},\"frame_style\":{},\"frame_radius\":{},\"frame_outer_radius\":{},\
-         \"frame_niri_radius\":{},\"tray_badge\":{},\
+         \"frame_niri_radius\":{},\"frame_fullscreen_width\":{},\"frame_fullscreen_title\":{},\
+         \"frame_fullscreen_notice\":{},\"frame_fullscreen_button\":{},\"frame_double_click\":{},\
+         \"tray_badge\":{},\
          \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{},\"ask_again\":{},\
          \"question_timeout\":{},\"handshake_check\":{},\"protected\":[{}],\"host_runs\":[{}],\
          \"permissions\":{{\"microphone\":{},\"screencast\":{},\"camera\":{},\"camera_mode\":{},\
@@ -154,6 +164,14 @@ pub fn defaults(tools: &Tools) -> String {
         sourced(radius_json(frame_radius), frame_radius_source),
         sourced(radius_json(frame_outer), frame_outer_source),
         crate::frame::niri_radius(),
+        match fs_width {
+            Some(w) => sourced(w.to_string(), fs_width_source),
+            None => sourced_str("same", fs_width_source),
+        },
+        sourced_str(fs_title.as_str(), fs_title_source),
+        sourced(fs_notice.to_string(), fs_notice_source),
+        sourced_str(fs_button.as_str(), fs_button_source),
+        sourced_str(double_click.as_str(), double_click_source),
         sourced_str(tray_badge.as_str(), tray_badge_source),
         sourced_str(&autostart, autostart_source),
         sourced_str(&user_entries, user_entries_source),

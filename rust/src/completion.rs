@@ -240,6 +240,9 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                     "buttons",
                     "radius",
                     "outer-radius",
+                    "fullscreen",
+                    "fullscreen-button",
+                    "double-click",
                     "color",
                 ],
             ),
@@ -261,6 +264,24 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             }
             "frame" if pos == 3 && word(2) == "outer-radius" => {
                 strs(&mut out, &["0", "12", "20", "niri", "default"])
+            }
+            "frame" if pos == 3 && word(2) == "fullscreen" => {
+                strs(&mut out, &["width", "title", "notice"])
+            }
+            "frame" if pos == 4 && word(2) == "fullscreen" && word(3) == "width" => {
+                strs(&mut out, &["same", "0", "4", "default"])
+            }
+            "frame" if pos == 4 && word(2) == "fullscreen" && word(3) == "title" => {
+                strs(&mut out, &["off", "hover", "always", "default"])
+            }
+            "frame" if pos == 4 && word(2) == "fullscreen" && word(3) == "notice" => {
+                strs(&mut out, &["on", "off", "3", "default"])
+            }
+            "frame" if pos == 3 && word(2) == "fullscreen-button" => {
+                strs(&mut out, &["one", "two", "menu", "none", "default"])
+            }
+            "frame" if pos == 3 && word(2) == "double-click" => {
+                strs(&mut out, &["maximize", "none", "default"])
             }
             "frame" if pos == 3 && word(2) == "color" => owned(&mut out, &snap.zones),
             "frame" if pos == 4 && word(2) == "color" => strs(&mut out, &["default"]),

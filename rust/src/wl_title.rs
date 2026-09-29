@@ -2735,6 +2735,9 @@ mod tests {
             style: Style::Soft,
             radius: Radius::Px(12),
             outer: Radius::Px(0),
+            fullscreen: crate::frame::DEFAULT_FULLSCREEN,
+            fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
+            double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
         };
         assert_eq!(
             Look::of(&frame),
@@ -2761,6 +2764,9 @@ mod tests {
             style: Style::Soft,
             radius: Radius::Niri(20),
             outer: Radius::Px(0),
+            fullscreen: crate::frame::DEFAULT_FULLSCREEN,
+            fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
+            double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
         };
         // A niri of 20, a border of 4 — the strip of 20 over it
         // leaves the top square.
@@ -3064,6 +3070,9 @@ mod tests {
             style: Style::Soft,
             radius: Radius::Px(0),
             outer: Radius::Niri(20),
+            fullscreen: crate::frame::DEFAULT_FULLSCREEN,
+            fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
+            double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
         };
         let look = Look::of(&frame);
         assert_eq!((look.outer, look.border, look.band), (20, 4, true));

@@ -152,7 +152,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::os::fd::OwnedFd;
 use std::rc::{Rc, Weak};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use wl_proxy::client::Client;
 use wl_proxy::fixed::Fixed;
@@ -240,7 +240,7 @@ use wl_proxy::protocols::xdg_toplevel_drag_v1::xdg_toplevel_drag_v1::{
 };
 use wl_proxy::protocols::ObjectInterface;
 
-use crate::frame::TitleMode;
+use crate::frame::{Fullscreen, TitleMode};
 use crate::wl_proxy::Border;
 use crate::wl_title::{
     Button, ButtonsLook, Drawn, End, Lease, Lit, Look, Outer, Pixels, Prompt, Square, Text,
@@ -370,11 +370,12 @@ pub(crate) fn strips(g: Rect, i: Insets) -> [Rect; 4] {
 }
 
 /// Where the title strip is, over the program's geometry `g`: in the room
-/// the insets keep for it, above `g`; or, `over` the content (hover), along
-/// the top of `g` — never taller than `g` — when there is a frame (a
-/// border) to have it. `None`: no strip.
+/// the insets keep for it, above `g`; or, `over` the content (hover, the
+/// label on the way into fullscreen), along the top of `g` — never taller
+/// than `g` —, with a border or without one (a width of 0, 2026-09-29: the
+/// strip is then all there is of the frame). `None`: no strip.
 pub(crate) fn title_strip(g: Rect, i: Insets, over: bool) -> Option<Rect> {
-    title_row(g, i, over && i.border > 0)
+    title_row(g, i, over)
 }
 
 /// Where the tag's row is (`crate::wl_title::Look::tag`): as the title
@@ -404,6 +405,17 @@ fn title_row(g: Rect, i: Insets, over: bool) -> Option<Rect> {
     } else {
         None
     }
+}
+
+/// The insets of a frame of a border `border` wide whose title strip is in
+/// `mode`: the strip takes room only when it is always there.
+fn insets_of(mode: TitleMode, border: i32) -> Insets {
+    let title = if mode == TitleMode::Always {
+        TITLE_HEIGHT
+    } else {
+        0
+    };
+    Insets { border, title }
 }
 
 /// Where the text and the buttons go on a title strip, by the look.
@@ -780,6 +792,9 @@ pub(crate) struct Frames {
     /// The border's width: the launch's, changed on the fly
     /// ([`Frames::set_width`]).
     width: Cell<i32>,
+    /// The frame of a fullscreen window: the launch's, changed on the fly
+    /// with the width.
+    full: Cell<Fullscreen>,
     /// This connection's windows: what a change of the frame reaches.
     windows: RefCell<Vec<Weak<RefCell<Window>>>>,
     /// What the frame is drawn with, the launch's — changed on the fly
@@ -986,6 +1001,7 @@ impl Frames {
     ) -> Rc<Self> {
         let frames = Rc::new(Self {
             width: Cell::new(border.width),
+            full: Cell::new(border.fullscreen),
             windows: RefCell::default(),
             parts: RefCell::new(Parts {
                 mode: border.title,
@@ -1122,6 +1138,27 @@ impl Frames {
         }
     }
 
+    /// When a window of this connection next wants the proxy's loop to wake:
+    /// the end of a fullscreen label ([`Window::notice`]).
+    pub(crate) fn wake_at(&self) -> Option<Instant> {
+        self.windows
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter_map(|w| w.try_borrow().ok().and_then(|w| w.notice_until))
+            .min()
+    }
+
+    /// The loop woke at `now`: the labels whose seconds are over go.
+    pub(crate) fn tick(&self, now: Instant) {
+        let windows: Vec<_> = self.windows.borrow().clone();
+        for window in windows.iter().filter_map(Weak::upgrade) {
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.notice_over(now);
+            }
+        }
+    }
+
     /// Whether windows of this connection can have a frame; said once per
     /// proxy when not.
     fn can_draw(&self) -> bool {
@@ -1153,6 +1190,27 @@ impl Frames {
         }
     }
 
+    /// The border's width of a fullscreen window: its own, or the same as
+    /// outside fullscreen; none for the tag.
+    fn fullscreen_width(&self) -> i32 {
+        match self.full.get().width {
+            _ if self.look().tag() => 0,
+            Some(w) => w,
+            None => self.width.get(),
+        }
+    }
+
+    /// The insets of a window of this connection in a state `fullscreen` or
+    /// not, as the frame is now: the modes the connection's, not yet the
+    /// window's ([`Window::swap`]).
+    fn insets_now(&self, fullscreen: bool) -> Insets {
+        if fullscreen {
+            insets_of(self.full.get().title, self.fullscreen_width())
+        } else {
+            insets_of(self.mode(), self.border_width())
+        }
+    }
+
     /// The frame changed on the fly (step 6 of `docs/PERMISSIONS.md`
     /// §11.15): the width — 0 is none —, and where the colours, the look or
     /// the title's mode did too, the parts drawn with; every window of the
@@ -1160,6 +1218,7 @@ impl Frames {
     /// leaves it.
     pub(crate) fn set_frame(&self, border: &Border) {
         self.width.set(border.width);
+        self.full.set(border.fullscreen);
         let new = !Rc::ptr_eq(&self.parts.borrow().pixel, &border.pixel);
         if new {
             *self.parts.borrow_mut() = Parts {
@@ -1178,14 +1237,15 @@ impl Frames {
     }
 
     /// The strips of a new bordered window, four a ring of the look's
-    /// ([`Look::rings`]; none for the tag), above `top` (the program's
-    /// topmost layer on `root`). Attached, not committed: they show with the
-    /// first layout, which the program's commit applies.
+    /// ([`Look::rings`] of `width`; none for the tag), above `top` (the
+    /// program's topmost layer on `root`). Attached, not committed: they
+    /// show with the first layout, which the program's commit applies.
     fn make_strips(
         &self,
         root: &Rc<WlSurface>,
         top: &Rc<WlSurface>,
         me: &Weak<RefCell<Window>>,
+        width: i32,
     ) -> Option<Vec<Strip>> {
         let own = self.own.borrow();
         let (Some(compositor), Some(subcompositor), Some(viewporter), false) = (
@@ -1196,7 +1256,7 @@ impl Frames {
         ) else {
             return None;
         };
-        let rings = self.look().rings(self.border_width());
+        let rings = self.look().rings(width);
         let mut strips = Vec::with_capacity(rings.len() * 4);
         for (ring, &(_, square)) in rings.iter().enumerate() {
             let buffer = own.pixels.get(square)?;
@@ -2105,6 +2165,10 @@ struct Window {
     toplevel: Option<Weak<XdgToplevel>>,
     /// The launch's title mode.
     mode: TitleMode,
+    /// The launch's frame in fullscreen: its title's mode, and the label's
+    /// seconds on the way in (its width is the connection's, as the
+    /// border's is).
+    full: Fullscreen,
     /// The launch's look.
     look: Look,
     /// Decided once, when the proxy knows whether it can draw: whether the
@@ -2139,6 +2203,9 @@ struct Window {
     configures: VecDeque<(u32, bool)>,
     /// The pointer is at the top of the window: a hover strip is wanted.
     hover: bool,
+    /// Until when the title strip shows on a window that has just gone
+    /// fullscreen ([`Window::notice`]).
+    notice_until: Option<Instant>,
     /// What the frame is laid around now: the area, the insets, the strip.
     laid: Option<(Rect, Insets, Option<Rect>)>,
     /// The button the left pointer button went down on, until it comes up:
@@ -2168,7 +2235,7 @@ impl Window {
         xdg: &Rc<XdgSurface>,
         root: &Rc<WlSurface>,
         me: Weak<RefCell<Window>>,
-        mode: TitleMode,
+        (mode, full): (TitleMode, Fullscreen),
         look: Look,
     ) -> Self {
         Self {
@@ -2177,6 +2244,7 @@ impl Window {
             root: Rc::downgrade(root),
             toplevel: None,
             mode,
+            full,
             look,
             bordered: None,
             geometry: None,
@@ -2195,6 +2263,7 @@ impl Window {
             next_fullscreen: false,
             configures: VecDeque::new(),
             hover: false,
+            notice_until: None,
             laid: None,
             pressed: None,
             menu: None,
@@ -2220,26 +2289,65 @@ impl Window {
 
     /// What the frame takes of the window in a state `fullscreen` or not:
     /// the border (none in the tag look), and the title strip — or the tag's
-    /// row — when it takes room: always, not in fullscreen.
+    /// row — when it takes room: in mode `always`. Fullscreen has a width
+    /// and a mode of its own (`crate::frame::Fullscreen`; by default the
+    /// same border and no strip).
     fn insets(&mut self, f: &Frames, fullscreen: bool) -> Insets {
         if !self.framed(f) {
             return Insets::default();
         }
-        let title = if self.mode == TitleMode::Always && !fullscreen {
-            TITLE_HEIGHT
+        if fullscreen {
+            insets_of(self.full.title, f.fullscreen_width())
         } else {
-            0
-        };
-        Insets {
-            border: f.border_width(),
-            title,
+            insets_of(self.mode, f.border_width())
         }
     }
 
-    /// The insets of the state the program's next commit is of.
+    /// The insets of the state the program's next commit is of — and the
+    /// border never thinner than outside fullscreen while the compositor
+    /// says the window is not fullscreen, whatever the program acked last:
+    /// fail-closed, as the title strip is ([`Self::title_wanted`]). A
+    /// program that acks fullscreen and never its end would keep a thinner
+    /// border — none, where fullscreen has none — around a window the
+    /// compositor shows in its normal place.
     fn current(&mut self, f: &Frames) -> Insets {
         let fullscreen = self.fullscreen;
-        self.insets(f, fullscreen)
+        let mut i = self.insets(f, fullscreen);
+        if fullscreen && !self.next_fullscreen {
+            i.border = i.border.max(self.insets(f, false).border);
+        }
+        i
+    }
+
+    /// Fullscreen as both the program's last ack and the compositor's last
+    /// configure say.
+    fn fullscreen_now(&self) -> bool {
+        self.fullscreen && self.next_fullscreen
+    }
+
+    /// The window has just gone fullscreen, both saying so (it was not,
+    /// `was`): the title strip shows over the top of the content for the
+    /// label's seconds — a program that takes the whole screen could draw
+    /// another zone's frame there, and this says whose it is first; out of
+    /// fullscreen, no label. The clock is the one wait here that ends by
+    /// itself, on purpose: it decides nothing but how long two words are
+    /// in view (`crate::frame::FULLSCREEN_NOTICE_SETTING`).
+    fn notice(&mut self, was: bool) {
+        let now = self.fullscreen_now();
+        if now && !was && self.full.notice > 0 {
+            let seconds = Duration::from_secs(u64::from(self.full.notice));
+            self.notice_until = Some(Instant::now() + seconds);
+        } else if !now {
+            self.notice_until = None;
+        }
+    }
+
+    /// The label's seconds are over at `now`: the strip as its mode says.
+    fn notice_over(&mut self, now: Instant) {
+        if self.notice_until.is_some_and(|until| now >= until) {
+            self.notice_until = None;
+            self.show_title(true);
+        }
     }
 
     /// The area the frame is laid around now, if it is.
@@ -2287,8 +2395,14 @@ impl Window {
         if !self.framed(f) {
             return;
         }
+        // Another width may be another number of rings (fullscreen's own,
+        // `crate::frame::Fullscreen`): the strips made anew for it.
+        let rings = self.look.rings(i.border).len() * 4;
+        if self.strips.as_ref().is_some_and(|s| s.len() != rings) {
+            self.drop_border();
+        }
         if self.strips.is_none() {
-            self.strips = f.make_strips(root, top, &self.me);
+            self.strips = f.make_strips(root, top, &self.me, i.border);
             if self.strips.is_some() {
                 self.counted = Some(Framed::new(&f.framed));
             }
@@ -2308,13 +2422,17 @@ impl Window {
         // while the program's state is fullscreen: laid there hidden, so
         // that it can come out at once when the compositor takes the window
         // out of fullscreen before the program acks that
-        // ([`Self::title_wanted`]).
-        let over = self.mode != TitleMode::Off;
+        // ([`Self::title_wanted`]); in fullscreen for its own mode, or the
+        // label on the way in, too.
+        let over = self.mode != TitleMode::Off
+            || (self.fullscreen && (self.full.title != TitleMode::Off || self.full.notice > 0));
         // The frame's own round corners, and what is laid short of them —
-        // only when they are there to draw it.
+        // only when they are there to draw it; none in fullscreen (the
+        // screen's corners are square, and the border may be another).
         let outer = self
             .look
             .outer_corners()
+            .filter(|_| !self.fullscreen)
             .and_then(|o| outer_rects(area, i, &o))
             .filter(|_| self.make_outer(f, root, top));
         let pieces: &[Rect] = outer.as_ref().map_or(&[], |p| &p[..]);
@@ -2366,6 +2484,13 @@ impl Window {
         if radii == (0, 0) {
             return;
         }
+        // A fullscreen window's corners are the screen's: square.
+        if self.fullscreen {
+            if let Some(corners) = &mut self.corners {
+                corners.lay([None; 4]);
+            }
+            return;
+        }
         if self.corners.is_none() {
             // Their own scale only when there is no text to take it from.
             let fractional = self
@@ -2413,11 +2538,25 @@ impl Window {
     /// would stay hidden for the window's life, and the program would draw
     /// another zone's in its place. Fail-closed: the compositor's word
     /// brings it out, over the top of the content (it has no room: the
-    /// program's commits are still of the fullscreen size).
+    /// program's commits are still of the fullscreen size). In fullscreen
+    /// its own mode says (`crate::frame::Fullscreen`), and the label on the
+    /// way in brings it out whatever that is ([`Self::notice`]).
     fn title_wanted(&self) -> bool {
         let placed = self.laid.is_some_and(|(_, _, strip)| strip.is_some());
-        let fullscreen = self.fullscreen && self.next_fullscreen;
-        placed && !fullscreen && (self.mode == TitleMode::Always || self.hover)
+        let mode = if self.fullscreen_now() {
+            if self.notice_until.is_some() {
+                return placed;
+            }
+            self.full.title
+        } else {
+            self.mode
+        };
+        placed
+            && match mode {
+                TitleMode::Always => true,
+                TitleMode::Hover => self.hover,
+                TitleMode::Off => false,
+            }
     }
 
     /// Show or hide the title strip as [`Self::title_wanted`] says: `now`
@@ -2531,9 +2670,10 @@ impl Window {
     }
 
     /// The pointer wants a hover strip out or in (§0а): shown now, not at the
-    /// program's next commit. Nothing in another mode, nor in fullscreen.
+    /// program's next commit — where the mode of the window's state is
+    /// `hover` ([`Self::title_wanted`]; fullscreen has its own).
     fn set_hover(&mut self, on: bool) {
-        if self.mode != TitleMode::Hover || self.hover == on {
+        if self.hover == on {
             return;
         }
         self.hover = on;
@@ -2545,7 +2685,9 @@ impl Window {
     /// says — a program that stops committing must not keep it hidden
     /// either.
     fn configured(&mut self, fullscreen: bool) {
+        let was = self.fullscreen_now();
         self.next_fullscreen = fullscreen;
+        self.notice(was);
         self.show_title(true);
     }
 
@@ -2738,6 +2880,7 @@ impl Window {
         self.laid = None;
         self.outer_laid = None;
         self.mode = f.mode();
+        self.full = f.full.get();
         self.look = f.look();
     }
 
@@ -2758,18 +2901,10 @@ impl Window {
         ) else {
             return;
         };
-        // The insets of the frame as it is now — the mode the connection's,
-        // not yet the window's.
-        let title = if f.mode() == TitleMode::Always && !self.next_fullscreen {
-            TITLE_HEIGHT
-        } else {
-            0
-        };
+        // The insets of the frame as it is now — the modes the
+        // connection's, not yet the window's.
         let i = if self.framed(f) {
-            Insets {
-                border: f.border_width(),
-                title,
-            }
+            f.insets_now(self.next_fullscreen)
         } else {
             Insets::default()
         };
@@ -4036,9 +4171,10 @@ impl XdgWmBaseHandler for WmBase {
         slf.send_get_xdg_surface(id, surface);
         // Only a surface whose commits pass here can have its geometry kept
         // for its commit; any other (none should be) is passed on as it is.
-        let (mode, look) = (self.f.mode(), self.f.look());
+        let modes = (self.f.mode(), self.f.full.get());
+        let look = self.f.look();
         let window =
-            Rc::new_cyclic(|me| RefCell::new(Window::new(id, surface, me.clone(), mode, look)));
+            Rc::new_cyclic(|me| RefCell::new(Window::new(id, surface, me.clone(), modes, look)));
         {
             let mut windows = self.f.windows.borrow_mut();
             if windows.len() >= MAX_FRAMED {
@@ -4155,8 +4291,10 @@ impl XdgSurfaceHandler for XdgSurfaceH {
         slf.send_ack_configure(serial);
         if let Ok(mut window) = self.window.try_borrow_mut() {
             if let Some(at) = window.configures.iter().position(|(s, _)| *s == serial) {
+                let was = window.fullscreen_now();
                 window.fullscreen = window.configures[at].1;
                 window.configures.drain(..=at);
+                window.notice(was);
             }
         }
     }
@@ -5807,8 +5945,11 @@ mod tests {
         assert_eq!(title_strip(low, B, true).unwrap().h, 5);
         assert_eq!(
             title_strip(R, Insets::default(), true),
-            None,
-            "no frame, no strip"
+            Some(Rect {
+                h: TITLE_HEIGHT,
+                ..R
+            }),
+            "no border: the strip over the program all the same"
         );
     }
 

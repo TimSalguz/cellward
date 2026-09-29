@@ -849,6 +849,11 @@ let
     "frame.buttons"
     "frame.radius"
     "frame.outerRadius"
+    "frame.fullscreen.width"
+    "frame.fullscreen.title"
+    "frame.fullscreen.notice"
+    "frame.fullscreenButton"
+    "frame.doubleClick"
     "tray.badge"
     "compositorRestriction.enable"
     "desktop.windowMenu.key"
@@ -1290,7 +1295,7 @@ in
       );
       default = null;
       example = "hover";
-      description = "Полоса заголовка «зона · контейнер» цвета зоны вдоль верха окон программ зон (docs/WINDOW-FRAME.md §0а). always — всегда, внутри окна: программе достаётся высота меньше на полосу; hover — поверх верха содержимого, выезжает, когда указатель у верхнего края окна, места не занимает; off — только обводка. В fullscreen полосы нет в любом режиме. null — не задавать из Nix (тогда cellward frame title, иначе always). Меняется на ходу: открытые окна перестраиваются сразу.";
+      description = "Полоса заголовка «зона · контейнер» цвета зоны вдоль верха окон программ зон (docs/WINDOW-FRAME.md §0а). always — всегда, внутри окна: программе достаётся высота меньше на полосу; hover — поверх верха содержимого, выезжает, когда указатель у верхнего края окна, места не занимает; off — только обводка. Во весь экран у полосы свой режим (frame.fullscreen.title). null — не задавать из Nix (тогда cellward frame title, иначе always). Меняется на ходу: открытые окна перестраиваются сразу.";
     };
 
     frame.style = lib.mkOption {
@@ -1334,6 +1339,59 @@ in
       default = null;
       example = "niri";
       description = "Скругление внешних углов самой рамки, логические пиксели (0 — квадратные); \"niri\" — как у niri. Для композиторов, которые окна не обрезают: niri с clip-to-geometry true скругляет рамку сам (рамка лежит внутри окна), и это значение ему ничего не добавляет. У бирки внешних углов нет. null — не задавать из Nix (тогда cellward frame outer-radius, иначе 0). Меняется на ходу: открытые окна перестраиваются сразу.";
+    };
+
+    frame.fullscreen.width = lib.mkOption {
+      type = lib.types.nullOr (lib.types.either (lib.types.ints.between 0 32) (lib.types.enum [ "same" ]));
+      default = null;
+      example = 0;
+      description = "Толщина рамки окна, развёрнутого композитором во весь экран, логические пиксели; \"same\" — как без полного экрана. 0 — без обводки: чьё окно, тогда говорят только строка заголовка (frame.fullscreen.title) и имя зоны при входе (frame.fullscreen.notice). Если композитор вывел окно из полного экрана, а программа этого не подтвердила, обводка не тоньше обычной. null — не задавать из Nix (тогда cellward frame fullscreen width, иначе same). Меняется на ходу.";
+    };
+
+    frame.fullscreen.title = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "always"
+          "hover"
+          "off"
+        ]
+      );
+      default = null;
+      example = "hover";
+      description = "Строка заголовка у окна во весь экран: always — всегда, программе достаётся высота меньше на строку; hover — поверх верха содержимого, выезжает, когда указатель у верхнего края экрана; off — нет (кнопки полного экрана на ней тогда не видны: выйти — клавишей программы или композитора). null — не задавать из Nix (тогда cellward frame fullscreen title, иначе off: кайма остаётся, строки нет). Меняется на ходу.";
+    };
+
+    frame.fullscreen.notice = lib.mkOption {
+      type = lib.types.nullOr (lib.types.ints.between 0 30);
+      default = null;
+      example = 5;
+      description = "Сколько секунд показывать строку «зона · контейнер» поверх верха окна, когда оно ушло во весь экран, при любом режиме строки: программа на весь экран может нарисовать рамку чужой зоны, и имя зоны появляется раньше. 0 — не показывать. null — не задавать из Nix (тогда cellward frame fullscreen notice, иначе 3).";
+    };
+
+    frame.fullscreenButton = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "one"
+          "two"
+          "menu"
+          "none"
+        ]
+      );
+      default = null;
+      example = "two";
+      description = "Кнопка полного экрана в строке заголовка. Во весь экран — окно занимает экран (это делает композитор); во весь экран внутри окна — программе говорят, что она во весь экран, и она рисует себя так (видео без интерфейса вокруг), а окно остаётся на месте. one — одна кнопка □: левый клик — весь экран, правый — внутри окна; two — две: □ и ▣; menu — □ для всего экрана, «внутри окна» — строкой меню ≡; none — без кнопки (полный экран — как просит сама программа). Повторное нажатие возвращает окно. null — не задавать из Nix (тогда cellward frame fullscreen-button, иначе one). Меняется на ходу.";
+    };
+
+    frame.doubleClick = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "maximize"
+          "none"
+        ]
+      );
+      default = null;
+      example = "none";
+      description = "Двойной клик по строке заголовка: maximize — развернуть окно, повторно — вернуть (что сделает композитор, решает он: плиточные раскладки могут развёртывание не поддерживать); none — ничего. null — не задавать из Nix (тогда cellward frame double-click, иначе maximize). Меняется на ходу.";
     };
 
     tray.badge = lib.mkOption {
@@ -1750,6 +1808,21 @@ in
     })
     (lib.mkIf (cfg.frame.outerRadius != null) {
       ".config/vpn-zones/declared/frame-outer-radius".text = toString cfg.frame.outerRadius;
+    })
+    (lib.mkIf (cfg.frame.fullscreen.width != null) {
+      ".config/vpn-zones/declared/frame-fullscreen-width".text = toString cfg.frame.fullscreen.width;
+    })
+    (lib.mkIf (cfg.frame.fullscreen.title != null) {
+      ".config/vpn-zones/declared/frame-fullscreen-title".text = cfg.frame.fullscreen.title;
+    })
+    (lib.mkIf (cfg.frame.fullscreen.notice != null) {
+      ".config/vpn-zones/declared/frame-fullscreen-notice".text = toString cfg.frame.fullscreen.notice;
+    })
+    (lib.mkIf (cfg.frame.fullscreenButton != null) {
+      ".config/vpn-zones/declared/frame-fullscreen-button".text = cfg.frame.fullscreenButton;
+    })
+    (lib.mkIf (cfg.frame.doubleClick != null) {
+      ".config/vpn-zones/declared/frame-double-click".text = cfg.frame.doubleClick;
     })
     (lib.mkIf (cfg.compositorRestriction.enable != null) {
       ".config/vpn-zones/declared/wayland-sandbox".text = if cfg.compositorRestriction.enable then "on" else "off";

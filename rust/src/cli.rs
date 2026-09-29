@@ -3941,6 +3941,11 @@ fn tray(tools: &Tools, args: &[OsString]) -> u8 {
 /// `vpn-zone frame buttons cellward|gnome|kde|macos|windows|none` (cellward),
 /// `vpn-zone frame radius <0–16>|niri` (0),
 /// `vpn-zone frame outer-radius <0–32>|niri` (0),
+/// `vpn-zone frame fullscreen width same|<0–32>` (same),
+/// `vpn-zone frame fullscreen title always|hover|off` (off),
+/// `vpn-zone frame fullscreen notice on|off|<0–30>` (3 seconds),
+/// `vpn-zone frame fullscreen-button one|two|menu|none` (one),
+/// `vpn-zone frame double-click maximize|none` (maximize),
 /// `vpn-zone frame color <zone> default|<#rrggbb>` (`default`: from the
 /// zone's name): the frame of the zone's
 /// colour the Wayland proxy draws around its programs' windows, its title
@@ -3953,9 +3958,11 @@ fn tray(tools: &Tools, args: &[OsString]) -> u8 {
 fn frame(tools: &Tools, args: &[OsString]) -> u8 {
     use crate::container::Source;
     use crate::frame::{
-        ButtonStyle, Radius, Rgb, Style, TitleMode, BUTTONS_SETTING, COLOR_FILE, MAX_OUTER_RADIUS,
-        MAX_RADIUS, MAX_WIDTH, OUTER_RADIUS_SETTING, RADIUS_SETTING, STYLE_SETTING, SWITCH_SETTING,
-        TITLE_SETTING, WIDTH_SETTING,
+        ButtonStyle, DoubleClick, FullscreenButton, Radius, Rgb, Style, TitleMode, BUTTONS_SETTING,
+        COLOR_FILE, DEFAULT_NOTICE, DOUBLE_CLICK_SETTING, FULLSCREEN_BUTTON_SETTING,
+        FULLSCREEN_NOTICE_SETTING, FULLSCREEN_TITLE_SETTING, FULLSCREEN_WIDTH_SETTING, MAX_NOTICE,
+        MAX_OUTER_RADIUS, MAX_RADIUS, MAX_WIDTH, OUTER_RADIUS_SETTING, RADIUS_SETTING,
+        STYLE_SETTING, SWITCH_SETTING, TITLE_SETTING, WIDTH_SETTING,
     };
     const USAGE: &str = "cellward frame show|hide\ncellward frame width <0–32> (по умолчанию 4)\n\
                          cellward frame title always (по умолчанию)|hover|off\n\
@@ -3963,6 +3970,11 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                          cellward frame buttons cellward (по умолчанию)|gnome|kde|macos|windows|none\n\
                          cellward frame radius <0–16>|niri (по умолчанию 0)\n\
                          cellward frame outer-radius <0–32>|niri (по умолчанию 0)\n\
+                         cellward frame fullscreen width same (по умолчанию)|<0–32>\n\
+                         cellward frame fullscreen title always|hover|off (по умолчанию)\n\
+                         cellward frame fullscreen notice on (3 с, по умолчанию)|off|<0–30>\n\
+                         cellward frame fullscreen-button one (по умолчанию)|two|menu|none\n\
+                         cellward frame double-click maximize (по умолчанию)|none\n\
                          cellward frame color <зона> default (из имени зоны)|<#rrggbb>";
     let title_words = |mode: TitleMode| match mode {
         TitleMode::Always => "всегда (always)",
@@ -3986,6 +3998,26 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
     let radius_words = |r: Radius| match r {
         Radius::Px(px) => px.to_string(),
         Radius::Niri(px) => format!("как у niri ({px})"),
+    };
+    let fullscreen_width_words = |w: Option<i32>| match w {
+        None => "как без полного экрана (same)".to_owned(),
+        Some(w) => w.to_string(),
+    };
+    let notice_words = |seconds: u8| match seconds {
+        0 => "нет (off)".to_owned(),
+        s => format!("{s} с"),
+    };
+    let fullscreen_button_words = |b: FullscreenButton| match b {
+        FullscreenButton::One => {
+            "одна □: левый клик — весь экран, правый — весь экран внутри окна (one)"
+        }
+        FullscreenButton::Two => "две: □ весь экран и ▣ внутри окна (two)",
+        FullscreenButton::Menu => "□ весь экран, «внутри окна» — в меню ≡ (menu)",
+        FullscreenButton::None => "нет (none)",
+    };
+    let double_click_words = |d: DoubleClick| match d {
+        DoubleClick::Maximize => "развернуть окно или вернуть (maximize)",
+        DoubleClick::None => "ничего (none)",
     };
     // Now, and in the open windows too.
     const AT_ONCE: &str = "сразу, у открытых окон тоже";
@@ -4034,6 +4066,171 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 from(radius_source, "programs.cellward.frame.radius"),
                 radius_words(outer),
                 from(outer_source, "programs.cellward.frame.outerRadius")
+            );
+            let (fs_width, fs_width_source) = crate::frame::fullscreen_width(&tools.config);
+            let (fs_title, fs_title_source) = crate::frame::fullscreen_title(&tools.config);
+            let (notice, notice_source) = crate::frame::fullscreen_notice(&tools.config);
+            let (button, button_source) = crate::frame::fullscreen_button(&tools.config);
+            let (click, click_source) = crate::frame::double_click(&tools.config);
+            println!(
+                "во весь экран: толщина {}{}; заголовок: {}{}; имя зоны при входе: {}{}; \
+                 кнопка полного экрана: {}{}; двойной клик по заголовку: {}{}",
+                fullscreen_width_words(fs_width),
+                from(fs_width_source, "programs.cellward.frame.fullscreen.width"),
+                title_words(fs_title),
+                from(fs_title_source, "programs.cellward.frame.fullscreen.title"),
+                notice_words(notice),
+                from(notice_source, "programs.cellward.frame.fullscreen.notice"),
+                fullscreen_button_words(button),
+                from(button_source, "programs.cellward.frame.fullscreenButton"),
+                double_click_words(click),
+                from(click_source, "programs.cellward.frame.doubleClick")
+            );
+            0
+        }
+        Some("fullscreen") => {
+            let (Some(what), Some(value)) = (
+                args.get(1).and_then(|v| v.to_str()),
+                args.get(2).and_then(|v| v.to_str()),
+            ) else {
+                eprintln!("{USAGE}");
+                return 1;
+            };
+            let (name, word) = match what {
+                "width" => (
+                    FULLSCREEN_WIDTH_SETTING,
+                    crate::frame::parse_fullscreen_width(value)
+                        .map(crate::frame::fullscreen_width_word),
+                ),
+                "title" => (
+                    FULLSCREEN_TITLE_SETTING,
+                    TitleMode::parse(value).map(|m| m.as_str().to_owned()),
+                ),
+                "notice" => (
+                    FULLSCREEN_NOTICE_SETTING,
+                    match value {
+                        "on" => Some(DEFAULT_NOTICE),
+                        "off" => Some(0),
+                        seconds => crate::frame::parse_notice(seconds),
+                    }
+                    .map(|s| s.to_string()),
+                ),
+                _ => {
+                    eprintln!("{USAGE}");
+                    return 1;
+                }
+            };
+            let written = if value == "default" {
+                reset(name)
+            } else {
+                match word {
+                    Some(word) => write_setting(tools, name, OsStr::new(&word)),
+                    None => {
+                        let hint = match what {
+                            "width" => format!("толщина — same, целое от 0 до {MAX_WIDTH} или default"),
+                            "title" => "заголовок — always, hover, off или default".to_owned(),
+                            _ => format!(
+                                "имя зоны при входе — on, off, секунды от 0 до {MAX_NOTICE} или default"
+                            ),
+                        };
+                        eprintln!("{hint}");
+                        return 1;
+                    }
+                }
+            };
+            if let Err(e) = written {
+                eprintln!("не записать {e}");
+                return 1;
+            }
+            match what {
+                "width" => {
+                    let (w, source) = crate::frame::fullscreen_width(&tools.config);
+                    let note = if w == Some(0) {
+                        " (во весь экран окно без обводки: чьё оно, скажут строка заголовка, если \
+                         включена, и имя зоны при входе)"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "толщина рамки во весь экран: {}{}{note} — {AT_ONCE}",
+                        fullscreen_width_words(w),
+                        from(source, "programs.cellward.frame.fullscreen.width")
+                    );
+                }
+                "title" => {
+                    let (mode, source) = crate::frame::fullscreen_title(&tools.config);
+                    println!(
+                        "заголовок рамки во весь экран: {}{} — {AT_ONCE}",
+                        title_words(mode),
+                        from(source, "programs.cellward.frame.fullscreen.title")
+                    );
+                }
+                _ => {
+                    let (seconds, source) = crate::frame::fullscreen_notice(&tools.config);
+                    println!(
+                        "имя зоны при входе во весь экран: {}{} — {AT_ONCE}",
+                        notice_words(seconds),
+                        from(source, "programs.cellward.frame.fullscreen.notice")
+                    );
+                }
+            }
+            0
+        }
+        Some("fullscreen-button") => {
+            let Some(value) = args.get(1).and_then(|v| v.to_str()) else {
+                eprintln!("{USAGE}");
+                return 1;
+            };
+            let written = if value == "default" {
+                reset(FULLSCREEN_BUTTON_SETTING)
+            } else {
+                match FullscreenButton::parse(value) {
+                    Some(b) => {
+                        write_setting(tools, FULLSCREEN_BUTTON_SETTING, OsStr::new(b.as_str()))
+                    }
+                    None => {
+                        eprintln!("кнопка полного экрана — one, two, menu, none или default");
+                        return 1;
+                    }
+                }
+            };
+            if let Err(e) = written {
+                eprintln!("не записать {e}");
+                return 1;
+            }
+            let (button, source) = crate::frame::fullscreen_button(&tools.config);
+            println!(
+                "кнопка полного экрана: {}{} — {AT_ONCE}",
+                fullscreen_button_words(button),
+                from(source, "programs.cellward.frame.fullscreenButton")
+            );
+            0
+        }
+        Some("double-click") => {
+            let Some(value) = args.get(1).and_then(|v| v.to_str()) else {
+                eprintln!("{USAGE}");
+                return 1;
+            };
+            let written = if value == "default" {
+                reset(DOUBLE_CLICK_SETTING)
+            } else {
+                match DoubleClick::parse(value) {
+                    Some(d) => write_setting(tools, DOUBLE_CLICK_SETTING, OsStr::new(d.as_str())),
+                    None => {
+                        eprintln!("двойной клик — maximize, none или default");
+                        return 1;
+                    }
+                }
+            };
+            if let Err(e) = written {
+                eprintln!("не записать {e}");
+                return 1;
+            }
+            let (click, source) = crate::frame::double_click(&tools.config);
+            println!(
+                "двойной клик по заголовку: {}{} — {AT_ONCE}",
+                double_click_words(click),
+                from(source, "programs.cellward.frame.doubleClick")
             );
             0
         }

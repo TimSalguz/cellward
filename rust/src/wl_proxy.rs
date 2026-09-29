@@ -175,7 +175,7 @@ use wl_proxy::protocols::xdg_shell::xdg_wm_base::{XdgWmBase, XdgWmBaseHandler};
 use wl_proxy::protocols::ObjectInterface;
 use wl_proxy::state::{State, StateHandler};
 
-use crate::frame::{Frame, Setup, TitleMode};
+use crate::frame::{Frame, Fullscreen, Setup, TitleMode};
 use crate::sys;
 use crate::wl_focus::{Focus, FocusPolicy};
 use crate::wl_frame::{Ask, Asks, Frames, Question, Questions, Reply, MAX_FRAMED};
@@ -532,12 +532,16 @@ impl Live {
         }
         self.setup.frame = next;
         // The width alone is the width alone — unless the look goes with it
-        // (a radius that follows niri's is niri's less the border).
+        // (a radius that follows niri's is niri's less the border) —, and so
+        // is the frame in fullscreen, unless a title strip is wanted where
+        // none was (its text is made then).
         let restyled = Frame {
             width: now.width,
+            fullscreen: now.fullscreen,
             ..next
         } != now
-            || Look::of(&next) != Look::of(&now);
+            || Look::of(&next) != Look::of(&now)
+            || next.shows_title() != now.shows_title();
         let pixel = if restyled {
             pixels(&Look::of(&next).squares(next.color))
                 .map_err(|e| eprintln!("wl-sandbox: the frame's new colours not made ({e})"))
@@ -1750,6 +1754,8 @@ pub(crate) struct Border {
     /// Its windows always think they have the focus (3d).
     pub always_focused: bool,
     pub width: i32,
+    /// The frame of a fullscreen window (`crate::frame::Fullscreen`).
+    pub fullscreen: Fullscreen,
     pub pixel: Rc<OwnedFd>,
     /// What each square of `pixel` is, in its order.
     pub squares: Vec<Square>,
@@ -1779,7 +1785,7 @@ impl TextSource {
     /// A text of `look` for `frame`, in the other half; none where the
     /// frame shows no text and no round corner.
     fn text(&mut self, frame: Frame, look: Look) -> Option<Rc<Text>> {
-        if frame.title == TitleMode::Off && !look.round() {
+        if !frame.shows_title() && !look.round() {
             return None;
         }
         let prepared = Prepared::with_look(self.font.clone(), &self.title, look)?;
@@ -1811,6 +1817,7 @@ impl Border {
         self.pixel = Rc::new(pixel);
         self.title = frame.title;
         self.width = frame.width;
+        self.fullscreen = frame.fullscreen;
         self.text = self.source.as_mut().and_then(|s| s.text(frame, look));
     }
 }
@@ -1854,7 +1861,7 @@ fn prepare_border(drawing: Drawing) -> Option<Border> {
             }
         }
     });
-    let wanted = drawing.frame.title != TitleMode::Off || look.round();
+    let wanted = drawing.frame.shows_title() || look.round();
     let (text, source) = match made {
         Some((prepared, source)) => {
             let text = wanted.then(|| {
@@ -1874,6 +1881,7 @@ fn prepare_border(drawing: Drawing) -> Option<Border> {
     Some(Border {
         always_focused: drawing.always_focused,
         width: drawing.frame.width,
+        fullscreen: drawing.frame.fullscreen,
         pixel: Rc::new(pixel),
         squares,
         title: drawing.frame.title,
@@ -2350,7 +2358,12 @@ fn serve(
         } else {
             -1
         };
-        if let Some(until) = paused {
+        // The frames' own clock: a fullscreen label's end.
+        let wake = conns
+            .iter()
+            .filter_map(|c| c.frames.as_ref().and_then(|f| f.wake_at()))
+            .min();
+        for until in [paused, wake].into_iter().flatten() {
             let left = until.saturating_duration_since(now).as_millis();
             let left = libc::c_int::try_from(left)
                 .unwrap_or(libc::c_int::MAX)
@@ -2363,6 +2376,14 @@ fn serve(
             Err(e) => {
                 eprintln!("wl-sandbox: the Wayland proxy cannot wait: {e}");
                 return 1;
+            }
+        }
+        if wake.is_some() {
+            let woke = Instant::now();
+            for conn in &conns {
+                if let Some(f) = &conn.frames {
+                    f.tick(woke);
+                }
             }
         }
         let mut at = 0;
@@ -2406,6 +2427,7 @@ fn serve(
                     Answer::Frame(frame, pixel) => {
                         if let Some(b) = border.as_mut() {
                             b.width = frame.width;
+                            b.fullscreen = frame.fullscreen;
                             if let Some(pixel) = pixel {
                                 b.restyle(frame, pixel);
                             }
@@ -3244,6 +3266,9 @@ mod tests {
                         style: Style::Full,
                         radius: Radius::Px(0),
                         outer: Radius::Px(0),
+                        fullscreen: crate::frame::DEFAULT_FULLSCREEN,
+                        fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
+                        double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
                     },
                     title: String::new(),
                     font: None,
@@ -4408,6 +4433,14 @@ mod tests {
                 style,
                 radius: Radius::Px(radius),
                 outer: Radius::Px(0),
+                // No label on the way into fullscreen: the title's own
+                // tests are of the strip's mode; the label has its test.
+                fullscreen: Fullscreen {
+                    notice: 0,
+                    ..crate::frame::DEFAULT_FULLSCREEN
+                },
+                fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
+                double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
             },
             title: "nl · основной".to_owned(),
             font,
@@ -4741,6 +4774,122 @@ mod tests {
                 .any(|m| m.iface == "wl_surface" && m.opcode == 1 && m.object == title),
             "{got:#?}"
         );
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    /// The frame in fullscreen has settings of its own (2026-09-29): here
+    /// no border and no strip — the program told the whole output, the
+    /// border's strips gone —, and the zone's label over the top of the
+    /// content for a moment on the way in, gone by itself. Fail-closed, as
+    /// the title strip is: the compositor ends fullscreen, the program never
+    /// acks that, and its next commit has the border back all the same.
+    #[test]
+    fn fullscreen_has_a_frame_of_its_own_and_the_zones_label_on_the_way_in() {
+        fn configure(
+            out: &mut UnixStream,
+            (toplevel, xdg): (u32, u32),
+            states: &[i32],
+            serial: u32,
+        ) {
+            let mut args = vec![800, 600, 4 * states.len() as i32];
+            args.extend_from_slice(states);
+            let mut bytes = Vec::new();
+            event(&mut bytes, toplevel, 0, |a| {
+                a.extend_from_slice(&words(&args))
+            });
+            event(&mut bytes, xdg, 0, |a| {
+                a.extend_from_slice(&serial.to_ne_bytes())
+            });
+            out.write_all(&bytes).unwrap();
+        }
+        let mut drawing = looked(
+            TitleMode::Off,
+            test_font(),
+            ButtonStyle::Cellward,
+            Style::Full,
+            0,
+        );
+        drawing.frame.fullscreen = Fullscreen {
+            width: Some(0),
+            title: TitleMode::Off,
+            notice: 1,
+        };
+        let rig = Rig::with_drawing("fullscreen", Some(drawing));
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, TITLE_GLOBALS);
+        a_window(&mut client);
+        let (got, xdg, root) = first_commit(&log);
+        // Outside fullscreen: the border alone (the title is off).
+        assert_eq!(all(&got, "xdg_surface", 3)[0].args, [6, 16, 308, 208]);
+        let strips: Vec<u32> = all(&got, "wl_subcompositor", 1)
+            .iter()
+            .filter(|m| m.args[2] == root)
+            .map(|m| m.args[0])
+            .collect();
+        assert_eq!(strips.len(), 4, "{got:#?}");
+        let window = (all(&got, "xdg_surface", 1)[0].args[0], xdg);
+
+        // Fullscreen: the program is told the whole output; once it acks
+        // and commits, the strips are gone and the label is out over the
+        // top of the content.
+        configure(&mut compositor, window, &[2], 5);
+        let events = events_until(&mut client, |o, op, _| o == 8 && op == 0);
+        let told = events
+            .iter()
+            .find(|(o, op, _)| *o == 9 && *op == 0)
+            .unwrap();
+        assert_eq!(told.2[..2], [800, 600]);
+        request(&mut client, 8, 4, &5u32.to_ne_bytes());
+        request(&mut client, 8, 3, &words(&[0, 0, 800, 600]));
+        request(&mut client, 7, 6, &[]);
+        let got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        assert_eq!(all(&got, "xdg_surface", 3)[0].args, [0, 0, 800, 600]);
+        let gone: Vec<u32> = all(&got, "wl_subsurface", 0)
+            .iter()
+            .map(|m| m.object)
+            .collect();
+        assert_eq!(gone, strips, "the strips not gone: {got:#?}");
+        let made: Vec<Msg> = all(&got, "wl_subcompositor", 1)
+            .into_iter()
+            .filter(|m| m.args[2] == root)
+            .collect();
+        assert_eq!(made.len(), 1, "no label: {got:#?}");
+        let (label_sub, label) = (made[0].args[0], made[0].args[1]);
+        assert_eq!(placed(&got, label_sub), Some(vec![0, 0]));
+        assert!(
+            attached(&got, label).is_some_and(|buffer| buffer != 0),
+            "the label not shown: {got:#?}"
+        );
+        // Gone by itself after its second, the program committing nothing.
+        log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 1 && m.object == label && m.args[0] == 0
+        });
+
+        // The compositor ends fullscreen and the program never acks that:
+        // it is told its size less the border, and its next commit — still
+        // of the whole output — has the border around it again.
+        configure(&mut compositor, window, &[], 6);
+        let events = events_until(&mut client, |o, op, _| o == 8 && op == 0);
+        let told = events
+            .iter()
+            .find(|(o, op, _)| *o == 9 && *op == 0)
+            .unwrap();
+        assert_eq!(told.2[..2], [792, 592]);
+        request(&mut client, 7, 6, &[]);
+        let got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        assert_eq!(
+            signed(&all(&got, "xdg_surface", 3)[0].args),
+            [-4, -4, 808, 608]
+        );
+        let back = all(&got, "wl_subcompositor", 1)
+            .iter()
+            .filter(|m| m.args[2] == root)
+            .count();
+        assert_eq!(back, 4, "the border not back: {got:#?}");
         drop(client);
         assert_eq!(rig.finish(), 0);
     }
@@ -6240,6 +6389,9 @@ mod tests {
                 style: Style::Full,
                 radius: Radius::Px(0),
                 outer: Radius::Px(0),
+                fullscreen: crate::frame::DEFAULT_FULLSCREEN,
+                fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
+                double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
             };
             sys::send_with_fds(channel.as_raw_fd(), &frame_message(frame), &[]).unwrap();
         };
@@ -6334,6 +6486,9 @@ mod tests {
             style: Style::Full,
             radius: Radius::Px(0),
             outer: Radius::Px(0),
+            fullscreen: crate::frame::DEFAULT_FULLSCREEN,
+            fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
+            double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
         };
         let colours = pixel(blue).unwrap();
         let channel = rig.channel.as_ref().unwrap();

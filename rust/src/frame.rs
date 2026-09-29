@@ -69,6 +69,20 @@ pub const RADIUS_SETTING: &str = "frame-radius";
 /// The radius of the frame's own corners, outside, a setting file of the
 /// config directory (logical pixels, 0 for square ones, or `niri`).
 pub const OUTER_RADIUS_SETTING: &str = "frame-outer-radius";
+/// The border's width while the compositor has a window fullscreen, a
+/// setting file of the config directory: `same` (as outside fullscreen) or
+/// logical pixels ([`Fullscreen`]).
+pub const FULLSCREEN_WIDTH_SETTING: &str = "frame-fullscreen-width";
+/// The title strip's mode in fullscreen: `always`, `hover` or `off`.
+pub const FULLSCREEN_TITLE_SETTING: &str = "frame-fullscreen-title";
+/// How long the zone's label shows on a window going fullscreen, whole
+/// seconds; 0 for none.
+pub const FULLSCREEN_NOTICE_SETTING: &str = "frame-fullscreen-notice";
+/// How the title strip offers fullscreen: `one`, `two`, `menu` or `none`
+/// ([`FullscreenButton`]).
+pub const FULLSCREEN_BUTTON_SETTING: &str = "frame-fullscreen-button";
+/// What a double click on the title strip does: `maximize` or `none`.
+pub const DOUBLE_CLICK_SETTING: &str = "frame-double-click";
 
 /// The most characters of one part of the title — the zone's name, the
 /// container's — that are drawn; a longer one is cut, with an ellipsis.
@@ -471,6 +485,178 @@ fn word_setting<T>(
     (default, Source::Default)
 }
 
+/// The frame of a window the compositor has fullscreen (the owner,
+/// 2026-09-29: settings of its own; by default the border kept, no title
+/// strip, and the zone's label for a moment on the way in — a program that
+/// takes the whole screen could draw another zone's frame there, and the
+/// label says whose it is before it can).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fullscreen {
+    /// The border's width; `None` the same as outside fullscreen.
+    pub width: Option<i32>,
+    pub title: TitleMode,
+    /// How long the title strip shows, over the content, once the window
+    /// is fullscreen: whole seconds, 0 not at all.
+    pub notice: u8,
+}
+
+/// Three seconds: long enough to read two words, short of what a film or a
+/// game would mind at its top.
+pub const DEFAULT_NOTICE: u8 = 3;
+/// Longer than this is not a moment any more.
+pub const MAX_NOTICE: u8 = 30;
+/// The owner's choice (2026-09-29, «Кайма, строки нет»).
+pub const DEFAULT_FULLSCREEN: Fullscreen = Fullscreen {
+    width: None,
+    title: TitleMode::Off,
+    notice: DEFAULT_NOTICE,
+};
+
+/// A fullscreen width as a setting file or the command line has it: `same`
+/// (`None`), or a whole number of logical pixels, 0 to [`MAX_WIDTH`].
+pub fn parse_fullscreen_width(text: &str) -> Option<Option<i32>> {
+    match text.trim() {
+        "same" => Some(None),
+        text => whole(text, MAX_WIDTH).map(Some),
+    }
+}
+
+/// [`parse_fullscreen_width`] back.
+pub fn fullscreen_width_word(width: Option<i32>) -> String {
+    width.map_or_else(|| "same".to_owned(), |w| w.to_string())
+}
+
+/// A notice's seconds: a whole number, 0 to [`MAX_NOTICE`].
+pub fn parse_notice(text: &str) -> Option<u8> {
+    whole(text.trim(), i32::from(MAX_NOTICE)).and_then(|s| u8::try_from(s).ok())
+}
+
+/// How the title strip offers fullscreen (the owner, 2026-09-29: every way,
+/// and the choice a setting): the compositor's own — the window takes the
+/// screen — and fullscreen inside the window — the program is told it is
+/// fullscreen and draws itself so, the window stays where it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullscreenButton {
+    /// One button: a left click the compositor's fullscreen, a right click
+    /// the one inside the window.
+    One,
+    /// Two buttons, one for each.
+    Two,
+    /// A button for the compositor's; the one inside the window a row of
+    /// the ≡'s dropdown.
+    Menu,
+    /// No button: fullscreen as the program itself asks for it.
+    None,
+}
+
+pub const DEFAULT_FULLSCREEN_BUTTON: FullscreenButton = FullscreenButton::One;
+
+impl FullscreenButton {
+    pub const ALL: [FullscreenButton; 4] = [Self::One, Self::Two, Self::Menu, Self::None];
+
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        Self::ALL.into_iter().find(|b| b.as_str() == text)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::One => "one",
+            Self::Two => "two",
+            Self::Menu => "menu",
+            Self::None => "none",
+        }
+    }
+}
+
+/// What a double click on the title strip does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoubleClick {
+    /// The window maximized, or back from it: what a desktop's title bar
+    /// does.
+    Maximize,
+    /// Nothing more than two clicks.
+    None,
+}
+
+pub const DEFAULT_DOUBLE_CLICK: DoubleClick = DoubleClick::Maximize;
+
+impl DoubleClick {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "maximize" => Some(Self::Maximize),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Maximize => "maximize",
+            Self::None => "none",
+        }
+    }
+}
+
+/// The border's width in fullscreen and where it comes from.
+pub fn fullscreen_width(config: &Path) -> (Option<i32>, Source) {
+    word_setting(
+        config,
+        FULLSCREEN_WIDTH_SETTING,
+        parse_fullscreen_width,
+        DEFAULT_FULLSCREEN.width,
+    )
+}
+
+/// The title strip's mode in fullscreen and where it comes from.
+pub fn fullscreen_title(config: &Path) -> (TitleMode, Source) {
+    word_setting(
+        config,
+        FULLSCREEN_TITLE_SETTING,
+        TitleMode::parse,
+        DEFAULT_FULLSCREEN.title,
+    )
+}
+
+/// The label's seconds on the way into fullscreen and where they come from.
+pub fn fullscreen_notice(config: &Path) -> (u8, Source) {
+    word_setting(
+        config,
+        FULLSCREEN_NOTICE_SETTING,
+        parse_notice,
+        DEFAULT_FULLSCREEN.notice,
+    )
+}
+
+/// The frame in fullscreen as the settings have it now.
+pub fn fullscreen(config: &Path) -> Fullscreen {
+    Fullscreen {
+        width: fullscreen_width(config).0,
+        title: fullscreen_title(config).0,
+        notice: fullscreen_notice(config).0,
+    }
+}
+
+/// The fullscreen buttons and where they come from.
+pub fn fullscreen_button(config: &Path) -> (FullscreenButton, Source) {
+    word_setting(
+        config,
+        FULLSCREEN_BUTTON_SETTING,
+        FullscreenButton::parse,
+        DEFAULT_FULLSCREEN_BUTTON,
+    )
+}
+
+/// What a double click on the title does and where that comes from.
+pub fn double_click(config: &Path) -> (DoubleClick, Source) {
+    word_setting(
+        config,
+        DOUBLE_CLICK_SETTING,
+        DoubleClick::parse,
+        DEFAULT_DOUBLE_CLICK,
+    )
+}
+
 /// The buttons' look and where it comes from.
 pub fn buttons(config: &Path) -> (ButtonStyle, Source) {
     word_setting(config, BUTTONS_SETTING, ButtonStyle::parse, DEFAULT_BUTTONS)
@@ -558,8 +744,10 @@ pub fn clean_title(text: &str) -> String {
 }
 
 /// What `wl-sandbox --frame` carries: the colour, the width and the title's
-/// mode, and the look — the buttons', the style, the corners' radius inside
-/// and outside —, `rrggbb:w:mode[:buttons:style:radius[:outer]]`.
+/// mode, the look — the buttons', the style, the corners' radius inside and
+/// outside —, and the frame in fullscreen, the fullscreen buttons and the
+/// double click, `rrggbb:w:mode[:buttons:style:radius[:outer[:fullscreen]]]`
+/// — the last `width:title:notice:button:double-click`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Frame {
     pub color: Rgb,
@@ -569,6 +757,9 @@ pub struct Frame {
     pub style: Style,
     pub radius: Radius,
     pub outer: Radius,
+    pub fullscreen: Fullscreen,
+    pub fullscreen_button: FullscreenButton,
+    pub double_click: DoubleClick,
 }
 
 impl Frame {
@@ -582,7 +773,18 @@ impl Frame {
             style: style(config).0,
             radius: radius(config).0,
             outer: outer_radius(config).0,
+            fullscreen: fullscreen(config),
+            fullscreen_button: fullscreen_button(config).0,
+            double_click: double_click(config).0,
         }
+    }
+
+    /// Whether a title strip may ever show: its mode, or in fullscreen its
+    /// own mode or the label on the way in.
+    pub fn shows_title(&self) -> bool {
+        self.title != TitleMode::Off
+            || self.fullscreen.title != TitleMode::Off
+            || self.fullscreen.notice > 0
     }
 
     /// A launch's frame: the colour of its container, when it has one of its
@@ -596,15 +798,34 @@ impl Frame {
     }
 
     /// `rrggbb:w:mode`, and `:buttons:style:radius` after it when one of
-    /// them — or the outer radius — is not its default, `:outer` after them
-    /// when it is not: the launch's line of the common case stays the one it
-    /// was before there were looks.
+    /// them — or anything after them — is not its default, `:outer` after
+    /// them when it — or the fullscreen part — is not, and the fullscreen
+    /// part, all five, when one of them is not: the launch's line of the
+    /// common case stays the one it was before there were looks.
     pub fn to_arg(self) -> String {
         let default = (DEFAULT_BUTTONS, DEFAULT_STYLE, DEFAULT_RADIUS);
-        let outer = if self.outer == DEFAULT_OUTER_RADIUS {
+        let fullscreen = (self.fullscreen, self.fullscreen_button, self.double_click);
+        let tail = if fullscreen
+            == (
+                DEFAULT_FULLSCREEN,
+                DEFAULT_FULLSCREEN_BUTTON,
+                DEFAULT_DOUBLE_CLICK,
+            ) {
             String::new()
         } else {
-            format!(":{}", self.outer.arg())
+            format!(
+                ":{}:{}:{}:{}:{}",
+                fullscreen_width_word(self.fullscreen.width),
+                self.fullscreen.title.as_str(),
+                self.fullscreen.notice,
+                self.fullscreen_button.as_str(),
+                self.double_click.as_str()
+            )
+        };
+        let outer = if self.outer == DEFAULT_OUTER_RADIUS && tail.is_empty() {
+            String::new()
+        } else {
+            format!(":{}{tail}", self.outer.arg())
         };
         let look = if (self.buttons, self.style, self.radius) == default && outer.is_empty() {
             String::new()
@@ -624,9 +845,10 @@ impl Frame {
         )
     }
 
-    /// `rrggbb:w[:mode[:buttons[:style[:radius[:outer]]]]]`: what is left
-    /// out has its default; anything more, or anything that is not what its
-    /// place says, is no frame.
+    /// `rrggbb:w[:mode[:buttons[:style[:radius[:outer[:fullscreen]]]]]]`,
+    /// the fullscreen part `width[:title[:notice[:button[:double-click]]]]`:
+    /// what is left out has its default; anything more, or anything that is
+    /// not what its place says, is no frame.
     pub fn parse_arg(text: &str) -> Option<Self> {
         let mut parts = text.split(':');
         let color = Rgb::parse(parts.next()?)?;
@@ -654,6 +876,24 @@ impl Frame {
             None => DEFAULT_OUTER_RADIUS,
             Some(outer) => Radius::parse_arg(outer, MAX_OUTER_RADIUS)?,
         };
+        let mut fullscreen = DEFAULT_FULLSCREEN;
+        if let Some(w) = parts.next() {
+            fullscreen.width = parse_fullscreen_width(w)?;
+        }
+        if let Some(mode) = parts.next() {
+            fullscreen.title = TitleMode::parse(mode)?;
+        }
+        if let Some(notice) = parts.next() {
+            fullscreen.notice = parse_notice(notice)?;
+        }
+        let fullscreen_button = match parts.next() {
+            None => DEFAULT_FULLSCREEN_BUTTON,
+            Some(button) => FullscreenButton::parse(button)?,
+        };
+        let double_click = match parts.next() {
+            None => DEFAULT_DOUBLE_CLICK,
+            Some(click) => DoubleClick::parse(click)?,
+        };
         if parts.next().is_some() {
             return None;
         }
@@ -665,6 +905,9 @@ impl Frame {
             style,
             radius,
             outer,
+            fullscreen,
+            fullscreen_button,
+            double_click,
         })
     }
 }
@@ -841,6 +1084,9 @@ mod tests {
             style: DEFAULT_STYLE,
             radius: DEFAULT_RADIUS,
             outer: DEFAULT_OUTER_RADIUS,
+            fullscreen: DEFAULT_FULLSCREEN,
+            fullscreen_button: DEFAULT_FULLSCREEN_BUTTON,
+            double_click: DEFAULT_DOUBLE_CLICK,
         };
         assert_eq!(f.to_arg(), "0102ff:6:hover");
         assert_eq!(Frame::parse_arg(&f.to_arg()), Some(f));
@@ -881,6 +1127,9 @@ mod tests {
             style: Style::Tag,
             radius: Radius::Px(12),
             outer: DEFAULT_OUTER_RADIUS,
+            fullscreen: DEFAULT_FULLSCREEN,
+            fullscreen_button: DEFAULT_FULLSCREEN_BUTTON,
+            double_click: DEFAULT_DOUBLE_CLICK,
         };
         assert_eq!(f.to_arg(), "ff00ff:4:always:macos:tag:12");
         assert_eq!(Frame::parse_arg(&f.to_arg()), Some(f));
@@ -1021,6 +1270,176 @@ mod tests {
         );
         fs::write(config.join(RADIUS_SETTING), "9").unwrap();
         assert_eq!(Frame::of_zone(&state, &config, "nl").radius, Radius::Px(9));
+        let _ = fs::remove_dir_all(state.parent().unwrap());
+    }
+
+    /// The frame in fullscreen, its buttons and the double click ride at
+    /// the end of the same argument: all five said when one is not its
+    /// default (and the look and the outer radius before them), read back
+    /// part by part, what is left out its default, nonsense no frame.
+    #[test]
+    fn the_fullscreen_part_goes_there_and_back() {
+        let f = Frame::parse_arg("ff00ff:4:always").unwrap();
+        assert_eq!(
+            (f.fullscreen, f.fullscreen_button, f.double_click),
+            (
+                DEFAULT_FULLSCREEN,
+                DEFAULT_FULLSCREEN_BUTTON,
+                DEFAULT_DOUBLE_CLICK
+            )
+        );
+        assert_eq!(f.to_arg(), "ff00ff:4:always", "the common line unchanged");
+        let g = Frame {
+            fullscreen: Fullscreen {
+                width: Some(0),
+                title: TitleMode::Hover,
+                notice: 0,
+            },
+            ..f
+        };
+        assert_eq!(
+            g.to_arg(),
+            "ff00ff:4:always:cellward:soft:0:0:0:hover:0:one:maximize"
+        );
+        assert_eq!(Frame::parse_arg(&g.to_arg()), Some(g));
+        let h = Frame {
+            fullscreen_button: FullscreenButton::Menu,
+            double_click: DoubleClick::None,
+            ..f
+        };
+        assert_eq!(
+            h.to_arg(),
+            "ff00ff:4:always:cellward:soft:0:0:same:off:3:menu:none"
+        );
+        assert_eq!(Frame::parse_arg(&h.to_arg()), Some(h));
+        for button in FullscreenButton::ALL {
+            let g = Frame {
+                fullscreen_button: button,
+                ..f
+            };
+            assert_eq!(Frame::parse_arg(&g.to_arg()), Some(g), "{button:?}");
+        }
+        assert_eq!(
+            Frame::parse_arg("ff00ff:4:always:cellward:soft:0:0:7").map(|f| f.fullscreen),
+            Some(Fullscreen {
+                width: Some(7),
+                ..DEFAULT_FULLSCREEN
+            }),
+            "left out: the default"
+        );
+        for bad in [
+            "ff00ff:4:always:cellward:soft:0:0:33",
+            "ff00ff:4:always:cellward:soft:0:0:wide",
+            "ff00ff:4:always:cellward:soft:0:0:same:never",
+            "ff00ff:4:always:cellward:soft:0:0:same:off:31",
+            "ff00ff:4:always:cellward:soft:0:0:same:off:-1",
+            "ff00ff:4:always:cellward:soft:0:0:same:off:3:three",
+            "ff00ff:4:always:cellward:soft:0:0:same:off:3:one:triple",
+            "ff00ff:4:always:cellward:soft:0:0:same:off:3:one:none:more",
+            "ff00ff:4:always:cellward:soft:0:0:same:off:3:one:none:",
+        ] {
+            assert_eq!(Frame::parse_arg(bad), None, "{bad:?}");
+        }
+    }
+
+    /// The fullscreen settings, as the look's: Nix, then the local file,
+    /// then the default — a value that is not one of theirs skipped.
+    #[test]
+    fn the_fullscreen_settings_are_nix_then_local_then_the_default() {
+        let (state, config) = dirs("fullscreen");
+        let declared = config.join(DECLARED_DIR);
+        assert_eq!(
+            DEFAULT_FULLSCREEN,
+            Fullscreen {
+                width: None,
+                title: TitleMode::Off,
+                notice: 3
+            },
+            "the owner's: the border kept, no strip, the label"
+        );
+        assert_eq!(fullscreen(&config), DEFAULT_FULLSCREEN);
+        assert_eq!(
+            fullscreen_button(&config),
+            (FullscreenButton::One, Source::Default)
+        );
+        assert_eq!(
+            double_click(&config),
+            (DoubleClick::Maximize, Source::Default)
+        );
+        fs::write(config.join(FULLSCREEN_WIDTH_SETTING), "0\n").unwrap();
+        fs::write(config.join(FULLSCREEN_TITLE_SETTING), "hover").unwrap();
+        fs::write(config.join(FULLSCREEN_NOTICE_SETTING), "0").unwrap();
+        fs::write(config.join(FULLSCREEN_BUTTON_SETTING), "two").unwrap();
+        fs::write(config.join(DOUBLE_CLICK_SETTING), "none\n").unwrap();
+        assert_eq!(
+            fullscreen(&config),
+            Fullscreen {
+                width: Some(0),
+                title: TitleMode::Hover,
+                notice: 0
+            }
+        );
+        assert_eq!(fullscreen_width(&config).1, Source::Local);
+        assert_eq!(
+            fullscreen_button(&config),
+            (FullscreenButton::Two, Source::Local)
+        );
+        assert_eq!(double_click(&config), (DoubleClick::None, Source::Local));
+        crate::declared::declare(&declared.join(FULLSCREEN_WIDTH_SETTING), "same");
+        crate::declared::declare(&declared.join(FULLSCREEN_NOTICE_SETTING), "10");
+        assert_eq!(fullscreen_width(&config), (None, Source::Nix));
+        assert_eq!(fullscreen_notice(&config), (10, Source::Nix));
+        // Not theirs: as if not there.
+        crate::declared::declare(&declared.join(FULLSCREEN_NOTICE_SETTING), "31");
+        assert_eq!(fullscreen_notice(&config), (0, Source::Local));
+        fs::write(config.join(FULLSCREEN_TITLE_SETTING), "never").unwrap();
+        assert_eq!(fullscreen_title(&config), (TitleMode::Off, Source::Default));
+        fs::write(config.join(FULLSCREEN_WIDTH_SETTING), "33").unwrap();
+        crate::declared::declare(&declared.join(FULLSCREEN_WIDTH_SETTING), "wide");
+        assert_eq!(fullscreen_width(&config), (None, Source::Default));
+        for bad in ["", "+3", "1.5", "-1", "Same"] {
+            assert_eq!(parse_fullscreen_width(bad), None, "{bad:?}");
+            assert_eq!(parse_notice(bad), None, "{bad:?}");
+        }
+        assert_eq!(parse_fullscreen_width(" same\n"), Some(None));
+        assert_eq!(fullscreen_width_word(Some(6)), "6");
+        assert_eq!(fullscreen_width_word(None), "same");
+        // A zone's frame is what they say.
+        let frame = Frame::of_zone(&state, &config, "nl");
+        assert_eq!(
+            (frame.fullscreen_button, frame.double_click),
+            (FullscreenButton::Two, DoubleClick::None)
+        );
+        // A title strip may show where the mode, fullscreen's own mode or
+        // its label wants one.
+        let off = Frame {
+            title: TitleMode::Off,
+            fullscreen: Fullscreen {
+                width: None,
+                title: TitleMode::Off,
+                notice: 0,
+            },
+            ..frame
+        };
+        assert!(!off.shows_title());
+        let label = Fullscreen {
+            notice: 1,
+            ..off.fullscreen
+        };
+        assert!(Frame {
+            fullscreen: label,
+            ..off
+        }
+        .shows_title());
+        let hover = Fullscreen {
+            title: TitleMode::Hover,
+            ..off.fullscreen
+        };
+        assert!(Frame {
+            fullscreen: hover,
+            ..off
+        }
+        .shows_title());
         let _ = fs::remove_dir_all(state.parent().unwrap());
     }
 

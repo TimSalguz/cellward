@@ -1182,6 +1182,9 @@ mod tests {
                 style: crate::frame::DEFAULT_STYLE,
                 radius: crate::frame::DEFAULT_RADIUS,
                 outer: crate::frame::DEFAULT_OUTER_RADIUS,
+                fullscreen: crate::frame::DEFAULT_FULLSCREEN,
+                fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
+                double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
             }
         );
         assert_eq!(setup.title, "nl · банк", "cleaned again on the way in");

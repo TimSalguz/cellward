@@ -3356,6 +3356,122 @@ fn the_frames_look_goes_to_the_launch_and_the_status() {
 }
 
 #[test]
+fn the_frame_in_fullscreen_goes_to_the_launch_and_the_status() {
+    // 2026-09-29: the frame of a fullscreen window, the fullscreen buttons
+    // and the double click, as the look — Nix over the local setting over
+    // the default, in `status --json` with their source, and to the proxy
+    // in the launch's `--frame`, said only when one is not the default.
+    let home = Home::new("frame-fullscreen");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+    let colour = vpn_zone::frame::default_color("nl").hex()[1..].to_owned();
+
+    let json = stdout(&home.run(&["status", "--json"]));
+    for field in [
+        "\"frame_fullscreen_width\":{\"value\":\"same\",\"source\":\"default\"}",
+        "\"frame_fullscreen_title\":{\"value\":\"off\",\"source\":\"default\"}",
+        "\"frame_fullscreen_notice\":{\"value\":3,\"source\":\"default\"}",
+        "\"frame_fullscreen_button\":{\"value\":\"one\",\"source\":\"default\"}",
+        "\"frame_double_click\":{\"value\":\"maximize\",\"source\":\"default\"}",
+    ] {
+        assert!(json.contains(field), "{field}: {json}");
+    }
+    for args in [
+        &["frame", "fullscreen", "width", "0"][..],
+        &["frame", "fullscreen", "title", "hover"],
+        &["frame", "fullscreen", "notice", "off"],
+        &["frame", "fullscreen-button", "two"],
+        &["frame", "double-click", "none"],
+    ] {
+        let out = home.run(args);
+        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
+    }
+    let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+    assert!(
+        line.contains(&format!(
+            "--frame {colour}:4:always:cellward:soft:0:0:0:hover:0:two:none "
+        )),
+        "{line}"
+    );
+    let json = stdout(&home.run(&["status", "--json"]));
+    for field in [
+        "\"frame_fullscreen_width\":{\"value\":0,\"source\":\"local\"}",
+        "\"frame_fullscreen_title\":{\"value\":\"hover\",\"source\":\"local\"}",
+        "\"frame_fullscreen_notice\":{\"value\":0,\"source\":\"local\"}",
+        "\"frame_fullscreen_button\":{\"value\":\"two\",\"source\":\"local\"}",
+        "\"frame_double_click\":{\"value\":\"none\",\"source\":\"local\"}",
+    ] {
+        assert!(json.contains(field), "{field}: {json}");
+    }
+    let summary = stdout(&home.run(&["frame"]));
+    assert!(
+        summary.contains("(two)") && summary.contains("ничего (none)"),
+        "{summary}"
+    );
+    // `on` is the default's seconds, a number seconds of its own.
+    let out = home.run(&["frame", "fullscreen", "notice", "on"]);
+    assert!(stdout(&out).contains("3 с"), "{}", stdout(&out));
+    let out = home.run(&["frame", "fullscreen", "notice", "10"]);
+    assert!(stdout(&out).contains("10 с"), "{}", stdout(&out));
+
+    // Nix wins, and the command does not pretend to change what Nix set.
+    let declared = home.root.join("config/declared");
+    fs::create_dir_all(&declared).unwrap();
+    declare(&declared.join("frame-fullscreen-width"), "same");
+    declare(&declared.join("frame-double-click"), "maximize");
+    let json = stdout(&home.run(&["status", "--json"]));
+    for field in [
+        "\"frame_fullscreen_width\":{\"value\":\"same\",\"source\":\"nix\"}",
+        "\"frame_double_click\":{\"value\":\"maximize\",\"source\":\"nix\"}",
+    ] {
+        assert!(json.contains(field), "{field}: {json}");
+    }
+    for change in [
+        &["frame", "fullscreen", "width", "2"][..],
+        &["frame", "double-click", "default"],
+    ] {
+        let out = home.run(change);
+        assert!(!out.status.success(), "{change:?}");
+        assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
+    }
+    for name in ["frame-fullscreen-width", "frame-double-click"] {
+        fs::remove_file(declared.join(name)).unwrap();
+    }
+    // Back to the defaults: the launch's line as it was.
+    for args in [
+        &["frame", "fullscreen", "width", "default"][..],
+        &["frame", "fullscreen", "title", "default"],
+        &["frame", "fullscreen", "notice", "default"],
+        &["frame", "fullscreen-button", "default"],
+        &["frame", "double-click", "default"],
+    ] {
+        let out = home.run(args);
+        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
+    }
+    let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+    assert!(
+        line.contains(&format!("--frame {colour}:4:always --frame-title")),
+        "{line}"
+    );
+
+    // Nonsense is refused.
+    for bad in [
+        &["frame", "fullscreen", "width", "33"][..],
+        &["frame", "fullscreen", "width", "wide"],
+        &["frame", "fullscreen", "width"],
+        &["frame", "fullscreen", "title", "never"],
+        &["frame", "fullscreen", "notice", "31"],
+        &["frame", "fullscreen", "notice", "-1"],
+        &["frame", "fullscreen", "sideways", "1"],
+        &["frame", "fullscreen-button", "three"],
+        &["frame", "double-click", "triple"],
+    ] {
+        assert!(!home.run(bad).status.success(), "{bad:?}");
+    }
+}
+
+#[test]
 fn the_tray_badge_is_a_setting_nix_wins() {
     let home = Home::new("tray-badge");
     let out = home.run(&["tray"]);
