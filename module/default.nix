@@ -593,6 +593,9 @@ let
       ) "audio_manager = ${lib.boolToString c.permissions.audioManager}"
       ++ lib.optional (c.focus != null) "focus = ${c.focus}"
       ++ lib.optional (c.alwaysFocused != null) "always_focused = ${lib.boolToString c.alwaysFocused}"
+      ++ lib.optional (c.firewall.default != null) "net_default = ${c.firewall.default}"
+      ++ map (p: "net_allow = ${p}") c.firewall.allow
+      ++ map (p: "net_deny = ${p}") c.firewall.deny
       ++ map (device: "device = ${device}") c.permissions.devices
       ++ lib.mapAttrsToList (scheme: app: "link = ${scheme} ${app}") c.links
     )
@@ -659,6 +662,30 @@ let
         type = lib.types.nullOr lib.types.bool;
         default = null;
         description = "Окна программ контейнера всегда думают, что они в фокусе (docs/PERMISSIONS.md §11.15, 3г): игры и плееры не встают на паузу, программа не узнаёт, когда от неё отвернулись; нажатые клавиши и кнопки при уходе фокуса отпускаются. Цена: мессенджеры в нём перестают уведомлять. Действует в окнах с рамкой cellward. null — не задавать из Nix (выключено; `cellward container set <к> always-focused on`).";
+      };
+      firewall = {
+        default = lib.mkOption {
+          type = lib.types.nullOr (
+            lib.types.enum [
+              "allow"
+              "deny"
+            ]
+          );
+          default = null;
+          description = "Есть ли сеть у программ контейнера без своего правила (docs/FIREWALL.md §9): allow или deny. null — как задано локально (cellward container net <к> default …), иначе allow. Решается при каждом новом соединении программы; местное «deny» сужает и Nix.";
+        };
+        allow = lib.mkOption {
+          type = lib.types.listOf (lib.types.strMatching "[^-=/#[:space:]][^=/#[:space:]]*");
+          default = [ ];
+          example = [ "firefox" ];
+          description = "Программы контейнера (id ярлыка), у которых сеть есть.";
+        };
+        deny = lib.mkOption {
+          type = lib.types.listOf (lib.types.strMatching "[^-=/#[:space:]][^=/#[:space:]]*");
+          default = [ ];
+          example = [ "com.example.Tracker" ];
+          description = "Программы контейнера (id ярлыка), у которых сети нет: их соединения не уходят.";
+        };
       };
       permissions.x11 = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;

@@ -187,11 +187,16 @@ pub struct Notes<'a> {
     pub tally: Option<&'a crate::traffic::Tally>,
     pub flows: Option<&'a mut crate::flows::Table>,
     pub news: Option<BorrowedFd<'a>>,
+    /// The firewall's gate on new flows ([`Gate`]); none, and every frame
+    /// goes.
+    pub gate: Option<Gate<'a>>,
 }
 
 impl Notes<'_> {
     /// A whole frame: `outbound` read from the tap, else taken by it.
-    fn frame(&mut self, frame: &[u8], outbound: bool) {
+    /// Whether it goes on now: an outbound frame of a flow with no decision
+    /// is held by the gate, one of a denied flow is dropped.
+    fn frame(&mut self, frame: &[u8], outbound: bool) -> bool {
         if let Some(tally) = self.tally {
             if outbound {
                 tally.outbound(frame.len());
@@ -199,15 +204,157 @@ impl Notes<'_> {
                 tally.inbound(frame.len());
             }
         }
+        let seen = crate::flows::frame(frame, outbound);
         if let Some(flows) = self.flows.as_deref_mut() {
-            let fresh = crate::flows::frame(frame, outbound)
-                .is_some_and(|seen| flows.note(&seen, crate::flows::now()));
+            let fresh = seen
+                .as_ref()
+                .is_some_and(|seen| flows.note(seen, crate::flows::now()));
+            if let (Some(gate), Some(old)) = (self.gate.as_mut(), flows.take_evicted()) {
+                gate.forget(&old);
+            }
             if let Some(news) = self.news.filter(|_| fresh) {
                 // SAFETY: one byte from a live buffer; the pipe is the
                 // keeper's, non-blocking.
                 unsafe { libc::write(news.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
             }
         }
+        match (self.gate.as_mut(), outbound) {
+            (Some(gate), true) => gate.outbound(seen.as_ref().map(|s| &s.key), frame),
+            _ => true,
+        }
+    }
+
+    /// The gate's descriptor to poll, while there is a gate and its keeper
+    /// may still speak.
+    fn gate_fd(&self) -> Option<RawFd> {
+        self.gate
+            .as_ref()
+            .filter(|g| g.open)
+            .map(|g| g.wake.as_raw_fd())
+    }
+
+    /// The keeper's end of the gate's pipe is gone: it is not polled any
+    /// more, and nothing held is let go (closed at a failure).
+    fn gate_ended(&mut self) {
+        if let Some(gate) = self.gate.as_mut() {
+            gate.open = false;
+        }
+    }
+
+    /// The keeper decided: what the gate held and may go now, framed onto
+    /// `up`.
+    fn release(&mut self, up: &mut Vec<u8>) -> io::Result<()> {
+        match self.gate.as_mut() {
+            Some(gate) => gate.release(up),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Frames the gate holds at most, and their bytes: past these a frame of a
+/// flow with no decision is dropped — TCP sends its SYN again, a program
+/// its datagram.
+const MAX_HELD: usize = 256;
+const MAX_HELD_BYTES: usize = 1 << 20;
+
+/// The firewall's gate (`docs/FIREWALL.md` §9, stages 4 and 5): the frames
+/// of a new flow of the instance's programs are held until the instance's
+/// keeper has decided it (`crate::verdicts`, `crate::netrules`) — the keeper
+/// is woken by the relay's word on a new flow and wakes the relay back on
+/// `wake`; a flow allowed goes, a flow denied is dropped, frame by frame.
+/// DNS to the instance's constant forwarder is not held: it is where the
+/// names are noted. Frames that are not TCP or UDP are not held either.
+/// What the gate has read of a flow's decision it keeps while the flow is
+/// in the flows' table ([`Gate::forget`]): a flow pushed out of it and seen
+/// again is new again, and decided again.
+pub struct Gate<'a> {
+    verdicts: &'a crate::verdicts::Table,
+    wake: BorrowedFd<'a>,
+    decided: std::collections::HashMap<crate::flows::Key, bool>,
+    held: std::collections::VecDeque<(crate::flows::Key, Vec<u8>)>,
+    held_bytes: usize,
+    /// The keeper's end of `wake` is there.
+    open: bool,
+}
+
+impl<'a> Gate<'a> {
+    pub fn new(verdicts: &'a crate::verdicts::Table, wake: BorrowedFd<'a>) -> Self {
+        Self {
+            open: true,
+            verdicts,
+            wake,
+            decided: std::collections::HashMap::with_capacity(crate::flows::SLOTS),
+            held: std::collections::VecDeque::new(),
+            held_bytes: 0,
+        }
+    }
+
+    /// Whether the flow `key` is the gate's to hold.
+    fn gated(key: &crate::flows::Key) -> bool {
+        use crate::flows::{TCP, UDP};
+        if key.proto != TCP && key.proto != UDP {
+            return false;
+        }
+        let forwarder = key.rport == 53
+            && (key.remote == std::net::IpAddr::V4(crate::bridge::D4)
+                || key.remote == std::net::IpAddr::V6(crate::bridge::D6));
+        !forwarder
+    }
+
+    /// The decision for `key`: what the gate read before, else the table's.
+    fn decision(&mut self, key: &crate::flows::Key) -> Option<bool> {
+        if let Some(&allow) = self.decided.get(key) {
+            return Some(allow);
+        }
+        let allow = self.verdicts.get(key)? == crate::verdicts::Verdict::Allow;
+        self.decided.insert(*key, allow);
+        Some(allow)
+    }
+
+    /// An outbound frame of flow `key` (none: not a flow the table knows):
+    /// whether it goes now. Held — kept here — while its flow is undecided.
+    fn outbound(&mut self, key: Option<&crate::flows::Key>, frame: &[u8]) -> bool {
+        let Some(key) = key.filter(|k| Self::gated(k)) else {
+            return true;
+        };
+        match self.decision(key) {
+            Some(allow) => allow,
+            None => {
+                if self.held.len() < MAX_HELD && self.held_bytes + frame.len() <= MAX_HELD_BYTES {
+                    self.held_bytes += frame.len();
+                    self.held.push_back((*key, frame.to_vec()));
+                }
+                false
+            }
+        }
+    }
+
+    /// The flow `key` left the flows' table: its decision is forgotten.
+    fn forget(&mut self, key: &crate::flows::Key) {
+        self.decided.remove(key);
+    }
+
+    /// The keeper's word read, and the held frames of the flows decided
+    /// since let go — framed onto `up` — or dropped.
+    fn release(&mut self, up: &mut Vec<u8>) -> io::Result<()> {
+        let mut buf = [0u8; 64];
+        // SAFETY: read(2) into a buffer of the length given; the pipe is
+        // non-blocking.
+        while unsafe { libc::read(self.wake.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) } > 0 {
+        }
+        let held = std::mem::take(&mut self.held);
+        self.held_bytes = 0;
+        for (key, frame) in held {
+            match self.decision(&key) {
+                Some(true) => encode(&frame, up)?,
+                Some(false) => {}
+                None => {
+                    self.held_bytes += frame.len();
+                    self.held.push_back((key, frame));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -242,6 +389,7 @@ pub fn pump_counted(
         // Never full without a whole frame in it: a part of one is shorter
         // than the window.
         let read_stream = !tap_full && end < down.len();
+        let gate = notes.gate_fd();
         let mut fds = [
             libc::pollfd {
                 // A negative descriptor is skipped: an ended tap would
@@ -255,18 +403,33 @@ pub fn pump_counted(
                 events: interest(read_stream, up_sent < up.len()),
                 revents: 0,
             },
+            // The keeper's word that it decided (the gate's): skipped
+            // without a gate.
+            libc::pollfd {
+                fd: gate.unwrap_or(-1),
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
-        // SAFETY: two valid pollfds for the duration of the call.
-        if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
+        // SAFETY: three valid pollfds for the duration of the call.
+        if unsafe { libc::poll(fds.as_mut_ptr(), 3, -1) } < 0 {
             let e = io::Error::last_os_error();
             if e.kind() == io::ErrorKind::Interrupted {
                 continue;
             }
             return Err(e);
         }
-        let (at_tap, at_stream) = (fds[0].revents, fds[1].revents);
-        if (at_tap | at_stream) & libc::POLLNVAL != 0 {
+        let (at_tap, at_stream, at_gate) = (fds[0].revents, fds[1].revents, fds[2].revents);
+        if (at_tap | at_stream | at_gate) & libc::POLLNVAL != 0 {
             return Err(io::Error::from_raw_os_error(libc::EBADF));
+        }
+        // The keeper's decisions first: what they let go joins what waits
+        // for the stream. Its end is the keeper's: nothing more is decided,
+        // and what is held stays held.
+        if at_gate & libc::POLLIN != 0 {
+            notes.release(&mut up)?;
+        } else if at_gate & (libc::POLLHUP | libc::POLLERR) != 0 {
+            notes.gate_ended();
         }
         let gone = libc::POLLHUP | libc::POLLERR;
         // The stream first: its end is the usual one, and only a read tells
@@ -417,8 +580,9 @@ fn fill_up(
             // A read that filled the buffer was longer than any frame, and
             // is refused as one.
             Got::Bytes(n) => {
-                encode(&frame[..n], up)?;
-                notes.frame(&frame[..n], true);
+                if notes.frame(&frame[..n], true) {
+                    encode(&frame[..n], up)?;
+                }
             }
             Got::WouldBlock => return Ok(true),
             Got::Eof => return Ok(false),
@@ -592,6 +756,11 @@ pub struct Attach {
     /// A pipe to its keeper, a byte for every new flow
     /// (`crate::owners::Keeper`); none, and it says nothing.
     pub news: Option<RawFd>,
+    /// The instance's decisions' file (`crate::verdicts`) and the read end
+    /// of its keeper's pipe that says it decided: the gate ([`Gate`]).
+    /// Both, or neither — and every frame goes.
+    pub verdicts: Option<RawFd>,
+    pub gate: Option<RawFd>,
 }
 
 /// The epoch's wall an instance's rules carry (`crate::epoch`,
@@ -719,6 +888,12 @@ impl Attach {
             out.push("--news-fd".into());
             out.push(news.to_string().into());
         }
+        if let (Some(verdicts), Some(gate)) = (self.verdicts, self.gate) {
+            out.push("--verdicts-fd".into());
+            out.push(verdicts.to_string().into());
+            out.push("--gate-fd".into());
+            out.push(gate.to_string().into());
+        }
         out
     }
 
@@ -731,6 +906,7 @@ impl Attach {
             (None, None, None, None, None, None);
         let (mut tally, mut flows, mut news): (Option<RawFd>, Option<RawFd>, Option<RawFd>) =
             (None, None, None);
+        let (mut verdicts, mut gate): (Option<RawFd>, Option<RawFd>) = (None, None);
         let (mut wall_level, mut wall_cgroup): (Option<String>, Option<String>) = (None, None);
         let mut rest = args;
         while let [flag, value, tail @ ..] = rest {
@@ -781,6 +957,16 @@ impl Attach {
                     fd.ok_or("--news-fd takes a descriptor above 2")?,
                     &flag,
                 )?,
+                "--verdicts-fd" => once(
+                    &mut verdicts,
+                    fd.ok_or("--verdicts-fd takes a descriptor above 2")?,
+                    &flag,
+                )?,
+                "--gate-fd" => once(
+                    &mut gate,
+                    fd.ok_or("--gate-fd takes a descriptor above 2")?,
+                    &flag,
+                )?,
                 "--wall-level" => once(&mut wall_level, text.to_owned(), &flag)?,
                 "--wall-cgroup" => once(&mut wall_cgroup, text.to_owned(), &flag)?,
                 _ => return Err(format!("unknown argument {flag}")),
@@ -795,12 +981,26 @@ impl Attach {
         else {
             return Err("needs --stream-fd, --ready-fd, --a4, --ip and --nft".to_owned());
         };
-        let fds = [Some(stream), Some(ready), tally, flows, news];
+        if verdicts.is_some() != gate.is_some() {
+            return Err("--verdicts-fd and --gate-fd go together".to_owned());
+        }
+        if gate.is_some() && (flows.is_none() || news.is_none()) {
+            return Err("the gate needs the flows and the news".to_owned());
+        }
+        let fds = [
+            Some(stream),
+            Some(ready),
+            tally,
+            flows,
+            news,
+            verdicts,
+            gate,
+        ];
         let given: Vec<RawFd> = fds.iter().flatten().copied().collect();
         if (1..given.len()).any(|i| given[..i].contains(&given[i])) {
             return Err(
-                "the stream, the pipe of its word, the counters, the flows and the news share a \
-                 descriptor"
+                "the stream, the pipe of its word, the counters, the flows, the news and the \
+                 gate share a descriptor"
                     .to_owned(),
             );
         }
@@ -816,6 +1016,8 @@ impl Attach {
             tally,
             flows,
             news,
+            verdicts,
+            gate,
         })
     }
 }
@@ -1060,6 +1262,29 @@ fn attach_main(args: &[OsString]) -> u8 {
             }
         }
     });
+    // The gate (`docs/FIREWALL.md` §9): the decisions mapped before the
+    // seal, the keeper's word read. Without either, no frame is held — and a
+    // gate asked for that cannot be kept is no relay at all: its instance
+    // would go out undecided.
+    let gate_fd = attach.gate.and_then(|fd| adopt(fd).ok());
+    let decisions = attach
+        .verdicts
+        .and_then(|fd| adopt(fd).ok())
+        .and_then(|file| {
+            crate::verdicts::Table::map(file.as_fd(), false)
+                .map_err(|e| eprintln!("vpn-zone-core frame-relay: no decisions ({e})"))
+                .ok()
+        });
+    if attach.gate.is_some() && (gate_fd.is_none() || decisions.is_none() || flows.is_none()) {
+        eprintln!("vpn-zone-core frame-relay: its gate cannot be kept — not relaying");
+        return 1;
+    }
+    if let Some(fd) = &gate_fd {
+        if let Err(e) = set_nonblocking(fd.as_raw_fd()) {
+            eprintln!("vpn-zone-core frame-relay: its gate cannot be kept ({e}) — not relaying");
+            return 1;
+        }
+    }
     if let Err(e) = confine() {
         eprintln!("vpn-zone-core frame-relay: cannot confine itself ({e}) — not relaying");
         return 1;
@@ -1078,6 +1303,10 @@ fn attach_main(args: &[OsString]) -> u8 {
         tally: tally.as_ref(),
         flows: flows.as_mut(),
         news: news.as_ref().map(AsFd::as_fd),
+        gate: decisions
+            .as_ref()
+            .zip(gate_fd.as_ref())
+            .map(|(table, fd)| Gate::new(table, fd.as_fd())),
     };
     match pump_counted(tap.as_fd(), stream.as_fd(), &mut notes) {
         Ok(End::StreamClosed) => 0,
@@ -1524,6 +1753,98 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The gate (`docs/FIREWALL.md` §9): a new flow's frame waits for its
+    /// keeper's decision — let go when allowed, dropped when denied, and a
+    /// frame of a flow decided before goes at once; DNS to the instance's
+    /// forwarder is not held.
+    #[test]
+    fn the_gate_holds_a_new_flow_until_it_is_decided() {
+        use crate::verdicts::Verdict;
+        let dir = std::env::temp_dir().join(format!("vz-relay-gate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let flows_file = crate::flows::create(&dir).unwrap();
+        let verdicts_file = crate::verdicts::create(&dir).unwrap();
+        let mut decide = crate::verdicts::Table::map(verdicts_file.as_fd(), true).unwrap();
+        let (news_r, news_w) = crate::sys::pipe_nonblocking().unwrap();
+        let (wake_r, wake_w) = crate::sys::pipe_nonblocking().unwrap();
+        let (tap, tap_peer) = seqpacket_pair();
+        let (stream, mut stream_peer) = UnixStream::pair().unwrap();
+        stream_peer
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let pump = std::thread::spawn(move || {
+            let mut flows = crate::flows::Table::map(flows_file.as_fd(), true).unwrap();
+            let table = crate::verdicts::Table::map(verdicts_file.as_fd(), false).unwrap();
+            let mut notes = Notes {
+                flows: Some(&mut flows),
+                news: Some(news_w.as_fd()),
+                gate: Some(Gate::new(&table, wake_r.as_fd())),
+                ..Notes::default()
+            };
+            let end = pump_counted(tap.as_fd(), stream.as_fd(), &mut notes);
+            drop(notes);
+            flows.close();
+            table.close();
+            end
+        });
+        let packet = |proto: u8, dst: [u8; 4], sport: u16, dport: u16| {
+            let mut f = vec![0u8; 12];
+            f.extend_from_slice(&[0x08, 0x00, 0x45, 0, 0, 40, 0, 0, 0x40, 0, 64, proto, 0, 0]);
+            f.extend_from_slice(&[10, 254, 0, 2]);
+            f.extend_from_slice(&dst);
+            f.extend_from_slice(&sport.to_be_bytes());
+            f.extend_from_slice(&dport.to_be_bytes());
+            f.extend_from_slice(&[0; 16]);
+            f
+        };
+        let key = |dst: [u8; 4], sport: u16, dport: u16| crate::flows::Key {
+            proto: crate::flows::TCP,
+            lport: sport,
+            remote: std::net::IpAddr::from(dst),
+            rport: dport,
+        };
+        let wake = || {
+            // SAFETY: one byte from a live buffer.
+            unsafe { libc::write(wake_w.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
+        };
+        // Held: nothing reaches the stream until it is decided.
+        let first = packet(6, [203, 0, 113, 7], 40000, 443);
+        send_packet(&tap_peer, &first).unwrap();
+        assert_eq!(read_frame(&mut stream_peer), None, "held");
+        decide.put(key([203, 0, 113, 7], 40000, 443), Verdict::Allow);
+        wake();
+        assert_eq!(
+            read_frame(&mut stream_peer).as_ref(),
+            Some(&first),
+            "let go"
+        );
+        // Decided before: at once.
+        let again = packet(6, [203, 0, 113, 7], 40000, 443);
+        send_packet(&tap_peer, &again).unwrap();
+        assert_eq!(read_frame(&mut stream_peer).as_ref(), Some(&again));
+        // Denied: dropped, now and later.
+        let denied = packet(6, [198, 51, 100, 9], 40001, 80);
+        send_packet(&tap_peer, &denied).unwrap();
+        decide.put(key([198, 51, 100, 9], 40001, 80), Verdict::Deny);
+        wake();
+        send_packet(&tap_peer, &denied).unwrap();
+        assert_eq!(read_frame(&mut stream_peer), None, "dropped");
+        // DNS to the forwarder goes undecided.
+        let dns = packet(17, [10, 254, 255, 253], 5353, 53);
+        send_packet(&tap_peer, &dns).unwrap();
+        assert_eq!(
+            read_frame(&mut stream_peer).as_ref(),
+            Some(&dns),
+            "the forwarder"
+        );
+        drop(stream_peer);
+        assert_eq!(pump.join().unwrap().unwrap(), End::StreamClosed);
+        decide.close();
+        drop(news_r);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A stream that takes nothing stops the reading of the tap — the
     /// sender runs into a full queue long before megabytes have gone — and
     /// nothing is lost: every frame arrives, in order, once it is read.
@@ -1675,6 +1996,8 @@ mod tests {
             tally: None,
             flows: None,
             news: None,
+            verdicts: None,
+            gate: None,
         };
         let line = attach.args();
         assert_eq!(line[0], "--attach");
@@ -1730,7 +2053,37 @@ mod tests {
             ..attach.clone()
         };
         let line = noted.args();
-        assert_eq!(Attach::parse(&line[1..]), Ok(noted));
+        assert_eq!(Attach::parse(&line[1..]), Ok(noted.clone()));
+        // And its gate: both descriptors or neither, and never without the
+        // flows and the news it stands on.
+        let gated = Attach {
+            verdicts: Some(12),
+            gate: Some(13),
+            ..noted.clone()
+        };
+        let line = gated.args();
+        assert_eq!(Attach::parse(&line[1..]), Ok(gated.clone()));
+        for broken in [
+            Attach {
+                gate: None,
+                ..gated.clone()
+            },
+            Attach {
+                news: None,
+                ..gated.clone()
+            },
+            Attach {
+                gate: Some(11),
+                ..gated.clone()
+            },
+        ] {
+            let mut line = broken.args();
+            // `args` says the gate only with both: put the half back.
+            if broken.gate.is_none() {
+                line.extend(["--verdicts-fd".into(), "12".into()]);
+            }
+            assert!(Attach::parse(&line[1..]).is_err(), "{broken:?}");
+        }
         for fd in [7, 8, 9] {
             let line = Attach {
                 tally: Some(9),

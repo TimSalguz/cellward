@@ -1025,6 +1025,10 @@ pub struct RelayTools<'a> {
     /// The write end of its keeper's pipe for new flows
     /// (`crate::owners::Keeper`); none, and the relay says nothing.
     pub news: Option<RawFd>,
+    /// The decisions' file (`crate::verdicts`) and the read end of the
+    /// keeper's pipe that says it decided: the relay's gate. Both or none.
+    pub verdicts: Option<RawFd>,
+    pub gate: Option<RawFd>,
 }
 
 /// A container instance's way out through a zone.
@@ -1249,6 +1253,7 @@ fn spawn_relay(
 ) -> io::Result<Child> {
     let (stream_fd, ready_fd) = (stream.as_raw_fd(), ready.as_raw_fd());
     let (tally, flows, news) = (tools.tally, tools.flows, tools.news);
+    let (verdicts, gate) = (tools.verdicts, tools.gate);
     let args = crate::relay::Attach {
         stream: stream_fd,
         ready: ready_fd,
@@ -1260,12 +1265,16 @@ fn spawn_relay(
         tally,
         flows,
         news,
+        verdicts,
+        gate,
     }
     .args();
     let mut keep = vec![stream_fd, ready_fd];
     keep.extend(tally);
     keep.extend(flows);
     keep.extend(news);
+    keep.extend(verdicts);
+    keep.extend(gate);
     let mut cmd = in_instance(tools.core, space, &keep);
     cmd.arg("frame-relay").args(args).stdin(Stdio::null());
     cmd.spawn()
@@ -1280,7 +1289,7 @@ fn spawn_relay(
 /// `/dev/net/tun` and `/sys/fs/cgroup` are the host's (J5).
 pub fn in_instance(core: &Path, space: &OwnedFd, keep: &[RawFd]) -> Command {
     let space_fd = space.as_raw_fd();
-    let mut keep_fds: [RawFd; 6] = [-1; 6];
+    let mut keep_fds: [RawFd; 8] = [-1; 8];
     for (slot, fd) in keep_fds.iter_mut().zip(keep) {
         *slot = *fd;
     }

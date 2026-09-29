@@ -354,6 +354,13 @@ impl Keeper {
     /// now, in the instance's directory `dir`, of its space `space`, by
     /// the launches in `registry`; what is found appended to [`FILE`].
     pub fn heard(&mut self, dir: &Path, space: i32, registry: &Path) {
+        let fresh = self.fresh(dir);
+        self.resolve(dir, space, registry, &fresh);
+    }
+
+    /// The flows of the table not looked at yet (the firewall decides them
+    /// first where their program does not matter, `crate::netrules`).
+    pub fn fresh(&mut self, dir: &Path) -> Vec<Flow> {
         if self.table.is_none() {
             let file = OpenOptions::new()
                 .read(true)
@@ -364,16 +371,26 @@ impl Keeper {
                 .and_then(|f| crate::flows::Table::map(std::os::fd::AsFd::as_fd(&f), false).ok());
         }
         let Some(table) = &self.table else {
-            return;
+            return Vec::new();
         };
-        let flows = table.flows();
-        let fresh: Vec<Flow> = flows
-            .iter()
+        table
+            .flows()
+            .into_iter()
             .filter(|f| !self.known.contains(&(f.key, f.first)))
-            .cloned()
-            .collect();
+            .collect()
+    }
+
+    /// The owners of `fresh` ([`Keeper::fresh`]) looked up and written down:
+    /// each flow's, in order — `None` where none was found.
+    pub fn resolve(
+        &mut self,
+        dir: &Path,
+        space: i32,
+        registry: &Path,
+        fresh: &[Flow],
+    ) -> Vec<Option<Owner>> {
         if fresh.is_empty() {
-            return;
+            return Vec::new();
         }
         let socks = sockets(space);
         let mut holders = holders_of(&self.procs.in_netns(space));
@@ -386,14 +403,14 @@ impl Keeper {
             self.procs = Procs::scan();
             holders = holders_of(&self.procs.in_netns(space));
         }
-        let owners = owned(&socks, &holders, registry, &fresh);
+        let owners = owned(&socks, &holders, registry, fresh);
         let mut text = String::new();
-        for (f, owner) in fresh.iter().zip(owners) {
+        for (f, owner) in fresh.iter().zip(&owners) {
             let seen = (f.key, f.first);
             self.known.insert(seen);
             if let Some(o) = owner {
-                text.push_str(&line_of(&seen, &o));
-                self.found.insert(seen, o);
+                text.push_str(&line_of(&seen, o));
+                self.found.insert(seen, o.clone());
             }
         }
         // Past twice what the table holds: what left it is forgotten, and
@@ -402,6 +419,7 @@ impl Keeper {
         self.lines += text.lines().count();
         let most = 2 * crate::flows::SLOTS;
         if self.lines > most || self.known.len() > most {
+            let flows = self.table.as_ref().map(|t| t.flows()).unwrap_or_default();
             let now: HashSet<Seen> = flows.iter().map(|f| (f.key, f.first)).collect();
             self.known.retain(|s| now.contains(s));
             self.found.retain(|s, _| now.contains(s));
@@ -409,6 +427,7 @@ impl Keeper {
         } else if !text.is_empty() {
             let _ = append(dir, &text);
         }
+        owners
     }
 
     fn rewrite(&mut self, dir: &Path) {

@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A container's network by program** (2026-09-29, firewall stage 4):
+  `cellward container net <c> [allow|deny|forget <program>]`, `cellward
+  container net <c> default allow|deny|none`, `containers.<c>.firewall.
+  {default,allow,deny}` in Nix. The instance's relay holds the first
+  frames of every new flow of its programs until the keeper has decided it
+  by the flow's program and the container's rules — a decision of the
+  flow's own, never its port's —, then lets them go or drops them. With no
+  program lines the decision is one for all and written before anything
+  is looked up. DNS to the instance's forwarder is not held. Without a
+  rule nothing changes: the default is "allow" until the question comes.
 - **«Always focused», a container's choice** (2026-09-29, 3d): `cellward
   container set <c> always-focused on`, `containers.<c>.alwaysFocused`.
   Its windows are told `activated` in every configure (`suspended` taken

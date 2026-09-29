@@ -283,6 +283,9 @@ pub struct Table {
     free: Vec<usize>,
     /// The name slot written next.
     next_name: usize,
+    /// The flow the last new one took the slot of, until taken
+    /// ([`Table::take_evicted`]).
+    evicted: Option<Key>,
 }
 
 // SAFETY: the mapping is touched only through atomic operations on its
@@ -372,6 +375,7 @@ impl Table {
             keys: Vec::new(),
             free: Vec::new(),
             next_name: 0,
+            evicted: None,
         };
         // SAFETY: the mapping's first 8 bytes, inside it.
         if unsafe { std::slice::from_raw_parts(base.as_ptr(), 8) } != MAGIC {
@@ -461,9 +465,16 @@ impl Table {
         });
         if let Some(old) = self.keys[i].replace(key) {
             self.index.remove(&old);
+            self.evicted = Some(old);
         }
         self.index.insert(key, i);
         i
+    }
+
+    /// The flow a new one pushed out of the table since the last call, if
+    /// any: the relay's gate forgets its decision with it (`crate::relay`).
+    pub fn take_evicted(&mut self) -> Option<Key> {
+        self.evicted.take()
     }
 
     /// A frame seen, at `now`: its flow's slot made or brought up to date,

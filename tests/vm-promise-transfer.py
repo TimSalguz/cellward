@@ -364,6 +364,22 @@ def xf_zone(zone, addr, addr6):
     # curl is gone by now: its owner was found by the instance's keeper at
     # the flow's first packet, as the relay said it saw it (`owners.rs`).
     assert any(f["owner"] and f["owner"]["process"] == "curl" for f in to(server_ip)), c
+    # The firewall's rules (stage 4, 2026-09-29): curl of the main home
+    # denied — its connection does not leave (the relay holds its first
+    # packet until the keeper decides, and drops it); forgotten — it goes.
+    alice("cellward container net main deny curl")
+    alice(
+        f"! {run} curl -sS -g -f -m 15 --connect-timeout 5 -o /dev/null "
+        f"'http://10.99.0.1:{XF_PORT}/down.bin?from=fw-denied-{zone}' </dev/null"
+    )
+    assert xf_peers("GET", f"/down.bin?from=fw-denied-{zone}") == [], xf_log()
+    alice("cellward container net main forget curl")
+    alice(
+        f"{run} curl -sS -g -f -m 60 -o /dev/null "
+        f"'http://10.99.0.1:{XF_PORT}/down.bin?from=fw-allowed-{zone}' </dev/null"
+    )
+    assert xf_peers("GET", f"/down.bin?from=fw-allowed-{zone}") == [addr], xf_log()
+    XF_ROWS.append((f"{zone}: curl denied by the container's rule", "blocked", "-", "-"))
     # Who holds a connection (`owners.rs`, looked up from the host as it is
     # asked): a program of the zone that keeps one open is named.
     held_log = f"{XF}/hold-{zone}.log"

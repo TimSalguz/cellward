@@ -704,6 +704,45 @@ fn always_focused_is_a_containers_word_off_without_one() {
     assert_eq!(said(&home), "{\"value\":false,\"source\":\"default\"");
 }
 
+/// Stage 4 of the firewall (2026-09-29): a container's network by program
+/// — a program's line, the default for the rest, "allow" without one;
+/// «без изоляции» takes none.
+#[test]
+fn a_containers_network_rules_are_its_programs_lines() {
+    let home = Home::new("netrules");
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+    let ok = |args: &[&str]| {
+        let out = home.run(args);
+        assert!(out.status.success(), "{args:?}: {}", stderr(&out));
+        stdout(&out)
+    };
+    let shown = ok(&["container", "net", "work"]);
+    assert!(shown.contains("остальным программам: сеть есть"), "{shown}");
+    ok(&["container", "net", "work", "deny", "curl"]);
+    ok(&["container", "net", "work", "allow", "firefox"]);
+    ok(&["container", "net", "work", "default", "deny"]);
+    let shown = ok(&["container", "net", "work"]);
+    assert!(shown.contains("curl: сети нет"), "{shown}");
+    assert!(shown.contains("firefox: сеть есть"), "{shown}");
+    assert!(shown.contains("остальным программам: сети нет"), "{shown}");
+    let record =
+        fs::read_to_string(home.root.join("config/containers/work/container.conf")).unwrap();
+    assert!(record.contains("net_deny = curl"), "{record}");
+    assert!(record.contains("net_default = deny"), "{record}");
+    ok(&["container", "net", "work", "forget", "curl"]);
+    ok(&["container", "net", "work", "default", "none"]);
+    let shown = ok(&["container", "net", "work"]);
+    assert!(!shown.contains("curl"), "{shown}");
+    assert!(shown.contains("остальным программам: сеть есть"), "{shown}");
+    for bad in [
+        &["container", "net", "work", "deny", "a b"][..],
+        &["container", "net", "work", "maybe", "x"],
+        &["container", "net", "nosuch"],
+    ] {
+        assert_eq!(home.run(bad).status.code(), Some(1), "{bad:?}");
+    }
+}
+
 #[test]
 fn a_sandboxed_launch_carries_the_tool_paths_of_the_manifest() {
     let home = Home::new("fs-flags");

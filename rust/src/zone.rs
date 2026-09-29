@@ -125,7 +125,7 @@ use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, ToSocketAddrs};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
@@ -2985,6 +2985,13 @@ struct Transport {
     /// what looks up the new flows' owners (`crate::owners::Keeper`).
     news: Option<(OwnedFd, OwnedFd)>,
     owners: crate::owners::Keeper,
+    /// The firewall's gate (`docs/FIREWALL.md` §9, `crate::verdicts`): the
+    /// decisions' file every relay of its reads, the keeper's writing map of
+    /// it, and the pipe it wakes the relays on (read end, write end).
+    /// None: no gate — its relays hold nothing.
+    verdicts: Option<File>,
+    decisions: Option<crate::verdicts::Table>,
+    gate: Option<(OwnedFd, OwnedFd)>,
 }
 
 /// How a live switch ended ([`Transport::switch`]).
@@ -3043,6 +3050,28 @@ impl Transport {
         // The owners its keeper finds, anew with the table (`crate::owners`).
         let _ = fs::remove_file(zone.dir.join(crate::owners::FILE));
         let news = flows.as_ref().and_then(|_| sys::pipe_nonblocking().ok());
+        // The gate on new flows, with the flows and their news only: its
+        // decisions are by them. Without it the relays hold nothing — as
+        // before the firewall's rules, and said.
+        let (verdicts, decisions, gate) = if news.is_some() {
+            match crate::verdicts::create(&zone.dir).and_then(|file| {
+                let table = crate::verdicts::Table::map(file.as_fd(), true)?;
+                let pipe = sys::pipe_nonblocking()?;
+                Ok((file, table, pipe))
+            }) {
+                Ok((file, table, pipe)) => (Some(file), Some(table), Some(pipe)),
+                Err(e) => {
+                    eprintln!(
+                        "instance {}: no gate on its new flows ({e}) — its network rules do \
+                         not hold",
+                        plan.id
+                    );
+                    (None, None, None)
+                }
+            }
+        } else {
+            (None, None, None)
+        };
         Self {
             id: plan.id.clone(),
             network: plan.network.clone(),
@@ -3065,6 +3094,9 @@ impl Transport {
             flows,
             news,
             owners: crate::owners::Keeper::default(),
+            verdicts,
+            decisions,
+            gate,
         }
     }
 
@@ -3242,6 +3274,8 @@ impl Transport {
             tally: self.tally.as_ref().map(AsRawFd::as_raw_fd),
             flows: self.flows.as_ref().map(AsRawFd::as_raw_fd),
             news: self.news.as_ref().map(|(_, w)| w.as_raw_fd()),
+            verdicts: self.verdicts.as_ref().map(AsRawFd::as_raw_fd),
+            gate: self.gate.as_ref().map(|(r, _)| r.as_raw_fd()),
         };
         let stop = || ASKED_TO_STOP.load(Ordering::SeqCst);
         let link = crate::bridge::attach(
@@ -3803,7 +3837,57 @@ impl Transport {
         }
         let container = crate::instance::container_of(&self.id).unwrap_or(crate::registry::MAIN);
         let registry = self.state.join(".running").join(container);
-        self.owners.heard(&self.dir, self.space, &registry);
+        let fresh = self.owners.fresh(&self.dir);
+        if fresh.is_empty() {
+            return;
+        }
+        // Its network rules (`crate::netrules`): read anew for each round —
+        // a rule changed holds from the next new flow. The record: the
+        // container's, the main home's; a throwaway has none (the default).
+        let record = match crate::instance::who_of(&self.id) {
+            crate::origin::Who::Container(name) => Some(name),
+            crate::origin::Who::Main => Some(crate::container::MAIN_RECORD.to_owned()),
+            _ => None,
+        };
+        let rules = record
+            .as_deref()
+            .map(|r| crate::netrules::Rules::load(&self.config, r))
+            .unwrap_or_default();
+        // One verdict for every program: decided before anything is looked
+        // up — the flow is held for as little as a wake-up.
+        let uniform = rules.uniform();
+        if let Some(verdict) = uniform {
+            self.decide(fresh.iter().map(|f| (f.key, verdict)));
+        }
+        let owners = self
+            .owners
+            .resolve(&self.dir, self.space, &registry, &fresh);
+        if uniform.is_none() {
+            self.decide(fresh.iter().zip(&owners).map(|(f, o)| {
+                let program = o.as_ref().and_then(|o| o.program.as_deref());
+                (f.key, rules.decide(program))
+            }));
+        }
+    }
+
+    /// Decisions written for the relays, and the relays woken to read them.
+    fn decide(
+        &mut self,
+        decisions: impl Iterator<Item = (crate::flows::Key, crate::verdicts::Verdict)>,
+    ) {
+        let Some(table) = self.decisions.as_mut() else {
+            return;
+        };
+        let mut any = false;
+        for (key, verdict) in decisions {
+            table.put(key, verdict);
+            any = true;
+        }
+        if let Some((_, wake)) = self.gate.as_ref().filter(|_| any) {
+            // SAFETY: one byte from a live buffer; the pipe is non-blocking,
+            // and a full one already wakes the relay.
+            unsafe { libc::write(wake.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
+        }
     }
 
     /// What happened to it ([`Transport::polled`]'s answers): the zone's
