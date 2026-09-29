@@ -14,6 +14,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   are not given, it runs as before and says so.
 
 ### Added
+- **The microphone is silent until it is allowed** (2026-09-29, the owner's
+  decision, docs/PERMISSIONS.md §11.15): a record stream the person is asked
+  about is answered at once by the sound filter itself — a stream of silence
+  at its rate; the host's server has no stream of it, so nothing records and
+  nothing shows the microphone in use. Allowed, the filter makes the real
+  stream and links it to the channel the program knows; refused, it stays
+  silent, and the connection's later ones are silent without a question —
+  no error for the program to fail on.
 - **The network question on the program's own window** (2026-09-29, the
   owner's decision): a panel under the window's title, drawn by the
   Wayland proxy, with «Запретить» and «Разрешить…». «Запретить» there is the

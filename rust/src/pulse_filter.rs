@@ -78,14 +78,19 @@
 //! setting of its own — `docs/PERMISSIONS.md` §11.10), read when the stream
 //! is asked for. Whose program is on the other end is looked at once, when
 //! it connects, by the launch it descends from (`crate::origin`) — `yes` passes it, `no` answers it
-//! `ERROR`/`ACCESS`, `ask` holds that one request (`Up::Ask`) while the person
-//! on the host is asked, and passes or refuses it by the answer. A held
-//! request is not forwarded; the connection's other commands go on meanwhile,
-//! and the server, which pairs its replies by tag, answers the held one when
-//! it gets it, whenever that is. The program's name in the question is what
-//! its own properties say (`application.name`, of the stream or the client),
-//! shown as its word; the zone is the one this filter was started for, the
-//! container the one its launch was for.
+//! `ERROR`/`ACCESS`, `ask` answers it silent (`Up::Ghost`, 2026-09-29: the
+//! microphone, until it is allowed, is silent) while the person on the host is
+//! asked. A silent stream is the filter's own: its reply is made to be the
+//! server's, it sounds silence at its rate, and the server has no stream of it
+//! — nothing on the host records, nothing shows the microphone in use.
+//! Allowed, the filter asks the server for the real stream itself and links it
+//! to the channel the program knows (record channels are translated both ways
+//! from then on: `Session::record_up`, `record_down`); refused, it stays
+//! silent, and so does every later one of the connection, not asked about. The
+//! connection's other commands go on meanwhile. The program's name in the
+//! question is what its own properties say (`application.name`, of the stream
+//! or the client), shown as its word; the zone is the one this filter was
+//! started for, the container the one its launch was for.
 //!
 //! Descriptors (a sound server's shared memory) travel with the frame they
 //! came with: on a Unix stream socket a read never runs across the start of a
@@ -325,6 +330,9 @@ const COMMAND_UPDATE_PLAYBACK_STREAM_PROPLIST: u32 = 81;
 const COMMAND_UPDATE_CLIENT_PROPLIST: u32 = 82;
 const COMMAND_GET_CARD_INFO: u32 = 88;
 const COMMAND_GET_CARD_INFO_LIST: u32 = 89;
+const COMMAND_RECORD_STREAM_SUSPENDED: u32 = 77;
+const COMMAND_RECORD_STREAM_EVENT: u32 = 93;
+const COMMAND_RECORD_BUFFER_ATTR_CHANGED: u32 = 95;
 const COMMAND_SET_SOURCE_OUTPUT_VOLUME: u32 = 98;
 const COMMAND_SET_SOURCE_OUTPUT_MUTE: u32 = 99;
 /// A ring buffer in shared memory for the rest of the connection: after it,
@@ -335,6 +343,8 @@ const COMMAND_ENABLE_SRBCHANNEL: u32 = 101;
 const COMMAND_REGISTER_MEMFD_SHMID: u32 = 103;
 /// `ERR_ACCESS`.
 const ERR_ACCESS: u32 = 1;
+/// `ERR_NOENTITY`.
+const ERR_NOENTITY: u32 = 5;
 
 const READ_CHUNK: usize = 64 * 1024;
 const MAX_FDS_PER_READ: usize = 16;
@@ -919,6 +929,230 @@ pub fn record_source_refused(name: Option<&[u8]>) -> bool {
     name.is_none_or(names_a_monitor)
 }
 
+// --- A SILENT MICROPHONE ------------------------------------------------------
+// The owner (docs/PERMISSIONS.md §11.15, 2026-09-29): the microphone, until
+// it is allowed, is silent. A record stream the person is asked about — and
+// one of a connection whose microphone they refused — is answered by the
+// filter itself (a "ghost"): the program gets a stream that records silence
+// at its rate, and nothing records on the host — the server has no stream of
+// it, so nothing shows the microphone in use. Allowed, the filter makes the
+// real stream and links it to the channel the program knows; the two ends
+// may know a record stream by different channels from then on, and the
+// filter translates them (`Session::record_up`, `record_down`).
+
+/// Commands about a record stream by its channel, the first value.
+const RECORD_CHANNEL_COMMANDS: [u32; 8] = [
+    COMMAND_DELETE_RECORD_STREAM,
+    COMMAND_SET_RECORD_STREAM_NAME,
+    COMMAND_GET_RECORD_LATENCY,
+    COMMAND_CORK_RECORD_STREAM,
+    COMMAND_FLUSH_RECORD_STREAM,
+    COMMAND_SET_RECORD_STREAM_BUFFER_ATTR,
+    COMMAND_UPDATE_RECORD_STREAM_SAMPLE_RATE,
+    COMMAND_UPDATE_RECORD_STREAM_PROPLIST,
+];
+/// The server's words about a record stream by its channel, the first value.
+const RECORD_CHANNEL_EVENTS: [u32; 5] = [
+    COMMAND_RECORD_STREAM_KILLED,
+    COMMAND_RECORD_STREAM_SUSPENDED,
+    COMMAND_RECORD_STREAM_MOVED,
+    COMMAND_RECORD_STREAM_EVENT,
+    COMMAND_RECORD_BUFFER_ATTR_CHANGED,
+];
+/// The filter's own requests to the server are tagged from here: libpulse
+/// counts its tags up from 0.
+const OWN_TAGS: u32 = 0xfff0_0000;
+/// The source-output indices the filter makes up for its silent streams
+/// start here: the servers' are small.
+const GHOST_INDICES: u32 = 0x7ff0_0000;
+/// Silent streams of one connection at once: a thread each.
+const MAX_GHOSTS: usize = 8;
+/// A silent stream's buffer, when the program left it to the server.
+const GHOST_MAXLENGTH: u32 = 4 * 1024 * 1024;
+/// A silent stream's fragment, when the program left it to the server: the
+/// sound comes in pieces of this much, as from a server.
+const GHOST_FRAGMENT_MS: u64 = 20;
+
+/// A sample spec as the protocol carries it (`a`): format, channels, rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Spec {
+    format: u8,
+    channels: u8,
+    rate: u32,
+}
+
+impl Spec {
+    /// From a value's bytes: `a`, the format, the channels, the rate.
+    fn of(bytes: &[u8]) -> Option<Self> {
+        match bytes {
+            [TAG_SAMPLE_SPEC, format, channels, r0, r1, r2, r3] => Some(Self {
+                format: *format,
+                channels: *channels,
+                rate: u32::from_be_bytes([*r0, *r1, *r2, *r3]),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Bytes of one frame (a sample of every channel); `None` for a format
+    /// the protocol does not have, or no channel, or no rate.
+    fn frame_bytes(&self) -> Option<u32> {
+        let sample = match self.format {
+            // u8, A-law, µ-law.
+            0..=2 => 1,
+            // s16 le/be.
+            3 | 4 => 2,
+            // float32, s32, le/be.
+            5..=8 => 4,
+            // s24 le/be.
+            9 | 10 => 3,
+            // s24-32 le/be.
+            11 | 12 => 4,
+            _ => return None,
+        };
+        (self.channels > 0 && self.rate > 0).then(|| sample * u32::from(self.channels))
+    }
+
+    /// The byte silence is made of: u8's middle, A-law's and µ-law's zero.
+    fn silence(&self) -> u8 {
+        match self.format {
+            0 => 0x80,
+            1 => 0xd5,
+            2 => 0xff,
+            _ => 0,
+        }
+    }
+
+    /// Bytes of sound per second.
+    fn bytes_per_second(&self) -> u64 {
+        u64::from(self.frame_bytes().unwrap_or(1)) * u64::from(self.rate)
+    }
+}
+
+/// Where a silent stream is on its way to the real one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Link {
+    /// Silent: not allowed (yet).
+    Silent,
+    /// Allowed: the real stream asked for with this tag of the filter's,
+    /// corked as it was then.
+    Making { tag: u32, corked: bool },
+    /// The real stream, by the server's channel and index.
+    Linked { channel: u32, index: u32 },
+}
+
+/// A record stream the filter answered itself (a "ghost").
+#[derive(Debug)]
+struct Ghost {
+    /// Its source output's index, as the program was told.
+    index: u32,
+    /// The program's request, its properties cut: the real stream's.
+    request: Vec<u8>,
+    spec: Spec,
+    maxlength: u32,
+    fragsize: u32,
+    corked: bool,
+    /// Bytes of silence sent: its read and write index both.
+    sent: u64,
+    link: Link,
+}
+
+/// What a request of the filter's own is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Own {
+    /// A silent stream's real one, by the program's channel.
+    Link(u32),
+    /// Nothing: its answer is dropped.
+    Discard,
+}
+
+/// A frame of the protocol: the command channel's, or a stream's data.
+fn frame_of(channel: u32, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(DESCRIPTOR + payload.len());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&channel.to_be_bytes());
+    frame.extend_from_slice(&[0u8; 12]);
+    frame.extend_from_slice(payload);
+    frame
+}
+
+fn put_u32(p: &mut Vec<u8>, value: u32) {
+    p.push(TAG_U32);
+    p.extend_from_slice(&value.to_be_bytes());
+}
+
+fn put_u64(p: &mut Vec<u8>, tag: u8, value: u64) {
+    p.push(tag);
+    p.extend_from_slice(&value.to_be_bytes());
+}
+
+/// `REPLY` to the command tagged `tag`, with `values` after it.
+fn reply_frame(tag: u32, values: &[u8]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(10 + values.len());
+    put_u32(&mut p, COMMAND_REPLY);
+    put_u32(&mut p, tag);
+    p.extend_from_slice(values);
+    frame_of(COMMAND_CHANNEL, &p)
+}
+
+/// A command of the filter's own: `command`, its tag, `values` after them.
+fn command_frame(command: u32, tag: u32, values: &[u8]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(10 + values.len());
+    put_u32(&mut p, command);
+    put_u32(&mut p, tag);
+    p.extend_from_slice(values);
+    frame_of(COMMAND_CHANNEL, &p)
+}
+
+/// What becomes of a command's numbers of a record stream
+/// (`Session::record_numbers`).
+enum Numbers {
+    /// None of them is the filter's: as it came.
+    Same,
+    /// Told the server's numbers: this frame instead.
+    Rewritten(Vec<u8>),
+    /// A silent stream's: answered by the filter.
+    Answer(Up),
+}
+
+/// `ERROR` for the command tagged `tag`.
+fn error_of(tag: u32, error: u32) -> Vec<u8> {
+    let mut p = Vec::with_capacity(15);
+    put_u32(&mut p, COMMAND_ERROR);
+    put_u32(&mut p, tag);
+    put_u32(&mut p, error);
+    frame_of(COMMAND_CHANNEL, &p)
+}
+
+/// `bytes` of silence of `spec` on `channel`, as a server sends a record
+/// stream's sound: inline, from where the last piece ended.
+fn silence_frame(channel: u32, spec: Spec, bytes: usize) -> Vec<u8> {
+    frame_of(channel, &vec![spec.silence(); bytes])
+}
+
+/// The u32 value `item` of `frame`'s payload set to `value`.
+fn set_u32(frame: &mut [u8], item: &Item, value: u32) {
+    let at = DESCRIPTOR + item.span.start + 1;
+    frame[at..at + 4].copy_from_slice(&value.to_be_bytes());
+}
+
+/// The boolean value `item` of `frame`'s payload set to `value`.
+fn set_bool(frame: &mut [u8], item: &Item, value: bool) {
+    frame[DESCRIPTOR + item.span.start] = if value { TAG_TRUE } else { TAG_FALSE };
+}
+
+/// Now, as `T` carries a time: the seconds and microseconds since the epoch.
+fn now_timeval() -> [u8; 9] {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let mut out = [0u8; 9];
+    out[0] = TAG_TIMEVAL;
+    out[1..5].copy_from_slice(&(now.as_secs() as u32).to_be_bytes());
+    out[5..9].copy_from_slice(&now.subsec_micros().to_be_bytes());
+    out
+}
+
 /// What becomes of a frame from the zone.
 #[derive(Debug, PartialEq, Eq)]
 enum Up {
@@ -926,14 +1160,17 @@ enum Up {
     Forward(Vec<u8>),
     /// Answered `ERROR`/`ACCESS` for this tag, and why.
     Refuse(u32, String),
-    /// A record stream the person is asked about (`crate::microphone`): held
-    /// — its properties cut — until the answer, then forwarded or refused.
-    /// The zone's one open question is this one (`Policy::decide`).
-    Ask {
-        tag: u32,
-        frame: Vec<u8>,
-        program: String,
-        remember: bool,
+    /// Answered by the filter itself: this frame to the program.
+    Answer(Vec<u8>),
+    /// A record stream answered by the filter itself, silent (a ghost): its
+    /// reply to the program, its channel there, and the question about it —
+    /// the program's name and whether "always" may be offered —, none when
+    /// the person refused this connection the microphone. The zone's one
+    /// open question is this one (`Policy::decide`).
+    Ghost {
+        channel: u32,
+        reply: Vec<u8>,
+        ask: Option<(String, bool)>,
     },
     /// The connection ends.
     Close(String),
@@ -943,6 +1180,12 @@ enum Up {
 #[derive(Debug, PartialEq, Eq)]
 enum Down {
     Forward,
+    /// On to the program as this: a record stream's channel told as the
+    /// program knows it.
+    Rewritten(Vec<u8>),
+    /// An answer to the filter's own request: not the program's; this, if
+    /// anything, to the server.
+    Own(Option<Vec<u8>>),
     /// Not for the program: data on a channel it has no checked record
     /// stream on.
     Drop,
@@ -982,8 +1225,24 @@ struct Session {
     /// `UPDATE_CLIENT_PROPLIST`): its word, for the question only.
     client_name: Option<String>,
     /// The person refused a record stream of this connection: its retries
-    /// are refused without asking again.
+    /// are silent without asking again.
     mic_denied: bool,
+    /// The protocol version both ends speak: the program's (`AUTH`), then
+    /// the lower of it and the server's (its reply).
+    version: u32,
+    /// The tag of `AUTH`, whose reply says the server's version.
+    auth_tag: Option<u32>,
+    /// Record streams the program knows by another channel than the
+    /// server's: its channel → the server's, and back.
+    record_up: HashMap<u32, u32>,
+    record_down: HashMap<u32, u32>,
+    /// The silent record streams, by the program's channel.
+    ghosts: HashMap<u32, Ghost>,
+    /// How many ghosts this connection has had: their made-up indices.
+    ghosts_made: u32,
+    /// The filter's own requests to the server, by their tags.
+    own: HashMap<u32, Own>,
+    own_made: u32,
 }
 
 impl Session {
@@ -1032,24 +1291,40 @@ impl Session {
             _ if !self.authed => return Up::Refuse(tag, format!("{name} before AUTH")),
             _ => {}
         }
-        let Some(items) = parse(&frame[DESCRIPTOR..]) else {
+        let Some(mut items) = parse(&frame[DESCRIPTOR..]) else {
             return Up::Refuse(tag, format!("{name} (unreadable)"));
+        };
+        // A record stream the program knows by other numbers than the
+        // server's: a silent one's command is answered here, a linked or
+        // moved one's goes on with the server's numbers.
+        let rewritten;
+        let frame = match self.record_numbers(command, tag, frame, &mut items) {
+            Numbers::Answer(up) => return up,
+            Numbers::Rewritten(f) => {
+                rewritten = f;
+                &rewritten[..]
+            }
+            Numbers::Same => frame,
         };
         let payload = &frame[DESCRIPTOR..];
         let values = &items[2..];
-        // A record stream the person is asked about: its program, and whether
-        // "always" may be offered.
-        let mut ask = None;
+        // A record stream answered silent by the filter (`Up::Ghost`): the
+        // question about it — its program, and whether "always" may be
+        // offered —, none when the person refused the connection already.
+        let mut silent: Option<Option<(String, bool)>> = None;
         match rule {
             Rule::Refuse => return Up::Refuse(tag, name.to_owned()),
             Rule::Auth => {
                 // The server reads every later request by this version:
                 // from 13 on, the flags above it are taken off (both servers).
                 match u32_at(values, 0) {
-                    Some(v) if v & PROTOCOL_VERSION_MASK >= PROTOCOL_MIN => {}
+                    Some(v) if v & PROTOCOL_VERSION_MASK >= PROTOCOL_MIN => {
+                        self.version = v & PROTOCOL_VERSION_MASK;
+                    }
                     _ => return Up::Refuse(tag, "AUTH below protocol 13".to_owned()),
                 }
                 self.authed = true;
+                self.auth_tag = Some(tag);
                 return Up::Forward(frame.to_vec());
             }
             Rule::Pass => {
@@ -1078,24 +1353,23 @@ impl Session {
                     // `record_refused` has checked that values[16] are the
                     // stream's properties.
                     if self.mic_denied {
-                        return Up::Refuse(
-                            tag,
-                            format!("{name}: the person refused this connection the microphone"),
-                        );
-                    }
-                    let program = program_name(payload, &values[16..17])
-                        .or_else(|| self.client_name.clone())
-                        .unwrap_or_default();
-                    match self.mic.decide(&program, &self.who) {
-                        Verdict::Allow => {}
-                        Verdict::Refuse(why) => {
-                            return Up::Refuse(tag, format!("{name}: microphone: {why}"))
+                        // Refused by the person once: silent, not asked again.
+                        silent = Some(None);
+                    } else {
+                        let program = program_name(payload, &values[16..17])
+                            .or_else(|| self.client_name.clone())
+                            .unwrap_or_default();
+                        match self.mic.decide(&program, &self.who) {
+                            Verdict::Allow => {}
+                            Verdict::Refuse(why) => {
+                                return Up::Refuse(tag, format!("{name}: microphone: {why}"))
+                            }
+                            Verdict::Ask { remember } => silent = Some(Some((program, remember))),
                         }
-                        Verdict::Ask { remember } => ask = Some((program, remember)),
                     }
                 }
-                // A held stream is not being created until it is let go.
-                if ask.is_none() {
+                // A silent stream is not the server's until it is allowed.
+                if silent.is_none() {
                     self.creating.insert(tag, kind);
                 }
             }
@@ -1104,6 +1378,15 @@ impl Session {
                     return Up::Refuse(tag, format!("{name} (unreadable)"));
                 };
                 self.streams.remove(&(kind, channel));
+                if kind == Kind::Record {
+                    self.sources.remove(&channel);
+                    // A stream the program knew by another channel: gone
+                    // from the translation, and a linked ghost with it.
+                    if let Some(client) = self.record_down.remove(&channel) {
+                        self.record_up.remove(&client);
+                        self.ghosts.remove(&client);
+                    }
+                }
             }
             Rule::Own(kind) => {
                 let own = u32_at(values, 0).is_some_and(|index| {
@@ -1129,15 +1412,340 @@ impl Session {
                 keys.join(", ")
             );
         }
-        if let Some((program, remember)) = ask {
-            return Up::Ask {
-                tag,
-                frame,
-                program,
-                remember,
-            };
+        if let Some(ask) = silent {
+            return self.ghost(tag, frame, ask);
         }
         Up::Forward(frame)
+    }
+
+    /// Whether the program knows a record stream by channel `c`: a silent
+    /// one's, one it is told by another channel than the server's, or a
+    /// stream of the server's told as it is.
+    fn record_channel_taken(&self, c: u32) -> bool {
+        self.ghosts.contains_key(&c)
+            || self.record_down.values().any(|v| *v == c)
+            || (self.streams.contains_key(&(Kind::Record, c)) && !self.record_down.contains_key(&c))
+    }
+
+    /// The lowest record channel the program knows no stream by: libpulse
+    /// keeps its record streams in an array by channel.
+    fn free_channel(&self) -> u32 {
+        (0..u32::MAX)
+            .find(|c| !self.record_channel_taken(*c))
+            .unwrap_or(0)
+    }
+
+    /// A tag of the filter's own for a request to the server.
+    fn own_tag(&mut self, what: Own) -> u32 {
+        let tag = OWN_TAGS.wrapping_add(self.own_made);
+        self.own_made = self.own_made.wrapping_add(1);
+        self.own.insert(tag, what);
+        tag
+    }
+
+    /// A command about a record stream (`RECORD_CHANNEL_COMMANDS`, or a
+    /// source output's by its index) whose numbers the program knows
+    /// otherwise than the server: a silent stream's is answered here, a
+    /// linked or moved one's rewritten to the server's numbers — in the
+    /// frame and in `items` both.
+    fn record_numbers(
+        &mut self,
+        command: u32,
+        tag: u32,
+        frame: &[u8],
+        items: &mut [Item],
+    ) -> Numbers {
+        let Some(Value::U32(first)) = items.get(2).map(|i| i.value.clone()) else {
+            return Numbers::Same;
+        };
+        let rewrite = |items: &mut [Item], value: u32| {
+            let mut f = frame.to_vec();
+            set_u32(&mut f, &items[2], value);
+            items[2].value = Value::U32(value);
+            Numbers::Rewritten(f)
+        };
+        if RECORD_CHANNEL_COMMANDS.contains(&command) {
+            let silent = self
+                .ghosts
+                .get(&first)
+                .is_some_and(|g| !matches!(g.link, Link::Linked { .. }));
+            if silent {
+                return Numbers::Answer(self.ghost_command(command, tag, first, frame, items));
+            }
+            if let Some(&server) = self.record_up.get(&first) {
+                return rewrite(items, server);
+            }
+        }
+        if matches!(
+            command,
+            COMMAND_SET_SOURCE_OUTPUT_VOLUME
+                | COMMAND_SET_SOURCE_OUTPUT_MUTE
+                | COMMAND_GET_SOURCE_OUTPUT_INFO
+        ) {
+            if let Some(g) = self.ghosts.values().find(|g| g.index == first) {
+                return match g.link {
+                    Link::Linked { index, .. } => rewrite(items, index),
+                    // A silent stream has no volume the server knows.
+                    _ if command == COMMAND_GET_SOURCE_OUTPUT_INFO => {
+                        Numbers::Answer(Up::Answer(error_of(tag, ERR_NOENTITY)))
+                    }
+                    _ => Numbers::Answer(Up::Answer(reply_frame(tag, &[]))),
+                };
+            }
+        }
+        Numbers::Same
+    }
+
+    /// A command about a silent stream, answered as a server would.
+    fn ghost_command(
+        &mut self,
+        command: u32,
+        tag: u32,
+        channel: u32,
+        frame: &[u8],
+        items: &[Item],
+    ) -> Up {
+        let version = self.version;
+        let payload = &frame[DESCRIPTOR..];
+        let values = &items[2..];
+        if command == COMMAND_DELETE_RECORD_STREAM {
+            // Its real stream, if one is being made, is deleted when it is.
+            self.ghosts.remove(&channel);
+            return Up::Answer(reply_frame(tag, &[]));
+        }
+        let Some(g) = self.ghosts.get_mut(&channel) else {
+            return Up::Answer(error_of(tag, ERR_NOENTITY));
+        };
+        let mut out = Vec::new();
+        match command {
+            COMMAND_CORK_RECORD_STREAM => {
+                if let Some(Value::Bool(corked)) = values.get(1).map(|i| &i.value) {
+                    g.corked = *corked;
+                }
+            }
+            COMMAND_SET_RECORD_STREAM_BUFFER_ATTR => {
+                let frame_bytes = g.spec.frame_bytes().unwrap_or(1);
+                if let Some(m) = u32_at(values, 1).filter(|m| *m != INVALID && *m > 0) {
+                    g.maxlength = m.min(GHOST_MAXLENGTH);
+                }
+                if let Some(f) = u32_at(values, 2).filter(|f| *f != INVALID && *f >= frame_bytes) {
+                    g.fragsize = (f - f % frame_bytes).min(g.maxlength.max(frame_bytes));
+                }
+                put_u32(&mut out, g.maxlength);
+                put_u32(&mut out, g.fragsize);
+                if version >= 13 {
+                    put_u64(&mut out, TAG_USEC, 0);
+                }
+            }
+            COMMAND_UPDATE_RECORD_STREAM_SAMPLE_RATE => {
+                if let Some(rate) = u32_at(values, 1).filter(|r| (1..=384_000).contains(r)) {
+                    g.spec.rate = rate;
+                }
+            }
+            COMMAND_GET_RECORD_LATENCY => {
+                put_u64(&mut out, TAG_USEC, 0);
+                put_u64(&mut out, TAG_USEC, 0);
+                out.push(if g.corked { TAG_FALSE } else { TAG_TRUE });
+                // The program's own time back, then now.
+                match values.get(1).and_then(|i| payload.get(i.span.clone())) {
+                    Some(time) if time.first() == Some(&TAG_TIMEVAL) => out.extend_from_slice(time),
+                    _ => out.extend_from_slice(&now_timeval()),
+                }
+                out.extend_from_slice(&now_timeval());
+                put_u64(&mut out, TAG_S64, g.sent);
+                put_u64(&mut out, TAG_S64, g.sent);
+            }
+            // Flushed, named, its properties: nothing to keep of them.
+            _ => {}
+        }
+        Up::Answer(reply_frame(tag, &out))
+    }
+
+    /// A record stream answered silent by the filter (`request`, its
+    /// properties cut, tagged `tag`): its reply to the program, as the
+    /// server's would be at this connection's version, and the question
+    /// about it (`ask`). Refused where the zone's question was taken and
+    /// the stream cannot be made: too many, a format without a silence.
+    fn ghost(&mut self, tag: u32, request: Vec<u8>, ask: Option<(String, bool)>) -> Up {
+        let refused = |s: &Self, why: &str| {
+            if ask.is_some() {
+                s.mic.abandon();
+            }
+            Up::Refuse(tag, format!("CREATE_RECORD_STREAM: {why}"))
+        };
+        if self.ghosts.len() >= MAX_GHOSTS {
+            return refused(self, "too many silent record streams");
+        }
+        let Some(items) = parse(&request[DESCRIPTOR..]) else {
+            return refused(self, "unreadable");
+        };
+        let payload = &request[DESCRIPTOR..];
+        let values = &items[2..];
+        let spec = values
+            .first()
+            .and_then(|i| Spec::of(payload.get(i.span.clone())?));
+        let Some((spec, frame_bytes)) = spec.and_then(|s| Some((s, s.frame_bytes()?))) else {
+            return refused(self, "a sample format the filter makes no silence of");
+        };
+        let maxlength = u32_at(values, 4)
+            .filter(|m| *m != INVALID && *m > 0)
+            .map_or(GHOST_MAXLENGTH, |m| m.min(GHOST_MAXLENGTH))
+            .max(frame_bytes);
+        let fragment =
+            u32::try_from(spec.bytes_per_second() * GHOST_FRAGMENT_MS / 1000).unwrap_or(maxlength);
+        let fragsize = u32_at(values, 6)
+            .filter(|f| *f != INVALID && *f >= frame_bytes)
+            .unwrap_or(fragment);
+        let fragsize = (fragsize - fragsize % frame_bytes).clamp(frame_bytes, maxlength);
+        let corked = matches!(values.get(5).map(|i| &i.value), Some(Value::Bool(true)));
+        let channel = self.free_channel();
+        let index = GHOST_INDICES.wrapping_add(self.ghosts_made);
+        self.ghosts_made = self.ghosts_made.wrapping_add(1);
+        let mut out = Vec::new();
+        put_u32(&mut out, channel);
+        put_u32(&mut out, index);
+        if self.version >= 9 {
+            put_u32(&mut out, maxlength);
+            put_u32(&mut out, fragsize);
+        }
+        if self.version >= 12 {
+            // The format and the map as the program asked for them; the
+            // source it named, else the default one; not suspended.
+            out.extend_from_slice(&payload[values[0].span.clone()]);
+            out.extend_from_slice(&payload[values[1].span.clone()]);
+            put_u32(&mut out, INVALID);
+            out.push(TAG_STRING);
+            out.extend_from_slice(
+                str_at(values, 3)
+                    .flatten()
+                    .unwrap_or(&b"@DEFAULT_SOURCE@"[..]),
+            );
+            out.push(0);
+            out.push(TAG_FALSE);
+        }
+        if self.version >= 13 {
+            put_u64(&mut out, TAG_USEC, 0);
+        }
+        if self.version >= 22 {
+            // PCM, and nothing more said of it.
+            out.extend_from_slice(&[TAG_FORMAT_INFO, TAG_U8, 1, TAG_PROPLIST, TAG_STRING_NULL]);
+        }
+        self.ghosts.insert(
+            channel,
+            Ghost {
+                index,
+                request,
+                spec,
+                maxlength,
+                fragsize,
+                corked,
+                sent: 0,
+                link: Link::Silent,
+            },
+        );
+        Up::Ghost {
+            channel,
+            reply: reply_frame(tag, &out),
+            ask,
+        }
+    }
+
+    /// The person allowed the silent stream on `channel`: the request for
+    /// its real stream, tagged the filter's, as the program was told it —
+    /// its buffer, its corking, its rate, the format fixed to what it asked
+    /// for (not the source's) —, or `None` when it is gone or no longer
+    /// silent.
+    fn link(&mut self, channel: u32) -> Option<Vec<u8>> {
+        let g = self.ghosts.get(&channel)?;
+        if g.link != Link::Silent {
+            return None;
+        }
+        let items = parse(&g.request[DESCRIPTOR..])?;
+        if items.len() < 14 {
+            return None;
+        }
+        let tag = self.own_tag(Own::Link(channel));
+        let g = self.ghosts.get_mut(&channel)?;
+        let mut frame = g.request.clone();
+        set_u32(&mut frame, &items[1], tag);
+        let rate = DESCRIPTOR + items[2].span.start + 3;
+        frame[rate..rate + 4].copy_from_slice(&g.spec.rate.to_be_bytes());
+        set_u32(&mut frame, &items[6], g.maxlength);
+        set_bool(&mut frame, &items[7], g.corked);
+        set_u32(&mut frame, &items[8], g.fragsize);
+        for item in &items[11..14] {
+            set_bool(&mut frame, item, false);
+        }
+        g.link = Link::Making {
+            tag,
+            corked: g.corked,
+        };
+        Some(frame)
+    }
+
+    /// The server's answer to a request of the filter's own; what to send
+    /// the server after it, if anything.
+    fn own_answer(&mut self, own: Own, command: u32, frame: &[u8]) -> Option<Vec<u8>> {
+        let Own::Link(client) = own else {
+            return None;
+        };
+        if command == COMMAND_ERROR {
+            eprintln!("pulse-filter: the allowed record stream was not made — it stays silent");
+            if let Some(g) = self.ghosts.get_mut(&client) {
+                g.link = Link::Silent;
+            }
+            return None;
+        }
+        let items = parse(&frame[DESCRIPTOR..]);
+        let values = items.as_deref().map_or(&[][..], |i| &i[2..]);
+        let (Some(server), Some(index)) = (u32_at(values, 0), u32_at(values, 1)) else {
+            return None;
+        };
+        let source = str_at(values, 7).flatten();
+        let refused = record_source_refused(source);
+        let corked_then = self.ghosts.get(&client).and_then(|g| match g.link {
+            Link::Making { corked, .. } => Some(corked),
+            _ => None,
+        });
+        let Some(corked_then) = corked_then.filter(|_| !refused) else {
+            // Gone meanwhile, or linked to what the zone does not record:
+            // the real stream goes, the silent one stays.
+            if refused {
+                eprintln!(
+                    "pulse-filter: the allowed record stream was linked to what is not a \
+                     microphone — deleted, it stays silent"
+                );
+                if let Some(g) = self.ghosts.get_mut(&client) {
+                    g.link = Link::Silent;
+                }
+            }
+            let tag = self.own_tag(Own::Discard);
+            let mut p = Vec::new();
+            put_u32(&mut p, server);
+            return Some(command_frame(COMMAND_DELETE_RECORD_STREAM, tag, &p));
+        };
+        self.record_up.insert(client, server);
+        self.record_down.insert(server, client);
+        self.streams.insert((Kind::Record, server), index);
+        self.sources
+            .insert(server, source.unwrap_or_default().to_vec());
+        let corked = {
+            let g = self.ghosts.get_mut(&client)?;
+            g.link = Link::Linked {
+                channel: server,
+                index,
+            };
+            g.corked
+        };
+        // Corked or uncorked since it was asked for: the real stream told.
+        if corked == corked_then {
+            return None;
+        }
+        let tag = self.own_tag(Own::Discard);
+        let mut p = Vec::new();
+        put_u32(&mut p, server);
+        p.push(if corked { TAG_TRUE } else { TAG_FALSE });
+        Some(command_frame(COMMAND_CORK_RECORD_STREAM, tag, &p))
     }
 
     /// Why this connection's recording ends now: its program's microphone
@@ -1163,9 +1771,15 @@ impl Session {
             // source the server has named and the filter has let through —
             // and while its program may record (`microphone::Policy::watch`).
             return if self.streams.contains_key(&(Kind::Record, channel)) {
-                match self.microphone_taken_away() {
-                    Some(why) => Down::Close(why),
-                    None => Down::Forward,
+                match (self.microphone_taken_away(), self.record_down.get(&channel)) {
+                    (Some(why), _) => Down::Close(why),
+                    // On the channel the program knows it by.
+                    (None, Some(&client)) => {
+                        let mut f = frame.to_vec();
+                        f[4..8].copy_from_slice(&client.to_be_bytes());
+                        Down::Rewritten(f)
+                    }
+                    (None, None) => Down::Forward,
                 }
             } else {
                 Down::Drop
@@ -1174,6 +1788,45 @@ impl Session {
         let Some((command, tag)) = command_of(frame) else {
             return Down::Close("a command the filter cannot read".to_owned());
         };
+        if matches!(command, COMMAND_REPLY | COMMAND_ERROR) {
+            // An answer to the filter's own request: not the program's.
+            if let Some(own) = self.own.remove(&tag) {
+                return Down::Own(self.own_answer(own, command, frame));
+            }
+            // AUTH's: the server's version, the lower of the two spoken.
+            if self.auth_tag == Some(tag) {
+                self.auth_tag = None;
+                let items = parse(&frame[DESCRIPTOR..]);
+                if let Some(v) = items.as_deref().and_then(|i| u32_at(i, 2)) {
+                    let v = v & PROTOCOL_VERSION_MASK;
+                    if v > 0 && (self.version == 0 || v < self.version) {
+                        self.version = v;
+                    }
+                }
+            }
+        }
+        let verdict = self.down_command(command, tag, frame);
+        // A record stream's word, on the channel the program knows it by.
+        if verdict == Down::Forward && RECORD_CHANNEL_EVENTS.contains(&command) {
+            let items = parse(&frame[DESCRIPTOR..]).unwrap_or_default();
+            let server = u32_at(&items, 2);
+            if let Some((server, client)) =
+                server.and_then(|s| Some((s, *self.record_down.get(&s)?)))
+            {
+                let mut f = frame.to_vec();
+                set_u32(&mut f, &items[2], client);
+                if command == COMMAND_RECORD_STREAM_KILLED {
+                    self.record_down.remove(&server);
+                    self.record_up.remove(&client);
+                    self.ghosts.remove(&client);
+                }
+                return Down::Rewritten(f);
+            }
+        }
+        verdict
+    }
+
+    fn down_command(&mut self, command: u32, tag: u32, frame: &[u8]) -> Down {
         match command {
             COMMAND_ENABLE_SRBCHANNEL => Down::Close(
                 "the sound server offers a shared ring buffer, which would carry commands \
@@ -1206,6 +1859,18 @@ impl Session {
                     }
                     self.sources
                         .insert(channel, source.unwrap_or_default().to_vec());
+                    // A channel the program knows a silent stream by: this
+                    // one is told another.
+                    if self.record_channel_taken(channel) {
+                        self.streams.insert((kind, channel), index);
+                        let client = self.free_channel();
+                        self.record_up.insert(client, channel);
+                        self.record_down.insert(channel, client);
+                        let items = items.unwrap_or_default();
+                        let mut f = frame.to_vec();
+                        set_u32(&mut f, &items[2], client);
+                        return Down::Rewritten(f);
+                    }
                 }
                 self.streams.insert((kind, channel), index);
                 Down::Forward
@@ -1386,59 +2051,78 @@ fn pump_up(
                 eprintln!("pulse-filter: {what} refused");
                 to_client.send(&error_frame(tag), &[])?;
             }
-            Up::Ask {
-                tag,
-                frame,
-                program,
-                remember,
-            } => ask(
-                AskedStream {
-                    tag,
-                    frame,
-                    carried,
-                    program,
-                    remember,
-                },
-                to_server,
-                to_client,
-                session,
-            )?,
+            Up::Answer(frame) => to_client.send(&frame, &[])?,
+            Up::Ghost {
+                channel,
+                reply,
+                ask,
+            } => {
+                to_client.send(&reply, &[])?;
+                silence(channel, to_client, session);
+                if let Some((program, remember)) = ask {
+                    self::ask(channel, program, remember, to_server, session);
+                }
+            }
             Up::Close(why) => return Err(io::Error::other(why)),
         }
     }
     Ok(())
 }
 
-/// A record stream held for the person's answer, with what it came with.
-struct AskedStream {
-    tag: u32,
-    frame: Vec<u8>,
-    carried: Vec<OwnedFd>,
-    program: String,
-    remember: bool,
+/// A silent stream's sound, on a thread of its own: a fragment of silence
+/// at a time, at the stream's rate, while it is not corked — until it is
+/// linked to its real stream, gone, or the program is.
+fn silence(channel: u32, to_client: &Arc<Out>, session: &Arc<Mutex<Session>>) {
+    let (to_client, session) = (Arc::clone(to_client), Arc::clone(session));
+    let started = thread::Builder::new().spawn(move || loop {
+        let (frame, wait) = {
+            let mut s = lock(&session);
+            let Some(g) = s.ghosts.get_mut(&channel) else {
+                return;
+            };
+            if matches!(g.link, Link::Linked { .. }) {
+                return;
+            }
+            let per_second = g.spec.bytes_per_second().max(1);
+            let wait =
+                std::time::Duration::from_micros(u64::from(g.fragsize) * 1_000_000 / per_second);
+            if g.corked {
+                (None, wait)
+            } else {
+                g.sent += u64::from(g.fragsize);
+                let fragment = g.fragsize as usize;
+                (Some(silence_frame(channel, g.spec, fragment)), wait)
+            }
+        };
+        if let Some(frame) = frame {
+            if to_client.send(&frame, &[]).is_err() {
+                return;
+            }
+        }
+        thread::sleep(wait.max(std::time::Duration::from_millis(1)));
+    });
+    if let Err(e) = started {
+        eprintln!("pulse-filter: no thread for a silent record stream ({e}) — it stays mute");
+    }
 }
 
-/// Ask about a held record stream on a thread of its own — the connection's
-/// other commands go on meanwhile — and forward it or answer it `ERROR` by
-/// the answer.
+/// Ask about a silent record stream on a thread of its own — the
+/// connection's other commands go on meanwhile, the program hears silence —
+/// and, allowed, have its real stream made.
 fn ask(
-    held: AskedStream,
+    channel: u32,
+    program: String,
+    remember: bool,
     to_server: &Arc<Out>,
-    to_client: &Arc<Out>,
     session: &Arc<Mutex<Session>>,
-) -> io::Result<()> {
+) {
     let (mic, who, peer) = {
         let s = lock(session);
         (Arc::clone(&s.mic), s.who.clone(), s.peer)
     };
-    let tag = held.tag;
     let spawned = {
-        let (to_server, to_client, session, mic) = (
-            Arc::clone(to_server),
-            Arc::clone(to_client),
-            Arc::clone(session),
-            Arc::clone(&mic),
-        );
+        let (to_server, session, mic) =
+            (Arc::clone(to_server), Arc::clone(session), Arc::clone(&mic));
         thread::Builder::new().spawn(move || {
             // The connection's state by the answer, while the zone's question
             // is still open: a request of this connection that comes in
@@ -1446,35 +2130,35 @@ fn ask(
             // finds the deny standing — none gets a question of its own.
             let launch = peer
                 .and_then(|p| crate::onwindow::launch_above(&crate::onwindow::runtime_dir(), p));
-            let allowed = mic.ask(&held.program, &who, held.remember, launch, |allowed| {
+            let made = mic.ask(&program, &who, remember, launch, |allowed| {
                 let mut s = lock(&session);
                 if allowed {
-                    s.creating.insert(held.tag, Kind::Record);
+                    s.link(channel)
                 } else {
                     s.mic_denied = true;
+                    None
                 }
-                allowed
             });
-            // The connection may be gone by now: then these sends fail, and
-            // there is nobody to tell.
-            if allowed {
-                let raw: Vec<RawFd> = held.carried.iter().map(AsRawFd::as_raw_fd).collect();
-                let _ = to_server.send(&held.frame, &raw);
-            } else {
-                let _ = to_client.send(&error_frame(held.tag), &[]);
+            // The connection may be gone by now: then this fails, and there
+            // is nobody to tell.
+            if let Some(frame) = made {
+                let _ = to_server.send(&frame, &[]);
             }
         })
     };
     if let Err(e) = spawned {
         mic.abandon();
-        eprintln!("pulse-filter: CREATE_RECORD_STREAM refused: cannot ask ({e})");
-        to_client.send(&error_frame(tag), &[])?;
+        eprintln!("pulse-filter: a record stream stays silent: cannot ask ({e})");
     }
-    Ok(())
 }
 
 /// The server's frames to the zone.
-fn pump_down(server: &UnixStream, to_client: &Out, session: &Mutex<Session>) -> io::Result<()> {
+fn pump_down(
+    server: &UnixStream,
+    to_client: &Out,
+    to_server: &Out,
+    session: &Mutex<Session>,
+) -> io::Result<()> {
     let mut frames = Frames::new(server);
     while let Some((frame, carried)) = frames.next()? {
         let verdict = lock(session).down(&frame);
@@ -1482,6 +2166,15 @@ fn pump_down(server: &UnixStream, to_client: &Out, session: &Mutex<Session>) -> 
             Down::Forward => {
                 let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
                 to_client.send(&frame, &raw)?;
+            }
+            Down::Rewritten(frame) => {
+                let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
+                to_client.send(&frame, &raw)?;
+            }
+            Down::Own(then) => {
+                if let Some(frame) = then {
+                    to_server.send(&frame, &[])?;
+                }
             }
             Down::Drop => {}
             Down::Close(why) => {
@@ -1546,12 +2239,12 @@ fn serve(
         lock: Mutex::new(()),
     });
     let down = {
-        let to_client = Arc::clone(&to_client);
+        let (to_client, to_server) = (Arc::clone(&to_client), Arc::clone(&to_server));
         let session = Arc::clone(&session);
         let server = server.try_clone()?;
         // A thread that cannot be made ends this connection, not the filter.
         thread::Builder::new().spawn(move || {
-            if let Err(e) = pump_down(&server, &to_client, &session) {
+            if let Err(e) = pump_down(&server, &to_client, &to_server, &session) {
                 report(&e);
             }
             let _ = to_client.sock.shutdown(std::net::Shutdown::Both);
@@ -1562,6 +2255,8 @@ fn serve(
     let _ = client.shutdown(std::net::Shutdown::Both);
     let _ = server.shutdown(std::net::Shutdown::Both);
     let _ = down.join();
+    // The silent streams' threads end at their next fragment.
+    lock(&session).ghosts.clear();
     result
 }
 
@@ -2464,8 +3159,8 @@ mod tests {
         let mut s = with_mic(Setting::Ask, false);
         let why = refused(s.up(&record(1, INVALID, None, none, INVALID)));
         assert!(why.contains("графической"), "{why}");
-        // Ask: held — not being created — under the program's own name, the
-        // stream's over the client's.
+        // Ask: answered silent by the filter — not the server's — under the
+        // program's own name, the stream's over the client's.
         let mut s = with_mic(Setting::Ask, true);
         let client = packet(
             COMMAND_SET_CLIENT_NAME,
@@ -2475,17 +3170,21 @@ mod tests {
         assert!(matches!(s.up(&client), Up::Forward(_)));
         let sneaky: &[(&str, &str)] = &[("target.object", "x")];
         match s.up(&record(2, INVALID, None, sneaky, INVALID)) {
-            Up::Ask {
-                tag,
-                frame,
-                program,
-                remember,
+            Up::Ghost {
+                channel,
+                reply,
+                ask,
             } => {
-                assert_eq!((tag, program.as_str(), remember), (2, "Client", true));
-                // Held with its properties cut, as it would have gone on.
-                assert_eq!(frame, record(2, INVALID, None, none, INVALID));
+                assert_eq!(channel, 0);
+                assert_eq!(command_of(&reply), Some((COMMAND_REPLY, 2)));
+                assert_eq!(ask, Some(("Client".to_owned(), true)));
+                // Kept with its properties cut, as it would have gone on.
+                assert_eq!(
+                    s.ghosts[&0].request,
+                    record(2, INVALID, None, none, INVALID)
+                );
             }
-            other => panic!("not held: {other:?}"),
+            other => panic!("not silent: {other:?}"),
         }
         assert!(s.creating.is_empty());
         // One question at a time for the zone.
@@ -2495,22 +3194,287 @@ mod tests {
         let named: &[(&str, &str)] = &[("application.name", "Stream")];
         assert!(matches!(
             s.up(&record(4, INVALID, None, named, INVALID)),
-            Up::Ask { program, .. } if program == "Stream"
+            Up::Ghost { channel: 1, ask: Some((program, _)), .. } if program == "Stream"
         ));
         s.mic.abandon();
-        // Refused by the person once: the connection is not asked again.
+        // Refused by the person once: silent, not asked again.
         s.mic_denied = true;
-        let why = refused(s.up(&record(5, INVALID, None, none, INVALID)));
-        assert!(why.contains("refused this connection"), "{why}");
+        assert!(matches!(
+            s.up(&record(5, INVALID, None, none, INVALID)),
+            Up::Ghost {
+                channel: 2,
+                ask: None,
+                ..
+            }
+        ));
     }
 
-    /// "Ask" for real: the record stream waits for the answer while the
-    /// connection's other commands reach the server; allowed once, it goes
-    /// on — that stream only; refused, it is answered ERROR and the
-    /// connection is not asked again.
+    /// A silent record stream (the owner, docs/PERMISSIONS.md §11.15): the
+    /// filter's reply is the server's at the connection's version — its
+    /// buffer, the format asked for, a source that is no monitor —, its
+    /// commands are answered by the filter, and nothing of it reaches the
+    /// server; its sound is silence of its format.
     #[test]
-    fn a_record_stream_waits_for_the_answer_and_the_rest_goes_on() {
-        use std::io::{Read, Write};
+    fn a_silent_stream_is_answered_by_the_filter() {
+        let mut s = with_mic(Setting::Ask, true);
+        let none: &[(&str, &str)] = &[];
+        let Up::Ghost { channel, reply, .. } = s.up(&record(2, INVALID, None, none, INVALID))
+        else {
+            panic!("not silent");
+        };
+        s.mic.abandon();
+        let items = parse(&reply[DESCRIPTOR..]).unwrap();
+        let values = &items[2..];
+        // 20 ms of s16 stereo at 48 kHz.
+        assert_eq!(u32_at(values, 0), Some(channel));
+        assert_eq!(u32_at(values, 1), Some(GHOST_INDICES));
+        assert_eq!(u32_at(values, 2), Some(GHOST_MAXLENGTH));
+        assert_eq!(u32_at(values, 3), Some(3840));
+        assert_eq!(str_at(values, 7), Some(Some(&b"@DEFAULT_SOURCE@"[..])));
+        assert!(!record_source_refused(str_at(values, 7).unwrap()));
+        assert_eq!(values.len(), 11, "protocol 35: latency and format too");
+        // Its commands: the filter's to answer.
+        let answer = |up: Up, tag: u32| match up {
+            Up::Answer(frame) => {
+                assert_eq!(command_of(&frame), Some((COMMAND_REPLY, tag)));
+                parse(&frame[DESCRIPTOR..]).unwrap()
+            }
+            other => panic!("not answered: {other:?}"),
+        };
+        answer(
+            s.up(&packet(
+                COMMAND_CORK_RECORD_STREAM,
+                3,
+                &[V::L(channel), V::B(true)],
+            )),
+            3,
+        );
+        assert!(s.ghosts[&channel].corked);
+        let attr = answer(
+            s.up(&packet(
+                COMMAND_SET_RECORD_STREAM_BUFFER_ATTR,
+                4,
+                &[
+                    V::L(channel),
+                    V::L(8192),
+                    V::L(1001),
+                    V::B(true),
+                    V::B(false),
+                ],
+            )),
+            4,
+        );
+        assert_eq!(
+            (u32_at(&attr, 2), u32_at(&attr, 3)),
+            (Some(8192), Some(1000))
+        );
+        let mut latency = payload(&[V::L(COMMAND_GET_RECORD_LATENCY), V::L(5), V::L(channel)]);
+        latency.extend_from_slice(&[TAG_TIMEVAL, 0, 0, 0, 7, 0, 0, 0, 9]);
+        let lat = answer(s.up(&framed(COMMAND_CHANNEL, &latency)), 5);
+        assert_eq!(lat.len(), 2 + 7);
+        assert_eq!(lat[4].value, Value::Bool(false), "corked: not running");
+        let volume = packet(
+            COMMAND_SET_SOURCE_OUTPUT_VOLUME,
+            6,
+            &[V::L(GHOST_INDICES), V::CVol],
+        );
+        answer(s.up(&volume), 6);
+        answer(
+            s.up(&packet(COMMAND_DELETE_RECORD_STREAM, 7, &[V::L(channel)])),
+            7,
+        );
+        assert!(s.ghosts.is_empty());
+        // Silence of each format.
+        let spec = |format| Spec {
+            format,
+            channels: 1,
+            rate: 8000,
+        };
+        assert_eq!(silence_frame(3, spec(0), 2)[DESCRIPTOR..], [0x80, 0x80]);
+        assert_eq!(silence_frame(3, spec(2), 1)[DESCRIPTOR..], [0xff]);
+        assert_eq!(silence_frame(3, spec(3), 2)[DESCRIPTOR..], [0, 0]);
+        assert_eq!(channel_of(&silence_frame(3, spec(3), 2)), Some(3));
+        assert_eq!(spec(13).frame_bytes(), None);
+    }
+
+    /// Allowed, a silent stream's real one is made by the filter's own
+    /// request — the format as the program was told it, its corking — and
+    /// linked: the server's answer is not the program's, the sound and the
+    /// words of the server's channel come on the program's, and its
+    /// commands go to the server's channel and index. A real stream on a
+    /// channel a silent one has is told another.
+    #[test]
+    fn an_allowed_silent_stream_is_linked_to_the_real_one() {
+        let mut s = with_mic(Setting::Ask, true);
+        let none: &[(&str, &str)] = &[];
+        let Up::Ghost { channel, .. } = s.up(&record(2, INVALID, None, none, INVALID)) else {
+            panic!("not silent");
+        };
+        s.mic.abandon();
+        assert_eq!(channel, 0);
+        answer_ok(s.up(&packet(
+            COMMAND_CORK_RECORD_STREAM,
+            3,
+            &[V::L(channel), V::B(true)],
+        )));
+        let made = s.link(channel).expect("its real stream");
+        let (command, tag) = command_of(&made).unwrap();
+        assert_eq!(command, COMMAND_CREATE_RECORD_STREAM);
+        assert!(tag >= OWN_TAGS);
+        let items = parse(&made[DESCRIPTOR..]).unwrap();
+        assert_eq!(items[7].value, Value::Bool(true), "corked");
+        assert!(items[11..14].iter().all(|i| i.value == Value::Bool(false)));
+        assert_eq!(u32_at(&items, 8), Some(3840));
+        assert!(s.link(channel).is_none(), "made once");
+        // Uncorked meanwhile: told to the real stream after its reply.
+        answer_ok(s.up(&packet(
+            COMMAND_CORK_RECORD_STREAM,
+            4,
+            &[V::L(channel), V::B(false)],
+        )));
+        let reply = record_reply(tag, 5, 77, Some("alsa_input.usb-Mic.mono"));
+        let Down::Own(Some(cork)) = s.down(&reply) else {
+            panic!("the reply was the program's");
+        };
+        assert_eq!(
+            command_of(&cork).map(|c| c.0),
+            Some(COMMAND_CORK_RECORD_STREAM)
+        );
+        assert!(matches!(
+            s.down(&error_of(command_of(&cork).unwrap().1, 1)),
+            Down::Own(None)
+        ));
+        // The server's sound and words on the program's channel.
+        let Down::Rewritten(data) = s.down(&framed(5, b"sound")) else {
+            panic!("not the program's channel");
+        };
+        assert_eq!(channel_of(&data), Some(0));
+        let suspended = packet(
+            COMMAND_RECORD_STREAM_SUSPENDED,
+            INVALID,
+            &[V::L(5), V::B(true)],
+        );
+        let Down::Rewritten(word) = s.down(&suspended) else {
+            panic!("not the program's channel");
+        };
+        assert_eq!(
+            parse(&word[DESCRIPTOR..]).and_then(|i| u32_at(&i, 2)),
+            Some(0)
+        );
+        // Its commands to the server's channel and index.
+        let Up::Forward(cork) = s.up(&packet(
+            COMMAND_CORK_RECORD_STREAM,
+            6,
+            &[V::L(0), V::B(true)],
+        )) else {
+            panic!("not the server's");
+        };
+        assert_eq!(
+            parse(&cork[DESCRIPTOR..]).and_then(|i| u32_at(&i, 2)),
+            Some(5)
+        );
+        let Up::Forward(volume) = s.up(&packet(
+            COMMAND_SET_SOURCE_OUTPUT_VOLUME,
+            7,
+            &[V::L(GHOST_INDICES), V::CVol],
+        )) else {
+            panic!("not the server's");
+        };
+        assert_eq!(
+            parse(&volume[DESCRIPTOR..]).and_then(|i| u32_at(&i, 2)),
+            Some(77)
+        );
+        // Another silent stream takes channel 1; a real one the server puts
+        // on channel 1 is told channel 2.
+        s.mic_denied = true;
+        let Up::Ghost {
+            channel: second, ..
+        } = s.up(&record(8, INVALID, None, none, INVALID))
+        else {
+            panic!("not silent");
+        };
+        assert_eq!(second, 1);
+        s.creating.insert(9, Kind::Record);
+        let Down::Rewritten(told) = s.down(&record_reply(
+            9,
+            1,
+            78,
+            Some("alsa_input.pci.analog-stereo"),
+        )) else {
+            panic!("told the channel of a silent stream");
+        };
+        assert_eq!(
+            parse(&told[DESCRIPTOR..]).and_then(|i| u32_at(&i, 2)),
+            Some(2)
+        );
+        let Down::Rewritten(data) = s.down(&framed(1, b"sound")) else {
+            panic!("not the program's channel");
+        };
+        assert_eq!(channel_of(&data), Some(2));
+        // Deleted by the program: gone from the translation.
+        let Up::Forward(delete) = s.up(&packet(COMMAND_DELETE_RECORD_STREAM, 10, &[V::L(0)]))
+        else {
+            panic!("not the server's");
+        };
+        assert_eq!(
+            parse(&delete[DESCRIPTOR..]).and_then(|i| u32_at(&i, 2)),
+            Some(5)
+        );
+        assert!(!s.ghosts.contains_key(&0) && !s.record_down.contains_key(&5));
+        assert_eq!(s.down(&framed(5, b"x")), Down::Drop);
+    }
+
+    /// A silent stream the program deleted while its real one was being
+    /// made: the real one is deleted as soon as it is; one the server
+    /// linked to a monitor, too — and the silent one stays silent.
+    #[test]
+    fn a_real_stream_nobody_wants_is_deleted() {
+        let mut s = with_mic(Setting::Ask, true);
+        let none: &[(&str, &str)] = &[];
+        let Up::Ghost { channel, .. } = s.up(&record(2, INVALID, None, none, INVALID)) else {
+            panic!("not silent");
+        };
+        s.mic.abandon();
+        let made = s.link(channel).unwrap();
+        let tag = command_of(&made).unwrap().1;
+        answer_ok(s.up(&packet(COMMAND_DELETE_RECORD_STREAM, 3, &[V::L(channel)])));
+        let Down::Own(Some(delete)) = s.down(&record_reply(tag, 4, 70, Some("alsa_input.x")))
+        else {
+            panic!("not deleted");
+        };
+        assert_eq!(
+            command_of(&delete).map(|c| c.0),
+            Some(COMMAND_DELETE_RECORD_STREAM)
+        );
+        assert!(s.record_down.is_empty());
+        // Linked to a monitor: deleted, silent again.
+        s.mic_denied = true;
+        let Up::Ghost { channel, .. } = s.up(&record(5, INVALID, None, none, INVALID)) else {
+            panic!("not silent");
+        };
+        let made = s.link(channel).unwrap();
+        let tag = command_of(&made).unwrap().1;
+        let Down::Own(Some(_)) = s.down(&record_reply(tag, 6, 71, Some("x.monitor"))) else {
+            panic!("not deleted");
+        };
+        assert_eq!(s.ghosts[&channel].link, Link::Silent);
+        assert_eq!(s.down(&framed(6, b"x")), Down::Drop);
+    }
+
+    fn answer_ok(up: Up) {
+        match up {
+            Up::Answer(frame) => assert_eq!(command_of(&frame).map(|c| c.0), Some(COMMAND_REPLY)),
+            other => panic!("not answered: {other:?}"),
+        }
+    }
+
+    /// "Ask" for real: the record stream is answered at once, silent, while
+    /// the person is asked and the connection's other commands reach the
+    /// server; allowed once, its real stream is made — that stream only;
+    /// refused, it stays silent and the connection is not asked again.
+    #[test]
+    fn a_record_stream_is_silent_until_the_answer_and_the_rest_goes_on() {
+        use std::io::Write;
         use std::time::{Duration, Instant};
         let dir = std::env::temp_dir().join(format!("vz-pulse-ask-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -2573,12 +3537,23 @@ mod tests {
         c.write_all(&packet(COMMAND_GET_SERVER_INFO, 3, &[]))
             .unwrap();
         // The server gets the rest of the connection's commands, not the
-        // held stream.
+        // silent stream.
         let mut frames = Frames::new(&seen);
         let mut next = || command_of(&frames.next().unwrap().unwrap().0).unwrap();
         assert_eq!(next(), (COMMAND_AUTH, 0));
         assert_eq!(next(), (COMMAND_SET_CLIENT_NAME, 1));
         assert_eq!(next(), (COMMAND_GET_SERVER_INFO, 3));
+        // The program: its stream's reply at once, then silence on it.
+        let reader = c.try_clone().unwrap();
+        let mut heard = Frames::new(&reader);
+        let mut replied = || loop {
+            let (frame, _) = heard.next().unwrap().unwrap();
+            if channel_of(&frame) == Some(COMMAND_CHANNEL) {
+                break command_of(&frame).unwrap();
+            }
+            assert!(frame[DESCRIPTOR..].iter().all(|b| *b == 0), "not silence");
+        };
+        assert_eq!(replied(), (COMMAND_REPLY, 2));
         // The question: the filter's zone, the program's own word, cleaned.
         let question = wait_asked();
         assert!(
@@ -2587,26 +3562,26 @@ mod tests {
         );
         assert!(question.contains("«‹b›Evil‹/b› Зона: host»"), "{question}");
         assert!(question.contains("Всегда — настоящему дому"), "{question}");
-        // Once: this stream reaches the server now; nothing is remembered.
+        // Once: its real stream is made now, by the filter's own request;
+        // nothing is remembered.
         answer("0");
-        assert_eq!(next(), (COMMAND_CREATE_RECORD_STREAM, 2));
+        let (made, tag) = next();
+        assert_eq!(made, COMMAND_CREATE_RECORD_STREAM);
+        assert!(tag >= OWN_TAGS, "the program's tag: {tag}");
         assert!(!dir.join("state/nl/microphone").exists());
-        // The next stream is asked about again, and refused.
+        // The next stream is asked about again, and refused: silent.
         fs::remove_file(&asked).unwrap();
         fs::remove_file(&go).unwrap();
         c.write_all(&record(4, INVALID, None, none, INVALID))
             .unwrap();
+        assert_eq!(replied(), (COMMAND_REPLY, 4));
         wait_asked();
         answer("2");
-        let mut reply = vec![0u8; DESCRIPTOR + 15];
-        c.read_exact(&mut reply).unwrap();
-        assert_eq!(command_of(&reply), Some((COMMAND_ERROR, 4)));
-        // Refused once: this connection is not asked again.
+        // Refused once: this connection is not asked again — silent too.
         fs::remove_file(&asked).unwrap();
         c.write_all(&record(5, INVALID, None, none, INVALID))
             .unwrap();
-        c.read_exact(&mut reply).unwrap();
-        assert_eq!(command_of(&reply), Some((COMMAND_ERROR, 5)));
+        assert_eq!(replied(), (COMMAND_REPLY, 5));
         assert!(!asked.exists(), "asked again after a refusal");
         // Neither refused stream reached the server.
         c.write_all(&packet(COMMAND_GET_SERVER_INFO, 6, &[]))
