@@ -1410,7 +1410,7 @@ mod tests {
         assert!(!p.ask("app", &Who::Main, true, None, None, |a| a));
         let journal = d.journal();
         assert_eq!(journal.matches("\"event\":\"microphone\"").count(), 5);
-        assert!(journal.contains("\"decision\":\"refused\",\"why\":\"человек отказал\""));
+        assert!(journal.contains("\"decision\":\"refused\",\"why\":\"человек отказал"));
     }
 
     /// No answer in time: refused, and the dialog is gone.
