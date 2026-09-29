@@ -4188,7 +4188,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
                 Command::new(&zone.tools.pasta)
                     .arg("--netns")
                     .arg(&netns)
-                    .args(host_network_pasta_args(word.path(), v6, resolver))
+                    .args(host_network_pasta_args(&word.path(), v6, resolver))
                     .spawn()
             }) {
             Ok(mut child) => {
