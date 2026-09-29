@@ -177,8 +177,8 @@ let
               "cellward run offline -- python3 -c "
               "\"import time; f = open('/dev/video0', 'rb'); time.sleep(60)\""
           )
-          machine.wait_until_succeeds("pgrep -u alice -f 'camera-serve --fd'", timeout=60)
-          server = machine.succeed("pgrep -u alice -f 'camera-serve --fd' | head -1").strip()
+          machine.wait_until_succeeds("pgrep -u alice -f 'camera-serve --from'", timeout=60)
+          server = machine.succeed("pgrep -u alice -f 'camera-serve --from' | head -1").strip()
           # Out of the program's reach and of the host's: a user namespace of
           # its own, an empty root.
           mine = machine.succeed(f"readlink /proc/{server}/ns/user").strip()
