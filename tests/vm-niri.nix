@@ -149,6 +149,21 @@ let
 
       MAGENTA = (255, 0, 255)
 
+      class Shot:
+          """A screen's pixels: `at(x, y)` the colour there (None off it),
+          `size` its width and height."""
+
+          def __init__(self, pixels, w, h):
+              self.pixels = pixels
+              self.size = (w, h)
+
+          def __call__(self, x, y):
+              w, h = self.size
+              if not (0 <= x < w and 0 <= y < h):
+                  return None
+              i = (y * w + x) * 3
+              return tuple(self.pixels[i : i + 3])
+
       def shot(name):
           """niri's screen (device pixels): a PNG to look at, a PPM to read."""
           alice(f"WAYLAND_DISPLAY={nested} grim /tmp/{name}.png")
@@ -160,15 +175,7 @@ let
           ppm.unlink()
           assert magic == b"P6", magic
           w, h = map(int, size.split())
-
-          def at(x, y):
-              if not (0 <= x < w and 0 <= y < h):
-                  return None
-              i = (y * w + x) * 3
-              return tuple(pixels[i : i + 3])
-
-          at.size = (w, h)
-          return at
+          return Shot(pixels, w, h)
 
       def frame_box(at):
           """The frame's pixels' bounds: the window's geometry, whatever
@@ -200,6 +207,7 @@ let
                   if n == tries - 1:
                       raise
                   machine.sleep(1)
+          raise AssertionError(f"{name}: never tried")
 
       alice(
           f"systemd-run --user --unit=vmfoot --setenv=WAYLAND_DISPLAY={nested} "

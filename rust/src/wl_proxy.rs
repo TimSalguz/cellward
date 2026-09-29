@@ -5904,11 +5904,7 @@ mod tests {
         }
         // Four images of one region, one after the other.
         for pair in offsets.windows(2) {
-            assert_eq!(
-                pair[1].0,
-                pair[0].0 + 12 * pair[0].1 as u32 * 4,
-                "{offsets:?}"
-            );
+            assert_eq!(pair[1].0, pair[0].0 + 12 * pair[0].1 * 4, "{offsets:?}");
         }
         drop(client);
         assert_eq!(rig.finish(), 0);

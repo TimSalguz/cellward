@@ -6349,7 +6349,9 @@ mod tests {
     /// but the pieces (clear there).
     #[test]
     fn the_frames_own_corners_take_the_strips_ends() {
-        let content = |x: i32, y: i32| x >= R.x && x < R.x + R.w && y >= R.y && y < R.y + R.h;
+        let inside = |r: &Rect, x: i32, y: i32| {
+            (r.x..r.x + r.w).contains(&x) && (r.y..r.y + r.h).contains(&y)
+        };
         let check = |i: Insets, o: &Outer, widths: &[i32], over: bool| -> [Rect; 4] {
             let pieces = outer_rects(R, i, o).expect("room for them");
             let whole = geometry_up(R, i);
@@ -6365,10 +6367,8 @@ mod tests {
             for y in whole.y..whole.y + whole.h {
                 for x in whole.x..whole.x + whole.w {
                     let got = n[((y - whole.y) * whole.w + x - whole.x) as usize];
-                    let on_pieces = pieces
-                        .iter()
-                        .any(|p| x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h);
-                    if content(x, y) {
+                    let on_pieces = pieces.iter().any(|p| inside(p, x, y));
+                    if inside(&R, x, y) {
                         assert_eq!(got, u8::from(on_pieces), "content ({x}, {y})");
                     } else {
                         assert_eq!(got, 1, "frame ({x}, {y}) {o:?}");
