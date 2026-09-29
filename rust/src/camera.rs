@@ -47,7 +47,7 @@ pub const INTERVALS: [(u32, u32); 3] = [(1, 30), (1, 15), (1, 5)];
 pub const MAX_BUFFERS: u32 = 8;
 const PAGE: u64 = 4096;
 /// Each buffer's room in the file: the largest frame, in whole pages.
-pub const BUFFER_ROOM: u64 = (1280 * 720 * 2).div_ceil(PAGE) * PAGE;
+pub const BUFFER_ROOM: u64 = (1280u64 * 720 * 2).div_ceil(PAGE) * PAGE;
 /// The file's size: room for every buffer. A mapping past the end of a
 /// file is a SIGBUS; within it, pages of black.
 pub const FILE_SIZE: u64 = BUFFER_ROOM * MAX_BUFFERS as u64;
