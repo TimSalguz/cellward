@@ -79,6 +79,7 @@ let
           pkgs.util-linux
           pkgs.sway
           pkgs.wtype
+          pkgs.grim
         ];
         environment.etc."vm-camera/client.py".source = ./vm-camera-client.py;
         environment.etc."vm-camera/sway.conf".text = "default_border none\n";

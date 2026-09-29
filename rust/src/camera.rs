@@ -2160,7 +2160,7 @@ mod tests {
         assert_eq!(s.streaming_format(0), Some((640, 480, (1, 30))));
         assert!(ioctl(&mut s, fh, 4, vidioc::DQBUF, &buffer(0)).is_empty());
         // A frame larger than the buffer: cut to it.
-        let size = 640 * 480 * 2;
+        let size: usize = 640 * 480 * 2;
         let frame: Vec<u8> = (0..size + 100).map(|i| (i % 251) as u8).collect();
         let out = s.deliver(0, &frame, (7, 8));
         let pieces = size.div_ceil(STORE_CHUNK);
