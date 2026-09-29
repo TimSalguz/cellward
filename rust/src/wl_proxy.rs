@@ -289,12 +289,16 @@ const NETWORK: u8 = b's';
 /// policy held it back (`notify`, `ask`; `crate::wl_focus`): the person is
 /// to be told. One for any number of requests of a round. No answer.
 const ATTENTION: u8 = b'f';
+/// Proxy → supervisor: the launch restarted with a network chosen — a row
+/// of the ≡'s dropdown (`crate::wl_frame`, step 3c). No answer.
+const RESTART: u8 = b'x';
 
 /// The byte of an ask of the frame, on the channel.
 fn ask_byte(ask: Ask) -> u8 {
     match ask {
         Ask::Menu => MENU,
         Ask::Network => NETWORK,
+        Ask::Restart => RESTART,
     }
 }
 
@@ -303,6 +307,7 @@ fn ask_of(byte: u8) -> Option<Ask> {
     match byte {
         MENU => Some(Ask::Menu),
         NETWORK => Some(Ask::Network),
+        RESTART => Some(Ask::Restart),
         _ => None,
     }
 }
@@ -1005,8 +1010,10 @@ pub(crate) fn menu_argv(
 ) -> Vec<OsString> {
     let mut verb: Vec<OsString> =
         vec!["window-menu".into(), "--pid".into(), pid.to_string().into()];
-    if ask == Ask::Network {
-        verb.push("--network".into());
+    match ask {
+        Ask::Network => verb.push("--network".into()),
+        Ask::Restart => verb.push("--restart".into()),
+        Ask::Menu => {}
     }
     user_unit_argv(
         systemd_run,
@@ -4188,7 +4195,7 @@ mod tests {
     fn the_asks_have_bytes_of_their_own() {
         // Distinct from every other byte of the channel, either way.
         let others = [READY, CONNECT, UPSTREAM, UPSTREAM_BARE, REFUSED];
-        for ask in [Ask::Menu, Ask::Network] {
+        for ask in [Ask::Menu, Ask::Network, Ask::Restart] {
             let byte = ask_byte(ask);
             assert!(!others.contains(&byte), "{ask:?}");
             assert_eq!(ask_of(byte), Some(ask));

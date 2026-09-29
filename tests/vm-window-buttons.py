@@ -106,9 +106,29 @@ with subtest("the frame's buttons: at the right end of the title, lit under the 
     assert near(at(*menu), shade_lit), at(*menu)
     assert at(*close) == border, at(*close)
 
-with subtest("the frame's ≡ opens the window menu of that launch"):
+with subtest("the frame's ≡ drops its menu down; a row of it opens the window menu"):
     sup = node("btn")["pid"]
+    # The dropdown (step 3c): an xdg_popup of the proxy's own under the ≡,
+    # toward the window's middle — its right edge the ≡'s, its top the
+    # strip's bottom —, the title's colour with an edge, a row 28 high.
+    top, right = menu[1] + title, menu[0] + button_w
+    spot = (right - 8, top + 6)
+    at = shot("frame-dropdown-before")
+    under = at(*spot)
     click(menu[0] + button_w // 2, menu[1] + title // 2)
+    machine.sleep(1)
+    at = shot("frame-dropdown")
+    assert at(*spot) == border and under != border, (at(*spot), under)
+    # Nothing started yet: the dropdown is the proxy's alone.
+    machine.fail(f"journalctl --no-pager | grep -F 'window-menu --pid {sup}'")
+    # Its third row, «Все действия окна…», lit under the pointer, then
+    # chosen: the window menu of the launch, as the ≡ opened it before.
+    row = (right - 20, top + 1 + 2 * 28 + 14)
+    pointer("move", *row)
+    at = shot("frame-dropdown-lit")
+    assert at(right - 8, row[1]) != border, "the row under the pointer is lit"
+    pointer("press")
+    pointer("release")
     # The supervisor had systemd --user start it, for its own pid.
     machine.wait_until_succeeds(
         f"journalctl --no-pager | grep -F 'window-menu --pid {sup}'", timeout=30

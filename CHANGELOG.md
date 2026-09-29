@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The frame's ≡ drops a menu down** (2026-09-29, step 3c): an
+  `xdg_popup` of the proxy's own under the button — «Сменить сеть…»,
+  «Перезапустить с выбором сети…», «Все действия окна…» (the window menu
+  as before), «Закрыть окно». A row lights under the pointer; ↑ ↓ Enter,
+  Esc; a click elsewhere closes it. The program neither sees it nor gets
+  its keys. No compositor rule is needed for it to float.
 - **Presets: what a program needs** (2026-09-29, step 3a of
   `docs/PERMISSIONS.md` §11.15). A catalog by launcher id — browsers, calls,
   messengers, OBS, Steam and Wine, players, viewers, password managers,

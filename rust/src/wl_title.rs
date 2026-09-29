@@ -86,6 +86,26 @@ pub const MAX_SCALE: u32 = 480;
 /// How many scales are held at once.
 pub const SLOTS: usize = 4;
 
+/// The ≡'s dropdown (`crate::wl_frame`, step 3c of `docs/PERMISSIONS.md`
+/// §11.15): its rows, top to bottom. What each does is the frame's.
+pub const MENU_LABELS: [&str; 4] = [
+    "Сменить сеть…",
+    "Перезапустить с выбором сети…",
+    "Все действия окна…",
+    "Закрыть окно",
+];
+/// A row of the dropdown, logical pixels.
+pub const MENU_ROW: i32 = 28;
+/// The space before a row's text, logical pixels.
+const MENU_PAD: i32 = 12;
+/// The dropdown's edge, logical pixels.
+const MENU_EDGE: i32 = 1;
+/// The narrowest dropdown, logical pixels.
+const MENU_MIN_WIDTH: i32 = 200;
+/// The dropdown is drawn at this scale at most, and the compositor scales
+/// it further: what the memfd holds of it stays a few megabytes.
+pub const MENU_MAX_SCALE: u32 = 240;
+
 // --- THE LOOK ---------------------------------------------------------------
 
 /// A button of the title strip, by what it does (`crate::wl_frame` acts on
@@ -868,6 +888,73 @@ pub fn render(font: &FontVec, line: &Line, scale: u32, bg: Rgb) -> (i32, i32, Ve
     (w, h, pixels)
 }
 
+/// The dropdown's size for `lines`, logical pixels: the longest line and
+/// its pads, a row each.
+pub fn menu_size(lines: &[Line]) -> (i32, i32) {
+    let text = lines.iter().map(|l| l.width).max().unwrap_or(0);
+    let w = text
+        .saturating_add(2 * (MENU_PAD + MENU_EDGE))
+        .max(MENU_MIN_WIDTH);
+    let rows = i32::try_from(lines.len()).unwrap_or(0);
+    (
+        w,
+        rows.saturating_mul(MENU_ROW).saturating_add(2 * MENU_EDGE),
+    )
+}
+
+/// The row of a dropdown of `rows` at `y` logical pixels from its top, if
+/// any: its edge is none.
+pub fn menu_row(rows: usize, y: f64) -> Option<usize> {
+    let y = y - f64::from(MENU_EDGE);
+    if !y.is_finite() || y < 0.0 {
+        return None;
+    }
+    let row = (y / f64::from(MENU_ROW)).floor() as usize;
+    (row < rows).then_some(row)
+}
+
+/// The dropdown at `scale` (at most [`MENU_MAX_SCALE`]): every image of it
+/// — none lit, then each row lit — one after the other, XRGB8888, opaque,
+/// `ink` on `bg` with an edge. Its size in device pixels (one image), and
+/// the pixels.
+pub fn render_menu(font: &FontVec, lines: &[Line], scale: u32, bg: Rgb) -> (i32, i32, Vec<u8>) {
+    let scale = clamp_scale(scale).min(MENU_MAX_SCALE);
+    let (lw, lh) = menu_size(lines);
+    let (w, h) = (device(lw, scale), device(lh, scale));
+    let edge = device(MENU_EDGE, scale).max(1);
+    let row_h = device(MENU_ROW, scale).max(1);
+    let x0 = device(MENU_EDGE + MENU_PAD, scale) as f32;
+    let fg = ink(bg);
+    let edge_color = blend(bg, fg, 0.35);
+    let lit_color = blend(bg, fg, 0.18);
+    let rows: Vec<Vec<f32>> = lines
+        .iter()
+        .map(|line| line_coverage(font, line, scale, w, row_h, x0))
+        .collect();
+    let image = (w.max(0) as usize) * (h.max(0) as usize) * 4;
+    let mut pixels = Vec::with_capacity(image * (lines.len() + 1));
+    for variant in 0..=lines.len() {
+        let lit = variant.checked_sub(1);
+        for y in 0..h {
+            for x in 0..w {
+                let color = if x < edge || y < edge || x >= w - edge || y >= h - edge {
+                    edge_color
+                } else {
+                    let row = ((y - edge) / row_h) as usize;
+                    let base = if lit == Some(row) { lit_color } else { bg };
+                    let at = (((y - edge) % row_h) * w + x) as usize;
+                    match rows.get(row).and_then(|c| c.get(at)) {
+                        Some(&c) => blend(base, fg, c),
+                        None => base,
+                    }
+                };
+                pixels.extend_from_slice(&color.xrgb8888());
+            }
+        }
+    }
+    (w, h, pixels)
+}
+
 /// How much of the pixel (`x`, `y`) of an image `w` wide is inside it with
 /// its top corners rounded by `r` device pixels: 1 but near those corners.
 fn tab_alpha(x: i32, y: i32, w: i32, r: f32) -> f32 {
@@ -1048,6 +1135,8 @@ fn image_width(line: &Line, look: &Look) -> i32 {
 pub struct Prepared {
     font: FontVec,
     line: Line,
+    /// The dropdown's rows ([`MENU_LABELS`]).
+    menu: Vec<Line>,
     /// Each button's glyph, in the look's order.
     glyphs: Vec<GlyphId>,
     look: Look,
@@ -1070,9 +1159,11 @@ impl Prepared {
             .iter()
             .map(|b| font.glyph_id(b.glyph))
             .collect();
+        let menu = MENU_LABELS.iter().map(|l| lay_out(&font, l)).collect();
         (line.width > 0).then_some(Self {
             font,
             line,
+            menu,
             glyphs,
             look,
         })
@@ -1103,10 +1194,21 @@ impl Prepared {
         4 * d * d * 4
     }
 
+    /// Bytes of one region of the dropdown: every image of it at
+    /// [`MENU_MAX_SCALE`].
+    fn menu_bytes(&self) -> usize {
+        let (w, h) = menu_size(&self.menu);
+        (self.menu.len() + 1)
+            * device(w, MENU_MAX_SCALE) as usize
+            * device(h, MENU_MAX_SCALE) as usize
+            * 4
+    }
+
     /// The memfd's size: [`SLOTS`] regions of the line, then [`SLOTS`] of
-    /// the buttons, then [`SLOTS`] of the corners.
+    /// the buttons, then [`SLOTS`] of the corners, then [`SLOTS`] of the
+    /// dropdown.
     pub fn memfd_size(&self) -> usize {
-        (self.slot_bytes() + self.button_bytes() + self.corner_bytes()) * SLOTS
+        (self.slot_bytes() + self.button_bytes() + self.corner_bytes() + self.menu_bytes()) * SLOTS
     }
 }
 
@@ -1155,6 +1257,7 @@ impl Regions {
 pub struct Text {
     font: FontVec,
     line: Line,
+    menu_lines: Vec<Line>,
     glyphs: Vec<GlyphId>,
     bg: Rgb,
     look: Look,
@@ -1167,6 +1270,8 @@ pub struct Text {
     title: Regions,
     buttons: Regions,
     corners: Regions,
+    /// The dropdown's, after the corners'.
+    menu: Regions,
     clock: Cell<u64>,
 }
 
@@ -1214,9 +1319,14 @@ impl Text {
         let title = Regions::new(0, prepared.slot_bytes());
         let buttons = Regions::new(title.bytes(), prepared.button_bytes());
         let corners = Regions::new(title.bytes() + buttons.bytes(), prepared.corner_bytes());
+        let menu = Regions::new(
+            title.bytes() + buttons.bytes() + corners.bytes(),
+            prepared.menu_bytes(),
+        );
         Self {
             font: prepared.font,
             line: prepared.line,
+            menu_lines: prepared.menu,
             glyphs: prepared.glyphs,
             bg,
             look: prepared.look,
@@ -1225,6 +1335,7 @@ impl Text {
             title,
             buttons,
             corners,
+            menu,
             clock: Cell::new(0),
         }
     }
@@ -1264,8 +1375,10 @@ impl Text {
 
     /// The pool's size: the whole memfd.
     pub fn pool_size(&self) -> i32 {
-        i32::try_from(self.title.bytes() + self.buttons.bytes() + self.corners.bytes())
-            .unwrap_or(i32::MAX)
+        i32::try_from(
+            self.title.bytes() + self.buttons.bytes() + self.corners.bytes() + self.menu.bytes(),
+        )
+        .unwrap_or(i32::MAX)
     }
 
     /// The line at `scale` — the tag with it, in the tag look —, drawn if it
@@ -1289,6 +1402,21 @@ impl Text {
         self.region_at(&self.buttons, scale, |scale| {
             render_buttons(&self.font, &self.glyphs, &self.look.buttons, scale, self.bg)
         })
+    }
+
+    /// The dropdown at `scale` (at most [`MENU_MAX_SCALE`]), every image of
+    /// it, as [`Text::at`] the line: image `v` (0 none lit, `1 + row` that
+    /// row lit) is `v × width × height × 4` bytes after `offset`.
+    pub fn menu_at(&self, scale: u32) -> Option<Drawn> {
+        let scale = clamp_scale(scale).min(MENU_MAX_SCALE);
+        self.region_at(&self.menu, scale, |scale| {
+            render_menu(&self.font, &self.menu_lines, scale, self.bg)
+        })
+    }
+
+    /// The dropdown's size, logical pixels, and its rows.
+    pub fn menu_size(&self) -> ((i32, i32), usize) {
+        (menu_size(&self.menu_lines), self.menu_lines.len())
     }
 
     /// The round corners at `scale`, all four, as [`Text::at`] the line:
@@ -1462,6 +1590,38 @@ mod tests {
         assert!(prepared.line.width as f32 > MAX_WIDTH - 40.0);
         let (_, dots) = prepared.line.glyphs.last().unwrap();
         assert!(*dots > 0.0);
+    }
+
+    /// The dropdown (step 3c): a row each, the edge is none; an image per
+    /// state — none lit, each row lit — the lit row different, the others
+    /// not; drawn at 2× at most, in its own region of the memfd.
+    #[test]
+    fn the_dropdown_is_its_rows_each_state_an_image() {
+        assert_eq!(menu_row(4, 0.5), None, "the edge");
+        assert_eq!(menu_row(4, f64::from(MENU_EDGE) + 1.0), Some(0));
+        assert_eq!(menu_row(4, f64::from(MENU_EDGE + MENU_ROW) + 1.0), Some(1));
+        assert_eq!(menu_row(4, f64::from(MENU_EDGE + 4 * MENU_ROW) + 1.0), None);
+        assert_eq!(menu_row(4, f64::NAN), None);
+        let Some(bytes) = font() else { return };
+        let prepared = Prepared::new(bytes, "nl · work").expect("a font");
+        let (w, h) = menu_size(&prepared.menu);
+        assert!(w >= MENU_MIN_WIDTH && h == 4 * MENU_ROW + 2 * MENU_EDGE);
+        let (dw, dh, pixels) =
+            render_menu(&prepared.font, &prepared.menu, 480, Rgb(0x30, 0x60, 0x90));
+        assert_eq!(
+            (dw, dh),
+            (device(w, MENU_MAX_SCALE), device(h, MENU_MAX_SCALE))
+        );
+        let image = (dw * dh * 4) as usize;
+        assert_eq!(pixels.len(), image * 5);
+        let row = |variant: usize, r: i32| {
+            let y = device(MENU_EDGE, 240) + r * device(MENU_ROW, 240) + 1;
+            let at = variant * image + ((y * dw + dw - 3) * 4) as usize;
+            pixels[at..at + 4].to_vec()
+        };
+        assert_ne!(row(0, 1), row(2, 1), "row 1 lit in image 2");
+        assert_eq!(row(0, 0), row(2, 0), "row 0 not");
+        assert!(prepared.menu_bytes() >= image * 5);
     }
 
     /// The regions: a scale drawn once is reused; one held by the compositor

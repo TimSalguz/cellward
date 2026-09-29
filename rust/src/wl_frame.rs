@@ -204,6 +204,9 @@ use wl_proxy::protocols::wayland::wl_data_device_manager::{
 };
 use wl_proxy::protocols::wayland::wl_data_offer::WlDataOffer;
 use wl_proxy::protocols::wayland::wl_data_source::WlDataSource;
+use wl_proxy::protocols::wayland::wl_keyboard::{
+    WlKeyboard, WlKeyboardHandler, WlKeyboardKeyState,
+};
 use wl_proxy::protocols::wayland::wl_output::WlOutputTransform;
 use wl_proxy::protocols::wayland::wl_pointer::{
     WlPointer, WlPointerAxis, WlPointerAxisRelativeDirection, WlPointerAxisSource,
@@ -218,7 +221,10 @@ use wl_proxy::protocols::wayland::wl_subsurface::{WlSubsurface, WlSubsurfaceHand
 use wl_proxy::protocols::wayland::wl_surface::{WlSurface, WlSurfaceHandler};
 use wl_proxy::protocols::wayland::wl_touch::{WlTouch, WlTouchHandler};
 use wl_proxy::protocols::xdg_shell::xdg_popup::{XdgPopup, XdgPopupHandler};
-use wl_proxy::protocols::xdg_shell::xdg_positioner::{XdgPositioner, XdgPositionerHandler};
+use wl_proxy::protocols::xdg_shell::xdg_positioner::{
+    XdgPositioner, XdgPositionerAnchor, XdgPositionerConstraintAdjustment, XdgPositionerGravity,
+    XdgPositionerHandler,
+};
 use wl_proxy::protocols::xdg_shell::xdg_surface::{XdgSurface, XdgSurfaceHandler};
 use wl_proxy::protocols::xdg_shell::xdg_toplevel::{
     XdgToplevel, XdgToplevelHandler, XdgToplevelResizeEdge,
@@ -690,6 +696,9 @@ pub(crate) struct Frames {
     /// `wl_pointer` of the program on a seat hears the same event, and one
     /// of them acts on it ([`Frames::first`]).
     acted: Cell<Option<u32>>,
+    /// The window whose ≡ dropdown is open ([`Dropdown`]): one at a time on
+    /// a connection. Its keys come here.
+    menu_on: RefCell<Option<Weak<RefCell<Window>>>>,
 }
 
 /// What a click on the frame asks of the supervisor (`crate::wl_proxy`),
@@ -703,6 +712,9 @@ pub(crate) enum Ask {
     /// instance can be, else its restart with a network chosen (stage 5 of
     /// the container design).
     Network,
+    /// The launch restarted with a network chosen (`window-menu
+    /// --restart`): a row of the ≡'s dropdown.
+    Restart,
 }
 
 /// Asks the proxy's loop has not sent yet. A few at most: a click is one,
@@ -776,6 +788,9 @@ struct Own {
     /// For the cursor over the frame, when the compositor offers it; without
     /// it the cursor over the frame is whatever it was.
     cursor_shape: Option<Rc<WpCursorShapeManagerV1>>,
+    /// For the ≡'s dropdown, an `xdg_popup` of the proxy's own; without it
+    /// the ≡ asks for the window menu as before.
+    wm_base: Option<Rc<XdgWmBase>>,
     /// A buffer of each square of the colours' memfd, in its order.
     pixels: Vec<Rc<WlBuffer>>,
     /// The pool of the title's pixels: the launch's memfd, this connection's
@@ -852,6 +867,7 @@ impl Frames {
             framed: Rc::default(),
             asks,
             acted: Cell::new(None),
+            menu_on: RefCell::new(None),
         });
         let display = client.display();
         let registry = display.new_send_get_registry();
@@ -1270,6 +1286,11 @@ impl WlRegistryHandler for OwnRegistry {
             ObjectInterface::WpCursorShapeManagerV1 if own.cursor_shape.is_none() => {
                 own.cursor_shape = Some(bind(slf, name, 1));
             }
+            ObjectInterface::XdgWmBase if own.wm_base.is_none() => {
+                let wm_base: Rc<XdgWmBase> = bind(slf, name, 1);
+                wm_base.set_handler(OwnWmBase);
+                own.wm_base = Some(wm_base);
+            }
             _ => {}
         }
     }
@@ -1299,6 +1320,8 @@ enum Part {
     Text,
     Buttons,
     Corner,
+    /// The ≡'s dropdown ([`Dropdown`]).
+    Menu,
 }
 
 impl Part {
@@ -1867,6 +1890,8 @@ struct Window {
     /// The button the left pointer button went down on, until it comes up:
     /// a button acts when both happen on it.
     pressed: Option<Button>,
+    /// The ≡'s dropdown, while it is open.
+    menu: Option<Dropdown>,
 }
 
 impl Window {
@@ -1901,6 +1926,7 @@ impl Window {
             hover: false,
             laid: None,
             pressed: None,
+            menu: None,
         }
     }
 
@@ -2217,7 +2243,7 @@ impl Window {
         };
         match part {
             Part::Buttons => self.look.buttons.at(x, y).map_or(Hit::Nothing, Hit::Button),
-            Part::Corner => Hit::Nothing,
+            Part::Corner | Part::Menu => Hit::Nothing,
             _ if self.next_fullscreen => Hit::Nothing,
             Part::Title | Part::Text => Hit::Title,
             Part::Border(side, ring) => {
@@ -2297,7 +2323,13 @@ impl Window {
                     toplevel.send_close();
                 }
             }
-            Button::Menu => f.asks.push(Ask::Menu),
+            // The dropdown where it can be (step 3c); else the window menu
+            // as before.
+            Button::Menu => {
+                if !self.open_menu(f, seat, serial) {
+                    f.asks.push(Ask::Menu);
+                }
+            }
             Button::Network => f.asks.push(Ask::Network),
         }
     }
@@ -2322,6 +2354,7 @@ impl Window {
     /// frame, at once — a subsurface's destruction does not wait for a
     /// commit.
     fn drop_strips(&mut self) {
+        self.close_menu();
         for strip in self.strips.take().into_iter().flatten() {
             strip.viewport.send_destroy();
             strip.sub.send_destroy();
@@ -2335,6 +2368,432 @@ impl Window {
         }
         self.counted = None;
         self.laid = None;
+    }
+}
+
+// --- THE ≡'S DROPDOWN (step 3c of docs/PERMISSIONS.md §11.15) ---------------
+
+/// The ≡'s dropdown: an `xdg_popup` of the program's window, a surface of the
+/// proxy's own — the program cannot name it, draw in it, nor hear what is
+/// done in it. Its rows are `wl_title::MENU_LABELS`, drawn in the title's
+/// memfd ([`Text::menu_at`]) with every state an image: a row lights under
+/// the pointer (a new buffer of the same region, no drawing) and acts on the
+/// release of the left button over it; ↑ ↓ light another, Enter or Space
+/// acts, Esc closes. The popup takes the grab with the click's serial: the
+/// keyboard is its while it is open, and the compositor closes it on a click
+/// elsewhere (`popup_done`). Where it cannot be — no `xdg_wm_base` of the
+/// proxy's own, no font, no row of buttons laid —, the ≡ asks for the
+/// window menu as it did.
+struct Dropdown {
+    surface: Rc<WlSurface>,
+    view: Rc<WpViewport>,
+    xdg: Rc<XdgSurface>,
+    popup: Rc<XdgPopup>,
+    text: Rc<Text>,
+    pool: Rc<WlShmPool>,
+    /// The buttons' scale when it opened (120ths).
+    scale: u32,
+    /// Logical pixels, and the rows.
+    size: (i32, i32),
+    rows: usize,
+    lit: Option<usize>,
+    /// The compositor configured it: it may be drawn.
+    configured: bool,
+    current: Option<Rc<WlBuffer>>,
+    retired: Vec<Rc<WlBuffer>>,
+}
+
+impl Dropdown {
+    /// Its image in its state, attached and committed; false when there is
+    /// nothing to draw it in.
+    fn draw(&mut self) -> bool {
+        let Some(drawn) = self.text.menu_at(self.scale) else {
+            return false;
+        };
+        let (width, height) = (drawn.width, drawn.height);
+        let image = width.saturating_mul(height).saturating_mul(4);
+        let variant = self.lit.map_or(0, |row| row.saturating_add(1));
+        let offset = drawn
+            .offset
+            .saturating_add(image.saturating_mul(i32::try_from(variant).unwrap_or(0)));
+        let buffer = memfd_buffer(
+            &self.pool,
+            (width, height),
+            offset,
+            drawn.lease,
+            Pixels::Opaque,
+        );
+        attach_whole(&self.surface, &buffer, width, height);
+        self.view.send_set_destination(self.size.0, self.size.1);
+        retire(&mut self.current, &mut self.retired);
+        self.current = Some(buffer);
+        self.surface.send_commit();
+        true
+    }
+
+    /// `row` lit (none: nothing), shown at once where it changed.
+    fn light(&mut self, row: Option<usize>) {
+        let row = row.filter(|r| *r < self.rows);
+        if self.lit == row {
+            return;
+        }
+        self.lit = row;
+        if self.configured {
+            self.draw();
+        }
+    }
+
+    /// Gone: the popup first, then its role and its surface.
+    fn destroy(mut self) {
+        self.popup.send_destroy();
+        self.xdg.send_destroy();
+        self.view.send_destroy();
+        self.surface.send_destroy();
+        destroy_buffers(self.current.take(), std::mem::take(&mut self.retired));
+    }
+}
+
+/// Where the ≡ is, in the geometry the compositor was told (§5.2) — what a
+/// popup's anchor is relative to: the strip `strip` and the row of buttons
+/// `at` pixels into it (root surface coordinates, as the program's own
+/// geometry `geometry` sent), the ≡ its cell of the look.
+pub(crate) fn menu_anchor(
+    strip: Rect,
+    at: i32,
+    geometry: Rect,
+    look: &ButtonsLook,
+) -> Option<Rect> {
+    let cell = look.order.iter().position(|b| b.button == Button::Menu)?;
+    let x = strip
+        .x
+        .saturating_add(at)
+        .saturating_add(look.width.saturating_mul(i32::try_from(cell).ok()?));
+    Some(Rect {
+        x: x.saturating_sub(geometry.x),
+        y: strip.y.saturating_sub(geometry.y),
+        w: look.width.max(1),
+        h: TITLE_HEIGHT,
+    })
+}
+
+/// evdev key codes the dropdown answers.
+const KEY_ESC: u32 = 1;
+const KEY_ENTER: u32 = 28;
+const KEY_SPACE: u32 = 57;
+const KEY_KPENTER: u32 = 96;
+const KEY_UP: u32 = 103;
+const KEY_DOWN: u32 = 108;
+
+/// What a key does in a dropdown of `rows` with `lit` lit: another row lit,
+/// the lit one's action, or the dropdown closed.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MenuKey {
+    Light(usize),
+    Act(usize),
+    Close,
+    Nothing,
+}
+
+pub(crate) fn menu_key(key: u32, rows: usize, lit: Option<usize>) -> MenuKey {
+    if rows == 0 {
+        return MenuKey::Close;
+    }
+    match key {
+        KEY_ESC => MenuKey::Close,
+        KEY_DOWN => MenuKey::Light(lit.map_or(0, |r| (r + 1) % rows)),
+        KEY_UP => MenuKey::Light(lit.map_or(rows - 1, |r| (r + rows - 1) % rows)),
+        KEY_ENTER | KEY_KPENTER | KEY_SPACE => lit.map_or(MenuKey::Nothing, MenuKey::Act),
+        _ => MenuKey::Nothing,
+    }
+}
+
+impl Window {
+    /// The ≡'s dropdown opened under it, taking the grab with `serial` on
+    /// `seat` (the click's). False when it cannot be: the caller asks for
+    /// the window menu instead. One at a time on the connection: another
+    /// window's goes.
+    fn open_menu(&mut self, f: &Frames, seat: Option<&Rc<WlSeat>>, serial: u32) -> bool {
+        if self.menu.is_some() {
+            self.close_menu();
+            return true;
+        }
+        let (Some(seat), Some(text), Some(parent)) = (seat, f.text.clone(), self.xdg.upgrade())
+        else {
+            return false;
+        };
+        let (Some((_, _, Some(strip))), Some(geometry)) = (self.laid, self.sent_geometry) else {
+            return false;
+        };
+        let Some((at, scale)) = self
+            .title
+            .as_ref()
+            .and_then(|t| t.buttons.as_ref())
+            .and_then(|b| b.at.map(|at| (at, b.scale)))
+        else {
+            return false;
+        };
+        let Some(anchor) = menu_anchor(strip, at, geometry, &self.look.buttons) else {
+            return false;
+        };
+        let (compositor, viewporter, wm_base, pool) = {
+            let own = f.own.borrow();
+            (
+                own.compositor.clone(),
+                own.viewporter.clone(),
+                own.wm_base.clone(),
+                own.text_pool.clone(),
+            )
+        };
+        let (Some(compositor), Some(viewporter), Some(wm_base), Some(pool)) =
+            (compositor, viewporter, wm_base, pool)
+        else {
+            return false;
+        };
+        if let Some(other) = f.menu_on.take().and_then(|w| w.upgrade()) {
+            if let Ok(mut other) = other.try_borrow_mut() {
+                other.close_menu();
+            }
+        }
+        let ((w, h), rows) = text.menu_size();
+        let surface = compositor.new_send_create_surface();
+        quiet(&*surface);
+        surface.set_handler(Mine {
+            window: self.me.clone(),
+            part: Part::Menu,
+        });
+        let view = viewporter.new_send_get_viewport(&surface);
+        quiet(&*view);
+        let xdg = wm_base.new_send_get_xdg_surface(&surface);
+        quiet(&*xdg);
+        xdg.set_handler(MenuXdg {
+            window: self.me.clone(),
+        });
+        let positioner = wm_base.new_send_create_positioner();
+        quiet(&*positioner);
+        positioner.send_set_size(w, h);
+        positioner.send_set_anchor_rect(anchor.x, anchor.y, anchor.w, anchor.h);
+        // Under the ≡, toward the middle of the window: its end is the
+        // look's.
+        let (anchor_at, gravity) = match self.look.buttons.end {
+            End::Right => (
+                XdgPositionerAnchor::BOTTOM_RIGHT,
+                XdgPositionerGravity::BOTTOM_LEFT,
+            ),
+            End::Left => (
+                XdgPositionerAnchor::BOTTOM_LEFT,
+                XdgPositionerGravity::BOTTOM_RIGHT,
+            ),
+        };
+        positioner.send_set_anchor(anchor_at);
+        positioner.send_set_gravity(gravity);
+        positioner.send_set_constraint_adjustment(XdgPositionerConstraintAdjustment(
+            XdgPositionerConstraintAdjustment::SLIDE_X.0
+                | XdgPositionerConstraintAdjustment::SLIDE_Y.0
+                | XdgPositionerConstraintAdjustment::FLIP_Y.0,
+        ));
+        let popup = xdg.new_send_get_popup(Some(&parent), &positioner);
+        quiet(&*popup);
+        popup.set_handler(MenuPopup {
+            window: self.me.clone(),
+        });
+        positioner.send_destroy();
+        popup.send_grab(seat, serial);
+        surface.send_commit();
+        self.menu = Some(Dropdown {
+            surface,
+            view,
+            xdg,
+            popup,
+            text,
+            pool,
+            scale,
+            size: (w, h),
+            rows,
+            lit: None,
+            configured: false,
+            current: None,
+            retired: Vec::new(),
+        });
+        *f.menu_on.borrow_mut() = Some(self.me.clone());
+        true
+    }
+
+    /// The dropdown gone, if it is open.
+    fn close_menu(&mut self) {
+        if let Some(menu) = self.menu.take() {
+            menu.destroy();
+        }
+    }
+
+    /// The pointer over the dropdown at `y` (none: off it): the row there lit.
+    fn menu_hover(&mut self, y: Option<f64>) {
+        if let Some(menu) = &mut self.menu {
+            let row = y.and_then(|y| crate::wl_title::menu_row(menu.rows, y));
+            menu.light(row);
+        }
+    }
+
+    /// The left button let go over the dropdown at `y`: the row there acts.
+    fn menu_click(&mut self, f: &Frames, y: f64) {
+        let row = self
+            .menu
+            .as_ref()
+            .and_then(|m| crate::wl_title::menu_row(m.rows, y));
+        if let Some(row) = row {
+            self.menu_act(f, row);
+        }
+    }
+
+    /// A key while the dropdown has the keyboard.
+    fn menu_key(&mut self, f: &Frames, key: u32) {
+        let Some(menu) = &mut self.menu else {
+            return;
+        };
+        match menu_key(key, menu.rows, menu.lit) {
+            MenuKey::Light(row) => menu.light(Some(row)),
+            MenuKey::Act(row) => self.menu_act(f, row),
+            MenuKey::Close => self.close_menu(),
+            MenuKey::Nothing => {}
+        }
+    }
+
+    /// Row `row` of `wl_title::MENU_LABELS` chosen: the dropdown goes, and
+    /// what the row says is asked of the supervisor — or, the last, the
+    /// program's own close event, as the × does.
+    fn menu_act(&mut self, f: &Frames, row: usize) {
+        let Some(menu) = self.menu.take() else {
+            return;
+        };
+        let asks = &f.asks;
+        menu.destroy();
+        match row {
+            0 => asks.push(Ask::Network),
+            1 => asks.push(Ask::Restart),
+            2 => asks.push(Ask::Menu),
+            3 => {
+                if let Some(toplevel) = self.toplevel.as_ref().and_then(Weak::upgrade) {
+                    toplevel.send_close();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The proxy's own `xdg_wm_base`: it answers the compositor's pings itself.
+struct OwnWmBase;
+
+impl XdgWmBaseHandler for OwnWmBase {
+    fn handle_ping(&mut self, slf: &Rc<XdgWmBase>, serial: u32) {
+        slf.send_pong(serial);
+    }
+}
+
+/// The dropdown's `xdg_surface`: a configure is acked and the dropdown
+/// drawn.
+struct MenuXdg {
+    window: Weak<RefCell<Window>>,
+}
+
+impl XdgSurfaceHandler for MenuXdg {
+    fn handle_configure(&mut self, slf: &Rc<XdgSurface>, serial: u32) {
+        slf.send_ack_configure(serial);
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        if let Ok(mut window) = window.try_borrow_mut() {
+            if let Some(menu) = &mut window.menu {
+                menu.configured = true;
+                menu.draw();
+            }
+        }
+    }
+}
+
+/// The dropdown's `xdg_popup`: dismissed by the compositor (a click
+/// elsewhere, the window gone), it goes.
+struct MenuPopup {
+    window: Weak<RefCell<Window>>,
+}
+
+impl XdgPopupHandler for MenuPopup {
+    fn handle_configure(&mut self, _slf: &Rc<XdgPopup>, _x: i32, _y: i32, _w: i32, _h: i32) {}
+
+    fn handle_popup_done(&mut self, _slf: &Rc<XdgPopup>) {
+        if let Some(window) = self.window.upgrade() {
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.close_menu();
+            }
+        }
+    }
+}
+
+/// The program's keyboard. While a surface of the proxy's has its focus —
+/// the dropdown, whose grab took it —, nothing of it is the program's: the
+/// enter, the keys, the modifiers and the leave are the dropdown's. Every
+/// `wl_keyboard` of the program hears a key; the dropdown acts on it once
+/// ([`Frames::first`]).
+struct Keyboard {
+    f: Rc<Frames>,
+    menu: bool,
+}
+
+impl WlKeyboardHandler for Keyboard {
+    fn handle_enter(
+        &mut self,
+        slf: &Rc<WlKeyboard>,
+        serial: u32,
+        surface: &Rc<WlSurface>,
+        keys: &[u8],
+    ) {
+        self.menu = !programs(surface);
+        if !self.menu {
+            slf.send_enter(serial, surface, keys);
+        }
+    }
+
+    fn handle_leave(&mut self, slf: &Rc<WlKeyboard>, serial: u32, surface: &Rc<WlSurface>) {
+        if programs(surface) {
+            slf.send_leave(serial, surface);
+        }
+        self.menu = false;
+    }
+
+    fn handle_key(
+        &mut self,
+        slf: &Rc<WlKeyboard>,
+        serial: u32,
+        time: u32,
+        key: u32,
+        state: WlKeyboardKeyState,
+    ) {
+        if !self.menu {
+            slf.send_key(serial, time, key, state);
+            return;
+        }
+        if state != WlKeyboardKeyState::PRESSED || !self.f.first(serial) {
+            return;
+        }
+        let window = self.f.menu_on.borrow().as_ref().and_then(Weak::upgrade);
+        if let Some(window) = window {
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.menu_key(&self.f, key);
+            }
+        }
+    }
+
+    fn handle_modifiers(
+        &mut self,
+        slf: &Rc<WlKeyboard>,
+        serial: u32,
+        mods_depressed: u32,
+        mods_latched: u32,
+        mods_locked: u32,
+        group: u32,
+    ) {
+        if !self.menu {
+            slf.send_modifiers(serial, mods_depressed, mods_latched, mods_locked, group);
+        }
     }
 }
 
@@ -2742,6 +3201,10 @@ impl XdgSurfaceHandler for XdgSurfaceH {
     }
 
     fn handle_destroy(&mut self, slf: &Rc<XdgSurface>) {
+        // Its popup of the proxy's first: a parent outlives its popups.
+        if let Ok(mut window) = self.window.try_borrow_mut() {
+            window.close_menu();
+        }
         slf.send_destroy();
         if let Ok(mut window) = self.window.try_borrow_mut() {
             window.drop_strips();
@@ -2887,6 +3350,9 @@ impl XdgToplevelHandler for Toplevel {
     }
 
     fn handle_destroy(&mut self, slf: &Rc<XdgToplevel>) {
+        if let Ok(mut window) = self.window.try_borrow_mut() {
+            window.close_menu();
+        }
         slf.send_destroy();
         if let Ok(mut window) = self.window.try_borrow_mut() {
             window.drop_strips();
@@ -3263,6 +3729,14 @@ impl WlSeatHandler for Seat {
         slf.send_get_touch(id);
         id.set_handler(Touch::default());
     }
+
+    fn handle_get_keyboard(&mut self, slf: &Rc<WlSeat>, id: &Rc<WlKeyboard>) {
+        slf.send_get_keyboard(id);
+        id.set_handler(Keyboard {
+            f: self.f.clone(),
+            menu: false,
+        });
+    }
 }
 
 /// The program's pointer. While the pointer is over a strip (`away`), every
@@ -3328,7 +3802,9 @@ fn spot(surface: &Rc<WlSurface>) -> Option<(Rc<RefCell<Window>>, Spot)> {
         let spot = match own.part {
             Part::Border(Side::Top, _) => Spot::Top,
             Part::Border(..) => Spot::Side,
-            Part::Title | Part::Text | Part::Buttons => Spot::Top,
+            // The dropdown hangs from the title: a hover strip stays out
+            // while the pointer is on it.
+            Part::Title | Part::Text | Part::Buttons | Part::Menu => Spot::Top,
             // Never entered (no input region): as a side, it changes
             // nothing of a hover strip.
             Part::Corner => Spot::Side,
@@ -3444,6 +3920,14 @@ impl Pointer {
         let Some(window) = over.window.upgrade() else {
             return;
         };
+        if over.part == Part::Menu {
+            let y = over.y;
+            self.set_cursor(slf, WpCursorShapeDeviceV1Shape::DEFAULT);
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.menu_hover(Some(y));
+            }
+            return;
+        }
         let hit = window
             .try_borrow()
             .map_or(Hit::Nothing, |w| w.hit(over.part, over.x, over.y));
@@ -3459,7 +3943,17 @@ impl Pointer {
     /// button pressed and not let go of is let go (the release will not
     /// come here).
     fn off_frame(&mut self) {
-        if let Some(window) = self.over.take().and_then(|o| o.window.upgrade()) {
+        let Some(over) = self.over.take() else {
+            return;
+        };
+        let Some(window) = over.window.upgrade() else {
+            return;
+        };
+        if over.part == Part::Menu {
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.menu_hover(None);
+            }
+        } else {
             light_under(&window, None, true);
         }
     }
@@ -3503,6 +3997,15 @@ impl Pointer {
             return;
         }
         let (part, x, y) = (over.part, over.x, over.y);
+        // A row of the dropdown acts on the release over it.
+        if part == Part::Menu {
+            if state == WlPointerButtonState::RELEASED {
+                if let Ok(mut window) = window.try_borrow_mut() {
+                    window.menu_click(&self.f, y);
+                }
+            }
+            return;
+        }
         let seat = self.seat.upgrade();
         let down = state == WlPointerButtonState::PRESSED;
         click(&window, &self.f, (part, x, y), down, seat.as_ref(), serial);
@@ -4312,6 +4815,62 @@ mod tests {
             surface_size(&c),
             Some((1000, 700)),
             "a destination is the size even before the buffer's is known"
+        );
+    }
+
+    /// The dropdown hangs from the ≡'s cell, in the geometry the compositor
+    /// was told: the strip and the row where they are, less the geometry's
+    /// origin; the ≡ the first cell of stage 3's look.
+    #[test]
+    fn the_dropdown_hangs_from_the_menu_button() {
+        let look = &LOOK.buttons;
+        let strip = Rect {
+            x: 4,
+            y: 4,
+            w: 632,
+            h: TITLE_HEIGHT,
+        };
+        let geometry = Rect {
+            x: 0,
+            y: 0,
+            w: 640,
+            h: 500,
+        };
+        let at = strip.w - look.width_all() - look.margin;
+        let anchor = menu_anchor(strip, at, geometry, look).unwrap();
+        assert_eq!(anchor.x, 4 + at);
+        assert_eq!(
+            (anchor.y, anchor.w, anchor.h),
+            (4, look.width, TITLE_HEIGHT)
+        );
+        // The geometry's origin moved: the anchor with it.
+        let moved = Rect {
+            x: -3,
+            y: -7,
+            ..geometry
+        };
+        let far = menu_anchor(strip, at, moved, look).unwrap();
+        assert_eq!((far.x, far.y), (anchor.x + 3, anchor.y + 7));
+    }
+
+    /// The dropdown's keys: ↓ ↑ go round, Enter and Space act on the lit
+    /// row (nothing lit: nothing), Esc closes, anything else is nothing.
+    #[test]
+    fn the_dropdown_answers_its_keys() {
+        assert_eq!(menu_key(KEY_DOWN, 4, None), MenuKey::Light(0));
+        assert_eq!(menu_key(KEY_DOWN, 4, Some(3)), MenuKey::Light(0));
+        assert_eq!(menu_key(KEY_UP, 4, None), MenuKey::Light(3));
+        assert_eq!(menu_key(KEY_UP, 4, Some(0)), MenuKey::Light(3));
+        assert_eq!(menu_key(KEY_ENTER, 4, Some(2)), MenuKey::Act(2));
+        assert_eq!(menu_key(KEY_KPENTER, 4, Some(1)), MenuKey::Act(1));
+        assert_eq!(menu_key(KEY_SPACE, 4, None), MenuKey::Nothing);
+        assert_eq!(menu_key(KEY_ESC, 4, Some(1)), MenuKey::Close);
+        assert_eq!(menu_key(30, 4, Some(1)), MenuKey::Nothing);
+        assert_eq!(menu_key(KEY_DOWN, 0, None), MenuKey::Close);
+        assert_eq!(
+            crate::wl_title::MENU_LABELS.len(),
+            4,
+            "the rows menu_act knows"
         );
     }
 
