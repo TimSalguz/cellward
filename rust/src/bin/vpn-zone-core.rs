@@ -178,6 +178,12 @@ Usage:
         in the sandbox's own /tmp), waits a second for it and becomes the
         program.
 
+  vpn-zone-core camera-serve --mount <dir> [--device <name>]...
+        A camera that is black until the real one is allowed: a FUSE file
+        (video0, or each --device name) mounted at <dir>, which programs
+        take for a V4L2 camera; black frames only while one streams. Stage
+        0: the device alone (rust/src/camera.rs).
+
   vpn-zone-core --help
 
 Exit codes:
@@ -304,6 +310,14 @@ fn main() -> ExitCode {
             Ok(parsed) => ExitCode::from(vpn_zone::pulse_filter::run(&parsed)),
             Err(e) => {
                 eprintln!("vpn-zone-core pulse-filter: {e}");
+                eprint!("{USAGE}");
+                ExitCode::from(EXIT_USAGE)
+            }
+        },
+        Some("camera-serve") => match vpn_zone::camera::Args::parse(&args[1..]) {
+            Ok(parsed) => ExitCode::from(vpn_zone::camera::run(&parsed)),
+            Err(e) => {
+                eprintln!("vpn-zone-core camera-serve: {e}");
                 eprint!("{USAGE}");
                 ExitCode::from(EXIT_USAGE)
             }
