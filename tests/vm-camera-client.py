@@ -4,6 +4,10 @@ and take frames — each black — then stop. `block`: DQBUF waits for a frame;
 `poll`: the file non-blocking, poll(2) first, as Firefox and Telegram do.
 
     python3 vm-camera-client.py <device> block|poll [<frames>]
+    python3 vm-camera-client.py <device> real [<seconds>]
+
+`real`: frames taken, blocking, until one is not black — the real camera
+the person allowed, in the same stream; how many black ones came first.
 """
 
 import fcntl
@@ -35,6 +39,9 @@ YUYV = struct.unpack("<I", b"YUYV")[0]
 
 path, mode = sys.argv[1], sys.argv[2]
 count_wanted = int(sys.argv[3]) if len(sys.argv) > 3 else 5
+real = mode == "real"
+if real:
+    mode = "block"
 flags = os.O_RDWR | (os.O_NONBLOCK if mode == "poll" else 0)
 fd = os.open(path, flags)
 
@@ -94,6 +101,24 @@ for index in range(count):
 
 fcntl.ioctl(fd, STREAMON, struct.pack("I", CAPTURE))
 start = time.monotonic()
+if real:
+    black = 0
+    while time.monotonic() - start < count_wanted:
+        b = buffer()
+        fcntl.ioctl(fd, DQBUF, b)
+        index, used = struct.unpack_from("I", b, 0)[0], struct.unpack_from("I", b, 8)[0]
+        frame = maps[index][:used]
+        fcntl.ioctl(fd, QBUF, b)
+        if set(frame[0::2]) == {0x10} and set(frame[1::2]) == {0x80}:
+            black += 1
+            continue
+        print(f"real: a frame of the camera after {black} black ones", flush=True)
+        break
+    else:
+        print(f"real: {black} black frames and no real one", flush=True)
+        sys.exit(1)
+    fcntl.ioctl(fd, STREAMOFF, struct.pack("I", CAPTURE))
+    sys.exit(0)
 sequences = []
 for _ in range(count_wanted):
     if mode == "poll":

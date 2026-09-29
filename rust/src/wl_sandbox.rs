@@ -626,9 +626,12 @@ impl Compositor {
 /// this one the host's. It waits on one end of a socket pair for the FUSE
 /// connection the launch opens and mounts (`profile::give_black_camera`:
 /// only there, in the instance's user namespace, can it be), and serves
-/// it; with the other end gone and nothing sent, it ends. The other end,
-/// for the launch.
-fn start_camera() -> Result<OwnedFd, String> {
+/// it; with the other end gone and nothing sent, it ends. `ask` (mode
+/// `ask`): it asks the person for the real camera (`crate::camask`), on the
+/// launch's compositor `display` — the host's, not the zone's socket this
+/// process's environment names by now. The other end, for the launch, and
+/// the server's pid.
+fn start_camera(ask: bool, display: Option<&OsStr>) -> Result<(OwnedFd, u32), String> {
     let (ours, theirs) =
         std::os::unix::net::UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
     let exe = std::env::current_exe().map_err(|e| format!("which program am I: {e}"))?;
@@ -640,6 +643,13 @@ fn start_camera() -> Result<OwnedFd, String> {
         .arg("--device")
         .arg("video0")
         .stdin(std::process::Stdio::null());
+    if ask {
+        cmd.arg("--ask");
+    }
+    match display {
+        Some(display) => cmd.env("WAYLAND_DISPLAY", display),
+        None => cmd.env_remove("WAYLAND_DISPLAY"),
+    };
     // SAFETY: between fork and exec only fcntl(2), which is
     // async-signal-safe, on a descriptor this process holds.
     unsafe {
@@ -651,9 +661,9 @@ fn start_camera() -> Result<OwnedFd, String> {
             Ok(())
         });
     }
-    cmd.spawn().map_err(|e| format!("camera-serve: {e}"))?;
+    let child = cmd.spawn().map_err(|e| format!("camera-serve: {e}"))?;
     drop(ours);
-    Ok(OwnedFd::from(theirs))
+    Ok((OwnedFd::from(theirs), child.id()))
 }
 
 /// Register a sandboxed socket with the compositor, then run the program on it.
@@ -857,11 +867,20 @@ pub fn run(args: Args) -> u8 {
     // The black camera: its server started, its socket down the launch —
     // kept across the exec, its number in the environment —, this
     // process's copy gone once the child has it.
-    let camera = args.camera.and_then(|_| match start_camera() {
-        Ok(socket) => Some(socket),
-        Err(e) => {
-            eprintln!("wl-sandbox: no black camera ({e}) — the program has none");
-            None
+    let camera = args.camera.and_then(|mode| {
+        let ask = mode == crate::camera::Mode::Ask;
+        match start_camera(ask, previous_display.as_deref()) {
+            Ok((socket, pid)) => {
+                // The one of the launch's own processes that asks.
+                if let (true, Some((proxy, _))) = (ask, &mut proxy) {
+                    proxy.let_ask(pid as i32);
+                }
+                Some(socket)
+            }
+            Err(e) => {
+                eprintln!("wl-sandbox: no black camera ({e}) — the program has none");
+                None
+            }
         }
     });
     if let Some(socket) = &camera {

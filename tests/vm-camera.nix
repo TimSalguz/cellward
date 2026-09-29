@@ -12,7 +12,12 @@
 #     a launch into the offline network under headless sway — its
 #     supervisor serves the camera, the program in the container takes black
 #     frames from /dev/video0; the server in namespaces of its own with an
-#     empty root, and gone with the program.
+#     empty root, and gone with the program;
+#   - asked (stage B): the main home's camera `ask`, the host's camera a
+#     loopback one fed a test picture — the question in the launch window,
+#     «Разрешить, пока работает», and the program's stream gets the real
+#     frames without a restart; «Отказать» written as the program's rule, not
+#     asked again, black.
 #
 #   nix-build tests/vm-camera.nix -A driver -o vm-camera-driver
 #   ./vm-camera-driver/bin/nixos-test-driver
@@ -32,13 +37,19 @@ let
     name = "cellward-vm-camera";
 
     nodes.machine =
-      { pkgs, ... }:
+      { config, pkgs, ... }:
       {
+        # The host's camera for the question's test: a loopback one, a
+        # capture device once something feeds it.
+        boot.extraModulePackages = [ config.boot.kernelPackages.v4l2loopback ];
+        boot.kernelModules = [ "v4l2loopback" ];
+        boot.extraModprobeConfig = "options v4l2loopback video_nr=9 exclusive_caps=1 card_label=vm-camera";
         imports = [ "${pins.home-manager}/nixos" ];
         users.users.alice = {
           isNormalUser = true;
           uid = 1000;
           linger = true;
+          extraGroups = [ "video" ];
           # The offline network: a user namespace, nothing more.
           subUidRanges = [
             {
@@ -58,8 +69,8 @@ let
         home-manager.users.alice = {
           imports = [ ../module ];
           programs.cellward.enable = true;
-          # The main home's programs get a black camera.
-          programs.cellward.main.permissions.camera = "black";
+          # Programs with no word of their own get a black camera.
+          programs.cellward.defaults.permissions.camera = "black";
           home.stateVersion = "25.05";
         };
         environment.systemPackages = [
@@ -67,6 +78,7 @@ let
           pkgs.ffmpeg-headless
           pkgs.util-linux
           pkgs.sway
+          pkgs.wtype
         ];
         environment.etc."vm-camera/client.py".source = ./vm-camera-client.py;
         environment.etc."vm-camera/sway.conf".text = "default_border none\n";
@@ -196,6 +208,58 @@ let
           print(out)
           assert "regular file" in out, out
           assert "block: 5 black frames of 640x480" in out, out
+
+      def unit_says(unit, words, timeout=90):
+          machine.wait_until_succeeds(
+              "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 journalctl --user "
+              f"-u {unit} --no-pager' | grep -q '{words}'",
+              timeout=timeout,
+          )
+
+      def answer_in_the_window(key):
+          machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=60)
+          # Past the guard: a "yes" sooner is taken for a slip.
+          machine.sleep(3)
+          user(f"WAYLAND_DISPLAY={display} grim /tmp/camera-question.png")
+          machine.copy_from_vm("/tmp/camera-question.png", "")
+          user(f"WAYLAND_DISPLAY={display} wtype -s 400 -k {key} -k Return")
+          machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=30)
+
+      with subtest("asked: allowed, the real camera comes into the same stream"):
+          machine.succeed(
+              "systemd-run --unit=vmfeed ffmpeg -hide_banner -loglevel error -re "
+              "-f lavfi -i testsrc=size=640x480:rate=15 -pix_fmt yuyv422 -f v4l2 /dev/video9"
+          )
+          machine.wait_until_succeeds("systemctl is-active vmfeed", timeout=30)
+          # Fed: a capture device from its first frame on.
+          machine.sleep(3)
+          user("cellward container set main camera ask")
+          user(
+              f"systemd-run --user --unit=vmcamask --setenv=WAYLAND_DISPLAY={display} "
+              "cellward run offline -- python3 /etc/vm-camera/client.py /dev/video0 real 90"
+          )
+          # «Разрешить, пока работает», the second answer.
+          answer_in_the_window(2)
+          unit_says("vmcamask", "real: a frame of the camera after")
+          print(user("journalctl --user -u vmcamask --no-pager | grep real: || true"))
+          machine.fail("grep -rq '^cam_deny' /home/alice/.config/vpn-zones/")
+
+      with subtest("asked: refused, the program's rule — not asked again, black"):
+          user(
+              f"systemd-run --user --unit=vmcamno --setenv=WAYLAND_DISPLAY={display} "
+              "cellward run offline -- python3 /etc/vm-camera/client.py /dev/video0 block 25"
+          )
+          # «Отказать», the first.
+          answer_in_the_window(1)
+          unit_says("vmcamno", "block: 25 black frames")
+          machine.succeed("grep -rq '^cam_deny' /home/alice/.config/vpn-zones/")
+          # Again: no question, black.
+          out = user(
+              f"WAYLAND_DISPLAY={display} cellward run offline -- "
+              "python3 /etc/vm-camera/client.py /dev/video0 block 5"
+          )
+          assert "block: 5 black frames" in out, out
+          machine.fail("pgrep -x vpn-zone-window")
     '';
   };
 in

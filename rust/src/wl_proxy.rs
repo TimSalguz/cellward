@@ -572,9 +572,30 @@ struct Asking {
     /// The launch's compositor, named in every answer: where the launch
     /// window asks, whatever the instance's own environment says.
     display: Option<OsString>,
+    /// The launch's camera server (`crate::camera`, `ask`), which asks of
+    /// it though it is the launch's own process: its pid, and a pidfd that
+    /// says whether that is still it.
+    camera: Option<(i32, OwnedFd)>,
 }
 
 impl Asking {
+    /// Whether `client` is the launch's camera server, alive: the one of
+    /// the launch's own processes that asks.
+    fn is_camera(&self, client: RawFd) -> bool {
+        let Some((pid, pidfd)) = &self.camera else {
+            return false;
+        };
+        let mut alive = libc::pollfd {
+            fd: pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd, not waited for; a pidfd is readable once its
+        // process has ended.
+        let ended = unsafe { libc::poll(&mut alive, 1, 0) } != 0;
+        !ended && sys::peer_pid(client) == Some(*pid)
+    }
+
     /// `$XDG_RUNTIME_DIR/vpn-zones/ask/<this process>`, in a directory only
     /// the user enters; a leftover of an earlier run with this pid replaced.
     fn bind(runtime_dir: &Path, display: Option<OsString>) -> io::Result<Self> {
@@ -890,6 +911,16 @@ impl Proxy {
     /// Listen for the instances' questions about this launch ([`ASK_DIR`]):
     /// after [`Proxy::take_over`], before the program starts. Without the
     /// socket the launch window asks them, as it did.
+    /// The launch's camera server `pid` (`crate::camera`, `ask`) may ask on
+    /// the socket of questions, the launch's own process though it is: the
+    /// one asker of it that is; a number that has become another process's
+    /// asks nothing (its pidfd says it ended).
+    pub fn let_ask(&mut self, pid: i32) {
+        if let Some(pidfd) = sys::pidfd_open(pid) {
+            self.asking.camera = Some((pid, pidfd));
+        }
+    }
+
     pub fn listen_for_questions(&mut self, runtime_dir: &Path) {
         match Asking::bind(runtime_dir, self.display.clone()) {
             Ok(asking) => self.asking = asking,
@@ -1248,7 +1279,9 @@ impl Proxy {
             let Ok(fd) = accept_nonblocking(listener.as_raw_fd()) else {
                 break;
             };
-            if self.asking.waiting.len() >= MAX_ASKERS || of_this_launch(fd.as_raw_fd()) {
+            if self.asking.waiting.len() >= MAX_ASKERS
+                || (of_this_launch(fd.as_raw_fd()) && !self.asking.is_camera(fd.as_raw_fd()))
+            {
                 continue;
             }
             self.asking

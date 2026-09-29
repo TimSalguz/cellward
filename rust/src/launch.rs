@@ -555,7 +555,7 @@ fn env_nonempty(name: &str) -> Option<OsString> {
 /// the PERMISSION KEY, not a name for humans. A launch that never went through
 /// the picker has no label — callers fall back to the id, which is still
 /// better than naming no program at all.
-fn pretty_label(state: &Path, key: &OsStr) -> Option<String> {
+pub(crate) fn pretty_label(state: &Path, key: &OsStr) -> Option<String> {
     if key.is_empty() {
         return None;
     }

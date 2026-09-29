@@ -31,8 +31,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   connection in the launch's namespaces and sends it to the server, which
   then goes into namespaces of its own with an empty root. Black frames
   only while a program streams (in the VM: 50 frames over 10 seconds cost
-  the server no measurable CPU). `ask` is black for now: the question comes
-  next. The built-in default stays `no`. `status --json`: `camera` is still
+  the server no measurable CPU). `ask` asks when the program starts
+  streaming (the program's window, then the launch window; the question's
+  time is `question-timeout`), black frames meanwhile: allowed, the real
+  camera's frames come into the same stream — written into the pages the
+  program mapped —, closed again when it stops; «Отказать» is the program's
+  rule (`cam_deny`), taken back by «Снова спрашивать о камере» in the
+  window's ☰; «always» writes `camera = yes`. The built-in default stays `no`. `status --json`: `camera` is still
   whether the real cameras are given; the word is the new `camera_mode`
   (in `permissions` and in each container).
 - **Round corners that follow niri, and outside the frame** (2026-09-29):
