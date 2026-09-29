@@ -64,7 +64,8 @@ use std::rc::Rc;
 use ab_glyph::{point, Font, FontVec, GlyphId, PxScale, ScaleFont};
 
 use crate::frame::{
-    ButtonStyle, Frame, Radius, Rgb, Style, TitleMode, MAX_OUTER_RADIUS, MAX_RADIUS, MAX_WIDTH,
+    ButtonStyle, Frame, Radius, Rgb, Style, TitleMode, MAX_OUTER_RADIUS, MAX_RADIUS,
+    MAX_WIDTH as MAX_BORDER,
 };
 
 /// The font the package was built with (`package.nix`), if it was.
@@ -711,7 +712,7 @@ impl Look {
             radius_top: top.clamp(0, MAX_RADIUS),
             outer,
             border: if outer > 0 {
-                frame.width.clamp(0, MAX_WIDTH)
+                frame.width.clamp(0, MAX_BORDER)
             } else {
                 0
             },
@@ -1706,7 +1707,7 @@ impl Prepared {
         }
         // The frame's own corners at their largest: as wide as the widest
         // radius or border, the top ones down past the title strip.
-        let widest = MAX_OUTER_RADIUS.max(MAX_WIDTH);
+        let widest = MAX_OUTER_RADIUS.max(MAX_BORDER);
         let outer = Self::outer_bytes_of(widest, widest + HEIGHT) * SLOTS;
         2 * (most + outer)
     }
@@ -2742,6 +2743,7 @@ mod tests {
                 buttons: MACOS,
                 radius: 12,
                 radius_top: 12,
+                ..LOOK
             }
         );
     }
