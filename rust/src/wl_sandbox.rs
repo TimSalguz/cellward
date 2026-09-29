@@ -620,57 +620,40 @@ impl Compositor {
     }
 }
 
-/// A launch's black camera (`--camera`, `crate::camera`), its server
-/// started: what goes down the launch to `profile-run`, which mounts it
-/// (`profile::give_black_camera`) — the FUSE connection, and the pipe on
-/// which the server waits to hear that it is mounted.
-struct CameraHandOff {
-    fuse: OwnedFd,
-    ready: OwnedFd,
-}
-
-/// Start a black camera's server (`vpn-zone-core camera-serve --fd
-/// --ready`) here, on the host: out of the program's reach, as the proxy
-/// is — its pid namespace is the instance's, this one the host's. It
-/// serves a FUSE connection of ours once the pipe says the launch mounted
-/// it, and ends when the launch's mount namespace does (or at once, the
-/// pipe's end without a byte).
-fn start_camera() -> Result<CameraHandOff, String> {
-    let fuse = crate::camera::open_fuse()?;
-    let (ready_r, ready_w) = sys::pipe().map_err(|e| format!("pipe: {e}"))?;
+/// Start a launch's black camera's server (`--camera`, `crate::camera`;
+/// `vpn-zone-core camera-serve --from`) here, on the host: out of the
+/// program's reach, as the proxy is — its pid namespace is the instance's,
+/// this one the host's. It waits on one end of a socket pair for the FUSE
+/// connection the launch opens and mounts (`profile::give_black_camera`:
+/// only there, in the instance's user namespace, can it be), and serves
+/// it; with the other end gone and nothing sent, it ends. The other end,
+/// for the launch.
+fn start_camera() -> Result<OwnedFd, String> {
+    let (ours, theirs) =
+        std::os::unix::net::UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
     let exe = std::env::current_exe().map_err(|e| format!("which program am I: {e}"))?;
-    let (f, r) = (
-        std::os::fd::AsRawFd::as_raw_fd(&fuse),
-        std::os::fd::AsRawFd::as_raw_fd(&ready_r),
-    );
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&ours);
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("camera-serve")
-        .arg("--fd")
-        .arg(f.to_string())
-        .arg("--ready")
-        .arg(r.to_string())
+        .arg("--from")
+        .arg(fd.to_string())
         .arg("--device")
         .arg("video0")
         .stdin(std::process::Stdio::null());
     // SAFETY: between fork and exec only fcntl(2), which is
-    // async-signal-safe, on two descriptors this process holds.
+    // async-signal-safe, on a descriptor this process holds.
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(move || {
-            for fd in [f, r] {
-                if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
+            if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
+                return Err(io::Error::last_os_error());
             }
             Ok(())
         });
     }
     cmd.spawn().map_err(|e| format!("camera-serve: {e}"))?;
-    drop(ready_r);
-    Ok(CameraHandOff {
-        fuse,
-        ready: ready_w,
-    })
+    drop(ours);
+    Ok(OwnedFd::from(theirs))
 }
 
 /// Register a sandboxed socket with the compositor, then run the program on it.
@@ -871,26 +854,21 @@ pub fn run(args: Args) -> u8 {
     if proxy.is_none() || !proxy_speaks {
         no_word();
     }
-    // The black camera: its server started, the connection and the pipe
-    // down the launch — kept across the exec, their numbers in the
-    // environment —, this process's copies gone once the child has them.
+    // The black camera: its server started, its socket down the launch —
+    // kept across the exec, its number in the environment —, this
+    // process's copy gone once the child has it.
     let camera = args.camera.and_then(|_| match start_camera() {
-        Ok(camera) => Some(camera),
+        Ok(socket) => Some(socket),
         Err(e) => {
             eprintln!("wl-sandbox: no black camera ({e}) — the program has none");
             None
         }
     });
-    if let Some(c) = &camera {
-        use std::os::fd::AsRawFd;
-        for (fd, name) in [
-            (c.fuse.as_raw_fd(), crate::profile::ENV_CAMERA_FD),
-            (c.ready.as_raw_fd(), crate::profile::ENV_CAMERA_READY_FD),
-        ] {
-            // SAFETY: fcntl on a descriptor we hold.
-            unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
-            std::env::set_var(name, fd.to_string());
-        }
+    if let Some(socket) = &camera {
+        let fd = std::os::fd::AsRawFd::as_raw_fd(socket);
+        // SAFETY: fcntl on a descriptor we hold.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+        std::env::set_var(crate::profile::ENV_CAMERA_FD, fd.to_string());
     }
     // NOT exec: after the program exits somebody has to close the switch and
     // unlink the socket, so it is started as a child.
@@ -900,7 +878,6 @@ pub fn run(args: Args) -> u8 {
     if pid != 0 {
         drop(camera);
         std::env::remove_var(crate::profile::ENV_CAMERA_FD);
-        std::env::remove_var(crate::profile::ENV_CAMERA_READY_FD);
     }
     if pid == 0 {
         // The switch belongs to the parent. O_CLOEXEC would close this copy at

@@ -26,10 +26,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (`cellward container set <c> camera …`, `cellward defaults set camera …`,
   Nix `permissions.camera` takes the words besides true/false, which stay
   `yes` and `no`). `black` gives the launch a black camera — `/dev/video0`
-  that programs take for a V4L2 one, served by the launch's supervisor on
-  the host (the server then in namespaces of its own with an empty root),
-  mounted by `profile-run` in the launch's mount namespace; black frames
-  only while a program streams. `ask` is black for now: the question comes
+  that programs take for a V4L2 one, served by a server the launch's
+  supervisor starts on the host; `profile-run` opens and mounts the FUSE
+  connection in the launch's namespaces and sends it to the server, which
+  then goes into namespaces of its own with an empty root. Black frames
+  only while a program streams (in the VM: 50 frames over 10 seconds cost
+  the server no measurable CPU). `ask` is black for now: the question comes
   next. The built-in default stays `no`. `status --json`: `camera` is still
   whether the real cameras are given; the word is the new `camera_mode`
   (in `permissions` and in each container).

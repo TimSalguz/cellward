@@ -22,13 +22,16 @@
 //! own work on a frame is the most of it, and so it gets few.
 //!
 //! **Given to a launch** (a container's camera `black` or `ask`,
-//! [`Mode`]): its supervisor (`wl-sandbox`, on the host) opens the FUSE
-//! connection and starts this server on it (`--fd`, `--ready`); the
-//! launch's `profile-run` mounts it in the launch's mount namespace and
-//! binds its file onto `/dev/video0` (`profile::give_black_camera`). The
-//! server is out of the program's reach — the host's pid namespace — and,
-//! once the camera is mounted, in namespaces of its own with an empty
-//! root: it keeps nothing of the host's but the connection.
+//! [`Mode`]): its supervisor (`wl-sandbox`, on the host) starts this server
+//! beside itself with one end of a socket pair (`--from`); the launch's
+//! `profile-run` opens `/dev/fuse` in the instance's user namespace — the
+//! kernel mounts a connection only in the user namespace it was opened in —,
+//! mounts it in the launch's mount namespace, sends the connection over the
+//! socket and binds its file onto `/dev/video0`
+//! (`profile::give_black_camera`). The server is out of the program's
+//! reach — the host's pid namespace — and, the connection in hand, in
+//! namespaces of its own with an empty root: it keeps nothing of the host's
+//! but the connection.
 //!
 //! **Fail-closed.** What this does not know is refused: buffers other than
 //! MMAP, a 32-bit program's ioctls (other sizes, other numbers), controls,
@@ -1022,27 +1025,28 @@ fn ioctl_out(s: &[u8], out_size: usize) -> Vec<u8> {
 // --- THE SERVER -------------------------------------------------------------
 
 /// `vpn-zone-core camera-serve --mount <dir> [--device <name>]…`, or
-/// `--fd <n> --ready <n>` instead of `--mount`: a FUSE connection someone
-/// else mounts — a launch's `profile-run`, in the launch's mount namespace
-/// (`profile::give_black_camera`) —, served once the byte on the pipe
-/// `--ready` says it is mounted (before, `/dev/fuse` refuses a read).
+/// `--from <n>` instead of `--mount`: a FUSE connection someone else opens
+/// and mounts — a launch's `profile-run`, in the launch's mount namespace
+/// (`profile::give_black_camera`) —, sent over the socket `<n>` once it is
+/// mounted, and served then.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Args {
     pub place: Place,
     pub devices: Vec<String>,
 }
 
-/// Where the cameras are: mounted here, or on a connection handed over.
+/// Where the cameras are: mounted here, or on a connection sent over a
+/// socket.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Place {
     Mount(PathBuf),
-    Fd { fuse: RawFd, ready: RawFd },
+    From(RawFd),
 }
 
 impl Args {
     pub fn parse(args: &[OsString]) -> Result<Self, String> {
         let mut mount = None;
-        let (mut fuse, mut ready) = (None, None);
+        let mut from = None;
         let mut devices = Vec::new();
         let mut it = args.iter();
         let number = |it: &mut std::slice::Iter<'_, OsString>, what: &str| {
@@ -1057,8 +1061,7 @@ impl Args {
                 Some("--mount") => {
                     mount = Some(PathBuf::from(it.next().ok_or("--mount: which directory?")?));
                 }
-                Some("--fd") => fuse = Some(number(&mut it, "--fd")?),
-                Some("--ready") => ready = Some(number(&mut it, "--ready")?),
+                Some("--from") => from = Some(number(&mut it, "--from")?),
                 Some("--device") => {
                     let name = it
                         .next()
@@ -1080,10 +1083,10 @@ impl Args {
         if devices.is_empty() {
             devices.push("video0".to_owned());
         }
-        let place = match (mount, fuse, ready) {
-            (Some(dir), None, None) => Place::Mount(dir),
-            (None, Some(fuse), Some(ready)) if fuse != ready => Place::Fd { fuse, ready },
-            _ => return Err("--mount <dir>, or --fd <n> and --ready <n>".to_owned()),
+        let place = match (mount, from) {
+            (Some(dir), None) => Place::Mount(dir),
+            (None, Some(from)) => Place::From(from),
+            _ => return Err("--mount <dir>, or --from <n>".to_owned()),
         };
         Ok(Self { place, devices })
     }
@@ -1115,11 +1118,23 @@ fn errno() -> i32 {
 
 /// `/dev/fuse` opened: a connection to mount.
 pub fn open_fuse() -> Result<OwnedFd, String> {
-    let path = c"/dev/fuse";
+    open_fuse_at(std::path::Path::new("/dev/fuse"))
+}
+
+/// The FUSE device at `path` opened (the zone's devtmpfs has it where the
+/// launch's `/dev` does not): a connection to mount — in the user namespace
+/// of this process, the one it is opened in.
+pub fn open_fuse_at(path: &std::path::Path) -> Result<OwnedFd, String> {
+    let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     // SAFETY: a NUL-terminated path; the descriptor is owned below.
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    let fd = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if fd < 0 {
-        return Err(format!("/dev/fuse: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "{}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
     }
     // SAFETY: open has just returned it.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
@@ -1144,17 +1159,22 @@ pub fn mount(fuse: RawFd, dir: &std::path::Path, uid: u32, gid: u32) -> Result<(
     .map_err(|e| format!("cannot mount at {}: {e}", dir.display()))
 }
 
-/// A descriptor this process was handed by number, believed only when it
-/// is open and of the kind `mode` (`S_IFCHR`, `S_IFIFO`), and closed on
-/// every exec from here on.
-pub fn handed(fd: RawFd, mode: libc::mode_t) -> Option<OwnedFd> {
+/// The kind of file `fd` is (`S_IFCHR`, `S_IFSOCK`, …); `None` where it is
+/// no descriptor.
+fn kind_of(fd: RawFd) -> Option<libc::mode_t> {
     // SAFETY: fstat of a number that may be no descriptor at all: it fails
     // then, into a zeroed struct of our own.
-    let kind = unsafe {
+    unsafe {
         let mut st: libc::stat = std::mem::zeroed();
         (libc::fstat(fd, &mut st) == 0).then_some(st.st_mode & libc::S_IFMT)
-    };
-    if kind != Some(mode) {
+    }
+}
+
+/// A descriptor this process was handed by number, believed only when it
+/// is open and of the kind `mode` (`S_IFCHR`, `S_IFSOCK`), and closed on
+/// every exec from here on.
+pub fn handed(fd: RawFd, mode: libc::mode_t) -> Option<OwnedFd> {
+    if kind_of(fd) != Some(mode) {
         return None;
     }
     // SAFETY: fcntl on that descriptor, open as just seen.
@@ -1175,23 +1195,18 @@ fn serve(args: &Args) -> Result<(), String> {
             mount(fuse.as_raw_fd(), dir, uid, gid)?;
             fuse
         }
-        Place::Fd { fuse, ready } => {
-            let fuse = handed(*fuse, libc::S_IFCHR).ok_or("--fd: no /dev/fuse there")?;
-            let ready = handed(*ready, libc::S_IFIFO).ok_or("--ready: no pipe there")?;
-            // Mounted: a byte. The pipe's end without one — its writer gone
-            // (`profile-run` could not mount it, or never ran): nothing to
-            // serve.
-            let mut byte = [0u8; 1];
-            let n = loop {
-                // SAFETY: read(2) into a buffer of that length.
-                let n = unsafe { libc::read(ready.as_raw_fd(), byte.as_mut_ptr().cast(), 1) };
-                if n < 0 && errno() == libc::EINTR {
-                    continue;
-                }
-                break n;
-            };
-            if n != 1 {
+        Place::From(socket) => {
+            let socket = handed(*socket, libc::S_IFSOCK).ok_or("--from: no socket there")?;
+            // Mounted: the connection, sent. The socket's end without it —
+            // its other end gone (`profile-run` could not mount it, or never
+            // ran): nothing to serve.
+            let (_, fds) = crate::sys::recv_with_fds(socket.as_raw_fd(), 1, 1)
+                .map_err(|e| format!("the connection not received: {e}"))?;
+            let Some(fuse) = fds.into_iter().next() else {
                 return Ok(());
+            };
+            if kind_of(fuse.as_raw_fd()) != Some(libc::S_IFCHR) {
+                return Err("what was sent is no /dev/fuse".to_owned());
             }
             // Nothing more of the host's from here: namespaces of its own,
             // an empty root — as the Wayland proxy (`wl_proxy::isolate`).
@@ -1771,8 +1786,8 @@ mod tests {
             })
         );
         assert_eq!(
-            Args::parse(&argv(&["--fd", "5", "--ready", "7"])).map(|a| a.place),
-            Ok(Place::Fd { fuse: 5, ready: 7 })
+            Args::parse(&argv(&["--from", "5"])).map(|a| a.place),
+            Ok(Place::From(5))
         );
         assert_eq!(
             Args::parse(&argv(&[
@@ -1788,11 +1803,10 @@ mod tests {
             &["--mount", "/m", "--device", "../x"],
             &["--mount", "/m", "--device", "Video0"],
             &["--mount", "/m", "--other"],
-            &["--fd", "5"],
-            &["--fd", "5", "--ready", "5"],
-            &["--fd", "2", "--ready", "7"],
-            &["--mount", "/m", "--fd", "5", "--ready", "7"],
-            &["--fd", "x", "--ready", "7"],
+            &["--from"],
+            &["--from", "2"],
+            &["--mount", "/m", "--from", "5"],
+            &["--from", "x"],
         ] {
             assert!(Args::parse(&argv(bad)).is_err(), "{bad:?}");
         }

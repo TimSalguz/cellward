@@ -76,12 +76,11 @@ pub const ENV_EXPECT_PIDNS: &str = "VPN_ZONE_EXPECT_PIDNS";
 /// once the main program has ended.
 pub const ENV_STATUS_FD: &str = "VPN_ZONE_STATUS_FD";
 
-/// The black camera's FUSE connection (`crate::camera`), opened on the host
-/// by the launch's supervisor (`wl-sandbox`), whose camera server serves
-/// it: mounted here, in the launch's mount namespace ([`give_black_camera`]).
+/// The socket to the black camera's server (`crate::camera`), which the
+/// launch's supervisor (`wl-sandbox`) started on the host: the FUSE
+/// connection this process opens and mounts in the launch's mount
+/// namespace goes over it ([`give_black_camera`]).
 pub const ENV_CAMERA_FD: &str = "VPN_ZONE_CAMERA_FD";
-/// And the pipe that server waits on: a byte once the camera is mounted.
-pub const ENV_CAMERA_READY_FD: &str = "VPN_ZONE_CAMERA_READY_FD";
 /// The black camera's files, as `/dev` has them.
 const BLACK_CAMERAS: [&str; 1] = ["video0"];
 
@@ -888,39 +887,33 @@ fn give_capture() -> Result<(), String> {
     Ok(())
 }
 
-/// The black camera's descriptors this process was handed
-/// ([`ENV_CAMERA_FD`], [`ENV_CAMERA_READY_FD`]): taken out of the
-/// environment, each believed only as what it is to be — `/dev/fuse`, a
-/// pipe —, closed on every exec from here on. `None` without the first.
-fn take_black_camera() -> Option<(std::os::fd::OwnedFd, Option<std::os::fd::OwnedFd>)> {
-    let number = |name: &str| {
-        let value = std::env::var_os(name);
-        std::env::remove_var(name);
-        value?
-            .to_str()?
-            .parse::<std::os::fd::RawFd>()
-            .ok()
-            .filter(|&fd| fd > 2)
-    };
-    let fuse = number(ENV_CAMERA_FD).and_then(|fd| crate::camera::handed(fd, libc::S_IFCHR));
-    let ready = number(ENV_CAMERA_READY_FD).and_then(|fd| crate::camera::handed(fd, libc::S_IFIFO));
-    fuse.map(|fuse| (fuse, ready))
+/// The socket to the black camera's server this process was handed
+/// ([`ENV_CAMERA_FD`]): taken out of the environment, believed only as a
+/// socket, closed on every exec from here on.
+fn take_black_camera() -> Option<std::os::fd::OwnedFd> {
+    let value = std::env::var_os(ENV_CAMERA_FD);
+    std::env::remove_var(ENV_CAMERA_FD);
+    let fd = value?
+        .to_str()?
+        .parse::<std::os::fd::RawFd>()
+        .ok()
+        .filter(|&fd| fd > 2)?;
+    crate::camera::handed(fd, libc::S_IFSOCK)
 }
 
 /// Give this launch a black camera (`crate::camera`, `docs/PERMISSIONS.md`
-/// §11.15 step 4): the connection its supervisor opened on the host
-/// ([`ENV_CAMERA_FD`]) mounted in this launch's mount namespace — the
-/// zone's user namespace lets its root mount FUSE — for the files to be
-/// this launch's user's alone; the connection's descriptor closed at once
-/// (a server that dies ends the connection then: an error for the program,
-/// never a wait); the server told ([`ENV_CAMERA_READY_FD`]); each camera's
-/// file bound onto `/dev/video<N>`, the mount itself taken away. Never
-/// fatal: a camera not given is one the program does not have.
-fn give_black_camera(
-    fuse: std::os::fd::OwnedFd,
-    ready: Option<std::os::fd::OwnedFd>,
-) -> Result<(), String> {
+/// §11.15 step 4): a FUSE connection opened here, in the instance's user
+/// namespace — the kernel mounts one only in the user namespace it was
+/// opened in, whose root may mount FUSE —, from the zone's devtmpfs;
+/// mounted in this launch's mount namespace for the files to be this
+/// launch's user's alone; sent to the server over `server`
+/// ([`ENV_CAMERA_FD`]) and its descriptor closed here (a server that dies
+/// ends the connection then: an error for the program, never a wait);
+/// each camera's file bound onto `/dev/video<N>`, the mount itself taken
+/// away. Never fatal: a camera not given is one the program does not have.
+fn give_black_camera(server: std::os::fd::OwnedFd) -> Result<(), String> {
     use std::os::fd::AsRawFd;
+    let fuse = crate::camera::open_fuse_at(&Path::new(crate::zone::DEVTMPFS).join("fuse"))?;
     let dir = Path::new("/dev/.cellward-camera");
     match fs::create_dir(dir) {
         Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
@@ -930,16 +923,22 @@ fn give_black_camera(
     }
     // SAFETY: getuid and getgid take nothing and cannot fail.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-    let mounted = crate::camera::mount(fuse.as_raw_fd(), dir, uid, gid);
+    let mounted = crate::camera::mount(fuse.as_raw_fd(), dir, uid, gid).and_then(|()| {
+        // Served from now on: the connection to the server, which waits
+        // for it.
+        crate::sys::send_with_fds(server.as_raw_fd(), b"m", &[fuse.as_raw_fd()])
+            .map_err(|e| format!("the connection not sent to its server: {e}"))
+    });
     drop(fuse);
+    drop(server);
     if let Err(e) = mounted {
+        if let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()) {
+            // SAFETY: a NUL-terminated path; a detaching unmount, of ours
+            // if there is one.
+            unsafe { libc::umount2(path.as_ptr(), libc::MNT_DETACH) };
+        }
         let _ = fs::remove_dir(dir);
         return Err(e);
-    }
-    // Served from now on: a byte to the server, which waits for it.
-    if let Some(ready) = ready {
-        // SAFETY: write(2) of one byte to a pipe we hold.
-        unsafe { libc::write(ready.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
     }
     let mut given = Ok(());
     for name in BLACK_CAMERAS {
@@ -1350,8 +1349,8 @@ pub fn run(args: Args) -> u8 {
                         eprintln!("profile-run: the cameras are not given: {e}");
                     }
                 }
-                if let Some((fuse, ready)) = black_camera.take() {
-                    if let Err(e) = give_black_camera(fuse, ready) {
+                if let Some(server) = black_camera.take() {
+                    if let Err(e) = give_black_camera(server) {
                         eprintln!("profile-run: the black camera is not given: {e}");
                     }
                 }
@@ -1360,8 +1359,8 @@ pub fn run(args: Args) -> u8 {
             None => eprintln!("profile-run: cannot act as the zone's root — no device given"),
         }
     }
-    // Not given (not asked for, or no root to give it as): its descriptors
-    // go here — the server, its pipe's writer gone, ends.
+    // Not given (not asked for, or no root to give it as): its socket goes
+    // here — the server, its other end gone, ends.
     drop(black_camera);
     let mounted = if args.profile_dir.as_os_str().is_empty() {
         Vec::new()
