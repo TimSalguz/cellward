@@ -3569,24 +3569,36 @@ mod tests {
         assert_eq!(made, COMMAND_CREATE_RECORD_STREAM);
         assert!(tag >= OWN_TAGS, "the program's tag: {tag}");
         assert!(!dir.join("state/nl/microphone").exists());
+        // A stream asked for while the last question is still closing is
+        // refused as "a question is open": asked for again, with the next
+        // tag, until it is not.
+        let mut tag = 4;
+        let mut asked_for = |c: &mut UnixStream, replied: &mut dyn FnMut() -> (u32, u32)| loop {
+            c.write_all(&record(tag, INVALID, None, none, INVALID))
+                .unwrap();
+            let (command, answered) = replied();
+            assert_eq!(answered, tag);
+            tag += 1;
+            if command == COMMAND_REPLY {
+                return answered;
+            }
+            assert_eq!(command, COMMAND_ERROR);
+            thread::sleep(Duration::from_millis(20));
+        };
         // The next stream is asked about again, and refused: silent.
         fs::remove_file(&asked).unwrap();
         fs::remove_file(&go).unwrap();
-        c.write_all(&record(4, INVALID, None, none, INVALID))
-            .unwrap();
-        assert_eq!(replied(), (COMMAND_REPLY, 4));
+        asked_for(&mut c, &mut replied);
         wait_asked();
         answer("2");
         // Refused once: this connection is not asked again — silent too.
         fs::remove_file(&asked).unwrap();
-        c.write_all(&record(5, INVALID, None, none, INVALID))
-            .unwrap();
-        assert_eq!(replied(), (COMMAND_REPLY, 5));
+        let last = asked_for(&mut c, &mut replied);
         assert!(!asked.exists(), "asked again after a refusal");
         // Neither refused stream reached the server.
-        c.write_all(&packet(COMMAND_GET_SERVER_INFO, 6, &[]))
+        c.write_all(&packet(COMMAND_GET_SERVER_INFO, last + 1, &[]))
             .unwrap();
-        assert_eq!(next(), (COMMAND_GET_SERVER_INFO, 6));
+        assert_eq!(next(), (COMMAND_GET_SERVER_INFO, last + 1));
         let _ = fs::remove_dir_all(&dir);
     }
 }
