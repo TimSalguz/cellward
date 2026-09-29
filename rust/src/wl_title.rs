@@ -85,6 +85,9 @@ pub const MIN_SCALE: u32 = 120;
 pub const MAX_SCALE: u32 = 480;
 /// How many scales are held at once.
 pub const SLOTS: usize = 4;
+/// How many questions' panels are held at once: the one shown, and the
+/// next drawn while the compositor still holds it.
+pub const PROMPT_SLOTS: usize = 2;
 
 /// The ≡'s dropdown (`crate::wl_frame`, step 3c of `docs/PERMISSIONS.md`
 /// §11.15): its rows, top to bottom. What each does is the frame's.
@@ -771,6 +774,11 @@ pub fn fit(advances: &[f32], ellipsis: f32, max: f32) -> (usize, bool) {
 
 /// Lay `text` out in `font` at scale 1: kerned, cut to [`MAX_WIDTH`].
 pub fn lay_out(font: &FontVec, text: &str) -> Line {
+    lay_out_within(font, text, MAX_WIDTH)
+}
+
+/// [`lay_out`], cut to `max` logical pixels.
+pub fn lay_out_within(font: &FontVec, text: &str, max: f32) -> Line {
     let scaled = font.as_scaled(PxScale::from(FONT_PX));
     let ids: Vec<GlyphId> = text.chars().map(|c| font.glyph_id(c)).collect();
     let advances: Vec<f32> = ids
@@ -782,7 +790,7 @@ pub fn lay_out(font: &FontVec, text: &str) -> Line {
         })
         .collect();
     let dots = font.glyph_id('…');
-    let (kept, cut) = fit(&advances, scaled.h_advance(dots), MAX_WIDTH);
+    let (kept, cut) = fit(&advances, scaled.h_advance(dots), max);
     let mut glyphs = Vec::with_capacity(kept + 1);
     let mut pen = 0.0;
     for (id, advance) in ids.iter().zip(&advances).take(kept) {
@@ -949,6 +957,228 @@ pub fn render_menu(font: &FontVec, lines: &[Line], scale: u32, bg: Rgb) -> (i32,
                     }
                 };
                 pixels.extend_from_slice(&color.xrgb8888());
+            }
+        }
+    }
+    (w, h, pixels)
+}
+
+// --- A QUESTION ON A PROGRAM'S WINDOW ----------------------------------------
+// The owner, 2026-09-29: a program's permissions are asked on its own
+// window — a panel the frame's proxy lays under its title strip
+// (`crate::wl_frame`), not a window of its own.
+
+/// The panel's width, logical pixels.
+pub const PROMPT_WIDTH: i32 = 440;
+const PROMPT_PAD: i32 = 12;
+/// Rows of text at most; what does not fit ends in `…`.
+pub const PROMPT_ROWS: usize = 3;
+const PROMPT_ROW: i32 = 20;
+const PROMPT_BUTTON: i32 = 28;
+const PROMPT_BUTTON_PAD: i32 = 12;
+const PROMPT_GAP: i32 = 8;
+/// Buttons at most.
+pub const PROMPT_BUTTONS: usize = 3;
+
+/// A rectangle of the panel, logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// A question laid out: its rows of text, its buttons — each its cell and
+/// label —, its size (logical pixels).
+pub struct Prompt {
+    rows: Vec<Line>,
+    buttons: Vec<(Rect, Line)>,
+    pub size: (i32, i32),
+}
+
+impl Prompt {
+    /// `text` wrapped by words into [`PROMPT_ROWS`] rows at most, a row a
+    /// paragraph at least; `labels` the buttons, [`PROMPT_BUTTONS`] at most,
+    /// in rows at the bottom right — as many to a row as fit —, the first on
+    /// the left of the first row (the safe one, which the caller puts first).
+    pub fn lay_out(font: &FontVec, text: &str, labels: &[&str]) -> Self {
+        let room = PROMPT_WIDTH - 2 * PROMPT_PAD;
+        let wrapped = wrap(font, text, room);
+        let cut = wrapped.len() > PROMPT_ROWS;
+        let rows: Vec<Line> = wrapped
+            .iter()
+            .take(PROMPT_ROWS)
+            .enumerate()
+            .map(|(i, row)| {
+                // The last row kept of a longer text says so.
+                if cut && i + 1 == PROMPT_ROWS {
+                    lay_out_within(font, &format!("{row}…"), room as f32)
+                } else {
+                    lay_out_within(font, row, room as f32)
+                }
+            })
+            .collect();
+        let labels: Vec<Line> = labels
+            .iter()
+            .take(PROMPT_BUTTONS)
+            .map(|l| lay_out_within(font, l, (room - 2 * PROMPT_BUTTON_PAD) as f32))
+            .collect();
+        // The buttons' rows: each as many as fit, by their widths.
+        let mut lines: Vec<Vec<(Line, i32)>> = Vec::new();
+        for label in labels {
+            let w = label.width + 2 * PROMPT_BUTTON_PAD;
+            match lines.last_mut() {
+                Some(line) if line.iter().map(|(_, w)| w + PROMPT_GAP).sum::<i32>() + w <= room => {
+                    line.push((label, w))
+                }
+                _ => lines.push(vec![(label, w)]),
+            }
+        }
+        let mut y = PROMPT_PAD + PROMPT_ROW * rows.len().max(1) as i32 + PROMPT_GAP;
+        let mut buttons = Vec::new();
+        for line in lines {
+            let total = line.iter().map(|(_, w)| w).sum::<i32>()
+                + PROMPT_GAP * (line.len() as i32 - 1).max(0);
+            let mut x = (PROMPT_WIDTH - PROMPT_PAD - total).max(PROMPT_PAD);
+            for (label, w) in line {
+                buttons.push((
+                    Rect {
+                        x,
+                        y,
+                        w,
+                        h: PROMPT_BUTTON,
+                    },
+                    label,
+                ));
+                x += w + PROMPT_GAP;
+            }
+            y += PROMPT_BUTTON + PROMPT_GAP;
+        }
+        Self {
+            rows,
+            buttons,
+            size: (PROMPT_WIDTH, y - PROMPT_GAP + PROMPT_PAD),
+        }
+    }
+
+    /// The button at (`x`, `y`), logical pixels from the panel's top left.
+    pub fn button_at(&self, x: f64, y: f64) -> Option<usize> {
+        self.buttons.iter().position(|(c, _)| {
+            (f64::from(c.x)..f64::from(c.x + c.w)).contains(&x)
+                && (f64::from(c.y)..f64::from(c.y + c.h)).contains(&y)
+        })
+    }
+
+    pub fn buttons(&self) -> usize {
+        self.buttons.len()
+    }
+
+    /// The cell of the button `i`.
+    pub fn cell(&self, i: usize) -> Option<Rect> {
+        self.buttons.get(i).map(|(c, _)| *c)
+    }
+
+    /// Its tallest: every row of text, and every button in a row of its own.
+    fn max_height() -> i32 {
+        2 * PROMPT_PAD
+            + PROMPT_ROW * PROMPT_ROWS as i32
+            + (PROMPT_BUTTON + PROMPT_GAP) * PROMPT_BUTTONS as i32
+    }
+}
+
+/// `text` in rows of `room` logical pixels at most, by words; a line break
+/// starts a row.
+fn wrap(font: &FontVec, text: &str, room: i32) -> Vec<String> {
+    let mut rows = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut row = String::new();
+        for word in paragraph.split_whitespace() {
+            let candidate = if row.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{row} {word}")
+            };
+            if row.is_empty() || lay_out_within(font, &candidate, f32::MAX).width <= room {
+                row = candidate;
+            } else {
+                rows.push(std::mem::replace(&mut row, word.to_owned()));
+            }
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+/// The panel at `scale` (at most [`MENU_MAX_SCALE`]): every image of it —
+/// no button lit, then each lit — one after the other, XRGB8888, opaque,
+/// `ink` on `bg` with an edge. Its size in device pixels (one image), and
+/// the pixels.
+pub fn render_prompt(font: &FontVec, prompt: &Prompt, scale: u32, bg: Rgb) -> (i32, i32, Vec<u8>) {
+    let scale = clamp_scale(scale).min(MENU_MAX_SCALE);
+    let (w, h) = (device(prompt.size.0, scale), device(prompt.size.1, scale));
+    let (wu, hu) = (w.max(0) as usize, h.max(0) as usize);
+    let edge = device(1, scale).max(1);
+    let fg = ink(bg);
+    let edge_color = blend(bg, fg, 0.35);
+    // The text's coverage over the whole image, once.
+    let mut text = vec![0f32; wu * hu];
+    let row_h = device(PROMPT_ROW, scale).max(1);
+    for (i, row) in prompt.rows.iter().enumerate() {
+        let y0 = device(PROMPT_PAD + PROMPT_ROW * i as i32, scale);
+        let x0 = device(PROMPT_PAD, scale) as f32;
+        let cov = line_coverage(font, row, scale, w, row_h, x0);
+        for y in 0..row_h {
+            let (dst, src) = ((y0 + y) as usize, y as usize);
+            if dst < hu {
+                for x in 0..wu {
+                    text[dst * wu + x] = cov[src * wu + x];
+                }
+            }
+        }
+    }
+    // Each button's cell in device pixels, and its label's coverage there.
+    let cells: Vec<(i32, i32, i32, i32)> = prompt
+        .buttons
+        .iter()
+        .map(|(c, _)| {
+            let (x0, y0) = (device(c.x, scale), device(c.y, scale));
+            (x0, y0, device(c.x + c.w, scale), device(c.y + c.h, scale))
+        })
+        .collect();
+    for ((_, label), &(x0, y0, x1, y1)) in prompt.buttons.iter().zip(&cells) {
+        let (cw, ch) = (x1 - x0, y1 - y0);
+        let lx = ((cw - device(label.width, scale)) / 2).max(0) as f32;
+        let cov = line_coverage(font, label, scale, cw, ch, lx);
+        for y in 0..ch {
+            for x in 0..cw {
+                let (dx, dy) = ((x0 + x) as usize, (y0 + y) as usize);
+                if dx < wu && dy < hu {
+                    text[dy * wu + dx] = cov[(y * cw + x) as usize];
+                }
+            }
+        }
+    }
+    let variants = 1 + prompt.buttons.len();
+    let mut pixels = Vec::with_capacity(variants * wu * hu * 4);
+    for variant in 0..variants {
+        let lit = variant.checked_sub(1);
+        for y in 0..h {
+            for x in 0..w {
+                let base = if x < edge || y < edge || x >= w - edge || y >= h - edge {
+                    edge_color
+                } else {
+                    match cells
+                        .iter()
+                        .position(|&(x0, y0, x1, y1)| x >= x0 && x < x1 && y >= y0 && y < y1)
+                    {
+                        Some(i) if lit == Some(i) => blend(bg, fg, 0.30),
+                        Some(_) => blend(bg, fg, 0.12),
+                        None => bg,
+                    }
+                };
+                let c = text[y as usize * wu + x as usize];
+                pixels.extend_from_slice(&blend(base, fg, c).xrgb8888());
             }
         }
     }
@@ -1204,11 +1434,21 @@ impl Prepared {
             * 4
     }
 
+    /// Bytes of one region of a question's panel: every image of the
+    /// tallest one at [`MENU_MAX_SCALE`].
+    fn prompt_bytes() -> usize {
+        (1 + PROMPT_BUTTONS)
+            * device(PROMPT_WIDTH, MENU_MAX_SCALE) as usize
+            * device(Prompt::max_height(), MENU_MAX_SCALE) as usize
+            * 4
+    }
+
     /// The memfd's size: [`SLOTS`] regions of the line, then [`SLOTS`] of
     /// the buttons, then [`SLOTS`] of the corners, then [`SLOTS`] of the
-    /// dropdown.
+    /// dropdown, then [`PROMPT_SLOTS`] of the questions' panels.
     pub fn memfd_size(&self) -> usize {
         (self.slot_bytes() + self.button_bytes() + self.corner_bytes() + self.menu_bytes()) * SLOTS
+            + Self::prompt_bytes() * PROMPT_SLOTS
     }
 }
 
@@ -1231,11 +1471,15 @@ struct Regions {
 
 impl Regions {
     fn new(base: usize, slot_bytes: usize) -> Self {
+        Self::with_slots(base, slot_bytes, SLOTS)
+    }
+
+    fn with_slots(base: usize, slot_bytes: usize, count: usize) -> Self {
         Self {
             base,
             slot_bytes,
             slots: RefCell::new(
-                (0..SLOTS)
+                (0..count)
                     .map(|_| Slot {
                         scale: 0,
                         leases: Rc::new(Cell::new(0)),
@@ -1248,7 +1492,7 @@ impl Regions {
     }
 
     fn bytes(&self) -> usize {
-        self.slot_bytes * SLOTS
+        self.slot_bytes * self.slots.borrow().len()
     }
 }
 
@@ -1272,6 +1516,8 @@ pub struct Text {
     corners: Regions,
     /// The dropdown's, after the corners'.
     menu: Regions,
+    /// The questions' panels', last: drawn anew for each question.
+    prompt: Regions,
     clock: Cell<u64>,
 }
 
@@ -1323,6 +1569,11 @@ impl Text {
             title.bytes() + buttons.bytes() + corners.bytes(),
             prepared.menu_bytes(),
         );
+        let prompt = Regions::with_slots(
+            title.bytes() + buttons.bytes() + corners.bytes() + menu.bytes(),
+            Prepared::prompt_bytes(),
+            PROMPT_SLOTS,
+        );
         Self {
             font: prepared.font,
             line: prepared.line,
@@ -1336,6 +1587,7 @@ impl Text {
             buttons,
             corners,
             menu,
+            prompt,
             clock: Cell::new(0),
         }
     }
@@ -1376,7 +1628,11 @@ impl Text {
     /// The pool's size: the whole memfd.
     pub fn pool_size(&self) -> i32 {
         i32::try_from(
-            self.title.bytes() + self.buttons.bytes() + self.corners.bytes() + self.menu.bytes(),
+            self.title.bytes()
+                + self.buttons.bytes()
+                + self.corners.bytes()
+                + self.menu.bytes()
+                + self.prompt.bytes(),
         )
         .unwrap_or(i32::MAX)
     }
@@ -1411,6 +1667,40 @@ impl Text {
         let scale = clamp_scale(scale).min(MENU_MAX_SCALE);
         self.region_at(&self.menu, scale, |scale| {
             render_menu(&self.font, &self.menu_lines, scale, self.bg)
+        })
+    }
+
+    /// A question's panel laid out in the launch's font.
+    pub fn prompt(&self, text: &str, labels: &[&str]) -> Prompt {
+        Prompt::lay_out(&self.font, text, labels)
+    }
+
+    /// `prompt` drawn at `scale` (at most [`MENU_MAX_SCALE`]), every image
+    /// of it — none lit, then each button lit —, always anew (its words are
+    /// its question's): in a region nobody holds. `None` when every one is
+    /// held, or the write failed.
+    pub fn prompt_at(&self, scale: u32, prompt: &Prompt) -> Option<Drawn> {
+        let scale = clamp_scale(scale).min(MENU_MAX_SCALE);
+        let regions = &self.prompt;
+        let mut slots = regions.slots.borrow_mut();
+        let free = (0..slots.len()).find(|&i| slots[i].leases.get() == 0)?;
+        let (w, h, pixels) = render_prompt(&self.font, prompt, scale, self.bg);
+        let offset = regions.base + free * regions.slot_bytes;
+        slots[free].scale = 0;
+        if pixels.len() > regions.slot_bytes
+            || self.file.write_all_at(&pixels, offset as u64).is_err()
+        {
+            return None;
+        }
+        let slot = &mut slots[free];
+        slot.scale = scale;
+        slot.size = (w, h);
+        Some(Drawn {
+            offset: offset as i32,
+            width: w,
+            height: h,
+            scale,
+            lease: Lease::new(&slot.leases),
         })
     }
 
@@ -2338,6 +2628,158 @@ mod tests {
         assert_eq!(tagged.width(), tagged.tag().unwrap().width);
         let line = tagged.at(120).unwrap();
         assert_eq!(line.width, device(tagged.width(), 120));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const ASKED: &str = "«Firefox» (контейнер «work») хочет в сеть: example.org:443.\nПока вы не ответили, у неё сети нет.";
+    const ANSWERS: [&str; 3] = ["Запретить", "Разрешить, пока работает", "Разрешить всегда"];
+
+    /// A question: its words in rows, cut to the rows it has room for; its
+    /// buttons in rows at the bottom right, inside the panel, apart, the
+    /// safe one first; each found under the pointer, nothing between them.
+    #[test]
+    fn a_question_is_wrapped_and_its_buttons_are_inside() {
+        let Some(bytes) = font() else { return };
+        let prepared = Prepared::new(bytes, "nl · work").expect("a font");
+        let prompt = Prompt::lay_out(&prepared.font, ASKED, &ANSWERS);
+        assert!((2..=PROMPT_ROWS).contains(&prompt.rows.len()));
+        assert_eq!(prompt.size.0, PROMPT_WIDTH);
+        assert!(prompt.size.1 <= Prompt::max_height());
+        assert_eq!(prompt.buttons(), 3);
+        let cells: Vec<Rect> = (0..3).map(|i| prompt.cell(i).unwrap()).collect();
+        for (i, c) in cells.iter().enumerate() {
+            assert!(
+                c.x >= PROMPT_PAD && c.x + c.w <= PROMPT_WIDTH - PROMPT_PAD,
+                "{c:?}"
+            );
+            assert!(c.y + c.h <= prompt.size.1 - PROMPT_PAD, "{c:?}");
+            let (x, y) = (f64::from(c.x + c.w / 2), f64::from(c.y + c.h / 2));
+            assert_eq!(prompt.button_at(x, y), Some(i));
+            for d in &cells[i + 1..] {
+                let apart = c.x + c.w <= d.x || d.x + d.w <= c.x || c.y + c.h <= d.y;
+                assert!(apart, "{c:?} {d:?}");
+            }
+        }
+        // The first is the first: on the top row of buttons, leftmost there.
+        assert!(cells.iter().all(|c| c.y >= cells[0].y));
+        assert!(cells
+            .iter()
+            .filter(|c| c.y == cells[0].y)
+            .all(|c| c.x >= cells[0].x));
+        assert_eq!(prompt.button_at(1.0, 1.0), None, "the text");
+        assert_eq!(prompt.button_at(f64::NAN, 1.0), None);
+        assert!(prompt.cell(3).is_none());
+        // A text longer than the rows: cut, its last row ending in `…`.
+        let long = "слово ".repeat(200);
+        let cut = Prompt::lay_out(&prepared.font, &long, &ANSWERS[..1]);
+        assert_eq!(cut.rows.len(), PROMPT_ROWS);
+        let dots = prepared.font.glyph_id('…');
+        assert_eq!(cut.rows[PROMPT_ROWS - 1].glyphs.last().unwrap().0, dots);
+        assert!(cut
+            .rows
+            .iter()
+            .all(|r| r.width <= PROMPT_WIDTH - 2 * PROMPT_PAD));
+        assert_eq!(cut.buttons(), 1);
+        // More labels than buttons: the first ones.
+        let many = Prompt::lay_out(&prepared.font, "?", &["a", "b", "c", "d"]);
+        assert_eq!(many.buttons(), PROMPT_BUTTONS);
+    }
+
+    /// The panel: an image with no button lit, then one with each lit; its
+    /// edge; a button's corner its shade, deeper when lit.
+    #[test]
+    fn the_panel_is_drawn_in_every_state() {
+        let Some(bytes) = font() else { return };
+        let prepared = Prepared::new(bytes, "nl · work").expect("a font");
+        let prompt = Prompt::lay_out(&prepared.font, ASKED, &ANSWERS);
+        let bg = Rgb(0x30, 0x60, 0x90);
+        let fg = ink(bg);
+        for scale in [120, 180, 480] {
+            let (w, h, pixels) = render_prompt(&prepared.font, &prompt, scale, bg);
+            let at = scale.min(MENU_MAX_SCALE);
+            assert_eq!(
+                (w, h),
+                (device(prompt.size.0, at), device(prompt.size.1, at))
+            );
+            let image = (w * h * 4) as usize;
+            assert_eq!(pixels.len(), image * 4);
+            assert!(pixels.len() <= Prepared::prompt_bytes());
+            let word = |v: usize, x: i32, y: i32| {
+                let i = v * image + ((y * w + x) * 4) as usize;
+                pixels[i..i + 4].to_vec()
+            };
+            let colour = |c: Rgb| c.xrgb8888().to_vec();
+            assert_eq!(word(0, 0, 0), colour(blend(bg, fg, 0.35)), "the edge");
+            for i in 0..3 {
+                let c = prompt.cell(i).unwrap();
+                let (x, y) = (device(c.x, at), device(c.y, at));
+                for v in 0..4 {
+                    let lit = v == i + 1;
+                    let want = blend(bg, fg, if lit { 0.30 } else { 0.12 });
+                    assert_eq!(
+                        word(v, x, y),
+                        colour(want),
+                        "scale {scale} image {v} button {i}"
+                    );
+                }
+            }
+            // Words in the text's rows, the same in every image.
+            let row = (device(PROMPT_PAD, at) * w * 4) as usize;
+            let rows = (device(PROMPT_ROW, at) * w * 4) as usize;
+            let first = &pixels[row..row + rows];
+            let (plain, edge) = (colour(bg), colour(blend(bg, fg, 0.35)));
+            assert!(
+                first
+                    .chunks(4)
+                    .any(|p| p != plain.as_slice() && p != edge.as_slice()),
+                "no text"
+            );
+            assert_eq!(first, &pixels[image * 3 + row..image * 3 + row + rows]);
+        }
+    }
+
+    /// A question's panel is drawn anew into a region of its own, after the
+    /// dropdown's; one held by the compositor is not drawn over.
+    #[test]
+    fn a_question_is_drawn_anew_in_a_region_of_its_own() {
+        let Some(bytes) = font() else { return };
+        let dir = std::env::temp_dir().join(format!("vz-prompt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prepared = Prepared::new(bytes, "nl · work").unwrap();
+        let size = prepared.memfd_size();
+        let path = dir.join("text");
+        let file = File::create(&path).unwrap();
+        file.set_len(size as u64).unwrap();
+        let writer = OwnedFd::from(File::options().write(true).open(&path).unwrap());
+        let bg = Rgb(240, 91, 240);
+        let text = Text::new(prepared, bg, OwnedFd::from(file), writer);
+        assert_eq!(text.pool_size() as usize, size);
+        let one = text.prompt(ASKED, &ANSWERS);
+        let two = text.prompt("«curl» хочет в сеть.", &ANSWERS[..2]);
+        let first = text.prompt_at(180, &one).unwrap();
+        let second = text.prompt_at(180, &two).unwrap();
+        let before = text.title.bytes() + text.buttons.bytes() + text.corners.bytes();
+        assert!(first.offset as usize >= before + text.menu.bytes());
+        assert_ne!(first.offset, second.offset);
+        assert!(text.prompt_at(180, &one).is_none(), "both held");
+        let read = |d: &Drawn, p: &Prompt| {
+            let (_, _, want) = render_prompt(&text.font, p, d.scale, bg);
+            let mut got = vec![0u8; want.len()];
+            File::open(&path)
+                .unwrap()
+                .read_exact_at(&mut got, d.offset as u64)
+                .unwrap();
+            assert!(d.offset as usize + want.len() <= size, "past the memfd");
+            assert_eq!(got, want);
+        };
+        read(&first, &one);
+        read(&second, &two);
+        // Let go of: drawn over with the next question, at its scale.
+        let offset = first.offset;
+        drop(first);
+        let third = text.prompt_at(240, &two).unwrap();
+        assert_eq!((third.offset, third.scale), (offset, 240));
+        read(&third, &two);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
