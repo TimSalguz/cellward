@@ -223,13 +223,14 @@ let
           choose nothing), and Enter once the guard is over — a "yes" sooner
           is taken for a slip."""
           machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=60)
-          machine.sleep(3)
+          machine.sleep(2)
           user(f"WAYLAND_DISPLAY={display} grim /tmp/camera-question.png")
           machine.copy_from_vm("/tmp/camera-question.png", "")
-          if downs:
-              user(f"WAYLAND_DISPLAY={display} wtype -s 300 " + " ".join(["-k Down"] * downs))
-          machine.sleep(3)
-          user(f"WAYLAND_DISPLAY={display} wtype -k Return")
+          # One wtype for all of it: its keyboard is the seat's only while it
+          # runs, and the window's guard counts only with the focus — a second
+          # wtype would bring the focus back, and the guard with it.
+          keys = " ".join(["-k Down"] * downs)
+          user(f"WAYLAND_DISPLAY={display} wtype -s 1500 {keys} -s 3500 -k Return")
           machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=30)
 
       with subtest("asked: allowed, the real camera comes into the same stream"):
