@@ -761,10 +761,18 @@ fn containers(tools: &Tools) -> u8 {
                     row("restart", "Сменить и перезапустить программы"),
                     row("other", "Другой контейнер…"),
                 ];
+                // Whose connections it breaks (`docs/PERMISSIONS.md` §11.16,
+                // step 5).
+                let mut text = crate::switch::warning(&container.name, &instance.network, &network);
+                let along = crate::focus::others_in(&tools.state, &container.name, None);
+                if !along.is_empty() {
+                    let names: Vec<String> = along.iter().map(|o| format!("«{o}»")).collect();
+                    text.push_str(&format!("\n\nСеть сменится у: {}.", names.join(", ")));
+                }
                 let Some(way) = menu(
                     tools,
                     &format!("Сеть контейнера «{selector}»"),
-                    &crate::switch::warning(&container.name, &instance.network, &network),
+                    &text,
                     &ways,
                 ) else {
                     return 0;

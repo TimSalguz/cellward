@@ -1245,6 +1245,24 @@ pub fn switch_targets(state: &Path, current: &str) -> Vec<String> {
     out
 }
 
+/// The other programs of `container` running now, by the names a person
+/// knows them by — whose connections a switch of its network breaks too
+/// (`docs/PERMISSIONS.md` §11.16, step 5). Not `program`, the one asking:
+/// it is the switch's own.
+pub fn others_in(state: &Path, container: &str, program: Option<&str>) -> Vec<String> {
+    let running = state.join(".running");
+    let mut out: Vec<String> = registry::live_records(&running.join(container), &|pid| {
+        registry::alive(&running, pid)
+    })
+    .into_iter()
+    .filter(|(p, r)| Some(p.as_str()) != program && r.selector == container)
+    .map(|(p, _)| shown(&label(state, &p)))
+    .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The container whose network the frame's ⇄ can switch live for this
 /// launch: a named container's own, whose instance runs now — its id is
 /// the container's name. `None` for the main home's, a throwaway's, an
@@ -1269,7 +1287,9 @@ pub fn switchable(
 /// 4's): the network chosen in the launch window's menu — `offline` and the
 /// zones, never the one it is in ([`switch_targets`]) —, then, after what a
 /// switch breaks and what it cannot (`switch::warning`), how: now, with its
-/// programs restarted, or another container (said how). A guarded question,
+/// programs restarted — the other programs it takes along named (step 5 of
+/// `docs/PERMISSIONS.md` §11.16) —, or only this one, into another
+/// container: the restart, which asks the container. A guarded question,
 /// as every question of the window is: keys typed on, meant for another
 /// window, do not answer it. `cellward container set <c> network <net>
 /// --yes [--restart]` does it — the keeper's preconditions, the lock, the
@@ -1284,6 +1304,19 @@ fn switch_network(tools: &Tools, label: &str, launch: Option<&Launch>) -> Option
         "cellward window-menu: {label}: сеть контейнера «{container}» ({}) меняется на ходу",
         zone_words(&current)
     );
+    let others = others_in(
+        &tools.state,
+        &container,
+        launch.and_then(|l| l.program.as_deref()),
+    );
+    let along = (!others.is_empty()).then(|| {
+        let names: Vec<String> = others.iter().map(|o| format!("«{o}»")).collect();
+        format!("Сеть сменится и у: {}.", names.join(", "))
+    });
+    if let Some(along) = &along {
+        eprintln!("cellward window-menu: {label}: {along}");
+    }
+    let alone = format!("Только «{label}» — в другой контейнер…");
     let mut actions: Vec<(String, String, bool)> = targets
         .iter()
         .enumerate()
@@ -1295,17 +1328,15 @@ fn switch_network(tools: &Tools, label: &str, launch: Option<&Launch>) -> Option
             (format!("net{i}"), shown, false)
         })
         .collect();
-    actions.push((
-        "restart".to_owned(),
-        format!("Закрыть «{label}» и запустить снова — выбрать сеть и контейнер…"),
-        true,
-    ));
+    actions.push(("restart".to_owned(), alone.clone(), true));
+    let mut notes = vec![format!(
+        "Сейчас {}. Программы контейнера останутся работать, их соединения разорвутся.",
+        in_net(&current)
+    )];
+    notes.extend(along.clone());
     let choose = crate::window::Menu {
         title: format!("Сеть контейнера «{container}»"),
-        notes: vec![format!(
-            "Сейчас {}. Программы контейнера останутся работать, их соединения разорвутся.",
-            in_net(&current)
-        )],
+        notes,
         actions,
         ..Default::default()
     };
@@ -1324,9 +1355,11 @@ fn switch_network(tools: &Tools, label: &str, launch: Option<&Launch>) -> Option
         return Some(0);
     };
     let warning = crate::switch::warning(&container, &current, to);
+    let mut notes = vec![warning.clone()];
+    notes.extend(along);
     let how = crate::window::Menu {
         title: format!("Сеть контейнера «{container}»"),
-        notes: vec![warning.clone()],
+        notes,
         actions: vec![
             ("now".to_owned(), "Сменить сейчас".to_owned(), true),
             (
@@ -1334,7 +1367,7 @@ fn switch_network(tools: &Tools, label: &str, launch: Option<&Launch>) -> Option
                 "Сменить и перезапустить программы".to_owned(),
                 true,
             ),
-            ("other".to_owned(), "Другой контейнер…".to_owned(), false),
+            ("other".to_owned(), alone, false),
         ],
         guard_ms: crate::dialog::TOO_FAST.as_millis() as u64,
         ..Default::default()
@@ -1354,13 +1387,9 @@ fn switch_network(tools: &Tools, label: &str, launch: Option<&Launch>) -> Option
     match ask_menu(tools, &how).as_deref() {
         Some("now") => {}
         Some("restart") => args.push("--restart"),
-        Some("other") => {
-            notify(
-                "Чтобы в новой сети быть другим, запусти программу в другом контейнере: в окне \
-                 запуска выбери другой контейнер (или «Новый контейнер со своим домом…»).",
-            );
-            return Some(0);
-        }
+        // Only this one, into another container: the restart, whose launch
+        // window asks the container (and the network).
+        Some("other") => return None,
         _ => return Some(0),
     }
     let done = Command::new(&tools.runner)
@@ -1848,6 +1877,34 @@ mod tests {
         let mut from_offline = switch_targets(&state, "offline");
         from_offline.sort();
         assert_eq!(from_offline, ["de", "nl"]);
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    /// Whose connections a switch breaks too: the container's other live
+    /// programs, by their labels — not the one asking, not a dead one, not
+    /// another container's.
+    #[test]
+    fn the_other_programs_of_a_container_are_named() {
+        let state = std::env::temp_dir().join(format!("vz-others-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        let me = std::process::id() as i32;
+        let dir = state.join(".running/work");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("firefox"), format!("{me} nl work\n")).unwrap();
+        fs::write(
+            dir.join("telegram"),
+            format!("{me} nl work\n{me} nl work\n"),
+        )
+        .unwrap();
+        fs::write(dir.join("gone"), "2147483000 nl work\n").unwrap();
+        fs::create_dir_all(state.join(".labels")).unwrap();
+        fs::write(state.join(".labels/telegram"), "Telegram\n").unwrap();
+        let bank = state.join(".running/bank");
+        fs::create_dir_all(&bank).unwrap();
+        fs::write(bank.join("wine"), format!("{me} nl bank\n")).unwrap();
+        assert_eq!(others_in(&state, "work", Some("firefox")), ["Telegram"]);
+        assert_eq!(others_in(&state, "work", None), ["Telegram", "firefox"]);
+        assert!(others_in(&state, "empty", None).is_empty());
         let _ = fs::remove_dir_all(&state);
     }
 

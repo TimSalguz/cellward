@@ -30,6 +30,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
+- **The ⇄ says whose network changes along** (2026-09-30,
+  docs/PERMISSIONS.md §11.16, step 5): switching a container's network
+  names its other running programs («Сеть сменится и у: …») in both of the
+  frame's questions and in the container manager; «Только «X» — в другой
+  контейнер…» now restarts just that program through the launch window,
+  which asks the container, instead of only saying how.
 - **«Похоже, сеть … душат»** (2026-09-30, docs/PERMISSIONS.md §11.16,
   step 4): `cellward watch` tells the censor's cut from a dead tunnel —
   the tunnel received its first 10–24 KiB in all and not a byte more

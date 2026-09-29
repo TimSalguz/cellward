@@ -324,6 +324,12 @@ with subtest("the frame's ⇄ on a container's program: its network, switched li
         f"SWAYSOCK={swaysock} swaymsg '[app_id=btn2] floating enable, resize set 640 400, "
         "move position 100 100'"
     )
+    # Another program of the container: the switch would take it along, and
+    # the menu names it (docs/PERMISSIONS.md §11.16, step 5).
+    alice("systemd-run --user --unit=vmbtn2b cellward run offline --container vmbtnc -- sleep infinity")
+    machine.wait_until_succeeds(
+        "grep -qs . /home/alice/.local/state/vpn-zones/.running/vmbtnc/sleep", timeout=30
+    )
     pointer("move", 5, 5)
     machine.sleep(2)
     sup2 = node("btn2")["pid"]
@@ -338,6 +344,9 @@ with subtest("the frame's ⇄ on a container's program: its network, switched li
     machine.wait_until_succeeds(
         "journalctl --no-pager | grep -F 'сеть контейнера «vmbtnc» (без сети) меняется на ходу'",
         timeout=30,
+    )
+    machine.wait_until_succeeds(
+        "journalctl --no-pager | grep -F 'Сеть сменится и у: «sleep».'", timeout=30
     )
     machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
     machine.sleep(2)
@@ -356,6 +365,6 @@ with subtest("the frame's ⇄ on a container's program: its network, switched li
     status = json.loads(alice("cellward status --json"))
     inst = next(i for i in status["instances"] if i["id"] == "vmbtnc")
     assert inst["network"] == "offline", inst
-    alice("systemctl --user stop vmbtn2")
+    alice("systemctl --user stop vmbtn2 vmbtn2b")
     machine.wait_until_fails(f"test -e /proc/{sup2}", timeout=30)
     alice("systemctl --user stop vmpointer")
