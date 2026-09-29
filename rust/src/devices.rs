@@ -699,9 +699,12 @@ mod tests {
                 word.to_ascii_lowercase().replace("abc-1", "ABC-1")
             );
         }
+        // Every device (2e, «без изоляции»): a word of its own.
+        assert_eq!(Grant::parse("all"), Some(Grant::All));
+        assert_eq!(Grant::All.word(), ALL);
         for bad in [
             "",
-            "all",
+            "all devices",
             "usb:",
             "usb:105:0407",
             "usb:1050:04g7",
