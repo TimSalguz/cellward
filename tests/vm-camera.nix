@@ -224,8 +224,9 @@ let
           is taken for a slip."""
           machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=60)
           machine.sleep(2)
-          user(f"WAYLAND_DISPLAY={display} grim /tmp/camera-question.png")
-          machine.copy_from_vm("/tmp/camera-question.png", "")
+          shot = f"camera-question-{downs}"
+          user(f"WAYLAND_DISPLAY={display} grim /tmp/{shot}.png")
+          machine.copy_from_vm(f"/tmp/{shot}.png", "")
           # One wtype for all of it: its keyboard is the seat's only while it
           # runs, and the window's guard counts only with the focus — a second
           # wtype would bring the focus back, and the guard with it. Before
