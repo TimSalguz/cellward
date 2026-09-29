@@ -3497,6 +3497,7 @@ fn a_networks_connection_is_a_setting_nix_wins() {
         json.contains("\"name\":\"unconfined\"") && json.contains("\"connection\":null"),
         "{json}"
     );
+    assert!(json.contains("\"login_asked\":false"), "{json}");
     let out = home.run(&["connection", "nl", "ask"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("спросить (ask)"), "{}", stdout(&out));
