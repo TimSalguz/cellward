@@ -38,15 +38,18 @@
 //! first, held by the relay, and the answer is theirs all.
 
 use std::collections::{HashMap, VecDeque};
-use std::ffi::OsString;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
 
 use crate::flows::Key;
+use crate::onwindow::OnWindow;
 use crate::verdicts::Verdict;
+
+/// The panel's answers on the program's window: the safe one first — the
+/// only one that is an answer there (`crate::onwindow`).
+const PANEL: [&str; 2] = ["Запретить", "Разрешить…"];
 
 /// What the person said.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,7 +306,7 @@ fn question(
     let started = std::time::Instant::now();
     let mut display = None;
     if let Some((runtime, pid)) = at {
-        match on_window(&runtime, pid, &text, timeout) {
+        match crate::onwindow::ask(&runtime, pid, &text, &PANEL, timeout) {
             OnWindow::No => return Answer::Deny,
             OnWindow::Unanswered => return Answer::Closed,
             OnWindow::Elsewhere(on) => display = on,
@@ -334,81 +337,6 @@ fn question(
             _ => Answer::Deny,
         },
         _ => Answer::Closed,
-    }
-}
-
-/// What the launch's supervisor said of a question on the program's window.
-#[derive(Debug, PartialEq, Eq)]
-enum OnWindow {
-    /// "No", there.
-    No,
-    /// Not answered in time.
-    Unanswered,
-    /// To be asked in the launch window — on the launch's compositor, when
-    /// its supervisor named it: «Разрешить…», no window of the program's to
-    /// ask on, or no supervisor to ask at all.
-    Elsewhere(Option<OsString>),
-}
-
-/// The panel's answers: the safe one first. Only it is an answer; any other
-/// is "ask in the launch window" (`crate::wl_proxy::ASK_WINDOW`).
-const PANEL: [&str; 2] = ["Запретить", "Разрешить…"];
-
-/// `text` asked on the window of the launch whose supervisor is `pid`,
-/// through its socket of questions under `runtime`: what it said
-/// ([`OnWindow`]). Its socket is its supervisor's own — the process on the
-/// other end is `pid` — or nothing is asked there.
-fn on_window(
-    runtime: &Path,
-    pid: i32,
-    text: &str,
-    timeout: Option<std::time::Duration>,
-) -> OnWindow {
-    use std::io::{Read, Write};
-    let elsewhere = OnWindow::Elsewhere(None);
-    let Some(request) = crate::wl_proxy::ask_request(text, &PANEL) else {
-        return elsewhere;
-    };
-    let Ok(stream) = UnixStream::connect(crate::wl_proxy::ask_path(runtime, pid)) else {
-        return elsewhere;
-    };
-    if crate::sys::peer_pid(stream.as_raw_fd()) != Some(pid) {
-        return elsewhere;
-    }
-    if stream.set_read_timeout(timeout).is_err() || (&stream).write_all(&request).is_err() {
-        return elsewhere;
-    }
-    let mut reply = Vec::new();
-    match (&stream)
-        .take(1 + MAX_DISPLAY as u64)
-        .read_to_end(&mut reply)
-    {
-        Ok(_) => reply_of(&reply),
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-            ) =>
-        {
-            OnWindow::Unanswered
-        }
-        Err(_) => elsewhere,
-    }
-}
-
-/// The longest compositor's name a supervisor's reply carries.
-const MAX_DISPLAY: usize = 256;
-
-/// A supervisor's reply: its answer's byte, then its compositor's name.
-fn reply_of(reply: &[u8]) -> OnWindow {
-    use std::os::unix::ffi::OsStringExt;
-    let display = reply
-        .get(1..)
-        .filter(|d| !d.is_empty() && d.len() <= MAX_DISPLAY && !d.contains(&0))
-        .map(|d| OsString::from_vec(d.to_vec()));
-    match reply.first() {
-        Some(&crate::wl_proxy::ASK_NO) => OnWindow::No,
-        _ => OnWindow::Elsewhere(display),
     }
 }
 
@@ -483,42 +411,6 @@ mod tests {
             asker.ask(curl, launch, key(4), "x:443".into()),
             Some(Verdict::Deny)
         );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// The supervisor's word: "no" is the answer; anything else, and a
-    /// word it never said, asks in the launch window — on its compositor
-    /// when it named one.
-    #[test]
-    fn only_no_is_an_answer_from_the_programs_window() {
-        use crate::wl_proxy::{ASK_NO, ASK_NOWHERE, ASK_WINDOW};
-        assert_eq!(reply_of(&[ASK_NO]), OnWindow::No);
-        assert_eq!(reply_of(b"nwayland-1"), OnWindow::No);
-        let on = |d: &str| OnWindow::Elsewhere(Some(OsString::from(d)));
-        assert_eq!(reply_of(b"mwayland-1"), on("wayland-1"));
-        assert_eq!(reply_of(&[ASK_WINDOW]), OnWindow::Elsewhere(None));
-        assert_eq!(reply_of(&[ASK_NOWHERE]), OnWindow::Elsewhere(None));
-        assert_eq!(reply_of(b"y"), OnWindow::Elsewhere(None), "never a yes");
-        assert_eq!(reply_of(b""), OnWindow::Elsewhere(None), "closed");
-        assert_eq!(reply_of(b"mway\0land"), OnWindow::Elsewhere(None));
-        assert_eq!(ASK_NO, b'n');
-    }
-
-    /// A socket of questions that is not the launch's supervisor's — its
-    /// pid another process's — is not asked on.
-    #[test]
-    fn a_socket_not_the_launchs_is_not_asked_on() {
-        let root = std::env::temp_dir().join(format!("vz-netask-sock-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let path = crate::wl_proxy::ask_path(&root, 1);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        let asked = on_window(&root, 1, "?", Some(std::time::Duration::from_secs(5)));
-        assert_eq!(asked, OnWindow::Elsewhere(None));
-        drop(listener);
-        // No socket at all.
-        let none = on_window(&root, 2, "?", None);
-        assert_eq!(none, OnWindow::Elsewhere(None));
         let _ = std::fs::remove_dir_all(&root);
     }
 

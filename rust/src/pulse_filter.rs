@@ -975,6 +975,9 @@ struct Session {
     /// Whose program is on the other end (`crate::origin`), looked at when
     /// it connected: the microphone is decided by its container.
     who: Who,
+    /// Its pid, the host's: where its launch is found for a question on
+    /// its window (`crate::onwindow`).
+    peer: Option<i32>,
     /// What the program calls itself (`SET_CLIENT_NAME`,
     /// `UPDATE_CLIENT_PROPLIST`): its word, for the question only.
     client_name: Option<String>,
@@ -1424,9 +1427,9 @@ fn ask(
     to_client: &Arc<Out>,
     session: &Arc<Mutex<Session>>,
 ) -> io::Result<()> {
-    let (mic, who) = {
+    let (mic, who, peer) = {
         let s = lock(session);
-        (Arc::clone(&s.mic), s.who.clone())
+        (Arc::clone(&s.mic), s.who.clone(), s.peer)
     };
     let tag = held.tag;
     let spawned = {
@@ -1441,7 +1444,9 @@ fn ask(
             // is still open: a request of this connection that comes in
             // meanwhile is refused as "a question is open", and one after it
             // finds the deny standing — none gets a question of its own.
-            let allowed = mic.ask(&held.program, &who, held.remember, |allowed| {
+            let launch = peer
+                .and_then(|p| crate::onwindow::launch_above(&crate::onwindow::runtime_dir(), p));
+            let allowed = mic.ask(&held.program, &who, held.remember, launch, |allowed| {
                 let mut s = lock(&session);
                 if allowed {
                     s.creating.insert(held.tag, Kind::Record);
@@ -1492,10 +1497,17 @@ fn pump_down(server: &UnixStream, to_client: &Out, session: &Mutex<Session>) -> 
 /// Whose program the peer of `client` is (`crate::origin`), looked at
 /// while it is certainly the process that connected. Unknown when it cannot
 /// be looked at.
-fn who_is(client: &UnixStream, args: &Args) -> Who {
+/// Whose program `client` is, and its pid (this process's pid namespace's:
+/// the host's) — where its launch is found for a question on its window
+/// (`crate::onwindow::launch_above`).
+fn who_is(client: &UnixStream, args: &Args) -> (Who, Option<i32>) {
     let Some(peer) = crate::origin::Peer::of(client.as_raw_fd()) else {
-        return Who::Unknown;
+        return (Who::Unknown, None);
     };
+    (who_of(&peer, args), Some(peer.pid))
+}
+
+fn who_of(peer: &crate::origin::Peer, args: &Args) -> Who {
     // An instance's filter: its clients are the instance's container — when
     // they are in its user namespace, as they must be to reach the socket.
     if let Some(who) = &args.container {
@@ -1509,14 +1521,20 @@ fn who_is(client: &UnixStream, args: &Args) -> Who {
     let Some(state) = args.zone_dir.parent() else {
         return Who::Unknown;
     };
-    crate::origin::of_peer(state, &args.zone, &peer)
+    crate::origin::of_peer(state, &args.zone, peer)
 }
 
-fn serve(client: UnixStream, upstream: &PathBuf, mic: Arc<Policy>, who: Who) -> io::Result<()> {
+fn serve(
+    client: UnixStream,
+    upstream: &PathBuf,
+    mic: Arc<Policy>,
+    (who, peer): (Who, Option<i32>),
+) -> io::Result<()> {
     let server = UnixStream::connect(upstream)?;
     let session = Arc::new(Mutex::new(Session {
         mic,
         who,
+        peer,
         ..Session::default()
     }));
     let to_client = Arc::new(Out {
@@ -2379,7 +2397,7 @@ mod tests {
         let path = upstream.clone();
         let mic = Arc::new(Policy::fixed(Setting::Yes, false));
         thread::spawn(move || {
-            let _ = serve(filter_side, &path, mic, Who::Main);
+            let _ = serve(filter_side, &path, mic, (Who::Main, None));
         });
         let (mut seen, _) = server.accept().unwrap();
         let mut c = client;
@@ -2535,7 +2553,7 @@ mod tests {
         let (client, filter_side) = UnixStream::pair().unwrap();
         let path = upstream.clone();
         thread::spawn(move || {
-            let _ = serve(filter_side, &path, mic, Who::Main);
+            let _ = serve(filter_side, &path, mic, (Who::Main, None));
         });
         let (seen, _) = server.accept().unwrap();
         seen.set_read_timeout(Some(Duration::from_secs(10)))

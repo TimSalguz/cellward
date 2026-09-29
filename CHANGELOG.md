@@ -15,7 +15,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   proxy reads the program's messages, so a proxy the program took over can
   only say "no" or open the launch window. A click on the panel counts only
   while the program has no popup and after the pointer has rested on it
-  for the launch window's guard.
+  for the launch window's guard. The microphone is asked the same way:
+  «Отказать» on the panel, the whole question — once, always — in the
+  launch window.
 - **The network is asked for** (2026-09-29, firewall stage 5, the owner's
   decision of 2026-09-28): a program with no rule of its container's gets
   a question at its first connection — «Запретить» (a rule: not asked

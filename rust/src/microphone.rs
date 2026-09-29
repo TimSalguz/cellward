@@ -74,7 +74,12 @@ use std::time::{Duration, Instant};
 
 use crate::cli::DECLARED_DIR;
 use crate::container::Source;
+use crate::onwindow::OnWindow;
 use crate::origin::Who;
+
+/// The panel's answers on the program's window: the safe one first — the
+/// only one that is an answer there (`crate::onwindow`).
+const PANEL: [&str; 2] = ["Отказать", "Разрешить…"];
 
 /// The zone's marker, in its state directory: `yes`, `no` or `ask`.
 pub const MARKER: &str = "microphone";
@@ -395,6 +400,23 @@ pub fn question(zone: &str, who: &Who, program: &str, remember: bool) -> String 
     format!(
         "{from} хочет записывать звук с микрофона.\n\n\
          Она называет себя: «{}» — это её собственные слова.\n\n{always}Разрешить?",
+        shown_program(program)
+    )
+}
+
+/// The question as the panel on the program's window says it: shorter —
+/// whose it is and what it calls itself; the launch window has the rest.
+pub fn panel_question(zone: &str, who: &Who, program: &str) -> String {
+    let from = match who {
+        Who::Main => format!("Программа настоящего дома (сеть «{zone}»)"),
+        Who::Container(name) => format!(
+            "Программа из контейнера «{}» (сеть «{zone}»)",
+            shown_container(name)
+        ),
+        Who::Unknown => format!("Программа сети «{zone}»"),
+    };
+    format!(
+        "{from} хочет записывать звук с микрофона. Она называет себя: «{}».",
         shown_program(program)
     )
 }
@@ -767,6 +789,7 @@ impl Policy {
         program: &str,
         who: &Who,
         remember: bool,
+        launch: Option<i32>,
         then: impl FnOnce(bool) -> R,
     ) -> R {
         struct Close<'a>(&'a AtomicBool);
@@ -785,10 +808,29 @@ impl Policy {
         };
         let always = always_label(&zone, who);
         let asked = Instant::now();
-        // In the launch window first, guarded (`window::question`): counted
+        // On the program's own window first (`crate::onwindow`, the owner's
+        // decision of 2026-09-29), when its launch (`launch`: its
+        // supervisor) has one: «Отказать» there is the answer; «Разрешить…»,
+        // or no window to ask on, asks in the launch window — on the
+        // launch's compositor, whatever the filter's environment says.
+        let mut display = None;
+        let mut on_window = None;
+        if let Some(pid) = launch {
+            let short = panel_question(&zone, who, program);
+            let runtime = crate::onwindow::runtime_dir();
+            match crate::onwindow::ask(&runtime, pid, &short, &PANEL, Some(self.timeout)) {
+                OnWindow::No => on_window = Some(Some(if remember { 2 } else { 1 })),
+                OnWindow::Unanswered => on_window = Some(None),
+                OnWindow::Elsewhere(on) => display = on,
+            }
+        }
+        let left = self.timeout.saturating_sub(asked.elapsed());
+        // In the launch window next, guarded (`window::question`): counted
         // from when the question can be seen, not from its start — a loaded
         // machine shows it later. The safe answer first: Enter refuses.
-        let in_window = {
+        let in_window = if on_window.is_some() {
+            on_window
+        } else {
             let mut answers: Vec<(&str, &str, bool)> = vec![
                 ("deny", "Отказать", false),
                 ("once", "Разрешить один раз", false),
@@ -796,13 +838,14 @@ impl Policy {
             if remember {
                 answers.push(("always", always.as_str(), false));
             }
-            match crate::window::question(
+            match crate::window::question_on(
                 &self.window,
+                display.as_deref(),
                 &title,
                 &text,
                 None,
                 &answers,
-                Some(self.timeout),
+                Some(left),
             ) {
                 crate::window::Asked::NotShown => None,
                 crate::window::Asked::Chose(tag) => Some(match (tag.as_str(), remember) {
@@ -1245,18 +1288,18 @@ mod tests {
         // Once: this stream, nothing written.
         let p = d.policy(d.kdialog("once", "exit 0"), true, TIMEOUT);
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
-        assert!(p.ask("app", &Who::Main, true, |a| a));
+        assert!(p.ask("app", &Who::Main, true, None, |a| a));
         assert!(!record.exists());
         // Deny.
         let p = d.policy(d.kdialog("deny", "exit 2"), true, TIMEOUT);
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
-        assert!(!p.ask("app", &Who::Main, true, |a| a));
+        assert!(!p.ask("app", &Who::Main, true, None, |a| a));
         assert!(!record.exists());
         // Always: yes in the main home's own record (§11.15, 2a) — in every
         // network —, and the next stream is not asked about.
         let p = d.policy(d.kdialog("always", "exit 1"), true, TIMEOUT);
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
-        assert!(p.ask("app", &Who::Main, true, |a| a));
+        assert!(p.ask("app", &Who::Main, true, None, |a| a));
         let conf = std::fs::read_to_string(&record).unwrap();
         assert!(conf.contains("microphone = yes"), "{conf}");
         assert!(!d.zone().join(MARKER).exists());
@@ -1270,7 +1313,7 @@ mod tests {
             p.decide("app", &Who::Main),
             Verdict::Ask { remember: false }
         );
-        assert!(!p.ask("app", &Who::Main, false, |a| a));
+        assert!(!p.ask("app", &Who::Main, false, None, |a| a));
         assert!(!record.exists());
         // A template declared in Nix is a default, not a ceiling: "always"
         // is offered over it.
@@ -1278,7 +1321,7 @@ mod tests {
         d.declare("defaults.conf", "microphone = ask\n");
         let p = d.policy(d.kdialog("three", "exit 2"), true, TIMEOUT);
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
-        assert!(!p.ask("app", &Who::Main, true, |a| a));
+        assert!(!p.ask("app", &Who::Main, true, None, |a| a));
         let journal = d.journal();
         assert_eq!(journal.matches("\"event\":\"microphone\"").count(), 5);
         assert!(journal.contains("\"decision\":\"refused\",\"why\":\"человек отказал\""));
@@ -1296,7 +1339,7 @@ mod tests {
         let p = d.policy(kdialog, true, Duration::from_secs(1));
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
         let started = Instant::now();
-        assert!(!p.ask("app", &Who::Main, true, |a| a));
+        assert!(!p.ask("app", &Who::Main, true, None, |a| a));
         assert!(started.elapsed() < Duration::from_secs(10));
         let pid: i32 = std::fs::read_to_string(&pidfile)
             .unwrap()
@@ -1321,7 +1364,7 @@ mod tests {
         // A kdialog that cannot be started is no answer either.
         let p = d.policy(d.base.join("missing"), true, TIMEOUT);
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
-        assert!(!p.ask("app", &Who::Main, true, |a| a));
+        assert!(!p.ask("app", &Who::Main, true, None, |a| a));
     }
 
     /// After a refusal the zone is not asked for a while: a program that
@@ -1333,7 +1376,7 @@ mod tests {
         let kdialog = d.kdialog("deny", &format!("touch {}; exit 2", asked.display()));
         let p = d.policy(kdialog.clone(), true, TIMEOUT);
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
-        assert!(!p.ask("app", &Who::Main, true, |a| a));
+        assert!(!p.ask("app", &Who::Main, true, None, |a| a));
         std::fs::remove_file(&asked).unwrap();
         let Verdict::Refuse(why) = p.decide("app", &Who::Main) else {
             panic!("asked again right after a refusal");
@@ -1349,7 +1392,7 @@ mod tests {
             .policy(kdialog, true, TIMEOUT)
             .with_after_deny(Duration::ZERO);
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
-        assert!(!p.ask("app", &Who::Main, true, |a| a));
+        assert!(!p.ask("app", &Who::Main, true, None, |a| a));
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
         p.abandon();
     }
@@ -1379,7 +1422,7 @@ mod tests {
             .policy(d.kdialog("once", "exit 0"), true, TIMEOUT)
             .with_too_fast(TOO_FAST);
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
-        assert!(!p.ask("app", &Who::Main, true, |a| a));
+        assert!(!p.ask("app", &Who::Main, true, None, |a| a));
         assert!(!d.zone().join(MARKER).exists());
         assert!(d.journal().contains("случайное нажатие"), "{}", d.journal());
         assert!(matches!(p.decide("app", &Who::Main), Verdict::Refuse(_)));
@@ -1389,7 +1432,7 @@ mod tests {
             .policy(d.kdialog("once", "sleep 0.3; exit 0"), true, TIMEOUT)
             .with_too_fast(Duration::from_millis(200));
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
-        assert!(p.ask("app", &Who::Main, true, |a| a));
+        assert!(p.ask("app", &Who::Main, true, None, |a| a));
     }
 
     /// The pause after a refusal is the setting's, Nix's first — read when
@@ -1412,7 +1455,7 @@ mod tests {
         d.write("config/ask-again", "1s");
         assert_eq!(p.pause(), AFTER_DENY);
         d.write("config/ask-again", "45s");
-        assert!(!p.ask("app", &Who::Main, true, |a| a));
+        assert!(!p.ask("app", &Who::Main, true, None, |a| a));
         let Verdict::Refuse(why) = p.decide("app", &Who::Main) else {
             panic!("asked again right after a refusal");
         };
@@ -1430,7 +1473,7 @@ mod tests {
         let d = Dirs::new("settle");
         let p = d.policy(d.kdialog("once", "exit 0"), true, TIMEOUT);
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
-        let meanwhile = p.ask("app", &Who::Main, true, |allowed| {
+        let meanwhile = p.ask("app", &Who::Main, true, None, |allowed| {
             assert!(allowed);
             p.decide("app", &Who::Main)
         });
@@ -1466,11 +1509,11 @@ mod tests {
         assert!(
             matches!(p.decide("other", &Who::Main), Verdict::Refuse(why) if why.contains("уже открыт"))
         );
-        assert!(p.ask("app", &Who::Main, true, |a| a));
+        assert!(p.ask("app", &Who::Main, true, None, |a| a));
         assert!(asked.exists());
         // Answered: the next one may ask again.
         assert_eq!(p.decide("app", &Who::Main), Verdict::Ask { remember: true });
-        assert!(p.ask("app", &Who::Main, true, |a| a));
+        assert!(p.ask("app", &Who::Main, true, None, |a| a));
     }
 
     /// A container's own word over the template, both ways (2b of §11.15);
@@ -1571,7 +1614,7 @@ mod tests {
         std::fs::create_dir_all(d.base.join("profiles/work")).unwrap();
         let p = d.policy(d.kdialog("always", "exit 1"), true, TIMEOUT);
         assert_eq!(p.decide("app", &work), Verdict::Ask { remember: true });
-        assert!(p.ask("app", &work, true, |a| a));
+        assert!(p.ask("app", &work, true, None, |a| a));
         let conf =
             std::fs::read_to_string(d.config().join("containers/work/container.conf")).unwrap();
         assert!(conf.contains("microphone = yes"), "{conf}");
@@ -1585,7 +1628,7 @@ mod tests {
         // back by the answer.
         let gone = Who::Container("gone".into());
         assert_eq!(p.decide("app", &gone), Verdict::Ask { remember: true });
-        assert!(p.ask("app", &gone, true, |a| a));
+        assert!(p.ask("app", &gone, true, None, |a| a));
         assert!(!d.config().join("containers/gone").exists());
         assert!(d.journal().contains("не записано"), "{}", d.journal());
     }
@@ -1605,7 +1648,7 @@ mod tests {
             Verdict::Ask { remember: false }
         );
         // Its "always" button is not there: exit 1 is a refusal.
-        assert!(!p.ask("app", &Who::Unknown, true, |a| a));
+        assert!(!p.ask("app", &Who::Unknown, true, None, |a| a));
         assert!(asked.exists());
         assert!(
             d.journal().contains("\"container\":\"?\""),
