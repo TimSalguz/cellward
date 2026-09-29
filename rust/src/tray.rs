@@ -117,11 +117,11 @@ pub fn color(zone_dir: Option<&Path>, config: &Path, zone: &str, who: &Who) -> R
 }
 
 /// "zone · container" for the tooltip, as the frame's title says it: the
-/// main home is "основной"; a program whose container is not known shows
+/// main home is "настоящий дом"; a program whose container is not known shows
 /// the zone alone.
 pub fn label(zone: &str, who: &Who) -> String {
     match who {
-        Who::Main => crate::frame::title_text(zone, "основной"),
+        Who::Main => crate::frame::title_text(zone, "настоящий дом"),
         Who::Container(name) => crate::frame::title_text(zone, name),
         Who::Unknown => crate::frame::title_part(zone),
     }
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn the_label_is_the_frames_title() {
-        assert_eq!(label("work", &Who::Main), "work · основной");
+        assert_eq!(label("work", &Who::Main), "work · настоящий дом");
         assert_eq!(label("work", &Who::Container("mail".into())), "work · mail");
         assert_eq!(label("work", &Who::Unknown), "work");
         assert_eq!(tooltip_text("", "work · mail"), "work · mail");

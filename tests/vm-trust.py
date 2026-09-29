@@ -61,7 +61,7 @@ with subtest("one name: the main home, a change of kind, one container a launch"
     alice("sh -c '! cellward run direct --profile vmlayer --sandbox vmkind -- true'")
     alice("sh -c '! cellward container create main'")
     out = alice("cellward container show vmmain")
-    assert "основной дом" in out, out
+    assert "настоящий дом" in out, out
 
 with subtest("trust: a CA and a server certificate made on the fly"):
     alice(

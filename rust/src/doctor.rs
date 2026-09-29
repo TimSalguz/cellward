@@ -1736,7 +1736,7 @@ pub fn live_switch_check(live: Option<crate::epoch::LiveSwitch>) -> Check {
             "kind" => Check::new(
                 id,
                 Level::Skip,
-                "экземпляр на одну сеть (основной дом, разовый) — сеть не меняется",
+                "экземпляр на одну сеть (настоящий дом, разовый) — сеть не меняется",
             ),
             "outside" => Check::new(
                 id,

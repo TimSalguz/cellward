@@ -1147,7 +1147,7 @@ const HOST_FILES_SWITCH: Switch = Switch {
     off: "read-only",
     nix: "programs.cellward.hostFilesWritable",
     read: crate::hermetic::host_files_writable,
-    said_on: "сеть допускает запись файлов хоста: контейнеры основного дома без своей настройки \
+    said_on: "сеть допускает запись файлов хоста: контейнеры настоящего дома без своей настройки \
               и те, что её просят (cellward container set <к> host-files writable), могут писать \
               то, что хост потом исполняет (автозапуск, ярлыки, конфиги оболочек и композитора)",
     said_off: "сеть не допускает запись файлов хоста: то, что хост исполняет из дома, в её \
@@ -1899,7 +1899,7 @@ fn container_create(tools: &Tools, name: &OsStr, home: crate::container::Home) -
                 }
                 crate::container::Home::Layer => "пустой слой поверх твоего ~/",
                 crate::container::Home::Main => {
-                    "основной дом: настоящий, со своими сетью и разрешениями"
+                    "настоящий дом: настоящий, со своими сетью и разрешениями"
                 }
             };
             println!("контейнер {name} создан ({what})");
@@ -2058,7 +2058,7 @@ fn trust_target(tools: &Tools, name: &OsStr) -> Result<TrustTarget, String> {
     let Some(c) = crate::container::load(tools, &text) else {
         if text.is_empty() || text == registry::MAIN || crate::container::reserved_name(&text) {
             return Err(format!(
-                "«{text}» — не контейнер: основной дом общий с хостом, и сертификат в нём был бы сертификатом хоста"
+                "«{text}» — не контейнер: настоящий дом общий с хостом, и сертификат в нём был бы сертификатом хоста"
             ));
         }
         let name = crate::container::canonical(tools, &text).unwrap_or(text);
@@ -2068,7 +2068,7 @@ fn trust_target(tools: &Tools, name: &OsStr) -> Result<TrustTarget, String> {
     };
     if c.home == crate::container::Home::Main {
         return Err(format!(
-            "{} — основной дом: его базы сертификатов — хоста, и сертификат в них был бы сертификатом хоста",
+            "{} — настоящий дом: его базы сертификатов — хоста, и сертификат в них был бы сертификатом хоста",
             c.name
         ));
     }
@@ -4188,7 +4188,7 @@ fn pins(tools: &Tools) -> u8 {
             .unwrap_or_else(|| key.to_string_lossy().into_owned());
         let value = read_setting(&file).unwrap_or_default();
         let shown = match value.as_str() {
-            "__main__" | "" => "основной, сеть спрашивается при запуске".to_owned(),
+            "__main__" | "" => "настоящий дом, сеть спрашивается при запуске".to_owned(),
             "__fs__" => "разовый контейнер, сеть спрашивается при запуске".to_owned(),
             selector => match crate::container::load(tools, selector) {
                 Some(c) => match &c.network.value {

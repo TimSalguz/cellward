@@ -1403,7 +1403,7 @@ fn a_choice_for_a_zone_is_the_window_only_and_comes_back_on_stdout() {
     );
     assert!(home.asked().is_empty());
     let told = home.read("window.in").unwrap();
-    assert!(told.contains("title\tЗапрос из зоны «nl»\n"), "{told}");
+    assert!(told.contains("title\tЗапрос из сети «nl»\n"), "{told}");
     // The command is its own block, not notes the window writes itself.
     assert!(
         told.contains("cmd\tfirefox\ncmd\thttps://example.org/a b\n"),

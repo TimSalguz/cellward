@@ -976,7 +976,7 @@ impl Panel {
         let top = row![
             tab("Сеть", Tab::Network),
             tab("Контейнеры", Tab::Containers),
-            tab("Зоны", Tab::Zones),
+            tab("Подключения", Tab::Zones),
             tab("Настройки", Tab::Settings),
             container(text(note).size(13)).width(Length::Fill),
             button(text("Закрыть  Esc").size(14))
@@ -1502,9 +1502,9 @@ impl Panel {
         let block: Element<'a, Msg> = match pending {
             Pending::Kill(zone) => column![
                 question(format!(
-                    "Оборвать зону «{zone}»? Все её программы — удалённый доступ, браузеры, \
-                     всё, что в ней запущено, — будут заморожены и убиты, несохранённое \
-                     пропадёт."
+                    "Оборвать подключение «{zone}»? Все его программы — удалённый доступ, \
+                     браузеры, всё, что в нём запущено, — будут заморожены и убиты, \
+                     несохранённое пропадёт."
                 )),
                 row![go("Оборвать", Some(Msg::KillGo), true), cancel].spacing(6)
             ]
@@ -1512,9 +1512,9 @@ impl Panel {
             .into(),
             Pending::RemoveZone(zone) => column![
                 question(format!(
-                    "Удалить зону «{zone}»? Она будет остановлена и удалена вместе с копией \
-                     конфига — в нём приватный ключ. Программы, закреплённые за ней, снова \
-                     начнут спрашивать сеть."
+                    "Удалить подключение «{zone}»? Оно будет остановлено и удалено вместе с \
+                     копией конфига — в нём приватный ключ. Программы, закреплённые за ним, \
+                     снова начнут спрашивать сеть."
                 )),
                 row![go("Удалить", Some(Msg::RemoveZoneGo), true), cancel].spacing(6)
             ]
@@ -1522,9 +1522,9 @@ impl Panel {
             .into(),
             Pending::AddZone { conf, name } => column![
                 question(format!(
-                    "Зона из «{conf}». Как её назвать? Имя попадёт в ярлыки и окна."
+                    "Подключение из «{conf}». Как его назвать? Имя попадёт в ярлыки и окна."
                 )),
-                text_input("имя зоны: буквы, цифры, _ и -", name)
+                text_input("имя подключения: буквы, цифры, _ и -", name)
                     .on_input(Msg::ZoneName)
                     .on_submit(Msg::AddZoneGo)
                     .size(14)
@@ -1611,7 +1611,7 @@ impl Panel {
         }
         let idle = !self.busy && self.pending.is_none();
         page = page.push(
-            button(text("Добавить зону из конфига…").size(13))
+            button(text("Добавить VPN из конфига…").size(13))
                 .padding([4, 10])
                 .style(button::secondary)
                 .on_press_maybe(idle.then_some(Msg::AddZoneAsk)),
@@ -1692,8 +1692,8 @@ impl Panel {
         }
         page = page.push(
             text(
-                "Запертая зона не выпускает свои программы в другие сети. Оборвать — убить все \
-                 программы зоны сразу и опустить её.",
+                "Запертое подключение не выпускает свои программы в другие сети. Оборвать — \
+                 убить все его программы сразу и опустить его.",
             )
             .size(12),
         );
@@ -1770,7 +1770,7 @@ impl Panel {
         ));
         let mut homes = vec![
             ("ask".to_owned(), "Спрашивать каждый раз".to_owned()),
-            ("main".to_owned(), "Всегда основной дом".to_owned()),
+            ("main".to_owned(), "Всегда настоящий дом".to_owned()),
             (
                 "own".to_owned(),
                 "У каждой программы свой контейнер".to_owned(),

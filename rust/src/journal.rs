@@ -209,7 +209,7 @@ fn human(fields: &[(String, String)]) -> String {
     let what = match get("event") {
         "launch-unconfined" => {
             let container = match get("container") {
-                "" => "основной дом".to_owned(),
+                "" => "настоящий дом".to_owned(),
                 "__fs__" => "разовый контейнер".to_owned(),
                 c => format!("контейнер {c}"),
             };

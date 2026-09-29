@@ -718,7 +718,7 @@ pub fn net_menu(zones: &[MenuZone], pinned: &str, current_container: &str) -> Ve
         let mut text = if zone.host_interface {
             format!("Через интерфейс: {name} (без шифрования)")
         } else if let Some(system) = &zone.system_zone {
-            format!("VPN: {name} (через системную зону {system})")
+            format!("VPN: {name} (через системное подключение {system})")
         } else {
             format!("VPN: {name}")
         };
@@ -813,7 +813,7 @@ pub fn container_label_in(tools: &Tools, selector: &str) -> String {
 fn label_of(selector: &str, home: Option<crate::container::Home>) -> String {
     use crate::container::Home;
     match selector {
-        "" | MAIN => "основной".to_owned(),
+        "" | MAIN => "настоящий дом".to_owned(),
         THROWAWAY => "разовый".to_owned(),
         other => {
             let (name, home) = match other.strip_prefix(SANDBOX_PREFIX) {
@@ -871,8 +871,11 @@ pub fn profile_menu(
 ) -> Vec<Row> {
     use crate::container::Home;
     let mut menu = vec![
-        row("", "Основной дом: общий с системой"),
-        row("pinmain", "Основной дом — всегда"),
+        row(
+            "",
+            "Настоящий дом: все ваши файлы — ключи ssh, пароли браузера, токены",
+        ),
+        row("pinmain", "Настоящий дом — всегда"),
         // A home of the program's own: permanent, but nobody else's. It differs
         // from a named container with a home of its own only in that the name
         // is picked automatically — it is "an isolated home by default", which
@@ -985,7 +988,10 @@ pub fn window_containers(
     };
     let own = own_name(key);
     let mut items = vec![
-        item("", "Основной дом — общий с системой"),
+        item(
+            "",
+            "Настоящий дом — все ваши файлы: ключи ssh, пароли браузера, токены",
+        ),
         item(
             "__ownsb__",
             "Свой контейнер — постоянный дом только этой программы",
@@ -1829,8 +1835,8 @@ fn zone_request(
 ) -> window::Request {
     let mut req = window_request(tools, key, "", zone, memory);
     req.title = match zone.strip_prefix("system:") {
-        Some(system) => format!("Запрос из системной зоны «{system}»"),
-        None => format!("Запрос из зоны «{zone}»"),
+        Some(system) => format!("Запрос из системного подключения «{system}»"),
+        None => format!("Запрос из сети «{zone}»"),
     };
     req.notes.clear();
     let asker = if req.nets.iter().any(|n| n.tag == zone) {
@@ -1844,7 +1850,7 @@ fn zone_request(
     if locked {
         req.nets.retain(|n| n.tag == zone);
         req.notes
-            .push("Зона заперта: запустить можно только в ней самой.".to_owned());
+            .push("Подключение заперто: запустить можно только в нём самом.".to_owned());
     }
     if let Some(at) = req
         .nets
@@ -2155,7 +2161,7 @@ fn ask_profile(
         memory.last_choice().unwrap_or("__ownsb__").into(),
         "--menu".into(),
         "В каком контейнере открыть? Контейнер хранит настройки, сессии и логины отдельно от \
-         основного дома"
+         настоящего дома"
             .into(),
     ];
     push_rows(
@@ -3432,7 +3438,7 @@ mod tests {
             name: name.to_owned(),
             ..MenuZone::default()
         };
-        let menu = net_menu(&[zone("de"), zone("nl")], "", "основной");
+        let menu = net_menu(&[zone("de"), zone("nl")], "", "настоящий дом");
         assert_eq!(
             tags(&menu),
             [
@@ -3451,7 +3457,7 @@ mod tests {
         assert_eq!(text_of(&menu, "pin:nl"), "Всегда: VPN: nl");
         assert_eq!(
             text_of(&menu, "__chooseprofile__"),
-            "⚙ Сменить контейнер (сейчас: основной)…"
+            "⚙ Сменить контейнер (сейчас: настоящий дом)…"
         );
         // The way back out of a pin is only offered when there is one — of
         // the program's container: the network is the container's.
@@ -3482,7 +3488,7 @@ mod tests {
                 },
             ],
             "",
-            "основной",
+            "настоящий дом",
         );
         assert_eq!(
             text_of(&menu, "lan"),
@@ -3490,13 +3496,13 @@ mod tests {
         );
         assert_eq!(text_of(&menu, "nl"), "VPN: nl — туннель не отвечает");
         // A zone through a system zone is a VPN, and says whose tunnel it is.
-        assert_eq!(text_of(&menu, "mz"), "VPN: mz (через системную зону sz)");
+        assert_eq!(text_of(&menu, "mz"), "VPN: mz (через системное подключение sz)");
     }
 
     #[test]
     fn the_container_in_force_is_named_the_way_the_user_chose_it() {
-        assert_eq!(container_label(""), "основной");
-        assert_eq!(container_label(MAIN), "основной");
+        assert_eq!(container_label(""), "настоящий дом");
+        assert_eq!(container_label(MAIN), "настоящий дом");
         assert_eq!(container_label(THROWAWAY), "разовый");
         assert_eq!(container_label("sb:app-firefox"), "свой");
         assert_eq!(container_label("sb:work"), "work — свой дом");
@@ -3507,7 +3513,7 @@ mod tests {
         // window's words.
         use crate::container::Home;
         assert_eq!(label_of("dev", Some(Home::Private)), "dev — свой дом");
-        assert_eq!(label_of("files", Some(Home::Main)), "files — основной дом");
+        assert_eq!(label_of("files", Some(Home::Main)), "files — настоящий дом");
         assert_eq!(label_of("work", Some(Home::Layer)), "work — слой над домом");
     }
 
@@ -3564,8 +3570,11 @@ mod tests {
         // One vocabulary with the launch window: a container, by its name
         // and the kind of its home; the two throwaway kinds by what the
         // program sees.
-        assert_eq!(text_of(&menu, ""), "Основной дом: общий с системой");
-        assert_eq!(text_of(&menu, "pinmain"), "Основной дом — всегда");
+        assert_eq!(
+            text_of(&menu, ""),
+            "Настоящий дом: все ваши файлы — ключи ssh, пароли браузера, токены"
+        );
+        assert_eq!(text_of(&menu, "pinmain"), "Настоящий дом — всегда");
         assert_eq!(
             text_of(&menu, "__ownsb__"),
             "🔒 Свой контейнер: постоянный дом только этой программы"
@@ -3593,10 +3602,13 @@ mod tests {
         );
         // The main home says what it is, and is never "busy": it is one
         // identity in every network.
-        assert_eq!(text_of(&menu, "files"), "⚠ Контейнер «files»: основной дом");
+        assert_eq!(
+            text_of(&menu, "files"),
+            "⚠ Контейнер «files»: настоящий дом"
+        );
         assert_eq!(
             text_of(&menu, "pin:files"),
-            "⚠ Контейнер «files»: основной дом — всегда"
+            "⚠ Контейнер «files»: настоящий дом — всегда"
         );
         assert_eq!(
             text_of(&menu, "work"),
@@ -3902,7 +3914,10 @@ mod tests {
         assert_eq!(
             labels,
             [
-                ("", "Основной дом — общий с системой"),
+                (
+                    "",
+                    "Настоящий дом — все ваши файлы: ключи ssh, пароли браузера, токены"
+                ),
                 (
                     "__ownsb__",
                     "Свой контейнер — постоянный дом только этой программы"
@@ -3913,7 +3928,7 @@ mod tests {
                 ),
                 ("общая", "Контейнер «общая» — свой дом"),
                 ("банк", "Контейнер «банк» — слой над домом"),
-                ("files", "Контейнер «files» — основной дом"),
+                ("files", "Контейнер «files» — настоящий дом"),
                 (
                     "tmpjoin:/tmp/vpn-profile-abc",
                     "К открытому временному слою: firefox"

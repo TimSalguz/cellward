@@ -392,7 +392,7 @@ fn a_launch_is_wrapped_in_the_compositor_restriction_by_default() {
     // restricted socket goes into (LEAK-MODEL §13).
     assert!(
         line.starts_with(&format!(
-            "зона nl, контейнер основной: /nonexistent/vpn-zone-core wl-sandbox firefox --zone {key} --frame "
+            "сеть nl, контейнер настоящий дом: /nonexistent/vpn-zone-core wl-sandbox firefox --zone {key} --frame "
         )),
         "{line}"
     );
@@ -417,7 +417,7 @@ fn a_launch_is_wrapped_in_the_compositor_restriction_by_default() {
     );
     assert_eq!(
         stdout(&out).trim(),
-        "зона unconfined, контейнер основной: firefox"
+        "сеть unconfined, контейнер настоящий дом: firefox"
     );
     // The allowlist likewise: obs is let through unconfined only.
     fs::create_dir_all(home.root.join("config")).unwrap();
@@ -470,7 +470,7 @@ fn an_unconfined_launch_starts_no_zone_and_loses_nothing_on_the_way() {
     assert!(!stderr(&out).contains("systemctl"), "{}", stderr(&out));
     let line = stdout(&out);
     assert!(
-        line.starts_with("зона unconfined, контейнер основной:"),
+        line.starts_with("сеть unconfined, контейнер настоящий дом:"),
         "{line}"
     );
     assert!(
@@ -486,7 +486,7 @@ fn an_unconfined_launch_starts_no_zone_and_loses_nothing_on_the_way() {
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
-        stdout(&out).starts_with("зона unconfined, контейнер work:"),
+        stdout(&out).starts_with("сеть unconfined, контейнер work:"),
         "{}",
         stdout(&out)
     );
@@ -618,7 +618,7 @@ fn containers_and_sandboxes_are_created_listed_and_removed() {
         .status
         .success());
     let list = stdout(&home.run(&["container", "list"]));
-    assert!(list.contains("основной дом"), "{list}");
+    assert!(list.contains("настоящий дом"), "{list}");
     assert!(list.contains("свой дом"), "{list}");
 
     assert!(home.run(&["profile", "rm", "work"]).status.success());
@@ -1890,7 +1890,7 @@ fn explain_says_who_asked_and_what_the_network_tolerates() {
          \"tolerated\":{\"value\":true,\"source\":\"local\",\"refused_by\":null},"
     );
     ok(&["defaults", "set", "nix-daemon", "default"]);
-    assert!(ok(&["explain", "main", "nl"]).contains("Основной дом"));
+    assert!(ok(&["explain", "main", "nl"]).contains("Настоящий дом"));
     // Offline tolerates none, and is refused them.
     let json = setting(&["explain", "work", "offline", "--json"], "nix_daemon");
     assert!(json.contains("\"value\":false"), "{json}");
@@ -2772,7 +2772,7 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
     // launch knows it.
     assert!(
         line.contains(&format!(
-            "wl-sandbox foot --zone {} --frame {}:4:always --frame-title nl · основной \
+            "wl-sandbox foot --zone {} --frame {}:4:always --frame-title nl · настоящий дом \
              --frame-switch {} -- foot",
             // The sockets by the instance's key (stage 5: nothing by the
             // zone's name); the title still names the zone.

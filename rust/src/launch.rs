@@ -1189,7 +1189,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 refuse(
                     tools,
                     &format!(
-                        "«{}» уже работает с основным домом вне контейнера «{id}» (pid {pid}). \
+                        "«{}» уже работает с настоящим домом вне контейнера «{id}» (pid {pid}). \
                          У контейнера своё пространство процессов, и замок профиля, которым \
                          программа вроде браузера не даёт открыть его дважды, сквозь него не \
                          виден: второй процесс открыл бы тот же профиль. Закрой ту программу — \
@@ -1215,7 +1215,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 refuse(
                     tools,
                     &format!(
-                        "«{}» уже работает с основным домом в контейнере «{id}» (pid {pid}). \
+                        "«{}» уже работает с настоящим домом в контейнере «{id}» (pid {pid}). \
                          У контейнера своё пространство процессов, и замок профиля, которым \
                          программа вроде браузера не даёт открыть его дважды, с хоста не \
                          виден: эта программа открыла бы тот же профиль. Закрой ту программу — \
@@ -1257,12 +1257,12 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         let shown_container = if container.profile.is_empty() {
-            "основной".to_owned()
+            "настоящий дом".to_owned()
         } else {
             container.profile.to_string_lossy().into_owned()
         };
         println!(
-            "зона {zone_name}, контейнер {shown_container}: {}",
+            "сеть {zone_name}, контейнер {shown_container}: {}",
             shown.join(" ")
         );
         return 0;

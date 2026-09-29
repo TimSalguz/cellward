@@ -6,6 +6,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **«Основной» is «Настоящий дом»** (2026-09-29, 2d of
+  `docs/PERMISSIONS.md` §11.15): what it is — the real home, every file of
+  it. The launch window says what that opens: «Настоящий дом — все ваши
+  файлы: ключи ssh, пароли браузера, токены». Frames, the tray, the window
+  menu, questions and messages say the same.
+- **No «зона» in the windows.** A zone is only a chosen network: the
+  cellward window's tab is «Подключения» (a VPN connection to add, bring up,
+  lock, cut off, remove), the launch window says «Запрос из сети …»,
+  «Подключение заперто», the window menu «подключение опустится».
 - **A network's lists say only what it tolerates** (2026-09-29, 2c of
   `docs/PERMISSIONS.md` §11.15).
   - The lists are `hermetic.exceptions` and `hermetic.default`,

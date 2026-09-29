@@ -545,16 +545,16 @@ fn profile_rm(tools: &Tools) -> u8 {
     let Some(choice) = menu(
         tools,
         "Удалить контейнер",
-        "Какой контейнер со слоем над домом удалить? Основной дом не пострадает",
+        "Какой контейнер со слоем над домом удалить? Настоящий дом не пострадает",
         &rows,
     ) else {
         return 0;
     };
 
     let warn = if choice == "__all__" {
-        format!("Удалить ВСЕ контейнеры со слоем над домом ({total})?\n\nПропадут накопленные в них настройки, куки и сессии. Твой основной дом (~/.config и остальное) не тронется.")
+        format!("Удалить ВСЕ контейнеры со слоем над домом ({total})?\n\nПропадут накопленные в них настройки, куки и сессии. Твой настоящий дом (~/.config и остальное) не тронется.")
     } else {
-        format!("Удалить контейнер «{choice}»?\n\nПропадут его настройки, куки и сессии. Основной дом не тронется.")
+        format!("Удалить контейнер «{choice}»?\n\nПропадут его настройки, куки и сессии. Настоящий дом не тронется.")
     };
     if !dialog::confirm(
         &tools.kdialog,
@@ -978,7 +978,7 @@ fn settings(tools: &Tools) -> u8 {
         "prof" => {
             let mut rows = vec![
                 row("ask", "Спрашивать каждый раз"),
-                row("main", "Всегда основной дом (общий с системой)"),
+                row("main", "Всегда настоящий дом (все ваши файлы)"),
                 row(
                     "own",
                     "У каждой программы свой контейнер — постоянный дом только её",
@@ -1153,7 +1153,7 @@ fn forget(tools: &Tools) -> u8 {
         let selector = read_setting(&profile_pins.join(key)).unwrap_or_default();
         let shown = match selector.as_str() {
             "" => "—".to_owned(),
-            MAIN => "основной".to_owned(),
+            MAIN => "настоящий дом".to_owned(),
             other => match crate::container::load(tools, other) {
                 Some(c) => match &c.network.value {
                     crate::container::Network::Named(n) => format!("{} (сеть {n})", c.name),

@@ -474,7 +474,7 @@ fn window_name(state: &Path, window: &Window, launch: Option<&Launch>) -> String
 pub fn describe(state: &Path, window: &Window, launch: Option<&Launch>) -> String {
     let name = window_name(state, window, launch);
     match launch {
-        None => format!("{name}: сеть не известна — не хост и не зона cellward"),
+        None => format!("{name}: сеть не известна — не хост и не подключение cellward"),
         Some(l) => {
             let container = match &l.selector {
                 Some(s) => crate::picker::container_label(s),
@@ -684,7 +684,7 @@ pub fn menu_entries(
             Pin::Main => out.push(entry(
                 "pin",
                 format!(
-                    "Всегда запускать «{label}» в основном доме {}",
+                    "Всегда запускать «{label}» в настоящем доме {}",
                     in_net(&l.zone)
                 ),
                 false,
@@ -1039,7 +1039,7 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
                         .map_err(|e| e.to_string())
                         .map(|()| {
                             format!(
-                                "Теперь в контейнере «{name}»: основной дом, всегда {}",
+                                "Теперь в контейнере «{name}»: настоящий дом, всегда {}",
                                 in_net(&l.zone)
                             )
                         })
@@ -1116,12 +1116,15 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
             if crate::system::run_dir(&l.zone).exists() {
                 notify(
                     &label,
-                    &format!("{} — системная зона: оборвать её отсюда нельзя", l.zone),
+                    &format!(
+                        "{} — системное подключение: оборвать его отсюда нельзя",
+                        l.zone
+                    ),
                 );
                 return 1;
             }
             if !confirm(format!(
-                "Оборвать сеть {}? Все её программы сразу останутся без сети, зона опустится.",
+                "Оборвать сеть {}? Все её программы сразу останутся без сети, подключение опустится.",
                 l.zone
             )) {
                 return 0;

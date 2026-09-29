@@ -301,7 +301,7 @@ pub fn text(subject: &Subject, zone: &str, rows: &[Row]) -> String {
             };
             format!("Контейнер «{name}» ({home}) в сети {zone}:")
         }
-        Subject::Main => format!("Основной дом (без контейнера) в сети {zone}:"),
+        Subject::Main => format!("Настоящий дом (без контейнера) в сети {zone}:"),
         Subject::Program(id) => format!(
             "Программа {id} ни в одном контейнере: её запускают в разовом контейнере — в сети \
              {zone} так:"

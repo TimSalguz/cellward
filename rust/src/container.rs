@@ -171,7 +171,7 @@ impl Home {
         match self {
             Self::Private => "свой дом",
             Self::Layer => "слой над домом",
-            Self::Main => "основной дом",
+            Self::Main => "настоящий дом",
         }
     }
 }
@@ -550,7 +550,7 @@ fn main_container_name(tools: &Tools, network: &str) -> Option<String> {
 pub fn main_for_network(tools: &Tools, network: &str) -> Result<String, String> {
     let network = crate::launch::network_name(network);
     let name = main_container_name(tools, network)
-        .ok_or_else(|| format!("нет имени для контейнера основного дома в сети {network}"))?;
+        .ok_or_else(|| format!("нет имени для контейнера настоящего дома в сети {network}"))?;
     if load_quiet(tools, &name).is_none() {
         let file = policy_dir(tools, &name).join(FILE);
         let text = format!(
@@ -687,7 +687,7 @@ pub fn migrate_pins(tools: &Tools) -> Vec<String> {
                         let _ = fs::remove_file(file);
                         said.push(format!(
                             "{key}: сеть {net} была закреплена за программой в основном \
-                                 доме — теперь она в контейнере {name} (основной дом, сеть {net})"
+                                 доме — теперь она в контейнере {name} (настоящий дом, сеть {net})"
                         ));
                     }
                     Err(e) => {
@@ -2264,7 +2264,7 @@ pub fn merge(
     }
     if a.home == Home::Main {
         return Err(format!(
-            "{from} и {into} — основной дом: своих данных у них нет, объединять нечего"
+            "{from} и {into} — настоящий дом: своих данных у них нет, объединять нечего"
         ));
     }
     for c in [&a, &b] {
@@ -2790,7 +2790,7 @@ pub fn set_home(tools: &Tools, selector: &str, home: Home) -> Result<(), String>
         && fs::read_dir(container.trust_dir()).is_ok_and(|mut d| d.next().is_some())
     {
         return Err(format!(
-            "у контейнера {selector} свои корневые сертификаты, а у основного дома их быть не может \
+            "у контейнера {selector} свои корневые сертификаты, а у настоящего дома их быть не может \
              (они легли бы в настоящий дом) — сначала cellward trust reset {selector}"
         ));
     }
