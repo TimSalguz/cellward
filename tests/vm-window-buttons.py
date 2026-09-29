@@ -213,8 +213,8 @@ with subtest("the frame's □: the compositor's fullscreen; its right click, ins
     alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=btn] fullscreen disable'")
     until_mode(0)
     machine.sleep(2)
-    # DIAG: in fullscreen, a hover strip brought out by the pointer after the
-    # compositor's fullscreen is done (a desynchronized commit of the strip).
+    # `hover` in fullscreen: the strip comes out at the screen's top edge
+    # under the pointer, with its text.
     alice("cellward frame fullscreen notice 0")
     alice("cellward frame fullscreen title hover")
     machine.sleep(2)
@@ -226,11 +226,7 @@ with subtest("the frame's □: the compositor's fullscreen; its right click, ins
     x, y, w, h = view("btn")
     pointer("move", x + w // 2, y + 1)
     machine.sleep(2)
-    try:
-        titled(shot("diag-fullscreen-hover"), x, y, w)
-        print("DIAG fullscreen hover: text there")
-    except AssertionError as e:
-        print(f"DIAG fullscreen hover: {e}")
+    settled("frame-fullscreen-hover", lambda at: titled(at, x, y, w))
     pointer("move", x + w // 2, y + h // 2)
     alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=btn] fullscreen disable'")
     until_mode(0)

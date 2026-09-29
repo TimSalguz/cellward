@@ -433,69 +433,42 @@ let
       # (`frame fullscreen notice`: here long enough to be seen whatever the
       # machine's pace, then none).
       with subtest("in fullscreen the border stays; the zone's name for a moment, then no title"):
-          # DIAG: a pointer for the label's check.
-          out = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_outputs -r"))[0]["rect"]
-          alice(
-              f"systemd-run --user --unit=vmdiagpointer --setenv=WAYLAND_DISPLAY={display} "
-              f"${pkgs.python3}/bin/python3 ${./vm-pointer.py} /tmp/diag-pointer {out['width']} {out['height']}"
-          )
-          machine.wait_until_succeeds("test -p /tmp/diag-pointer", timeout=30)
+          def fullscreen(on):
+              state = "enable" if on else "disable"
+              alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen {state}'")
+              machine.sleep(2)
+
           alice("cellward frame fullscreen notice 30")
           machine.sleep(2)
-          alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen enable'")
-          machine.sleep(2)
+          fullscreen(True)
           x, y, w, h = view("foot")
 
-          settled(
-              "frame-fullscreen-label", lambda at: framed(at, x, y, w, h, top=width + title)
-          )
-          # DIAG: the label's text, and again after a desynchronized commit
-          # of the strip (the pointer lights a button: `apply_now`).
-          try:
-              titled(shot("diag-label-1"), x, y, w)
-              print("DIAG label text: there")
-          except AssertionError as e:
-              print(f"DIAG label text: {e}")
-          alice(f"echo move {x + w - width - 12} {y + width + 10} > /tmp/diag-pointer")
-          machine.sleep(2)
-          try:
-              titled(shot("diag-label-2"), x, y, w)
-              print("DIAG label text after a lit button: there")
-          except AssertionError as e:
-              print(f"DIAG label text after a lit button: {e}")
-          alice("echo move 5 700 > /tmp/diag-pointer")
-          alice("systemctl --user stop vmdiagpointer")
-          tree = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r"))
-          node = find(tree, "foot")
-          print("DIAG foot in fullscreen:", {k: node.get(k) for k in ("rect", "window_rect", "geometry", "deco_rect", "fullscreen_mode")})
-          # DIAG: the strip in its room in fullscreen (`always`).
-          alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen disable'")
-          machine.sleep(2)
-          alice("cellward frame fullscreen title always")
-          machine.sleep(2)
-          alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen enable'")
-          machine.sleep(3)
-          x, y, w, h = view("foot")
-          try:
-              at = shot("diag-fullscreen-always")
+          def labelled(at):
+              """The name over the top of the content, under the border: its
+              text drawn (it was not, shown in the commit that ends sway's
+              transaction — `Window::after_commit`)."""
               framed(at, x, y, w, h, top=width + title)
               titled(at, x, y, w)
-              print("DIAG fullscreen always: text there")
-          except AssertionError as e:
-              print(f"DIAG fullscreen always: {e}")
-          alice("cellward frame fullscreen title default")
-          machine.sleep(2)
-          alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen disable'")
-          machine.sleep(2)
+
+          settled("frame-fullscreen-label", labelled)
+          fullscreen(False)
+          # Without the name: the border alone.
           alice("cellward frame fullscreen notice 0")
           machine.sleep(2)
-          alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen enable'")
-          machine.sleep(2)
+          fullscreen(True)
           x, y, w, h = view("foot")
           settled("frame-fullscreen", lambda at: framed(at, x, y, w, h))
-          alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen disable'")
+          fullscreen(False)
+          # `always` in fullscreen: the strip in its room, with its text.
+          alice("cellward frame fullscreen title always")
           machine.sleep(2)
+          fullscreen(True)
+          x, y, w, h = view("foot")
+          settled("frame-fullscreen-always", labelled)
+          fullscreen(False)
+          alice("cellward frame fullscreen title default")
           alice("cellward frame fullscreen notice default")
+          machine.sleep(2)
           x, y, w, h = view("foot")
           settled(
               "frame-fullscreen-back", lambda at: framed(at, x, y, w, h, top=width + title)

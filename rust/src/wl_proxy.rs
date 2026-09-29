@@ -4789,7 +4789,8 @@ mod tests {
     /// The frame in fullscreen has settings of its own (2026-09-29): here
     /// no border and no strip — the program told the whole output, the
     /// border's strips gone —, and the zone's label over the top of the
-    /// content for a moment on the way in, gone by itself. Fail-closed, as
+    /// content for a moment on the way in — laid hidden in the program's
+    /// commit and brought out right after it —, gone by itself. Fail-closed, as
     /// the title strip is: the compositor ends fullscreen, the program never
     /// acks that, and its next commit has the border back all the same.
     #[test]
@@ -4866,6 +4867,15 @@ mod tests {
         assert_eq!(made.len(), 1, "no label: {got:#?}");
         let (label_sub, label) = (made[0].args[0], made[0].args[1]);
         assert_eq!(placed(&got, label_sub), Some(vec![0, 0]));
+        assert_eq!(
+            attached(&got, label),
+            None,
+            "shown in the commit that makes the window fullscreen: {got:#?}"
+        );
+        // Out right after that commit, in a commit of its own.
+        let got = log_until(&log, |m| {
+            m.iface == "wl_subsurface" && m.opcode == 4 && m.object == label_sub
+        });
         assert!(
             attached(&got, label).is_some_and(|buffer| buffer != 0),
             "the label not shown: {got:#?}"

@@ -2217,6 +2217,9 @@ struct Window {
     /// Until when the title strip shows on a window that has just gone
     /// fullscreen ([`Window::notice`]).
     notice_until: Option<Instant>,
+    /// The label is to come out after the program's next commit, not in it
+    /// ([`Window::after_commit`]).
+    notice_due: bool,
     /// Fullscreen inside the window (`crate::frame::FullscreenButton`): the
     /// program is told it is fullscreen, the compositor is asked nothing.
     in_window: bool,
@@ -2284,6 +2287,7 @@ impl Window {
             configures: VecDeque::new(),
             hover: false,
             notice_until: None,
+            notice_due: false,
             in_window: false,
             maximized: false,
             title_pressed: None,
@@ -2362,8 +2366,22 @@ impl Window {
         if now && !was && seconds > 0 {
             let seconds = Duration::from_secs(u64::from(seconds));
             self.notice_until = Some(Instant::now() + seconds);
+            self.notice_due = true;
         } else if !now {
             self.notice_until = None;
+            self.notice_due = false;
+        }
+    }
+
+    /// The program's commit has gone to the compositor: a label due comes
+    /// out now, a commit of the strip's own after it. Shown in the commit
+    /// that makes the window fullscreen — the one that ends sway's
+    /// transaction —, the strip came out without its text and buttons
+    /// (sway 1.11, pixman; niri drew them): laid hidden in it, and brought
+    /// out right after, as a hover strip is, they are drawn.
+    fn after_commit(&mut self) {
+        if std::mem::take(&mut self.notice_due) {
+            self.show_title(true);
         }
     }
 
@@ -2571,7 +2589,7 @@ impl Window {
         let placed = self.laid.is_some_and(|(_, _, strip)| strip.is_some());
         let mode = if self.fullscreen_now() {
             if self.notice_until.is_some() {
-                return placed;
+                return placed && !self.notice_due;
             }
             self.full.title
         } else {
@@ -4178,6 +4196,11 @@ impl WlSurfaceHandler for Surface {
             }
         }
         slf.send_commit();
+        if let Some(window) = &self.window {
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.after_commit();
+            }
+        }
     }
 
     fn handle_destroy(&mut self, slf: &Rc<WlSurface>) {

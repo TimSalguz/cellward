@@ -9,7 +9,9 @@
 #     the title strip;
 #   - without niri's clipping, the frame's own corners
 #     (`frame outer-radius niri`) cut the frame round themselves, on the fly;
-#   - a new radius in niri's config reaches the open window.
+#   - a new radius in niri's config reaches the open window;
+#   - fullscreen: the border at the screen's edges, the zone's name over the
+#     top for a moment, with its text.
 #
 #   nix-build tests/vm-niri.nix -A driver -o vm-niri-driver
 #   mkdir -p /tmp/vm-niri && ./vm-niri-driver/bin/nixos-test-driver -o /tmp/vm-niri
@@ -288,11 +290,7 @@ let
               ink = sum(1 for x in range(12, 200) for y in range(4, 24) if at(x, y) != MAGENTA)
               assert ink > 100, ("no text on the label", ink)
 
-          try:
-              settled("niri-fullscreen-label", labelled)
-              print("DIAG niri label: text there")
-          except AssertionError as e:
-              print(f"DIAG niri label: {e}")
+          settled("niri-fullscreen-label", labelled)
           alice(f"NIRI_SOCKET={sock} niri msg action fullscreen-window")
           alice("cellward frame fullscreen notice default")
           machine.sleep(2)
