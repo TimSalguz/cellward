@@ -1294,11 +1294,14 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             .chain(cmd.iter())
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        let shown_container = if container.profile.is_empty() {
-            "настоящий дом".to_owned()
-        } else {
-            container.profile.to_string_lossy().into_owned()
-        };
+        // The container by its name — a sandbox, a container of the real
+        // home, «без изоляции» (`open`) —; the real home's own, as it is.
+        let shown_container = container_name(&selection)
+            .or_else(|| {
+                (!container.profile.is_empty())
+                    .then(|| container.profile.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "настоящий дом".to_owned());
         println!(
             "сеть {zone_name}, контейнер {shown_container}: {}",
             shown.join(" ")
