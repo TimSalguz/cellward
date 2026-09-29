@@ -375,14 +375,15 @@ impl ButtonsLook {
             _ => (like.rest, like.hover, like.press),
         };
         let mut buttons: Vec<ButtonLook> = self.order.to_vec();
-        let mut at = match buttons.last() {
+        let at = match buttons.last() {
             Some(last) if last.button == Button::Close => buttons.len() - 1,
             _ => buttons.len(),
         };
-        for &(what, glyph) in add {
-            buttons.insert(at, button(what, glyph, rest, hover, press));
-            at += 1;
-        }
+        buttons.splice(
+            at..at,
+            add.iter()
+                .map(|&(what, glyph)| button(what, glyph, rest, hover, press)),
+        );
         Self {
             order: Row::of(&buttons),
             fullscreen: fs,
