@@ -702,7 +702,9 @@ programs.cellward = {
   audio_manager}`, и что они просят у сети (2в): `{hermetic, nix_daemon,
   host_files_writable}`, каждое `{value,
   source}`. `networks[].microphone` и `networks[].screencast` показывают то
-  же: своего слова о программах у сети больше нет.
+  же: своего слова о программах у сети больше нет. И `network` (добавлено
+  2026-09-29, вопрос файрвола, `docs/FIREWALL.md` §9): `yes|no|ask` — есть
+  ли сеть у программы без правила её контейнера, встроенное `ask`.
 - **`containers[].always_focused`** (добавлено 2026-09-29, 3г
   `docs/PERMISSIONS.md` §11.15): `{value, source}` — думают ли окна
   контейнера, что они всегда в фокусе (`cellward container set <к>

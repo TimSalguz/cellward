@@ -645,6 +645,11 @@ let
           )
           machine.succeed("test -S /run/systemd/resolve/io.systemd.Resolve")
 
+      # No screen to ask on: a program of a container has the network without
+      # a question — set locally, so that a subtest can ask (docs/FIREWALL.md
+      # §9).
+      alice("cellward defaults set network yes")
+
       with subtest("cellward add: synthetic config (wg genkey, TEST-NET endpoint)"):
           alice(
               "priv=$(wg genkey); peer=$(wg genkey | wg pubkey); "

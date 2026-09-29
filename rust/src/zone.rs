@@ -2992,6 +2992,19 @@ struct Transport {
     verdicts: Option<File>,
     decisions: Option<crate::verdicts::Table>,
     gate: Option<(OwnedFd, OwnedFd)>,
+    /// The firewall's question, for the flows its rules ask about
+    /// (`crate::netask`); none without a gate — nothing to hold them.
+    asker: Option<crate::netask::Asker>,
+}
+
+/// The record an instance's network rules are in (`crate::netrules`): its
+/// container's, the main home's; none for a throwaway.
+fn record_of(id: &str) -> Option<String> {
+    match crate::instance::who_of(id) {
+        crate::origin::Who::Container(name) => Some(name),
+        crate::origin::Who::Main => Some(crate::container::MAIN_RECORD.to_owned()),
+        _ => None,
+    }
 }
 
 /// How a live switch ended ([`Transport::switch`]).
@@ -3050,6 +3063,9 @@ impl Transport {
         // The owners its keeper finds, anew with the table (`crate::owners`).
         let _ = fs::remove_file(zone.dir.join(crate::owners::FILE));
         let news = flows.as_ref().and_then(|_| sys::pipe_nonblocking().ok());
+        // Once, the programs that already went out keep the network when
+        // "ask" becomes the default (`crate::netrules::grandfather`).
+        crate::netrules::grandfather(&zone.home.join(CONFIG_SUBDIR), state);
         // The gate on new flows, with the flows and their news only: its
         // decisions are by them. Without it the relays hold nothing — as
         // before the firewall's rules, and said.
@@ -3094,6 +3110,22 @@ impl Transport {
             flows,
             news,
             owners: crate::owners::Keeper::default(),
+            asker: gate.as_ref().and_then(|_| {
+                crate::netask::Asker::new(
+                    &zone.tools.window,
+                    &zone.home.join(CONFIG_SUBDIR),
+                    state,
+                    record_of(&plan.id),
+                )
+                .map_err(|e| {
+                    eprintln!(
+                        "instance {}: nobody to ask about its programs' network ({e}) — \
+                             what its rules ask about is refused",
+                        plan.id
+                    )
+                })
+                .ok()
+            }),
             verdicts,
             decisions,
             gate,
@@ -3816,6 +3848,14 @@ impl Transport {
                 revents: 0,
             });
         }
+        // The person's answers (`crate::netask`): last but the news.
+        if let Some(asker) = &self.asker {
+            out.push(libc::pollfd {
+                fd: asker.fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
         if let Some((news, _)) = &self.news {
             out.push(libc::pollfd {
                 fd: news.as_raw_fd(),
@@ -3844,15 +3884,10 @@ impl Transport {
         // Its network rules (`crate::netrules`): read anew for each round —
         // a rule changed holds from the next new flow. The record: the
         // container's, the main home's; a throwaway has none (the default).
-        let record = match crate::instance::who_of(&self.id) {
-            crate::origin::Who::Container(name) => Some(name),
-            crate::origin::Who::Main => Some(crate::container::MAIN_RECORD.to_owned()),
-            _ => None,
+        let rules = match record_of(&self.id) {
+            Some(record) => crate::netrules::Rules::load(&self.config, &record),
+            None => crate::netrules::Rules::template_only(&self.config),
         };
-        let rules = record
-            .as_deref()
-            .map(|r| crate::netrules::Rules::load(&self.config, r))
-            .unwrap_or_default();
         // One verdict for every program: decided before anything is looked
         // up — the flow is held for as little as a wake-up.
         let uniform = rules.uniform();
@@ -3862,12 +3897,46 @@ impl Transport {
         let owners = self
             .owners
             .resolve(&self.dir, self.space, &registry, &fresh);
-        if uniform.is_none() {
-            self.decide(fresh.iter().zip(&owners).map(|(f, o)| {
-                let program = o.as_ref().and_then(|o| o.program.as_deref());
-                (f.key, rules.decide(program))
-            }));
+        if uniform.is_some() {
+            return;
         }
+        // By each flow's program — asked about where its rule says so. A
+        // flow the gate does not hold (DNS to the forwarder, not TCP or UDP)
+        // is not asked about: it went.
+        let names = crate::flows::read(&self.dir)
+            .map(|(_, names)| names)
+            .unwrap_or_default();
+        let mut decided = Vec::new();
+        for (f, owner) in fresh.iter().zip(&owners) {
+            if !crate::relay::gated(&f.key) {
+                decided.push((f.key, crate::verdicts::Verdict::Allow));
+                continue;
+            }
+            let program = owner.as_ref().and_then(|o| o.program.clone());
+            match rules.decide(program.as_deref()).verdict() {
+                Some(verdict) => decided.push((f.key, verdict)),
+                None => match self.asker.as_mut() {
+                    Some(asker) => {
+                        let to = crate::netask::destination(&f.key, &names);
+                        if let Some(verdict) = asker.ask(program, f.key, to) {
+                            decided.push((f.key, verdict));
+                        }
+                    }
+                    // Nobody to ask: closed.
+                    None => decided.push((f.key, crate::verdicts::Verdict::Deny)),
+                },
+            }
+        }
+        self.decide(decided.into_iter());
+    }
+
+    /// The person answered (`crate::netask`): the flows that waited decided.
+    fn heard_answers(&mut self) {
+        let decided = match self.asker.as_mut() {
+            Some(asker) => asker.answered(),
+            None => return,
+        };
+        self.decide(decided.into_iter());
     }
 
     /// Decisions written for the relays, and the relays woken to read them.
@@ -3900,6 +3969,17 @@ impl Transport {
         // a cut or a zone's return changes what is polled.
         if self.news.is_some() && polled.last().is_some_and(|p| p.revents != 0) {
             self.heard_news();
+        }
+        // The person's answers, last but the news.
+        let tail = usize::from(self.news.is_some());
+        if self.asker.is_some()
+            && polled
+                .len()
+                .checked_sub(1 + tail)
+                .and_then(|at| polled.get(at))
+                .is_some_and(|p| p.revents != 0)
+        {
+            self.heard_answers();
         }
         let mut at = 0;
         if let Some(link) = &self.link {

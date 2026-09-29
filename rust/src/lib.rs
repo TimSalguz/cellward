@@ -139,6 +139,7 @@ pub mod kill;
 pub mod launch;
 pub mod links;
 pub mod microphone;
+pub mod netask;
 pub mod netrules;
 pub mod openconnect;
 pub mod origin;

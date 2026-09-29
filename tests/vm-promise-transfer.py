@@ -380,6 +380,21 @@ def xf_zone(zone, addr, addr6):
     )
     assert xf_peers("GET", f"/down.bin?from=fw-allowed-{zone}") == [addr], xf_log()
     XF_ROWS.append((f"{zone}: curl denied by the container's rule", "blocked", "-", "-"))
+    # The question (2026-09-29): with "ask" and no screen to ask on, a
+    # program's new connection does not leave — a question that cannot be
+    # shown is "no"; the template's "yes" again, it goes.
+    alice("cellward defaults set network ask")
+    alice(
+        f"! {run} curl -sS -g -f -m 15 --connect-timeout 5 -o /dev/null "
+        f"'http://10.99.0.1:{XF_PORT}/down.bin?from=fw-asked-{zone}' </dev/null"
+    )
+    assert xf_peers("GET", f"/down.bin?from=fw-asked-{zone}") == [], xf_log()
+    alice("cellward defaults set network yes")
+    alice(
+        f"{run} curl -sS -g -f -m 60 -o /dev/null "
+        f"'http://10.99.0.1:{XF_PORT}/down.bin?from=fw-yes-{zone}' </dev/null"
+    )
+    assert xf_peers("GET", f"/down.bin?from=fw-yes-{zone}") == [addr], xf_log()
     # Who holds a connection (`owners.rs`, looked up from the host as it is
     # asked): a program of the zone that keeps one open is named.
     held_log = f"{XF}/hold-{zone}.log"

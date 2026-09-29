@@ -815,6 +815,7 @@ let
     "defaults.permissions.hermetic"
     "defaults.permissions.nixDaemon"
     "defaults.permissions.hostFilesWritable"
+    "defaults.permissions.network"
     "launcher.mode"
     "interception.userEntries"
     "autostart.unassigned"
@@ -985,6 +986,11 @@ in
           type = lib.types.nullOr lib.types.bool;
           default = null;
           description = "Просьба контейнеров без своего слова писать то, что хост исполняет из дома; действует только в сетях из hostFilesWritable. null — не задавать из Nix (cellward defaults set host-files read-only|writable, иначе false).";
+        };
+        network = lib.mkOption {
+          type = lib.types.nullOr (lib.types.enum [ "yes" "no" "ask" ]);
+          default = null;
+          description = "Есть ли сеть у программы контейнера без своего правила (docs/FIREWALL.md §9): yes, no или ask — спросить при первом соединении программы, до ответа сети у неё нет. Правило контейнера (containers.<к>.firewall) важнее. null — не задавать из Nix (cellward defaults set network …, иначе ask).";
         };
       };
     };
@@ -1674,6 +1680,7 @@ in
         ++ lib.optional (cfg.defaults.permissions.hermetic != null) "hermetic = ${lib.boolToString cfg.defaults.permissions.hermetic}\n"
         ++ lib.optional (cfg.defaults.permissions.nixDaemon != null) "nix_daemon = ${lib.boolToString cfg.defaults.permissions.nixDaemon}\n"
         ++ lib.optional (cfg.defaults.permissions.hostFilesWritable != null) "host_files_writable = ${lib.boolToString cfg.defaults.permissions.hostFilesWritable}\n"
+        ++ lib.optional (cfg.defaults.permissions.network != null) "network = ${cfg.defaults.permissions.network}\n"
       );
     })
     (lib.mkIf (cfg.protect != [ ]) {

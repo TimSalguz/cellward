@@ -130,7 +130,8 @@ pub fn defaults(tools: &Tools) -> String {
          \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{},\"ask_again\":{},\
          \"question_timeout\":{},\"handshake_check\":{},\"protected\":[{}],\"host_runs\":[{}],\
          \"permissions\":{{\"microphone\":{},\"screencast\":{},\"camera\":{},\
-         \"audio_manager\":{},\"hermetic\":{},\"nix_daemon\":{},\"host_files_writable\":{}}}}}",
+         \"audio_manager\":{},\"hermetic\":{},\"nix_daemon\":{},\"host_files_writable\":{},\
+         \"network\":{}}}}}",
         sourced_str(&network, network_source),
         sourced_str(&container, container_source),
         sourced_str(&mode, mode_source),
@@ -178,6 +179,11 @@ pub fn defaults(tools: &Tools) -> String {
         {
             let (on, src) = crate::permissions::request(&tools.config, "host_files_writable");
             sourced(on.to_string(), src)
+        },
+        // The network's default for a program with no rule (the firewall).
+        {
+            let (s, src) = crate::permissions::switch(&tools.config, "network");
+            sourced_str(s.as_str(), src)
         }
     )
 }

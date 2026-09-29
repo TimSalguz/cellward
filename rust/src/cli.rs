@@ -2781,7 +2781,13 @@ fn container_net(tools: &Tools, words: &[String]) -> u8 {
                 };
                 println!("{program}: {}{from}", said(*verdict));
             }
-            println!("остальным программам: {}", said(rules.default_verdict()));
+            println!(
+                "остальным программам: {}",
+                match rules.default_rule().verdict() {
+                    Some(v) => said(v),
+                    None => "спрашивать",
+                }
+            );
             return 0;
         }
         (Some(verb @ ("allow" | "deny" | "forget")), Some(program)) if words.len() == 3 => {
@@ -2813,7 +2819,10 @@ fn container_net(tools: &Tools, words: &[String]) -> u8 {
                 format!(
                     "у программ контейнера {selector} без своего правила {} — с их \
                      следующего соединения",
-                    said(verdict.unwrap_or(Verdict::Allow))
+                    match verdict {
+                        Some(v) => said(v),
+                        None => "как в шаблоне (cellward defaults)",
+                    }
                 )
             })
         }

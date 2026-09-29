@@ -717,7 +717,10 @@ and `cellward container show <name> --json` print subsets of the same schema.
   host_files_writable}`, each `{value, source}`; a request opens only
   where the network tolerates it (`networks[].tolerates`).
   `networks[].microphone` and `networks[].screencast` show the same: the
-  network has no word of its own for its programs any more.
+  network has no word of its own for its programs any more. And `network`
+  (added 2026-09-29, the firewall's question, `docs/FIREWALL.md` §9):
+  `yes|no|ask` — whether a program with no rule of its container's has the
+  network, `ask` built in.
 - **`containers[].always_focused`** (added 2026-09-29, 3d of
   `docs/PERMISSIONS.md` §11.15): `{value, source}`, whether its windows always
   think they have the focus (`cellward container set <c> always-focused

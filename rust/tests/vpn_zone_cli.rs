@@ -705,8 +705,8 @@ fn always_focused_is_a_containers_word_off_without_one() {
 }
 
 /// Stage 4 of the firewall (2026-09-29): a container's network by program
-/// — a program's line, the default for the rest, "allow" without one;
-/// «без изоляции» takes none.
+/// — a program's line, the record's default for the rest, the template's
+/// without one ("ask" built in); «без изоляции» takes none.
 #[test]
 fn a_containers_network_rules_are_its_programs_lines() {
     let home = Home::new("netrules");
@@ -717,7 +717,10 @@ fn a_containers_network_rules_are_its_programs_lines() {
         stdout(&out)
     };
     let shown = ok(&["container", "net", "work"]);
-    assert!(shown.contains("остальным программам: сеть есть"), "{shown}");
+    assert!(
+        shown.contains("остальным программам: спрашивать"),
+        "{shown}"
+    );
     ok(&["container", "net", "work", "deny", "curl"]);
     ok(&["container", "net", "work", "allow", "firefox"]);
     ok(&["container", "net", "work", "default", "deny"]);
@@ -733,6 +736,13 @@ fn a_containers_network_rules_are_its_programs_lines() {
     ok(&["container", "net", "work", "default", "none"]);
     let shown = ok(&["container", "net", "work"]);
     assert!(!shown.contains("curl"), "{shown}");
+    assert!(
+        shown.contains("остальным программам: спрашивать"),
+        "{shown}"
+    );
+    // The template's word, for every record without one of its own.
+    ok(&["defaults", "set", "network", "yes"]);
+    let shown = ok(&["container", "net", "work"]);
     assert!(shown.contains("остальным программам: сеть есть"), "{shown}");
     for bad in [
         &["container", "net", "work", "deny", "a b"][..],
@@ -2937,7 +2947,8 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
              \"audio_manager\":{\"value\":false,\"source\":\"default\"},\
              \"hermetic\":{\"value\":true,\"source\":\"default\"},\
              \"nix_daemon\":{\"value\":false,\"source\":\"default\"},\
-             \"host_files_writable\":{\"value\":false,\"source\":\"default\"}}}"
+             \"host_files_writable\":{\"value\":false,\"source\":\"default\"},\
+             \"network\":{\"value\":\"ask\",\"source\":\"default\"}}}"
         ),
         "{json}"
     );

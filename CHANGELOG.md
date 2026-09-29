@@ -6,6 +6,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The network is asked for** (2026-09-29, firewall stage 5, the owner's
+  decision of 2026-09-28): a program with no rule of its container's gets
+  a question at its first connection — «Запретить» (a rule: not asked
+  again), «Разрешить, пока работает» (the instance's life), «Разрешить
+  всегда» (a rule). Its connections wait, held by the relay, and the answer
+  is theirs all; one question at a time for an instance. Closed, not
+  answered in time or with no screen to ask on: "no" for the instance's
+  life. The default is the permissions' template's `network` (`cellward
+  defaults set network yes|no|ask`, `defaults.permissions.network`), `ask`
+  built in; «без изоляции» always has the network. **Once, every program
+  the connections' journal saw going out gets "allow" in its container**,
+  so the update asks about new programs, not the usual ones.
 - **A container's network by program** (2026-09-29, firewall stage 4):
   `cellward container net <c> [allow|deny|forget <program>]`, `cellward
   container net <c> default allow|deny|none`, `containers.<c>.firewall.

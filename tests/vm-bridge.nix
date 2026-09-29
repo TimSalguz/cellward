@@ -76,6 +76,9 @@ let
         home-manager.users.alice = {
           imports = [ ../module ];
           programs.cellward.enable = true;
+          # No screen to ask on here: a program of a container has the
+          # network without a question (docs/FIREWALL.md §9).
+          programs.cellward.defaults.permissions.network = "yes";
           home.stateVersion = "26.05";
         };
 

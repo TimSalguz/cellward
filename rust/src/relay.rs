@@ -251,6 +251,19 @@ impl Notes<'_> {
     }
 }
 
+/// Whether the flow `key` is the gate's to hold ([`Gate`]) — and its
+/// keeper's to decide: TCP and UDP, but DNS to the instance's forwarder.
+pub fn gated(key: &crate::flows::Key) -> bool {
+    use crate::flows::{TCP, UDP};
+    if key.proto != TCP && key.proto != UDP {
+        return false;
+    }
+    let forwarder = key.rport == 53
+        && (key.remote == std::net::IpAddr::V4(crate::bridge::D4)
+            || key.remote == std::net::IpAddr::V6(crate::bridge::D6));
+    !forwarder
+}
+
 /// Frames the gate holds at most, and their bytes: past these a frame of a
 /// flow with no decision is dropped — TCP sends its SYN again, a program
 /// its datagram.
@@ -289,18 +302,6 @@ impl<'a> Gate<'a> {
         }
     }
 
-    /// Whether the flow `key` is the gate's to hold.
-    fn gated(key: &crate::flows::Key) -> bool {
-        use crate::flows::{TCP, UDP};
-        if key.proto != TCP && key.proto != UDP {
-            return false;
-        }
-        let forwarder = key.rport == 53
-            && (key.remote == std::net::IpAddr::V4(crate::bridge::D4)
-                || key.remote == std::net::IpAddr::V6(crate::bridge::D6));
-        !forwarder
-    }
-
     /// The decision for `key`: what the gate read before, else the table's.
     fn decision(&mut self, key: &crate::flows::Key) -> Option<bool> {
         if let Some(&allow) = self.decided.get(key) {
@@ -314,7 +315,7 @@ impl<'a> Gate<'a> {
     /// An outbound frame of flow `key` (none: not a flow the table knows):
     /// whether it goes now. Held — kept here — while its flow is undecided.
     fn outbound(&mut self, key: Option<&crate::flows::Key>, frame: &[u8]) -> bool {
-        let Some(key) = key.filter(|k| Self::gated(k)) else {
+        let Some(key) = key.filter(|k| gated(k)) else {
             return true;
         };
         match self.decision(key) {

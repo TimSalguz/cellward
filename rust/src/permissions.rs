@@ -28,7 +28,7 @@ use crate::tools::Tools;
 /// The template's local file, in the config directory.
 pub const FILE: &str = "defaults.conf";
 /// The switches (`yes|no|ask`), built-in `ask`.
-pub const SWITCHES: [&str; 2] = ["microphone", "screencast"];
+pub const SWITCHES: [&str; 3] = ["microphone", "screencast", "network"];
 /// The flags (`on|off`, kept `true|false` as a container's), built-in off:
 /// the cameras, and the host's raw PipeWire (the audio manager).
 pub const FLAGS: [&str; 2] = ["camera", "audio_manager"];
@@ -109,6 +109,9 @@ fn key_of(word: &str) -> Option<(&'static str, Option<(&'static str, &'static st
     Some(match word {
         "microphone" => ("microphone", None),
         "screencast" => ("screencast", None),
+        // The network's default for a program with no rule (the firewall,
+        // `crate::netrules`): `ask` built in.
+        "network" => ("network", None),
         "camera" => ("camera", Some(("on", "off"))),
         "audio-manager" | "audio_manager" => ("audio_manager", Some(("on", "off"))),
         "hermetic" => ("hermetic", Some(("on", "off"))),
@@ -130,7 +133,7 @@ fn openness(setting: Setting) -> u8 {
 }
 
 const USAGE: &str = "cellward defaults — разрешения контейнеров без своего слова\n\
-                     cellward defaults set microphone|screencast yes|no|ask|default\n\
+                     cellward defaults set microphone|screencast|network yes|no|ask|default\n\
                      cellward defaults set camera|audio-manager on|off|default\n\
                      cellward defaults set hermetic|nix-daemon on|off|default\n\
                      cellward defaults set host-files read-only|writable|default";
