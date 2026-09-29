@@ -126,10 +126,11 @@ let
           machine.sleep(1)
           alice(f"WAYLAND_DISPLAY={display} grim /tmp/launch-window-keys.png")
           machine.copy_from_vm("/tmp/launch-window-keys.png", "")
-          # A new container (the seventh row, «Новый контейнер со своим
-          # домом…»): its name is typed beside the buttons, and the lists
-          # keep the height the window fitted itself to.
-          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 7")
+          # A new container (the eighth row, «Новый контейнер со своим
+          # домом…», below «Без изоляции» since 2026-09-29): its name is
+          # typed beside the buttons, and the lists keep the height the
+          # window fitted itself to.
+          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 8")
           machine.sleep(1)
           alice(f"WAYLAND_DISPLAY={display} wtype -s 400 proba")
           machine.sleep(1)
