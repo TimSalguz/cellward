@@ -51,9 +51,8 @@ let
         home-manager.users.alice = {
           imports = [ ../module ];
           programs.cellward.enable = true;
-          # No screen to ask on here: a program of a container has the
-          # network without a question (docs/FIREWALL.md §9).
-          programs.cellward.defaults.permissions.network = "yes";
+          # The network is asked about, as by default: on the program's own
+          # window (tests/vm-window-question.py); the rest is offline.
           # The window menu on a key and our windows floating: the snippet
           # sway is started with below.
           programs.cellward.desktop = {
@@ -76,6 +75,12 @@ let
         ];
         fonts.packages = [ pkgs.dejavu_fonts ];
         virtualisation.memorySize = 1536;
+        # The host's own network (`cellward run host`) is pasta by the
+        # host's routes: a default one, to nowhere.
+        networking.defaultGateway = {
+          address = "192.168.1.254";
+          interface = "eth1";
+        };
       };
 
     testScript = ''
@@ -542,6 +547,11 @@ let
       # (tests/vm-activate.py), under input, allow and notify.
       ACTIVATE = "${pkgs.python3}/bin/python3 ${./vm-activate.py}"
       exec(open("${./vm-window-focus.py}").read())
+
+      # The network question on the program's own window (docs/FIREWALL.md
+      # §4.3.1): a panel of the proxy's, a hasty click none, «Запретить» a
+      # rule, «Разрешить…» the launch window on the launch's compositor.
+      exec(open("${./vm-window-question.py}").read())
 
       # A daemon the program leaves behind (stage 3 of the container design,
       # rust/src/profile.rs `supervise`): in its instance's pid namespace an
