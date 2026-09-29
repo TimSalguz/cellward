@@ -1733,9 +1733,14 @@ fn confine(
     unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr(), 0, 0, 0) };
     // First: its maps are written while its /proc files are still its own
     // (not dumpable, they are root's). An extra wall: without it the proxy
-    // is what it was before it.
-    if let Err(e) = isolate() {
-        eprintln!("wl-sandbox: the Wayland proxy runs without namespaces of its own ({e})");
+    // is what it was before it — tried in a child first, since a namespace
+    // half made cannot be undone.
+    if isolation_given() {
+        if let Err(e) = isolate() {
+            eprintln!("wl-sandbox: the Wayland proxy is isolated only in part ({e})");
+        }
+    } else {
+        eprintln!("wl-sandbox: the Wayland proxy runs without namespaces of its own");
     }
     // SAFETY: prctl with these arguments takes no pointers.
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
@@ -1773,6 +1778,30 @@ fn confine(
         .and_then(|f| f.load())
         .map_err(|e| format!("seccomp: {e}"))?;
     Ok(border)
+}
+
+/// Whether [`isolate`] can be done here, tried in a child of the proxy's
+/// first. A namespace half made cannot be undone, and a proxy left in one
+/// may serve nothing: GitHub's Ubuntu runners' AppArmor lets `unshare`
+/// through and then refuses the maps. The proxy is single-threaded: the
+/// probe may do anything before its `_exit`.
+fn isolation_given() -> bool {
+    // SAFETY: fork in a single-threaded process; the child only calls
+    // `isolate` and leaves with _exit.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return false;
+    }
+    if pid == 0 {
+        let code = i32::from(isolate().is_err());
+        // SAFETY: always sound.
+        unsafe { libc::_exit(code) };
+    }
+    let mut status = 0;
+    // The probe ends at once, whatever it found.
+    wait(pid, &mut status, 0) == Some(pid)
+        && libc::WIFEXITED(status)
+        && libc::WEXITSTATUS(status) == 0
 }
 
 /// Namespaces of the proxy's own, in its fresh single-threaded child
