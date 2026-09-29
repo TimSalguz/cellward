@@ -259,11 +259,13 @@ let
       with subtest("asked: refused, the program's rule — not asked again, black"):
           user(
               f"systemd-run --user --unit=vmcamno --setenv=WAYLAND_DISPLAY={display} "
-              "cellward run offline -- python3 /etc/vm-camera/client.py /dev/video0 block 25"
+              "cellward run offline -- python3 /etc/vm-camera/client.py /dev/video0 block 60"
           )
-          # «Отказать», the first.
+          # «Отказать», the first — while it streams: a program gone before
+          # the answer takes its question with it.
           answer_in_the_window(0)
-          unit_says("vmcamno", "block: 25 black frames")
+          unit_says("vmcamno", "camera for «python3» refused")
+          unit_says("vmcamno", "block: 60 black frames")
           machine.succeed("grep -rq '^cam_deny' /home/alice/.config/vpn-zones/")
           # Again: no question, black.
           out = user(
