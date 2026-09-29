@@ -58,6 +58,8 @@ fn zones(state: &Path) -> Vec<String> {
         .into_iter()
         .filter(|d| d.join("config.conf").is_file())
         .filter_map(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+        // The host's own network has a line of its own, there or not yet.
+        .filter(|n| n != crate::launch::HOST)
         .collect();
     out.sort();
     out
@@ -144,6 +146,18 @@ pub fn data(tools: &Tools) -> String {
         locked(crate::launch::OFFLINE),
         "-",
     ]);
+    {
+        let up = crate::cli::zone_pid(&tools.state, OsStr::new(crate::launch::HOST)).is_some();
+        line(&[
+            "network",
+            crate::launch::HOST,
+            "host",
+            if up { "1" } else { "0" },
+            &color(crate::launch::HOST),
+            locked(crate::launch::HOST),
+            "-",
+        ]);
+    }
     line(&[
         "network",
         crate::launch::UNCONFINED,

@@ -144,3 +144,33 @@ with subtest("host-interface zone: a missing interface refuses to come up"):
         "su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; cellward up vmnone'"
     )
     machine.fail(f"test -f {STATE}/vmnone/ready")
+
+# The host's own network (2e of PERMISSIONS §11.15): a zone made when it is
+# first wanted, pasta by the host's routes, the host's resolver behind its
+# gateway's address, and a container's instance in it as in any network.
+with subtest("the host's network: made when wanted, the host's routes and resolver"):
+    machine.fail(f"test -e {STATE}/host")
+    out = alice("cellward status --json")
+    assert '"name":"host","kind":"host-network"' in out, out
+    out = alice(f"cellward run host -- socat -T10 - TCP:{server_ip}:8090")
+    assert "peer=192.168.1.1" in out, f"from the instance: {out}"
+    machine.succeed(f"grep -qx '\\[HostNetwork\\]' {STATE}/host/config.conf")
+    hpid = machine.succeed(f"cat {STATE}/host/zone.pid").strip()
+    out = in_zone(hpid, "cat /etc/resolv.conf")
+    assert "nameserver 10.255.255.254" in out, out
+    # The host's resolver answers there: the name only the host's dnsmasq
+    # knows, which no VPN network may ever resolve (the leak test's).
+    out = alice("cellward run host -- getent ahostsv4 leaktest.internal")
+    assert "10.66.66.66" in out, out
+    # The host's own services stay refused, as for an interface of the host.
+    machine.succeed(
+        "systemd-run --unit=hostlocal2 socat TCP-LISTEN:8092,fork,reuseaddr 'SYSTEM:echo host-local'"
+    )
+    machine.wait_until_succeeds("ss -ltn | grep -q ':8092 '")
+    out = alice(
+        "cellward run host -- sh -c "
+        "'timeout -s KILL 10 socat -T5 - TCP:192.168.1.1:8092 </dev/null; true'"
+    )
+    assert "host-local" not in out, out
+    machine.succeed("systemctl stop hostlocal2")
+    alice("cellward down host")

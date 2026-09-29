@@ -1519,9 +1519,23 @@ pub fn system_checks(tools: &Tools, uid: u32) -> Vec<Check> {
             "zone-name-unconfined",
             Level::Fail,
             format!(
-                "есть зона с именем «{}» — теперь это имя сети хоста без ограничений; \
+                "есть зона с именем «{}» — теперь это имя выбора «без изоляции и без VPN»; \
                  запуск в неё отказывается, переименуй её каталог в {}",
                 crate::launch::UNCONFINED,
+                tools.state.display()
+            ),
+        ));
+    }
+    // And one that kept the name `host` from before it meant the host's own
+    // network (2e): refused the same way (`launch::ensure_host_zone`).
+    if crate::launch::foreign_host_zone(&tools.state) {
+        checks.push(Check::new(
+            "zone-name-host",
+            Level::Fail,
+            format!(
+                "есть зона с именем «{}» — теперь это имя сети хоста (без VPN); запуск в неё \
+                 отказывается, переименуй её каталог в {}",
+                crate::launch::HOST,
                 tools.state.display()
             ),
         ));

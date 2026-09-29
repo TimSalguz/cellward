@@ -201,6 +201,8 @@ fn zone_kind(dir: &std::path::Path) -> Option<&'static str> {
     let ini = WgConfig::parse(&strip_cr(&raw)).ok();
     Some(match ini {
         Some(ini) if crate::openconnect::is_openconnect(&ini) => "openconnect",
+        // The host's own network (2e): no tunnel, nothing encrypted.
+        Some(ini) if crate::hostif::is_host_network(&ini) => "host-network",
         // Not encrypted by the zone: a configuration tool has to be able to
         // say so without reading the file.
         Some(ini) if crate::hostif::is_host_interface(&ini) => "host-interface",
@@ -220,6 +222,7 @@ pub fn networks(tools: &Tools) -> String {
             .to_owned(),
     ];
     let mut offline_listed = false;
+    let mut host_listed = false;
     let installed = crate::build::installed(tools);
     let instances = crate::instance::running(&tools.state);
     for dir in visible_entries(&tools.state) {
@@ -240,7 +243,13 @@ pub fn networks(tools: &Tools) -> String {
         if crate::launch::is_unconfined_name(&name) {
             continue;
         }
+        // And one called `host` from before it meant the host's own network
+        // (2e): the network is listed below, the zone refused.
+        if name == crate::launch::HOST && kind != "host-network" {
+            continue;
+        }
         offline_listed |= name == "offline";
+        host_listed |= name == crate::launch::HOST;
         let up = zone_pid(&tools.state, dir.file_name().unwrap_or_default()).is_some();
         // A running zone's build: an update leaves it running, on the build it
         // was started from (`crate::build`).
@@ -332,7 +341,7 @@ pub fn networks(tools: &Tools) -> String {
             let (color, source) = crate::frame::zone_color(&tools.state, &tools.config, &name);
             sourced_str(&color.hex(), source)
         };
-        let source = if kind == "offline" {
+        let source = if kind == "offline" || kind == "host-network" {
             "default"
         } else {
             "local"
@@ -391,6 +400,22 @@ pub fn networks(tools: &Tools) -> String {
             sourced_str(&color.hex(), source),
             attached_to(&instances, crate::launch::OFFLINE),
             tolerates(tools, &tools.state.join("offline"), "offline")
+        ));
+    }
+    if !host_listed {
+        // Its zone is made when it is first wanted (`launch::ensure_host_zone`).
+        let dir = tools.state.join(crate::launch::HOST);
+        let (color, source) =
+            crate::frame::zone_color(&tools.state, &tools.config, crate::launch::HOST);
+        items.push(format!(
+            "{{\"name\":\"{}\",\"kind\":\"host-network\",\"aliases\":[],\"source\":\"default\",\"up\":false,\
+             \"locked\":{},\"lock_not_held_by\":null,\"tunnel_alive\":null,\"handshake_age_s\":null,\"rx_bytes\":null,\
+             \"tx_bytes\":null,\"interface\":null,\"x11\":null,\"hermetic\":null,\"nix_daemon\":null,\"host_files_writable\":null,\"camera\":null,\
+             \"microphone\":null,\"screencast\":null,\"audio_manager\":null,\"system_zone\":null,\"frame_color\":{},\"build\":null,\"restart_needed\":null,\"attached\":[],\"bridge\":null,\"tolerates\":{}}}",
+            crate::launch::HOST,
+            dir.join(NO_ESCAPE).exists(),
+            sourced_str(&color.hex(), source),
+            tolerates(tools, &dir, crate::launch::HOST)
         ));
     }
     array(items)
@@ -1022,7 +1047,7 @@ pub fn bar(tools: &Tools) -> String {
         }
         text.push_str(&format!("⚠{}", unconfined.len()));
         tooltip.push_str(&format!(
-            "\nБез ограничений (⚠) сейчас: {}",
+            "\nБез изоляции (⚠) сейчас: {}",
             unconfined.join(", ")
         ));
     }

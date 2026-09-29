@@ -174,7 +174,9 @@ fn zones(state: &Path) -> Vec<PathBuf> {
         .filter(|dir| dir.join("config.conf").is_file())
         .filter(|dir| {
             dir.file_name().is_some_and(|n| {
-                n != "offline" && !crate::launch::is_unconfined_name(&n.to_string_lossy())
+                n != "offline"
+                    && n != crate::launch::HOST
+                    && !crate::launch::is_unconfined_name(&n.to_string_lossy())
             })
         })
         .collect()
@@ -726,6 +728,7 @@ fn containers(tools: &Tools) -> u8 {
                     crate::picker::UNCONFINED_ROW.1,
                 ),
                 row("offline", "Без сети"),
+                row(crate::picker::HOST_ROW.0, crate::picker::HOST_ROW.1),
             ];
             for zone in zones(&tools.state) {
                 let name = name_of(&zone);
@@ -955,6 +958,7 @@ fn settings(tools: &Tools) -> u8 {
                     "offline",
                     "Без сети (безопасный выбор для незнакомой программы)",
                 ),
+                row(crate::picker::HOST_ROW.0, crate::picker::HOST_ROW.1),
                 row(
                     crate::picker::UNCONFINED_ROW.0,
                     crate::picker::UNCONFINED_ROW.1,

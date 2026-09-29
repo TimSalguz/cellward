@@ -168,7 +168,7 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     let text = name.to_string_lossy();
     if crate::launch::is_unconfined_name(&text) {
         eprintln!(
-            "у {} нет зоны: это сеть хоста, обрывать нечего — программы там обычные процессы хоста",
+            "у {} нет зоны: без изоляции программы — обычные процессы хоста, обрывать нечего",
             crate::launch::UNCONFINED
         );
         return EXIT_REFUSED;

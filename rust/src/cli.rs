@@ -292,6 +292,13 @@ pub fn started_up(state: &Path, name: &OsStr) -> bool {
 /// desktop once it is taking a while: the wait has no clock of its own, and
 /// a stuck start is the person's to end.
 pub fn start_zone(tools: &Tools, name: &OsStr, notify: bool) -> u8 {
+    // The host's own network is made when it is first wanted.
+    if name == launch::HOST {
+        if let Err(why) = launch::ensure_host_zone(&tools.state) {
+            eprintln!("cellward: {why}");
+            return 1;
+        }
+    }
     if zone_up(&tools.state, name).is_some() {
         return systemctl(tools, "start", name);
     }
@@ -567,7 +574,10 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
     // unconfined` is the host's network — and
     // "offline" is the directory the picker creates by itself for the empty
     // zone. (`docs/GOTCHAS.md` §2)
-    if launch::is_unconfined_name(&name.to_string_lossy()) || name == launch::OFFLINE {
+    if launch::is_unconfined_name(&name.to_string_lossy())
+        || name == launch::OFFLINE
+        || name == launch::HOST
+    {
         eprintln!(
             "«{}» — встроенный вариант пикера, так зону назвать нельзя",
             name.to_string_lossy()
@@ -3511,8 +3521,8 @@ fn print_merge(tools: &Tools, from: &str, into: &str, report: &crate::container:
     println!("  {from} остался (без программ); удалить, когда проверишь результат: {remove}");
 }
 
-/// Is there a network by this name: `unconfined` (or `direct`), `offline`, or
-/// a zone?
+/// Is there a network by this name: `unconfined` (or `direct`), `offline`,
+/// `host`, or a zone?
 fn network_exists(tools: &Tools, name: &str) -> bool {
     crate::container::network_exists(tools, name)
 }

@@ -306,7 +306,7 @@ fn add_refuses_a_bad_name_and_a_file_that_is_not_a_config() {
     // zone called "unconfined" (or "direct", its old name) would be shadowed
     // by the host's network in every launch, and "offline" is the directory
     // the picker creates by itself.
-    for reserved in ["unconfined", "direct", "offline"] {
+    for reserved in ["unconfined", "direct", "offline", "host"] {
         let out = home.run(&["add", reserved, conf.to_str().unwrap()]);
         assert_eq!(out.status.code(), Some(1), "{reserved}");
         assert!(stderr(&out).contains("встроенный"), "{}", stderr(&out));
@@ -508,6 +508,55 @@ fn a_zone_left_with_the_name_unconfined_is_refused_not_left_behind() {
     }
     let json = stdout(&home.run(&["status", "--json"]));
     assert_eq!(json.matches("\"name\":\"unconfined\"").count(), 1, "{json}");
+}
+
+/// 2e (2026-09-29): `host` is the host's own network — a zone of its own,
+/// listed before it is made, made when first wanted, carrying a container's
+/// instance like any network. A zone of the person's by that name from
+/// before is refused, never written over.
+#[test]
+fn the_hosts_network_is_made_when_wanted_and_a_zone_by_its_name_refused() {
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+    let listed_once = |home: &Home| {
+        let json = stdout(&home.run(&["status", "--json"]));
+        assert_eq!(json.matches("\"name\":\"host\"").count(), 1, "{json}");
+        assert!(
+            json.contains("\"name\":\"host\",\"kind\":\"host-network\""),
+            "{json}"
+        );
+    };
+    let home = Home::new("hostnet");
+    listed_once(&home);
+    fs::create_dir_all(home.root.join("profiles/work")).unwrap();
+    home.zone_is_up("host");
+    let out = home.run_with(&["run", "host", "--profile", "work", "--", "firefox"], &dry);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("сеть host, контейнер work"),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(
+        fs::read_to_string(home.state().join("host/config.conf")).unwrap(),
+        "[HostNetwork]\n"
+    );
+    listed_once(&home);
+
+    let home = Home::new("hostzone");
+    home.zone_is_up("host");
+    fs::write(home.state().join("host/config.conf"), "[Interface]\n").unwrap();
+    let out = home.run_with(&["run", "host", "--", "firefox"], &dry);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(stderr(&out).contains("Переименуй"), "{}", stderr(&out));
+    assert_eq!(
+        fs::read_to_string(home.state().join("host/config.conf")).unwrap(),
+        "[Interface]\n",
+        "never written over"
+    );
+    listed_once(&home);
+    let out = home.run(&["up", "host"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("Переименуй"), "{}", stderr(&out));
 }
 
 #[test]
@@ -1061,7 +1110,7 @@ fn the_journal_reads_for_a_person_and_for_a_program() {
     let out = stdout(&home.run(&["journal"]));
     assert!(
         out.contains(
-            "2026-09-17 13:05:09 UTC  без ограничений: firefox (firefox, контейнер sb:web), pid 42"
+            "2026-09-17 13:05:09 UTC  без изоляции: firefox (firefox, контейнер sb:web), pid 42"
         ),
         "{out}"
     );

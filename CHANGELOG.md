@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **The host's own network, `host`** (2026-09-29, 2e of
+  `docs/PERMISSIONS.md` §11.15): no VPN, and the program in its container
+  all the same.
+  - A zone like one through an interface of the host, bound to none: pasta
+    goes by the host's routes, whichever they are now, and the host's
+    resolver answers behind the zone's gateway.
+  - It carries container instances like any network: a container's
+    settings hold there as in any other, and so do the connections list and
+    the firewall. `unconfined` gave the program all the host has.
+  - It tolerates every way around it — there is nothing to go around — so
+    the container's word decides. Its lock still holds.
+  - Its zone is made when first wanted (`cellward run host …`, `cellward up
+    host`, the launch window's «Сеть хоста — без VPN, программа в своём
+    контейнере»). `status --json` lists it as kind `host-network` before
+    that.
+  - A zone of the person's called `host` from before is never written over:
+    a launch into it is refused, and `doctor` names it. `cellward add host`
+    is refused.
+  - `unconfined` is said as what it is: «Без изоляции и без VPN».
+
 ### Changed
 - **«Основной» is «Настоящий дом»** (2026-09-29, 2d of
   `docs/PERMISSIONS.md` §11.15): what it is — the real home, every file of

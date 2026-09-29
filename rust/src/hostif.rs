@@ -168,6 +168,46 @@ where
 /// The section that makes a config a host-interface zone.
 pub const SECTION: &str = "HostInterface";
 
+/// The section of the host's own network (2e of `docs/PERMISSIONS.md`
+/// §11.15): the built-in network `host` (`crate::launch::HOST`). A zone
+/// like one through an interface of the host, bound to none: the host's
+/// routes are its way out, whichever they are now, and the host's resolver
+/// answers its names. Nothing of it is encrypted. It carries containers as
+/// every network does, and their settings hold in it — what the
+/// unconfined choice never did.
+pub const HOST_NETWORK: &str = "HostNetwork";
+
+/// The whole config of the built-in network `host`.
+pub const HOST_NETWORK_CONFIG: &str = "[HostNetwork]\n";
+
+/// Is this the host's own network?
+pub fn is_host_network(ini: &WgConfig) -> bool {
+    ini.section(HOST_NETWORK).is_some()
+}
+
+/// Whether the host has IPv6 to give the zone of its own network: a
+/// default route by an interface with a global address ([`ipv6_usable`]).
+/// Without it pasta gets `-4`, and the zone no IPv6 at all.
+pub fn host_ipv6_usable(if_inet6: &str, ipv6_route: &str) -> bool {
+    crate::doctor::default_routes6(ipv6_route)
+        .iter()
+        .any(|interface| ipv6_usable(interface, if_inet6, ipv6_route))
+}
+
+/// The host's resolver for the zone of its own network: the first IPv4
+/// `nameserver` of its `resolv.conf` — a loopback one too (systemd-resolved's
+/// stub): pasta asks it from the host, where it is. IPv4 only: the zone asks
+/// one IPv4 address (its gateway's), and pasta forwards that to one of the
+/// same family.
+pub fn host_resolver(resolv_conf: &str) -> Option<std::net::Ipv4Addr> {
+    resolv_conf.lines().find_map(|line| {
+        let mut words = line.split_whitespace();
+        (words.next() == Some("nameserver"))
+            .then(|| words.next()?.parse().ok())
+            .flatten()
+    })
+}
+
 /// A parsed `[HostInterface]` section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostIfConfig {
@@ -293,6 +333,31 @@ mod tests {
         assert!(is_host_interface(&ini));
         let wg = WgConfig::parse(b"[Interface]\nPrivateKey = x\n").unwrap();
         assert!(!is_host_interface(&wg));
+    }
+
+    /// The host's own network: its section alone, whatever else is there;
+    /// its resolver the first IPv4 one, loopback included; its IPv6 there
+    /// when some default route has an interface with a global address.
+    #[test]
+    fn the_hosts_network_is_its_section_its_resolver_and_its_ipv6() {
+        let ini = WgConfig::parse(HOST_NETWORK_CONFIG.as_bytes()).unwrap();
+        assert!(is_host_network(&ini) && !is_host_interface(&ini));
+        let other = WgConfig::parse(b"[HostInterface]\nInterface = eth0\n").unwrap();
+        assert!(!is_host_network(&other));
+        assert_eq!(
+            host_resolver(
+                "# a note\nsearch lan\nnameserver ::1\nnameserver 127.0.0.53\noptions edns0\n"
+            ),
+            Some("127.0.0.53".parse().unwrap())
+        );
+        assert_eq!(host_resolver("nameserver fe80::1%eth0\n"), None);
+        assert_eq!(host_resolver(""), None);
+        let inet6 = "20010db8000100000000000000000001 03 40 00 80 eth1\n";
+        let zero = "00000000000000000000000000000000";
+        let routes = format!("{zero} 00 {zero} 00 fe800000000000000000000000000001 00000400 00000001 00000000 00000003 eth1\n");
+        assert!(host_ipv6_usable(inet6, &routes));
+        assert!(!host_ipv6_usable(inet6, ""), "no default route");
+        assert!(!host_ipv6_usable("", &routes), "no global address");
     }
 
     /// A deletion of our interface, a rename of it, and anything else.

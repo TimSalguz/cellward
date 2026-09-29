@@ -47,7 +47,8 @@ Consequences, in order of importance:
 | concept | where it lives | what it isolates |
 |---|---|---|
 | zone | `~/.local/state/vpn-zones/<zone>/` + `vpn-zone@<zone>` | network (app-ns: `lo` + tunnel only); WireGuard, AmneziaWG or OpenConnect |
-| `unconfined` | nothing | nothing (host network) |
+| `host` | a zone of the host's own network (`[HostNetwork]`), made when first wanted | network only as any zone's: the host's routes and resolver, no VPN; its containers keep their settings |
+| `unconfined` | nothing | nothing (host network, no isolation) |
 | `offline` | a zone with a marker, created on demand | everything network, incl. host resolvers |
 | layer container (`home = layer`, was "profile") | `~/.local/state/vpn-profiles/<name>/` (data), `~/.config/vpn-zones/containers/<name>/` (policy) | the whole home, under its layer (`<name>/home/upper`); a granted path (`container grant`) is written in the real home; mounts below the home read-only unless granted; other containers' storage not seen (`crate::home_layer`, 2026-09-26 — before, only `.config`, `.local/share`, `.cache`, `.mozilla`, `.pki` were layered, and the rest of the home was written through) |
 | temporary layer over the home | `~/.local/state/vpn-zones/.throwaway/vpn-profile-*` | same, erased after the last tenant |
@@ -149,7 +150,8 @@ container = {
 | zone: OpenConnect | client in the uplink, its tun moved into the app namespace (done) | no |
 | zone: another client (sing-box, OpenVPN, a GUI client) | same shape, M4 | no |
 | through a host interface | **done**: no uplink — pasta attached to the app namespace itself, its interface named `awg0`, every socket bound to that host interface (`--outbound-if4/-if6`), no port forwarding; `[HostInterface]` config | no |
-| `unconfined` | the host's network, no namespace (done) | no |
+| the host's own network (`host`) | **done** (2e, 2026-09-29): pasta attached to the app namespace as for a host interface, bound to none — the host's routes, whichever they are now; the host's resolver behind the zone's gateway (`--dns-forward`, `--dns-host` = the first IPv4 `nameserver` of the host's `resolv.conf`, systemd-resolved's stub included); IPv6 when the host has a default v6 route; `[HostNetwork]`, written by cellward itself | no |
+| `unconfined` | the host's network, no namespace, no isolation (done) | no |
 | `offline` | loopback only (done) | no |
 | a host interface **itself** inside the container | moving a real link into another network namespace needs `CAP_NET_ADMIN` in the host's namespace | **yes**: a small system helper (NixOS module option), never the default |
 
@@ -828,7 +830,9 @@ every key of version 1.
   whole real home, and a tool that showed an unknown kind as a home of its
   own would show the real home as isolated;
 - a network by `name`; `networks[].kind` is one of `unconfined`, `offline`,
-  `wireguard`, `openconnect`, `host-interface`, `system-zone`, and `interface`
+  `host-network` (the built-in `host`, listed before its zone is made; added
+  2026-09-29), `wireguard`, `openconnect`, `host-interface`, `system-zone`,
+  and `interface`
   is the host's interface for `host-interface` and `null` for every other kind
   — a `host-interface` network is NOT encrypted by this project; `system_zone`
   is the system zone whose tunnel a `system-zone` network goes out by

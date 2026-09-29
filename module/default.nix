@@ -627,7 +627,7 @@ let
         type = lib.types.nullOr (lib.types.strMatching "[A-Za-z0-9_][A-Za-z0-9_-]*");
         default = null;
         example = "offline";
-        description = "Сеть контейнера: имя зоны, unconfined (без ограничений: сеть хоста, без VPN и без изоляции зоны; прежнее имя direct тоже принимается) или offline. Запуск в другой сети — отказ. null — сеть не задана в Nix и меняется локально (`cellward container set`).";
+        description = "Сеть контейнера: имя сети с VPN, host (сеть хоста без VPN, контейнер со своими настройками), unconfined (без изоляции и без VPN: у программы всё, что у хоста; прежнее имя direct тоже принимается) или offline. Запуск в другой сети — отказ. null — сеть не задана в Nix и меняется локально (`cellward container set`).";
       };
       apps = lib.mkOption {
         type = lib.types.listOf lib.types.str;
@@ -896,7 +896,7 @@ in
         type = lib.types.nullOr (lib.types.strMatching "[A-Za-z0-9_][A-Za-z0-9_-]*");
         default = null;
         example = "offline";
-        description = "Сеть, которую пикер предлагает незнакомой программе: offline, unconfined (без ограничений: сеть хоста, без VPN и без изоляции зоны; прежнее имя direct тоже принимается) или имя зоны. null — не задавать из Nix (`cellward default`).";
+        description = "Сеть, которую пикер предлагает незнакомой программе: offline, host (сеть хоста без VPN, программа в своём контейнере), unconfined (без изоляции и без VPN; прежнее имя direct тоже принимается) или имя сети с VPN. null — не задавать из Nix (`cellward default`).";
       };
       container = lib.mkOption {
         type = lib.types.nullOr (

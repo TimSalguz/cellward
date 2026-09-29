@@ -214,7 +214,7 @@ fn human(fields: &[(String, String)]) -> String {
                 c => format!("контейнер {c}"),
             };
             format!(
-                "без ограничений: {} ({}, {container}), pid {}",
+                "без изоляции: {} ({}, {container}), pid {}",
                 get("app"),
                 get("program"),
                 get("pid")
@@ -328,7 +328,7 @@ pub fn run(tools: &crate::tools::Tools, args: &[std::ffi::OsString]) -> u8 {
             events.join(",")
         );
     } else if lines.is_empty() {
-        println!("журнал пуст: запусков без ограничений и решений брокера не было");
+        println!("журнал пуст: запусков без изоляции и решений брокера не было");
     } else {
         for l in &lines {
             match parse(l) {

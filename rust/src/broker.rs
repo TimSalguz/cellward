@@ -987,7 +987,7 @@ fn ask(
     };
     begin_asking(&origin.name())?;
     let network = if target == crate::launch::UNCONFINED {
-        "без ограничений (сеть хоста без VPN и без изоляции)".to_owned()
+        "без изоляции и без VPN (у программы всё, что у хоста)".to_owned()
     } else {
         format!("сети «{target}»")
     };

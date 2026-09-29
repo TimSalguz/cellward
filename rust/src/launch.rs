@@ -130,6 +130,13 @@ pub fn is_unconfined_name(name: &str) -> bool {
 }
 /// The other built-in choice: a zone with loopback only, created on demand.
 pub const OFFLINE: &str = "offline";
+/// The built-in network that is the host's own, as a network and nothing
+/// more (2e of `docs/PERMISSIONS.md` §11.15): no VPN — the host's routes and
+/// its resolver (`hostif::HOST_NETWORK`) —, and a container's instance in it
+/// as in any other network, its settings holding there. [`UNCONFINED`] is
+/// that network with no isolation. Its zone is made on demand
+/// ([`ensure_host_zone`]).
+pub const HOST: &str = "host";
 
 /// Programs that keep the full set of compositor protocols.
 ///
@@ -667,6 +674,12 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     if zone == OFFLINE {
         ensure_offline_zone(&tools.state);
     }
+    if zone == HOST {
+        if let Err(why) = ensure_host_zone(&tools.state) {
+            refuse(tools, &why);
+            return 1;
+        }
+    }
 
     // --- 1a. ONE IDENTITY, ONE NETWORK ---
     // Before anything is created: a container bound to a network runs in that
@@ -759,13 +772,14 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
 
     // Unconfined, a container is its home and nothing else (review
     // 2026-09-28): its camera, microphone, devices and X settings are the
-    // host's there. Said, until the host's network is a network of the
-    // container's own space like any other.
+    // host's there. Said, with the way to have both: the host's own network
+    // ([`HOST`]) carries its instance like any other (2e).
     if zone == UNCONFINED {
         if let Some(name) = container_name(&selection) {
             eprintln!(
-                "cellward: {} в сети без ограничений — настройки контейнера {name} (камера, \
-                 микрофон, устройства, X) здесь не действуют: у программы всё, что у хоста",
+                "cellward: {} без изоляции и без VPN — настройки контейнера {name} (камера, \
+                 микрофон, устройства, X) здесь не действуют: у программы всё, что у хоста. \
+                 Сеть хоста с контейнером — «{HOST}»",
                 label.as_deref().unwrap_or(&name)
             );
         }
@@ -2268,6 +2282,43 @@ pub fn ensure_offline_zone(state: &Path) {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join(OFFLINE), b"");
     }
+}
+
+/// The zone of the host's own network ([`HOST`]), made when it is not
+/// there. A directory of that name with another config is a zone of the
+/// person's from before the name was taken: never written over — a launch
+/// "into" it would leave its VPN behind without a word —, and refused until
+/// it is renamed.
+pub fn ensure_host_zone(state: &Path) -> Result<(), String> {
+    if foreign_host_zone(state) {
+        return Err(format!(
+            "«{HOST}» теперь значит сеть хоста (без VPN), а у тебя есть зона с таким \
+             именем — запуск остановлен, чтобы не уйти мимо её VPN. Переименуй её: \
+             cellward down {HOST}, переименуй каталог {} и снова cellward up",
+            state.join(HOST).display()
+        ));
+    }
+    let dir = state.join(HOST);
+    let config = dir.join("config.conf");
+    match fs::read(&config) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => fs::create_dir_all(&dir)
+            .and_then(|()| fs::write(&config, crate::hostif::HOST_NETWORK_CONFIG))
+            .map_err(|e| format!("сеть хоста: не создать {} ({e})", config.display())),
+        Err(e) => Err(format!(
+            "сеть хоста: не прочитать {} ({e})",
+            config.display()
+        )),
+    }
+}
+
+/// Whether the zone called [`HOST`] is one of the person's from before the
+/// name was taken: its config is there and is no host network's.
+pub fn foreign_host_zone(state: &Path) -> bool {
+    fs::read(state.join(HOST).join("config.conf")).is_ok_and(|raw| {
+        !crate::config::WgConfig::parse(&crate::cli::strip_cr(&raw))
+            .is_ok_and(|ini| crate::hostif::is_host_network(&ini))
+    })
 }
 
 /// Hand the launch to `systemd --user`, which lives outside every zone.

@@ -815,7 +815,7 @@ fn without_a_graphical_session_the_remembered_choice_is_taken_and_said_out_loud(
 
 #[test]
 fn the_unconfined_choice_goes_through_run_like_any_other_network() {
-    // "Прямой интернет" (now "Без ограничений") used to be the picker becoming
+    // "Прямой интернет" (now "Без изоляции и без VPN") used to be the picker becoming
     // the command itself —
     // and everything `vpn-zone run` adds on the way (the container, the
     // compositor restriction, the registry record) was lost without a word.
@@ -830,7 +830,7 @@ fn the_unconfined_choice_goes_through_run_like_any_other_network() {
     let menu = &home.asked()[0];
     assert!(
         menu.iter()
-            .any(|a| a == "Без ограничений — сеть хоста без VPN и без изоляции: камера, микрофон, устройства открыты"),
+            .any(|a| a == "Без изоляции и без VPN — у программы всё, что у хоста: файлы, камера, микрофон, устройства"),
         "{menu:?}"
     );
     assert!(!menu.iter().any(|a| a == "direct"), "{menu:?}");

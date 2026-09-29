@@ -306,6 +306,11 @@ pub fn tolerance(zone_dir: &Path, config: &Path, zone: &str, key: &str) -> Optio
     if key == "hermetic" && zone_dir.join(crate::launch::NO_ESCAPE).exists() {
         return Some((false, Source::Local));
     }
+    // The host's own network: a way around it is the host's network itself —
+    // nothing to go around. The container's word decides (2e).
+    if zone == crate::launch::HOST {
+        return Some((true, Source::Default));
+    }
     let (on, source) = zone_value(zone_dir, config, zone, key);
     Some((on != safe_value(key), source))
 }
@@ -449,6 +454,12 @@ pub fn start_settings(zone_dir: &Path, config: &Path, zone: &str) -> [(&'static 
 /// template says.
 fn space_value(zone_dir: &Path, config: &Path, zone: &str, key: &str) -> bool {
     let safe = safe_value(key);
+    // The host's own network tolerates every way around it for its
+    // containers ([`tolerance`]); its own space, where only its bridges'
+    // passt run, is not opened by that.
+    if zone == crate::launch::HOST && is_bypass(key) {
+        return safe;
+    }
     match tolerance(zone_dir, config, zone, key) {
         Some((tolerated, _)) => {
             if tolerated {
@@ -606,6 +617,39 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.base);
         }
+    }
+
+    /// The host's own network tolerates every way around it — there is
+    /// nothing to go around — but for its lock, and its own space comes up
+    /// safe (2e).
+    #[test]
+    fn the_hosts_network_tolerates_what_its_containers_ask() {
+        let base = std::env::temp_dir().join(format!("vz-hostnet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let zone_dir = base.join("host");
+        let config = base.join("config");
+        std::fs::create_dir_all(&zone_dir).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        let host = crate::launch::HOST;
+        for key in BYPASS_KEYS {
+            assert_eq!(
+                tolerance(&zone_dir, &config, host, key),
+                Some((true, Source::Default)),
+                "{key}"
+            );
+            assert_eq!(
+                space_value(&zone_dir, &config, host, key),
+                safe_value(key),
+                "{key}"
+            );
+        }
+        assert_eq!(tolerance(&zone_dir, &config, host, "camera"), None);
+        std::fs::write(zone_dir.join(crate::launch::NO_ESCAPE), "").unwrap();
+        assert_eq!(
+            tolerance(&zone_dir, &config, host, "hermetic"),
+            Some((false, Source::Local))
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Off unless Nix names the zone or its marker turns it on; anything else

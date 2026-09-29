@@ -693,7 +693,14 @@ pub type Row = (String, String);
 /// host's there).
 pub const UNCONFINED_ROW: (&str, &str) = (
     crate::launch::UNCONFINED,
-    "Без ограничений — сеть хоста без VPN и без изоляции: камера, микрофон, устройства открыты",
+    "Без изоляции и без VPN — у программы всё, что у хоста: файлы, камера, микрофон, устройства",
+);
+
+/// The host's own network (2e of `docs/PERMISSIONS.md` §11.15): no VPN, and
+/// the program in its container all the same.
+pub const HOST_ROW: (&str, &str) = (
+    crate::launch::HOST,
+    "Сеть хоста — без VPN, программа в своём контейнере",
 );
 
 fn row(tag: &str, text: impl Into<String>) -> Row {
@@ -710,6 +717,7 @@ pub fn net_menu(zones: &[MenuZone], pinned: &str, current_container: &str) -> Ve
     let mut nets = vec![
         row(UNCONFINED_ROW.0, UNCONFINED_ROW.1),
         row("offline", "Без сети"),
+        row(HOST_ROW.0, HOST_ROW.1),
     ];
     for zone in zones {
         let name = &zone.name;
@@ -2099,7 +2107,7 @@ fn zone_names(state: &Path) -> Vec<String> {
         .into_iter()
         .filter(|dir| dir.join("config.conf").is_file())
         .filter_map(|dir| dir.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .filter(|name| name != "offline")
+        .filter(|name| name != "offline" && name != crate::launch::HOST)
         // A zone left with a name that now means the host's network is not
         // offered: choosing it would launch unconfined. (`vpn-zone doctor`
         // names it.)
@@ -3444,14 +3452,20 @@ mod tests {
             [
                 "unconfined",
                 "offline",
+                "host",
                 "de",
                 "nl",
                 "pin:unconfined",
                 "pin:offline",
+                "pin:host",
                 "pin:de",
                 "pin:nl",
                 "__chooseprofile__",
             ]
+        );
+        assert_eq!(
+            text_of(&menu, "host"),
+            "Сеть хоста — без VPN, программа в своём контейнере"
         );
         assert_eq!(text_of(&menu, "nl"), "VPN: nl");
         assert_eq!(text_of(&menu, "pin:nl"), "Всегда: VPN: nl");

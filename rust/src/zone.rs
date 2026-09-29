@@ -585,6 +585,9 @@ const TOOL_HOSTIF: u8 = b'h';
 /// pasta, started by the system-zone service in a system zone's network, has
 /// attached to the app namespace (`docs/SYSTEM.md` §7b).
 const TOOL_SYSZONE: u8 = b's';
+/// pasta attached to the app namespace itself, by the host's own routes: the
+/// host's network (`hostif::HOST_NETWORK`).
+const TOOL_HOSTNET: u8 = b'n';
 /// The system tier's run directory: its root service's socket and the system
 /// zones' state. Hidden in every zone (`hide_system_tier`).
 pub(crate) const SYSTEM_TIER_DIR: &str = "/run/vpn-zones";
@@ -3892,6 +3895,9 @@ pub enum Backend {
     /// No tunnel and no uplink: pasta attaches to the app namespace and binds
     /// everything it sends to one interface of the host.
     HostIf(HostIfConfig),
+    /// The host's own network (`hostif::HOST_NETWORK`): pasta attaches to the
+    /// app namespace and binds nothing — the host's routes, and its resolver.
+    HostNet,
     /// No tunnel of its own and no uplink: pasta, started by the system-zone
     /// service in a SYSTEM zone's network, attaches to the app namespace —
     /// the system zone's tunnel is this zone's way out (docs/SYSTEM.md §7b).
@@ -3927,7 +3933,7 @@ impl Backend {
                 port: None,
             }],
             // No uplink exists to be filtered.
-            Self::HostIf(_) | Self::SysZone(_) => Vec::new(),
+            Self::HostIf(_) | Self::HostNet | Self::SysZone(_) => Vec::new(),
         }
     }
 }
@@ -3974,10 +3980,11 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
         let (backend, seed) = prepare(zone)?;
         (Some(backend), seed)
     };
-    // A host-interface zone's pasta is in the host's network: the host's own
-    // addresses, taken here where they can be seen.
+    // A host-interface zone's pasta is in the host's network, and so is the
+    // pasta of the host's own: the host's own addresses, taken here where
+    // they can be seen.
     let first = match &cfg {
-        Some(Backend::HostIf(_)) => host_address_rules(&host_addresses()),
+        Some(Backend::HostIf(_) | Backend::HostNet) => host_address_rules(&host_addresses()),
         _ => Vec::new(),
     };
 
@@ -4137,6 +4144,70 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
                 // The zone gets EOF instead of the byte and refuses to come up:
                 // a host-interface zone without pasta has no way out at all,
                 // and saying "up" would be a lie.
+                drop(moved_w);
+                eprintln!(
+                    "zone {}: cannot start pasta ({e}) — the zone has no way out",
+                    zone.name()
+                );
+            }
+        }
+    } else if let Some(Backend::HostNet) = cfg.as_ref() {
+        // The host's own network: pasta as for an interface of the host, bound
+        // to none — whichever way out the host has now is the zone's — and the
+        // host's resolver behind the gateway's address.
+        drop(uplink_up_r);
+        drop(uplink_up_w);
+        if let Err(e) = wait_for_app_namespace(zone_up_r) {
+            kill_and_reap(zone_pid);
+            return Err(e);
+        }
+        let netns = format!("/proc/{zone_pid}/ns/net");
+        let v6 = hostif::host_ipv6_usable(
+            &fs::read_to_string("/proc/net/if_inet6").unwrap_or_default(),
+            &fs::read_to_string("/proc/net/ipv6_route").unwrap_or_default(),
+        );
+        if !v6 {
+            println!(
+                "zone {}: the host has no usable IPv6 — the zone gets none",
+                zone.name()
+            );
+        }
+        let resolver = hostif::host_resolver(&fs::read_to_string(ETC_RESOLV).unwrap_or_default());
+        if resolver.is_none() {
+            eprintln!(
+                "zone {}: the host names no IPv4 resolver in {ETC_RESOLV} — names do not \
+                 resolve in its network",
+                zone.name()
+            );
+        }
+        let word = PastaWord::new();
+        match word
+            .as_ref()
+            .map_err(|e| io::Error::other(format!("no directory for its pid file: {e}")))
+            .and_then(|word| {
+                Command::new(&zone.tools.pasta)
+                    .arg("--netns")
+                    .arg(&netns)
+                    .args(host_network_pasta_args(word.path(), v6, resolver))
+                    .spawn()
+            }) {
+            Ok(mut child) => {
+                PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
+                let done = word.as_ref().is_ok_and(|word| word.wait(&mut child));
+                pasta = Some(child);
+                if !done {
+                    // EOF instead of the byte: pasta ended before it was done,
+                    // and says why itself (no default route, most often).
+                    drop(moved_w);
+                    eprintln!(
+                        "zone {}: pasta ended before its interface was ready",
+                        zone.name()
+                    );
+                } else if let Err(e) = tell_the_zone(moved_w, TOOL_HOSTNET) {
+                    eprintln!("zone {}: {e}", zone.name());
+                }
+            }
+            Err(e) => {
                 drop(moved_w);
                 eprintln!(
                     "zone {}: cannot start pasta ({e}) — the zone has no way out",
@@ -4326,6 +4397,13 @@ fn prepare_backend(zone: &Zone, raw: &[u8]) -> Result<Backend, String> {
     let mut cfg = WgConfig::parse(raw).map_err(|e| format!("{CONFIG}: {e}"))?;
     if openconnect::is_openconnect(&cfg) {
         return prepare_openconnect(zone, &cfg);
+    }
+    if hostif::is_host_network(&cfg) {
+        println!(
+            "zone {}: out by the host's own routes (no tunnel, nothing encrypted)",
+            zone.name()
+        );
+        return Ok(Backend::HostNet);
     }
     if hostif::is_host_interface(&cfg) {
         let host = HostIfConfig::from_ini(&cfg).map_err(|e| format!("{CONFIG}: {e}"))?;
@@ -4706,6 +4784,7 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
         }
         // `supervise` never starts an uplink for these.
         Backend::HostIf(_) => Err("a host-interface zone has no uplink".to_string()),
+        Backend::HostNet => Err("the host's network has no uplink".to_string()),
         Backend::SysZone(_) => {
             Err("a zone through a system zone has no uplink of its own".to_string())
         }
@@ -7929,6 +8008,19 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
             let dns: Vec<String> = host.dns.iter().map(ToString::to_string).collect();
             (dns, None, Mirror::HostIf(host.interface.clone()))
         }
+        TOOL_HOSTNET => {
+            let Backend::HostNet = backend else {
+                return Err(
+                    "pasta was attached by the host's routes to a zone that is not the host's \
+                     network"
+                        .into(),
+                );
+            };
+            wait_for_pasta_link(zone)?;
+            // pasta forwards what is asked there to the host's resolver
+            // (`--dns-forward`, [`host_network_pasta_args`]).
+            (vec![HOSTIF_GATEWAY4.to_owned()], None, Mirror::HostNet)
+        }
         TOOL_SYSZONE => {
             let Backend::SysZone(sys) = backend else {
                 return Err(
@@ -8019,6 +8111,9 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
                 "zone {}: going out through the host's interface {interface}",
                 zone.name()
             );
+        }
+        Mirror::HostNet => {
+            println!("zone {}: going out by the host's own routes", zone.name());
         }
         Mirror::SysZone(system, _) => {
             println!(
@@ -8495,6 +8590,8 @@ enum Mirror {
     /// The same question for pasta's interface, which goes out through the
     /// named interface of the host.
     HostIf(String),
+    /// And for the one that goes out by the host's own routes.
+    HostNet,
     /// pasta's interface for the link, and the named system zone's own mirror
     /// for the tunnel behind it — `wg show` output, read by the group
     /// vpn-zones, so `vpn-zone check` answers from the handshake as for any
@@ -8526,6 +8623,11 @@ fn start_status_mirror(zone: &Zone, mirror: Mirror) {
             )),
             Mirror::HostIf(interface) => Some(link_mirror(
                 &format!("host interface {interface}"),
+                &tool_output(&ip, &["-o", "link", "show", TUN_IFACE]).unwrap_or_default(),
+                &tool_output(&ip, &["-br", "-4", "addr", "show", TUN_IFACE]).unwrap_or_default(),
+            )),
+            Mirror::HostNet => Some(link_mirror(
+                "the host's network",
                 &tool_output(&ip, &["-o", "link", "show", TUN_IFACE]).unwrap_or_default(),
                 &tool_output(&ip, &["-br", "-4", "addr", "show", TUN_IFACE]).unwrap_or_default(),
             )),
@@ -8891,6 +8993,44 @@ pub fn app_ruleset() -> String {
 
 /// The host's own addresses, from where the host's network is seen: every
 /// interface's IPv4 and IPv6 ones ([`refusable`] says which).
+/// pasta's arguments for the host's own network, after `--netns`: the
+/// interface and the addresses of a host-interface zone ([`HOSTIF_GUEST4`]),
+/// bound to no interface of the host; DNS asked at the gateway's address
+/// forwarded to `resolver`, the host's (`hostif::host_resolver`); IPv6 only
+/// when the host has it to give; every door a zone's pasta shuts shut.
+pub(crate) fn host_network_pasta_args(
+    pid_file: &Path,
+    v6: bool,
+    resolver: Option<std::net::Ipv4Addr>,
+) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = ["--config-net", "-q", "-I", TUN_IFACE, "-f", "-P"]
+        .iter()
+        .map(Into::into)
+        .collect();
+    args.push(pid_file.into());
+    for arg in [
+        "-a",
+        HOSTIF_GUEST4,
+        "-n",
+        HOSTIF_PREFIX4,
+        "-g",
+        HOSTIF_GATEWAY4,
+        "--dns-forward",
+        HOSTIF_GATEWAY4,
+    ] {
+        args.push(arg.into());
+    }
+    if let Some(resolver) = resolver {
+        args.push("--dns-host".into());
+        args.push(resolver.to_string().into());
+    }
+    if !v6 {
+        args.push("-4".into());
+    }
+    args.extend(PASTA_CLOSED.iter().map(Into::into));
+    args
+}
+
 fn host_addresses() -> Vec<std::net::IpAddr> {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     let mut out = Vec::new();
@@ -9403,6 +9543,38 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host's own network: pasta bound to no interface, the host's
+    /// resolver behind the gateway's address, IPv6 off when the host has
+    /// none to give, and every door shut.
+    #[test]
+    fn the_hosts_network_is_pasta_by_the_hosts_routes() {
+        let args: Vec<String> = host_network_pasta_args(
+            Path::new("/run/p"),
+            false,
+            Some("127.0.0.53".parse().unwrap()),
+        )
+        .into_iter()
+        .map(|a| a.into_string().unwrap())
+        .collect();
+        let text = args.join(" ");
+        assert!(
+            text.contains("--dns-forward 10.255.255.254 --dns-host 127.0.0.53"),
+            "{text}"
+        );
+        assert!(
+            text.contains("-I awg0") && text.contains("-P /run/p"),
+            "{text}"
+        );
+        assert!(args.iter().any(|a| a == "-4"), "{text}");
+        assert!(!text.contains("outbound"), "bound to nothing: {text}");
+        assert!(text.ends_with(&PASTA_CLOSED.join(" ")), "{text}");
+        let v6: Vec<String> = host_network_pasta_args(Path::new("/p"), true, None)
+            .into_iter()
+            .map(|a| a.into_string().unwrap())
+            .collect();
+        assert!(!v6.iter().any(|a| a == "-4" || a == "--dns-host"), "{v6:?}");
+    }
 
     /// A host-interface zone refuses the host's own addresses, before its
     /// own accepts (audit 2026-09-27).

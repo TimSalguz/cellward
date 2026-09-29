@@ -260,7 +260,8 @@ fn network_text(network: &str) -> String {
     match network {
         "ask" => "спрашивать при запуске".to_owned(),
         "offline" => "без сети".to_owned(),
-        "unconfined" => "без ограничений (сеть хоста)".to_owned(),
+        "unconfined" => "без изоляции и без VPN".to_owned(),
+        "host" => "сеть хоста (без VPN)".to_owned(),
         zone => format!("VPN: {zone}"),
     }
 }
@@ -1254,7 +1255,8 @@ impl Panel {
         for n in &self.data.networks {
             let label = match n.kind.as_str() {
                 "offline" => "Без сети".to_owned(),
-                "unconfined" => "Без ограничений".to_owned(),
+                "unconfined" => "Без изоляции и без VPN".to_owned(),
+                "host" => "Сеть хоста (без VPN)".to_owned(),
                 _ if n.up => n.name.clone(),
                 _ => format!("{} (опущена)", n.name),
             };
@@ -1631,10 +1633,10 @@ impl Panel {
                 continue;
             }
             let color = n.color.unwrap_or(Color::from_rgb8(0x88, 0x88, 0x88));
-            let title = if n.kind == "offline" {
-                "offline (без сети)".to_owned()
-            } else {
-                n.name.clone()
+            let title = match n.kind.as_str() {
+                "offline" => "offline (без сети)".to_owned(),
+                "host" => "host (сеть хоста, без VPN)".to_owned(),
+                _ => n.name.clone(),
             };
             let state = if n.kind == "offline" {
                 if n.locked {
@@ -1646,7 +1648,7 @@ impl Panel {
                 tunnel_text(n)
             };
             let mut buttons = row![].spacing(6);
-            if n.kind == "zone" {
+            if n.kind == "zone" || n.kind == "host" {
                 if n.up {
                     buttons = buttons
                         .push(act("Опустить", Msg::ZoneDo(n.name.clone(), "down"), false))
@@ -1756,9 +1758,10 @@ impl Panel {
                 "Без сети — безопасно для незнакомой программы".to_owned(),
             ),
             (
-                "unconfined".to_owned(),
-                "Без ограничений (сеть хоста)".to_owned(),
+                "host".to_owned(),
+                "Сеть хоста — без VPN, в своём контейнере".to_owned(),
             ),
+            ("unconfined".to_owned(), "Без изоляции и без VPN".to_owned()),
         ];
         for n in self.data.networks.iter().filter(|n| n.kind == "zone") {
             nets.push((n.name.clone(), format!("VPN: {}", n.name)));

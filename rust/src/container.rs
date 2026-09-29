@@ -566,10 +566,12 @@ pub fn main_for_network(tools: &Tools, network: &str) -> Result<String, String> 
     Ok(name)
 }
 
-/// Is `network` one a launch can go to: `offline`, the host's, or a zone
-/// that still has its config?
+/// Is `network` one a launch can go to: `offline`, the host's own (its
+/// zone made when first wanted), unconfined, or a zone that still has its
+/// config?
 pub fn network_exists(tools: &Tools, network: &str) -> bool {
     network == crate::launch::OFFLINE
+        || network == crate::launch::HOST
         || crate::launch::is_unconfined_name(network)
         || (!network.is_empty()
             && !network.contains('/')

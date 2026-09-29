@@ -424,16 +424,17 @@ fn markup(text: &str) -> String {
 /// The network as a person says it.
 pub fn zone_words(zone: &str) -> String {
     match zone {
-        crate::launch::UNCONFINED => "без ограничений".to_owned(),
+        crate::launch::UNCONFINED => "без изоляции и без VPN".to_owned(),
+        crate::launch::HOST => "сеть хоста".to_owned(),
         "offline" => "без сети".to_owned(),
         zone => zone.to_owned(),
     }
 }
 
-/// "сеть nl", "без сети", "без ограничений" — the network in a sentence.
+/// "сеть nl", "без сети", "сеть хоста" — the network in a sentence.
 fn net_phrase(zone: &str) -> String {
     match zone {
-        crate::launch::UNCONFINED | "offline" => zone_words(zone),
+        crate::launch::UNCONFINED | crate::launch::HOST | "offline" => zone_words(zone),
         zone => format!("сеть {zone}"),
     }
 }
