@@ -16,11 +16,13 @@ use crate::origin::Who;
 use crate::status::string;
 use crate::tools::Tools;
 
-/// A setting's value: on or off, or a word (`yes`, `no`, `ask`).
+/// A setting's value: on or off, a word (`yes`, `no`, `ask`), or the
+/// camera's mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Value {
     Flag(bool),
     Word(crate::microphone::Setting),
+    Camera(crate::camera::Mode),
 }
 
 /// One setting, as `explain` shows it.
@@ -96,7 +98,6 @@ pub fn rows(tools: &Tools, zone: &str, who: &Who, home: Option<Home>) -> Vec<Row
         Who::Main => Some(crate::container::MAIN_RECORD),
         Who::Unknown => None,
     };
-    let own = |key: &str| record.and_then(|name| crate::container::own_flag_in(config, name, key));
     // X11: the container's own word, both ways, else its network's
     // (`x11::effective`), as a launch reads them.
     let zone_x11 = crate::x11::zone_setting(&tools.state, config, zone);
@@ -120,7 +121,7 @@ pub fn rows(tools: &Tools, zone: &str, who: &Who, home: Option<Home>) -> Vec<Row
     // The cameras: a container's by the camera's order, the network's for
     // a launch of no container (`launch`, THE CAMERAS).
     let camera = crate::hermetic::camera(&dir, config, zone);
-    let own_camera = own("camera");
+    let own_camera = record.and_then(|name| crate::container::own_camera_in(config, name));
     // Its own word over the template both ways (§11.15, 2b).
     let (camera, camera_whose) = match (record, own_camera) {
         (Some(_), Some(own)) => (own, Asker::Container),
@@ -129,9 +130,9 @@ pub fn rows(tools: &Tools, zone: &str, who: &Who, home: Option<Home>) -> Vec<Row
     };
     rows.push(Row {
         key: "camera",
-        value: Value::Flag(camera.0),
+        value: Value::Camera(camera.0),
         source: camera.1,
-        asked: Some((Value::Flag(camera.0), camera.1, camera_whose)),
+        asked: Some((Value::Camera(camera.0), camera.1, camera_whose)),
         tolerated: None,
         refused_by: None,
         moot: None,
@@ -214,12 +215,15 @@ fn opens(key: &str, value: Value) -> bool {
     match value {
         Value::Flag(on) => on != (key == "hermetic"),
         Value::Word(word) => word == crate::microphone::Setting::Yes,
+        Value::Camera(mode) => mode == crate::camera::Mode::Yes,
     }
 }
 
 fn word(key: &str, value: Value) -> &'static str {
     match value {
         Value::Word(crate::microphone::Setting::Ask) => "спросить",
+        Value::Camera(crate::camera::Mode::Ask) => "спросить, до ответа чёрная",
+        Value::Camera(crate::camera::Mode::Black) => "чёрная",
         value if opens(key, value) => "да",
         _ => "нет",
     }
@@ -338,6 +342,7 @@ fn value_json(value: Value) -> String {
     match value {
         Value::Flag(on) => on.to_string(),
         Value::Word(word) => string(word.as_str()),
+        Value::Camera(mode) => string(mode.as_str()),
     }
 }
 

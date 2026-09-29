@@ -149,12 +149,12 @@ fn allowance(
 /// user — it filmed without a question.
 pub const CAMERA: &str = "camera";
 
-/// Whether a program with no word of its container's reaches the cameras:
-/// the template (`crate::permissions`, 2b of `docs/PERMISSIONS.md`
-/// §11.15), whatever network it runs in. The zone's arguments are kept for
-/// the callers' shape.
-pub fn camera(_zone_dir: &Path, config: &Path, _zone: &str) -> (bool, Source) {
-    crate::permissions::flag(config, "camera")
+/// How a program with no word of its container's sees the cameras
+/// (`crate::camera::Mode`): the template (`crate::permissions`, 2b of
+/// `docs/PERMISSIONS.md` §11.15), whatever network it runs in. The zone's
+/// arguments are kept for the callers' shape.
+pub fn camera(_zone_dir: &Path, config: &Path, _zone: &str) -> (crate::camera::Mode, Source) {
+    crate::permissions::camera(config)
 }
 
 /// Whether a hermetic zone gets the host's raw `pipewire-0` instead of the

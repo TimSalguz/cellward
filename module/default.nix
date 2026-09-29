@@ -576,7 +576,10 @@ let
       ++ lib.optional (c.frameColor != null) "frame_color = ${c.frameColor}"
       ++ lib.optional (c.permissions.microphone != null) "microphone = ${c.permissions.microphone}"
       ++ lib.optional (c.permissions.screencast != null) "screencast = ${c.permissions.screencast}"
-      ++ lib.optional (c.permissions.camera != null) "camera = ${lib.boolToString c.permissions.camera}"
+      # true/false as before (a build of before reads them), the mode's words as they are.
+      ++ lib.optional (c.permissions.camera != null) "camera = ${
+        if builtins.isBool c.permissions.camera then lib.boolToString c.permissions.camera else c.permissions.camera
+      }"
       # A container's own zone-level permissions (stage 5 of the container
       # design, rust/src/hermetic.rs CONTAINER_KEYS): only where set.
       ++ lib.optional (
@@ -726,10 +729,10 @@ let
         description = "Устройства, которые зоны закрывают всем своим программам и которые выдаются этому контейнеру (docs/PERMISSIONS.md §11.12): наборы games (геймпады и их HID), security-keys (ключи FIDO), phone (adb, MTP), serial (ttyUSB, ttyACM), vm (kvm, vhost-net, vhost-vsock, net/tun — виртуальные машины) одно устройство usb:<производитель>:<модель>[:<серийный>] — все его узлы, или all — все устройства хоста, в том числе подключённые позже (как у «без изоляции»; у контейнера со своим домом пока не действует); что подключено — cellward devices. Действует для программ, запущенных после изменения; устройство, подключённое позже, видно после перезапуска программы.";
       };
       permissions.camera = lib.mkOption {
-        type = lib.types.nullOr lib.types.bool;
+        type = lib.types.nullOr (lib.types.either lib.types.bool (lib.types.enum [ "no" "black" "ask" "yes" ]));
         default = null;
-        example = true;
-        description = "Видны ли программам контейнера камеры хоста (/dev/video*, /dev/media*): зона закрывает их всем своим программам, а запуск, которому они разрешены, открывает их в своём пространстве монтирования. null — как у его зоны (programs.cellward.camera) или как задано локально (cellward container set <контейнер> camera). Значение зоны из Nix важнее местной настройки контейнера, если та шире; строже — действует (местное «нет» при «да» зоны из Nix — «нет»); значение контейнера из Nix — важнее всего. Действует для программ, запущенных после изменения; камера, подключённая позже, закрыта у всех — перезапустите программу.";
+        example = "black";
+        description = "Камера для программ контейнера: \"no\" (или false) — камеры нет; \"black\" — чёрная камера: программа видит камеру и может снимать, но кадры чёрные, настоящая не открывается (обслуживает надзиратель запуска на хосте, ЦП тратится только пока программа снимает — 5 кадров в секунду без копирования); \"ask\" — чёрная, пока человек не разрешит настоящую (вопрос появится в следующей версии, пока просто чёрная); \"yes\" (или true) — камеры хоста (/dev/video*, /dev/media*), снимать можно без вопроса. null — как у всех (defaults.permissions.camera, иначе no) или как задано локально (cellward container set <контейнер> camera). Значение контейнера из Nix — важнее всего. Действует для программ, запущенных после изменения; камера, подключённая позже, видна после перезапуска программы.";
       };
       permissions.hermetic = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;
@@ -964,9 +967,9 @@ in
           description = "Трансляция экрана через портал у программ контейнера без своего слова: yes, no или ask. Как microphone выше. null — не задавать из Nix (cellward defaults set screencast …, иначе ask).";
         };
         camera = lib.mkOption {
-          type = lib.types.nullOr lib.types.bool;
+          type = lib.types.nullOr (lib.types.either lib.types.bool (lib.types.enum [ "no" "black" "ask" "yes" ]));
           default = null;
-          description = "Видны ли камеры хоста программам контейнера без своего слова. Сеть этого больше не решает; своё слово — containers.<имя>.permissions.camera, main.permissions.camera. null — не задавать из Nix (cellward defaults set camera on|off, иначе нет).";
+          description = "Камера программ контейнера без своего слова: no, black, ask или yes (как containers.<имя>.permissions.camera; true — yes, false — no). Сеть этого больше не решает; своё слово — containers.<имя>.permissions.camera, main.permissions.camera. null — не задавать из Nix (cellward defaults set camera …, иначе no).";
         };
         audioManager = lib.mkOption {
           type = lib.types.nullOr lib.types.bool;
@@ -1683,7 +1686,12 @@ in
       ".config/vpn-zones/declared/defaults.conf".text = lib.concatStrings (
         lib.optional (cfg.defaults.permissions.microphone != null) "microphone = ${cfg.defaults.permissions.microphone}\n"
         ++ lib.optional (cfg.defaults.permissions.screencast != null) "screencast = ${cfg.defaults.permissions.screencast}\n"
-        ++ lib.optional (cfg.defaults.permissions.camera != null) "camera = ${lib.boolToString cfg.defaults.permissions.camera}\n"
+        ++ lib.optional (cfg.defaults.permissions.camera != null) "camera = ${
+          if builtins.isBool cfg.defaults.permissions.camera then
+            lib.boolToString cfg.defaults.permissions.camera
+          else
+            cfg.defaults.permissions.camera
+        }\n"
         ++ lib.optional (cfg.defaults.permissions.audioManager != null) "audio_manager = ${lib.boolToString cfg.defaults.permissions.audioManager}\n"
         ++ lib.optional (cfg.defaults.permissions.hermetic != null) "hermetic = ${lib.boolToString cfg.defaults.permissions.hermetic}\n"
         ++ lib.optional (cfg.defaults.permissions.nixDaemon != null) "nix_daemon = ${lib.boolToString cfg.defaults.permissions.nixDaemon}\n"

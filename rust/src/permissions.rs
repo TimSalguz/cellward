@@ -30,8 +30,9 @@ pub const FILE: &str = "defaults.conf";
 /// The switches (`yes|no|ask`), built-in `ask`.
 pub const SWITCHES: [&str; 3] = ["microphone", "screencast", "network"];
 /// The flags (`on|off`, kept `true|false` as a container's), built-in off:
-/// the cameras, and the host's raw PipeWire (the audio manager).
-pub const FLAGS: [&str; 2] = ["camera", "audio_manager"];
+/// the host's raw PipeWire (the audio manager). The cameras were one; now
+/// a mode of four words ([`camera`]).
+pub const FLAGS: [&str; 1] = ["audio_manager"];
 /// The requests for a way around the network (`hermetic::BYPASS_KEYS`, 2c
 /// of §11.15), kept `true|false` as a container's own; their safe values
 /// where nobody said. A request opens nothing by itself: only where the
@@ -83,6 +84,17 @@ pub fn flag(config: &Path, key: &str) -> (bool, Source) {
     }
 }
 
+/// The template's camera ([`crate::camera::Mode`]): `no` where nobody said,
+/// and for a word that is none of its, or a file that cannot be read.
+pub fn camera(config: &Path) -> (crate::camera::Mode, Source) {
+    use crate::camera::Mode;
+    match word(config, "camera") {
+        Ok(Some((w, source))) => (Mode::parse(&w).unwrap_or(Mode::No), source),
+        Ok(None) => (Mode::No, Source::Default),
+        Err(source) => (Mode::No, source),
+    }
+}
+
 /// The template's request `key` ([`REQUESTS`]) and whose word it is: the
 /// safe value where nobody said, or in a word that is neither, or in a
 /// file that cannot be read.
@@ -112,7 +124,8 @@ fn key_of(word: &str) -> Option<(&'static str, Option<(&'static str, &'static st
         // The network's default for a program with no rule (the firewall,
         // `crate::netrules`): `ask` built in.
         "network" => ("network", None),
-        "camera" => ("camera", Some(("on", "off"))),
+        // A mode of its own words (`crate::camera::Mode`), taken apart.
+        "camera" => ("camera", None),
         "audio-manager" | "audio_manager" => ("audio_manager", Some(("on", "off"))),
         "hermetic" => ("hermetic", Some(("on", "off"))),
         "nix-daemon" | "nix_daemon" => ("nix_daemon", Some(("on", "off"))),
@@ -134,7 +147,8 @@ fn openness(setting: Setting) -> u8 {
 
 const USAGE: &str = "cellward defaults — разрешения контейнеров без своего слова\n\
                      cellward defaults set microphone|screencast|network yes|no|ask|default\n\
-                     cellward defaults set camera|audio-manager on|off|default\n\
+                     cellward defaults set camera no|black|ask|yes|default\n\
+                     cellward defaults set audio-manager on|off|default\n\
                      cellward defaults set hermetic|nix-daemon on|off|default\n\
                      cellward defaults set host-files read-only|writable|default";
 
@@ -152,6 +166,13 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
             };
             let value = match (*value, words) {
                 ("default", _) => None,
+                (v, None) if key == "camera" => match crate::camera::Mode::parse(v) {
+                    Some(mode) => Some(mode.record_word()),
+                    None => {
+                        eprintln!("{USAGE}");
+                        return 1;
+                    }
+                },
                 (v, Some((on, _))) if v == on => Some("true"),
                 (v, Some((_, off))) if v == off => Some("false"),
                 (v, None) => match Setting::parse(v) {
@@ -225,6 +246,15 @@ fn shown(config: &Path) -> String {
             (_, false) => "nix-daemon: off",
         };
         out.push_str(&format!("  {said}{from}\n"));
+    }
+    {
+        let (mode, source) = camera(config);
+        let from = match source {
+            Source::Nix => " (Nix)",
+            Source::Local => "",
+            Source::Default => " (умолчание)",
+        };
+        out.push_str(&format!("  camera: {}{from}\n", mode.as_str()));
     }
     for key in FLAGS {
         let (on, source) = flag(config, key);
@@ -418,11 +448,12 @@ pub fn migrate(tools: &Tools) {
                 if words.is_empty() {
                     continue;
                 }
-                let template = if flag(&tools.config, key).0 {
-                    Setting::Yes
+                let open = if key == "camera" {
+                    camera(&tools.config).0 == crate::camera::Mode::Yes
                 } else {
-                    Setting::No
+                    flag(&tools.config, key).0
                 };
+                let template = if open { Setting::Yes } else { Setting::No };
                 let with_own: Vec<(String, Option<String>, bool)> = records
                     .iter()
                     .map(|(name, net)| {
@@ -557,6 +588,20 @@ mod tests {
         fs::write(root.join(FILE), "microphone = no\nscreencast = sometimes\n").unwrap();
         assert_eq!(switch(&root, "microphone"), (Setting::No, Source::Local));
         assert_eq!(switch(&root, "screencast"), (Setting::No, Source::Local));
+        // The camera: a mode; the flag's words of before as yes and no,
+        // nonsense as no.
+        use crate::camera::Mode;
+        assert_eq!(camera(&root), (Mode::No, Source::Default));
+        for (word, mode) in [
+            ("black", Mode::Black),
+            ("on", Mode::Yes),
+            ("true", Mode::Yes),
+            ("ask", Mode::Ask),
+            ("maybe", Mode::No),
+        ] {
+            fs::write(root.join(FILE), format!("camera = {word}\n")).unwrap();
+            assert_eq!(camera(&root), (mode, Source::Local), "{word}");
+        }
         let _ = fs::remove_dir_all(&root);
     }
 }

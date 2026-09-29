@@ -7,7 +7,12 @@
 #     a blocking DQBUF and by poll(2) on a non-blocking file;
 #   - ffmpeg's v4l2 input, a real one, three frames of it;
 #   - nothing spent while nobody streams: the server's CPU time the same
-#     after seconds of it.
+#     after seconds of it;
+#   - given to a container (stage A): the main home's camera `black` (Nix),
+#     a launch into the offline network under headless sway — its
+#     supervisor serves the camera, the program in the container takes black
+#     frames from /dev/video0; the server in namespaces of its own with an
+#     empty root, and gone with the program.
 #
 #   nix-build tests/vm-camera.nix -A driver -o vm-camera-driver
 #   ./vm-camera-driver/bin/nixos-test-driver
@@ -33,20 +38,40 @@ let
         users.users.alice = {
           isNormalUser = true;
           uid = 1000;
+          linger = true;
+          # The offline network: a user namespace, nothing more.
+          subUidRanges = [
+            {
+              startUid = 100000;
+              count = 65536;
+            }
+          ];
+          subGidRanges = [
+            {
+              startGid = 100000;
+              count = 65536;
+            }
+          ];
         };
         home-manager.useGlobalPkgs = true;
         home-manager.useUserPackages = true;
         home-manager.users.alice = {
           imports = [ ../module ];
           programs.cellward.enable = true;
+          # The main home's programs get a black camera.
+          programs.cellward.main.permissions.camera = "black";
           home.stateVersion = "25.05";
         };
         environment.systemPackages = [
           pkgs.python3
           pkgs.ffmpeg-headless
           pkgs.util-linux
+          pkgs.sway
         ];
         environment.etc."vm-camera/client.py".source = ./vm-camera-client.py;
+        environment.etc."vm-camera/sway.conf".text = "default_border none\n";
+        fonts.packages = [ pkgs.dejavu_fonts ];
+        virtualisation.memorySize = 1536;
       };
 
     testScript = ''
@@ -57,6 +82,7 @@ let
 
       machine.wait_for_unit("multi-user.target")
       machine.wait_for_unit("home-manager-alice.service")
+      machine.wait_for_unit("user@1000.service")
       core = alice("command -v vpn-zone-core").strip()
 
       def in_namespace(body):
@@ -109,6 +135,49 @@ let
               "test \"$before\" = \"$after\"\n"
           )
           assert "idle:" in out, out
+
+      def user(cmd):
+          return alice("export XDG_RUNTIME_DIR=/run/user/1000; " + cmd)
+
+      with subtest("a container's black camera: served by its launch's supervisor"):
+          out = user("cellward status --json")
+          assert '"camera_mode":{"value":"black","source":"nix"}' in out, out
+          user(
+              "systemd-run --user --unit=vmsway "
+              "--setenv=WLR_BACKENDS=headless --setenv=WLR_LIBINPUT_NO_DEVICES=1 "
+              "--setenv=WLR_RENDERER=pixman --setenv=WLR_HEADLESS_OUTPUTS=1 "
+              "sway -c /etc/vm-camera/sway.conf"
+          )
+          machine.wait_until_succeeds("ls /run/user/1000/sway-ipc.*.sock", timeout=60)
+          display = machine.succeed(
+              "ls /run/user/1000 | grep -E '^wayland-[0-9]+$' | head -1"
+          ).strip()
+          # A program that holds the camera open a while, for the server to
+          # be looked at.
+          user(
+              f"systemd-run --user --unit=vmcamhold --setenv=WAYLAND_DISPLAY={display} "
+              "cellward run offline -- python3 -c "
+              "\"import time; f = open('/dev/video0', 'rb'); time.sleep(60)\""
+          )
+          machine.wait_until_succeeds("pgrep -u alice -f 'camera-serve --fd'", timeout=60)
+          server = machine.succeed("pgrep -u alice -f 'camera-serve --fd' | head -1").strip()
+          # Out of the program's reach and of the host's: a user namespace of
+          # its own, an empty root.
+          mine = machine.succeed(f"readlink /proc/{server}/ns/user").strip()
+          shell = machine.succeed("readlink /proc/self/ns/user").strip()
+          assert mine != shell, (mine, shell)
+          machine.wait_until_succeeds(f"test -z \"$(ls -A /proc/{server}/root/)\"", timeout=30)
+          user("systemctl --user stop vmcamhold")
+          # Gone with the program: nothing left of the camera.
+          machine.wait_until_fails(f"test -e /proc/{server}", timeout=30)
+          # The program takes black frames from /dev/video0, in the container.
+          out = user(
+              f"WAYLAND_DISPLAY={display} cellward run offline -- sh -c "
+              "'stat -c %F /dev/video0; python3 /etc/vm-camera/client.py /dev/video0 block'"
+          )
+          print(out)
+          assert "regular file" in out, out
+          assert "block: 5 black frames of 640x480" in out, out
     '';
   };
 in

@@ -21,6 +21,15 @@
 //! before it gives a camera up), a few FUSE round trips each; the program's
 //! own work on a frame is the most of it, and so it gets few.
 //!
+//! **Given to a launch** (a container's camera `black` or `ask`,
+//! [`Mode`]): its supervisor (`wl-sandbox`, on the host) opens the FUSE
+//! connection and starts this server on it (`--fd`, `--ready`); the
+//! launch's `profile-run` mounts it in the launch's mount namespace and
+//! binds its file onto `/dev/video0` (`profile::give_black_camera`). The
+//! server is out of the program's reach — the host's pid namespace — and,
+//! once the camera is mounted, in namespaces of its own with an empty
+//! root: it keeps nothing of the host's but the connection.
+//!
 //! **Fail-closed.** What this does not know is refused: buffers other than
 //! MMAP, a 32-bit program's ioctls (other sizes, other numbers), controls,
 //! any ioctl not listed ([`ENOTTY`]). The server gone, every call on the
@@ -32,6 +41,64 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
+
+// --- THE SETTING ------------------------------------------------------------
+
+/// How a container's programs see the host's cameras (`docs/PERMISSIONS.md`
+/// §11.15, step 4): a container's own word, else the template's, else
+/// [`Mode::No`] — nothing given, nothing spent (the owner, 2026-09-29: the
+/// black camera optional, not a must).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// No camera at all.
+    No,
+    /// A black camera ([`Server`]), never the real one.
+    Black,
+    /// A black camera until the person allows the real one — black for now:
+    /// the question comes with the next stage.
+    Ask,
+    /// The host's real cameras, bound in (`profile::give_capture`).
+    Yes,
+}
+
+impl Mode {
+    /// A setting's word: `no|black|ask|yes`, and `on|off|true|false` — a
+    /// camera's flag of before — as `yes` and `no`.
+    pub fn parse(word: &str) -> Option<Self> {
+        match word.trim() {
+            "no" | "off" | "false" => Some(Self::No),
+            "black" => Some(Self::Black),
+            "ask" => Some(Self::Ask),
+            "yes" | "on" | "true" => Some(Self::Yes),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::No => "no",
+            Self::Black => "black",
+            Self::Ask => "ask",
+            Self::Yes => "yes",
+        }
+    }
+
+    /// The word a record keeps: `true`/`false` for the two a camera's flag
+    /// had — a build of before reads them, and `black` or `ask` as off, the
+    /// closed way.
+    pub fn record_word(self) -> &'static str {
+        match self {
+            Self::No => "false",
+            Self::Yes => "true",
+            other => other.as_str(),
+        }
+    }
+
+    /// A black camera is served for it.
+    pub fn black(self) -> bool {
+        matches!(self, Self::Black | Self::Ask)
+    }
+}
 
 // --- THE DEVICE -------------------------------------------------------------
 
@@ -954,23 +1021,44 @@ fn ioctl_out(s: &[u8], out_size: usize) -> Vec<u8> {
 
 // --- THE SERVER -------------------------------------------------------------
 
-/// `vpn-zone-core camera-serve --mount <dir> [--device <name>]…`.
+/// `vpn-zone-core camera-serve --mount <dir> [--device <name>]…`, or
+/// `--fd <n> --ready <n>` instead of `--mount`: a FUSE connection someone
+/// else mounts — a launch's `profile-run`, in the launch's mount namespace
+/// (`profile::give_black_camera`) —, served once the byte on the pipe
+/// `--ready` says it is mounted (before, `/dev/fuse` refuses a read).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Args {
-    pub mount: PathBuf,
+    pub place: Place,
     pub devices: Vec<String>,
+}
+
+/// Where the cameras are: mounted here, or on a connection handed over.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Place {
+    Mount(PathBuf),
+    Fd { fuse: RawFd, ready: RawFd },
 }
 
 impl Args {
     pub fn parse(args: &[OsString]) -> Result<Self, String> {
         let mut mount = None;
+        let (mut fuse, mut ready) = (None, None);
         let mut devices = Vec::new();
         let mut it = args.iter();
+        let number = |it: &mut std::slice::Iter<'_, OsString>, what: &str| {
+            it.next()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.parse::<RawFd>().ok())
+                .filter(|&n| n > 2)
+                .ok_or_else(|| format!("{what}: a descriptor's number"))
+        };
         while let Some(arg) = it.next() {
             match arg.to_str() {
                 Some("--mount") => {
                     mount = Some(PathBuf::from(it.next().ok_or("--mount: which directory?")?));
                 }
+                Some("--fd") => fuse = Some(number(&mut it, "--fd")?),
+                Some("--ready") => ready = Some(number(&mut it, "--ready")?),
                 Some("--device") => {
                     let name = it
                         .next()
@@ -992,10 +1080,12 @@ impl Args {
         if devices.is_empty() {
             devices.push("video0".to_owned());
         }
-        Ok(Self {
-            mount: mount.ok_or("--mount is needed")?,
-            devices,
-        })
+        let place = match (mount, fuse, ready) {
+            (Some(dir), None, None) => Place::Mount(dir),
+            (None, Some(fuse), Some(ready)) if fuse != ready => Place::Fd { fuse, ready },
+            _ => return Err("--mount <dir>, or --fd <n> and --ready <n>".to_owned()),
+        };
+        Ok(Self { place, devices })
     }
 }
 
@@ -1023,9 +1113,8 @@ fn errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
-/// Mount the cameras at `args.mount` and serve them until they are
-/// unmounted.
-fn serve(args: &Args) -> Result<(), String> {
+/// `/dev/fuse` opened: a connection to mount.
+pub fn open_fuse() -> Result<OwnedFd, String> {
     let path = c"/dev/fuse";
     // SAFETY: a NUL-terminated path; the descriptor is owned below.
     let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
@@ -1033,21 +1122,88 @@ fn serve(args: &Args) -> Result<(), String> {
         return Err(format!("/dev/fuse: {}", std::io::Error::last_os_error()));
     }
     // SAFETY: open has just returned it.
-    let fuse = unsafe { OwnedFd::from_raw_fd(fd) };
-    // SAFETY: getuid and getgid take nothing and cannot fail.
-    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-    let data = format!(
-        "fd={},rootmode=40000,user_id={uid},group_id={gid}",
-        fuse.as_raw_fd()
-    );
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// The options of a mount of the connection `fuse`: its files are the
+/// programs' of `uid` and `gid` alone (no `allow_other`).
+pub fn mount_options(fuse: RawFd, uid: u32, gid: u32) -> String {
+    format!("fd={fuse},rootmode=40000,user_id={uid},group_id={gid}")
+}
+
+/// Mount the connection `fuse` at `dir`: its files a camera's
+/// ([`mount_options`]), no set-id, no device, no program run from it.
+pub fn mount(fuse: RawFd, dir: &std::path::Path, uid: u32, gid: u32) -> Result<(), String> {
     crate::sys::mount(
         std::ffi::OsStr::new("cellward-camera"),
-        &args.mount,
+        dir,
         "fuse",
         libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
-        &data,
+        &mount_options(fuse, uid, gid),
     )
-    .map_err(|e| format!("cannot mount at {}: {e}", args.mount.display()))?;
+    .map_err(|e| format!("cannot mount at {}: {e}", dir.display()))
+}
+
+/// A descriptor this process was handed by number, believed only when it
+/// is open and of the kind `mode` (`S_IFCHR`, `S_IFIFO`), and closed on
+/// every exec from here on.
+pub fn handed(fd: RawFd, mode: libc::mode_t) -> Option<OwnedFd> {
+    // SAFETY: fstat of a number that may be no descriptor at all: it fails
+    // then, into a zeroed struct of our own.
+    let kind = unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        (libc::fstat(fd, &mut st) == 0).then_some(st.st_mode & libc::S_IFMT)
+    };
+    if kind != Some(mode) {
+        return None;
+    }
+    // SAFETY: fcntl on that descriptor, open as just seen.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    // SAFETY: an open descriptor this process was handed, owned by nobody
+    // else here.
+    Some(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Mount the cameras at `args.mount`, or take the connection handed over
+/// once it is mounted, and serve them until they are unmounted.
+fn serve(args: &Args) -> Result<(), String> {
+    // SAFETY: getuid and getgid take nothing and cannot fail.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let fuse = match &args.place {
+        Place::Mount(dir) => {
+            let fuse = open_fuse()?;
+            mount(fuse.as_raw_fd(), dir, uid, gid)?;
+            fuse
+        }
+        Place::Fd { fuse, ready } => {
+            let fuse = handed(*fuse, libc::S_IFCHR).ok_or("--fd: no /dev/fuse there")?;
+            let ready = handed(*ready, libc::S_IFIFO).ok_or("--ready: no pipe there")?;
+            // Mounted: a byte. The pipe's end without one — its writer gone
+            // (`profile-run` could not mount it, or never ran): nothing to
+            // serve.
+            let mut byte = [0u8; 1];
+            let n = loop {
+                // SAFETY: read(2) into a buffer of that length.
+                let n = unsafe { libc::read(ready.as_raw_fd(), byte.as_mut_ptr().cast(), 1) };
+                if n < 0 && errno() == libc::EINTR {
+                    continue;
+                }
+                break n;
+            };
+            if n != 1 {
+                return Ok(());
+            }
+            // Nothing more of the host's from here: namespaces of its own,
+            // an empty root — as the Wayland proxy (`wl_proxy::isolate`).
+            // Where the system gives none, as it is, said.
+            if crate::wl_proxy::isolation_given() {
+                crate::wl_proxy::isolate().map_err(|e| format!("cannot isolate itself: {e}"))?;
+            } else {
+                eprintln!("camera-serve: no namespaces of its own here — served as it is");
+            }
+            fuse
+        }
+    };
     // SAFETY: flags only; the descriptor is owned below.
     let tfd = unsafe {
         libc::timerfd_create(
@@ -1573,15 +1729,50 @@ mod tests {
         assert_eq!(black_interval_ns(), 200_000_000);
     }
 
+    /// The setting's words, the flag's of before among them; kept as a
+    /// build of before reads them, the new ones as off there.
+    #[test]
+    fn the_modes_words() {
+        for (word, mode) in [
+            ("no", Mode::No),
+            ("off", Mode::No),
+            ("false", Mode::No),
+            (" black\n", Mode::Black),
+            ("ask", Mode::Ask),
+            ("yes", Mode::Yes),
+            ("on", Mode::Yes),
+            ("true", Mode::Yes),
+        ] {
+            assert_eq!(Mode::parse(word), Some(mode), "{word:?}");
+        }
+        for bad in ["", "maybe", "Black", "1"] {
+            assert_eq!(Mode::parse(bad), None, "{bad:?}");
+        }
+        for mode in [Mode::No, Mode::Black, Mode::Ask, Mode::Yes] {
+            assert_eq!(Mode::parse(mode.as_str()), Some(mode));
+            assert_eq!(Mode::parse(mode.record_word()), Some(mode));
+        }
+        assert_eq!(
+            (Mode::No.record_word(), Mode::Yes.record_word()),
+            ("false", "true")
+        );
+        assert!(Mode::Black.black() && Mode::Ask.black());
+        assert!(!Mode::No.black() && !Mode::Yes.black());
+    }
+
     #[test]
     fn the_arguments_are_a_mount_point_and_names() {
         let argv = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
         assert_eq!(
             Args::parse(&argv(&["--mount", "/tmp/c"])),
             Ok(Args {
-                mount: PathBuf::from("/tmp/c"),
+                place: Place::Mount(PathBuf::from("/tmp/c")),
                 devices: vec!["video0".to_owned()]
             })
+        );
+        assert_eq!(
+            Args::parse(&argv(&["--fd", "5", "--ready", "7"])).map(|a| a.place),
+            Ok(Place::Fd { fuse: 5, ready: 7 })
         );
         assert_eq!(
             Args::parse(&argv(&[
@@ -1597,6 +1788,11 @@ mod tests {
             &["--mount", "/m", "--device", "../x"],
             &["--mount", "/m", "--device", "Video0"],
             &["--mount", "/m", "--other"],
+            &["--fd", "5"],
+            &["--fd", "5", "--ready", "5"],
+            &["--fd", "2", "--ready", "7"],
+            &["--mount", "/m", "--fd", "5", "--ready", "7"],
+            &["--fd", "x", "--ready", "7"],
         ] {
             assert!(Args::parse(&argv(bad)).is_err(), "{bad:?}");
         }

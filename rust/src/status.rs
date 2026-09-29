@@ -138,7 +138,7 @@ pub fn defaults(tools: &Tools) -> String {
          \"frame_niri_radius\":{},\"tray_badge\":{},\
          \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{},\"ask_again\":{},\
          \"question_timeout\":{},\"handshake_check\":{},\"protected\":[{}],\"host_runs\":[{}],\
-         \"permissions\":{{\"microphone\":{},\"screencast\":{},\"camera\":{},\
+         \"permissions\":{{\"microphone\":{},\"screencast\":{},\"camera\":{},\"camera_mode\":{},\
          \"audio_manager\":{},\"hermetic\":{},\"nix_daemon\":{},\"host_files_writable\":{},\
          \"network\":{}}}}}",
         sourced_str(&network, network_source),
@@ -172,8 +172,14 @@ pub fn defaults(tools: &Tools) -> String {
             sourced_str(s.as_str(), src)
         },
         {
-            let (on, src) = crate::permissions::flag(&tools.config, "camera");
-            sourced(on.to_string(), src)
+            // `camera`: given the real ones, as before there were modes;
+            // `camera_mode` the word (`crate::camera::Mode`).
+            let (mode, src) = crate::permissions::camera(&tools.config);
+            sourced((mode == crate::camera::Mode::Yes).to_string(), src)
+        },
+        {
+            let (mode, src) = crate::permissions::camera(&tools.config);
+            sourced_str(mode.as_str(), src)
         },
         {
             let (on, src) = crate::permissions::flag(&tools.config, "audio_manager");
@@ -339,8 +345,10 @@ pub fn networks(tools: &Tools) -> String {
             sourced(on.to_string(), source)
         };
         let camera = {
-            let (on, source) = crate::hermetic::camera(&dir, &tools.config, &name);
-            sourced(on.to_string(), source)
+            // Given the real cameras; the mode is the template's
+            // (`permissions.camera_mode`), a network has no say.
+            let (mode, source) = crate::hermetic::camera(&dir, &tools.config, &name);
+            sourced((mode == crate::camera::Mode::Yes).to_string(), source)
         };
         // Whether its programs record the microphone: in force at once (the
         // sound filter reads it for every record stream).
@@ -885,7 +893,11 @@ pub fn container(tools: &Tools, c: &Container) -> String {
         None => sourced("null".to_owned(), Source::Default),
     };
     let camera = match &c.camera {
-        Some(m) => sourced(m.value.to_string(), m.source),
+        Some(m) => sourced((m.value == crate::camera::Mode::Yes).to_string(), m.source),
+        None => sourced("null".to_owned(), Source::Default),
+    };
+    let camera_mode = match &c.camera {
+        Some(m) => sourced_str(m.value.as_str(), m.source),
         None => sourced("null".to_owned(), Source::Default),
     };
     // The devices it is given (`crate::devices`), each with where from.
@@ -939,7 +951,7 @@ pub fn container(tools: &Tools, c: &Container) -> String {
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
          \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"devices\":{devices},\"links\":{links},\"focus\":{focus},\"always_focused\":{},{own},\"instances\":{instances}}}",
+         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"camera_mode\":{camera_mode},\"devices\":{devices},\"links\":{links},\"focus\":{focus},\"always_focused\":{},{own},\"instances\":{instances}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),

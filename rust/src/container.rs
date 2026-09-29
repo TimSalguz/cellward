@@ -257,9 +257,9 @@ pub struct Container {
     /// Whether its programs cast the screen through the portal
     /// (`crate::screencast`); none of its own is the zone's setting.
     pub screencast: Option<Sourced<crate::microphone::Setting>>,
-    /// Whether its programs reach the host's cameras; none of its own is the
-    /// zone's setting.
-    pub camera: Option<Sourced<bool>>,
+    /// How its programs see the host's cameras (`crate::camera::Mode`);
+    /// none of its own is the template's.
+    pub camera: Option<Sourced<crate::camera::Mode>>,
     /// The devices it is given (`crate::devices::Grant` words): declared
     /// ones first, then the local ones.
     pub devices: Vec<Sourced<String>>,
@@ -1587,11 +1587,21 @@ pub fn own_flag_in(config: &Path, name: &str, key: &str) -> Option<(bool, Source
 /// `off` closes what the zone's declared `on` opens (review 2026-09-28: it
 /// was ignored), a local `on` never opens what the zone's declared `off`
 /// closes.
-pub fn camera_for(zone_dir: &Path, config: &Path, zone: &str, name: &str) -> bool {
+pub fn camera_for(zone_dir: &Path, config: &Path, zone: &str, name: &str) -> crate::camera::Mode {
     // Its own word over the template both ways (§11.15, 2b).
-    own_flag_in(config, name, "camera")
+    own_camera_in(config, name)
         .unwrap_or_else(|| crate::hermetic::camera(zone_dir, config, zone))
         .0
+}
+
+/// The container `name`'s own camera ([`crate::camera::Mode`]): a word
+/// that is none of the mode's, or a record that cannot be read, `no`.
+pub fn own_camera_in(config: &Path, name: &str) -> Option<(crate::camera::Mode, Source)> {
+    use crate::camera::Mode;
+    match own_value_in(config, name, "camera") {
+        Ok(own) => own.map(|(word, source)| (Mode::parse(&word).unwrap_or(Mode::No), source)),
+        Err(source) => Some((Mode::No, source)),
+    }
 }
 
 /// Read one container. `None` when it neither exists on disk nor is declared.
@@ -1863,7 +1873,7 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
     let screencast = crate::microphone::container_switch(&tools.config, name, "screencast")
         .map(|(value, source)| Sourced { value, source });
     let camera =
-        own_flag_in(&tools.config, name, "camera").map(|(value, source)| Sourced { value, source });
+        own_camera_in(&tools.config, name).map(|(value, source)| Sourced { value, source });
     // Words that are no grant are left out: nothing is given by a typo.
     let mut devices: Vec<Sourced<String>> = Vec::new();
     let declared_devices: Vec<&str> = declared_conf
@@ -2758,9 +2768,13 @@ pub fn set_screencast(
     set_switch(tools, selector, "screencast", "трансляция экрана", setting)
 }
 
-/// Let a container's programs reach the host's cameras, or not (`None`: as
-/// its zone), locally.
-pub fn set_camera(tools: &Tools, selector: &str, on: Option<bool>) -> Result<(), String> {
+/// A container's camera, locally ([`crate::camera::Mode`]; `None`: the
+/// template's).
+pub fn set_camera(
+    tools: &Tools,
+    selector: &str,
+    mode: Option<crate::camera::Mode>,
+) -> Result<(), String> {
     open_refusal(selector)?;
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
     if container
@@ -2775,7 +2789,7 @@ pub fn set_camera(tools: &Tools, selector: &str, on: Option<bool>) -> Result<(),
     write_key(
         &container.policy.join(FILE),
         "camera",
-        on.map(|on| if on { "true" } else { "false" }),
+        mode.map(crate::camera::Mode::record_word),
         true,
     )
 }
@@ -3885,6 +3899,7 @@ mod tests {
     /// the container over its local one.
     #[test]
     fn a_containers_camera_is_its_own_over_the_template() {
+        use crate::camera::Mode;
         let base = std::env::temp_dir().join(format!("vz-camera-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let zone = base.join("state/nl");
@@ -3893,26 +3908,37 @@ mod tests {
         fs::create_dir_all(config.join("containers/work")).unwrap();
         fs::create_dir_all(config.join("declared/containers")).unwrap();
         let conf = config.join("containers/work/container.conf");
-        assert!(!camera_for(&zone, &config, "nl", "work"));
+        assert_eq!(camera_for(&zone, &config, "nl", "work"), Mode::No);
         fs::write(zone.join(crate::hermetic::CAMERA), "on").unwrap();
-        assert!(!camera_for(&zone, &config, "nl", "work"));
+        assert_eq!(camera_for(&zone, &config, "nl", "work"), Mode::No);
         fs::write(config.join(crate::permissions::FILE), "camera = true\n").unwrap();
-        assert!(camera_for(&zone, &config, "nl", "work"));
+        assert_eq!(camera_for(&zone, &config, "nl", "work"), Mode::Yes);
         fs::write(&conf, "camera = false\n").unwrap();
-        assert!(!camera_for(&zone, &config, "nl", "work"));
+        assert_eq!(camera_for(&zone, &config, "nl", "work"), Mode::No);
         // The template in Nix is a default, not a ceiling.
         crate::declared::declare(&config.join("declared/defaults.conf"), "camera = false\n");
         fs::write(&conf, "camera = true\n").unwrap();
-        assert!(camera_for(&zone, &config, "nl", "work"));
+        assert_eq!(camera_for(&zone, &config, "nl", "work"), Mode::Yes);
         fs::write(&conf, "").unwrap();
-        assert!(!camera_for(&zone, &config, "nl", "work"));
+        assert_eq!(camera_for(&zone, &config, "nl", "work"), Mode::No);
         // Nix's for the container over everything.
         crate::declared::declare(
             &config.join("declared/containers/work.conf"),
             "home = private\ncamera = true\n",
         );
         fs::write(&conf, "camera = false\n").unwrap();
-        assert!(camera_for(&zone, &config, "nl", "work"));
+        assert_eq!(camera_for(&zone, &config, "nl", "work"), Mode::Yes);
+        // The mode's own words: black, ask; nonsense is none.
+        let _ = fs::remove_file(config.join("declared/containers/work.conf"));
+        for (word, mode) in [
+            ("black", Mode::Black),
+            ("ask", Mode::Ask),
+            ("sometimes", Mode::No),
+        ] {
+            fs::write(&conf, format!("camera = {word}\n")).unwrap();
+            assert_eq!(camera_for(&zone, &config, "nl", "work"), mode, "{word}");
+            assert_eq!(own_camera_in(&config, "work"), Some((mode, Source::Local)));
+        }
         let _ = fs::remove_dir_all(&base);
     }
 }

@@ -253,6 +253,9 @@ pub struct Args {
     /// `crate::wl_focus`): its container's policy, `input` when not said.
     /// The proxy's: without one, the compositor's rules alone.
     pub focus: crate::wl_focus::FocusPolicy,
+    /// `--camera black|ask`: a black camera for the launch, served from
+    /// here ([`start_camera`]); `None` for any other.
+    pub camera: Option<crate::camera::Mode>,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
 }
@@ -279,6 +282,8 @@ pub enum ArgError {
     BadFrame,
     /// `--focus` without `input`, `notify`, `ask` or `allow`.
     BadFocus,
+    /// `--camera` without `black` or `ask`.
+    BadCamera,
 }
 
 impl fmt::Display for ArgError {
@@ -295,6 +300,7 @@ impl fmt::Display for ArgError {
                  [:<radius 0-16>]]]], --frame-title a text, --frame-switch a directory"
             ),
             Self::BadFocus => write!(f, "--focus needs input, notify, ask or allow"),
+            Self::BadCamera => write!(f, "--camera needs black or ask"),
         }
     }
 }
@@ -329,6 +335,7 @@ impl Args {
         let (mut state, mut frame_zone, mut container) = (None, None, None);
         let mut focus = crate::wl_focus::FocusPolicy::default();
         let mut always_focused = false;
+        let mut camera = None;
         let mut words = argv[..split].iter();
         while let Some(word) = words.next() {
             if word == "--no-proxy" {
@@ -371,6 +378,15 @@ impl Args {
                     .and_then(|w| w.to_str())
                     .and_then(crate::wl_focus::FocusPolicy::parse)
                     .ok_or(ArgError::BadFocus)?;
+            } else if word == "--camera" {
+                camera = Some(
+                    words
+                        .next()
+                        .and_then(|w| w.to_str())
+                        .and_then(crate::camera::Mode::parse)
+                        .filter(|m| m.black())
+                        .ok_or(ArgError::BadCamera)?,
+                );
             } else if word == "--zone" {
                 let name = words.next().ok_or(ArgError::BadZone)?.to_string_lossy();
                 if !valid_zone_dir(&name) {
@@ -414,6 +430,7 @@ impl Args {
             proxy,
             frame,
             focus,
+            camera,
             cmd,
         })
     }
@@ -601,6 +618,59 @@ impl Compositor {
         // backend; `self` is both, and it is dropped on return.
         Ok(())
     }
+}
+
+/// A launch's black camera (`--camera`, `crate::camera`), its server
+/// started: what goes down the launch to `profile-run`, which mounts it
+/// (`profile::give_black_camera`) — the FUSE connection, and the pipe on
+/// which the server waits to hear that it is mounted.
+struct CameraHandOff {
+    fuse: OwnedFd,
+    ready: OwnedFd,
+}
+
+/// Start a black camera's server (`vpn-zone-core camera-serve --fd
+/// --ready`) here, on the host: out of the program's reach, as the proxy
+/// is — its pid namespace is the instance's, this one the host's. It
+/// serves a FUSE connection of ours once the pipe says the launch mounted
+/// it, and ends when the launch's mount namespace does (or at once, the
+/// pipe's end without a byte).
+fn start_camera() -> Result<CameraHandOff, String> {
+    let fuse = crate::camera::open_fuse()?;
+    let (ready_r, ready_w) = sys::pipe().map_err(|e| format!("pipe: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("which program am I: {e}"))?;
+    let (f, r) = (
+        std::os::fd::AsRawFd::as_raw_fd(&fuse),
+        std::os::fd::AsRawFd::as_raw_fd(&ready_r),
+    );
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("camera-serve")
+        .arg("--fd")
+        .arg(f.to_string())
+        .arg("--ready")
+        .arg(r.to_string())
+        .arg("--device")
+        .arg("video0")
+        .stdin(std::process::Stdio::null());
+    // SAFETY: between fork and exec only fcntl(2), which is
+    // async-signal-safe, on two descriptors this process holds.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(move || {
+            for fd in [f, r] {
+                if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    cmd.spawn().map_err(|e| format!("camera-serve: {e}"))?;
+    drop(ready_r);
+    Ok(CameraHandOff {
+        fuse,
+        ready: ready_w,
+    })
 }
 
 /// Register a sandboxed socket with the compositor, then run the program on it.
@@ -801,11 +871,37 @@ pub fn run(args: Args) -> u8 {
     if proxy.is_none() || !proxy_speaks {
         no_word();
     }
+    // The black camera: its server started, the connection and the pipe
+    // down the launch — kept across the exec, their numbers in the
+    // environment —, this process's copies gone once the child has them.
+    let camera = args.camera.and_then(|_| match start_camera() {
+        Ok(camera) => Some(camera),
+        Err(e) => {
+            eprintln!("wl-sandbox: no black camera ({e}) — the program has none");
+            None
+        }
+    });
+    if let Some(c) = &camera {
+        use std::os::fd::AsRawFd;
+        for (fd, name) in [
+            (c.fuse.as_raw_fd(), crate::profile::ENV_CAMERA_FD),
+            (c.ready.as_raw_fd(), crate::profile::ENV_CAMERA_READY_FD),
+        ] {
+            // SAFETY: fcntl on a descriptor we hold.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+            std::env::set_var(name, fd.to_string());
+        }
+    }
     // NOT exec: after the program exits somebody has to close the switch and
     // unlink the socket, so it is started as a child.
     // SAFETY: single-threaded at this point, so the child may allocate and
     // print before it execs.
     let pid = unsafe { libc::fork() };
+    if pid != 0 {
+        drop(camera);
+        std::env::remove_var(crate::profile::ENV_CAMERA_FD);
+        std::env::remove_var(crate::profile::ENV_CAMERA_READY_FD);
+    }
     if pid == 0 {
         // The switch belongs to the parent. O_CLOEXEC would close this copy at
         // execve anyway; doing it here covers the case where the exec fails.
@@ -1028,6 +1124,27 @@ mod tests {
             &["foot", "--focus", "", "--", "x"],
         ] {
             assert_eq!(Args::parse(&argv(bad)), Err(ArgError::BadFocus), "{bad:?}");
+        }
+    }
+
+    /// `--camera black|ask`: the black camera served from here; no other
+    /// word — the real cameras are no supervisor's.
+    #[test]
+    fn the_black_camera_is_a_word_of_its_own() {
+        use crate::camera::Mode;
+        let a = Args::parse(&argv(&["foot", "--", "foot"])).unwrap();
+        assert_eq!(a.camera, None);
+        for (word, mode) in [("black", Mode::Black), ("ask", Mode::Ask)] {
+            let a = Args::parse(&argv(&["foot", "--camera", word, "--", "foot"])).unwrap();
+            assert_eq!(a.camera, Some(mode), "{word}");
+        }
+        for bad in [
+            &["foot", "--camera", "--", "x"][..],
+            &["foot", "--camera", "yes", "--", "x"],
+            &["foot", "--camera", "no", "--", "x"],
+            &["foot", "--camera", "grey", "--", "x"],
+        ] {
+            assert_eq!(Args::parse(&argv(bad)), Err(ArgError::BadCamera), "{bad:?}");
         }
     }
 

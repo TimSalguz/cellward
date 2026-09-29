@@ -22,6 +22,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
+- **A container's camera is a mode** (2026-09-29): `camera = no|black|ask|yes`
+  (`cellward container set <c> camera …`, `cellward defaults set camera …`,
+  Nix `permissions.camera` takes the words besides true/false, which stay
+  `yes` and `no`). `black` gives the launch a black camera — `/dev/video0`
+  that programs take for a V4L2 one, served by the launch's supervisor on
+  the host (the server then in namespaces of its own with an empty root),
+  mounted by `profile-run` in the launch's mount namespace; black frames
+  only while a program streams. `ask` is black for now: the question comes
+  next. The built-in default stays `no`. `status --json`: `camera` is still
+  whether the real cameras are given; the word is the new `camera_mode`
+  (in `permissions` and in each container).
 - **Round corners that follow niri, and outside the frame** (2026-09-29):
   `cellward frame radius niri` rounds the window's corners inside the frame
   concentrically with niri's `geometry-corner-radius` (read from niri's

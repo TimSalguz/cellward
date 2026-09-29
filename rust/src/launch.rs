@@ -807,15 +807,21 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // --- THE CAMERAS ---
     // The host's cameras for this launch (`docs/PERMISSIONS.md` §11.10): the
     // zone's `/dev` has none, and a launch they are let gets them bound in,
-    // in its own mount namespace (`profile::give_capture`)
-    // — by its container's setting, the zone's for a launch with none.
-    let camera = zone != UNCONFINED && {
+    // in its own mount namespace (`profile::give_capture`); a launch of a
+    // black camera (`black`, `ask`: `crate::camera`) gets one served by its
+    // supervisor (`wl-sandbox --camera`), mounted by `profile-run
+    // --black-camera` — by its container's setting, the template's for a
+    // launch with none.
+    let camera_mode = if zone == UNCONFINED {
+        crate::camera::Mode::No
+    } else {
         let zone_dir = tools.state.join(&zone_name);
         match record_name(&selection) {
             Some(name) => crate::container::camera_for(&zone_dir, &tools.config, &zone_name, &name),
             None => crate::hermetic::camera(&zone_dir, &tools.config, &zone_name).0,
         }
     };
+    let camera = camera_mode == crate::camera::Mode::Yes;
 
     // --- THE DEVICES ---
     // The devices given to its container (`docs/PERMISSIONS.md` §11.12): the
@@ -971,6 +977,11 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         if always_focused {
             wrap.push("--always-focused".into());
         }
+        // A black camera: served from the supervisor, on the host.
+        if camera_mode.black() {
+            wrap.push("--camera".into());
+            wrap.push(camera_mode.as_str().into());
+        }
         wrap.push("--".into());
         wrap
     });
@@ -1033,8 +1044,9 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             wrapped.push("--x11".into());
             wrapped.push("on".into());
         }
-        // The cameras into its own /dev, where they are let.
-        if camera {
+        // The cameras into its own /dev, where they are let — the real
+        // ones, or the black one its `/dev` has then.
+        if camera_mode != crate::camera::Mode::No {
             wrapped.push("--camera".into());
             wrapped.push("on".into());
         }
@@ -1456,6 +1468,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             shares: &shares,
             own_x11,
             camera,
+            black_camera: camera_mode.black(),
             devices: &device_args,
             storage: storage_dir.as_deref(),
         },
@@ -1556,6 +1569,9 @@ pub struct Entry<'a> {
     /// The host's cameras let this launch in an instance: bound into its
     /// own mount namespace (`profile-run --camera`).
     pub camera: bool,
+    /// A black camera instead (`profile-run --black-camera`), served by the
+    /// launch's supervisor.
+    pub black_camera: bool,
     /// The devices its container is given, as `profile-run --device` takes
     /// them (`devices::Pass::arg`): bound into its own mount namespace.
     pub devices: &'a [String],
@@ -1652,6 +1668,9 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
         }
         if entry.camera && in_space {
             exec.push("--camera".into());
+        }
+        if entry.black_camera && in_space {
+            exec.push("--black-camera".into());
         }
         if entry.own_x11 && in_space {
             exec.push("--own-x11".into());
@@ -3602,6 +3621,7 @@ mod tests {
             storage: None,
             own_x11: false,
             camera: false,
+            black_camera: false,
             devices: &[],
         }
     }
@@ -3969,6 +3989,24 @@ mod tests {
         let parsed = crate::profile::Args::parse(&line[at + 1..]).unwrap();
         assert!(!parsed.ephemeral);
         assert!(parsed.camera);
+    }
+
+    /// A black camera (`crate::camera::Mode::Black`, `Ask`): `profile-run
+    /// --black-camera`, which mounts what its supervisor serves; the real
+    /// cameras not given with it.
+    #[test]
+    fn a_black_camera_is_profile_runs_to_mount() {
+        let mut e = entry(Network::Instance, Path::new("/s/c"), false);
+        e.black_camera = true;
+        let line = entry_argv(&e, argv(&["firefox"]));
+        let at = line.iter().position(|a| a == "profile-run").unwrap();
+        let parsed = crate::profile::Args::parse(&line[at + 1..]).unwrap();
+        assert!(parsed.black_camera && !parsed.camera, "{line:?}");
+        // Outside a space of ours: nothing to mount it in.
+        let mut e = entry(Network::Unconfined, Path::new("/s/c"), false);
+        e.black_camera = true;
+        let line = entry_argv(&e, argv(&["firefox"]));
+        assert!(!line.contains(&os("--black-camera")), "{line:?}");
     }
 
     /// Every device (`devices::Grant::All`, «без изоляции»): one flag of

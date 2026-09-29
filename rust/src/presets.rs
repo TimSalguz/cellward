@@ -464,7 +464,7 @@ pub fn apply(tools: &Tools, container: &str, key: &str, ticked: &[String]) -> Ve
     for item in chosen {
         use crate::container as c;
         let done = match &item {
-            Item::Camera => c::set_camera(tools, container, Some(true)),
+            Item::Camera => c::set_camera(tools, container, Some(crate::camera::Mode::Yes)),
             Item::Microphone(s) => c::set_microphone(tools, container, Some(*s)),
             Item::Screencast(s) => c::set_screencast(tools, container, Some(*s)),
             Item::X11 => c::set_x11(tools, container, Some(true)),

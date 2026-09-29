@@ -2850,8 +2850,24 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
         json.contains("\"audio_manager\":{\"value\":true,\"source\":\"local\"}"),
         "{json}"
     );
+    // The camera: a mode of its own words (2026-09-29), `camera` still
+    // the real ones given; nonsense refused.
+    let out = home.run(&["defaults", "set", "camera", "black"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("camera: black\n"), "{}", stdout(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    for field in [
+        "\"camera\":{\"value\":false,\"source\":\"local\"}",
+        "\"camera_mode\":{\"value\":\"black\",\"source\":\"local\"}",
+    ] {
+        assert!(json.contains(field), "{field}: {json}");
+    }
     assert!(!home
-        .run(&["defaults", "set", "camera", "yes"])
+        .run(&["defaults", "set", "camera", "grey"])
+        .status
+        .success());
+    assert!(home
+        .run(&["defaults", "set", "camera", "default"])
         .status
         .success());
     assert!(home
@@ -2946,6 +2962,7 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
             "],\"permissions\":{\"microphone\":{\"value\":\"ask\",\"source\":\"default\"},\
              \"screencast\":{\"value\":\"ask\",\"source\":\"default\"},\
              \"camera\":{\"value\":false,\"source\":\"default\"},\
+             \"camera_mode\":{\"value\":\"no\",\"source\":\"default\"},\
              \"audio_manager\":{\"value\":false,\"source\":\"default\"},\
              \"hermetic\":{\"value\":true,\"source\":\"default\"},\
              \"nix_daemon\":{\"value\":false,\"source\":\"default\"},\
@@ -3147,6 +3164,37 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
     ] {
         assert!(!home.run(bad).status.success(), "{bad:?}");
     }
+}
+
+#[test]
+fn a_black_camera_is_the_supervisors_to_serve() {
+    // 2026-09-29 (`crate::camera`): a camera `black` or `ask` is served by
+    // the launch's supervisor — `wl-sandbox --camera <mode>` —; `no` is
+    // none, `yes` the real ones, which are no supervisor's.
+    let home = Home::new("black-camera");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+    let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+    assert!(!line.contains("--camera"), "{line}");
+    for (word, served) in [
+        ("black", true),
+        ("ask", true),
+        ("yes", false),
+        ("no", false),
+    ] {
+        let out = home.run(&["container", "set", "main", "camera", word]);
+        assert!(out.status.success(), "{word}: {}", stderr(&out));
+        let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+        assert_eq!(
+            line.contains(&format!("--camera {word} --")),
+            served,
+            "{word}: {line}"
+        );
+    }
+    let out = home.run(&["container", "set", "main", "camera", "grey"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("black"), "{}", stderr(&out));
 }
 
 #[test]

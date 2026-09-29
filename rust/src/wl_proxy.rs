@@ -1983,7 +1983,7 @@ fn confine(
 /// may serve nothing: GitHub's Ubuntu runners' AppArmor lets `unshare`
 /// through and then refuses the maps. The proxy is single-threaded: the
 /// probe may do anything before its `_exit`.
-fn isolation_given() -> bool {
+pub(crate) fn isolation_given() -> bool {
     // SAFETY: fork in a single-threaded process; the child only calls
     // `isolate` and leaves with _exit.
     let pid = unsafe { libc::fork() };
@@ -2009,7 +2009,7 @@ fn isolation_given() -> bool {
 /// (`pivot_root(".", ".")`); every capability in the namespace dropped.
 /// The parent-death signal stays: the new namespace is a child of the old,
 /// owned by the same user, so the credentials' change keeps it.
-fn isolate() -> Result<(), String> {
+pub(crate) fn isolate() -> Result<(), String> {
     fn check(what: &str, rc: libc::c_int) -> Result<(), String> {
         if rc == 0 {
             Ok(())

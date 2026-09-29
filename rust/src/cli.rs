@@ -2939,7 +2939,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                      x11 default (как у сети)|on|off | \
                      home private|layer|main | color default (цвет сети)|<#rrggbb> | \
                      microphone|screencast default (как у зоны)|yes|no|ask | \
-                     camera default (как у зоны)|on|off | \
+                     camera default (как у всех)|no|black|ask|yes | \
                      focus default (input)|input|notify|ask|allow | \
                      hermetic|nix-daemon|audio-manager default (как у зоны)|on|off | \
                      host-files default (как у зоны)|read-only|writable"
@@ -3045,32 +3045,41 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                 };
             }
             if key == "camera" {
-                let on = match value.as_str() {
+                use crate::camera::Mode;
+                let mode = match value.as_str() {
                     "default" => None,
-                    "on" => Some(true),
-                    "off" => Some(false),
-                    _ => {
-                        eprintln!("camera: default (как у зоны), on или off");
-                        return 1;
-                    }
+                    word => match Mode::parse(word) {
+                        Some(mode) => Some(mode),
+                        None => {
+                            eprintln!("camera: default (как у всех), no, black, ask или yes");
+                            return 1;
+                        }
+                    },
                 };
-                return match crate::container::set_camera(tools, selector, on) {
+                return match crate::container::set_camera(tools, selector, mode) {
                     Ok(()) => {
-                        match on {
-                            Some(true) => println!(
+                        match mode {
+                            Some(Mode::Yes) => println!(
                                 "программам контейнера {selector} видны камеры хоста — снимать \
                                  они могут без вопроса (программам, запущенным после этого)"
                             ),
-                            // Closed even where the zone is in Nix's camera
-                            // list: a local "off" is stricter than the
-                            // declared "on" (`container::camera_for`,
-                            // review 2026-09-28).
-                            Some(false) => println!(
-                                "камеры хоста программам контейнера {selector} не видны \
-                                 (запущенным после этого) — и если его сеть в \
-                                 programs.cellward.camera в Nix: строже Nix сети — действует"
+                            Some(Mode::Black) => println!(
+                                "программам контейнера {selector} видна чёрная камера: снимать \
+                                 можно, но кадры чёрные, настоящая камера не открывается \
+                                 (программам, запущенным после этого)"
                             ),
-                            None => println!("у контейнера {selector} снова камера как у его зоны"),
+                            Some(Mode::Ask) => println!(
+                                "программам контейнера {selector} видна камера, чёрная, пока \
+                                 человек не разрешит настоящую (вопрос — в следующей версии; \
+                                 пока она просто чёрная; программам, запущенным после этого)"
+                            ),
+                            Some(Mode::No) => println!(
+                                "камеры хоста программам контейнера {selector} не видны \
+                                 (запущенным после этого)"
+                            ),
+                            None => println!(
+                                "у контейнера {selector} снова камера как у всех (cellward defaults)"
+                            ),
                         }
                         0
                     }
@@ -3678,8 +3687,11 @@ fn print_container(tools: &Tools, c: &crate::container::Container) {
         );
     }
     if let Some(m) = &c.camera {
-        let on = if m.value { "on" } else { "off" };
-        println!("  камера:    {on} ({})", source_word(m.source));
+        println!(
+            "  камера:    {} ({})",
+            m.value.as_str(),
+            source_word(m.source)
+        );
     }
     if let Some(m) = &c.screencast {
         println!(

@@ -372,12 +372,12 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             "container"
                 if pos == 5
                     && word(2) == "set"
-                    && matches!(
-                        word(4),
-                        "camera" | "hermetic" | "nix-daemon" | "audio-manager" | "x11"
-                    ) =>
+                    && matches!(word(4), "hermetic" | "nix-daemon" | "audio-manager" | "x11") =>
             {
                 strs(&mut out, &["default", "on", "off"])
+            }
+            "container" if pos == 5 && word(2) == "set" && word(4) == "camera" => {
+                strs(&mut out, &["default", "no", "black", "ask", "yes"])
             }
             "container" if pos == 5 && word(2) == "set" && word(4) == "host-files" => {
                 strs(&mut out, &["default", "read-only", "writable"])
