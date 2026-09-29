@@ -3496,7 +3496,10 @@ mod tests {
         );
         assert_eq!(text_of(&menu, "nl"), "VPN: nl — туннель не отвечает");
         // A zone through a system zone is a VPN, and says whose tunnel it is.
-        assert_eq!(text_of(&menu, "mz"), "VPN: mz (через системное подключение sz)");
+        assert_eq!(
+            text_of(&menu, "mz"),
+            "VPN: mz (через системное подключение sz)"
+        );
     }
 
     #[test]
