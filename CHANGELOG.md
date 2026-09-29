@@ -22,6 +22,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
+- **Fullscreen in the frame** (2026-09-29, docs/WINDOW-FRAME.md §8
+  «Полный экран»). A frame of its own for a fullscreen window: `cellward
+  frame fullscreen width same|<0–32>` (same), `… title always|hover|off`
+  (off: the border stays, no strip), `… notice on|off|<0–30>` (3 seconds:
+  the zone's name over the top of the content on the way in, whatever the
+  strip's mode — a program that takes the whole screen could draw another
+  zone's frame). Fail-closed as the title strip: while the compositor says
+  the window is not fullscreen, the border is never thinner than outside
+  fullscreen, whatever the program acked. A □ button before × (`frame
+  fullscreen-button one|two|menu|none`, default one): a left click is the
+  compositor's fullscreen, on or off; fullscreen inside the window — the
+  program told it is fullscreen, the window staying where it is — is the
+  right click of □ (`one`), a second button ▣ (`two`) or a row of the ≡'s
+  dropdown (`menu`); the program's own `unset_fullscreen` ends it. Two
+  presses on the title within 400 ms maximize the window, or end that
+  (`frame double-click maximize|none`). Nix: `frame.fullscreen.{width,title,
+  notice}`, `frame.fullscreenButton`, `frame.doubleClick`. `status --json`,
+  new keys only: `frame_fullscreen_width` (a number or `"same"`),
+  `frame_fullscreen_title`, `frame_fullscreen_notice` (seconds),
+  `frame_fullscreen_button`, `frame_double_click`. `wl-sandbox --frame`
+  takes the five after the outer radius. The title strip over the content
+  no longer needs a border (a width of 0 with `hover`).
 - **A container's camera is a mode** (2026-09-29): `camera =
   no|black|ask|yes` (`cellward container set <c> camera …`, `cellward
   defaults set camera …`, Nix `permissions.camera` takes the words besides
