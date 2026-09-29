@@ -219,7 +219,7 @@ fn lock(dir: &Path) -> Result<fs::File, String> {
 /// and whether it is up — the real ones ([`Real`]), or a test's.
 trait Steps {
     fn ask(&self, zone: &str, mode: Mode, wants: Wants<'_>) -> bool;
-    fn log_in(&self, zone: &str, wants: Wants<'_>, cfg: &OcConfig) -> bool;
+    fn log_in(&self, zone: &str, asked: (Mode, Wants<'_>), cfg: &OcConfig) -> bool;
     fn start(&self, zone: &str, wants: Wants<'_>);
     fn up(&self, zone: &str) -> bool;
 }
@@ -231,8 +231,8 @@ impl Steps for Real<'_> {
         question(self.0, zone, mode, wants)
     }
 
-    fn log_in(&self, zone: &str, wants: Wants<'_>, cfg: &OcConfig) -> bool {
-        log_in(self.0, zone, wants, cfg)
+    fn log_in(&self, zone: &str, asked: (Mode, Wants<'_>), cfg: &OcConfig) -> bool {
+        log_in(self.0, zone, asked, cfg)
     }
 
     fn start(&self, zone: &str, wants: Wants<'_>) {
@@ -309,7 +309,7 @@ fn decide(
     }
     let yes = match login {
         // The form is the question: «Подключить» there is the yes.
-        Some(cfg) => steps.log_in(zone, wants, cfg),
+        Some(cfg) => steps.log_in(zone, (mode, wants), cfg),
         None => {
             let yes = matches!(wants, Wants::Person) || steps.ask(zone, mode, wants);
             if yes {
@@ -678,7 +678,7 @@ struct Answer {
 /// it when a try before did not bring the network up.
 fn login_request(
     zone: &str,
-    wants: Wants<'_>,
+    (mode, wants): (Mode, Wants<'_>),
     cfg: &OcConfig,
     prefill: (&str, &str, &str),
     (error, keyring): (Option<&str>, bool),
@@ -689,6 +689,9 @@ fn login_request(
         crate::window::clean(&who(zone, wants)),
         crate::window::clean(&cfg.server)
     );
+    if mode == Mode::Manual && !matches!(wants, Wants::Person) {
+        req.push_str("note\tЭта сеть подключается только вручную: вход подключит её сейчас.\n");
+    }
     if let Wants::Program(_) = wants {
         req.push_str("note\tПрограмма ждёт без сети.\n");
     }
@@ -784,7 +787,7 @@ fn login_form(tools: &Tools, request: &str, user: &str, group: &str) -> Option<A
 /// The login of `zone` taken in the form and handed to its holder while it
 /// starts; the form again, with what went wrong, until the network is up or
 /// the person gives up. Whether it is up.
-fn log_in(tools: &Tools, zone: &str, wants: Wants<'_>, cfg: &OcConfig) -> bool {
+fn log_in(tools: &Tools, zone: &str, (mode, wants): (Mode, Wants<'_>), cfg: &OcConfig) -> bool {
     let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) else {
         eprintln!("cellward: XDG_RUNTIME_DIR не задан — вход в сеть {zone} передать некуда");
         return false;
@@ -803,7 +806,7 @@ fn log_in(tools: &Tools, zone: &str, wants: Wants<'_>, cfg: &OcConfig) -> bool {
             .unwrap_or_default();
         let request = login_request(
             zone,
-            wants,
+            (mode, wants),
             cfg,
             (&user, &group, &remembered),
             (error.as_deref(), keyring),
@@ -898,7 +901,7 @@ mod tests {
             self.answer
         }
 
-        fn log_in(&self, zone: &str, wants: Wants<'_>, _: &OcConfig) -> bool {
+        fn log_in(&self, zone: &str, (_, wants): (Mode, Wants<'_>), _: &OcConfig) -> bool {
             self.logins.set(self.logins.get() + 1);
             if self.answer {
                 self.start(zone, wants);
@@ -1088,7 +1091,7 @@ mod tests {
             OcConfig::parse(b"[OpenConnect]\nServer = vpn.example.org\nLogin = ask\n").unwrap();
         let req = login_request(
             "work",
-            Wants::Program("Wine"),
+            (Mode::Ask, Wants::Program("Wine")),
             &cfg,
             ("ivan", "", "secret"),
             (Some("Шлюз не принял вход"), true),
@@ -1100,11 +1103,29 @@ mod tests {
         assert!(req.contains("field\tpassword\tПароль\tsecret\tsecret\n"));
         assert!(req.contains("\tcode\t\n"));
         assert!(req.contains("remember\tЗапомнить пароль в связке ключей сеанса\t1\n"));
-        let plain = login_request("work", Wants::Person, &cfg, ("", "", ""), (None, false));
+        let plain = login_request(
+            "work",
+            (Mode::Manual, Wants::Person),
+            &cfg,
+            ("", "", ""),
+            (None, false),
+        );
         assert!(
             !plain.contains("remember") && !plain.contains("ждёт"),
             "{plain}"
         );
+        assert!(
+            !plain.contains("вручную"),
+            "the person connecting it: {plain}"
+        );
+        let manual = login_request(
+            "work",
+            (Mode::Manual, Wants::Program("Wine")),
+            &cfg,
+            ("", "", ""),
+            (None, false),
+        );
+        assert!(manual.contains("только вручную"), "{manual}");
         let answer = parse_answer(
             "field\tuser\tivan\nfield\tgroup\tstaff\nfield\tpassword\tp w\nfield\tcode\t42\n\
              remember\t1\n",
