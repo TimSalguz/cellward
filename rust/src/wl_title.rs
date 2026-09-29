@@ -1406,7 +1406,11 @@ impl Prepared {
     /// Bytes of one region of the line: the line (or the tag) at
     /// [`MAX_SCALE`].
     fn slot_bytes(&self) -> usize {
-        device(image_width(&self.line, &self.look), MAX_SCALE) as usize
+        self.slot_bytes_as(&self.look)
+    }
+
+    fn slot_bytes_as(&self, look: &Look) -> usize {
+        device(image_width(&self.line, look), MAX_SCALE) as usize
             * device(HEIGHT, MAX_SCALE) as usize
             * 4
     }
@@ -1414,7 +1418,11 @@ impl Prepared {
     /// Bytes of one region of the buttons: every image of the row at
     /// [`MAX_SCALE`].
     fn button_bytes(&self) -> usize {
-        let look = &self.look.buttons;
+        Self::button_bytes_as(&self.look)
+    }
+
+    fn button_bytes_as(look: &Look) -> usize {
+        let look = &look.buttons;
         look.variants()
             * device(look.width_all(), MAX_SCALE) as usize
             * device(HEIGHT, MAX_SCALE) as usize
@@ -1424,7 +1432,11 @@ impl Prepared {
     /// Bytes of one region of the round corners: the four at
     /// [`MAX_SCALE`]; none with square ones.
     fn corner_bytes(&self) -> usize {
-        let d = device(self.look.corners(), MAX_SCALE) as usize;
+        Self::corner_bytes_as(&self.look)
+    }
+
+    fn corner_bytes_as(look: &Look) -> usize {
+        let d = device(look.corners(), MAX_SCALE) as usize;
         4 * d * d * 4
     }
 
@@ -1451,8 +1463,37 @@ impl Prepared {
     /// the buttons, then [`SLOTS`] of the corners, then [`SLOTS`] of the
     /// dropdown, then [`PROMPT_SLOTS`] of the questions' panels.
     pub fn memfd_size(&self) -> usize {
-        (self.slot_bytes() + self.button_bytes() + self.corner_bytes() + self.menu_bytes()) * SLOTS
+        self.memfd_size_as(&self.look)
+    }
+
+    fn memfd_size_as(&self, look: &Look) -> usize {
+        (self.slot_bytes_as(look)
+            + Self::button_bytes_as(look)
+            + Self::corner_bytes_as(look)
+            + self.menu_bytes())
+            * SLOTS
             + Self::prompt_bytes() * PROMPT_SLOTS
+    }
+
+    /// A memfd for any look the frame may be given on the fly (step 6 of
+    /// `docs/PERMISSIONS.md` §11.15) — every button style, a border or the
+    /// tag, the round corners at their largest —, twice: a new look is
+    /// drawn in the other half ([`Text::new_at`]), while the compositor may
+    /// still show buffers of the old one. Sparse: what is never drawn costs
+    /// nothing.
+    pub fn memfd_size_any(&self) -> usize {
+        let mut most = 0;
+        for buttons in ButtonStyle::ALL {
+            for style in [Style::Full, Style::Soft, Style::Tag] {
+                let look = Look {
+                    style,
+                    buttons: buttons_look(buttons),
+                    radius: MAX_RADIUS,
+                };
+                most = most.max(self.memfd_size_as(&look));
+            }
+        }
+        2 * most
     }
 }
 
@@ -1509,10 +1550,13 @@ pub struct Text {
     glyphs: Vec<GlyphId>,
     bg: Rgb,
     look: Look,
-    /// The memfd, to write the pixels with.
-    file: File,
+    /// The memfd, to write the pixels with — one descriptor for every text
+    /// of the launch: the only one the proxy's filter lets it write to.
+    file: Rc<File>,
     /// The same memfd (another descriptor), for the pools.
     pub fd: Rc<OwnedFd>,
+    /// The whole memfd's size: a pool of it is the whole of it.
+    pool: usize,
     /// The line's regions, first in the memfd, the buttons' after them, the
     /// corners' last.
     title: Regions,
@@ -1566,15 +1610,40 @@ impl Text {
     /// `memfd` of [`Prepared::memfd_size`] bytes, and a second descriptor of
     /// it for writing. `bg`: the title's colour ([`Look::title_color`]).
     pub fn new(prepared: Prepared, bg: Rgb, memfd: OwnedFd, writer: OwnedFd) -> Self {
-        let title = Regions::new(0, prepared.slot_bytes());
-        let buttons = Regions::new(title.bytes(), prepared.button_bytes());
-        let corners = Regions::new(title.bytes() + buttons.bytes(), prepared.corner_bytes());
+        let size = prepared.memfd_size();
+        Self::new_at(
+            prepared,
+            bg,
+            Rc::new(memfd),
+            Rc::new(File::from(writer)),
+            0,
+            size,
+        )
+    }
+
+    /// [`Text::new`] in a memfd shared with other texts (the frame's look
+    /// changed on the fly): its regions from `origin` on, the memfd
+    /// `total` bytes ([`Prepared::memfd_size_any`]).
+    pub fn new_at(
+        prepared: Prepared,
+        bg: Rgb,
+        memfd: Rc<OwnedFd>,
+        writer: Rc<File>,
+        origin: usize,
+        total: usize,
+    ) -> Self {
+        let title = Regions::new(origin, prepared.slot_bytes());
+        let buttons = Regions::new(origin + title.bytes(), prepared.button_bytes());
+        let corners = Regions::new(
+            origin + title.bytes() + buttons.bytes(),
+            prepared.corner_bytes(),
+        );
         let menu = Regions::new(
-            title.bytes() + buttons.bytes() + corners.bytes(),
+            origin + title.bytes() + buttons.bytes() + corners.bytes(),
             prepared.menu_bytes(),
         );
         let prompt = Regions::with_slots(
-            title.bytes() + buttons.bytes() + corners.bytes() + menu.bytes(),
+            origin + title.bytes() + buttons.bytes() + corners.bytes() + menu.bytes(),
             Prepared::prompt_bytes(),
             PROMPT_SLOTS,
         );
@@ -1585,8 +1654,9 @@ impl Text {
             glyphs: prepared.glyphs,
             bg,
             look: prepared.look,
-            file: File::from(writer),
-            fd: Rc::new(memfd),
+            file: writer,
+            fd: memfd,
+            pool: total,
             title,
             buttons,
             corners,
@@ -1631,14 +1701,12 @@ impl Text {
 
     /// The pool's size: the whole memfd.
     pub fn pool_size(&self) -> i32 {
-        i32::try_from(
-            self.title.bytes()
-                + self.buttons.bytes()
-                + self.corners.bytes()
-                + self.menu.bytes()
-                + self.prompt.bytes(),
-        )
-        .unwrap_or(i32::MAX)
+        i32::try_from(self.pool).unwrap_or(i32::MAX)
+    }
+
+    /// The memfd and its writer, for a text of another look in it.
+    pub fn memfd(&self) -> (Rc<OwnedFd>, Rc<File>) {
+        (self.fd.clone(), self.file.clone())
     }
 
     /// The line at `scale` — the tag with it, in the tag look —, drawn if it

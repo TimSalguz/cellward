@@ -674,20 +674,9 @@ pub(crate) struct Frames {
     width: Cell<i32>,
     /// This connection's windows: what a change of the frame reaches.
     windows: RefCell<Vec<Weak<RefCell<Window>>>>,
-    /// The title strip's mode, the launch's.
-    mode: TitleMode,
-    /// The look — the style, the buttons, the round corners —, the
-    /// launch's.
-    look: Look,
-    /// The colours, a 3×3 square each in a sealed memfd, made before the
-    /// proxy confined itself (`wl_proxy::pixels`): the same for every
-    /// connection of the launch — one zone, one colour, its tones.
-    pixel: Rc<OwnedFd>,
-    /// What each square of it is ([`Look::squares`]): its buffer's format.
-    squares: Vec<Square>,
-    /// The title's line and the memfd of its pixels (`crate::wl_title`), the
-    /// launch's too. `None`: the strip goes without its text.
-    text: Option<Rc<Text>>,
+    /// What the frame is drawn with, the launch's — changed on the fly
+    /// ([`Frames::set_parts`]).
+    parts: RefCell<Parts>,
     own: RefCell<Own>,
     /// The scale (120ths) the compositor last preferred for a title of this
     /// connection: a new window's text is drawn at it first.
@@ -713,6 +702,24 @@ pub(crate) struct Frames {
     always_focused: bool,
     /// The launch's questions, shared by all its connections.
     questions: Rc<Questions>,
+}
+
+/// What a frame is drawn with that may change on the fly (step 6 of
+/// `docs/PERMISSIONS.md` §11.15).
+pub(crate) struct Parts {
+    /// The title strip's mode.
+    pub(crate) mode: TitleMode,
+    /// The look — the style, the buttons, the round corners.
+    pub(crate) look: Look,
+    /// The colours, a 3×3 square each in a sealed memfd, made outside the
+    /// proxy's filter (`wl_proxy::pixels`): the same for every connection of
+    /// the launch — one zone, one colour, its tones.
+    pub(crate) pixel: Rc<OwnedFd>,
+    /// What each square of it is ([`Look::squares`]): its buffer's format.
+    pub(crate) squares: Vec<Square>,
+    /// The title's line and the memfd of its pixels (`crate::wl_title`).
+    /// `None`: the strip goes without its text.
+    pub(crate) text: Option<Rc<Text>>,
 }
 
 /// What a click on the frame asks of the supervisor (`crate::wl_proxy`),
@@ -872,11 +879,13 @@ impl Frames {
         let frames = Rc::new(Self {
             width: Cell::new(border.width),
             windows: RefCell::default(),
-            mode: border.title,
-            look: border.look,
-            pixel: border.pixel.clone(),
-            squares: border.squares.clone(),
-            text: border.text.clone(),
+            parts: RefCell::new(Parts {
+                mode: border.title,
+                look: border.look,
+                pixel: border.pixel.clone(),
+                squares: border.squares.clone(),
+                text: border.text.clone(),
+            }),
             own: RefCell::default(),
             scale: Cell::new(crate::wl_title::MIN_SCALE),
             warned,
@@ -940,14 +949,21 @@ impl Frames {
     fn finish(&self) {
         let mut own = self.own.borrow_mut();
         own.complete = true;
+        self.make_buffers(&mut own);
+    }
+
+    /// A buffer of each colour of the parts, and the pool of their title's
+    /// text: at the start, and after a change on the fly.
+    fn make_buffers(&self, own: &mut Own) {
         let Some(shm) = own.shm.clone() else {
             return;
         };
-        let count = i32::try_from(self.squares.len()).unwrap_or(0);
-        let pool = shm.new_send_create_pool(&self.pixel, PIXEL_BYTES.saturating_mul(count));
+        let parts = self.parts.borrow();
+        let count = i32::try_from(parts.squares.len()).unwrap_or(0);
+        let pool = shm.new_send_create_pool(&parts.pixel, PIXEL_BYTES.saturating_mul(count));
         quiet(&*pool);
         own.pixels = (0..count)
-            .zip(&self.squares)
+            .zip(&parts.squares)
             .map(|(k, square)| {
                 let buffer = pool.new_send_create_buffer(
                     PIXEL_BYTES * k,
@@ -961,10 +977,40 @@ impl Frames {
             })
             .collect();
         pool.send_destroy();
-        if let Some(text) = &self.text {
+        own.text_pool = parts.text.as_ref().map(|text| {
             let pool = shm.new_send_create_pool(&text.fd, text.pool_size());
             quiet(&*pool);
-            own.text_pool = Some(pool);
+            pool
+        });
+    }
+
+    /// The title strip's mode now.
+    fn mode(&self) -> TitleMode {
+        self.parts.borrow().mode
+    }
+
+    /// The look now.
+    fn look(&self) -> Look {
+        self.parts.borrow().look
+    }
+
+    /// The title's text now.
+    fn text(&self) -> Option<Rc<Text>> {
+        self.parts.borrow().text.clone()
+    }
+
+    /// Every window of the connection laid anew at its program's next
+    /// commit, and told its size again.
+    fn restyle(&self) {
+        let windows: Vec<_> = {
+            let mut windows = self.windows.borrow_mut();
+            windows.retain(|w| w.strong_count() > 0);
+            windows.clone()
+        };
+        for window in windows.iter().filter_map(Weak::upgrade) {
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.restyle(self);
+            }
         }
     }
 
@@ -992,30 +1038,35 @@ impl Frames {
 
     /// The border's width in this look: none for the tag.
     fn border_width(&self) -> i32 {
-        if self.look.tag() {
+        if self.look().tag() {
             0
         } else {
             self.width.get()
         }
     }
 
-    /// The border's width changed (the setting, on the fly — 0 is none):
-    /// every window of the connection laid anew, and its program told the
-    /// size the new frame leaves it.
-    pub(crate) fn set_width(&self, width: i32) {
-        if self.width.replace(width) == width {
-            return;
-        }
-        let windows: Vec<_> = {
-            let mut windows = self.windows.borrow_mut();
-            windows.retain(|w| w.strong_count() > 0);
-            windows.clone()
-        };
-        for window in windows.iter().filter_map(Weak::upgrade) {
-            if let Ok(mut window) = window.try_borrow_mut() {
-                window.reframe(self);
+    /// The frame changed on the fly (step 6 of `docs/PERMISSIONS.md`
+    /// §11.15): the width — 0 is none —, and where the colours, the look or
+    /// the title's mode did too, the parts drawn with; every window of the
+    /// connection laid anew, and its program told the size the new frame
+    /// leaves it.
+    pub(crate) fn set_frame(&self, border: &Border) {
+        self.width.set(border.width);
+        let new = !Rc::ptr_eq(&self.parts.borrow().pixel, &border.pixel);
+        if new {
+            *self.parts.borrow_mut() = Parts {
+                mode: border.title,
+                look: border.look,
+                pixel: border.pixel.clone(),
+                squares: border.squares.clone(),
+                text: border.text.clone(),
+            };
+            let mut own = self.own.borrow_mut();
+            if own.complete {
+                self.make_buffers(&mut own);
             }
         }
+        self.restyle();
     }
 
     /// The strips of a new bordered window, four a ring of the look's
@@ -1037,7 +1088,7 @@ impl Frames {
         ) else {
             return None;
         };
-        let rings = self.look.rings(self.border_width());
+        let rings = self.look().rings(self.border_width());
         let mut strips = Vec::with_capacity(rings.len() * 4);
         for (ring, &(_, square)) in rings.iter().enumerate() {
             let buffer = own.pixels.get(square)?;
@@ -1086,12 +1137,13 @@ impl Frames {
         me: &Weak<RefCell<Window>>,
     ) -> Option<TitleParts> {
         let own = self.own.borrow();
-        let tag = self.text.as_ref().and_then(|text| text.tag());
+        let (look, text) = (self.look(), self.text());
+        let tag = text.as_ref().and_then(|text| text.tag());
         let (Some(compositor), Some(subcompositor), Some(viewporter), Some(buffer)) = (
             &own.compositor,
             &own.subcompositor,
             &own.viewporter,
-            own.pixels.get(self.look.title_square(tag.is_some())),
+            own.pixels.get(look.title_square(tag.is_some())),
         ) else {
             return None;
         };
@@ -1122,7 +1174,7 @@ impl Frames {
             surface.send_set_input_region(Some(&region));
             region.send_destroy();
         }
-        let (text, buttons) = match (&self.text, &own.text_pool) {
+        let (text, buttons) = match (&text, &own.text_pool) {
             (Some(text), Some(pool)) => {
                 let text_surface = own_surface(Part::Text);
                 let text_sub = subcompositor.new_send_get_subsurface(&text_surface, &surface);
@@ -1142,7 +1194,7 @@ impl Frames {
                 // The buttons, when the look has any: the row at its
                 // logical size, whatever scale it is drawn at; placed by the
                 // strip's layout.
-                let row = self.look.buttons.width_all();
+                let row = look.buttons.width_all();
                 let buttons = (row > 0).then(|| {
                     let buttons_surface = own_surface(Part::Buttons);
                     let buttons_sub =
@@ -1209,11 +1261,12 @@ impl Frames {
         fractional: bool,
     ) -> Option<CornerParts> {
         let own = self.own.borrow();
+        let text = self.text();
         let (Some(compositor), Some(subcompositor), Some(viewporter), Some(text), Some(pool)) = (
             &own.compositor,
             &own.subcompositor,
             &own.viewporter,
-            &self.text,
+            &text,
             &own.text_pool,
         ) else {
             return None;
@@ -1933,6 +1986,9 @@ struct Window {
     menu: Option<Dropdown>,
     /// A question's panel, while it is up.
     prompt: Option<Panel>,
+    /// The frame changed on the fly since it was made: made anew at the
+    /// program's next commit ([`Window::swap`]).
+    stale: bool,
     /// The compositor's last configure of the toplevel — the size it asked
     /// for, and the states the program was told —, and of its xdg_surface:
     /// what a change of the frame tells the program again, less the new
@@ -1979,6 +2035,7 @@ impl Window {
             pressed: None,
             menu: None,
             prompt: None,
+            stale: false,
             last_configure: None,
             last_serial: None,
             acked: None,
@@ -2036,6 +2093,9 @@ impl Window {
         top: &Rc<WlSurface>,
         size: Option<(i32, i32)>,
     ) {
+        if self.stale {
+            self.swap(f);
+        }
         let i = self.current(f);
         if let (Some(g), Some(xdg)) = (self.geometry, self.xdg.upgrade()) {
             let want = geometry_up(g, i);
@@ -2416,16 +2476,32 @@ impl Window {
         self.counted = None;
     }
 
-    /// The frame changed on the fly: the border made anew at the program's
-    /// next commit, as wide as the frame is now — none at 0 —, everything
-    /// laid anew then; and the program told the size that leaves it.
-    fn reframe(&mut self, f: &Frames) {
+    /// The frame changed on the fly: made anew at the program's next commit
+    /// ([`Window::swap`]) — the old one shows until then, never none —, and
+    /// the program told the size the new one leaves it.
+    fn restyle(&mut self, f: &Frames) {
         if !self.framed(f) {
             return;
         }
-        self.drop_border();
-        self.laid = None;
+        self.stale = true;
         self.reconfigure(f);
+    }
+
+    /// The old frame for the new one, in the program's commit: the border,
+    /// the title strip and the corners gone, the mode and the look the
+    /// connection's now, everything laid anew.
+    fn swap(&mut self, f: &Frames) {
+        self.stale = false;
+        self.drop_border();
+        if let Some(t) = self.title.take() {
+            t.destroy();
+        }
+        if let Some(corners) = self.corners.take() {
+            corners.destroy();
+        }
+        self.laid = None;
+        self.mode = f.mode();
+        self.look = f.look();
     }
 
     /// The compositor's last configure told the program again, the frame's
@@ -2445,8 +2521,21 @@ impl Window {
         ) else {
             return;
         };
-        let fullscreen = self.next_fullscreen;
-        let i = self.insets(f, fullscreen);
+        // The insets of the frame as it is now — the mode the connection's,
+        // not yet the window's.
+        let title = if f.mode() == TitleMode::Always && !self.next_fullscreen {
+            TITLE_HEIGHT
+        } else {
+            0
+        };
+        let i = if self.framed(f) {
+            Insets {
+                border: f.border_width(),
+                title,
+            }
+        } else {
+            Insets::default()
+        };
         toplevel.send_configure(
             size_down(width, i.across()),
             size_down(height, i.down()),
@@ -2619,8 +2708,7 @@ impl Window {
             self.close_menu();
             return true;
         }
-        let (Some(seat), Some(text), Some(parent)) = (seat, f.text.clone(), self.xdg.upgrade())
-        else {
+        let (Some(seat), Some(text), Some(parent)) = (seat, f.text(), self.xdg.upgrade()) else {
             return false;
         };
         let (Some((_, _, Some(strip))), Some(geometry)) = (self.laid, self.sent_geometry) else {
@@ -3103,7 +3191,7 @@ impl Window {
     /// proxy's own, no region to draw it in.
     fn open_prompt(&mut self, f: &Frames, question: &Question) -> bool {
         self.close_prompt();
-        let (Some(text), Some(parent)) = (f.text.clone(), self.xdg.upgrade()) else {
+        let (Some(text), Some(parent)) = (f.text(), self.xdg.upgrade()) else {
             return false;
         };
         if self.toplevel.as_ref().and_then(Weak::upgrade).is_none() {
@@ -3707,7 +3795,7 @@ impl XdgWmBaseHandler for WmBase {
         slf.send_get_xdg_surface(id, surface);
         // Only a surface whose commits pass here can have its geometry kept
         // for its commit; any other (none should be) is passed on as it is.
-        let (mode, look) = (self.f.mode, self.f.look);
+        let (mode, look) = (self.f.mode(), self.f.look());
         let window =
             Rc::new_cyclic(|me| RefCell::new(Window::new(id, surface, me.clone(), mode, look)));
         {

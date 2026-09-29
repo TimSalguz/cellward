@@ -3036,15 +3036,19 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
     assert!(
         line.contains(&format!(
             "wl-sandbox foot --zone {} --frame {}:4:always --frame-title nl · настоящий дом \
-             --frame-switch {} -- foot",
+             --frame-switch {} --frame-state {} --frame-zone nl ",
             // The sockets by the instance's key (stage 5: nothing by the
             // zone's name); the title still names the zone.
             vpn_zone::instance::key("main:nl"),
             &default[1..],
-            home.root.join("config").display()
+            home.root.join("config").display(),
+            home.state().display()
         )),
         "{line}"
     );
+    // Where the frame comes from, for the supervisor to read it again on
+    // the fly; the program after it.
+    assert!(line.contains(" -- foot"), "{line}");
     let line = stdout(&home.run_with(&["run", "nl", "--fs-sandbox", "--", "foot"], &dry));
     assert!(line.contains("--frame-title nl · разовый "), "{line}");
     // No border for the host's own session: it is no zone.

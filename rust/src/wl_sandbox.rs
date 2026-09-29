@@ -326,6 +326,7 @@ impl Args {
         let mut frame = None;
         let mut title = String::new();
         let mut switch = None;
+        let (mut state, mut frame_zone, mut container) = (None, None, None);
         let mut focus = crate::wl_focus::FocusPolicy::default();
         let mut always_focused = false;
         let mut words = argv[..split].iter();
@@ -344,6 +345,24 @@ impl Args {
                     .filter(|d| !d.is_empty())
                     .ok_or(ArgError::BadFrame)?;
                 switch = Some(PathBuf::from(dir));
+            } else if word == "--frame-state" {
+                let dir = words
+                    .next()
+                    .filter(|d| !d.is_empty())
+                    .ok_or(ArgError::BadFrame)?;
+                state = Some(PathBuf::from(dir));
+            } else if word == "--frame-zone" {
+                let name = words.next().ok_or(ArgError::BadFrame)?.to_string_lossy();
+                if !valid_zone_dir(&name) {
+                    return Err(ArgError::BadFrame);
+                }
+                frame_zone = Some(name.into_owned());
+            } else if word == "--frame-container" {
+                let name = words.next().ok_or(ArgError::BadFrame)?.to_string_lossy();
+                if !valid_zone_dir(&name) {
+                    return Err(ArgError::BadFrame);
+                }
+                container = Some(name.into_owned());
             } else if word == "--always-focused" {
                 always_focused = true;
             } else if word == "--focus" {
@@ -373,11 +392,21 @@ impl Args {
         // directory with no settings in it.
         // `--always-focused` (3d of `docs/PERMISSIONS.md` §11.15) is the
         // frame's: without it nothing of it holds.
+        // Where it comes from: both the state and the zone, or nothing (the
+        // width alone is read again).
+        let origin = state
+            .zip(frame_zone)
+            .map(|(state, zone)| crate::frame::Origin {
+                state,
+                zone,
+                container,
+            });
         let frame = frame.map(|frame| crate::frame::Setup {
             frame,
             title,
             switch: switch.unwrap_or_default(),
             always_focused,
+            origin,
         });
         Ok(Self {
             app_id: app_id.to_string_lossy().into_owned(),

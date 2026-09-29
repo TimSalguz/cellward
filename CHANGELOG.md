@@ -22,10 +22,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
-- **The frame's width changes on the fly** (2026-09-29, step 6): `cellward
-  frame width` (or Nix `frame.width`) reaches the windows already open —
-  their programs are told the size the new border leaves them. `0` is a
-  frame without a border (the title strip alone where it is on).
+- **The frame changes on the fly** (2026-09-29, step 6): the width, the
+  colour (the zone's, the container's), the title strip's mode, the style,
+  the buttons and the corners' radius reach the windows already open —
+  their programs are told the size the new frame leaves them, and the new
+  frame replaces the old one in their next commit (never none in between).
+  `frame width 0` is a frame without a border (the title strip alone where
+  it is on).
 - **Which microphone** (2026-09-29): allowed, with more than one
   microphone on the host, the person is asked which one — «Как в системе»
   first; the real stream is made on the one chosen. The list is the host

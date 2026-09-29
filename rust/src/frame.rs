@@ -557,6 +557,40 @@ pub struct Setup {
     /// Its windows always think they have the focus (3d of
     /// `docs/PERMISSIONS.md` §11.15, `crate::wl_frame`).
     pub always_focused: bool,
+    /// Where its frame comes from, for its supervisor to read it again on
+    /// the fly (`--frame-state`, `--frame-zone`, `--frame-container`);
+    /// `None`: only the width is read again.
+    pub origin: Option<Origin>,
+}
+
+/// Where a launch's frame comes from: the zones' state directory (the
+/// zone's colour), the zone, and the container whose own colour it has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    pub state: PathBuf,
+    pub zone: String,
+    pub container: Option<String>,
+}
+
+impl Setup {
+    /// The frame as the settings have it now: `config` the settings'
+    /// directory (the switch's); the width alone where the origin is not
+    /// known.
+    pub fn read_again(&self) -> Frame {
+        match &self.origin {
+            Some(o) => {
+                let color = o
+                    .container
+                    .as_deref()
+                    .and_then(|c| crate::container::frame_color_in(&self.switch, c));
+                Frame::of_launch(&o.state, &self.switch, &o.zone, color.as_deref())
+            }
+            None => Frame {
+                width: width(&self.switch).0,
+                ..self.frame
+            },
+        }
+    }
 }
 
 #[cfg(test)]

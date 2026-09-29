@@ -460,18 +460,18 @@ pub struct Proxy {
 
 /// The frame's settings watched for the proxy (step 6 of
 /// `docs/PERMISSIONS.md` §11.15: the frame changed on the fly): an inotify
-/// of the settings' directory and of Nix's words in it, and the frame the
+/// of the settings' directory, of Nix's words in it, of the zone's state
+/// (its colour) and of the container's record (its own), and the frame the
 /// proxy draws now.
 struct Live {
     inotify: OwnedFd,
-    config: PathBuf,
-    frame: Frame,
+    setup: Setup,
 }
 
 impl Live {
-    /// The directory `config` and its `declared/` watched; `None` when not
-    /// even the first can be.
-    fn watch(config: &Path, frame: Frame) -> Option<Self> {
+    /// `setup`'s places watched; `None` when not even the settings'
+    /// directory can be.
+    fn watch(setup: &Setup) -> Option<Self> {
         // SAFETY: flags only; the descriptor is owned below.
         let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
         if fd < 0 {
@@ -491,31 +491,52 @@ impl Live {
             // SAFETY: a NUL-terminated path that outlives the call.
             unsafe { libc::inotify_add_watch(inotify.as_raw_fd(), path.as_ptr(), mask) >= 0 }
         };
+        let config = &setup.switch;
         if !watch(config) {
             return None;
         }
         watch(&config.join(crate::cli::DECLARED_DIR));
+        watch(&config.join(crate::container::DECLARED));
+        if let Some(origin) = &setup.origin {
+            watch(&origin.state.join(&origin.zone));
+            if let Some(container) = &origin.container {
+                watch(&crate::container::policy_dir_in(config, container));
+            }
+        }
         Some(Self {
             inotify,
-            config: config.to_path_buf(),
-            frame,
+            setup: setup.clone(),
         })
     }
 
-    /// The settings' directory changed: its events drained, and the frame
-    /// as the settings have it now, when it is not the one the proxy has.
-    fn changed(&mut self) -> Option<Frame> {
+    /// The watched places changed: their events drained, and the frame as
+    /// the settings have it now when it is not the one the proxy has —
+    /// with a memfd of its colours when they, the look or the title's mode
+    /// are new (the proxy's filter makes none).
+    fn changed(&mut self) -> Option<(Frame, Option<OwnedFd>)> {
         let mut buf = [0u8; 4096];
         // SAFETY: read(2) into a buffer of that length; non-blocking.
         while unsafe { libc::read(self.inotify.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) }
             > 0
         {}
-        let mut next = self.frame;
-        next.width = crate::frame::width(&self.config).0;
-        (next != self.frame).then(|| {
-            self.frame = next;
-            next
-        })
+        let next = self.setup.read_again();
+        let now = self.setup.frame;
+        if next == now {
+            return None;
+        }
+        self.setup.frame = next;
+        let restyled = Frame {
+            width: now.width,
+            ..next
+        } != now;
+        let pixel = if restyled {
+            pixels(&Look::of(&next).squares(next.color))
+                .map_err(|e| eprintln!("wl-sandbox: the frame's new colours not made ({e})"))
+                .ok()
+        } else {
+            None
+        };
+        Some((next, pixel))
     }
 }
 
@@ -784,9 +805,7 @@ pub fn start(
         upstream: upstream.to_path_buf(),
         adopting: false,
         signals: None,
-        live: frame
-            .as_ref()
-            .and_then(|setup| Live::watch(&setup.switch, setup.frame)),
+        live: frame.as_ref().and_then(Live::watch),
         frame: frame.map(|setup| setup.switch),
         display,
         menu: MenuStart::default(),
@@ -991,8 +1010,9 @@ impl Proxy {
             // The frame's settings changed: the proxy told the frame now.
             if live_at.is_some_and(|at| fds[at].revents != 0) {
                 let next = self.live.as_mut().and_then(Live::changed);
-                if let (Some(frame), Some(c)) = (next, &self.channel) {
-                    let _ = sys::send_with_fds(c.as_raw_fd(), &frame_message(frame), &[]);
+                if let (Some((frame, pixel)), Some(c)) = (next, &self.channel) {
+                    let fds: Vec<RawFd> = pixel.iter().map(AsRawFd::as_raw_fd).collect();
+                    let _ = sys::send_with_fds(c.as_raw_fd(), &frame_message(frame), &fds);
                 }
             }
             if listener_at.is_some_and(|at| fds[at].revents != 0) {
@@ -1699,6 +1719,63 @@ pub(crate) struct Border {
     pub title: TitleMode,
     pub text: Option<Rc<Text>>,
     pub look: Look,
+    /// What a title of another look is drawn from, on the fly: `None`
+    /// without a font.
+    pub(crate) source: Option<TextSource>,
+}
+
+/// The title's makings for a look given on the fly (step 6 of
+/// `docs/PERMISSIONS.md` §11.15): the font, the line's text, and the memfd
+/// the texts are drawn in — made for any look, twice ([`Prepared::
+/// memfd_size_any`]) —, with the one descriptor the proxy's filter lets it
+/// write to; a new look's text in the half the one in use is not in.
+pub(crate) struct TextSource {
+    font: Vec<u8>,
+    title: String,
+    memfd: Rc<OwnedFd>,
+    writer: Rc<fs::File>,
+    total: usize,
+    half: usize,
+}
+
+impl TextSource {
+    /// A text of `look` for `frame`, in the other half; none where the
+    /// frame shows no text and no round corner.
+    fn text(&mut self, frame: Frame, look: Look) -> Option<Rc<Text>> {
+        if frame.title == TitleMode::Off && look.corners() == 0 {
+            return None;
+        }
+        let prepared = Prepared::with_look(self.font.clone(), &self.title, look)?;
+        let half = self.half ^ 1;
+        let origin = half * (self.total / 2);
+        if origin + prepared.memfd_size() > self.total {
+            return None;
+        }
+        self.half = half;
+        Some(Rc::new(Text::new_at(
+            prepared,
+            look.title_color(frame.color),
+            self.memfd.clone(),
+            self.writer.clone(),
+            origin,
+            self.total,
+        )))
+    }
+}
+
+impl Border {
+    /// The frame's colours, look or title mode changed on the fly: drawn
+    /// with `pixel` — the supervisor's memfd of the new colours — and a
+    /// title of the new look from now on.
+    pub(crate) fn restyle(&mut self, frame: Frame, pixel: OwnedFd) {
+        let look = Look::of(&frame);
+        self.look = look;
+        self.squares = look.squares(frame.color);
+        self.pixel = Rc::new(pixel);
+        self.title = frame.title;
+        self.width = frame.width;
+        self.text = self.source.as_mut().and_then(|s| s.text(frame, look));
+    }
 }
 
 /// Everything of the frame that has to be made before the filter: the
@@ -1717,22 +1794,46 @@ fn prepare_border(drawing: Drawing) -> Option<Border> {
             return None;
         }
     };
-    let text = drawing
-        .font
-        .filter(|_| drawing.frame.title != TitleMode::Off || look.corners() > 0)
-        .and_then(|font| Prepared::with_look(font, &drawing.title, look))
-        .and_then(|prepared| match title_memfd(prepared.memfd_size()) {
-            Ok((memfd, writer)) => Some(Rc::new(Text::new(
+    // The title's memfd, for any look it may be given later: made with a
+    // font, the text in it only where the frame shows some.
+    let made = drawing.font.and_then(|font| {
+        let prepared = Prepared::with_look(font.clone(), &drawing.title, look)?;
+        let total = prepared.memfd_size_any();
+        match title_memfd(total) {
+            Ok((memfd, writer)) => Some((
                 prepared,
-                look.title_color(drawing.frame.color),
-                memfd,
-                writer,
-            ))),
+                TextSource {
+                    font,
+                    title: drawing.title.clone(),
+                    memfd: Rc::new(memfd),
+                    writer: Rc::new(fs::File::from(writer)),
+                    total,
+                    half: 0,
+                },
+            )),
             Err(e) => {
                 eprintln!("wl-sandbox: cannot make the title's memory ({e}) — no text in it");
                 None
             }
-        });
+        }
+    });
+    let wanted = drawing.frame.title != TitleMode::Off || look.corners() > 0;
+    let (text, source) = match made {
+        Some((prepared, source)) => {
+            let text = wanted.then(|| {
+                Rc::new(Text::new_at(
+                    prepared,
+                    look.title_color(drawing.frame.color),
+                    source.memfd.clone(),
+                    source.writer.clone(),
+                    0,
+                    source.total,
+                ))
+            });
+            (text, Some(source))
+        }
+        None => (None, None),
+    };
     Some(Border {
         always_focused: drawing.always_focused,
         width: drawing.frame.width,
@@ -1741,6 +1842,7 @@ fn prepare_border(drawing: Drawing) -> Option<Border> {
         title: drawing.frame.title,
         text,
         look,
+        source,
     })
 }
 
@@ -2158,7 +2260,9 @@ pub fn filter(
 /// The descriptor the title's pixels are written with, when the frame has a
 /// title with text: the one [`filter`] lets `pwrite64` write to.
 fn title_writer(border: Option<&Border>) -> Option<RawFd> {
-    border.and_then(|b| b.text.as_ref()).map(|t| t.writer())
+    border
+        .and_then(|b| b.source.as_ref())
+        .map(|s| s.writer.as_raw_fd())
 }
 
 /// Serve until the supervisor has said the program is gone and the last
@@ -2262,13 +2366,16 @@ fn serve(
                     Answer::Retract(seq) => questions.retract(seq),
                     // The frame changed on the fly: every connection's
                     // windows laid anew, and the next connection's too.
-                    Answer::Frame(frame) => {
+                    Answer::Frame(frame, pixel) => {
                         if let Some(b) = border.as_mut() {
                             b.width = frame.width;
-                        }
-                        for conn in &conns {
-                            if let Some(f) = &conn.frames {
-                                f.set_width(frame.width);
+                            if let Some(pixel) = pixel {
+                                b.restyle(frame, pixel);
+                            }
+                            for conn in &conns {
+                                if let Some(f) = &conn.frames {
+                                    f.set_frame(b);
+                                }
                             }
                         }
                     }
@@ -2357,7 +2464,9 @@ enum Answer {
     Refused,
     Question(Question),
     Retract(u8),
-    Frame(Frame),
+    /// The frame changed on the fly, and the memfd of its new colours when
+    /// they, the look or the title's mode changed.
+    Frame(Frame, Option<OwnedFd>),
     Nothing,
     Closed,
 }
@@ -2385,7 +2494,8 @@ fn answer(channel: &UnixStream) -> Answer {
             }
             Answer::Question(question_of(head[0], &payload))
         }
-        Ok((1, _, _)) if byte[0] == FRAME => {
+        Ok((1, mut fds, _)) if byte[0] == FRAME => {
+            let pixel = fds.pop();
             let mut len = [0u8; 2];
             if !recv_exact(channel.as_raw_fd(), &mut len) {
                 return Answer::Closed;
@@ -2399,7 +2509,7 @@ fn answer(channel: &UnixStream) -> Answer {
             std::str::from_utf8(&arg)
                 .ok()
                 .and_then(Frame::parse_arg)
-                .map_or(Answer::Nothing, Answer::Frame)
+                .map_or(Answer::Nothing, |frame| Answer::Frame(frame, pixel))
         }
         Ok((1, _, _)) if byte[0] == RETRACT => {
             let mut seq = [0u8; 1];
@@ -6044,30 +6154,123 @@ mod tests {
         assert_eq!(rig.finish(), 0);
     }
 
-    /// The supervisor's watch of the frame's settings: a width written is
-    /// the frame to tell the proxy, once; Nix's word over the local one;
-    /// a change that leaves the frame as it is tells nothing.
+    /// The frame's colour changed on the fly: the supervisor's memfd of the
+    /// new colours becomes a pool of the connection's at once, and at the
+    /// program's next commit the border is made anew of its buffers — the
+    /// old one shown until then.
     #[test]
-    fn a_width_written_is_the_frame_to_tell() {
-        let config = std::env::temp_dir().join(format!("vz-live-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&config);
+    fn the_frames_colour_changes_on_the_fly() {
+        let rig = Rig::with_border("live-colour", Some((4, Rgb(0xff, 0, 0x80))));
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, FRAME_GLOBALS);
+        a_window(&mut client);
+        let got = log_until(&log, |m| m.iface == "xdg_wm_base" && m.opcode == 2);
+        let (xdg, root) = (got.last().unwrap().args[0], got.last().unwrap().args[1]);
+        let got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        let toplevel = got
+            .iter()
+            .find(|m| m.iface == "xdg_surface" && m.opcode == 1)
+            .map(|m| m.args[0])
+            .unwrap();
+        let mut out = Vec::new();
+        event(&mut out, toplevel, 0, |a| {
+            a.extend_from_slice(&words(&[800, 600, 0]))
+        });
+        event(&mut out, xdg, 0, |a| {
+            a.extend_from_slice(&7u32.to_ne_bytes())
+        });
+        compositor.write_all(&out).unwrap();
+        events_until(&mut client, |o, op, _| o == 8 && op == 0);
+        request(&mut client, 8, 4, &7u32.to_ne_bytes());
+        log_until(&log, |m| m.iface == "xdg_surface" && m.opcode == 4);
+        let blue = Rgb(0, 0x40, 0xff);
+        let frame = Frame {
+            color: blue,
+            width: 4,
+            title: TitleMode::Off,
+            buttons: ButtonStyle::Cellward,
+            style: Style::Full,
+            radius: 0,
+        };
+        let colours = pixel(blue).unwrap();
+        let channel = rig.channel.as_ref().unwrap();
+        sys::send_with_fds(
+            channel.as_raw_fd(),
+            &frame_message(frame),
+            &[colours.as_raw_fd()],
+        )
+        .unwrap();
+        // The same size told again; the new colours a pool at once.
+        let events = events_until(&mut client, |o, op, _| o == 8 && op == 0);
+        let size = events
+            .iter()
+            .rev()
+            .find(|(o, op, _)| *o == 9 && *op == 0)
+            .map(|(_, _, a)| (a[0], a[1]));
+        assert_eq!(size, Some((792, 592)));
+        let pooled = log_until(&log, |m| m.iface == "wl_shm" && m.opcode == 0);
+        assert_eq!(pooled.last().unwrap().args[1], 36);
+        request(&mut client, 8, 4, &7u32.to_ne_bytes());
+        request(&mut client, 7, 6, &[]);
+        let got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        let count = |iface: &str, opcode: u32| {
+            got.iter()
+                .filter(|m| m.iface == iface && m.opcode == opcode)
+                .count()
+        };
+        assert_eq!(count("xdg_surface", 4), 0, "the ack went on twice");
+        assert_eq!(count("wl_subsurface", 0), 4, "the old border gone");
+        assert_eq!(count("wl_subcompositor", 1), 4, "the new border made");
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    /// The supervisor's watch of the frame's settings: what is written is
+    /// the frame to tell the proxy, once — the width alone without colours,
+    /// the zone's colour with a memfd of the new ones; Nix's word over the
+    /// local one; a change that leaves the frame as it is tells nothing.
+    #[test]
+    fn a_setting_written_is_the_frame_to_tell() {
+        use crate::frame::{Origin, COLOR_FILE, WIDTH_SETTING};
+        let root = std::env::temp_dir().join(format!("vz-live-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (config, state) = (root.join("config"), root.join("state"));
         fs::create_dir_all(config.join(crate::cli::DECLARED_DIR)).unwrap();
-        let frame = Frame::parse_arg("ff0080:4").unwrap();
-        let mut live = Live::watch(&config, frame).expect("an inotify");
-        assert_eq!(live.changed(), None, "nothing changed");
-        fs::write(config.join(crate::frame::WIDTH_SETTING), "0").unwrap();
-        assert_eq!(live.changed().map(|f| f.width), Some(0));
-        assert_eq!(live.changed(), None, "told once");
+        fs::create_dir_all(state.join("nl")).unwrap();
+        let setup = Setup {
+            frame: Frame::of_launch(&state, &config, "nl", None),
+            title: String::new(),
+            switch: config.clone(),
+            always_focused: false,
+            origin: Some(Origin {
+                state: state.clone(),
+                zone: "nl".to_owned(),
+                container: None,
+            }),
+        };
+        let mut live = Live::watch(&setup).expect("an inotify");
+        assert!(live.changed().is_none(), "nothing changed");
+        fs::write(config.join(WIDTH_SETTING), "0").unwrap();
+        let (frame, pixel) = live.changed().expect("the width");
+        assert_eq!(frame.width, 0);
+        assert!(pixel.is_none(), "the width alone");
+        assert!(live.changed().is_none(), "told once");
         fs::write(config.join("frames"), "shown").unwrap();
-        assert_eq!(live.changed(), None, "the width is what it was");
+        assert!(live.changed().is_none(), "the frame is what it was");
+        fs::write(state.join("nl").join(COLOR_FILE), "#123456").unwrap();
+        let (frame, pixel) = live.changed().expect("the colour");
+        assert_eq!(frame.color, Rgb(0x12, 0x34, 0x56));
+        assert!(pixel.is_some(), "the new colours");
         crate::declared::declare(
-            &config
-                .join(crate::cli::DECLARED_DIR)
-                .join(crate::frame::WIDTH_SETTING),
+            &config.join(crate::cli::DECLARED_DIR).join(WIDTH_SETTING),
             "9",
         );
-        assert_eq!(live.changed().map(|f| f.width), Some(9));
-        assert_eq!(frame_message(live.frame)[0], FRAME);
-        let _ = fs::remove_dir_all(&config);
+        let (frame, pixel) = live.changed().expect("Nix's width");
+        assert_eq!((frame.width, pixel.is_none()), (9, true));
+        assert_eq!(frame_message(live.setup.frame)[0], FRAME);
+        let _ = fs::remove_dir_all(&root);
     }
 }

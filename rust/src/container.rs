@@ -408,6 +408,24 @@ fn read_declared(tools: &Tools, name: &str) -> Option<(Conf, Option<Home>)> {
     read_declared_in(&tools.config, name)
 }
 
+/// A container's own frame colour (`frame_color`), Nix's word over the
+/// local one, from the config directory alone: what a launch's supervisor
+/// reads again when the settings change on the fly (`crate::wl_proxy`).
+pub fn frame_color_in(config: &Path, name: &str) -> Option<String> {
+    let color = |conf: &[(String, String)]| {
+        values(conf, "frame_color")
+            .last()
+            .and_then(crate::frame::Rgb::parse)
+            .map(|c| c.hex())
+    };
+    read_declared_in(config, name)
+        .and_then(|(conf, _)| color(&conf))
+        .or_else(|| {
+            let local = fs::read_to_string(policy_dir_in(config, name).join(FILE)).ok()?;
+            color(&parse_conf(&local))
+        })
+}
+
 /// [`read_declared`], from the config dir alone.
 fn read_declared_in(config: &Path, name: &str) -> Option<(Conf, Option<Home>)> {
     if let Ok(text) = crate::declared::read(&declared_file_in(config, name)) {

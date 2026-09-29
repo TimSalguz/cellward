@@ -943,6 +943,16 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             wrap.push(crate::frame::title_text(&zone_name, &shown).into());
             wrap.push("--frame-switch".into());
             wrap.push(tools.config.clone().into());
+            // Where it comes from, for the supervisor to read it again when
+            // the settings change (step 6 of docs/PERMISSIONS.md §11.15).
+            wrap.push("--frame-state".into());
+            wrap.push(tools.state.clone().into());
+            wrap.push("--frame-zone".into());
+            wrap.push(zone_name.clone().into());
+            if let Some(name) = container_name(&selection) {
+                wrap.push("--frame-container".into());
+                wrap.push(name.into());
+            }
         }
         // What becomes of the program's asking for the focus
         // (`crate::wl_focus`): its container's policy. `input`, the
