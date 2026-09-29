@@ -1063,11 +1063,11 @@ mod tests {
         let login = Login {
             user: "ivan".into(),
             group: "staff".into(),
-            password: "p\tass\nword".into(),
+            password: "Xq\t7\nZw".into(),
             code: "123456".into(),
         };
         let back = Login::decode(&login.encode()).unwrap();
-        assert_eq!(back.password, "password", "no tab, no line break");
+        assert_eq!(back.password, "Xq7Zw", "no tab, no line break");
         assert_eq!(
             (back.user.as_str(), back.group.as_str(), back.code.as_str()),
             ("ivan", "staff", "123456")
@@ -1075,7 +1075,7 @@ mod tests {
         assert_eq!(Login::decode("user\tivan\n"), None, "no password: none");
         let shown = format!("{login:?}");
         assert!(
-            !shown.contains("word") && !shown.contains("123456"),
+            !shown.contains("Xq") && !shown.contains("Zw") && !shown.contains("123456"),
             "{shown}"
         );
     }
