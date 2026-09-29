@@ -30,6 +30,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
+- **A network's «Подключение»** (2026-09-29, docs/PERMISSIONS.md §11.16):
+  `cellward connection <network> auto|ask|manual|default` (Nix
+  `programs.cellward.connection.<network>`). `auto`, the default, is as
+  before: a launch into a network that is down brings it up. `ask` asks
+  first — a guarded question in the launch window, the program waiting
+  with no network; `manual` only connects when the person says so, and a
+  launch into it while it is down asks whether to connect it now. One
+  question per network at a time: launches that want the same network
+  meanwhile take its answer. Moving a container to such a network (⇄,
+  `container set … network`) asks the same way, the container staying
+  where it is until the network is up. «Не подключать» refuses the launch
+  where the person sees it. `status --json`: each network's `connection`
+  (`null` for no network).
 - **Fullscreen in the frame** (2026-09-29, docs/WINDOW-FRAME.md §8
   «Полный экран»). A frame of its own for a fullscreen window: `cellward
   frame fullscreen width same|<0–32>` (same), `… title always|hover|off`

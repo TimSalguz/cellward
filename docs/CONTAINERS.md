@@ -802,6 +802,7 @@ and `cellward container show <name> --json` print subsets of the same schema.
       "screencast":          { "value": "ask", "source": "default" },
       "audio_manager":       { "value": false, "source": "default" },
       "frame_color":         { "value": "#4cacd9", "source": "default" },
+      "connection":          { "value": "auto", "source": "default" },
       "build": "current", "restart_needed": ["nix_daemon"] },
     { "name": "lan", "kind": "host-interface", "aliases": [], "source": "local",
       "up": false, "locked": false, "lock_not_held_by": null, "tunnel_alive": null,

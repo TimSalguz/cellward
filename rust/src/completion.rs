@@ -107,6 +107,7 @@ const VERBS: &[&str] = &[
     "wayland-sandbox",
     "wayland-proxy",
     "frame",
+    "connection",
     "tray",
     "check",
     "hermetic",
@@ -284,6 +285,8 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 strs(&mut out, &["maximize", "none", "default"])
             }
             "frame" if pos == 3 && word(2) == "color" => owned(&mut out, &snap.zones),
+            "connection" if pos == 2 => owned(&mut out, &snap.zones),
+            "connection" if pos == 3 => strs(&mut out, &["auto", "ask", "manual", "default"]),
             "frame" if pos == 4 && word(2) == "color" => strs(&mut out, &["default"]),
             "tray" if pos == 2 => strs(&mut out, &["badge"]),
             "tray" if pos == 3 && word(2) == "badge" => {

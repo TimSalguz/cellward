@@ -593,6 +593,52 @@ let
           machine.wait_until_fails("pgrep -x vz-wl-proxy", timeout=30)
           machine.fail(f"test -e {wl}/wl-sandbox-{sup}")
 
+      # A network's «Подключение» (docs/PERMISSIONS.md §11.16): `ask` — a
+      # launch into it while it is down asks first, in the launch window,
+      # and the program waits; «Не подключать» (Enter, the safe answer)
+      # refuses the launch, said; «Подключить» starts the network (this
+      # one's tunnel is a stand-in: it does not come up, and that is said).
+      with subtest("a network that asks: the question before it comes up"):
+          alice("cellward connection de ask")
+          out = alice("cellward status --json")
+          assert '"connection":{"value":"ask","source":"local"}' in out, out
+
+          def launch_into_de(unit):
+              alice(
+                  f"systemd-run --user --unit={unit} --setenv=WAYLAND_DISPLAY={display} "
+                  "cellward run de -- foot --app-id conn"
+              )
+              machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=60)
+              machine.sleep(2)
+              alice(f"WAYLAND_DISPLAY={display} grim /tmp/{unit}.png")
+              machine.copy_from_vm(f"/tmp/{unit}.png", "")
+
+          def answer(downs):
+              keys = " ".join(["-s 3500 -k Down"] * downs)
+              alice(f"WAYLAND_DISPLAY={display} wtype {keys} -s 3500 -k Return")
+              machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=30)
+
+          def said(unit):
+              return f"journalctl --no-pager _SYSTEMD_USER_UNIT={unit}.service"
+
+          launch_into_de("connect-refused")
+          answer(0)
+          machine.wait_until_succeeds(
+              said("connect-refused") + " | grep -F 'не запущена: сеть de не подключена'",
+              timeout=30,
+          )
+          machine.fail(said("connect-refused") + " | grep -F 'поднимаю зону de'")
+          launch_into_de("connect-agreed")
+          answer(1)
+          machine.wait_until_succeeds(
+              said("connect-agreed") + " | grep -F 'поднимаю зону de'", timeout=30
+          )
+          machine.wait_until_succeeds(
+              said("connect-agreed") + " | grep -F 'зона de не поднимается'", timeout=90
+          )
+          assert find(json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r")), "conn") is None
+          alice("cellward connection de default")
+
       # The frame's buttons, dragging and resizing (docs/WINDOW-FRAME.md §8,
       # "Этап 3"), with a pointer: a file of its own, exec()'d in these
       # globals, and the virtual pointer it drives (tests/vm-pointer.py).

@@ -1289,7 +1289,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         // stead, and a shortcut's stderr is read by nobody.
         Some(id) => {
             if !dryrun {
-                if let Err(why) = up_instance(tools, id, &zone, &zone_name) {
+                let program = label
+                    .clone()
+                    .unwrap_or_else(|| appname.to_string_lossy().into_owned());
+                if let Err(why) = up_instance(tools, id, (&zone, &zone_name), &program) {
                     refuse(tools, &why);
                     return 1;
                 }
@@ -1955,12 +1958,19 @@ fn zone_launches_refusal(tools: &Tools, name: &str, zone: &str) -> Option<String
 }
 
 /// The launch's instance `id` up and ready in `zone` (stage 2): its zone up
-/// first — started when it is down, as a launch into a zone always did —
-/// and carrying instances; the instance started when it is not up, asked
-/// for this network (`instance::ask_network`); one that runs in another
-/// network refused (`docs/CONTAINERS.md` I2) — before its start and after,
-/// for a launch that asked otherwise meanwhile.
-fn up_instance(tools: &Tools, id: &str, zone: &OsStr, zone_name: &str) -> Result<(), String> {
+/// first — started when it is down, as a launch into a zone always did,
+/// where the network's «Подключение» lets it (`crate::connect`: `ask` and
+/// `manual` ask the person, `program` named) — and carrying instances; the
+/// instance started when it is not up, asked for this network
+/// (`instance::ask_network`); one that runs in another network refused
+/// (`docs/CONTAINERS.md` I2) — before its start and after, for a launch
+/// that asked otherwise meanwhile.
+fn up_instance(
+    tools: &Tools,
+    id: &str,
+    (zone, zone_name): (&OsStr, &str),
+    program: &str,
+) -> Result<(), String> {
     let running_in = || {
         fs::read_to_string(crate::instance::dir(&tools.state, id).join(crate::instance::NETWORK))
             .map(|text| text.trim().to_owned())
@@ -1982,6 +1992,7 @@ fn up_instance(tools: &Tools, id: &str, zone: &OsStr, zone_name: &str) -> Result
     if zone_name != OFFLINE {
         let mut pid = cli::zone_up(&tools.state, zone);
         if pid.is_none() {
+            crate::connect::consent(tools, zone_name, crate::connect::Wants::Program(program))?;
             // Returns once the zone is ready or failed (`Type=notify`), and
             // says so while it waits (`cli::start_zone`).
             let _ = cli::start_zone(tools, zone, true);

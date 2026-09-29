@@ -109,6 +109,7 @@ pub mod camera;
 pub mod cli;
 pub mod completion;
 pub mod config;
+pub mod connect;
 pub mod connlog;
 pub mod console;
 pub mod container;

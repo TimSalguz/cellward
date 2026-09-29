@@ -3472,6 +3472,73 @@ fn the_frame_in_fullscreen_goes_to_the_launch_and_the_status() {
 }
 
 #[test]
+fn a_networks_connection_is_a_setting_nix_wins() {
+    // docs/PERMISSIONS.md §11.16: a network's «Подключение» — auto (the
+    // default), ask or manual —, Nix over the network's own setting over the
+    // default, in `status --json` with its source.
+    let home = Home::new("connection");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    let out = home.run(&["connection", "nl"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("nl: подключение сразу (auto) (умолчание)"),
+        "{}",
+        stdout(&out)
+    );
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"connection\":{\"value\":\"auto\",\"source\":\"default\"}"),
+        "{json}"
+    );
+    // No network, no connecting.
+    assert!(
+        json.contains("\"name\":\"unconfined\"") && json.contains("\"connection\":null"),
+        "{json}"
+    );
+    let out = home.run(&["connection", "nl", "ask"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("спросить (ask)"), "{}", stdout(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"connection\":{\"value\":\"ask\",\"source\":\"local\"}"),
+        "{json}"
+    );
+    let all = stdout(&home.run(&["connection"]));
+    assert!(all.contains("nl: подключение спросить (ask)"), "{all}");
+
+    // Nix wins, and the command does not pretend to change what Nix set.
+    let declared = home.root.join("config/declared");
+    fs::create_dir_all(&declared).unwrap();
+    declare(&declared.join("network-connect"), "nl manual\n");
+    let out = home.run(&["connection", "nl", "auto"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"connection\":{\"value\":\"manual\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    fs::remove_file(declared.join("network-connect")).unwrap();
+    let out = home.run(&["connection", "nl", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"connection\":{\"value\":\"auto\",\"source\":\"default\"}"),
+        "{json}"
+    );
+
+    // Nonsense is refused.
+    for bad in [
+        &["connection", "nl", "always"][..],
+        &["connection", "nope", "ask"],
+        &["connection", "../nl", "ask"],
+    ] {
+        assert!(!home.run(bad).status.success(), "{bad:?}");
+    }
+}
+
+#[test]
 fn the_tray_badge_is_a_setting_nix_wins() {
     let home = Home::new("tray-badge");
     let out = home.run(&["tray"]);

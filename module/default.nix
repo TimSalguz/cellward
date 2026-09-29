@@ -842,6 +842,7 @@ let
     "tunnelWatch.enable"
     "waylandProxy.enable"
     "waylandProxy.exceptions"
+    "connection"
     "frame.colors"
     "frame.width"
     "frame.title"
@@ -1268,6 +1269,21 @@ in
       description = "Программы (по имени бинаря или id ярлыка), которые запускаются без посредника, если он с ними не работает. Им остаётся ограниченный сокет security-context.";
     };
 
+    connection = lib.mkOption {
+      type = lib.types.attrsOf (
+        lib.types.enum [
+          "auto"
+          "ask"
+          "manual"
+        ]
+      );
+      default = { };
+      example = {
+        work = "ask";
+      };
+      description = "Подключение сети (docs/PERMISSIONS.md §11.16): имя сети → auto — сразу, когда в неё запускают программу (как было всегда); ask — сначала окно «Программа X хочет в сеть Y — подключить?», программа ждёт без сети; manual — только вручную (cellward up <сеть>, трей), запуск в неподключённую сеть спрашивает, подключить ли её сейчас. Смена сети контейнера (⇄) спрашивает так же, контейнер остаётся в прежней сети, пока новая не подключена. Сеть без строки здесь — cellward connection <сеть> …, иначе auto.";
+    };
+
     frame.colors = lib.mkOption {
       type = lib.types.attrsOf (lib.types.strMatching "#[0-9a-fA-F]{6}");
       default = { };
@@ -1601,6 +1617,10 @@ in
         message = "programs.cellward.frame.colors: имя зоны — непустое и без пробелов";
       }
       {
+        assertion = lib.all (z: builtins.match "[^[:space:]]+" z != null) (lib.attrNames cfg.connection);
+        message = "programs.cellward.connection: имя сети — непустое и без пробелов";
+      }
+      {
         assertion = lib.all (z: builtins.match "[^[:space:]]+" z != null) (lib.attrNames cfg.microphone);
         message = "programs.cellward.microphone: имя зоны — непустое и без пробелов";
       }
@@ -1718,6 +1738,11 @@ in
     (lib.mkIf (cfg.waylandProxy.exceptions != [ ]) {
       ".config/vpn-zones/declared/wayland-no-proxy".text =
         lib.concatStringsSep "\n" cfg.waylandProxy.exceptions + "\n";
+    })
+    (lib.mkIf (cfg.connection != { }) {
+      ".config/vpn-zones/declared/network-connect".text = lib.concatStrings (
+        lib.mapAttrsToList (zone: mode: "${zone} ${mode}\n") cfg.connection
+      );
     })
     (lib.mkIf (cfg.frame.colors != { }) {
       ".config/vpn-zones/declared/frame-colors".text = lib.concatStrings (
