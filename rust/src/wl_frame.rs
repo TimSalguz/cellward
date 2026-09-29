@@ -151,6 +151,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::os::fd::OwnedFd;
 use std::rc::{Rc, Weak};
+use std::time::Instant;
 
 use wl_proxy::client::Client;
 use wl_proxy::fixed::Fixed;
@@ -240,7 +241,9 @@ use wl_proxy::protocols::ObjectInterface;
 
 use crate::frame::TitleMode;
 use crate::wl_proxy::Border;
-use crate::wl_title::{Button, ButtonsLook, End, Lease, Lit, Look, Pixels, Square, Text};
+use crate::wl_title::{
+    Button, ButtonsLook, Drawn, End, Lease, Lit, Look, Pixels, Prompt, Square, Text,
+};
 
 // --- THE ARITHMETIC ---------------------------------------------------------
 // What the frame takes of a window is its [`Insets`]: the border all round,
@@ -704,6 +707,8 @@ pub(crate) struct Frames {
     /// `suspended` taken out, the keyboard's and the pointer's leave held
     /// back — the keys and buttons down let go of first, so nothing sticks.
     always_focused: bool,
+    /// The launch's questions, shared by all its connections.
+    questions: Rc<Questions>,
 }
 
 /// What a click on the frame asks of the supervisor (`crate::wl_proxy`),
@@ -858,6 +863,7 @@ impl Frames {
         border: &Border,
         warned: Rc<Cell<bool>>,
         asks: Rc<Asks>,
+        questions: Rc<Questions>,
     ) -> Rc<Self> {
         let frames = Rc::new(Self {
             width: border.width,
@@ -874,6 +880,7 @@ impl Frames {
             acted: Cell::new(None),
             menu_on: RefCell::new(None),
             always_focused: border.always_focused,
+            questions,
         });
         let display = client.display();
         let registry = display.new_send_get_registry();
@@ -1328,6 +1335,8 @@ enum Part {
     Corner,
     /// The ≡'s dropdown ([`Dropdown`]).
     Menu,
+    /// A question's panel ([`Panel`]).
+    Prompt,
 }
 
 impl Part {
@@ -1898,6 +1907,8 @@ struct Window {
     pressed: Option<Button>,
     /// The ≡'s dropdown, while it is open.
     menu: Option<Dropdown>,
+    /// A question's panel, while it is up.
+    prompt: Option<Panel>,
 }
 
 impl Window {
@@ -1933,6 +1944,7 @@ impl Window {
             laid: None,
             pressed: None,
             menu: None,
+            prompt: None,
         }
     }
 
@@ -2249,7 +2261,7 @@ impl Window {
         };
         match part {
             Part::Buttons => self.look.buttons.at(x, y).map_or(Hit::Nothing, Hit::Button),
-            Part::Corner | Part::Menu => Hit::Nothing,
+            Part::Corner | Part::Menu | Part::Prompt => Hit::Nothing,
             _ if self.next_fullscreen => Hit::Nothing,
             Part::Title | Part::Text => Hit::Title,
             Part::Border(side, ring) => {
@@ -2361,6 +2373,7 @@ impl Window {
     /// commit.
     fn drop_strips(&mut self) {
         self.close_menu();
+        self.close_prompt();
         for strip in self.strips.take().into_iter().flatten() {
             strip.viewport.send_destroy();
             strip.sub.send_destroy();
@@ -2734,6 +2747,481 @@ impl XdgPopupHandler for MenuPopup {
     }
 }
 
+// --- A QUESTION ON THE PROGRAM'S WINDOW (docs/FIREWALL.md §4.3) ------------
+
+/// A question of the supervisor's (`crate::wl_proxy`'s `QUESTION`): its
+/// number, its words and its answers' labels, the safe one first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Question {
+    pub(crate) seq: u8,
+    pub(crate) text: String,
+    pub(crate) labels: Vec<String>,
+}
+
+/// What became of a question, for the supervisor: the answer chosen (its
+/// place among the labels), or no window to ask it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reply {
+    Chose(u8, u8),
+    Nowhere(u8),
+}
+
+/// Windows remembered for a question at most, the last focused kept.
+const MAX_ASKABLE: usize = 256;
+
+/// A window a question may be asked on, and its connection's frame.
+type Askable = (Weak<RefCell<Window>>, Weak<Frames>);
+
+/// The launch's questions, for all its connections (the owner,
+/// 2026-09-29: a program's permissions are asked on its own window). The
+/// one asked now; the windows it may be asked on, the last focused first;
+/// the one it is on; and what came of it, for the proxy's loop to send.
+///
+/// **Whose answer.** A panel is a surface of the proxy's: the program can
+/// neither name it, nor draw in it, nor hear what is done in it. What it
+/// can do is lie over it — a popup of its own, drawn as a panel, letting
+/// the clicks through — so a click is taken only while the program has no
+/// popup at all, and only once the pointer has rested on the panel for the
+/// launch window's guard (`crate::dialog::TOO_FAST`): a press or a key of
+/// the program's, a popup of it come or gone, start that again. And the
+/// proxy reads the program's messages: a proxy the program took over could
+/// answer for the person. So the answers here are never a "yes": the
+/// supervisor asks with "no" and "ask me in the launch window", whose
+/// "yes" no process of the launch can give (`crate::netask`).
+#[derive(Default)]
+pub(crate) struct Questions {
+    asked: RefCell<Option<Question>>,
+    windows: RefCell<VecDeque<Askable>>,
+    on: RefCell<Weak<RefCell<Window>>>,
+    replies: RefCell<VecDeque<Reply>>,
+    /// The program's popups now, on all its connections.
+    popups: Cell<usize>,
+    /// When a press or a key of the program's, or a popup of it come or
+    /// gone, last made a click on a panel too soon.
+    touched: Cell<Option<Instant>>,
+}
+
+impl Questions {
+    /// A question to ask, on the window focused last that can show it; the
+    /// one asked before, if any, taken down.
+    pub(crate) fn ask(&self, question: Question) {
+        self.close();
+        *self.asked.borrow_mut() = Some(question);
+        self.place();
+    }
+
+    /// The supervisor takes its question `seq` back: its panel goes.
+    pub(crate) fn retract(&self, seq: u8) {
+        if self.asked.borrow().as_ref().is_some_and(|q| q.seq == seq) {
+            self.close();
+            *self.asked.borrow_mut() = None;
+        }
+    }
+
+    /// After a round of the proxy's loop: a question whose window went
+    /// asked on another (or said to be nowhere), and what came of the
+    /// questions, to send.
+    pub(crate) fn take(&self) -> Vec<Reply> {
+        let shown = self
+            .on
+            .borrow()
+            .upgrade()
+            .is_some_and(|w| w.try_borrow().is_ok_and(|w| w.prompt.is_some()));
+        if !shown && self.asked.borrow().is_some() {
+            self.place();
+        }
+        self.replies.borrow_mut().drain(..).collect()
+    }
+
+    /// The question on the first window that can show it; nowhere, said so.
+    fn place(&self) {
+        let Some(question) = self.asked.borrow().clone() else {
+            return;
+        };
+        let windows: Vec<_> = {
+            let mut windows = self.windows.borrow_mut();
+            windows.retain(|(w, f)| w.strong_count() > 0 && f.strong_count() > 0);
+            windows.iter().cloned().collect()
+        };
+        for (window, f) in windows {
+            let (Some(window), Some(f)) = (window.upgrade(), f.upgrade()) else {
+                continue;
+            };
+            let Ok(mut w) = window.try_borrow_mut() else {
+                continue;
+            };
+            if w.open_prompt(&f, &question) {
+                *self.on.borrow_mut() = Rc::downgrade(&window);
+                return;
+            }
+        }
+        self.done(Reply::Nowhere(question.seq));
+    }
+
+    /// The panel up now taken down.
+    fn close(&self) {
+        let on = std::mem::take(&mut *self.on.borrow_mut());
+        if let Some(window) = on.upgrade() {
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.close_prompt();
+            }
+        }
+    }
+
+    /// What came of the question asked now, if it is `reply`'s.
+    fn done(&self, reply: Reply) {
+        let seq = match reply {
+            Reply::Chose(seq, _) | Reply::Nowhere(seq) => seq,
+        };
+        if self.asked.borrow().as_ref().is_none_or(|q| q.seq != seq) {
+            return;
+        }
+        *self.asked.borrow_mut() = None;
+        *self.on.borrow_mut() = Weak::new();
+        self.replies.borrow_mut().push_back(reply);
+    }
+
+    /// A window of the launch's, to ask on; the last of those remembered.
+    fn opened(&self, window: &Rc<RefCell<Window>>, f: &Rc<Frames>) {
+        let mut windows = self.windows.borrow_mut();
+        let me = Rc::downgrade(window);
+        if !windows.iter().any(|(w, _)| Weak::ptr_eq(w, &me)) {
+            windows.push_back((me, Rc::downgrade(f)));
+        }
+        if windows.len() > MAX_ASKABLE {
+            windows.retain(|(w, _)| w.strong_count() > 0);
+            windows.truncate(MAX_ASKABLE);
+        }
+    }
+
+    /// The compositor says `window` has the focus: the first to ask on.
+    fn focused(&self, window: &Rc<RefCell<Window>>, f: &Rc<Frames>) {
+        let mut windows = self.windows.borrow_mut();
+        let me = Rc::downgrade(window);
+        windows.retain(|(w, _)| w.strong_count() > 0 && !Weak::ptr_eq(w, &me));
+        windows.push_front((me, Rc::downgrade(f)));
+        windows.truncate(MAX_ASKABLE);
+    }
+
+    /// A click on a panel is too soon from now.
+    fn touch(&self) {
+        self.touched.set(Some(Instant::now()));
+    }
+
+    /// Whether a click on a panel the pointer came onto at `since` is the
+    /// person's: no popup of the program's anywhere, and the pointer still
+    /// on it for the guard since then and since the last [`Self::touch`].
+    fn armed(&self, since: Instant) -> bool {
+        if self.popups.get() > 0 {
+            return false;
+        }
+        let from = self.touched.get().map_or(since, |t| t.max(since));
+        from.elapsed() >= crate::dialog::TOO_FAST
+    }
+}
+
+/// A popup of the program's, counted while it is ([`Questions::popups`]).
+struct Shown(Rc<Questions>);
+
+impl Shown {
+    fn new(questions: &Rc<Questions>) -> Self {
+        questions
+            .popups
+            .set(questions.popups.get().saturating_add(1));
+        questions.touch();
+        Self(questions.clone())
+    }
+}
+
+impl Drop for Shown {
+    fn drop(&mut self) {
+        self.0.popups.set(self.0.popups.get().saturating_sub(1));
+        self.0.touch();
+    }
+}
+
+/// A question's panel: an `xdg_popup` of the program's window under its
+/// title strip (at its top without one), a surface of the proxy's own like
+/// the ≡'s dropdown — but without a grab: the keyboard stays the
+/// program's, and nothing of the person's elsewhere closes it. Every image
+/// of it drawn once, when it opens ([`Text::prompt_at`]); a button lights
+/// under the pointer (a new buffer of the same region) and answers on a
+/// press and a release on it, the first when armed ([`Questions::armed`]).
+struct Panel {
+    surface: Rc<WlSurface>,
+    view: Rc<WpViewport>,
+    xdg: Rc<XdgSurface>,
+    popup: Rc<XdgPopup>,
+    pool: Rc<WlShmPool>,
+    seq: u8,
+    prompt: Prompt,
+    /// Every image of it, held while it is up.
+    drawn: Drawn,
+    lit: Option<usize>,
+    /// The button pressed while armed, until the release.
+    pressed: Option<usize>,
+    /// When the pointer came onto it (none: it is not on it).
+    since: Option<Instant>,
+    /// The compositor configured it: it may be drawn.
+    configured: bool,
+    current: Option<Rc<WlBuffer>>,
+    retired: Vec<Rc<WlBuffer>>,
+}
+
+impl Panel {
+    /// Its image with the lit button, attached and committed.
+    fn draw(&mut self) {
+        let (width, height) = (self.drawn.width, self.drawn.height);
+        let image = width.saturating_mul(height).saturating_mul(4);
+        let variant = self.lit.map_or(0, |b| b.saturating_add(1));
+        let offset = self
+            .drawn
+            .offset
+            .saturating_add(image.saturating_mul(i32::try_from(variant).unwrap_or(0)));
+        let buffer = memfd_buffer(
+            &self.pool,
+            (width, height),
+            offset,
+            self.drawn.lease.another(),
+            Pixels::Opaque,
+        );
+        attach_whole(&self.surface, &buffer, width, height);
+        self.view
+            .send_set_destination(self.prompt.size.0, self.prompt.size.1);
+        retire(&mut self.current, &mut self.retired);
+        self.current = Some(buffer);
+        self.surface.send_commit();
+    }
+
+    /// `button` lit (none: nothing), shown at once where it changed.
+    fn light(&mut self, button: Option<usize>) {
+        if self.lit == button {
+            return;
+        }
+        self.lit = button;
+        if self.configured {
+            self.draw();
+        }
+    }
+
+    /// Gone: the popup first, then its role and its surface.
+    fn destroy(mut self) {
+        self.popup.send_destroy();
+        self.xdg.send_destroy();
+        self.view.send_destroy();
+        self.surface.send_destroy();
+        destroy_buffers(self.current.take(), std::mem::take(&mut self.retired));
+    }
+}
+
+impl Window {
+    /// `question`'s panel opened on this window; false when it cannot be —
+    /// no toplevel, not laid out yet, no font, no `xdg_wm_base` of the
+    /// proxy's own, no region to draw it in.
+    fn open_prompt(&mut self, f: &Frames, question: &Question) -> bool {
+        self.close_prompt();
+        let (Some(text), Some(parent)) = (f.text.clone(), self.xdg.upgrade()) else {
+            return false;
+        };
+        if self.toplevel.as_ref().and_then(Weak::upgrade).is_none() {
+            return false;
+        }
+        let (Some((_, _, strip)), Some(geometry)) = (self.laid, self.sent_geometry) else {
+            return false;
+        };
+        let (compositor, viewporter, wm_base, pool) = {
+            let own = f.own.borrow();
+            (
+                own.compositor.clone(),
+                own.viewporter.clone(),
+                own.wm_base.clone(),
+                own.text_pool.clone(),
+            )
+        };
+        let (Some(compositor), Some(viewporter), Some(wm_base), Some(pool)) =
+            (compositor, viewporter, wm_base, pool)
+        else {
+            return false;
+        };
+        let labels: Vec<&str> = question.labels.iter().map(String::as_str).collect();
+        let prompt = text.prompt(&question.text, &labels);
+        let Some(drawn) = text.prompt_at(f.scale.get(), &prompt) else {
+            return false;
+        };
+        let (w, h) = prompt.size;
+        let surface = compositor.new_send_create_surface();
+        quiet(&*surface);
+        surface.set_handler(Mine {
+            window: self.me.clone(),
+            part: Part::Prompt,
+        });
+        let view = viewporter.new_send_get_viewport(&surface);
+        quiet(&*view);
+        let xdg = wm_base.new_send_get_xdg_surface(&surface);
+        quiet(&*xdg);
+        xdg.set_handler(PromptXdg {
+            window: self.me.clone(),
+        });
+        let positioner = wm_base.new_send_create_positioner();
+        quiet(&*positioner);
+        positioner.send_set_size(w, h);
+        // Under the title strip, in the middle; at the window's top when it
+        // has none.
+        let (anchor, at) = match strip {
+            Some(s) => (
+                Rect {
+                    x: s.x.saturating_sub(geometry.x),
+                    y: s.y.saturating_sub(geometry.y),
+                    w: s.w.max(1),
+                    h: TITLE_HEIGHT,
+                },
+                XdgPositionerAnchor::BOTTOM,
+            ),
+            None => (
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: geometry.w.max(1),
+                    h: geometry.h.max(1),
+                },
+                XdgPositionerAnchor::TOP,
+            ),
+        };
+        positioner.send_set_anchor_rect(anchor.x, anchor.y, anchor.w, anchor.h);
+        positioner.send_set_anchor(at);
+        positioner.send_set_gravity(XdgPositionerGravity::BOTTOM);
+        positioner.send_set_constraint_adjustment(XdgPositionerConstraintAdjustment(
+            XdgPositionerConstraintAdjustment::SLIDE_X.0
+                | XdgPositionerConstraintAdjustment::SLIDE_Y.0,
+        ));
+        let popup = xdg.new_send_get_popup(Some(&parent), &positioner);
+        quiet(&*popup);
+        popup.set_handler(PromptPopup {
+            window: self.me.clone(),
+            questions: f.questions.clone(),
+        });
+        positioner.send_destroy();
+        surface.send_commit();
+        self.prompt = Some(Panel {
+            surface,
+            view,
+            xdg,
+            popup,
+            pool,
+            seq: question.seq,
+            prompt,
+            drawn,
+            lit: None,
+            pressed: None,
+            since: None,
+            configured: false,
+            current: None,
+            retired: Vec::new(),
+        });
+        true
+    }
+
+    /// The panel gone, if it is up.
+    fn close_prompt(&mut self) {
+        if let Some(panel) = self.prompt.take() {
+            panel.destroy();
+        }
+    }
+
+    /// The pointer on the panel at `at` (none: off it): the button there lit.
+    fn prompt_hover(&mut self, at: Option<(f64, f64)>) {
+        let Some(panel) = &mut self.prompt else {
+            return;
+        };
+        match at {
+            Some((x, y)) => {
+                panel.since.get_or_insert_with(Instant::now);
+                let button = panel.prompt.button_at(x, y);
+                panel.light(button);
+            }
+            None => {
+                panel.since = None;
+                panel.pressed = None;
+                panel.light(None);
+            }
+        }
+    }
+
+    /// The left button down (`down`) or up at (`x`, `y`) on the panel: a
+    /// press too soon is none, and makes the next one wait; a release on
+    /// the button pressed answers.
+    fn prompt_click(&mut self, f: &Frames, x: f64, y: f64, down: bool) {
+        let Some(panel) = &mut self.prompt else {
+            return;
+        };
+        let at = panel.prompt.button_at(x, y);
+        if down {
+            let armed = panel.since.is_some_and(|since| f.questions.armed(since));
+            panel.pressed = at.filter(|_| armed);
+            if !armed {
+                f.questions.touch();
+            }
+            return;
+        }
+        let Some(button) = panel.pressed.take().filter(|b| Some(*b) == at) else {
+            return;
+        };
+        let seq = panel.seq;
+        self.close_prompt();
+        f.questions
+            .done(Reply::Chose(seq, u8::try_from(button).unwrap_or(u8::MAX)));
+    }
+}
+
+/// The panel's `xdg_surface`: a configure is acked and the panel drawn.
+struct PromptXdg {
+    window: Weak<RefCell<Window>>,
+}
+
+impl XdgSurfaceHandler for PromptXdg {
+    fn handle_configure(&mut self, slf: &Rc<XdgSurface>, serial: u32) {
+        slf.send_ack_configure(serial);
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        if let Ok(mut window) = window.try_borrow_mut() {
+            if let Some(panel) = &mut window.prompt {
+                panel.configured = true;
+                panel.draw();
+            }
+        };
+    }
+}
+
+/// The panel's `xdg_popup`: dismissed by the compositor (its window
+/// unmapped, or anything else), it goes, and the question is nowhere — the
+/// launch window asks it (`crate::netask`).
+struct PromptPopup {
+    window: Weak<RefCell<Window>>,
+    questions: Rc<Questions>,
+}
+
+impl XdgPopupHandler for PromptPopup {
+    fn handle_configure(&mut self, _slf: &Rc<XdgPopup>, _x: i32, _y: i32, _w: i32, _h: i32) {}
+
+    fn handle_popup_done(&mut self, _slf: &Rc<XdgPopup>) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let seq = match window.try_borrow_mut() {
+            Ok(mut window) => {
+                let seq = window.prompt.as_ref().map(|p| p.seq);
+                window.close_prompt();
+                seq
+            }
+            Err(_) => None,
+        };
+        if let Some(seq) = seq {
+            self.questions.done(Reply::Nowhere(seq));
+        }
+    }
+}
+
 /// The program's keyboard. While a surface of the proxy's has its focus —
 /// the dropdown, whose grab took it —, nothing of it is the program's: the
 /// enter, the keys, the modifiers and the leave are the dropdown's. Every
@@ -2802,6 +3290,7 @@ impl WlKeyboardHandler for Keyboard {
     ) {
         if !self.menu {
             if state == WlKeyboardKeyState::PRESSED {
+                self.f.questions.touch();
                 if !self.down.contains(&key) && self.down.len() < 32 {
                     self.down.push(key);
                 }
@@ -3197,6 +3686,7 @@ impl XdgSurfaceHandler for XdgSurfaceH {
         if let Ok(mut window) = self.window.try_borrow_mut() {
             window.toplevel = Some(Rc::downgrade(id));
         }
+        self.f.questions.opened(&self.window, &self.f);
         id.set_handler(Toplevel {
             f: self.f.clone(),
             window: self.window.clone(),
@@ -3212,7 +3702,10 @@ impl XdgSurfaceHandler for XdgSurfaceH {
     ) {
         let i = parent.map_or(Insets::default(), |p| insets_of_xdg(&self.f, p));
         with_positioner_up(positioner, i, || slf.send_get_popup(id, parent, positioner));
-        id.set_handler(Popup { i });
+        id.set_handler(Popup {
+            i,
+            _shown: Shown::new(&self.f.questions),
+        });
     }
 
     /// The compositor's configure of this surface: whether it says
@@ -3242,9 +3735,10 @@ impl XdgSurfaceHandler for XdgSurfaceH {
     }
 
     fn handle_destroy(&mut self, slf: &Rc<XdgSurface>) {
-        // Its popup of the proxy's first: a parent outlives its popups.
+        // Its popups of the proxy's first: a parent outlives its popups.
         if let Ok(mut window) = self.window.try_borrow_mut() {
             window.close_menu();
+            window.close_prompt();
         }
         slf.send_destroy();
         if let Ok(mut window) = self.window.try_borrow_mut() {
@@ -3370,6 +3864,11 @@ impl XdgToplevelHandler for Toplevel {
         if let Ok(mut window) = self.window.try_borrow_mut() {
             window.configured(fullscreen);
         }
+        // The compositor's word, not the one a window that always thinks
+        // it has the focus is told.
+        if has_state(states, ACTIVATED) {
+            self.f.questions.focused(&self.window, &self.f);
+        }
         let i = self.insets(fullscreen);
         let focused;
         let states = if self.f.always_focused {
@@ -3421,6 +3920,7 @@ impl XdgToplevelHandler for Toplevel {
     fn handle_destroy(&mut self, slf: &Rc<XdgToplevel>) {
         if let Ok(mut window) = self.window.try_borrow_mut() {
             window.close_menu();
+            window.close_prompt();
         }
         slf.send_destroy();
         if let Ok(mut window) = self.window.try_borrow_mut() {
@@ -3468,9 +3968,11 @@ impl XdgPositionerHandler for Positioner {
 }
 
 /// A popup, with the frame of its parent when it was made (none when the
-/// parent has none).
+/// parent has none); counted among the program's popups while it is
+/// ([`Questions`]).
 struct Popup {
     i: Insets,
+    _shown: Shown,
 }
 
 impl XdgPopupHandler for Popup {
@@ -3883,7 +4385,7 @@ fn spot(surface: &Rc<WlSurface>) -> Option<(Rc<RefCell<Window>>, Spot)> {
             Part::Border(..) => Spot::Side,
             // The dropdown hangs from the title: a hover strip stays out
             // while the pointer is on it.
-            Part::Title | Part::Text | Part::Buttons | Part::Menu => Spot::Top,
+            Part::Title | Part::Text | Part::Buttons | Part::Menu | Part::Prompt => Spot::Top,
             // Never entered (no input region): as a side, it changes
             // nothing of a hover strip.
             Part::Corner => Spot::Side,
@@ -4009,6 +4511,14 @@ impl Pointer {
             };
             return;
         }
+        if over.part == Part::Prompt {
+            let (x, y) = (over.x, over.y);
+            self.set_cursor(slf, WpCursorShapeDeviceV1Shape::DEFAULT);
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.prompt_hover(Some((x, y)));
+            };
+            return;
+        }
         let hit = window
             .try_borrow()
             .map_or(Hit::Nothing, |w| w.hit(over.part, over.x, over.y));
@@ -4033,6 +4543,10 @@ impl Pointer {
         if over.part == Part::Menu {
             if let Ok(mut window) = window.try_borrow_mut() {
                 window.menu_hover(None);
+            };
+        } else if over.part == Part::Prompt {
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.prompt_hover(None);
             };
         } else {
             light_under(&window, None, true);
@@ -4078,6 +4592,14 @@ impl Pointer {
             return;
         }
         let (part, x, y) = (over.part, over.x, over.y);
+        // A button of a question's panel: pressed and let go of on it.
+        if part == Part::Prompt {
+            let down = state == WlPointerButtonState::PRESSED;
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.prompt_click(&self.f, x, y, down);
+            }
+            return;
+        }
         // A row of the dropdown acts on the release over it.
         if part == Part::Menu {
             if state == WlPointerButtonState::RELEASED {
@@ -4202,6 +4724,7 @@ impl WlPointerHandler for Pointer {
         self.frame_button(serial, button, state);
         if !self.away {
             if state == WlPointerButtonState::PRESSED {
+                self.f.questions.touch();
                 if !self.down.contains(&button) && self.down.len() < 32 {
                     self.down.push(button);
                 }
@@ -5393,5 +5916,49 @@ mod tests {
                 h: 500
             }
         );
+    }
+
+    /// With no window to ask on, a question is nowhere at once; what comes
+    /// back is only for the question asked now.
+    #[test]
+    fn a_question_without_a_window_is_nowhere() {
+        let questions = Questions::default();
+        let question = |seq| Question {
+            seq,
+            text: "?".to_owned(),
+            labels: vec!["Запретить".to_owned(), "Разрешить…".to_owned()],
+        };
+        questions.ask(question(3));
+        assert_eq!(questions.take(), [Reply::Nowhere(3)]);
+        assert!(questions.take().is_empty(), "said once");
+        // Not asked now: a word of it is nothing.
+        questions.done(Reply::Chose(3, 0));
+        assert!(questions.take().is_empty());
+        questions.retract(3);
+        assert!(questions.take().is_empty());
+    }
+
+    /// A click on a panel is taken once the pointer has rested on it for
+    /// the guard, since it came and since the program's last press, key or
+    /// popup — and never while the program has a popup.
+    #[test]
+    fn a_click_on_a_panel_waits_for_the_guard_and_for_no_popup() {
+        let questions = Rc::new(Questions::default());
+        let long_ago = Instant::now()
+            .checked_sub(crate::dialog::TOO_FAST * 2)
+            .unwrap();
+        assert!(questions.armed(long_ago));
+        assert!(!questions.armed(Instant::now()), "the pointer just came");
+        questions.touch();
+        assert!(!questions.armed(long_ago), "a press of the program's");
+        questions.touched.set(Some(long_ago));
+        assert!(questions.armed(long_ago));
+        let popup = Shown::new(&questions);
+        assert_eq!(questions.popups.get(), 1);
+        questions.touched.set(Some(long_ago));
+        assert!(!questions.armed(long_ago), "a popup of the program's");
+        drop(popup);
+        assert_eq!(questions.popups.get(), 0);
+        assert!(!questions.armed(long_ago), "the popup went just now");
     }
 }

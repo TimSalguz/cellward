@@ -129,12 +129,24 @@
 //! starting `cellward window-focus --pid <its pid>` in a unit of
 //! `systemd --user` ([`focus_argv`]), one at a time, and waiting for it.
 //! The filter is as it was.
+//!
+//! **The questions** (2026-09-29, `crate::wl_frame::Questions`): a
+//! container's instance asks about a program of the launch — its network
+//! (`crate::netask`) — on the launch's socket of questions ([`ASK_DIR`]),
+//! which the supervisor listens on; it hands the question to the proxy
+//! ([`QUESTION`]), which shows it on the program's window focused last, as
+//! a panel under its title, and says what the person chose ([`ANSWERED`])
+//! or that there was no window to ask on ([`NOWHERE`]). The supervisor's
+//! answer to the instance is never a "yes" ([`ASK_NO`], [`ASK_WINDOW`],
+//! [`ASK_NOWHERE`]): the proxy reads the program's messages, and one the
+//! program took over must not answer for the person. The filter is as it
+//! was.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
-use std::io;
+use std::io::{self, Read as _, Write as _};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -158,7 +170,7 @@ use wl_proxy::state::{State, StateHandler};
 use crate::frame::{Frame, Setup, TitleMode};
 use crate::sys;
 use crate::wl_focus::{Focus, FocusPolicy};
-use crate::wl_frame::{Ask, Asks, Frames, MAX_FRAMED};
+use crate::wl_frame::{Ask, Asks, Frames, Question, Questions, Reply, MAX_FRAMED};
 use crate::wl_title::{Look, Prepared, Square, Text};
 
 /// The proxy's process name (`/proc/<pid>/comm`, 15 bytes at most).
@@ -174,6 +186,53 @@ pub const SUPERVISOR_NAME: &str = "vz-wl-sandbox";
 /// per launch. `crate::zone` keeps nothing of `vpn-zones/` in a zone but the
 /// zone's own `wayland/<zone>`, so this directory is never seen from one.
 pub const UPSTREAM_DIR: &str = "vpn-zones/wl-up";
+
+/// Below the runtime directory: the sockets the containers' instances ask a
+/// launch's questions on, one per launch, named by its supervisor's pid —
+/// its record's in the registry (`crate::netask`). Never seen from a zone,
+/// like [`UPSTREAM_DIR`].
+pub const ASK_DIR: &str = "vpn-zones/ask";
+
+/// The socket of questions of the launch whose supervisor is `pid`.
+pub fn ask_path(runtime_dir: &Path, pid: i32) -> PathBuf {
+    runtime_dir.join(ASK_DIR).join(pid.to_string())
+}
+
+/// A question as an instance asks it on [`ask_path`]: its length (two
+/// bytes, little-endian), then its words and its answers' labels, each
+/// after a NUL — the safe answer first. The supervisor answers with a byte
+/// ([`ASK_NO`], [`ASK_WINDOW`], [`ASK_NOWHERE`]) and closes; the instance
+/// closing first takes it back.
+pub fn ask_request(text: &str, labels: &[&str]) -> Option<Vec<u8>> {
+    let mut payload = text.as_bytes().to_vec();
+    for label in labels {
+        payload.push(0);
+        payload.extend_from_slice(label.as_bytes());
+    }
+    if payload.len() > MAX_QUESTION
+        || text.contains('\0')
+        || labels.iter().any(|l| l.contains('\0'))
+    {
+        return None;
+    }
+    let len = u16::try_from(payload.len()).ok()?;
+    let mut out = len.to_le_bytes().to_vec();
+    out.extend_from_slice(&payload);
+    Some(out)
+}
+
+/// The person chose the first answer, the safe one — "no".
+pub const ASK_NO: u8 = b'n';
+/// The person chose another: the question is to be asked in the launch
+/// window, which no process of the launch can answer.
+pub const ASK_WINDOW: u8 = b'm';
+/// No window of the launch to ask on (none open, none framed, no proxy, the
+/// panel dismissed): the launch window asks.
+pub const ASK_NOWHERE: u8 = b'w';
+/// A question's bytes at most.
+pub const MAX_QUESTION: usize = 4096;
+/// Instances' connections at once on a launch's socket of questions.
+const MAX_ASKERS: usize = 8;
 
 /// The baseline: the highest version of each interface the program is shown.
 /// Pinned, like the crate: a newer one is a reviewed change.
@@ -292,6 +351,17 @@ const ATTENTION: u8 = b'f';
 /// Proxy → supervisor: the launch restarted with a network chosen — a row
 /// of the ≡'s dropdown (`crate::wl_frame`, step 3c). No answer.
 const RESTART: u8 = b'x';
+/// Supervisor → proxy: a question to show on the launch's window — its
+/// number, the length of the rest (two bytes, little-endian) and the rest:
+/// [`ask_request`]'s. No answer but [`ANSWERED`] or [`NOWHERE`] later.
+const QUESTION: u8 = b'q';
+/// Supervisor → proxy: the question of this number is taken back.
+const RETRACT: u8 = b'w';
+/// Proxy → supervisor: the question of this number answered — then the
+/// answer's place among its labels.
+const ANSWERED: u8 = b'a';
+/// Proxy → supervisor: no window to show the question of this number on.
+const NOWHERE: u8 = b'o';
 
 /// The byte of an ask of the frame, on the channel.
 fn ask_byte(ask: Ask) -> u8 {
@@ -368,6 +438,115 @@ pub struct Proxy {
     /// The `systemd-run --wait` of a notification or a question about the
     /// focus, for as long as it is up.
     attention: MenuStart,
+    /// The launch's socket of questions and the instances asking on it.
+    asking: Asking,
+}
+
+/// A launch's socket of questions ([`ASK_DIR`]) and the instances on it,
+/// the supervisor's: one question at a time goes to the proxy.
+#[derive(Default)]
+struct Asking {
+    listener: Option<UnixListener>,
+    path: Option<PathBuf>,
+    /// Connected, their question not shown yet: each with what it sent.
+    waiting: VecDeque<(UnixStream, Vec<u8>)>,
+    /// The one whose question the proxy has, and its number.
+    asked: Option<(UnixStream, u8)>,
+    seq: u8,
+    /// The launch's compositor, named in every answer: where the launch
+    /// window asks, whatever the instance's own environment says.
+    display: Option<OsString>,
+}
+
+impl Asking {
+    /// `$XDG_RUNTIME_DIR/vpn-zones/ask/<this process>`, in a directory only
+    /// the user enters; a leftover of an earlier run with this pid replaced.
+    fn bind(runtime_dir: &Path, display: Option<OsString>) -> io::Result<Self> {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let dir = runtime_dir.join(ASK_DIR);
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)?;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        // SAFETY: getpid takes nothing and cannot fail.
+        let path = ask_path(runtime_dir, unsafe { libc::getpid() });
+        let _ = fs::remove_file(&path);
+        let listener = UnixListener::bind(&path)?;
+        listener.set_nonblocking(true)?;
+        Ok(Self {
+            listener: Some(listener),
+            path: Some(path),
+            display,
+            ..Self::default()
+        })
+    }
+
+    /// `answer` to an instance, then the launch's compositor; it closes
+    /// with `stream`.
+    fn say(&self, stream: &UnixStream, answer: u8) {
+        use std::os::unix::ffi::OsStrExt;
+        let mut reply = vec![answer];
+        if let Some(display) = &self.display {
+            reply.extend_from_slice(display.as_bytes());
+        }
+        let mut out = stream;
+        let _ = out.write_all(&reply);
+    }
+
+    /// No more questions: every instance still here told there is no window
+    /// to ask on, the socket gone.
+    fn close(&mut self) {
+        self.listener = None;
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path);
+        }
+        self.close_questions();
+        self.waiting.clear();
+    }
+
+    /// No proxy to ask through: every instance with a question told there
+    /// is no window; the socket kept (those still sending hear it next).
+    fn close_questions(&mut self) {
+        if let Some((stream, _)) = self.asked.take() {
+            self.say(&stream, ASK_NOWHERE);
+        }
+        let waiting = std::mem::take(&mut self.waiting);
+        for (stream, buf) in waiting {
+            if asked_of(&buf).is_some() {
+                self.say(&stream, ASK_NOWHERE);
+            } else {
+                self.waiting.push_back((stream, buf));
+            }
+        }
+    }
+}
+
+/// What an instance sent since, added to `buf`: false when it closed, or
+/// sent more than a question.
+fn read_question(stream: &UnixStream, buf: &mut Vec<u8>) -> bool {
+    let mut chunk = [0u8; 1024];
+    let mut from = stream;
+    loop {
+        match from.read(&mut chunk) {
+            Ok(0) => return false,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                let whole = asked_of(buf).map(<[u8]>::len).map(|l| l + 2);
+                if buf.len() > 2 + MAX_QUESTION || whole.is_some_and(|w| buf.len() > w) {
+                    return false;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return e.kind() == io::ErrorKind::WouldBlock,
+        }
+    }
+}
+
+/// The question an instance sent, once it is all there ([`ask_request`]).
+fn asked_of(buf: &[u8]) -> Option<&[u8]> {
+    let len = usize::from(u16::from_le_bytes([*buf.first()?, *buf.get(1)?]));
+    buf.get(2..2 + len)
 }
 
 /// The signals the supervisor passes on to its launch. The pid of the launch
@@ -524,6 +703,7 @@ pub fn start(
         menu: MenuStart::default(),
         focus,
         attention: MenuStart::default(),
+        asking: Asking::default(),
     };
     match proxy.await_ready() {
         Ok(()) => Ok(proxy),
@@ -595,8 +775,22 @@ impl Proxy {
         }
     }
 
+    /// Listen for the instances' questions about this launch ([`ASK_DIR`]):
+    /// after [`Proxy::take_over`], before the program starts. Without the
+    /// socket the launch window asks them, as it did.
+    pub fn listen_for_questions(&mut self, runtime_dir: &Path) {
+        match Asking::bind(runtime_dir, self.display.clone()) {
+            Ok(asking) => self.asking = asking,
+            Err(e) => eprintln!(
+                "wl-sandbox: cannot listen for questions ({e}) — they are asked in the launch \
+                 window"
+            ),
+        }
+    }
+
     /// Stop it at once, on a path that will not start the program behind it.
     pub fn kill(mut self) {
+        self.asking.close();
         if self.adopting {
             // SAFETY: as in `take_over`.
             unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0) };
@@ -644,6 +838,7 @@ impl Proxy {
                     // The proxy stops accepting when this closes, and exits
                     // with its last connection.
                     self.channel = None;
+                    self.asking.close();
                 }
                 if !proxy_alive {
                     break;
@@ -671,6 +866,15 @@ impl Proxy {
                 fds.push(pollfd(s.fd.as_raw_fd()));
                 fds.len() - 1
             });
+            let listener_at = self.asking.listener.as_ref().map(|l| {
+                fds.push(pollfd(l.as_raw_fd()));
+                fds.len() - 1
+            });
+            let askers_at = fds.len();
+            let asked = self.asking.asked.iter().map(|(s, _)| s);
+            for stream in asked.chain(self.asking.waiting.iter().map(|(s, _)| s)) {
+                fds.push(pollfd(stream.as_raw_fd()));
+            }
             // Orphans are reaped on every wake-up (SIGCHLD is one); without
             // the pidfds an exit is only noticed on this timeout.
             let timeout = if main_fd.is_some() && self.pidfd.is_some() {
@@ -690,6 +894,11 @@ impl Proxy {
                     self.channel = None;
                 }
             }
+            self.heard_askers(&fds[askers_at..]);
+            if listener_at.is_some_and(|at| fds[at].revents != 0) {
+                self.accept_askers();
+            }
+            self.next_question();
             if let (Some(at), Some(signals)) = (signals_at, &self.signals) {
                 if fds[at].revents != 0 {
                     for (sig, sent) in signals.read() {
@@ -777,7 +986,16 @@ impl Proxy {
     }
 
     /// One request of the proxy. False when the channel is gone.
-    fn answer(&self) -> bool {
+    fn answer(&mut self) -> bool {
+        if let Some(fd) = self.channel.as_ref().map(AsRawFd::as_raw_fd) {
+            let mut byte = [0u8; 1];
+            if let Ok(1) = recv_peek(fd, &mut byte) {
+                if byte[0] == ANSWERED || byte[0] == NOWHERE {
+                    self.replied(fd);
+                    return true;
+                }
+            }
+        }
         let Some(channel) = &self.channel else {
             return false;
         };
@@ -827,6 +1045,126 @@ impl Proxy {
             Err(_) => sys::send_with_fds(channel.as_raw_fd(), &[REFUSED], &[]),
         };
         sent.is_ok()
+    }
+
+    /// The proxy says what came of the question it has: the instance
+    /// told — never a "yes": the first answer is "no", any other "ask in the
+    /// launch window" (the module's docs) —, and the next question asked.
+    /// A word of another number (taken back meanwhile) is nothing.
+    fn replied(&mut self, fd: RawFd) {
+        let mut word = [0u8; 3];
+        if recv_now(fd, &mut word[..1]) != 1 {
+            return;
+        }
+        let rest = if word[0] == ANSWERED { 2 } else { 1 };
+        if recv_now(fd, &mut word[1..=rest]) != rest {
+            return;
+        }
+        let answer = match word {
+            [NOWHERE, ..] => ASK_NOWHERE,
+            [_, _, 0] => ASK_NO,
+            _ => ASK_WINDOW,
+        };
+        if !matches!(&self.asking.asked, Some((_, seq)) if *seq == word[1]) {
+            return;
+        }
+        if let Some((stream, _)) = self.asking.asked.take() {
+            self.asking.say(&stream, answer);
+        }
+        self.next_question();
+    }
+
+    /// The instances' connections that woke (among `fds`, by descriptor:
+    /// the proxy's answer may have moved one from waiting to asked since
+    /// the poll): what they sent kept; one that closed, or sent more than a
+    /// question, gone — the question shown for it taken back.
+    fn heard_askers(&mut self, fds: &[libc::pollfd]) {
+        let woke: HashSet<RawFd> = fds
+            .iter()
+            .filter(|p| p.revents != 0)
+            .map(|p| p.fd)
+            .collect();
+        if woke.is_empty() {
+            return;
+        }
+        if let Some((stream, seq)) = &self.asking.asked {
+            if woke.contains(&stream.as_raw_fd()) {
+                // An instance says nothing after its question: anything is
+                // its end.
+                let mut byte = [0u8; 1];
+                let mut from = stream;
+                let quiet = matches!(from.read(&mut byte),
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::Interrupted);
+                if !quiet {
+                    let seq = *seq;
+                    self.asking.asked = None;
+                    if let Some(c) = &self.channel {
+                        let _ = sys::send_with_fds(c.as_raw_fd(), &[RETRACT, seq], &[]);
+                    }
+                }
+            }
+        }
+        let waiting = std::mem::take(&mut self.asking.waiting);
+        for (stream, mut buf) in waiting {
+            if woke.contains(&stream.as_raw_fd()) && !read_question(&stream, &mut buf) {
+                continue;
+            }
+            self.asking.waiting.push_back((stream, buf));
+        }
+    }
+
+    /// New instances on the socket of questions, as many as there is room
+    /// for. Never the launch's own processes: nothing of it asks of it.
+    fn accept_askers(&mut self) {
+        let Some(listener) = &self.asking.listener else {
+            return;
+        };
+        for _ in 0..MAX_ASKERS {
+            let Ok(fd) = accept_nonblocking(listener.as_raw_fd()) else {
+                break;
+            };
+            if self.asking.waiting.len() >= MAX_ASKERS || of_this_launch(fd.as_raw_fd()) {
+                continue;
+            }
+            self.asking
+                .waiting
+                .push_back((UnixStream::from(fd), Vec::new()));
+        }
+    }
+
+    /// The next question to the proxy, when none is out; without a proxy to
+    /// ask through, every instance told there is no window.
+    fn next_question(&mut self) {
+        let Some(channel) = &self.channel else {
+            self.asking.close_questions();
+            return;
+        };
+        if self.asking.asked.is_some() {
+            return;
+        }
+        let Some(i) = self
+            .asking
+            .waiting
+            .iter()
+            .position(|(_, buf)| asked_of(buf).is_some())
+        else {
+            return;
+        };
+        let Some((stream, buf)) = self.asking.waiting.remove(i) else {
+            return;
+        };
+        let payload = asked_of(&buf).unwrap_or_default();
+        self.asking.seq = self.asking.seq.wrapping_add(1);
+        let seq = self.asking.seq;
+        let len = u16::try_from(payload.len()).unwrap_or(0).to_le_bytes();
+        let mut message = vec![QUESTION, seq, len[0], len[1]];
+        message.extend_from_slice(payload);
+        if sys::send_with_fds(channel.as_raw_fd(), &message, &[]).is_ok() {
+            self.asking.asked = Some((stream, seq));
+        } else {
+            self.asking.say(&stream, ASK_NOWHERE);
+        }
     }
 
     /// A click on the frame's ≡ or ⇄ (`crate::wl_frame`): the window menu of
@@ -1608,6 +1946,8 @@ fn serve(
     let warned = Rc::new(Cell::new(false));
     // What the frames' buttons ask of the supervisor, sent after each round.
     let asks = Rc::new(Asks::default());
+    // The supervisor's questions, on the launch's windows.
+    let questions = Rc::new(Questions::default());
     // The launch's focus policy and what `input` has let through: one for
     // all its connections (`crate::wl_focus`).
     let focus = Focus::new(focus);
@@ -1681,7 +2021,8 @@ fn serve(
                     Answer::Upstream(up, framed) => {
                         if let Some(client) = waiting.pop_front() {
                             let border = border.as_ref().filter(|_| framed);
-                            match Conn::open(client, up, border, &warned, &asks, &focus) {
+                            let shared = (&warned, &asks, &questions);
+                            match Conn::open(client, up, border, shared, &focus) {
                                 Ok(conn) => conns.push(conn),
                                 Err(e) => eprintln!("wl-sandbox: the Wayland proxy: {e}"),
                             }
@@ -1690,6 +2031,8 @@ fn serve(
                     Answer::Refused => {
                         waiting.pop_front();
                     }
+                    Answer::Question(question) => questions.ask(question),
+                    Answer::Retract(seq) => questions.retract(seq),
                     Answer::Nothing => {}
                     Answer::Closed => {
                         // The program has exited: no new connections, those
@@ -1716,6 +2059,17 @@ fn serve(
         for ask in asks.take() {
             if let Some(c) = &channel {
                 let _ = sys::send_with_fds(c.as_raw_fd(), &[ask_byte(ask)], &[]);
+            }
+        }
+        // What came of the supervisor's questions: a question whose window
+        // went this round goes to another first.
+        for reply in questions.take() {
+            let bytes = match reply {
+                Reply::Chose(seq, button) => vec![ANSWERED, seq, button],
+                Reply::Nowhere(seq) => vec![NOWHERE, seq],
+            };
+            if let Some(c) = &channel {
+                let _ = sys::send_with_fds(c.as_raw_fd(), &bytes, &[]);
             }
         }
         // The requests for the focus held back this round (`notify`,
@@ -1762,6 +2116,8 @@ enum Answer {
     /// The connection upstream, and whether to draw the border on it.
     Upstream(OwnedFd, bool),
     Refused,
+    Question(Question),
+    Retract(u8),
     Nothing,
     Closed,
 }
@@ -1776,11 +2132,58 @@ fn answer(channel: &UnixStream) -> Answer {
             None => Answer::Refused,
         },
         Ok((1, _, _)) if byte[0] == REFUSED => Answer::Refused,
+        // The rest of it is there: the supervisor sends a message whole.
+        Ok((1, _, _)) if byte[0] == QUESTION => {
+            let mut head = [0u8; 3];
+            if !recv_exact(channel.as_raw_fd(), &mut head) {
+                return Answer::Closed;
+            }
+            let len = usize::from(u16::from_le_bytes([head[1], head[2]]));
+            let mut payload = vec![0u8; len.min(MAX_QUESTION)];
+            if len > MAX_QUESTION || !recv_exact(channel.as_raw_fd(), &mut payload) {
+                return Answer::Closed;
+            }
+            Answer::Question(question_of(head[0], &payload))
+        }
+        Ok((1, _, _)) if byte[0] == RETRACT => {
+            let mut seq = [0u8; 1];
+            if !recv_exact(channel.as_raw_fd(), &mut seq) {
+                return Answer::Closed;
+            }
+            Answer::Retract(seq[0])
+        }
         Ok((0, _, _)) => Answer::Closed,
         Err(e) if e.kind() == io::ErrorKind::Interrupted => Answer::Nothing,
         // The supervisor never sends anything else: a broken channel.
         _ => Answer::Closed,
     }
+}
+
+/// A question of number `seq` from [`ask_request`]'s bytes after their
+/// length: its words, then its answers' labels.
+fn question_of(seq: u8, payload: &[u8]) -> Question {
+    let mut parts = payload.split(|b| *b == 0);
+    let text = String::from_utf8_lossy(parts.next().unwrap_or_default()).into_owned();
+    let labels = parts
+        .take(crate::wl_title::PROMPT_BUTTONS)
+        .map(|l| String::from_utf8_lossy(l).into_owned())
+        .collect();
+    Question { seq, text, labels }
+}
+
+/// `buf` filled from the channel, which holds the rest of a message: false
+/// when it closed or broke first.
+fn recv_exact(fd: RawFd, buf: &mut [u8]) -> bool {
+    let mut at = 0;
+    while at < buf.len() {
+        match sys::recv_into_with_fds(fd, &mut buf[at..], 0) {
+            Ok((0, _, _)) => return false,
+            Ok((n, _, _)) => at += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// One program connection and its own connection upstream.
@@ -1799,14 +2202,16 @@ struct Conn {
 }
 
 impl Conn {
+    /// `shared`: the launch's — "cannot draw" said, the frames' asks, the
+    /// questions.
     fn open(
         client: OwnedFd,
         upstream: OwnedFd,
         border: Option<&Border>,
-        warned: &Rc<Cell<bool>>,
-        asks: &Rc<Asks>,
+        shared: (&Rc<Cell<bool>>, &Rc<Asks>, &Rc<Questions>),
         focus: &Rc<Focus>,
     ) -> Result<Self, String> {
+        let (warned, asks, questions) = shared;
         let upstream = Rc::new(upstream);
         let state = State::builder(BASELINE)
             .with_server_fd(&upstream)
@@ -1830,7 +2235,8 @@ impl Conn {
         // Before any request of the program is read: the border's own
         // registry goes upstream first, so that its answer is in before the
         // compositor's first configure of any window (`crate::wl_frame`).
-        let frames = border.map(|b| Frames::install(&client, b, warned.clone(), asks.clone()));
+        let frames = border
+            .map(|b| Frames::install(&client, b, warned.clone(), asks.clone(), questions.clone()));
         client.display().set_handler(Display {
             closing: closing.clone(),
             frames: frames.clone(),
@@ -2123,6 +2529,48 @@ fn poll(fds: &mut [libc::pollfd], timeout_ms: libc::c_int) -> io::Result<usize> 
         return Err(io::Error::last_os_error());
     }
     Ok(n as usize)
+}
+
+/// What of `buf`'s length is there to read now, read (`MSG_DONTWAIT`): the
+/// supervisor never waits on the proxy.
+fn recv_now(fd: RawFd, buf: &mut [u8]) -> usize {
+    let mut at = 0;
+    while at < buf.len() {
+        // SAFETY: recv into the rest of a buffer of that length.
+        let n = unsafe {
+            libc::recv(
+                fd,
+                buf[at..].as_mut_ptr().cast(),
+                buf.len() - at,
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if n > 0 {
+            at += n.unsigned_abs();
+        } else if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        } else {
+            break;
+        }
+    }
+    at
+}
+
+/// The next byte on the channel, left there (`MSG_PEEK`).
+fn recv_peek(fd: RawFd, buf: &mut [u8; 1]) -> io::Result<usize> {
+    // SAFETY: recv into a buffer of one byte.
+    let n = unsafe {
+        libc::recv(
+            fd,
+            buf.as_mut_ptr().cast(),
+            1,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(n.unsigned_abs())
 }
 
 /// `accept4(SOCK_NONBLOCK | SOCK_CLOEXEC)`: wl-proxy never blocks on a
@@ -4985,6 +5433,198 @@ mod tests {
                 "not shown at once: {order:?}"
             );
         }
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    // --- the questions (crate::netask, crate::wl_frame::Questions) ----------
+
+    #[test]
+    fn the_questions_have_bytes_of_their_own() {
+        let others = [
+            READY,
+            CONNECT,
+            UPSTREAM,
+            UPSTREAM_BARE,
+            REFUSED,
+            MENU,
+            NETWORK,
+            ATTENTION,
+            RESTART,
+        ];
+        for byte in [QUESTION, RETRACT, ANSWERED, NOWHERE] {
+            assert!(!others.contains(&byte), "{}", byte as char);
+        }
+        assert_ne!(QUESTION, RETRACT);
+        assert_ne!(ANSWERED, NOWHERE);
+        // The instance's words: three, and none a "yes".
+        assert_eq!([ASK_NO, ASK_WINDOW, ASK_NOWHERE], [b'n', b'm', b'w']);
+    }
+
+    /// A question as an instance sends it, and as the proxy reads it: its
+    /// words, its labels — three at most —; none with a NUL in it, none
+    /// longer than [`MAX_QUESTION`].
+    #[test]
+    fn a_question_goes_whole_and_comes_as_it_went() {
+        let bytes = ask_request(
+            "«curl» хочет в сеть.\nНет сети.",
+            &["Запретить", "Разрешить…"],
+        )
+        .unwrap();
+        let payload = asked_of(&bytes).unwrap();
+        assert_eq!(payload.len() + 2, bytes.len());
+        assert_eq!(asked_of(&bytes[..bytes.len() - 1]), None, "not all there");
+        assert_eq!(asked_of(&bytes[..1]), None);
+        let q = question_of(9, payload);
+        assert_eq!(q.seq, 9);
+        assert_eq!(q.text, "«curl» хочет в сеть.\nНет сети.");
+        assert_eq!(q.labels, ["Запретить", "Разрешить…"]);
+        let many = ask_request("?", &["a", "b", "c", "d"]).unwrap();
+        assert_eq!(
+            question_of(1, asked_of(&many).unwrap()).labels,
+            ["a", "b", "c"]
+        );
+        assert_eq!(ask_request("a\0b", &["x"]), None);
+        assert_eq!(ask_request("a", &["x\0"]), None);
+        assert_eq!(ask_request(&"x".repeat(MAX_QUESTION), &["y"]), None);
+    }
+
+    /// An instance's question is read as it comes; one that closes, or
+    /// sends more than its question, is done with.
+    #[test]
+    fn an_instances_question_is_read_as_it_comes() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        let bytes = ask_request("?", &["no", "more"]).unwrap();
+        let mut buf = Vec::new();
+        (&theirs).write_all(&bytes[..3]).unwrap();
+        assert!(read_question(&ours, &mut buf));
+        assert_eq!(asked_of(&buf), None);
+        (&theirs).write_all(&bytes[3..]).unwrap();
+        assert!(read_question(&ours, &mut buf));
+        assert!(asked_of(&buf).is_some());
+        (&theirs).write_all(b"x").unwrap();
+        assert!(!read_question(&ours, &mut buf), "more than a question");
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        drop(theirs);
+        assert!(!read_question(&ours, &mut Vec::new()), "closed");
+    }
+
+    /// Without a frame there is no window to ask on: the question is
+    /// nowhere, with its number.
+    #[test]
+    fn a_question_without_a_frame_is_nowhere() {
+        let rig = Rig::new("nowhere");
+        let channel = rig.channel.as_ref().unwrap();
+        let mut message = vec![QUESTION, 5];
+        message.extend_from_slice(&ask_request("?", &["no", "more"]).unwrap());
+        sys::send_with_fds(channel.as_raw_fd(), &message, &[]).unwrap();
+        channel
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut reply = [0u8; 2];
+        (&*channel).read_exact(&mut reply).unwrap();
+        assert_eq!(reply, [NOWHERE, 5]);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    /// A question on the program's window (the owner, 2026-09-29): a panel
+    /// of the proxy's, a popup of the window without a grab. A click too
+    /// soon is none; after the guard, the button clicked is said on the
+    /// channel with the question's number — and the program heard nothing.
+    #[test]
+    fn a_question_is_asked_on_the_window_and_a_hasty_click_is_none() {
+        let Some(font) = test_font() else { return };
+        let rig = Rig::with_drawing(
+            "question",
+            Some(titled(TitleMode::Always, Some(font.clone()))),
+        );
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, BUTTON_GLOBALS);
+        a_window(&mut client);
+        let got = log_until(&log, |m| m.iface == "xdg_wm_base" && m.opcode == 2);
+        let root = got.last().unwrap().args[1];
+        log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        request(&mut client, 6, 0, &10u32.to_ne_bytes());
+        let get_pointer = log_until(&log, |m| m.iface == "wl_seat" && m.opcode == 0);
+        let pointer = get_pointer.last().unwrap().args[0];
+        let send = |compositor: &mut UnixStream, events: &[(u32, Vec<i32>)]| {
+            let mut out = Vec::new();
+            for (opcode, args) in events {
+                event(&mut out, pointer, *opcode, |a| {
+                    a.extend_from_slice(&words(args))
+                });
+                event(&mut out, pointer, 5, |_| {});
+            }
+            compositor.write_all(&out).unwrap();
+        };
+        let fixed = |v: i32| v * 256;
+        let button = |serial: i32, down: bool| (3u32, vec![serial, 2, 0x110, i32::from(down)]);
+
+        let text = "«curl» (контейнер «work») хочет в сеть: example.org:443.";
+        let labels = ["Запретить", "Разрешить…"];
+        let channel = rig.channel.as_ref().unwrap();
+        let mut message = vec![QUESTION, 7];
+        message.extend_from_slice(&ask_request(text, &labels).unwrap());
+        sys::send_with_fds(channel.as_raw_fd(), &message, &[]).unwrap();
+        let got = log_until(&log, |m| m.iface == "xdg_surface" && m.opcode == 2);
+        let panel = got
+            .iter()
+            .rev()
+            .find(|m| m.iface == "wl_compositor" && m.opcode == 0)
+            .expect("the panel's surface")
+            .args[0];
+        let prompt = crate::wl_title::Prompt::lay_out(
+            &ab_glyph::FontVec::try_from_vec(font).unwrap(),
+            text,
+            &labels,
+        );
+        let center = |i: usize| {
+            let c = prompt.cell(i).unwrap();
+            (c.x + c.w / 2, c.y + c.h / 2)
+        };
+        // «Разрешить…» at once: too soon — nothing.
+        let (x, y) = center(1);
+        send(
+            &mut compositor,
+            &[
+                (0, vec![80, panel as i32, fixed(x), fixed(y)]),
+                button(81, true),
+                button(82, false),
+            ],
+        );
+        std::thread::sleep(crate::dialog::TOO_FAST + Duration::from_millis(500));
+        // «Запретить» after the guard: said.
+        let (x, y) = center(0);
+        send(
+            &mut compositor,
+            &[
+                (2, vec![1, fixed(x), fixed(y)]),
+                button(83, true),
+                button(84, false),
+            ],
+        );
+        channel
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut reply = [0u8; 3];
+        (&*channel).read_exact(&mut reply).unwrap();
+        assert_eq!(reply, [ANSWERED, 7, 0], "the hasty click was taken");
+        // The program heard nothing of it: on its own surface it hears the
+        // pointer come.
+        send(
+            &mut compositor,
+            &[(0, vec![90, root as i32, fixed(7), fixed(40)])],
+        );
+        let events = events_until(&mut client, |o, op, _| o == 10 && op == 5);
+        let heard: Vec<u32> = events
+            .iter()
+            .filter(|(o, _, _)| *o == 10)
+            .map(|(_, op, _)| *op)
+            .collect();
+        assert_eq!(heard, [0, 5], "the program saw the panel's input");
         drop(client);
         assert_eq!(rig.finish(), 0);
     }

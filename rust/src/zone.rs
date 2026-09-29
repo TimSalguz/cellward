@@ -3115,6 +3115,7 @@ impl Transport {
                     &zone.tools.window,
                     &zone.home.join(CONFIG_SUBDIR),
                     state,
+                    &host_runtime_dir(zone),
                     record_of(&plan.id),
                 )
                 .map_err(|e| {
@@ -3918,7 +3919,8 @@ impl Transport {
                 None => match self.asker.as_mut() {
                     Some(asker) => {
                         let to = crate::netask::destination(&f.key, &names);
-                        if let Some(verdict) = asker.ask(program, f.key, to) {
+                        let launch = owner.as_ref().and_then(|o| o.launch);
+                        if let Some(verdict) = asker.ask(program, launch, f.key, to) {
                             decided.push((f.key, verdict));
                         }
                     }

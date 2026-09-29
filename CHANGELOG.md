@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The network question on the program's own window** (2026-09-29, the
+  owner's decision): a panel under the window's title, drawn by the
+  Wayland proxy, with «Запретить» and «Разрешить…». «Запретить» there is the
+  answer; «Разрешить…» — and a program with no window to ask on — asks in
+  the launch window, on the launch's compositor even when the instance's
+  unit has no `WAYLAND_DISPLAY`. A "yes" never comes from the panel: the
+  proxy reads the program's messages, so a proxy the program took over can
+  only say "no" or open the launch window. A click on the panel counts only
+  while the program has no popup and after the pointer has rested on it
+  for the launch window's guard.
 - **The network is asked for** (2026-09-29, firewall stage 5, the owner's
   decision of 2026-09-28): a program with no rule of its container's gets
   a question at its first connection — «Запретить» (a rule: not asked

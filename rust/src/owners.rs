@@ -53,6 +53,9 @@ pub struct Owner {
     /// The program's key in the registry (`crate::registry`), when a
     /// launch of the container's is among its parents.
     pub program: Option<String>,
+    /// That launch's pid, its record's — its supervisor's under the Wayland
+    /// proxy (`crate::wl_proxy::ask_path`). Not kept in [`FILE`].
+    pub launch: Option<i32>,
 }
 
 /// An address as `/proc/net/*` prints it: the bytes of the kernel's
@@ -227,13 +230,13 @@ fn launches(registry: &Path) -> HashMap<i32, String> {
     out
 }
 
-/// The program of process `pid`: it or the nearest of its parents that is a
-/// launch.
-fn program_of(pid: i32, launches: &HashMap<i32, String>) -> Option<String> {
+/// The program of process `pid` and its launch: it or the nearest of its
+/// parents that is one.
+fn program_of(pid: i32, launches: &HashMap<i32, String>) -> Option<(String, i32)> {
     let mut at = pid;
     for _ in 0..64 {
         if let Some(key) = launches.get(&at) {
-            return Some(key.clone());
+            return Some((key.clone(), at));
         }
         let stat = fs::read_to_string(format!("/proc/{at}/stat")).ok()?;
         at = parent_in(&stat).filter(|p| *p > 1)?;
@@ -275,10 +278,12 @@ fn owned(
                         .collect()
                 })
                 .unwrap_or_default();
+            let launch = program_of(pid, &launches);
             Some(Owner {
                 pid,
                 process,
-                program: program_of(pid, &launches),
+                launch: launch.as_ref().map(|(_, at)| *at),
+                program: launch.map(|(key, _)| key),
             })
         })
         .collect()
@@ -328,6 +333,7 @@ pub fn read(dir: &Path) -> HashMap<Seen, Owner> {
                 pid: pid.parse().ok()?,
                 process: (*process).to_owned(),
                 program: (*program != "-").then(|| (*program).to_owned()),
+                launch: None,
             };
             Some(((key, first.parse().ok()?), owner))
         })
@@ -656,6 +662,7 @@ mod tests {
             pid: 42,
             process: "tab\there".to_owned(),
             program: None,
+            launch: None,
         };
         let me = std::process::id();
         let dir = std::env::temp_dir().join(format!("vz-owners-line-{me}"));

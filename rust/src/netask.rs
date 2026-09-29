@@ -3,11 +3,23 @@
 //! about (`crate::netrules::Rule::Ask`) — the person is asked whether it may.
 //!
 //! **Who asks.** The instance's keeper (`zone::Transport`), which decides
-//! every new flow for its relay's gate (`crate::verdicts`). The question is
-//! the launch window's guarded one (`crate::window::question`), shown by a
-//! thread of its own: the keeper's loop goes on — other programs' flows are
-//! decided, the instance cut and carried — and hears the answer on a pipe it
-//! polls ([`Asker::fd`]).
+//! every new flow for its relay's gate (`crate::verdicts`), by a thread of
+//! its own for each question: the keeper's loop goes on — other programs'
+//! flows are decided, the instance cut and carried — and hears the answer
+//! on a pipe it polls ([`Asker::fd`]).
+//!
+//! **Where** (the owner, 2026-09-29: on the program's own window, so that
+//! nobody wonders which window asks). First on the window of the program's
+//! launch: its supervisor's socket of questions (`crate::wl_proxy::ask_path`)
+//! has the Wayland proxy show a panel under the window's title, with
+//! «Запретить» and «Разрешить…». «Запретить» there is the answer. Anything
+//! else — «Разрешить…», no window to show it on, no such socket (a launch
+//! without the proxy, a flow of no launch) — asks in the launch window
+//! (`crate::window::question`), on the launch's compositor when its
+//! supervisor named it: a "yes" is given only there. The proxy reads the
+//! program's messages, and one the program took over must not say "yes"
+//! for the person; the worst it can do is say "no", or open the launch
+//! window.
 //!
 //! **What it says.** The program by its label, its container, where it goes
 //! (the name a DNS answer gave the address, else the address) and the port.
@@ -26,7 +38,9 @@
 //! first, held by the relay, and the answer is theirs all.
 
 use std::collections::{HashMap, VecDeque};
+use std::ffi::OsString;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -55,6 +69,9 @@ pub struct Asker {
     window: PathBuf,
     config: PathBuf,
     state: PathBuf,
+    /// The host's runtime directory: where the launches' sockets of
+    /// questions are.
+    runtime: PathBuf,
     /// Its record (`crate::netrules`): where an "always" or a "deny" is
     /// written; none for a throwaway.
     record: Option<String>,
@@ -66,8 +83,9 @@ pub struct Asker {
     wake: (OwnedFd, Arc<OwnedFd>),
     /// The flows waiting for their program's answer.
     waiting: HashMap<Program, Vec<Key>>,
-    /// Where each program's first waiting flow goes, for its question.
-    first: HashMap<Program, String>,
+    /// Where each program's first waiting flow goes, for its question, and
+    /// the launch it came from.
+    first: HashMap<Program, (String, Option<i32>)>,
     /// The answers for the instance's life.
     session: HashMap<Program, Verdict>,
     /// The program asked about now, and those waiting their turn.
@@ -80,6 +98,7 @@ impl Asker {
         window: &Path,
         config: &Path,
         state: &Path,
+        runtime: &Path,
         record: Option<String>,
     ) -> std::io::Result<Self> {
         let (r, w) = crate::sys::pipe_nonblocking()?;
@@ -93,6 +112,7 @@ impl Asker {
             window: window.to_path_buf(),
             config: config.to_path_buf(),
             state: state.to_path_buf(),
+            runtime: runtime.to_path_buf(),
             record,
             shown,
             tx,
@@ -111,18 +131,24 @@ impl Asker {
         self.wake.0.as_raw_fd()
     }
 
-    /// A flow of `program` its rules ask about, going to `to`: its verdict
-    /// now when the instance's life has one for the program; else it waits
-    /// for the answer (`None`), a question opened for its program when
-    /// there is none yet.
-    pub fn ask(&mut self, program: Program, key: Key, to: String) -> Option<Verdict> {
+    /// A flow of `program` (of the launch `launch`, when one was found) its
+    /// rules ask about, going to `to`: its verdict now when the instance's
+    /// life has one for the program; else it waits for the answer (`None`),
+    /// a question opened for its program when there is none yet.
+    pub fn ask(
+        &mut self,
+        program: Program,
+        launch: Option<i32>,
+        key: Key,
+        to: String,
+    ) -> Option<Verdict> {
         if let Some(verdict) = self.session.get(&program) {
             return Some(*verdict);
         }
         let waiting = self.waiting.entry(program.clone()).or_default();
         waiting.push(key);
         if waiting.len() == 1 {
-            self.first.insert(program.clone(), to);
+            self.first.insert(program.clone(), (to, launch));
             self.queue.push_back(program);
             self.next();
         }
@@ -142,16 +168,23 @@ impl Asker {
             .as_deref()
             .map(|key| label_of(&self.state, key))
             .unwrap_or_else(|| "Неизвестная программа".to_owned());
-        let to = self.first.get(&program).cloned().unwrap_or_default();
+        let (to, launch) = self.first.get(&program).cloned().unwrap_or_default();
         // "Always" is a rule: a record and a program to write it for.
         let always = self.record.is_some() && program.is_some();
         let (window, shown) = (self.window.clone(), self.shown.clone());
+        let at = launch.map(|pid| (self.runtime.clone(), pid));
         let timeout = crate::timings::QUESTION.read(&self.config).0.duration();
         let (tx, wake) = (self.tx.clone(), self.wake.1.clone());
         let spawned = std::thread::Builder::new()
             .name("net-question".to_owned())
             .spawn(move || {
-                let answer = question(&window, timeout, &label, &shown, &to, always);
+                let asked = Asked {
+                    label: &label,
+                    shown: &shown,
+                    to: &to,
+                    always,
+                };
+                let answer = question(&window, at, timeout, &asked);
                 let _ = tx.send((program, answer));
                 // SAFETY: one byte from a live buffer; the pipe is
                 // non-blocking, and a full one already wakes the keeper.
@@ -239,19 +272,45 @@ pub fn destination(key: &Key, names: &[crate::flows::Name]) -> String {
     }
 }
 
-/// The question itself: in the launch window, guarded, the safe answer
-/// first. Not shown, closed, not answered in time: [`Answer::Closed`].
+/// A question: the program's label, its container as a person reads it,
+/// where it goes, and whether "always" is offered.
+struct Asked<'a> {
+    label: &'a str,
+    shown: &'a str,
+    to: &'a str,
+    always: bool,
+}
+
+/// The question itself: on the program's window when its launch (`at`: the
+/// runtime directory and the launch's pid) can show it — "no" there is the
+/// answer —, else in the launch window, guarded, the safe answer first. Not
+/// shown, closed, not answered in time: [`Answer::Closed`].
 fn question(
     window: &Path,
+    at: Option<(PathBuf, i32)>,
     timeout: Option<std::time::Duration>,
-    label: &str,
-    shown: &str,
-    to: &str,
-    always: bool,
+    asked: &Asked,
 ) -> Answer {
+    let Asked {
+        label,
+        shown,
+        to,
+        always,
+    } = *asked;
     let title = format!("Сеть — «{label}»");
     let text =
         format!("«{label}» ({shown}) хочет в сеть: {to}.\nПока вы не ответили, у неё сети нет.");
+    let started = std::time::Instant::now();
+    let mut display = None;
+    if let Some((runtime, pid)) = at {
+        match on_window(&runtime, pid, &text, timeout) {
+            OnWindow::No => return Answer::Deny,
+            OnWindow::Unanswered => return Answer::Closed,
+            OnWindow::Elsewhere(on) => display = on,
+        }
+    }
+    // What is left of the time to answer in.
+    let timeout = timeout.map(|t| t.saturating_sub(started.elapsed()));
     let mut answers: Vec<(&str, &str, bool)> = vec![
         ("deny", "Запретить", false),
         ("now", "Разрешить, пока работает", false),
@@ -259,13 +318,97 @@ fn question(
     if always {
         answers.push(("always", "Разрешить всегда", false));
     }
-    match crate::window::question(window, &title, &text, None, &answers, timeout) {
+    let asked = crate::window::question_on(
+        window,
+        display.as_deref(),
+        &title,
+        &text,
+        None,
+        &answers,
+        timeout,
+    );
+    match asked {
         crate::window::Asked::Chose(tag) => match tag.as_str() {
             "always" => Answer::Always,
             "now" => Answer::Now,
             _ => Answer::Deny,
         },
         _ => Answer::Closed,
+    }
+}
+
+/// What the launch's supervisor said of a question on the program's window.
+#[derive(Debug, PartialEq, Eq)]
+enum OnWindow {
+    /// "No", there.
+    No,
+    /// Not answered in time.
+    Unanswered,
+    /// To be asked in the launch window — on the launch's compositor, when
+    /// its supervisor named it: «Разрешить…», no window of the program's to
+    /// ask on, or no supervisor to ask at all.
+    Elsewhere(Option<OsString>),
+}
+
+/// The panel's answers: the safe one first. Only it is an answer; any other
+/// is "ask in the launch window" (`crate::wl_proxy::ASK_WINDOW`).
+const PANEL: [&str; 2] = ["Запретить", "Разрешить…"];
+
+/// `text` asked on the window of the launch whose supervisor is `pid`,
+/// through its socket of questions under `runtime`: what it said
+/// ([`OnWindow`]). Its socket is its supervisor's own — the process on the
+/// other end is `pid` — or nothing is asked there.
+fn on_window(
+    runtime: &Path,
+    pid: i32,
+    text: &str,
+    timeout: Option<std::time::Duration>,
+) -> OnWindow {
+    use std::io::{Read, Write};
+    let elsewhere = OnWindow::Elsewhere(None);
+    let Some(request) = crate::wl_proxy::ask_request(text, &PANEL) else {
+        return elsewhere;
+    };
+    let Ok(stream) = UnixStream::connect(crate::wl_proxy::ask_path(runtime, pid)) else {
+        return elsewhere;
+    };
+    if crate::sys::peer_pid(stream.as_raw_fd()) != Some(pid) {
+        return elsewhere;
+    }
+    if stream.set_read_timeout(timeout).is_err() || (&stream).write_all(&request).is_err() {
+        return elsewhere;
+    }
+    let mut reply = Vec::new();
+    match (&stream)
+        .take(1 + MAX_DISPLAY as u64)
+        .read_to_end(&mut reply)
+    {
+        Ok(_) => reply_of(&reply),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            OnWindow::Unanswered
+        }
+        Err(_) => elsewhere,
+    }
+}
+
+/// The longest compositor's name a supervisor's reply carries.
+const MAX_DISPLAY: usize = 256;
+
+/// A supervisor's reply: its answer's byte, then its compositor's name.
+fn reply_of(reply: &[u8]) -> OnWindow {
+    use std::os::unix::ffi::OsStringExt;
+    let display = reply
+        .get(1..)
+        .filter(|d| !d.is_empty() && d.len() <= MAX_DISPLAY && !d.contains(&0))
+        .map(|d| OsString::from_vec(d.to_vec()));
+    match reply.first() {
+        Some(&crate::wl_proxy::ASK_NO) => OnWindow::No,
+        _ => OnWindow::Elsewhere(display),
     }
 }
 
@@ -295,14 +438,24 @@ mod tests {
             Path::new(""),
             &root.join("config"),
             &root.join("state"),
+            &root,
             Some("work".to_owned()),
         )
         .unwrap();
         let curl = Some("curl".to_owned());
-        assert_eq!(asker.ask(curl.clone(), key(1), "x:443".into()), None);
-        assert_eq!(asker.ask(curl.clone(), key(2), "x:443".into()), None);
+        // A launch with no socket of questions: the launch window, which
+        // there is none of either.
+        let launch = Some(i32::MAX);
         assert_eq!(
-            asker.ask(None, key(3), "y:80".into()),
+            asker.ask(curl.clone(), launch, key(1), "x:443".into()),
+            None
+        );
+        assert_eq!(
+            asker.ask(curl.clone(), launch, key(2), "x:443".into()),
+            None
+        );
+        assert_eq!(
+            asker.ask(None, None, key(3), "y:80".into()),
             None,
             "waits its turn"
         );
@@ -326,7 +479,46 @@ mod tests {
                 (key(3), Verdict::Deny)
             ]
         );
-        assert_eq!(asker.ask(curl, key(4), "x:443".into()), Some(Verdict::Deny));
+        assert_eq!(
+            asker.ask(curl, launch, key(4), "x:443".into()),
+            Some(Verdict::Deny)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The supervisor's word: "no" is the answer; anything else, and a
+    /// word it never said, asks in the launch window — on its compositor
+    /// when it named one.
+    #[test]
+    fn only_no_is_an_answer_from_the_programs_window() {
+        use crate::wl_proxy::{ASK_NO, ASK_NOWHERE, ASK_WINDOW};
+        assert_eq!(reply_of(&[ASK_NO]), OnWindow::No);
+        assert_eq!(reply_of(b"nwayland-1"), OnWindow::No);
+        let on = |d: &str| OnWindow::Elsewhere(Some(OsString::from(d)));
+        assert_eq!(reply_of(b"mwayland-1"), on("wayland-1"));
+        assert_eq!(reply_of(&[ASK_WINDOW]), OnWindow::Elsewhere(None));
+        assert_eq!(reply_of(&[ASK_NOWHERE]), OnWindow::Elsewhere(None));
+        assert_eq!(reply_of(b"y"), OnWindow::Elsewhere(None), "never a yes");
+        assert_eq!(reply_of(b""), OnWindow::Elsewhere(None), "closed");
+        assert_eq!(reply_of(b"mway\0land"), OnWindow::Elsewhere(None));
+        assert_eq!(ASK_NO, b'n');
+    }
+
+    /// A socket of questions that is not the launch's supervisor's — its
+    /// pid another process's — is not asked on.
+    #[test]
+    fn a_socket_not_the_launchs_is_not_asked_on() {
+        let root = std::env::temp_dir().join(format!("vz-netask-sock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = crate::wl_proxy::ask_path(&root, 1);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let asked = on_window(&root, 1, "?", Some(std::time::Duration::from_secs(5)));
+        assert_eq!(asked, OnWindow::Elsewhere(None));
+        drop(listener);
+        // No socket at all.
+        let none = on_window(&root, 2, "?", None);
+        assert_eq!(none, OnWindow::Elsewhere(None));
         let _ = std::fs::remove_dir_all(&root);
     }
 

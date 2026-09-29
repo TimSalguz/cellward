@@ -764,6 +764,7 @@ pub fn run(args: Args) -> u8 {
 
     if let Some((proxy, _)) = &mut proxy {
         proxy.take_over();
+        proxy.listen_for_questions(&runtime_dir);
     }
     // Nobody on the way to say the program opened a window (no proxy —
     // `--no-proxy`, none started —, or no copy for it): said now. Our copy

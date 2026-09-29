@@ -146,10 +146,24 @@ pub fn render_menu(menu: &Menu) -> String {
 /// The window, started with `menu` on its standard input; `None` when there
 /// is no window to start.
 pub fn spawn_menu(window: &Path, menu: &Menu) -> Option<Child> {
+    spawn_menu_on(window, None, menu)
+}
+
+/// [`spawn_menu`] on the compositor `display` (`WAYLAND_DISPLAY`; none: the
+/// one this process has).
+pub fn spawn_menu_on(
+    window: &Path,
+    display: Option<&std::ffi::OsStr>,
+    menu: &Menu,
+) -> Option<Child> {
     if window.as_os_str().is_empty() {
         return None;
     }
-    let mut child = Command::new(window)
+    let mut command = Command::new(window);
+    if let Some(display) = display {
+        command.env("WAYLAND_DISPLAY", display);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -208,6 +222,21 @@ pub fn question(
     answers: &[(&str, &str, bool)],
     deadline: Option<std::time::Duration>,
 ) -> Asked {
+    question_on(window, None, title, text, command, answers, deadline)
+}
+
+/// [`question`] on the compositor `display` (`WAYLAND_DISPLAY`; none: the
+/// one this process has) — an instance's keeper asks on its launch's,
+/// whatever its unit's environment says (`crate::netask`).
+pub fn question_on(
+    window: &Path,
+    display: Option<&std::ffi::OsStr>,
+    title: &str,
+    text: &str,
+    command: Option<(&str, &[String])>,
+    answers: &[(&str, &str, bool)],
+    deadline: Option<std::time::Duration>,
+) -> Asked {
     let (program, command) = command.map_or((String::new(), Vec::new()), |(program, words)| {
         (program.to_owned(), words.to_vec())
     });
@@ -222,7 +251,7 @@ pub fn question(
         command,
         program,
     };
-    let Some(mut child) = spawn_menu(window, &menu) else {
+    let Some(mut child) = spawn_menu_on(window, display, &menu) else {
         return Asked::NotShown;
     };
     if let Some(deadline) = deadline {

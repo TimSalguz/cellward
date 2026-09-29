@@ -1153,6 +1153,7 @@ mod tests {
             pid: 4242,
             process: "telegram-deskto".to_owned(),
             program: Some("org.telegram.desktop".to_owned()),
+            launch: None,
         };
         let rows = vec![Listed {
             id: "work".to_owned(),
