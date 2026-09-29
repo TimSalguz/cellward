@@ -3170,6 +3170,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                                     crate::devices::Grant::Phone
                                         | crate::devices::Grant::Serial
                                         | crate::devices::Grant::Usb { .. }
+                                        | crate::devices::Grant::All
                                 )
                             );
                             if own_network {

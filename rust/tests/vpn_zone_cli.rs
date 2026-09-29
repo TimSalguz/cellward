@@ -559,6 +559,74 @@ fn the_hosts_network_is_made_when_wanted_and_a_zone_by_its_name_refused() {
     assert!(stderr(&out).contains("Переименуй"), "{}", stderr(&out));
 }
 
+/// 2e (2026-09-29): «без изоляции» is the built-in record `open` — a
+/// container of the real home with everything open, the whole home given,
+/// in the network asked, a VPN's too. Written anew before every launch into
+/// it and not to be changed; a container of the person's by that name is
+/// never written over.
+#[test]
+fn no_isolation_is_a_record_with_everything_open() {
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+    let home = Home::new("open");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    let out = home.run_with(&["run", "nl", "--no-isolation", "--", "claude"], &dry);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("сеть nl, контейнер open"),
+        "{}",
+        stdout(&out)
+    );
+    let policy = home.root.join("config/containers/open");
+    let record = fs::read_to_string(policy.join("container.conf")).unwrap();
+    for line in [
+        "builtin=open",
+        "home=main",
+        "hermetic=false",
+        "host_files_writable=true",
+        "camera=true",
+        "microphone=yes",
+        "device=all",
+    ] {
+        assert!(record.lines().any(|l| l == line), "{line}: {record}");
+    }
+    assert_eq!(
+        fs::read_to_string(policy.join("paths")).unwrap().trim(),
+        home.root.display().to_string()
+    );
+    // Changed by hand: written back before the next launch.
+    fs::write(policy.join("container.conf"), "builtin=open\nhome=main\n").unwrap();
+    let out = home.run_with(&["run", "nl", "--container", "open", "--", "claude"], &dry);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let record = fs::read_to_string(policy.join("container.conf")).unwrap();
+    assert!(record.contains("device=all"), "{record}");
+    // Not to be changed, nor made by hand.
+    for args in [
+        &["container", "set", "open", "camera", "off"][..],
+        &["container", "devices", "open", "add", "games"],
+        &["container", "grant", "open", "~/x"],
+        &["container", "create", "open"],
+    ] {
+        let out = home.run(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stdout(&out));
+    }
+
+    let home = Home::new("openmine");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    let policy = home.root.join("config/containers/open");
+    fs::create_dir_all(&policy).unwrap();
+    fs::write(policy.join("container.conf"), "home=private\n").unwrap();
+    let out = home.run_with(&["run", "nl", "--no-isolation", "--", "claude"], &dry);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(stderr(&out).contains("без изоляции"), "{}", stderr(&out));
+    assert_eq!(
+        fs::read_to_string(policy.join("container.conf")).unwrap(),
+        "home=private\n",
+        "never written over"
+    );
+}
+
 #[test]
 fn a_sandboxed_launch_carries_the_tool_paths_of_the_manifest() {
     let home = Home::new("fs-flags");

@@ -54,6 +54,7 @@ Consequences, in order of importance:
 | temporary layer over the home | `~/.local/state/vpn-zones/.throwaway/vpn-profile-*` | same, erased after the last tenant |
 | container of a home of its own (`home = private`, was "named sandbox") | `~/.local/state/vpn-profiles/<name>/home` (data — the one data directory of every container, 2026-09-26; before, `vpn-sandboxes/<name>`), `~/.config/vpn-zones/containers/<name>/` (policy: `perms`, `paths`, `container.conf`, `trust/`) | whole home, bus, runtime dir, seccomp, X11 |
 | container of the main home (`home = main`) | its policy only | nothing of the home: a network, programs and permissions of its own under a name |
+| «without isolation» (`open`, `run <net> --no-isolation`, 2026-09-29) | a built-in policy, written anew before every launch into it | nothing but the network: the real home, every device (`all`), the host's session, the Nix daemon and its startup files where the network tolerates them; not to be changed |
 | the program's own container | a container of a home of its own called `app-<key>` | same |
 | throwaway container | an empty home in tmpfs | same, erased on exit |
 | compositor restriction | `wl-sandbox`, on by default | screen capture, input emulation, background clipboard |

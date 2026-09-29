@@ -1585,6 +1585,84 @@ pub fn load(tools: &Tools, selector: &str) -> Option<Container> {
 /// have ([`reserved_name`]).
 pub const MAIN_RECORD: &str = "main";
 
+/// The built-in record of «без изоляции» (2e of `docs/PERMISSIONS.md`
+/// §11.15): a container of the real home with everything open — the host's
+/// session, the Nix daemon, the places the host runs writable, every device
+/// (`devices::Grant::All`), the cameras, the microphone, the screen, the
+/// sound, an X server of its own — and the whole home given, so the
+/// person's protected list is lifted too. In any network, a VPN's included:
+/// the network still has its say in the ways around it (`hermetic::
+/// tolerance`), and it is still the network's only way out. Written anew
+/// before every launch into it ([`ensure_open_record`]) and not to be
+/// changed: a container that needs less is a container of the real home of
+/// the person's own.
+pub const OPEN_RECORD: &str = "open";
+/// The line that makes a record of that name ours.
+const OPEN_MARK: &str = "builtin";
+
+/// What the record of «без изоляции» says, whole.
+fn open_record_text() -> String {
+    format!(
+        "# cellward: «без изоляции» — встроенная запись, пишется заново перед каждым запуском\n\
+         {OPEN_MARK}={OPEN_RECORD}\nhome=main\nhermetic=false\nnix_daemon=true\n\
+         host_files_writable=true\naudio_manager=true\ncamera=true\nmicrophone=yes\n\
+         screencast=yes\nx11=true\ndevice={}\n",
+        crate::devices::ALL
+    )
+}
+
+/// Whether a container called [`OPEN_RECORD`] is the person's from before
+/// the name was taken: there, and without the built-in's mark.
+pub fn foreign_open_record(tools: &Tools) -> bool {
+    match fs::read_to_string(policy_dir(tools, OPEN_RECORD).join(FILE)) {
+        Ok(text) => !values(&parse_conf(&text), OPEN_MARK).any(|v| v == OPEN_RECORD),
+        Err(_) => {
+            data_dir(tools, OPEN_RECORD).is_dir() || read_declared(tools, OPEN_RECORD).is_some()
+        }
+    }
+}
+
+/// The record of «без изоляции» as it is to be ([`OPEN_RECORD`]): written
+/// where it is not, or not so. A container of the person's by that name is
+/// never written over.
+pub fn ensure_open_record(tools: &Tools) -> Result<(), String> {
+    if foreign_open_record(tools) {
+        return Err(format!(
+            "«{OPEN_RECORD}» теперь значит «без изоляции», а у тебя есть контейнер с таким \
+             именем — запуск остановлен. Перенеси его программы в другой контейнер и удали \
+             его: cellward container rm {OPEN_RECORD}"
+        ));
+    }
+    let policy = policy_dir(tools, OPEN_RECORD);
+    let wanted = [
+        (policy.join(FILE), open_record_text()),
+        (
+            policy.join(PATHS_FILE),
+            format!("{}\n", tools.home.display()),
+        ),
+    ];
+    for (file, text) in wanted {
+        if fs::read_to_string(&file).ok().as_deref() != Some(text.as_str()) {
+            fs::create_dir_all(&policy)
+                .and_then(|()| fs::write(&file, text))
+                .map_err(|e| format!("«без изоляции»: не записать {} ({e})", file.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Refused for the record of «без изоляции»: its settings are all open, and
+/// stay so ([`OPEN_RECORD`]).
+fn open_refusal(selector: &str) -> Result<(), String> {
+    if selector == OPEN_RECORD {
+        return Err(format!(
+            "«без изоляции» ({OPEN_RECORD}) не настраивается: в нём открыто всё. Нужно не \
+             всё — контейнер настоящего дома: cellward container create <имя> --home main"
+        ));
+    }
+    Ok(())
+}
+
 /// [`load`] without the move: for the move itself.
 fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
     let main = selector == MAIN_RECORD;
@@ -2075,6 +2153,7 @@ pub fn set_path(
     grant: bool,
     until: Option<u64>,
 ) -> Result<PathBuf, String> {
+    open_refusal(selector)?;
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
     // One line a grant: a line break would write two.
     if path.contains(['\n', '\r']) {
@@ -2252,6 +2331,8 @@ pub fn merge(
     if from == MAIN_RECORD || into == MAIN_RECORD {
         return Err("настоящий дом ни с чем не объединяется".to_owned());
     }
+    open_refusal(from)?;
+    open_refusal(into)?;
     let a = load(tools, from).ok_or_else(|| format!("контейнера {from} нет"))?;
     let b = load(tools, into).ok_or_else(|| format!("контейнера {into} нет"))?;
     if a.selector() == b.selector() {
@@ -2468,6 +2549,7 @@ pub fn declared_owner(tools: &Tools, app: &str) -> Option<String> {
 /// two networks at once is exactly what binding exists to prevent
 /// (`docs/CONTAINERS.md` I2).
 pub fn set_network(tools: &Tools, selector: &str, network: &Network) -> Result<(), String> {
+    open_refusal(selector)?;
     if selector == MAIN_RECORD {
         return Err(
             "у настоящего дома нет своей сети: она выбирается при запуске, в каждой сети у \
@@ -2524,6 +2606,7 @@ pub fn write_network_in(config: &Path, name: &str, network: &str) -> Result<(), 
 /// its zone's (`Some(false)`), or take its word back (`None`: its
 /// network's), locally.
 pub fn set_x11(tools: &Tools, selector: &str, on: Option<bool>) -> Result<(), String> {
+    open_refusal(selector)?;
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
     if container
         .x11
@@ -2615,6 +2698,7 @@ pub fn set_screencast(
 /// Let a container's programs reach the host's cameras, or not (`None`: as
 /// its zone), locally.
 pub fn set_camera(tools: &Tools, selector: &str, on: Option<bool>) -> Result<(), String> {
+    open_refusal(selector)?;
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
     if container
         .camera
@@ -2645,6 +2729,7 @@ pub fn set_permission(
     key: &str,
     on: Option<bool>,
 ) -> Result<(), String> {
+    open_refusal(selector)?;
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
     if crate::hermetic::container_own(&tools.config, &container.name, key)
         .is_some_and(|(_, source)| source == Source::Nix)
@@ -2664,11 +2749,12 @@ pub fn set_permission(
 /// Give a container a device, or take one back (`add` false), locally. A
 /// device Nix gave is taken back there.
 pub fn set_device(tools: &Tools, selector: &str, word: &str, add: bool) -> Result<(), String> {
+    open_refusal(selector)?;
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
     let grant = crate::devices::Grant::parse(word).ok_or_else(|| {
         format!(
-            "«{word}» — не устройство: games, security-keys, phone, serial, vm или \
-             usb:<производитель>:<модель>[:<серийный>]"
+            "«{word}» — не устройство: games, security-keys, phone, serial, vm, \
+             usb:<производитель>:<модель>[:<серийный>] или all (все устройства хоста)"
         )
     })?;
     let word = grant.word();
@@ -2743,6 +2829,7 @@ fn set_switch(
     said: &str,
     setting: Option<crate::microphone::Setting>,
 ) -> Result<(), String> {
+    open_refusal(selector)?;
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
     if crate::microphone::container_switch(&tools.config, &container.name, key)
         .is_some_and(|(_, source)| source == Source::Nix)
@@ -2764,6 +2851,7 @@ fn set_switch(
 /// them. The data of the old kind go aside at the next launch
 /// ([`prepare_data`]), nothing is erased.
 pub fn set_home(tools: &Tools, selector: &str, home: Home) -> Result<(), String> {
+    open_refusal(selector)?;
     if selector == MAIN_RECORD {
         return Err("настоящий дом и есть настоящий дом: его вид не меняется".to_owned());
     }
@@ -2810,10 +2898,10 @@ pub fn set_home(tools: &Tools, selector: &str, home: Home) -> Result<(), String>
 /// Make a container: its policy with the kind of its home, and its data
 /// directory. Refused for a name that cannot be one and for one that exists.
 pub fn create(tools: &Tools, name: &str, home: Home) -> Result<Container, String> {
-    if !valid_name(name) {
+    if !valid_name(name) || name == OPEN_RECORD {
         return Err(format!(
             "«{name}» не может быть именем контейнера: нельзя / : пробелы, начало с - или ., \
-             и слова main, ask, own"
+             и слова main, open, ask, own"
         ));
     }
     if load(tools, name).is_some() {

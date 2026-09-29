@@ -696,6 +696,14 @@ pub const UNCONFINED_ROW: (&str, &str) = (
     "Без изоляции и без VPN — у программы всё, что у хоста: файлы, камера, микрофон, устройства",
 );
 
+/// «Без изоляции» (2e of `docs/PERMISSIONS.md` §11.15,
+/// `container::OPEN_RECORD`): everything the host has, in the network chosen
+/// — a VPN's too. Said as what it opens.
+pub const OPEN_ROW: (&str, &str) = (
+    crate::container::OPEN_RECORD,
+    "⚠ Без изоляции: у программы всё, что у хоста — устройства, сеанс, все файлы; сеть — выбранная",
+);
+
 /// The host's own network (2e of `docs/PERMISSIONS.md` §11.15): no VPN, and
 /// the program in its container all the same.
 pub const HOST_ROW: (&str, &str) = (
@@ -822,6 +830,7 @@ fn label_of(selector: &str, home: Option<crate::container::Home>) -> String {
     use crate::container::Home;
     match selector {
         "" | MAIN => "настоящий дом".to_owned(),
+        crate::container::OPEN_RECORD => "без изоляции".to_owned(),
         THROWAWAY => "разовый".to_owned(),
         other => {
             let (name, home) = match other.strip_prefix(SANDBOX_PREFIX) {
@@ -884,6 +893,11 @@ pub fn profile_menu(
             "Настоящий дом: все ваши файлы — ключи ssh, пароли браузера, токены",
         ),
         row("pinmain", "Настоящий дом — всегда"),
+        row(OPEN_ROW.0, OPEN_ROW.1),
+        (
+            format!("pin:{}", OPEN_ROW.0),
+            format!("{} — всегда", OPEN_ROW.1),
+        ),
         // A home of the program's own: permanent, but nobody else's. It differs
         // from a named container with a home of its own only in that the name
         // is picked automatically — it is "an isolated home by default", which
@@ -909,7 +923,11 @@ pub fn profile_menu(
     }
     menu.push(row("__newsb__", "🔒➕ Новый контейнер со своим домом…"));
 
-    for profile in profiles {
+    // «Без изоляции» has its row above.
+    for profile in profiles
+        .iter()
+        .filter(|p| p.name != crate::container::OPEN_RECORD)
+    {
         let name = &profile.name;
         let shown = if profile.main {
             format!("⚠ Контейнер «{name}»: {}", Home::Main.label())
@@ -1001,6 +1019,10 @@ pub fn window_containers(
             "Настоящий дом — все ваши файлы: ключи ssh, пароли браузера, токены",
         ),
         item(
+            OPEN_ROW.0,
+            "Без изоляции — у программы всё, что у хоста: устройства, сеанс, все файлы",
+        ),
+        item(
             "__ownsb__",
             "Свой контейнер — постоянный дом только этой программы",
         ),
@@ -1024,7 +1046,11 @@ pub fn window_containers(
         it.bound = Some(row.bound.clone()).filter(|z| !z.is_empty());
         items.push(it);
     }
-    for profile in profiles {
+    // «Без изоляции» has its row above.
+    for profile in profiles
+        .iter()
+        .filter(|p| p.name != crate::container::OPEN_RECORD)
+    {
         let home = if profile.main {
             Home::Main
         } else {
@@ -3566,6 +3592,8 @@ mod tests {
             [
                 "",
                 "pinmain",
+                "open",
+                "pin:open",
                 "__ownsb__",
                 "pin:__ownsb__",
                 "__fs__",
@@ -3934,6 +3962,10 @@ mod tests {
                 (
                     "",
                     "Настоящий дом — все ваши файлы: ключи ssh, пароли браузера, токены"
+                ),
+                (
+                    "open",
+                    "Без изоляции — у программы всё, что у хоста: устройства, сеанс, все файлы"
                 ),
                 (
                     "__ownsb__",

@@ -47,7 +47,15 @@ pub enum Grant {
         product: String,
         serial: Option<String>,
     },
+    /// Every device of the host, those plugged in later too: the host's
+    /// devtmpfs over the launch's `/dev` (`profile::give_all_devices`) —
+    /// what «без изоляции» has (2e of `docs/PERMISSIONS.md` §11.15), and
+    /// anyone given it.
+    All,
 }
+
+/// The word of [`Grant::All`].
+pub const ALL: &str = "all";
 
 /// The sets, by their words.
 pub const SETS: [(&str, Grant); 5] = [
@@ -72,6 +80,9 @@ impl Grant {
     /// Anything else is none.
     pub fn parse(word: &str) -> Option<Self> {
         let word = word.trim();
+        if word == ALL {
+            return Some(Self::All);
+        }
         if let Some((_, grant)) = SETS.iter().find(|(name, _)| *name == word) {
             return Some(grant.clone());
         }
@@ -102,6 +113,7 @@ impl Grant {
                 Some(serial) => format!("usb:{vendor}:{product}:{serial}"),
                 None => format!("usb:{vendor}:{product}"),
             },
+            Self::All => ALL.to_owned(),
             set => SETS
                 .iter()
                 .find(|(_, g)| g == set)
@@ -388,6 +400,7 @@ pub fn granted<'a>(nodes: &'a [Node], grants: &[Grant]) -> Vec<&'a Node> {
                 }
                 Grant::Serial => name.starts_with("ttyUSB") || name.starts_with("ttyACM"),
                 Grant::Vm => node.vm(),
+                Grant::All => true,
                 Grant::Usb {
                     vendor,
                     product,

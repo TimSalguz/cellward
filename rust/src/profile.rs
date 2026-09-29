@@ -216,6 +216,8 @@ pub struct Args {
     /// device its container is given (`crate::devices`), bound into this
     /// mount namespace once it is checked again here ([`give_devices`]).
     pub devices: Vec<crate::devices::Pass>,
+    /// `--all-devices`: every device of the host ([`give_all_devices`]).
+    pub all_devices: bool,
     /// `--share PATH`, repeated: a path of the real home granted to the
     /// container (`container grant`) — written through the layer, into the
     /// real home. Checked again here, as written and as resolved.
@@ -279,6 +281,7 @@ impl Args {
         let mut camera = false;
         let mut own_x11 = false;
         let mut devices = Vec::new();
+        let mut all_devices = false;
         let mut registered = None;
         while let Some(flag) = positional.first() {
             if flag == "--registered" {
@@ -305,6 +308,11 @@ impl Args {
             }
             if flag == "--camera" {
                 camera = true;
+                positional = &positional[1..];
+                continue;
+            }
+            if flag == "--all-devices" {
+                all_devices = true;
                 positional = &positional[1..];
                 continue;
             }
@@ -370,6 +378,7 @@ impl Args {
             storage,
             camera,
             devices,
+            all_devices,
             share,
             trust_extra,
             cmd,
@@ -901,6 +910,43 @@ fn give_devices(passes: &[crate::devices::Pass]) {
     }
 }
 
+/// Give this launch every device of the host — «без изоляции» (2e of
+/// `docs/PERMISSIONS.md` §11.15), or a container given `all`: the devtmpfs
+/// the zone keeps out of its programs' reach (`zone::DEVTMPFS`) bound over
+/// this launch's `/dev`, whole, in its own mount namespace. A device plugged
+/// in later is there and one unplugged goes: the devtmpfs is the kernel's
+/// own. What the zone's `/dev` has of its own — its terminals, its shared
+/// memory and queues — is taken along first and put back over it: the
+/// host's terminals stay out of reach even so (the devtmpfs's `pts` is an
+/// empty directory).
+fn give_all_devices() -> Result<(), String> {
+    let dev = Path::new("/dev");
+    let mut kept = Vec::new();
+    for name in ["pts", "shm", "mqueue", "hugepages"] {
+        let path = dev.join(name);
+        if path.is_dir() {
+            let tree = crate::sys::clone_tree(&path)
+                .map_err(|e| format!("cannot keep {}: {e}", path.display()))?;
+            kept.push((path, tree));
+        }
+    }
+    crate::sys::mount(
+        std::ffi::OsStr::new(crate::zone::DEVTMPFS),
+        dev,
+        "",
+        libc::MS_BIND,
+        "",
+    )
+    .map_err(|e| format!("cannot bind the host's devices over /dev: {e}"))?;
+    for (path, tree) in kept {
+        if path.is_dir() {
+            crate::sys::attach_tree(&tree, &path)
+                .map_err(|e| format!("cannot put {} back: {e}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// While it lives, what this process makes is the zone root's from the
 /// start (`setfsuid`/`setfsgid` 0 — `profile-run` has the zone's
 /// capabilities): made as the user, a directory of the zone's `/dev` would
@@ -1190,8 +1236,12 @@ pub fn run(args: Args) -> u8 {
     }
     // The cameras, where this launch is let them, and the devices its
     // container is given: never fatal — what is not given, the program
-    // does not get.
-    if args.camera || !args.devices.is_empty() {
+    // does not get. Every device, where it is given all of them.
+    if args.all_devices {
+        if let Err(e) = give_all_devices() {
+            eprintln!("profile-run: the host's devices are not given: {e}");
+        }
+    } else if args.camera || !args.devices.is_empty() {
         match AsZoneRoot::enter() {
             Some(_root) => {
                 if args.camera {

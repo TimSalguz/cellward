@@ -25,6 +25,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     a launch into it is refused, and `doctor` names it. `cellward add host`
     is refused.
   - `unconfined` is said as what it is: «Без изоляции и без VPN».
+- **«Без изоляции» in any network, a VPN's too** (2026-09-29, 2e):
+  `cellward run <network> --no-isolation -- …`, the launch window's row «Без
+  изоляции».
+  - It is the built-in record `open`: a container of the real home with
+    everything open — the host's session, the Nix daemon, the places the
+    host runs writable, every device, the cameras, the microphone, the
+    screen, the sound, an X server of its own — and the whole home given,
+    so the person's protected list is lifted too.
+  - The network still decides the ways around it: where it does not
+    tolerate them, they stay closed. Every device is given, so a device
+    with a network of its own is a way out (THREAT-MODEL N25).
+  - Written anew before every launch into it and not to be changed
+    (`container set|devices|grant open …` are refused): a container that
+    needs less is a container of the real home of the person's own. A
+    container of the person's called `open` is never written over; a
+    launch into it is refused and `doctor` names it.
+  - New device grant `all` (`container devices <c> add all`): the host's
+    devtmpfs over the launch's `/dev`, devices plugged in later included;
+    the launch keeps its own terminals. Not yet for a home of its own
+    (`fs-sandbox`).
 
 ### Changed
 - **«Основной» is «Настоящий дом»** (2026-09-29, 2d of

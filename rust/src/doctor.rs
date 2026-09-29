@@ -1526,6 +1526,20 @@ pub fn system_checks(tools: &Tools, uid: u32) -> Vec<Check> {
             ),
         ));
     }
+    // A container of the person's called `open` from before the name meant
+    // «без изоляции» (2e): refused the same way
+    // (`container::ensure_open_record`).
+    if crate::container::foreign_open_record(tools) {
+        checks.push(Check::new(
+            "container-name-open",
+            Level::Fail,
+            format!(
+                "есть контейнер «{}» — теперь это имя выбора «без изоляции»; запуск в него \
+                 отказывается: перенеси его программы в другой контейнер и удали его",
+                crate::container::OPEN_RECORD
+            ),
+        ));
+    }
     // And one that kept the name `host` from before it meant the host's own
     // network (2e): refused the same way (`launch::ensure_host_zone`).
     if crate::launch::foreign_host_zone(&tools.state) {

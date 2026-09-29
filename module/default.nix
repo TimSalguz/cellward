@@ -1372,6 +1372,14 @@ in
       && lib.all (app: builtins.match "[^-./[:space:]][^/[:space:]]*" app != null) (lib.attrValues c.links);
       message = "programs.cellward.containers.${name}.links: схема ссылки — латиница, цифры, + . - (https, tg…); программа — id ярлыка без пути и пробелов (firefox)";
     }) cfg.containers
+    ++ [
+      {
+        # «Без изоляции» — встроенная запись cellward (2д, docs/PERMISSIONS.md
+        # §11.15): всё открыто, пишется заново перед каждым запуском.
+        assertion = !(cfg.containers ? open);
+        message = "programs.cellward.containers.open: имя занято «без изоляции» — встроенной записью cellward, в которой открыто всё и которая не настраивается; назови контейнер иначе";
+      }
+    ]
     ++ lib.mapAttrsToList (name: c: {
       assertion = c.home != "main" || (lib.all inProtect c.permissions.paths && c.trust.certificates == [ ]);
       message = "programs.cellward.containers.${name}: настоящему дому (home = \"main\") выдаётся только запись в защищённое (paths из programs.cellward.protect), и своих сертификатов у него нет — сертификат лёг бы в настоящий дом";

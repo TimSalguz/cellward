@@ -50,4 +50,28 @@ alice("cellward container stop vmprot || true")
 prot_gone()
 alice(f"{PROT} sh -c '! touch /home/alice/vmrepo/y'")
 alice("cellward container stop vmprot || true")
-alice("cellward protect rm ~/vmrepo && rm -rf ~/vmrepo ~/.cache/nix/host-made")
+
+# «Без изоляции» (2e of PERMISSIONS §11.15): everything open, in the network
+# asked — here the hermetic one. Every device (the host's devtmpfs: a node
+# no instance has otherwise), its own terminals still, the protected list
+# written (the whole home given); the network's word on the ways around it
+# holds — vmherm tolerates no host files writable.
+with subtest("without isolation: every device, the protected list written, the network's word on its bypasses holds"):
+    alice("cellward run vmherm -- sh -c '! test -e /dev/net/tun'")
+    machine.succeed(
+        "cat > /home/alice/open-probe.sh <<'EOF'\n"
+        "set -e\n"
+        "test -c /dev/net/tun\n"
+        "test -e /dev/pts/ptmx\n"
+        "touch /home/alice/vmrepo/open-wrote\n"
+        "if echo x >> /home/alice/.gitconfig 2>/dev/null; then echo gitconfig-written; exit 1; fi\n"
+        "echo open-ok\n"
+        "EOF\n"
+        "chown alice /home/alice/open-probe.sh"
+    )
+    out = alice("cellward run vmherm --no-isolation -- sh /home/alice/open-probe.sh")
+    assert "open-ok" in out, out
+    machine.succeed("test -e /home/alice/vmrepo/open-wrote")
+    alice("! cellward container set open camera off")
+    alice("cellward container stop open || true")
+alice("cellward protect rm ~/vmrepo && rm -rf ~/vmrepo ~/.cache/nix/host-made ~/open-probe.sh")

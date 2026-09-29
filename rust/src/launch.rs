@@ -295,6 +295,11 @@ impl Selection {
                 rest.drain(..2.min(rest.len()));
                 Container::Named(name)
             }
+            // «Без изоляции» (2e): its built-in record, in the network asked.
+            Some(f) if f == "--no-isolation" => {
+                rest.remove(0);
+                Container::Named(OsString::from(crate::container::OPEN_RECORD))
+            }
             Some(f) if f == "--tmp-profile" => {
                 rest.remove(0);
                 if rest.first().is_some_and(|f| f == "--join") {
@@ -353,6 +358,9 @@ pub fn strip_selection(argv: &[OsString]) -> Vec<OsString> {
     match rest.first().map(OsString::as_os_str) {
         Some(f) if f == "--profile" || f == "-p" || f == "--container" => {
             rest.drain(..2.min(rest.len()));
+        }
+        Some(f) if f == "--no-isolation" => {
+            rest.remove(0);
         }
         Some(f) if f == "--tmp-profile" => {
             rest.remove(0);
@@ -638,6 +646,15 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             return 1;
         }
     };
+    // «Без изоляции»: its record as it is to be, before it is looked up
+    // (`container::OPEN_RECORD`).
+    if matches!(&selection.container, Container::Named(name) if name == crate::container::OPEN_RECORD)
+    {
+        if let Err(why) = crate::container::ensure_open_record(tools) {
+            refuse(tools, &why);
+            return 1;
+        }
+    }
     // One launch, one container, whatever words named it.
     let selection = match resolve_selection(tools, selection) {
         Ok(selection) => selection,
@@ -775,7 +792,9 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // host's there. Said, with the way to have both: the host's own network
     // ([`HOST`]) carries its instance like any other (2e).
     if zone == UNCONFINED {
-        if let Some(name) = container_name(&selection) {
+        if let Some(name) =
+            container_name(&selection).filter(|n| n != crate::container::OPEN_RECORD)
+        {
             eprintln!(
                 "cellward: {} без изоляции и без VPN — настройки контейнера {name} (камера, \
                  микрофон, устройства, X) здесь не действуют: у программы всё, что у хоста. \
@@ -803,29 +822,34 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // zone's `/dev` has none, and this launch gets the given ones bound in,
     // in its own mount namespace (`profile-run --device`), checking each
     // once more there. None for a launch with no container.
-    let devices: Vec<crate::devices::Pass> = match record_name(&selection) {
-        Some(name) if zone != UNCONFINED => {
-            let grants: Vec<crate::devices::Grant> = crate::container::load(tools, &name)
-                .map(|c| {
-                    c.devices
-                        .iter()
-                        .filter_map(|d| crate::devices::Grant::parse(&d.value))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if grants.is_empty() {
-                Vec::new()
-            } else {
-                let nodes = crate::devices::host_nodes();
-                crate::devices::granted(&nodes, &grants)
-                    .into_iter()
-                    .map(crate::devices::Node::pass)
+    let grants: Vec<crate::devices::Grant> = match record_name(&selection) {
+        Some(name) if zone != UNCONFINED => crate::container::load(tools, &name)
+            .map(|c| {
+                c.devices
+                    .iter()
+                    .filter_map(|d| crate::devices::Grant::parse(&d.value))
                     .collect()
-            }
-        }
+            })
+            .unwrap_or_default(),
         _ => Vec::new(),
     };
-    let device_args: Vec<String> = devices.iter().map(crate::devices::Pass::arg).collect();
+    // Every device (`devices::Grant::All`, «без изоляции»): the host's
+    // devtmpfs whole, a device plugged in later too — no list of nodes.
+    let all_devices = grants.contains(&crate::devices::Grant::All);
+    let devices: Vec<crate::devices::Pass> = if grants.is_empty() || all_devices {
+        Vec::new()
+    } else {
+        let nodes = crate::devices::host_nodes();
+        crate::devices::granted(&nodes, &grants)
+            .into_iter()
+            .map(crate::devices::Node::pass)
+            .collect()
+    };
+    let device_args: Vec<String> = if all_devices {
+        vec![crate::devices::ALL.to_owned()]
+    } else {
+        devices.iter().map(crate::devices::Pass::arg).collect()
+    };
 
     // --- X11 (docs/HERMETICITY.md §7, A) ---
     // The host's X server is out of reach in a zone. A container with the x11
@@ -1612,6 +1636,11 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
         }
         if in_space {
             for device in entry.devices {
+                // Every device: its own flag (`profile::give_all_devices`).
+                if device == crate::devices::ALL {
+                    exec.push("--all-devices".into());
+                    continue;
+                }
                 exec.push("--device".into());
                 exec.push(device.into());
             }
@@ -3903,6 +3932,26 @@ mod tests {
         let parsed = crate::profile::Args::parse(&line[at + 1..]).unwrap();
         assert!(!parsed.ephemeral);
         assert!(parsed.camera);
+    }
+
+    /// Every device (`devices::Grant::All`, «без изоляции»): one flag of
+    /// its own to `profile-run`, no node listed.
+    #[test]
+    fn every_device_is_one_flag() {
+        let mut e = entry(Network::Instance, Path::new("/s/c"), false);
+        let devices = [crate::devices::ALL.to_owned()];
+        e.devices = &devices;
+        let line = entry_argv(&e, argv(&["claude"]));
+        assert!(line.contains(&os("--all-devices")), "{line:?}");
+        assert!(!line.contains(&os("--device")), "{line:?}");
+        let at = line.iter().position(|a| a == "profile-run").unwrap();
+        let parsed = crate::profile::Args::parse(&line[at + 1..]).unwrap();
+        assert!(parsed.all_devices && parsed.devices.is_empty());
+        assert_eq!(
+            crate::devices::Grant::parse("all"),
+            Some(crate::devices::Grant::All)
+        );
+        assert_eq!(crate::devices::Grant::All.word(), "all");
     }
 
     /// What a zone asked the broker for is a file name in the registry, not

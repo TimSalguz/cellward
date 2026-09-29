@@ -428,6 +428,8 @@ cellward run <zone> -- firefox                 # run in a zone
 cellward run <zone> --container work -- firefox  # + a container (--profile, --sandbox: the old words)
 cellward run <zone> --fs-sandbox -- firefox    # + a throwaway container: an empty home
 cellward run <zone> --tmp-profile -- firefox   # + a temporary layer over the home
+cellward run <zone> --no-isolation -- claude   # without isolation: everything the host has, in that network
+cellward run host -- firefox                   # the host's network, no VPN, the program in its container
 
 cellward profile create|list|rm <name>
 cellward sandbox create|list|rm <name>

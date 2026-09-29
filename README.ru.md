@@ -419,6 +419,8 @@ cellward run <зона> -- firefox                 # запустить в зо�
 cellward run <зона> --container work -- firefox  # + контейнер (--profile, --sandbox — прежние слова)
 cellward run <зона> --fs-sandbox -- firefox    # + разовый контейнер: пустой дом
 cellward run <зона> --tmp-profile -- firefox   # + временный слой над домом
+cellward run <сеть> --no-isolation -- claude   # без изоляции: всё, что у хоста, в этой сети
+cellward run host -- firefox                   # сеть хоста без VPN, программа в своём контейнере
 
 cellward profile create|list|rm <имя>
 cellward sandbox create|list|rm <имя>
