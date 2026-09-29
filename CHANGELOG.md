@@ -36,6 +36,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   number or `"niri"`, new `frame_outer_radius` (the same) and
   `frame_niri_radius`. `wl-sandbox --frame` takes a seventh field, the
   outer radius; a radius there is a number or `niri<N>`.
+- **The black camera, stage 0** (2026-09-29): `vpn-zone-core camera-serve`
+  — a camera that programs take for a V4L2 one, served over FUSE (a user
+  namespace may mount FUSE, not make device nodes): black frames in the
+  pages the program maps, one every slowest listed interval while it
+  streams, nothing while nobody does. Not yet given to containers: the
+  device alone, checked in a VM with a V4L2 client of its own and ffmpeg.
 - **The frame changes on the fly** (2026-09-29, step 6): the width, the
   colour (the zone's, the container's), the title strip's mode, the style,
   the buttons and the corners' radius reach the windows already open —
