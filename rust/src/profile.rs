@@ -930,14 +930,12 @@ fn give_all_devices() -> Result<(), String> {
             kept.push((path, tree));
         }
     }
-    crate::sys::mount(
-        std::ffi::OsStr::new(crate::zone::DEVTMPFS),
-        dev,
-        "",
-        libc::MS_BIND,
-        "",
-    )
-    .map_err(|e| format!("cannot bind the host's devices over /dev: {e}"))?;
+    // A clone of the devtmpfs attached (`open_tree`, `move_mount`), as a
+    // node is given (`zone::give_node`): the old API's bind of it is
+    // refused here (EINVAL).
+    crate::sys::clone_tree(Path::new(crate::zone::DEVTMPFS))
+        .and_then(|tree| crate::sys::attach_tree(&tree, dev))
+        .map_err(|e| format!("cannot bind the host's devices over /dev: {e}"))?;
     for (path, tree) in kept {
         if path.is_dir() {
             crate::sys::attach_tree(&tree, &path)
