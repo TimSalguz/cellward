@@ -438,9 +438,12 @@ let
           alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen enable'")
           machine.sleep(2)
           x, y, w, h = view("foot")
-          settled(
-              "frame-fullscreen-label", lambda at: framed(at, x, y, w, h, top=width + title)
-          )
+
+          def labelled(at):
+              framed(at, x, y, w, h, top=width + title)
+              titled(at, x, y, w)
+
+          settled("frame-fullscreen-label", labelled)
           alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen disable'")
           machine.sleep(2)
           alice("cellward frame fullscreen notice 0")

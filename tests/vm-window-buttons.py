@@ -173,6 +173,22 @@ with subtest("the frame's ⇄ on the main home's program: the restart with a net
     assert node("btn") is not None, "restarted without a yes"
     machine.succeed(f"test -e /proc/{sup}")
 
+with subtest("a hover strip comes out under the pointer at the window's top, with its text"):
+    alice("cellward frame title hover")
+    machine.sleep(2)
+    x, y, w, h = view("btn")
+    pointer("move", x + w // 2, y + 1)
+    machine.sleep(2)
+
+    def hovered(at):
+        framed(at, x, y, w, h, top=width + title)
+        titled(at, x, y, w)
+
+    settled("frame-hover-out", hovered)
+    pointer("move", 5, 5)
+    alice("cellward frame title default")
+    machine.sleep(2)
+
 with subtest("the frame's □: the compositor's fullscreen; its right click, inside the window"):
     def fullscreen_mode():
         return node("btn").get("fullscreen_mode", 0)
