@@ -3,7 +3,7 @@ open the camera, ask what it is and for a format, map its buffers, stream
 and take frames — each black — then stop. `block`: DQBUF waits for a frame;
 `poll`: the file non-blocking, poll(2) first, as Firefox and Telegram do.
 
-    python3 vm-camera-client.py <device> block|poll
+    python3 vm-camera-client.py <device> block|poll [<frames>]
 """
 
 import fcntl
@@ -34,6 +34,7 @@ CAPTURE, MMAP = 1, 1
 YUYV = struct.unpack("<I", b"YUYV")[0]
 
 path, mode = sys.argv[1], sys.argv[2]
+count_wanted = int(sys.argv[3]) if len(sys.argv) > 3 else 5
 flags = os.O_RDWR | (os.O_NONBLOCK if mode == "poll" else 0)
 fd = os.open(path, flags)
 
@@ -94,7 +95,7 @@ for index in range(count):
 fcntl.ioctl(fd, STREAMON, struct.pack("I", CAPTURE))
 start = time.monotonic()
 sequences = []
-for _ in range(5):
+for _ in range(count_wanted):
     if mode == "poll":
         waiter = select.poll()
         waiter.register(fd, select.POLLIN)
@@ -113,6 +114,7 @@ for m in maps:
     m.close()
 os.close(fd)
 assert sequences == sorted(sequences), sequences
-print(f"{mode}: 5 black frames of {width}x{height} in {elapsed:.2f} s, sequence {sequences}")
+shown = sequences if len(sequences) <= 10 else sequences[:3] + ["…"] + sequences[-2:]
+print(f"{mode}: {count_wanted} black frames of {width}x{height} in {elapsed:.2f} s, sequence {shown}")
 # The slowest interval listed, 1/5 s: five frames take the most of a second.
-assert elapsed > 0.6, elapsed
+assert elapsed > 0.12 * count_wanted, elapsed

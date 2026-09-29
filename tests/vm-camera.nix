@@ -7,7 +7,7 @@
 #     a blocking DQBUF and by poll(2) on a non-blocking file;
 #   - ffmpeg's v4l2 input, a real one, three frames of it;
 #   - nothing spent while nobody streams: the server's CPU time the same
-#     after seconds of it;
+#     after seconds of it; streaming ten seconds, under 1 % of a core;
 #   - given to a container (stage A): the main home's camera `black` (Nix),
 #     a launch into the offline network under headless sway — its
 #     supervisor serves the camera, the program in the container takes black
@@ -135,6 +135,24 @@ let
               "test \"$before\" = \"$after\"\n"
           )
           assert "idle:" in out, out
+
+      # What a program streaming for ten seconds costs the server: its CPU
+      # time over them, fifty black frames. Printed, and held to under 1 %
+      # of a core — the owner's worry (2026-09-29) was a black window's load.
+      with subtest("streaming costs the server next to nothing"):
+          out = in_namespace(
+              "cpu() { awk '{ print $14 + $15 }' /proc/$server/stat; }\n"
+              "before=$(cpu)\n"
+              "python3 /etc/vm-camera/client.py /tmp/cam/video0 block 50\n"
+              "after=$(cpu)\n"
+              "echo \"streaming: $before $after $(getconf CLK_TCK)\"\n"
+          )
+          print(out)
+          line = next(l for l in out.splitlines() if l.startswith("streaming:"))
+          before, after, tick = map(int, line.split()[1:])
+          spent = (after - before) / tick
+          print(f"the server spent {spent:.3f} s of CPU over 10 s of streaming")
+          assert spent <= 0.1, spent
 
       def user(cmd):
           return alice("export XDG_RUNTIME_DIR=/run/user/1000; " + cmd)
