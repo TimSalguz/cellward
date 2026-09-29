@@ -2962,7 +2962,7 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
             "],\"permissions\":{\"microphone\":{\"value\":\"ask\",\"source\":\"default\"},\
              \"screencast\":{\"value\":\"ask\",\"source\":\"default\"},\
              \"camera\":{\"value\":false,\"source\":\"default\"},\
-             \"camera_mode\":{\"value\":\"no\",\"source\":\"default\"},\
+             \"camera_mode\":{\"value\":\"ask\",\"source\":\"default\"},\
              \"audio_manager\":{\"value\":false,\"source\":\"default\"},\
              \"hermetic\":{\"value\":true,\"source\":\"default\"},\
              \"nix_daemon\":{\"value\":false,\"source\":\"default\"},\
@@ -3170,16 +3170,18 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
 fn a_black_camera_is_the_supervisors_to_serve() {
     // 2026-09-29 (`crate::camera`): a camera `black` or `ask` is served by
     // the launch's supervisor — `wl-sandbox --camera <mode>` —; `no` is
-    // none, `yes` the real ones, which are no supervisor's.
+    // none, `yes` the real ones, which are no supervisor's. `ask` — the
+    // default — only where the host has a camera to ask about.
+    let camera_here = vpn_zone::camera::host_has_camera();
     let home = Home::new("black-camera");
     home.zone_is_up("nl");
     fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
     let dry = [("VPN_ZONE_DRYRUN", "1")];
     let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
-    assert!(!line.contains("--camera"), "{line}");
+    assert_eq!(line.contains("--camera ask --"), camera_here, "{line}");
     for (word, served) in [
         ("black", true),
-        ("ask", true),
+        ("ask", camera_here),
         ("yes", false),
         ("no", false),
     ] {

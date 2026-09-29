@@ -30,19 +30,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
-- **A container's camera is a mode** (2026-09-29): `camera = no|black|ask|yes`
-  (`cellward container set <c> camera …`, `cellward defaults set camera …`,
-  Nix `permissions.camera` takes the words besides true/false, which stay
-  `yes` and `no`). `black` gives the launch a black camera — `/dev/video0`
-  that programs take for a V4L2 one, served by a server the launch's
-  supervisor starts on the host; `profile-run` opens and mounts the FUSE
-  connection in the launch's namespaces and sends it to the server, which
-  then goes into namespaces of its own with an empty root. Black frames
-  only while a program streams (in the VM: 50 frames over 10 seconds cost
-  the server no measurable CPU). `ask` is black for now: the question comes
-  next. The built-in default stays `no`. `status --json`: `camera` is still
-  whether the real cameras are given; the word is the new `camera_mode`
-  (in `permissions` and in each container).
+- **A container's camera is a mode** (2026-09-29): `camera =
+  no|black|ask|yes` (`cellward container set <c> camera …`, `cellward
+  defaults set camera …`, Nix `permissions.camera` takes the words besides
+  true/false, which stay `yes` and `no`). `black` gives the launch a black
+  camera — `/dev/video0` that programs take for a V4L2 one, served by a
+  server the launch's supervisor starts on the host; `profile-run` opens and
+  mounts the FUSE connection in the launch's namespaces and sends it to the
+  server, which then goes into namespaces of its own with an empty root.
+  Black frames only while a program streams (in the VM: 50 frames over 10
+  seconds cost the server no measurable CPU). `ask` asks when the program
+  starts streaming (the program's window, then the launch window; the
+  question's time is `question-timeout`), black frames meanwhile: allowed,
+  the real camera's frames come into the same stream — written into the
+  pages the program mapped —, closed again when it stops; «Отказать» is the
+  program's rule (`cam_deny`), taken back by «Снова спрашивать о камере» in
+  the window's ☰; «always» writes `camera = yes`. The built-in default is
+  `ask` (the owner, 2026-09-29): a program with no word of its container's
+  sees a black camera and is asked when it starts streaming — on a host with
+  a camera; with none, no camera. `status --json`: `camera` is still whether
+  the real cameras are given; the word is the new `camera_mode` (in
+  `permissions` and in each container).
 - **Round corners that follow niri, and outside the frame** (2026-09-29):
   `cellward frame radius niri` rounds the window's corners inside the frame
   concentrically with niri's `geometry-corner-radius` (read from niri's

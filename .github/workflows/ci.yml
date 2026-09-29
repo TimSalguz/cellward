@@ -355,7 +355,14 @@ jobs:
       - name: Собрать драйвер VM-теста
         run: nix-build tests/vm-camera.nix -A driver -o vm-camera-driver
       - name: Прогнать VM-тест
-        run: env -u XDG_RUNTIME_DIR ./vm-camera-driver/bin/nixos-test-driver
+        run: mkdir -p vm-camera-out && env -u XDG_RUNTIME_DIR ./vm-camera-driver/bin/nixos-test-driver -o vm-camera-out
+      - name: Снимки вопроса о камере
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: camera-question
+          path: vm-camera-out/*.png
+          if-no-files-found: ignore
 
   # Смоук: поднять настоящую зону в непривилегированном userns и проверить её
   # изнутри. Требует fallback на ядерный wireguard (amneziawg-модуля на

@@ -84,13 +84,15 @@ pub fn flag(config: &Path, key: &str) -> (bool, Source) {
     }
 }
 
-/// The template's camera ([`crate::camera::Mode`]): `no` where nobody said,
-/// and for a word that is none of its, or a file that cannot be read.
+/// The template's camera ([`crate::camera::Mode`]): `ask` where nobody
+/// said (the owner, 2026-09-29, once the question was there — the recorded
+/// model's "asked, black until allowed"; `crate::camera::Mode::DEFAULT`);
+/// `no` for a word that is none of its, or a file that cannot be read.
 pub fn camera(config: &Path) -> (crate::camera::Mode, Source) {
     use crate::camera::Mode;
     match word(config, "camera") {
         Ok(Some((w, source))) => (Mode::parse(&w).unwrap_or(Mode::No), source),
-        Ok(None) => (Mode::No, Source::Default),
+        Ok(None) => (Mode::DEFAULT, Source::Default),
         Err(source) => (Mode::No, source),
     }
 }
@@ -591,7 +593,7 @@ mod tests {
         // The camera: a mode; the flag's words of before as yes and no,
         // nonsense as no.
         use crate::camera::Mode;
-        assert_eq!(camera(&root), (Mode::No, Source::Default));
+        assert_eq!(camera(&root), (Mode::Ask, Source::Default));
         for (word, mode) in [
             ("black", Mode::Black),
             ("on", Mode::Yes),

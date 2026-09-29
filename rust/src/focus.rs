@@ -659,7 +659,8 @@ pub fn pin_of(tools: &Tools, launch: &Launch) -> Pin {
 }
 
 /// What the person said no to for `launch`'s program in its container —
-/// its network, its microphone —, each an entry of the window's menu that
+/// its network, its microphone, its camera —, each an entry of the window's
+/// menu that
 /// has it asked again (the owner, docs/PERMISSIONS.md §11.15: not asked
 /// until it is changed in the window's ☰). Only the local record's words:
 /// Nix's are Nix's to change.
@@ -683,6 +684,13 @@ pub fn refused_entries(
         out.push((
             "mic-ask".to_owned(),
             format!("Снова спрашивать о микрофоне для «{label}»"),
+            false,
+        ));
+    }
+    if crate::microphone::denied_as(&tools.config, &record, crate::camask::DENIED, &program) {
+        out.push((
+            "cam-ask".to_owned(),
+            format!("Снова спрашивать о камере для «{label}»"),
             false,
         ));
     }
@@ -1151,7 +1159,7 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             }
         }
-        "net-ask" | "mic-ask" => {
+        "net-ask" | "mic-ask" | "cam-ask" => {
             let Some((record, program)) = refused_record(tools, launch.as_ref()) else {
                 return 0;
             };
@@ -1160,9 +1168,18 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
                     .join(crate::container::FILE);
                 crate::netrules::write_line(&file, &program, None)
                     .map(|()| "О сети спросят при её следующем соединении")
-            } else {
+            } else if choice == "mic-ask" {
                 crate::microphone::set_denied(&tools.config, &record, &program, false)
                     .map(|()| "О микрофоне спросят, когда она попросит его снова")
+            } else {
+                crate::microphone::set_denied_as(
+                    &tools.config,
+                    &record,
+                    crate::camask::DENIED,
+                    &program,
+                    false,
+                )
+                .map(|()| "О камере спросят, когда она начнёт снимать в следующий раз")
             };
             match done {
                 Ok(text) => notify(&label, text),

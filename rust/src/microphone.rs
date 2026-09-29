@@ -429,16 +429,34 @@ pub fn record_of(who: &Who) -> Option<&str> {
 /// Whether the person said no to `program` (its launch's key) in the
 /// record `record`.
 pub fn denied(config: &Path, record: &str, program: &str) -> bool {
+    denied_as(config, record, DENIED, program)
+}
+
+/// Whether the person said no to `program` in the record `record`, under
+/// the key `key` — the microphone's [`DENIED`], the camera's
+/// (`crate::camask::DENIED`).
+pub fn denied_as(config: &Path, record: &str, key: &str, program: &str) -> bool {
     let file = crate::container::policy_dir_in(config, record).join(crate::container::FILE);
     std::fs::read_to_string(file).is_ok_and(|text| {
         crate::container::parse_conf(&text)
             .iter()
-            .any(|(k, v)| k == DENIED && v.trim() == program)
+            .any(|(k, v)| k == key && v.trim() == program)
     })
 }
 
 /// `program`'s "no" written into the record `record`, or taken out of it.
 pub fn set_denied(config: &Path, record: &str, program: &str, no: bool) -> Result<(), String> {
+    set_denied_as(config, record, DENIED, program, no)
+}
+
+/// [`set_denied`] under the key `key`.
+pub fn set_denied_as(
+    config: &Path,
+    record: &str,
+    key: &str,
+    program: &str,
+    no: bool,
+) -> Result<(), String> {
     if !crate::netrules::valid_program(program) {
         return Err(format!("«{program}» — не ключ программы (id ярлыка)"));
     }
@@ -448,14 +466,14 @@ pub fn set_denied(config: &Path, record: &str, program: &str, no: bool) -> Resul
         .unwrap_or_default();
     let mut kept: Vec<String> = local
         .iter()
-        .filter(|(k, _)| k == DENIED)
+        .filter(|(k, _)| k == key)
         .map(|(_, v)| v.trim().to_owned())
         .filter(|p| p != program)
         .collect();
     if no {
         kept.push(program.to_owned());
     }
-    crate::container::write_values(&file, DENIED, &kept)
+    crate::container::write_values(&file, key, &kept)
 }
 
 /// A program's "no" written into its container's record — under the lock

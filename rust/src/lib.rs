@@ -104,6 +104,7 @@ pub mod bridge;
 pub mod broker;
 pub mod build;
 pub mod bus_filter;
+pub mod camask;
 pub mod camera;
 pub mod cli;
 pub mod completion;

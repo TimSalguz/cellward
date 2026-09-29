@@ -555,7 +555,7 @@ fn env_nonempty(name: &str) -> Option<OsString> {
 /// the PERMISSION KEY, not a name for humans. A launch that never went through
 /// the picker has no label — callers fall back to the id, which is still
 /// better than naming no program at all.
-fn pretty_label(state: &Path, key: &OsStr) -> Option<String> {
+pub(crate) fn pretty_label(state: &Path, key: &OsStr) -> Option<String> {
     if key.is_empty() {
         return None;
     }
@@ -812,6 +812,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // supervisor (`wl-sandbox --camera`), mounted by `profile-run
     // --black-camera` — by its container's setting, the template's for a
     // launch with none.
+    // A camera `ask` on a host with none is none (`camera::Mode::given`).
     let camera_mode = if zone == UNCONFINED {
         crate::camera::Mode::No
     } else {
@@ -820,6 +821,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             Some(name) => crate::container::camera_for(&zone_dir, &tools.config, &zone_name, &name),
             None => crate::hermetic::camera(&zone_dir, &tools.config, &zone_name).0,
         }
+        .given(crate::camera::host_has_camera())
     };
     let camera = camera_mode == crate::camera::Mode::Yes;
 

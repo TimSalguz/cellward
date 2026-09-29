@@ -49,22 +49,38 @@ use std::path::PathBuf;
 
 /// How a container's programs see the host's cameras (`docs/PERMISSIONS.md`
 /// §11.15, step 4): a container's own word, else the template's, else
-/// [`Mode::No`] — nothing given, nothing spent (the owner, 2026-09-29: the
-/// black camera optional, not a must).
+/// [`Mode::DEFAULT`] — asked (the owner, 2026-09-29, once the question was
+/// there; the black camera stays optional: `no` gives none, nothing spent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// No camera at all.
     No,
     /// A black camera ([`Server`]), never the real one.
     Black,
-    /// A black camera until the person allows the real one — black for now:
-    /// the question comes with the next stage.
+    /// A black camera until the person allows the real one: asked when the
+    /// program starts streaming (`crate::camask`), the real frames then in
+    /// the same stream.
     Ask,
     /// The host's real cameras, bound in (`profile::give_capture`).
     Yes,
 }
 
 impl Mode {
+    /// Where nobody said: asked, black until allowed — given only where the
+    /// host has a camera to ask about ([`Mode::given`]).
+    pub const DEFAULT: Self = Self::Ask;
+
+    /// The mode a launch gets on a host with a camera or not
+    /// (`host_has_camera`): `ask` on one with none is none — nothing to
+    /// ask about, and a program is not shown a camera that is not there;
+    /// `black`, said, is given all the same.
+    pub fn given(self, host_has_camera: bool) -> Self {
+        match self {
+            Self::Ask if !host_has_camera => Self::No,
+            other => other,
+        }
+    }
+
     /// A setting's word: `no|black|ask|yes`, and `on|off|true|false` — a
     /// camera's flag of before — as `yes` and `no`.
     pub fn parse(word: &str) -> Option<Self> {
@@ -101,6 +117,20 @@ impl Mode {
     pub fn black(self) -> bool {
         matches!(self, Self::Black | Self::Ask)
     }
+}
+
+/// Whether the host has a camera's node at all (`/dev/video<N>`): what a
+/// camera `ask` is given by ([`Mode::given`]). Plugged in later: seen by the
+/// next launch, as the real ones are.
+pub fn host_has_camera() -> bool {
+    std::fs::read_dir("/dev").is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.strip_prefix("video")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+    })
 }
 
 // --- THE DEVICE -------------------------------------------------------------
@@ -746,17 +776,68 @@ impl Server {
         }
         let mut out = Vec::new();
         for (i, owner) in filled {
-            if let Some(k) = self.owed.iter().position(|o| o.fh == owner) {
-                let owed = self.owed.remove(k);
-                let camera = &mut self.cameras[i];
-                if let Some(s) = take_frame(camera, owed.size) {
-                    out.push(reply(owed.unique, &ioctl_out(&s, owed.size)));
-                }
-            } else if let Some(kh) = self.polls.remove(&owner) {
-                out.push(message(0, NOTIFY_POLL, &kh.to_ne_bytes()));
-            }
+            out.extend(self.wake(i, owner));
         }
         out
+    }
+
+    /// A frame done for `owner`'s stream of camera `i`: to a `DQBUF` that
+    /// waits for it, else a wake to its poll.
+    fn wake(&mut self, i: usize, owner: u64) -> Vec<Vec<u8>> {
+        if let Some(k) = self.owed.iter().position(|o| o.fh == owner) {
+            let owed = self.owed.remove(k);
+            let camera = &mut self.cameras[i];
+            take_frame(camera, owed.size)
+                .map(|s| vec![reply(owed.unique, &ioctl_out(&s, owed.size))])
+                .unwrap_or_default()
+        } else if let Some(kh) = self.polls.remove(&owner) {
+            vec![message(0, NOTIFY_POLL, &kh.to_ne_bytes())]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// A frame of the real camera, `data`, into the first queued buffer of
+    /// camera `i` — written into the pages of the file the program maps
+    /// (`FUSE_NOTIFY_STORE`), no more than the buffer holds —, the buffer
+    /// done and the program told as by [`Server::tick`]. With no buffer
+    /// queued the frame is dropped, as a camera drops one.
+    pub fn deliver(&mut self, i: usize, data: &[u8], now: Stamp) -> Vec<Vec<u8>> {
+        let Some(camera) = self.cameras.get_mut(i) else {
+            return Vec::new();
+        };
+        let size = camera.size_image() as usize;
+        let Some(stream) = camera.stream.as_mut().filter(|s| s.streaming) else {
+            return Vec::new();
+        };
+        let sequence = stream.sequence;
+        stream.sequence = stream.sequence.wrapping_add(1);
+        let Some(index) = stream.queued.pop_front() else {
+            return Vec::new();
+        };
+        let mut out = store(
+            2 + i as u64,
+            u64::from(index) * BUFFER_ROOM,
+            &data[..data.len().min(size)],
+        );
+        stream.held[index as usize] = Held::Done;
+        stream.done.push_back(Frame {
+            index,
+            sequence,
+            at: now,
+        });
+        let owner = stream.owner;
+        out.extend(self.wake(i, owner));
+        out
+    }
+
+    /// Camera `i`'s format while a program streams it: width, height, the
+    /// interval it asked for.
+    pub fn streaming_format(&self, i: usize) -> Option<(u32, u32, (u32, u32))> {
+        self.cameras
+            .get(i)
+            .filter(|c| c.stream.as_ref().is_some_and(|s| s.streaming))
+            .map(|c| (c.width, c.height, c.interval))
     }
 
     /// A V4L2 ioctl `cmd` on the open file `fh`, its struct `input`.
@@ -1015,6 +1096,29 @@ fn take_frame(camera: &mut Camera, size: usize) -> Option<Vec<u8>> {
     Some(s)
 }
 
+/// `FUSE_NOTIFY_STORE`: data into the pages of a file the kernel holds.
+const NOTIFY_STORE: i32 = 4;
+/// The most of a frame one notice carries.
+const STORE_CHUNK: usize = 64 * 1024;
+
+/// `data` into the file of `node` at `offset`, in the kernel's pages — the
+/// ones a program has mapped, so it reads the frame there: one notice a
+/// piece of [`STORE_CHUNK`].
+fn store(node: u64, offset: u64, data: &[u8]) -> Vec<Vec<u8>> {
+    data.chunks(STORE_CHUNK)
+        .enumerate()
+        .map(|(k, piece)| {
+            let mut body = Vec::with_capacity(24 + piece.len());
+            body.extend_from_slice(&node.to_ne_bytes());
+            body.extend_from_slice(&(offset + (k * STORE_CHUNK) as u64).to_ne_bytes());
+            body.extend_from_slice(&(piece.len() as u32).to_ne_bytes());
+            body.extend_from_slice(&0u32.to_ne_bytes());
+            body.extend_from_slice(piece);
+            message(0, NOTIFY_STORE, &body)
+        })
+        .collect()
+}
+
 /// `fuse_ioctl_out` and the struct after it, `out_size` bytes of it.
 fn ioctl_out(s: &[u8], out_size: usize) -> Vec<u8> {
     let mut out = vec![0u8; 16];
@@ -1033,6 +1137,9 @@ fn ioctl_out(s: &[u8], out_size: usize) -> Vec<u8> {
 pub struct Args {
     pub place: Place,
     pub devices: Vec<String>,
+    /// `--ask`: the person asked for the real camera ([`Mode::Ask`],
+    /// `crate::camask`), black until then; without it, black for good.
+    pub ask: bool,
 }
 
 /// Where the cameras are: mounted here, or on a connection sent over a
@@ -1047,6 +1154,7 @@ impl Args {
     pub fn parse(args: &[OsString]) -> Result<Self, String> {
         let mut mount = None;
         let mut from = None;
+        let mut ask = false;
         let mut devices = Vec::new();
         let mut it = args.iter();
         let number = |it: &mut std::slice::Iter<'_, OsString>, what: &str| {
@@ -1062,6 +1170,7 @@ impl Args {
                     mount = Some(PathBuf::from(it.next().ok_or("--mount: which directory?")?));
                 }
                 Some("--from") => from = Some(number(&mut it, "--from")?),
+                Some("--ask") => ask = true,
                 Some("--device") => {
                     let name = it
                         .next()
@@ -1088,7 +1197,11 @@ impl Args {
             (None, Some(from)) => Place::From(from),
             _ => return Err("--mount <dir>, or --from <n>".to_owned()),
         };
-        Ok(Self { place, devices })
+        Ok(Self {
+            place,
+            devices,
+            ask,
+        })
     }
 }
 
@@ -1184,11 +1297,222 @@ pub fn handed(fd: RawFd, mode: libc::mode_t) -> Option<OwnedFd> {
     Some(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// An ioctl of V4L2 on the host's camera `fd`, its struct `arg`; retried
+/// on a signal.
+fn xioctl(fd: RawFd, cmd: u32, arg: &mut [u8]) -> Result<(), String> {
+    loop {
+        // SAFETY: the struct is `arg`, as long as the number says (the
+        // callers give each one its own size).
+        let r = unsafe { libc::ioctl(fd, cmd as _, arg.as_mut_ptr()) };
+        if r == 0 {
+            return Ok(());
+        }
+        match errno() {
+            libc::EINTR => continue,
+            e => return Err(std::io::Error::from_raw_os_error(e).to_string()),
+        }
+    }
+}
+
+/// The host's first camera that captures and streams: `/dev/video<N>`,
+/// opened non-blocking. Metadata nodes and others that capture nothing are
+/// passed over.
+fn host_camera() -> Result<OwnedFd, String> {
+    for n in 0..64 {
+        let Ok(path) = std::ffi::CString::new(format!("/dev/video{n}")) else {
+            continue;
+        };
+        // SAFETY: a NUL-terminated path; the descriptor is owned below.
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            continue;
+        }
+        // SAFETY: open has just returned it.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut cap = [0u8; 104];
+        if xioctl(fd.as_raw_fd(), vidioc::QUERYCAP, &mut cap).is_err() {
+            continue;
+        }
+        let caps = if u32_at(&cap, 84) & CAP_DEVICE_CAPS != 0 {
+            u32_at(&cap, 88)
+        } else {
+            u32_at(&cap, 84)
+        };
+        if caps & CAP_VIDEO_CAPTURE != 0 && caps & CAP_STREAMING != 0 {
+            return Ok(fd);
+        }
+    }
+    Err("no camera on the host".to_owned())
+}
+
+/// A buffer of the host's camera, mapped.
+struct Map {
+    ptr: *mut libc::c_void,
+    len: usize,
+}
+
+impl Drop for Map {
+    fn drop(&mut self) {
+        // SAFETY: a mapping of ours, of that length, not used after this.
+        unsafe { libc::munmap(self.ptr, self.len) };
+    }
+}
+
+/// The host's camera, streaming for a program the person allowed it:
+/// opened, in the program's format, its buffers mapped. Dropped — the
+/// program stops, or closes the camera —, it stops streaming and is closed
+/// (its light goes off).
+struct Real {
+    fd: OwnedFd,
+    maps: Vec<Map>,
+}
+
+impl Drop for Real {
+    fn drop(&mut self) {
+        let mut off = BUF_TYPE_CAPTURE.to_ne_bytes();
+        let _ = xioctl(self.fd.as_raw_fd(), vidioc::STREAMOFF, &mut off);
+    }
+}
+
+impl Real {
+    /// The host's camera streaming `width` × `height` YUYV at `interval`
+    /// (as near as it goes): the program's format, which it keeps — a
+    /// camera that has not that is none for it (it stays black).
+    fn start(width: u32, height: u32, interval: (u32, u32)) -> Result<Self, String> {
+        let fd = host_camera()?;
+        let raw = fd.as_raw_fd();
+        let mut fmt = [0u8; 208];
+        put32(&mut fmt, 0, BUF_TYPE_CAPTURE);
+        put32(&mut fmt, 8, width);
+        put32(&mut fmt, 12, height);
+        put32(&mut fmt, 16, YUYV);
+        put32(&mut fmt, 20, FIELD_NONE);
+        xioctl(raw, vidioc::S_FMT, &mut fmt)?;
+        if (u32_at(&fmt, 8), u32_at(&fmt, 12), u32_at(&fmt, 16)) != (width, height, YUYV) {
+            return Err(format!("the camera has no {width}×{height} YUYV"));
+        }
+        let mut parm = [0u8; 204];
+        put32(&mut parm, 0, BUF_TYPE_CAPTURE);
+        put32(&mut parm, 12, interval.0);
+        put32(&mut parm, 16, interval.1);
+        // Its own rate where it has not that one: frames as they come.
+        let _ = xioctl(raw, vidioc::S_PARM, &mut parm);
+        let mut req = [0u8; 20];
+        put32(&mut req, 0, 4);
+        put32(&mut req, 4, BUF_TYPE_CAPTURE);
+        put32(&mut req, 8, MEMORY_MMAP);
+        xioctl(raw, vidioc::REQBUFS, &mut req)?;
+        let count = u32_at(&req, 0).min(MAX_BUFFERS);
+        if count == 0 {
+            return Err("the camera gave no buffers".to_owned());
+        }
+        let mut maps = Vec::new();
+        for index in 0..count {
+            let mut b = [0u8; 88];
+            put32(&mut b, 0, index);
+            put32(&mut b, 4, BUF_TYPE_CAPTURE);
+            put32(&mut b, 60, MEMORY_MMAP);
+            xioctl(raw, vidioc::QUERYBUF, &mut b)?;
+            let (offset, len) = (u32_at(&b, 64), u32_at(&b, 72) as usize);
+            // SAFETY: a mapping of the camera's buffer as it said it is.
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    len,
+                    libc::PROT_READ,
+                    libc::MAP_SHARED,
+                    raw,
+                    libc::off_t::from(offset),
+                )
+            };
+            if ptr == libc::MAP_FAILED {
+                return Err(format!("mmap: {}", std::io::Error::last_os_error()));
+            }
+            maps.push(Map { ptr, len });
+            xioctl(raw, vidioc::QBUF, &mut b)?;
+        }
+        let mut on = BUF_TYPE_CAPTURE.to_ne_bytes();
+        xioctl(raw, vidioc::STREAMON, &mut on)?;
+        Ok(Self { fd, maps })
+    }
+
+    /// A frame the camera has done: its buffer and how much of it is the
+    /// frame. `None` when there is none now.
+    fn take(&self) -> Option<(u32, usize)> {
+        let mut b = [0u8; 88];
+        put32(&mut b, 4, BUF_TYPE_CAPTURE);
+        put32(&mut b, 60, MEMORY_MMAP);
+        xioctl(self.fd.as_raw_fd(), vidioc::DQBUF, &mut b).ok()?;
+        let index = u32_at(&b, 0);
+        let map = self.maps.get(index as usize)?;
+        Some((index, (u32_at(&b, 8) as usize).min(map.len)))
+    }
+
+    /// The frame in buffer `index`, `used` bytes of it.
+    fn frame(&self, index: u32, used: usize) -> &[u8] {
+        match self.maps.get(index as usize) {
+            // SAFETY: the mapping lives as long as `self`, and `used` is no
+            // more than its length (`Real::take`).
+            Some(map) => unsafe { std::slice::from_raw_parts(map.ptr.cast::<u8>(), used) },
+            None => &[],
+        }
+    }
+
+    /// Buffer `index` back to the camera, for the next frame.
+    fn give_back(&self, index: u32) {
+        let mut b = [0u8; 88];
+        put32(&mut b, 0, index);
+        put32(&mut b, 4, BUF_TYPE_CAPTURE);
+        put32(&mut b, 60, MEMORY_MMAP);
+        let _ = xioctl(self.fd.as_raw_fd(), vidioc::QBUF, &mut b);
+    }
+}
+
+/// Namespaces of its own but for the files — network, IPC, UTS, in a user
+/// namespace whose one uid and gid are the user's, its capabilities there
+/// dropped: what a server that asks the person (the launch's socket of
+/// questions, the launch window) and opens the host's camera keeps of the
+/// host; `--ask`'s, where [`crate::wl_proxy::isolate`] is the black one's.
+fn isolate_but_files() -> Result<(), String> {
+    // SAFETY: getuid and getgid take nothing and cannot fail.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNET | libc::CLONE_NEWIPC | libc::CLONE_NEWUTS;
+    // SAFETY: unshare takes flags only.
+    if unsafe { libc::unshare(flags) } != 0 {
+        return Err(format!("unshare: {}", std::io::Error::last_os_error()));
+    }
+    let write = |file: &str, text: String| {
+        std::fs::write(format!("/proc/self/{file}"), text).map_err(|e| format!("{file}: {e}"))
+    };
+    write("setgroups", "deny".to_owned())?;
+    write("uid_map", format!("{uid} {uid} 1"))?;
+    write("gid_map", format!("{gid} {gid} 1"))?;
+    crate::enter::drop_capabilities();
+    Ok(())
+}
+
+/// Whether the person lets the program have the real camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Consent {
+    /// Not asked yet: at the first streaming.
+    Unasked,
+    /// The question is out.
+    Asking,
+    Allowed,
+    /// No — said, written before, not known whose, or the camera would not.
+    Refused,
+}
+
 /// Mount the cameras at `args.mount`, or take the connection handed over
 /// once it is mounted, and serve them until they are unmounted.
 fn serve(args: &Args) -> Result<(), String> {
-    // SAFETY: getuid and getgid take nothing and cannot fail.
-    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    // SAFETY: getuid, getgid and getppid take nothing and cannot fail.
+    let (uid, gid, supervisor) = unsafe { (libc::getuid(), libc::getgid(), libc::getppid()) };
     let fuse = match &args.place {
         Place::Mount(dir) => {
             let fuse = open_fuse()?;
@@ -1208,11 +1532,18 @@ fn serve(args: &Args) -> Result<(), String> {
             if kind_of(fuse.as_raw_fd()) != Some(libc::S_IFCHR) {
                 return Err("what was sent is no /dev/fuse".to_owned());
             }
-            // Nothing more of the host's from here: namespaces of its own,
-            // an empty root — as the Wayland proxy (`wl_proxy::isolate`).
-            // Where the system gives none, as it is, said.
+            // Nothing more of the host's from here than it needs: for the
+            // black camera, namespaces of its own with an empty root — as the
+            // Wayland proxy (`wl_proxy::isolate`); for the one that asks, the
+            // files kept (the question, the host's camera). Where the system
+            // gives none, as it is, said.
             if crate::wl_proxy::isolation_given() {
-                crate::wl_proxy::isolate().map_err(|e| format!("cannot isolate itself: {e}"))?;
+                let isolated = if args.ask {
+                    isolate_but_files()
+                } else {
+                    crate::wl_proxy::isolate()
+                };
+                isolated.map_err(|e| format!("cannot isolate itself: {e}"))?;
             } else {
                 eprintln!("camera-serve: no namespaces of its own here — served as it is");
             }
@@ -1231,11 +1562,23 @@ fn serve(args: &Args) -> Result<(), String> {
     }
     // SAFETY: timerfd_create has just returned it.
     let timer = unsafe { OwnedFd::from_raw_fd(tfd) };
+    // The question's answer comes back on a channel, a byte on the pipe
+    // saying so.
+    let (wake_r, wake_w) = crate::sys::pipe_nonblocking().map_err(|e| format!("pipe: {e}"))?;
+    let mut wake_w = Some(wake_w);
+    let (tx, rx) = std::sync::mpsc::channel::<crate::camask::Decision>();
+    let mut tx = Some(tx);
+    let mut consent = if args.ask {
+        Consent::Unasked
+    } else {
+        Consent::Refused
+    };
+    let mut real: Option<Real> = None;
     let mut server = Server::new(args.devices.clone(), uid, gid);
     let mut buf = vec![0u8; READ_BUFFER];
     let mut armed = false;
     loop {
-        let mut fds = [
+        let mut fds = vec![
             libc::pollfd {
                 fd: fuse.as_raw_fd(),
                 events: libc::POLLIN,
@@ -1246,9 +1589,21 @@ fn serve(args: &Args) -> Result<(), String> {
                 events: libc::POLLIN,
                 revents: 0,
             },
+            libc::pollfd {
+                fd: wake_r.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
-        // SAFETY: two pollfds of the array it is given.
-        let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if let Some(r) = &real {
+            fds.push(libc::pollfd {
+                fd: r.fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        // SAFETY: the pollfds of the vector it is given, as many.
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
         if n < 0 {
             if errno() == libc::EINTR {
                 continue;
@@ -1259,7 +1614,38 @@ fn serve(args: &Args) -> Result<(), String> {
             let mut ticks = [0u8; 8];
             // SAFETY: read(2) into a buffer of that length; non-blocking.
             unsafe { libc::read(timer.as_raw_fd(), ticks.as_mut_ptr().cast(), 8) };
-            write_all(fuse.as_raw_fd(), &server.tick(now()))?;
+            if real.is_none() {
+                write_all(fuse.as_raw_fd(), &server.tick(now()))?;
+            }
+        }
+        if fds[2].revents & libc::POLLIN != 0 {
+            let mut drain = [0u8; 8];
+            // SAFETY: read(2) into a buffer of that length; non-blocking.
+            unsafe { libc::read(wake_r.as_raw_fd(), drain.as_mut_ptr().cast(), 8) };
+            if let Ok(decision) = rx.try_recv() {
+                consent = match decision {
+                    crate::camask::Decision::Once | crate::camask::Decision::Always => {
+                        Consent::Allowed
+                    }
+                    crate::camask::Decision::No => Consent::Refused,
+                };
+            }
+        }
+        if let Some(r) = fds.get(3) {
+            if r.revents & libc::POLLIN != 0 {
+                if let Some(camera) = &real {
+                    while let Some((index, used)) = camera.take() {
+                        let messages = server.deliver(0, camera.frame(index, used), now());
+                        camera.give_back(index);
+                        write_all(fuse.as_raw_fd(), &messages)?;
+                    }
+                }
+            } else if r.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+                // The camera gone (unplugged): black from here on.
+                eprintln!("camera-serve: the host's camera is gone — black from here on");
+                real = None;
+                consent = Consent::Refused;
+            }
         }
         if fds[0].revents & libc::POLLIN != 0 {
             // SAFETY: read(2) into a buffer of that length.
@@ -1281,7 +1667,51 @@ fn serve(args: &Args) -> Result<(), String> {
         } else if fds[0].revents & (libc::POLLERR | libc::POLLHUP) != 0 {
             return Ok(());
         }
-        let want = server.streaming();
+        // The question, at the first streaming: in a thread of its own, the
+        // frames black meanwhile.
+        if consent == Consent::Unasked && server.streaming() {
+            consent = match crate::camask::Asking::find(supervisor) {
+                Some(asking) if asking.denied() => {
+                    eprintln!(
+                        "camera-serve: «{}» was refused the camera before — black",
+                        asking.label
+                    );
+                    Consent::Refused
+                }
+                Some(asking) => match (tx.take(), wake_w.take()) {
+                    (Some(tx), Some(wake)) => {
+                        std::thread::spawn(move || {
+                            let _ = tx.send(asking.ask());
+                            // SAFETY: write(2) of one byte to a pipe we hold.
+                            unsafe { libc::write(wake.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
+                        });
+                        Consent::Asking
+                    }
+                    _ => Consent::Refused,
+                },
+                None => {
+                    eprintln!(
+                        "camera-serve: this launch is not in the registry — nobody to ask, black"
+                    );
+                    Consent::Refused
+                }
+            };
+        }
+        // The real camera while the program streams and may have it.
+        let format = server.streaming_format(0);
+        match (consent == Consent::Allowed, format, real.is_some()) {
+            (true, Some((w, h, interval)), false) => match Real::start(w, h, interval) {
+                Ok(camera) => real = Some(camera),
+                Err(e) => {
+                    eprintln!("camera-serve: the host's camera not started ({e}) — black");
+                    consent = Consent::Refused;
+                }
+            },
+            (false, _, true) | (_, None, true) => real = None,
+            _ => {}
+        }
+        // Black frames while it streams and no real one comes.
+        let want = server.streaming() && real.is_none();
         if want != armed {
             let ns = if want { black_interval_ns() } else { 0 };
             let every = libc::timespec {
@@ -1730,7 +2160,61 @@ mod tests {
         );
     }
 
-    /// Sizes and rates: the largest size that fits what is asked, the
+    /// A real frame (the person allowed the camera): written into the
+    /// pages of the program's first queued buffer in pieces of
+    /// `STORE_CHUNK` (`FUSE_NOTIFY_STORE`, no more than the buffer holds),
+    /// then the buffer done — the waiting `DQBUF` answered after the data,
+    /// never before; with no buffer queued, dropped.
+    #[test]
+    fn a_real_frame_goes_into_the_programs_buffer_before_it_is_told() {
+        let mut s = server();
+        let fh = open(&mut s, 0);
+        let mut req = vec![0u8; 20];
+        put32(&mut req, 0, 2);
+        put32(&mut req, 4, BUF_TYPE_CAPTURE);
+        put32(&mut req, 8, MEMORY_MMAP);
+        answer(&ioctl(&mut s, fh, 1, vidioc::REQBUFS, &req)).unwrap();
+        let buffer = |index: u32| {
+            let mut b = vec![0u8; 88];
+            put32(&mut b, 0, index);
+            put32(&mut b, 4, BUF_TYPE_CAPTURE);
+            put32(&mut b, 60, MEMORY_MMAP);
+            b
+        };
+        answer(&ioctl(&mut s, fh, 2, vidioc::QBUF, &buffer(1))).unwrap();
+        assert_eq!(s.streaming_format(0), None, "not streaming yet");
+        let mut on = vec![0u8; 4];
+        put32(&mut on, 0, BUF_TYPE_CAPTURE);
+        answer(&ioctl(&mut s, fh, 3, vidioc::STREAMON, &on)).unwrap();
+        assert_eq!(s.streaming_format(0), Some((640, 480, (1, 30))));
+        assert!(ioctl(&mut s, fh, 4, vidioc::DQBUF, &buffer(0)).is_empty());
+        // A frame larger than the buffer: cut to it.
+        let size: usize = 640 * 480 * 2;
+        let frame: Vec<u8> = (0..size + 100).map(|i| (i % 251) as u8).collect();
+        let out = s.deliver(0, &frame, (7, 8));
+        let pieces = size.div_ceil(STORE_CHUNK);
+        assert_eq!(out.len(), pieces + 1, "the pieces, then the answer");
+        let mut stored = Vec::new();
+        for (k, m) in out[..pieces].iter().enumerate() {
+            let (unique, code, body) = parsed(m);
+            assert_eq!((unique, code), (0, NOTIFY_STORE));
+            assert_eq!(u64_at(&body, 0), 2, "the camera's node");
+            assert_eq!(u64_at(&body, 8), BUFFER_ROOM + (k * STORE_CHUNK) as u64);
+            assert_eq!(u32_at(&body, 16) as usize, body.len() - 24);
+            stored.extend_from_slice(&body[24..]);
+        }
+        assert_eq!(stored, frame[..size]);
+        let (unique, error, body) = parsed(&out[pieces]);
+        assert_eq!((unique, error), (4, 0));
+        let b = &body[16..];
+        assert_eq!((u32_at(b, 0), u32_at(b, 8)), (1, size as u32));
+        assert_eq!((u64_at(b, 24), u64_at(b, 32)), (7, 8));
+        // Nothing queued now: the next frame is dropped.
+        assert!(s.deliver(0, &frame, (7, 9)).is_empty());
+        assert!(s.deliver(5, &frame, (7, 9)).is_empty(), "no such camera");
+    }
+
+    /// Sizes and rates: the largest size that fits what is asked, the    /// Sizes and rates: the largest size that fits what is asked, the
     /// nearest interval listed; black frames at the slowest.
     #[test]
     fn sizes_and_rates_are_the_listed_ones() {
@@ -1773,6 +2257,12 @@ mod tests {
         );
         assert!(Mode::Black.black() && Mode::Ask.black());
         assert!(!Mode::No.black() && !Mode::Yes.black());
+        // On a host with no camera, asking is none; black, said, is black.
+        assert_eq!(Mode::Ask.given(false), Mode::No);
+        assert_eq!(Mode::Ask.given(true), Mode::Ask);
+        assert_eq!(Mode::Black.given(false), Mode::Black);
+        assert_eq!(Mode::Yes.given(false), Mode::Yes);
+        assert_eq!(Mode::DEFAULT, Mode::Ask);
     }
 
     #[test]
@@ -1782,13 +2272,15 @@ mod tests {
             Args::parse(&argv(&["--mount", "/tmp/c"])),
             Ok(Args {
                 place: Place::Mount(PathBuf::from("/tmp/c")),
-                devices: vec!["video0".to_owned()]
+                devices: vec!["video0".to_owned()],
+                ask: false,
             })
         );
         assert_eq!(
             Args::parse(&argv(&["--from", "5"])).map(|a| a.place),
             Ok(Place::From(5))
         );
+        assert!(Args::parse(&argv(&["--from", "5", "--ask"])).unwrap().ask);
         assert_eq!(
             Args::parse(&argv(&[
                 "--mount", "/m", "--device", "video2", "--device", "video3"
