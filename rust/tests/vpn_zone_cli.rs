@@ -627,6 +627,47 @@ fn no_isolation_is_a_record_with_everything_open() {
     );
 }
 
+/// Step 3 (2026-09-29): a program's preset — what its own container takes
+/// by itself when it is made (asking for the microphone and the screen),
+/// and what is only offered (the cameras).
+#[test]
+fn a_programs_own_container_takes_what_its_preset_gives_by_itself() {
+    let home = Home::new("preset");
+    let out = home.run(&["presets", "vesktop"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("микрофон — спрашивать — само"), "{text}");
+    assert!(text.contains("камеры — по выбору"), "{text}");
+    let json = stdout(&home.run(&["presets", "--json"]));
+    assert!(
+        json.contains("{\"id\":\"vesktop\",\"source\":\"default\""),
+        "{json}"
+    );
+    assert!(
+        stdout(&home.run(&["presets", "no-such-program"])).contains("заготовки нет"),
+        "a program with none"
+    );
+    // Made at its first launch, which goes no further here (no systemctl).
+    let _ = home.run(&[
+        "run",
+        "offline",
+        "--sandbox",
+        "app-vesktop",
+        "--",
+        "vesktop",
+    ]);
+    let record = fs::read_to_string(
+        home.root
+            .join("config/containers/app-vesktop/container.conf"),
+    )
+    .unwrap();
+    assert!(
+        record.contains("microphone = ask") && record.contains("screencast = ask"),
+        "{record}"
+    );
+    assert!(!record.contains("camera"), "only offered: {record}");
+}
+
 #[test]
 fn a_sandboxed_launch_carries_the_tool_paths_of_the_manifest() {
     let home = Home::new("fs-flags");

@@ -146,6 +146,7 @@ pub mod panel;
 pub mod permissions;
 pub mod picker;
 pub mod place;
+pub mod presets;
 pub mod profile;
 pub mod protect;
 pub mod pulse_filter;

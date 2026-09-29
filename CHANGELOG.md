@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Presets: what a program needs** (2026-09-29, step 3a of
+  `docs/PERMISSIONS.md` §11.15). A catalog by launcher id — browsers, calls,
+  messengers, OBS, Steam and Wine, players, viewers, password managers,
+  editors, terminals, mixers, virtual machines —, `cellward presets [<id>]
+  [--json]`.
+  - A program's own container takes the safe part by itself when it is
+    made, only where it has no word of its own: asking for the microphone
+    and the screen, an X server of its own, gamepads, security keys.
+  - The rest is only offered: the cameras, folders of the real home,
+    devices with a network of their own, the host's session, the Nix
+    daemon, the places the host runs, the raw PipeWire, a home that sees
+    the real one.
+  - `programs.cellward.programs.<id>` in Nix replaces the built-in preset
+    whole.
 - **The host's own network, `host`** (2026-09-29, 2e of
   `docs/PERMISSIONS.md` §11.15): no VPN, and the program in its container
   all the same.

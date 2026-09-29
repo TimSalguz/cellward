@@ -2157,7 +2157,22 @@ pub fn prepare_selection(tools: &Tools, selection: &Selection) -> Result<(), Str
     };
     let container = match crate::container::load(tools, &name) {
         Some(c) => c,
-        None => crate::container::create(tools, &name, crate::container::Home::Private)?,
+        None => {
+            let made = crate::container::create(tools, &name, crate::container::Home::Private)?;
+            // A program's own container takes what its preset gives by
+            // itself (`crate::presets`, step 3 of `docs/PERMISSIONS.md`
+            // §11.15); the rest is only offered.
+            if let Some(key) = name.strip_prefix("app-") {
+                let given = crate::presets::seed(tools, &name, key);
+                if !given.is_empty() {
+                    eprintln!(
+                        "cellward: контейнеру {name} по заготовке: {}",
+                        given.join(", ")
+                    );
+                }
+            }
+            crate::container::load(tools, &name).unwrap_or(made)
+        }
     };
     if !crate::container::data_ready(&container) {
         if let Some(busy) = crate::container::running_network(tools, &container) {

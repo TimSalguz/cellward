@@ -91,6 +91,14 @@ let
   # names in hmDeclared, under the old ones in hmOldNames.
   declaredOptions = {
     enable = true;
+    # A program's preset (step 3 of docs/PERMISSIONS.md §11.15).
+    programs.vesktop = {
+      why = "звонки\nи экран";
+      microphone = "ask";
+      camera = true;
+      devices = [ "games" ];
+      folders = [ "~/Downloads" ];
+    };
     defaults = {
       network = "offline";
       container = "own";
@@ -443,6 +451,10 @@ in
           "audio_manager = true"
           "x11 = false"
         ]
+      ))
+      (expect "a program's preset is written line by line, its reason on one" (
+        hmDeclared.config.home.file.".config/vpn-zones/declared/programs/vesktop.conf".text
+        == "why=звонки и экран\nmicrophone=ask\ncamera=on\ndevice=games\nfolder=~/Downloads\n"
       ))
       (expect "a container with no word of its own on x11 has one in its declared file" (
         !lib.hasInfix "x11 =" hmDeclared.config.home.file.".config/vpn-zones/declared/containers/work.conf".text

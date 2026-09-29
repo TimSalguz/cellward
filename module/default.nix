@@ -820,6 +820,7 @@ let
     "desktop.sway.enable"
     "containers"
     "main"
+    "programs"
   ];
 
   # --- desktop: the window menu's key and our windows' rule ----------------
@@ -1083,6 +1084,80 @@ in
       default = [ ];
       example = [ "~/Configurations/my-machine" ];
       description = "Что из настоящего дома не пишет ни один контейнер, кроме тех, кому это явно выдано (cellward container grant или paths контейнера): прежде всего репозиторий конфигурации машины — кто пишет в него, тот при следующей пересборке получает root. Пути внутри дома, ~/… или абсолютные. То, что исполняет сам хост (автозапуск, службы, оболочки, git, ~/bin, конфигурации панелей, терминалов и редакторов), защищено всегда и сюда не пишется. Действует в герметичных контейнерах с настоящим домом, с их следующего подъёма. Без пересборки — cellward protect add|rm <путь>.";
+    };
+
+    programs = lib.mkOption {
+      type = lib.types.attrsOf (
+        lib.types.submodule {
+          options = {
+            why = lib.mkOption {
+              type = lib.types.str;
+              default = "";
+              description = "Зачем программе это — показывается рядом с заготовкой.";
+            };
+            microphone = lib.mkOption {
+              type = lib.types.nullOr (lib.types.enum [ "yes" "no" "ask" ]);
+              default = null;
+              description = "Микрофон: ask кладётся в свой контейнер программы сам, yes — только предлагается.";
+            };
+            screencast = lib.mkOption {
+              type = lib.types.nullOr (lib.types.enum [ "yes" "no" "ask" ]);
+              default = null;
+              description = "Показ экрана: ask — сам, yes — только предлагается.";
+            };
+            camera = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Камеры хоста — предлагаются.";
+            };
+            x11 = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Свой X-сервер контейнера — кладётся сам.";
+            };
+            devices = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [ ];
+              example = [ "games" ];
+              description = "Устройства (как в permissions.devices): games и security-keys — сами, остальные предлагаются.";
+            };
+            folders = lib.mkOption {
+              type = lib.types.listOf (lib.types.strMatching "~/.+");
+              default = [ ];
+              example = [ "~/Downloads" ];
+              description = "Папки настоящего дома — предлагаются.";
+            };
+            session = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Сеанс хоста (systemd --user, вся шина) — предлагается.";
+            };
+            nixDaemon = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Nix-демон — предлагается.";
+            };
+            hostFilesWritable = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Запись того, что исполняет хост, — предлагается.";
+            };
+            audioManager = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "PipeWire хоста без ограничений — предлагается.";
+            };
+            home = lib.mkOption {
+              type = lib.types.nullOr (lib.types.enum [ "private" "layer" "main" ]);
+              default = null;
+              description = "Вид дома: private — сам, layer и main — предлагаются.";
+            };
+          };
+        }
+      );
+      default = { };
+      example = lib.literalExpression "{ vesktop = { microphone = \"ask\"; screencast = \"ask\"; camera = true; }; }";
+      description = "Заготовки программ по id ярлыка (docs/PERMISSIONS.md §11.15, шаг 3): что нужно программе. Безопасное (вопросы о микрофоне и экране, свой X, геймпады, ключи безопасности) её свой контейнер получает сам, когда создаётся; остальное окно запуска только предлагает. Заготовка отсюда заменяет встроенную целиком. Посмотреть действующую — cellward presets <id>.";
     };
 
     netlog = {
@@ -1372,6 +1447,10 @@ in
       && lib.all (app: builtins.match "[^-./[:space:]][^/[:space:]]*" app != null) (lib.attrValues c.links);
       message = "programs.cellward.containers.${name}.links: схема ссылки — латиница, цифры, + . - (https, tg…); программа — id ярлыка без пути и пробелов (firefox)";
     }) cfg.containers
+    ++ lib.mapAttrsToList (id: _: {
+      assertion = builtins.match "[A-Za-z0-9_][A-Za-z0-9._-]*" id != null;
+      message = "programs.cellward.programs.${id}: id ярлыка — латиница, цифры, . _ - (firefox, com.obsproject.Studio)";
+    }) cfg.programs
     ++ [
       {
         # «Без изоляции» — встроенная запись cellward (2д, docs/PERMISSIONS.md
@@ -1567,6 +1646,25 @@ in
     (lib.mkIf (cfg.protect != [ ]) {
       ".config/vpn-zones/declared/protect".text = lib.concatMapStrings (p: "${p}\n") cfg.protect;
     })
+    (lib.mapAttrs' (
+      id: p:
+      lib.nameValuePair ".config/vpn-zones/declared/programs/${id}.conf" {
+        text = lib.concatStrings (
+          lib.optional (p.why != "") "why=${lib.replaceStrings [ "\n" ] [ " " ] p.why}\n"
+          ++ lib.optional (p.microphone != null) "microphone=${p.microphone}\n"
+          ++ lib.optional (p.screencast != null) "screencast=${p.screencast}\n"
+          ++ lib.optional p.camera "camera=on\n"
+          ++ lib.optional p.x11 "x11=on\n"
+          ++ map (d: "device=${d}\n") p.devices
+          ++ map (f: "folder=${f}\n") p.folders
+          ++ lib.optional p.session "session=on\n"
+          ++ lib.optional p.nixDaemon "nix_daemon=on\n"
+          ++ lib.optional p.hostFilesWritable "host_files_writable=on\n"
+          ++ lib.optional p.audioManager "audio_manager=on\n"
+          ++ lib.optional (p.home != null) "home=${p.home}\n"
+        );
+      }
+    ) cfg.programs)
     (lib.mkIf (cfg.netlog.keepDays != null) {
       ".config/vpn-zones/declared/netlog-keep".text = toString cfg.netlog.keepDays;
     })
