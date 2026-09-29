@@ -1068,6 +1068,7 @@ mod tests {
                 buttons: crate::frame::DEFAULT_BUTTONS,
                 style: crate::frame::DEFAULT_STYLE,
                 radius: crate::frame::DEFAULT_RADIUS,
+                outer: crate::frame::DEFAULT_OUTER_RADIUS,
             }
         );
         assert_eq!(setup.title, "nl · банк", "cleaned again on the way in");
@@ -1090,7 +1091,7 @@ mod tests {
             (
                 crate::frame::ButtonStyle::Macos,
                 crate::frame::Style::Tag,
-                12
+                crate::frame::Radius::Px(12)
             )
         );
         for bad in [

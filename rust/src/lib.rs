@@ -141,6 +141,7 @@ pub mod links;
 pub mod microphone;
 pub mod netask;
 pub mod netrules;
+pub mod niri;
 pub mod onwindow;
 pub mod openconnect;
 pub mod origin;

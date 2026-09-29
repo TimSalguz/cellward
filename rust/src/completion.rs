@@ -232,7 +232,15 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             "frame" if pos == 2 => strs(
                 &mut out,
                 &[
-                    "show", "hide", "width", "title", "style", "buttons", "radius", "color",
+                    "show",
+                    "hide",
+                    "width",
+                    "title",
+                    "style",
+                    "buttons",
+                    "radius",
+                    "outer-radius",
+                    "color",
                 ],
             ),
             "frame" if pos == 3 && word(2) == "width" => strs(&mut out, &["4"]),
@@ -249,7 +257,10 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 ],
             ),
             "frame" if pos == 3 && word(2) == "radius" => {
-                strs(&mut out, &["0", "8", "12", "default"])
+                strs(&mut out, &["0", "8", "12", "niri", "default"])
+            }
+            "frame" if pos == 3 && word(2) == "outer-radius" => {
+                strs(&mut out, &["0", "12", "20", "niri", "default"])
             }
             "frame" if pos == 3 && word(2) == "color" => owned(&mut out, &snap.zones),
             "frame" if pos == 4 && word(2) == "color" => strs(&mut out, &["default"]),

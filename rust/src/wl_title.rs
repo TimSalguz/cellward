@@ -46,10 +46,12 @@
 //! and a border of two ([`soft_inner`], [`soft_outer`]); `tag`, no border and
 //! a small tab with the label ([`tag_layout`], [`render_tag`]) —, the
 //! buttons' look ([`buttons_look`]: which end, which order, the glyphs, the
-//! shape, the colours at rest, under the pointer and pressed) and the radius
-//! of the window's corners inside the frame ([`render_corners`], in
-//! [`SLOTS`] regions of their own too). The drawing here and the layout and
-//! the hit-testing in `crate::wl_frame` follow whatever it says.
+//! shape, the colours at rest, under the pointer and pressed), the radii
+//! of the window's corners inside the frame, the top's and the bottom's
+//! ([`render_corners`], in [`SLOTS`] regions of their own too), and the
+//! radius of the frame's own corners outside ([`render_outer`], the
+//! same). The drawing here and the layout and the hit-testing in
+//! `crate::wl_frame` follow whatever it says.
 
 #![forbid(unsafe_code)]
 
@@ -61,7 +63,9 @@ use std::rc::Rc;
 
 use ab_glyph::{point, Font, FontVec, GlyphId, PxScale, ScaleFont};
 
-use crate::frame::{ButtonStyle, Frame, Rgb, Style, MAX_RADIUS};
+use crate::frame::{
+    ButtonStyle, Frame, Radius, Rgb, Style, TitleMode, MAX_OUTER_RADIUS, MAX_RADIUS, MAX_WIDTH,
+};
 
 /// The font the package was built with (`package.nix`), if it was.
 pub const FONT: Option<&str> = option_env!("VPN_ZONE_FRAME_FONT");
@@ -358,8 +362,18 @@ pub struct Look {
     pub style: Style,
     pub buttons: ButtonsLook,
     /// The window's corners inside the frame, logical pixels: 0 square
-    /// ([`Look::corners`]).
+    /// ([`Look::corners`]) — the bottom's, and the top's
+    /// ([`Look::radius_top`]) but where it follows niri's
+    /// ([`inner_radii`]).
     pub radius: i32,
+    pub radius_top: i32,
+    /// The frame's own corners, outside, logical pixels: 0 square
+    /// ([`Look::outer_corners`]); and what they are drawn over — the
+    /// border's width and whether the title strip is under the top ones
+    /// (mode `always`) —, 0 and no without them.
+    pub outer: i32,
+    pub border: i32,
+    pub band: bool,
 }
 
 /// Red under the pointer for "close", as desktops have it (Adwaita's
@@ -596,12 +610,67 @@ pub fn buttons_look(style: ButtonStyle) -> ButtonsLook {
     }
 }
 
+/// The frame's own round corners (`crate::frame::OUTER_RADIUS_SETTING`,
+/// [`Look::outer_corners`]): four pieces in the frame's corners, drawn with
+/// what of the frame is there — the border's rings, the title strip's end —
+/// cut by the quarter circle, and clear where the program's content is (a
+/// piece cannot cut what is under it: the strips of the border and the
+/// title strip are laid short of the pieces instead, `crate::wl_frame`).
+/// Logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Outer {
+    pub radius: i32,
+    /// A piece's width, and the bottom ones' height: the radius, or the
+    /// border where it is wider — a piece takes the whole corner of every
+    /// ring, so that each strip of a ring is laid short of it whole.
+    pub side: i32,
+    /// The top ones' height: down past the title strip's row where the
+    /// radius reaches below the border — the strip's ends are theirs then,
+    /// in mode `hover` too (clear there: the strip over the content is laid
+    /// short of them) —, else the side.
+    pub top: i32,
+    pub border: i32,
+    /// The title strip is under the top ones (mode `always`): its colour
+    /// drawn there.
+    pub band: bool,
+}
+
+/// The radii of the window's corners inside `frame`, the top's and the
+/// bottom's: its setting's number, both; niri's (`crate::frame::Radius::
+/// Niri`) less the border, and at the top less the title strip too where it
+/// takes room (mode `always`) — niri rounds the window's geometry, which is
+/// the frame's outer edge, and the curve inside is then concentric with
+/// its. Below 0 is square.
+pub fn inner_radii(frame: &Frame) -> (i32, i32) {
+    match frame.radius {
+        Radius::Px(r) => (r, r),
+        Radius::Niri(r) => {
+            let border = if frame.style == Style::Tag {
+                0
+            } else {
+                frame.width.max(0)
+            };
+            let strip = if frame.title == TitleMode::Always {
+                HEIGHT
+            } else {
+                0
+            };
+            let bottom = r.saturating_sub(border);
+            (bottom.saturating_sub(strip).max(0), bottom.max(0))
+        }
+    }
+}
+
 /// Stage 3's look, `full` with `cellward`'s buttons and square corners: the
 /// one the proxy's wire tests and the VM's old pixel checks are of.
 pub const LOOK: Look = Look {
     style: Style::Full,
     buttons: CELLWARD,
     radius: 0,
+    radius_top: 0,
+    outer: 0,
+    border: 0,
+    band: false,
 };
 
 /// The soft style's tone of the title strip, the tag-less border's inner
@@ -629,10 +698,24 @@ fn tone(frame: Rgb, saturation: f64, value: f64) -> Rgb {
 impl Look {
     /// The launch's look, as its settings have it.
     pub fn of(frame: &Frame) -> Self {
+        let (top, bottom) = inner_radii(frame);
+        let outer = if frame.style == Style::Tag {
+            0
+        } else {
+            frame.outer.px().clamp(0, MAX_OUTER_RADIUS)
+        };
         Self {
             style: frame.style,
             buttons: buttons_look(frame.buttons),
-            radius: frame.radius.clamp(0, MAX_RADIUS),
+            radius: bottom.clamp(0, MAX_RADIUS),
+            radius_top: top.clamp(0, MAX_RADIUS),
+            outer,
+            border: if outer > 0 {
+                frame.width.clamp(0, MAX_WIDTH)
+            } else {
+                0
+            },
+            band: outer > 0 && frame.title == TitleMode::Always,
         }
     }
 
@@ -641,15 +724,46 @@ impl Look {
         self.style == Style::Tag
     }
 
-    /// The radius of the round corners drawn over the window's: none in the
-    /// tag look — they are the border's colour laid over the program's
-    /// corners, and without a border there is nothing for them to blend into.
-    pub fn corners(&self) -> i32 {
+    /// The radii of the round corners drawn over the window's, the top
+    /// ones' and the bottom ones': none in the tag look — they are the
+    /// border's colour laid over the program's corners, and without a
+    /// border there is nothing for them to blend into.
+    pub fn corners(&self) -> (i32, i32) {
         if self.tag() {
-            0
+            (0, 0)
         } else {
-            self.radius.clamp(0, MAX_RADIUS)
+            (
+                self.radius_top.clamp(0, MAX_RADIUS),
+                self.radius.clamp(0, MAX_RADIUS),
+            )
         }
+    }
+
+    /// Whether any corner is drawn round: of the window inside the frame,
+    /// or of the frame outside.
+    pub fn round(&self) -> bool {
+        self.corners() != (0, 0) || self.outer_corners().is_some()
+    }
+
+    /// The frame's own round corners: none in the tag look (nothing of the
+    /// frame is in a window's corner), nor square.
+    pub fn outer_corners(&self) -> Option<Outer> {
+        if self.tag() || self.outer <= 0 {
+            return None;
+        }
+        let side = self.outer.max(self.border);
+        let top = if self.outer > self.border {
+            side.max(self.border.saturating_add(HEIGHT))
+        } else {
+            side
+        };
+        Some(Outer {
+            radius: self.outer,
+            side,
+            top,
+            border: self.border,
+            band: self.band,
+        })
     }
 
     /// The title strip's colour (the tag's, the buttons' [`Paint::Frame`],
@@ -1235,22 +1349,24 @@ pub fn render_tag(
     (w, h, pixels)
 }
 
-/// The window's round corners at `scale` ([`Look::corners`]): four images of
-/// `radius` logical pixels square — the top left, the top right, the bottom
-/// left, the bottom right corner of the window —, `color` where the
-/// window's corner is cut off and clear inside the quarter circle, whose
-/// edge is smoothed over a device pixel. ARGB8888, premultiplied. The side
-/// of one image in device pixels, and the pixels of all four one after the
-/// other.
-pub fn render_corners(radius: i32, scale: u32, color: Rgb) -> (i32, i32, Vec<u8>) {
-    let d = device(radius, scale);
-    let r = d as f32;
-    let side = d.max(0) as usize;
-    let mut pixels = Vec::with_capacity(4 * side * side * 4);
-    for (right, bottom) in [(false, false), (true, false), (false, true), (true, true)] {
+/// The window's round corners at `scale` ([`Look::corners`]): four square
+/// images — the top left and the top right corner of the window, `top`
+/// logical pixels; the bottom left and the bottom right, `bottom` —,
+/// `color` where the window's corner is cut off and clear inside the
+/// quarter circle, whose edge is smoothed over a device pixel. ARGB8888,
+/// premultiplied. The side of a top one and of a bottom one in device
+/// pixels, and the pixels of all four one after the other (a radius of 0:
+/// none of that corner).
+pub fn render_corners(top: i32, bottom: i32, scale: u32, color: Rgb) -> (i32, i32, Vec<u8>) {
+    let (dt, db) = (device(top, scale).max(0), device(bottom, scale).max(0));
+    let (st, sb) = (dt as usize, db as usize);
+    let mut pixels = Vec::with_capacity(2 * (st * st + sb * sb) * 4);
+    for (right, lower) in [(false, false), (true, false), (false, true), (true, true)] {
+        let d = if lower { db } else { dt };
+        let r = d as f32;
         // The circle's centre: the corner of the image nearest the window's
         // middle.
-        let (cx, cy) = (if right { 0.0 } else { r }, if bottom { 0.0 } else { r });
+        let (cx, cy) = (if right { 0.0 } else { r }, if lower { 0.0 } else { r });
         for y in 0..d {
             for x in 0..d {
                 let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
@@ -1259,7 +1375,74 @@ pub fn render_corners(radius: i32, scale: u32, color: Rgb) -> (i32, i32, Vec<u8>
             }
         }
     }
-    (d, d, pixels)
+    (dt, db, pixels)
+}
+
+/// The frame's own round corners at `scale` ([`Outer`]): four images — the
+/// top left and the top right, `side` × `top` logical pixels; the bottom
+/// left and the bottom right, `side` square —, each the frame's corner as
+/// it would be square: `rings`' colours (their widths from the outside in,
+/// meeting on the diagonal as the strips do), the title strip's colour `bg`
+/// in its row under the top ones where it is there, clear over the
+/// program's content; covered by the quarter circle of the radius, its edge
+/// smoothed over a device pixel, clear outside it. ARGB8888, premultiplied.
+/// The width of one image and the top ones' height in device pixels, and
+/// the pixels of all four one after the other.
+pub fn render_outer(o: &Outer, rings: &[(i32, Rgb)], bg: Rgb, scale: u32) -> (i32, i32, Vec<u8>) {
+    let w = device(o.side, scale).max(0);
+    let top = device(o.top, scale).max(0);
+    let r = device(o.radius, scale) as f32;
+    let border = device(o.border, scale);
+    let row_end = device(o.border.saturating_add(HEIGHT), scale);
+    // Where each ring ends, from the outside in, and its colour.
+    let mut sum = 0i32;
+    let ends: Vec<(i32, Rgb)> = rings
+        .iter()
+        .map(|&(width, color)| {
+            sum = sum.saturating_add(width.max(0));
+            (device(sum, scale), color)
+        })
+        .collect();
+    // What of the frame is at the top left's pixel (`x`, `y`): a ring's
+    // colour, the title strip's, or nothing (the program's).
+    let under = |x: i32, y: i32, upper: bool| -> Option<Rgb> {
+        let depth = x.min(y);
+        if depth < border {
+            return ends
+                .iter()
+                .find(|(end, _)| depth < *end)
+                .or(ends.last())
+                .map(|&(_, color)| color);
+        }
+        (upper && o.band && y < row_end).then_some(bg)
+    };
+    let (wu, tu) = (w as usize, top as usize);
+    let mut pixels = Vec::with_capacity(2 * (wu * tu + wu * wu) * 4);
+    for (right, lower) in [(false, false), (true, false), (false, true), (true, true)] {
+        let h = if lower { w } else { top };
+        for row in 0..h {
+            for col in 0..w {
+                // The top left's pixel this one mirrors.
+                let x = if right { w - 1 - col } else { col };
+                let y = if lower { h - 1 - row } else { row };
+                let pixel = match under(x, y, !lower) {
+                    None => [0; 4],
+                    Some(color) => {
+                        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                        let cover = if px < r && py < r {
+                            let dist = ((px - r).powi(2) + (py - r).powi(2)).sqrt();
+                            (r - dist + 0.5).clamp(0.0, 1.0)
+                        } else {
+                            1.0
+                        };
+                        premultiplied(color, cover)
+                    }
+                };
+                pixels.extend_from_slice(&pixel);
+            }
+        }
+    }
+    (w, top, pixels)
 }
 
 /// The row of buttons at `scale` as `look` has it, on the frame's colour
@@ -1436,8 +1619,31 @@ impl Prepared {
     }
 
     fn corner_bytes_as(look: &Look) -> usize {
-        let d = device(look.corners(), MAX_SCALE) as usize;
-        4 * d * d * 4
+        let (top, bottom) = look.corners();
+        let (dt, db) = (
+            device(top, MAX_SCALE).max(0) as usize,
+            device(bottom, MAX_SCALE).max(0) as usize,
+        );
+        2 * (dt * dt + db * db) * 4
+    }
+
+    /// Bytes of one region of the frame's own corners: the four at
+    /// [`MAX_SCALE`]; none with square ones.
+    fn outer_bytes(&self) -> usize {
+        Self::outer_bytes_as(&self.look)
+    }
+
+    fn outer_bytes_as(look: &Look) -> usize {
+        look.outer_corners()
+            .map_or(0, |o| Self::outer_bytes_of(o.side, o.top))
+    }
+
+    fn outer_bytes_of(side: i32, top: i32) -> usize {
+        let (w, t) = (
+            device(side, MAX_SCALE).max(0) as usize,
+            device(top, MAX_SCALE).max(0) as usize,
+        );
+        2 * (w * t + w * w) * 4
     }
 
     /// Bytes of one region of the dropdown: every image of it at
@@ -1461,7 +1667,8 @@ impl Prepared {
 
     /// The memfd's size: [`SLOTS`] regions of the line, then [`SLOTS`] of
     /// the buttons, then [`SLOTS`] of the corners, then [`SLOTS`] of the
-    /// dropdown, then [`PROMPT_SLOTS`] of the questions' panels.
+    /// frame's own corners, then [`SLOTS`] of the dropdown, then
+    /// [`PROMPT_SLOTS`] of the questions' panels.
     pub fn memfd_size(&self) -> usize {
         self.memfd_size_as(&self.look)
     }
@@ -1470,6 +1677,7 @@ impl Prepared {
         (self.slot_bytes_as(look)
             + Self::button_bytes_as(look)
             + Self::corner_bytes_as(look)
+            + Self::outer_bytes_as(look)
             + self.menu_bytes())
             * SLOTS
             + Self::prompt_bytes() * PROMPT_SLOTS
@@ -1477,7 +1685,8 @@ impl Prepared {
 
     /// A memfd for any look the frame may be given on the fly (step 6 of
     /// `docs/PERMISSIONS.md` §11.15) — every button style, a border or the
-    /// tag, the round corners at their largest —, twice: a new look is
+    /// tag, the round corners at their largest, the frame's own too —,
+    /// twice: a new look is
     /// drawn in the other half ([`Text::new_at`]), while the compositor may
     /// still show buffers of the old one. Sparse: what is never drawn costs
     /// nothing.
@@ -1489,11 +1698,17 @@ impl Prepared {
                     style,
                     buttons: buttons_look(buttons),
                     radius: MAX_RADIUS,
+                    radius_top: MAX_RADIUS,
+                    ..LOOK
                 };
                 most = most.max(self.memfd_size_as(&look));
             }
         }
-        2 * most
+        // The frame's own corners at their largest: as wide as the widest
+        // radius or border, the top ones down past the title strip.
+        let widest = MAX_OUTER_RADIUS.max(MAX_WIDTH);
+        let outer = Self::outer_bytes_of(widest, widest + HEIGHT) * SLOTS;
+        2 * (most + outer)
     }
 }
 
@@ -1539,6 +1754,11 @@ impl Regions {
     fn bytes(&self) -> usize {
         self.slot_bytes * self.slots.borrow().len()
     }
+
+    /// Where the next thing's regions start.
+    fn end(&self) -> usize {
+        self.base + self.bytes()
+    }
 }
 
 /// The launch's title: the line, the buttons, the round corners, the frame's
@@ -1549,6 +1769,8 @@ pub struct Text {
     menu_lines: Vec<Line>,
     glyphs: Vec<GlyphId>,
     bg: Rgb,
+    /// The frame's colour: the rings of the frame's own corners.
+    frame: Rgb,
     look: Look,
     /// The memfd, to write the pixels with — one descriptor for every text
     /// of the launch: the only one the proxy's filter lets it write to.
@@ -1557,11 +1779,12 @@ pub struct Text {
     pub fd: Rc<OwnedFd>,
     /// The whole memfd's size: a pool of it is the whole of it.
     pool: usize,
-    /// The line's regions, first in the memfd, the buttons' after them, the
-    /// corners' last.
+    /// The line's regions, first in the memfd, the buttons' after them,
+    /// the corners', the frame's own corners'.
     title: Regions,
     buttons: Regions,
     corners: Regions,
+    outer: Regions,
     /// The dropdown's, after the corners'.
     menu: Regions,
     /// The questions' panels', last: drawn anew for each question.
@@ -1608,12 +1831,13 @@ pub struct Drawn {
 
 impl Text {
     /// `memfd` of [`Prepared::memfd_size`] bytes, and a second descriptor of
-    /// it for writing. `bg`: the title's colour ([`Look::title_color`]).
+    /// it for writing. `bg`: the title's colour ([`Look::title_color`]),
+    /// the frame's too.
     pub fn new(prepared: Prepared, bg: Rgb, memfd: OwnedFd, writer: OwnedFd) -> Self {
         let size = prepared.memfd_size();
         Self::new_at(
             prepared,
-            bg,
+            (bg, bg),
             Rc::new(memfd),
             Rc::new(File::from(writer)),
             0,
@@ -1626,33 +1850,25 @@ impl Text {
     /// `total` bytes ([`Prepared::memfd_size_any`]).
     pub fn new_at(
         prepared: Prepared,
-        bg: Rgb,
+        (bg, frame): (Rgb, Rgb),
         memfd: Rc<OwnedFd>,
         writer: Rc<File>,
         origin: usize,
         total: usize,
     ) -> Self {
         let title = Regions::new(origin, prepared.slot_bytes());
-        let buttons = Regions::new(origin + title.bytes(), prepared.button_bytes());
-        let corners = Regions::new(
-            origin + title.bytes() + buttons.bytes(),
-            prepared.corner_bytes(),
-        );
-        let menu = Regions::new(
-            origin + title.bytes() + buttons.bytes() + corners.bytes(),
-            prepared.menu_bytes(),
-        );
-        let prompt = Regions::with_slots(
-            origin + title.bytes() + buttons.bytes() + corners.bytes() + menu.bytes(),
-            Prepared::prompt_bytes(),
-            PROMPT_SLOTS,
-        );
+        let buttons = Regions::new(title.end(), prepared.button_bytes());
+        let corners = Regions::new(buttons.end(), prepared.corner_bytes());
+        let outer = Regions::new(corners.end(), prepared.outer_bytes());
+        let menu = Regions::new(outer.end(), prepared.menu_bytes());
+        let prompt = Regions::with_slots(menu.end(), Prepared::prompt_bytes(), PROMPT_SLOTS);
         Self {
             font: prepared.font,
             line: prepared.line,
             menu_lines: prepared.menu,
             glyphs: prepared.glyphs,
             bg,
+            frame,
             look: prepared.look,
             file: writer,
             fd: memfd,
@@ -1660,6 +1876,7 @@ impl Text {
             title,
             buttons,
             corners,
+            outer,
             menu,
             prompt,
             clock: Cell::new(0),
@@ -1781,16 +1998,38 @@ impl Text {
         (menu_size(&self.menu_lines), self.menu_lines.len())
     }
 
-    /// The round corners at `scale`, all four, as [`Text::at`] the line:
-    /// corner `k` ([`render_corners`]' order) is `k × width × height × 4`
-    /// bytes after `offset`. `None` with square corners.
+    /// The round corners at `scale`, all four, as [`Text::at`] the line,
+    /// but `width` is the side of a top one and `height` of a bottom one
+    /// ([`render_corners`], in its order: the top two, then the bottom
+    /// two). `None` with square corners.
     pub fn corners_at(&self, scale: u32) -> Option<Drawn> {
-        let radius = self.look.corners();
-        if radius <= 0 {
+        let (top, bottom) = self.look.corners();
+        if (top, bottom) == (0, 0) {
             return None;
         }
         self.region_at(&self.corners, scale, |scale| {
-            render_corners(radius, scale, self.bg)
+            render_corners(top, bottom, scale, self.bg)
+        })
+    }
+
+    /// The frame's own round corners at `scale` ([`render_outer`]), all
+    /// four, as [`Text::at`] the line, but `width` is the width of one and
+    /// `height` the top ones' height — the bottom ones are `width` square.
+    /// `None` with square ones.
+    pub fn outer_at(&self, scale: u32) -> Option<Drawn> {
+        let outer = self.look.outer_corners()?;
+        let squares = self.look.squares(self.frame);
+        let rings: Vec<(i32, Rgb)> = self
+            .look
+            .rings(outer.border)
+            .into_iter()
+            .filter_map(|(width, square)| match squares.get(square) {
+                Some(Square::Color(color)) => Some((width, *color)),
+                _ => None,
+            })
+            .collect();
+        self.region_at(&self.outer, scale, |scale| {
+            render_outer(&outer, &rings, self.bg, scale)
         })
     }
 
@@ -1815,7 +2054,6 @@ impl Text {
             {
                 return None;
             }
-            debug_assert_eq!(pixels.len() % (w * h * 4).max(1) as usize, 0);
             slots[free].scale = scale;
             slots[free].size = (w, h);
             Some(free)
@@ -2440,6 +2678,7 @@ mod tests {
         let tag = Look {
             style: Style::Tag,
             radius: 8,
+            radius_top: 8,
             ..LOOK
         };
         assert_eq!(full.squares(c), [Square::Color(c)]);
@@ -2458,9 +2697,24 @@ mod tests {
         assert!(tag.rings(6).is_empty());
         assert_eq!((tag.title_square(true), tag.title_square(false)), (1, 0));
         // Round corners, but not on a tag.
-        assert_eq!(tag.corners(), 0);
-        assert_eq!(Look { radius: 8, ..soft }.corners(), 8);
-        assert_eq!(Look { radius: 99, ..soft }.corners(), MAX_RADIUS);
+        assert_eq!(tag.corners(), (0, 0));
+        assert!(!tag.round());
+        let round = Look {
+            radius: 8,
+            radius_top: 4,
+            ..soft
+        };
+        assert_eq!(round.corners(), (4, 8));
+        assert!(round.round());
+        assert_eq!(
+            Look {
+                radius: 99,
+                radius_top: 99,
+                ..soft
+            }
+            .corners(),
+            (MAX_RADIUS, MAX_RADIUS)
+        );
         // The pixels: opaque, or nothing at all; premultiplied in between.
         assert_eq!(u32::from_ne_bytes(Square::Color(c).word()), 0xff12_80c0);
         assert_eq!(Square::Clear.word(), [0; 4]);
@@ -2478,15 +2732,82 @@ mod tests {
             title: crate::frame::TitleMode::Always,
             buttons: crate::frame::ButtonStyle::Macos,
             style: Style::Soft,
-            radius: 12,
+            radius: Radius::Px(12),
+            outer: Radius::Px(0),
         };
         assert_eq!(
             Look::of(&frame),
             Look {
                 style: Style::Soft,
                 buttons: MACOS,
-                radius: 12
+                radius: 12,
+                radius_top: 12,
             }
+        );
+    }
+
+    /// Following niri's radius: concentric inside it — less the border, at
+    /// the top less the title strip where it takes room —, square where
+    /// that leaves nothing; no more than the most.
+    #[test]
+    fn the_radius_inside_follows_niris_outside() {
+        let frame = crate::frame::Frame {
+            color: Rgb(1, 2, 3),
+            width: 4,
+            title: TitleMode::Always,
+            buttons: crate::frame::ButtonStyle::Cellward,
+            style: Style::Soft,
+            radius: Radius::Niri(20),
+            outer: Radius::Px(0),
+        };
+        // A niri of 20, a border of 4 — the strip of 20 over it
+        // leaves the top square.
+        assert_eq!(inner_radii(&frame), (0, 16));
+        assert_eq!(Look::of(&frame).corners(), (0, 16));
+        for title in [TitleMode::Hover, TitleMode::Off] {
+            assert_eq!(
+                inner_radii(&Frame { title, ..frame }),
+                (16, 16),
+                "{title:?}"
+            );
+        }
+        let wide = Frame {
+            radius: Radius::Niri(40),
+            ..frame
+        };
+        assert_eq!(inner_radii(&wide), (16, 36));
+        assert_eq!(Look::of(&wide).corners(), (16, MAX_RADIUS));
+        assert_eq!(
+            inner_radii(&Frame {
+                width: 0,
+                title: TitleMode::Off,
+                ..frame
+            }),
+            (20, 20),
+            "no border: niri's own"
+        );
+        assert_eq!(
+            inner_radii(&Frame {
+                radius: Radius::Niri(3),
+                ..frame
+            }),
+            (0, 0),
+            "a border wider than niri's radius: square"
+        );
+        // A tag has no border to take off, and draws no corner anyway.
+        let tag = Frame {
+            style: Style::Tag,
+            ..frame
+        };
+        assert_eq!(inner_radii(&tag), (0, 20));
+        assert!(!Look::of(&tag).round());
+        // A number is the number, top and bottom.
+        assert_eq!(
+            inner_radii(&Frame {
+                radius: Radius::Px(9),
+                ..frame
+            }),
+            (9, 9)
         );
     }
 
@@ -2589,7 +2910,7 @@ mod tests {
     #[test]
     fn the_round_corners_are_clear_inside_their_quarter_circle() {
         let c = Rgb(240, 91, 240);
-        let (d, d2, pixels) = render_corners(8, 120, c);
+        let (d, d2, pixels) = render_corners(8, 8, 120, c);
         assert_eq!((d, d2), (8, 8));
         assert_eq!(pixels.len(), 4 * 8 * 8 * 4);
         let word = |k: i32, x: i32, y: i32| {
@@ -2622,10 +2943,167 @@ mod tests {
             }
         }
         // At 1.5: 12 pixels, the same shape.
-        let (d, _, pixels) = render_corners(8, 180, c);
+        let (d, _, pixels) = render_corners(8, 8, 180, c);
         assert_eq!((d, pixels.len()), (12, 4 * 12 * 12 * 4));
         // None at 0.
-        assert_eq!(render_corners(0, 120, c).2.len(), 0);
+        assert_eq!(render_corners(0, 0, 120, c).2.len(), 0);
+        // The top two of one radius, the bottom two of another: each the
+        // shape of its own, one after the other.
+        let (top, bottom, pixels) = render_corners(4, 8, 120, c);
+        assert_eq!((top, bottom), (4, 8));
+        assert_eq!(pixels.len(), 2 * (4 * 4 + 8 * 8) * 4);
+        let (_, _, small) = render_corners(4, 4, 120, c);
+        let (_, _, large) = render_corners(8, 8, 120, c);
+        assert_eq!(
+            pixels[..2 * 4 * 4 * 4],
+            small[..2 * 4 * 4 * 4],
+            "the top two"
+        );
+        assert_eq!(
+            pixels[2 * 4 * 4 * 4..],
+            large[2 * 8 * 8 * 4..],
+            "the bottom two"
+        );
+        // A square top: the bottom two alone.
+        let (top, bottom, pixels) = render_corners(0, 8, 120, c);
+        assert_eq!((top, bottom), (0, 8));
+        assert_eq!(pixels[..], large[2 * 8 * 8 * 4..]);
+    }
+
+    /// The frame's own corners: what of the frame is in each — the rings
+    /// from the outside in, the title strip's colour in its row under the
+    /// top ones, clear over the content —, cut by the quarter circle; each
+    /// a mirror of the top left.
+    #[test]
+    fn the_frames_own_corners_are_the_frame_cut_round() {
+        let (outer_c, inner_c, bg) = (Rgb(200, 0, 0), Rgb(0, 200, 0), Rgb(0, 0, 200));
+        let o = Outer {
+            radius: 12,
+            side: 12,
+            top: 24,
+            border: 4,
+            band: true,
+        };
+        let rings = [(2, outer_c), (2, inner_c)];
+        let (w, top, pixels) = render_outer(&o, &rings, bg, 120);
+        assert_eq!((w, top), (12, 24));
+        assert_eq!(pixels.len(), 2 * (12 * 24 + 12 * 12) * 4);
+        let word =
+            |image: &[u8], at: usize| u32::from_ne_bytes(image[at..at + 4].try_into().unwrap());
+        let top_left = |x: i32, y: i32| word(&pixels, ((y * w + x) * 4) as usize);
+        let opaque = |c: Rgb| u32::from_ne_bytes(c.xrgb8888());
+        // The window's very corner: cut off, clear.
+        assert_eq!(top_left(0, 0), 0);
+        // Along the top, the outer ring, then the inner one: past the curve
+        // whole.
+        assert!(top_left(11, 0) >> 24 > 0xf0, "{:x}", top_left(11, 0));
+        assert_eq!(top_left(11, 3), opaque(inner_c));
+        assert_eq!(top_left(3, 11), opaque(inner_c));
+        assert_eq!(
+            top_left(1, 11),
+            top_left(11, 1),
+            "the rings meet on the diagonal"
+        );
+        assert_eq!(top_left(11, 1) & 0x00ff_ffff, opaque(outer_c) & 0x00ff_ffff);
+        // Inside the border: the title strip's row, its colour; below it the
+        // content, clear.
+        assert_eq!(top_left(8, 8), opaque(bg));
+        assert_eq!(top_left(8, 23), opaque(bg));
+        // Without the strip under them (hover): clear there.
+        let hover = Outer { band: false, ..o };
+        let (_, _, bare) = render_outer(&hover, &rings, bg, 120);
+        assert_eq!(word(&bare, ((8 * w + 8) * 4) as usize), 0);
+        // The others mirror the top left: the top right across, the bottom
+        // ones up and across — no strip under them.
+        // Where each image starts: the top two `w` × `top`, the bottom two
+        // `w` square.
+        let start = [0, w * top, 2 * w * top, 2 * w * top + w * w];
+        let image = |k: usize, x: i32, y: i32| word(&pixels, ((start[k] + y * w + x) * 4) as usize);
+        let bare_left = |x: i32, y: i32| word(&bare, ((y * w + x) * 4) as usize);
+        for y in 0..top {
+            for x in 0..w {
+                assert_eq!(
+                    image(1, x, y),
+                    top_left(w - 1 - x, y),
+                    "top right ({x}, {y})"
+                );
+            }
+        }
+        for y in 0..w {
+            for x in 0..w {
+                assert_eq!(
+                    image(2, x, y),
+                    bare_left(x, w - 1 - y),
+                    "bottom left ({x}, {y})"
+                );
+                assert_eq!(
+                    image(3, x, y),
+                    bare_left(w - 1 - x, w - 1 - y),
+                    "bottom right"
+                );
+            }
+        }
+        // At 1.5 the sizes of the scale.
+        let (w, top, _) = render_outer(&o, &rings, bg, 180);
+        assert_eq!((w, top), (18, 36));
+    }
+
+    /// The look of the settings: the frame's own corners where the outer
+    /// radius says, over the border and the title strip of the settings;
+    /// none on a tag; the top ones down past the strip only where the
+    /// radius reaches below the border.
+    #[test]
+    fn the_outer_radius_is_the_looks() {
+        let frame = crate::frame::Frame {
+            color: Rgb(1, 2, 3),
+            width: 4,
+            title: TitleMode::Always,
+            buttons: crate::frame::ButtonStyle::Cellward,
+            style: Style::Soft,
+            radius: Radius::Px(0),
+            outer: Radius::Niri(20),
+        };
+        let look = Look::of(&frame);
+        assert_eq!((look.outer, look.border, look.band), (20, 4, true));
+        assert!(look.round());
+        assert_eq!(
+            look.outer_corners(),
+            Some(Outer {
+                radius: 20,
+                side: 20,
+                top: 24,
+                border: 4,
+                band: true
+            })
+        );
+        let hover = Look::of(&Frame {
+            title: TitleMode::Hover,
+            ..frame
+        });
+        assert_eq!(
+            hover.outer_corners().map(|o| (o.top, o.band)),
+            Some((24, false))
+        );
+        let inside = Look::of(&Frame {
+            outer: Radius::Px(3),
+            ..frame
+        });
+        assert_eq!(
+            inside.outer_corners().map(|o| (o.side, o.top)),
+            Some((4, 4)),
+            "a radius inside the border: its corner square alone"
+        );
+        let tag = Look::of(&Frame {
+            style: Style::Tag,
+            ..frame
+        });
+        assert_eq!((tag.outer_corners(), tag.round()), (None, false));
+        let square = Look::of(&Frame {
+            outer: Radius::Px(0),
+            ..frame
+        });
+        assert_eq!((square.outer, square.border, square.band), (0, 0, false));
+        assert!(!square.round());
     }
 
     /// The corners' regions: after the line's and the buttons', written as
@@ -2651,6 +3129,7 @@ mod tests {
         let round = Look {
             style: Style::Soft,
             radius: 8,
+            radius_top: 8,
             ..LOOK
         };
         let (text, path, size) = text_of(round, "round");
@@ -2658,7 +3137,7 @@ mod tests {
         let corners = text.corners_at(180).unwrap();
         assert_eq!((corners.width, corners.height), (12, 12));
         assert!(corners.offset as usize >= text.title.bytes() + text.buttons.bytes());
-        let (_, _, want) = render_corners(8, 180, Rgb(240, 91, 240));
+        let (_, _, want) = render_corners(8, 8, 180, Rgb(240, 91, 240));
         assert!(
             corners.offset as usize + want.len() <= size,
             "past the memfd"
@@ -2685,13 +3164,43 @@ mod tests {
             .borrow()
             .iter()
             .all(|s| s.leases.get() == 0));
+        // The frame's own: a region of their own, after the corners'.
+        let outer = Look {
+            outer: 12,
+            border: 4,
+            band: true,
+            ..round
+        };
+        let (text, path, size) = text_of(outer, "outer");
+        let drawn = text.outer_at(120).unwrap();
+        assert_eq!((drawn.width, drawn.height), (12, 24));
+        assert!(drawn.offset as usize >= text.corners.end());
+        let rings = [
+            (2, soft_outer(Rgb(240, 91, 240))),
+            (2, soft_inner(Rgb(240, 91, 240))),
+        ];
+        let (_, _, want) = render_outer(
+            &outer.outer_corners().unwrap(),
+            &rings,
+            Rgb(240, 91, 240),
+            120,
+        );
+        assert!(drawn.offset as usize + want.len() <= size, "past the memfd");
+        let mut got = vec![0u8; want.len()];
+        File::open(&path)
+            .unwrap()
+            .read_exact_at(&mut got, drawn.offset as u64)
+            .unwrap();
+        assert_eq!(got, want);
         // Square: nothing; a tag: nothing, and its line is the tag, clear
         // at the corners.
         let (square, _, _) = text_of(LOOK, "square");
         assert!(square.corners_at(120).is_none());
+        assert!(square.outer_at(120).is_none());
         let tag = Look {
             style: Style::Tag,
             radius: 8,
+            radius_top: 8,
             ..LOOK
         };
         let (tagged, _, _) = text_of(tag, "tag");

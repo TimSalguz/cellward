@@ -103,6 +103,14 @@ pub fn defaults(tools: &Tools) -> String {
     let (frame_buttons, frame_buttons_source) = crate::frame::buttons(&tools.config);
     let (frame_style, frame_style_source) = crate::frame::style(&tools.config);
     let (frame_radius, frame_radius_source) = crate::frame::radius(&tools.config);
+    // The frame's own corners, outside it; either radius a number or
+    // "niri" — niri's own, which `frame_niri_radius` says as it is read
+    // now (0: niri's config sets none, or there is none).
+    let (frame_outer, frame_outer_source) = crate::frame::outer_radius(&tools.config);
+    let radius_json = |r: crate::frame::Radius| match r {
+        crate::frame::Radius::Px(px) => px.to_string(),
+        crate::frame::Radius::Niri(_) => string("niri"),
+    };
     // The zone's mark on its programs' tray icons (`crate::tray`).
     let (tray_badge, tray_badge_source) = crate::tray::badge(&tools.config);
     // How long a refused permission is not asked about again.
@@ -126,7 +134,8 @@ pub fn defaults(tools: &Tools) -> String {
     format!(
         "{{\"network\":{},\"container\":{},\"launcher_mode\":{},\"compositor_restriction\":{},\
          \"wayland_proxy\":{},\"frames\":{},\"frame_width\":{},\"frame_title\":{},\
-         \"frame_buttons\":{},\"frame_style\":{},\"frame_radius\":{},\"tray_badge\":{},\
+         \"frame_buttons\":{},\"frame_style\":{},\"frame_radius\":{},\"frame_outer_radius\":{},\
+         \"frame_niri_radius\":{},\"tray_badge\":{},\
          \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{},\"ask_again\":{},\
          \"question_timeout\":{},\"handshake_check\":{},\"protected\":[{}],\"host_runs\":[{}],\
          \"permissions\":{{\"microphone\":{},\"screencast\":{},\"camera\":{},\
@@ -142,7 +151,9 @@ pub fn defaults(tools: &Tools) -> String {
         sourced_str(frame_title.as_str(), frame_title_source),
         sourced_str(frame_buttons.as_str(), frame_buttons_source),
         sourced_str(frame_style.as_str(), frame_style_source),
-        sourced(frame_radius.to_string(), frame_radius_source),
+        sourced(radius_json(frame_radius), frame_radius_source),
+        sourced(radius_json(frame_outer), frame_outer_source),
+        crate::frame::niri_radius(),
         sourced_str(tray_badge.as_str(), tray_badge_source),
         sourced_str(&autostart, autostart_source),
         sourced_str(&user_entries, user_entries_source),

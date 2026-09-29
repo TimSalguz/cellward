@@ -3242,6 +3242,53 @@ fn the_frames_look_goes_to_the_launch_and_the_status() {
         "{line}"
     );
 
+    // niri's radius (2026-09-29), inside and outside: the setting says
+    // `niri`, the launch niri's number as its config has it now.
+    let niri = home.root.join("niri.kdl");
+    fs::write(
+        &niri,
+        "window-rule {\n    geometry-corner-radius 20\n    clip-to-geometry true\n}\n",
+    )
+    .unwrap();
+    let with_niri = [
+        ("VPN_ZONE_DRYRUN", "1"),
+        ("NIRI_CONFIG", niri.to_str().unwrap()),
+    ];
+    for setting in ["radius", "outer-radius"] {
+        let out = home.run_with(&["frame", setting, "niri"], &with_niri);
+        assert!(out.status.success(), "{setting}: {}", stderr(&out));
+        assert!(stdout(&out).contains("как у niri (20)"), "{}", stdout(&out));
+    }
+    let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &with_niri));
+    assert!(
+        line.contains(&format!(
+            "--frame {colour}:4:always:cellward:soft:niri20:niri20 "
+        )),
+        "{line}"
+    );
+    let json = stdout(&home.run_with(&["status", "--json"], &with_niri));
+    for field in [
+        "\"frame_radius\":{\"value\":\"niri\",\"source\":\"local\"}",
+        "\"frame_outer_radius\":{\"value\":\"niri\",\"source\":\"local\"}",
+        "\"frame_niri_radius\":20,",
+    ] {
+        assert!(json.contains(field), "{field}: {json}");
+    }
+    // The outer radius alone away from its default says the look before it.
+    for (setting, value) in [("radius", "default"), ("outer-radius", "24")] {
+        let out = home.run(&["frame", setting, value]);
+        assert!(out.status.success(), "{setting}: {}", stderr(&out));
+    }
+    let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+    assert!(
+        line.contains(&format!("--frame {colour}:4:always:cellward:soft:0:24 ")),
+        "{line}"
+    );
+    assert!(home
+        .run(&["frame", "outer-radius", "default"])
+        .status
+        .success());
+
     // Nonsense is refused.
     for bad in [
         &["frame", "style", "glass"][..],
@@ -3250,6 +3297,9 @@ fn the_frames_look_goes_to_the_launch_and_the_status() {
         &["frame", "radius", "17"],
         &["frame", "radius", "-1"],
         &["frame", "radius", "round"],
+        &["frame", "radius", "niri20"],
+        &["frame", "outer-radius", "33"],
+        &["frame", "outer-radius"],
     ] {
         assert!(!home.run(bad).status.success(), "{bad:?}");
     }

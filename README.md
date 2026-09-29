@@ -494,7 +494,7 @@ unknown. Nothing trusts the window's title; the bar line escapes markup.
 **The zone's frame.** Windows of a program in a zone come with a frame the
 Wayland proxy draws inside the window: a border of the zone's (or the
 container's) colour and a title strip with `<zone> · <container>`
-(`cellward frame show|hide|width|color|title|style|buttons|radius`). At the right end of the strip
+(`cellward frame show|hide|width|color|title|style|buttons|radius|outer-radius`). At the right end of the strip
 three buttons: **≡** opens the window menu of that very launch (`cellward
 window-menu --pid`), **⇄** switches the container's network live — its
 programs run on, their connections are broken (for the main home or a
@@ -515,7 +515,7 @@ shows. Like the frame, a reminder: the program cannot take the mark off, but
 it can paint another one into its own picture.
 
 Its look is yours to choose, for programs started after the change (and in
-Nix: `programs.cellward.frame.style`, `.buttons`, `.radius`):
+Nix: `programs.cellward.frame.style`, `.buttons`, `.radius`, `.outerRadius`):
 
 ```sh
 cellward frame style soft|full|tag    # soft (default): the zone's hue, calmer, the border in
@@ -525,6 +525,8 @@ cellward frame buttons cellward|gnome|kde|macos|windows|none
                                       # the buttons' look: square cells (default), GNOME's,
                                       # KDE's, macOS's traffic lights at the left, Windows's
 cellward frame radius 10              # round the window's corners inside the frame (0-16)
+cellward frame radius niri            # ... concentric with niri's geometry-corner-radius
+cellward frame outer-radius 12        # round the frame's own corners too (0-32 or niri)
 cellward frame                        # what is set now, and where from
 ```
 

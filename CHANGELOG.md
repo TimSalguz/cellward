@@ -22,6 +22,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
+- **Round corners that follow niri, and outside the frame** (2026-09-29):
+  `cellward frame radius niri` rounds the window's corners inside the frame
+  concentrically with niri's `geometry-corner-radius` (read from niri's
+  config: the last `window-rule` without `match`) — niri's radius less the
+  border, at the top less the title strip where it takes room; the top and
+  the bottom corners now have radii of their own. `cellward frame
+  outer-radius <0–32>|niri` (Nix `programs.cellward.frame.outerRadius`)
+  rounds the frame's own corners for compositors that do not clip windows:
+  the border's strips and the title strip are laid short of four corner
+  pieces that draw them round. niri's config is watched too: a new radius
+  there reaches the open windows. `status --json`: `frame_radius` is a
+  number or `"niri"`, new `frame_outer_radius` (the same) and
+  `frame_niri_radius`. `wl-sandbox --frame` takes a seventh field, the
+  outer radius; a radius there is a number or `niri<N>`.
 - **The frame changes on the fly** (2026-09-29, step 6): the width, the
   colour (the zone's, the container's), the title strip's mode, the style,
   the buttons and the corners' radius reach the windows already open —

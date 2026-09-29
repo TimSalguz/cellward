@@ -3927,26 +3927,30 @@ fn tray(tools: &Tools, args: &[OsString]) -> u8 {
 /// `vpn-zone frame title always|hover|off` (always),
 /// `vpn-zone frame style soft|full|tag` (soft),
 /// `vpn-zone frame buttons cellward|gnome|kde|macos|windows|none` (cellward),
-/// `vpn-zone frame radius <0–16>` (0),
+/// `vpn-zone frame radius <0–16>|niri` (0),
+/// `vpn-zone frame outer-radius <0–32>|niri` (0),
 /// `vpn-zone frame color <zone> default|<#rrggbb>` (`default`: from the
 /// zone's name): the frame of the zone's
 /// colour the Wayland proxy draws around its programs' windows, its title
 /// strip and its look (`crate::frame`, `docs/WINDOW-FRAME.md` §0а, §8 «Вид
-/// рамки»). Each takes effect for windows opened after it: the colour, the
-/// width, the title and the look when a program is launched, the switch
-/// when it connects. `default` for any but the switch drops the local
+/// рамки»). The colour, the width, the title and the look take effect at
+/// once, open windows too (their launch's supervisor watches them,
+/// `wl_proxy::Live`); the switch for windows opened after it, when their
+/// program connects. `default` for any but the switch drops the local
 /// setting; one declared in Nix is changed there.
 fn frame(tools: &Tools, args: &[OsString]) -> u8 {
     use crate::container::Source;
     use crate::frame::{
-        ButtonStyle, Rgb, Style, TitleMode, BUTTONS_SETTING, COLOR_FILE, MAX_RADIUS, MAX_WIDTH,
-        RADIUS_SETTING, STYLE_SETTING, SWITCH_SETTING, TITLE_SETTING, WIDTH_SETTING,
+        ButtonStyle, Radius, Rgb, Style, TitleMode, BUTTONS_SETTING, COLOR_FILE, MAX_OUTER_RADIUS,
+        MAX_RADIUS, MAX_WIDTH, OUTER_RADIUS_SETTING, RADIUS_SETTING, STYLE_SETTING, SWITCH_SETTING,
+        TITLE_SETTING, WIDTH_SETTING,
     };
     const USAGE: &str = "cellward frame show|hide\ncellward frame width <0–32> (по умолчанию 4)\n\
                          cellward frame title always (по умолчанию)|hover|off\n\
                          cellward frame style soft (по умолчанию)|full|tag\n\
                          cellward frame buttons cellward (по умолчанию)|gnome|kde|macos|windows|none\n\
-                         cellward frame radius <0–16> (по умолчанию 0)\n\
+                         cellward frame radius <0–16>|niri (по умолчанию 0)\n\
+                         cellward frame outer-radius <0–32>|niri (по умолчанию 0)\n\
                          cellward frame color <зона> default (из имени зоны)|<#rrggbb>";
     let title_words = |mode: TitleMode| match mode {
         TitleMode::Always => "всегда (always)",
@@ -3966,6 +3970,13 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
         ButtonStyle::Windows => "как в Windows (windows)",
         ButtonStyle::None => "без кнопок (none)",
     };
+    // A radius: the number, or niri's and what it is now.
+    let radius_words = |r: Radius| match r {
+        Radius::Px(px) => px.to_string(),
+        Radius::Niri(px) => format!("как у niri ({px})"),
+    };
+    // Now, and in the open windows too.
+    const AT_ONCE: &str = "сразу, у открытых окон тоже";
     let from = |source: Source, nix: &str| match source {
         Source::Local => String::new(),
         Source::Nix => format!(" (задано в Nix: {nix})"),
@@ -3996,9 +4007,10 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
             let (style, style_source) = crate::frame::style(&tools.config);
             let (buttons, buttons_source) = crate::frame::buttons(&tools.config);
             let (radius, radius_source) = crate::frame::radius(&tools.config);
+            let (outer, outer_source) = crate::frame::outer_radius(&tools.config);
             println!(
                 "рамки зон: {shown}; толщина {width}{}; заголовок: {}{}; вид: {}{}; кнопки: {}{}; \
-                 скругление {radius}{}",
+                 скругление внутри {}{}, снаружи {}{}",
                 from(source, "programs.cellward.frame.width"),
                 title_words(title),
                 from(title_source, "programs.cellward.frame.title"),
@@ -4006,7 +4018,10 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 from(style_source, "programs.cellward.frame.style"),
                 buttons_words(buttons),
                 from(buttons_source, "programs.cellward.frame.buttons"),
-                from(radius_source, "programs.cellward.frame.radius")
+                radius_words(radius),
+                from(radius_source, "programs.cellward.frame.radius"),
+                radius_words(outer),
+                from(outer_source, "programs.cellward.frame.outerRadius")
             );
             0
         }
@@ -4032,7 +4047,7 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
             }
             let (style, source) = crate::frame::style(&tools.config);
             println!(
-                "вид рамки: {}{} — у программ, запущенных после этого",
+                "вид рамки: {}{} — {AT_ONCE}",
                 style_words(style),
                 from(source, "programs.cellward.frame.style")
             );
@@ -4062,24 +4077,35 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
             }
             let (look, source) = crate::frame::buttons(&tools.config);
             println!(
-                "кнопки рамки: {}{} — у программ, запущенных после этого",
+                "кнопки рамки: {}{} — {AT_ONCE}",
                 buttons_words(look),
                 from(source, "programs.cellward.frame.buttons")
             );
             0
         }
-        Some("radius") => {
+        Some(which @ ("radius" | "outer-radius")) => {
             let Some(value) = args.get(1).and_then(|v| v.to_str()) else {
                 eprintln!("{USAGE}");
                 return 1;
             };
-            let written = if value == "default" {
-                reset(RADIUS_SETTING)
+            let outer = which == "outer-radius";
+            let (name, max) = if outer {
+                (OUTER_RADIUS_SETTING, MAX_OUTER_RADIUS)
             } else {
-                match crate::frame::parse_radius(value) {
-                    Some(r) => write_setting(tools, RADIUS_SETTING, OsStr::new(&r.to_string())),
+                (RADIUS_SETTING, MAX_RADIUS)
+            };
+            let written = if value == "default" {
+                reset(name)
+            } else {
+                let parsed = if outer {
+                    crate::frame::parse_outer_radius(value)
+                } else {
+                    crate::frame::parse_radius(value)
+                };
+                match parsed {
+                    Some(r) => write_setting(tools, name, OsStr::new(&r.word())),
                     None => {
-                        eprintln!("скругление — целое от 0 до {MAX_RADIUS} или default");
+                        eprintln!("скругление — целое от 0 до {max}, niri или default");
                         return 1;
                     }
                 }
@@ -4088,15 +4114,29 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 eprintln!("не записать {e}");
                 return 1;
             }
-            let (radius, source) = crate::frame::radius(&tools.config);
-            let note = if radius > 0 && crate::frame::style(&tools.config).0 == Style::Tag {
-                " (у бирки углы не скругляются: вокруг нет рамки)"
+            let (radius, source) = if outer {
+                crate::frame::outer_radius(&tools.config)
             } else {
-                ""
+                crate::frame::radius(&tools.config)
+            };
+            let tag = crate::frame::style(&tools.config).0 == Style::Tag;
+            let note = match radius {
+                _ if tag && radius.px() > 0 => " (у бирки углы не скругляются: вокруг нет рамки)",
+                Radius::Niri(0) => " (в конфиге niri радиуса для всех окон нет — углы квадратные)",
+                _ => "",
+            };
+            let (what, nix) = if outer {
+                (
+                    "скругление рамки снаружи",
+                    "programs.cellward.frame.outerRadius",
+                )
+            } else {
+                ("скругление углов окна", "programs.cellward.frame.radius")
             };
             println!(
-                "скругление углов окна: {radius}{}{note} — у программ, запущенных после этого",
-                from(source, "programs.cellward.frame.radius")
+                "{what}: {}{}{note} — {AT_ONCE}",
+                radius_words(radius),
+                from(source, nix)
             );
             0
         }
@@ -4131,7 +4171,7 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
             }
             let (title, source) = crate::frame::title_mode(&tools.config);
             println!(
-                "заголовок рамки: {}{} — у программ, запущенных после этого",
+                "заголовок рамки: {}{} — {AT_ONCE}",
                 title_words(title),
                 from(source, "programs.cellward.frame.title")
             );
@@ -4186,7 +4226,7 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
             }
             let (width, source) = crate::frame::width(&tools.config);
             println!(
-                "толщина рамки: {width}{} — у программ, запущенных после этого",
+                "толщина рамки: {width}{} — {AT_ONCE}",
                 from(source, "programs.cellward.frame.width")
             );
             0
@@ -4222,7 +4262,7 @@ fn frame(tools: &Tools, args: &[OsString]) -> u8 {
             }
             let (color, source) = crate::frame::zone_color(&tools.state, &tools.config, &name);
             println!(
-                "зона {name}: рамка {}{} — у программ, запущенных после этого",
+                "зона {name}: рамка {}{} — {AT_ONCE}",
                 color.hex(),
                 from(source, "programs.cellward.frame.colors")
             );

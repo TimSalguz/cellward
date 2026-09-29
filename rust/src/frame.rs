@@ -20,6 +20,15 @@
 //! laid anew. The width first — 0 is no border at all, the title strip
 //! alone where it is on.
 //!
+//! **Round corners** (2026-09-29, the owner: «закругление тоже пусть
+//! меняется динамически… и внешнее… в идеале расчёт автоматическим по
+//! закруглению niri»): the radius inside the frame, over the program's
+//! corners, and the one outside it, the frame's own; each a number or
+//! `niri` — niri's radius for every window (`crate::niri`), read when the
+//! frame is, and again when niri's config changes. Inside, `niri` is the
+//! radius that keeps the curves concentric: niri's less the border, at the
+//! top less the title strip too where it takes room.
+//!
 //! Where a setting comes from, as for the others: Nix (`declared/`) over the
 //! local one, the local one over the default. The switch has no Nix option —
 //! it is flipped for a call and back, and a switch declared in Nix could not
@@ -55,8 +64,11 @@ pub const BUTTONS_SETTING: &str = "frame-buttons";
 /// `soft` or `tag` ([`Style`]).
 pub const STYLE_SETTING: &str = "frame-style";
 /// The radius of the window's corners inside the frame, a setting file of
-/// the config directory (logical pixels, 0 for square ones).
+/// the config directory (logical pixels, 0 for square ones, or `niri`).
 pub const RADIUS_SETTING: &str = "frame-radius";
+/// The radius of the frame's own corners, outside, a setting file of the
+/// config directory (logical pixels, 0 for square ones, or `niri`).
+pub const OUTER_RADIUS_SETTING: &str = "frame-outer-radius";
 
 /// The most characters of one part of the title — the zone's name, the
 /// container's — that are drawn; a longer one is cut, with an ellipsis.
@@ -70,10 +82,84 @@ pub const DEFAULT_WIDTH: i32 = 4;
 /// Wider than this is not a border any more.
 pub const MAX_WIDTH: i32 = 32;
 /// Square corners unless asked: the owner's windows as they were.
-pub const DEFAULT_RADIUS: i32 = 0;
+pub const DEFAULT_RADIUS: Radius = Radius::Px(0);
+/// And the frame's own.
+pub const DEFAULT_OUTER_RADIUS: Radius = Radius::Px(0);
 /// Rounder than this is not a corner of a window any more: 16 is the most
 /// the owner asked for (2026-09-27, «0–16»).
 pub const MAX_RADIUS: i32 = 16;
+/// The frame's own corners: as round as the border and the radius inside
+/// it together, at most.
+pub const MAX_OUTER_RADIUS: i32 = 32;
+
+/// A radius of round corners, as a setting has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Radius {
+    /// Logical pixels.
+    Px(i32),
+    /// niri's radius for every window (`crate::niri`), logical pixels, as it
+    /// was read ([`niri_radius`]); 0 where its config sets none.
+    Niri(i32),
+}
+
+impl Radius {
+    /// The number of pixels, or niri's as it was read.
+    pub fn px(self) -> i32 {
+        match self {
+            Self::Px(r) | Self::Niri(r) => r,
+        }
+    }
+
+    /// The setting's word: the number, or `niri`.
+    pub fn word(self) -> String {
+        match self {
+            Self::Px(r) => r.to_string(),
+            Self::Niri(_) => "niri".to_owned(),
+        }
+    }
+
+    /// On `wl-sandbox --frame`: the number, or `niri` and niri's radius as
+    /// it was read, `niri20` — the proxy reads no file.
+    fn arg(self) -> String {
+        match self {
+            Self::Px(r) => r.to_string(),
+            Self::Niri(r) => format!("niri{r}"),
+        }
+    }
+
+    /// [`Radius::arg`] back, a number of pixels up to `max`.
+    fn parse_arg(text: &str, max: i32) -> Option<Self> {
+        match text.strip_prefix("niri") {
+            Some(r) => whole(r, MAX_OUTER_RADIUS).map(Self::Niri),
+            None => whole(text, max).map(Self::Px),
+        }
+    }
+
+    /// niri's radius read again where the setting says `niri`.
+    fn read(self) -> Self {
+        match self {
+            Self::Niri(_) => Self::Niri(niri_radius()),
+            px => px,
+        }
+    }
+}
+
+/// A whole number of 0 to `max`, digits only.
+fn whole(text: &str, max: i32) -> Option<i32> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok().filter(|r| (0..=max).contains(r))
+}
+
+/// niri's radius for every window now, whole logical pixels up to
+/// [`MAX_OUTER_RADIUS`]; 0 where niri's config sets none, or there is no
+/// niri's config.
+pub fn niri_radius() -> i32 {
+    crate::niri::corner_radius_now().map_or(0, |r| {
+        r.round().clamp(0.0, f64::from(MAX_OUTER_RADIUS)) as i32
+    })
+}
 
 /// A colour, 8 bits a channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,18 +481,43 @@ pub fn style(config: &Path) -> (Style, Source) {
     word_setting(config, STYLE_SETTING, Style::parse, DEFAULT_STYLE)
 }
 
-/// A radius as a setting file or the command line has it: a whole number of
-/// logical pixels, 0 to [`MAX_RADIUS`].
-pub fn parse_radius(text: &str) -> Option<i32> {
-    text.trim()
-        .parse()
-        .ok()
-        .filter(|r| (0..=MAX_RADIUS).contains(r))
+/// A radius inside the frame as a setting file or the command line has it:
+/// a whole number of logical pixels, 0 to [`MAX_RADIUS`], or `niri` —
+/// `Niri(0)` here, niri's own read by [`radius`].
+pub fn parse_radius(text: &str) -> Option<Radius> {
+    parse_radius_up_to(text, MAX_RADIUS)
 }
 
-/// The radius of the window's corners and where it comes from.
-pub fn radius(config: &Path) -> (i32, Source) {
-    word_setting(config, RADIUS_SETTING, parse_radius, DEFAULT_RADIUS)
+/// The frame's own radius, as [`parse_radius`]: 0 to [`MAX_OUTER_RADIUS`],
+/// or `niri`.
+pub fn parse_outer_radius(text: &str) -> Option<Radius> {
+    parse_radius_up_to(text, MAX_OUTER_RADIUS)
+}
+
+fn parse_radius_up_to(text: &str, max: i32) -> Option<Radius> {
+    match text.trim() {
+        "niri" => Some(Radius::Niri(0)),
+        text => whole(text, max).map(Radius::Px),
+    }
+}
+
+/// The radius of the window's corners inside the frame and where it comes
+/// from; niri's read now where it is `niri`.
+pub fn radius(config: &Path) -> (Radius, Source) {
+    let (r, source) = word_setting(config, RADIUS_SETTING, parse_radius, DEFAULT_RADIUS);
+    (r.read(), source)
+}
+
+/// The radius of the frame's own corners and where it comes from, as
+/// [`radius`].
+pub fn outer_radius(config: &Path) -> (Radius, Source) {
+    let (r, source) = word_setting(
+        config,
+        OUTER_RADIUS_SETTING,
+        parse_outer_radius,
+        DEFAULT_OUTER_RADIUS,
+    );
+    (r.read(), source)
 }
 
 /// Whether a character may be drawn in the title: not a control character,
@@ -447,8 +558,8 @@ pub fn clean_title(text: &str) -> String {
 }
 
 /// What `wl-sandbox --frame` carries: the colour, the width and the title's
-/// mode, and the look — the buttons', the style, the corners' radius —,
-/// `rrggbb:w:mode[:buttons:style:radius]`.
+/// mode, and the look — the buttons', the style, the corners' radius inside
+/// and outside —, `rrggbb:w:mode[:buttons:style:radius[:outer]]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Frame {
     pub color: Rgb,
@@ -456,7 +567,8 @@ pub struct Frame {
     pub title: TitleMode,
     pub buttons: ButtonStyle,
     pub style: Style,
-    pub radius: i32,
+    pub radius: Radius,
+    pub outer: Radius,
 }
 
 impl Frame {
@@ -469,6 +581,7 @@ impl Frame {
             buttons: buttons(config).0,
             style: style(config).0,
             radius: radius(config).0,
+            outer: outer_radius(config).0,
         }
     }
 
@@ -483,18 +596,24 @@ impl Frame {
     }
 
     /// `rrggbb:w:mode`, and `:buttons:style:radius` after it when one of
-    /// them is not its default: the launch's line of the common case stays
-    /// the one it was before there were looks.
+    /// them — or the outer radius — is not its default, `:outer` after them
+    /// when it is not: the launch's line of the common case stays the one it
+    /// was before there were looks.
     pub fn to_arg(self) -> String {
         let default = (DEFAULT_BUTTONS, DEFAULT_STYLE, DEFAULT_RADIUS);
-        let look = if (self.buttons, self.style, self.radius) == default {
+        let outer = if self.outer == DEFAULT_OUTER_RADIUS {
+            String::new()
+        } else {
+            format!(":{}", self.outer.arg())
+        };
+        let look = if (self.buttons, self.style, self.radius) == default && outer.is_empty() {
             String::new()
         } else {
             format!(
-                ":{}:{}:{}",
+                ":{}:{}:{}{outer}",
                 self.buttons.as_str(),
                 self.style.as_str(),
-                self.radius
+                self.radius.arg()
             )
         };
         format!(
@@ -505,9 +624,9 @@ impl Frame {
         )
     }
 
-    /// `rrggbb:w[:mode[:buttons[:style[:radius]]]]`: what is left out has its
-    /// default; anything more, or anything that is not what its place says,
-    /// is no frame.
+    /// `rrggbb:w[:mode[:buttons[:style[:radius[:outer]]]]]`: what is left
+    /// out has its default; anything more, or anything that is not what its
+    /// place says, is no frame.
     pub fn parse_arg(text: &str) -> Option<Self> {
         let mut parts = text.split(':');
         let color = Rgb::parse(parts.next()?)?;
@@ -529,7 +648,11 @@ impl Frame {
         };
         let radius = match parts.next() {
             None => DEFAULT_RADIUS,
-            Some(radius) => parse_radius(radius)?,
+            Some(radius) => Radius::parse_arg(radius, MAX_RADIUS)?,
+        };
+        let outer = match parts.next() {
+            None => DEFAULT_OUTER_RADIUS,
+            Some(outer) => Radius::parse_arg(outer, MAX_OUTER_RADIUS)?,
         };
         if parts.next().is_some() {
             return None;
@@ -541,6 +664,7 @@ impl Frame {
             buttons,
             style,
             radius,
+            outer,
         })
     }
 }
@@ -716,6 +840,7 @@ mod tests {
             buttons: DEFAULT_BUTTONS,
             style: DEFAULT_STYLE,
             radius: DEFAULT_RADIUS,
+            outer: DEFAULT_OUTER_RADIUS,
         };
         assert_eq!(f.to_arg(), "0102ff:6:hover");
         assert_eq!(Frame::parse_arg(&f.to_arg()), Some(f));
@@ -754,7 +879,8 @@ mod tests {
             title: TitleMode::Always,
             buttons: ButtonStyle::Macos,
             style: Style::Tag,
-            radius: 12,
+            radius: Radius::Px(12),
+            outer: DEFAULT_OUTER_RADIUS,
         };
         assert_eq!(f.to_arg(), "ff00ff:4:always:macos:tag:12");
         assert_eq!(Frame::parse_arg(&f.to_arg()), Some(f));
@@ -767,6 +893,24 @@ mod tests {
         };
         assert_eq!(full.to_arg(), "ff00ff:4:always:cellward:full:0");
         assert_eq!(Frame::parse_arg(&full.to_arg()), Some(full));
+        // niri's radius rides as it was read, inside and outside; the outer
+        // alone says the look before it.
+        let niri = Frame {
+            radius: Radius::Niri(20),
+            outer: Radius::Niri(20),
+            ..f
+        };
+        assert_eq!(niri.to_arg(), "ff00ff:4:always:macos:tag:niri20:niri20");
+        assert_eq!(Frame::parse_arg(&niri.to_arg()), Some(niri));
+        let outer = Frame {
+            buttons: DEFAULT_BUTTONS,
+            style: DEFAULT_STYLE,
+            radius: DEFAULT_RADIUS,
+            outer: Radius::Px(24),
+            ..f
+        };
+        assert_eq!(outer.to_arg(), "ff00ff:4:always:cellward:soft:0:24");
+        assert_eq!(Frame::parse_arg(&outer.to_arg()), Some(outer));
         for look in ButtonStyle::ALL {
             let g = Frame { buttons: look, ..f };
             assert_eq!(Frame::parse_arg(&g.to_arg()), Some(g), "{look:?}");
@@ -791,8 +935,14 @@ mod tests {
             "ff00ff:4:always:macos:tag:17",
             "ff00ff:4:always:macos:tag:-1",
             "ff00ff:4:always:macos:tag:3px",
-            "ff00ff:4:always:macos:tag:3:more",
+            "ff00ff:4:always:macos:tag:3:4:more",
             "ff00ff:4:always::tag:3",
+            "ff00ff:4:always:macos:tag:+3",
+            "ff00ff:4:always:macos:tag:niri",
+            "ff00ff:4:always:macos:tag:niri33",
+            "ff00ff:4:always:macos:tag:niri-1",
+            "ff00ff:4:always:macos:tag:3:33",
+            "ff00ff:4:always:macos:tag:3:",
         ] {
             assert_eq!(Frame::parse_arg(bad), None, "{bad:?}");
         }
@@ -806,28 +956,40 @@ mod tests {
         let declared = config.join(DECLARED_DIR);
         assert_eq!(buttons(&config), (ButtonStyle::Cellward, Source::Default));
         assert_eq!(style(&config), (Style::Soft, Source::Default));
-        assert_eq!(radius(&config), (0, Source::Default));
+        assert_eq!(radius(&config), (Radius::Px(0), Source::Default));
+        assert_eq!(outer_radius(&config), (Radius::Px(0), Source::Default));
         fs::write(config.join(BUTTONS_SETTING), "macos\n").unwrap();
         fs::write(config.join(STYLE_SETTING), "tag").unwrap();
         fs::write(config.join(RADIUS_SETTING), "12\n").unwrap();
         assert_eq!(buttons(&config), (ButtonStyle::Macos, Source::Local));
         assert_eq!(style(&config), (Style::Tag, Source::Local));
-        assert_eq!(radius(&config), (12, Source::Local));
+        assert_eq!(radius(&config), (Radius::Px(12), Source::Local));
         crate::declared::declare(&declared.join(BUTTONS_SETTING), "windows");
         crate::declared::declare(&declared.join(STYLE_SETTING), "full");
         crate::declared::declare(&declared.join(RADIUS_SETTING), "16");
         assert_eq!(buttons(&config), (ButtonStyle::Windows, Source::Nix));
         assert_eq!(style(&config), (Style::Full, Source::Nix));
-        assert_eq!(radius(&config), (16, Source::Nix));
+        assert_eq!(radius(&config), (Radius::Px(16), Source::Nix));
         // Not theirs: as if not there.
         crate::declared::declare(&declared.join(BUTTONS_SETTING), "beos");
         crate::declared::declare(&declared.join(STYLE_SETTING), "glass");
         crate::declared::declare(&declared.join(RADIUS_SETTING), "17");
         assert_eq!(buttons(&config), (ButtonStyle::Macos, Source::Local));
         assert_eq!(style(&config), (Style::Tag, Source::Local));
-        assert_eq!(radius(&config), (12, Source::Local));
+        assert_eq!(radius(&config), (Radius::Px(12), Source::Local));
         fs::write(config.join(RADIUS_SETTING), "-2").unwrap();
-        assert_eq!(radius(&config), (0, Source::Default));
+        assert_eq!(radius(&config), (Radius::Px(0), Source::Default));
+        // niri's: the word kept, its radius read (none here but the
+        // machine's own niri, if any: whatever it is, it is niri's).
+        fs::write(config.join(OUTER_RADIUS_SETTING), "niri\n").unwrap();
+        assert!(matches!(
+            outer_radius(&config),
+            (Radius::Niri(_), Source::Local)
+        ));
+        fs::write(config.join(OUTER_RADIUS_SETTING), "32").unwrap();
+        assert_eq!(outer_radius(&config), (Radius::Px(32), Source::Local));
+        fs::write(config.join(OUTER_RADIUS_SETTING), "33").unwrap();
+        assert_eq!(outer_radius(&config), (Radius::Px(0), Source::Default));
         // Each word back to itself.
         for look in ButtonStyle::ALL {
             assert_eq!(ButtonStyle::parse(look.as_str()), Some(look));
@@ -835,18 +997,30 @@ mod tests {
         for s in [Style::Full, Style::Soft, Style::Tag] {
             assert_eq!(Style::parse(&format!(" {}\n", s.as_str())), Some(s));
         }
-        assert_eq!(parse_radius(" 0 "), Some(0));
-        assert_eq!(parse_radius("16"), Some(16));
-        assert_eq!(parse_radius("1.5"), None);
+        assert_eq!(parse_radius(" 0 "), Some(Radius::Px(0)));
+        assert_eq!(parse_radius("16"), Some(Radius::Px(16)));
+        assert_eq!(parse_radius("17"), None);
+        assert_eq!(parse_radius("niri"), Some(Radius::Niri(0)));
+        assert_eq!(
+            parse_radius("niri20"),
+            None,
+            "the setting says niri, not its value"
+        );
+        assert_eq!(parse_outer_radius("32"), Some(Radius::Px(32)));
+        for bad in ["1.5", "+3", "", "Niri", "-0"] {
+            assert_eq!(parse_radius(bad), None, "{bad:?}");
+        }
+        assert_eq!(Radius::Niri(20).word(), "niri");
+        assert_eq!(Radius::Px(7).word(), "7");
         // And a zone's frame is what they say (the radius's file says -2:
         // the default).
         let frame = Frame::of_zone(&state, &config, "nl");
         assert_eq!(
-            (frame.buttons, frame.style, frame.radius),
-            (ButtonStyle::Macos, Style::Tag, 0)
+            (frame.buttons, frame.style, frame.radius, frame.outer),
+            (ButtonStyle::Macos, Style::Tag, Radius::Px(0), Radius::Px(0))
         );
         fs::write(config.join(RADIUS_SETTING), "9").unwrap();
-        assert_eq!(Frame::of_zone(&state, &config, "nl").radius, 9);
+        assert_eq!(Frame::of_zone(&state, &config, "nl").radius, Radius::Px(9));
         let _ = fs::remove_dir_all(state.parent().unwrap());
     }
 

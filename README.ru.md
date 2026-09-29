@@ -484,7 +484,7 @@ window-rule {
 
 **Рамка зоны.** Окна программы в зоне приходят с рамкой, которую рисует
 посредник Wayland внутри окна: обводка цвета зоны (или контейнера) и полоса
-заголовка «<зона> · <контейнер>» (`cellward frame show|hide|width|color|title|style|buttons|radius`).
+заголовка «<зона> · <контейнер>» (`cellward frame show|hide|width|color|title|style|buttons|radius|outer-radius`).
 У правого края полосы — три кнопки: **≡** открывает меню окна именно этого
 запуска (`cellward window-menu --pid`), **⇄** меняет сеть контейнера на ходу —
 программы остаются, их соединения рвутся (у основного дома и одноразового
@@ -504,7 +504,7 @@ window-rule {
 программа не может, но может нарисовать в своей картинке другую.
 
 Вид рамки выбирается — для программ, запущенных после смены (в Nix:
-`programs.cellward.frame.style`, `.buttons`, `.radius`):
+`programs.cellward.frame.style`, `.buttons`, `.radius`, `.outerRadius`):
 
 ```sh
 cellward frame style soft|full|tag    # soft (по умолчанию): оттенок зоны, мягче, обводка в два
@@ -514,6 +514,8 @@ cellward frame buttons cellward|gnome|kde|macos|windows|none
                                       # вид кнопок: квадратные (по умолчанию), как в GNOME, KDE,
                                       # macOS (светофор слева), Windows, или без кнопок
 cellward frame radius 10              # скругление углов окна внутри рамки (0–16)
+cellward frame radius niri            # ... по скруглению niri (geometry-corner-radius)
+cellward frame outer-radius 12        # скругление самой рамки снаружи (0–32 или niri)
 cellward frame                        # что задано сейчас и откуда
 ```
 

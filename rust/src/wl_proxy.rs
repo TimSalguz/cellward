@@ -461,8 +461,9 @@ pub struct Proxy {
 /// The frame's settings watched for the proxy (step 6 of
 /// `docs/PERMISSIONS.md` §11.15: the frame changed on the fly): an inotify
 /// of the settings' directory, of Nix's words in it, of the zone's state
-/// (its colour) and of the container's record (its own), and the frame the
-/// proxy draws now.
+/// (its colour), of the container's record (its own) and of niri's config
+/// (a radius that follows niri's, `crate::niri`), and the frame the proxy
+/// draws now.
 struct Live {
     inotify: OwnedFd,
     setup: Setup,
@@ -503,6 +504,11 @@ impl Live {
                 watch(&crate::container::policy_dir_in(config, container));
             }
         }
+        // Its directory: a config that home-manager links is replaced there,
+        // the file itself never written.
+        if let Some(dir) = crate::niri::config_path().as_deref().and_then(Path::parent) {
+            watch(dir);
+        }
         Some(Self {
             inotify,
             setup: setup.clone(),
@@ -525,10 +531,13 @@ impl Live {
             return None;
         }
         self.setup.frame = next;
+        // The width alone is the width alone — unless the look goes with it
+        // (a radius that follows niri's is niri's less the border).
         let restyled = Frame {
             width: now.width,
             ..next
-        } != now;
+        } != now
+            || Look::of(&next) != Look::of(&now);
         let pixel = if restyled {
             pixels(&Look::of(&next).squares(next.color))
                 .map_err(|e| eprintln!("wl-sandbox: the frame's new colours not made ({e})"))
@@ -759,19 +768,14 @@ pub fn start(
 ) -> Result<Proxy, String> {
     let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
     let listener = zone_listener.try_clone().map_err(|e| format!("dup: {e}"))?;
-    // The font, read here: the proxy opens nothing. Only when there is a
-    // title to draw — or round corners, whose pixels go where the title's
-    // do (`prepare_border`).
-    let drawing = frame.as_ref().map(|setup| {
-        let wanted = setup.frame.title != TitleMode::Off || Look::of(&setup.frame).corners() > 0;
-        Drawing {
-            frame: setup.frame,
-            font: (wanted && !setup.title.is_empty())
-                .then(read_font)
-                .flatten(),
-            title: setup.title.clone(),
-            always_focused: setup.always_focused,
-        }
+    // The font, read here: the proxy opens nothing. Whenever there is a
+    // title's text, drawn or not yet: a title or round corners (whose pixels
+    // go where the title's do, `prepare_border`) may come on the fly.
+    let drawing = frame.as_ref().map(|setup| Drawing {
+        frame: setup.frame,
+        font: (!setup.title.is_empty()).then(read_font).flatten(),
+        title: setup.title.clone(),
+        always_focused: setup.always_focused,
     });
     // SAFETY: getpid takes nothing and cannot fail.
     let supervisor = unsafe { libc::getpid() };
@@ -1742,7 +1746,7 @@ impl TextSource {
     /// A text of `look` for `frame`, in the other half; none where the
     /// frame shows no text and no round corner.
     fn text(&mut self, frame: Frame, look: Look) -> Option<Rc<Text>> {
-        if frame.title == TitleMode::Off && look.corners() == 0 {
+        if frame.title == TitleMode::Off && !look.round() {
             return None;
         }
         let prepared = Prepared::with_look(self.font.clone(), &self.title, look)?;
@@ -1754,7 +1758,7 @@ impl TextSource {
         self.half = half;
         Some(Rc::new(Text::new_at(
             prepared,
-            look.title_color(frame.color),
+            (look.title_color(frame.color), frame.color),
             self.memfd.clone(),
             self.writer.clone(),
             origin,
@@ -1817,13 +1821,13 @@ fn prepare_border(drawing: Drawing) -> Option<Border> {
             }
         }
     });
-    let wanted = drawing.frame.title != TitleMode::Off || look.corners() > 0;
+    let wanted = drawing.frame.title != TitleMode::Off || look.round();
     let (text, source) = match made {
         Some((prepared, source)) => {
             let text = wanted.then(|| {
                 Rc::new(Text::new_at(
                     prepared,
-                    look.title_color(drawing.frame.color),
+                    (look.title_color(drawing.frame.color), drawing.frame.color),
                     source.memfd.clone(),
                     source.writer.clone(),
                     0,
@@ -2980,7 +2984,7 @@ fn outq(fd: RawFd) -> libc::c_int {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame::{ButtonStyle, Rgb, Style};
+    use crate::frame::{ButtonStyle, Radius, Rgb, Style};
     use std::io::{Read, Write};
     use std::sync::mpsc;
 
@@ -3205,7 +3209,8 @@ mod tests {
                         title: TitleMode::Off,
                         buttons: ButtonStyle::Cellward,
                         style: Style::Full,
-                        radius: 0,
+                        radius: Radius::Px(0),
+                        outer: Radius::Px(0),
                     },
                     title: String::new(),
                     font: None,
@@ -4368,7 +4373,8 @@ mod tests {
                 title: mode,
                 buttons,
                 style,
-                radius,
+                radius: Radius::Px(radius),
+                outer: Radius::Px(0),
             },
             title: "nl · основной".to_owned(),
             font,
@@ -5803,6 +5809,111 @@ mod tests {
         assert_eq!(rig.finish(), 0);
     }
 
+    /// The frame's own round corners on the wire: four more subsurfaces of
+    /// the program's, in the corners of the whole window — the top ones
+    /// down past where a title strip would be —, each a see-through buffer
+    /// of its size, taking the pointer on the border's band alone; the
+    /// border's strips laid short of them.
+    #[test]
+    fn the_frames_own_corners_take_the_strips_ends_on_the_wire() {
+        let font = test_font();
+        let with_text = font.is_some();
+        let mut drawing = looked(TitleMode::Off, font, ButtonStyle::Cellward, Style::Full, 0);
+        drawing.frame.outer = Radius::Px(12);
+        let rig = Rig::with_drawing("outer", Some(drawing));
+        let (mut client, _compositor, log) = rig.connect_framed(UPSTREAM, TITLE_GLOBALS);
+        a_window(&mut client);
+        let (got, _, root) = first_commit(&log);
+        let subs = all(&got, "wl_subcompositor", 1);
+        let on_root: Vec<(u32, u32)> = subs
+            .iter()
+            .filter(|m| m.args[2] == root)
+            .map(|m| (m.args[0], m.args[1]))
+            .collect();
+        let size_of = |surface: u32| {
+            let view = all(&got, "wp_viewporter", 1)
+                .into_iter()
+                .find(|m| m.args[1] == surface)
+                .unwrap()
+                .args[0];
+            got.iter()
+                .rev()
+                .find(|m| m.iface == "wp_viewport" && m.opcode == 2 && m.object == view)
+                .map(|m| signed(&m.args))
+                .unwrap()
+        };
+        let laid = |(sub, surface): (u32, u32)| {
+            let at = placed(&got, sub).unwrap();
+            let size = size_of(surface);
+            [at[0], at[1], size[0], size[1]]
+        };
+        if !with_text {
+            // No memory to draw them in: the strips whole, as without them.
+            assert_eq!(on_root.len(), 4, "{subs:?}");
+            assert_eq!(laid(on_root[0]), [6, 16, 308, 4]);
+            drop(client);
+            assert_eq!(rig.finish(), 0);
+            return;
+        }
+        assert_eq!(on_root.len(), 8, "four strips, four corners: {subs:?}");
+        // The program's geometry 10, 20, 300 × 200; the window 6, 16,
+        // 308 × 208. The strips: top, bottom, left, right, short of them.
+        let strips: Vec<[i32; 4]> = on_root[..4].iter().map(|&p| laid(p)).collect();
+        assert_eq!(
+            strips,
+            [
+                [18, 16, 284, 4],
+                [18, 216, 284, 4],
+                [6, 40, 4, 172],
+                [310, 40, 4, 172]
+            ]
+        );
+        let pieces: Vec<[i32; 4]> = on_root[4..].iter().map(|&p| laid(p)).collect();
+        assert_eq!(
+            pieces,
+            [
+                [6, 16, 12, 24],
+                [302, 16, 12, 24],
+                [6, 212, 12, 12],
+                [302, 212, 12, 12]
+            ]
+        );
+        let mut offsets = Vec::new();
+        for (k, &(_, surface)) in on_root[4..].iter().enumerate() {
+            let buffer = made(&got, attached(&got, surface).expect("not drawn"));
+            let h = if k < 2 { 24 } else { 12 };
+            assert_eq!(buffer[1..], [12, h, 48, 0], "an ARGB image of its size");
+            offsets.push((buffer[0], h));
+            // Input on the border's band: the top one's top and side.
+            let region = got
+                .iter()
+                .find(|m| m.iface == "wl_surface" && m.opcode == 5 && m.object == surface)
+                .expect("no input region")
+                .args[0];
+            let adds: Vec<Vec<i32>> = got
+                .iter()
+                .filter(|m| m.iface == "wl_region" && m.opcode == 1 && m.object == region)
+                .map(|m| signed(&m.args))
+                .collect();
+            if k == 0 {
+                assert_eq!(adds, [vec![0, 0, 12, 4], vec![0, 0, 4, 24]]);
+            }
+            if k == 3 {
+                assert_eq!(adds, [vec![0, 8, 12, 4], vec![8, 0, 4, 12]]);
+            }
+        }
+        // Four images of one region, one after the other.
+        for pair in offsets.windows(2) {
+            assert_eq!(
+                pair[1].0,
+                pair[0].0 + 12 * pair[0].1 as u32 * 4,
+                "{offsets:?}"
+            );
+        }
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
     // --- the questions (crate::netask, crate::wl_frame::Questions) ----------
 
     #[test]
@@ -6098,7 +6209,8 @@ mod tests {
                 title: TitleMode::Off,
                 buttons: ButtonStyle::Cellward,
                 style: Style::Full,
-                radius: 0,
+                radius: Radius::Px(0),
+                outer: Radius::Px(0),
             };
             sys::send_with_fds(channel.as_raw_fd(), &frame_message(frame), &[]).unwrap();
         };
@@ -6191,7 +6303,8 @@ mod tests {
             title: TitleMode::Off,
             buttons: ButtonStyle::Cellward,
             style: Style::Full,
-            radius: 0,
+            radius: Radius::Px(0),
+            outer: Radius::Px(0),
         };
         let colours = pixel(blue).unwrap();
         let channel = rig.channel.as_ref().unwrap();

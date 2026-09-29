@@ -758,6 +758,8 @@ programs.cellward = {
     "frame_style": { "value": "soft", "source": "default" },
     "frame_buttons": { "value": "cellward", "source": "default" },
     "frame_radius": { "value": 0, "source": "default" },
+    "frame_outer_radius": { "value": 0, "source": "default" },
+    "frame_niri_radius": 20,
     "tray_badge": { "value": "dot", "source": "default" },
     "autostart_unassigned": { "value": "offline", "source": "default" },
     "user_entries": { "value": "take-over", "source": "default" },

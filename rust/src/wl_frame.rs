@@ -92,7 +92,8 @@
 //! the tag is not the frame's and moves nothing. The buttons' end, order,
 //! cells and margin are the look's, and so is where the pointer finds them
 //! ([`title_layout`], `ButtonsLook::at`). Round corners: four small
-//! surfaces over the corners of the program's content ([`corner_rects`]),
+//! surfaces over the corners of the program's content ([`corner_rects`];
+//! the top two of a radius of their own, `crate::wl_title::inner_radii`),
 //! the title's colour where the corner is cut off and clear inside a
 //! quarter circle, drawn at the scale like the text; clear to input (an
 //! empty input region: a click there is the program's). Not with the tag:
@@ -242,7 +243,7 @@ use wl_proxy::protocols::ObjectInterface;
 use crate::frame::TitleMode;
 use crate::wl_proxy::Border;
 use crate::wl_title::{
-    Button, ButtonsLook, Drawn, End, Lease, Lit, Look, Pixels, Prompt, Square, Text,
+    Button, ButtonsLook, Drawn, End, Lease, Lit, Look, Outer, Pixels, Prompt, Square, Text,
 };
 
 // --- THE ARITHMETIC ---------------------------------------------------------
@@ -492,23 +493,130 @@ pub(crate) fn ring_edges(side: Side, strip: Rect, outer: Rect, border: i32, x: f
 }
 
 /// Where the round corners go over the program's geometry `g`: squares of
-/// `radius` in its four corners — top left, top right, bottom left, bottom
-/// right, as `crate::wl_title::render_corners` draws them —, smaller on a
-/// window too small for them (never over its middle). `None`: no room for
-/// any.
-pub(crate) fn corner_rects(g: Rect, radius: i32) -> Option<[Rect; 4]> {
-    let r = radius.min(g.w / 2).min(g.h / 2);
-    if r <= 0 {
+/// `top` in its top corners and of `bottom` in its bottom ones — top left,
+/// top right, bottom left, bottom right, as `crate::wl_title::
+/// render_corners` draws them —, smaller on a window too small for them
+/// (never over its middle). `None`: that corner square, or no room for it.
+pub(crate) fn corner_rects(g: Rect, top: i32, bottom: i32) -> [Option<Rect>; 4] {
+    let most = (g.w / 2).min(g.h / 2);
+    let (t, b) = (top.min(most), bottom.min(most));
+    let at = |x: i32, y: i32, r: i32| (r > 0).then_some(Rect { x, y, w: r, h: r });
+    let lower = g.y.saturating_add(g.h - b);
+    [
+        at(g.x, g.y, t),
+        at(g.x.saturating_add(g.w - t), g.y, t),
+        at(g.x, lower, b),
+        at(g.x.saturating_add(g.w - b), lower, b),
+    ]
+}
+
+/// Where the frame's own round corners go (`crate::wl_title::Outer`): in
+/// the corners of the whole window — the program's geometry `g` and the
+/// frame's insets `i` around it —, the top two `side` × `top`, the bottom
+/// two `side` square; top left, top right, bottom left, bottom right, as
+/// `crate::wl_title::render_outer` draws them. `None`: a window too small
+/// for them and something of each strip between them, or no title strip
+/// for the top ones to draw the ends of (mode `always` in fullscreen: the
+/// strip takes no room then).
+pub(crate) fn outer_rects(g: Rect, i: Insets, o: &Outer) -> Option<[Rect; 4]> {
+    if o.band && i.title <= 0 {
         return None;
     }
-    let (right, bottom) = (g.x.saturating_add(g.w - r), g.y.saturating_add(g.h - r));
-    let at = |x: i32, y: i32| Rect { x, y, w: r, h: r };
+    let whole = geometry_up(g, i);
+    if o.side.saturating_mul(2) >= whole.w || o.top.saturating_add(o.side) >= whole.h {
+        return None;
+    }
+    let right = whole.x.saturating_add(whole.w - o.side);
+    let lower = whole.y.saturating_add(whole.h - o.side);
+    let at = |x: i32, y: i32, h: i32| Rect { x, y, w: o.side, h };
     Some([
-        at(g.x, g.y),
-        at(right, g.y),
-        at(g.x, bottom),
-        at(right, bottom),
+        at(whole.x, whole.y, o.top),
+        at(right, whole.y, o.top),
+        at(whole.x, lower, o.side),
+        at(right, lower, o.side),
     ])
+}
+
+/// `r` — a strip of the border, the title strip — laid short of the frame's
+/// own round corners `pieces` ([`outer_rects`]), which draw what of it is
+/// under them: where a piece takes `r`'s whole height at one of its ends,
+/// `r` starts (or ends) past it; its whole width, below (or above) it. The
+/// pieces are laid so that each takes a strip's end whole.
+pub(crate) fn trim(r: Rect, pieces: &[Rect]) -> Rect {
+    let mut r = r;
+    for p in pieces {
+        let (px1, py1) = (p.x.saturating_add(p.w), p.y.saturating_add(p.h));
+        let (rx1, ry1) = (r.x.saturating_add(r.w), r.y.saturating_add(r.h));
+        if !(p.x < rx1 && r.x < px1 && p.y < ry1 && r.y < py1) {
+            continue;
+        }
+        let tall = p.y <= r.y && py1 >= ry1;
+        let wide = p.x <= r.x && px1 >= rx1;
+        if tall && p.x <= r.x {
+            r = Rect {
+                x: px1,
+                w: rx1 - px1,
+                ..r
+            };
+        } else if tall && px1 >= rx1 {
+            r.w = p.x - r.x;
+        } else if wide && p.y <= r.y {
+            r = Rect {
+                y: py1,
+                h: ry1 - py1,
+                ..r
+            };
+        } else if wide && py1 >= ry1 {
+            r.h = p.y - r.y;
+        }
+    }
+    Rect {
+        w: r.w.max(0),
+        h: r.h.max(0),
+        ..r
+    }
+}
+
+/// The input region of the frame's own corner `corner` (top left, top
+/// right, bottom left, bottom right), in its own coordinates: the border's
+/// band — a press there resizes, as on the strips it stands for — and, on
+/// the top ones, the title strip's end under it (moves); not the program's
+/// content inside, whose presses are the program's.
+pub(crate) fn outer_input(o: &Outer, corner: usize) -> Vec<Rect> {
+    let (right, lower) = (corner % 2 == 1, corner >= 2);
+    let h = if lower { o.side } else { o.top };
+    let b = o.border.clamp(0, o.side);
+    let mut rects = vec![
+        Rect {
+            x: 0,
+            y: 0,
+            w: o.side,
+            h: b,
+        },
+        Rect {
+            x: 0,
+            y: 0,
+            w: b,
+            h,
+        },
+    ];
+    if !lower && o.band && o.side > b {
+        rects.push(Rect {
+            x: b,
+            y: b,
+            w: o.side - b,
+            h: TITLE_HEIGHT.min(h - b),
+        });
+    }
+    rects
+        .into_iter()
+        .filter(|r| r.w > 0 && r.h > 0)
+        .map(|r| Rect {
+            x: if right { o.side - r.x - r.w } else { r.x },
+            y: if lower { h - r.y - r.h } else { r.y },
+            ..r
+        })
+        .collect()
 }
 
 /// A strip of the border, by the side it is on — in the order of
@@ -1252,13 +1360,17 @@ impl Frames {
     /// above them: a hover strip lies over the top corners. Clear to input.
     /// Their scale is the text's when the window has one (`fractional`
     /// false), else their own: a `wp_fractional_scale_v1` of the first.
-    /// None without the title's memfd (no font: no corners either).
+    /// None without the title's memfd (no font: no corners either). The
+    /// frame's own (`round` [`Round::Outer`]) alike, but for their input:
+    /// the border's band and the title strip's end in them
+    /// ([`outer_input`]).
     fn make_corners(
         self: &Rc<Self>,
         root: &Rc<WlSurface>,
         top: &Rc<WlSurface>,
         me: &Weak<RefCell<Window>>,
         fractional: bool,
+        round: Round,
     ) -> Option<CornerParts> {
         let own = self.own.borrow();
         let text = self.text();
@@ -1271,23 +1383,34 @@ impl Frames {
         ) else {
             return None;
         };
+        let outer = match round {
+            Round::Inner => None,
+            Round::Outer => Some(text.look().outer_corners()?),
+        };
         let pieces: Vec<Strip> = (0..4)
-            .map(|_| {
+            .map(|corner| {
                 let surface = compositor.new_send_create_surface();
                 quiet(&*surface);
                 surface.set_handler(Mine {
                     window: me.clone(),
-                    part: Part::Corner,
+                    part: match round {
+                        Round::Inner => Part::Corner,
+                        Round::Outer => Part::Outer(corner),
+                    },
                 });
                 let sub = subcompositor.new_send_get_subsurface(&surface, root);
                 quiet(&*sub);
                 sub.send_place_above(top);
                 let viewport = viewporter.new_send_get_viewport(&surface);
                 quiet(&*viewport);
-                // An empty input region: a click on the window's corner is
-                // the program's, as without them.
+                // The window's corners: an empty input region, a click on
+                // the window's corner is the program's, as without them.
+                // The frame's own: what of the frame is in them.
                 let region = compositor.new_send_create_region();
                 quiet(&*region);
+                for r in outer.iter().flat_map(|o| outer_input(o, corner)) {
+                    region.send_add(r.x, r.y, r.w, r.h);
+                }
                 surface.send_set_input_region(Some(&region));
                 region.send_destroy();
                 Strip {
@@ -1311,12 +1434,13 @@ impl Frames {
             None
         };
         Some(CornerParts {
+            round,
             text: text.clone(),
             pool: pool.clone(),
             pieces,
             fraction,
             scale: self.scale.get(),
-            laid: None,
+            laid: false,
             current: Vec::new(),
             retired: Vec::new(),
         })
@@ -1410,6 +1534,9 @@ enum Part {
     Text,
     Buttons,
     Corner,
+    /// The frame's own round corner: top left, top right, bottom left,
+    /// bottom right.
+    Outer(usize),
     /// The ≡'s dropdown ([`Dropdown`]).
     Menu,
     /// A question's panel ([`Panel`]).
@@ -1423,7 +1550,7 @@ impl Part {
     fn titled(self) -> bool {
         matches!(
             self,
-            Part::Title | Part::Text | Part::Buttons | Part::Corner
+            Part::Title | Part::Text | Part::Buttons | Part::Corner | Part::Outer(_)
         )
     }
 }
@@ -1822,6 +1949,15 @@ impl ButtonParts {
     }
 }
 
+/// Which round corners a [`CornerParts`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Round {
+    /// The window's, inside the frame (`Look::corners`).
+    Inner,
+    /// The frame's own, outside (`Look::outer_corners`).
+    Outer,
+}
+
 /// The window's round corners (`Look::corners`): four subsurfaces of the
 /// program's root over the corners of its content ([`corner_rects`]), each
 /// a buffer of the region of the title's memfd that holds the four at the
@@ -1830,6 +1966,7 @@ impl ButtonParts {
 /// Synchronized, like the strips: their place and size go with the
 /// program's commit; a new scale shows at once (desync, commit, sync).
 struct CornerParts {
+    round: Round,
     text: Rc<Text>,
     pool: Rc<WlShmPool>,
     /// Top left, top right, bottom left, bottom right.
@@ -1838,9 +1975,8 @@ struct CornerParts {
     fraction: Option<Rc<WpFractionalScaleV1>>,
     /// The scale asked for (120ths).
     scale: u32,
-    /// The side they are laid at, logical pixels; `None`: not laid (a
-    /// window too small for them).
-    laid: Option<i32>,
+    /// Whether they are laid (not: a window too small for them).
+    laid: bool,
     /// The buffers attached, one a corner; none before the first layout.
     current: Vec<Rc<WlBuffer>>,
     retired: Vec<Rc<WlBuffer>>,
@@ -1850,35 +1986,55 @@ impl CornerParts {
     /// Attach the four at `self.scale` and commit each (cached: the root's
     /// commit applies them). False when there is nothing to draw them in.
     fn draw(&mut self) -> bool {
-        let Some(drawn) = self.text.corners_at(self.scale) else {
+        let drawn = match self.round {
+            Round::Inner => self.text.corners_at(self.scale),
+            Round::Outer => self.text.outer_at(self.scale),
+        };
+        let Some(drawn) = drawn else {
             return false;
         };
-        let (width, height) = (drawn.width, drawn.height);
-        let image = width.saturating_mul(height).saturating_mul(4);
+        // The window's: the top two of one side, the bottom two of another,
+        // a square corner no image and no buffer. The frame's own: the top
+        // two taller.
+        let sizes = match self.round {
+            Round::Inner => {
+                let (top, bottom) = (drawn.width, drawn.height);
+                [(top, top), (top, top), (bottom, bottom), (bottom, bottom)]
+            }
+            Round::Outer => {
+                let (w, top) = (drawn.width, drawn.height);
+                [(w, top), (w, top), (w, w), (w, w)]
+            }
+        };
         let old = std::mem::take(&mut self.current);
-        for (corner, piece) in (0i32..).zip(&self.pieces) {
-            let offset = drawn.offset.saturating_add(image.saturating_mul(corner));
-            let buffer = memfd_buffer(
-                &self.pool,
-                (width, height),
-                offset,
-                drawn.lease.another(),
-                Pixels::Alpha,
-            );
-            attach_whole(&piece.surface, &buffer, width, height);
-            piece.surface.send_commit();
-            self.current.push(buffer);
+        let mut offset = drawn.offset;
+        for (piece, (w, h)) in self.pieces.iter().zip(sizes) {
+            if w > 0 && h > 0 {
+                let buffer = memfd_buffer(
+                    &self.pool,
+                    (w, h),
+                    offset,
+                    drawn.lease.another(),
+                    Pixels::Alpha,
+                );
+                attach_whole(&piece.surface, &buffer, w, h);
+                piece.surface.send_commit();
+                self.current.push(buffer);
+            }
+            offset = offset.saturating_add(w.saturating_mul(h).saturating_mul(4));
         }
         self.retired.extend(old);
         sweep(&mut self.retired);
         true
     }
 
-    /// Lay them over the corners of `g` at `radius` (cached, applied with
-    /// the program's commit), drawn the first time; a window too small for
-    /// them has none.
-    fn lay(&mut self, g: Rect, radius: i32) {
-        let Some(rects) = corner_rects(g, radius) else {
+    /// Lay them at `rects` ([`corner_rects`], [`outer_rects`]; cached,
+    /// applied with the program's commit), drawn the first time; a window
+    /// too small for them has none. A square corner is neither laid nor
+    /// drawn: the look's, the same for the window's life (a new look is
+    /// new corners, `Window::swap`).
+    fn lay(&mut self, rects: [Option<Rect>; 4]) {
+        if rects.iter().all(Option::is_none) {
             if !self.current.is_empty() {
                 for piece in &self.pieces {
                     piece.surface.send_attach(None, 0, 0);
@@ -1887,15 +2043,17 @@ impl CornerParts {
                 self.retired.append(&mut self.current);
                 sweep(&mut self.retired);
             }
-            self.laid = None;
+            self.laid = false;
             return;
-        };
-        for (piece, r) in self.pieces.iter().zip(rects) {
-            piece.sub.send_set_position(r.x, r.y);
-            piece.viewport.send_set_destination(r.w, r.h);
-            piece.surface.send_commit();
         }
-        self.laid = Some(rects[0].w);
+        for (piece, r) in self.pieces.iter().zip(rects) {
+            if let Some(r) = r {
+                piece.sub.send_set_position(r.x, r.y);
+                piece.viewport.send_set_destination(r.w, r.h);
+                piece.surface.send_commit();
+            }
+        }
+        self.laid = true;
         if self.current.is_empty() {
             self.draw();
         }
@@ -1903,11 +2061,11 @@ impl CornerParts {
 
     /// Drawn anew at `scale` when they are laid. Whether they were.
     fn rescale(&mut self, scale: u32) -> bool {
-        if self.scale == scale && (self.laid.is_none() || !self.current.is_empty()) {
+        if self.scale == scale && (!self.laid || !self.current.is_empty()) {
             return false;
         }
         self.scale = scale;
-        self.laid.is_some() && self.draw()
+        self.laid && self.draw()
     }
 
     /// Show what is pending of them now, as `TitleParts::apply_now` the
@@ -1964,6 +2122,10 @@ struct Window {
     strips: Option<Vec<Strip>>,
     title: Option<TitleParts>,
     corners: Option<CornerParts>,
+    /// The frame's own round corners, and where they are laid now (the
+    /// strips and the title strip laid short of them, [`trim`]).
+    outer: Option<CornerParts>,
+    outer_laid: Option<[Rect; 4]>,
     /// Counted among the connection's framed windows while it has strips.
     counted: Option<Framed>,
     /// Fullscreen, as of the configure the program acked last: its next
@@ -2026,6 +2188,8 @@ impl Window {
             strips: None,
             title: None,
             corners: None,
+            outer: None,
+            outer_laid: None,
             counted: None,
             fullscreen: false,
             next_fullscreen: false,
@@ -2133,10 +2297,10 @@ impl Window {
         let area = self
             .geometry
             .or_else(|| size.map(|(w, h)| Rect { x: 0, y: 0, w, h }));
-        let (Some(strips), Some(area)) = (&self.strips, area) else {
+        let Some(area) = area else {
             return;
         };
-        if area.w <= 0 || area.h <= 0 {
+        if self.strips.is_none() || area.w <= 0 || area.h <= 0 {
             return;
         }
         // Where the title goes: in its room when the insets keep one, else
@@ -2146,10 +2310,18 @@ impl Window {
         // out of fullscreen before the program acks that
         // ([`Self::title_wanted`]).
         let over = self.mode != TitleMode::Off;
+        // The frame's own round corners, and what is laid short of them —
+        // only when they are there to draw it.
+        let outer = self
+            .look
+            .outer_corners()
+            .and_then(|o| outer_rects(area, i, &o))
+            .filter(|_| self.make_outer(f, root, top));
+        let pieces: &[Rect] = outer.as_ref().map_or(&[], |p| &p[..]);
         let strip = if self.look.tag() {
             tag_row(area, i, over)
         } else {
-            title_strip(area, i, over)
+            title_strip(area, i, over).map(|r| trim(r, pieces))
         };
         if self.laid == Some((area, i, strip)) {
             // Nothing moves; whether the strip shows may still change (the
@@ -2163,14 +2335,22 @@ impl Window {
             .into_iter()
             .map(|(w, _)| w)
             .collect();
-        for (s, r) in strips.iter().zip(ring_strips(area, i, &widths)) {
+        for (s, r) in self
+            .strips
+            .iter()
+            .flatten()
+            .zip(ring_strips(area, i, &widths))
+        {
+            let r = trim(r, pieces);
             s.sub.send_set_position(r.x, r.y);
             s.viewport.send_set_destination(r.w, r.h);
             s.surface.send_commit();
         }
         self.laid = Some((area, i, strip));
+        self.outer_laid = outer;
         self.lay_title(f, root, top, strip);
         self.lay_corners(f, root, top, area);
+        self.lay_outer(outer);
     }
 
     /// The round corners over `area`'s, before the program's commit: made
@@ -2182,8 +2362,8 @@ impl Window {
         top: &Rc<WlSurface>,
         area: Rect,
     ) {
-        let radius = self.look.corners();
-        if radius <= 0 {
+        let radii = self.look.corners();
+        if radii == (0, 0) {
             return;
         }
         if self.corners.is_none() {
@@ -2193,10 +2373,32 @@ impl Window {
                 .as_ref()
                 .and_then(|t| t.text.as_ref())
                 .is_some_and(|text| text.fraction.is_some());
-            self.corners = f.make_corners(root, top, &self.me, !fractional);
+            self.corners = f.make_corners(root, top, &self.me, !fractional, Round::Inner);
         }
         if let Some(corners) = &mut self.corners {
-            corners.lay(area, radius);
+            corners.lay(corner_rects(area, radii.0, radii.1));
+        }
+    }
+
+    /// The frame's own round corners, made the first time they are wanted:
+    /// whether they are there (not without the title's memfd).
+    fn make_outer(&mut self, f: &Rc<Frames>, root: &Rc<WlSurface>, top: &Rc<WlSurface>) -> bool {
+        if self.outer.is_none() {
+            // Their own scale only when nothing else of the window's is
+            // drawn at one: the title's text (made after them, in the same
+            // layout) takes it, else the window's round corners.
+            let own_scale = self.mode == TitleMode::Off && self.look.corners() == (0, 0);
+            self.outer = f.make_corners(root, top, &self.me, own_scale, Round::Outer);
+        }
+        self.outer.is_some()
+    }
+
+    /// The frame's own round corners at `rects` ([`outer_rects`]; `None`:
+    /// none now — a window too small for them —, the strips laid whole),
+    /// before the program's commit.
+    fn lay_outer(&mut self, rects: Option<[Rect; 4]>) {
+        if let Some(outer) = &mut self.outer {
+            outer.lay(rects.map_or([None; 4], |r| r.map(Some)));
         }
     }
 
@@ -2306,7 +2508,7 @@ impl Window {
                 t.apply_now();
             }
         }
-        if let Some(corners) = &mut self.corners {
+        for corners in [&mut self.corners, &mut self.outer].into_iter().flatten() {
             if corners.rescale(scale) {
                 corners.apply_now();
             }
@@ -2321,7 +2523,8 @@ impl Window {
             .as_ref()
             .and_then(|t| t.text.as_ref())
             .is_some_and(|text| text.fraction.is_some())
-            || self.corners.as_ref().is_some_and(|c| c.fraction.is_some());
+            || self.corners.as_ref().is_some_and(|c| c.fraction.is_some())
+            || self.outer.as_ref().is_some_and(|c| c.fraction.is_some());
         if !fractional {
             self.rescale(u32::try_from(factor.clamp(1, 4)).unwrap_or(1) * 120);
         }
@@ -2356,6 +2559,7 @@ impl Window {
         let Some((area, i, _)) = self.laid else {
             return Hit::Nothing;
         };
+        let pieces: &[Rect] = self.outer_laid.as_ref().map_or(&[], |p| &p[..]);
         match part {
             Part::Buttons => self.look.buttons.at(x, y).map_or(Hit::Nothing, Hit::Button),
             Part::Corner | Part::Menu | Part::Prompt => Hit::Nothing,
@@ -2373,7 +2577,31 @@ impl Window {
                     return Hit::Nothing;
                 };
                 let outer = strips(area, i)[side.index()];
-                Hit::Edge(ring_edges(side, strip, outer, i.border, x, y))
+                Hit::Edge(ring_edges(side, trim(strip, pieces), outer, i.border, x, y))
+            }
+            // The frame's own corner: the strip of the border it stands
+            // for where the point is in the border's band — a corner of the
+            // window, as on the strips —, else the title strip's end.
+            Part::Outer(corner) => {
+                let Some(&piece) = pieces.get(corner) else {
+                    return Hit::Nothing;
+                };
+                let whole = geometry_up(area, i);
+                let (px, py) = (f64::from(piece.x) + x, f64::from(piece.y) + y);
+                let b = f64::from(i.border);
+                let side = if py < f64::from(whole.y) + b {
+                    Side::Top
+                } else if py >= f64::from(whole.y.saturating_add(whole.h)) - b {
+                    Side::Bottom
+                } else if px < f64::from(whole.x) + b {
+                    Side::Left
+                } else if px >= f64::from(whole.x.saturating_add(whole.w)) - b {
+                    Side::Right
+                } else {
+                    return Hit::Title;
+                };
+                let outer = strips(area, i)[side.index()];
+                Hit::Edge(ring_edges(side, piece, outer, i.border, x, y))
             }
         }
     }
@@ -2460,7 +2688,12 @@ impl Window {
         if let Some(t) = &self.title {
             t.sub.send_place_above(top);
         }
-        for piece in self.corners.iter().flat_map(|c| &c.pieces) {
+        for piece in self
+            .corners
+            .iter()
+            .chain(&self.outer)
+            .flat_map(|c| &c.pieces)
+        {
             piece.sub.send_place_above(top);
         }
     }
@@ -2496,10 +2729,14 @@ impl Window {
         if let Some(t) = self.title.take() {
             t.destroy();
         }
-        if let Some(corners) = self.corners.take() {
+        for corners in [self.corners.take(), self.outer.take()]
+            .into_iter()
+            .flatten()
+        {
             corners.destroy();
         }
         self.laid = None;
+        self.outer_laid = None;
         self.mode = f.mode();
         self.look = f.look();
     }
@@ -2554,11 +2791,15 @@ impl Window {
         if let Some(t) = self.title.take() {
             t.destroy();
         }
-        if let Some(corners) = self.corners.take() {
+        for corners in [self.corners.take(), self.outer.take()]
+            .into_iter()
+            .flatten()
+        {
             corners.destroy();
         }
         self.counted = None;
         self.laid = None;
+        self.outer_laid = None;
     }
 }
 
@@ -4578,6 +4819,9 @@ fn spot(surface: &Rc<WlSurface>) -> Option<(Rc<RefCell<Window>>, Spot)> {
             // Never entered (no input region): as a side, it changes
             // nothing of a hover strip.
             Part::Corner => Spot::Side,
+            // The frame's own: its top ones are the top of the frame.
+            Part::Outer(corner) if corner < 2 => Spot::Top,
+            Part::Outer(_) => Spot::Side,
         };
         return own.window.upgrade().map(|w| (w, spot));
     }
@@ -6019,10 +6263,11 @@ mod tests {
     }
 
     /// The round corners: squares of the radius in the program's corners,
-    /// smaller on a small window, none on one too small.
+    /// smaller on a small window, none on one too small; the top two of
+    /// their own radius.
     #[test]
     fn the_round_corners_lie_in_the_windows_corners() {
-        let [tl, tr, bl, br] = corner_rects(R, 12).unwrap();
+        let [tl, tr, bl, br] = corner_rects(R, 12, 12).map(Option::unwrap);
         assert_eq!(
             tl,
             Rect {
@@ -6065,12 +6310,193 @@ mod tests {
         }
         let small = Rect { w: 10, h: 30, ..R };
         assert_eq!(
-            corner_rects(small, 12).unwrap()[3].w,
+            corner_rects(small, 12, 12)[3].unwrap().w,
             5,
             "half the window at most"
         );
-        assert_eq!(corner_rects(Rect { w: 1, ..R }, 12), None);
-        assert_eq!(corner_rects(R, 0), None);
+        assert_eq!(corner_rects(Rect { w: 1, ..R }, 12, 12), [None; 4]);
+        assert_eq!(corner_rects(R, 0, 0), [None; 4]);
+        // Square at the top (a title strip over niri's radius): the bottom
+        // two alone, where they were.
+        let [tl, tr, bl2, br2] = corner_rects(R, 0, 12);
+        assert_eq!((tl, tr), (None, None));
+        assert_eq!((bl2, br2), (Some(bl), Some(br)));
+        // Each its own size.
+        let [tl, tr, bl, br] = corner_rects(R, 4, 16).map(Option::unwrap);
+        assert_eq!((tl.x, tl.y, tl.w), (26, 23, 4));
+        assert_eq!((tr.x, tr.w), (26 + 640 - 4, 4));
+        assert_eq!((bl.y, bl.w, br.x), (23 + 480 - 16, 16, 26 + 640 - 16));
+    }
+
+    /// How many of `rects` cover each pixel of `whole`, row by row.
+    fn coverage(whole: Rect, rects: &[Rect]) -> Vec<u8> {
+        let mut n = vec![0u8; (whole.w * whole.h) as usize];
+        for r in rects {
+            for y in r.y.max(whole.y)..(r.y + r.h).min(whole.y + whole.h) {
+                for x in r.x.max(whole.x)..(r.x + r.w).min(whole.x + whole.w) {
+                    n[((y - whole.y) * whole.w + x - whole.x) as usize] += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// The frame's own round corners: in the whole window's corners, the
+    /// top ones down past the title strip where the radius reaches below
+    /// the border. Every strip of every ring and the title strip are laid
+    /// short of them whole: with them, they cover the frame once — no
+    /// pixel twice, none left out —, and nothing of the program's content
+    /// but the pieces (clear there).
+    #[test]
+    fn the_frames_own_corners_take_the_strips_ends() {
+        let content = |x: i32, y: i32| x >= R.x && x < R.x + R.w && y >= R.y && y < R.y + R.h;
+        let check = |i: Insets, o: &Outer, widths: &[i32], over: bool| -> [Rect; 4] {
+            let pieces = outer_rects(R, i, o).expect("room for them");
+            let whole = geometry_up(R, i);
+            let mut laid: Vec<Rect> = ring_strips(R, i, widths)
+                .into_iter()
+                .map(|r| trim(r, &pieces))
+                .collect();
+            let strip = title_strip(R, i, over).map(|r| trim(r, &pieces));
+            laid.extend(strip.filter(|_| i.title > 0));
+            assert!(laid.iter().all(|r| r.w > 0 && r.h > 0), "{laid:?}");
+            laid.extend(pieces);
+            let n = coverage(whole, &laid);
+            for y in whole.y..whole.y + whole.h {
+                for x in whole.x..whole.x + whole.w {
+                    let got = n[((y - whole.y) * whole.w + x - whole.x) as usize];
+                    let on_pieces = pieces
+                        .iter()
+                        .any(|p| x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h);
+                    if content(x, y) {
+                        assert_eq!(got, u8::from(on_pieces), "content ({x}, {y})");
+                    } else {
+                        assert_eq!(got, 1, "frame ({x}, {y}) {o:?}");
+                    }
+                }
+            }
+            pieces
+        };
+        // A niri of 20 outside, a border of 4 (soft: two rings of
+        // 2) and the title strip under it.
+        let niri = Outer {
+            radius: 20,
+            side: 20,
+            top: 24,
+            border: 4,
+            band: true,
+        };
+        let whole = geometry_up(R, BT);
+        let [tl, tr, bl, br] = check(BT, &niri, &[2, 2], true);
+        assert_eq!(
+            tl,
+            Rect {
+                x: whole.x,
+                y: whole.y,
+                w: 20,
+                h: 24
+            }
+        );
+        assert_eq!((tr.x, tr.y, tr.h), (whole.x + whole.w - 20, whole.y, 24));
+        assert_eq!(
+            bl,
+            Rect {
+                x: whole.x,
+                y: whole.y + whole.h - 20,
+                w: 20,
+                h: 20
+            }
+        );
+        assert_eq!((br.x, br.y), (tr.x, bl.y));
+        // The title strip: short of them at both ends, its full height.
+        let pieces = [tl, tr, bl, br];
+        assert_eq!(
+            trim(title_strip(R, BT, true).unwrap(), &pieces),
+            Rect {
+                x: whole.x + 20,
+                y: R.y - TITLE_HEIGHT,
+                w: whole.w - 40,
+                h: TITLE_HEIGHT
+            }
+        );
+        // One ring; a radius inside the border (the pieces its corners
+        // alone); hover (no room for the strip: the one over the content
+        // short of them too).
+        check(BT, &niri, &[4], true);
+        let small = Outer {
+            radius: 3,
+            side: 4,
+            top: 4,
+            border: 4,
+            band: true,
+        };
+        check(BT, &small, &[2, 2], true);
+        assert_eq!(
+            trim(
+                title_strip(R, BT, true).unwrap(),
+                &outer_rects(R, BT, &small).unwrap()
+            ),
+            title_strip(R, BT, true).unwrap(),
+            "the strip whole: the pieces are the border's"
+        );
+        let hover = Outer {
+            band: false,
+            ..niri
+        };
+        let pieces = check(B, &hover, &[2, 2], true);
+        assert_eq!(
+            trim(title_strip(R, B, true).unwrap(), &pieces),
+            Rect {
+                x: R.x - 4 + 20,
+                y: R.y,
+                w: R.w + 8 - 40,
+                h: TITLE_HEIGHT
+            }
+        );
+        // None: a window too small for them; fullscreen in mode `always`
+        // (the strip takes no room, the top ones would draw its ends over
+        // the content).
+        assert_eq!(outer_rects(Rect { w: 30, ..R }, BT, &niri), None);
+        assert_eq!(outer_rects(Rect { h: 10, ..R }, BT, &niri), None);
+        assert_eq!(outer_rects(R, B, &niri), None);
+    }
+
+    /// A piece of the frame's own corner takes the pointer where the frame
+    /// is in it — the border's band, the title strip's end on the top ones
+    /// —, never over the program's content.
+    #[test]
+    fn the_frames_own_corners_take_input_where_the_frame_is() {
+        let o = Outer {
+            radius: 20,
+            side: 20,
+            top: 24,
+            border: 4,
+            band: true,
+        };
+        let rect = |x, y, w, h| Rect { x, y, w, h };
+        assert_eq!(
+            outer_input(&o, 0),
+            [rect(0, 0, 20, 4), rect(0, 0, 4, 24), rect(4, 4, 16, 20)]
+        );
+        assert_eq!(
+            outer_input(&o, 1),
+            [rect(0, 0, 20, 4), rect(16, 0, 4, 24), rect(0, 4, 16, 20)]
+        );
+        assert_eq!(outer_input(&o, 2), [rect(0, 16, 20, 4), rect(0, 0, 4, 20)]);
+        assert_eq!(outer_input(&o, 3), [rect(0, 16, 20, 4), rect(16, 0, 4, 20)]);
+        // Without the strip under them, the band alone; without a border,
+        // nothing (the pieces are over the content then).
+        let hover = Outer { band: false, ..o };
+        assert_eq!(
+            outer_input(&hover, 0),
+            [rect(0, 0, 20, 4), rect(0, 0, 4, 24)]
+        );
+        let bare = Outer {
+            border: 0,
+            band: false,
+            ..o
+        };
+        assert!(outer_input(&bare, 0).is_empty());
     }
 
     /// The tag's row: the title's, but a frame without a border still lays
