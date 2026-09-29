@@ -57,6 +57,9 @@ mod cell {
 }
 
 const V6: u32 = 1 << 8;
+/// Reads of a slot before it is taken for none (a writer mid-write, or
+/// gone in the middle).
+const READS: usize = 1024;
 
 /// What a flow may do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,11 +200,13 @@ impl Table {
         }
     }
 
-    /// The decision in slot `i`, read whole.
+    /// The decision in slot `i`, read whole. A slot that stays odd — its
+    /// writer killed in the middle of it — is none: the reader never waits
+    /// on a writer that is gone (its next keeper empties it).
     fn read_slot(&self, i: usize) -> Option<(Key, Verdict)> {
         let s = Self::slot(i);
         let seq = self.u32_cell(s + cell::SEQ);
-        loop {
+        for _ in 0..READS {
             let before = seq.load(Ordering::Acquire);
             if !before.is_multiple_of(2) {
                 std::hint::spin_loop();
@@ -229,6 +234,7 @@ impl Table {
             };
             return Some((key, verdict));
         }
+        None
     }
 
     /// The decision for `key`, if there is one (the relay's).
