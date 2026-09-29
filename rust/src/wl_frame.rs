@@ -2812,6 +2812,10 @@ impl Window {
         let toplevel = self.toplevel.as_ref().and_then(Weak::upgrade);
         if down {
             self.pressed = None;
+            // A press elsewhere between two on the title: no double click.
+            if hit != Hit::Title {
+                self.title_pressed = None;
+            }
             match (hit, &toplevel, seat) {
                 // The second press of a double click maximizes (or back);
                 // any other press moves.
