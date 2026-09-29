@@ -1,7 +1,8 @@
 """tests/vm-window.nix, continued: a network whose login is asked
 (docs/PERMISSIONS.md §11.16, step 2): a real ocserv on the machine that asks
-a password and then a one-time code (TOTP); an OpenConnect zone with
-`Login = ask`; a launch into it brings the connect window's form. A wrong
+a password and then a one-time code (TOTP); an OpenConnect zone without a
+`PasswordFile`, so its login is asked; a launch into it brings the connect
+window's form. A wrong
 password: the form again, with what went wrong. The right one and the code:
 the zone comes up with them, the program runs — and the password is on no
 disk and on no command line.
@@ -101,7 +102,7 @@ with subtest("a network that asks its login: the form, then the zone with it"):
         + SRV
         + ":4443' 'Protocol = anyconnect' 'User = ivan' 'ServerCert = "
         + pin
-        + "' 'Login = ask' 'Args = --no-dtls' > /tmp/ocwork.conf"
+        + "' 'Args = --no-dtls' > /tmp/ocwork.conf"
     )
     alice("cellward add ocwork /tmp/ocwork.conf")
     # A network whose login is asked asks by default.

@@ -1381,7 +1381,9 @@ cookie.
    2026-09-29: `cellward connection`, `programs.cellward.connection`,
    `connection` сети в статусе; `crate::connect`).
 2. Вход OpenConnect в этом окне, «запомнить пароль» (**сделано**,
-   2026-09-30: `Login = ask` в `[OpenConnect]` вместо `PasswordFile`; форма —
+   2026-09-30: логин спрашивается у сети `[OpenConnect]` без `PasswordFile`
+   — без ключа, который можно спутать с именем пользователя; `AskLogin = no`
+   — шлюзу, который ничего не спрашивает; форма —
    `vpn-zone-window login`, поля неактивны, пока окно не простоит в фокусе
    без нажатий; ответы — держателю зоны через сокет
    `$XDG_RUNTIME_DIR/vpn-zones/login/<сеть>.sock`, который отдаётся только

@@ -731,7 +731,7 @@ fn up(tools: &Tools, args: &[OsString]) -> u8 {
     };
     let name_text = name.to_string_lossy();
     // A network whose login is asked takes it in the connect window first
-    // (`crate::connect`, `Login = ask`); any other is started as it was.
+    // (`crate::connect`, no `PasswordFile`); any other is started as it was.
     if crate::connect::asks_login(&tools.state, &name_text).is_some() {
         return match crate::connect::bring_up(tools, &name_text, crate::connect::Wants::Person) {
             Ok(()) => {

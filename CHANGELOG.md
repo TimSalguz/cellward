@@ -31,8 +31,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Added
 - **The OpenConnect login asked in a window** (2026-09-30, ROADMAP M4,
-  docs/PERMISSIONS.md §11.16): `Login = ask` in `[OpenConnect]` instead of
-  `PasswordFile`. When the zone is to come up — a launch into it, a
+  docs/PERMISSIONS.md §11.16): an `[OpenConnect]` network without a
+  `PasswordFile` asks its login — no key to write for it, and no value a
+  user name could be taken for; `AskLogin = no` for a gateway that asks
+  nothing (such a zone was started without a password before, and is
+  still with it). When the zone is to come up — a launch into it, a
   container moved there, `cellward up` — the connect window's form
   (`vpn-zone-window login`, its fields dead until it has been focused and
   still) asks for the user, the group, the password and a one-time code.

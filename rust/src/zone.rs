@@ -4079,7 +4079,7 @@ pub struct OcZone {
     /// filter would not let a lookup out even if it had one. The client is then
     /// told the answer with `--resolve`, so it never asks either.
     pub addr: IpAddr,
-    /// The login the connect window took (`Login = ask`, `crate::connect`):
+    /// The login the connect window took (no `PasswordFile`, `crate::connect`):
     /// taken over its socket while still in the host's namespaces, handed
     /// to the client on its standard input.
     pub login: Option<crate::connect::Login>,
@@ -4658,7 +4658,7 @@ fn prepare_openconnect(zone: &Zone, ini: &WgConfig) -> Result<Backend, String> {
     // before it is handed to the client (`spawn_openconnect`).
     cfg.check_password_file()
         .map_err(|e| format!("{CONFIG}: {e}"))?;
-    // A login asked when the zone starts (`Login = ask`): taken now, over the
+    // A login asked when the zone starts (no `PasswordFile`): taken now, over the
     // socket of the user's runtime directory whoever started the zone holds
     // (`connect::Offer`) — here, before a namespace of the zone exists.
     let login = if cfg.login {
@@ -7564,7 +7564,7 @@ fn real_program(program: &Path) -> Result<PathBuf, String> {
 /// * `--non-inter` because a zone is started by a systemd unit and there is no
 ///   terminal to ask anything on; a prompt would hang the zone instead of
 ///   failing it. Not with a one-time code of the connect window's login
-///   (`Login = ask`): the gateway's second prompt reads it from standard
+///   (no `PasswordFile`): the gateway's second prompt reads it from standard
 ///   input, the line after the password — and a prompt past those finds the
 ///   input closed, and fails.
 /// * `--no-external-auth` so that authentication never tries to open a browser

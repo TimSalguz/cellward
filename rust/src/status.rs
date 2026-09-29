@@ -393,7 +393,7 @@ pub fn networks(tools: &Tools) -> String {
             sourced_str(&color.hex(), source)
         };
         // How it is connected (`crate::connect`), and whether its login is
-        // asked when it is (`Login = ask`): `null` for no network.
+        // asked when it is (no `PasswordFile`): `null` for no network.
         let (connection, login_asked) = if name == crate::launch::OFFLINE {
             ("null".to_owned(), "null".to_owned())
         } else {

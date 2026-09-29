@@ -281,7 +281,7 @@ AuthGroup  = Employees                ; the "realm"/"domain" dropdown, if the se
 ServerCert = pin-sha256:HXXQ…=        ; pin the certificate; without it, the system CA store
                                       ; (pin-sha256: or sha256: — never sha1:)
 PasswordFile = /home/alice/.config/vpn-zones/secrets/work.pass
-                                      ; or instead: Login = ask — asked in a window
+                                      ; optional: without it, the login is asked in a window
 MTU        = 1300                     ; optional, wins over what the gateway offers
 Args       = --no-dtls --os=linux-64  ; optional, from an allowlist
 ```
@@ -346,7 +346,8 @@ all — but then the zone is brought up by a person rather than by our code, and
 both the certificate pin and the allowlist are bypassed: the two things the
 format exists for.
 
-**Done (2026-09-29): `Login = ask`** instead of `PasswordFile`. When the zone
+**Done (2026-09-29): the login asked** — the default where there is no
+`PasswordFile` (`AskLogin = no` for a gateway that asks nothing). When the zone
 is to come up — a program launched into it, a container moved there,
 `cellward up` — the connect window asks for the user, the group, the password
 and, if the gateway wants one, a one-time code. The answers never touch a

@@ -166,9 +166,12 @@ pub struct OcConfig {
     /// Absolute path of a file holding the password on its first line. Checked
     /// for being nobody else's business; read as late as possible.
     pub password_file: Option<PathBuf>,
-    /// `Login = ask`: the login is asked when the zone starts — the connect
-    /// window's form (`crate::connect`, `docs/PERMISSIONS.md` §11.16) —,
-    /// never stored in a file. Not with `PasswordFile`.
+    /// The login is asked when the zone starts — the connect window's form
+    /// (`crate::connect`, `docs/PERMISSIONS.md` §11.16) —, never stored in
+    /// a file: the default where there is no `PasswordFile` (the owner,
+    /// 2026-09-30: nothing to write for the common case, and no value a
+    /// user name could be taken for). `AskLogin = no`: a gateway that asks
+    /// nothing, started without a password, as before.
     pub login: bool,
     /// `MTU =` in the config, which wins over what the gateway offers.
     pub mtu: Option<u32>,
@@ -203,10 +206,10 @@ pub enum ConfigError {
         uid: u32,
     },
     PasswordFileEmpty(String),
-    /// `Login =` other than `ask`.
-    BadLogin(String),
-    /// `Login = ask` and a `PasswordFile` both: one or the other.
-    LoginAndPasswordFile,
+    /// `AskLogin =` other than yes or no.
+    BadAskLogin(String),
+    /// `AskLogin = yes` and a `PasswordFile` both: one or the other.
+    AskLoginAndPasswordFile,
     /// A flag that is not on the allowlist, or one written as two words.
     ForbiddenArg(String),
 }
@@ -247,13 +250,15 @@ impl fmt::Display for ConfigError {
                 write!(f, "PasswordFile = {path} belongs to uid {uid}, not to you")
             }
             Self::PasswordFileEmpty(p) => write!(f, "PasswordFile = {p} is empty"),
-            Self::BadLogin(v) => write!(
+            Self::BadAskLogin(v) => write!(
                 f,
-                "Login = {v}: the only value is ask — the login asked when the zone starts"
+                "AskLogin = {v}: yes (the login asked when the zone starts — the default \
+                 without a PasswordFile) or no (the gateway asks nothing)"
             ),
-            Self::LoginAndPasswordFile => write!(
+            Self::AskLoginAndPasswordFile => write!(
                 f,
-                "Login = ask and PasswordFile both: the login is asked, or its password read                  from the file — one of them"
+                "AskLogin = yes and PasswordFile both: the login is asked, or its password \
+                 read from the file — one of them"
             ),
             Self::ForbiddenArg(a) => write!(
                 f,
@@ -312,7 +317,7 @@ impl OcConfig {
                 "authgroup",
                 "servercert",
                 "passwordfile",
-                "login",
+                "asklogin",
                 "mtu",
                 "args",
             ]
@@ -353,14 +358,16 @@ impl OcConfig {
             None => None,
         };
 
-        let login = match section.get("Login") {
-            Some(v) if v.eq_ignore_ascii_case("ask") => true,
-            Some(v) => return Err(ConfigError::BadLogin(v.to_string())),
-            None => false,
+        let ask_login = match section.get("AskLogin").map(str::to_ascii_lowercase) {
+            Some(v) if ["yes", "true", "on"].contains(&v.as_str()) => Some(true),
+            Some(v) if ["no", "false", "off"].contains(&v.as_str()) => Some(false),
+            Some(v) => return Err(ConfigError::BadAskLogin(v)),
+            None => None,
         };
-        if login && password_file.is_some() {
-            return Err(ConfigError::LoginAndPasswordFile);
+        if ask_login == Some(true) && password_file.is_some() {
+            return Err(ConfigError::AskLoginAndPasswordFile);
         }
+        let login = ask_login.unwrap_or(password_file.is_none());
 
         let extra = match section.get("Args") {
             Some(args) => check_args(args)?,
@@ -1100,26 +1107,36 @@ mod tests {
         ));
     }
 
-    /// `Login = ask`: the login is asked when the zone starts — not with a
-    /// password file, and no other value.
+    /// The login is asked when the zone starts unless a password file is
+    /// named — `AskLogin = no` for a gateway that asks nothing; never both
+    /// asked and read from a file.
     #[test]
-    fn the_login_is_asked_or_read_from_a_file_never_both() {
-        let cfg = config("[OpenConnect]\nServer = a.b\nUser = ivan\nLogin = ask\n").unwrap();
+    fn the_login_is_asked_unless_a_file_holds_the_password() {
+        let cfg = config("[OpenConnect]\nServer = a.b\nUser = ask\n").unwrap();
         assert!(cfg.login && cfg.password_file.is_none());
-        assert_eq!(cfg.user.as_deref(), Some("ivan"));
-        assert!(!config("[OpenConnect]\nServer = a.b\n").unwrap().login);
-        assert!(
-            config("[OpenConnect]\nServer = a.b\nlogin = ASK\n")
-                .unwrap()
-                .login
+        assert_eq!(
+            cfg.user.as_deref(),
+            Some("ask"),
+            "a user named ask is a user"
+        );
+        let file = config("[OpenConnect]\nServer = a.b\nPasswordFile = /run/x\n").unwrap();
+        assert!(!file.login);
+        let quiet = config("[OpenConnect]\nServer = a.b\nAskLogin = no\n").unwrap();
+        assert!(!quiet.login);
+        let loud = config("[OpenConnect]\nServer = a.b\nasklogin = YES\n").unwrap();
+        assert!(loud.login);
+        assert_eq!(
+            config("[OpenConnect]\nServer = a.b\nAskLogin = sometimes\n"),
+            Err(ConfigError::BadAskLogin("sometimes".to_string()))
         );
         assert_eq!(
-            config("[OpenConnect]\nServer = a.b\nLogin = always\n"),
-            Err(ConfigError::BadLogin("always".to_string()))
+            config("[OpenConnect]\nServer = a.b\nAskLogin = yes\nPasswordFile = /run/x\n"),
+            Err(ConfigError::AskLoginAndPasswordFile)
         );
         assert_eq!(
-            config("[OpenConnect]\nServer = a.b\nLogin = ask\nPasswordFile = /run/x\n"),
-            Err(ConfigError::LoginAndPasswordFile)
+            config("[OpenConnect]\nServer = a.b\nLogin = ask\n"),
+            Err(ConfigError::UnknownKey("Login".to_string())),
+            "gone: a key a user name could be read into"
         );
     }
 

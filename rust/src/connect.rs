@@ -3,8 +3,8 @@
 //! program is launched into it, as it always did; `ask`, the person is
 //! asked first; `manual`, only the person connects it, and a launch into it
 //! while it is down asks whether to connect it now — and, for a network
-//! whose login is asked (`Login = ask` of an OpenConnect zone), the connect
-//! window's login form, whose answers go to the zone's holder alone.
+//! whose login is asked (an OpenConnect zone without a `PasswordFile`), the
+//! connect window's login form, whose answers go to the zone's holder alone.
 //!
 //! The question is the launch window's, guarded as every question of it is
 //! (`crate::window::question`): nothing is taken until the person has been
@@ -158,8 +158,8 @@ pub fn set(state: &Path, config: &Path, zone: &str, mode: Option<Mode>) -> Resul
     }
 }
 
-/// The network's OpenConnect section, where its login is asked
-/// (`Login = ask`).
+/// The network's OpenConnect section, where its login is asked (no
+/// `PasswordFile`, and not `AskLogin = no`).
 pub fn asks_login(state: &Path, zone: &str) -> Option<OcConfig> {
     let raw = fs::read(state.join(zone).join("config.conf")).ok()?;
     let cfg = OcConfig::parse(&raw).ok()?;
@@ -250,7 +250,7 @@ impl Steps for Real<'_> {
 /// `zone` up for `wants`, as its «Подключение» says: `auto` starts it;
 /// `ask` and `manual` ask the person first (a launch, a container — the
 /// person connecting it asks nothing); a network whose login is asked
-/// (`Login = ask`) takes it in the connect window's form, asked again with
+/// (no `PasswordFile`) takes it in the connect window's form, asked again with
 /// what went wrong until the network is up or the person gives up. One
 /// question per network at a time: a launch that waited through another's
 /// takes its outcome, one after it asks anew. `Err`: why it is not up, for
@@ -570,8 +570,9 @@ pub fn fetch_login(zone: &str) -> Result<Login, String> {
     let path = login_socket(Path::new(&runtime), zone);
     let mut stream = UnixStream::connect(&path).map_err(|e| {
         format!(
-            "no login was given for {zone} ({}: {e}) — Login = ask: it is asked when a program \
-             is launched into the zone, or by `cellward up {zone}`",
+            "no login was given for {zone} ({}: {e}) — it is asked when a program is launched \
+             into the zone, or by `cellward up {zone}`; a gateway that asks nothing: \
+             AskLogin = no",
             path.display()
         )
     })?;
@@ -960,7 +961,7 @@ mod tests {
         // A network whose login is asked asks by default.
         fs::write(
             t.state.join("work/config.conf"),
-            "[OpenConnect]\nServer = vpn.example.org\nLogin = ask\n",
+            "[OpenConnect]\nServer = vpn.example.org\n",
         )
         .unwrap();
         assert_eq!(
@@ -968,6 +969,17 @@ mod tests {
             (Mode::Ask, Source::Default)
         );
         assert!(asks_login(&t.state, "work").is_some());
+        // Its password in a file: nothing to ask, it starts as any other.
+        fs::write(
+            t.state.join("work/config.conf"),
+            "[OpenConnect]\nServer = vpn.example.org\nPasswordFile = /run/x\n",
+        )
+        .unwrap();
+        assert_eq!(
+            mode(&t.state, &t.config, "work"),
+            (Mode::Auto, Source::Default)
+        );
+        assert!(asks_login(&t.state, "work").is_none());
     }
 
     /// `auto` starts; `ask` and `manual` ask, and the answer decides; the
@@ -1037,7 +1049,7 @@ mod tests {
         let t = tools("login");
         fs::write(
             t.state.join("work/config.conf"),
-            "[OpenConnect]\nServer = vpn.example.org\nLogin = ask\n",
+            "[OpenConnect]\nServer = vpn.example.org\n",
         )
         .unwrap();
         set(&t.state, &t.config, "work", Some(Mode::Auto)).unwrap();
@@ -1087,8 +1099,7 @@ mod tests {
     /// keyring where there is one, what went wrong said.
     #[test]
     fn the_form_is_prefilled_and_read_back() {
-        let cfg =
-            OcConfig::parse(b"[OpenConnect]\nServer = vpn.example.org\nLogin = ask\n").unwrap();
+        let cfg = OcConfig::parse(b"[OpenConnect]\nServer = vpn.example.org\n").unwrap();
         let req = login_request(
             "work",
             (Mode::Ask, Wants::Program("Wine")),
