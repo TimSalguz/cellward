@@ -3135,7 +3135,7 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
     for bad in [
         &["frame", "color", "nl", "blue"][..],
         &["frame", "color", "nope", "#000000"],
-        &["frame", "width", "0"],
+        &["frame", "width", "-1"],
         &["frame", "width", "33"],
         &["frame", "title", "sometimes"],
         &["frame", "title"],

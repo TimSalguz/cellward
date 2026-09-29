@@ -1067,7 +1067,7 @@ mod tests {
         for bad in [
             &["foot", "--frame", "--", "x"][..],
             &["foot", "--frame", "red:4", "--", "x"],
-            &["foot", "--frame", "ff0080:0", "--", "x"],
+            &["foot", "--frame", "ff0080:33", "--", "x"],
             &["foot", "--frame", "ff0080:4:maybe", "--", "x"],
             &["foot", "--frame", "ff0080:4:always:beos", "--", "x"],
             &["foot", "--frame", "ff0080:4:always:kde:soft:99", "--", "x"],

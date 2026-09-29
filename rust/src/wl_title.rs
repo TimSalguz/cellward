@@ -682,6 +682,10 @@ impl Look {
     /// would, which a strip of one stretched pixel cannot. `tag`: none.
     pub fn rings(&self, width: i32) -> Vec<(i32, usize)> {
         let width = width.max(0);
+        // No border: no ring (a strip of no width is no strip).
+        if width == 0 {
+            return Vec::new();
+        }
         match self.style {
             Style::Full => vec![(width, 0)],
             Style::Soft if width >= 2 => vec![(width / 2, 1), (width - width / 2, 0)],

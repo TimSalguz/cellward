@@ -14,6 +14,12 @@
 //! fields, said only when one is not the default), so that the launch's line
 //! stays what it was.
 //!
+//! **On the fly** (step 6 of `docs/PERMISSIONS.md` §11.15, 2026-09-29): the
+//! launch's supervisor watches the settings' directory (inotify,
+//! `wl_proxy::Live`) and tells its proxy the frame anew; open windows are
+//! laid anew. The width first — 0 is no border at all, the title strip
+//! alone where it is on.
+//!
 //! Where a setting comes from, as for the others: Nix (`declared/`) over the
 //! local one, the local one over the default. The switch has no Nix option —
 //! it is flipped for a call and back, and a switch declared in Nix could not
@@ -184,7 +190,7 @@ fn width_file(text: Option<String>) -> Option<i32> {
         .trim()
         .parse()
         .ok()
-        .filter(|w| (1..=MAX_WIDTH).contains(w))
+        .filter(|w| (0..=MAX_WIDTH).contains(w))
 }
 
 /// The border's width in logical pixels and where it comes from.
@@ -506,7 +512,7 @@ impl Frame {
         let mut parts = text.split(':');
         let color = Rgb::parse(parts.next()?)?;
         let width: i32 = parts.next()?.parse().ok()?;
-        if !(1..=MAX_WIDTH).contains(&width) {
+        if !(0..=MAX_WIDTH).contains(&width) {
             return None;
         }
         let title = match parts.next() {
@@ -648,10 +654,13 @@ mod tests {
         assert_eq!(width(&config), (7, Source::Local));
         crate::declared::declare(&config.join(DECLARED_DIR).join(WIDTH_SETTING), "2\n");
         assert_eq!(width(&config), (2, Source::Nix));
-        for bad in ["0", "-3", "33", "wide", ""] {
+        for bad in ["-3", "33", "wide", ""] {
             crate::declared::declare(&config.join(DECLARED_DIR).join(WIDTH_SETTING), bad);
             assert_eq!(width(&config), (7, Source::Local), "{bad:?}");
         }
+        // No border at all: the title strip alone, where it is on.
+        crate::declared::declare(&config.join(DECLARED_DIR).join(WIDTH_SETTING), "0");
+        assert_eq!(width(&config), (0, Source::Nix));
         assert!(!hidden(&config));
         fs::write(config.join(SWITCH_SETTING), "shown").unwrap();
         assert!(!hidden(&config));
@@ -684,9 +693,10 @@ mod tests {
             }),
             "without a mode, the default one"
         );
+        assert_eq!(Frame::parse_arg("0102ff:0").map(|f| f.width), Some(0));
         for bad in [
             "0102ff",
-            "0102ff:0",
+            "0102ff:-1",
             "0102ff:99",
             "zz02ff:4",
             ":4",

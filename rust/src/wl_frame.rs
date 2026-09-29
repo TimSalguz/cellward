@@ -669,7 +669,11 @@ fn surface_size(s: &Committed) -> Option<(i32, i32)> {
 /// The frame of one connection: what the proxy bound for it upstream, and
 /// what it draws with. Every handler below holds it.
 pub(crate) struct Frames {
-    width: i32,
+    /// The border's width: the launch's, changed on the fly
+    /// ([`Frames::set_width`]).
+    width: Cell<i32>,
+    /// This connection's windows: what a change of the frame reaches.
+    windows: RefCell<Vec<Weak<RefCell<Window>>>>,
     /// The title strip's mode, the launch's.
     mode: TitleMode,
     /// The look — the style, the buttons, the round corners —, the
@@ -866,7 +870,8 @@ impl Frames {
         questions: Rc<Questions>,
     ) -> Rc<Self> {
         let frames = Rc::new(Self {
-            width: border.width,
+            width: Cell::new(border.width),
+            windows: RefCell::default(),
             mode: border.title,
             look: border.look,
             pixel: border.pixel.clone(),
@@ -990,7 +995,26 @@ impl Frames {
         if self.look.tag() {
             0
         } else {
-            self.width
+            self.width.get()
+        }
+    }
+
+    /// The border's width changed (the setting, on the fly — 0 is none):
+    /// every window of the connection laid anew, and its program told the
+    /// size the new frame leaves it.
+    pub(crate) fn set_width(&self, width: i32) {
+        if self.width.replace(width) == width {
+            return;
+        }
+        let windows: Vec<_> = {
+            let mut windows = self.windows.borrow_mut();
+            windows.retain(|w| w.strong_count() > 0);
+            windows.clone()
+        };
+        for window in windows.iter().filter_map(Weak::upgrade) {
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.reframe(self);
+            }
         }
     }
 
@@ -1909,6 +1933,16 @@ struct Window {
     menu: Option<Dropdown>,
     /// A question's panel, while it is up.
     prompt: Option<Panel>,
+    /// The compositor's last configure of the toplevel — the size it asked
+    /// for, and the states the program was told —, and of its xdg_surface:
+    /// what a change of the frame tells the program again, less the new
+    /// insets ([`Window::reconfigure`]).
+    last_configure: Option<(i32, i32, Vec<u8>)>,
+    last_serial: Option<u32>,
+    /// The last configure the program acked that went on to the compositor:
+    /// the same serial acked again (after the proxy told it again) is not
+    /// passed on — the compositor would take it for a wrong one.
+    acked: Option<u32>,
 }
 
 impl Window {
@@ -1945,6 +1979,9 @@ impl Window {
             pressed: None,
             menu: None,
             prompt: None,
+            last_configure: None,
+            last_serial: None,
+            acked: None,
         }
     }
 
@@ -2368,17 +2405,63 @@ impl Window {
         }
     }
 
+    /// The border's strips gone, at once: the window is, or its border is
+    /// to be made anew ([`Window::reframe`]).
+    fn drop_border(&mut self) {
+        for strip in self.strips.take().into_iter().flatten() {
+            strip.viewport.send_destroy();
+            strip.sub.send_destroy();
+            strip.surface.send_destroy();
+        }
+        self.counted = None;
+    }
+
+    /// The frame changed on the fly: the border made anew at the program's
+    /// next commit, as wide as the frame is now — none at 0 —, everything
+    /// laid anew then; and the program told the size that leaves it.
+    fn reframe(&mut self, f: &Frames) {
+        if !self.framed(f) {
+            return;
+        }
+        self.drop_border();
+        self.laid = None;
+        self.reconfigure(f);
+    }
+
+    /// The compositor's last configure told the program again, the frame's
+    /// insets as they are now taken off its size: the program lays itself
+    /// out anew and commits, and the frame is laid around that commit. The
+    /// same serial — the compositor's own; the program's second ack of it
+    /// is not passed on ([`Window::acked`]).
+    fn reconfigure(&mut self, f: &Frames) {
+        let (Some((width, height, states)), Some(serial)) =
+            (self.last_configure.clone(), self.last_serial)
+        else {
+            return;
+        };
+        let (Some(toplevel), Some(xdg)) = (
+            self.toplevel.as_ref().and_then(Weak::upgrade),
+            self.xdg.upgrade(),
+        ) else {
+            return;
+        };
+        let fullscreen = self.next_fullscreen;
+        let i = self.insets(f, fullscreen);
+        toplevel.send_configure(
+            size_down(width, i.across()),
+            size_down(height, i.down()),
+            &states,
+        );
+        xdg.send_configure(serial);
+    }
+
     /// The window is gone (its toplevel or xdg_surface destroyed): so is its
     /// frame, at once — a subsurface's destruction does not wait for a
     /// commit.
     fn drop_strips(&mut self) {
         self.close_menu();
         self.close_prompt();
-        for strip in self.strips.take().into_iter().flatten() {
-            strip.viewport.send_destroy();
-            strip.sub.send_destroy();
-            strip.surface.send_destroy();
-        }
+        self.drop_border();
         if let Some(t) = self.title.take() {
             t.destroy();
         }
@@ -3627,6 +3710,13 @@ impl XdgWmBaseHandler for WmBase {
         let (mode, look) = (self.f.mode, self.f.look);
         let window =
             Rc::new_cyclic(|me| RefCell::new(Window::new(id, surface, me.clone(), mode, look)));
+        {
+            let mut windows = self.f.windows.borrow_mut();
+            if windows.len() >= MAX_FRAMED {
+                windows.retain(|w| w.strong_count() > 0);
+            }
+            windows.push(Rc::downgrade(&window));
+        }
         let attached = match surface.try_get_handler_mut::<Surface>() {
             Ok(mut h) => {
                 h.window = Some(window.clone());
@@ -3713,6 +3803,7 @@ impl XdgSurfaceHandler for XdgSurfaceH {
     /// serial, until the program acks it.
     fn handle_configure(&mut self, slf: &Rc<XdgSurface>, serial: u32) {
         if let Ok(mut window) = self.window.try_borrow_mut() {
+            window.last_serial = Some(serial);
             let fullscreen = window.next_fullscreen;
             window.configures.push_back((serial, fullscreen));
             if window.configures.len() > MAX_CONFIGURES {
@@ -3725,6 +3816,13 @@ impl XdgSurfaceHandler for XdgSurfaceH {
     /// The program acks a configure: its next commit is of that state, and
     /// of every one before it (xdg-shell).
     fn handle_ack_configure(&mut self, slf: &Rc<XdgSurface>, serial: u32) {
+        if let Ok(mut window) = self.window.try_borrow_mut() {
+            // A configure the proxy told again, acked again: the compositor
+            // has had its ack.
+            if window.acked.replace(serial) == Some(serial) {
+                return;
+            }
+        }
         slf.send_ack_configure(serial);
         if let Ok(mut window) = self.window.try_borrow_mut() {
             if let Some(at) = window.configures.iter().position(|(s, _)| *s == serial) {
@@ -3877,6 +3975,9 @@ impl XdgToplevelHandler for Toplevel {
         } else {
             states
         };
+        if let Ok(mut window) = self.window.try_borrow_mut() {
+            window.last_configure = Some((width, height, states.to_vec()));
+        }
         slf.send_configure(
             size_down(width, i.across()),
             size_down(height, i.down()),

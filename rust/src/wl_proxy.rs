@@ -370,6 +370,12 @@ const RETRACT: u8 = b'w';
 const ANSWERED: u8 = b'a';
 /// Proxy → supervisor: no window to show the question of this number on.
 const NOWHERE: u8 = b'o';
+/// Supervisor → proxy: the frame's settings changed on the fly — the length
+/// of the rest (two bytes, little-endian) and the rest,
+/// `crate::frame::Frame::to_arg`'s. No answer.
+const FRAME: u8 = b'l';
+/// A frame's line at most.
+const MAX_FRAME_ARG: usize = 256;
 
 /// The byte of an ask of the frame, on the channel.
 fn ask_byte(ask: Ask) -> u8 {
@@ -448,6 +454,78 @@ pub struct Proxy {
     attention: MenuStart,
     /// The launch's socket of questions and the instances asking on it.
     asking: Asking,
+    /// The frame's settings watched, and the frame as the proxy has it.
+    live: Option<Live>,
+}
+
+/// The frame's settings watched for the proxy (step 6 of
+/// `docs/PERMISSIONS.md` §11.15: the frame changed on the fly): an inotify
+/// of the settings' directory and of Nix's words in it, and the frame the
+/// proxy draws now.
+struct Live {
+    inotify: OwnedFd,
+    config: PathBuf,
+    frame: Frame,
+}
+
+impl Live {
+    /// The directory `config` and its `declared/` watched; `None` when not
+    /// even the first can be.
+    fn watch(config: &Path, frame: Frame) -> Option<Self> {
+        // SAFETY: flags only; the descriptor is owned below.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: inotify_init1 has just returned this descriptor.
+        let inotify = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mask = libc::IN_CLOSE_WRITE
+            | libc::IN_MOVED_TO
+            | libc::IN_MOVED_FROM
+            | libc::IN_CREATE
+            | libc::IN_DELETE;
+        let watch = |dir: &Path| {
+            let Ok(path) = CString::new(dir.as_os_str().as_encoded_bytes()) else {
+                return false;
+            };
+            // SAFETY: a NUL-terminated path that outlives the call.
+            unsafe { libc::inotify_add_watch(inotify.as_raw_fd(), path.as_ptr(), mask) >= 0 }
+        };
+        if !watch(config) {
+            return None;
+        }
+        watch(&config.join(crate::cli::DECLARED_DIR));
+        Some(Self {
+            inotify,
+            config: config.to_path_buf(),
+            frame,
+        })
+    }
+
+    /// The settings' directory changed: its events drained, and the frame
+    /// as the settings have it now, when it is not the one the proxy has.
+    fn changed(&mut self) -> Option<Frame> {
+        let mut buf = [0u8; 4096];
+        // SAFETY: read(2) into a buffer of that length; non-blocking.
+        while unsafe { libc::read(self.inotify.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) }
+            > 0
+        {}
+        let mut next = self.frame;
+        next.width = crate::frame::width(&self.config).0;
+        (next != self.frame).then(|| {
+            self.frame = next;
+            next
+        })
+    }
+}
+
+/// The message that tells the proxy `frame` ([`FRAME`]).
+fn frame_message(frame: Frame) -> Vec<u8> {
+    let arg = frame.to_arg();
+    let len = u16::try_from(arg.len()).unwrap_or(0).to_le_bytes();
+    let mut message = vec![FRAME, len[0], len[1]];
+    message.extend_from_slice(arg.as_bytes());
+    message
 }
 
 /// A launch's socket of questions ([`ASK_DIR`]) and the instances on it,
@@ -706,6 +784,9 @@ pub fn start(
         upstream: upstream.to_path_buf(),
         adopting: false,
         signals: None,
+        live: frame
+            .as_ref()
+            .and_then(|setup| Live::watch(&setup.switch, setup.frame)),
         frame: frame.map(|setup| setup.switch),
         display,
         menu: MenuStart::default(),
@@ -870,6 +951,10 @@ impl Proxy {
                     fds.push(pollfd(fd.as_raw_fd()));
                 }
             }
+            let live_at = self.live.as_ref().map(|l| {
+                fds.push(pollfd(l.inotify.as_raw_fd()));
+                fds.len() - 1
+            });
             let signals_at = self.signals.as_ref().map(|s| {
                 fds.push(pollfd(s.fd.as_raw_fd()));
                 fds.len() - 1
@@ -903,6 +988,13 @@ impl Proxy {
                 }
             }
             self.heard_askers(&fds[askers_at..]);
+            // The frame's settings changed: the proxy told the frame now.
+            if live_at.is_some_and(|at| fds[at].revents != 0) {
+                let next = self.live.as_mut().and_then(Live::changed);
+                if let (Some(frame), Some(c)) = (next, &self.channel) {
+                    let _ = sys::send_with_fds(c.as_raw_fd(), &frame_message(frame), &[]);
+                }
+            }
             if listener_at.is_some_and(|at| fds[at].revents != 0) {
                 self.accept_askers();
             }
@@ -2074,7 +2166,7 @@ fn title_writer(border: Option<&Border>) -> Option<RawFd> {
 fn serve(
     listener: UnixListener,
     channel: UnixStream,
-    border: Option<Border>,
+    mut border: Option<Border>,
     focus: FocusPolicy,
 ) -> libc::c_int {
     // "Cannot draw" is said once for the launch, not once per connection.
@@ -2168,6 +2260,18 @@ fn serve(
                     }
                     Answer::Question(question) => questions.ask(question),
                     Answer::Retract(seq) => questions.retract(seq),
+                    // The frame changed on the fly: every connection's
+                    // windows laid anew, and the next connection's too.
+                    Answer::Frame(frame) => {
+                        if let Some(b) = border.as_mut() {
+                            b.width = frame.width;
+                        }
+                        for conn in &conns {
+                            if let Some(f) = &conn.frames {
+                                f.set_width(frame.width);
+                            }
+                        }
+                    }
                     Answer::Nothing => {}
                     Answer::Closed => {
                         // The program has exited: no new connections, those
@@ -2253,6 +2357,7 @@ enum Answer {
     Refused,
     Question(Question),
     Retract(u8),
+    Frame(Frame),
     Nothing,
     Closed,
 }
@@ -2279,6 +2384,22 @@ fn answer(channel: &UnixStream) -> Answer {
                 return Answer::Closed;
             }
             Answer::Question(question_of(head[0], &payload))
+        }
+        Ok((1, _, _)) if byte[0] == FRAME => {
+            let mut len = [0u8; 2];
+            if !recv_exact(channel.as_raw_fd(), &mut len) {
+                return Answer::Closed;
+            }
+            let len = usize::from(u16::from_le_bytes(len));
+            let mut arg = vec![0u8; len.min(MAX_FRAME_ARG)];
+            if len > MAX_FRAME_ARG || !recv_exact(channel.as_raw_fd(), &mut arg) {
+                return Answer::Closed;
+            }
+            // A line the proxy does not read is nothing: the frame stays.
+            std::str::from_utf8(&arg)
+                .ok()
+                .and_then(Frame::parse_arg)
+                .map_or(Answer::Nothing, Answer::Frame)
         }
         Ok((1, _, _)) if byte[0] == RETRACT => {
             let mut seq = [0u8; 1];
@@ -5808,5 +5929,145 @@ mod tests {
         let mut byte = [0u8];
         (&ours).read_exact(&mut byte).unwrap();
         assert_eq!(&byte, b"x");
+    }
+
+    /// The frame's width changed on the fly (step 6 of
+    /// docs/PERMISSIONS.md §11.15): the program is told the compositor's
+    /// last configure again, the new border taken off it — its second ack
+    /// of that serial is not the compositor's —, and at its next commit the
+    /// border is made anew: none at 0, six wide at 6, the geometry grown by
+    /// it.
+    #[test]
+    fn the_frames_width_changes_on_the_fly() {
+        let color = Rgb(0xff, 0, 0x80);
+        let rig = Rig::with_border("live-width", Some((4, color)));
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, FRAME_GLOBALS);
+        a_window(&mut client);
+        let got = log_until(&log, |m| m.iface == "xdg_wm_base" && m.opcode == 2);
+        let (xdg, root) = (got.last().unwrap().args[0], got.last().unwrap().args[1]);
+        let mut got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        let toplevel = got
+            .iter()
+            .find(|m| m.iface == "xdg_surface" && m.opcode == 1)
+            .map(|m| m.args[0])
+            .unwrap();
+        // The compositor's 800×600, serial 5: 792×592 for the program, and
+        // its ack passed on.
+        let mut out = Vec::new();
+        event(&mut out, toplevel, 0, |a| {
+            a.extend_from_slice(&words(&[800, 600, 0]))
+        });
+        event(&mut out, xdg, 0, |a| {
+            a.extend_from_slice(&5u32.to_ne_bytes())
+        });
+        compositor.write_all(&out).unwrap();
+        let configured = |client: &mut UnixStream| {
+            let events = events_until(client, |o, op, _| o == 8 && op == 0);
+            let size = events
+                .iter()
+                .rev()
+                .find(|(o, op, _)| *o == 9 && *op == 0)
+                .map(|(_, _, a)| (a[0] as i32, a[1] as i32))
+                .expect("no configure");
+            let serial = events.last().unwrap().2[0];
+            (size, serial)
+        };
+        assert_eq!(configured(&mut client), ((792, 592), 5));
+        request(&mut client, 8, 4, &5u32.to_ne_bytes());
+        got.extend(log_until(&log, |m| {
+            m.iface == "xdg_surface" && m.opcode == 4
+        }));
+        assert_eq!(got.last().unwrap().args, [5]);
+        let channel = rig.channel.as_ref().unwrap();
+        let tell = |width: i32| {
+            let frame = Frame {
+                color,
+                width,
+                title: TitleMode::Off,
+                buttons: ButtonStyle::Cellward,
+                style: Style::Full,
+                radius: 0,
+            };
+            sys::send_with_fds(channel.as_raw_fd(), &frame_message(frame), &[]).unwrap();
+        };
+        // No border: the whole 800×600 is the program's, the same serial.
+        tell(0);
+        assert_eq!(configured(&mut client), ((800, 600), 5));
+        // Its second ack of 5 stays here; its commit lays the frame anew:
+        // the strips gone, the geometry its own.
+        request(&mut client, 8, 4, &5u32.to_ne_bytes());
+        request(&mut client, 7, 6, &[]);
+        let got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        assert!(
+            !got.iter()
+                .any(|m| m.iface == "xdg_surface" && m.opcode == 4),
+            "the ack went on twice: {got:#?}"
+        );
+        let destroyed = got
+            .iter()
+            .filter(|m| m.iface == "wl_subsurface" && m.opcode == 0)
+            .count();
+        assert_eq!(destroyed, 4, "{got:#?}");
+        let geometry = got
+            .iter()
+            .rev()
+            .find(|m| m.iface == "xdg_surface" && m.opcode == 3)
+            .map(|m| m.args.clone());
+        assert_eq!(geometry, Some(vec![10, 20, 300, 200]));
+        // Six wide: told 788×588, four strips made anew, the geometry grown.
+        tell(6);
+        assert_eq!(configured(&mut client), ((788, 588), 5));
+        request(&mut client, 8, 4, &5u32.to_ne_bytes());
+        request(&mut client, 7, 6, &[]);
+        let got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        assert!(!got
+            .iter()
+            .any(|m| m.iface == "xdg_surface" && m.opcode == 4));
+        let made = got
+            .iter()
+            .filter(|m| m.iface == "wl_subcompositor" && m.opcode == 1)
+            .count();
+        assert_eq!(made, 4, "{got:#?}");
+        let geometry = got
+            .iter()
+            .rev()
+            .find(|m| m.iface == "xdg_surface" && m.opcode == 3)
+            .map(|m| m.args.clone());
+        assert_eq!(geometry, Some(vec![4, 14, 312, 212]));
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    /// The supervisor's watch of the frame's settings: a width written is
+    /// the frame to tell the proxy, once; Nix's word over the local one;
+    /// a change that leaves the frame as it is tells nothing.
+    #[test]
+    fn a_width_written_is_the_frame_to_tell() {
+        let config = std::env::temp_dir().join(format!("vz-live-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&config);
+        fs::create_dir_all(config.join(crate::cli::DECLARED_DIR)).unwrap();
+        let frame = Frame::parse_arg("ff0080:4").unwrap();
+        let mut live = Live::watch(&config, frame).expect("an inotify");
+        assert_eq!(live.changed(), None, "nothing changed");
+        fs::write(config.join(crate::frame::WIDTH_SETTING), "0").unwrap();
+        assert_eq!(live.changed().map(|f| f.width), Some(0));
+        assert_eq!(live.changed(), None, "told once");
+        fs::write(config.join("frames"), "shown").unwrap();
+        assert_eq!(live.changed(), None, "the width is what it was");
+        crate::declared::declare(
+            &config
+                .join(crate::cli::DECLARED_DIR)
+                .join(crate::frame::WIDTH_SETTING),
+            "9",
+        );
+        assert_eq!(live.changed().map(|f| f.width), Some(9));
+        assert_eq!(frame_message(live.frame)[0], FRAME);
+        let _ = fs::remove_dir_all(&config);
     }
 }
