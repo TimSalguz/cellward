@@ -250,7 +250,7 @@ let
       # the border's edges — the pixels stages 2 and 3 were checked by. The
       # default since 2026-09-28 is `soft`, two calmer tones;
       # tests/vm-window-looks.py shows it next to this one, and the other
-      # looks. Read at launch, like the width.
+      # looks.
       alice("cellward frame style full")
 
       # The hotkey menu (docs/WINDOW-FRAME.md §7б): a program in a zone opens a
@@ -376,6 +376,21 @@ let
           inside = [at(d(x + width) + slack + i, row) for i in range(d(w - 2 * width) - 2 * slack)]
           assert border not in inside, "the border inside the window"
 
+      def settled(name, check, tries=15):
+          """The screen shot again until `check` of it passes: a frame
+          changed on the fly (step 6 of docs/PERMISSIONS.md §11.15) is laid
+          anew with the program's next commit, after it has laid itself out
+          for the size the new frame leaves it."""
+          for n in range(tries):
+              at = shot(name)
+              try:
+                  check(at)
+                  return at
+              except AssertionError:
+                  if n == tries - 1:
+                      raise
+                  machine.sleep(1)
+
       def lettering(at, x, y, w, scale=1):
           """The pixels of the title strip that are not the zone's colour:
           its text. The strip is under the top border, between the sides,
@@ -468,10 +483,11 @@ let
           )
           machine.sleep(2)
 
-      # `cellward frame title hover` (read at launch): the strip takes no
-      # room and is not there until the pointer comes to the window's top
-      # edge — which this seat, with no pointer device at all, never does
-      # (the coming out is the proxy's unit test). The status names it.
+      # `cellward frame title hover`: the strip takes no room and is not
+      # there until the pointer comes to the window's top edge — which this
+      # seat, with no pointer device at all, never does (the coming out is
+      # the proxy's unit test). The status names it. On the fly: the older
+      # window's strip goes too, and both have one again with the mode back.
       with subtest("a hover title takes no room and is not shown by itself"):
           alice("cellward frame title hover")
           out = alice("cellward status --json")
@@ -485,13 +501,18 @@ let
               timeout=60,
           )
           machine.sleep(2)
-          at = shot("frame-hover")
-          x, y, w, h = view("hover")
-          framed(at, x, y, w, h)
-          # The older window keeps its strip: the mode is its launch's.
-          x, y, w, h = view("foot")
-          framed(at, x, y, w, h, top=width + title)
+
+          def strips(top):
+              def check(at):
+                  for app in ("hover", "foot"):
+                      x, y, w, h = view(app)
+                      framed(at, x, y, w, h, top=top)
+
+              return check
+
+          settled("frame-hover", strips(width))
           alice("cellward frame title default")
+          settled("frame-hover-back", strips(width + title))
           alice("systemctl --user stop vmhover")
           machine.wait_until_fails(
               f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q '\"app_id\": *\"hover\"'",
@@ -577,9 +598,10 @@ let
           machine.wait_until_fails(f"test -e /proc/{daemon}", timeout=30)
           machine.wait_until_fails(f"test -e /proc/{sup}", timeout=30)
 
-      # The frame's looks (docs/WINDOW-FRAME.md §8, «Вид рамки»): the soft
-      # style next to the full one, round corners, the tag, and each look of
-      # the buttons — a screenshot of each in the output.
+      # The frame's looks (docs/WINDOW-FRAME.md §8, «Вид рамки»): the full
+      # style and the soft one taken on the fly, round corners and square
+      # again, the tag, and each look of the buttons — a screenshot of each
+      # in the output.
       exec(open("${./vm-window-looks.py}").read())
     '';
   };

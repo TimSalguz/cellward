@@ -5,10 +5,12 @@ instead of a frame, and each look of the buttons. Each is a screenshot in
 the test's output (CI uploads them), and its pixels are checked.
 
 Executed by the main test script with exec(), in its globals: machine,
-alice, display, swaysock, find, view, shot, framed, border, width, title;
-POINTER, the command of tests/vm-pointer.py. The pixel checks before this
-file are of the `full` style (the main script sets it); this one sets what
-each subtest shows, and puts the defaults back at the end.
+alice, display, swaysock, find, view, shot, settled, framed, border, width,
+title; POINTER, the command of tests/vm-pointer.py. The pixel checks before
+this file are of the `full` style (the main script sets it); this one sets
+what each subtest shows, and puts the defaults back at the end. A look is
+every open window's at once (step 6 of docs/PERMISSIONS.md §11.15): the
+window opened before a change takes it on the fly.
 """
 
 fifo = "/tmp/vm-looks-pointer"
@@ -90,19 +92,10 @@ machine.wait_until_succeeds(
 machine.wait_until_succeeds(f"test -p {fifo}", timeout=30)
 aim("move", 5, 5)
 
-with subtest("looks: the soft style next to the full one"):
-    # `full` is still the local setting of the checks before.
-    launch("look-full", 40, 60)
-    alice("cellward frame style soft")
-    out = alice("cellward status --json")
-    assert '"frame_style":{"value":"soft","source":"local"}' in out, out
-    launch("look-soft", 660, 60)
-    aim("move", 5, 5)
-    machine.sleep(1)
-    at = shot("frame-full-soft")
-    x, y, w, h = view("look-full")
-    framed(at, x, y, w, h, top=width + title)
-    x, y, w, h = view("look-soft")
+def soft(at, x, y, w, h):
+    """The soft style on the window at (x, y, w, h): two tones across the
+    border, the title strip the inner one with the text on it, foot's
+    content inside."""
     # Two tones across the border's width of 6, three pixels each: the
     # outer one darker, the inner one the title's; on every side.
     middle = y + h // 2
@@ -137,6 +130,28 @@ with subtest("looks: the soft style next to the full one"):
     for c, r in [(x + width + 2, middle), (x + w // 2, y + width + title + 2)]:
         assert not near(at(c, r), soft_inner, 30), ("the frame inside", c, r, at(c, r))
     assert at(x + 1, middle) != border and at(x + w // 2, y + width + 1) != border
+
+
+with subtest("looks: the full style, and the soft one on the fly"):
+    # `full` is still the local setting of the checks before.
+    launch("look-full", 40, 60)
+    aim("move", 5, 5)
+    machine.sleep(1)
+    at = shot("frame-full")
+    x, y, w, h = view("look-full")
+    framed(at, x, y, w, h, top=width + title)
+    alice("cellward frame style soft")
+    out = alice("cellward status --json")
+    assert '"frame_style":{"value":"soft","source":"local"}' in out, out
+    # The open window takes it; one opened now has it from the start.
+    launch("look-soft", 660, 60)
+    aim("move", 5, 5)
+
+    def both_soft(at):
+        for app in ("look-full", "look-soft"):
+            soft(at, *view(app))
+
+    settled("frame-full-soft", both_soft)
     stop("look-full")
     stop("look-soft")
 
@@ -168,7 +183,18 @@ with subtest("looks: round corners inside the frame"):
         # Along the edges beyond the radius, foot's.
         along = at(px + 16 * dx, py)
         assert not near(along, soft_inner, 30), ("the corner too long", px, py, along)
+    # Square again on the fly: the content's very corners are foot's.
     alice("cellward frame radius default")
+
+    def square(at):
+        x, y, w, h = view("look-round")
+        cx, cy = x + width, y + width + title
+        cw, ch = w - 2 * width, h - 2 * width - title
+        for px, py in [(cx, cy), (cx + cw - 1, cy), (cx, cy + ch - 1), (cx + cw - 1, cy + ch - 1)]:
+            got = at(px, py)
+            assert not near(got, soft_inner, 30), ("still round", px, py, got)
+
+    settled("frame-radius-square", square)
     stop("look-round")
 
 with subtest("looks: the tag instead of a frame; beside it a press is not the frame's"):
