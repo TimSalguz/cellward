@@ -439,7 +439,7 @@ fn net_phrase(zone: &str) -> String {
     }
 }
 
-/// "в сети nl", "без сети", "без ограничений" — where a program runs.
+/// "в сети nl", "без сети", "без изоляции и без VPN" — where a program runs.
 fn in_net(zone: &str) -> String {
     match zone {
         crate::launch::UNCONFINED | "offline" => zone_words(zone),
@@ -1931,12 +1931,12 @@ mod tests {
         };
         assert_eq!(
             describe(&state, &w, Some(&launch)),
-            "Огненный <лис>: без ограничений, контейнер: work — свой дом"
+            "Огненный <лис>: без изоляции и без VPN, контейнер: work — свой дом"
         );
         // Markup is escaped for the bar: waybar parses it.
         assert_eq!(
             bar_line(&state, Some(&w), Some(&launch)),
-            "{\"text\":\"без ограничений · work — свой дом\",\"tooltip\":\"Огненный &lt;лис&gt;: без ограничений, контейнер: work — свой дом\",\"class\":\"zone-unconfined\"}"
+            "{\"text\":\"без изоляции и без VPN · work — свой дом\",\"tooltip\":\"Огненный &lt;лис&gt;: без изоляции и без VPN, контейнер: work — свой дом\",\"class\":\"zone-unconfined\"}"
         );
         // Nothing but the app id: shown without its line break.
         assert!(describe(&state, &w, None).starts_with("«firefox»: "));
