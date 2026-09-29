@@ -628,6 +628,15 @@ let
               timeout=30,
           )
           machine.fail(said("connect-refused") + " | grep -F 'поднимаю зону de'")
+
+          def sorry_closed():
+              """The refusal's own window («Запуск остановлен», kdialog)
+              closed: it would take the keys meant for the next question."""
+              machine.wait_until_succeeds("pgrep -x kdialog", timeout=30)
+              machine.succeed("pkill -x kdialog")
+              machine.wait_until_fails("pgrep -x kdialog", timeout=30)
+
+          sorry_closed()
           launch_into_de("connect-agreed")
           answer(1)
           machine.wait_until_succeeds(
@@ -636,6 +645,7 @@ let
           machine.wait_until_succeeds(
               said("connect-agreed") + " | grep -F 'зона de не поднимается'", timeout=90
           )
+          sorry_closed()
           assert find(json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r")), "conn") is None
           alice("cellward connection de default")
 
