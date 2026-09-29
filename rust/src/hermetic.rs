@@ -315,9 +315,8 @@ pub fn tolerance(zone_dir: &Path, config: &Path, zone: &str, key: &str) -> Optio
 pub enum Asker {
     /// The container's own, from Nix or locally.
     Container,
-    /// Its network's list or marker, for a container without a word of its
-    /// own and for the main home — step 1's compatibility: what the lists
-    /// gave before is still asked for.
+    /// Its network's: X11 only, the network's still (a bypass the lists
+    /// only tolerate, 2c of `docs/PERMISSIONS.md` §11.15).
     Network,
     /// Nobody's: a throwaway container, or a program whose container is
     /// not known — the safe value.

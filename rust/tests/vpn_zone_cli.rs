@@ -2252,11 +2252,18 @@ fn a_networks_restart_needed_is_its_instances() {
     let out = home.run(&["container", "set", "work", "nix-daemon", "off"]);
     assert!(out.status.success(), "{}", stderr(&out));
     networks_say("[]");
-    // The network's own word, for a container without one.
+    // A container without a word of its own asks what the template says
+    // (2c, 2026-09-29): the network's lists only tolerate.
     let out = home.run(&["container", "set", "work", "nix-daemon", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    networks_say("[]");
+    let out = home.run(&["defaults", "set", "nix-daemon", "on"]);
     assert!(out.status.success(), "{}", stderr(&out));
     networks_say("[\"nix_daemon\"]");
     let out = home.run(&["nix-daemon", "nl", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    networks_say("[]");
+    let out = home.run(&["defaults", "set", "host-files", "writable"]);
     assert!(out.status.success(), "{}", stderr(&out));
     networks_say("[]");
     let out = home.run(&["host-files", "nl", "writable"]);
