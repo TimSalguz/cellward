@@ -2838,11 +2838,20 @@ mod tests {
                             }
                             Shape::Circle(across) => {
                                 assert_eq!(word(v, x0, 0), frame, "{style:?}: the cell's corner");
-                                let n = count(v, i, bg);
-                                assert!(
-                                    n >= disc(across),
-                                    "{style:?} {scale} {v} {i}: {n} of {bg:?}"
+                                // The fullscreen squares take more of
+                                // macOS's small lights than a third, where
+                                // they show: at rest there is no glyph.
+                                let square = matches!(
+                                    row.order[i].button,
+                                    Button::Fullscreen | Button::InWindow
                                 );
+                                if !(square && row.glyphs == Glyphs::Lit && v > 0) {
+                                    let n = count(v, i, bg);
+                                    assert!(
+                                        n >= disc(across),
+                                        "{style:?} {scale} {v} {i}: {n} of {bg:?}"
+                                    );
+                                }
                             }
                         }
                         // Nothing on the top and bottom rows but the colour

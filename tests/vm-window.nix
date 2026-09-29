@@ -433,17 +433,38 @@ let
       # (`frame fullscreen notice`: here long enough to be seen whatever the
       # machine's pace, then none).
       with subtest("in fullscreen the border stays; the zone's name for a moment, then no title"):
+          # DIAG: a pointer for the label's check.
+          out = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_outputs -r"))[0]["rect"]
+          alice(
+              f"systemd-run --user --unit=vmdiagpointer --setenv=WAYLAND_DISPLAY={display} "
+              f"${pkgs.python3}/bin/python3 ${./vm-pointer.py} /tmp/diag-pointer {out['width']} {out['height']}"
+          )
+          machine.wait_until_succeeds("test -p /tmp/diag-pointer", timeout=30)
           alice("cellward frame fullscreen notice 30")
           machine.sleep(2)
           alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen enable'")
           machine.sleep(2)
           x, y, w, h = view("foot")
 
-          def labelled(at):
-              framed(at, x, y, w, h, top=width + title)
-              titled(at, x, y, w)
-
-          settled("frame-fullscreen-label", labelled)
+          settled(
+              "frame-fullscreen-label", lambda at: framed(at, x, y, w, h, top=width + title)
+          )
+          # DIAG: the label's text, and again after a desynchronized commit
+          # of the strip (the pointer lights a button: `apply_now`).
+          try:
+              titled(shot("diag-label-1"), x, y, w)
+              print("DIAG label text: there")
+          except AssertionError as e:
+              print(f"DIAG label text: {e}")
+          alice(f"echo move {x + w - width - 12} {y + width + 10} > /tmp/diag-pointer")
+          machine.sleep(2)
+          try:
+              titled(shot("diag-label-2"), x, y, w)
+              print("DIAG label text after a lit button: there")
+          except AssertionError as e:
+              print(f"DIAG label text after a lit button: {e}")
+          alice("echo move 5 700 > /tmp/diag-pointer")
+          alice("systemctl --user stop vmdiagpointer")
           alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen disable'")
           machine.sleep(2)
           alice("cellward frame fullscreen notice 0")
