@@ -166,6 +166,8 @@ let
       permissions.x11 = false;
       permissions.hostFilesWritable = false;
       permissions.audioManager = true;
+      # Every device (2026-09-29): a word the type takes.
+      permissions.devices = [ "all" ];
       permissions.paths = [
         "~/.wine"
         "/mnt/games"
@@ -450,6 +452,7 @@ in
           "host_files_writable = false"
           "audio_manager = true"
           "x11 = false"
+          "device = all"
         ]
       ))
       (expect "a program's preset is written line by line, its reason on one" (
