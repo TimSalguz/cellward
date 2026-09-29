@@ -434,7 +434,7 @@ cellward kill <zone>                           # cut a zone off now: its program
 cellward container stop|kill <container>       # end a container's instance: its programs closed / killed at once
 cellward container create <name> [--home private|layer|main]  # a container: its own home, a layer, or the real one
 cellward container grant <name> <dir> [--for 2h]  # a directory of the real home, for a while
-cellward watch [--json]                        # are the tunnels alive (a timer runs it and notifies)
+cellward watch [--json]                        # are the tunnels alive, or throttled (a timer runs it and notifies)
 cellward status --bar                          # one JSON line for waybar and similar bars
 cellward focused [--json|--bar|--watch]        # the zone and container of the focused window (niri, sway)
 cellward window-menu                           # its menu: pin the network, restart with a choice, close, cut off

@@ -425,7 +425,7 @@ cellward kill <зона>                           # оборвать зону �
 cellward container stop|kill <контейнер>       # закончить экземпляр контейнера: программы закрыты / убиты сразу
 cellward container create <имя> [--home private|layer|main]  # контейнер: свой дом, слой или настоящий дом
 cellward container grant <имя> <каталог> [--for 2h]  # каталог настоящего дома, на время
-cellward watch [--json]                        # живы ли туннели (зовёт таймер, уведомляет)
+cellward watch [--json]                        # живы ли туннели, не душат ли (зовёт таймер, уведомляет)
 cellward status --bar                          # строка JSON для waybar и подобных баров
 cellward focused [--json|--bar|--watch]        # зона и контейнер окна в фокусе (niri, sway)
 cellward window-menu                           # его меню: закрепить сеть, перезапустить с выбором, закрыть, оборвать

@@ -30,6 +30,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
+- **«Похоже, сеть … душат»** (2026-09-30, docs/PERMISSIONS.md §11.16,
+  step 4): `cellward watch` tells the censor's cut from a dead tunnel —
+  the tunnel received its first 10–24 KiB in all and not a byte more
+  between two looks while its programs pushed more than keepalives into
+  it. Passive: the tunnel's counters only, no traffic read, no packet of
+  our own. Two looks in a row, one notification, and "works again" when it
+  does. A new verdict, `throttled`, in `watch --json` and in the panel's
+  network line; an OpenConnect network's status mirror now has its
+  counters (`transfer:`, from `ip -s`), so its `rx_bytes`/`tx_bytes` in
+  `status --json` are no longer 0.
 - **«Сеть … подключена»** (2026-09-30, docs/PERMISSIONS.md §11.16, step
   3): a notification once a network the person was asked about — the
   question of `ask`/`manual`, the login form — is up; one per network,

@@ -540,6 +540,8 @@ let
           pkgs.dnsmasq
           # What arrives through the tunnel (tests/vm-promise-resolv-rename.py).
           pkgs.tcpdump
+          # The censor's cut of the tunnel (tests/vm-tunnel-cut.py).
+          pkgs.nftables
         ];
         networking.firewall.allowedUDPPorts = [
           51820
@@ -1236,6 +1238,7 @@ let
           assert counts[0] == counts[1], f"tunnel packets from another owner:\n{out}"
           machine.succeed("nft delete table inet vzowner")
 
+      exec(open("${./vm-tunnel-cut.py}").read())
       exec(open("${./vm-promise-resolv-rename.py}").read())
       exec(open("${./vm-promise-transfer.py}").read())
 

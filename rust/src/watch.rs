@@ -15,6 +15,15 @@
 //! (180 s) — or there never was one. For OpenConnect and host-interface zones
 //! the mirror already says `connected` or `disconnected`.
 //!
+//! **Throttled** (`docs/PERMISSIONS.md` §11.16, step 4 — the owner: apart
+//! from connecting, and a notification is enough) is the censor's cut: the
+//! boxes that let the first ~15–20 KB of a connection through and then hold
+//! back everything that comes in. Seen passively, in the same counters — no
+//! traffic read, no packet of our own: the tunnel received that much in all
+//! and not a byte more between two looks, while its programs pushed more
+//! than keepalives into it. Told apart from a quiet tunnel by the push, and
+//! from a dead server by the amount (nothing at all, or much more).
+//!
 //! The state between two runs is one small file per zone in `.watch/`: the
 //! counters and the last verdict, so that a notification is sent on a change
 //! and not every minute.
@@ -31,6 +40,13 @@ use crate::tools::Tools;
 pub const WATCH_DIR: &str = ".watch";
 /// WireGuard's `REJECT_AFTER_TIME`: a session older than this carries nothing.
 pub const SESSION_LIMIT_S: u64 = 180;
+/// What a tunnel cut by a censor's box has received in all: the ~15–20 KB
+/// the box lets through, with the tunnel's own overhead around them.
+pub const CUT_RX: std::ops::RangeInclusive<u64> = 10 * 1024..=24 * 1024;
+/// What its programs pushed into it between two looks with nothing back: more
+/// than WireGuard's keepalives (32 bytes a packet), so that a quiet tunnel is
+/// not taken for a cut one.
+pub const CUT_TX_PUSH: u64 = 1024;
 
 /// What a status mirror says, parsed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -124,8 +140,11 @@ pub enum Verdict {
     /// Nothing sent since the last look: nothing can be said, nothing is wrong.
     Idle,
     Dead,
-    /// Dead at one look only. A single look can fall between a packet and its
-    /// answer; a death is announced when two looks in a row agree.
+    /// Cut after its first kilobytes ([`CUT_RX`]): the censor's signature.
+    Throttled,
+    /// Dead, or cut, at one look only. A single look can fall between a
+    /// packet and its answer; either is announced when two looks in a row
+    /// agree.
     Suspect,
     /// First look, or no mirror: no counters to compare yet.
     Unknown,
@@ -137,6 +156,7 @@ impl Verdict {
             Self::Alive => "alive",
             Self::Idle => "idle",
             Self::Dead => "dead",
+            Self::Throttled => "throttled",
             Self::Suspect => "suspect",
             Self::Unknown => "unknown",
         }
@@ -147,6 +167,7 @@ impl Verdict {
             "alive" => Some(Self::Alive),
             "idle" => Some(Self::Idle),
             "dead" => Some(Self::Dead),
+            "throttled" => Some(Self::Throttled),
             "suspect" => Some(Self::Suspect),
             "unknown" => Some(Self::Unknown),
             _ => None,
@@ -156,23 +177,35 @@ impl Verdict {
 
 /// The decision, from this reading and the previous one.
 pub fn verdict(previous: Option<&Reading>, now: &Reading) -> Verdict {
-    if let Some(connected) = now.connected {
-        return if connected {
-            Verdict::Alive
-        } else {
-            Verdict::Dead
-        };
+    if now.connected == Some(false) {
+        return Verdict::Dead;
     }
+    // A mirror that says it in words says alive — unless its counters, where
+    // it has them, show the cut.
+    let words = if now.connected == Some(true) {
+        Verdict::Alive
+    } else {
+        Verdict::Unknown
+    };
     let Some(previous) = previous else {
-        return Verdict::Unknown;
+        return words;
     };
     // Counters that went down: the interface was recreated (the zone was
     // restarted between two looks). Nothing to compare.
     if now.tx_bytes < previous.tx_bytes || now.rx_bytes < previous.rx_bytes {
-        return Verdict::Unknown;
+        return words;
     }
     let sending = now.tx_bytes > previous.tx_bytes;
     let receiving = now.rx_bytes > previous.rx_bytes;
+    if !receiving
+        && now.tx_bytes - previous.tx_bytes >= CUT_TX_PUSH
+        && CUT_RX.contains(&now.rx_bytes)
+    {
+        return Verdict::Throttled;
+    }
+    if now.connected == Some(true) {
+        return Verdict::Alive;
+    }
     let stale = now.handshake_age_s.is_none_or(|age| age > SESSION_LIMIT_S);
     match (sending, receiving) {
         (_, true) => Verdict::Alive,
@@ -207,31 +240,46 @@ pub fn parse_memory(text: &str) -> Option<(Reading, Verdict)> {
     ))
 }
 
-/// The state to keep after a look: a death needs two looks in a row, and a
-/// quiet look (`Idle`, `Unknown`) keeps what was known — a tunnel that died
-/// and then went quiet is still dead as far as the person knows.
+/// The state to keep after a look: a death, or a cut, needs two looks in a
+/// row — either after the other is known already —, and a quiet look
+/// (`Idle`, `Unknown`) keeps what was known — a tunnel that died and then
+/// went quiet is still dead as far as the person knows.
 pub fn next_state(last: Option<Verdict>, fresh: Verdict) -> Verdict {
+    let broken = |v: Option<Verdict>| {
+        matches!(
+            v,
+            Some(Verdict::Dead | Verdict::Throttled | Verdict::Suspect)
+        )
+    };
     match (fresh, last) {
-        (Verdict::Dead, Some(Verdict::Dead | Verdict::Suspect)) => Verdict::Dead,
-        (Verdict::Dead, _) => Verdict::Suspect,
+        (Verdict::Dead | Verdict::Throttled, last) if broken(last) => fresh,
+        (Verdict::Dead | Verdict::Throttled, _) => Verdict::Suspect,
         (Verdict::Idle | Verdict::Unknown, Some(last)) => last,
         _ => fresh,
     }
 }
 
 /// Which notification a change of the kept state deserves, if any:
-/// `(title, body)`. A death that was not announced yet, and a recovery from an
-/// announced one.
+/// `(title, body)`. A death, or a cut, that was not announced yet, and a
+/// recovery from an announced one.
 pub fn announcement(zone: &str, last: Option<Verdict>, now: Verdict) -> Option<(String, String)> {
     match (last, now) {
         (Some(Verdict::Dead), Verdict::Dead) => None,
+        (Some(Verdict::Throttled), Verdict::Throttled) => None,
+        (_, Verdict::Throttled) => Some((
+            format!("Похоже, сеть {zone} душат"),
+            "Туннель пропустил первые килобайты и встал: программы отправляют, ответа нет — так \
+             выглядит ограничение у провайдера. Утечки нет — выход закрыт. Может помочь другой \
+             сервер или протокол."
+                .to_owned(),
+        )),
         (_, Verdict::Dead) => Some((
             format!("Зона «{zone}»: туннель не отвечает"),
             "Программы зоны отправляют данные и ничего не получают: сети у них нет. Утечки нет — \
              выход закрыт. Проверь сервер или конфиг: cellward check, cellward doctor."
                 .to_owned(),
         )),
-        (Some(Verdict::Dead), Verdict::Alive) => Some((
+        (Some(Verdict::Dead | Verdict::Throttled), Verdict::Alive) => Some((
             format!("Зона «{zone}»: туннель снова работает"),
             "Трафик через туннель снова ходит в обе стороны.".to_owned(),
         )),
@@ -391,6 +439,12 @@ mod tests {
         assert_eq!(parse_size("1.00 GiB"), Some(1 << 30));
         let oc = "interface: awg0\n  backend: openconnect\n  connected: yes\n";
         assert_eq!(parse_mirror(oc).connected, Some(true));
+        let counted = format!("{oc}  transfer: 15360 B received, 4096 B sent\n");
+        let r = parse_mirror(&counted);
+        assert_eq!(
+            (r.rx_bytes, r.tx_bytes, r.connected),
+            (15360, 4096, Some(true))
+        );
         let gone = "interface: awg0\n  backend: x\n  disconnected: gone\n";
         assert_eq!(parse_mirror(gone).connected, Some(false));
     }
@@ -437,6 +491,86 @@ mod tests {
             verdict(Some(&before), &reading(0, 10, None)),
             Verdict::Unknown
         );
+    }
+
+    /// The cut: the first kilobytes in, then nothing, while programs push —
+    /// not a quiet tunnel, not one that never answered, not one that carried
+    /// much before it stopped; the same for a mirror in words with counters.
+    #[test]
+    fn a_tunnel_cut_after_its_first_kilobytes_is_throttled() {
+        let cut = 16 * 1024;
+        let before = reading(cut, 3000, Some(20));
+        let pushed = reading(cut, 3000 + CUT_TX_PUSH, Some(80));
+        assert_eq!(verdict(Some(&before), &pushed), Verdict::Throttled);
+        // With a stale handshake too: cut, rather than dead.
+        let stale = reading(cut, 9000, Some(400));
+        assert_eq!(verdict(Some(&before), &stale), Verdict::Throttled);
+        // Keepalives only: quiet, not cut.
+        let kept = reading(cut, 3000 + 3 * 32, Some(80));
+        assert_eq!(verdict(Some(&before), &kept), Verdict::Alive);
+        // Something came in: alive.
+        let answered = reading(cut + 1, 9000, Some(80));
+        assert_eq!(verdict(Some(&before), &answered), Verdict::Alive);
+        // Nothing ever, or much before: that is no cut.
+        let never = (reading(0, 3000, None), reading(0, 9000, None));
+        assert_eq!(verdict(Some(&never.0), &never.1), Verdict::Dead);
+        let much = (
+            reading(5 << 20, 3000, Some(20)),
+            reading(5 << 20, 9000, Some(400)),
+        );
+        assert_eq!(verdict(Some(&much.0), &much.1), Verdict::Dead);
+        // OpenConnect: connected in words, cut by its counters.
+        let oc = |rx, tx| Reading {
+            connected: Some(true),
+            ..reading(rx, tx, None)
+        };
+        assert_eq!(
+            verdict(Some(&oc(cut, 3000)), &oc(cut, 9000)),
+            Verdict::Throttled
+        );
+        assert_eq!(
+            verdict(Some(&oc(cut, 3000)), &oc(cut + 500, 9000)),
+            Verdict::Alive
+        );
+        assert_eq!(verdict(None, &oc(cut, 9000)), Verdict::Alive);
+        let gone = Reading {
+            connected: Some(false),
+            ..reading(cut, 9000, None)
+        };
+        assert_eq!(verdict(Some(&oc(cut, 3000)), &gone), Verdict::Dead);
+    }
+
+    #[test]
+    fn a_cut_takes_two_looks_is_announced_once_and_so_is_the_recovery() {
+        assert_eq!(
+            next_state(Some(Verdict::Alive), Verdict::Throttled),
+            Verdict::Suspect
+        );
+        assert_eq!(
+            next_state(Some(Verdict::Suspect), Verdict::Throttled),
+            Verdict::Throttled
+        );
+        assert_eq!(
+            next_state(Some(Verdict::Throttled), Verdict::Idle),
+            Verdict::Throttled
+        );
+        // Either known already: the other at once.
+        assert_eq!(
+            next_state(Some(Verdict::Throttled), Verdict::Dead),
+            Verdict::Dead
+        );
+        assert_eq!(
+            next_state(Some(Verdict::Dead), Verdict::Throttled),
+            Verdict::Throttled
+        );
+        let (title, body) = announcement("nl", Some(Verdict::Suspect), Verdict::Throttled).unwrap();
+        assert_eq!(title, "Похоже, сеть nl душат");
+        assert!(body.contains("Утечки нет"), "{body}");
+        assert!(announcement("nl", Some(Verdict::Alive), Verdict::Suspect).is_none());
+        assert!(announcement("nl", Some(Verdict::Throttled), Verdict::Throttled).is_none());
+        assert!(announcement("nl", Some(Verdict::Throttled), Verdict::Alive).is_some());
+        assert!(announcement("nl", Some(Verdict::Throttled), Verdict::Dead).is_some());
+        assert_eq!(Verdict::parse("throttled"), Some(Verdict::Throttled));
     }
 
     #[test]

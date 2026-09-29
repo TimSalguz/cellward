@@ -8824,8 +8824,10 @@ fn start_status_mirror(zone: &Zone, mirror: Mirror) {
     thread::spawn(move || loop {
         let text = match &mirror {
             Mirror::Wg(tool) => tool_output(tool, &["show", TUN_IFACE]).ok(),
+            // With its counters (`-s`): what `crate::watch` tells a cut
+            // tunnel by (`docs/PERMISSIONS.md` §11.16, step 4).
             Mirror::Oc => Some(oc_mirror(
-                &tool_output(&ip, &["-o", "link", "show", TUN_IFACE]).unwrap_or_default(),
+                &tool_output(&ip, &["-s", "-o", "link", "show", TUN_IFACE]).unwrap_or_default(),
                 &tool_output(&ip, &["-br", "-4", "addr", "show", TUN_IFACE]).unwrap_or_default(),
             )),
             Mirror::HostIf(interface) => Some(link_mirror(
@@ -8916,7 +8918,28 @@ pub fn link_mirror(backend: &str, link: &str, addr: &str) -> String {
         text.push_str(addr);
         text.push('\n');
     }
+    // The counters, where the dump has them (`ip -s`), in `wg show`'s words:
+    // `crate::watch` reads both alike.
+    if let Some((rx, tx)) = link_counters(link) {
+        text.push_str(&format!("  transfer: {rx} B received, {tx} B sent\n"));
+    }
     text
+}
+
+/// The byte counters of `ip -s -o link show`: `(received, sent)`. Its one
+/// line is cut into rows by backslashes; the row after the `RX:` header
+/// holds that direction's numbers, bytes first — and so for `TX:`.
+pub fn link_counters(link: &str) -> Option<(u64, u64)> {
+    let rows: Vec<&str> = link.split('\\').map(str::trim).collect();
+    let bytes = |head: &str| {
+        let at = rows.iter().position(|row| row.starts_with(head))?;
+        rows.get(at + 1)?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    };
+    Some((bytes("RX:")?, bytes("TX:")?))
 }
 
 /// Close every resolver of the HOST off from the zone.
@@ -10611,6 +10634,23 @@ networks:  files
             oc_mirror(up, "awg0             UNKNOWN"),
             "interface: awg0\n  backend: openconnect\n  connected: yes\n"
         );
+
+        // With its counters (`ip -s`): in `wg show`'s words, for the watcher
+        // to tell a cut tunnel by.
+        let counted = format!(
+            "{up}\\    RX:  bytes packets errors dropped  missed   mcast           \\    \
+             15360      12      0       0       0       0 \\    TX:  bytes packets errors \
+             dropped carrier collsns           \\    4096      20      0       0       0       0 "
+        );
+        assert_eq!(link_counters(&counted), Some((15360, 4096)));
+        assert_eq!(
+            oc_mirror(&counted, addr),
+            "interface: awg0\n  backend: openconnect\n  connected: yes\n  address: 10.5.0.7/32\n  \
+             transfer: 15360 B received, 4096 B sent\n"
+        );
+        assert_eq!(link_counters(up), None);
+        let reading = crate::watch::parse_mirror(&oc_mirror(&counted, addr));
+        assert_eq!((reading.rx_bytes, reading.tx_bytes), (15360, 4096));
     }
 
     #[test]
