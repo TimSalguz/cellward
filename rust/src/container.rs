@@ -3908,9 +3908,9 @@ mod tests {
         fs::create_dir_all(config.join("containers/work")).unwrap();
         fs::create_dir_all(config.join("declared/containers")).unwrap();
         let conf = config.join("containers/work/container.conf");
-        assert_eq!(camera_for(&zone, &config, "nl", "work"), Mode::No);
+        assert_eq!(camera_for(&zone, &config, "nl", "work"), Mode::DEFAULT);
         fs::write(zone.join(crate::hermetic::CAMERA), "on").unwrap();
-        assert_eq!(camera_for(&zone, &config, "nl", "work"), Mode::No);
+        assert_eq!(camera_for(&zone, &config, "nl", "work"), Mode::DEFAULT);
         fs::write(config.join(crate::permissions::FILE), "camera = true\n").unwrap();
         assert_eq!(camera_for(&zone, &config, "nl", "work"), Mode::Yes);
         fs::write(&conf, "camera = false\n").unwrap();

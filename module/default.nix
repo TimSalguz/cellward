@@ -732,7 +732,7 @@ let
         type = lib.types.nullOr (lib.types.either lib.types.bool (lib.types.enum [ "no" "black" "ask" "yes" ]));
         default = null;
         example = "black";
-        description = "Камера для программ контейнера: \"no\" (или false) — камеры нет; \"black\" — чёрная камера: программа видит камеру и может снимать, но кадры чёрные, настоящая не открывается (обслуживает надзиратель запуска на хосте, ЦП тратится только пока программа снимает — 5 кадров в секунду без копирования); \"ask\" — чёрная, пока человек не разрешит настоящую: спрашивают, когда программа начинает снимать (на окне программы, затем в окне запуска); «Разрешить» — настоящие кадры в том же потоке, без перезапуска; «Отказать» — правило программы, пока его не снять в меню окна (☰); \"yes\" (или true) — камеры хоста (/dev/video*, /dev/media*), снимать можно без вопроса. null — как у всех (defaults.permissions.camera, иначе no) или как задано локально (cellward container set <контейнер> camera). Значение контейнера из Nix — важнее всего. Действует для программ, запущенных после изменения; камера, подключённая позже, видна после перезапуска программы.";
+        description = "Камера для программ контейнера: \"no\" (или false) — камеры нет; \"black\" — чёрная камера: программа видит камеру и может снимать, но кадры чёрные, настоящая не открывается (обслуживает надзиратель запуска на хосте, ЦП тратится только пока программа снимает — 5 кадров в секунду без копирования); \"ask\" — чёрная, пока человек не разрешит настоящую: спрашивают, когда программа начинает снимать (на окне программы, затем в окне запуска); «Разрешить» — настоящие кадры в том же потоке, без перезапуска; «Отказать» — правило программы, пока его не снять в меню окна (☰); \"yes\" (или true) — камеры хоста (/dev/video*, /dev/media*), снимать можно без вопроса. null — как у всех (defaults.permissions.camera, иначе ask; ask на машине без камеры — камеры нет) или как задано локально (cellward container set <контейнер> camera). Значение контейнера из Nix — важнее всего. Действует для программ, запущенных после изменения; камера, подключённая позже, видна после перезапуска программы.";
       };
       permissions.hermetic = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;
@@ -969,7 +969,7 @@ in
         camera = lib.mkOption {
           type = lib.types.nullOr (lib.types.either lib.types.bool (lib.types.enum [ "no" "black" "ask" "yes" ]));
           default = null;
-          description = "Камера программ контейнера без своего слова: no, black, ask или yes (как containers.<имя>.permissions.camera; true — yes, false — no). Сеть этого больше не решает; своё слово — containers.<имя>.permissions.camera, main.permissions.camera. null — не задавать из Nix (cellward defaults set camera …, иначе no).";
+          description = "Камера программ контейнера без своего слова: no, black, ask или yes (как containers.<имя>.permissions.camera; true — yes, false — no). Сеть этого больше не решает; своё слово — containers.<имя>.permissions.camera, main.permissions.camera. null — не задавать из Nix (cellward defaults set camera …, иначе ask — чёрная до ответа, спрашивают при начале съёмки; на машине без камеры — камеры нет).";
         };
         audioManager = lib.mkOption {
           type = lib.types.nullOr lib.types.bool;

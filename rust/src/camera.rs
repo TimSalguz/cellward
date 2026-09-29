@@ -49,8 +49,8 @@ use std::path::PathBuf;
 
 /// How a container's programs see the host's cameras (`docs/PERMISSIONS.md`
 /// §11.15, step 4): a container's own word, else the template's, else
-/// [`Mode::No`] — nothing given, nothing spent (the owner, 2026-09-29: the
-/// black camera optional, not a must).
+/// [`Mode::DEFAULT`] — asked (the owner, 2026-09-29, once the question was
+/// there; the black camera stays optional: `no` gives none, nothing spent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// No camera at all.
@@ -66,6 +66,21 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// Where nobody said: asked, black until allowed — given only where the
+    /// host has a camera to ask about ([`Mode::given`]).
+    pub const DEFAULT: Self = Self::Ask;
+
+    /// The mode a launch gets on a host with a camera or not
+    /// (`host_has_camera`): `ask` on one with none is none — nothing to
+    /// ask about, and a program is not shown a camera that is not there;
+    /// `black`, said, is given all the same.
+    pub fn given(self, host_has_camera: bool) -> Self {
+        match self {
+            Self::Ask if !host_has_camera => Self::No,
+            other => other,
+        }
+    }
+
     /// A setting's word: `no|black|ask|yes`, and `on|off|true|false` — a
     /// camera's flag of before — as `yes` and `no`.
     pub fn parse(word: &str) -> Option<Self> {
@@ -102,6 +117,20 @@ impl Mode {
     pub fn black(self) -> bool {
         matches!(self, Self::Black | Self::Ask)
     }
+}
+
+/// Whether the host has a camera's node at all (`/dev/video<N>`): what a
+/// camera `ask` is given by ([`Mode::given`]). Plugged in later: seen by the
+/// next launch, as the real ones are.
+pub fn host_has_camera() -> bool {
+    std::fs::read_dir("/dev").is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.strip_prefix("video")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+    })
 }
 
 // --- THE DEVICE -------------------------------------------------------------
@@ -2228,6 +2257,12 @@ mod tests {
         );
         assert!(Mode::Black.black() && Mode::Ask.black());
         assert!(!Mode::No.black() && !Mode::Yes.black());
+        // On a host with no camera, asking is none; black, said, is black.
+        assert_eq!(Mode::Ask.given(false), Mode::No);
+        assert_eq!(Mode::Ask.given(true), Mode::Ask);
+        assert_eq!(Mode::Black.given(false), Mode::Black);
+        assert_eq!(Mode::Yes.given(false), Mode::Yes);
+        assert_eq!(Mode::DEFAULT, Mode::Ask);
     }
 
     #[test]
