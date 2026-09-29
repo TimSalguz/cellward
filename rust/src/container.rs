@@ -3726,11 +3726,11 @@ mod tests {
         assert!(report.copied >= 4, "{report:?}");
     }
 
-    /// The camera of a launch: the container's own word, the zone's where
-    /// it has none, Nix's over either's local one — but a local "off"
-    /// under the zone's declared "on" (review 2026-09-28).
+    /// 2b of §11.15: a container's own word for the cameras over the
+    /// template both ways; the network's marker has no say; Nix's word for
+    /// the container over its local one.
     #[test]
-    fn a_containers_camera_is_its_own_and_nix_is_not_overridden() {
+    fn a_containers_camera_is_its_own_over_the_template() {
         let base = std::env::temp_dir().join(format!("vz-camera-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let zone = base.join("state/nl");
@@ -3741,29 +3741,24 @@ mod tests {
         let conf = config.join("containers/work/container.conf");
         assert!(!camera_for(&zone, &config, "nl", "work"));
         fs::write(zone.join(crate::hermetic::CAMERA), "on").unwrap();
+        assert!(!camera_for(&zone, &config, "nl", "work"));
+        fs::write(config.join(crate::permissions::FILE), "camera = true\n").unwrap();
         assert!(camera_for(&zone, &config, "nl", "work"));
         fs::write(&conf, "camera = false\n").unwrap();
         assert!(!camera_for(&zone, &config, "nl", "work"));
-        fs::write(zone.join(crate::hermetic::CAMERA), "off").unwrap();
+        // The template in Nix is a default, not a ceiling.
+        crate::declared::declare(&config.join("declared/defaults.conf"), "camera = false\n");
         fs::write(&conf, "camera = true\n").unwrap();
         assert!(camera_for(&zone, &config, "nl", "work"));
-        // Nix's word for the zone over the container's local one that
-        // would add nothing…
-        crate::declared::declare(&config.join("declared/camera"), "nl\n");
-        assert!(camera_for(&zone, &config, "nl", "work"));
-        // …and not over one that closes (changed on purpose, review
-        // 2026-09-28: the zone's declared "on" was taken here): the
-        // container asked for less than its network gives.
-        fs::write(&conf, "camera = false\n").unwrap();
-        assert!(!camera_for(&zone, &config, "nl", "work"));
         fs::write(&conf, "").unwrap();
-        assert!(camera_for(&zone, &config, "nl", "work"));
+        assert!(!camera_for(&zone, &config, "nl", "work"));
         // Nix's for the container over everything.
         crate::declared::declare(
             &config.join("declared/containers/work.conf"),
-            "home = private\ncamera = false\n",
+            "home = private\ncamera = true\n",
         );
-        assert!(!camera_for(&zone, &config, "nl", "work"));
+        fs::write(&conf, "camera = false\n").unwrap();
+        assert!(camera_for(&zone, &config, "nl", "work"));
         let _ = fs::remove_dir_all(&base);
     }
 }
