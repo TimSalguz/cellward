@@ -28,7 +28,7 @@ def listed(app_id):
 
 def the_form(name):
     """The login form up (the window with `login`), shown."""
-    machine.wait_until_succeeds("pgrep -f 'vpn-zone-window login'", timeout=60)
+    machine.wait_until_succeeds("pgrep -f '[v]pn-zone-window login'", timeout=60)
     machine.sleep(2)
     alice(f"WAYLAND_DISPLAY={display} grim /tmp/{name}.png")
     machine.copy_from_vm(f"/tmp/{name}.png", "")
@@ -41,7 +41,7 @@ def type_into_the_form(password, code):
     if code:
         words += f" {code}"
     alice(f"WAYLAND_DISPLAY={display} wtype {words} -s 300 -k Return")
-    machine.wait_until_fails("pgrep -f 'vpn-zone-window login'", timeout=30)
+    machine.wait_until_fails("pgrep -f '[v]pn-zone-window login'", timeout=30)
 
 
 with subtest("a network that asks its login: the form, then the zone with it"):

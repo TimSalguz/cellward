@@ -638,10 +638,11 @@ let
               """The refusal's own window («Запуск остановлен», kdialog)
               closed: it would take the keys meant for the next question."""
               # Nix wraps it: its process is `.kdialog-wrapped`, found by
-              # what it was asked.
-              machine.wait_until_succeeds("pgrep -f -- '--sorry'", timeout=30)
-              machine.succeed("pkill -f -- '--sorry'")
-              machine.wait_until_fails("pgrep -f -- '--sorry'", timeout=30)
+              # what it was asked — a pattern that does not match the shell
+              # it is run from.
+              machine.wait_until_succeeds("pgrep -f '[-]-sorry'", timeout=30)
+              machine.succeed("pkill -f '[-]-sorry'")
+              machine.wait_until_fails("pgrep -f '[-]-sorry'", timeout=30)
 
           sorry_closed()
           launch_into_de("connect-agreed")
