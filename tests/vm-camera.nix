@@ -228,9 +228,10 @@ let
           machine.copy_from_vm("/tmp/camera-question.png", "")
           # One wtype for all of it: its keyboard is the seat's only while it
           # runs, and the window's guard counts only with the focus — a second
-          # wtype would bring the focus back, and the guard with it.
-          keys = " ".join(["-k Down"] * downs)
-          user(f"WAYLAND_DISPLAY={display} wtype -s 1500 {keys} -s 3500 -k Return")
+          # wtype would bring the focus back, and the guard with it. Before
+          # the guard is over a key only starts it again: each one after it.
+          keys = " ".join(["-s 3500 -k Down"] * downs)
+          user(f"WAYLAND_DISPLAY={display} wtype {keys} -s 3500 -k Return")
           machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=30)
 
       with subtest("asked: allowed, the real camera comes into the same stream"):
