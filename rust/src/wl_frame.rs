@@ -2712,7 +2712,7 @@ impl XdgSurfaceHandler for MenuXdg {
                 menu.configured = true;
                 menu.draw();
             }
-        }
+        };
     }
 }
 
@@ -2729,7 +2729,7 @@ impl XdgPopupHandler for MenuPopup {
         if let Some(window) = self.window.upgrade() {
             if let Ok(mut window) = window.try_borrow_mut() {
                 window.close_menu();
-            }
+            };
         }
     }
 }
@@ -2818,7 +2818,7 @@ impl WlKeyboardHandler for Keyboard {
         if let Some(window) = window {
             if let Ok(mut window) = window.try_borrow_mut() {
                 window.menu_key(&self.f, key);
-            }
+            };
         }
     }
 
@@ -4006,7 +4006,7 @@ impl Pointer {
             self.set_cursor(slf, WpCursorShapeDeviceV1Shape::DEFAULT);
             if let Ok(mut window) = window.try_borrow_mut() {
                 window.menu_hover(Some(y));
-            }
+            };
             return;
         }
         let hit = window
@@ -4033,7 +4033,7 @@ impl Pointer {
         if over.part == Part::Menu {
             if let Ok(mut window) = window.try_borrow_mut() {
                 window.menu_hover(None);
-            }
+            };
         } else {
             light_under(&window, None, true);
         }
