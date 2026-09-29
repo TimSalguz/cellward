@@ -249,8 +249,9 @@ with subtest("looks: the tag instead of a frame; beside it a press is not the fr
     machine.wait_until_fails(listed("look-tag"), timeout=30)
     alice("cellward frame style full")
 
-# Each look of the buttons (the owner, 2026-09-27): where the row is, close
-# red under the pointer, and (macOS, Windows) that × still closes.
+# Each look of the buttons (the owner, 2026-09-27): where the row is — four
+# of them with the fullscreen button (2026-09-29) —, close red under the
+# pointer, and (macOS, Windows) that × still closes.
 buttons_of = {
     # look: its end, a button's width, the margin at the end, a disc's
     # width (none: the whole cell)
@@ -268,10 +269,10 @@ for name, (end, cell, margin, disc) in buttons_of.items():
         x, y, w, h = view(f"look-{name}")
         left, right, top = x + width, x + w - width, y + width
         if end == "right":
-            row = (right - margin - 3 * cell, right - margin)
+            row = (right - margin - 4 * cell, right - margin)
             close = (row[1] - cell, row[1])
         else:
-            row = (left + margin, left + margin + 3 * cell)
+            row = (left + margin, left + margin + 4 * cell)
             close = (row[0], row[0] + cell)
         red = close_red[name]
 

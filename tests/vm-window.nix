@@ -309,9 +309,10 @@ let
       # text on magenta: near-black, the one that stands out more.
       title = 20
       ink = (0x14, 0x14, 0x14)
-      # The row of buttons at the strip's right end (wl_title::LOOK): three
-      # of 24 — their glyphs are not the title's text.
-      buttons = 3 * 24
+      # The row of buttons at the strip's right end (wl_title::LOOK and the
+      # fullscreen button, `frame fullscreen-button one`): four of 24 —
+      # their glyphs are not the title's text.
+      buttons = 4 * 24
 
       def view(app_id):
           """Where sway shows a window's contents, in logical pixels."""
@@ -426,17 +427,35 @@ let
           framed(at, x, y, w, h, top=width + title)
           titled(at, x, y, w)
 
-      # Fullscreen: the border stays, the title strip goes, and foot gets its
-      # room.
-      with subtest("in fullscreen the border stays, the title goes"):
+      # Fullscreen (the owner's defaults, 2026-09-29): the border stays, the
+      # title strip goes, and foot gets its room — after the zone's name over
+      # the top of the content for a moment on the way in
+      # (`frame fullscreen notice`: here long enough to be seen whatever the
+      # machine's pace, then none).
+      with subtest("in fullscreen the border stays; the zone's name for a moment, then no title"):
+          alice("cellward frame fullscreen notice 30")
+          machine.sleep(2)
           alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen enable'")
           machine.sleep(2)
           x, y, w, h = view("foot")
-          framed(shot("frame-fullscreen"), x, y, w, h)
+          settled(
+              "frame-fullscreen-label", lambda at: framed(at, x, y, w, h, top=width + title)
+          )
           alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen disable'")
           machine.sleep(2)
+          alice("cellward frame fullscreen notice 0")
+          machine.sleep(2)
+          alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen enable'")
+          machine.sleep(2)
           x, y, w, h = view("foot")
-          framed(shot("frame-fullscreen-back"), x, y, w, h, top=width + title)
+          settled("frame-fullscreen", lambda at: framed(at, x, y, w, h))
+          alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen disable'")
+          machine.sleep(2)
+          alice("cellward frame fullscreen notice default")
+          x, y, w, h = view("foot")
+          settled(
+              "frame-fullscreen-back", lambda at: framed(at, x, y, w, h, top=width + title)
+          )
 
       # A fractional scale: the border is a stretched pixel, the same colour
       # to its edges, and `width` logical pixels wide — give or take a device

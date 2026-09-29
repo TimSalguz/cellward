@@ -9,10 +9,11 @@ device, so no pointer: that script holds a virtual one on the seat, and
 this one moves and clicks it through a FIFO.
 """
 
-# The look there is (rust/src/wl_title.rs, LOOK): menu, network, close at
-# the right end of the title strip, 24 wide each; close red under the
-# pointer, the others a shade of the frame's colour — on magenta, whose
-# text is near-black, 22 % toward black.
+# The look there is (rust/src/wl_title.rs, LOOK, and the fullscreen button
+# of `frame fullscreen-button one`): menu, network, fullscreen, close at the
+# right end of the title strip, 24 wide each; close red under the pointer,
+# the others a shade of the frame's colour — on magenta, whose text is
+# near-black, 22 % toward black.
 button_w = 24
 close_lit = (0xE0, 0x1B, 0x24)
 shade_lit = (199, 0, 199)
@@ -39,7 +40,7 @@ def cells(x, y, w):
     """The top left of each button's cell, left to right: the row ends
     where the right border begins, under the top border."""
     right = x + w - width
-    return [(right - (3 - i) * button_w, y + width) for i in range(3)]
+    return [(right - (4 - i) * button_w, y + width) for i in range(4)]
 
 
 def glyph(at, cx, cy):
@@ -85,8 +86,8 @@ with subtest("the frame's buttons: at the right end of the title, lit under the 
     x, y, w, h = view("btn")
     at = shot("frame-buttons")
     framed(at, x, y, w, h, top=width + title)
-    menu, network, close = cells(x, y, w)
-    for cell in (menu, network, close):
+    menu, network, square, close = cells(x, y, w)
+    for cell in (menu, network, square, close):
         assert at(*cell) == border, (cell, at(*cell))
         assert glyph(at, *cell) > 8, f"no glyph on the button at {cell}"
     # Between the text and the row, the strip is its colour alone.
@@ -98,7 +99,7 @@ with subtest("the frame's buttons: at the right end of the title, lit under the 
     machine.sleep(1)
     at = shot("frame-buttons-close-lit")
     assert near(at(*close), close_lit), at(*close)
-    assert at(*menu) == border and at(*network) == border
+    assert at(*menu) == border and at(*network) == border and at(*square) == border
     assert glyph(at, *close) > 8
     pointer("move", menu[0] + button_w // 2, menu[1] + title // 2)
     machine.sleep(1)
@@ -172,6 +173,48 @@ with subtest("the frame's ⇄ on the main home's program: the restart with a net
     assert node("btn") is not None, "restarted without a yes"
     machine.succeed(f"test -e /proc/{sup}")
 
+with subtest("the frame's □: the compositor's fullscreen; its right click, inside the window"):
+    def fullscreen_mode():
+        return node("btn").get("fullscreen_mode", 0)
+
+    def until_mode(mode):
+        for _ in range(30):
+            if fullscreen_mode() == mode:
+                return
+            machine.sleep(1)
+        assert fullscreen_mode() == mode, node("btn")
+
+    x, y, w, h = view("btn")
+    square = cells(x, y, w)[2]
+    click(square[0] + button_w // 2, square[1] + title // 2)
+    until_mode(1)
+    # sway has it fullscreen: the whole output, the border at its edges.
+    pointer("move", 5, 5)
+    machine.sleep(4)
+    x, y, w, h = view("btn")
+    at = shot("frame-button-fullscreen")
+    assert at(x + 1, y + h // 2) == border and at(x + w - 2, y + h // 2) == border
+    alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=btn] fullscreen disable'")
+    until_mode(0)
+    machine.sleep(2)
+    # Its right click: foot is told it is fullscreen, sway is asked
+    # nothing — the window where it was, as big as it was. (What foot is
+    # told is the proxy's wire test.)
+    x, y, w, h = view("btn")
+    before = node("btn")["rect"]
+    square = cells(x, y, w)[2]
+    pointer("move", square[0] + button_w // 2, square[1] + title // 2)
+    pointer("press", "right")
+    pointer("release", "right")
+    machine.sleep(2)
+    assert fullscreen_mode() == 0 and node("btn")["rect"] == before, (before, node("btn"))
+    framed(shot("frame-button-in-window"), x, y, w, h, top=width + title)
+    # And again: out of it.
+    pointer("press", "right")
+    pointer("release", "right")
+    machine.sleep(1)
+    pointer("move", 5, 5)
+
 with subtest("dragging the title moves the window; its border resizes it"):
     x, y, w, h = view("btn")
     before = node("btn")["rect"]
@@ -218,7 +261,7 @@ with subtest("dragging the title moves the window; its border resizes it"):
 
 with subtest("the frame's × closes the program, as its own close would"):
     x, y, w, h = view("btn")
-    close = cells(x, y, w)[2]
+    close = cells(x, y, w)[3]
     click(close[0] + button_w // 2, close[1] + title // 2)
     machine.wait_until_fails(
         f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q '\"app_id\": *\"btn\"'",

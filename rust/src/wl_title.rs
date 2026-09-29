@@ -64,8 +64,8 @@ use std::rc::Rc;
 use ab_glyph::{point, Font, FontVec, GlyphId, PxScale, ScaleFont};
 
 use crate::frame::{
-    ButtonStyle, Frame, Radius, Rgb, Style, TitleMode, MAX_OUTER_RADIUS, MAX_RADIUS,
-    MAX_WIDTH as MAX_BORDER,
+    ButtonStyle, Frame, FullscreenButton, Radius, Rgb, Style, TitleMode, MAX_OUTER_RADIUS,
+    MAX_RADIUS, MAX_WIDTH as MAX_BORDER,
 };
 
 /// The font the package was built with (`package.nix`), if it was.
@@ -94,14 +94,56 @@ pub const SLOTS: usize = 4;
 /// next drawn while the compositor still holds it.
 pub const PROMPT_SLOTS: usize = 2;
 
-/// The ≡'s dropdown (`crate::wl_frame`, step 3c of `docs/PERMISSIONS.md`
-/// §11.15): its rows, top to bottom. What each does is the frame's.
-pub const MENU_LABELS: [&str; 4] = [
-    "Сменить сеть…",
-    "Перезапустить с выбором сети…",
-    "Все действия окна…",
-    "Закрыть окно",
+/// A row of the ≡'s dropdown (`crate::wl_frame`, step 3c of
+/// `docs/PERMISSIONS.md` §11.15), by what it does: the frame acts on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuRow {
+    Network,
+    Restart,
+    /// Fullscreen inside the window, on or off (`crate::frame::
+    /// FullscreenButton::Menu`).
+    InWindow,
+    Actions,
+    Close,
+}
+
+impl MenuRow {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Network => "Сменить сеть…",
+            Self::Restart => "Перезапустить с выбором сети…",
+            Self::InWindow => "Во весь экран внутри окна",
+            Self::Actions => "Все действия окна…",
+            Self::Close => "Закрыть окно",
+        }
+    }
+}
+
+/// The dropdown's rows, top to bottom.
+pub const MENU: [MenuRow; 4] = [
+    MenuRow::Network,
+    MenuRow::Restart,
+    MenuRow::Actions,
+    MenuRow::Close,
 ];
+/// ... with fullscreen inside the window among them, where the buttons put
+/// it there.
+const MENU_IN_WINDOW: [MenuRow; 5] = [
+    MenuRow::Network,
+    MenuRow::Restart,
+    MenuRow::InWindow,
+    MenuRow::Actions,
+    MenuRow::Close,
+];
+
+/// The dropdown's rows with the buttons `buttons`.
+pub fn menu_rows(buttons: &ButtonsLook) -> &'static [MenuRow] {
+    if buttons.fullscreen == FullscreenButton::Menu {
+        &MENU_IN_WINDOW
+    } else {
+        &MENU
+    }
+}
 /// A row of the dropdown, logical pixels.
 pub const MENU_ROW: i32 = 28;
 /// The space before a row's text, logical pixels.
@@ -131,6 +173,14 @@ pub enum Button {
     Network,
     /// The window's own `close`, as a server-side decoration's would be.
     Close,
+    /// Fullscreen as the compositor has it, on or off: what the program's
+    /// own request would ask (the owner, 2026-09-29); with one fullscreen
+    /// button (`crate::frame::FullscreenButton::One`) its right click is
+    /// [`Button::InWindow`]'s.
+    Fullscreen,
+    /// Fullscreen inside the window, on or off: the program is told it is
+    /// fullscreen, the window stays where it is.
+    InWindow,
 }
 
 /// A colour of the look, made from the frame's own (the zone's, or the
@@ -207,12 +257,63 @@ pub struct ButtonLook {
     pub press: Paint,
 }
 
+/// The most buttons a row has: menu, network, both fullscreens, close.
+pub const MAX_BUTTONS: usize = 5;
+
+/// What an unused place of a [`Row`] holds.
+const NO_BUTTON: ButtonLook = button(Button::Close, ' ', Paint::Frame, Paint::Frame, Paint::Frame);
+
+/// A row of buttons, left to right: at most [`MAX_BUTTONS`] of them, a
+/// slice of them as the row is used ([`std::ops::Deref`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Row {
+    buttons: [ButtonLook; MAX_BUTTONS],
+    len: usize,
+}
+
+impl Row {
+    /// The row of `buttons`, the first [`MAX_BUTTONS`] of them.
+    pub const fn of(buttons: &[ButtonLook]) -> Self {
+        let mut out = [NO_BUTTON; MAX_BUTTONS];
+        let mut i = 0;
+        while i < buttons.len() && i < MAX_BUTTONS {
+            out[i] = buttons[i];
+            i += 1;
+        }
+        Self {
+            buttons: out,
+            len: i,
+        }
+    }
+}
+
+impl std::ops::Deref for Row {
+    type Target = [ButtonLook];
+
+    fn deref(&self) -> &[ButtonLook] {
+        &self.buttons[..self.len]
+    }
+}
+
+impl IntoIterator for Row {
+    type Item = ButtonLook;
+    type IntoIter = std::iter::Take<std::array::IntoIter<ButtonLook, MAX_BUTTONS>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.buttons.into_iter().take(self.len)
+    }
+}
+
 /// The buttons' look.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ButtonsLook {
     pub end: End,
     /// The buttons from left to right.
-    pub order: &'static [ButtonLook],
+    pub order: Row,
+    /// Which fullscreen buttons are in the row ([`ButtonsLook::
+    /// with_fullscreen`]): with one, its right click is fullscreen inside
+    /// the window; with `menu`, the dropdown has a row for that.
+    pub fullscreen: FullscreenButton,
     /// One button's width, logical pixels: a whole number of pixels at the
     /// usual scales (1.25, 1.5, 1.75, 2) — a multiple of 4 —, like the
     /// strip's height.
@@ -238,6 +339,55 @@ impl ButtonsLook {
     pub fn width_all(&self) -> i32 {
         self.width
             .saturating_mul(i32::try_from(self.order.len()).unwrap_or(0))
+    }
+
+    /// This look with the fullscreen buttons `fs` asks for (the owner,
+    /// 2026-09-29): before close where close ends the row — where the
+    /// desktops have maximize —, else at the row's end; painted as the
+    /// look's menu button, among macOS's traffic lights grey. A look without
+    /// buttons stays without.
+    pub fn with_fullscreen(self, fs: FullscreenButton) -> Self {
+        let add: &[(Button, char)] = match fs {
+            FullscreenButton::One | FullscreenButton::Menu => {
+                &[(Button::Fullscreen, FULLSCREEN_GLYPH)]
+            }
+            FullscreenButton::Two => &[
+                (Button::InWindow, IN_WINDOW_GLYPH),
+                (Button::Fullscreen, FULLSCREEN_GLYPH),
+            ],
+            FullscreenButton::None => &[],
+        };
+        let Some(like) = self
+            .order
+            .iter()
+            .find(|b| b.button == Button::Menu)
+            .or_else(|| self.order.first())
+            .copied()
+        else {
+            return self;
+        };
+        let (rest, hover, press) = match like.rest {
+            Paint::Fixed(_) => (
+                Paint::Fixed(MAC_GREY),
+                Paint::Fixed(MAC_GREY),
+                Paint::Fixed(MAC_GREY_PRESS),
+            ),
+            _ => (like.rest, like.hover, like.press),
+        };
+        let mut buttons: Vec<ButtonLook> = self.order.to_vec();
+        let mut at = match buttons.last() {
+            Some(last) if last.button == Button::Close => buttons.len() - 1,
+            _ => buttons.len(),
+        };
+        for &(what, glyph) in add {
+            buttons.insert(at, button(what, glyph, rest, hover, press));
+            at += 1;
+        }
+        Self {
+            order: Row::of(&buttons),
+            fullscreen: fs,
+            ..self
+        }
     }
 
     /// The button at (`x`, `y`) logical pixels from the row's top left, if
@@ -391,6 +541,14 @@ const MAC_YELLOW: Rgb = Rgb(0xfe, 0xbc, 0x2e);
 const MAC_YELLOW_PRESS: Rgb = Rgb(0xbe, 0x8d, 0x22);
 const MAC_GREEN: Rgb = Rgb(0x28, 0xc8, 0x40);
 const MAC_GREEN_PRESS: Rgb = Rgb(0x1e, 0x96, 0x30);
+/// The fullscreen buttons among the traffic lights: macOS's system grey,
+/// and deeper — the lights' own colours are taken.
+const MAC_GREY: Rgb = Rgb(0x8e, 0x8e, 0x93);
+const MAC_GREY_PRESS: Rgb = Rgb(0x6c, 0x6c, 0x70);
+/// The glyphs of the fullscreen buttons: a square for the screen, a square
+/// in a square for the window (the font's: `≡ ⇄ ×` are, ⛶ is not).
+const FULLSCREEN_GLYPH: char = '\u{25a1}';
+const IN_WINDOW_GLYPH: char = '\u{25a3}';
 /// Windows 11's close under the pointer, and deeper.
 const WIN_RED: Rgb = Rgb(0xc4, 0x2b, 0x1c);
 const WIN_RED_PRESS: Rgb = Rgb(0x9b, 0x22, 0x16);
@@ -418,7 +576,7 @@ const fn button(
 /// pixels at the usual scales.
 pub const CELLWARD: ButtonsLook = ButtonsLook {
     end: End::Right,
-    order: &[
+    order: Row::of(&[
         button(
             Button::Menu,
             '≡',
@@ -440,7 +598,8 @@ pub const CELLWARD: ButtonsLook = ButtonsLook {
             Paint::Fixed(CLOSE_HOVER),
             Paint::Fixed(CLOSE_PRESS),
         ),
-    ],
+    ]),
+    fullscreen: FullscreenButton::None,
     width: 24,
     size: 16.0,
     shape: Shape::Cell,
@@ -453,7 +612,7 @@ pub const CELLWARD: ButtonsLook = ButtonsLook {
 /// pointer and pressed; close red under the pointer.
 pub const GNOME: ButtonsLook = ButtonsLook {
     end: End::Right,
-    order: &[
+    order: Row::of(&[
         button(
             Button::Menu,
             '≡',
@@ -475,7 +634,8 @@ pub const GNOME: ButtonsLook = ButtonsLook {
             Paint::Fixed(CLOSE_HOVER),
             Paint::Fixed(CLOSE_PRESS),
         ),
-    ],
+    ]),
+    fullscreen: FullscreenButton::None,
     width: 24,
     size: 13.0,
     shape: Shape::Circle(16),
@@ -488,7 +648,7 @@ pub const GNOME: ButtonsLook = ButtonsLook {
 /// pressed a lighter one; close a red disc.
 pub const KDE: ButtonsLook = ButtonsLook {
     end: End::Right,
-    order: &[
+    order: Row::of(&[
         button(
             Button::Menu,
             '≡',
@@ -510,7 +670,8 @@ pub const KDE: ButtonsLook = ButtonsLook {
             Paint::Fixed(BREEZE_RED),
             Paint::Fixed(BREEZE_RED_PRESS),
         ),
-    ],
+    ]),
+    fullscreen: FullscreenButton::None,
     width: 24,
     size: 13.0,
     shape: Shape::Circle(18),
@@ -524,7 +685,7 @@ pub const KDE: ButtonsLook = ButtonsLook {
 /// is at rest.
 pub const MACOS: ButtonsLook = ButtonsLook {
     end: End::Left,
-    order: &[
+    order: Row::of(&[
         button(
             Button::Close,
             '×',
@@ -546,7 +707,8 @@ pub const MACOS: ButtonsLook = ButtonsLook {
             Paint::Fixed(MAC_GREEN),
             Paint::Fixed(MAC_GREEN_PRESS),
         ),
-    ],
+    ]),
+    fullscreen: FullscreenButton::None,
     width: 20,
     size: 10.0,
     shape: Shape::Circle(12),
@@ -558,7 +720,7 @@ pub const MACOS: ButtonsLook = ButtonsLook {
 /// shade under the pointer, close red.
 pub const WINDOWS: ButtonsLook = ButtonsLook {
     end: End::Right,
-    order: &[
+    order: Row::of(&[
         button(
             Button::Menu,
             '≡',
@@ -580,7 +742,8 @@ pub const WINDOWS: ButtonsLook = ButtonsLook {
             Paint::Fixed(WIN_RED),
             Paint::Fixed(WIN_RED_PRESS),
         ),
-    ],
+    ]),
+    fullscreen: FullscreenButton::None,
     width: 32,
     size: 12.0,
     shape: Shape::Cell,
@@ -591,7 +754,8 @@ pub const WINDOWS: ButtonsLook = ButtonsLook {
 /// No buttons: an empty row, laid nowhere.
 pub const NO_BUTTONS: ButtonsLook = ButtonsLook {
     end: End::Right,
-    order: &[],
+    order: Row::of(&[]),
+    fullscreen: FullscreenButton::None,
     width: 24,
     size: 16.0,
     shape: Shape::Cell,
@@ -707,7 +871,7 @@ impl Look {
         };
         Self {
             style: frame.style,
-            buttons: buttons_look(frame.buttons),
+            buttons: buttons_look(frame.buttons).with_fullscreen(frame.fullscreen_button),
             radius: bottom.clamp(0, MAX_RADIUS),
             radius_top: top.clamp(0, MAX_RADIUS),
             outer,
@@ -1553,7 +1717,7 @@ fn image_width(line: &Line, look: &Look) -> i32 {
 pub struct Prepared {
     font: FontVec,
     line: Line,
-    /// The dropdown's rows ([`MENU_LABELS`]).
+    /// The dropdown's rows ([`menu_rows`] of the look).
     menu: Vec<Line>,
     /// Each button's glyph, in the look's order.
     glyphs: Vec<GlyphId>,
@@ -1577,7 +1741,10 @@ impl Prepared {
             .iter()
             .map(|b| font.glyph_id(b.glyph))
             .collect();
-        let menu = MENU_LABELS.iter().map(|l| lay_out(&font, l)).collect();
+        let menu = menu_rows(&look.buttons)
+            .iter()
+            .map(|row| lay_out(&font, row.label()))
+            .collect();
         (line.width > 0).then_some(Self {
             font,
             line,
@@ -1650,11 +1817,24 @@ impl Prepared {
     /// Bytes of one region of the dropdown: every image of it at
     /// [`MENU_MAX_SCALE`].
     fn menu_bytes(&self) -> usize {
-        let (w, h) = menu_size(&self.menu);
-        (self.menu.len() + 1)
+        Self::menu_bytes_of(&self.menu)
+    }
+
+    fn menu_bytes_of(lines: &[Line]) -> usize {
+        let (w, h) = menu_size(lines);
+        (lines.len() + 1)
             * device(w, MENU_MAX_SCALE) as usize
             * device(h, MENU_MAX_SCALE) as usize
             * 4
+    }
+
+    /// Bytes of one region of the dropdown of `look`'s rows.
+    fn menu_bytes_as(&self, look: &Look) -> usize {
+        let lines: Vec<Line> = menu_rows(&look.buttons)
+            .iter()
+            .map(|row| lay_out(&self.font, row.label()))
+            .collect();
+        Self::menu_bytes_of(&lines)
     }
 
     /// Bytes of one region of a question's panel: every image of the
@@ -1679,7 +1859,7 @@ impl Prepared {
             + Self::button_bytes_as(look)
             + Self::corner_bytes_as(look)
             + Self::outer_bytes_as(look)
-            + self.menu_bytes())
+            + self.menu_bytes_as(look))
             * SLOTS
             + Self::prompt_bytes() * PROMPT_SLOTS
     }
@@ -1694,15 +1874,17 @@ impl Prepared {
     pub fn memfd_size_any(&self) -> usize {
         let mut most = 0;
         for buttons in ButtonStyle::ALL {
-            for style in [Style::Full, Style::Soft, Style::Tag] {
-                let look = Look {
-                    style,
-                    buttons: buttons_look(buttons),
-                    radius: MAX_RADIUS,
-                    radius_top: MAX_RADIUS,
-                    ..LOOK
-                };
-                most = most.max(self.memfd_size_as(&look));
+            for fullscreen in FullscreenButton::ALL {
+                for style in [Style::Full, Style::Soft, Style::Tag] {
+                    let look = Look {
+                        style,
+                        buttons: buttons_look(buttons).with_fullscreen(fullscreen),
+                        radius: MAX_RADIUS,
+                        radius_top: MAX_RADIUS,
+                        ..LOOK
+                    };
+                    most = most.max(self.memfd_size_as(&look));
+                }
             }
         }
         // The frame's own corners at their largest: as wide as the widest
@@ -1997,6 +2179,11 @@ impl Text {
     /// The dropdown's size, logical pixels, and its rows.
     pub fn menu_size(&self) -> ((i32, i32), usize) {
         (menu_size(&self.menu_lines), self.menu_lines.len())
+    }
+
+    /// What each row of the dropdown does, top to bottom.
+    pub fn menu_rows(&self) -> &'static [MenuRow] {
+        menu_rows(&self.look.buttons)
     }
 
     /// The round corners at `scale`, all four, as [`Text::at`] the line,
@@ -2497,6 +2684,85 @@ mod tests {
         assert_eq!(buttons_look(crate::frame::DEFAULT_BUTTONS), CELLWARD);
     }
 
+    /// The fullscreen buttons (2026-09-29): □ before close where close ends
+    /// the row, at the end where it does not (macOS's lights), ▣ before it
+    /// with `two`; painted as the menu button, grey among the lights; with
+    /// `menu` the dropdown has fullscreen inside the window as a row; a look
+    /// without buttons stays without, and none added is the look as it was.
+    #[test]
+    fn the_fullscreen_buttons_go_before_close_or_at_the_end() {
+        use crate::frame::FullscreenButton;
+        let order =
+            |look: &ButtonsLook| -> Vec<Button> { look.order.iter().map(|b| b.button).collect() };
+        let one = CELLWARD.with_fullscreen(FullscreenButton::One);
+        assert_eq!(
+            order(&one),
+            [
+                Button::Menu,
+                Button::Network,
+                Button::Fullscreen,
+                Button::Close
+            ]
+        );
+        assert_eq!((one.width_all(), one.variants()), (96, 9));
+        let (square, menu) = (one.order[2], CELLWARD.order[0]);
+        assert_eq!(
+            (square.glyph, square.rest, square.hover, square.press),
+            ('□', menu.rest, menu.hover, menu.press)
+        );
+        let two = WINDOWS.with_fullscreen(FullscreenButton::Two);
+        assert_eq!(
+            order(&two),
+            [
+                Button::Menu,
+                Button::Network,
+                Button::InWindow,
+                Button::Fullscreen,
+                Button::Close
+            ]
+        );
+        assert_eq!(two.order.len(), MAX_BUTTONS);
+        assert_eq!(two.order[2].glyph, '▣');
+        let mac = MACOS.with_fullscreen(FullscreenButton::Two);
+        assert_eq!(
+            order(&mac),
+            [
+                Button::Close,
+                Button::Menu,
+                Button::Network,
+                Button::InWindow,
+                Button::Fullscreen
+            ]
+        );
+        assert!(mac.order[3..]
+            .iter()
+            .all(|b| b.rest == Paint::Fixed(MAC_GREY) && b.press == Paint::Fixed(MAC_GREY_PRESS)));
+        assert!(NO_BUTTONS
+            .with_fullscreen(FullscreenButton::Two)
+            .order
+            .is_empty());
+        assert_eq!(CELLWARD.with_fullscreen(FullscreenButton::None), CELLWARD);
+        // The row as a slice, and by value.
+        assert_eq!(
+            one.order.into_iter().map(|b| b.button).collect::<Vec<_>>(),
+            order(&one)
+        );
+        // The dropdown's rows.
+        assert_eq!(menu_rows(&one), &MENU[..]);
+        let in_menu = CELLWARD.with_fullscreen(FullscreenButton::Menu);
+        assert_eq!(order(&in_menu), order(&one));
+        assert_eq!(
+            menu_rows(&in_menu),
+            &[
+                MenuRow::Network,
+                MenuRow::Restart,
+                MenuRow::InWindow,
+                MenuRow::Actions,
+                MenuRow::Close
+            ][..]
+        );
+    }
+
     /// Every look's row drawn in every state at the usual scales: a cell of
     /// the whole colour, or a disc of it on the strip's colour; a glyph in
     /// each cell — macOS's only while one of them is lit, on all of them
@@ -2506,9 +2772,15 @@ mod tests {
         use crate::frame::ButtonStyle;
         let Some(bytes) = font() else { return };
         let frame = Rgb(0xff, 0x00, 0xff);
-        for style in ButtonStyle::ALL {
+        // Every look, with every choice of fullscreen buttons.
+        let looks = ButtonStyle::ALL.into_iter().flat_map(|style| {
+            crate::frame::FullscreenButton::ALL
+                .into_iter()
+                .map(move |fs| (style, fs))
+        });
+        for (style, fs) in looks {
             let look = Look {
-                buttons: buttons_look(style),
+                buttons: buttons_look(style).with_fullscreen(fs),
                 ..LOOK
             };
             let prepared =
@@ -2743,7 +3015,7 @@ mod tests {
             Look::of(&frame),
             Look {
                 style: Style::Soft,
-                buttons: MACOS,
+                buttons: MACOS.with_fullscreen(crate::frame::FullscreenButton::One),
                 radius: 12,
                 radius_top: 12,
                 ..LOOK

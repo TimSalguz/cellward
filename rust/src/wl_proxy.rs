@@ -175,7 +175,7 @@ use wl_proxy::protocols::xdg_shell::xdg_wm_base::{XdgWmBase, XdgWmBaseHandler};
 use wl_proxy::protocols::ObjectInterface;
 use wl_proxy::state::{State, StateHandler};
 
-use crate::frame::{Frame, Fullscreen, Setup, TitleMode};
+use crate::frame::{DoubleClick, Frame, Fullscreen, Setup, TitleMode};
 use crate::sys;
 use crate::wl_focus::{Focus, FocusPolicy};
 use crate::wl_frame::{Ask, Asks, Frames, Question, Questions, Reply, MAX_FRAMED};
@@ -533,11 +533,13 @@ impl Live {
         self.setup.frame = next;
         // The width alone is the width alone — unless the look goes with it
         // (a radius that follows niri's is niri's less the border) —, and so
-        // is the frame in fullscreen, unless a title strip is wanted where
-        // none was (its text is made then).
+        // are the frame in fullscreen, unless a title strip is wanted where
+        // none was (its text is made then), and the double click. (The
+        // fullscreen buttons are the look's.)
         let restyled = Frame {
             width: now.width,
             fullscreen: now.fullscreen,
+            double_click: now.double_click,
             ..next
         } != now
             || Look::of(&next) != Look::of(&now)
@@ -1756,6 +1758,8 @@ pub(crate) struct Border {
     pub width: i32,
     /// The frame of a fullscreen window (`crate::frame::Fullscreen`).
     pub fullscreen: Fullscreen,
+    /// What a double click on the title does.
+    pub double_click: DoubleClick,
     pub pixel: Rc<OwnedFd>,
     /// What each square of `pixel` is, in its order.
     pub squares: Vec<Square>,
@@ -1818,6 +1822,7 @@ impl Border {
         self.title = frame.title;
         self.width = frame.width;
         self.fullscreen = frame.fullscreen;
+        self.double_click = frame.double_click;
         self.text = self.source.as_mut().and_then(|s| s.text(frame, look));
     }
 }
@@ -1882,6 +1887,7 @@ fn prepare_border(drawing: Drawing) -> Option<Border> {
         always_focused: drawing.always_focused,
         width: drawing.frame.width,
         fullscreen: drawing.frame.fullscreen,
+        double_click: drawing.frame.double_click,
         pixel: Rc::new(pixel),
         squares,
         title: drawing.frame.title,
@@ -2428,6 +2434,7 @@ fn serve(
                         if let Some(b) = border.as_mut() {
                             b.width = frame.width;
                             b.fullscreen = frame.fullscreen;
+                            b.double_click = frame.double_click;
                             if let Some(pixel) = pixel {
                                 b.restyle(frame, pixel);
                             }
@@ -4439,7 +4446,8 @@ mod tests {
                     notice: 0,
                     ..crate::frame::DEFAULT_FULLSCREEN
                 },
-                fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
+                // Stage 3's row: the fullscreen buttons have their test.
+                fullscreen_button: crate::frame::FullscreenButton::None,
                 double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
             },
             title: "nl · основной".to_owned(),
@@ -4985,6 +4993,173 @@ mod tests {
         ("wp_fractional_scale_manager_v1", 1),
         ("wp_cursor_shape_manager_v1", 1),
     ];
+
+    /// The fullscreen button and the double click on the wire (2026-09-29).
+    /// With one fullscreen button — □, before close —, its left click asks
+    /// the compositor for fullscreen, and for its end where the compositor
+    /// says fullscreen. Its right click tells the program it is fullscreen
+    /// inside the window, the compositor asked nothing: the compositor's
+    /// last configure told again, fullscreen among its states; the
+    /// program's own `unset_fullscreen` ends that, told again without, and
+    /// is not passed on. Two presses on the title close together maximize
+    /// the window instead of moving it — maximized, they ask for its end.
+    #[test]
+    fn the_fullscreen_button_and_the_double_click() {
+        let Some(font) = test_font() else {
+            return;
+        };
+        let mut drawing = titled(TitleMode::Always, Some(font));
+        drawing.frame.fullscreen_button = crate::frame::FullscreenButton::One;
+        let rig = Rig::with_drawing("fs-button", Some(drawing));
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, BUTTON_GLOBALS);
+        a_window(&mut client);
+        let (got, xdg, root) = first_commit(&log);
+        let toplevel = all(&got, "xdg_surface", 1)[0].args[0];
+        let subs = all(&got, "wl_subcompositor", 1);
+        let on_root: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == root).collect();
+        assert_eq!(on_root.len(), 5, "{subs:?}");
+        let title = on_root[4].args[1];
+        let on_title: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == title).collect();
+        assert_eq!(on_title.len(), 2, "{subs:?}");
+        let (buttons_sub, buttons) = (on_title[1].args[0], on_title[1].args[1]);
+        // Four of 24 at the strip's right end: ≡ ⇄ □ ×.
+        assert_eq!(placed(&got, buttons_sub), Some(vec![300 - 96, 0]));
+
+        request(&mut client, 6, 0, &10u32.to_ne_bytes());
+        let pointer = log_until(&log, |m| m.iface == "wl_seat" && m.opcode == 0)
+            .last()
+            .unwrap()
+            .args[0];
+        let send = |compositor: &mut UnixStream, events: &[(u32, u32, Vec<i32>)]| {
+            let mut out = Vec::new();
+            for (object, opcode, args) in events {
+                event(&mut out, *object, *opcode, |a| {
+                    a.extend_from_slice(&words(args))
+                });
+                if *object == pointer {
+                    event(&mut out, pointer, 5, |_| {});
+                }
+            }
+            compositor.write_all(&out).unwrap();
+        };
+        let fixed = |v: i32| v * 256;
+        let enter = |serial: i32, surface: u32, x: i32, y: i32| {
+            (
+                pointer,
+                0u32,
+                vec![serial, surface as i32, fixed(x), fixed(y)],
+            )
+        };
+        let press = |serial: i32, time: i32, button: i32, down: bool| {
+            (pointer, 3u32, vec![serial, time, button, i32::from(down)])
+        };
+        let configure = |states: &[i32], serial: i32| {
+            let mut args = vec![800, 600, 4 * states.len() as i32];
+            args.extend_from_slice(states);
+            [(toplevel, 0u32, args), (xdg, 0u32, vec![serial])]
+        };
+        let asked = |log: &mpsc::Receiver<Msg>, opcode: u32| {
+            log_until(log, |m| {
+                m.iface == "xdg_toplevel" && m.opcode == opcode && m.object == toplevel
+            })
+        };
+        // The program's configures, `[width, height, bytes, states…]`, up
+        // to the xdg_surface's.
+        let told = |client: &mut UnixStream| -> Vec<u32> {
+            events_until(client, |o, op, _| o == 8 && op == 0)
+                .into_iter()
+                .rev()
+                .find(|(o, op, _)| *o == 9 && *op == 0)
+                .unwrap()
+                .2
+        };
+
+        // □, left: the compositor asked for fullscreen.
+        send(
+            &mut compositor,
+            &[
+                enter(40, buttons, 60, 10),
+                press(41, 1000, 0x110, true),
+                press(42, 1050, 0x110, false),
+            ],
+        );
+        asked(&log, 11);
+        // The compositor says fullscreen (not acked yet: the strip still
+        // out): □ asks for its end.
+        let mut events = configure(&[2], 5).to_vec();
+        events.extend([press(43, 2000, 0x110, true), press(44, 2050, 0x110, false)]);
+        send(&mut compositor, &events);
+        asked(&log, 12);
+        assert_eq!(told(&mut client)[2..], [4, 2]);
+        send(&mut compositor, &configure(&[], 6));
+        assert_eq!(told(&mut client)[..3], [792, 572, 0]);
+        request(&mut client, 8, 4, &6u32.to_ne_bytes());
+
+        // □, right: the program is told fullscreen, the window's size, the
+        // compositor's serial.
+        send(
+            &mut compositor,
+            &[press(45, 3000, 0x111, true), press(46, 3050, 0x111, false)],
+        );
+        assert_eq!(told(&mut client), [792, 572, 4, 2]);
+        // The program leaves it: told again without, and the compositor is
+        // not asked — the program's commit is the next it hears.
+        request(&mut client, 9, 12, &[]);
+        assert_eq!(told(&mut client), [792, 572, 0]);
+        request(&mut client, 7, 6, &[]);
+        let got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        assert!(
+            !got.iter()
+                .any(|m| m.iface == "xdg_toplevel" && m.opcode == 12),
+            "passed on: {got:#?}"
+        );
+
+        // The title, twice within the double click's time: moved, then
+        // maximized.
+        send(
+            &mut compositor,
+            &[
+                enter(50, title, 60, 10),
+                press(51, 5000, 0x110, true),
+                press(52, 5050, 0x110, false),
+            ],
+        );
+        asked(&log, 5);
+        send(
+            &mut compositor,
+            &[press(53, 5200, 0x110, true), press(54, 5250, 0x110, false)],
+        );
+        asked(&log, 9);
+        // Maximized: twice again, its end; a press long after, a move.
+        send(&mut compositor, &configure(&[1], 7));
+        told(&mut client);
+        send(
+            &mut compositor,
+            &[
+                press(55, 6000, 0x110, true),
+                press(56, 6050, 0x110, false),
+                press(57, 6100, 0x110, true),
+                press(58, 6150, 0x110, false),
+            ],
+        );
+        let got = asked(&log, 10);
+        assert_eq!(
+            got.iter()
+                .filter(|m| m.iface == "xdg_toplevel" && m.opcode == 5)
+                .count(),
+            1,
+            "the first press moves: {got:#?}"
+        );
+        send(
+            &mut compositor,
+            &[press(59, 9000, 0x110, true), press(60, 9050, 0x110, false)],
+        );
+        asked(&log, 5);
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
 
     /// The frame's buttons and edges on the wire (§5.4, §5.5, §5.11): over
     /// a button the default cursor and the button lit — pressed while held

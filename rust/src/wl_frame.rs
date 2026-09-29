@@ -209,7 +209,7 @@ use wl_proxy::protocols::wayland::wl_data_source::WlDataSource;
 use wl_proxy::protocols::wayland::wl_keyboard::{
     WlKeyboard, WlKeyboardHandler, WlKeyboardKeyState,
 };
-use wl_proxy::protocols::wayland::wl_output::WlOutputTransform;
+use wl_proxy::protocols::wayland::wl_output::{WlOutput, WlOutputTransform};
 use wl_proxy::protocols::wayland::wl_pointer::{
     WlPointer, WlPointerAxis, WlPointerAxisRelativeDirection, WlPointerAxisSource,
     WlPointerButtonState, WlPointerHandler,
@@ -240,10 +240,10 @@ use wl_proxy::protocols::xdg_toplevel_drag_v1::xdg_toplevel_drag_v1::{
 };
 use wl_proxy::protocols::ObjectInterface;
 
-use crate::frame::{Fullscreen, TitleMode};
+use crate::frame::{DoubleClick, Fullscreen, FullscreenButton, TitleMode};
 use crate::wl_proxy::Border;
 use crate::wl_title::{
-    Button, ButtonsLook, Drawn, End, Lease, Lit, Look, Outer, Pixels, Prompt, Square, Text,
+    Button, ButtonsLook, Drawn, End, Lease, Lit, Look, MenuRow, Outer, Pixels, Prompt, Square, Text,
 };
 
 // --- THE ARITHMETIC ---------------------------------------------------------
@@ -795,6 +795,9 @@ pub(crate) struct Frames {
     /// The frame of a fullscreen window: the launch's, changed on the fly
     /// with the width.
     full: Cell<Fullscreen>,
+    /// What a double click on the title does, the launch's, changed on the
+    /// fly with the width.
+    double_click: Cell<DoubleClick>,
     /// This connection's windows: what a change of the frame reaches.
     windows: RefCell<Vec<Weak<RefCell<Window>>>>,
     /// What the frame is drawn with, the launch's — changed on the fly
@@ -957,8 +960,14 @@ pub(crate) const HOVER_EDGE: i32 = 2;
 /// Configures remembered until the program acks them: a program acks the
 /// last it has seen, and a hostile one may never ack — bounded.
 const MAX_CONFIGURES: usize = 32;
-/// `xdg_toplevel.state.fullscreen`.
+/// `xdg_toplevel.state.maximized` and `fullscreen`.
+const MAXIMIZED: u32 = 1;
 const FULLSCREEN: u32 = 2;
+/// The longest a double click on the title takes from its first press to
+/// its second, milliseconds of the compositor's clock (the events' own
+/// times): GTK's default. A double click is made of time — the one outcome
+/// of the frame a clock decides, as every desktop's title bar has it.
+const DOUBLE_CLICK_MS: u32 = 400;
 
 /// An object of the proxy's own: whatever the compositor sends it is not the
 /// program's (it could not be passed on anyway — the object has no id in the
@@ -1002,6 +1011,7 @@ impl Frames {
         let frames = Rc::new(Self {
             width: Cell::new(border.width),
             full: Cell::new(border.fullscreen),
+            double_click: Cell::new(border.double_click),
             windows: RefCell::default(),
             parts: RefCell::new(Parts {
                 mode: border.title,
@@ -1219,6 +1229,7 @@ impl Frames {
     pub(crate) fn set_frame(&self, border: &Border) {
         self.width.set(border.width);
         self.full.set(border.fullscreen);
+        self.double_click.set(border.double_click);
         let new = !Rc::ptr_eq(&self.parts.borrow().pixel, &border.pixel);
         if new {
             *self.parts.borrow_mut() = Parts {
@@ -2206,6 +2217,15 @@ struct Window {
     /// Until when the title strip shows on a window that has just gone
     /// fullscreen ([`Window::notice`]).
     notice_until: Option<Instant>,
+    /// Fullscreen inside the window (`crate::frame::FullscreenButton`): the
+    /// program is told it is fullscreen, the compositor is asked nothing.
+    in_window: bool,
+    /// Maximized, as the compositor's last configure says: what a double
+    /// click on the title turns ([`Window::double_clicked`]).
+    maximized: bool,
+    /// When the title was last pressed, on the compositor's clock: the
+    /// first press of a double click, maybe.
+    title_pressed: Option<u32>,
     /// What the frame is laid around now: the area, the insets, the strip.
     laid: Option<(Rect, Insets, Option<Rect>)>,
     /// The button the left pointer button went down on, until it comes up:
@@ -2264,6 +2284,9 @@ impl Window {
             configures: VecDeque::new(),
             hover: false,
             notice_until: None,
+            in_window: false,
+            maximized: false,
+            title_pressed: None,
             laid: None,
             pressed: None,
             menu: None,
@@ -2327,15 +2350,17 @@ impl Window {
 
     /// The window has just gone fullscreen, both saying so (it was not,
     /// `was`): the title strip shows over the top of the content for the
-    /// label's seconds — a program that takes the whole screen could draw
-    /// another zone's frame there, and this says whose it is first; out of
-    /// fullscreen, no label. The clock is the one wait here that ends by
-    /// itself, on purpose: it decides nothing but how long two words are
-    /// in view (`crate::frame::FULLSCREEN_NOTICE_SETTING`).
-    fn notice(&mut self, was: bool) {
+    /// label's seconds, as the frame has them now — a program that takes
+    /// the whole screen could draw another zone's frame there, and this
+    /// says whose it is first; out of fullscreen, no label. The clock is the
+    /// one wait here that ends by itself, on purpose: it decides nothing but
+    /// how long two words are in view
+    /// (`crate::frame::FULLSCREEN_NOTICE_SETTING`).
+    fn notice(&mut self, was: bool, f: &Frames) {
         let now = self.fullscreen_now();
-        if now && !was && self.full.notice > 0 {
-            let seconds = Duration::from_secs(u64::from(self.full.notice));
+        let seconds = f.full.get().notice;
+        if now && !was && seconds > 0 {
+            let seconds = Duration::from_secs(u64::from(seconds));
             self.notice_until = Some(Instant::now() + seconds);
         } else if !now {
             self.notice_until = None;
@@ -2425,7 +2450,8 @@ impl Window {
         // ([`Self::title_wanted`]); in fullscreen for its own mode, or the
         // label on the way in, too.
         let over = self.mode != TitleMode::Off
-            || (self.fullscreen && (self.full.title != TitleMode::Off || self.full.notice > 0));
+            || (self.fullscreen
+                && (self.full.title != TitleMode::Off || self.notice_until.is_some()));
         // The frame's own round corners, and what is laid short of them —
         // only when they are there to draw it; none in fullscreen (the
         // screen's corners are square, and the border may be another).
@@ -2684,10 +2710,10 @@ impl Window {
     /// out (or goes) now when that changes what [`Self::title_wanted`]
     /// says — a program that stops committing must not keep it hidden
     /// either.
-    fn configured(&mut self, fullscreen: bool) {
+    fn configured(&mut self, fullscreen: bool, f: &Frames) {
         let was = self.fullscreen_now();
         self.next_fullscreen = fullscreen;
-        self.notice(was);
+        self.notice(was, f);
         self.show_title(true);
     }
 
@@ -2775,11 +2801,27 @@ impl Window {
     /// moved, on the border resized — by the compositor, which issued the
     /// serial to this connection and so takes the request as the program's;
     /// down on a button it is pressed, and up on the same button it acts.
-    fn click(&mut self, f: &Frames, hit: Hit, down: bool, seat: Option<&Rc<WlSeat>>, serial: u32) {
+    fn click(
+        &mut self,
+        f: &Frames,
+        hit: Hit,
+        down: bool,
+        seat: Option<&Rc<WlSeat>>,
+        (serial, time): (u32, u32),
+    ) {
         let toplevel = self.toplevel.as_ref().and_then(Weak::upgrade);
         if down {
             self.pressed = None;
             match (hit, &toplevel, seat) {
+                // The second press of a double click maximizes (or back);
+                // any other press moves.
+                (Hit::Title, Some(toplevel), _) if self.double_clicked(f, time) => {
+                    if self.maximized {
+                        toplevel.send_unset_maximized();
+                    } else {
+                        toplevel.send_set_maximized();
+                    }
+                }
                 (Hit::Title, Some(toplevel), Some(seat)) => toplevel.send_move(seat, serial),
                 (Hit::Edge(edges), Some(toplevel), Some(seat)) if edges != 0 => {
                     toplevel.send_resize(seat, serial, XdgToplevelResizeEdge(edges))
@@ -2816,6 +2858,87 @@ impl Window {
                 }
             }
             Button::Network => f.asks.push(Ask::Network),
+            Button::Fullscreen => self.toggle_fullscreen(),
+            Button::InWindow => self.toggle_in_window(f),
+        }
+    }
+
+    /// A press on the title at `time` (the compositor's clock): whether it
+    /// is the second of a double click (`crate::frame::DoubleClick`) —
+    /// within [`DOUBLE_CLICK_MS`] of the first, which counts for no other
+    /// then. Any other press may be the first.
+    fn double_clicked(&mut self, f: &Frames, time: u32) -> bool {
+        if f.double_click.get() == DoubleClick::None {
+            self.title_pressed = None;
+            return false;
+        }
+        match self.title_pressed.take() {
+            Some(first) if time.wrapping_sub(first) <= DOUBLE_CLICK_MS => true,
+            _ => {
+                self.title_pressed = Some(time);
+                false
+            }
+        }
+    }
+
+    /// The right pointer button let go of at (`x`, `y`) on the row of
+    /// buttons: on the one fullscreen button
+    /// (`crate::frame::FullscreenButton::One`), fullscreen inside the
+    /// window.
+    fn right_click(&mut self, f: &Frames, x: f64, y: f64) {
+        if self.look.buttons.fullscreen == FullscreenButton::One
+            && self.hit(Part::Buttons, x, y) == Hit::Button(Button::Fullscreen)
+        {
+            self.toggle_in_window(f);
+        }
+    }
+
+    /// Fullscreen as the compositor has it, asked for or ended by the
+    /// frame's button, as the program's own request would: the compositor
+    /// tells the program in its configure. Fullscreen inside the window ends
+    /// with it: the compositor's own is what was asked for.
+    fn toggle_fullscreen(&mut self) {
+        let Some(toplevel) = self.toplevel.as_ref().and_then(Weak::upgrade) else {
+            return;
+        };
+        if self.next_fullscreen {
+            toplevel.send_unset_fullscreen();
+        } else {
+            self.in_window = false;
+            toplevel.send_set_fullscreen(None);
+        }
+    }
+
+    /// Fullscreen inside the window, on or off: the program told the
+    /// compositor's last configure again, fullscreen among its states or
+    /// not ([`Window::told_states`]) — the window stays where it is, its
+    /// frame as it was.
+    fn toggle_in_window(&mut self, f: &Frames) {
+        self.in_window = !self.in_window;
+        self.reconfigure(f);
+    }
+
+    /// The states the program is told of the compositor's `states`: those,
+    /// and fullscreen while the window is fullscreen inside itself.
+    fn told_states(&self, states: &[u8]) -> Vec<u8> {
+        let mut told = states.to_vec();
+        if self.in_window && !has_state(states, FULLSCREEN) {
+            told.extend_from_slice(&FULLSCREEN.to_ne_bytes());
+        }
+        told
+    }
+
+    /// The size the program is told of the compositor's `width` × `height`:
+    /// less the frame's insets `i` — and, fullscreen inside the window where
+    /// the compositor leaves the size to the program (0), the size it has
+    /// now: told fullscreen and no size, a program may take the output's.
+    fn told_size(&self, width: i32, height: i32, i: Insets) -> (i32, i32) {
+        let (w, h) = (size_down(width, i.across()), size_down(height, i.down()));
+        match self.geometry {
+            Some(g) if self.in_window && (w == 0 || h == 0) => {
+                (if w == 0 { g.w } else { w }, if h == 0 { g.h } else { h })
+            }
+            _ => (w, h),
         }
     }
 
@@ -2908,11 +3031,8 @@ impl Window {
         } else {
             Insets::default()
         };
-        toplevel.send_configure(
-            size_down(width, i.across()),
-            size_down(height, i.down()),
-            &states,
-        );
+        let (w, h) = self.told_size(width, height, i);
+        toplevel.send_configure(w, h, &self.told_states(&states));
         xdg.send_configure(serial);
     }
 
@@ -2942,7 +3062,7 @@ impl Window {
 
 /// The ≡'s dropdown: an `xdg_popup` of the program's window, a surface of the
 /// proxy's own — the program cannot name it, draw in it, nor hear what is
-/// done in it. Its rows are `wl_title::MENU_LABELS`, drawn in the title's
+/// done in it. Its rows are `wl_title::menu_rows`, drawn in the title's
 /// memfd ([`Text::menu_at`]) with every state an image: a row lights under
 /// the pointer (a new buffer of the same region, no drawing) and acts on the
 /// release of the left button over it; ↑ ↓ light another, Enter or Space
@@ -3223,25 +3343,28 @@ impl Window {
         }
     }
 
-    /// Row `row` of `wl_title::MENU_LABELS` chosen: the dropdown goes, and
-    /// what the row says is asked of the supervisor — or, the last, the
-    /// program's own close event, as the × does.
+    /// Row `row` of the dropdown chosen (`wl_title::menu_rows`): the
+    /// dropdown goes, and what the row says is asked of the supervisor — or
+    /// fullscreen inside the window is turned on or off, or the program's
+    /// own close event sent, as the × does.
     fn menu_act(&mut self, f: &Frames, row: usize) {
         let Some(menu) = self.menu.take() else {
             return;
         };
         let asks = &f.asks;
+        let chosen = menu.text.menu_rows().get(row).copied();
         menu.destroy();
-        match row {
-            0 => asks.push(Ask::Network),
-            1 => asks.push(Ask::Restart),
-            2 => asks.push(Ask::Menu),
-            3 => {
+        match chosen {
+            Some(MenuRow::Network) => asks.push(Ask::Network),
+            Some(MenuRow::Restart) => asks.push(Ask::Restart),
+            Some(MenuRow::Actions) => asks.push(Ask::Menu),
+            Some(MenuRow::InWindow) => self.toggle_in_window(f),
+            Some(MenuRow::Close) => {
                 if let Some(toplevel) = self.toplevel.as_ref().and_then(Weak::upgrade) {
                     toplevel.send_close();
                 }
             }
-            _ => {}
+            None => {}
         }
     }
 }
@@ -4294,7 +4417,7 @@ impl XdgSurfaceHandler for XdgSurfaceH {
                 let was = window.fullscreen_now();
                 window.fullscreen = window.configures[at].1;
                 window.configures.drain(..=at);
-                window.notice(was);
+                window.notice(was, &self.f);
             }
         }
     }
@@ -4427,7 +4550,8 @@ impl XdgToplevelHandler for Toplevel {
     fn handle_configure(&mut self, slf: &Rc<XdgToplevel>, width: i32, height: i32, states: &[u8]) {
         let fullscreen = has_state(states, FULLSCREEN);
         if let Ok(mut window) = self.window.try_borrow_mut() {
-            window.configured(fullscreen);
+            window.maximized = has_state(states, MAXIMIZED);
+            window.configured(fullscreen, &self.f);
         }
         // The compositor's word, not the one a window that always thinks
         // it has the focus is told.
@@ -4442,14 +4566,47 @@ impl XdgToplevelHandler for Toplevel {
         } else {
             states
         };
+        // Fullscreen inside the window adds its state and may keep the size.
+        let (size, told) = match self.window.try_borrow_mut() {
+            Ok(mut window) => {
+                window.last_configure = Some((width, height, states.to_vec()));
+                (
+                    window.told_size(width, height, i),
+                    window.told_states(states),
+                )
+            }
+            Err(_) => (
+                (size_down(width, i.across()), size_down(height, i.down())),
+                states.to_vec(),
+            ),
+        };
+        slf.send_configure(size.0, size.1, &told);
+    }
+
+    /// The program asks for the compositor's fullscreen: fullscreen inside
+    /// the window, if it was, ends — the program asked for the other.
+    fn handle_set_fullscreen(&mut self, slf: &Rc<XdgToplevel>, output: Option<&Rc<WlOutput>>) {
         if let Ok(mut window) = self.window.try_borrow_mut() {
-            window.last_configure = Some((width, height, states.to_vec()));
+            window.in_window = false;
         }
-        slf.send_configure(
-            size_down(width, i.across()),
-            size_down(height, i.down()),
-            states,
-        );
+        slf.send_set_fullscreen(output);
+    }
+
+    /// The program leaves fullscreen: inside the window, that ends it — the
+    /// program is told its state again without —; the compositor's is asked
+    /// to end as ever, where it is fullscreen (or might be).
+    fn handle_unset_fullscreen(&mut self, slf: &Rc<XdgToplevel>) {
+        let ask = match self.window.try_borrow_mut() {
+            Ok(mut window) if window.in_window => {
+                window.in_window = false;
+                window.reconfigure(&self.f);
+                window.next_fullscreen
+            }
+            _ => true,
+        };
+        if ask {
+            slf.send_unset_fullscreen();
+        }
     }
 
     /// The bounds of a window that is not fullscreen.
@@ -4853,6 +5010,7 @@ impl WpViewportHandler for Viewport {
 /// The left pointer button (`linux/input-event-codes.h`): the one the frame
 /// acts on.
 const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
 
 struct Seat {
     f: Rc<Frames>,
@@ -5148,9 +5306,15 @@ impl Pointer {
     }
 
     /// A button of the pointer over the frame (§5.11): the left one acts,
-    /// once for all the program's pointers ([`Frames::first`]).
-    fn frame_button(&mut self, serial: u32, button: u32, state: WlPointerButtonState) {
-        if button != BTN_LEFT {
+    /// once for all the program's pointers ([`Frames::first`]); the right
+    /// one on the row of buttons only ([`Window::right_click`]).
+    fn frame_button(
+        &mut self,
+        (serial, time): (u32, u32),
+        button: u32,
+        state: WlPointerButtonState,
+    ) {
+        if button != BTN_LEFT && button != BTN_RIGHT {
             return;
         }
         let Some(over) = &self.over else {
@@ -5163,6 +5327,14 @@ impl Pointer {
             return;
         }
         let (part, x, y) = (over.part, over.x, over.y);
+        if button == BTN_RIGHT {
+            if part == Part::Buttons && state == WlPointerButtonState::RELEASED {
+                if let Ok(mut window) = window.try_borrow_mut() {
+                    window.right_click(&self.f, x, y);
+                }
+            }
+            return;
+        }
         // A button of a question's panel: pressed and let go of on it.
         if part == Part::Prompt {
             let down = state == WlPointerButtonState::PRESSED;
@@ -5182,7 +5354,14 @@ impl Pointer {
         }
         let seat = self.seat.upgrade();
         let down = state == WlPointerButtonState::PRESSED;
-        click(&window, &self.f, (part, x, y), down, seat.as_ref(), serial);
+        click(
+            &window,
+            &self.f,
+            (part, x, y),
+            down,
+            seat.as_ref(),
+            (serial, time),
+        );
     }
 }
 
@@ -5205,11 +5384,11 @@ fn click(
     at: (Part, f64, f64),
     down: bool,
     seat: Option<&Rc<WlSeat>>,
-    serial: u32,
+    event: (u32, u32),
 ) {
     if let Ok(mut window) = window.try_borrow_mut() {
         let hit = window.hit(at.0, at.1, at.2);
-        window.click(f, hit, down, seat, serial);
+        window.click(f, hit, down, seat, event);
     }
 }
 
@@ -5292,7 +5471,7 @@ impl WlPointerHandler for Pointer {
         button: u32,
         state: WlPointerButtonState,
     ) {
-        self.frame_button(serial, button, state);
+        self.frame_button((serial, time), button, state);
         if !self.away {
             if state == WlPointerButtonState::PRESSED {
                 self.f.questions.touch();
@@ -6090,11 +6269,7 @@ mod tests {
         assert_eq!(menu_key(KEY_ESC, 4, Some(1)), MenuKey::Close);
         assert_eq!(menu_key(30, 4, Some(1)), MenuKey::Nothing);
         assert_eq!(menu_key(KEY_DOWN, 0, None), MenuKey::Close);
-        assert_eq!(
-            crate::wl_title::MENU_LABELS.len(),
-            4,
-            "the rows menu_act knows"
-        );
+        assert_eq!(crate::wl_title::MENU.len(), 4, "the rows of the dropdown");
     }
 
     /// The buttons at the look's end of the strip, the text in the rest with
@@ -6640,12 +6815,13 @@ mod tests {
         assert!(outer_input(&bare, 0).is_empty());
     }
 
-    /// The tag's row: the title's, but a frame without a border still lays
-    /// it over the content (hover); the title strip there needs a border.
+    /// The tag's row: the title's, and a frame without a border lays it
+    /// over the content (hover) — as it does the title strip since
+    /// 2026-09-29 (a width of 0, the label of fullscreen).
     #[test]
     fn the_tags_row_is_there_without_a_border() {
         let none = Insets::default();
-        assert_eq!(title_strip(R, none, true), None, "no frame, no strip");
+        assert_eq!(title_strip(R, none, true), tag_row(R, none, true));
         assert_eq!(
             tag_row(R, none, true),
             Some(Rect {

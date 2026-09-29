@@ -11,7 +11,7 @@ for as long as it runs, and moves and clicks it as the lines written to the
 FIFO say:
 
     move <x> <y>       to (x, y), logical pixels of the layout
-    press | release    the left button
+    press | release [right]    the left button, or the right one
 
 Usage: python3 vm-pointer.py <fifo> <layout width> <layout height>, with
 WAYLAND_DISPLAY and XDG_RUNTIME_DIR. Raw Wayland on the socket: the VM has
@@ -85,6 +85,7 @@ bind("zwlr_virtual_pointer_manager_v1", 1, 5)
 send(5, 0, struct.pack("=II", 4, 6))
 
 BTN_LEFT = 0x110
+BTN_RIGHT = 0x111
 start = time.monotonic()
 
 
@@ -101,8 +102,9 @@ def act(line):
         # motion_absolute(time, x, y, x_extent, y_extent)
         send(6, 1, struct.pack("=IIIII", now(), x, y, extent_w, extent_h))
     elif words[0] in ("press", "release"):
-        # button(time, button, state)
-        send(6, 2, struct.pack("=III", now(), BTN_LEFT, 1 if words[0] == "press" else 0))
+        # button(time, button, state): the left one, or `right`
+        button = BTN_RIGHT if words[1:] == ["right"] else BTN_LEFT
+        send(6, 2, struct.pack("=III", now(), button, 1 if words[0] == "press" else 0))
     else:
         print(f"vm-pointer: what is {line!r}?", file=sys.stderr)
         return
