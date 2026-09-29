@@ -32,13 +32,14 @@
 //! ([`BYPASS_KEYS`]) — no hermeticity, the Nix daemon, the host's files
 //! writable. A container asks for one, its network tolerates it, and only
 //! both open it ([`explain`]); a network that does not tolerate one closes
-//! it for every container in it, whatever their own word. The old per-zone
-//! lists and markers say both at once, for compatibility: that the network
-//! tolerates it, and that a container without a word of its own — and the
-//! main home — asks for it. `offline` tolerates none; a zone locked by the
-//! person, no host session. The audio manager stays the container's, by
-//! [`for_container`] as the camera: its container's word, the network's for
-//! one without.
+//! it for every container in it, whatever their own word. The per-zone
+//! lists and markers say only that the network tolerates it (2c of
+//! §11.15, 2026-09-29); a container without a word of its own — and the
+//! main home — asks for what the template asks for (`crate::permissions`,
+//! `cellward defaults set hermetic|nix-daemon|host-files …`), which took
+//! over, once, what the lists used to ask for them. `offline` tolerates
+//! none; a zone locked by the person, no host session. The audio manager
+//! is a program's permission: its container's word, else the template's.
 //!
 //! **Nobody's** (a throwaway container, or a program whose container is not
 //! known): the safe values, whatever its network says (review 2026-09-28,
@@ -404,7 +405,13 @@ pub fn explain(zone_dir: &Path, config: &Path, zone: &str, who: &Who, key: &str)
         // the template both ways, the network no say (§11.15, 2b).
         (Some((on, source)), None) => (on, source, Asker::Container),
         (None, None) => (network.0, network.1, Asker::Template),
-        (None, Some(_)) => (network.0, network.1, Asker::Network),
+        // No word of its own for a way around the network: the template's
+        // request (2c of §11.15) — the network's lists say only what it
+        // tolerates.
+        (None, Some(_)) => {
+            let (on, source) = crate::permissions::request(config, key);
+            (on, source, Asker::Template)
+        }
     };
     let value = match tolerated {
         Some((false, source)) if asked.0 != safe => (safe, source),
@@ -434,7 +441,25 @@ pub fn value_for(
 /// The settings a zone takes when it comes up, by their names in
 /// `status --json`.
 pub fn start_settings(zone_dir: &Path, config: &Path, zone: &str) -> [(&'static str, bool); 4] {
-    start_settings_for(zone_dir, config, zone, &Who::Main)
+    CONTAINER_KEYS.map(|(key, _)| (key, space_value(zone_dir, config, zone, key)))
+}
+
+/// A zone's own space's `key`: no program of anybody's is in it since
+/// stage 5 of the container design — it comes up as its network
+/// tolerates (a way around it: open where tolerated), the rest as the
+/// template says.
+fn space_value(zone_dir: &Path, config: &Path, zone: &str, key: &str) -> bool {
+    let safe = safe_value(key);
+    match tolerance(zone_dir, config, zone, key) {
+        Some((tolerated, _)) => {
+            if tolerated {
+                !safe
+            } else {
+                safe
+            }
+        }
+        None => zone_value(zone_dir, config, zone, key).0,
+    }
 }
 
 /// The settings a container's instance comes up with for the programs of
@@ -497,7 +522,8 @@ pub fn wider_than(note: &str, target: &[(&'static str, bool)]) -> Vec<&'static s
 /// Nothing is launched into that space since stage 5; `status` names the
 /// instances' ([`restart_needed_of`]).
 pub fn restart_needed(zone_dir: &Path, config: &Path, zone: &str) -> Option<Vec<&'static str>> {
-    restart_needed_of(zone_dir, zone_dir, config, zone, &Who::Main)
+    // A zone's own space came up as its network tolerates ([`start_settings`]).
+    restart_needed_by(zone_dir, start_settings(zone_dir, config, zone))
 }
 
 /// [`restart_needed`] of what came up with the note in `applied_dir` by the
@@ -511,6 +537,14 @@ pub fn restart_needed_of(
     zone: &str,
     who: &Who,
 ) -> Option<Vec<&'static str>> {
+    restart_needed_by(applied_dir, start_settings_for(zone_dir, config, zone, who))
+}
+
+/// What of `now` differs from the note in `applied_dir`.
+fn restart_needed_by(
+    applied_dir: &Path,
+    now: [(&'static str, bool); 4],
+) -> Option<Vec<&'static str>> {
     let text = std::fs::read_to_string(applied_dir.join(APPLIED)).ok()?;
     let applied = |name: &str| {
         text.lines()
@@ -518,7 +552,7 @@ pub fn restart_needed_of(
             .find(|(k, _)| k.trim() == name)
             .map(|(_, v)| v.trim() == "true")
     };
-    let mut changed: Vec<&'static str> = start_settings_for(zone_dir, config, zone, who)
+    let mut changed: Vec<&'static str> = now
         .into_iter()
         .filter(|(name, now)| applied(name).is_some_and(|then| then != *now))
         .map(|(name, _)| name)
@@ -900,27 +934,43 @@ mod tests {
         );
         // And what an instance of it comes up with in a zone that is
         // hermetic by default: hermetic — the zone tolerates no host
-        // session (step 1, 2026-09-28) —; in one that does, its own, while
-        // the main home's is the zone's.
+        // session (step 1, 2026-09-28) —; in one that does, what it asks
+        // for, its own word or the template's (2c of §11.15); the zone's
+        // own space as the zone tolerates.
         d.write("config/containers/work/container.conf", "");
         d.declare("containers/work.conf", "home = private\nhermetic = false\n");
         let work = Who::Container("work".into());
         let settings = start_settings_for(&d.zone(), &d.config(), "nl", &work);
         assert_eq!(settings[0], ("hermetic", true));
+        d.write("zone/hermetic", "off");
+        let settings = start_settings_for(&d.zone(), &d.config(), "nl", &work);
+        assert_eq!(settings[0], ("hermetic", false));
         d.declare(
             "containers/work.conf",
             "home = private\nnix_daemon = true\n",
         );
-        d.write("zone/hermetic", "off");
         let settings = start_settings_for(&d.zone(), &d.config(), "nl", &work);
-        assert_eq!(settings[0], ("hermetic", false));
+        assert_eq!(settings[0], ("hermetic", true), "no request of its own");
         assert_eq!(settings[1], ("nix_daemon", false));
+        std::fs::write(
+            d.config().join(crate::permissions::FILE),
+            "hermetic = false\n",
+        )
+        .unwrap();
+        let settings = start_settings_for(&d.zone(), &d.config(), "nl", &work);
+        assert_eq!(settings[0], ("hermetic", false), "the template's request");
         d.declare("containers/work.conf", "home = private\nhermetic = true\n");
         let settings = start_settings_for(&d.zone(), &d.config(), "nl", &work);
         assert_eq!(settings[0], ("hermetic", true));
         let main = start_settings_for(&d.zone(), &d.config(), "nl", &Who::Main);
         assert_eq!(main[0], ("hermetic", false));
-        assert_eq!(start_settings(&d.zone(), &d.config(), "nl"), main);
+        std::fs::remove_file(d.config().join(crate::permissions::FILE)).unwrap();
+        let main = start_settings_for(&d.zone(), &d.config(), "nl", &Who::Main);
+        assert_eq!(main[0], ("hermetic", true));
+        assert_eq!(
+            start_settings(&d.zone(), &d.config(), "nl")[0],
+            ("hermetic", false)
+        );
     }
 
     /// Review 2026-09-28: a throwaway container's instance (nobody's) comes
@@ -946,11 +996,13 @@ mod tests {
         d.write("zone/hermetic", "off");
         d.write("zone/nix-daemon", "on");
         d.write("zone/host-files", "writable");
-        // The audio manager is a program's permission: the template's, the
-        // network no say (§11.15, 2b).
+        // What the main home asks for is the template's (2b, 2c of §11.15):
+        // the audio manager, and the ways around the network the network
+        // tolerates.
         std::fs::write(
             d.config().join(crate::permissions::FILE),
-            "audio_manager = true\n",
+            "audio_manager = true\nhermetic = false\nnix_daemon = true\n\
+             host_files_writable = true\n",
         )
         .unwrap();
         assert_eq!(
@@ -967,7 +1019,11 @@ mod tests {
         d.declare("nix-daemon", "nl\n");
         d.declare("host-files-writable", "nl\n");
         std::fs::remove_file(d.config().join(crate::permissions::FILE)).unwrap();
-        d.declare("defaults.conf", "audio_manager = true\n");
+        d.declare(
+            "defaults.conf",
+            "audio_manager = true\nhermetic = false\nnix_daemon = true\n\
+             host_files_writable = true\n",
+        );
         assert_eq!(
             start_settings_for(&d.zone(), &d.config(), "nl", &Who::Main),
             open
@@ -1140,19 +1196,13 @@ mod tests {
                                     }
                                 }
                                 _ => {
-                                    // What the lists gave, for whom they
-                                    // spoke: the main home, a container
-                                    // with no word of its own.
-                                    assert_eq!(told.asked.2, Asker::Network, "{case}");
-                                    if network == "zone" {
-                                        assert_eq!(got, before, "the lists' word: {case}");
-                                    } else {
-                                        assert_eq!(
-                                            got.0 != safe,
-                                            tolerated && network_word.0 != safe,
-                                            "{case}"
-                                        );
-                                    }
+                                    // No word of its own — the main home,
+                                    // a container without one: the
+                                    // template's request (2c of §11.15),
+                                    // none here, so the safe value; the
+                                    // lists only tolerate.
+                                    assert_eq!(told.asked.2, Asker::Template, "{case}");
+                                    assert_eq!(got.0, safe, "no request, opened: {case}");
                                 }
                             }
                             if network == "offline" {

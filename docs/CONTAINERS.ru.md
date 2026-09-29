@@ -696,7 +696,8 @@ programs.cellward = {
 - **`defaults.permissions`** (добавлено 2026-09-29, шаг 2б
   `docs/PERMISSIONS.md` §11.15): шаблон — что получают программы
   контейнера без своего слова, — `{microphone, screencast, camera,
-  audio_manager}`, каждое `{value,
+  audio_manager}`, и что они просят у сети (2в): `{hermetic, nix_daemon,
+  host_files_writable}`, каждое `{value,
   source}`. `networks[].microphone` и `networks[].screencast` показывают то
   же: своего слова о программах у сети больше нет.
 - **`defaults.protected`** (добавлено 2026-09-29, `docs/LEAK-MODEL.md`

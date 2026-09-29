@@ -32,6 +32,11 @@ pub const SWITCHES: [&str; 2] = ["microphone", "screencast"];
 /// The flags (`on|off`, kept `true|false` as a container's), built-in off:
 /// the cameras, and the host's raw PipeWire (the audio manager).
 pub const FLAGS: [&str; 2] = ["camera", "audio_manager"];
+/// The requests for a way around the network (`hermetic::BYPASS_KEYS`, 2c
+/// of §11.15), kept `true|false` as a container's own; their safe values
+/// where nobody said. A request opens nothing by itself: only where the
+/// network tolerates it (`hermetic::tolerance`).
+pub const REQUESTS: [&str; 3] = ["hermetic", "nix_daemon", "host_files_writable"];
 
 /// The template's word for `key` and whose: Nix's over the local one;
 /// `Err(source)`: a file there that cannot be read (the strictest, then).
@@ -78,6 +83,43 @@ pub fn flag(config: &Path, key: &str) -> (bool, Source) {
     }
 }
 
+/// The template's request `key` ([`REQUESTS`]) and whose word it is: the
+/// safe value where nobody said, or in a word that is neither, or in a
+/// file that cannot be read.
+pub fn request(config: &Path, key: &str) -> (bool, Source) {
+    let safe = crate::hermetic::safe_value(key);
+    match word(config, key) {
+        Ok(Some((w, source))) => (
+            match w.as_str() {
+                "true" | "on" => true,
+                "false" | "off" => false,
+                _ => safe,
+            },
+            source,
+        ),
+        Ok(None) => (safe, Source::Default),
+        Err(source) => (safe, source),
+    }
+}
+
+/// The key a person's word names, and the value words it takes: `(key,
+/// on, off)` for a flag or a request (kept `true`/`false`), `None` words
+/// for a switch (`yes|no|ask`).
+fn key_of(word: &str) -> Option<(&'static str, Option<(&'static str, &'static str)>)> {
+    Some(match word {
+        "microphone" => ("microphone", None),
+        "screencast" => ("screencast", None),
+        "camera" => ("camera", Some(("on", "off"))),
+        "audio-manager" | "audio_manager" => ("audio_manager", Some(("on", "off"))),
+        "hermetic" => ("hermetic", Some(("on", "off"))),
+        "nix-daemon" | "nix_daemon" => ("nix_daemon", Some(("on", "off"))),
+        "host-files" | "host_files_writable" => {
+            ("host_files_writable", Some(("writable", "read-only")))
+        }
+        _ => return None,
+    })
+}
+
 /// How much a switch lets through.
 fn openness(setting: Setting) -> u8 {
     match setting {
@@ -89,7 +131,9 @@ fn openness(setting: Setting) -> u8 {
 
 const USAGE: &str = "cellward defaults — разрешения контейнеров без своего слова\n\
                      cellward defaults set microphone|screencast yes|no|ask|default\n\
-                     cellward defaults set camera|audio-manager on|off|default";
+                     cellward defaults set camera|audio-manager on|off|default\n\
+                     cellward defaults set hermetic|nix-daemon on|off|default\n\
+                     cellward defaults set host-files read-only|writable|default";
 
 /// `cellward defaults [set <key> <value>|default]`.
 pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
@@ -99,16 +143,15 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
             print!("{}", shown(&tools.config));
             0
         }
-        ["set", key, value]
-            if SWITCHES.contains(key) || FLAGS.contains(&key.replace('-', "_").as_str()) =>
-        {
-            let flag = FLAGS.contains(&key.replace('-', "_").as_str());
-            let key = &key.replace('-', "_");
-            let value = match (*value, flag) {
+        ["set", said, value] if key_of(said).is_some() => {
+            let Some((key, words)) = key_of(said) else {
+                return 1;
+            };
+            let value = match (*value, words) {
                 ("default", _) => None,
-                ("on", true) => Some("true"),
-                ("off", true) => Some("false"),
-                (v, false) => match Setting::parse(v) {
+                (v, Some((on, _))) if v == on => Some("true"),
+                (v, Some((_, off))) if v == off => Some("false"),
+                (v, None) => match Setting::parse(v) {
                     Some(s) => Some(s.as_str()),
                     None => {
                         eprintln!("{USAGE}");
@@ -163,6 +206,23 @@ fn shown(config: &Path) -> String {
         };
         out.push_str(&format!("  {key}: {}{from}\n", setting.as_str()));
     }
+    for key in REQUESTS {
+        let (on, source) = request(config, key);
+        let from = match source {
+            Source::Nix => " (Nix)",
+            Source::Local => "",
+            Source::Default => " (умолчание)",
+        };
+        let said = match (key, on) {
+            ("host_files_writable", true) => "host-files: writable",
+            ("host_files_writable", false) => "host-files: read-only",
+            ("hermetic", true) => "hermetic: on",
+            ("hermetic", false) => "hermetic: off — просит сессию хоста",
+            (_, true) => "nix-daemon: on — просит Nix-демон хоста",
+            (_, false) => "nix-daemon: off",
+        };
+        out.push_str(&format!("  {said}{from}\n"));
+    }
     for key in FLAGS {
         let (on, source) = flag(config, key);
         let from = match source {
@@ -181,8 +241,12 @@ fn shown(config: &Path) -> String {
 
 // --- THE MOVE ------------------------------------------------------------------
 
-/// The marker of the move, in the containers' policy directory.
+/// The marks of the move's parts, in the containers' policy directory: the
+/// switches' (the microphone, the screen cast), the flags' (the cameras,
+/// the audio manager), the requests'.
 const MOVED: &str = ".permissions-by-container";
+const MOVED_FLAGS: &str = ".permissions-flags-by-container";
+const MOVED_REQUESTS: &str = ".permissions-requests-by-template";
 
 /// The networks' own words of before for a switch: `(network, setting)`,
 /// the zone's marker (`marker` in its state directory) and Nix's list
@@ -278,106 +342,151 @@ pub fn moves(
     out
 }
 
-/// The move, once (see the module's words). Run with the containers' own
-/// move (`container::migrate`).
+/// The move, in three parts, each once — its own mark in the containers'
+/// policy directory: a build that made one part does not keep the next
+/// build from making its own (see the module's words).
 pub fn migrate(tools: &Tools) {
-    let marker = tools.config.join(crate::container::POLICY_DIR).join(MOVED);
-    if marker.exists() {
-        return;
-    }
-    // Marked first: whatever becomes of it, it is not tried at every start.
-    let _ = fs::create_dir_all(marker.parent().unwrap_or(&tools.config));
-    if fs::write(&marker, "").is_err() {
-        return;
-    }
-    let mut records: Vec<(String, Option<String>)> = crate::container::load_all_quiet(tools)
-        .into_iter()
-        .map(|c| {
-            let net = match &c.network.value {
-                crate::container::Network::Named(n) => Some(n.clone()),
-                crate::container::Network::Ask => None,
-            };
-            (c.name, net)
-        })
-        .collect();
-    records.push((crate::container::MAIN_RECORD.to_owned(), None));
-    let mut said = Vec::new();
-    // The flags as switches of two words: on is `yes`, off is `no` — the
-    // same rule, never wider.
-    for (key, marker_name) in [
-        ("camera", crate::hermetic::CAMERA),
-        ("audio_manager", crate::hermetic::AUDIO_MANAGER),
-    ] {
-        let words = network_flags(tools, marker_name, marker_name);
-        if words.is_empty() {
-            continue;
+    let mut said: Vec<String> = Vec::new();
+    if mark(tools, MOVED_REQUESTS) {
+        // The requests for a way around a network (2c): what the networks' lists
+        // asked for, for the main home and the containers with no word of their
+        // own, becomes the template's — a request opens nothing where the
+        // network does not tolerate it, so this gives nothing that was not given.
+        for key in REQUESTS {
+            if !matches!(word(&tools.config, key), Ok(None)) {
+                continue;
+            }
+            let safe = crate::hermetic::safe_value(key);
+            let mut names: Vec<String> = fs::read_dir(&tools.state)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| !n.starts_with('.'))
+                .collect();
+            for list in ["hermetic-exceptions", "nix-daemon", "host-files-writable"] {
+                if let Ok(text) =
+                    crate::declared::read(&tools.config.join(crate::cli::DECLARED_DIR).join(list))
+                {
+                    names.extend(
+                        text.lines()
+                            .map(str::trim)
+                            .filter(|l| !l.is_empty())
+                            .map(str::to_owned),
+                    );
+                }
+            }
+            // A network of none of these names: what the defaults give one.
+            names.push("__cellward-any__".to_owned());
+            let opens = names.iter().any(|zone| {
+                crate::hermetic::tolerance(&tools.state.join(zone), &tools.config, zone, key)
+                    .is_some_and(|(tolerated, _)| tolerated)
+            });
+            if opens {
+                let file = tools.config.join(FILE);
+                let word = if safe { "false" } else { "true" };
+                if crate::container::write_key(&file, key, Some(word), true).is_ok() {
+                    said.push(format!("defaults: {key} = {word}"));
+                }
+            }
         }
-        let template = if flag(&tools.config, key).0 {
-            Setting::Yes
-        } else {
-            Setting::No
-        };
-        let with_own: Vec<(String, Option<String>, bool)> = records
-            .iter()
-            .map(|(name, net)| {
-                // A file that cannot be read is a word not known: kept.
-                let own = !matches!(
-                    crate::container::own_value_in(&tools.config, name, key),
-                    Ok(None)
-                );
-                (name.clone(), net.clone(), own)
+    }
+    let parts = [mark(tools, MOVED_FLAGS), mark(tools, MOVED)];
+    if parts.iter().any(|m| *m) {
+        let mut records: Vec<(String, Option<String>)> = crate::container::load_all_quiet(tools)
+            .into_iter()
+            .map(|c| {
+                let net = match &c.network.value {
+                    crate::container::Network::Named(n) => Some(n.clone()),
+                    crate::container::Network::Ask => None,
+                };
+                (c.name, net)
             })
             .collect();
-        for (record, value) in moves(template, &words, &with_own) {
-            let word = if value == Setting::Yes {
-                "true"
-            } else {
-                "false"
-            };
-            let file = crate::container::policy_dir(tools, &record).join(crate::container::FILE);
-            if let Some(dir) = file.parent() {
-                let _ = fs::create_dir_all(dir);
+        records.push((crate::container::MAIN_RECORD.to_owned(), None));
+        if parts[0] {
+            // The flags as switches of two words: on is `yes`, off is `no` — the
+            // same rule, never wider.
+            for (key, marker_name) in [
+                ("camera", crate::hermetic::CAMERA),
+                ("audio_manager", crate::hermetic::AUDIO_MANAGER),
+            ] {
+                let words = network_flags(tools, marker_name, marker_name);
+                if words.is_empty() {
+                    continue;
+                }
+                let template = if flag(&tools.config, key).0 {
+                    Setting::Yes
+                } else {
+                    Setting::No
+                };
+                let with_own: Vec<(String, Option<String>, bool)> = records
+                    .iter()
+                    .map(|(name, net)| {
+                        // A file that cannot be read is a word not known: kept.
+                        let own = !matches!(
+                            crate::container::own_value_in(&tools.config, name, key),
+                            Ok(None)
+                        );
+                        (name.clone(), net.clone(), own)
+                    })
+                    .collect();
+                for (record, value) in moves(template, &words, &with_own) {
+                    let word = if value == Setting::Yes {
+                        "true"
+                    } else {
+                        "false"
+                    };
+                    let file =
+                        crate::container::policy_dir(tools, &record).join(crate::container::FILE);
+                    if let Some(dir) = file.parent() {
+                        let _ = fs::create_dir_all(dir);
+                    }
+                    if crate::container::write_key(&file, key, Some(word), true).is_ok() {
+                        said.push(format!("{record}: {key} = {word}"));
+                    }
+                }
             }
-            if crate::container::write_key(&file, key, Some(word), true).is_ok() {
-                said.push(format!("{record}: {key} = {word}"));
+        }
+        if parts[1] {
+            for (key, marker_name, declared) in [
+                (
+                    "microphone",
+                    crate::microphone::MARKER,
+                    crate::microphone::DECLARED,
+                ),
+                (
+                    "screencast",
+                    crate::screencast::MARKER,
+                    crate::screencast::DECLARED,
+                ),
+            ] {
+                let words = network_words(tools, marker_name, declared);
+                if words.is_empty() {
+                    continue;
+                }
+                let template = switch(&tools.config, key).0;
+                let with_own: Vec<(String, Option<String>, bool)> = records
+                    .iter()
+                    .map(|(name, net)| {
+                        let own =
+                            crate::microphone::container_switch(&tools.config, name, key).is_some();
+                        (name.clone(), net.clone(), own)
+                    })
+                    .collect();
+                for (record, value) in moves(template, &words, &with_own) {
+                    let file =
+                        crate::container::policy_dir(tools, &record).join(crate::container::FILE);
+                    if let Some(dir) = file.parent() {
+                        let _ = fs::create_dir_all(dir);
+                    }
+                    if crate::container::write_key(&file, key, Some(value.as_str()), true).is_ok() {
+                        said.push(format!("{record}: {key} = {}", value.as_str()));
+                    }
+                }
             }
         }
     }
-    for (key, marker_name, declared) in [
-        (
-            "microphone",
-            crate::microphone::MARKER,
-            crate::microphone::DECLARED,
-        ),
-        (
-            "screencast",
-            crate::screencast::MARKER,
-            crate::screencast::DECLARED,
-        ),
-    ] {
-        let words = network_words(tools, marker_name, declared);
-        if words.is_empty() {
-            continue;
-        }
-        let template = switch(&tools.config, key).0;
-        let with_own: Vec<(String, Option<String>, bool)> = records
-            .iter()
-            .map(|(name, net)| {
-                let own = crate::microphone::container_switch(&tools.config, name, key).is_some();
-                (name.clone(), net.clone(), own)
-            })
-            .collect();
-        for (record, value) in moves(template, &words, &with_own) {
-            let file = crate::container::policy_dir(tools, &record).join(crate::container::FILE);
-            if let Some(dir) = file.parent() {
-                let _ = fs::create_dir_all(dir);
-            }
-            if crate::container::write_key(&file, key, Some(value.as_str()), true).is_ok() {
-                said.push(format!("{record}: {key} = {}", value.as_str()));
-            }
-        }
-    }
-    let _ = fs::write(&marker, said.join("\n"));
     if !said.is_empty() {
         let text = said.join("; ");
         let _ = crate::journal::append(
@@ -386,6 +495,18 @@ pub fn migrate(tools: &Tools) {
             &[("words", text.as_str())],
         );
     }
+}
+
+/// Take the mark of a part of the move: `false` when it was taken already,
+/// or cannot be — marked first, so that whatever becomes of the part it is
+/// not tried at every start.
+fn mark(tools: &Tools, name: &str) -> bool {
+    let marker = tools.config.join(crate::container::POLICY_DIR).join(name);
+    if marker.exists() {
+        return false;
+    }
+    let _ = fs::create_dir_all(marker.parent().unwrap_or(&tools.config));
+    fs::write(&marker, "").is_ok()
 }
 
 #[cfg(test)]

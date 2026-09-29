@@ -1207,6 +1207,25 @@ fn zone_allowance(tools: &Tools, args: &[OsString], switch: &Switch) -> u8 {
     };
     let said = if on { switch.said_on } else { switch.said_off };
     println!("зона {name}: {said}{from}{restart}");
+    if on {
+        if let Some(key) = switch.bypass {
+            // What the network tolerates is asked for by the containers
+            // (2c of docs/PERMISSIONS.md §11.15): said, with the words.
+            let (asked, _) = crate::permissions::request(&tools.config, key);
+            let verb = switch.verb;
+            let value = switch.on;
+            println!(
+                "  это допуск сети: получат его те, кто просит — контейнер своим словом \
+                 (cellward container set <к>|main {verb} {value}) или все без своего слова \
+                 (cellward defaults set {verb} {value}; сейчас {})",
+                if asked != crate::hermetic::safe_value(key) {
+                    "просят"
+                } else {
+                    "не просят"
+                }
+            );
+        }
+    }
     0
 }
 

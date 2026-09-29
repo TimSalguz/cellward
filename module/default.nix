@@ -779,6 +779,9 @@ let
     "defaults.permissions.screencast"
     "defaults.permissions.camera"
     "defaults.permissions.audioManager"
+    "defaults.permissions.hermetic"
+    "defaults.permissions.nixDaemon"
+    "defaults.permissions.hostFilesWritable"
     "launcher.mode"
     "interception.userEntries"
     "autostart.unassigned"
@@ -933,6 +936,21 @@ in
           type = lib.types.nullOr lib.types.bool;
           default = null;
           description = "PipeWire хоста без ограничений программам контейнера без своего слова — только для доверенного микшера; по умолчанию нет. Своё слово — containers.<имя>.permissions.audioManager, main.permissions.audioManager. null — не задавать из Nix (cellward defaults set audio-manager on|off).";
+        };
+        hermetic = lib.mkOption {
+          type = lib.types.nullOr lib.types.bool;
+          default = null;
+          description = "Просьба контейнеров без своего слова (и настоящего дома без своего) о сессии хоста: false — просить её, то есть быть негерметичными. Действует только в сетях, которые это допускают (hermetic.exceptions / hermetic.default); сеть только допускает, просит контейнер (docs/PERMISSIONS.md §11.15, 2в). null — не задавать из Nix (cellward defaults set hermetic on|off, иначе true — не просить).";
+        };
+        nixDaemon = lib.mkOption {
+          type = lib.types.nullOr lib.types.bool;
+          default = null;
+          description = "Просьба контейнеров без своего слова о Nix-демоне хоста; действует только в сетях из nixDaemon. null — не задавать из Nix (cellward defaults set nix-daemon on|off, иначе false).";
+        };
+        hostFilesWritable = lib.mkOption {
+          type = lib.types.nullOr lib.types.bool;
+          default = null;
+          description = "Просьба контейнеров без своего слова писать то, что хост исполняет из дома; действует только в сетях из hostFilesWritable. null — не задавать из Nix (cellward defaults set host-files read-only|writable, иначе false).";
         };
       };
     };
@@ -1533,6 +1551,9 @@ in
         ++ lib.optional (cfg.defaults.permissions.screencast != null) "screencast = ${cfg.defaults.permissions.screencast}\n"
         ++ lib.optional (cfg.defaults.permissions.camera != null) "camera = ${lib.boolToString cfg.defaults.permissions.camera}\n"
         ++ lib.optional (cfg.defaults.permissions.audioManager != null) "audio_manager = ${lib.boolToString cfg.defaults.permissions.audioManager}\n"
+        ++ lib.optional (cfg.defaults.permissions.hermetic != null) "hermetic = ${lib.boolToString cfg.defaults.permissions.hermetic}\n"
+        ++ lib.optional (cfg.defaults.permissions.nixDaemon != null) "nix_daemon = ${lib.boolToString cfg.defaults.permissions.nixDaemon}\n"
+        ++ lib.optional (cfg.defaults.permissions.hostFilesWritable != null) "host_files_writable = ${lib.boolToString cfg.defaults.permissions.hostFilesWritable}\n"
       );
     })
     (lib.mkIf (cfg.protect != [ ]) {

@@ -6,6 +6,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **A network's lists say only what it tolerates** (2026-09-29, 2c of
+  `docs/PERMISSIONS.md` §11.15).
+  - The lists are `hermetic.exceptions` and `hermetic.default`,
+    `nixDaemon` and `hostFilesWritable`, and `cellward
+    hermetic|nix-daemon|host-files <network>`. Until now they also asked
+    for the way around the network on behalf of the main home and of every
+    container with no word of its own.
+  - That request is now explicit, in one place: the template (`cellward
+    defaults set hermetic|nix-daemon|host-files …`,
+    `programs.cellward.defaults.permissions.hermetic|nixDaemon|
+    hostFilesWritable`, `status defaults.permissions`), or a container's
+    own word.
+  - Once, the template takes over what the lists asked for. A request opens
+    nothing where the network does not tolerate it, so nothing is wider than
+    before.
+  - A zone's own space comes up as its network tolerates, as before.
+  - `explain` names the template as the asker; the network commands say who
+    gets what they tolerate.
 - **The network no longer decides whether its programs record the
   microphone or cast the screen** (2026-09-29, 2b of
   `docs/PERMISSIONS.md` §11.15).

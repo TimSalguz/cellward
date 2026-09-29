@@ -1874,13 +1874,22 @@ fn explain_says_who_asked_and_what_the_network_tolerates() {
     );
     let said = ok(&["container", "set", "work", "nix-daemon", "on"]);
     assert!(!said.contains("ВНИМАНИЕ"), "{said}");
-    // The main home asks for what the network gives.
+    // The main home asks for what the template asks for (2c of §11.15):
+    // nothing by default — the network's word is only what it tolerates.
+    assert_eq!(
+        setting(&["explain", "main", "nl", "--json"], "nix_daemon"),
+        "{\"key\":\"nix_daemon\",\"value\":false,\"source\":\"default\",\
+         \"asked\":{\"value\":false,\"source\":\"default\",\"by\":\"template\"},\
+         \"tolerated\":{\"value\":true,\"source\":\"local\",\"refused_by\":null},"
+    );
+    ok(&["defaults", "set", "nix-daemon", "on"]);
     assert_eq!(
         setting(&["explain", "main", "nl", "--json"], "nix_daemon"),
         "{\"key\":\"nix_daemon\",\"value\":true,\"source\":\"local\",\
-         \"asked\":{\"value\":true,\"source\":\"local\",\"by\":\"network\"},\
+         \"asked\":{\"value\":true,\"source\":\"local\",\"by\":\"template\"},\
          \"tolerated\":{\"value\":true,\"source\":\"local\",\"refused_by\":null},"
     );
+    ok(&["defaults", "set", "nix-daemon", "default"]);
     assert!(ok(&["explain", "main", "nl"]).contains("Основной дом"));
     // Offline tolerates none, and is refused them.
     let json = setting(&["explain", "work", "offline", "--json"], "nix_daemon");
@@ -2675,7 +2684,10 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
              \"permissions\":{\"microphone\":{\"value\":\"ask\",\"source\":\"default\"},\
              \"screencast\":{\"value\":\"ask\",\"source\":\"default\"},\
              \"camera\":{\"value\":false,\"source\":\"default\"},\
-             \"audio_manager\":{\"value\":false,\"source\":\"default\"}}}"
+             \"audio_manager\":{\"value\":false,\"source\":\"default\"},\
+             \"hermetic\":{\"value\":true,\"source\":\"default\"},\
+             \"nix_daemon\":{\"value\":false,\"source\":\"default\"},\
+             \"host_files_writable\":{\"value\":false,\"source\":\"default\"}}}"
         ),
         "{json}"
     );

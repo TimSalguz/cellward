@@ -123,7 +123,7 @@ pub fn defaults(tools: &Tools) -> String {
          \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{},\"ask_again\":{},\
          \"question_timeout\":{},\"handshake_check\":{},\"protected\":[{}],\
          \"permissions\":{{\"microphone\":{},\"screencast\":{},\"camera\":{},\
-         \"audio_manager\":{}}}}}",
+         \"audio_manager\":{},\"hermetic\":{},\"nix_daemon\":{},\"host_files_writable\":{}}}}}",
         sourced_str(&network, network_source),
         sourced_str(&container, container_source),
         sourced_str(&mode, mode_source),
@@ -157,6 +157,18 @@ pub fn defaults(tools: &Tools) -> String {
         },
         {
             let (on, src) = crate::permissions::flag(&tools.config, "audio_manager");
+            sourced(on.to_string(), src)
+        },
+        {
+            let (on, src) = crate::permissions::request(&tools.config, "hermetic");
+            sourced(on.to_string(), src)
+        },
+        {
+            let (on, src) = crate::permissions::request(&tools.config, "nix_daemon");
+            sourced(on.to_string(), src)
+        },
+        {
+            let (on, src) = crate::permissions::request(&tools.config, "host_files_writable");
             sourced(on.to_string(), src)
         }
     )
