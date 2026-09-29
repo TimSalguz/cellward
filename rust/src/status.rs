@@ -116,12 +116,19 @@ pub fn defaults(tools: &Tools) -> String {
         .iter()
         .map(|(path, source)| sourced_str(&path.to_string_lossy(), *source))
         .collect();
+    // The places the host runs or trusts, which no container of the real
+    // home writes (`zone::host_run_places`): one list for every tool that
+    // must never offer to put a program's word there (stillconf).
+    let host_runs: Vec<String> = crate::zone::host_run_places(&tools.home)
+        .iter()
+        .map(|path| string(&path.to_string_lossy()))
+        .collect();
     format!(
         "{{\"network\":{},\"container\":{},\"launcher_mode\":{},\"compositor_restriction\":{},\
          \"wayland_proxy\":{},\"frames\":{},\"frame_width\":{},\"frame_title\":{},\
          \"frame_buttons\":{},\"frame_style\":{},\"frame_radius\":{},\"tray_badge\":{},\
          \"autostart_unassigned\":{},\"user_entries\":{},\"hermetic\":{},\"ask_again\":{},\
-         \"question_timeout\":{},\"handshake_check\":{},\"protected\":[{}],\
+         \"question_timeout\":{},\"handshake_check\":{},\"protected\":[{}],\"host_runs\":[{}],\
          \"permissions\":{{\"microphone\":{},\"screencast\":{},\"camera\":{},\
          \"audio_manager\":{},\"hermetic\":{},\"nix_daemon\":{},\"host_files_writable\":{}}}}}",
         sourced_str(&network, network_source),
@@ -143,6 +150,7 @@ pub fn defaults(tools: &Tools) -> String {
         sourced_str(&question.text(), question_source),
         sourced_str(&handshake.text(), handshake_source),
         protected.join(","),
+        host_runs.join(","),
         {
             let (s, src) = crate::permissions::switch(&tools.config, "microphone");
             sourced_str(s.as_str(), src)

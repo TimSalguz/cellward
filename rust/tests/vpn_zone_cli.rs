@@ -2736,8 +2736,18 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
              \"ask_again\":{\"value\":\"3m\",\"source\":\"default\"},\
              \"question_timeout\":{\"value\":\"2m\",\"source\":\"default\"},\
              \"handshake_check\":{\"value\":\"6s\",\"source\":\"default\"},\
-             \"protected\":[],\
-             \"permissions\":{\"microphone\":{\"value\":\"ask\",\"source\":\"default\"},\
+             \"protected\":[],\"host_runs\":[\""
+        ),
+        "{json}"
+    );
+    // The places the host runs, where the defaults go on.
+    assert!(
+        json.contains(&format!("\"{}/.bashrc\"", home.root.display())),
+        "{json}"
+    );
+    assert!(
+        json.contains(
+            "],\"permissions\":{\"microphone\":{\"value\":\"ask\",\"source\":\"default\"},\
              \"screencast\":{\"value\":\"ask\",\"source\":\"default\"},\
              \"camera\":{\"value\":false,\"source\":\"default\"},\
              \"audio_manager\":{\"value\":false,\"source\":\"default\"},\

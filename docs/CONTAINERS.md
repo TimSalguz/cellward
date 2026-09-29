@@ -720,6 +720,12 @@ and `cellward container show <name> --json` print subsets of the same schema.
 - **`defaults.protected`** (added 2026-09-29, `docs/LEAK-MODEL.md` §32):
   what the person protects in the real home besides the host's own places
   (`cellward protect`, `programs.cellward.protect`), each `{value, source}`.
+- **`defaults.host_runs`** (added 2026-09-29): the places the host runs or
+  trusts below the home — its shells' and git's files, autostart and
+  services, `~/bin` and the tools' directories, the panels', terminals' and
+  editors' configurations —, absolute paths. No container of the real home
+  writes them. The list a tool must never offer to write a program's
+  word into.
 - **`networks[].tolerates`** (added 2026-09-28, step 1 of the permission
   model, `docs/PERMISSIONS.md` §11.14): the ways around a network it
   tolerates for its containers — `{"hermetic", "nix_daemon",
