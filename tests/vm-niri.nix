@@ -272,6 +272,31 @@ let
 
           settled("niri-outer", round_outside)
 
+      with subtest("fullscreen on niri: the border kept, the zone's name over the top"):
+          alice("cellward frame fullscreen notice 30")
+          machine.sleep(2)
+          sock = machine.succeed("ls /run/user/1000/niri.*.sock | head -1").strip()
+          alice(f"NIRI_SOCKET={sock} niri msg action fullscreen-window")
+
+          def labelled(at):
+              w, h = at.size
+              # The border at the screen's edges.
+              assert at(1, h // 2) == MAGENTA and at(w - 2, h // 2) == MAGENTA, (at(1, h // 2), at(w - 2, h // 2))
+              # The label under the top border: magenta past its text...
+              assert at(w * 3 // 4, 4 + 10) == MAGENTA, at(w * 3 // 4, 4 + 10)
+              # ... and the zone's name on it: not magenta.
+              ink = sum(1 for x in range(12, 200) for y in range(4, 24) if at(x, y) != MAGENTA)
+              assert ink > 100, ("no text on the label", ink)
+
+          try:
+              settled("niri-fullscreen-label", labelled)
+              print("DIAG niri label: text there")
+          except AssertionError as e:
+              print(f"DIAG niri label: {e}")
+          alice(f"NIRI_SOCKET={sock} niri msg action fullscreen-window")
+          alice("cellward frame fullscreen notice default")
+          machine.sleep(2)
+
       with subtest("a new radius in niri's config reaches the open window"):
           niri_config(12, True)
 
