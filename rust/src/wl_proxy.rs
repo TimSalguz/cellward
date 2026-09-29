@@ -4106,8 +4106,9 @@ mod tests {
             assert_eq!(next(&log), 3, "close let go");
             events_until(&mut client, |o, op, _| o == 9 && op == 1);
 
-            // Over the menu: lit; clicked, asked of the supervisor. The
-            // network likewise.
+            // Over the menu: lit; clicked, its dropdown (step 3c) — and its
+            // third row, «Все действия окна…», asked of the supervisor. The
+            // network: asked at once.
             let channel = rig.channel.as_ref().unwrap();
             channel
                 .set_read_timeout(Some(Duration::from_secs(10)))
@@ -4121,7 +4122,26 @@ mod tests {
             assert_eq!(next(&log), 1, "the menu under the pointer");
             send(&mut compositor, &[button(43, true), button(44, false)]);
             assert_eq!((next(&log), next(&log)), (4, 1), "pressed, let go");
+            let got = log_until(&log, |m| m.iface == "xdg_surface" && m.opcode == 2);
+            let popup = got
+                .iter()
+                .rev()
+                .find(|m| m.iface == "wl_compositor" && m.opcode == 0)
+                .expect("the dropdown's surface")
+                .args[0];
+            send(
+                &mut compositor,
+                &[
+                    leave(60, buttons),
+                    enter(61, popup, 100, 1 + 2 * 28 + 14),
+                    button(62, true),
+                    button(63, false),
+                ],
+            );
+            assert_eq!(next(&log), 0, "off the row");
             assert_eq!(asked(), MENU);
+            send(&mut compositor, &[enter(64, buttons, 10, 10)]);
+            assert_eq!(next(&log), 1, "the menu under the pointer again");
             send(&mut compositor, &[motion(30, 10)]);
             assert_eq!(next(&log), 2, "the network under the pointer");
             send(&mut compositor, &[button(45, true), button(46, false)]);
