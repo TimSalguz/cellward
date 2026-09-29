@@ -601,8 +601,8 @@ let
       # A network's «Подключение» (docs/PERMISSIONS.md §11.16): `ask` — a
       # launch into it while it is down asks first, in the launch window,
       # and the program waits; «Не подключать» (Enter, the safe answer)
-      # refuses the launch, said; «Подключить» starts the network (this
-      # one's tunnel is a stand-in: it does not come up, and that is said).
+      # refuses the launch, said; «Подключить» starts the network, and the
+      # program runs in it.
       with subtest("a network that asks: the question before it comes up"):
           alice("cellward connection de ask")
           out = alice("cellward status --json")
@@ -650,11 +650,15 @@ let
           machine.wait_until_succeeds(
               said("connect-agreed") + " | grep -F 'поднимаю зону de'", timeout=30
           )
+          # The stand-in comes up (a tunnel without a peer is an interface
+          # all the same), and the program runs in it.
           machine.wait_until_succeeds(
-              said("connect-agreed") + " | grep -F 'зона de не поднимается'", timeout=90
+              f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' "
+              "| grep -q '\"app_id\": *\"conn\"'",
+              timeout=90,
           )
-          sorry_closed()
-          assert find(json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r")), "conn") is None
+          alice("systemctl --user stop connect-agreed || true")
+          alice("cellward down de")
           alice("cellward connection de default")
 
       # A network whose login is asked (docs/PERMISSIONS.md §11.16, step 2):
