@@ -40,7 +40,7 @@ pub fn valid_program(key: &str) -> bool {
         && !key.starts_with('-')
         && !key
             .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '=' | '/' | '#'))
+            .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '=' | '/' | '#' | '?'))
 }
 
 /// What a program's network is: there, not, or asked about.
@@ -311,7 +311,7 @@ pub fn grandfather(config: &Path, state: &Path) {
             let [who, program, ..] = fields.as_slice() else {
                 continue;
             };
-            if program.starts_with('~') || !valid_program(program) {
+            if program.starts_with('~') || *program == "?" || !valid_program(program) {
                 continue;
             }
             let record = if who.starts_with("main:") {
@@ -493,7 +493,7 @@ mod tests {
         for ok in ["firefox", "org.telegram.desktop", "app_x-1"] {
             assert!(valid_program(ok), "{ok}");
         }
-        for bad in ["", "a b", "a=b", "../x", "-x", "a\nb", "#x"] {
+        for bad in ["", "a b", "a=b", "../x", "-x", "a\nb", "#x", "?"] {
             assert!(!valid_program(bad), "{bad:?}");
         }
     }

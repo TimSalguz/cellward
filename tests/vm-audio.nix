@@ -100,8 +100,9 @@ let
         # of a zone are loaded at boot.
         programs.cellward.enable = true;
         # No screen to ask on here: a program of a container has the
-        # network without a question (docs/FIREWALL.md §9).
-        programs.cellward.defaults.permissions.network = "yes";
+        # network without a question (docs/FIREWALL.md §9) — the user's
+        # setting, home-manager's.
+        home-manager.users.alice.programs.cellward.defaults.permissions.network = "yes";
         # The policy's own log lines, for a failure to be read.
         systemd.user.services.wireplumber.environment.WIREPLUMBER_DEBUG = "2,s-vpn-zones:4";
         home-manager.useGlobalPkgs = true;
