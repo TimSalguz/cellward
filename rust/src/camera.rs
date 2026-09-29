@@ -441,8 +441,8 @@ impl Server {
     }
 
     /// One request from the kernel; what goes back to it (replies, and
-    /// notices), in order. `now`: the monotonic time.
-    pub fn handle(&mut self, request: &[u8], now: Stamp) -> Vec<Vec<u8>> {
+    /// notices), in order.
+    pub fn handle(&mut self, request: &[u8]) -> Vec<Vec<u8>> {
         if request.len() < IN_HEADER {
             return Vec::new();
         }
@@ -1102,7 +1102,7 @@ fn serve(args: &Args) -> Result<(), String> {
                     _ => return Err(format!("/dev/fuse: {}", std::io::Error::last_os_error())),
                 }
             }
-            let messages = server.handle(&buf[..n as usize], now());
+            let messages = server.handle(&buf[..n as usize]);
             write_all(fuse.as_raw_fd(), &messages)?;
             if server.destroyed {
                 return Ok(());
@@ -1193,7 +1193,7 @@ mod tests {
         if (cmd >> 30) & R != 0 {
             put32(&mut body, 28, size);
         }
-        s.handle(&request(op::IOCTL, unique, 2, &body), NOW)
+        s.handle(&request(op::IOCTL, unique, 2, &body))
     }
 
     /// An ioctl's struct back, or its error.
@@ -1210,7 +1210,7 @@ mod tests {
     fn open(s: &mut Server, flags: u32) -> u64 {
         let mut body = [0u8; 8];
         put32(&mut body, 0, flags);
-        let out = s.handle(&request(op::OPEN, 5, 2, &body), NOW);
+        let out = s.handle(&request(op::OPEN, 5, 2, &body));
         let (_, error, body) = parsed(&out[0]);
         assert_eq!(error, 0);
         assert_eq!(u32_at(&body, 8), KEEP_CACHE);
@@ -1249,13 +1249,13 @@ mod tests {
         put32(&mut init, 0, 7);
         put32(&mut init, 4, 40);
         put32(&mut init, 8, 65536);
-        let out = s.handle(&request(op::INIT, 1, 0, &init), NOW);
+        let out = s.handle(&request(op::INIT, 1, 0, &init));
         let (unique, error, body) = parsed(&out[0]);
         assert_eq!((unique, error, body.len()), (1, 0, 64));
         assert_eq!((u32_at(&body, 0), u32_at(&body, 4)), (7, FUSE_MINOR));
         assert_eq!(u32_at(&body, 20), MAX_WRITE);
 
-        let out = s.handle(&request(op::LOOKUP, 2, ROOT, b"video0\0"), NOW);
+        let out = s.handle(&request(op::LOOKUP, 2, ROOT, b"video0\0"));
         let (_, error, body) = parsed(&out[0]);
         assert_eq!((error, body.len()), (0, 128));
         assert_eq!(u64_at(&body, 0), 2);
@@ -1264,18 +1264,18 @@ mod tests {
         assert_eq!(u32_at(attr, 60), S_IFREG | 0o660);
         assert_eq!((u32_at(attr, 68), u32_at(attr, 72)), (1000, 100));
         for (node, name) in [(ROOT, &b"video1\0"[..]), (2, &b"x\0"[..])] {
-            let out = s.handle(&request(op::LOOKUP, 3, node, name), NOW);
+            let out = s.handle(&request(op::LOOKUP, 3, node, name));
             assert_eq!(parsed(&out[0]).1, -libc::ENOENT);
         }
-        let out = s.handle(&request(op::GETATTR, 4, ROOT, &[0u8; 16]), NOW);
+        let out = s.handle(&request(op::GETATTR, 4, ROOT, &[0u8; 16]));
         let (_, error, body) = parsed(&out[0]);
         assert_eq!((error, u32_at(&body, 16 + 60)), (0, S_IFDIR | 0o755));
-        let out = s.handle(&request(op::SETATTR, 4, 2, &[0u8; 88]), NOW);
+        let out = s.handle(&request(op::SETATTR, 4, 2, &[0u8; 88]));
         assert_eq!(parsed(&out[0]).1, -libc::EPERM);
 
         let mut read = [0u8; 40];
         put32(&mut read, 16, 4096);
-        let out = s.handle(&request(op::READDIR, 6, ROOT, &read), NOW);
+        let out = s.handle(&request(op::READDIR, 6, ROOT, &read));
         let (_, _, dir) = parsed(&out[0]);
         let names: Vec<String> = {
             let mut at = 0;
@@ -1290,10 +1290,10 @@ mod tests {
         assert_eq!(names, [".", "..", "video0"]);
         // From the third on: the camera alone.
         put64(&mut read, 8, 2);
-        let out = s.handle(&request(op::READDIR, 7, ROOT, &read), NOW);
+        let out = s.handle(&request(op::READDIR, 7, ROOT, &read));
         assert_eq!(u32_at(&parsed(&out[0]).2, 16), 6);
         // Anything else (here FUSE_GETXATTR): not here.
-        let out = s.handle(&request(22, 8, 2, &[]), NOW);
+        let out = s.handle(&request(22, 8, 2, &[]));
         assert_eq!(parsed(&out[0]).1, -libc::ENOSYS);
     }
 
@@ -1308,7 +1308,7 @@ mod tests {
             put64(&mut read, 0, fh);
             put64(&mut read, 8, offset);
             put32(&mut read, 16, 4096);
-            let out = s.handle(&request(op::READ, 9, 2, &read), NOW);
+            let out = s.handle(&request(op::READ, 9, 2, &read));
             let (_, error, data) = parsed(&out[0]);
             assert_eq!(error, 0);
             let want = (FILE_SIZE - offset).min(4096) as usize;
@@ -1443,7 +1443,7 @@ mod tests {
 
         // An interrupted wait is answered EINTR, and owed nothing more.
         assert!(ioctl(&mut s, fh, 21, vidioc::DQBUF, &buffer(0)).is_empty());
-        let out = s.handle(&request(op::INTERRUPT, 22, 0, &21u64.to_ne_bytes()), NOW);
+        let out = s.handle(&request(op::INTERRUPT, 22, 0, &21u64.to_ne_bytes()));
         assert_eq!(parsed(&out[0]).0, 21);
         assert_eq!(parsed(&out[0]).1, -libc::EINTR);
 
@@ -1456,7 +1456,7 @@ mod tests {
         assert_eq!(u32_at(&q, 12) & (BUF_FLAG_QUEUED | BUF_FLAG_DONE), 0);
 
         // Closed: the buffers go with it.
-        s.handle(&request(op::RELEASE, 25, 2, &fh.to_ne_bytes()), NOW);
+        s.handle(&request(op::RELEASE, 25, 2, &fh.to_ne_bytes()));
         let other = open(&mut s, 0);
         let r = answer(&ioctl(&mut s, other, 26, vidioc::REQBUFS, &req)).unwrap();
         assert_eq!(u32_at(&r, 0), 4);
@@ -1491,7 +1491,7 @@ mod tests {
             put64(&mut body, 0, fh);
             put64(&mut body, 8, 77);
             put32(&mut body, 16, POLL_SCHEDULE_NOTIFY);
-            let out = s.handle(&request(op::POLL, unique, 2, &body), NOW);
+            let out = s.handle(&request(op::POLL, unique, 2, &body));
             u32_at(&parsed(&out[0]).2, 0)
         };
         assert_eq!(poll(&mut s, 5), 0);
@@ -1550,7 +1550,7 @@ mod tests {
         put32(&mut body, 24, 208);
         put32(&mut body, 28, 208);
         body.extend_from_slice(&[0u8; 100]);
-        let out = s.handle(&request(op::IOCTL, 7, 2, &body), NOW);
+        let out = s.handle(&request(op::IOCTL, 7, 2, &body));
         assert_eq!(parsed(&out[0]).1, -EINVAL);
         // A file this never opened.
         assert_eq!(
