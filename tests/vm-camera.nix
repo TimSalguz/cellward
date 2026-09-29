@@ -211,9 +211,11 @@ let
           assert "block: 5 black frames of 640x480" in out, out
 
       def unit_says(unit, words, timeout=90):
+          """`words` in the journal: the program's own lines are its
+          instance's cgroup's, not the unit's that launched it — looked for
+          in every journal."""
           machine.wait_until_succeeds(
-              "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 journalctl --user "
-              f"-u {unit} --no-pager' | grep -q '{words}'",
+              f"journalctl --no-pager | grep -q '{words}'",
               timeout=timeout,
           )
 
@@ -251,7 +253,7 @@ let
           # «Разрешить, пока работает», the second answer.
           answer_in_the_window(1)
           unit_says("vmcamask", "real: a frame of the camera after")
-          print(user("journalctl --user -u vmcamask --no-pager | grep real: || true"))
+          print(machine.succeed("journalctl --no-pager | grep real: || true"))
           machine.fail("grep -rq '^cam_deny' /home/alice/.config/vpn-zones/")
 
       with subtest("asked: refused, the program's rule — not asked again, black"):
