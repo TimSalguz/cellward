@@ -3070,6 +3070,33 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                     }
                 };
             }
+            if key == "always-focused" || key == "always_focused" {
+                let on = match value.as_str() {
+                    "default" => None,
+                    "on" => Some(true),
+                    "off" => Some(false),
+                    _ => {
+                        eprintln!("always-focused: default (выключено), on или off");
+                        return 1;
+                    }
+                };
+                return match crate::container::set_always_focused(tools, selector, on) {
+                    Ok(()) => {
+                        if on == Some(true) {
+                            println!(
+                                "окна контейнера {selector} всегда думают, что они в фокусе                                  (запущенные после этого): не встают на паузу и не узнают,                                  когда от них отвернулись; мессенджеры в нём перестанут                                  уведомлять"
+                            );
+                        } else {
+                            println!("окна контейнера {selector} снова знают, в фокусе ли они");
+                        }
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
+                    }
+                };
+            }
             if key == "x11" {
                 // `default`: none of its own — its network's; `off` refuses
                 // the network's too (2026-09-28, `x11::effective`).

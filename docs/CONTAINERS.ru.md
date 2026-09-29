@@ -703,6 +703,11 @@ programs.cellward = {
   host_files_writable}`, каждое `{value,
   source}`. `networks[].microphone` и `networks[].screencast` показывают то
   же: своего слова о программах у сети больше нет.
+- **`containers[].always_focused`** (добавлено 2026-09-29, 3г
+  `docs/PERMISSIONS.md` §11.15): `{value, source}` — думают ли окна
+  контейнера, что они всегда в фокусе (`cellward container set <к>
+  always-focused on|off|default`, `containers.<к>.alwaysFocused`); без своего
+  слова — `false` из `default`.
 - **`defaults.protected`** (добавлено 2026-09-29, `docs/LEAK-MODEL.md`
   §32): что человек защищает в настоящем доме сверх мест, которые исполняет
   хост (`cellward protect`, `programs.cellward.protect`), каждое `{value,

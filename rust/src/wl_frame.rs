@@ -699,6 +699,11 @@ pub(crate) struct Frames {
     /// The window whose ≡ dropdown is open ([`Dropdown`]): one at a time on
     /// a connection. Its keys come here.
     menu_on: RefCell<Option<Weak<RefCell<Window>>>>,
+    /// The launch's windows always think they have the focus (3d of
+    /// `docs/PERMISSIONS.md` §11.15): `activated` kept in every configure,
+    /// `suspended` taken out, the keyboard's and the pointer's leave held
+    /// back — the keys and buttons down let go of first, so nothing sticks.
+    always_focused: bool,
 }
 
 /// What a click on the frame asks of the supervisor (`crate::wl_proxy`),
@@ -868,6 +873,7 @@ impl Frames {
             asks,
             acted: Cell::new(None),
             menu_on: RefCell::new(None),
+            always_focused: border.always_focused,
         });
         let display = client.display();
         let registry = display.new_send_get_registry();
@@ -2736,6 +2742,13 @@ impl XdgPopupHandler for MenuPopup {
 struct Keyboard {
     f: Rc<Frames>,
     menu: bool,
+    /// The keys down on the program's surface, and its locked modifiers and
+    /// group: what a held-back leave lets go of (3d).
+    down: Vec<u32>,
+    locked: (u32, u32),
+    /// The program's surface a leave of it was held back from (3d,
+    /// `Frames::always_focused`): passed on before the next enter.
+    held: Option<Weak<WlSurface>>,
 }
 
 impl WlKeyboardHandler for Keyboard {
@@ -2748,13 +2761,33 @@ impl WlKeyboardHandler for Keyboard {
     ) {
         self.menu = !programs(surface);
         if !self.menu {
+            if let Some(gone) = self.held.take().and_then(|w| w.upgrade()).filter(programs) {
+                slf.send_leave(serial, &gone);
+            }
+            self.down = keys
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|k| u32::from_ne_bytes(*k))
+                .take(32)
+                .collect();
             slf.send_enter(serial, surface, keys);
         }
     }
 
     fn handle_leave(&mut self, slf: &Rc<WlKeyboard>, serial: u32, surface: &Rc<WlSurface>) {
         if programs(surface) {
-            slf.send_leave(serial, surface);
+            if self.f.always_focused {
+                // It keeps the focus (3d): what is down is let go of, the
+                // modifiers but the locked ones with it.
+                for key in std::mem::take(&mut self.down) {
+                    slf.send_key(serial, 0, key, WlKeyboardKeyState::RELEASED);
+                }
+                slf.send_modifiers(serial, 0, 0, self.locked.0, self.locked.1);
+                self.held = Some(Rc::downgrade(surface));
+            } else {
+                slf.send_leave(serial, surface);
+            }
         }
         self.menu = false;
     }
@@ -2768,6 +2801,13 @@ impl WlKeyboardHandler for Keyboard {
         state: WlKeyboardKeyState,
     ) {
         if !self.menu {
+            if state == WlKeyboardKeyState::PRESSED {
+                if !self.down.contains(&key) && self.down.len() < 32 {
+                    self.down.push(key);
+                }
+            } else {
+                self.down.retain(|k| *k != key);
+            }
             slf.send_key(serial, time, key, state);
             return;
         }
@@ -2792,6 +2832,7 @@ impl WlKeyboardHandler for Keyboard {
         group: u32,
     ) {
         if !self.menu {
+            self.locked = (mods_locked, group);
             slf.send_modifiers(serial, mods_depressed, mods_latched, mods_locked, group);
         }
     }
@@ -3291,6 +3332,27 @@ impl Toplevel {
 }
 
 /// Whether a configure's states (an array of u32) hold `state`.
+/// `xdg_toplevel.state.activated` and `suspended`.
+const ACTIVATED: u32 = 4;
+const SUSPENDED: u32 = 9;
+
+/// A configure's states as a window that always thinks it has the focus is
+/// told them (3d): `activated` there, `suspended` not; the rest as they are.
+pub(crate) fn always_activated(states: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = states
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|word| u32::from_ne_bytes(**word) != SUSPENDED)
+        .flatten()
+        .copied()
+        .collect();
+    if !has_state(&out, ACTIVATED) {
+        out.extend_from_slice(&ACTIVATED.to_ne_bytes());
+    }
+    out
+}
+
 fn has_state(states: &[u8], state: u32) -> bool {
     states
         .as_chunks::<4>()
@@ -3309,6 +3371,13 @@ impl XdgToplevelHandler for Toplevel {
             window.configured(fullscreen);
         }
         let i = self.insets(fullscreen);
+        let focused;
+        let states = if self.f.always_focused {
+            focused = always_activated(states);
+            &focused[..]
+        } else {
+            states
+        };
         slf.send_configure(
             size_down(width, i.across()),
             size_down(height, i.down()),
@@ -3735,6 +3804,9 @@ impl WlSeatHandler for Seat {
         id.set_handler(Keyboard {
             f: self.f.clone(),
             menu: false,
+            down: Vec::new(),
+            locked: (0, 0),
+            held: None,
         });
     }
 }
@@ -3773,6 +3845,13 @@ struct Pointer {
     /// needed, and the shape it set since the last enter.
     shape: Option<Rc<WpCursorShapeDeviceV1>>,
     cursor: Option<WpCursorShapeDeviceV1Shape>,
+    /// The program's surface a leave of it was held back from, and that
+    /// leave's serial (3d, `Frames::always_focused`): the program's pointer
+    /// stays where it was. Passed on before the next enter.
+    held: Option<(u32, Weak<WlSurface>)>,
+    /// The buttons down on the program's surfaces: let go of before a leave
+    /// is held back, or they would stay down.
+    down: Vec<u32>,
 }
 
 /// Where on a frame the pointer is: the window, its part, and the point on
@@ -3834,6 +3913,8 @@ impl Pointer {
             entered: 0,
             shape: None,
             cursor: None,
+            held: None,
+            down: Vec::new(),
         }
     }
 
@@ -4049,6 +4130,15 @@ impl WlPointerHandler for Pointer {
         surface_y: Fixed,
     ) {
         self.hover_enter(surface, surface_y);
+        // Back on the program: the leave held back goes first (3d).
+        if programs(surface) {
+            if let Some((held, gone)) = self.held.take() {
+                if let Some(gone) = gone.upgrade().filter(programs) {
+                    slf.send_leave(held, &gone);
+                    self.sent = true;
+                }
+            }
+        }
         self.away = !programs(surface);
         self.entered = serial;
         self.cursor = None;
@@ -4068,7 +4158,18 @@ impl WlPointerHandler for Pointer {
         self.off_frame();
         if programs(surface) {
             self.away = false;
-            self.pass(|| slf.send_leave(serial, surface));
+            if self.f.always_focused {
+                // The program's pointer stays where it was (3d): what is
+                // down is let go of, and the leave waits for the next enter.
+                for button in std::mem::take(&mut self.down) {
+                    self.pass(|| {
+                        slf.send_button(serial, 0, button, WlPointerButtonState::RELEASED)
+                    });
+                }
+                self.held = Some((serial, Rc::downgrade(surface)));
+            } else {
+                self.pass(|| slf.send_leave(serial, surface));
+            }
         } else {
             self.away = false;
         }
@@ -4099,6 +4200,15 @@ impl WlPointerHandler for Pointer {
         state: WlPointerButtonState,
     ) {
         self.frame_button(serial, button, state);
+        if !self.away {
+            if state == WlPointerButtonState::PRESSED {
+                if !self.down.contains(&button) && self.down.len() < 32 {
+                    self.down.push(button);
+                }
+            } else {
+                self.down.retain(|b| *b != button);
+            }
+        }
         self.pass(|| slf.send_button(serial, time, button, state));
     }
 
@@ -4851,6 +4961,22 @@ mod tests {
         };
         let far = menu_anchor(strip, at, moved, look).unwrap();
         assert_eq!((far.x, far.y), (anchor.x + 3, anchor.y + 7));
+    }
+
+    /// «Always focused» (3d): `activated` added where it is not, once;
+    /// `suspended` taken out; every other state kept, in its order.
+    #[test]
+    fn a_window_that_is_always_focused_is_told_it_is_activated() {
+        let words = |ws: &[u32]| -> Vec<u8> { ws.iter().flat_map(|w| w.to_ne_bytes()).collect() };
+        assert_eq!(always_activated(&words(&[])), words(&[ACTIVATED]));
+        assert_eq!(
+            always_activated(&words(&[FULLSCREEN, SUSPENDED])),
+            words(&[FULLSCREEN, ACTIVATED])
+        );
+        assert_eq!(
+            always_activated(&words(&[ACTIVATED, 1])),
+            words(&[ACTIVATED, 1])
+        );
     }
 
     /// The dropdown's keys: ↓ ↑ go round, Enter and Space act on the lit

@@ -952,6 +952,15 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             wrap.push("--focus".into());
             wrap.push(focus.as_str().into());
         }
+        // Its windows always think they have the focus (3d): the
+        // container's word, off without one.
+        let always_focused = record_name(&selection)
+            .and_then(|name| crate::container::load(tools, &name))
+            .and_then(|c| c.always_focused)
+            .is_some_and(|a| a.value);
+        if always_focused {
+            wrap.push("--always-focused".into());
+        }
         wrap.push("--".into());
         wrap
     });

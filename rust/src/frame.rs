@@ -548,6 +548,9 @@ pub struct Setup {
     pub frame: Frame,
     pub title: String,
     pub switch: PathBuf,
+    /// Its windows always think they have the focus (3d of
+    /// `docs/PERMISSIONS.md` §11.15, `crate::wl_frame`).
+    pub always_focused: bool,
 }
 
 #[cfg(test)]

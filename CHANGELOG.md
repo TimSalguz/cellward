@@ -6,6 +6,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **«Always focused», a container's choice** (2026-09-29, 3d): `cellward
+  container set <c> always-focused on`, `containers.<c>.alwaysFocused`.
+  Its windows are told `activated` in every configure (`suspended` taken
+  out), and the keyboard's and the pointer's leave to another program are
+  held back — keys and buttons down are let go of first, so nothing
+  sticks; for the program the pointer stays where it was. Games and players
+  do not pause, and the program does not learn when the person looked
+  away. Messengers in it stop notifying. It holds in windows with
+  cellward's frame. `containers[].always_focused` in `status --json`.
 - **The frame's ≡ drops a menu down** (2026-09-29, step 3c): an
   `xdg_popup` of the proxy's own under the button — «Сменить сеть…»,
   «Перезапустить с выбором сети…», «Все действия окна…» (the window menu

@@ -668,6 +668,42 @@ fn a_programs_own_container_takes_what_its_preset_gives_by_itself() {
     assert!(!record.contains("camera"), "only offered: {record}");
 }
 
+/// 3d (2026-09-29): «always focused» is a container's word, off without
+/// one; the launch tells wl-sandbox, whose frame keeps it.
+#[test]
+fn always_focused_is_a_containers_word_off_without_one() {
+    let home = Home::new("afocus");
+    home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    fs::create_dir_all(home.root.join("profiles/game")).unwrap();
+    let said = |home: &Home| {
+        let json = stdout(&home.run(&["status", "--json"]));
+        let at = json.find("\"name\":\"game\"").expect("the container");
+        json[at..]
+            .split("\"always_focused\":")
+            .nth(1)
+            .unwrap()
+            .split('}')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(said(&home), "{\"value\":false,\"source\":\"default\"");
+    let out = home.run(&["container", "set", "game", "always-focused", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(said(&home), "{\"value\":true,\"source\":\"local\"");
+    let line = stdout(&home.run_with(
+        &["run", "nl", "--container", "game", "--", "steam"],
+        &[("VPN_ZONE_DRYRUN", "1")],
+    ));
+    assert!(line.contains("--always-focused"), "{line}");
+    let out = home.run(&["container", "set", "game", "always-focused", "maybe"]);
+    assert_eq!(out.status.code(), Some(1));
+    let out = home.run(&["container", "set", "game", "always-focused", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(said(&home), "{\"value\":false,\"source\":\"default\"");
+}
+
 #[test]
 fn a_sandboxed_launch_carries_the_tool_paths_of_the_manifest() {
     let home = Home::new("fs-flags");

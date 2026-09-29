@@ -592,6 +592,7 @@ let
         c.permissions.audioManager != null
       ) "audio_manager = ${lib.boolToString c.permissions.audioManager}"
       ++ lib.optional (c.focus != null) "focus = ${c.focus}"
+      ++ lib.optional (c.alwaysFocused != null) "always_focused = ${lib.boolToString c.alwaysFocused}"
       ++ map (device: "device = ${device}") c.permissions.devices
       ++ lib.mapAttrsToList (scheme: app: "link = ${scheme} ${app}") c.links
     )
@@ -653,6 +654,11 @@ let
         default = null;
         example = "notify";
         description = "Может ли программа контейнера забрать фокус клавиатуры (xdg-activation: просьба активировать окно; посредник Wayland видит каждую такую просьбу): input — один раз на щелчок или клавишу человека (первая просьба с серийным номером этого события проходит, повторные — нет), notify — ни одна не проходит, вместо неё уведомление «<программа> просит внимания» с кнопкой «Перейти», ask — вопрос «Переключить фокус на <программа>?», allow — все проходят, как без посредника. null — input или как задано локально (cellward container set <контейнер> focus). Фокус нового окна при открытии решает композитор (у niri — правило окна open-focused). Действует для программ, запущенных после изменения.";
+      };
+      alwaysFocused = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        description = "Окна программ контейнера всегда думают, что они в фокусе (docs/PERMISSIONS.md §11.15, 3г): игры и плееры не встают на паузу, программа не узнаёт, когда от неё отвернулись; нажатые клавиши и кнопки при уходе фокуса отпускаются. Цена: мессенджеры в нём перестают уведомлять. Действует в окнах с рамкой cellward. null — не задавать из Nix (выключено; `cellward container set <к> always-focused on`).";
       };
       permissions.x11 = lib.mkOption {
         type = lib.types.nullOr lib.types.bool;

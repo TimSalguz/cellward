@@ -922,7 +922,7 @@ pub fn container(tools: &Tools, c: &Container) -> String {
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
          \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"devices\":{devices},\"links\":{links},\"focus\":{focus},{own},\"instances\":{instances}}}",
+         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"devices\":{devices},\"links\":{links},\"focus\":{focus},\"always_focused\":{},{own},\"instances\":{instances}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),
@@ -935,6 +935,12 @@ pub fn container(tools: &Tools, c: &Container) -> String {
         match &c.x11 {
             Some(x11) => sourced(x11.value.to_string(), x11.source),
             None => sourced("null".to_owned(), Source::Default),
+        },
+        // Its windows always think they have the focus (3d): its own word,
+        // off without one.
+        match &c.always_focused {
+            Some(a) => sourced(a.value.to_string(), a.source),
+            None => sourced("false".to_owned(), Source::Default),
         }
     )
 }

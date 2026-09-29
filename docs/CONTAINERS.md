@@ -718,6 +718,11 @@ and `cellward container show <name> --json` print subsets of the same schema.
   where the network tolerates it (`networks[].tolerates`).
   `networks[].microphone` and `networks[].screencast` show the same: the
   network has no word of its own for its programs any more.
+- **`containers[].always_focused`** (added 2026-09-29, 3d of
+  `docs/PERMISSIONS.md` §11.15): `{value, source}`, whether its windows always
+  think they have the focus (`cellward container set <c> always-focused
+  on|off|default`, `containers.<c>.alwaysFocused`); `false` from `default`
+  without a word of its own.
 - **`defaults.protected`** (added 2026-09-29, `docs/LEAK-MODEL.md` §32):
   what the person protects in the real home besides the host's own places
   (`cellward protect`, `programs.cellward.protect`), each `{value, source}`.

@@ -484,6 +484,7 @@ pub fn start(
                 .then(read_font)
                 .flatten(),
             title: setup.title.clone(),
+            always_focused: setup.always_focused,
         }
     });
     // SAFETY: getpid takes nothing and cannot fail.
@@ -1154,6 +1155,8 @@ struct Drawing {
     frame: Frame,
     title: String,
     font: Option<Vec<u8>>,
+    /// The launch's windows always think they have the focus (3d).
+    always_focused: bool,
 }
 
 /// The font the package was built with (`crate::wl_title::FONT`), read whole.
@@ -1249,6 +1252,8 @@ fn child(
 /// ([`title_memfd`]); the look (2026-09-28: the style, the buttons, the
 /// round corners — `crate::wl_title::Look`).
 pub(crate) struct Border {
+    /// Its windows always think they have the focus (3d).
+    pub always_focused: bool,
     pub width: i32,
     pub pixel: Rc<OwnedFd>,
     /// What each square of `pixel` is, in its order.
@@ -1291,6 +1296,7 @@ fn prepare_border(drawing: Drawing) -> Option<Border> {
             }
         });
     Some(Border {
+        always_focused: drawing.always_focused,
         width: drawing.frame.width,
         pixel: Rc::new(pixel),
         squares,
@@ -2389,6 +2395,7 @@ mod tests {
                     },
                     title: String::new(),
                     font: None,
+                    always_focused: false,
                 }),
             )
         }
@@ -3551,6 +3558,7 @@ mod tests {
             },
             title: "nl · основной".to_owned(),
             font,
+            always_focused: false,
         }
     }
 

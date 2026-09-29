@@ -243,6 +243,11 @@ pub struct Container {
     /// 2026-09-28 an `off` of its own refuses the zone's X server too
     /// (`x11::effective`), where it used to be "not mine, the zone's then".
     pub x11: Option<Sourced<bool>>,
+    /// Its windows always think they have the focus (3d of
+    /// `docs/PERMISSIONS.md` §11.15, `crate::wl_frame`): `activated` kept,
+    /// the keyboard's and the pointer's leave held back. Off unless it says
+    /// so.
+    pub always_focused: Option<Sourced<bool>>,
     /// The colour of its windows' frame (`#rrggbb`); none of its own is the
     /// zone's (`docs/PERMISSIONS.md` §11.10).
     pub frame_color: Option<Sourced<String>>,
@@ -1796,6 +1801,24 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
             })
         });
 
+    let always = |conf: &[(String, String)]| {
+        values(conf, "always_focused")
+            .last()
+            .map(|v| matches!(v, "true" | "on" | "yes"))
+    };
+    let always_focused = declared_conf
+        .and_then(always)
+        .map(|value| Sourced {
+            value,
+            source: Source::Nix,
+        })
+        .or_else(|| {
+            always(&local).map(|value| Sourced {
+                value,
+                source: Source::Local,
+            })
+        });
+
     let color = |conf: &[(String, String)]| {
         values(conf, "frame_color")
             .last()
@@ -1877,6 +1900,7 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         paths,
         expires,
         x11,
+        always_focused,
         dir,
         policy,
     })
@@ -2605,6 +2629,27 @@ pub fn write_network_in(config: &Path, name: &str, network: &str) -> Result<(), 
 /// Give a container an X server of its own in zones (`Some(true)`), refuse
 /// its zone's (`Some(false)`), or take its word back (`None`: its
 /// network's), locally.
+/// Let a container's windows always think they have the focus, or not
+/// (`None`: no word of its own — off), locally.
+pub fn set_always_focused(tools: &Tools, selector: &str, on: Option<bool>) -> Result<(), String> {
+    let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    if container
+        .always_focused
+        .as_ref()
+        .is_some_and(|a| a.source == Source::Nix)
+    {
+        return Err(format!(
+            "«всегда в фокусе» контейнера {selector} задано в Nix — меняется там"
+        ));
+    }
+    write_key(
+        &container.policy.join(FILE),
+        "always_focused",
+        on.map(|on| if on { "true" } else { "false" }),
+        true,
+    )
+}
+
 pub fn set_x11(tools: &Tools, selector: &str, on: Option<bool>) -> Result<(), String> {
     open_refusal(selector)?;
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
@@ -3650,6 +3695,7 @@ mod tests {
             paths: Vec::new(),
             expires: Vec::new(),
             x11: None,
+            always_focused: None,
             frame_color: None,
             microphone: None,
             screencast: None,

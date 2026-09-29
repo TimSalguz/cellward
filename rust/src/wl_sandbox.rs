@@ -327,6 +327,7 @@ impl Args {
         let mut title = String::new();
         let mut switch = None;
         let mut focus = crate::wl_focus::FocusPolicy::default();
+        let mut always_focused = false;
         let mut words = argv[..split].iter();
         while let Some(word) = words.next() {
             if word == "--no-proxy" {
@@ -343,6 +344,8 @@ impl Args {
                     .filter(|d| !d.is_empty())
                     .ok_or(ArgError::BadFrame)?;
                 switch = Some(PathBuf::from(dir));
+            } else if word == "--always-focused" {
+                always_focused = true;
             } else if word == "--focus" {
                 focus = words
                     .next()
@@ -368,10 +371,13 @@ impl Args {
         }
         // Without a switch nothing can hide the border: an empty path is a
         // directory with no settings in it.
+        // `--always-focused` (3d of `docs/PERMISSIONS.md` §11.15) is the
+        // frame's: without it nothing of it holds.
         let frame = frame.map(|frame| crate::frame::Setup {
             frame,
             title,
             switch: switch.unwrap_or_default(),
+            always_focused,
         });
         Ok(Self {
             app_id: app_id.to_string_lossy().into_owned(),
