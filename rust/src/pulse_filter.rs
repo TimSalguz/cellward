@@ -1221,6 +1221,8 @@ struct Session {
     /// Its pid, the host's: where its launch is found for a question on
     /// its window (`crate::onwindow`).
     peer: Option<i32>,
+    /// Its launch's key: a refusal of its microphone is written for it.
+    program_key: Option<String>,
     /// What the program calls itself (`SET_CLIENT_NAME`,
     /// `UPDATE_CLIENT_PROPLIST`): its word, for the question only.
     client_name: Option<String>,
@@ -1359,11 +1361,16 @@ impl Session {
                         let program = program_name(payload, &values[16..17])
                             .or_else(|| self.client_name.clone())
                             .unwrap_or_default();
-                        match self.mic.decide(&program, &self.who) {
+                        match self
+                            .mic
+                            .decide(&program, &self.who, self.program_key.as_deref())
+                        {
                             Verdict::Allow => {}
                             Verdict::Refuse(why) => {
                                 return Up::Refuse(tag, format!("{name}: microphone: {why}"))
                             }
+                            // Refused before: silent, not asked.
+                            Verdict::Silent(_) => silent = Some(None),
                             Verdict::Ask { remember } => silent = Some(Some((program, remember))),
                         }
                     }
@@ -2116,9 +2123,14 @@ fn ask(
     to_server: &Arc<Out>,
     session: &Arc<Mutex<Session>>,
 ) {
-    let (mic, who, peer) = {
+    let (mic, who, peer, key) = {
         let s = lock(session);
-        (Arc::clone(&s.mic), s.who.clone(), s.peer)
+        (
+            Arc::clone(&s.mic),
+            s.who.clone(),
+            s.peer,
+            s.program_key.clone(),
+        )
     };
     let spawned = {
         let (to_server, session, mic) =
@@ -2130,15 +2142,22 @@ fn ask(
             // finds the deny standing — none gets a question of its own.
             let launch = peer
                 .and_then(|p| crate::onwindow::launch_above(&crate::onwindow::runtime_dir(), p));
-            let made = mic.ask(&program, &who, remember, launch, |allowed| {
-                let mut s = lock(&session);
-                if allowed {
-                    s.link(channel)
-                } else {
-                    s.mic_denied = true;
-                    None
-                }
-            });
+            let made = mic.ask(
+                &program,
+                &who,
+                remember,
+                launch,
+                key.as_deref(),
+                |allowed| {
+                    let mut s = lock(&session);
+                    if allowed {
+                        s.link(channel)
+                    } else {
+                        s.mic_denied = true;
+                        None
+                    }
+                },
+            );
             // The connection may be gone by now: then this fails, and there
             // is nobody to tell.
             if let Some(frame) = made {
@@ -2190,14 +2209,29 @@ fn pump_down(
 /// Whose program the peer of `client` is (`crate::origin`), looked at
 /// while it is certainly the process that connected. Unknown when it cannot
 /// be looked at.
-/// Whose program `client` is, and its pid (this process's pid namespace's:
-/// the host's) — where its launch is found for a question on its window
-/// (`crate::onwindow::launch_above`).
-fn who_is(client: &UnixStream, args: &Args) -> (Who, Option<i32>) {
+/// Whose program `client` is, its pid (this process's pid namespace's: the
+/// host's) — where its launch is found for a question on its window
+/// (`crate::onwindow::launch_above`) —, and its launch's key, which a
+/// refusal of its microphone is written for (`crate::microphone::DENIED`).
+fn who_is(client: &UnixStream, args: &Args) -> (Who, Option<i32>, Option<String>) {
     let Some(peer) = crate::origin::Peer::of(client.as_raw_fd()) else {
-        return (Who::Unknown, None);
+        return (Who::Unknown, None, None);
     };
-    (who_of(&peer, args), Some(peer.pid))
+    let who = who_of(&peer, args);
+    let key = program_key(&who, peer.pid, args);
+    (who, Some(peer.pid), key)
+}
+
+/// The key of the launch process `pid` belongs to, in its container's
+/// registry (`crate::owners::launch_of`); none for a program not known.
+fn program_key(who: &Who, pid: i32, args: &Args) -> Option<String> {
+    let container = match who {
+        Who::Main => crate::registry::MAIN,
+        Who::Container(name) => name.as_str(),
+        Who::Unknown => return None,
+    };
+    let registry = args.zone_dir.parent()?.join(".running").join(container);
+    crate::owners::launch_of(&registry, pid).map(|(key, _)| key)
 }
 
 fn who_of(peer: &crate::origin::Peer, args: &Args) -> Who {
@@ -2221,13 +2255,14 @@ fn serve(
     client: UnixStream,
     upstream: &PathBuf,
     mic: Arc<Policy>,
-    (who, peer): (Who, Option<i32>),
+    (who, peer, program_key): (Who, Option<i32>, Option<String>),
 ) -> io::Result<()> {
     let server = UnixStream::connect(upstream)?;
     let session = Arc::new(Mutex::new(Session {
         mic,
         who,
         peer,
+        program_key,
         ..Session::default()
     }));
     let to_client = Arc::new(Out {
@@ -3092,7 +3127,7 @@ mod tests {
         let path = upstream.clone();
         let mic = Arc::new(Policy::fixed(Setting::Yes, false));
         thread::spawn(move || {
-            let _ = serve(filter_side, &path, mic, (Who::Main, None));
+            let _ = serve(filter_side, &path, mic, (Who::Main, None, None));
         });
         let (mut seen, _) = server.accept().unwrap();
         let mut c = client;
@@ -3461,6 +3496,19 @@ mod tests {
         assert_eq!(s.down(&framed(6, b"x")), Down::Drop);
     }
 
+    /// A program refused before — or one that did not answer — is silent
+    /// at once, not asked (`microphone::Verdict::Silent`).
+    #[test]
+    fn a_refused_program_is_silent_without_a_question() {
+        let mut s = with_mic(Setting::Ask, true);
+        assert!(!s.mic.ask("app", &Who::Main, true, None, None, |a| a));
+        let none: &[(&str, &str)] = &[];
+        assert!(matches!(
+            s.up(&record(1, INVALID, None, none, INVALID)),
+            Up::Ghost { ask: None, .. }
+        ));
+    }
+
     fn answer_ok(up: Up) {
         match up {
             Up::Answer(frame) => assert_eq!(command_of(&frame).map(|c| c.0), Some(COMMAND_REPLY)),
@@ -3517,7 +3565,7 @@ mod tests {
         let (client, filter_side) = UnixStream::pair().unwrap();
         let path = upstream.clone();
         thread::spawn(move || {
-            let _ = serve(filter_side, &path, mic, (Who::Main, None));
+            let _ = serve(filter_side, &path, mic, (Who::Main, None, None));
         });
         let (seen, _) = server.accept().unwrap();
         seen.set_read_timeout(Some(Duration::from_secs(10)))

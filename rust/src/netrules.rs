@@ -279,6 +279,15 @@ pub fn write_line(file: &Path, program: &str, verdict: Option<Verdict>) -> Resul
     Ok(())
 }
 
+/// Whether the local record `record` says no to `program`: what the
+/// window's ☰ may take back (Nix's words are Nix's).
+pub fn denied_locally(config: &Path, record: &str, program: &str) -> bool {
+    let file = crate::container::policy_dir_in(config, record).join(crate::container::FILE);
+    std::fs::read_to_string(file).is_ok_and(|text| {
+        values(&crate::container::parse_conf(&text), DENY).any(|p| p.trim() == program)
+    })
+}
+
 /// The mark, in the config directory, that [`grandfather`] was done.
 pub const GRANDFATHERED: &str = ".net-grandfathered";
 
@@ -496,5 +505,22 @@ mod tests {
         for bad in ["", "a b", "a=b", "../x", "-x", "a\nb", "#x", "?"] {
             assert!(!valid_program(bad), "{bad:?}");
         }
+    }
+
+    /// A local "no" is what the window's ☰ may take back: written, found;
+    /// taken out, gone — and an "allow" is no "no".
+    #[test]
+    fn a_local_no_is_found_and_taken_back() {
+        let config = std::env::temp_dir().join(format!("vz-netrules-no-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config);
+        let file = crate::container::policy_dir_in(&config, "work").join(crate::container::FILE);
+        assert!(!denied_locally(&config, "work", "curl"));
+        write_line(&file, "curl", Some(Verdict::Deny)).unwrap();
+        write_line(&file, "steam", Some(Verdict::Allow)).unwrap();
+        assert!(denied_locally(&config, "work", "curl"));
+        assert!(!denied_locally(&config, "work", "steam"));
+        write_line(&file, "curl", None).unwrap();
+        assert!(!denied_locally(&config, "work", "curl"));
+        let _ = std::fs::remove_dir_all(&config);
     }
 }

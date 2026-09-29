@@ -2865,12 +2865,14 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
         .run(&["container", "set", "main", "audio-manager", "default"])
         .status
         .success());
-    // The pause after a refusal: a term within 30s…1d, Nix over it.
+    // The pause after a refusal — kept, not used since 2026-09-29 (a
+    // refusal is the program's rule): a term within 30s…1d, Nix over it.
     let out = home.run(&["ask-again", "10m"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("через 10m"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("срок 10m"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("не действует"), "{}", stdout(&out));
     let out = home.run(&["ask-again", "600s"]);
-    assert!(stdout(&out).contains("через 10m"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("срок 10m"), "{}", stdout(&out));
     for bad in ["5s", "2d", "0m", "soon"] {
         assert!(!home.run(&["ask-again", bad]).status.success(), "{bad}");
     }

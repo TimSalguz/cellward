@@ -658,6 +658,48 @@ pub fn pin_of(tools: &Tools, launch: &Launch) -> Pin {
     }
 }
 
+/// What the person said no to for `launch`'s program in its container —
+/// its network, its microphone —, each an entry of the window's menu that
+/// has it asked again (the owner, docs/PERMISSIONS.md §11.15: not asked
+/// until it is changed in the window's ☰). Only the local record's words:
+/// Nix's are Nix's to change.
+pub fn refused_entries(
+    tools: &Tools,
+    label: &str,
+    launch: Option<&Launch>,
+) -> Vec<(String, String, bool)> {
+    let Some((record, program)) = refused_record(tools, launch) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if crate::netrules::denied_locally(&tools.config, &record, &program) {
+        out.push((
+            "net-ask".to_owned(),
+            format!("Снова спрашивать о сети для «{label}»"),
+            false,
+        ));
+    }
+    if crate::microphone::denied(&tools.config, &record, &program) {
+        out.push((
+            "mic-ask".to_owned(),
+            format!("Снова спрашивать о микрофоне для «{label}»"),
+            false,
+        ));
+    }
+    out
+}
+
+/// The record of `launch`'s container, and its program's key.
+fn refused_record(tools: &Tools, launch: Option<&Launch>) -> Option<(String, String)> {
+    let l = launch?;
+    let program = l.program.clone()?;
+    let record = match l.selector.as_deref()? {
+        "" => crate::container::MAIN_RECORD.to_owned(),
+        selector => crate::container::load(tools, selector)?.name,
+    };
+    Some((record, program))
+}
+
 /// The entries of the hotkey menu for the program of a window: `(tag, label,
 /// danger)`.
 pub fn menu_entries(
@@ -984,6 +1026,7 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
                         .as_ref()
                         .is_some_and(|l| crate::system::run_dir(&l.zone).exists())
             })
+            .chain(refused_entries(tools, &label, launch.as_ref()))
             .collect(),
         ..Default::default()
     };
@@ -1106,6 +1149,24 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
             if let Err(e) = started {
                 notify(&label, &format!("Не запустилась: {e}"));
                 return 1;
+            }
+        }
+        "net-ask" | "mic-ask" => {
+            let Some((record, program)) = refused_record(tools, launch.as_ref()) else {
+                return 0;
+            };
+            let done = if choice == "net-ask" {
+                let file = crate::container::policy_dir_in(&tools.config, &record)
+                    .join(crate::container::FILE);
+                crate::netrules::write_line(&file, &program, None)
+                    .map(|()| "О сети спросят при её следующем соединении")
+            } else {
+                crate::microphone::set_denied(&tools.config, &record, &program, false)
+                    .map(|()| "О микрофоне спросят, когда она попросит его снова")
+            };
+            match done {
+                Ok(text) => notify(&label, text),
+                Err(e) => notify(&label, &e),
             }
         }
         "kill-zone" => {

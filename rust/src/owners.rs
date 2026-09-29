@@ -244,6 +244,12 @@ fn program_of(pid: i32, launches: &HashMap<i32, String>) -> Option<(String, i32)
     None
 }
 
+/// The launch process `pid` belongs to, among the container's in
+/// `registry`: its program's key and the launch's pid.
+pub fn launch_of(registry: &Path, pid: i32) -> Option<(String, i32)> {
+    program_of(pid, &launches(registry))
+}
+
 /// The owner of each of `flows` of the instance whose space is process
 /// `space`, among `procs`, by the launches in `registry`: `None` where none
 /// is found.

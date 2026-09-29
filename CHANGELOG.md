@@ -13,7 +13,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   there dropped — on top of its seccomp allow-list. Where user namespaces
   are not given, it runs as before and says so.
 
+### Deprecated
+- **`cellward ask-again`, Nix `askAgainAfter`** (2026-09-29): no longer
+  used. The owner's rule (docs/PERMISSIONS.md §11.15): after «Отказать» a
+  program is not asked again until that is changed in the window's ☰ — a
+  rule of the program's (`mic_deny`, as the network's `net_deny`); no
+  answer, a window closed, an allow too soon: "no" until the sound filter
+  starts again. No timer. The setting is still accepted and shown.
+
 ### Added
+- **"Ask again" in the window's ☰**: «Снова спрашивать о сети / о
+  микрофоне для «…»» takes the program's "no" out of its container's record.
 - **The microphone is silent until it is allowed** (2026-09-29, the owner's
   decision, docs/PERMISSIONS.md §11.15): a record stream the person is asked
   about is answered at once by the sound filter itself — a stream of silence
