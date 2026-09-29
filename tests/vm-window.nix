@@ -72,6 +72,11 @@ let
           pkgs.grim
           pkgs.wtype
           pkgs.foot
+          # A gateway that asks a password and a one-time code
+          # (tests/vm-window-login.py).
+          pkgs.ocserv
+          pkgs.openssl
+          pkgs.oath-toolkit
         ];
         fonts.packages = [ pkgs.dejavu_fonts ];
         virtualisation.memorySize = 1536;
@@ -650,6 +655,12 @@ let
           sorry_closed()
           assert find(json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r")), "conn") is None
           alice("cellward connection de default")
+
+      # A network whose login is asked (docs/PERMISSIONS.md §11.16, step 2):
+      # a real ocserv asking a password and a one-time code, the connect
+      # window's form typed into — a file of its own, exec()'d in these
+      # globals.
+      exec(open("${./vm-window-login.py}").read())
 
       # The frame's buttons, dragging and resizing (docs/WINDOW-FRAME.md §8,
       # "Этап 3"), with a pointer: a file of its own, exec()'d in these

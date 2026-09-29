@@ -133,6 +133,8 @@ enum Msg {
     Connect,
     Cancel,
     Key(Key),
+    /// Shift down or up: Tab goes back with it.
+    Shift(bool),
     Press,
     Focus(bool),
     Armed(u64),
@@ -143,6 +145,7 @@ struct Form {
     armed: bool,
     holds: u64,
     focused: bool,
+    shift: bool,
 }
 
 /// `Msg::Armed(holds)` after `ms`, slept on a thread of its own (the launch
@@ -161,9 +164,14 @@ fn arm_after(ms: u64, holds: u64) -> Task<Msg> {
     )
 }
 
-/// The id of the first field to type into: the first one empty.
+/// The first field to type into: the first one that may not stay empty
+/// and is (the password, where the user is prefilled), else the first
+/// empty one.
 fn first_empty(req: &Request) -> Option<usize> {
-    req.fields.iter().position(|f| f.value.is_empty())
+    req.fields
+        .iter()
+        .position(|f| f.value.is_empty() && matches!(f.kind, Kind::Text | Kind::Secret))
+        .or_else(|| req.fields.iter().position(|f| f.value.is_empty()))
 }
 
 fn field_id(i: usize) -> iced::widget::Id {
@@ -176,6 +184,7 @@ impl Form {
             armed: req.guard == 0,
             holds: 0,
             focused: false,
+            shift: false,
             req,
         }
     }
@@ -220,7 +229,16 @@ impl Form {
                 }
             }
             Msg::Cancel => std::process::exit(1),
+            // Tab and Shift+Tab: the next field, the one before.
+            Msg::Key(Key::Named(key::Named::Tab)) => {
+                return if self.shift {
+                    iced::widget::operation::focus_previous()
+                } else {
+                    iced::widget::operation::focus_next()
+                };
+            }
             Msg::Key(_) | Msg::Press => {}
+            Msg::Shift(on) => self.shift = on,
             Msg::Focus(focused) => {
                 self.focused = focused;
                 if !self.armed {
@@ -307,6 +325,9 @@ impl Form {
                     Some(Msg::Key(key))
                 }
             }
+            iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                Some(Msg::Shift(modifiers.shift()))
+            }
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Msg::Press),
             iced::Event::Window(iced::window::Event::Focused) => Some(Msg::Focus(true)),
             iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::Focus(false)),
@@ -387,7 +408,7 @@ mod tests {
         assert_eq!(req.fields[2].kind, Kind::Secret);
         assert_eq!(req.fields[3].kind, Kind::Code);
         assert_eq!(req.remember, Some(("Запомнить пароль".to_owned(), false)));
-        assert_eq!(first_empty(&req), Some(1));
+        assert_eq!(first_empty(&req), Some(2), "the password, not the group");
         let mut form = Form::new(req);
         assert!(!form.armed, "a guarded form takes nothing at first");
         let _ = form.update(Msg::Input(2, "x".into()));
