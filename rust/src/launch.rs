@@ -73,6 +73,10 @@ pub const ENV_DRYRUN: &str = "VPN_ZONE_DRYRUN";
 /// proxy, no compositor restriction — is not relaxed. The requester chose
 /// the command's first word, and so the name the lists are read by.
 pub const ENV_UNASKED: &str = "VPN_ZONE_UNASKED";
+/// On a launch of the session's autostart (the picker's `--autostart`): a
+/// network refused at an autostart question of this session is not asked
+/// again ([`crate::connect::autostart_launch`]).
+pub const ENV_AUTOSTART: &str = "VPN_ZONE_AUTOSTART";
 
 /// Environment variables that name a compositor's IPC socket — a way to have
 /// the compositor spawn a process on the host. Dropped from launches into a
@@ -612,6 +616,12 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     std::env::remove_var(ENV_DELEGATED);
     let unasked = env_nonempty(ENV_UNASKED).is_some();
     std::env::remove_var(ENV_UNASKED);
+    // Taken, and not carried into the program: a launch it asks for later is
+    // no autostart.
+    if env_nonempty(ENV_AUTOSTART).is_some() {
+        crate::connect::autostart_launch();
+    }
+    std::env::remove_var(ENV_AUTOSTART);
     let asked_from = env_nonempty(ENV_FROM).filter(|_| from_zone);
     std::env::remove_var(ENV_FROM);
     // A locked zone's own launches stay in it (`run_locked`), which the zone
@@ -1292,9 +1302,27 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 let program = label
                     .clone()
                     .unwrap_or_else(|| appname.to_string_lossy().into_owned());
-                if let Err(why) = up_instance(tools, id, (&zone, &zone_name), &program) {
-                    refuse(tools, &why);
-                    return 1;
+                match up_instance(tools, id, (&zone, &zone_name), &program) {
+                    Ok(()) => {}
+                    Err(Stopped::Say(why)) => {
+                        refuse(tools, &why);
+                        return 1;
+                    }
+                    // The person answered another launch's question for
+                    // it: a notification, not a window of its own each.
+                    Err(Stopped::Taken(why)) => {
+                        eprintln!("{why}");
+                        if has_display() {
+                            crate::dialog::notify(
+                                &tools.notify_send,
+                                None,
+                                "10000",
+                                crate::dialog::APP,
+                                &why,
+                            );
+                        }
+                        return 1;
+                    }
                 }
             }
             Network::Instance
@@ -1970,7 +1998,7 @@ fn up_instance(
     id: &str,
     (zone, zone_name): (&OsStr, &str),
     program: &str,
-) -> Result<(), String> {
+) -> Result<(), Stopped> {
     let running_in = || {
         fs::read_to_string(crate::instance::dir(&tools.state, id).join(crate::instance::NETWORK))
             .map(|text| text.trim().to_owned())
@@ -1986,7 +2014,7 @@ fn up_instance(
     if crate::instance::up(&tools.state, id).is_some() {
         let running = running_in();
         if running != zone_name {
-            return Err(elsewhere(running));
+            return Err(elsewhere(running).into());
         }
     }
     if zone_name != OFFLINE {
@@ -1998,14 +2026,21 @@ fn up_instance(
                 tools,
                 &zone.to_string_lossy(),
                 crate::connect::Wants::Program(program),
-            )?;
+            )
+            .map_err(|not_up| {
+                if not_up.taken {
+                    Stopped::Taken(not_up.why)
+                } else {
+                    Stopped::Say(not_up.why)
+                }
+            })?;
             pid = cli::zone_up(&tools.state, zone);
         }
         if pid.is_none() {
-            return Err(format!("зона {zone_name} не поднимается"));
+            return Err(format!("зона {zone_name} не поднимается").into());
         }
         if let Some(why) = no_bridge_refusal(&tools.state, zone) {
-            return Err(why);
+            return Err(why.into());
         }
     }
     if crate::instance::up(&tools.state, id).is_none() {
@@ -2014,21 +2049,35 @@ fn up_instance(
         let unit = crate::instance::unit_name(id).unwrap_or_default();
         let _ = cli::systemctl_unit(tools, "start", OsStr::new(&unit));
         if crate::instance::up(&tools.state, id).is_none() {
-            return Err(format!(
-                "контейнер {id} не поднимается (journalctl --user -u '{unit}')"
-            ));
+            return Err(
+                format!("контейнер {id} не поднимается (journalctl --user -u '{unit}')").into(),
+            );
         }
     }
     let running = running_in();
     if running != zone_name {
-        return Err(elsewhere(running));
+        return Err(elsewhere(running).into());
     }
     // Once more by what it came up with (review 2026-09-28): it may have
     // come up meanwhile, by another launch, with settings of before.
     if let Some(why) = lock_refusal(tools, id, zone_name) {
-        return Err(why);
+        return Err(why.into());
     }
     Ok(())
+}
+
+/// Why a launch's instance is not up: said in a window of its own — or, a
+/// refusal the person gave at another launch's question
+/// (`connect::NotUp::taken`), in a notification.
+enum Stopped {
+    Say(String),
+    Taken(String),
+}
+
+impl From<String> for Stopped {
+    fn from(why: String) -> Self {
+        Self::Say(why)
+    }
 }
 
 /// Why this launch may not use its container in `zone`, if it may not.

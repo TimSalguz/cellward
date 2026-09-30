@@ -11,7 +11,10 @@
 //! still with it in view; the form is `vpn-zone-window login`, guarded once.
 //! One question per network at a time: launches that want the same network
 //! meanwhile wait for its outcome and take it — autostart after the login
-//! asks once per network, not once per program. Programs wait with no
+//! asks once per network, not once per program, and a refusal at an
+//! autostart question holds for the session's later autostart launches too
+//! ([`autostart_launch`]); a refusal taken so is said in a notification,
+//! the person having answered already. Programs wait with no
 //! network while it is open: a network that is down has no route out, so
 //! nothing goes anywhere meanwhile. «Не подключать», a closed question, or
 //! no way to ask at all: the network stays down, and the launch is refused
@@ -182,21 +185,83 @@ pub enum Wants<'a> {
     Person,
 }
 
-/// The last answer: its number, and whether it was yes.
-fn last_answer(dir: &Path) -> Option<(u64, bool)> {
+/// The last answer: its number, whether it was yes, and the graphical
+/// session of the autostart it was refused at, if it was.
+fn last_answer(dir: &Path) -> Option<(u64, bool, Option<String>)> {
     let text = fs::read_to_string(dir.join(ANSWER)).ok()?;
-    let (seq, word) = text.trim().split_once(' ')?;
-    let yes = match word {
+    let mut words = text.split_whitespace();
+    let seq = words.next()?.parse().ok()?;
+    let yes = match words.next()? {
         "yes" => true,
         "no" => false,
         _ => return None,
     };
-    Some((seq.parse().ok()?, yes))
+    Some((seq, yes, words.next().map(str::to_owned)))
 }
 
-fn write_answer(dir: &Path, seq: u64, yes: bool) -> std::io::Result<()> {
-    let text = format!("{seq} {}\n", if yes { "yes" } else { "no" });
+fn write_answer(dir: &Path, seq: u64, yes: bool, autostart: Option<&str>) -> std::io::Result<()> {
+    let mut text = format!("{seq} {}", if yes { "yes" } else { "no" });
+    if let Some(session) = autostart {
+        text.push(' ');
+        text.push_str(session);
+    }
+    text.push('\n');
     crate::desktop::write_atomically(&dir.join(ANSWER), text.as_bytes())
+}
+
+/// Why a network is not up, for the person.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NotUp {
+    pub why: String,
+    /// Refused at another launch's question — one it waited through, or an
+    /// autostart question of this session before it: the person saw and
+    /// answered that one, and this launch says so without a window of its
+    /// own.
+    pub taken: bool,
+}
+
+impl From<String> for NotUp {
+    fn from(why: String) -> Self {
+        Self { why, taken: false }
+    }
+}
+
+impl std::fmt::Display for NotUp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.why)
+    }
+}
+
+/// The graphical session of this process, when it is a launch of the
+/// session's autostart ([`autostart_launch`]).
+static AUTOSTART: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// This process is a launch of the session's autostart
+/// (`launch::ENV_AUTOSTART`): a network refused at an autostart question of
+/// the same graphical session is refused for it too — once per network,
+/// however far apart the programs start (the owner, 2026-09-29). Without a
+/// display there is no session to tell, and it is asked as any launch.
+pub fn autostart_launch() {
+    if let Some(session) = display_session() {
+        let _ = AUTOSTART.set(session);
+    }
+}
+
+/// The graphical session by its display socket, made anew with each login:
+/// `<device>:<inode>:<mtime>` of `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, or of
+/// X's socket.
+fn display_session() -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let socket = match std::env::var_os("WAYLAND_DISPLAY").filter(|v| !v.is_empty()) {
+        Some(name) => Path::new(&std::env::var_os("XDG_RUNTIME_DIR")?).join(name),
+        None => {
+            let display = std::env::var("DISPLAY").ok()?;
+            let number = display.strip_prefix(':')?.split('.').next()?.to_owned();
+            PathBuf::from(format!("/tmp/.X11-unix/X{number}"))
+        }
+    };
+    let meta = fs::metadata(socket).ok()?;
+    Some(format!("{}:{}:{}", meta.dev(), meta.ino(), meta.mtime()))
 }
 
 /// The network's question lock, held until dropped. Opened close-on-exec
@@ -219,14 +284,15 @@ fn lock(dir: &Path) -> Result<fs::File, String> {
 }
 
 /// What bringing a network up takes, apart: asking, logging in, starting,
-/// whether it is up, and saying it is — the real ones ([`Real`]), or a
-/// test's.
+/// whether it is up, and saying it is; the autostart session the launch is
+/// of — the real ones ([`Real`]), or a test's.
 trait Steps {
     fn ask(&self, zone: &str, mode: Mode, wants: Wants<'_>) -> bool;
     fn log_in(&self, zone: &str, asked: (Mode, Wants<'_>), cfg: &OcConfig) -> bool;
     fn start(&self, zone: &str, wants: Wants<'_>);
     fn up(&self, zone: &str) -> bool;
     fn connected(&self, zone: &str, wants: Wants<'_>);
+    fn autostart(&self) -> Option<String>;
 }
 
 struct Real<'a>(&'a Tools);
@@ -272,6 +338,10 @@ impl Steps for Real<'_> {
             .stderr(Stdio::null())
             .status();
     }
+
+    fn autostart(&self) -> Option<String> {
+        AUTOSTART.get().cloned()
+    }
 }
 
 /// `zone` up for `wants`, as its «Подключение» says: `auto` starts it;
@@ -280,9 +350,10 @@ impl Steps for Real<'_> {
 /// (no `PasswordFile`) takes it in the connect window's form, asked again with
 /// what went wrong until the network is up or the person gives up. One
 /// question per network at a time: a launch that waited through another's
-/// takes its outcome, one after it asks anew. `Err`: why it is not up, for
+/// takes its outcome, one after it asks anew — unless both are of this
+/// session's autostart, and it was a refusal. `Err`: why it is not up, for
 /// the person.
-pub fn bring_up(tools: &Tools, zone: &str, wants: Wants<'_>) -> Result<(), String> {
+pub fn bring_up(tools: &Tools, zone: &str, wants: Wants<'_>) -> Result<(), NotUp> {
     bring_up_with(tools, zone, wants, &Real(tools))
 }
 
@@ -291,7 +362,7 @@ fn bring_up_with(
     zone: &str,
     wants: Wants<'_>,
     steps: &impl Steps,
-) -> Result<(), String> {
+) -> Result<(), NotUp> {
     if steps.up(zone) {
         return Ok(());
     }
@@ -303,18 +374,19 @@ fn bring_up_with(
         return if steps.up(zone) {
             Ok(())
         } else {
-            Err(failed(zone, wants))
+            Err(failed(zone, wants).into())
         };
     }
     let dir = tools.state.join(zone);
     // The questions answered before this launch began to wait: an answer
     // after them was given while it waited, and is its answer too.
-    let seen = last_answer(&dir).map_or(0, |(seq, _)| seq);
+    let seen = last_answer(&dir).map_or(0, |(seq, _, _)| seq);
     decide(tools, zone, (mode, wants), seen, (login.as_ref(), steps))
 }
 
 /// Under the network's question lock: up meanwhile — yes; refused since
-/// `seen` — that refusal; else the person's, written for the launches that
+/// `seen`, or at an autostart question of this launch's autostart session
+/// — that refusal, taken; else the person's, written for the launches that
 /// wait for it. Connected after the person answered: said so, the lock
 /// given back first — the launches that waited go on meanwhile.
 fn decide(
@@ -323,16 +395,20 @@ fn decide(
     (mode, wants): (Mode, Wants<'_>),
     seen: u64,
     (login, steps): (Option<&OcConfig>, &impl Steps),
-) -> Result<(), String> {
+) -> Result<(), NotUp> {
     let dir = tools.state.join(zone);
     let held = lock(&dir)?;
     if steps.up(zone) {
         return Ok(());
     }
     let last = last_answer(&dir);
-    if let Some((seq, false)) = last {
-        if seq > seen {
-            return Err(refusal(zone, mode, wants));
+    let autostart = steps.autostart();
+    if let Some((seq, false, at)) = &last {
+        if *seq > seen || (autostart.is_some() && *at == autostart) {
+            return Err(NotUp {
+                why: refusal(zone, mode, wants),
+                taken: true,
+            });
         }
     }
     // Whether the person answered something: the form, the question — not
@@ -351,8 +427,11 @@ fn decide(
         }
     };
     let up = yes && steps.up(zone);
-    let seq = last.map_or(0, |(seq, _)| seq).max(seen) + 1;
-    if let Err(e) = write_answer(&dir, seq, up) {
+    let seq = last.map_or(0, |(seq, _, _)| seq).max(seen) + 1;
+    // The session kept with a refusal only: one that failed to come up is
+    // tried again by the next.
+    let refused_at = autostart.as_deref().filter(|_| !yes);
+    if let Err(e) = write_answer(&dir, seq, up, refused_at) {
         eprintln!("cellward: ответ о подключении сети {zone} не записан: {e}");
     }
     drop(held);
@@ -363,8 +442,8 @@ fn decide(
             }
             Ok(())
         }
-        (false, true) => Err(failed(zone, wants)),
-        (false, false) => Err(refusal(zone, mode, wants)),
+        (false, true) => Err(failed(zone, wants).into()),
+        (false, false) => Err(refusal(zone, mode, wants).into()),
     }
 }
 
@@ -931,6 +1010,7 @@ mod tests {
         logins: Cell<u32>,
         starts: Cell<u32>,
         told: Cell<u32>,
+        session: Option<String>,
     }
 
     impl Fake {
@@ -943,6 +1023,7 @@ mod tests {
                 logins: Cell::new(0),
                 starts: Cell::new(0),
                 told: Cell::new(0),
+                session: None,
             }
         }
     }
@@ -972,6 +1053,10 @@ mod tests {
 
         fn connected(&self, _: &str, _: Wants<'_>) {
             self.told.set(self.told.get() + 1);
+        }
+
+        fn autostart(&self) -> Option<String> {
+            self.session.clone()
         }
     }
 
@@ -1050,6 +1135,8 @@ mod tests {
         set(&t.state, &t.config, "work", Some(Mode::Ask)).unwrap();
         let fake = Fake::new(false, true);
         let refused = bring_up_with(&t, "work", program, &fake).unwrap_err();
+        assert!(!refused.taken, "its own question");
+        let refused = refused.why;
         assert!(refused.contains("«Firefox» не запущена"), "{refused}");
         assert_eq!((fake.asked.get(), fake.starts.get()), (1, 0));
         assert_eq!(fake.told.get(), 0, "refused: no notice");
@@ -1057,10 +1144,10 @@ mod tests {
         assert!(bring_up_with(&t, "work", program, &fake).is_ok());
         assert_eq!((fake.asked.get(), fake.starts.get()), (1, 1));
         assert_eq!(fake.told.get(), 1, "agreed and up: the person is told");
-        assert_eq!(last_answer(&t.state.join("work")), Some((2, true)));
+        assert_eq!(last_answer(&t.state.join("work")), Some((2, true, None)));
         // Agreed, and it did not come up: said so — not "connected".
         let fake = Fake::new(true, false);
-        let failed = bring_up_with(&t, "work", program, &fake).unwrap_err();
+        let failed = bring_up_with(&t, "work", program, &fake).unwrap_err().why;
         assert!(failed.contains("зона work не поднимается"), "{failed}");
         assert_eq!(fake.told.get(), 0);
         // The person connecting it: no question, and no notice — what they
@@ -1073,7 +1160,7 @@ mod tests {
         set(&t.state, &t.config, "work", Some(Mode::Manual)).unwrap();
         let fake = Fake::new(false, true);
         let container = Wants::Container("банк");
-        let refused = bring_up_with(&t, "work", container, &fake).unwrap_err();
+        let refused = bring_up_with(&t, "work", container, &fake).unwrap_err().why;
         assert!(
             refused.contains("только вручную") && refused.contains("cellward up work"),
             "{refused}"
@@ -1091,16 +1178,20 @@ mod tests {
     fn a_launch_that_waited_takes_the_refusal_given_meanwhile() {
         let t = tools("waited");
         let dir = t.state.join("work");
-        write_answer(&dir, 4, true).unwrap();
-        write_answer(&dir, 5, false).unwrap();
+        write_answer(&dir, 4, true, None).unwrap();
+        write_answer(&dir, 5, false, None).unwrap();
         let wants = (Mode::Ask, Wants::Program("Telegram"));
         let fake = Fake::new(true, true);
         let refused = decide(&t, "work", wants, 4, (None, &fake)).unwrap_err();
-        assert!(refused.contains("«Telegram» не запущена"), "{refused}");
+        assert!(
+            refused.taken,
+            "the answer to the question it waited through"
+        );
+        assert!(refused.why.contains("«Telegram» не запущена"), "{refused}");
         assert_eq!(fake.asked.get(), 0, "not asked again");
         assert!(decide(&t, "work", wants, 5, (None, &fake)).is_ok());
         assert_eq!(fake.asked.get(), 1);
-        assert_eq!(last_answer(&dir), Some((6, true)));
+        assert_eq!(last_answer(&dir), Some((6, true, None)));
         // Up since: the next one takes it, and the notice was the asker's.
         assert!(decide(&t, "work", wants, 6, (None, &fake)).is_ok());
         assert_eq!((fake.asked.get(), fake.told.get()), (1, 1));
@@ -1123,7 +1214,51 @@ mod tests {
         assert_eq!(fake.told.get(), 1, "the person waited on the form");
         let fake = Fake::new(false, true);
         let refused = bring_up_with(&t, "work", Wants::Program("Wine"), &fake).unwrap_err();
-        assert!(refused.contains("«Wine» не запущена"), "{refused}");
+        assert!(refused.why.contains("«Wine» не запущена"), "{refused}");
+    }
+
+    /// The autostart asks once per network in its session, however far
+    /// apart its programs start: a refusal at an autostart question is the
+    /// next autostart launch's too — not another session's, not a launch's
+    /// by hand; and a network agreed to that did not come up is tried again.
+    #[test]
+    fn the_autostart_asks_once_per_network_in_its_session() {
+        let t = tools("autostart");
+        set(&t.state, &t.config, "work", Some(Mode::Ask)).unwrap();
+        let at = |session: &str, answer, comes_up| Fake {
+            session: Some(session.to_owned()),
+            ..Fake::new(answer, comes_up)
+        };
+        let first = at("1:2:3", false, true);
+        let own = bring_up_with(&t, "work", Wants::Program("Telegram"), &first).unwrap_err();
+        assert!(!own.taken);
+        assert_eq!(first.asked.get(), 1);
+        assert_eq!(
+            last_answer(&t.state.join("work")),
+            Some((1, false, Some("1:2:3".to_owned())))
+        );
+        // Later in the same session: taken, not asked.
+        let later = at("1:2:3", true, true);
+        let taken = bring_up_with(&t, "work", Wants::Program("Signal"), &later).unwrap_err();
+        assert!(taken.taken, "{taken:?}");
+        assert!(taken.why.contains("«Signal» не запущена"), "{taken:?}");
+        assert_eq!(later.asked.get(), 0);
+        // The next login: asked.
+        let next_login = at("1:2:4", false, true);
+        assert!(bring_up_with(&t, "work", Wants::Program("Signal"), &next_login).is_err());
+        assert_eq!(next_login.asked.get(), 1);
+        // By hand: asked.
+        let by_hand = Fake::new(true, false);
+        let failed = bring_up_with(&t, "work", Wants::Program("Signal"), &by_hand).unwrap_err();
+        assert!(!failed.taken);
+        assert_eq!(by_hand.asked.get(), 1);
+        // Agreed at an autostart question and not up: no session kept, the
+        // next autostart launch asks.
+        let agreed = at("1:2:5", true, false);
+        assert!(bring_up_with(&t, "work", Wants::Program("Signal"), &agreed).is_err());
+        let again = at("1:2:5", false, true);
+        assert!(bring_up_with(&t, "work", Wants::Program("Signal"), &again).is_err());
+        assert_eq!(again.asked.get(), 1, "a failure is no refusal to take");
     }
 
     #[test]
