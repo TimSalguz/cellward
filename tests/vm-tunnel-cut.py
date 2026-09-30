@@ -53,9 +53,10 @@ with subtest("a tunnel cut after its first kilobytes: watch says the network loo
         "nft add chain inet cut out '{ type filter hook output priority 0; }' && "
         "nft add rule inet cut out udp sport 51820 quota over 16 kbytes drop"
     )
+    # 200 KB, by the shell's own printf: the unit's PATH has no coreutils.
     server.succeed(
         "systemd-run --unit=big socat TCP-LISTEN:8097,bind=10.99.0.1,fork,reuseaddr "
-        "'SYSTEM:head -c 200000 /dev/zero'"
+        "'SYSTEM:printf %0200000d 0'"
     )
     alice("cellward up vmreal")
     zpid = machine.succeed(f"cat {STATE}/vmreal/zone.pid").strip()
