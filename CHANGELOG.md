@@ -30,6 +30,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
+- **`cellward-oc-auth`: the OpenConnect login as its gateway asks it**
+  (2026-09-30, docs/PERMISSIONS.md §11.17, step 1 of the step-by-step
+  network): the one binary linked with libopenconnect. It reads a request
+  on stdin and says each of the gateway's forms as it comes — text,
+  password, a choice (the group), a token's code — one JSON line each
+  (`vpn_zone::oc_form`), reading the answer to each; out comes the
+  session's cookie, the connect URL, the certificate and the address,
+  never kept. A look (`probe`) sends nothing and ends at the first form,
+  naming the certificate to pin. The name is resolved once and the login
+  goes to that address only; with a pin, the certificate must be the
+  pinned one whoever signed it. Not used by the connect path yet.
 - **The ⇄ says whose network changes along** (2026-09-30,
   docs/PERMISSIONS.md §11.16, step 5): switching a container's network
   names its other running programs («Сеть сменится и у: …») in both of the

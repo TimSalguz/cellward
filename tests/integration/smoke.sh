@@ -1197,7 +1197,7 @@ server-cert = $OCDIR/cert.pem
 server-key = $OCDIR/key.pem
 isolate-workers = false
 max-clients = 4
-max-same-clients = 2
+max-same-clients = 4
 try-mtu-discovery = false
 device = ocsmoketun
 predictable-ips = true
@@ -1247,6 +1247,67 @@ EOF
     fail "openconnect не назвал отпечаток"
   fi
   echo "ok: $OCPIN"
+
+  # Вход так, как его спрашивает шлюз (docs/PERMISSIONS.md §11.17):
+  # cellward-oc-auth, единственный бинарь с libopenconnect. Проба ничего не
+  # отправляет и называет тот же отпечаток, что клиент; вход идёт по формам
+  # шлюза, ответы — на stdin, выходит cookie сессии (здесь не печатается).
+  step "cellward-oc-auth: проба и вход по формам шлюза"
+  OC_AUTH="$(dirname "$VZ_BIN")/cellward-oc-auth"
+  [ -x "$OC_AUTH" ] || fail "нет $OC_AUTH"
+  ocprobe=$(printf '{"server":"%s","port":4443,"protocol":"anyconnect","probe":true}\n' \
+    "$SRVIP" | "$OC_AUTH" 2>&1) || true
+  printf '%s\n' "$ocprobe" | grep -qF "\"probe\":{\"fingerprint\":\"$OCPIN\"" \
+    || fail "проба не назвала отпечаток $OCPIN: $ocprobe"
+  echo "ok: проба — тот же отпечаток"
+  ocauth() {
+    python3 - "$OC_AUTH" "$SRVIP" "$OCPIN" "$1" <<'PY'
+import json, subprocess, sys
+helper, server, pin, password = sys.argv[1:5]
+p = subprocess.Popen([helper], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+def send(obj):
+    p.stdin.write(json.dumps(obj) + "\n")
+    p.stdin.flush()
+send({"server": server, "port": 4443, "protocol": "anyconnect", "pin": pin})
+forms = 0
+for line in p.stdout:
+    said = json.loads(line)
+    if "form" in said:
+        forms += 1
+        form = said["form"]
+        if form["error"] or forms > 4:
+            # Refused: said in the form; nothing more to try.
+            print("refused: " + form["error"])
+            send({"cancel": True})
+            continue
+        values = {}
+        for f in form["fields"]:
+            if f["kind"] == "select":
+                values[f["name"]] = f["value"]
+            elif f["kind"] == "password":
+                values[f["name"]] = password
+            else:
+                values[f["name"]] = "smoke"
+        send({"answers": values})
+    elif "done" in said:
+        d = said["done"]
+        assert d["cookie"], "no cookie"
+        assert d["fingerprint"] == pin, d["fingerprint"]
+        assert d["address"] == server, d["address"]
+        print(f"done after {forms} form(s)")
+    elif "failed" in said:
+        print("failed: " + said["failed"])
+p.wait()
+PY
+  }
+  ocwrong=$(ocauth wrong-password)
+  printf '%s\n' "$ocwrong" | grep -q '^failed:' || fail "вход с неверным паролем: $ocwrong"
+  if printf '%s\n' "$ocwrong" | grep -q '^done'; then
+    fail "неверный пароль впустил: $ocwrong"
+  fi
+  ocright=$(ocauth "$OCPASSWORD")
+  printf '%s\n' "$ocright" | grep -q '^done after' || fail "вход по формам: $ocright"
+  echo "ok: вход по формам — $(printf '%s\n' "$ocright" | grep '^done')"
 
   step "cellward add ocsmoke (конфиг с секцией [OpenConnect])"
   cat > "$WORK/ocsmoke.conf" <<EOF

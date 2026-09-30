@@ -8,6 +8,7 @@
   rustPlatform,
   pkg-config,
   libseccomp,
+  openconnect,
   dejavu_fonts,
 }:
 
@@ -23,6 +24,7 @@ rustPlatform.buildRustPackage {
     fileset = lib.fileset.unions [
       ./rust/Cargo.toml
       ./rust/Cargo.lock
+      ./rust/build.rs
       ./rust/src
       ./rust/tests
     ];
@@ -39,8 +41,15 @@ rustPlatform.buildRustPackage {
   # дописать wayland. Посредник Wayland (крейт wl-proxy, rust/src/wl_proxy.rs)
   # тоже чистый Rust: разбирает протокол сам, libwayland ему не нужна — его
   # крейты приходят через Cargo.lock, как и остальные.
+  #
+  # libopenconnect — только для cellward-oc-auth (вход OpenConnect так, как
+  # его спрашивает шлюз, docs/PERMISSIONS.md §11.17): build.rs линкует её в
+  # этот один бинарь, остальные её не несут.
   nativeBuildInputs = [ pkg-config ];
-  buildInputs = [ libseccomp ];
+  buildInputs = [
+    libseccomp
+    openconnect
+  ];
   # Шрифт подписи в рамке окна (rust/src/wl_title.rs): путь в store вшивается
   # в бинарь при сборке (option_env!), посредник читает этот файл и больше
   # ничего — ни fontconfig, ни поиска шрифтов в системе во время работы. Путь в

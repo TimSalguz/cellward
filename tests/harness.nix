@@ -656,6 +656,8 @@ in
       rustfmt
       pkg-config
       libseccomp
+      # cellward-oc-auth links it (rust/build.rs).
+      openconnect
     ];
     # The font of the window title (rust/src/wl_title.rs), as package.nix
     # builds it in: the tests draw the text with it.
