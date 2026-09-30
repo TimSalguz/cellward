@@ -645,6 +645,33 @@ let
               machine.wait_until_fails("pgrep -f '[-]-sorry'", timeout=30)
 
           sorry_closed()
+
+          # The autostart asks once per network in its session, however far
+          # apart its programs start (§11.16): refused at one autostart
+          # question, the next autostart launch takes it — not asked, no
+          # window of its own, the refusal in its journal (and a
+          # notification). A launch by hand after them asks again.
+          def launch_autostart(unit):
+              alice(
+                  f"systemd-run --user --unit={unit} --setenv=WAYLAND_DISPLAY={display} "
+                  "--setenv=VPN_ZONE_AUTOSTART=1 cellward run de -- foot --app-id conn"
+              )
+
+          launch_autostart("connect-auto1")
+          machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=60)
+          machine.sleep(2)
+          answer(0)
+          sorry_closed()
+          launch_autostart("connect-auto2")
+          machine.wait_until_fails(
+              "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active -q "
+              "connect-auto2'",
+              timeout=60,
+          )
+          machine.succeed(said("connect-auto2") + " | grep -F 'не запущена: сеть de не подключена'")
+          machine.fail("pgrep -x vpn-zone-window")
+          machine.fail("pgrep -f '[-]-sorry'")
+
           launch_into_de("connect-agreed")
           answer(1)
           machine.wait_until_succeeds(

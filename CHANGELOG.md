@@ -30,6 +30,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
+- **The autostart asks once per network** (2026-09-30, docs/PERMISSIONS.md
+  §11.16): a refusal at an autostart question holds for the session's
+  later autostart launches too, however far apart they start — kept with
+  the graphical session (its display socket), so the next login, and a
+  launch by hand, ask again. The picker's `--autostart` marks the launch
+  (`VPN_ZONE_AUTOSTART`, not carried into the program). A refusal taken
+  from another launch's question — this, or one it waited through — is
+  said in a notification instead of a «Запуск остановлен» window of its
+  own each.
 - **The ⇄ says whose network changes along** (2026-09-30,
   docs/PERMISSIONS.md §11.16, step 5): switching a container's network
   names its other running programs («Сеть сменится и у: …») in both of the

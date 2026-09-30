@@ -1600,6 +1600,9 @@ pub fn main() -> ExitCode {
     }
     let memory = read_memory(&tools, &key);
     if args.autostart {
+        // For the launch: a network refused at an autostart question of this
+        // session is not asked again (`connect::autostart_launch`).
+        std::env::set_var(launch::ENV_AUTOSTART, "1");
         if let Some(code) = autostart(&tools, &key, &label, &memory, &args.cmd) {
             return code;
         }
