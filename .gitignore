@@ -2,3 +2,6 @@ result
 result-*
 rust/target/
 window/target/
+CLAUDE.md
+claude.md
+codex-session-*.md

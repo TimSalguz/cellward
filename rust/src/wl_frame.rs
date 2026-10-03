@@ -3472,7 +3472,7 @@ type Askable = (Weak<RefCell<Window>>, Weak<Frames>);
 /// **Whose answer.** A panel is a surface of the proxy's: the program can
 /// neither name it, nor draw in it, nor hear what is done in it. What it
 /// can do is lie over it — a popup of its own, drawn as a panel, letting
-/// the clicks through — so a click is taken only while the program has no
+/// the clicks through — so a denial is taken only while the program has no
 /// popup at all, and only once the pointer has rested on the panel for the
 /// launch window's guard (`crate::dialog::TOO_FAST`): a press or a key of
 /// the program's, a popup of it come or gone, start that again. And the
@@ -3480,6 +3480,9 @@ type Askable = (Weak<RefCell<Window>>, Weak<Frames>);
 /// answer for the person. So the answers here are never a "yes": the
 /// supervisor asks with "no" and "ask me in the launch window", whose
 /// "yes" no process of the launch can give (`crate::netask`).
+/// Opening that guarded window is not a decision: its button accepts a
+/// normal click immediately, just like the frame's menu. Requiring another
+/// invisible hover delay here made repeated ordinary clicks do nothing.
 #[derive(Default)]
 pub(crate) struct Questions {
     asked: RefCell<Option<Question>>,
@@ -3610,6 +3613,10 @@ impl Questions {
         let from = self.touched.get().map_or(since, |t| t.max(since));
         from.elapsed() >= crate::dialog::TOO_FAST
     }
+
+    fn click_allowed(&self, button: usize, since: Option<Instant>) -> bool {
+        button != 0 || since.is_some_and(|since| self.armed(since))
+    }
 }
 
 /// A popup of the program's, counted while it is ([`Questions::popups`]).
@@ -3638,7 +3645,8 @@ impl Drop for Shown {
 /// program's, and nothing of the person's elsewhere closes it. Every image
 /// of it drawn once, when it opens ([`Text::prompt_at`]); a button lights
 /// under the pointer (a new buffer of the same region) and answers on a
-/// press and a release on it, the first when armed ([`Questions::armed`]).
+/// press and a release on it. A denial waits for [`Questions::armed`];
+/// opening the guarded launch window requires no second guard here.
 struct Panel {
     surface: Rc<WlSurface>,
     view: Rc<WpViewport>,
@@ -3848,9 +3856,8 @@ impl Window {
         };
         let at = panel.prompt.button_at(x, y);
         if down {
-            let armed = panel.since.is_some_and(|since| f.questions.armed(since));
-            panel.pressed = at.filter(|_| armed);
-            if !armed {
+            panel.pressed = at.filter(|button| f.questions.click_allowed(*button, panel.since));
+            if panel.pressed.is_none() {
                 f.questions.touch();
             }
             return;
@@ -6919,5 +6926,16 @@ mod tests {
         drop(popup);
         assert_eq!(questions.popups.get(), 0);
         assert!(!questions.armed(long_ago), "the popup went just now");
+    }
+
+    #[test]
+    fn opening_the_guarded_window_needs_no_hover_delay() {
+        let questions = Rc::new(Questions::default());
+        questions.touch();
+        let _popup = Shown::new(&questions);
+        // Even an untrusted proxy can only request the guarded window.
+        assert!(questions.click_allowed(1, Some(Instant::now())));
+        assert!(!questions.click_allowed(0, Some(Instant::now())));
+        assert!(!questions.click_allowed(0, None));
     }
 }

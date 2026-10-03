@@ -12,6 +12,8 @@
 #   - a new radius in niri's config reaches the open window;
 #   - fullscreen: the border at the screen's edges, the zone's name over the
 #     top for a moment, with its text.
+#   - permission panels accept real pointer clicks, fall back on the same
+#     display, and gate real TCP traffic to a second VM until approval.
 #
 #   nix-build tests/vm-niri.nix -A driver -o vm-niri-driver
 #   mkdir -p /tmp/vm-niri && ./vm-niri-driver/bin/nixos-test-driver -o /tmp/vm-niri
@@ -73,6 +75,7 @@ let
           pkgs.niri
           pkgs.grim
           pkgs.foot
+          pkgs.wtype
         ];
         # sway plain: no bar, no borders — niri's window is all of its
         # output.
@@ -84,10 +87,33 @@ let
         hardware.graphics.enable = true;
         fonts.packages = [ pkgs.dejavu_fonts ];
         virtualisation.memorySize = 2048;
+        networking.interfaces.eth1.ipv4.addresses = [
+          { address = "192.0.2.1"; prefixLength = 24; }
+        ];
+        networking.defaultGateway = {
+          address = "192.168.1.2";
+          interface = "eth1";
+        };
       };
+
+    nodes.peer = { pkgs, ... }: {
+      networking.interfaces.eth1.ipv4.addresses = [
+        { address = "192.0.2.2"; prefixLength = 24; }
+      ];
+      networking.firewall.allowedTCPPorts = [ 8080 ];
+      environment.etc."permission-http/allowed".text = "permission-ok\n";
+      systemd.services.permission-http = {
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network.target" ];
+        serviceConfig.ExecStart =
+          "${pkgs.python3}/bin/python3 -m http.server 8080 --bind 0.0.0.0 --directory /etc/permission-http";
+      };
+    };
 
     testScript = ''
       import shlex
+      import base64
+      import gzip
 
       def alice(cmd):
           return machine.succeed(
@@ -169,12 +195,14 @@ let
       def shot(name):
           """niri's screen (device pixels): a PNG to look at, a PPM to read."""
           alice(f"WAYLAND_DISPLAY={nested} grim /tmp/{name}.png")
-          machine.copy_from_vm(f"/tmp/{name}.png", "")
+          # Copy through the console: repeated writes to the driver's 9p
+          # share can panic the guest's netfs write collector under TCG.
+          png = base64.b64decode(machine.succeed(f"base64 -w0 /tmp/{name}.png"))
+          (machine.out_dir / f"{name}.png").write_bytes(png)
           alice(f"WAYLAND_DISPLAY={nested} grim -t ppm /tmp/{name}.ppm")
-          machine.copy_from_vm(f"/tmp/{name}.ppm", "")
-          ppm = machine.out_dir / f"{name}.ppm"
-          magic, size, _depth, pixels = ppm.read_bytes().split(b"\n", 3)
-          ppm.unlink()
+          packed = machine.succeed(f"gzip -c /tmp/{name}.ppm | base64 -w0")
+          ppm = gzip.decompress(base64.b64decode(packed))
+          magic, size, _depth, pixels = ppm.split(b"\n", 3)
           assert magic == b"P6", magic
           w, h = map(int, size.split())
           return Shot(pixels, w, h)
@@ -306,6 +334,9 @@ let
               assert at(x0 + 5, y1 - 5) == MAGENTA, at(x0 + 5, y1 - 5)
 
           settled("niri-radius-12", smaller)
+
+      POINTER = "${pkgs.python3}/bin/python3 ${./vm-pointer.py}"
+      exec(open("${./vm-niri-question.py}").read())
     '';
   };
 in

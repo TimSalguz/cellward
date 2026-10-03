@@ -310,7 +310,7 @@ jobs:
   # концентрично, снаружи свои уголки без обрезки niri, новый радиус в его
   # конфиге — открытому окну. Снимки — в выводе драйвера.
   vm-niri:
-    name: vm-niri (NixOS test, the frame on niri)
+    name: vm-niri (NixOS test, frame and permissions on niri)
     runs-on: ubuntu-24.04
     needs: eval
     steps:

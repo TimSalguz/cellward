@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- Permission panels accept an ordinary click on “Allow…” to open the guarded
+  confirmation window. An unanswered panel hands off after 15 seconds on the
+  launch's own Wayland display, including for network, microphone and camera
+  requests. No permission is granted by the handoff.
+- A network denial installed while a question is open takes precedence over
+  its stale allowing answer, including the flows already waiting for it.
 - **The main-home guard** (2026-09-29, the owner, with zen): a copy of the
   program in a container with a home of its own no longer refuses a launch
   of the real home's — it runs its own profile; and two launches answered at

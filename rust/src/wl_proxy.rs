@@ -573,7 +573,7 @@ struct Asking {
     /// Connected, their question not shown yet: each with what it sent.
     waiting: VecDeque<(UnixStream, Vec<u8>)>,
     /// The one whose question the proxy has, and its number.
-    asked: Option<(UnixStream, u8)>,
+    asked: Option<(UnixStream, u8, std::time::Instant)>,
     seq: u8,
     /// The launch's compositor, named in every answer: where the launch
     /// window asks, whatever the instance's own environment says.
@@ -585,6 +585,22 @@ struct Asking {
 }
 
 impl Asking {
+    /// An unresponsive panel must not consume the permission's whole
+    /// deadline. The supervisor retains the launch's display, so the
+    /// guarded window can still ask on the correct compositor. Neither a
+    /// timeout nor anything the proxy says grants a permission.
+    const PANEL_WAIT: Duration = Duration::from_secs(15);
+
+    fn expire(&mut self, now: std::time::Instant) -> Option<u8> {
+        let (_, _, started) = self.asked.as_ref()?;
+        if now.saturating_duration_since(*started) < Self::PANEL_WAIT {
+            return None;
+        }
+        let (stream, seq, _) = self.asked.take()?;
+        self.say(&stream, ASK_WINDOW);
+        Some(seq)
+    }
+
     /// Whether `client` is the launch's camera server, alive: the one of
     /// the launch's own processes that asks.
     fn is_camera(&self, client: RawFd) -> bool {
@@ -651,7 +667,7 @@ impl Asking {
     /// No proxy to ask through: every instance with a question told there
     /// is no window; the socket kept (those still sending hear it next).
     fn close_questions(&mut self) {
-        if let Some((stream, _)) = self.asked.take() {
+        if let Some((stream, _, _)) = self.asked.take() {
             self.say(&stream, ASK_NOWHERE);
         }
         let waiting = std::mem::take(&mut self.waiting);
@@ -1024,7 +1040,7 @@ impl Proxy {
                 fds.len() - 1
             });
             let askers_at = fds.len();
-            let asked = self.asking.asked.iter().map(|(s, _)| s);
+            let asked = self.asking.asked.iter().map(|(s, _, _)| s);
             for stream in asked.chain(self.asking.waiting.iter().map(|(s, _)| s)) {
                 fds.push(pollfd(stream.as_raw_fd()));
             }
@@ -1048,6 +1064,11 @@ impl Proxy {
                 }
             }
             self.heard_askers(&fds[askers_at..]);
+            if let Some(seq) = self.asking.expire(std::time::Instant::now()) {
+                if let Some(c) = &self.channel {
+                    let _ = sys::send_with_fds(c.as_raw_fd(), &[RETRACT, seq], &[]);
+                }
+            }
             // The frame's settings changed: the proxy told the frame now.
             if live_at.is_some_and(|at| fds[at].revents != 0) {
                 let next = self.live.as_mut().and_then(Live::changed);
@@ -1226,10 +1247,10 @@ impl Proxy {
             [_, _, 0] => ASK_NO,
             _ => ASK_WINDOW,
         };
-        if !matches!(&self.asking.asked, Some((_, seq)) if *seq == word[1]) {
+        if !matches!(&self.asking.asked, Some((_, seq, _)) if *seq == word[1]) {
             return;
         }
-        if let Some((stream, _)) = self.asking.asked.take() {
+        if let Some((stream, _, _)) = self.asking.asked.take() {
             self.asking.say(&stream, answer);
         }
         self.next_question();
@@ -1248,7 +1269,7 @@ impl Proxy {
         if woke.is_empty() {
             return;
         }
-        if let Some((stream, seq)) = &self.asking.asked {
+        if let Some((stream, seq, _)) = &self.asking.asked {
             if woke.contains(&stream.as_raw_fd()) {
                 // An instance says nothing after its question: anything is
                 // its end.
@@ -1324,7 +1345,7 @@ impl Proxy {
         let mut message = vec![QUESTION, seq, len[0], len[1]];
         message.extend_from_slice(payload);
         if sys::send_with_fds(channel.as_raw_fd(), &message, &[]).is_ok() {
-            self.asking.asked = Some((stream, seq));
+            self.asking.asked = Some((stream, seq, std::time::Instant::now()));
         } else {
             self.asking.say(&stream, ASK_NOWHERE);
         }
@@ -6280,6 +6301,28 @@ mod tests {
     // --- the questions (crate::netask, crate::wl_frame::Questions) ----------
 
     #[test]
+    fn an_unresponsive_panel_falls_back_on_its_own_display() {
+        let (supervisor, mut caller) = UnixStream::pair().unwrap();
+        let start = std::time::Instant::now();
+        let mut asking = Asking {
+            asked: Some((supervisor, 17, start)),
+            display: Some(OsString::from("wayland-nested")),
+            ..Asking::default()
+        };
+        assert_eq!(asking.expire(start), None);
+        assert!(asking.asked.is_some());
+        assert_eq!(asking.expire(start + Asking::PANEL_WAIT), Some(17));
+        assert!(
+            asking.asked.is_none(),
+            "late proxy answers have no question"
+        );
+        let mut reply = Vec::new();
+        caller.read_to_end(&mut reply).unwrap();
+        assert_eq!(reply, b"mwayland-nested", "a handoff, never permission");
+        assert_eq!(asking.expire(start + Asking::PANEL_WAIT), None);
+    }
+
+    #[test]
     fn the_questions_have_bytes_of_their_own() {
         let others = [
             READY,
@@ -6425,8 +6468,8 @@ mod tests {
             let c = prompt.cell(i).unwrap();
             (c.x + c.w / 2, c.y + c.h / 2)
         };
-        // «Разрешить…» at once: too soon — nothing.
-        let (x, y) = center(1);
+        // A persistent denial at once: too soon — nothing.
+        let (x, y) = center(0);
         send(
             &mut compositor,
             &[
