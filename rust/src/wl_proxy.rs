@@ -145,10 +145,9 @@
 //! ([`QUESTION`]), which shows it on the program's window focused last, as
 //! a panel under its title, and says what the person chose ([`ANSWERED`])
 //! or that there was no window to ask on ([`NOWHERE`]). The supervisor's
-//! answer to the instance is never a "yes" ([`ASK_NO`], [`ASK_WINDOW`],
-//! [`ASK_NOWHERE`]): the proxy reads the program's messages, and one the
-//! program took over must not answer for the person. The filter is as it
-//! was.
+//! answer to the instance is the guarded button the person chose
+//! ([`ASK_NO`], [`ASK_YES`]), or that there was no usable window
+//! ([`ASK_WINDOW`], [`ASK_NOWHERE`]). The filter is as it was.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -209,7 +208,7 @@ pub fn ask_path(runtime_dir: &Path, pid: i32) -> PathBuf {
 /// A question as an instance asks it on [`ask_path`]: its length (two
 /// bytes, little-endian), then its words and its answers' labels, each
 /// after a NUL — the safe answer first. The supervisor answers with a byte
-/// ([`ASK_NO`], [`ASK_WINDOW`], [`ASK_NOWHERE`]) and closes; the instance
+/// ([`ASK_NO`], [`ASK_YES`], [`ASK_WINDOW`], [`ASK_NOWHERE`]) and closes; the instance
 /// closing first takes it back.
 pub fn ask_request(text: &str, labels: &[&str]) -> Option<Vec<u8>> {
     let mut payload = text.as_bytes().to_vec();
@@ -231,6 +230,8 @@ pub fn ask_request(text: &str, labels: &[&str]) -> Option<Vec<u8>> {
 
 /// The person chose the first answer, the safe one — "no".
 pub const ASK_NO: u8 = b'n';
+/// The person chose the second, allowing answer after the panel's guard.
+pub const ASK_YES: u8 = b'y';
 /// The person chose another: the question is to be asked in the launch
 /// window, which no process of the launch can answer.
 pub const ASK_WINDOW: u8 = b'm';
@@ -1230,8 +1231,8 @@ impl Proxy {
     }
 
     /// The proxy says what came of the question it has: the instance
-    /// told — never a "yes": the first answer is "no", any other "ask in the
-    /// launch window" (the module's docs) —, and the next question asked.
+    /// told — the first answer is "no", the second "yes", any other "ask in
+    /// the launch window" —, and the next question asked.
     /// A word of another number (taken back meanwhile) is nothing.
     fn replied(&mut self, fd: RawFd) {
         let mut word = [0u8; 3];
@@ -1245,6 +1246,7 @@ impl Proxy {
         let answer = match word {
             [NOWHERE, ..] => ASK_NOWHERE,
             [_, _, 0] => ASK_NO,
+            [_, _, 1] => ASK_YES,
             _ => ASK_WINDOW,
         };
         if !matches!(&self.asking.asked, Some((_, seq, _)) if *seq == word[1]) {
@@ -6341,7 +6343,10 @@ mod tests {
         assert_ne!(QUESTION, RETRACT);
         assert_ne!(ANSWERED, NOWHERE);
         // The instance's words: three, and none a "yes".
-        assert_eq!([ASK_NO, ASK_WINDOW, ASK_NOWHERE], [b'n', b'm', b'w']);
+        assert_eq!(
+            [ASK_NO, ASK_YES, ASK_WINDOW, ASK_NOWHERE],
+            [b'n', b'y', b'm', b'w']
+        );
     }
 
     /// A question as an instance sends it, and as the proxy reads it: its

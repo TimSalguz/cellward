@@ -12,14 +12,10 @@
 //! nobody wonders which window asks). First on the window of the program's
 //! launch: its supervisor's socket of questions (`crate::wl_proxy::ask_path`)
 //! has the Wayland proxy show a panel under the window's title, with
-//! «Запретить» and «Разрешить…». «Запретить» there is the answer. Anything
-//! else — «Разрешить…», no window to show it on, no such socket (a launch
-//! without the proxy, a flow of no launch) — asks in the launch window
-//! (`crate::window::question`), on the launch's compositor when its
-//! supervisor named it: a "yes" is given only there. The proxy reads the
-//! program's messages, and one the program took over must not say "yes"
-//! for the person; the worst it can do is say "no", or open the launch
-//! window.
+//! «Запретить» and «Разрешить, пока работает». Both are answers there after
+//! the panel's input guard. No window to show it on or no such socket (a
+//! launch without the proxy, a flow of no launch) asks in the separate
+//! launch window (`crate::window::question`) as a fallback.
 //!
 //! **What it says.** The program by its label, its container, where it goes
 //! (the name a DNS answer gave the address, else the address) and the port.
@@ -49,7 +45,7 @@ use crate::verdicts::Verdict;
 
 /// The panel's answers on the program's window: the safe one first — the
 /// only one that is an answer there (`crate::onwindow`).
-const PANEL: [&str; 2] = ["Запретить", "Разрешить…"];
+const PANEL: [&str; 2] = ["Запретить", "Разрешить, пока работает"];
 
 /// What the person said.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,9 +290,10 @@ struct Asked<'a> {
 }
 
 /// The question itself: on the program's window when its launch (`at`: the
-/// runtime directory and the launch's pid) can show it — "no" there is the
-/// answer —, else in the launch window, guarded, the safe answer first. Not
-/// shown, closed, not answered in time: [`Answer::Closed`].
+/// runtime directory and the launch's pid) can show it — its guarded refusal
+/// or session allowance is the answer —, else in the launch window, guarded,
+/// the safe answer first. Not shown, closed, not answered in time:
+/// [`Answer::Closed`].
 fn question(
     window: &Path,
     at: Option<(PathBuf, i32)>,
@@ -315,10 +312,27 @@ fn question(
     let started = std::time::Instant::now();
     let mut display = None;
     if let Some((runtime, pid)) = at {
-        match crate::onwindow::ask(&runtime, pid, &text, &PANEL, timeout) {
-            OnWindow::No => return Answer::Deny,
-            OnWindow::Unanswered => return Answer::Closed,
-            OnWindow::Elsewhere(on) => display = on,
+        // Programs such as browsers open their first connection while their
+        // first Wayland window is still being mapped. "No window" at that
+        // instant is not a reason to detach the question into a separate
+        // launch window: give the program window a brief chance to appear.
+        let appear_until = started + std::time::Duration::from_secs(5);
+        loop {
+            let left = timeout.map(|t| t.saturating_sub(started.elapsed()));
+            match crate::onwindow::ask(&runtime, pid, &text, &PANEL, left) {
+                OnWindow::No => return Answer::Deny,
+                OnWindow::Yes => return Answer::Now,
+                OnWindow::Unanswered => return Answer::Closed,
+                OnWindow::Elsewhere(on) => {
+                    display = on.or(display);
+                    if std::time::Instant::now() >= appear_until
+                        || left.is_some_and(|left| left.is_zero())
+                    {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
         }
     }
     // What is left of the time to answer in.

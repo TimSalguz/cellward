@@ -896,6 +896,7 @@ impl Policy {
             let runtime = crate::onwindow::runtime_dir();
             match crate::onwindow::ask(&runtime, pid, &short, &PANEL, Some(self.timeout)) {
                 OnWindow::No => on_window = Some(Some(if remember { 2 } else { 1 })),
+                OnWindow::Yes => on_window = Some(Some(1)),
                 OnWindow::Unanswered => on_window = Some(None),
                 OnWindow::Elsewhere(on) => display = on,
             }

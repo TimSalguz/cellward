@@ -1,11 +1,9 @@
 //! A question on the program's own window (the owner, 2026-09-29;
 //! `docs/FIREWALL.md` §4.3.1): asked on the socket of questions of the
 //! program's launch (`crate::wl_proxy::ask_path`), whose supervisor has the
-//! Wayland proxy show it as a panel under the window's title. Its only
-//! answer is "no" — the first of its labels, the safe one; anything else is
-//! "ask in the launch window", on the launch's compositor, which the reply
-//! names. The proxy reads the program's messages: a "yes" is never taken
-//! from it (`crate::wl_proxy`'s module docs).
+//! Wayland proxy show it as a panel under the window's title. Its first two
+//! guarded buttons are the refusal and the session-scoped allowance. With no
+//! usable program window, the question is handed to the launch window.
 //!
 //! Who asks: the instance's keeper about a program's network
 //! (`crate::netask`), the sound filter about its microphone
@@ -50,6 +48,8 @@ pub fn launch_above(runtime: &Path, pid: i32) -> Option<i32> {
 pub enum OnWindow {
     /// "No", there.
     No,
+    /// The second, session-scoped allowing answer.
+    Yes,
     /// Not answered in time.
     Unanswered,
     /// To be asked in the launch window — on the launch's compositor, when
@@ -114,6 +114,7 @@ fn reply_of(reply: &[u8]) -> OnWindow {
         .map(|d| OsString::from_vec(d.to_vec()));
     match reply.first() {
         Some(&crate::wl_proxy::ASK_NO) => OnWindow::No,
+        Some(&crate::wl_proxy::ASK_YES) => OnWindow::Yes,
         _ => OnWindow::Elsewhere(display),
     }
 }
@@ -127,17 +128,18 @@ mod tests {
     /// when it named one.
     #[test]
     fn only_no_is_an_answer_from_the_programs_window() {
-        use crate::wl_proxy::{ASK_NO, ASK_NOWHERE, ASK_WINDOW};
+        use crate::wl_proxy::{ASK_NO, ASK_NOWHERE, ASK_WINDOW, ASK_YES};
         assert_eq!(reply_of(&[ASK_NO]), OnWindow::No);
+        assert_eq!(reply_of(&[ASK_YES]), OnWindow::Yes);
         assert_eq!(reply_of(b"nwayland-1"), OnWindow::No);
         let on = |d: &str| OnWindow::Elsewhere(Some(OsString::from(d)));
         assert_eq!(reply_of(b"mwayland-1"), on("wayland-1"));
         assert_eq!(reply_of(&[ASK_WINDOW]), OnWindow::Elsewhere(None));
         assert_eq!(reply_of(&[ASK_NOWHERE]), OnWindow::Elsewhere(None));
-        assert_eq!(reply_of(b"y"), OnWindow::Elsewhere(None), "never a yes");
         assert_eq!(reply_of(b""), OnWindow::Elsewhere(None), "closed");
         assert_eq!(reply_of(b"mway\0land"), OnWindow::Elsewhere(None));
         assert_eq!(ASK_NO, b'n');
+        assert_eq!(ASK_YES, b'y');
     }
 
     /// A socket of questions that is not the launch's supervisor's — its

@@ -146,6 +146,7 @@ impl Asking {
         let decided: Option<Answer> =
             match crate::onwindow::ask(&runtime, self.supervisor, &short, &PANEL, timeout) {
                 OnWindow::No => Some(Answer::No),
+                OnWindow::Yes => Some(Answer::Once),
                 OnWindow::Unanswered => Some(Answer::Deny("нет ответа".to_owned())),
                 OnWindow::Elsewhere(on) => {
                     display = on;

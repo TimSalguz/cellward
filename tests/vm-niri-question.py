@@ -112,18 +112,18 @@ with subtest("niri routes a deliberate pointer click to the permission panel"):
     reply = machine.succeed("cat /tmp/niri-panel-deny.reply").strip()
     assert reply == "n" + nested, reply
 
-with subtest("niri routes the permission panel's Allow button to the launch window"):
+with subtest("niri accepts the permission panel's guarded Allow button in place"):
     pointer("move", 5, 5)
     question("niri-panel-allow")
     buttons, row = settled("niri-question-more", panel_buttons)
     left, right = buttons[1]
     pointer("move", (left + right) // 2, row)
-    # Opening the separate guarded window must work with a normal click.
+    machine.sleep(2.5)
     pointer("press")
     pointer("release")
     machine.wait_until_succeeds("test -s /tmp/niri-panel-allow.reply", timeout=15)
     reply = machine.succeed("cat /tmp/niri-panel-allow.reply").strip()
-    assert reply == "m" + nested, reply
+    assert reply == "y" + nested, reply
 
 with subtest("an unanswered panel hands off on niri, never silently denies or allows"):
     pointer("move", 5, 5)
@@ -146,7 +146,7 @@ def requested(path):
     return f"journalctl -u permission-http --no-pager | grep -F 'GET /{path} HTTP'"
 
 
-def network_question(unit, path):
+def network_question(unit, path, *, app_id=None, container=""):
     # Unique launch keys avoid inheriting a previous program's session answer.
     command = (
         "sleep 4; exec 3<>/dev/tcp/192.0.2.2/8080; "
@@ -155,32 +155,35 @@ def network_question(unit, path):
     )
     alice(
         f"systemd-run --user --unit={unit} --setenv=WAYLAND_DISPLAY={nested} "
-        f"--setenv=VPN_ZONE_APPID={unit} "
-        f"cellward run host -- foot --app-id {unit} bash -c {shlex.quote(command)}"
+        f"--setenv=VPN_ZONE_APPID={app_id or unit} "
+        f"cellward run host {container} -- foot --app-id {unit} bash -c {shlex.quote(command)}"
     )
-    # Leave the panel unanswered: the supervisor must open a real guarded
-    # question even when its caller's systemd environment has no display.
-    machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=90)
-    win = machine.succeed("pgrep -x vpn-zone-window").strip()
-    env = machine.succeed(f"tr '\\0' '\\n' < /proc/{win}/environ")
-    assert f"WAYLAND_DISPLAY={nested}" in env.splitlines()
+    # The connection remains held while its panel is unanswered.
+    machine.sleep(5)
     peer.fail(requested(path))
+
+
+def allow_network_panel(name):
+    buttons, row = settled(name, panel_buttons)
+    left, right = buttons[1]
+    pointer("move", (left + right) // 2, row)
+    machine.sleep(2.5)
+    pointer("press")
+    pointer("release")
 
 
 with subtest("real TCP remains held until niri's guarded question is explicitly allowed"):
     network_question("niri-net-allow", "allowed?from=container")
     # The peer probe above requested another path; it cannot satisfy this.
-    x, y = settled("niri-network-allow", second_menu_action)
-    pointer("move", x, y)
-    machine.sleep(2.5)
-    pointer("press")
-    pointer("release")
-    machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=20)
+    allow_network_panel("niri-network-allow")
     peer.wait_until_succeeds(requested("allowed?from=container"), timeout=30)
     alice("systemctl --user stop niri-net-allow")
 
 with subtest("closing the network question keeps actual TCP closed"):
     network_question("niri-net-close", "closed")
+    # If nobody answers in the application window, the safe fallback remains
+    # a guarded launch window; closing it is a refusal.
+    machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=90)
     x, y = settled("niri-network-close", close_menu_button)
     pointer("move", x, y)
     machine.sleep(2.5)
@@ -190,6 +193,30 @@ with subtest("closing the network question keeps actual TCP closed"):
     machine.sleep(3)
     peer.fail(requested("closed"))
     alice("systemctl --user stop niri-net-close")
+
+with subtest("an own application container can stop and ask again after it is recreated"):
+    alice("cellward container create app-niri-own-repeat --home private")
+    alice(
+        "install -Dm600 /dev/null "
+        "/home/alice/.config/vpn-zones/containers/app-niri-own-repeat/perms"
+    )
+    for n in (1, 2):
+        unit = f"niri-own-repeat-{n}"
+        path = f"own-repeat-{n}"
+        network_question(
+            unit,
+            path,
+            app_id="niri-own-repeat",
+            container="--container app-niri-own-repeat",
+        )
+        allow_network_panel(f"niri-own-repeat-{n}")
+        peer.wait_until_succeeds(requested(path), timeout=30)
+        alice(f"systemctl --user stop {unit}")
+        machine.wait_until_fails(
+            "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 "
+            "systemctl --user is-active vpn-zone-container@app-niri-own-repeat.service'",
+            timeout=60,
+        )
 
 with subtest("the same application in private and real homes has no false conflict"):
     alice("cellward container create niri-private --home private")

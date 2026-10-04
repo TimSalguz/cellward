@@ -41,9 +41,10 @@
 //! [`net_step`], [`container_without_dialog`], [`Container::from_selector`].
 
 use std::ffi::OsString;
-use std::fs;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::fs::{self, File, OpenOptions};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
@@ -62,6 +63,53 @@ pub const ENV_ASK: &str = "VPN_ZONE_ASK";
 /// The container chosen in "⚙ Сменить контейнер", carried across the re-exec.
 /// Internal: setting it by hand does nothing useful.
 pub const ENV_PROFILE: &str = "VPN_ZONE_PROFILE";
+/// The picker's per-program lock across its deliberate self-exec.
+const ENV_LOCK_FD: &str = "VPN_ZONE_PICK_LOCK_FD";
+
+struct PickerLock(File);
+
+impl PickerLock {
+    fn take(state: &Path, key: &str) -> std::io::Result<Option<Self>> {
+        if let Some(raw) = std::env::var_os(ENV_LOCK_FD) {
+            std::env::remove_var(ENV_LOCK_FD);
+            if let Ok(fd) = raw.to_string_lossy().parse::<i32>() {
+                if fd > 2 {
+                    // SAFETY: this descriptor was deliberately inherited by
+                    // our immediately preceding self-exec.
+                    let file = unsafe { File::from_raw_fd(fd) };
+                    // The launched application must never inherit it.
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+                    return Ok(Some(Self(file)));
+                }
+            }
+        }
+        let dir = state.join(".picker-locks");
+        fs::create_dir_all(&dir)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join(key))?;
+        // SAFETY: flock on our live file descriptor.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            Ok(Some(Self(file)))
+        } else if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+            Ok(None)
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn inherit_once(&self) {
+        let fd = self.0.as_raw_fd();
+        // SAFETY: keep our lock only over the immediate self-exec. The next
+        // pass restores CLOEXEC before it can launch the application.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+        std::env::set_var(ENV_LOCK_FD, fd.to_string());
+    }
+}
 
 /// Sentinel for "the main profile" where an empty string would not do: in
 /// `.pinnedprofile` and in `VPN_ZONE_PROFILE` an empty value cannot be told
@@ -1567,6 +1615,18 @@ pub fn main() -> ExitCode {
         }
     }
 
+    let picker_lock = match PickerLock::take(&tools.state, &key) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            eprintln!("vpn-zone-pick: выбор для «{key}» уже открыт");
+            return ExitCode::SUCCESS;
+        }
+        Err(e) => {
+            eprintln!("vpn-zone-pick: не защитить единственный выбор для «{key}»: {e}");
+            return ExitCode::from(EXIT_NOT_STARTED);
+        }
+    };
+
     // The name for the dialogs: from the label the shortcut generator left, or
     // from `--label`, or the key itself.
     let label = match &args.label {
@@ -1743,7 +1803,7 @@ pub fn main() -> ExitCode {
                     } else {
                         selector
                     };
-                    return reexec(&tools, &key, &args.cmd, Some(&handover));
+                    return reexec(&tools, &picker_lock, &key, &args.cmd, Some(&handover));
                 }
                 NetChoice::Pin(zone) => {
                     chosen = Some(true);
@@ -2480,7 +2540,13 @@ fn remember(state: &Path, sub: &str, key: &str, value: &str) {
 /// binary asking itself a second question, and during a home-manager switch the
 /// profile path may already point at the next generation. The environment
 /// (including `VPN_ZONE_TOOLS`) is inherited as it is.
-fn reexec(tools: &Tools, key: &str, cmd: &[OsString], handover: Option<&str>) -> ExitCode {
+fn reexec(
+    tools: &Tools,
+    picker_lock: &PickerLock,
+    key: &str,
+    cmd: &[OsString],
+    handover: Option<&str>,
+) -> ExitCode {
     std::env::set_var(ENV_ASK, "1");
     match handover {
         Some(selector) => std::env::set_var(ENV_PROFILE, selector),
@@ -2494,7 +2560,9 @@ fn reexec(tools: &Tools, key: &str, cmd: &[OsString], handover: Option<&str>) ->
         .unwrap_or_else(|| tools.picker.clone());
     let mut argv: Vec<OsString> = vec![me.clone().into(), "--id".into(), key.into(), "--".into()];
     argv.extend(cmd.iter().cloned());
+    picker_lock.inherit_once();
     let e = exec_command(&argv);
+    std::env::remove_var(ENV_LOCK_FD);
     eprintln!("не удалось запустить {}: {e}", me.display());
     ExitCode::from(EXIT_NOT_STARTED)
 }
