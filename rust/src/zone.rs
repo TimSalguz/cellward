@@ -1580,6 +1580,27 @@ fn reap(pid: libc::pid_t) -> u8 {
     exit_code_of(status)
 }
 
+/// Reap only this owned child, if it ended. Never wait for an arbitrary
+/// child: the instance's permission thread owns its question window and
+/// must collect both its exit status and its answer itself.
+fn reap_owned_child(pid: libc::pid_t) -> Option<u8> {
+    if pid <= 0 {
+        return None;
+    }
+    loop {
+        let mut status = 0;
+        // SAFETY: a positive child pid and a valid status pointer.
+        let dead = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if dead == pid {
+            return Some(exit_code_of(status));
+        }
+        if dead < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return None;
+    }
+}
+
 /// Wait for the FIRST of our children to die: pid and its exit code. `-1` means
 /// there is nothing left to wait for, which can only happen if everything
 /// managed to die before we got here.
@@ -2502,16 +2523,23 @@ fn keep(
             }
         }
         if CHILD_ENDED.swap(false, Ordering::SeqCst) {
-            loop {
-                let mut status: libc::c_int = 0;
-                // SAFETY: `status` is a valid pointer for the duration of the call.
-                let dead = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-                if dead <= 0 {
-                    break;
-                }
+            // A SIGCHLD may belong to the question thread. waitpid(-1)
+            // used to steal its successful answer, making wait_with_output
+            // fail with ECHILD and turning an explicit Allow into Deny.
+            // The transport likewise owns and reaps its relay's Child.
+            for dead in [
+                holder,
+                helpers.system_bus,
+                helpers.session_bus,
+                helpers.pulse,
+                helpers.pipewire,
+            ] {
+                let Some(code) = reap_owned_child(dead) else {
+                    continue;
+                };
                 if dead == holder {
                     space_gone = true;
-                    holder_code = exit_code_of(status);
+                    holder_code = code;
                 } else {
                     helpers.died(zone, dead);
                 }
@@ -9773,6 +9801,29 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reaping_a_keeper_child_leaves_the_questions_answer_to_its_owner() {
+        let question = Command::new("sh")
+            .args(["-c", "printf 'action\\tnow\\n'"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut helper = Command::new("sh").args(["-c", "exit 7"]).spawn().unwrap();
+        for pid in [question.id(), helper.id()] {
+            let fd = sys::pidfd_open(pid as i32).unwrap();
+            assert!(sys::pidfd_wait(&fd, std::time::Duration::from_secs(5)));
+        }
+        assert_eq!(reap_owned_child(0), None);
+        assert_eq!(reap_owned_child(-1), None);
+        assert_eq!(reap_owned_child(helper.id() as i32), Some(7));
+        // Already collected through its pid above; also make the ownership
+        // explicit to Child (which reports ECHILD here).
+        let _ = helper.try_wait();
+        let reply = question.wait_with_output().unwrap();
+        assert!(reply.status.success());
+        assert_eq!(reply.stdout, b"action\tnow\n");
+    }
 
     /// The host's own network: pasta bound to no interface, the host's
     /// resolver behind the gateway's address, IPv6 off when the host has

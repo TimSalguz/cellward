@@ -61,6 +61,44 @@ def panel_buttons(at):
     return runs[-1]
 
 
+def second_menu_action(at):
+    # The guarded launch window highlights its first (safe) action in blue.
+    # Derive the next row from that highlight instead of relying on a window
+    # position: niri may tile this dialog beside an existing application.
+    points = []
+    w, h = at.size
+    for y in range(h):
+        for x in range(w):
+            red, green, blue = at(x, y)
+            if 50 < red < 150 and 50 < green < 150 and blue > 180:
+                points.append((x, y))
+    assert len(points) > 1000, "guarded menu's selected action not found"
+    xs, ys = zip(*points)
+    return (min(xs) + max(xs)) // 2, max(ys) + 19
+
+
+def close_menu_button(at):
+    # The cancellation button is the only long mid-grey horizontal block in
+    # the dialog. Locate it instead of assuming where niri tiled the window.
+    runs = []
+    w, h = at.size
+    for y in range(h):
+        start = None
+        for x in range(w):
+            red, green, blue = at(x, y)
+            grey = max(red, green, blue) - min(red, green, blue) <= 2
+            if grey and 130 <= red <= 200:
+                if start is None:
+                    start = x
+            elif start is not None:
+                if x - start > 100:
+                    runs.append((start, x - 1, y))
+                start = None
+    assert runs, "guarded menu's close button not found"
+    left, right, row = max(runs, key=lambda run: run[1] - run[0])
+    return (left + right) // 2, row
+
+
 with subtest("niri routes a deliberate pointer click to the permission panel"):
     pointer("move", 5, 5)
     question("niri-panel-deny")
@@ -99,6 +137,9 @@ with subtest("an unanswered panel hands off on niri, never silently denies or al
 alice("systemctl --user stop vmfoot")
 peer.wait_for_unit("permission-http.service")
 peer.wait_until_succeeds("curl --fail http://192.0.2.2:8080/allowed", timeout=30)
+# Prove the second node is reachable before attributing a missing request to
+# the container firewall rather than to the VM link itself.
+machine.wait_until_succeeds("curl --fail http://192.0.2.2:8080/allowed", timeout=30)
 
 
 def requested(path):
@@ -129,17 +170,62 @@ def network_question(unit, path):
 with subtest("real TCP remains held until niri's guarded question is explicitly allowed"):
     network_question("niri-net-allow", "allowed?from=container")
     # The peer probe above requested another path; it cannot satisfy this.
-    alice(f"WAYLAND_DISPLAY={sway} wtype -s 2000 -k Down -s 2000 -k Return")
+    x, y = settled("niri-network-allow", second_menu_action)
+    pointer("move", x, y)
+    machine.sleep(2.5)
+    pointer("press")
+    pointer("release")
     machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=20)
     peer.wait_until_succeeds(requested("allowed?from=container"), timeout=30)
     alice("systemctl --user stop niri-net-allow")
 
 with subtest("closing the network question keeps actual TCP closed"):
     network_question("niri-net-close", "closed")
-    alice(f"WAYLAND_DISPLAY={sway} wtype -k Escape")
+    x, y = settled("niri-network-close", close_menu_button)
+    pointer("move", x, y)
+    machine.sleep(2.5)
+    pointer("press")
+    pointer("release")
     machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=20)
     machine.sleep(3)
     peer.fail(requested("closed"))
     alice("systemctl --user stop niri-net-close")
+
+with subtest("the same application in private and real homes has no false conflict"):
+    alice("cellward container create niri-private --home private")
+    # Seed the safe empty filesystem answer so this test is only about the
+    # main-home single-instance guard.
+    alice(
+        "install -Dm600 /dev/null "
+        "/home/alice/.config/vpn-zones/containers/niri-private/perms"
+    )
+    for unit, container, app_id, command in [
+        (
+            "niri-own-home",
+            "--container niri-private",
+            "niri-own-home",
+            "touch ~/private-marker; sleep 600",
+        ),
+        ("niri-real-home", "", "niri-real-home", "sleep 600"),
+    ]:
+        alice(
+            f"systemd-run --user --unit={unit} --setenv=WAYLAND_DISPLAY={nested} "
+            "--setenv=VPN_ZONE_APPID=niri-same-application "
+            f"cellward run offline {container} -- foot --app-id {app_id} "
+            f"bash -c {shlex.quote(command)}"
+        )
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
+            f"{niri_cmd} windows' | grep -F '\"app_id\":\"{app_id}\"'",
+            timeout=60,
+        )
+    windows = json.loads(alice(f"{niri_cmd} windows"))
+    ids = {w["app_id"] for w in windows}
+    assert {"niri-own-home", "niri-real-home"} <= ids, ids
+    machine.succeed("test ! -e /home/alice/private-marker")
+    machine.succeed(
+        "test -e /home/alice/.local/state/vpn-profiles/niri-private/home/private-marker"
+    )
+    alice("systemctl --user stop niri-own-home niri-real-home")
 
 alice("systemctl --user stop niri-question-pointer")

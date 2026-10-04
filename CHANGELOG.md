@@ -12,6 +12,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   requests. No permission is granted by the handoff.
 - A network denial installed while a question is open takes precedence over
   its stale allowing answer, including the flows already waiting for it.
+- A successful guarded network answer is no longer stolen by the instance
+  keeper's generic child reaper and silently treated as denial.
 - **The main-home guard** (2026-09-29, the owner, with zen): a copy of the
   program in a container with a home of its own no longer refuses a launch
   of the real home's — it runs its own profile; and two launches answered at
