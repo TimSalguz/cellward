@@ -56,6 +56,30 @@ Remaining boundaries found in this review:
   authorized connection. The stale-question fix also checks connections that
   were held waiting for a decision.
 
+## Launch interface and capability limits
+
+The launch window already treats the container and the network as independent
+choices. A container owns its home and permissions; the network only chooses
+where its packets go. The unchecked permission boxes are suggestions from the
+program preset, not a complete permission editor. The complete granular editor
+is still the `cellward container set|devices|grant|net` and `cellward trust`
+CLI. Choosing
+“No isolation” is the explicit way to give a program everything the host user
+has while retaining the selected network and its anti-bypass policy.
+
+Some powers intentionally are not ordinary grants. A Nix daemon configured
+with the user in `trusted-users`, writable host startup/configuration paths,
+the host session bus, and all devices can each amount to host control. PAM's
+privileged password helper is not granted to containers at all. Noctalia stays
+in the session core on the host until a narrow trusted authentication broker
+exists.
+
+Assigning a program to another container changes future launches, but does not
+copy its existing files from the real home. `container merge` also deliberately
+rejects the real home. A future import must ask for explicit source paths, keep
+the originals, refuse cellward/session/credential state, and report conflicts;
+silently guessing one application's profile is not safe migration.
+
 ## Regression checks
 
 Rust tests cover immediate handoff versus protected denial, fallback display
