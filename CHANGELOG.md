@@ -14,6 +14,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   its stale allowing answer, including the flows already waiting for it.
 - A successful guarded network answer is no longer stolen by the instance
   keeper's generic child reaper and silently treated as denial.
+- Noctalia's session and lock shell is no longer intercepted as an ordinary
+  application. It stays on the host, where PAM can use its privileged helper;
+  a dedicated shell container needs a trusted authentication broker.
 - **The main-home guard** (2026-09-29, the owner, with zen): a copy of the
   program in a container with a home of its own no longer refuses a launch
   of the real home's — it runs its own profile; and two launches answered at
