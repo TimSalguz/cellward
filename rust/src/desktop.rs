@@ -247,6 +247,14 @@ pub fn is_candidate(file_name: &str, entry: Option<&Group>) -> bool {
     if entry.get("Type").unwrap_or("Application") != "Application" {
         return false;
     }
+    // A desktop shell is part of the graphical session, not an application
+    // to move behind the picker. In particular Noctalia owns the lock screen
+    // and performs PAM authentication. A normal container deliberately
+    // cannot use the host's privileged PAM helper, so intercepting its
+    // autostart makes a correct password fail after the screen locks.
+    if session_core(entry) {
+        return false;
+    }
     for hidden in ["NoDisplay", "Hidden"] {
         if entry
             .get(hidden)
@@ -257,6 +265,26 @@ pub fn is_candidate(file_name: &str, entry: Option<&Group>) -> bool {
         }
     }
     entry.get("Exec").is_some_and(|e| !e.is_empty())
+}
+
+/// Session components that must stay on the host until cellward has a
+/// dedicated shell container with a trusted authentication broker.
+fn session_core(entry: &Group) -> bool {
+    let words = entry.get("Exec").map(exec_words).unwrap_or_default();
+    let base_is = |word: &str, names: &[&str]| {
+        Path::new(word)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| names.contains(&name))
+    };
+    words
+        .iter()
+        .any(|w| base_is(w, &["noctalia", "noctalia-shell"]))
+        || words.windows(3).any(|w| {
+            base_is(&w[0], &["qs", "quickshell"])
+                && matches!(w[1].as_str(), "-c" | "--config")
+                && w[2] == "noctalia-shell"
+        })
 }
 
 /// A hidden handler: an application entry kept out of menus (`NoDisplay=true`)
@@ -1975,8 +2003,9 @@ fn sync_autostart(
                 )
             })
         };
-        let starts_nothing = exec.is_empty() || yes("Hidden") || yes("X-systemd-skip");
-        if starts_nothing {
+        let leave_on_host =
+            exec.is_empty() || yes("Hidden") || yes("X-systemd-skip") || session_core(entry);
+        if leave_on_host {
             if taken {
                 given_back += give_back(&path, name);
             }
@@ -2550,6 +2579,28 @@ Name=not carried over
             assert!(!is_candidate("x.desktop", desktop_entry(&g)), "{skip}");
         }
         assert!(!is_candidate("x.desktop", None));
+    }
+
+    #[test]
+    fn noctalia_lock_shell_is_session_core_not_a_container_candidate() {
+        for exec in [
+            "noctalia",
+            "/nix/store/example/bin/noctalia-shell --replace",
+            "qs -c noctalia-shell",
+            "quickshell --config noctalia-shell",
+        ] {
+            let groups = parse_desktop(&format!(
+                "[Desktop Entry]\nType=Application\nName=Noctalia\nExec={exec}\n"
+            ));
+            assert!(!is_candidate(
+                "org.noctalia.shell.desktop",
+                desktop_entry(&groups)
+            ));
+        }
+        let other = parse_desktop(
+            "[Desktop Entry]\nType=Application\nName=Other shell\nExec=qs -c my-shell\n",
+        );
+        assert!(is_candidate("my-shell.desktop", desktop_entry(&other)));
     }
 
     #[test]
@@ -3344,6 +3395,36 @@ Name=not carried over
         d.setting("mode", "off");
         d.sync();
         assert_eq!(fs::read_to_string(&path).unwrap(), rewritten);
+    }
+
+    #[test]
+    fn noctalias_user_autostart_stays_in_the_session_core() {
+        let d = Desk::new("noctalia-autostart");
+        let original = "[Desktop Entry]\nType=Application\nName=Noctalia\n\
+                        Exec=qs -c noctalia-shell\n";
+        let path = d.autostart("noctalia.desktop", original);
+        d.sync();
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+        // An entry intercepted by an older build is restored from its backup.
+        fs::create_dir_all(d.state.join(AUTOSTART_ADOPTED_DIR)).unwrap();
+        fs::write(
+            d.state.join(AUTOSTART_ADOPTED_DIR).join("noctalia.desktop"),
+            original,
+        )
+        .unwrap();
+        fs::write(
+            &path,
+            render_autostart(&parse_desktop(original), "/bin/pick", "noctalia"),
+        )
+        .unwrap();
+        d.sync();
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert!(!d
+            .state
+            .join(AUTOSTART_ADOPTED_DIR)
+            .join("noctalia.desktop")
+            .exists());
     }
 
     #[test]

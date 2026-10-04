@@ -121,8 +121,8 @@ with subtest("the network question is a panel on the program's window; a hasty c
     runs, row = buttons_of(at, box)
     assert len(runs) == 2, (runs, box)
     deny, more = runs
-    # «Разрешить…» at once: too soon — nothing opens, the panel stays.
-    qpointer("move", (more[0] + more[1]) // 2, row)
+    # A persistent denial at once: too soon — the panel stays.
+    qpointer("move", (deny[0] + deny[1]) // 2, row)
     qpointer("press")
     qpointer("release")
     machine.sleep(2)
@@ -149,7 +149,7 @@ with subtest("«Разрешить…» asks in the launch window, on the launch
     assert len(runs) == 2, (runs, box)
     deny, more = runs
     qpointer("move", (more[0] + more[1]) // 2, row)
-    machine.sleep(2.5)
+    # Opening a guarded question grants nothing: an ordinary click works.
     qpointer("press")
     qpointer("release")
     machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)

@@ -213,12 +213,21 @@ impl Asker {
         }
         let mut decided = Vec::new();
         while let Ok((program, answer)) = self.rx.try_recv() {
+            // The question may have been open while the person or Nix
+            // tightened the policy. A stale allowing answer must neither
+            // release held traffic nor overwrite that newer refusal.
+            let rules = match self.record.as_deref() {
+                Some(record) => crate::netrules::Rules::load(&self.config, record),
+                None => crate::netrules::Rules::template_only(&self.config),
+            };
+            let refused = rules.decide(program.as_deref()) == crate::netrules::Rule::Deny;
             let verdict = match answer {
+                Answer::Always | Answer::Now if refused => Verdict::Deny,
                 Answer::Always | Answer::Now => Verdict::Allow,
                 Answer::Deny | Answer::Closed => Verdict::Deny,
             };
             let rule = match answer {
-                Answer::Always => Some(Verdict::Allow),
+                Answer::Always if !refused => Some(Verdict::Allow),
                 Answer::Deny => Some(Verdict::Deny),
                 _ => None,
             };
@@ -233,7 +242,7 @@ impl Asker {
                 _ => false,
             };
             // Not written as a rule: kept for the instance's life.
-            if !written {
+            if !written && !refused {
                 self.session.insert(program.clone(), verdict);
             }
             for key in self.waiting.remove(&program).unwrap_or_default() {
@@ -343,6 +352,39 @@ fn question(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_denial_wins_over_an_open_questions_allowing_answer() {
+        let root = std::env::temp_dir().join(format!("vz-netask-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (i, rule) in ["net_deny = browser\n", "net_default = deny\n"]
+            .iter()
+            .enumerate()
+        {
+            for answer in [Answer::Now, Answer::Always] {
+                let config = root.join(format!("{i}-{answer:?}"));
+                let mut asker =
+                    Asker::new(Path::new(""), &config, &root, &root, Some("work".into())).unwrap();
+                let program = Some("browser".to_owned());
+                // A question is already open with two held connections.
+                asker.open = Some(program.clone());
+                asker.waiting.insert(program.clone(), vec![key(1), key(2)]);
+                let file =
+                    crate::container::policy_dir_in(&config, "work").join(crate::container::FILE);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(&file, rule).unwrap();
+                asker.tx.send((program.clone(), answer)).unwrap();
+                assert_eq!(
+                    asker.answered(),
+                    [(key(1), Verdict::Deny), (key(2), Verdict::Deny)]
+                );
+                assert_eq!(std::fs::read_to_string(&file).unwrap(), *rule);
+                assert!(!asker.session.contains_key(&program));
+                assert!(asker.open.is_none());
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     fn key(port: u16) -> Key {
         Key {

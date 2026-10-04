@@ -430,12 +430,21 @@ fn a_launch_is_wrapped_in_the_compositor_restriction_by_default() {
         "{}",
         stdout(&out)
     );
-    // Unconfined, a name on the list is not enough (2026-09-27): an `obs`
-    // that is not the one the system's profiles give — none is, here — is
-    // restricted like any other program…
+    // Unconfined, a name on the list is not enough (2026-09-27): a private
+    // `obs` that is not the one the system's profiles give is restricted like
+    // any other program. Make that premise explicit: a developer may have the
+    // real OBS installed in a profile.
+    let fake_bin = home.root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let fake_obs = fake_bin.join("obs");
+    fs::write(&fake_obs, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(&fake_obs, fs::Permissions::from_mode(0o755)).unwrap();
     let out = home.run_with(
         &["run", "unconfined", "--", "obs"],
-        &[("VPN_ZONE_DRYRUN", "1")],
+        &[
+            ("VPN_ZONE_DRYRUN", "1"),
+            ("PATH", fake_bin.to_str().unwrap()),
+        ],
     );
     assert!(stdout(&out).contains("wl-sandbox obs"), "{}", stdout(&out));
     // …and a wayland-allow line naming a file by its path lets that file.
