@@ -105,6 +105,7 @@ by what those programs use the bus for:
 | Secret Service / KWallet / GNOME Keyring | browsers fall back to an unencrypted password store or ask for a password; mail and chat clients lose saved logins |
 | MPRIS (`org.mpris.MediaPlayer2.*` needs `--own`) | media keys and the shell's player widget do not see players in the zone |
 | tray icons of Electron and Qt (they own `org.kde.StatusNotifierItem-<pid>-<n>`, today's Electron `org.freedesktop.StatusNotifierItem-<pid>-<n>`, first) | no icon, and a program that closes to the tray cannot be brought back from it — allowed since 2026-09-24 by `--own=org.kde.StatusNotifierItem-*`, and since 2026-09-27 by `--own=org.freedesktop.StatusNotifierItem-*` too: rules of our patched proxy that own and nothing more |
+| Mozilla's remote (`org.mozilla.<app>.<profile>`: a second launch hands its command line to the copy running) | Firefox launched again shows "already running" instead of a window — allowed since 2026-10-14 under a name of the container instance's own: `MOZ_DBUS_APP_NAME=cw<key>`, `--own`/`--talk` on `org.mozilla.cw<key>.*` only, so a launch never reaches the host's Firefox or one in another network |
 | IBus / fcitx5 input methods | typing in a second layout through an input method stops working in zone programs |
 | KDE global shortcuts (`org.kde.kglobalaccel`) | shortcuts registered by zone programs do nothing |
 | dconf / GSettings writes (`ca.desrt.dconf`) | GTK programs cannot save settings (they fall back to memory) |
@@ -210,12 +211,12 @@ becomes a default, with the table above as the list of what the owner accepts.
 - **A — X11: option А — implemented.** Closed in zones by default: tmpfs over
   `/tmp/.X11-unix` in the zone's mount namespace and no `DISPLAY` in a launch.
   A container with the `x11` permission gets its own `xwayland-satellite`.
-  There is no `x11 = "host"` hole. The same per zone, for zones without
-  containers: `cellward x11 <zone> on` or `zoneX11 = [ "<zone>" ]` — the
-  default of a container without a word of its own; since 2026-09-28 a
-  container's `x11 = false` (`cellward container set <c> x11 off`) refuses
-  the zone's X server too, where it used to be the container's OR the
-  zone's.
+  There is no `x11 = "host"` hole. It is the container's word, in every
+  network (since 2026-10-15): `cellward container set <c> x11 on|off`, and
+  for containers without one (the main home too) the template's —
+  `cellward defaults set x11 on`, `defaults.permissions.x11`. The network
+  no longer says: `cellward x11 <zone>` and `zoneX11` were read once, by
+  the move to the containers (a container bound to such a network kept it).
   An X server asks its clients for nothing, so its socket is the launch's
   alone (2026-09-27): `x11-run` binds `/tmp/.X11-unix/X<n>` itself, in a
   `/tmp/.X11-unix` of the launch's own mount namespace (`profile-run

@@ -1676,13 +1676,18 @@ pub fn main() -> ExitCode {
     let mut chosen: Option<bool> = None;
 
     match net_step(&memory) {
+        // Watched as an asked launch is (`launch_asked`): a hand-over ends
+        // without a window of its own, and the window of the copy that runs
+        // is then raised for the person's click.
         NetStep::Running { zone, selector } => {
-            return launch(
+            return launch_asked(
                 &tools,
                 &key,
+                &label,
                 &zone,
                 &Container::from_selector(&selector, |n| container_exists(&tools, n)),
                 &args.cmd,
+                &memory,
             );
         }
         NetStep::Bound { zone } => zone_choice = zone,
@@ -2662,6 +2667,10 @@ fn launch_asked(
         let dir = tools.state.join(HANDOVER);
         let _ = fs::create_dir_all(&dir).and_then(|()| fs::write(dir.join(key), ""));
     }
+    // And the person clicked for that copy's window: raised for them.
+    if (handover || memory.hands_over) && status.success() && !in_zone {
+        raise_running(&tools.state, key);
+    }
     if status.code() == Some(i32::from(EXIT_NOT_STARTED)) {
         tell_not_started(tools, label, NOT_STARTED_UNSAID);
     } else if !status.success() {
@@ -2685,6 +2694,46 @@ fn launch_asked(
     }
     ExitCode::from(status.code().map_or(1, |c| c as u8))
 }
+
+/// The window of the copy of `key` that runs, raised through the
+/// compositor's IPC (`crate::focus::focus_launch`): the click on a running
+/// program's shortcut was handed to that copy, and the copy cannot raise
+/// it itself — the token it makes is from its own last input, which a
+/// compositor holds too old (niri) and the focus policy of its container
+/// lets up once (`crate::wl_focus`). The person's click is what raises it,
+/// as the frame's ⇄ does; nothing the program asks for. A copy in the tray
+/// maps its window a moment after: looked for a few seconds.
+fn raise_running(state: &Path, key: &str) {
+    let running = state.join(".running");
+    let pids: Vec<i32> = registry::dirs(&running)
+        .into_iter()
+        .filter_map(|dir| fs::read_to_string(dir.join(key)).ok())
+        .flat_map(|text| {
+            text.lines()
+                .filter_map(registry::parse_record)
+                .filter(|r| registry::launched_here(&running, r.pid))
+                .map(|r| r.pid)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let [pid] = pids[..] else {
+        return;
+    };
+    let until = std::time::Instant::now() + RAISE_WITHIN;
+    loop {
+        match crate::focus::focus_launch(pid) {
+            Ok(()) => return,
+            Err(e) if std::time::Instant::now() >= until => {
+                eprintln!("vpn-zone-pick: окно «{key}» не поднять: {e}");
+                return;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+        }
+    }
+}
+
+/// How long [`raise_running`] looks for the window of the copy that runs.
+const RAISE_WITHIN: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Why a launch did not start, when nothing on the way said it.
 const NOT_STARTED_UNSAID: &str = "запуск закончился, не начав программу (код 127) — причина в \

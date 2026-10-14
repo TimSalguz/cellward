@@ -451,7 +451,7 @@ cellward profile create|list|rm <name>
 cellward sandbox create|list|rm <name>
 cellward perms list|reset <app|--all>          # granted file accesses
 cellward lock|unlock <zone>                    # forbid leaving for other networks
-cellward x11 <zone> on|off                     # an X server of their own for the zone's programs
+cellward defaults set x11 on|off               # an X server of their own for containers without a word of theirs (per container: container set <c> x11)
 cellward hermetic <zone> default|on|off        # no systemd --user, a filtered session bus, the broker; default: as all zones
 cellward hermetic --default on|off             # for zones without a setting of their own (on — the default since 2026-09)
 cellward default-profile ask|main|own|<name>  # ask (default): the window asks; a program never given a container gets its own home preselected

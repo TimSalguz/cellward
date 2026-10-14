@@ -617,7 +617,7 @@ programs.cellward = {
   };
   compositorRestriction.enable = true;
   hermetic.default = true;               # and hermetic.exceptions = [ "<zone>" ]
-  zoneX11 = [ ];                         # zones whose programs get an X server of their own
+  defaults.permissions.x11 = false;      # an X server of their own for containers without a word of theirs
 
   containers.work = {
     home = "private";                    # private | overlay
@@ -965,8 +965,8 @@ host's files or the audio manager (review 2026-09-28). An instance comes up with
 them; `instances[].restart_needed` names what has changed since. The
 zone-level options `hermetic.exceptions`, `nixDaemon` and
 `hostFilesWritable` are what the network tolerates (and what a container
-without a word of its own asks for); `audioManager` and `zoneX11` still
-work, as the default of a container without its own, and warn.
+without a word of its own asks for); `audioManager` and `zoneX11` no
+longer work (read once, by the move to the containers) and warn.
 
 **`uplink_owner`** (`{uid, gid}` or `null`) is for a host egress policy: every
 socket a zone's traffic leaves the host by is pasta's and belongs to the zone's

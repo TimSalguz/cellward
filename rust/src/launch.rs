@@ -875,15 +875,13 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // wrapping below goes around this one), so it speaks to the compositor
     // through the restricted socket like the program does. A sandbox starts
     // its own satellite and is told about the permission instead.
-    // Or the zone itself has x11: for someone who runs zones without
-    // containers, Steam in a zone must open all the same. The container's
-    // own word first, both ways (`x11::effective`, 2026-09-28): its `off`
-    // refuses the zone's X server, which it could not before.
+    // The container's own word, else the template's (`x11::effective`):
+    // whatever the network — it only says where packets go (2026-10-15).
     let container_x11 = crate::x11::effective(
         record_name(&selection)
             .and_then(|name| crate::container::load(tools, &name))
             .and_then(|c| c.x11.map(|x11| x11.value)),
-        zone != UNCONFINED && crate::x11::zone_setting(&tools.state, &tools.config, &zone_name).0,
+        crate::permissions::flag(&tools.config, "x11").0,
     );
     let own_x11 = container_x11
         && zone != UNCONFINED
@@ -1108,6 +1106,57 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         .then(|| regdir.join(registry::BY_BINARY).join(&binary));
     let dryrun = env_nonempty(ENV_DRYRUN).is_some();
 
+    // The real home in a pid namespace of the instance's own (stage 3,
+    // `docs/THREAT-MODEL.md` X4): an application of the main home that runs
+    // elsewhere already is not started beside it — into an instance while it
+    // runs outside (`main_home_rival`), and the other way round (review
+    // 2026-09-28): the main home unconfined is a host process, and the copy
+    // of the application in an instance of the real home keeps a lock that
+    // names a pid of the instance's namespace — on the host nobody, or
+    // somebody else: Chromium takes it for a stale lock, deletes it and
+    // opens the profile the other copy has open (`main_home_in_instance`).
+    // Only the host's side of cellward can see both; a program started on
+    // the host past cellward is not seen here (LEAK-MODEL §28). Under one
+    // lock per program, and noted before the zone and the instance come up
+    // (`main_home_guard`): two launches answered at once both passed the
+    // look while neither program ran yet (owner, 2026-09-29). Before the
+    // warning below: where it finds the program, the question is whether to
+    // open it there — its profile cannot be open in two networks at once, so
+    // "start it anyway" would only end in this refusal.
+    let main_home = matches!(
+        (&selection.sandbox, &selection.container),
+        (Sandbox::None, Container::Main | Container::MainNamed(_))
+    );
+    // Kept until the `exec` — the note lives on with the pid — or taken back
+    // by the launch that gives up on the way.
+    let _main_home_note = match program_word(&selection.cmd)
+        .filter(|_| main_home && appid_env.is_some() && !dryrun)
+    {
+        None => None,
+        Some(word) => match main_home_guard(tools, instance_id.as_deref(), &zone_name, word) {
+            Ok(note) => note,
+            // Open where it runs, if the person says so: a launch of its own
+            // there, guarded as every launch is.
+            Err(Clash {
+                there: Some(there), ..
+            }) if has_display()
+                && !OFFERED_THERE.swap(true, std::sync::atomic::Ordering::Relaxed) =>
+            {
+                let program = label
+                    .clone()
+                    .unwrap_or_else(|| basename(word).to_string_lossy().into_owned());
+                if !open_there_instead(tools, &program, &zone_name, &there) {
+                    return 1;
+                }
+                return run(tools, &there.argv(&selection.cmd));
+            }
+            Err(clash) => {
+                refuse(tools, &clash.why);
+                return 1;
+            }
+        },
+    };
+
     let busy = match registry::lock(&regdir) {
         Ok(_guard) => {
             let live = |file: &Path| {
@@ -1254,39 +1303,6 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
     }
 
-    // The real home in a pid namespace of the instance's own (stage 3,
-    // `docs/THREAT-MODEL.md` X4): an application of the main home that runs
-    // elsewhere already is not started beside it — into an instance while it
-    // runs outside (`main_home_rival`), and the other way round (review
-    // 2026-09-28): the main home unconfined is a host process, and the copy
-    // of the application in an instance of the real home keeps a lock that
-    // names a pid of the instance's namespace — on the host nobody, or
-    // somebody else: Chromium takes it for a stale lock, deletes it and
-    // opens the profile the other copy has open (`main_home_in_instance`).
-    // Only the host's side of cellward can see both; a program started on
-    // the host past cellward is not seen here (LEAK-MODEL §28). Under one
-    // lock per program, and noted before the zone and the instance come up
-    // (`main_home_guard`): two launches answered at once both passed the
-    // look while neither program ran yet (owner, 2026-09-29).
-    let main_home = matches!(
-        (&selection.sandbox, &selection.container),
-        (Sandbox::None, Container::Main | Container::MainNamed(_))
-    );
-    // Kept until the `exec` — the note lives on with the pid — or taken back
-    // by the launch that gives up on the way.
-    let _main_home_note = match program_word(&selection.cmd)
-        .filter(|_| main_home && appid_env.is_some() && !dryrun)
-    {
-        None => None,
-        Some(word) => match main_home_guard(tools, instance_id.as_deref(), &zone_name, word) {
-            Ok(note) => note,
-            Err(why) => {
-                refuse(tools, &why);
-                return 1;
-            }
-        },
-    };
-
     // --- 5. THE ZONE AND THE INSTANCE ---
     let network = match &instance_id {
         // Nothing to start and nothing to enter: the host's own network.
@@ -1428,6 +1444,17 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         // takes its portal only in Flatpak or when told so; fcitx5's clients
         // fall back to theirs by themselves.
         std::env::set_var("IBUS_USE_PORTAL", "1");
+    }
+    // Mozilla's programs hand a second launch to the copy already running
+    // under a name of the instance's own (`instance::moz_remote_name`): in
+    // the same instance, and in no other place — not the host's, nor one in
+    // another network. Whatever the caller had set is not theirs to keep.
+    match &instance_id {
+        Some(id) => std::env::set_var(
+            crate::instance::MOZ_REMOTE_ENV,
+            crate::instance::moz_remote_name(id),
+        ),
+        None => std::env::remove_var(crate::instance::MOZ_REMOTE_ENV),
     }
 
     // The caller's working directory, which entering a space would lose. A
@@ -2724,12 +2751,96 @@ pub fn rival(
 /// both pass (owner, 2026-09-29: two pickers, one network, two containers,
 /// «Да» in both). The lock is let go before a refusal is shown, and a
 /// launch never waits for more than another's look and note.
+/// A launch of the real home its guard stopped: why — and where the program
+/// runs already, when that is known: the person may open it there instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clash {
+    pub why: String,
+    pub there: Option<There>,
+}
+
+/// Where a launch goes: its network, and its container of the real home
+/// (none: the built-in main).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct There {
+    pub network: String,
+    pub container: Option<String>,
+}
+
+impl There {
+    /// Of an instance's id (empty: none — the host) and its network.
+    pub fn of(place: &str, network: &str) -> Self {
+        Self {
+            network: network.to_owned(),
+            container: crate::instance::container_of(place)
+                .filter(|_| !place.is_empty())
+                .map(str::to_owned),
+        }
+    }
+
+    /// `cellward run`'s words for a launch of `cmd` there.
+    pub fn argv(&self, cmd: &[OsString]) -> Vec<OsString> {
+        let mut argv = vec![OsString::from(&self.network)];
+        if let Some(container) = &self.container {
+            argv.push("--container".into());
+            argv.push(container.into());
+        }
+        argv.push("--".into());
+        argv.extend(cmd.iter().cloned());
+        argv
+    }
+}
+
+/// Where the process `pid` runs: the instance whose user namespace it is
+/// in, or the host's own network for a process of the host's. `None` when
+/// it is neither — a zone's own namespaces, of an earlier build.
+fn where_runs(tools: &Tools, pid: i32) -> Option<There> {
+    let chain = crate::place::chain_of(pid);
+    for instance in crate::instance::running(&tools.state) {
+        let key = crate::place::ns_key(Path::new(&format!("/proc/{}/ns/user", instance.pid)));
+        if key.is_some_and(|key| chain.contains(&key)) {
+            return Some(There::of(&instance.id, &instance.network));
+        }
+    }
+    let host = crate::place::ns_key(Path::new("/proc/self/ns/user"))?;
+    (chain.first() == Some(&host)).then(|| There::of("", UNCONFINED))
+}
+
+/// The main-home guard stopped a launch of `program` while it runs `there`
+/// already: asked whether to open it there instead — one profile cannot be
+/// open in two networks at once, and a second window of the running copy is
+/// what the person wanted. In the guarded launch window, the safe answer
+/// first: Enter cancels, nothing is opened before the person has been still
+/// with it in view. `true`: open it there.
+/// Asked once per launch: the launch it turns into is not asked again,
+/// whatever its own guard finds.
+static OFFERED_THERE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn open_there_instead(tools: &Tools, program: &str, wanted: &str, there: &There) -> bool {
+    let network = if there.network == UNCONFINED {
+        "без изоляции (сеть хоста, без VPN)".to_owned()
+    } else {
+        format!("сети «{}»", there.network)
+    };
+    let text = format!(
+        "«{program}» с настоящим домом уже открыта в {network}.\n\
+         Один профиль нельзя открыть в двух сетях сразу, поэтому в «{wanted}» её не запустить.\n\
+         Открыть окно там, где она уже работает? Его трафик пойдёт через ту же сеть."
+    );
+    let open = format!("Открыть в {network}");
+    let answers = [("cancel", "Отмена", false), ("there", open.as_str(), false)];
+    matches!(
+        crate::window::question(&tools.window, "Уже открыта", &text, None, &answers, None),
+        crate::window::Asked::Chose(tag) if tag == "there"
+    )
+}
+
 fn main_home_guard(
     tools: &Tools,
     place: Option<&str>,
     network: &str,
     word: &OsStr,
-) -> Result<Option<MainHomeNote>, String> {
+) -> Result<Option<MainHomeNote>, Clash> {
     let name = main_home_name(word);
     let program = basename(word).to_string_lossy().into_owned();
     let me = std::process::id() as i32;
@@ -2751,16 +2862,22 @@ fn main_home_guard(
     };
     match place {
         Some(id) => {
-            let seen =
-                main_home_rival(tools, id, word).or_else(|| noted_rival(&notes, id).map(|n| n.pid));
-            if let Some(pid) = seen {
-                return Err(format!(
-                    "«{program}» уже работает с настоящим домом вне контейнера «{id}» (pid {pid}). \
-                     У контейнера своё пространство процессов, и замок профиля, которым \
-                     программа вроде браузера не даёт открыть его дважды, сквозь него не \
-                     виден: второй процесс открыл бы тот же профиль. Закрой ту программу — \
-                     или запусти эту в контейнере со своим домом"
-                ));
+            let seen = main_home_rival(tools, id, word)
+                .map(|pid| (pid, where_runs(tools, pid)))
+                .or_else(|| {
+                    noted_rival(&notes, id).map(|n| (n.pid, Some(There::of(&n.place, &n.network))))
+                });
+            if let Some((pid, there)) = seen {
+                return Err(Clash {
+                    why: format!(
+                        "«{program}» уже работает с настоящим домом вне контейнера «{id}» (pid {pid}). \
+                         У контейнера своё пространство процессов, и замок профиля, которым \
+                         программа вроде браузера не даёт открыть его дважды, сквозь него не \
+                         виден: второй процесс открыл бы тот же профиль. Закрой ту программу — \
+                         или запусти эту в контейнере со своим домом"
+                    ),
+                    there,
+                });
             }
         }
         None => {
@@ -2777,13 +2894,16 @@ fn main_home_guard(
             let seen = main_home_in_instance(tools, word)
                 .or_else(|| noted().map(|n| (n.pid, n.place.clone(), n.network.clone())));
             if let Some((pid, id, network)) = seen {
-                return Err(format!(
-                    "«{program}» уже работает с настоящим домом в контейнере «{id}» (pid {pid}). \
-                     У контейнера своё пространство процессов, и замок профиля, которым \
-                     программа вроде браузера не даёт открыть его дважды, с хоста не \
-                     виден: эта программа открыла бы тот же профиль. Закрой ту программу — \
-                     или запусти эту там же, в сети «{network}»"
-                ));
+                return Err(Clash {
+                    why: format!(
+                        "«{program}» уже работает с настоящим домом в контейнере «{id}» (pid {pid}). \
+                         У контейнера своё пространство процессов, и замок профиля, которым \
+                         программа вроде браузера не даёт открыть его дважды, с хоста не \
+                         виден: эта программа открыла бы тот же профиль. Закрой ту программу — \
+                         или запусти эту там же, в сети «{network}»"
+                    ),
+                    there: Some(There::of(&id, &network)),
+                });
             }
         }
     }

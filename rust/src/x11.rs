@@ -36,14 +36,17 @@ use std::process::{Command, Stdio};
 
 use crate::profile::EXIT_NOT_STARTED;
 
-/// The marker of a zone whose programs get an X server of their own, in the
-/// zone's directory.
+/// The marker of a zone whose programs got an X server of their own, in the
+/// zone's directory — read once, by the move to the containers
+/// (`crate::permissions::migrate`, 2026-10-15): the network no longer says.
 pub const ZONE_FLAG: &str = "x11";
-/// The zones declared to have one, one name per line, below the config dir.
+/// The zones declared to have had one (`zoneX11`), one name per line,
+/// below the config dir — read by the same move only.
 pub const DECLARED_ZONES: &str = "declared/zone-x11";
 
-/// Where the per-zone setting comes from, if the zone has one:
-/// `(on, source)`. Declared in Nix wins over the local marker.
+/// A network's word of before, as `status --json` still names it under
+/// `networks[]` (schema 1): `(on, source)`, Nix's over the marker. Nothing
+/// a launch decides by.
 pub fn zone_setting(state: &Path, config: &Path, zone: &str) -> (bool, crate::container::Source) {
     use crate::container::Source;
     if let Ok(text) = crate::declared::read(&config.join(DECLARED_ZONES)) {
@@ -59,14 +62,13 @@ pub fn zone_setting(state: &Path, config: &Path, zone: &str) -> (bool, crate::co
 }
 
 /// Whether a launch gets an X server of its own: its container's word
-/// (`own`, `container.x11`) where it has one — `off` refuses the zone's
-/// too —, the zone's (`zone`, [`zone_setting`]) where it has none or the
-/// launch has no container. Until 2026-09-28 it was the container's OR the
-/// zone's, and a container could not refuse the X server its zone gave all
-/// its programs (`zoneX11`): one X server shows every client the others'
-/// windows, keys and clipboard.
-pub fn effective(own: Option<bool>, zone: bool) -> bool {
-    own.unwrap_or(zone)
+/// (`own`, `container.x11`; the main home's record's) where it has one,
+/// the template's (`template`, `cellward defaults set x11`) where it has
+/// none — never the network's (2026-10-15: the network only says where
+/// packets go; a program that needs X died in one network and ran in
+/// another). A launch with no container known gets the template's.
+pub fn effective(own: Option<bool>, template: bool) -> bool {
+    own.unwrap_or(template)
 }
 
 /// Where X servers put their sockets.

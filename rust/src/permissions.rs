@@ -30,9 +30,10 @@ pub const FILE: &str = "defaults.conf";
 /// The switches (`yes|no|ask`), built-in `ask`.
 pub const SWITCHES: [&str; 3] = ["microphone", "screencast", "network"];
 /// The flags (`on|off`, kept `true|false` as a container's), built-in off:
-/// the host's raw PipeWire (the audio manager). The cameras were one; now
-/// a mode of four words ([`camera`]).
-pub const FLAGS: [&str; 1] = ["audio_manager"];
+/// the host's raw PipeWire (the audio manager), an X server of the
+/// container's own (`x11`, the network's until 2026-10-15). The cameras
+/// were one; now a mode of four words ([`camera`]).
+pub const FLAGS: [&str; 2] = ["audio_manager", "x11"];
 /// The requests for a way around the network (`hermetic::BYPASS_KEYS`, 2c
 /// of §11.15), kept `true|false` as a container's own; their safe values
 /// where nobody said. A request opens nothing by itself: only where the
@@ -129,6 +130,7 @@ fn key_of(word: &str) -> Option<(&'static str, Option<(&'static str, &'static st
         // A mode of its own words (`crate::camera::Mode`), taken apart.
         "camera" => ("camera", None),
         "audio-manager" | "audio_manager" => ("audio_manager", Some(("on", "off"))),
+        "x11" => ("x11", Some(("on", "off"))),
         "hermetic" => ("hermetic", Some(("on", "off"))),
         "nix-daemon" | "nix_daemon" => ("nix_daemon", Some(("on", "off"))),
         "host-files" | "host_files_writable" => {
@@ -150,7 +152,7 @@ fn openness(setting: Setting) -> u8 {
 const USAGE: &str = "cellward defaults — разрешения контейнеров без своего слова\n\
                      cellward defaults set microphone|screencast|network yes|no|ask|default\n\
                      cellward defaults set camera no|black|ask|yes|default\n\
-                     cellward defaults set audio-manager on|off|default\n\
+                     cellward defaults set audio-manager|x11 on|off|default\n\
                      cellward defaults set hermetic|nix-daemon on|off|default\n\
                      cellward defaults set host-files read-only|writable|default";
 
@@ -282,6 +284,31 @@ fn shown(config: &Path) -> String {
 const MOVED: &str = ".permissions-by-container";
 const MOVED_FLAGS: &str = ".permissions-flags-by-container";
 const MOVED_REQUESTS: &str = ".permissions-requests-by-template";
+/// The X server's (2026-10-15): the last of a network's words for its
+/// programs.
+const MOVED_X11: &str = ".permissions-x11-by-container";
+
+/// The networks' own words of before for the X server: on where Nix's
+/// list (`zoneX11`) names the network or its marker is there
+/// (`cellward x11 <zone> on`, an empty file); no word for the others.
+fn network_x11(tools: &Tools) -> Vec<(String, Setting)> {
+    let mut out: Vec<(String, Setting)> = Vec::new();
+    if let Ok(text) = crate::declared::read(&tools.config.join(crate::x11::DECLARED_ZONES)) {
+        for zone in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            out.push((zone.to_owned(), Setting::Yes));
+        }
+    }
+    for entry in fs::read_dir(&tools.state).into_iter().flatten().flatten() {
+        let zone = entry.file_name().to_string_lossy().into_owned();
+        if zone.starts_with('.') || out.iter().any(|(z, _)| *z == zone) {
+            continue;
+        }
+        if entry.path().join(crate::x11::ZONE_FLAG).exists() {
+            out.push((zone, Setting::Yes));
+        }
+    }
+    out
+}
 
 /// The networks' own words of before for a switch: `(network, setting)`,
 /// the zone's marker (`marker` in its state directory) and Nix's list
@@ -426,7 +453,11 @@ pub fn migrate(tools: &Tools) {
             }
         }
     }
-    let parts = [mark(tools, MOVED_FLAGS), mark(tools, MOVED)];
+    let parts = [
+        mark(tools, MOVED_FLAGS),
+        mark(tools, MOVED),
+        mark(tools, MOVED_X11),
+    ];
     if parts.iter().any(|m| *m) {
         let mut records: Vec<(String, Option<String>)> = crate::container::load_all_quiet(tools)
             .into_iter()
@@ -480,6 +511,56 @@ pub fn migrate(tools: &Tools) {
                     }
                     if crate::container::write_key(&file, key, Some(word), true).is_ok() {
                         said.push(format!("{record}: {key} = {word}"));
+                    }
+                }
+            }
+        }
+        if parts[2] {
+            // The X server as a switch of two words, the same rule: a
+            // container bound to a network takes its word, the main home
+            // and the unbound one the narrowest — off, unless every
+            // network said on.
+            let words = network_x11(tools);
+            if !words.is_empty() {
+                let template = if flag(&tools.config, "x11").0 {
+                    Setting::Yes
+                } else {
+                    Setting::No
+                };
+                // Every network the person has: one with no word said off.
+                let mut words = words;
+                for entry in fs::read_dir(&tools.state).into_iter().flatten().flatten() {
+                    let zone = entry.file_name().to_string_lossy().into_owned();
+                    if !zone.starts_with('.')
+                        && entry.path().is_dir()
+                        && !words.iter().any(|(z, _)| *z == zone)
+                    {
+                        words.push((zone, Setting::No));
+                    }
+                }
+                let with_own: Vec<(String, Option<String>, bool)> = records
+                    .iter()
+                    .map(|(name, net)| {
+                        let own = !matches!(
+                            crate::container::own_value_in(&tools.config, name, "x11"),
+                            Ok(None)
+                        );
+                        (name.clone(), net.clone(), own)
+                    })
+                    .collect();
+                for (record, value) in moves(template, &words, &with_own) {
+                    let word = if value == Setting::Yes {
+                        "true"
+                    } else {
+                        "false"
+                    };
+                    let file =
+                        crate::container::policy_dir(tools, &record).join(crate::container::FILE);
+                    if let Some(dir) = file.parent() {
+                        let _ = fs::create_dir_all(dir);
+                    }
+                    if crate::container::write_key(&file, "x11", Some(word), true).is_ok() {
+                        said.push(format!("{record}: x11 = {word}"));
                     }
                 }
             }

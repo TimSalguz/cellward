@@ -1443,30 +1443,52 @@ pub fn render_prompt(font: &FontVec, prompt: &Prompt, scale: u32, bg: Rgb) -> (i
             }
         }
     }
-    let variants = 1 + prompt.buttons.len();
+    let variants = prompt_variants(prompt.buttons.len());
     let mut pixels = Vec::with_capacity(variants * wu * hu * 4);
     for variant in 0..variants {
-        let lit = variant.checked_sub(1);
+        let lit = prompt_lit(variant);
         for y in 0..h {
             for x in 0..w {
+                let cell = cells
+                    .iter()
+                    .position(|&(x0, y0, x1, y1)| x >= x0 && x < x1 && y >= y0 && y < y1);
                 let base = if x < edge || y < edge || x >= w - edge || y >= h - edge {
                     edge_color
                 } else {
-                    match cells
-                        .iter()
-                        .position(|&(x0, y0, x1, y1)| x >= x0 && x < x1 && y >= y0 && y < y1)
-                    {
-                        Some(i) if lit == Some(i) => blend(bg, fg, 0.30),
+                    match cell {
+                        Some(i) if lit == Some((i, true)) => blend(bg, fg, 0.30),
                         Some(_) => blend(bg, fg, 0.12),
                         None => bg,
                     }
                 };
-                let c = text[y as usize * wu + x as usize];
+                // Under the pointer before the guard is over: its words
+                // faint — not yet a button to press.
+                let faint = matches!((cell, lit), (Some(i), Some((l, false))) if i == l);
+                let c = text[y as usize * wu + x as usize] * if faint { 0.4 } else { 1.0 };
                 pixels.extend_from_slice(&blend(base, fg, c).xrgb8888());
             }
         }
     }
     (w, h, pixels)
+}
+
+/// How many images a panel of `buttons` has: none lit, then for each
+/// button the pointer on it before its guard is over (its words faint) and
+/// after (lit, to be pressed).
+pub fn prompt_variants(buttons: usize) -> usize {
+    1 + 2 * buttons
+}
+
+/// The image of a panel with button `lit` under the pointer, `armed` or not
+/// yet (none: no button).
+pub fn prompt_variant(lit: Option<usize>, armed: bool) -> usize {
+    lit.map_or(0, |b| 1 + 2 * b + usize::from(armed))
+}
+
+/// Which button an image has under the pointer, and whether armed.
+fn prompt_lit(variant: usize) -> Option<(usize, bool)> {
+    let v = variant.checked_sub(1)?;
+    Some((v / 2, v % 2 == 1))
 }
 
 /// How much of the pixel (`x`, `y`) of an image `w` wide is inside it with
@@ -1841,7 +1863,7 @@ impl Prepared {
     /// Bytes of one region of a question's panel: every image of the
     /// tallest one at [`MENU_MAX_SCALE`].
     fn prompt_bytes() -> usize {
-        (1 + PROMPT_BUTTONS)
+        prompt_variants(PROMPT_BUTTONS)
             * device(PROMPT_WIDTH, MENU_MAX_SCALE) as usize
             * device(Prompt::max_height(), MENU_MAX_SCALE) as usize
             * 4
@@ -3576,7 +3598,7 @@ mod tests {
                 (device(prompt.size.0, at), device(prompt.size.1, at))
             );
             let image = (w * h * 4) as usize;
-            assert_eq!(pixels.len(), image * 4);
+            assert_eq!(pixels.len(), image * prompt_variants(3));
             assert!(pixels.len() <= Prepared::prompt_bytes());
             let word = |v: usize, x: i32, y: i32| {
                 let i = v * image + ((y * w + x) * 4) as usize;
@@ -3587,8 +3609,8 @@ mod tests {
             for i in 0..3 {
                 let c = prompt.cell(i).unwrap();
                 let (x, y) = (device(c.x, at), device(c.y, at));
-                for v in 0..4 {
-                    let lit = v == i + 1;
+                for v in 0..prompt_variants(3) {
+                    let lit = v == prompt_variant(Some(i), true);
                     let want = blend(bg, fg, if lit { 0.30 } else { 0.12 });
                     assert_eq!(
                         word(v, x, y),
@@ -3609,6 +3631,26 @@ mod tests {
                 "no text"
             );
             assert_eq!(first, &pixels[image * 3 + row..image * 3 + row + rows]);
+            // Under the pointer before the guard is over, a button's words
+            // are fainter than when it is not under it: not yet a button.
+            let c = prompt.cell(1).unwrap();
+            let ink_in = |v: usize| {
+                let mut far = 0u32;
+                for y in device(c.y, at)..device(c.y + c.h, at) {
+                    for x in device(c.x, at)..device(c.x + c.w, at) {
+                        let p = word(v, x, y);
+                        let cell = colour(blend(bg, fg, 0.12));
+                        far += p
+                            .iter()
+                            .zip(&cell)
+                            .map(|(a, b)| a.abs_diff(*b) as u32)
+                            .sum::<u32>();
+                    }
+                }
+                far
+            };
+            let (idle, waiting) = (ink_in(0), ink_in(prompt_variant(Some(1), false)));
+            assert!(waiting * 2 < idle, "scale {scale}: {waiting} vs {idle}");
         }
     }
 

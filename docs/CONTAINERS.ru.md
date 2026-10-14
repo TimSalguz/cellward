@@ -604,7 +604,7 @@ programs.cellward = {
   };
   compositorRestriction.enable = true;
   hermetic.default = true;               # и hermetic.exceptions = [ "<зона>" ]
-  zoneX11 = [ ];                         # зоны, чьим программам — свой X-сервер
+  defaults.permissions.x11 = false;      # свой X-сервер контейнерам без своего слова
 
   containers.work = {
     home = "private";                    # private | overlay
@@ -944,8 +944,8 @@ container set <к> hermetic|nix-daemon|audio-manager default|on|off`,
 записи файлов хоста и менеджера звука (ревью 2026-09-28). Экземпляр поднимается с ними; что изменилось с тех пор,
 называет `instances[].restart_needed`. Опции зон `hermetic.exceptions`,
 `nixDaemon` и `hostFilesWritable` — то, что сеть допускает (и что просит
-контейнер без своего слова); `audioManager` и `zoneX11` работают — как
-значение по умолчанию для контейнера без своего — и предупреждают.
+контейнер без своего слова); `audioManager` и `zoneX11` не действуют
+(прочитаны один раз, при переносе в контейнеры) и предупреждают.
 
 **`uplink_owner`** (`{uid, gid}` или `null`) — для политики хоста на выход:
 каждый сокет, которым трафик зоны покидает хост, — сокет pasta и

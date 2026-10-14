@@ -43,7 +43,7 @@ machine.succeed(
 with subtest("one launch's X server: out of reach of another launch and of another zone"):
     # Launch A: an X server of its own, and a client it starts only when
     # told — by then another launch has taken the display's abstract name.
-    alice("cellward x11 vmsmoke on")
+    alice("cellward container set main x11 on")
     alice(
         f"systemd-run --user --unit=vmxa --setenv=WAYLAND_DISPLAY={display} "
         "cellward run vmsmoke -- sh -c "
@@ -53,7 +53,7 @@ with subtest("one launch's X server: out of reach of another launch and of anoth
     )
     machine.wait_until_succeeds("test -s /home/alice/vmxa-display", timeout=120)
     # The other launches below get no X server of their own.
-    alice("cellward x11 vmsmoke off")
+    alice("cellward container set main x11 default")
     n = machine.succeed("cat /home/alice/vmxa-display").strip().lstrip(":")
     assert n.isdigit(), n
     sat = machine.succeed(f"pgrep -u alice -f '[x]wayland-satellite[^ ]* :{n} '").split()[0]

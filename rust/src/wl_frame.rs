@@ -1149,22 +1149,32 @@ impl Frames {
     }
 
     /// When a window of this connection next wants the proxy's loop to wake:
-    /// the end of a fullscreen label ([`Window::notice`]).
+    /// the end of a fullscreen label ([`Window::notice`]), a panel's button
+    /// under the pointer to be shown armed.
     pub(crate) fn wake_at(&self) -> Option<Instant> {
         self.windows
             .borrow()
             .iter()
             .filter_map(Weak::upgrade)
-            .filter_map(|w| w.try_borrow().ok().and_then(|w| w.notice_until))
+            .filter_map(|w| {
+                w.try_borrow().ok().and_then(|w| {
+                    [w.notice_until, w.prompt_arms_at(&self.questions)]
+                        .into_iter()
+                        .flatten()
+                        .min()
+                })
+            })
             .min()
     }
 
-    /// The loop woke at `now`: the labels whose seconds are over go.
+    /// The loop woke at `now`: the labels whose seconds are over go, a
+    /// panel's button whose guard is over is shown armed.
     pub(crate) fn tick(&self, now: Instant) {
         let windows: Vec<_> = self.windows.borrow().clone();
         for window in windows.iter().filter_map(Weak::upgrade) {
             if let Ok(mut window) = window.try_borrow_mut() {
                 window.notice_over(now);
+                window.prompt_rearm(&self.questions);
             }
         }
     }
@@ -3594,9 +3604,27 @@ impl Questions {
         windows.truncate(MAX_ASKABLE);
     }
 
-    /// A click on a panel is too soon from now.
+    /// A click on a panel is too soon from now — and the button under the
+    /// pointer shown so at once, its words faint again.
     fn touch(&self) {
         self.touched.set(Some(Instant::now()));
+        let on = self.on.try_borrow().ok().and_then(|on| on.upgrade());
+        if let Some(window) = on {
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.prompt_rearm(self);
+            }
+        }
+    }
+
+    /// When a panel the pointer came onto at `since` is armed, if nothing
+    /// touches it meanwhile; `None` while the program has a popup — that
+    /// going touches it.
+    fn arms_at(&self, since: Instant) -> Option<Instant> {
+        if self.popups.get() > 0 {
+            return None;
+        }
+        let from = self.touched.get().map_or(since, |t| t.max(since));
+        Some(from + crate::dialog::TOO_FAST)
     }
 
     /// Whether a click on a panel the pointer came onto at `since` is the
@@ -3653,6 +3681,8 @@ struct Panel {
     /// Every image of it, held while it is up.
     drawn: Drawn,
     lit: Option<usize>,
+    /// The lit button is shown armed: the guard is over, a press answers.
+    armed: bool,
     /// The button pressed while armed, until the release.
     pressed: Option<usize>,
     /// When the pointer came onto it (none: it is not on it).
@@ -3668,7 +3698,7 @@ impl Panel {
     fn draw(&mut self) {
         let (width, height) = (self.drawn.width, self.drawn.height);
         let image = width.saturating_mul(height).saturating_mul(4);
-        let variant = self.lit.map_or(0, |b| b.saturating_add(1));
+        let variant = crate::wl_title::prompt_variant(self.lit, self.armed);
         let offset = self
             .drawn
             .offset
@@ -3688,12 +3718,15 @@ impl Panel {
         self.surface.send_commit();
     }
 
-    /// `button` lit (none: nothing), shown at once where it changed.
-    fn light(&mut self, button: Option<usize>) {
-        if self.lit == button {
+    /// `button` lit (none: nothing), `armed` or not yet, shown at once
+    /// where it changed.
+    fn light(&mut self, button: Option<usize>, armed: bool) {
+        let armed = armed && button.is_some();
+        if (self.lit, self.armed) == (button, armed) {
             return;
         }
         self.lit = button;
+        self.armed = armed;
         if self.configured {
             self.draw();
         }
@@ -3807,6 +3840,7 @@ impl Window {
             prompt,
             drawn,
             lit: None,
+            armed: false,
             pressed: None,
             since: None,
             configured: false,
@@ -3823,23 +3857,44 @@ impl Window {
         }
     }
 
-    /// The pointer on the panel at `at` (none: off it): the button there lit.
-    fn prompt_hover(&mut self, at: Option<(f64, f64)>) {
+    /// The pointer on the panel at `at` (none: off it): the button there lit
+    /// — armed once the guard is over ([`Questions::armed`]), its words faint
+    /// until then, so that a press too soon is seen to be one.
+    fn prompt_hover(&mut self, questions: &Questions, at: Option<(f64, f64)>) {
         let Some(panel) = &mut self.prompt else {
             return;
         };
         match at {
             Some((x, y)) => {
-                panel.since.get_or_insert_with(Instant::now);
+                let since = *panel.since.get_or_insert_with(Instant::now);
                 let button = panel.prompt.button_at(x, y);
-                panel.light(button);
+                panel.light(button, questions.armed(since));
             }
             None => {
                 panel.since = None;
                 panel.pressed = None;
-                panel.light(None);
+                panel.light(None, false);
             }
         }
+    }
+
+    /// The lit button shown armed or not as the guard says now: when its
+    /// time is over ([`Frames::tick`]), and when something touched it.
+    fn prompt_rearm(&mut self, questions: &Questions) {
+        let Some(panel) = &mut self.prompt else {
+            return;
+        };
+        let armed = panel.since.is_some_and(|since| questions.armed(since));
+        panel.light(panel.lit, armed);
+    }
+
+    /// When the lit button of this window's panel is to be shown armed.
+    fn prompt_arms_at(&self, questions: &Questions) -> Option<Instant> {
+        let panel = self.prompt.as_ref()?;
+        if panel.lit.is_none() || panel.armed {
+            return None;
+        }
+        questions.arms_at(panel.since?)
     }
 
     /// The left button down (`down`) or up at (`x`, `y`) on the panel: a
@@ -3854,6 +3909,7 @@ impl Window {
             panel.pressed = at.filter(|button| f.questions.click_allowed(*button, panel.since));
             if panel.pressed.is_none() {
                 f.questions.touch();
+                panel.light(panel.lit, false);
             }
             return;
         }
@@ -5273,7 +5329,7 @@ impl Pointer {
             let (x, y) = (over.x, over.y);
             self.set_cursor(slf, WpCursorShapeDeviceV1Shape::DEFAULT);
             if let Ok(mut window) = window.try_borrow_mut() {
-                window.prompt_hover(Some((x, y)));
+                window.prompt_hover(&self.f.questions, Some((x, y)));
             };
             return;
         }
@@ -5304,7 +5360,7 @@ impl Pointer {
             };
         } else if over.part == Part::Prompt {
             if let Ok(mut window) = window.try_borrow_mut() {
-                window.prompt_hover(None);
+                window.prompt_hover(&self.f.questions, None);
             };
         } else {
             light_under(&window, None, true);
@@ -6921,6 +6977,29 @@ mod tests {
         drop(popup);
         assert_eq!(questions.popups.get(), 0);
         assert!(!questions.armed(long_ago), "the popup went just now");
+    }
+
+    /// The button under the pointer is shown armed when its guard is over:
+    /// counted from the pointer's coming or the last touch, whichever is
+    /// later; never while the program has a popup.
+    #[test]
+    fn a_panels_button_arms_when_its_guard_is_over() {
+        let questions = Rc::new(Questions::default());
+        let since = Instant::now();
+        assert_eq!(
+            questions.arms_at(since),
+            Some(since + crate::dialog::TOO_FAST)
+        );
+        questions.touch();
+        let touched = questions.touched.get().unwrap();
+        assert_eq!(
+            questions.arms_at(since),
+            Some(touched + crate::dialog::TOO_FAST)
+        );
+        let popup = Shown::new(&questions);
+        assert_eq!(questions.arms_at(since), None, "a popup of the program's");
+        drop(popup);
+        assert!(questions.arms_at(since).is_some());
     }
 
     #[test]
