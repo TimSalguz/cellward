@@ -391,6 +391,8 @@ impl Window {
                 | Msg::Container(_)
                 | Msg::PinNet(_)
                 | Msg::PinContainer(_)
+                | Msg::Rule(_)
+                | Msg::Offer(_, _)
                 | Msg::Name(_)
                 | Msg::Launch
                 | Msg::Action(_)
@@ -1062,7 +1064,9 @@ mod tests {
     /// no "always" to tick.
     #[test]
     fn a_guarded_window_takes_nothing_until_the_person_is_still() {
-        let req = parse_request(&format!("{REQUEST}guard\t1500\npins\t0\n"));
+        let req = parse_request(&format!(
+            "{REQUEST}guard\t1500\npins\t0\nrule\tссылки https — сюда\noffer\tcam\tкамеры\n"
+        ));
         assert_eq!(req.guard, 1500);
         assert!(req.no_pins && !req.pin_net, "a pin sent along is dropped");
         let mut w = Window::new(req);
@@ -1078,6 +1082,13 @@ mod tests {
         let _ = w.update(Msg::Container(0));
         let _ = w.update(Msg::Launch);
         let _ = w.update(Msg::PinContainer(true));
+        let _ = w.update(Msg::Rule(true));
+        let _ = w.update(Msg::Offer(0, true));
+        assert!(!w.rule, "the link rule ticked during the guard");
+        assert!(
+            w.offered.iter().all(|t| !t),
+            "an offer ticked during the guard"
+        );
         assert_eq!(
             (w.net, w.container),
             (2, 1),
@@ -1101,6 +1112,10 @@ mod tests {
         assert!(!w.armed, "a click did not start the guard again");
         arm(&mut w);
         assert!(w.ready());
+        // Armed, the boxes are the person's to tick.
+        let _ = w.update(Msg::Rule(true));
+        assert!(w.rule);
+        let _ = w.update(Msg::Rule(false));
         // The focus goes and comes back: disarmed, and the guard again.
         let _ = w.update(Msg::Focus(false));
         assert!(!w.armed);
@@ -1109,7 +1124,7 @@ mod tests {
         arm(&mut w);
         press(&mut w, Key::Named(key::Named::Space));
         assert!(!w.pin_net && !w.pin_container);
-        assert!(w.answer().ends_with("pin-net\t0\npin-container\t0\n"));
+        assert!(w.answer().contains("pin-net\t0\npin-container\t0\n"));
     }
 
     /// A link's rule: offered unticked, answered as ticked or not, and never
