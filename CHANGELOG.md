@@ -41,10 +41,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   input, which niri holds too old. The picker now watches that launch and,
   once it hands over, raises the copy's window through the compositor's IPC
   (niri, sway) — for the person's click, nothing the program asks for.
-- **Permission panel buttons show when they take a click.** A button under
-  the pointer is drawn with faint words until its guard (1.5 s of the pointer
-  resting, no key or popup of the program's) is over, then lit; a press too
-  soon is visibly none. Before, a lit button looked pressable from the first
+- **A panel the person is at is not taken away.** An unanswered panel on
+  the program's window is handed to the separate guarded window after 15
+  seconds; now that wait counts again each time the pointer comes onto the
+  panel, so a question being answered there no longer jumps into a second
+  window ("first one permission, then another"). The question's own
+  deadline is unchanged, and the proxy's word can only postpone, never
+  answer.
+- **Permission panel buttons count down to when they take a click.** A
+  button under the pointer fills with a bar over its guard (1.5 s of the
+  pointer resting, no key or popup of the program's), then is lit; a press
+  too soon, a key or a popup of the program's empties it again. The same
+  panel asks for the network, the microphone and the camera. Before, a lit button looked pressable from the first
   moment, and quick repeated clicks — each restarting the guard — never
   answered.
 - Permission panels accept an ordinary click on “Allow…” to open the guarded

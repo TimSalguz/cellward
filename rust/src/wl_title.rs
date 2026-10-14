@@ -1455,16 +1455,27 @@ pub fn render_prompt(font: &FontVec, prompt: &Prompt, scale: u32, bg: Rgb) -> (i
                 let base = if x < edge || y < edge || x >= w - edge || y >= h - edge {
                     edge_color
                 } else {
-                    match cell {
-                        Some(i) if lit == Some((i, true)) => blend(bg, fg, 0.30),
-                        Some(_) => blend(bg, fg, 0.12),
-                        None => bg,
+                    match (cell, lit) {
+                        (Some(i), Some((l, step))) if i == l && step == PROMPT_STEPS => {
+                            blend(bg, fg, 0.30)
+                        }
+                        // Under the pointer before its guard is over: a
+                        // bar filling the button from the left, the time
+                        // left to wait.
+                        (Some(i), Some((l, step))) if i == l => {
+                            let (x0, _, x1, _) = cells[i];
+                            let filled = x0 + (x1 - x0) * step as i32 / PROMPT_STEPS as i32;
+                            if x < filled {
+                                blend(bg, fg, 0.22)
+                            } else {
+                                blend(bg, fg, 0.12)
+                            }
+                        }
+                        (Some(_), _) => blend(bg, fg, 0.12),
+                        (None, _) => bg,
                     }
                 };
-                // Under the pointer before the guard is over: its words
-                // faint — not yet a button to press.
-                let faint = matches!((cell, lit), (Some(i), Some((l, false))) if i == l);
-                let c = text[y as usize * wu + x as usize] * if faint { 0.4 } else { 1.0 };
+                let c = text[y as usize * wu + x as usize];
                 pixels.extend_from_slice(&blend(base, fg, c).xrgb8888());
             }
         }
@@ -1472,23 +1483,27 @@ pub fn render_prompt(font: &FontVec, prompt: &Prompt, scale: u32, bg: Rgb) -> (i
     (w, h, pixels)
 }
 
+/// The steps of a panel button's countdown: the guard's time
+/// (`crate::dialog::TOO_FAST`) in as many parts, the bar in the button one
+/// part longer each; at the last the button is lit, to be pressed.
+pub const PROMPT_STEPS: usize = 6;
+
 /// How many images a panel of `buttons` has: none lit, then for each
-/// button the pointer on it before its guard is over (its words faint) and
-/// after (lit, to be pressed).
+/// button under the pointer every step of its countdown, the last lit.
 pub fn prompt_variants(buttons: usize) -> usize {
-    1 + 2 * buttons
+    1 + buttons * (PROMPT_STEPS + 1)
 }
 
-/// The image of a panel with button `lit` under the pointer, `armed` or not
-/// yet (none: no button).
-pub fn prompt_variant(lit: Option<usize>, armed: bool) -> usize {
-    lit.map_or(0, |b| 1 + 2 * b + usize::from(armed))
+/// The image of a panel with button `lit` under the pointer at `step` of
+/// its countdown ([`PROMPT_STEPS`]: over, to be pressed; none: no button).
+pub fn prompt_variant(lit: Option<usize>, step: usize) -> usize {
+    lit.map_or(0, |b| 1 + b * (PROMPT_STEPS + 1) + step.min(PROMPT_STEPS))
 }
 
-/// Which button an image has under the pointer, and whether armed.
-fn prompt_lit(variant: usize) -> Option<(usize, bool)> {
+/// Which button an image has under the pointer, and at which step.
+fn prompt_lit(variant: usize) -> Option<(usize, usize)> {
     let v = variant.checked_sub(1)?;
-    Some((v / 2, v % 2 == 1))
+    Some((v / (PROMPT_STEPS + 1), v % (PROMPT_STEPS + 1)))
 }
 
 /// How much of the pixel (`x`, `y`) of an image `w` wide is inside it with
@@ -3610,8 +3625,13 @@ mod tests {
                 let c = prompt.cell(i).unwrap();
                 let (x, y) = (device(c.x, at), device(c.y, at));
                 for v in 0..prompt_variants(3) {
-                    let lit = v == prompt_variant(Some(i), true);
-                    let want = blend(bg, fg, if lit { 0.30 } else { 0.12 });
+                    // Lit at the countdown's end; under the bar from its
+                    // first step (the corner is its first column).
+                    let want = match prompt_lit(v) {
+                        Some((b, PROMPT_STEPS)) if b == i => blend(bg, fg, 0.30),
+                        Some((b, step)) if b == i && step > 0 => blend(bg, fg, 0.22),
+                        _ => blend(bg, fg, 0.12),
+                    };
                     assert_eq!(
                         word(v, x, y),
                         colour(want),
@@ -3631,26 +3651,17 @@ mod tests {
                 "no text"
             );
             assert_eq!(first, &pixels[image * 3 + row..image * 3 + row + rows]);
-            // Under the pointer before the guard is over, a button's words
-            // are fainter than when it is not under it: not yet a button.
+            // Under the pointer before the guard is over: a bar fills the
+            // button from the left, step by step — half of it at half the
+            // steps, none at the first.
             let c = prompt.cell(1).unwrap();
-            let ink_in = |v: usize| {
-                let mut far = 0u32;
-                for y in device(c.y, at)..device(c.y + c.h, at) {
-                    for x in device(c.x, at)..device(c.x + c.w, at) {
-                        let p = word(v, x, y);
-                        let cell = colour(blend(bg, fg, 0.12));
-                        far += p
-                            .iter()
-                            .zip(&cell)
-                            .map(|(a, b)| a.abs_diff(*b) as u32)
-                            .sum::<u32>();
-                    }
-                }
-                far
-            };
-            let (idle, waiting) = (ink_in(0), ink_in(prompt_variant(Some(1), false)));
-            assert!(waiting * 2 < idle, "scale {scale}: {waiting} vs {idle}");
+            let (x0, x1) = (device(c.x, at), device(c.x + c.w, at));
+            let y = device(c.y + c.h, at) - 1;
+            let half = prompt_variant(Some(1), PROMPT_STEPS / 2);
+            let (bar, rest) = (colour(blend(bg, fg, 0.22)), colour(blend(bg, fg, 0.12)));
+            assert_eq!(word(half, x0 + 1, y), bar, "scale {scale}: the bar");
+            assert_eq!(word(half, x1 - 2, y), rest, "scale {scale}: past the bar");
+            assert_eq!(word(prompt_variant(Some(1), 0), x0 + 1, y), rest);
         }
     }
 

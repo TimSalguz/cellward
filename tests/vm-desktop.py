@@ -285,36 +285,41 @@ def requested(path):
     return f"journalctl -u permission-http --no-pager | grep -F 'GET /{path}'"
 
 
-def ink(at, span, y):
-    """How far the words on a button are from its cell's colour."""
-    l, r = span
-    base = at(l + 2, y - 8)
-    return sum(
-        sum(abs(a - b) for a, b in zip(at(x, yy), base))
-        for x in range(l, r)
-        for yy in range(y - 8, y + 8)
-    )
+def bar_at(at, span, y):
+    """Whether a button's countdown bar is under way: on a row near the
+    button's top, above its words, two colours (the bar, the rest) where
+    there is one before it starts and once it is over."""
+    l, _ = span
+    x = l + 3
+    top = y
+    while top > 0 and at(x, top - 1) == at(x, y):
+        top -= 1
+    row = {at(c, top + 2) for c in range(l + 1, l + 140)}
+    return len(row) > 1
 
 
 def panel_round(tag, launch, path):
     """`launch` brings a program up that asks for the network at `path`; its
     panel clicked as people click: at once, and again soon — none of it an
-    answer, the button's words faint —, then after resting on it: lit, and
-    the answer."""
+    answer —, the countdown seen running in the button, then after it a
+    click that answers."""
     pointer("move", 5, 5)
     launch()
     spans, y = settled(f"{tag}-panel", panel_buttons, tries=40)
     allow = ((spans[1][0] + spans[1][1]) // 2, y)
     print(tag, "buttons", spans, "row", y)
-    idle = ink(shot(f"{tag}-idle"), spans[1], y)
+    assert not bar_at(shot(f"{tag}-idle"), spans[1], y), "a bar with nobody at the panel"
     click(*allow, rest=0.2)
     click(*allow, rest=0.4)
-    faint = ink(shot(f"{tag}-too-soon"), spans[1], y)
     assert peer.execute(requested(path))[0] != 0, "a click too soon answered"
+    # The pointer stays on the button: its bar fills, then it lights.
+    machine.sleep(0.5)
+    running = shot(f"{tag}-countdown")
     machine.sleep(2)
-    lit = shot(f"{tag}-armed")
-    print(tag, "ink idle/too soon/armed:", idle, faint, ink(lit, spans[1], y))
-    assert faint * 2 < idle, ("the button did not look waiting", faint, idle)
+    over = shot(f"{tag}-armed")
+    print(tag, "bar running:", bar_at(running, spans[1], y), "after:", bar_at(over, spans[1], y))
+    assert bar_at(running, spans[1], y), "no countdown in the button"
+    assert not bar_at(over, spans[1], y), "the countdown did not end"
     click(*allow, rest=0.1)
     peer.wait_until_succeeds(requested(path), timeout=20)
     shot(f"{tag}-answered")
@@ -511,4 +516,5 @@ for home in ["overlay", "private"]:
 
 print("FAILED:", FAILED)
 # Every scenario ran, with its screenshots kept; any one failed fails the test.
-assert not FAILED, FAILED
+# (A run of some scenarios only keeps its screenshots whatever came of them.)
+assert not FAILED or ONLY, FAILED

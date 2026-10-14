@@ -371,6 +371,12 @@ const RETRACT: u8 = b'w';
 const ANSWERED: u8 = b'a';
 /// Proxy → supervisor: no window to show the question of this number on.
 const NOWHERE: u8 = b'o';
+/// Proxy → supervisor: the pointer came onto the panel of the question of
+/// this number — the person is at it: its hand-over to the launch window
+/// ([`Asking::PANEL_WAIT`]) counts again from now. Nothing else: the
+/// question's own deadline is the asker's, and an answer is still only
+/// [`ANSWERED`]. No answer.
+const ENGAGED: u8 = b'g';
 /// Supervisor → proxy: the frame's settings changed on the fly — the length
 /// of the rest (two bytes, little-endian) and the rest,
 /// `crate::frame::Frame::to_arg`'s. No answer.
@@ -591,6 +597,16 @@ impl Asking {
     /// guarded window can still ask on the correct compositor. Neither a
     /// timeout nor anything the proxy says grants a permission.
     const PANEL_WAIT: Duration = Duration::from_secs(15);
+
+    /// The person is at the panel of question `seq`: its hand-over waits
+    /// from now. A word of another number is nothing.
+    fn engaged(&mut self, seq: u8, now: std::time::Instant) {
+        if let Some((_, asked, started)) = self.asked.as_mut() {
+            if *asked == seq {
+                *started = now;
+            }
+        }
+    }
 
     fn expire(&mut self, now: std::time::Instant) -> Option<u8> {
         let (_, _, started) = self.asked.as_ref()?;
@@ -1175,6 +1191,13 @@ impl Proxy {
             if let Ok(1) = recv_peek(fd, &mut byte) {
                 if byte[0] == ANSWERED || byte[0] == NOWHERE {
                     self.replied(fd);
+                    return true;
+                }
+                if byte[0] == ENGAGED {
+                    let mut word = [0u8; 2];
+                    if recv_now(fd, &mut word) == 2 {
+                        self.asking.engaged(word[1], std::time::Instant::now());
+                    }
                     return true;
                 }
             }
@@ -2502,6 +2525,7 @@ fn serve(
             let bytes = match reply {
                 Reply::Chose(seq, button) => vec![ANSWERED, seq, button],
                 Reply::Nowhere(seq) => vec![NOWHERE, seq],
+                Reply::Engaged(seq) => vec![ENGAGED, seq],
             };
             if let Some(c) = &channel {
                 let _ = sys::send_with_fds(c.as_raw_fd(), &bytes, &[]);
@@ -6324,6 +6348,27 @@ mod tests {
         assert_eq!(asking.expire(start + Asking::PANEL_WAIT), None);
     }
 
+    /// The person at the panel (the pointer came onto it): its hand-over
+    /// waits from then — and a word of another question's is nothing.
+    #[test]
+    fn a_panel_the_person_is_at_is_not_handed_over() {
+        let (supervisor, _caller) = UnixStream::pair().unwrap();
+        let start = std::time::Instant::now();
+        let mut asking = Asking {
+            asked: Some((supervisor, 17, start)),
+            ..Asking::default()
+        };
+        let later = start + Asking::PANEL_WAIT - Duration::from_secs(1);
+        asking.engaged(16, later);
+        asking.engaged(17, later);
+        assert_eq!(
+            asking.expire(start + Asking::PANEL_WAIT),
+            None,
+            "handed over"
+        );
+        assert_eq!(asking.expire(later + Asking::PANEL_WAIT), Some(17));
+    }
+
     #[test]
     fn the_questions_have_bytes_of_their_own() {
         let others = [
@@ -6337,7 +6382,7 @@ mod tests {
             ATTENTION,
             RESTART,
         ];
-        for byte in [QUESTION, RETRACT, ANSWERED, NOWHERE] {
+        for byte in [QUESTION, RETRACT, ANSWERED, NOWHERE, ENGAGED] {
             assert!(!others.contains(&byte), "{}", byte as char);
         }
         assert_ne!(QUESTION, RETRACT);
@@ -6497,6 +6542,11 @@ mod tests {
         channel
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
+        // The pointer's coming onto the panel is said first: the person is
+        // at it, its hand-over waits.
+        let mut engaged = [0u8; 2];
+        (&*channel).read_exact(&mut engaged).unwrap();
+        assert_eq!(engaged, [ENGAGED, 7]);
         let mut reply = [0u8; 3];
         (&*channel).read_exact(&mut reply).unwrap();
         assert_eq!(reply, [ANSWERED, 7, 0], "the hasty click was taken");

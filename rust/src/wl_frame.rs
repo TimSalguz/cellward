@@ -3466,6 +3466,9 @@ pub(crate) struct Question {
 pub(crate) enum Reply {
     Chose(u8, u8),
     Nowhere(u8),
+    /// The pointer came onto the panel: the person is at it — not an
+    /// answer, only a reason to wait for one there.
+    Engaged(u8),
 }
 
 /// Windows remembered for a question at most, the last focused kept.
@@ -3572,7 +3575,7 @@ impl Questions {
     /// What came of the question asked now, if it is `reply`'s.
     fn done(&self, reply: Reply) {
         let seq = match reply {
-            Reply::Chose(seq, _) | Reply::Nowhere(seq) => seq,
+            Reply::Chose(seq, _) | Reply::Nowhere(seq) | Reply::Engaged(seq) => seq,
         };
         if self.asked.borrow().as_ref().is_none_or(|q| q.seq != seq) {
             return;
@@ -3604,6 +3607,14 @@ impl Questions {
         windows.truncate(MAX_ASKABLE);
     }
 
+    /// The pointer came onto the panel of question `seq`: said to the
+    /// supervisor, which waits on for the person there.
+    fn engage(&self, seq: u8) {
+        if self.asked.borrow().as_ref().is_some_and(|q| q.seq == seq) {
+            self.replies.borrow_mut().push_back(Reply::Engaged(seq));
+        }
+    }
+
     /// A click on a panel is too soon from now — and the button under the
     /// pointer shown so at once, its words faint again.
     fn touch(&self) {
@@ -3616,15 +3627,34 @@ impl Questions {
         }
     }
 
-    /// When a panel the pointer came onto at `since` is armed, if nothing
+    /// When a panel the pointer came onto at `since` reaches `step` of its
+    /// countdown ([`crate::wl_title::PROMPT_STEPS`]: armed), if nothing
     /// touches it meanwhile; `None` while the program has a popup — that
     /// going touches it.
-    fn arms_at(&self, since: Instant) -> Option<Instant> {
+    fn step_at(&self, since: Instant, step: usize) -> Option<Instant> {
         if self.popups.get() > 0 {
             return None;
         }
         let from = self.touched.get().map_or(since, |t| t.max(since));
-        Some(from + crate::dialog::TOO_FAST)
+        let steps = crate::wl_title::PROMPT_STEPS as u32;
+        let step = step.min(crate::wl_title::PROMPT_STEPS) as u32;
+        Some(from + crate::dialog::TOO_FAST * step / steps)
+    }
+
+    /// The step of the countdown of a panel the pointer came onto at
+    /// `since`, now: [`crate::wl_title::PROMPT_STEPS`] exactly when
+    /// [`Self::armed`]; 0 while the program has a popup.
+    fn step(&self, since: Instant) -> usize {
+        if self.popups.get() > 0 {
+            return 0;
+        }
+        if self.armed(since) {
+            return crate::wl_title::PROMPT_STEPS;
+        }
+        let from = self.touched.get().map_or(since, |t| t.max(since));
+        let part = crate::dialog::TOO_FAST.as_nanos() / crate::wl_title::PROMPT_STEPS as u128;
+        let done = from.elapsed().as_nanos() / part.max(1);
+        (done as usize).min(crate::wl_title::PROMPT_STEPS - 1)
     }
 
     /// Whether a click on a panel the pointer came onto at `since` is the
@@ -3681,8 +3711,9 @@ struct Panel {
     /// Every image of it, held while it is up.
     drawn: Drawn,
     lit: Option<usize>,
-    /// The lit button is shown armed: the guard is over, a press answers.
-    armed: bool,
+    /// The lit button's step of its countdown
+    /// (`crate::wl_title::PROMPT_STEPS`: over, a press answers).
+    step: usize,
     /// The button pressed while armed, until the release.
     pressed: Option<usize>,
     /// When the pointer came onto it (none: it is not on it).
@@ -3698,7 +3729,7 @@ impl Panel {
     fn draw(&mut self) {
         let (width, height) = (self.drawn.width, self.drawn.height);
         let image = width.saturating_mul(height).saturating_mul(4);
-        let variant = crate::wl_title::prompt_variant(self.lit, self.armed);
+        let variant = crate::wl_title::prompt_variant(self.lit, self.step);
         let offset = self
             .drawn
             .offset
@@ -3718,15 +3749,15 @@ impl Panel {
         self.surface.send_commit();
     }
 
-    /// `button` lit (none: nothing), `armed` or not yet, shown at once
-    /// where it changed.
-    fn light(&mut self, button: Option<usize>, armed: bool) {
-        let armed = armed && button.is_some();
-        if (self.lit, self.armed) == (button, armed) {
+    /// `button` lit (none: nothing) at `step` of its countdown, shown at
+    /// once where it changed.
+    fn light(&mut self, button: Option<usize>, step: usize) {
+        let step = if button.is_some() { step } else { 0 };
+        if (self.lit, self.step) == (button, step) {
             return;
         }
         self.lit = button;
-        self.armed = armed;
+        self.step = step;
         if self.configured {
             self.draw();
         }
@@ -3840,7 +3871,7 @@ impl Window {
             prompt,
             drawn,
             lit: None,
-            armed: false,
+            step: 0,
             pressed: None,
             since: None,
             configured: false,
@@ -3858,43 +3889,46 @@ impl Window {
     }
 
     /// The pointer on the panel at `at` (none: off it): the button there lit
-    /// — armed once the guard is over ([`Questions::armed`]), its words faint
-    /// until then, so that a press too soon is seen to be one.
+    /// — its countdown running until the guard is over ([`Questions::step`]),
+    /// so that a press too soon is seen to be one, and how long to wait.
     fn prompt_hover(&mut self, questions: &Questions, at: Option<(f64, f64)>) {
         let Some(panel) = &mut self.prompt else {
             return;
         };
         match at {
             Some((x, y)) => {
+                if panel.since.is_none() {
+                    questions.engage(panel.seq);
+                }
                 let since = *panel.since.get_or_insert_with(Instant::now);
                 let button = panel.prompt.button_at(x, y);
-                panel.light(button, questions.armed(since));
+                panel.light(button, questions.step(since));
             }
             None => {
                 panel.since = None;
                 panel.pressed = None;
-                panel.light(None, false);
+                panel.light(None, 0);
             }
         }
     }
 
-    /// The lit button shown armed or not as the guard says now: when its
-    /// time is over ([`Frames::tick`]), and when something touched it.
+    /// The lit button's countdown at the step the guard says now: at each
+    /// step's time ([`Frames::tick`]), and when something touched it.
     fn prompt_rearm(&mut self, questions: &Questions) {
         let Some(panel) = &mut self.prompt else {
             return;
         };
-        let armed = panel.since.is_some_and(|since| questions.armed(since));
-        panel.light(panel.lit, armed);
+        let step = panel.since.map_or(0, |since| questions.step(since));
+        panel.light(panel.lit, step);
     }
 
-    /// When the lit button of this window's panel is to be shown armed.
+    /// When the lit button of this window's panel takes its next step.
     fn prompt_arms_at(&self, questions: &Questions) -> Option<Instant> {
         let panel = self.prompt.as_ref()?;
-        if panel.lit.is_none() || panel.armed {
+        if panel.lit.is_none() || panel.step >= crate::wl_title::PROMPT_STEPS {
             return None;
         }
-        questions.arms_at(panel.since?)
+        questions.step_at(panel.since?, panel.step + 1)
     }
 
     /// The left button down (`down`) or up at (`x`, `y`) on the panel: a
@@ -3909,7 +3943,7 @@ impl Window {
             panel.pressed = at.filter(|button| f.questions.click_allowed(*button, panel.since));
             if panel.pressed.is_none() {
                 f.questions.touch();
-                panel.light(panel.lit, false);
+                panel.light(panel.lit, 0);
             }
             return;
         }
@@ -6985,21 +7019,39 @@ mod tests {
     #[test]
     fn a_panels_button_arms_when_its_guard_is_over() {
         let questions = Rc::new(Questions::default());
+        let steps = crate::wl_title::PROMPT_STEPS;
         let since = Instant::now();
         assert_eq!(
-            questions.arms_at(since),
+            questions.step_at(since, steps),
             Some(since + crate::dialog::TOO_FAST)
         );
+        assert_eq!(questions.step_at(since, 0), Some(since));
+        assert_eq!(questions.step(since), 0, "the countdown starts");
         questions.touch();
         let touched = questions.touched.get().unwrap();
         assert_eq!(
-            questions.arms_at(since),
+            questions.step_at(since, steps),
             Some(touched + crate::dialog::TOO_FAST)
         );
         let popup = Shown::new(&questions);
-        assert_eq!(questions.arms_at(since), None, "a popup of the program's");
+        assert_eq!(
+            questions.step_at(since, steps),
+            None,
+            "a popup of the program's"
+        );
         drop(popup);
-        assert!(questions.arms_at(since).is_some());
+        assert!(questions.step_at(since, steps).is_some());
+        // Its guard over: the last step, and only then.
+        let long_ago = Instant::now()
+            .checked_sub(crate::dialog::TOO_FAST + Duration::from_millis(1))
+            .unwrap();
+        questions.touched.set(Some(long_ago));
+        assert_eq!(questions.step(long_ago), steps);
+        let half = Instant::now()
+            .checked_sub(crate::dialog::TOO_FAST / 2 + Duration::from_millis(10))
+            .unwrap();
+        questions.touched.set(Some(half));
+        assert_eq!(questions.step(half), steps / 2);
     }
 
     #[test]
