@@ -24,10 +24,14 @@
 #   nix-build tests/vm-desktop.nix -A test -o vm-desktop
 #   ls vm-desktop/*.png
 #
-# Interactive (needs /dev/kvm where the driver runs):
+# Interactive (needs /dev/kvm where the driver runs), watched live through
+# VNC — in the driver's prompt `test_script()` runs it all:
 #
-#   nix-build tests/vm-desktop.nix -A driverInteractive -o vm-desktop-driver
+#   nix-build tests/vm-desktop.nix -A driverInteractive --arg vnc true -o vm-desktop-driver
 #   ./vm-desktop-driver/bin/nixos-test-driver
+#   vncviewer localhost:5901        # once sway is up: the screen niri draws on
+#
+# A video of a run instead: `--arg record true`, then vm-desktop/desktop.mp4.
 {
   system ? builtins.currentSystem,
   # Only the scenarios whose names contain this (tests/vm-desktop.py).
@@ -36,6 +40,11 @@
   # where its own server cannot be reached from here: without it TeamSpeak
   # is left out, and so are its scenarios.
   teamspeakSrc ? null,
+  # To watch it live: a VNC server on the screen, at localhost:5901 of the
+  # machine the driver runs on (driverInteractive; see the header).
+  vnc ? false,
+  # A video of the whole run, `desktop.mp4` in the output.
+  record ? false,
 }:
 
 let
@@ -112,6 +121,8 @@ let
           })
           pkgs.foot
           pkgs.jq
+          pkgs.wayvnc
+          pkgs.wf-recorder
           # The owner's messenger: a Telegram Desktop fork, one copy per profile.
           pkgs.ayugram-desktop
           # A tray (StatusNotifierWatcher and host): the messenger hides
@@ -134,6 +145,13 @@ let
         hardware.graphics.enable = true;
         fonts.packages = [ pkgs.dejavu_fonts ];
         virtualisation.memorySize = 4096;
+        # The screen to the driver's machine (`vnc`): QEMU's user network.
+        virtualisation.forwardPorts = pkgs.lib.optional vnc {
+          from = "host";
+          host.port = 5901;
+          guest.port = 5900;
+        };
+        networking.firewall.allowedTCPPorts = pkgs.lib.optional vnc 5900;
         virtualisation.cores = 4;
         networking.interfaces.eth1.ipv4.addresses = [
           {
@@ -168,6 +186,8 @@ let
     testScript = ''
       import os
       os.environ["VM_DESKTOP_ONLY"] = ${builtins.toJSON only}
+      os.environ["VM_DESKTOP_VNC"] = ${builtins.toJSON (if vnc then "1" else "")}
+      os.environ["VM_DESKTOP_RECORD"] = ${builtins.toJSON (if record then "1" else "")}
       POINTER = "${pkgs.python3}/bin/python3 ${./vm-pointer.py}"
       exec(open("${./vm-desktop.py}").read())
     '';
