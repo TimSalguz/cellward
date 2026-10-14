@@ -63,6 +63,9 @@ let
           # niri's.
           programs.cellward.frame = {
             colors.offline = "#ff00ff";
+            # The network questions are asked in `host` (tests/vm-niri-question.py):
+            # their panels found by the same colour.
+            colors.host = "#ff00ff";
             width = 4;
             style = "full";
             title = "always";
