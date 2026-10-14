@@ -64,6 +64,19 @@ machine.wait_until_succeeds("ls /run/user/1000/sway-ipc.*.sock", timeout=60)
 sway = machine.succeed("ls /run/user/1000 | grep -E '^wayland-[0-9]+$' | head -1").strip()
 swaysock = machine.succeed("ls /run/user/1000/sway-ipc.*.sock").strip()
 
+# To watch (tests/vm-desktop.nix, `vnc`, `record`), view-only — a click of
+# the watcher's would land in a scenario: the screen sway shows —
+# niri's window over all of it.
+if os.environ.get("VM_DESKTOP_VNC"):
+    alice(f"systemd-run --user --unit=vmvnc --setenv=WAYLAND_DISPLAY={sway} wayvnc --disable-input 0.0.0.0 5900")
+    machine.wait_until_succeeds("ss -ltn | grep -q ':5900 '", timeout=30)
+    print("VNC: localhost:5901 on the driver's machine")
+if os.environ.get("VM_DESKTOP_RECORD"):
+    alice(
+        f"systemd-run --user --unit=vmrec --setenv=WAYLAND_DISPLAY={sway} "
+        "wf-recorder -r 10 -f /tmp/desktop.mp4"
+    )
+
 NIRI = (
     'output "winit" {\n    scale 1.0\n}\n'
     "layout {\n    gaps 8\n    focus-ring {\n        off\n    }\n"
@@ -513,6 +526,16 @@ for home in ["overlay", "private"]:
             assert any(app in t[0].lower() for t in titles()), titles()
             alice(f"systemctl --user stop {unit}", check=False)
             machine.sleep(3)
+
+if os.environ.get("VM_DESKTOP_RECORD"):
+    alice("systemctl --user kill -s INT vmrec", check=False)
+    # Done once its file stops growing (it writes the index last).
+    machine.wait_until_succeeds(
+        "test -s /tmp/desktop.mp4 && a=$(stat -c %s /tmp/desktop.mp4) && sleep 2 "
+        "&& test \"$a\" = \"$(stat -c %s /tmp/desktop.mp4)\"",
+        timeout=60,
+    )
+    machine.copy_from_vm("/tmp/desktop.mp4", "")
 
 print("FAILED:", FAILED)
 # Every scenario ran, with its screenshots kept; any one failed fails the test.
