@@ -3466,6 +3466,9 @@ pub(crate) struct Question {
 pub(crate) enum Reply {
     Chose(u8, u8),
     Nowhere(u8),
+    /// The pointer came onto the panel: the person is at it — not an
+    /// answer, only a reason to wait for one there.
+    Engaged(u8),
 }
 
 /// Windows remembered for a question at most, the last focused kept.
@@ -3572,7 +3575,7 @@ impl Questions {
     /// What came of the question asked now, if it is `reply`'s.
     fn done(&self, reply: Reply) {
         let seq = match reply {
-            Reply::Chose(seq, _) | Reply::Nowhere(seq) => seq,
+            Reply::Chose(seq, _) | Reply::Nowhere(seq) | Reply::Engaged(seq) => seq,
         };
         if self.asked.borrow().as_ref().is_none_or(|q| q.seq != seq) {
             return;
@@ -3602,6 +3605,14 @@ impl Questions {
         windows.retain(|(w, _)| w.strong_count() > 0 && !Weak::ptr_eq(w, &me));
         windows.push_front((me, Rc::downgrade(f)));
         windows.truncate(MAX_ASKABLE);
+    }
+
+    /// The pointer came onto the panel of question `seq`: said to the
+    /// supervisor, which waits on for the person there.
+    fn engage(&self, seq: u8) {
+        if self.asked.borrow().as_ref().is_some_and(|q| q.seq == seq) {
+            self.replies.borrow_mut().push_back(Reply::Engaged(seq));
+        }
     }
 
     /// A click on a panel is too soon from now — and the button under the
@@ -3866,6 +3877,9 @@ impl Window {
         };
         match at {
             Some((x, y)) => {
+                if panel.since.is_none() {
+                    questions.engage(panel.seq);
+                }
                 let since = *panel.since.get_or_insert_with(Instant::now);
                 let button = panel.prompt.button_at(x, y);
                 panel.light(button, questions.armed(since));
