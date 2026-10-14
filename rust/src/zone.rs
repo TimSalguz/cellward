@@ -1500,11 +1500,23 @@ impl Helpers {
         let system_bus = pid(start_system_bus_proxy(zone));
         // A hermetic zone's session bus the same way.
         let session_bus = if zone.hermetic {
+            // An instance's programs find their own copy already running
+            // (`instance::moz_remote_rules`): Firefox launched twice opens a
+            // window instead of "already running".
+            let own = zone
+                .instance
+                .as_ref()
+                .map(|i| crate::instance::moz_remote_rules(&i.id));
+            let rules: Vec<&str> = SESSION_BUS_RULES
+                .iter()
+                .copied()
+                .chain(own.iter().flatten().map(String::as_str))
+                .collect();
             pid(start_proxy(
                 zone,
                 &format!("unix:path={}", host_runtime_dir(zone).join("bus").display()),
                 SESSION_BUS_PROXY,
-                &SESSION_BUS_RULES,
+                &rules,
                 "session bus",
             ))
         } else {

@@ -1429,6 +1429,17 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         // fall back to theirs by themselves.
         std::env::set_var("IBUS_USE_PORTAL", "1");
     }
+    // Mozilla's programs hand a second launch to the copy already running
+    // under a name of the instance's own (`instance::moz_remote_name`): in
+    // the same instance, and in no other place — not the host's, nor one in
+    // another network. Whatever the caller had set is not theirs to keep.
+    match &instance_id {
+        Some(id) => std::env::set_var(
+            crate::instance::MOZ_REMOTE_ENV,
+            crate::instance::moz_remote_name(id),
+        ),
+        None => std::env::remove_var(crate::instance::MOZ_REMOTE_ENV),
+    }
 
     // The caller's working directory, which entering a space would lose. A
     // directory that has been removed under us is no reason not to start:

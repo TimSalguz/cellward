@@ -268,6 +268,37 @@ pub fn key(id: &str) -> String {
     format!("i-{hash:016x}")
 }
 
+/// The variable Mozilla's programs (Firefox, Thunderbird and their forks)
+/// read the first part of their "remote" name from: a second launch hands
+/// its command line over the session bus to `org.mozilla.<this>.<profile>`,
+/// which the running one owns, and opens a window there. With no one to
+/// hand it to, it finds its profile locked and shows "Firefox is already
+/// running".
+pub const MOZ_REMOTE_ENV: &str = "MOZ_DBUS_APP_NAME";
+
+/// What [`MOZ_REMOTE_ENV`] says in instance `id`: a name of the instance's
+/// own, so that a second launch finds the copy already running in the same
+/// instance — and never one on the host or in another container, which
+/// would open the window in that one's network. A hermetic instance's bus
+/// filter lets its programs own and call that name and no other Mozilla's
+/// ([`moz_remote_rules`]); the key is the instance's, a letter first, as a
+/// bus name's element must start.
+pub fn moz_remote_name(id: &str) -> String {
+    let key = key(id);
+    format!("cw{}", key.trim_start_matches("i-"))
+}
+
+/// The session bus filter's rules for [`moz_remote_name`]: own the names
+/// below it (our proxy's `.*` for OWN: those and nothing else) and call
+/// them — the copy of the program already running in this instance.
+pub fn moz_remote_rules(id: &str) -> [String; 2] {
+    let name = moz_remote_name(id);
+    [
+        format!("--own=org.mozilla.{name}.*"),
+        format!("--talk=org.mozilla.{name}.*"),
+    ]
+}
+
 /// The instance's state directory: `<state>/.instances/<key>`.
 pub fn dir(state: &Path, id: &str) -> PathBuf {
     state.join(INSTANCES_DIR).join(key(id))
@@ -744,6 +775,31 @@ mod tests {
         assert!(valid_id(&long));
         assert_eq!(key(&long).len(), 18);
         assert_ne!(key("a"), key("b"));
+    }
+
+    /// Firefox's remote name: the instance's own, a bus name's element (a
+    /// letter first, then letters and digits), and the filter's rules name
+    /// that subtree and nothing wider — not `org.mozilla.firefox.*`, which
+    /// the host's Firefox owns.
+    #[test]
+    fn mozillas_remote_name_is_the_instances_own() {
+        assert_eq!(moz_remote_name("main:offline"), "cw242da5417b1a1e19");
+        assert_ne!(moz_remote_name("main:offline"), moz_remote_name("main:nl"));
+        for id in ["main:offline", "Работа", ":tmp:vpn-profile-x"] {
+            let name = moz_remote_name(id);
+            assert!(
+                name.starts_with(|c: char| c.is_ascii_alphabetic()),
+                "{name}"
+            );
+            assert!(name.chars().all(|c| c.is_ascii_alphanumeric()), "{name}");
+        }
+        assert_eq!(
+            moz_remote_rules("main:offline"),
+            [
+                "--own=org.mozilla.cw242da5417b1a1e19.*",
+                "--talk=org.mozilla.cw242da5417b1a1e19.*",
+            ]
+        );
     }
 
     #[test]
