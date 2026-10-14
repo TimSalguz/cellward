@@ -875,15 +875,13 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // wrapping below goes around this one), so it speaks to the compositor
     // through the restricted socket like the program does. A sandbox starts
     // its own satellite and is told about the permission instead.
-    // Or the zone itself has x11: for someone who runs zones without
-    // containers, Steam in a zone must open all the same. The container's
-    // own word first, both ways (`x11::effective`, 2026-09-28): its `off`
-    // refuses the zone's X server, which it could not before.
+    // The container's own word, else the template's (`x11::effective`):
+    // whatever the network — it only says where packets go (2026-10-15).
     let container_x11 = crate::x11::effective(
         record_name(&selection)
             .and_then(|name| crate::container::load(tools, &name))
             .and_then(|c| c.x11.map(|x11| x11.value)),
-        zone != UNCONFINED && crate::x11::zone_setting(&tools.state, &tools.config, &zone_name).0,
+        crate::permissions::flag(&tools.config, "x11").0,
     );
     let own_x11 = container_x11
         && zone != UNCONFINED

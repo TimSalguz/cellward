@@ -573,8 +573,8 @@ let
       ++ map (app: "app = ${app}") c.apps
       ++ lib.optional (c.trust.certificates != [ ]) "trust = ${trustDir name c.trust.certificates}"
       ++ map (path: "path = ${path}") c.permissions.paths
-      # Its own word both ways (2026-09-28): false refuses its zone's X
-      # server (zoneX11) too; null, none of its own — the zone's.
+      # Its own word both ways: null, none of its own — the template's
+      # (defaults.permissions.x11), never the network's (2026-10-15).
       ++ lib.optional (c.permissions.x11 != null) "x11 = ${lib.boolToString c.permissions.x11}"
       ++ lib.optional (c.frameColor != null) "frame_color = ${c.frameColor}"
       ++ lib.optional (c.permissions.microphone != null) "microphone = ${c.permissions.microphone}"
@@ -697,7 +697,7 @@ let
         type = lib.types.nullOr lib.types.bool;
         default = null;
         example = false;
-        description = "Свой X-сервер (xwayland-satellite) для программ контейнера в зонах: true — есть, false — нет, даже если его даёт сеть (programs.cellward.zoneX11, cellward x11 <зона>), null — как у сети или как задано локально (cellward container set <контейнер> x11 default|on|off). До 2026-09-28 false значило «своего нет» и X-сервер сети всё равно был. X-сервер хоста из зон недоступен всегда: он показывает каждому клиенту окна, ввод и буфер обмена всех остальных. Действует для программ, запущенных после изменения. См. docs/HERMETICITY.ru.md §7.";
+        description = "Свой X-сервер (xwayland-satellite) для программ контейнера, в любой сети: true — есть, false — нет; null — как у всех (defaults.permissions.x11, иначе нет) или как задано локально (cellward container set <контейнер> x11 default|on|off). Сеть этого больше не решает (с 2026-10-15; zoneX11 прочитан один раз, при переносе в контейнеры). Программам только с X11 (TeamSpeak, Steam, приложения на CEF) без него не запуститься. X-сервер хоста из зон недоступен всегда: он показывает каждому клиенту окна, ввод и буфер обмена всех остальных; свой X-сервер видит только программы этого запуска. Действует для программ, запущенных после изменения. См. docs/HERMETICITY.ru.md §7.";
       };
       permissions.microphone = lib.mkOption {
         type = lib.types.nullOr (
@@ -818,6 +818,7 @@ let
     "defaults.permissions.screencast"
     "defaults.permissions.camera"
     "defaults.permissions.audioManager"
+    "defaults.permissions.x11"
     "defaults.permissions.hermetic"
     "defaults.permissions.nixDaemon"
     "defaults.permissions.hostFilesWritable"
@@ -980,6 +981,11 @@ in
           default = null;
           description = "Камера программ контейнера без своего слова: no, black, ask или yes (как containers.<имя>.permissions.camera; true — yes, false — no). Сеть этого больше не решает; своё слово — containers.<имя>.permissions.camera, main.permissions.camera. null — не задавать из Nix (cellward defaults set camera …, иначе ask — чёрная до ответа, спрашивают при начале съёмки; на машине без камеры — камеры нет).";
         };
+        x11 = lib.mkOption {
+          type = lib.types.nullOr lib.types.bool;
+          default = null;
+          description = "Свой X-сервер (xwayland-satellite) программам контейнера без своего слова (и настоящего дома без своего), в любой сети; по умолчанию нет. Своё слово — containers.<имя>.permissions.x11, main.permissions.x11. null — не задавать из Nix (cellward defaults set x11 on|off).";
+        };
         audioManager = lib.mkOption {
           type = lib.types.nullOr lib.types.bool;
           default = null;
@@ -1048,7 +1054,7 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "games" ];
-      description = "Устарело: containers.<имя>.permissions.x11. Зоны (по имени), программы которых получают свой X-сервер (xwayland-satellite) — для X11-only программ вроде Steam без контейнеров; значение по умолчанию для контейнеров без своего: контейнер с permissions.x11 = false X-сервера и здесь не получает. X-сервер хоста из зон недоступен всегда. Сами зоны в Nix не описываются: здесь только имена.";
+      description = "Не действует с 2026-10-15: сеть больше не решает это за свои программы (docs/PERMISSIONS.md §11.15) — defaults.permissions.x11, containers.<имя>.permissions.x11, main.permissions.x11. Прочитано один раз, при переносе в контейнеры: контейнер, привязанный к сети из списка, получил свой x11 = true; настоящий дом и контейнеры без сети — только если X-сервер был у всех сетей. Прежнее описание: зоны (по имени), программы которых получают свой X-сервер (xwayland-satellite).";
     };
 
     nixDaemon = lib.mkOption {
@@ -1548,10 +1554,9 @@ in
       + "main.permissions.camera, defaults.permissions.camera"
     )
     ++ lib.optional (cfg.zoneX11 != [ ]) (
-      "programs.cellward.zoneX11 устарело: свой X-сервер теперь у контейнера — "
-      + "programs.cellward.containers.<имя>.permissions.x11 (зона остаётся значением по "
-      + "умолчанию для контейнеров без своего, null; false у контейнера отказывается и от "
-      + "X-сервера зоны)"
+      "programs.cellward.zoneX11 не действует: сеть больше не решает, есть ли у её программ "
+      + "свой X-сервер (docs/PERMISSIONS.md §11.15) — containers.<имя>.permissions.x11, "
+      + "main.permissions.x11, defaults.permissions.x11"
     );
 
   assertions =
@@ -1779,6 +1784,7 @@ in
             cfg.defaults.permissions.camera
         }\n"
         ++ lib.optional (cfg.defaults.permissions.audioManager != null) "audio_manager = ${lib.boolToString cfg.defaults.permissions.audioManager}\n"
+        ++ lib.optional (cfg.defaults.permissions.x11 != null) "x11 = ${lib.boolToString cfg.defaults.permissions.x11}\n"
         ++ lib.optional (cfg.defaults.permissions.hermetic != null) "hermetic = ${lib.boolToString cfg.defaults.permissions.hermetic}\n"
         ++ lib.optional (cfg.defaults.permissions.nixDaemon != null) "nix_daemon = ${lib.boolToString cfg.defaults.permissions.nixDaemon}\n"
         ++ lib.optional (cfg.defaults.permissions.hostFilesWritable != null) "host_files_writable = ${lib.boolToString cfg.defaults.permissions.hostFilesWritable}\n"

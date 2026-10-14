@@ -442,7 +442,7 @@ cellward profile create|list|rm <имя>
 cellward sandbox create|list|rm <имя>
 cellward perms list|reset <программа|--all>    # выданные доступы к файлам
 cellward lock|unlock <зона>                    # запретить выход в другие сети
-cellward x11 <зона> on|off                     # свой X-сервер программам зоны
+cellward defaults set x11 on|off               # свой X-сервер контейнерам без своего слова (контейнеру: container set <к> x11)
 cellward hermetic <зона> default|on|off        # без systemd --user, шина через фильтр, брокер; default — как у всех зон
 cellward hermetic --default on|off             # для зон без своей настройки (on — по умолчанию с 2026-09)
 cellward default-profile ask|main|own|<имя>   # ask (по умолчанию): спрашивает окно; программе, которой контейнер не выбирали, предвыбран свой дом

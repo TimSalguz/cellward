@@ -98,16 +98,17 @@ pub fn rows(tools: &Tools, zone: &str, who: &Who, home: Option<Home>) -> Vec<Row
         Who::Main => Some(crate::container::MAIN_RECORD),
         Who::Unknown => None,
     };
-    // X11: the container's own word, both ways, else its network's
-    // (`x11::effective`), as a launch reads them.
-    let zone_x11 = crate::x11::zone_setting(&tools.state, config, zone);
+    // X11: the container's own word, both ways, else the template's
+    // (`x11::effective`), as a launch reads them — not the network's.
+    let template_x11 = crate::permissions::flag(config, "x11");
     let own_x11 = record
         .and_then(|name| crate::container::load(tools, name))
         .and_then(|c| c.x11)
         .map(|x11| (x11.value, x11.source));
-    let (x11, x11_whose) = match own_x11 {
-        Some(own) => (own, Asker::Container),
-        None => (zone_x11, Asker::Network),
+    let (x11, x11_whose) = match (record, own_x11) {
+        (_, Some(own)) => (own, Asker::Container),
+        (Some(_), None) => (template_x11, Asker::Template),
+        (None, None) => (template_x11, Asker::Nobody),
     };
     rows.push(Row {
         key: "x11",

@@ -1573,7 +1573,7 @@ let
           # in a /tmp/.X11-unix of the launch alone, and none in the abstract
           # namespace, which the zone's network namespace shows every program
           # of the zone. No clock: the program starts once the server answers.
-          alice("cellward x11 vmsmoke on")
+          alice("cellward container set main x11 on")
           alice(
               f"systemd-run --user --unit=vmxhold --setenv=WAYLAND_DISPLAY={display} "
               "cellward run vmsmoke -- sh -c "
@@ -1587,7 +1587,7 @@ let
           in_inst(*mi, f"test ! -e /tmp/.X11-unix/X{xd[1:]}")
           in_inst(*mi, f"sh -c '! grep -q @/tmp/.X11-unix/X{xd[1:]} /proc/net/unix'")
           alice("systemctl --user stop vmxhold || true")
-          alice("cellward x11 vmsmoke off")
+          alice("cellward container set main x11 default")
           alice("rm -f ~/vmx-info ~/vmx-display")
           exec(open("${./vm-promise-x11.py}").read())
           # The zone's directory of sockets is read-only in the zone: a

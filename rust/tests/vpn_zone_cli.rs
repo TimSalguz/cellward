@@ -886,7 +886,7 @@ fn containers_and_sandboxes_are_created_listed_and_removed() {
 
 #[test]
 fn two_entries_for_one_binary_see_each_other() {
-    // A Steam game's shortcut (id PEAK) and Steam itself, firefox and its
+    // A Steam game's shortcut (id PEAK) and Steam itself, a browser and its
     // private-window entry: different ids, one single-instance binary. The
     // second launch hands its work to the process that is already up, in ITS
     // network — and the warning used to stay silent.
@@ -916,13 +916,13 @@ fn two_entries_for_one_binary_see_each_other() {
 
     // A plain launch of another id of the same binary gets the ordinary text.
     fs::write(
-        index.join("firefox"),
+        index.join("vz-test-browser"),
         format!("{} de \n", std::process::id()),
     )
     .unwrap();
     let out = home.run_with(
-        &["run", "nl", "--", "firefox", "--private-window"],
-        &[("VPN_ZONE_APPID", "firefox-private")],
+        &["run", "nl", "--", "vz-test-browser", "--private-window"],
+        &[("VPN_ZONE_APPID", "vz-test-browser-private")],
     );
     let err = stderr(&out);
     assert!(err.contains("уже запущена в сети «de»"), "{err}");
@@ -932,9 +932,9 @@ fn two_entries_for_one_binary_see_each_other() {
     // be put (no kdialog here) stops the launch, and says why — before, it
     // ended with success and nothing to show (2026-09-28).
     let out = home.run_with(
-        &["run", "nl", "--", "firefox", "--private-window"],
+        &["run", "nl", "--", "vz-test-browser", "--private-window"],
         &[
-            ("VPN_ZONE_APPID", "firefox-private"),
+            ("VPN_ZONE_APPID", "vz-test-browser-private"),
             ("WAYLAND_DISPLAY", "wayland-test"),
         ],
     );
@@ -945,19 +945,23 @@ fn two_entries_for_one_binary_see_each_other() {
 
     // The same binary in the SAME network is no conflict at all.
     fs::write(
-        index.join("firefox"),
+        index.join("vz-test-browser"),
         format!("{} nl \n", std::process::id()),
     )
     .unwrap();
     let out = home.run_with(
-        &["run", "nl", "--", "firefox"],
-        &[("VPN_ZONE_APPID", "firefox-private")],
+        &["run", "nl", "--", "vz-test-browser"],
+        &[("VPN_ZONE_APPID", "vz-test-browser-private")],
     );
     assert!(!stderr(&out).contains("уже запущена"), "{}", stderr(&out));
     // …and the launch was filed under both keys on the way.
-    let by_id = fs::read_to_string(home.state().join(".running/__main__/firefox-private")).unwrap();
+    let by_id = fs::read_to_string(
+        home.state()
+            .join(".running/__main__/vz-test-browser-private"),
+    )
+    .unwrap();
     assert!(by_id.contains(" nl "), "{by_id}");
-    let by_binary = fs::read_to_string(index.join("firefox")).unwrap();
+    let by_binary = fs::read_to_string(index.join("vz-test-browser")).unwrap();
     assert_eq!(by_binary.lines().count(), 2, "{by_binary}");
 }
 
@@ -2672,25 +2676,34 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     let out = home.run(&["container", "set", "work", "x11", "maybe"]);
     assert_eq!(out.status.code(), Some(1));
 
-    // Or the zone itself, without any container.
+    // The network no longer says (2026-10-15): `cellward x11 <zone>` names
+    // the words that do it now, and gives nothing.
     let out = home.run_with(&["run", "nl", "--", "steam"], &dry);
     assert!(!stdout(&out).contains("x11-run"), "{}", stdout(&out));
     let out = home.run(&["x11", "nl", "on"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    let out = home.run_with(&["run", "nl", "--", "steam"], &dry);
+    assert_eq!(out.status.code(), Some(1));
     assert!(
-        stdout(&out).contains("x11-run --xwayland"),
+        stderr(&out).contains("cellward defaults set x11 on"),
         "{}",
-        stdout(&out)
+        stderr(&out)
     );
-    let json = stdout(&home.run(&["status", "--json"]));
-    assert!(
-        json.contains("\"x11\":{\"value\":true,\"source\":\"local\"},\"hermetic\":"),
-        "{json}"
-    );
-    // 2026-09-28: a container's own `off` refuses the zone's X server —
-    // it used to be the container's OR the zone's —; `default` takes its
-    // word back, and the zone's is its again.
+    let out = home.run_with(&["run", "nl", "--", "steam"], &dry);
+    assert!(!stdout(&out).contains("x11-run"), "{}", stdout(&out));
+    // The template: every container without a word of its own, the main
+    // home too, in every network.
+    let out = home.run(&["defaults", "set", "x11", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("x11: on"), "{}", stdout(&out));
+    for net in ["nl", "offline"] {
+        let out = home.run_with(&["run", net, "--", "steam"], &dry);
+        assert!(
+            stdout(&out).contains("x11-run --xwayland"),
+            "{net}: {}",
+            stdout(&out)
+        );
+    }
+    // A container's own `off` refuses the template's X server; `default`
+    // takes its word back, and the template's is its again.
     let out = home.run(&["container", "set", "work", "x11", "off"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let json = stdout(&home.run(&["container", "show", "work", "--json"]));
@@ -3015,12 +3028,6 @@ fn a_container_with_x11_gets_its_own_x_server_in_zones_only() {
     );
     fs::remove_file(home.root.join("config/declared/hermetic-default")).unwrap();
     fs::remove_file(home.root.join("config/declared/hermetic-exceptions")).unwrap();
-    // Declared in Nix: switched off there, not here.
-    fs::create_dir_all(home.root.join("config/declared")).unwrap();
-    declare(&home.root.join("config/declared/zone-x11"), "nl\n");
-    let out = home.run(&["x11", "nl", "off"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("в Nix"), "{}", stderr(&out));
 }
 
 #[test]
@@ -3616,4 +3623,50 @@ fn version_names_the_build() {
             "{word}: {text}"
         );
     }
+}
+
+/// The X server moves from the networks to the containers (2026-10-15),
+/// once and never wider: a container bound to a network that gave its
+/// programs one keeps it as its own word; one of no network, and the main
+/// home, take the narrowest of all networks' — none, while one network
+/// gave none.
+#[test]
+fn the_x_server_moves_from_the_networks_to_the_containers() {
+    let home = Home::new("x11-move");
+    home.zone_is_up("nl");
+    home.zone_is_up("de");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
+    fs::write(home.state().join("nl/x11"), "").unwrap();
+    let policy = home.root.join("config/containers");
+    for (name, conf) in [
+        ("work", "home = private\nnetwork = nl\n"),
+        ("bank", "home = private\nnetwork = de\n"),
+        ("free", "home = private\n"),
+    ] {
+        fs::create_dir_all(policy.join(name)).unwrap();
+        fs::write(policy.join(name).join("container.conf"), conf).unwrap();
+    }
+    let show = |name: &str| stdout(&home.run(&["container", "show", name, "--json"]));
+    assert!(
+        show("work").contains("\"x11\":{\"value\":true,\"source\":\"local\"}"),
+        "{}",
+        show("work")
+    );
+    for name in ["bank", "free"] {
+        assert!(
+            show(name).contains("\"x11\":{\"value\":null,\"source\":\"default\"}"),
+            "{name}: {}",
+            show(name)
+        );
+    }
+    // Once: a marker put back later is nobody's word.
+    fs::write(home.state().join("de/x11"), "").unwrap();
+    assert!(
+        show("bank").contains("\"x11\":{\"value\":null"),
+        "{}",
+        show("bank")
+    );
+    let dry = [("VPN_ZONE_DRYRUN", "1")];
+    let out = home.run_with(&["run", "de", "--", "steam"], &dry);
+    assert!(!stdout(&out).contains("x11-run"), "{}", stdout(&out));
 }
