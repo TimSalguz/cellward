@@ -5,7 +5,48 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- **The X server is the container's, in every network** (2026-10-15, the
+  owner). An X server of its own (xwayland-satellite) is the container's
+  word (`cellward container set <c> x11 on|off`, `containers.<c>.permissions.x11`,
+  the main home's `main.permissions.x11`), else the template's
+  (`cellward defaults set x11 on|off`, new `defaults.permissions.x11`;
+  off built in) — no longer the network's. A program that needs X
+  (TeamSpeak 6, CEF and Qt programs on X11) ran in one network and ended
+  at once in another. **Migration**, once, never wider: a container bound
+  to a network that had one (`zoneX11`, `cellward x11 <zone> on`) keeps it
+  as its own word; the main home and the containers of no network take
+  the narrowest of all networks' — none, unless every network had one
+  (journal: `permissions-moved`). `cellward x11 <zone>` now refuses with
+  the words that do it; `programs.cellward.zoneX11` no longer works and
+  warns.
+
 ### Fixed
+- **Firefox launched again into its container** opens a window of the copy
+  already running there instead of "Firefox is already running, but is not
+  responding". Mozilla's programs hand a second launch over the session bus
+  under `MOZ_DBUS_APP_NAME`; every container instance now gets a name of its
+  own (`org.mozilla.cw<key>.*`), which its hermetic bus filter lets it own and
+  call — and no other, so a launch never reaches the host's Firefox or one in
+  another network. Before, the filter let no Mozilla name through at all.
+- **A program of the real home open in another network**: the launch asks
+  "open it there?" instead of the stale "already running in another network"
+  warning followed by a refusal. One profile cannot be open in two networks
+  at once; "Open in «N»" launches it into the network it runs in, where the
+  running copy opens the window.
+- **A running messenger clicked in the menu comes to the front.** A
+  program known to hand a launch over to its running copy (Telegram,
+  AyuGram) is started into that copy's network with no question — and its
+  window stayed behind: the copy raises it with a token of its own last
+  input, which niri holds too old. The picker now watches that launch and,
+  once it hands over, raises the copy's window through the compositor's IPC
+  (niri, sway) — for the person's click, nothing the program asks for.
+- **Permission panel buttons show when they take a click.** A button under
+  the pointer is drawn with faint words until its guard (1.5 s of the pointer
+  resting, no key or popup of the program's) is over, then lit; a press too
+  soon is visibly none. Before, a lit button looked pressable from the first
+  moment, and quick repeated clicks — each restarting the guard — never
+  answered.
 - Permission panels accept an ordinary click on “Allow…” to open the guarded
   confirmation window. An unanswered panel hands off after 15 seconds on the
   launch's own Wayland display, including for network, microphone and camera
@@ -25,6 +66,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the next one sees the note.
 
 ### Security
+- **A window a zone's program raised takes no tick during its guard.** The
+  link rule's box and the preset's offers of the launch window ("Запрос из
+  сети …") could be ticked by a click during «Секунду…», which the window
+  promises to refuse: they are guarded as every other choice is.
 - **The Wayland proxy in namespaces of its own** (2026-09-29, the owner:
   the proxy reads the program's messages and is to be isolated better): a
   user namespace whose one uid is the user's, and in it mount, network, IPC
