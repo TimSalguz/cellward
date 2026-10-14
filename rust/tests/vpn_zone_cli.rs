@@ -3669,4 +3669,11 @@ fn the_x_server_moves_from_the_networks_to_the_containers() {
     let dry = [("VPN_ZONE_DRYRUN", "1")];
     let out = home.run_with(&["run", "de", "--", "steam"], &dry);
     assert!(!stdout(&out).contains("x11-run"), "{}", stdout(&out));
+    // The main home's own word, in every network.
+    let out = home.run(&["container", "set", "main", "x11", "on"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    for net in ["de", "nl"] {
+        let out = home.run_with(&["run", net, "--", "steam"], &dry);
+        assert!(stdout(&out).contains("x11-run"), "{net}: {}", stdout(&out));
+    }
 }
