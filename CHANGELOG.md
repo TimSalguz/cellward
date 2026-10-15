@@ -120,6 +120,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the next one sees the note.
 
 ### Security
+- **bubblewrap 0.12.0 or newer is required** (CVE-2026-87766): before it,
+  bwrap followed a link in a parent directory out of the sandbox while
+  setting it up, and a container's own home — `$HOME` of its sandbox, where
+  the mount points are made — is its program's to write. The module refuses
+  an older one, `cellward doctor` fails on it, and the tests' nixpkgs pin
+  (it had 0.11.2) moves to a nixos-26.05 commit with 0.12.0.
+- A container that sees the real home could make `~/.config/mimeapps.list`
+  when there was none, and write a desktop's own (`kde-mimeapps.list`,
+  read before it) — the host's handler for links. Both are now made empty
+  before a hermetic container comes up and are read-only in it.
 - **A window a zone's program raised takes no tick during its guard.** The
   link rule's box and the preset's offers of the launch window ("Запрос из
   сети …") could be ticked by a click during «Секунду…», which the window

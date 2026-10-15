@@ -1449,6 +1449,44 @@ fn file_check(id: &str, path: &Path, what: &str) -> Check {
     }
 }
 
+/// bwrap's version (`bwrap --version`: `bubblewrap 0.12.0`): before 0.12.0
+/// it followed a link in a parent directory out of the sandbox while
+/// setting it up (CVE-2026-87766) — and a container's own home, which a
+/// sandbox takes for `$HOME` and makes its mount points in, is its
+/// program's to write.
+pub fn bwrap_version_check(out: Option<&str>) -> Check {
+    let version = out.and_then(|o| o.split_whitespace().nth(1)).map(|v| {
+        v.split(['.', '-'])
+            .take(3)
+            .map(|n| n.parse::<u32>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    });
+    match version {
+        Some(v) if v.as_slice() >= [0, 12, 0].as_slice() => Check::new(
+            "bwrap-version",
+            Level::Ok,
+            format!(
+                "bubblewrap {}",
+                v.iter().map(u32::to_string).collect::<Vec<_>>().join(".")
+            ),
+        ),
+        Some(v) => Check::new(
+            "bwrap-version",
+            Level::Fail,
+            format!(
+                "bubblewrap {} уязвим (CVE-2026-87766: программа контейнера может создать \
+                 файлы вне песочницы при её сборке) — нужен 0.12.0 или новее",
+                v.iter().map(u32::to_string).collect::<Vec<_>>().join(".")
+            ),
+        ),
+        None => Check::new(
+            "bwrap-version",
+            Level::Warn,
+            "версию bubblewrap не узнать (bwrap --version)",
+        ),
+    }
+}
+
 /// `newuidmap` with the setuid bit, where NixOS and the distributions put it.
 fn newuidmap_check() -> Check {
     for dir in ["/run/wrappers/bin", "/usr/bin", "/bin"] {
@@ -1573,6 +1611,14 @@ pub fn system_checks(tools: &Tools, uid: u32) -> Vec<Check> {
     ] {
         checks.push(file_check(id, path, what));
     }
+    checks.push(bwrap_version_check(
+        Command::new(&tools.bwrap)
+            .arg("--version")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .as_deref(),
+    ));
     // The Nix daemon and `trusted-users` (review 2026-09-28): root on the
     // host for whatever has the daemon.
     checks.push(nix_trusted(tools, uid));
@@ -2579,6 +2625,20 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
 
 #[cfg(test)]
 mod tests {
+
+    /// bubblewrap before 0.12.0 is a failure (CVE-2026-87766); one not to
+    /// be read, a warning.
+    #[test]
+    fn an_old_bubblewrap_fails_the_doctor() {
+        let level = |out: Option<&str>| bwrap_version_check(out).level;
+        assert_eq!(level(Some("bubblewrap 0.12.0\n")), Level::Ok);
+        assert_eq!(level(Some("bubblewrap 0.13.1\n")), Level::Ok);
+        assert_eq!(level(Some("bubblewrap 0.11.2\n")), Level::Fail);
+        assert_eq!(level(Some("bubblewrap 0.9.0\n")), Level::Fail);
+        assert_eq!(level(Some("")), Level::Warn);
+        assert_eq!(level(None), Level::Warn);
+    }
+
     use super::*;
     use std::time::{Duration, Instant};
 
