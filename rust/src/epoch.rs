@@ -166,17 +166,19 @@ impl Epoch {
     pub fn place_launch(&self, leaf: &str) -> io::Result<()> {
         if is_leaf(leaf) {
             let dir = self.leaf_dir(leaf);
-            match fs::create_dir(&dir) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(_) => return self.place_self(),
-            }
-            let placed = fs::OpenOptions::new()
-                .write(true)
-                .open(dir.join("cgroup.procs"))
-                .and_then(|mut procs| procs.write_all(b"0"));
-            if placed.is_ok() {
-                return Ok(());
+            let placed = match fs::create_dir(&dir) {
+                Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
+                _ => fs::OpenOptions::new()
+                    .write(true)
+                    .open(dir.join("cgroup.procs"))
+                    .and_then(|mut procs| procs.write_all(b"0")),
+            };
+            match placed {
+                Ok(()) => return Ok(()),
+                Err(e) => eprintln!(
+                    "container-enter: the launch's own cgroup {} ({e}) — in the epoch's",
+                    dir.display()
+                ),
             }
         }
         self.place_self()

@@ -334,7 +334,10 @@ fn place(id: &str, epoch: &crate::epoch::Epoch) {
     let leaf = crate::sys::start_time(waiter).map(|start| crate::epoch::leaf_name(waiter, start));
     let placed = match &leaf {
         Some(leaf) => epoch.place_launch(leaf),
-        None => epoch.place_self(),
+        None => {
+            eprintln!("container-enter: no start time of its waiter {waiter} — in the epoch's cgroup");
+            epoch.place_self()
+        }
     };
     if let Err(e) = placed {
         if epoch.wall().is_some() {
