@@ -132,6 +132,12 @@ jobs:
         run: |
           nix-shell ../tests/harness.nix -A rustShell --run \
             'cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test'
+      # История буфера обмена — тоже крейт отдельный (clip/): те же проверки.
+      - name: история буфера обмена — fmt, clippy, test
+        working-directory: clip
+        run: |
+          nix-shell ../tests/harness.nix -A rustShell --run \
+            'cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test'
 
   # VM-тест (tests/vm.nix): qemu-машина с настоящим systemd и модулем + вторая
   # VM как живой WireGuard-пир. Закрывает то, до чего смоук не дотягивается
