@@ -833,6 +833,20 @@ fn parse_clip_args(args: &[OsString]) -> Result<(i32, Option<(String, String)>),
     }
 }
 
+/// What the module says of the history's window (`clipboard.window.*`,
+/// `declared/clip-window`): its flags.
+fn clip_window_settings(state: &Path) -> Vec<String> {
+    let text = fs::read_to_string(state.join("declared/clip-window")).unwrap_or_default();
+    text.lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(k, v)| {
+            matches!(*k, "lines" | "image-lines")
+                && v.parse::<u32>().is_ok_and(|n| (1..=30).contains(&n))
+        })
+        .flat_map(|(k, v)| [format!("--{k}"), v.to_owned()])
+        .collect()
+}
+
 fn paste_from_history(tools: &Tools, pid: i32, label: &str, history: &str) -> u8 {
     let notify = |body: &str| {
         crate::dialog::notify(&tools.notify_send, None, "5000", label, body);
@@ -840,6 +854,7 @@ fn paste_from_history(tools: &Tools, pid: i32, label: &str, history: &str) -> u8
     let out = Command::new(&tools.window)
         .args(["clip", "--history", history, "--launch"])
         .arg(pid.to_string())
+        .args(clip_window_settings(&tools.state))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -2134,6 +2149,23 @@ mod tests {
         let entries = menu_entries("Лис", Some(&launch), &Pin::Main, &none);
         assert!(entries[5].2, "cutting a zone off is marked as dangerous");
         assert!(entries[5].1.contains("nl"));
+    }
+
+    #[test]
+    fn the_clip_windows_settings_are_the_modules() {
+        let dir = std::env::temp_dir().join(format!("vz-clipwin-{}", std::process::id()));
+        fs::create_dir_all(dir.join("declared")).unwrap();
+        assert!(clip_window_settings(&dir).is_empty());
+        fs::write(
+            dir.join("declared/clip-window"),
+            "lines 5\nimage-lines 4\nother 1\nlines x\nimage-lines 999\n",
+        )
+        .unwrap();
+        assert_eq!(
+            clip_window_settings(&dir),
+            ["--lines", "5", "--image-lines", "4"]
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

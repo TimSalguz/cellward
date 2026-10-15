@@ -393,6 +393,9 @@ const FRAME: u8 = b'l';
 /// Supervisor → proxy: paste for the person what the clipboard history just
 /// made the selection (`crate::clip::want_paste`, [`PASTE_ASK`]). No answer.
 const PASTE: u8 = b'v';
+/// Proxy → supervisor: the clipboard history's window for this launch —
+/// a row of the ≡'s dropdown (`cellward clip-window --pid`). No answer.
+const CLIP: u8 = b'h';
 /// A frame's line at most.
 const MAX_FRAME_ARG: usize = 256;
 
@@ -402,6 +405,7 @@ fn ask_byte(ask: Ask) -> u8 {
         Ask::Menu => MENU,
         Ask::Network => NETWORK,
         Ask::Restart => RESTART,
+        Ask::Clip => CLIP,
     }
 }
 
@@ -411,6 +415,7 @@ fn ask_of(byte: u8) -> Option<Ask> {
         MENU => Some(Ask::Menu),
         NETWORK => Some(Ask::Network),
         RESTART => Some(Ask::Restart),
+        CLIP => Some(Ask::Clip),
         _ => None,
     }
 }
@@ -1562,6 +1567,7 @@ pub(crate) fn menu_argv(
     match ask {
         Ask::Network => verb.push("--network".into()),
         Ask::Restart => verb.push("--restart".into()),
+        Ask::Clip => verb[0] = "clip-window".into(),
         Ask::Menu => {}
     }
     user_unit_argv(
@@ -5374,7 +5380,7 @@ mod tests {
                 &mut compositor,
                 &[
                     leave(60, buttons),
-                    enter(61, popup, 100, 1 + 2 * 28 + 14),
+                    enter(61, popup, 100, 1 + 3 * 28 + 14),
                     button(62, true),
                     button(63, false),
                 ],
@@ -5464,7 +5470,7 @@ mod tests {
     fn the_asks_have_bytes_of_their_own() {
         // Distinct from every other byte of the channel, either way.
         let others = [READY, CONNECT, UPSTREAM, UPSTREAM_BARE, REFUSED];
-        for ask in [Ask::Menu, Ask::Network, Ask::Restart] {
+        for ask in [Ask::Menu, Ask::Network, Ask::Restart, Ask::Clip] {
             let byte = ask_byte(ask);
             assert!(!others.contains(&byte), "{ask:?}");
             assert_eq!(ask_of(byte), Some(ask));
@@ -5569,6 +5575,8 @@ mod tests {
                 "4242",
             ]
         );
+        let clip = argv(None, Ask::Clip);
+        assert_eq!(clip[clip.len() - 3..], ["clip-window", "--pid", "4242"]);
         let network = argv(None, Ask::Network);
         assert!(!network.iter().any(|a| a.contains("WAYLAND_DISPLAY")));
         assert_eq!(network.last().map(String::as_str), Some("--network"));
@@ -6345,6 +6353,7 @@ mod tests {
             NETWORK,
             ATTENTION,
             RESTART,
+            CLIP,
         ];
         for byte in [QUESTION, RETRACT, ANSWERED, NOWHERE, PASTE] {
             assert!(!others.contains(&byte), "{}", byte as char);
