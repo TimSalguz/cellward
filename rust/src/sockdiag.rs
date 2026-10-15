@@ -76,6 +76,10 @@ pub struct Socket {
     pub cookie: u64,
     pub uid: u32,
     pub inode: u32,
+    /// The cgroup the socket was made in (`INET_DIAG_CGROUP_ID`, Linux 5.7):
+    /// its id, the inode of its directory in the cgroup tree — the launch's
+    /// own (`crate::epoch`) whatever process holds it now.
+    pub cgroup: Option<u64>,
     /// `inet_diag_sockid` as the kernel wrote it: what a destroy names the
     /// socket by, byte for byte, as `ss -K` does.
     pub id: [u8; SOCKID_LEN],
@@ -208,8 +212,30 @@ fn socket(body: &[u8]) -> Result<Socket, ParseError> {
         // idiag_expires, idiag_rqueue and idiag_wqueue come first.
         uid: u32_ne(body, rest + 12),
         inode: u32_ne(body, rest + 16),
+        cgroup: cgroup_attr(&body[MSG_LEN..]),
         id: raw,
     })
+}
+
+/// `INET_DIAG_CGROUP_ID` among the attributes after a socket's message.
+const INET_DIAG_CGROUP_ID: u16 = 21;
+
+/// The cgroup id among a socket's attributes (`struct rtattr`s, each four-
+/// byte aligned), when the kernel wrote one.
+fn cgroup_attr(mut attrs: &[u8]) -> Option<u64> {
+    while attrs.len() >= 4 {
+        let len = usize::from(u16_ne(attrs, 0));
+        if len < 4 || len > attrs.len() {
+            return None;
+        }
+        if u16_ne(attrs, 2) == INET_DIAG_CGROUP_ID && len >= 12 {
+            let mut id = [0u8; 8];
+            id.copy_from_slice(&attrs[4..12]);
+            return Some(u64::from_ne_bytes(id));
+        }
+        attrs = attrs.get((len + 3) & !3..).unwrap_or_default();
+    }
+    None
 }
 
 /// Every message of one `recv` of the diag socket. Attributes after a
@@ -358,6 +384,31 @@ fn open() -> io::Result<OwnedFd> {
     }
     // SAFETY: the descriptor was just returned to us and nothing else owns it.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// A sock_diag socket of this network namespace — the namespace it stays
+/// of, whoever holds it later (`frame-relay --diag-socket`, the keeper's).
+pub fn open_here() -> io::Result<OwnedFd> {
+    open()
+}
+
+/// The cgroup each socket of `fd`'s namespace was made in, by its inode: TCP
+/// but listeners, and UDP, both families. What a dump cannot give is left
+/// out.
+pub fn cgroups(fd: &OwnedFd) -> std::collections::HashMap<u32, u64> {
+    let mut out = std::collections::HashMap::new();
+    let mut seq: u32 = 1;
+    for (protocol, states) in [(IPPROTO_TCP, STATES_BUT_LISTEN), (IPPROTO_UDP, ALL_STATES)] {
+        for family in [AF_INET, AF_INET6] {
+            seq = seq.wrapping_add(1);
+            for socket in dump(fd, family, protocol, states, seq).unwrap_or_default() {
+                if let (Some(cgroup), true) = (socket.cgroup, socket.inode != 0) {
+                    out.insert(socket.inode, cgroup);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// One request to the kernel.
@@ -524,6 +575,7 @@ pub fn destroy_supported() -> Result<(), String> {
         cookie: u64::from_ne_bytes(cookie),
         uid: 0,
         inode: 0,
+        cgroup: None,
         id,
     };
     for (seq, protocol) in [(1u32, IPPROTO_TCP), (2, IPPROTO_UDP)] {
@@ -548,6 +600,27 @@ pub fn destroy_supported() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The socket's cgroup among its attributes, after a pad the kernel
+    /// may put before a 64-bit one; none, or one cut short, is none.
+    #[test]
+    fn a_sockets_cgroup_is_read_from_its_attributes() {
+        let mut attrs = Vec::new();
+        attrs.extend_from_slice(&4u16.to_ne_bytes());
+        attrs.extend_from_slice(&20u16.to_ne_bytes());
+        attrs.extend_from_slice(&12u16.to_ne_bytes());
+        attrs.extend_from_slice(&INET_DIAG_CGROUP_ID.to_ne_bytes());
+        attrs.extend_from_slice(&0x1234_5678_9abc_u64.to_ne_bytes());
+        assert_eq!(cgroup_attr(&attrs), Some(0x1234_5678_9abc));
+        assert_eq!(cgroup_attr(&attrs[..4]), None);
+        assert_eq!(cgroup_attr(&attrs[..10]), None);
+        assert_eq!(cgroup_attr(&[]), None);
+        assert_eq!(
+            cgroup_attr(&[0, 0, 21, 0]),
+            None,
+            "a length below a header's"
+        );
+    }
     use super::*;
 
     /// A socket message as the kernel writes it, from its fields.
@@ -730,6 +803,7 @@ mod tests {
             cookie: 0,
             uid: 0,
             inode: 0,
+            cgroup: None,
             id: [0; SOCKID_LEN],
         };
         assert!(loopback_only(&s("127.0.0.1", "127.0.0.1")));
@@ -760,6 +834,7 @@ mod tests {
             cookie: 0,
             uid: 0,
             inode: 7,
+            cgroup: None,
             id: [0; SOCKID_LEN],
         };
         assert!(to_break(&s(1, "10.254.1.2", "10.99.0.1"), IPPROTO_TCP));

@@ -3168,7 +3168,18 @@ impl Transport {
             tally,
             flows,
             news,
-            owners: crate::owners::Keeper::default(),
+            // A sock_diag socket made in its network namespace: the cgroup
+            // each socket was made in, so its launch (`crate::owners`).
+            owners: crate::owners::Keeper::with_diag(
+                match (
+                    std::env::current_exe(),
+                    sys::pidfd_open(space)
+                        .filter(|_| crate::instance::space(state, &plan.id) == Some(space)),
+                ) {
+                    (Ok(core), Some(pidfd)) => crate::bridge::diag_socket(&core, &pidfd),
+                    _ => None,
+                },
+            ),
             asker: gate.as_ref().and_then(|_| {
                 crate::netask::Asker::new(
                     &zone.tools.window,

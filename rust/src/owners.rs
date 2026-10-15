@@ -185,12 +185,20 @@ fn socket_inode(link: &str) -> Option<u64> {
         .ok()
 }
 
-/// Which of `pids` holds each socket: its inode → the pid (the first found).
-fn holders_of(pids: &[i32]) -> HashMap<u64, i32> {
+/// Which of `pids` holds each socket: its inode → the pid (the first
+/// found); and those whose descriptors the user may not read — a process
+/// that made itself non-dumpable (Chromium's network service, CEF's).
+fn holders_of(pids: &[i32]) -> (HashMap<u64, i32>, Vec<i32>) {
     let mut out = HashMap::new();
+    let mut closed = Vec::new();
     for pid in pids {
-        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
-            continue;
+        let fds = match fs::read_dir(format!("/proc/{pid}/fd")) {
+            Ok(fds) => fds,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                closed.push(*pid);
+                continue;
+            }
+            Err(_) => continue,
         };
         for fd in fds.flatten() {
             if let Some(inode) = fs::read_link(fd.path())
@@ -201,7 +209,7 @@ fn holders_of(pids: &[i32]) -> HashMap<u64, i32> {
             }
         }
     }
-    out
+    (out, closed)
 }
 
 /// The parent of a process, from its `stat` (after its name, which may have
@@ -230,9 +238,28 @@ fn launches(registry: &Path) -> HashMap<i32, String> {
     out
 }
 
-/// The program of process `pid` and its launch: it or the nearest of its
-/// parents that is one.
+/// The program of process `pid` and its launch: by its launch's cgroup
+/// first ([`launch_by_cgroup`]) — a process its launch's parents left
+/// behind is still of it there —, else it or the nearest of its parents that
+/// is one.
 fn program_of(pid: i32, launches: &HashMap<i32, String>) -> Option<(String, i32)> {
+    launch_by_cgroup(pid, launches).or_else(|| program_by_parents(pid, launches))
+}
+
+/// The launch whose cgroup process `pid` is in (`crate::epoch`,
+/// `e<N>/l<waiter>-<start>`): the waiter, still the one of that start, and
+/// up its parents the launch. `/proc/<pid>/cgroup` is read also of a process
+/// that lets nobody read its descriptors.
+fn launch_by_cgroup(pid: i32, launches: &HashMap<i32, String>) -> Option<(String, i32)> {
+    let text = fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    let path = crate::kill::cgroup_of(&text)?;
+    let (waiter, start) = crate::epoch::leaf_of(path.rsplit('/').next()?)?;
+    (crate::sys::start_time(waiter) == Some(start)).then_some(())?;
+    program_by_parents(waiter, launches)
+}
+
+/// It or the nearest of its parents that is a launch.
+fn program_by_parents(pid: i32, launches: &HashMap<i32, String>) -> Option<(String, i32)> {
     let mut at = pid;
     for _ in 0..64 {
         if let Some(key) = launches.get(&at) {
@@ -258,14 +285,97 @@ pub fn of(space: i32, registry: &Path, flows: &[Flow], procs: &Procs) -> Vec<Opt
     if socks.is_empty() {
         return vec![None; flows.len()];
     }
-    let holders = holders_of(&procs.in_netns(space));
-    owned(&socks, &holders, registry, flows)
+    let (holders, closed) = holders_of(&procs.in_netns(space));
+    owned(&socks, &holders, &closed, registry, flows)
+}
+
+/// The process to name for a socket none of the readable processes holds:
+/// it is one of `closed`, whose descriptors cannot be read — and when every
+/// one of them is of the same launch (by its cgroup), the socket is that
+/// launch's for sure. Not one guessed among launches: two of them with
+/// such processes, or one of no launch, and the owner stays unknown.
+fn closed_holder(closed: &[i32], launches: &HashMap<i32, String>) -> Option<i32> {
+    let mut of_launch = closed
+        .iter()
+        .map(|pid| launch_by_cgroup(*pid, launches).map(|(_, launch)| (launch, *pid)));
+    let (launch, first) = of_launch.next()??;
+    of_launch
+        .all(|other| other.is_some_and(|(l, _)| l == launch))
+        .then_some(first)
+}
+
+/// The launches' cgroups of the instance's current epoch (`crate::epoch`)
+/// by their ids — the inode of each one's directory, as sock_diag names a
+/// socket's cgroup.
+fn leaves_by_id(dir: &Path) -> HashMap<u64, (PathBuf, String)> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(epoch) = crate::epoch::read(dir) else {
+        return HashMap::new();
+    };
+    crate::epoch::leaves(&epoch.dir())
+        .into_iter()
+        .filter_map(|leaf| {
+            let path = epoch.leaf_dir(&leaf);
+            let id = fs::metadata(&path).ok()?.ino();
+            Some((id, (path, leaf)))
+        })
+        .collect()
+}
+
+/// The owner of a socket made in a launch's cgroup `leaf`: the launch, by
+/// its waiter. A process is named only where it is sure: the one of the
+/// cgroup whose descriptors are closed — no readable one holds the socket,
+/// or it would have been found —, cellward's own wrapper aside. Several
+/// closed, and only the program is said: which of them made it cannot be
+/// known without privileges (`docs/FIREWALL.md` §3).
+fn by_leaf((path, leaf): &(PathBuf, String), launches: &HashMap<i32, String>) -> Option<Owner> {
+    let (waiter, start) = crate::epoch::leaf_of(leaf)?;
+    (crate::sys::start_time(waiter) == Some(start)).then_some(())?;
+    let (program, launch) = program_by_parents(waiter, launches)?;
+    let pids: Vec<i32> =
+        crate::epoch::procs_of(&fs::read_to_string(path.join("cgroup.procs")).unwrap_or_default());
+    let closed: Vec<i32> = pids
+        .into_iter()
+        .filter(|pid| {
+            fs::read_dir(format!("/proc/{pid}/fd"))
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+                && comm(*pid) != OWN_WRAPPER
+        })
+        .collect();
+    let (pid, process) = match closed.as_slice() {
+        [one] => (*one, comm(*one)),
+        _ => (0, String::new()),
+    };
+    Some(Owner {
+        pid,
+        process,
+        program: Some(program),
+        launch: Some(launch),
+    })
+}
+
+/// The `comm` of cellward's own processes in a launch (`profile-run`, the
+/// wrapper that starts the program): never the program's socket's maker.
+const OWN_WRAPPER: &str = "vpn-zone-core";
+
+/// A process's `comm`, its control characters made `?` — the container's
+/// own word.
+fn comm(pid: i32) -> String {
+    fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|c| {
+            c.trim()
+                .chars()
+                .map(|ch| if ch.is_control() { '?' } else { ch })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// [`of`], its sockets and their holders looked at already.
 fn owned(
     socks: &[Sock],
     holders: &HashMap<u64, i32>,
+    closed: &[i32],
     registry: &Path,
     flows: &[Flow],
 ) -> Vec<Option<Owner>> {
@@ -273,7 +383,11 @@ fn owned(
     flows
         .iter()
         .map(|f| {
-            let pid = *holders.get(&socket_of(socks, f)?.inode)?;
+            let inode = socket_of(socks, f)?.inode;
+            let pid = match holders.get(&inode) {
+                Some(pid) => *pid,
+                None => closed_holder(closed, &launches)?,
+            };
             // The container's own word: nothing of it said to a terminal as
             // a control character.
             let process = fs::read_to_string(format!("/proc/{pid}/comm"))
@@ -359,9 +473,21 @@ pub struct Keeper {
     /// The lines in the file.
     lines: usize,
     procs: Procs,
+    /// A sock_diag socket of the instance's network namespace
+    /// (`bridge::diag_socket`): which cgroup each socket was made in —
+    /// its launch's for sure, whatever process holds it and whether it lets
+    /// its descriptors be read.
+    diag: Option<std::os::fd::OwnedFd>,
 }
 
 impl Keeper {
+    pub fn with_diag(diag: Option<std::os::fd::OwnedFd>) -> Self {
+        Self {
+            diag,
+            ..Self::default()
+        }
+    }
+
     /// The relay said it saw new flows: those not looked at yet looked up
     /// now, in the instance's directory `dir`, of its space `space`, by
     /// the launches in `registry`; what is found appended to [`FILE`].
@@ -405,7 +531,7 @@ impl Keeper {
             return Vec::new();
         }
         let socks = sockets(space);
-        let mut holders = holders_of(&self.procs.in_netns(space));
+        let (mut holders, mut closed) = holders_of(&self.procs.in_netns(space));
         // A socket no process known to hold: a process new since the last
         // look — every process looked at again, once.
         let unheld = fresh
@@ -413,9 +539,26 @@ impl Keeper {
             .any(|f| socket_of(&socks, f).is_some_and(|s| !holders.contains_key(&s.inode)));
         if unheld {
             self.procs = Procs::scan();
-            holders = holders_of(&self.procs.in_netns(space));
+            (holders, closed) = holders_of(&self.procs.in_netns(space));
         }
-        let owners = owned(&socks, &holders, registry, fresh);
+        let mut owners = owned(&socks, &holders, &closed, registry, fresh);
+        // Those no process was found for: by the cgroup their socket was
+        // made in, where the kernel says it.
+        if owners.iter().any(Option::is_none) {
+            if let Some(diag) = &self.diag {
+                let made_in = crate::sockdiag::cgroups(diag);
+                let leaves = leaves_by_id(dir);
+                let launches = launches(registry);
+                for (owner, f) in owners.iter_mut().zip(fresh) {
+                    if owner.is_none() {
+                        *owner = socket_of(&socks, f)
+                            .and_then(|s| made_in.get(&(s.inode as u32)))
+                            .and_then(|id| leaves.get(id))
+                            .and_then(|leaf| by_leaf(leaf, &launches));
+                    }
+                }
+            }
+        }
         let mut text = String::new();
         for (f, owner) in fresh.iter().zip(&owners) {
             let seen = (f.key, f.first);
@@ -565,6 +708,18 @@ mod tests {
             ..flow(8000, "8.8.8.8", 443)
         };
         assert_eq!(socket_of(&listening, &outbound), None);
+    }
+
+    /// A socket nobody readable holds is a closed process's only when every
+    /// closed process is of one launch's cgroup: none, or one of no launch,
+    /// and nothing is said.
+    #[test]
+    fn a_closed_holder_is_named_only_when_its_launch_is_sure() {
+        let launches = HashMap::new();
+        assert_eq!(closed_holder(&[], &launches), None);
+        // This process: in no launch's cgroup.
+        assert_eq!(closed_holder(&[std::process::id() as i32], &launches), None);
+        assert_eq!(launch_by_cgroup(std::process::id() as i32, &launches), None);
     }
 
     #[test]

@@ -1385,6 +1385,36 @@ fn probe_main(args: &[OsString]) -> u8 {
 /// there; every socket that may reach out destroyed; the rules closed to
 /// loopback. The tally on stdout (`sockdiag::Tally::word`). 1 when a tap is
 /// there or the closed rules do not load.
+/// `frame-relay --diag-socket <fd>` in the instance (`bridge::diag_socket`):
+/// a sock_diag socket of its network namespace made and handed over on the
+/// Unix socket `fd` — the keeper asks it which cgroup each socket was made
+/// in (`crate::owners`), and only dumps on it.
+fn diag_socket_main(args: &[OsString]) -> u8 {
+    let Some(fd) = args
+        .first()
+        .and_then(|a| a.to_str())
+        .and_then(|a| a.parse::<RawFd>().ok())
+        .filter(|fd| *fd > 2)
+    else {
+        eprintln!("vpn-zone-core frame-relay --diag-socket <fd>");
+        return 2;
+    };
+    let sock = match crate::sockdiag::open_here() {
+        Ok(sock) => sock,
+        Err(e) => {
+            eprintln!("vpn-zone-core frame-relay --diag-socket: no diag socket ({e})");
+            return 1;
+        }
+    };
+    match crate::sys::send_with_fds(fd, b"d", &[sock.as_raw_fd()]) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("vpn-zone-core frame-relay --diag-socket: not handed over ({e})");
+            1
+        }
+    }
+}
+
 fn seal_main(args: &[OsString]) -> u8 {
     // SAFETY: prctl with these arguments takes no pointers.
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
@@ -1427,6 +1457,7 @@ pub fn main(args: &[OsString]) -> u8 {
         Some("--attach") => return attach_main(&args[1..]),
         Some("--probe") => return probe_main(&args[1..]),
         Some("--seal") => return seal_main(&args[1..]),
+        Some("--diag-socket") => return diag_socket_main(&args[1..]),
         _ => {}
     }
     let (tap, stream) = match parse_args(args) {

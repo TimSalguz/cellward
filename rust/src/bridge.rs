@@ -1340,6 +1340,30 @@ pub fn probe(core: &Path, nft: &Path, space: &OwnedFd, wall: crate::relay::Wall)
     }
 }
 
+/// A sock_diag socket of the instance's network namespace, made there by
+/// `frame-relay --diag-socket` and handed back (`crate::owners`): `None`
+/// where it could not be — the owners are then found by processes alone.
+pub fn diag_socket(core: &Path, space: &OwnedFd) -> Option<OwnedFd> {
+    let (mine, theirs) = std::os::unix::net::UnixStream::pair().ok()?;
+    let status = in_instance(core, space, &[theirs.as_raw_fd()])
+        .arg("frame-relay")
+        .arg("--diag-socket")
+        .arg(theirs.as_raw_fd().to_string())
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
+        .ok()?;
+    drop(theirs);
+    if !status.success() {
+        return None;
+    }
+    let mut byte = [0u8; 1];
+    match crate::sys::recv_into_with_fds(mine.as_raw_fd(), &mut byte, 1) {
+        Ok((1, mut fds, _)) if byte[0] == b'd' => fds.pop(),
+        _ => None,
+    }
+}
+
 /// `frame-relay --seal` in the instance (stage 4, a switch's break): the
 /// tally of what it destroyed, or why it did not seal.
 pub fn seal(core: &Path, nft: &Path, space: &OwnedFd) -> Result<crate::sockdiag::Tally, String> {
