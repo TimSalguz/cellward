@@ -204,10 +204,22 @@ use wl_proxy::protocols::wayland::wl_data_device::{WlDataDevice, WlDataDeviceHan
 use wl_proxy::protocols::wayland::wl_data_device_manager::{
     WlDataDeviceManager, WlDataDeviceManagerHandler,
 };
-use wl_proxy::protocols::wayland::wl_data_offer::WlDataOffer;
-use wl_proxy::protocols::wayland::wl_data_source::WlDataSource;
+use wl_proxy::protocols::wayland::wl_data_offer::{WlDataOffer, WlDataOfferHandler};
+use wl_proxy::protocols::wayland::wl_data_source::{WlDataSource, WlDataSourceHandler};
+use wl_proxy::protocols::wp_primary_selection_unstable_v1::zwp_primary_selection_device_manager_v1::{
+    ZwpPrimarySelectionDeviceManagerV1, ZwpPrimarySelectionDeviceManagerV1Handler,
+};
+use wl_proxy::protocols::wp_primary_selection_unstable_v1::zwp_primary_selection_device_v1::{
+    ZwpPrimarySelectionDeviceV1, ZwpPrimarySelectionDeviceV1Handler,
+};
+use wl_proxy::protocols::wp_primary_selection_unstable_v1::zwp_primary_selection_offer_v1::{
+    ZwpPrimarySelectionOfferV1, ZwpPrimarySelectionOfferV1Handler,
+};
+use wl_proxy::protocols::wp_primary_selection_unstable_v1::zwp_primary_selection_source_v1::{
+    ZwpPrimarySelectionSourceV1, ZwpPrimarySelectionSourceV1Handler,
+};
 use wl_proxy::protocols::wayland::wl_keyboard::{
-    WlKeyboard, WlKeyboardHandler, WlKeyboardKeyState,
+    WlKeyboard, WlKeyboardHandler, WlKeyboardKeyState, WlKeyboardKeymapFormat,
 };
 use wl_proxy::protocols::wayland::wl_output::{WlOutput, WlOutputTransform};
 use wl_proxy::protocols::wayland::wl_pointer::{
@@ -1068,6 +1080,8 @@ impl Frames {
             o.set_handler(SinglePixel);
         } else if let Some(o) = id.try_downcast::<WlDataDeviceManager>() {
             o.set_handler(DataDeviceManager);
+        } else if let Some(o) = id.try_downcast::<ZwpPrimarySelectionDeviceManagerV1>() {
+            o.set_handler(PrimaryManager);
         } else if let Some(o) = id.try_downcast::<ZwpPointerGesturesV1>() {
             o.set_handler(Gestures);
         } else if let Some(o) = id.try_downcast::<ZwpTabletManagerV2>() {
@@ -4014,12 +4028,31 @@ struct Keyboard {
     /// group: what a held-back leave lets go of (3d).
     down: Vec<u32>,
     locked: (u32, u32),
+    /// The modifiers held down now, and the keys a paste is on by its
+    /// keymap: whether a key is a paste (`crate::clip`).
+    depressed: u32,
+    paste: crate::clip::PasteKeys,
     /// The program's surface a leave of it was held back from (3d,
     /// `Frames::always_focused`): passed on before the next enter.
     held: Option<Weak<WlSurface>>,
 }
 
 impl WlKeyboardHandler for Keyboard {
+    fn handle_keymap(
+        &mut self,
+        slf: &Rc<WlKeyboard>,
+        format: WlKeyboardKeymapFormat,
+        fd: &Rc<OwnedFd>,
+        size: u32,
+    ) {
+        if format == WlKeyboardKeymapFormat::XKB_V1 {
+            if let Some(text) = crate::clip::read_keymap(fd, size) {
+                self.paste = crate::clip::paste_keys(&text);
+            }
+        }
+        slf.send_keymap(format, fd, size);
+    }
+
     fn handle_enter(
         &mut self,
         slf: &Rc<WlKeyboard>,
@@ -4071,6 +4104,9 @@ impl WlKeyboardHandler for Keyboard {
         if !self.menu {
             if state == WlKeyboardKeyState::PRESSED {
                 self.f.questions.touch();
+                if crate::clip::is_paste(&self.paste, key, self.depressed) {
+                    crate::clip::pasting(crate::clip::Which::Clipboard);
+                }
                 if !self.down.contains(&key) && self.down.len() < 32 {
                     self.down.push(key);
                 }
@@ -4100,6 +4136,7 @@ impl WlKeyboardHandler for Keyboard {
         mods_locked: u32,
         group: u32,
     ) {
+        self.depressed = mods_depressed;
         if !self.menu {
             self.locked = (mods_locked, group);
             slf.send_modifiers(serial, mods_depressed, mods_latched, mods_locked, group);
@@ -5149,6 +5186,8 @@ impl WlSeatHandler for Seat {
             menu: false,
             down: Vec::new(),
             locked: (0, 0),
+            depressed: 0,
+            paste: crate::clip::PasteKeys::default(),
             held: None,
         });
     }
@@ -5590,6 +5629,9 @@ impl WlPointerHandler for Pointer {
         if !self.away {
             if state == WlPointerButtonState::PRESSED {
                 self.f.questions.touch();
+                if button == crate::clip::BTN_MIDDLE {
+                    crate::clip::pasting(crate::clip::Which::Primary);
+                }
                 if !self.down.contains(&button) && self.down.len() < 32 {
                     self.down.push(button);
                 }
@@ -5980,6 +6022,15 @@ impl ZwpTabletToolV2Handler for Tool {
 struct DataDeviceManager;
 
 impl WlDataDeviceManagerHandler for DataDeviceManager {
+    fn handle_create_data_source(&mut self, slf: &Rc<WlDataDeviceManager>, id: &Rc<WlDataSource>) {
+        slf.send_create_data_source(id);
+        id.set_handler(Source);
+        // What this program copies says whose it is (`clip`).
+        if let Some(mark) = crate::clip::mark() {
+            id.send_offer(&mark);
+        }
+    }
+
     fn handle_get_data_device(
         &mut self,
         slf: &Rc<WlDataDeviceManager>,
@@ -6011,6 +6062,11 @@ impl WlDataDeviceHandler for DataDevice {
     ) {
         self.away = !programs(surface);
         if !self.away {
+            // A drag is the person's own act: what it carries is theirs to
+            // drop, whoever's it is.
+            if let Some(offer) = id {
+                crate::clip::dragged(offer.unique_id());
+            }
             slf.send_enter(serial, surface, x, y, id);
         }
     }
@@ -6030,6 +6086,149 @@ impl WlDataDeviceHandler for DataDevice {
     fn handle_drop(&mut self, slf: &Rc<WlDataDevice>) {
         if !std::mem::take(&mut self.away) {
             slf.send_drop();
+        }
+    }
+
+    fn handle_data_offer(&mut self, slf: &Rc<WlDataDevice>, id: &Rc<WlDataOffer>) {
+        id.set_handler(Offer::default());
+        slf.send_data_offer(id);
+    }
+}
+
+/// What the program copies (`wl_data_source`): a mark of ours it cannot
+/// say itself, and never asked of it.
+struct Source;
+
+impl WlDataSourceHandler for Source {
+    fn handle_offer(&mut self, slf: &Rc<WlDataSource>, mime_type: &str) {
+        if !crate::clip::is_mark(mime_type) {
+            slf.send_offer(mime_type);
+        }
+    }
+
+    fn handle_send(&mut self, slf: &Rc<WlDataSource>, mime_type: &str, fd: &Rc<OwnedFd>) {
+        if !crate::clip::is_mark(mime_type) {
+            slf.send_send(mime_type, fd);
+        }
+    }
+}
+
+/// What is offered to the program (`wl_data_offer`): the selection, or a
+/// drag. Its mark said whose it is, and is not passed on; a foreign one is
+/// read only when the person pastes, or drops it (`clip`).
+#[derive(Default)]
+struct Offer {
+    own: bool,
+}
+
+impl WlDataOfferHandler for Offer {
+    fn handle_offer(&mut self, slf: &Rc<WlDataOffer>, mime_type: &str) {
+        if crate::clip::is_mark(mime_type) {
+            self.own |= crate::clip::is_own(mime_type);
+            return;
+        }
+        slf.send_offer(mime_type);
+    }
+
+    fn handle_receive(&mut self, slf: &Rc<WlDataOffer>, mime_type: &str, fd: &Rc<OwnedFd>) {
+        if crate::clip::may_read(
+            self.own,
+            crate::clip::Which::Clipboard,
+            mime_type,
+            slf.unique_id(),
+        ) {
+            slf.send_receive(mime_type, fd);
+        }
+    }
+}
+
+struct PrimaryManager;
+
+impl ZwpPrimarySelectionDeviceManagerV1Handler for PrimaryManager {
+    fn handle_create_source(
+        &mut self,
+        slf: &Rc<ZwpPrimarySelectionDeviceManagerV1>,
+        id: &Rc<ZwpPrimarySelectionSourceV1>,
+    ) {
+        slf.send_create_source(id);
+        id.set_handler(PrimarySource);
+        if let Some(mark) = crate::clip::mark() {
+            id.send_offer(&mark);
+        }
+    }
+
+    fn handle_get_device(
+        &mut self,
+        slf: &Rc<ZwpPrimarySelectionDeviceManagerV1>,
+        id: &Rc<ZwpPrimarySelectionDeviceV1>,
+        seat: &Rc<WlSeat>,
+    ) {
+        slf.send_get_device(id, seat);
+        id.set_handler(PrimaryDevice);
+    }
+}
+
+struct PrimaryDevice;
+
+impl ZwpPrimarySelectionDeviceV1Handler for PrimaryDevice {
+    fn handle_data_offer(
+        &mut self,
+        slf: &Rc<ZwpPrimarySelectionDeviceV1>,
+        offer: &Rc<ZwpPrimarySelectionOfferV1>,
+    ) {
+        offer.set_handler(PrimaryOffer::default());
+        slf.send_data_offer(offer);
+    }
+}
+
+struct PrimarySource;
+
+impl ZwpPrimarySelectionSourceV1Handler for PrimarySource {
+    fn handle_offer(&mut self, slf: &Rc<ZwpPrimarySelectionSourceV1>, mime_type: &str) {
+        if !crate::clip::is_mark(mime_type) {
+            slf.send_offer(mime_type);
+        }
+    }
+
+    fn handle_send(
+        &mut self,
+        slf: &Rc<ZwpPrimarySelectionSourceV1>,
+        mime_type: &str,
+        fd: &Rc<OwnedFd>,
+    ) {
+        if !crate::clip::is_mark(mime_type) {
+            slf.send_send(mime_type, fd);
+        }
+    }
+}
+
+#[derive(Default)]
+struct PrimaryOffer {
+    own: bool,
+}
+
+impl ZwpPrimarySelectionOfferV1Handler for PrimaryOffer {
+    fn handle_offer(&mut self, slf: &Rc<ZwpPrimarySelectionOfferV1>, mime_type: &str) {
+        if crate::clip::is_mark(mime_type) {
+            self.own |= crate::clip::is_own(mime_type);
+            return;
+        }
+        slf.send_offer(mime_type);
+    }
+
+    fn handle_receive(
+        &mut self,
+        slf: &Rc<ZwpPrimarySelectionOfferV1>,
+        mime_type: &str,
+        fd: &Rc<OwnedFd>,
+    ) {
+        if crate::clip::may_read(
+            self.own,
+            crate::clip::Which::Primary,
+            mime_type,
+            slf.unique_id(),
+        ) {
+            slf.send_receive(mime_type, fd);
         }
     }
 }

@@ -832,7 +832,17 @@ pub fn run(args: Args) -> u8 {
         drop(up.listener);
         let word = opened_for_proxy();
         proxy_speaks = word.is_some();
-        match wl_proxy::start(&listener, &up.path, args.frame.clone(), word, args.focus) {
+        // Its instance's mark, for the clipboard by container (`crate::clip`):
+        // the restricted sockets' directory is the instance's.
+        let clip = crate::clip::token_for(&runtime_dir, &args.zone);
+        match wl_proxy::start(
+            &listener,
+            &up.path,
+            args.frame.clone(),
+            word,
+            args.focus,
+            clip,
+        ) {
             Ok(started) => proxy = Some((started, up.path)),
             Err(e) => {
                 // The second rung: the proxy did not start. The context made

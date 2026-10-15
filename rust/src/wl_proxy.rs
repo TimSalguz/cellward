@@ -797,6 +797,7 @@ pub fn start(
     frame: Option<Setup>,
     opened: Option<OwnedFd>,
     focus: FocusPolicy,
+    clip: Option<String>,
 ) -> Result<Proxy, String> {
     let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
     let listener = zone_listener.try_clone().map_err(|e| format!("dup: {e}"))?;
@@ -825,6 +826,9 @@ pub fn start(
         // A panic ends the proxy here: unwinding further would run the
         // supervisor's code (`wl_sandbox::run`) in this child.
         let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // The instance's mark for what its programs copy (`crate::clip`):
+            // the proxy reads no file of it, it is given.
+            crate::clip::set_mark(clip.as_deref());
             child(listener, theirs, supervisor, drawing, opened, focus)
         }))
         .unwrap_or(101);
@@ -2225,6 +2229,9 @@ pub fn filter(
     ctx.set_act_badarch(default)?;
     let allow = [
         "read",
+        // The keymap the compositor sends a keyboard, read where it lies
+        // (`crate::clip::paste_keys`): at an offset of a descriptor it holds.
+        "pread64",
         "write",
         "close",
         "recvmsg",
@@ -3683,7 +3690,7 @@ mod tests {
         let zone_path = dir.join("zone-sock");
         let zone = UnixListener::bind(&zone_path).unwrap();
         // Before any thread: the fork in `start` has to be the only thing.
-        let mut proxy = start(&zone, &up.path, None, None, FocusPolicy::Input).unwrap();
+        let mut proxy = start(&zone, &up.path, None, None, FocusPolicy::Input, None).unwrap();
         drop(zone);
         if shared.is_some() {
             await_file(&dir, "connected");
@@ -3819,6 +3826,7 @@ mod tests {
             None,
             crate::wl_sandbox::opened_for_proxy(),
             FocusPolicy::Input,
+            None,
         )
         .unwrap();
         drop(zone);
@@ -3857,7 +3865,7 @@ mod tests {
         };
         let up = Upstream::bind(&dir, 43).unwrap();
         let zone = UnixListener::bind(dir.join("zone-sock")).unwrap();
-        let mut proxy = start(&zone, &up.path, None, None, FocusPolicy::Input).unwrap();
+        let mut proxy = start(&zone, &up.path, None, None, FocusPolicy::Input, None).unwrap();
         drop(zone);
         drop(up.listener);
         proxy.take_over();

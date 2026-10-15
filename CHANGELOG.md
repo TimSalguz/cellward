@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The clipboard by container** (2026-10-15, the owner;
+  `docs/CLIPBOARD.md`): a program reads its own container's copies freely,
+  another container's or the host's only within two seconds of a paste of
+  the person's (Ctrl+V, Ctrl+Shift+V, Shift+Insert by the keyboard's
+  keymap, a middle click for the selection) or a drag. The Wayland proxy
+  marks what its program copies with its instance's secret, never shown to
+  a program. The proxy may now `pread` a descriptor it holds: the keymap.
 - **The frame's ☰ in parts** (2026-10-15, the owner): «Программа «X»» —
   its network rule (always allow, always deny, ask again), its restart and
   close; «Контейнер «Y» — для всех его программ» — its permissions in a

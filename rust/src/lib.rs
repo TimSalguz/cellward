@@ -107,6 +107,7 @@ pub mod bus_filter;
 pub mod camask;
 pub mod camera;
 pub mod cli;
+pub mod clip;
 pub mod completion;
 pub mod config;
 pub mod connect;
