@@ -323,15 +323,24 @@ fn leaves_by_id(dir: &Path) -> HashMap<u64, (PathBuf, String)> {
 }
 
 /// The owner of a socket made in a launch's cgroup `leaf`: the launch, by
-/// its waiter; the process named the first of the cgroup's — the one that
-/// made it may be gone, or one of several of the launch's.
+/// its waiter. The process named: one of the cgroup's whose descriptors are
+/// closed — no readable one holds the socket, or it would have been found
+/// —, else its newest; the one that made it may be gone, or one of several.
 fn by_leaf((path, leaf): &(PathBuf, String), launches: &HashMap<i32, String>) -> Option<Owner> {
     let (waiter, start) = crate::epoch::leaf_of(leaf)?;
     (crate::sys::start_time(waiter) == Some(start)).then_some(())?;
     let (program, launch) = program_by_parents(waiter, launches)?;
-    let pid = fs::read_to_string(path.join("cgroup.procs"))
-        .ok()
-        .and_then(|t| t.lines().next().and_then(|l| l.trim().parse().ok()))
+    let pids: Vec<i32> =
+        crate::epoch::procs_of(&fs::read_to_string(path.join("cgroup.procs")).unwrap_or_default());
+    let closed = |pid: &&i32| {
+        fs::read_dir(format!("/proc/{pid}/fd"))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+    };
+    let pid = pids
+        .iter()
+        .find(closed)
+        .or(pids.last())
+        .copied()
         .unwrap_or(waiter);
     Some(Owner {
         pid,
