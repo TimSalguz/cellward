@@ -21,6 +21,8 @@
 #   - the permissions in the launch window: one changed there is kept in
 #     the container's record and shown as it is at the next launch; the
 #     frame's ☰ in parts under headings, its permissions window;
+#   - the clipboard by container: another container's copy is read only
+#     when the person pastes it;
 #   - Firefox in a container layered over the home and in one of its own;
 #     TeamSpeak too where its tarball is given (`teamspeakSrc`).
 #
@@ -114,6 +116,7 @@ let
           pkgs.grim
           pkgs.wtype
           pkgs.chromium
+          pkgs.wl-clipboard
           # Quiet on its own: no first-run pages, studies or checks — the
           # connections the tests see are the ones they ask for.
           (pkgs.firefox.override {

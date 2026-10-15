@@ -703,7 +703,52 @@ if wanted(NESTED):
     machine.sleep(2)
 
 
-# --- 8. Whose a browser's connection is ----------------------------------------
+# --- 8. The clipboard by container ---------------------------------------------
+
+CLIP = "The clipboard by container: another container's copy only when pasted"
+
+if wanted(CLIP):
+    with scenario(CLIP):
+        # Two containers of the real home: what they write is seen here.
+        alice("cellward container create clipb --home main")
+        run("clip-a", "offline -- sh -c 'echo secret-a | wl-copy; sleep 600'",
+            env="--setenv=VPN_ZONE_APPID=clip-a")
+        machine.sleep(6)
+        # The host, not proxied: as before.
+        assert "secret-a" in alice(f"WAYLAND_DISPLAY={nested} wl-paste", check=False)
+        # Its own container: read freely.
+        run("clip-a2", "offline -- sh -c 'sleep 2; wl-paste > ~/clip-a.txt; sleep 600'",
+            env="--setenv=VPN_ZONE_APPID=clip-a2")
+        # Another container, nobody pasting: nothing.
+        run("clip-b", "offline --container clipb -- sh -c 'sleep 2; wl-paste > ~/clip-b.txt 2>&1; sleep 600'",
+            env="--setenv=VPN_ZONE_APPID=clip-b")
+        machine.sleep(10)
+        a = alice("cat ~/clip-a.txt", check=False)
+        b = alice("cat ~/clip-b.txt", check=False)
+        print("own:", repr(a), "foreign:", repr(b))
+        assert "secret-a" in a, a
+        assert "secret-a" not in b, b
+        # Another container, the person pasting into its terminal.
+        run("clip-b2", "offline --container clipb -- foot --app-id clipb2 sh -c "
+            "'read x; echo \"$x\" > ~/clip-b2.txt; sleep 600'",
+            env="--setenv=VPN_ZONE_APPID=clip-b2")
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {NIRI_MSG} --json windows' | grep -q clipb2",
+            timeout=60,
+        )
+        win = next(w for w in windows() if w["app_id"] == "clipb2")
+        alice(f"{NIRI_MSG} action focus-window --id {win['id']}")
+        machine.sleep(2)
+        alice(f"WAYLAND_DISPLAY={nested} wtype -M ctrl -M shift -k v -m shift -m ctrl")
+        machine.sleep(1)
+        alice(f"WAYLAND_DISPLAY={nested} wtype -k Return")
+        machine.wait_until_succeeds("grep -q secret-a /home/alice/clip-b2.txt", timeout=20)
+        shot("clip-pasted")
+    alice("systemctl --user stop clip-a clip-a2 clip-b clip-b2", check=False)
+    machine.sleep(2)
+
+
+# --- 9. Whose a browser's connection is ----------------------------------------
 
 CH = "Chromium's connection: the question names the program"
 
@@ -728,7 +773,7 @@ if wanted(CH):
     machine.sleep(3)
 
 
-# --- 9. Programs in a layer over the home and in a home of their own -------
+# --- 10. Programs in a layer over the home and in a home of their own ------
 
 for home in ["overlay", "private"]:
     for program, cmd, app in [
