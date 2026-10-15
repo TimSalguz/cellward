@@ -96,7 +96,10 @@ pub fn search(words: &[&str]) -> Result<Search, String> {
             "pasted" => s.query.pasted = Some(range(&value).ok_or_else(bad)?),
             "around" => {
                 let (at, window) = value.split_once(':').ok_or_else(bad)?;
-                s.query.around = Some((at.parse().map_err(|_| bad())?, window.parse().map_err(|_| bad())?));
+                s.query.around = Some((
+                    at.parse().map_err(|_| bad())?,
+                    window.parse().map_err(|_| bad())?,
+                ));
             }
             "before" => s.before = Some(value.parse().map_err(|_| bad())?),
             "limit" => s.limit = value.parse::<usize>().map_err(|_| bad())?.min(MAX_LIMIT),

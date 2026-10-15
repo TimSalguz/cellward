@@ -31,12 +31,17 @@ use wayland_client::protocol::{wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_device_v1 as ext_device, ext_data_control_manager_v1 as ext_manager,
-    ext_data_control_offer_v1 as ext_offer,
+    ext_data_control_offer_v1 as ext_offer, ext_data_control_source_v1 as ext_source,
 };
 use wayland_protocols_wlr::data_control::v1::client::{
     zwlr_data_control_device_v1 as wlr_device, zwlr_data_control_manager_v1 as wlr_manager,
-    zwlr_data_control_offer_v1 as wlr_offer,
+    zwlr_data_control_offer_v1 as wlr_offer, zwlr_data_control_source_v1 as wlr_source,
 };
+
+/// What the daemon offers beside an entry it makes the selection
+/// (`select`): a mark of nobody's — no file names it —, so that what it
+/// sets is not kept again, and no program sees it (proxies drop marks).
+const OWN_MARK: &str = "application/x-cellward-clip-recorder";
 
 /// How long a program has to hand over what it copied.
 const READ_WITHIN: Duration = Duration::from_secs(3);
@@ -170,36 +175,105 @@ impl Store {
         names
     }
 
-    /// The answer to one request line.
-    fn answer(&mut self, request: &str) -> String {
-        let words: Vec<&str> = request.trim_end().split('\t').collect();
+    /// The answer to one request line (`clipstore::protocol`).
+    fn answer(&mut self, request: &str) -> Reply {
+        use clipstore::protocol;
+        let words: Vec<&str> = request.trim_end_matches(['\n', '\r']).split('\t').collect();
+        let error = |e: &dyn std::fmt::Display| Reply::Text(format!("error\t{e}\n"));
+        let lines = |h: &mut History, q: &clipstore::Query, before, limit| -> Reply {
+            match h.query(q, before, limit) {
+                Ok(ids) => Reply::Text(
+                    ids.into_iter()
+                        .filter_map(|id| h.summary(id).ok().flatten())
+                        .map(|s| protocol::line(&s))
+                        .collect(),
+                ),
+                Err(e) => Reply::Text(format!("error\t{e}\n")),
+            }
+        };
         match words.as_slice() {
-            ["histories"] => self.names().iter().map(|n| format!("{n}\n")).collect(),
+            ["histories"] => Reply::Text(self.names().iter().map(|n| format!("{n}\n")).collect()),
             ["list", name, n] => {
-                let n = n.parse().unwrap_or(20).min(1000);
+                let n = n.parse().unwrap_or(20).min(protocol::MAX_LIMIT);
                 match self.history(name) {
-                    Ok(h) => match h.query(&clipstore::Query::default(), None, n) {
-                        Ok(ids) => ids
-                            .into_iter()
-                            .filter_map(|id| h.summary(id).ok().flatten())
-                            .map(|s| {
-                                let types: Vec<&str> =
-                                    s.types.iter().map(|(t, _)| t.as_str()).collect();
-                                format!(
-                                    "{}\t{}\t{}\t{}\n",
-                                    s.id,
-                                    s.copied_at,
-                                    types.join(","),
-                                    s.preview.replace(['\t', '\n'], " ")
-                                )
-                            })
-                            .collect(),
-                        Err(e) => format!("error\t{e}\n"),
-                    },
-                    Err(e) => format!("error\t{e}\n"),
+                    Ok(h) => lines(h, &clipstore::Query::default(), None, n),
+                    Err(e) => error(&e),
                 }
             }
-            _ => "error\tнепонятный запрос\n".to_owned(),
+            ["search", name, rest @ ..] => match protocol::search(rest) {
+                Ok(search) => match self.history(name) {
+                    Ok(h) => lines(h, &search.query, search.before, search.limit),
+                    Err(e) => error(&e),
+                },
+                Err(e) => error(&e),
+            },
+            ["get", name, id, mime] => {
+                let (Ok(id), Some(mime)) = (id.parse::<u64>(), protocol::decode(mime)) else {
+                    return error(&"не номер или не тип");
+                };
+                match self.history(name).map(|h| h.get(id)) {
+                    Ok(Ok(Some(entry))) => {
+                        match entry.contents.into_iter().find(|c| c.mime == mime) {
+                            Some(c) => {
+                                let mut out = format!("ok\t{}\n", c.data.len()).into_bytes();
+                                out.extend_from_slice(&c.data);
+                                Reply::Bytes(out)
+                            }
+                            None => error(&"такого типа у записи нет"),
+                        }
+                    }
+                    Ok(Ok(None)) => error(&"записи нет"),
+                    Ok(Err(e)) => error(&e),
+                    Err(e) => error(&e),
+                }
+            }
+            ["move", from, id, to] => {
+                let Ok(id) = id.parse::<u64>() else {
+                    return error(&"не номер");
+                };
+                if from == to {
+                    return error(&"это та же история");
+                }
+                let entry = match self.history(from).map(|h| h.get(id)) {
+                    Ok(Ok(Some(entry))) => entry,
+                    Ok(Ok(None)) => return error(&"записи нет"),
+                    Ok(Err(e)) => return error(&e),
+                    Err(e) => return error(&e),
+                };
+                match self.history(to).map(|h| h.import(&entry)) {
+                    Ok(Ok(added)) => Reply::Text(format!("ok\t{}\n", added.id())),
+                    Ok(Err(e)) => error(&e),
+                    Err(e) => error(&e),
+                }
+            }
+            ["delete", name, id] => {
+                let Ok(id) = id.parse::<u64>() else {
+                    return error(&"не номер");
+                };
+                match self.history(name).map(|h| h.delete(id)) {
+                    Ok(Ok(true)) => Reply::Text("ok\n".to_owned()),
+                    Ok(Ok(false)) => error(&"записи нет"),
+                    Ok(Err(e)) => error(&e),
+                    Err(e) => error(&e),
+                }
+            }
+            ["select", name, id] => {
+                let Ok(id) = id.parse::<u64>() else {
+                    return error(&"не номер");
+                };
+                match self.history(name) {
+                    Ok(h) => match h.get(id) {
+                        Ok(Some(entry)) => {
+                            let _ = h.record_paste(id, now_ms());
+                            Reply::Select(entry.contents)
+                        }
+                        Ok(None) => error(&"записи нет"),
+                        Err(e) => error(&e),
+                    },
+                    Err(e) => error(&e),
+                }
+            }
+            _ => Reply::Text("error\tнепонятный запрос\n".to_owned()),
         }
     }
 
@@ -215,8 +289,17 @@ impl Store {
     }
 }
 
-/// One question on the socket: from this user only, one line, answered.
-fn serve(store: &mut Store, mut stream: std::os::unix::net::UnixStream) {
+/// What a request is answered with.
+enum Reply {
+    Text(String),
+    Bytes(Vec<u8>),
+    /// `ok`, and the daemon makes these contents the selection.
+    Select(Vec<Content>),
+}
+
+/// One question on the socket: from this user only, one line, answered. A
+/// `select` hands back the contents to make the selection.
+fn serve(store: &mut Store, mut stream: std::os::unix::net::UnixStream) -> Option<Vec<Content>> {
     use std::io::{BufRead, Write};
     let mut cred = libc::ucred {
         pid: 0,
@@ -236,18 +319,31 @@ fn serve(store: &mut Store, mut stream: std::os::unix::net::UnixStream) {
     };
     // SAFETY: getuid takes nothing.
     if got != 0 || cred.uid != unsafe { libc::getuid() } {
-        return;
+        return None;
     }
     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
     let mut line = String::new();
     let Ok(clone) = stream.try_clone() else {
-        return;
+        return None;
     };
     let mut reader = std::io::BufReader::new(clone);
     if reader.read_line(&mut line).is_err() || line.len() > 4096 {
-        return;
+        return None;
     }
-    let _ = stream.write_all(store.answer(&line).as_bytes());
+    match store.answer(&line) {
+        Reply::Text(text) => {
+            let _ = stream.write_all(text.as_bytes());
+            None
+        }
+        Reply::Bytes(bytes) => {
+            let _ = stream.write_all(&bytes);
+            None
+        }
+        Reply::Select(contents) => {
+            let _ = stream.write_all(b"ok\n");
+            Some(contents)
+        }
+    }
 }
 
 // --- THE RECORDER --------------------------------------------------------------
@@ -294,6 +390,10 @@ struct App {
     /// An offer no longer the selection: destroyed after the round.
     gone: Vec<Offer>,
     finished: bool,
+    ext_device: Option<ext_device::ExtDataControlDeviceV1>,
+    wlr_device: Option<wlr_device::ZwlrDataControlDeviceV1>,
+    /// What the daemon's own selection offers (`select`), by type.
+    own: HashMap<String, std::sync::Arc<Vec<u8>>>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for App {
@@ -413,6 +513,40 @@ impl Dispatch<wlr_device::ZwlrDataControlDeviceV1, ()> for App {
     ]);
 }
 
+impl Dispatch<ext_source::ExtDataControlSourceV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        source: &ext_source::ExtDataControlSourceV1,
+        event: ext_source::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_source::Event::Send { mime_type, fd } => app.send(&mime_type, fd),
+            ext_source::Event::Cancelled => source.destroy(),
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wlr_source::ZwlrDataControlSourceV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        source: &wlr_source::ZwlrDataControlSourceV1,
+        event: wlr_source::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wlr_source::Event::Send { mime_type, fd } => app.send(&mime_type, fd),
+            wlr_source::Event::Cancelled => source.destroy(),
+            _ => {}
+        }
+    }
+}
+
 impl Dispatch<ext_offer::ExtDataControlOfferV1, ()> for App {
     fn event(
         app: &mut Self,
@@ -444,6 +578,42 @@ impl Dispatch<wlr_offer::ZwlrDataControlOfferV1, ()> for App {
 }
 
 impl App {
+    /// Make `contents` the selection: a source of the daemon's own, which
+    /// answers every type it offers from memory until another selection
+    /// takes its place.
+    fn select(&mut self, qh: &QueueHandle<Self>, contents: Vec<Content>) {
+        self.own = contents
+            .into_iter()
+            .map(|c| (c.mime, std::sync::Arc::new(c.data)))
+            .collect();
+        let mut types: Vec<String> = self.own.keys().cloned().collect();
+        types.push(OWN_MARK.to_owned());
+        if let (Some(manager), Some(device)) = (&self.ext, &self.ext_device) {
+            let source = manager.create_data_source(qh, ());
+            for t in &types {
+                source.offer(t.clone());
+            }
+            device.set_selection(Some(&source));
+        } else if let (Some(manager), Some(device)) = (&self.wlr, &self.wlr_device) {
+            let source = manager.create_data_source(qh, ());
+            for t in &types {
+                source.offer(t.clone());
+            }
+            device.set_selection(Some(&source));
+        }
+    }
+
+    /// A program asks the daemon's own selection for `mime`: written from a
+    /// thread of its own, the daemon's loop not waiting on the reader.
+    fn send(&self, mime: &str, fd: OwnedFd) {
+        if let Some(data) = self.own.get(mime).cloned() {
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let _ = std::fs::File::from(fd).write_all(&data);
+            });
+        }
+    }
+
     fn offered(&mut self, id: ObjectId, mime: String) {
         if let Some(types) = self.types.get_mut(&id) {
             // Bounded: a program offering types without end is not kept
@@ -546,9 +716,9 @@ fn daemon(dir: &Path) -> ExitCode {
         return ExitCode::from(1);
     };
     if let Some(ext) = &app.ext {
-        let _ = ext.get_data_device(&seat, &qh, ());
+        app.ext_device = Some(ext.get_data_device(&seat, &qh, ()));
     } else if let Some(wlr) = &app.wlr {
-        let _ = wlr.get_data_device(&seat, &qh, ());
+        app.wlr_device = Some(wlr.get_data_device(&seat, &qh, ()));
     } else {
         eprintln!("cellward-clip: композитор не даёт data-control — истории не будет");
         return ExitCode::from(1);
@@ -604,7 +774,9 @@ fn daemon(dir: &Path) -> ExitCode {
             if fds[1].revents != 0 {
                 while let Ok((stream, _)) = listener.accept() {
                     let _ = stream.set_nonblocking(false);
-                    serve(&mut store, stream);
+                    if let Some(contents) = serve(&mut store, stream) {
+                        app.select(&qh, contents);
+                    }
                 }
             }
             if queue.dispatch_pending(&mut app).is_err() {
