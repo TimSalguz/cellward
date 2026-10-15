@@ -89,7 +89,7 @@ pub struct Asker {
     waiting: HashMap<Program, Vec<Key>>,
     /// Where each program's first waiting flow goes, for its question, and
     /// the launch it came from.
-    first: HashMap<Program, (String, Option<i32>)>,
+    first: HashMap<Program, (String, Option<i32>, Option<String>)>,
     /// The answers for the instance's life.
     session: HashMap<Program, Verdict>,
     /// The programs asked about now, and those to be asked next.
@@ -138,11 +138,16 @@ impl Asker {
     /// A flow of `program` (of the launch `launch`, when one was found) its
     /// rules ask about, going to `to`: its verdict now when the instance's
     /// life has one for the program; else it waits for the answer (`None`),
-    /// a question opened for its program when there is none yet.
+    /// a question opened for its program when there is none yet. `process`:
+    /// the name of the process holding the flow's socket, when it was found
+    /// — what the question says of a flow whose launch was not
+    /// (`crate::owners`): it is asked about as its container's, by what is
+    /// known, never as some program's.
     pub fn ask(
         &mut self,
         program: Program,
         launch: Option<i32>,
+        process: Option<String>,
         key: Key,
         to: String,
     ) -> Option<Verdict> {
@@ -152,7 +157,7 @@ impl Asker {
         let waiting = self.waiting.entry(program.clone()).or_default();
         waiting.push(key);
         if waiting.len() == 1 {
-            self.first.insert(program.clone(), (to, launch));
+            self.first.insert(program.clone(), (to, launch, process));
             self.queue.push_back(program);
             self.next();
         }
@@ -171,11 +176,14 @@ impl Asker {
     /// The question of `program`, in a thread of its own.
     fn start(&mut self, program: Program) {
         self.open.insert(program.clone());
-        let label = program
-            .as_deref()
-            .map(|key| label_of(&self.state, key))
-            .unwrap_or_else(|| "Неизвестная программа".to_owned());
-        let (to, launch) = self.first.get(&program).cloned().unwrap_or_default();
+        let (to, launch, process) = self.first.get(&program).cloned().unwrap_or_default();
+        let label = match program.as_deref() {
+            Some(key) => format!("«{}»", label_of(&self.state, key)),
+            None => match process {
+                Some(process) => format!("Процесс «{process}»"),
+                None => "Неизвестный процесс".to_owned(),
+            },
+        };
         // "Always" is a rule: a record and a program to write it for.
         let always = self.record.is_some() && program.is_some();
         let (window, shown) = (self.window.clone(), self.shown.clone());
@@ -186,6 +194,7 @@ impl Asker {
         let timeout = None;
         let (tx, wake) = (self.tx.clone(), self.wake.1.clone());
         let program_of_failed = program.clone();
+        let known = program.is_some();
         let spawned = std::thread::Builder::new()
             .name("net-question".to_owned())
             .spawn(move || {
@@ -194,6 +203,7 @@ impl Asker {
                     shown: &shown,
                     to: &to,
                     always,
+                    known,
                 };
                 let answer = question(&window, at, timeout, &asked);
                 let _ = tx.send((program, answer));
@@ -289,13 +299,15 @@ pub fn destination(key: &Key, names: &[crate::flows::Name]) -> String {
     }
 }
 
-/// A question: the program's label, its container as a person reads it,
-/// where it goes, and whether "always" is offered.
+/// A question: the program's label (its process's, quoted, for a flow of
+/// no launch found), its container as a person reads it, where it goes,
+/// whether "always" is offered, and whether the program is known.
 struct Asked<'a> {
     label: &'a str,
     shown: &'a str,
     to: &'a str,
     always: bool,
+    known: bool,
 }
 
 /// The question itself: on the program's window when its launch (`at`: the
@@ -314,10 +326,16 @@ fn question(
         shown,
         to,
         always,
+        known,
     } = *asked;
-    let title = format!("Сеть — «{label}»");
-    let text =
-        format!("«{label}» ({shown}) хочет в сеть: {to}.\nПока вы не ответили, у неё сети нет.");
+    let title = format!("Сеть — {label}");
+    // A flow of no launch found: by its container, and said so.
+    let whose = if known {
+        shown.to_owned()
+    } else {
+        format!("{shown}, программа не определена")
+    };
+    let text = format!("{label} ({whose}) хочет в сеть: {to}.\nПока вы не ответили, сети нет.");
     let started = std::time::Instant::now();
     let mut display = None;
     if let Some((runtime, pid)) = at {
@@ -440,15 +458,15 @@ mod tests {
         // there is none of either.
         let launch = Some(i32::MAX);
         assert_eq!(
-            asker.ask(curl.clone(), launch, key(1), "x:443".into()),
+            asker.ask(curl.clone(), launch, None, key(1), "x:443".into()),
             None
         );
         assert_eq!(
-            asker.ask(curl.clone(), launch, key(2), "x:443".into()),
+            asker.ask(curl.clone(), launch, None, key(2), "x:443".into()),
             None
         );
         assert_eq!(
-            asker.ask(None, None, key(3), "y:80".into()),
+            asker.ask(None, None, Some("helper".into()), key(3), "y:80".into()),
             None,
             "decided before it was asked"
         );
@@ -474,7 +492,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            asker.ask(curl, launch, key(4), "x:443".into()),
+            asker.ask(curl, launch, None, key(4), "x:443".into()),
             Some(Verdict::Deny)
         );
         let _ = std::fs::remove_dir_all(&root);
