@@ -56,7 +56,7 @@ Consequences, in order of importance:
 | container of the main home (`home = main`) | its policy only | nothing of the home: a network, programs and permissions of its own under a name |
 | «without isolation» (`open`, `run <net> --no-isolation`, 2026-09-29) | a built-in policy, written anew before every launch into it | nothing but the network: the real home, every device (`all`), the host's session, the Nix daemon and its startup files where the network tolerates them; not to be changed |
 | the program's own container | a container of a home of its own called `app-<key>` | same |
-| throwaway container | an empty home in tmpfs | same, erased on exit |
+| throwaway container | an empty home in its instance's memory, shared by the programs joined to it | same, erased when the last one exits |
 | compositor restriction | `wl-sandbox`, on by default | screen capture, input emulation, background clipboard |
 
 What the picker remembers is per program: `.pinned`/`.last` (network) and
@@ -319,7 +319,14 @@ vpn-zone-core container-enter --instance <id> --   the WAITER: joins the instanc
 The instance's id is its container's name; `main:offline` for the main home
 (and `<c>:offline` for a container of the main home whose network is
 `ask`); `:tmp:<layer>` for a throwaway container; `:fs:<pid>-<start>` for a
-throwaway sandbox, one per launch. An instance is set up by the same code
+throwaway sandbox, named by the launch that opened it — another launch joins
+it with `--fs-sandbox --join <pid>-<start>` (the launch window offers the open
+ones), and the registry names it `__fs__:<pid>-<start>`. Its home is
+`/tmp/.cellward-home/home` in the instance's own `/tmp`, made by the keeper
+in a directory of its own, so no program of it can put anything in the
+home's place; it goes with the instance, at its last program's end. Joining
+is the host's alone: the broker refuses it to a zone's program, which would
+read another program's home. An instance is set up by the same code
 as a zone's space, with loopback alone, and holds what a zone holds for its
 programs — the covers, the private `/tmp` of a hermetic one, `/dev`, the
 helpers —, per container: two containers offline share no `/tmp`, no

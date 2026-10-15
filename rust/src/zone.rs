@@ -5850,6 +5850,44 @@ fn private_tmp(zone: &Zone) -> Result<(), String> {
     Ok(())
 }
 
+/// A throwaway sandbox's home, shared by the programs joined to it
+/// (`fs_sandbox::throwaway_home`): [`THROWAWAY_HOME`] in the instance's own
+/// `/tmp`, memory that goes with the instance. Its directory is the
+/// keeper's — its root's, read-only to the user — so no program of the
+/// sandbox can put a link to somewhere else in the place of the home a
+/// later program is given; the home in it is the user's own, 0700. Next to
+/// it the machine-id the sandbox shows, one for all its programs. Not
+/// fatal: without it each program gets an empty home of its own, as before.
+fn throwaway_home(zone: &Zone) {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let home = Path::new(THROWAWAY_HOME);
+    let Some(dir) = home.parent() else {
+        return;
+    };
+    let made = (|| -> io::Result<()> {
+        // The user's ids are mapped onto themselves (`instance_map_args`):
+        // the owner of the user's home.
+        let owner = fs::metadata(&zone.home)?;
+        fs::DirBuilder::new().mode(0o755).create(dir)?;
+        fs::DirBuilder::new().mode(0o700).create(home)?;
+        std::os::unix::fs::chown(home, Some(owner.uid()), Some(owner.gid()))?;
+        let id = crate::fs_sandbox::new_machine_id()?;
+        let machine = dir.join("machine-id");
+        fs::write(&machine, id)?;
+        fs::set_permissions(&machine, fs::Permissions::from_mode(0o444))?;
+        Ok(())
+    })();
+    if let Err(e) = made {
+        eprintln!(
+            "zone {}: no shared home for the throwaway sandbox ({e}) — each program gets one of its own",
+            zone.name()
+        );
+    }
+}
+
+/// Where [`throwaway_home`] makes it.
+pub const THROWAWAY_HOME: &str = "/tmp/.cellward-home/home";
+
 /// What [`private_tmp`] covers.
 const PRIVATE_TMP: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
 
@@ -8099,6 +8137,13 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     // lands inside the new /tmp.
     if zone.hermetic {
         private_tmp(zone)?;
+        if zone
+            .instance
+            .as_ref()
+            .is_some_and(|i| i.id.starts_with(crate::instance::FS_PREFIX))
+        {
+            throwaway_home(zone);
+        }
     }
     // One X server shows every client everything: the host's is out of reach,
     // and so are the X servers of other zones — /tmp is shared, this tmpfs
