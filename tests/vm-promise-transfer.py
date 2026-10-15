@@ -185,6 +185,19 @@ def hold(host, port, log):
         time.sleep(3600)
 
 
+def hold_closed(host, port, log):
+    """hold, the process non-dumpable first: its descriptors closed to the
+    user, as Chromium's network service makes itself."""
+    import ctypes, os
+    ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE, 0
+    s = socket.create_connection((host, int(port)), timeout=30)
+    with open(log, "w") as f:
+        f.write(f"held {s.getsockname()[1]} {os.getpid()}\n")
+    import time
+    while True:
+        time.sleep(3600)
+
+
 globals()[sys.argv[1]](*sys.argv[2:])
 '''
 
@@ -414,6 +427,35 @@ def xf_zone(zone, addr, addr6):
     assert held[0]["owner"]["process"].startswith("python"), held
     print(alice("cellward traffic --connections"))
     alice(f"systemctl --user stop xfhold-{zone}")
+    # Two launches whose processes let nobody read their descriptors: no
+    # process is seen holding either socket, and the closed ones are of two
+    # launches — each connection is still its own launch's, by the cgroup
+    # its socket was made in (sock_diag, `owners.rs`).
+    closed = {}
+    for n in [1, 2]:
+        log = f"{XF}/closed{n}-{zone}.log"
+        alice(f"rm -f {log}")
+        alice(
+            f"systemd-run --user --collect --unit=xfclosed{n}-{zone} -E PATH=\"$PATH\" "
+            f"{run} {XF_PY} {XF}/xfer.py hold_closed {server_ip} {XF_PORT} {log}"
+        )
+        machine.wait_until_succeeds(f"grep -q '^held ' {log}", timeout=90)
+        _, lport, pid = alice(f"cat {log}").split()
+        closed[int(lport)] = pid
+    c = json.loads(alice("cellward traffic --connections --json"))
+    for lport, pid in closed.items():
+        found = [
+            f["owner"] for i in c["instances"] if i["network"] == zone and i["connections"]
+            for f in i["connections"] if (f["proto"], f["local_port"]) == ("tcp", lport)
+        ]
+        assert found and found[0], (lport, c)
+        # The pid is the program's as its pid namespace has it: the
+        # owner's, as the host sees it, is of the same launch — its comm.
+        assert found[0]["process"].startswith("python"), found
+    owners = {f["owner"]["pid"] for i in c["instances"] if i["network"] == zone
+              for f in i["connections"] if f["local_port"] in closed and f["owner"]}
+    assert len(owners) == 2, (owners, c)
+    alice(f"systemctl --user stop xfclosed1-{zone} xfclosed2-{zone}")
 
     # The server connects to the zone's program through the tunnel: the
     # zone's address ends in the zone's app namespace, where nothing listens
