@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The frame's settings from the window menu** («Рамка — для всех окон»): a
+  window of rows — shown or hidden, width, style, title, buttons, radius, the
+  fullscreen button, the double click — and the container's own colour; a
+  setting Nix declares is shown, not offered. The ≡'s row says «Сменить сеть
+  контейнера…».
 - **Paste from the clipboard history** (the frame menu's «Вставить из истории
   буфера обмена…», `cellward clip-window --pid <pid> [--entry <h> <id>]`): the
   entry chosen becomes both selections, and the launch's proxy presses
