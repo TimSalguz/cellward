@@ -1040,7 +1040,8 @@ impl Window {
                     text(perm.label.as_str())
                         .size(13)
                         .width(Length::Fixed(230.0)),
-                    choices
+                    // Many choices (the frame's colours) go on below.
+                    choices.wrap().vertical_spacing(2)
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
