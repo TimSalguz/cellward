@@ -3968,6 +3968,12 @@ impl Transport {
                 decided.push((f.key, crate::verdicts::Verdict::Allow));
                 continue;
             }
+            // A destination blocked for the container: no, whoever's it is
+            // (`netrules::Block`), before the program's rule.
+            if rules.blocked(crate::flows::name_of(&names, &f.key.remote), &f.key.remote) {
+                decided.push((f.key, crate::verdicts::Verdict::Deny));
+                continue;
+            }
             let program = owner.as_ref().and_then(|o| o.program.clone());
             match rules.decide(program.as_deref()).verdict() {
                 Some(verdict) => decided.push((f.key, verdict)),

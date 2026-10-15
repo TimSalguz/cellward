@@ -2792,7 +2792,8 @@ fn ask_switch(dir: &Path, to: &str) -> Result<Vec<crate::switch::Said>, String> 
 fn container_net(tools: &Tools, words: &[String]) -> u8 {
     use crate::verdicts::Verdict;
     const USAGE: &str = "cellward container net <контейнер> [allow|deny|forget <программа>]\n\
-                         cellward container net <контейнер> default allow|deny|none";
+                         cellward container net <контейнер> default allow|deny|none\n\
+                         cellward container net <контейнер> block|unblock <имя|адрес|сеть>";
     let Some(selector) = words.first() else {
         eprintln!("{USAGE}");
         return 1;
@@ -2827,7 +2828,30 @@ fn container_net(tools: &Tools, words: &[String]) -> u8 {
                     None => "спрашивать",
                 }
             );
+            for (block, source) in &rules.blocks {
+                let from = if *source == crate::container::Source::Nix {
+                    " (Nix)"
+                } else {
+                    ""
+                };
+                println!("заблокировано: {}{from}", block.word());
+            }
             return 0;
+        }
+        (Some(verb @ ("block" | "unblock")), Some(target)) if words.len() == 3 => {
+            let add = verb == "block";
+            crate::netrules::set_block(tools, &record.name, target, add).map(|block| {
+                if add {
+                    format!(
+                        "{} заблокировано для контейнера {selector} — с новых соединений его \
+                         программ (имя — с поддоменами, по ответам DNS: DNS-over-HTTPS \
+                         программы его обходит, адрес — нет)",
+                        block.word()
+                    )
+                } else {
+                    format!("{} снова доступно контейнеру {selector}", block.word())
+                }
+            })
         }
         (Some(verb @ ("allow" | "deny" | "forget")), Some(program)) if words.len() == 3 => {
             let verdict = match verb {

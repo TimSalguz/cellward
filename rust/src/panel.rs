@@ -11,6 +11,7 @@
 //! ```text
 //! container⇥<name>⇥<home: private|layer|main>⇥<network|ask>⇥<#rrggbb>
 //! path⇥<container>⇥<path>⇥<until: unix seconds, 0 for ever>
+//! block⇥<container>⇥<name|address|network>⇥<nix|local>
 //! network⇥<name>⇥<kind: zone|offline|unconfined>⇥<up: 0|1>⇥<#rrggbb>⇥<locked: 0|1>⇥<tunnel>
 //! instance⇥<id>⇥<container|->⇥<network>⇥<out bytes>⇥<in bytes>⇥<since>
 //! flow⇥<instance id>⇥<proto>⇥<remote>⇥<remote port>⇥<name>⇥<who>⇥<out>⇥<in>⇥<last>
@@ -102,6 +103,16 @@ pub fn data(tools: &Tools) -> String {
                 .find(|(q, _)| *q == p.value)
                 .map_or(0, |(_, t)| *t);
             line(&["path", &c.name, &path, &until.to_string()]);
+        }
+        // Its blocked destinations (`netrules::Block`): what the person can
+        // take back, and what Nix set.
+        for (block, source) in crate::netrules::Rules::load(&tools.config, &c.name).blocks {
+            let from = if source == crate::container::Source::Nix {
+                "nix"
+            } else {
+                "local"
+            };
+            line(&["block", &c.name, &block.word(), from]);
         }
     }
     let locked = |zone: &str| {

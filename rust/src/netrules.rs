@@ -31,6 +31,93 @@ use crate::verdicts::Verdict;
 const ALLOW: &str = "net_allow";
 const DENY: &str = "net_deny";
 const DEFAULT: &str = "net_default";
+/// A destination none of the container's programs reaches ([`Block`]).
+const BLOCK: &str = "net_block";
+
+/// A destination blocked for a container (the owner, 2026-10-15): a name,
+/// with every name below it; an address; a network. Decided by the keeper
+/// for every new flow before its program's rule (`zone`): a flow to a
+/// blocked address, or to an address a DNS answer gave for a blocked name,
+/// is denied, whoever's it is.
+///
+/// What it cannot see: a name resolved where the relay reads no answer —
+/// DNS over HTTPS or TLS of a browser's own — reaches its address
+/// unblocked unless the address is blocked too; and an address shared by
+/// many names (a CDN) is blocked by its name only on a flow the answer for
+/// that name led to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Block {
+    Name(String),
+    Addr(std::net::IpAddr),
+    Net(std::net::IpAddr, u8),
+}
+
+impl Block {
+    /// A word of a person's or a record's: `example.com`, `1.2.3.4`,
+    /// `2001:db8::/32`. A name in lower case, of letters, digits, `-` and
+    /// dots, a dot inside it; no scheme, path or port.
+    pub fn parse(word: &str) -> Option<Self> {
+        let word = word.trim();
+        if let Some((addr, len)) = word.split_once('/') {
+            let addr: std::net::IpAddr = addr.parse().ok()?;
+            let len: u8 = len.parse().ok()?;
+            let max = if addr.is_ipv4() { 32 } else { 128 };
+            return (len <= max).then_some(Self::Net(addr, len));
+        }
+        if let Ok(addr) = word.parse() {
+            return Some(Self::Addr(addr));
+        }
+        let name = word.trim_end_matches('.').to_ascii_lowercase();
+        let ok = name.len() <= 253
+            && name.contains('.')
+            && name.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            });
+        ok.then_some(Self::Name(name))
+    }
+
+    /// How it is written in a record.
+    pub fn word(&self) -> String {
+        match self {
+            Self::Name(name) => name.clone(),
+            Self::Addr(addr) => addr.to_string(),
+            Self::Net(addr, len) => format!("{addr}/{len}"),
+        }
+    }
+
+    /// Whether a flow to `addr`, which a DNS answer named `name` (none: no
+    /// answer seen), goes where this blocks.
+    pub fn covers(&self, name: Option<&str>, addr: &std::net::IpAddr) -> bool {
+        match self {
+            Self::Addr(blocked) => blocked == addr,
+            Self::Net(net, len) => in_net(addr, net, *len),
+            Self::Name(blocked) => name.is_some_and(|n| {
+                let n = n.trim_end_matches('.').to_ascii_lowercase();
+                n == *blocked || n.ends_with(&format!(".{blocked}"))
+            }),
+        }
+    }
+}
+
+fn in_net(addr: &std::net::IpAddr, net: &std::net::IpAddr, len: u8) -> bool {
+    use std::net::IpAddr;
+    let (a, n, bits): (u128, u128, u32) = match (addr, net) {
+        (IpAddr::V4(a), IpAddr::V4(n)) => (u32::from(*a).into(), u32::from(*n).into(), 32),
+        (IpAddr::V6(a), IpAddr::V6(n)) => (u128::from(*a), u128::from(*n), 128),
+        _ => return false,
+    };
+    let len = u32::from(len).min(bits);
+    if len == 0 {
+        return true;
+    }
+    let shift = bits - len;
+    (a >> shift) == (n >> shift)
+}
 
 /// A launcher key as a rule names it: one word, nothing that would read as
 /// another line or another setting.
@@ -95,6 +182,8 @@ pub struct Rules {
     pub template: (Rule, Source),
     /// «Без изоляции»: the network, always.
     pub open: bool,
+    /// The destinations blocked ([`Block`]), Nix's first.
+    pub blocks: Vec<(Block, Source)>,
 }
 
 impl Default for Rules {
@@ -105,6 +194,7 @@ impl Default for Rules {
             default: None,
             template: (Rule::Ask, Source::Default),
             open: false,
+            blocks: Vec::new(),
         }
     }
 }
@@ -148,6 +238,11 @@ impl Rules {
             ..Rules::default()
         };
         for (conf, source) in [(&declared, Source::Nix), (&local, Source::Local)] {
+            for block in values(conf, BLOCK).filter_map(Block::parse) {
+                if !rules.blocks.iter().any(|(b, _)| *b == block) {
+                    rules.blocks.push((block, source));
+                }
+            }
             for (key, verdict) in [(ALLOW, Verdict::Allow), (DENY, Verdict::Deny)] {
                 for program in values(conf, key)
                     .map(str::trim)
@@ -199,10 +294,20 @@ impl Rules {
         if self.open {
             return Some(Verdict::Allow);
         }
+        // A destination blocked: each flow is looked at.
+        if !self.blocks.is_empty() {
+            return None;
+        }
         self.programs
             .is_empty()
             .then(|| self.default_rule().verdict())
             .flatten()
+    }
+
+    /// Whether a flow to `addr`, named `name` by a DNS answer, is blocked —
+    /// whoever's it is. Never for «без изоляции».
+    pub fn blocked(&self, name: Option<&str>, addr: &std::net::IpAddr) -> bool {
+        !self.open && self.blocks.iter().any(|(b, _)| b.covers(name, addr))
     }
 
     /// The rule for `program` (`None`: not found — the default).
@@ -248,6 +353,50 @@ pub fn set(
         program,
         verdict,
     )
+}
+
+/// Block `target` for `container`, or take a local block back (`add`
+/// false), locally. Nix's blocks are taken back there.
+pub fn set_block(
+    tools: &crate::tools::Tools,
+    container: &str,
+    target: &str,
+    add: bool,
+) -> Result<Block, String> {
+    let block = Block::parse(target).ok_or_else(|| {
+        format!("«{target}» — не имя, не адрес и не сеть (example.com, 1.2.3.4, 10.0.0.0/8)")
+    })?;
+    let record = crate::container::load(tools, container)
+        .ok_or_else(|| format!("контейнера {container} нет"))?;
+    if record.name == crate::container::OPEN_RECORD {
+        return Err("«без изоляции» не настраивается: сеть у его программ есть".to_owned());
+    }
+    let rules = Rules::load(&tools.config, &record.name);
+    if !add
+        && rules
+            .blocks
+            .iter()
+            .any(|(b, s)| *b == block && *s == Source::Nix)
+    {
+        return Err(format!(
+            "{} для контейнера {container} заблокировано в Nix — снимается там",
+            block.word()
+        ));
+    }
+    let file = record.policy.join(crate::container::FILE);
+    let local = std::fs::read_to_string(&file)
+        .map(|t| crate::container::parse_conf(&t))
+        .unwrap_or_default();
+    let mut kept: Vec<String> = values(&local, BLOCK)
+        .filter_map(Block::parse)
+        .filter(|b| *b != block)
+        .map(|b| b.word())
+        .collect();
+    if add {
+        kept.push(block.word());
+    }
+    crate::container::write_values(&file, BLOCK, &kept)?;
+    Ok(block)
 }
 
 /// `program`'s line in the record's local file `file`: allow, deny, or
@@ -383,6 +532,54 @@ pub fn set_default(
 
 #[cfg(test)]
 mod tests {
+
+    /// A blocked name covers itself and every name below it, never a name
+    /// that only ends the same way; an address and a network by their bits.
+    #[test]
+    fn a_block_covers_its_name_its_address_its_network() {
+        let addr = |a: &str| -> std::net::IpAddr { a.parse().unwrap() };
+        let yt = Block::parse("YouTube.com.").unwrap();
+        assert_eq!(yt, Block::Name("youtube.com".to_owned()));
+        assert!(yt.covers(Some("youtube.com"), &addr("1.1.1.1")));
+        assert!(yt.covers(Some("www.youtube.com"), &addr("1.1.1.1")));
+        assert!(!yt.covers(Some("notyoutube.com"), &addr("1.1.1.1")));
+        assert!(!yt.covers(None, &addr("1.1.1.1")));
+        let one = Block::parse("149.154.167.41").unwrap();
+        assert!(one.covers(None, &addr("149.154.167.41")));
+        assert!(!one.covers(None, &addr("149.154.167.42")));
+        let net = Block::parse("149.154.160.0/20").unwrap();
+        assert!(net.covers(None, &addr("149.154.167.41")));
+        assert!(!net.covers(None, &addr("149.154.176.1")));
+        assert!(!net.covers(None, &addr("2001:db8::1")));
+        let six = Block::parse("2001:db8::/32").unwrap();
+        assert!(six.covers(None, &addr("2001:db8:1::5")));
+        for bad in [
+            "",
+            "youtube",
+            "http://youtube.com",
+            "a b.com",
+            "-x.com",
+            "1.2.3.4/33",
+            "x.com:443",
+        ] {
+            assert_eq!(Block::parse(bad), None, "{bad}");
+        }
+        let rules = Rules {
+            blocks: vec![(yt, Source::Local)],
+            ..Rules::default()
+        };
+        assert!(
+            rules.uniform().is_none(),
+            "a block makes each flow looked at"
+        );
+        assert!(rules.blocked(Some("m.youtube.com"), &addr("1.1.1.1")));
+        let open = Rules {
+            open: true,
+            ..rules
+        };
+        assert!(!open.blocked(Some("m.youtube.com"), &addr("1.1.1.1")));
+    }
+
     use super::*;
 
     fn rules(nix: &str, local: &str) -> Rules {
