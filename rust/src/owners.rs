@@ -323,35 +323,40 @@ fn leaves_by_id(dir: &Path) -> HashMap<u64, (PathBuf, String)> {
 }
 
 /// The owner of a socket made in a launch's cgroup `leaf`: the launch, by
-/// its waiter. The process named: the newest of the cgroup's whose
-/// descriptors are closed — no readable one holds the socket, or it would have been found
-/// —, else its newest; the one that made it may be gone, or one of several.
+/// its waiter. A process is named only where it is sure: the one of the
+/// cgroup whose descriptors are closed — no readable one holds the socket,
+/// or it would have been found —, cellward's own wrapper aside. Several
+/// closed, and only the program is said: which of them made it cannot be
+/// known without privileges (`docs/FIREWALL.md` §3).
 fn by_leaf((path, leaf): &(PathBuf, String), launches: &HashMap<i32, String>) -> Option<Owner> {
     let (waiter, start) = crate::epoch::leaf_of(leaf)?;
     (crate::sys::start_time(waiter) == Some(start)).then_some(())?;
     let (program, launch) = program_by_parents(waiter, launches)?;
     let pids: Vec<i32> =
         crate::epoch::procs_of(&fs::read_to_string(path.join("cgroup.procs")).unwrap_or_default());
-    let closed = |pid: &&i32| {
-        fs::read_dir(format!("/proc/{pid}/fd"))
-            .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+    let closed: Vec<i32> = pids
+        .into_iter()
+        .filter(|pid| {
+            fs::read_dir(format!("/proc/{pid}/fd"))
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+                && comm(*pid) != OWN_WRAPPER
+        })
+        .collect();
+    let (pid, process) = match closed.as_slice() {
+        [one] => (*one, comm(*one)),
+        _ => (0, String::new()),
     };
-    // The newest closed one: the launch's own wrapper closes itself too,
-    // and the program comes after it.
-    let pid = pids
-        .iter()
-        .rev()
-        .find(closed)
-        .or(pids.last())
-        .copied()
-        .unwrap_or(waiter);
     Some(Owner {
         pid,
-        process: comm(pid),
+        process,
         program: Some(program),
         launch: Some(launch),
     })
 }
+
+/// The `comm` of cellward's own processes in a launch (`profile-run`, the
+/// wrapper that starts the program): never the program's socket's maker.
+const OWN_WRAPPER: &str = "vpn-zone-core";
 
 /// A process's `comm`, its control characters made `?` — the container's
 /// own word.

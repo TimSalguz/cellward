@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A connection's program by its socket's cgroup** (`docs/FIREWALL.md` §3):
+  the instance's keeper asks the kernel which launch's cgroup each socket was
+  made in, so a program whose processes close their descriptors (Chromium,
+  CEF) is named, not «Неизвестная программа».
 - **A cgroup of each launch's** in a container's instance
   (`e<epoch>/l<pid>-<start>`, `docs/FIREWALL.md` §3): made before the launch
   enters the instance, moved whole by a live switch, swept when empty — the
