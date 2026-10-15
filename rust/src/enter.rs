@@ -326,18 +326,14 @@ pub(crate) fn drop_capabilities() {
 /// it was started: with the network before the instance's first switch (its
 /// keeper notes that the instance cannot be switched while it runs), with
 /// none after it, behind the epoch's wall — which the person is told.
-fn place(id: &str, epoch: &crate::epoch::Epoch) {
-    // A cgroup of the launch's own below the epoch, named by the process
-    // that waits for it (this one's parent, on the host).
-    // SAFETY: getppid takes nothing and cannot fail.
-    let waiter = unsafe { libc::getppid() };
-    let leaf = crate::sys::start_time(waiter).map(|start| crate::epoch::leaf_name(waiter, start));
-    let placed = match &leaf {
+/// `leaf`: the name of the launch's own cgroup below the epoch
+/// ([`crate::epoch::leaf_name`] of the process that waits for it), made by
+/// the parent before the fork — the child is in the instance's pid
+/// namespace already, where its parent has no number.
+fn place(id: &str, epoch: &crate::epoch::Epoch, leaf: Option<&str>) {
+    let placed = match leaf {
         Some(leaf) => epoch.place_launch(leaf),
-        None => {
-            eprintln!("container-enter: no start time of its waiter {waiter} — in the epoch's cgroup");
-            epoch.place_self()
-        }
+        None => epoch.place_self(),
     };
     if let Err(e) = placed {
         if epoch.wall().is_some() {
@@ -573,6 +569,10 @@ pub fn run(args: &Args) -> u8 {
     // The instance's current epoch (stage 4): read under the lock, which a
     // switch holds exclusively while it moves to the next.
     let epoch = crate::epoch::read(&dir);
+    // This process waits for the launch: its cgroup is named by it.
+    // SAFETY: getpid takes nothing and cannot fail.
+    let waiter = unsafe { libc::getpid() };
+    let leaf = crate::sys::start_time(waiter).map(|start| crate::epoch::leaf_name(waiter, start));
     // The child's word: nothing (its exec closed the pipe) or why it could
     // not become the launch. And the main program's status, later.
     let pipes = crate::sys::pipe().and_then(|said| crate::sys::pipe().map(|status| (said, status)));
@@ -601,7 +601,7 @@ pub fn run(args: &Args) -> u8 {
         drop(status_r);
         drop(lock);
         if let Some(epoch) = &epoch {
-            place(&args.instance, epoch);
+            place(&args.instance, epoch, leaf.as_deref());
         }
         let why = become_the_launch(&space, &args.cmd, &status_w);
         let _ = File::from(said_w).write_all(why.as_bytes());
