@@ -142,6 +142,36 @@ with subtest("an instance's programs are in its epoch; one from a login session 
     machine.succeed("pkill -xf 'sleep 4343'")
     live_switch_is("vmia", True, None)
 
+with subtest("the task manager: an instance's launches, paused, resumed, ended"):
+    alice(
+        "systemd-run --user --collect --unit=tk-sleep cellward run offline --container vmia "
+        "-- sleep 5151"
+    )
+    machine.wait_until_succeeds("pgrep -xf 'sleep 5151'", timeout=30)
+
+    def tk_launch():
+        t = json.loads(alice("cellward tasks --json --watch 200 | head -1"))
+        i = next(i for i in t["instances"] if i["id"] == "vmia")
+        return next(
+            l for l in i["launches"] if any(p["comm"] == "sleep" and p["rss_kib"] > 0 for p in l["procs"])
+            and any(p["pid"] == int(machine.succeed("pgrep -xf 'sleep 5151'")) for p in l["procs"])
+        )
+
+    l = tk_launch()
+    assert l["program"] and not l["frozen"] and l["cpu"] is not None, l
+    alice(f"cellward tasks pause vmia {l['leaf']}")
+    machine.wait_until_succeeds(
+        "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 cellward tasks --json' | grep -q '\"frozen\":true'",
+        timeout=30,
+    )
+    alice(f"cellward tasks resume vmia {l['leaf']}")
+    assert not tk_launch()["frozen"]
+    alice(f"cellward tasks kill vmia {l['leaf']}")
+    machine.wait_until_fails("pgrep -xf 'sleep 5151'", timeout=30)
+    alice("! cellward tasks pause vmia l1-1")
+    alice("! cellward tasks kill vmia ../e1")
+
+
 with subtest("two containers' instances share no /tmp, no abstract socket, no System V IPC"):
     in_c("vmia", "sh -c 'echo a > /tmp/vmia-mark'")
     in_c("vmia", "test -e /tmp/vmia-mark")
