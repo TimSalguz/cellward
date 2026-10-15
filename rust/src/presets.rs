@@ -207,8 +207,6 @@ const CATALOG: &[Entry] = &[
             "discord",
             "com.discordapp.Discord",
             "webcord",
-            "TeamSpeak",
-            "teamspeak",
             "com.slack.Slack",
             "slack",
             "zoom",
@@ -220,6 +218,13 @@ const CATALOG: &[Entry] = &[
         ],
         || vec![Mic(Setting::Ask), Cast(Setting::Ask), Cam],
         "звонки: микрофон и показ экрана по вопросу; камера — по выбору",
+    ),
+    (
+        // CEF on X11 only: with no X server of its container it ends at
+        // once (2026-10-15, the owner's TeamSpeak 6 in a home of its own).
+        &["TeamSpeak", "teamspeak", "com.teamspeak.TeamSpeak"],
+        || vec![X11, Mic(Setting::Ask), Cast(Setting::Ask), Cam],
+        "звонки на X11: свой X (без него не запустится), микрофон и показ экрана по вопросу; камера — по выбору",
     ),
     (
         &[
@@ -634,6 +639,9 @@ mod tests {
         assert_eq!(keys.len(), n);
         assert!(built_in("firefox").is_some_and(|p| p.items.contains(&Mic(Setting::Ask))));
         assert!(built_in("no-such-program").is_none());
+        // An X11-only program gets its X server by itself: no box to tick.
+        let ts = built_in("TeamSpeak").unwrap();
+        assert!(ts.items.contains(&X11) && X11.safe());
     }
 
     /// Nix's preset replaces the built-in one whole.

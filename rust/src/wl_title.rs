@@ -1278,6 +1278,9 @@ pub struct Rect {
 pub struct Prompt {
     rows: Vec<Line>,
     buttons: Vec<(Rect, Line)>,
+    /// Each button's label while its countdown runs, one a second left:
+    /// `[left - 1][button]`, «Запретить · 3».
+    counting: Vec<Vec<Line>>,
     pub size: (i32, i32),
 }
 
@@ -1303,15 +1306,37 @@ impl Prompt {
                 }
             })
             .collect();
-        let labels: Vec<Line> = labels
+        let within = (room - 2 * PROMPT_BUTTON_PAD) as f32;
+        let labels: Vec<&str> = labels.iter().take(PROMPT_BUTTONS).copied().collect();
+        let counting: Vec<Vec<Line>> = (1..=PROMPT_COUNT)
+            .map(|left| {
+                labels
+                    .iter()
+                    .map(|l| lay_out_within(font, &format!("{l} · {left}"), within))
+                    .collect()
+            })
+            .collect();
+        // A button as wide as its widest label: it does not move as the
+        // seconds go.
+        let widest = |i: usize, plain: i32| {
+            counting
+                .iter()
+                .map(|row| row[i].width)
+                .fold(plain, i32::max)
+        };
+        let labels: Vec<(Line, i32)> = labels
             .iter()
-            .take(PROMPT_BUTTONS)
-            .map(|l| lay_out_within(font, l, (room - 2 * PROMPT_BUTTON_PAD) as f32))
+            .enumerate()
+            .map(|(i, l)| {
+                let line = lay_out_within(font, l, within);
+                let wide = widest(i, line.width);
+                (line, wide)
+            })
             .collect();
         // The buttons' rows: each as many as fit, by their widths.
         let mut lines: Vec<Vec<(Line, i32)>> = Vec::new();
-        for label in labels {
-            let w = label.width + 2 * PROMPT_BUTTON_PAD;
+        for (label, wide) in labels {
+            let w = wide + 2 * PROMPT_BUTTON_PAD;
             match lines.last_mut() {
                 Some(line) if line.iter().map(|(_, w)| w + PROMPT_GAP).sum::<i32>() + w <= room => {
                     line.push((label, w))
@@ -1342,6 +1367,7 @@ impl Prompt {
         Self {
             rows,
             buttons,
+            counting,
             size: (PROMPT_WIDTH, y - PROMPT_GAP + PROMPT_PAD),
         }
     }
@@ -1421,7 +1447,7 @@ pub fn render_prompt(font: &FontVec, prompt: &Prompt, scale: u32, bg: Rgb) -> (i
             }
         }
     }
-    // Each button's cell in device pixels, and its label's coverage there.
+    // Each button's cell in device pixels.
     let cells: Vec<(i32, i32, i32, i32)> = prompt
         .buttons
         .iter()
@@ -1430,23 +1456,45 @@ pub fn render_prompt(font: &FontVec, prompt: &Prompt, scale: u32, bg: Rgb) -> (i
             (x0, y0, device(c.x + c.w, scale), device(c.y + c.h, scale))
         })
         .collect();
-    for ((_, label), &(x0, y0, x1, y1)) in prompt.buttons.iter().zip(&cells) {
-        let (cw, ch) = (x1 - x0, y1 - y0);
-        let lx = ((cw - device(label.width, scale)) / 2).max(0) as f32;
-        let cov = line_coverage(font, label, scale, cw, ch, lx);
-        for y in 0..ch {
-            for x in 0..cw {
-                let (dx, dy) = ((x0 + x) as usize, (y0 + y) as usize);
-                if dx < wu && dy < hu {
-                    text[dy * wu + dx] = cov[(y * cw + x) as usize];
+    // The buttons' words over the rows' coverage: as they are, or with the
+    // seconds left.
+    let with_labels = |labels: &[&Line]| {
+        let mut text = text.clone();
+        for (label, &(x0, y0, x1, y1)) in labels.iter().zip(&cells) {
+            let (cw, ch) = (x1 - x0, y1 - y0);
+            let lx = ((cw - device(label.width, scale)) / 2).max(0) as f32;
+            let cov = line_coverage(font, label, scale, cw, ch, lx);
+            for y in 0..ch {
+                for x in 0..cw {
+                    let (dx, dy) = ((x0 + x) as usize, (y0 + y) as usize);
+                    if dx < wu && dy < hu {
+                        text[dy * wu + dx] = cov[(y * cw + x) as usize];
+                    }
                 }
             }
         }
-    }
+        text
+    };
+    let plain: Vec<&Line> = prompt.buttons.iter().map(|(_, l)| l).collect();
+    let open_text = with_labels(&plain);
     let variants = prompt_variants(prompt.buttons.len());
     let mut pixels = Vec::with_capacity(variants * wu * hu * 4);
     for variant in 0..variants {
-        let lit = prompt_lit(variant);
+        // Locked, `left` seconds to go: dim cells, faint words with the
+        // seconds; open: the button under the pointer lit.
+        let (locked, lit) = match prompt_kind(variant) {
+            Kind::Locked(left) => (Some(left), None),
+            Kind::Open(lit) => (None, lit),
+        };
+        let counting;
+        let text = match locked {
+            Some(left) => {
+                let row: Vec<&Line> = prompt.counting[(left - 1) as usize].iter().collect();
+                counting = with_labels(&row);
+                &counting
+            }
+            None => &open_text,
+        };
         for y in 0..h {
             for x in 0..w {
                 let cell = cells
@@ -1455,27 +1503,17 @@ pub fn render_prompt(font: &FontVec, prompt: &Prompt, scale: u32, bg: Rgb) -> (i
                 let base = if x < edge || y < edge || x >= w - edge || y >= h - edge {
                     edge_color
                 } else {
-                    match (cell, lit) {
-                        (Some(i), Some((l, step))) if i == l && step == PROMPT_STEPS => {
-                            blend(bg, fg, 0.30)
-                        }
-                        // Under the pointer before its guard is over: a
-                        // bar filling the button from the left, the time
-                        // left to wait.
-                        (Some(i), Some((l, step))) if i == l => {
-                            let (x0, _, x1, _) = cells[i];
-                            let filled = x0 + (x1 - x0) * step as i32 / PROMPT_STEPS as i32;
-                            if x < filled {
-                                blend(bg, fg, 0.22)
-                            } else {
-                                blend(bg, fg, 0.12)
-                            }
-                        }
-                        (Some(_), _) => blend(bg, fg, 0.12),
-                        (None, _) => bg,
+                    match cell {
+                        Some(_) if locked.is_some() => blend(bg, fg, 0.05),
+                        Some(i) if lit == Some(i) => blend(bg, fg, 0.30),
+                        Some(_) => blend(bg, fg, 0.12),
+                        None => bg,
                     }
                 };
-                let c = text[y as usize * wu + x as usize];
+                let mut c = text[y as usize * wu + x as usize];
+                if locked.is_some() && cell.is_some() {
+                    c *= 0.55;
+                }
                 pixels.extend_from_slice(&blend(base, fg, c).xrgb8888());
             }
         }
@@ -1483,27 +1521,39 @@ pub fn render_prompt(font: &FontVec, prompt: &Prompt, scale: u32, bg: Rgb) -> (i
     (w, h, pixels)
 }
 
-/// The steps of a panel button's countdown: the guard's time
-/// (`crate::dialog::TOO_FAST`) in as many parts, the bar in the button one
-/// part longer each; at the last the button is lit, to be pressed.
-pub const PROMPT_STEPS: usize = 6;
+/// The seconds a panel's buttons count down before they take a click
+/// (`crate::wl_frame::PANEL_GUARD`).
+pub const PROMPT_COUNT: u64 = 3;
 
-/// How many images a panel of `buttons` has: none lit, then for each
-/// button under the pointer every step of its countdown, the last lit.
+/// How many images a panel of `buttons` has: locked, each second of its
+/// countdown; then open — no button lit, then each lit.
 pub fn prompt_variants(buttons: usize) -> usize {
-    1 + buttons * (PROMPT_STEPS + 1)
+    PROMPT_COUNT as usize + 1 + buttons
 }
 
-/// The image of a panel with button `lit` under the pointer at `step` of
-/// its countdown ([`PROMPT_STEPS`]: over, to be pressed; none: no button).
-pub fn prompt_variant(lit: Option<usize>, step: usize) -> usize {
-    lit.map_or(0, |b| 1 + b * (PROMPT_STEPS + 1) + step.min(PROMPT_STEPS))
+/// The image of a panel locked with `left` seconds of its countdown to go.
+pub fn prompt_locked(left: u64) -> usize {
+    (left.clamp(1, PROMPT_COUNT) - 1) as usize
 }
 
-/// Which button an image has under the pointer, and at which step.
-fn prompt_lit(variant: usize) -> Option<(usize, usize)> {
-    let v = variant.checked_sub(1)?;
-    Some((v / (PROMPT_STEPS + 1), v % (PROMPT_STEPS + 1)))
+/// The image of a panel open, button `lit` under the pointer (none: none).
+pub fn prompt_open(lit: Option<usize>) -> usize {
+    PROMPT_COUNT as usize + lit.map_or(0, |b| b + 1)
+}
+
+/// What an image of a panel shows.
+enum Kind {
+    Locked(u64),
+    Open(Option<usize>),
+}
+
+fn prompt_kind(variant: usize) -> Kind {
+    let count = PROMPT_COUNT as usize;
+    if variant < count {
+        Kind::Locked(variant as u64 + 1)
+    } else {
+        Kind::Open((variant - count).checked_sub(1))
+    }
 }
 
 /// How much of the pixel (`x`, `y`) of an image `w` wide is inside it with
@@ -3625,12 +3675,11 @@ mod tests {
                 let c = prompt.cell(i).unwrap();
                 let (x, y) = (device(c.x, at), device(c.y, at));
                 for v in 0..prompt_variants(3) {
-                    // Lit at the countdown's end; under the bar from its
-                    // first step (the corner is its first column).
-                    let want = match prompt_lit(v) {
-                        Some((b, PROMPT_STEPS)) if b == i => blend(bg, fg, 0.30),
-                        Some((b, step)) if b == i && step > 0 => blend(bg, fg, 0.22),
-                        _ => blend(bg, fg, 0.12),
+                    // Locked: dim; open: lit under the pointer, else plain.
+                    let want = match prompt_kind(v) {
+                        Kind::Locked(_) => blend(bg, fg, 0.05),
+                        Kind::Open(Some(b)) if b == i => blend(bg, fg, 0.30),
+                        Kind::Open(_) => blend(bg, fg, 0.12),
                     };
                     assert_eq!(
                         word(v, x, y),
@@ -3650,19 +3699,46 @@ mod tests {
                     .any(|p| p != plain.as_slice() && p != edge.as_slice()),
                 "no text"
             );
-            assert_eq!(first, &pixels[image * 3 + row..image * 3 + row + rows]);
-            // Under the pointer before the guard is over: a bar fills the
-            // button from the left, step by step — half of it at half the
-            // steps, none at the first.
+            let last = prompt_open(Some(2));
+            assert_eq!(
+                first,
+                &pixels[image * last + row..image * last + row + rows]
+            );
+            // The seconds on the locked buttons: each second's image its own.
             let c = prompt.cell(1).unwrap();
-            let (x0, x1) = (device(c.x, at), device(c.x + c.w, at));
-            let y = device(c.y + c.h, at) - 1;
-            let half = prompt_variant(Some(1), PROMPT_STEPS / 2);
-            let (bar, rest) = (colour(blend(bg, fg, 0.22)), colour(blend(bg, fg, 0.12)));
-            assert_eq!(word(half, x0 + 1, y), bar, "scale {scale}: the bar");
-            assert_eq!(word(half, x1 - 2, y), rest, "scale {scale}: past the bar");
-            assert_eq!(word(prompt_variant(Some(1), 0), x0 + 1, y), rest);
+            let cell = |v: usize| {
+                (device(c.y, at)..device(c.y + c.h, at))
+                    .flat_map(|y| (device(c.x, at)..device(c.x + c.w, at)).map(move |x| (x, y)))
+                    .map(|(x, y)| word(v, x, y))
+                    .collect::<Vec<_>>()
+            };
+            assert_ne!(
+                cell(prompt_locked(3)),
+                cell(prompt_locked(2)),
+                "scale {scale}"
+            );
+            assert_ne!(
+                cell(prompt_locked(1)),
+                cell(prompt_open(None)),
+                "scale {scale}"
+            );
         }
+    }
+
+    /// A locked button is as wide as its widest label: it does not move as
+    /// the seconds go, and its seconds are written on it.
+    #[test]
+    fn a_countdown_does_not_move_the_buttons() {
+        let Some(bytes) = font() else { return };
+        let prepared = Prepared::new(bytes, "nl · work").expect("a font");
+        let prompt = Prompt::lay_out(&prepared.font, ASKED, &ANSWERS);
+        for (i, (cell, label)) in prompt.buttons.iter().enumerate() {
+            for row in &prompt.counting {
+                assert!(row[i].width + 2 * PROMPT_BUTTON_PAD <= cell.w, "{i}");
+            }
+            assert!(label.width <= prompt.counting[0][i].width);
+        }
+        assert_eq!(prompt.counting.len(), PROMPT_COUNT as usize);
     }
 
     /// A question's panel is drawn anew into a region of its own, after the

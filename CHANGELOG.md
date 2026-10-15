@@ -48,13 +48,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   window ("first one permission, then another"). The question's own
   deadline is unchanged, and the proxy's word can only postpone, never
   answer.
-- **Permission panel buttons count down to when they take a click.** A
-  button under the pointer fills with a bar over its guard (1.5 s of the
-  pointer resting, no key or popup of the program's), then is lit; a press
-  too soon, a key or a popup of the program's empties it again. The same
-  panel asks for the network, the microphone and the camera. Before, a lit button looked pressable from the first
-  moment, and quick repeated clicks — each restarting the guard — never
-  answered.
+- **Permission panel buttons are locked, with a countdown, until they take
+  a click** (the owner, 2026-10-15). From when the panel opens both buttons
+  are dimmed with the seconds left on them («Запретить · 3»), then open; a
+  key or a press of the program's, a popup of it, or a press on a locked
+  button starts the count again. The pointer no longer has to rest on a
+  button first. The same panel asks for the network, the microphone and the
+  camera.
+- **TeamSpeak has a preset of its own with an X server.** TeamSpeak 6 is
+  CEF on X11 and ended at once in a container with no X server; a new
+  container of it now gets one by itself (an existing one: `cellward
+  container set <c> x11 on`).
 - Permission panels accept an ordinary click on “Allow…” to open the guarded
   confirmation window. An unanswered panel hands off after 15 seconds on the
   launch's own Wayland display, including for network, microphone and camera

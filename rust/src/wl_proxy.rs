@@ -6528,7 +6528,7 @@ mod tests {
                 button(82, false),
             ],
         );
-        std::thread::sleep(crate::dialog::TOO_FAST + Duration::from_millis(500));
+        std::thread::sleep(crate::wl_frame::PANEL_GUARD + Duration::from_millis(500));
         // «Запретить» after the guard: said.
         let (x, y) = center(0);
         send(

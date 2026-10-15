@@ -298,41 +298,35 @@ def requested(path):
     return f"journalctl -u permission-http --no-pager | grep -F 'GET /{path}'"
 
 
-def bar_at(at, span, y):
-    """Whether a button's countdown bar is under way: on a row near the
-    button's top, above its words, two colours (the bar, the rest) where
-    there is one before it starts and once it is over."""
+def cell_of(at, span, y):
+    """A button's pixels, a row near its top and the rows through its
+    words — to well past its right end found: the seconds are written at
+    the end of its words, and what is beyond the panel stays as it was."""
     l, _ = span
-    x = l + 3
-    top = y
-    while top > 0 and at(x, top - 1) == at(x, y):
-        top -= 1
-    row = {at(c, top + 2) for c in range(l + 1, l + 140)}
-    return len(row) > 1
+    return [at(c, yy) for c in range(l + 1, l + 250) for yy in range(y - 6, y + 6)]
 
 
 def panel_round(tag, launch, path):
     """`launch` brings a program up that asks for the network at `path`; its
-    panel clicked as people click: at once, and again soon — none of it an
-    answer —, the countdown seen running in the button, then after it a
-    click that answers."""
+    panel clicked as people click: at once — none of it an answer, its
+    buttons locked with the seconds left on them —, then once the
+    countdown is over: open, and the click answers."""
     pointer("move", 5, 5)
     launch()
     spans, y = settled(f"{tag}-panel", panel_buttons, tries=40)
     allow = ((spans[1][0] + spans[1][1]) // 2, y)
     print(tag, "buttons", spans, "row", y)
-    assert not bar_at(shot(f"{tag}-idle"), spans[1], y), "a bar with nobody at the panel"
+    # A click at once starts the countdown again: locked, with its seconds.
     click(*allow, rest=0.2)
-    click(*allow, rest=0.4)
+    locked = cell_of(shot(f"{tag}-locked"), spans[1], y)
     assert peer.execute(requested(path))[0] != 0, "a click too soon answered"
-    # The pointer stays on the button: its bar fills, then it lights.
-    machine.sleep(0.5)
-    running = shot(f"{tag}-countdown")
-    machine.sleep(2)
-    over = shot(f"{tag}-armed")
-    print(tag, "bar running:", bar_at(running, spans[1], y), "after:", bar_at(over, spans[1], y))
-    assert bar_at(running, spans[1], y), "no countdown in the button"
-    assert not bar_at(over, spans[1], y), "the countdown did not end"
+    machine.sleep(1.2)
+    second = cell_of(shot(f"{tag}-locked-later"), spans[1], y)
+    machine.sleep(2.5)
+    open_ = cell_of(shot(f"{tag}-open"), spans[1], y)
+    print(tag, "locked changes:", locked != second, "opened:", locked != open_)
+    assert locked != second, "no seconds counted down on the button"
+    assert locked != open_ and second != open_, "the buttons did not open"
     click(*allow, rest=0.1)
     peer.wait_until_succeeds(requested(path), timeout=20)
     shot(f"{tag}-answered")
