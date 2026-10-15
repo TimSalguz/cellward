@@ -327,7 +327,16 @@ pub(crate) fn drop_capabilities() {
 /// keeper notes that the instance cannot be switched while it runs), with
 /// none after it, behind the epoch's wall — which the person is told.
 fn place(id: &str, epoch: &crate::epoch::Epoch) {
-    if let Err(e) = epoch.place_self() {
+    // A cgroup of the launch's own below the epoch, named by the process
+    // that waits for it (this one's parent, on the host).
+    // SAFETY: getppid takes nothing and cannot fail.
+    let waiter = unsafe { libc::getppid() };
+    let leaf = crate::sys::start_time(waiter).map(|start| crate::epoch::leaf_name(waiter, start));
+    let placed = match &leaf {
+        Some(leaf) => epoch.place_launch(leaf),
+        None => epoch.place_self(),
+    };
+    if let Err(e) = placed {
         if epoch.wall().is_some() {
             eprintln!(
                 "контейнер {id}: программа не попала в группу контейнера ({e}) — контейнер уже \
