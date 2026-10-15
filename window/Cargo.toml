@@ -31,3 +31,8 @@ iced = { version = "0.14", default-features = false, features = [
 opt-level = "s"
 lto = "thin"
 strip = true
+
+# The renderer's damage of a text, fixed here until iced does (vendor/
+# README.md): a text that changed left its glyphs' edges behind.
+[patch.crates-io]
+iced_tiny_skia = { path = "vendor/iced_tiny_skia" }

@@ -54,6 +54,8 @@ rustPlatform.buildRustPackage {
       ./Cargo.toml
       ./Cargo.lock
       ./src
+      # iced's renderer with its text damage fixed (vendor/README.md).
+      ./vendor
     ];
   };
 
