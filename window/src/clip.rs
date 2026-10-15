@@ -997,7 +997,10 @@ impl Clip {
             said.push(format!("только {}", kinds.join(", ")));
         }
         if let Some(re) = &self.re {
-            said.push(format!("шаблон /{re}/"));
+            // A long one cut: it is all in the builder.
+            let shown: String = re.chars().take(48).collect();
+            let more = if shown.len() < re.len() { "…" } else { "" };
+            said.push(format!("шаблон /{shown}{more}/"));
         }
         if said.is_empty() {
             return None;

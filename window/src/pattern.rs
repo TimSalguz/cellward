@@ -290,39 +290,92 @@ fn escape_in_class(chars: &str) -> String {
     out
 }
 
-/// The numbers `[lo, hi]` of one length as a pattern of digits.
+/// `n` digits of any value: `[0-9]`, `[0-9]{3}`.
+fn any_digits(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => "[0-9]".to_owned(),
+        n => format!("[0-9]{{{n}}}"),
+    }
+}
+
+/// The digits `x` to `y`: one, or a class.
+fn digit_class(x: u8, y: u8) -> String {
+    if x == y {
+        (x as char).to_string()
+    } else {
+        format!("[{}-{}]", x as char, y as char)
+    }
+}
+
+/// The numbers `[lo, hi]` of one length as a pattern of digits: the first
+/// digit's whole run in one class (`[1-5][0-9]{3}`), its ends apart when
+/// they do not start or end a run, digit by digit.
 fn same_length(lo: &str, hi: &str) -> String {
     if lo == hi {
         return lo.to_owned();
     }
     let (a, b) = (lo.as_bytes()[0], hi.as_bytes()[0]);
-    if lo.len() == 1 {
-        return format!("[{}-{}]", a as char, b as char);
-    }
+    let rest = lo.len() - 1;
     if a == b {
         return format!("{}{}", a as char, same_length(&lo[1..], &hi[1..]));
     }
-    let rest = lo.len() - 1;
-    let mut parts = vec![format!(
-        "{}{}",
-        a as char,
-        same_length(&lo[1..], &"9".repeat(rest))
-    )];
-    if b - a > 1 {
-        let (x, y) = ((a + 1) as char, (b - 1) as char);
-        let class = if x == y {
-            x.to_string()
-        } else {
-            format!("[{x}-{y}]")
-        };
-        parts.push(format!("{class}{}", "[0-9]".repeat(rest)));
+    let from_zero = lo[1..].bytes().all(|d| d == b'0');
+    let to_nine = hi[1..].bytes().all(|d| d == b'9');
+    let mut parts = Vec::new();
+    let mut first = a;
+    if !from_zero {
+        parts.push(format!(
+            "{}{}",
+            a as char,
+            same_length(&lo[1..], &"9".repeat(rest))
+        ));
+        first = a + 1;
     }
-    parts.push(format!(
-        "{}{}",
-        b as char,
-        same_length(&"0".repeat(rest), &hi[1..])
-    ));
-    format!("(?:{})", parts.join("|"))
+    let last = if to_nine { b } else { b - 1 };
+    if first <= last {
+        parts.push(format!("{}{}", digit_class(first, last), any_digits(rest)));
+    }
+    if !to_nine {
+        parts.push(format!(
+            "{}{}",
+            b as char,
+            same_length(&"0".repeat(rest), &hi[1..])
+        ));
+    }
+    if parts.len() == 1 {
+        parts.pop().unwrap_or_default()
+    } else {
+        format!("(?:{})", parts.join("|"))
+    }
+}
+
+/// Whether a pattern is one piece a repetition applies to whole: a
+/// character, a class, or a group that spans it all.
+fn atomic(p: &str) -> bool {
+    if p.chars().count() == 1 {
+        return true;
+    }
+    if p.starts_with('[') {
+        return p.find(']') == Some(p.len() - 1);
+    }
+    if !p.starts_with("(?:") {
+        return false;
+    }
+    let mut depth = 0;
+    for (i, c) in p.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i == p.len() - 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The numbers `[from, to]` (either order) as a pattern: split where the
@@ -422,8 +475,7 @@ impl Builder {
                 if left.is_empty() && right.is_empty() {
                     // A group of its own, a class, or one digit needs no
                     // group to repeat; digits in a row ("12") do.
-                    let single =
-                        range.starts_with("(?:") || range.starts_with('[') || range.len() == 1;
+                    let single = atomic(&range);
                     (range, single)
                 } else {
                     (format!("{left}{range}{right}"), false)
@@ -670,6 +722,26 @@ mod tests {
             }
         }
         assert_eq!(range_pattern(0, 20), "(?:[0-9]|(?:1[0-9]|20))");
+        assert_eq!(range_pattern(100, 999), "[1-9][0-9]{2}");
+        assert_eq!(
+            range_pattern(0, 65535),
+            "(?:[0-9]|[1-9][0-9]|[1-9][0-9]{2}|[1-9][0-9]{3}|(?:[1-5][0-9]{4}|\
+             6(?:[0-4][0-9]{3}|5(?:[0-4][0-9]{2}|5(?:[0-2][0-9]|3[0-5])))))"
+        );
+        for (p, whole) in [
+            ("5", true),
+            ("[1-9]", true),
+            ("[1-9][0-9]", false),
+            ("12", false),
+            ("(?:1|2)", true),
+            ("(?:1|2)(?:3)", false),
+        ] {
+            assert_eq!(atomic(p), whole, "{p}");
+        }
+        // A range of more than a piece is grouped to repeat.
+        let mut b = one(Kind::Number("100".into(), "999".into(), false));
+        b.blocks[0].times = Times::Some;
+        assert_eq!(b.pattern(), "(?:[1-9][0-9]{2})+");
     }
 
     #[test]
