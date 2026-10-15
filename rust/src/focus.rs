@@ -952,6 +952,8 @@ pub struct MenuParts {
     pub perms: bool,
     /// The container keeps a clipboard history, and the history runs.
     pub clip: bool,
+    /// The frame's settings offered (`crate::frame_window`).
+    pub frame: bool,
     pub program: Vec<(String, String, bool)>,
 }
 
@@ -1047,6 +1049,14 @@ pub fn menu_entries(
                 l.zone
             ),
             true,
+        ));
+    }
+    if parts.frame {
+        out.push(entry(HEADING, "Рамка — для всех окон".to_owned(), false));
+        out.push(entry(
+            "frame",
+            "Вид рамки: толщина, кнопки, заголовок, цвет контейнера…".to_owned(),
+            false,
         ));
     }
     out
@@ -1323,6 +1333,7 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
             .as_deref()
             .is_some_and(|r| r != crate::container::OPEN_RECORD),
         clip: clip_history(tools, launch.as_ref()).is_some() && clip_socket().exists(),
+        frame: true,
         program: refused_entries(tools, &label, launch.as_ref()),
     };
     let entries = menu_entries(&label, launch.as_ref(), &pin, &parts);
@@ -1466,6 +1477,19 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
         "clip" => {
             if let Some(history) = clip_history(tools, launch.as_ref()) {
                 return paste_from_history(tools, window.pid, &label, &history);
+            }
+        }
+        "frame" => {
+            let record = record
+                .as_deref()
+                .filter(|r| *r != crate::container::OPEN_RECORD);
+            let request = crate::frame_window::request(tools, record);
+            let Some(changes) = crate::window::ask_perms(&tools.window, &request) else {
+                return 0;
+            };
+            let said = crate::frame_window::apply(tools, record, &changes);
+            if !said.is_empty() {
+                notify(&label, &said.join("\n"));
             }
         }
         "perms" => {
@@ -2098,6 +2122,7 @@ mod tests {
             container: Some("Контейнер «work»".to_owned()),
             perms: true,
             clip: true,
+            frame: true,
             program: vec![("net-allow".to_owned(), "Сеть".to_owned(), false)],
         };
         let entries = menu_entries("Лис", Some(&launch), &Pin::Bind("work".into()), &work);
@@ -2113,7 +2138,9 @@ mod tests {
                 "perms",
                 "pin",
                 "#",
-                "kill-zone"
+                "kill-zone",
+                "#",
+                "frame"
             ]
         );
         assert_eq!(entries[0].1, "Программа «Лис»");

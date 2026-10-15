@@ -129,6 +129,7 @@ pub mod explain;
 pub mod flows;
 pub mod focus;
 pub mod frame;
+pub mod frame_window;
 pub mod fs_sandbox;
 pub mod grants;
 pub mod gui;

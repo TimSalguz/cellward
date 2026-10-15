@@ -4020,7 +4020,7 @@ fn tray(tools: &Tools, args: &[OsString]) -> u8 {
 /// `wl_proxy::Live`); the switch for windows opened after it, when their
 /// program connects. `default` for any but the switch drops the local
 /// setting; one declared in Nix is changed there.
-fn frame(tools: &Tools, args: &[OsString]) -> u8 {
+pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
     use crate::container::Source;
     use crate::frame::{
         ButtonStyle, DoubleClick, FullscreenButton, Radius, Rgb, Style, TitleMode, BUTTONS_SETTING,
