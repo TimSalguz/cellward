@@ -148,6 +148,10 @@ pub struct Menu {
     pub program: String,
 }
 
+/// The tag of a line of a menu that is no entry but the heading of those
+/// after it (`action⇥#⇥<text>⇥heading`): not to be chosen, never answered.
+pub const HEADING: &str = "#";
+
 /// The menu as the window reads it.
 pub fn render_menu(menu: &Menu) -> String {
     let mut out = format!("mode\tmenu\ntitle\t{}\n", clean(&menu.title));
@@ -155,11 +159,17 @@ pub fn render_menu(menu: &Menu) -> String {
         out.push_str(&format!("note\t{}\n", clean(note)));
     }
     for (tag, label, danger) in &menu.actions {
+        let flags = if tag == HEADING {
+            "heading"
+        } else if *danger {
+            "danger"
+        } else {
+            ""
+        };
         out.push_str(&format!(
-            "action\t{}\t{}\t{}\n",
+            "action\t{}\t{}\t{flags}\n",
             clean(tag),
             clean(label),
-            if *danger { "danger" } else { "" }
         ));
     }
     if !menu.program.is_empty() {
@@ -330,7 +340,66 @@ pub fn parse_menu_reply(text: &str) -> Option<String> {
     text.lines()
         .find_map(|l| l.strip_prefix("action\t"))
         .map(str::to_owned)
-        .filter(|t| !t.is_empty())
+        .filter(|t| !t.is_empty() && t != HEADING)
+}
+
+/// A container's permissions in a window of their own (`mode⇥perms`), from
+/// the frame's ☰: the rows of the launch window's ([`Perm`]), the
+/// container's as they are (its `permof⇥this⇥…`), a title and notes. The
+/// window takes nothing before its guard (a program could have brought it
+/// up); the answer is `perm⇥<key>⇥<value>` for each changed — none when
+/// nothing was, or it was closed.
+pub fn render_perms(title: &str, notes: &[String], perms: &[Perm], of: &PermOf) -> String {
+    let mut out = format!("mode\tperms\ntitle\t{}\n", clean(title));
+    for note in notes {
+        out.push_str(&format!("note\t{}\n", clean(note)));
+    }
+    let req = Request {
+        perms: perms.to_vec(),
+        perm_of: vec![PermOf {
+            tag: "this".to_owned(),
+            ..of.clone()
+        }],
+        ..Request::default()
+    };
+    for line in render(&req).lines().filter(|l| l.starts_with("perm")) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&format!("guard\t{}\n", crate::dialog::TOO_FAST.as_millis()));
+    out
+}
+
+/// The permissions a [`render_perms`] window answered: `None` when it was
+/// closed or could not be shown, else the changes (maybe none).
+pub fn ask_perms(window: &Path, request: &str) -> Option<Vec<(String, String)>> {
+    if window.as_os_str().is_empty() {
+        return None;
+    }
+    let mut child = Command::new(window)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let request = request.to_owned();
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut stdin, request.as_bytes());
+        });
+    }
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.strip_prefix("perm\t"))
+            .filter_map(|l| l.split_once('\t'))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect(),
+    )
 }
 
 /// What came back.

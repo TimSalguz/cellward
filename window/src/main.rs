@@ -295,6 +295,10 @@ fn blocked(item: &Item, net: &str) -> Option<String> {
 
 const NAME_FIELD: &str = "new-container-name";
 
+/// The tag of a menu's heading (vpn-zones' `window::HEADING`): a line, not
+/// a choice.
+const HEADING: &str = "#";
+
 impl Window {
     fn new(req: Request) -> Self {
         // Nothing marked: `offline`, never the first row (the host's network).
@@ -315,7 +319,11 @@ impl Window {
             net,
             container,
             name: String::new(),
-            entry: 0,
+            entry: req
+                .actions
+                .iter()
+                .position(|(tag, _, _)| tag != HEADING)
+                .unwrap_or(0),
             armed: req.guard == 0,
             holds: 0,
             focused: false,
@@ -336,6 +344,38 @@ impl Window {
 
     fn menu(&self) -> bool {
         self.req.mode == "menu"
+    }
+
+    /// A window of a container's permissions alone (`mode⇥perms`, the
+    /// frame's ☰): its rows, «Сохранить» and «Отмена».
+    fn perms_only(&self) -> bool {
+        self.req.mode == "perms"
+    }
+
+    /// Whether entry `i` of the menu is a heading: a line, not a choice.
+    fn heading(&self, i: usize) -> bool {
+        self.req
+            .actions
+            .get(i)
+            .is_some_and(|(tag, _, _)| tag == HEADING)
+    }
+
+    /// The menu's choices, by their places among its lines.
+    fn choices(&self) -> Vec<usize> {
+        (0..self.req.actions.len())
+            .filter(|i| !self.heading(*i))
+            .collect()
+    }
+
+    /// The highlight moved by `step` among the choices, headings passed over.
+    fn step_entry(&mut self, step: isize) {
+        let choices = self.choices();
+        if choices.is_empty() {
+            return;
+        }
+        let at = choices.iter().position(|i| *i == self.entry).unwrap_or(0) as isize;
+        let n = choices.len() as isize;
+        self.entry = choices[(at + step).rem_euclid(n) as usize];
     }
 
     fn net_tag(&self) -> &str {
@@ -398,6 +438,9 @@ impl Window {
     }
 
     fn container_tag(&self) -> &str {
+        if self.perms_only() {
+            return "this";
+        }
         self.req
             .containers
             .get(self.container)
@@ -451,8 +494,14 @@ impl Window {
                 out.push_str(&format!("offer\t{line}\n"));
             }
         }
-        // The permissions changed for the container chosen, and only what
-        // differs from what it had.
+        out.push_str(&self.perms_answer());
+        out
+    }
+
+    /// The permissions changed for the container chosen, and only what
+    /// differs from what it had: `perm⇥<key>⇥<value>` each.
+    fn perms_answer(&self) -> String {
+        let mut out = String::new();
         if let Some(of) = self.perm_of() {
             for (key, value, fixed) in &of.values {
                 let (now, _) = self.perm_value(key);
@@ -508,7 +557,7 @@ impl Window {
         }
         match msg {
             Msg::Action(i) => {
-                if let Some((tag, _, _)) = self.req.actions.get(i) {
+                if let Some((tag, _, _)) = self.req.actions.get(i).filter(|_| !self.heading(i)) {
                     println!("action\t{tag}");
                     std::process::exit(0);
                 }
@@ -569,6 +618,12 @@ impl Window {
             }
             Msg::Focus(focused) => self.focused = focused,
             Msg::Name(name) => self.name = name,
+            Msg::Launch if self.perms_only() => {
+                if self.armed {
+                    print!("{}", self.perms_answer());
+                    std::process::exit(0);
+                }
+            }
             Msg::Launch => {
                 if self.naming() && self.name.trim().is_empty() {
                     return iced::widget::operation::focus(NAME_FIELD);
@@ -597,11 +652,11 @@ impl Window {
                 Key::Named(key::Named::Escape) => self.update(Msg::Cancel),
                 Key::Named(key::Named::Enter) => self.update(Msg::Action(self.entry)),
                 Key::Named(key::Named::ArrowUp) if n > 0 => {
-                    self.entry = (self.entry + n - 1) % n;
+                    self.step_entry(-1);
                     self.hold()
                 }
                 Key::Named(key::Named::ArrowDown) if n > 0 => {
-                    self.entry = (self.entry + 1) % n;
+                    self.step_entry(1);
                     self.hold()
                 }
                 _ => self.hold(),
@@ -612,8 +667,9 @@ impl Window {
             match key.as_ref() {
                 Key::Named(key::Named::Escape) => return self.update(Msg::Cancel),
                 Key::Named(key::Named::Enter) => return self.update(Msg::Action(self.entry)),
-                Key::Named(key::Named::ArrowUp) if n > 0 => self.entry = (self.entry + n - 1) % n,
-                Key::Named(key::Named::ArrowDown) if n > 0 => self.entry = (self.entry + 1) % n,
+                Key::Named(key::Named::ArrowUp) if n > 0 => self.step_entry(-1),
+                Key::Named(key::Named::ArrowDown) if n > 0 => self.step_entry(1),
+                // A digit: that choice, headings not counted.
                 Key::Character(c) => {
                     if let Some(d) = c
                         .chars()
@@ -621,8 +677,8 @@ impl Window {
                         .and_then(|c| c.to_digit(10))
                         .filter(|d| *d > 0)
                     {
-                        if (d as usize) <= n {
-                            self.entry = d as usize - 1;
+                        if let Some(i) = self.choices().get(d as usize - 1) {
+                            self.entry = *i;
                         }
                     }
                 }
@@ -754,7 +810,16 @@ impl Window {
             page = page.push(self.command_view());
         }
         let mut list = column![].spacing(4);
+        let mut number = 0;
         for (i, (_, label, danger)) in self.req.actions.iter().enumerate() {
+            if self.heading(i) {
+                list = list.push(
+                    container(text(label.as_str()).size(13))
+                        .padding(iced::Padding::from([0, 4]).top(if i == 0 { 0 } else { 6 })),
+                );
+                continue;
+            }
+            number += 1;
             let style = match (i == self.entry, *danger) {
                 (true, true) => button::danger,
                 (true, false) => button::primary,
@@ -762,7 +827,7 @@ impl Window {
             };
             let mark = if *danger { "⚠ " } else { "" };
             list = list.push(
-                button(text(format!("{} {mark}{label}", i + 1)).size(15))
+                button(text(format!("{number} {mark}{label}")).size(15))
                     .width(Length::Fill)
                     .padding([6, 10])
                     .style(style)
@@ -789,6 +854,9 @@ impl Window {
     fn view(&self) -> Element<'_, Msg> {
         if self.menu() {
             return self.view_menu();
+        }
+        if self.perms_only() {
+            return self.view_perms();
         }
         let nets = self.column_view("Сеть", Pane::Net, &self.req.nets, self.net, Msg::Net);
         let containers = self.column_view(
@@ -886,6 +954,35 @@ impl Window {
             row![lead, launch, cancel]
                 .spacing(10)
                 .align_y(Alignment::Center),
+        );
+        page.into()
+    }
+
+    /// The permissions of one container (`mode⇥perms`): the title, the
+    /// notes, its rows, and «Сохранить» once the guard is over.
+    fn view_perms(&self) -> Element<'_, Msg> {
+        let mut page = column![text(&self.req.title).size(20)]
+            .spacing(12)
+            .padding(16);
+        for note in &self.req.notes {
+            page = page.push(text(format!("ⓘ {note}")).size(14));
+        }
+        page = page.push(self.perms_view());
+        let wait = if self.armed { "" } else { "Секунду…" };
+        page = page.push(
+            row![
+                container(text(wait).size(13)).width(Length::Fill),
+                button(text("Сохранить  Enter").size(14))
+                    .padding([6, 14])
+                    .style(button::primary)
+                    .on_press_maybe(self.armed.then_some(Msg::Launch)),
+                button(text("Отмена  Esc").size(14))
+                    .padding([6, 14])
+                    .style(button::secondary)
+                    .on_press(Msg::Cancel)
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
         );
         page.into()
     }
@@ -1080,10 +1177,10 @@ fn main() -> iced::Result {
     }
     let req = parse_request(&input);
     // Nothing to choose from is not a window: the caller falls back.
-    let empty = if req.mode == "menu" {
-        req.actions.is_empty()
-    } else {
-        req.nets.is_empty() || req.containers.is_empty()
+    let empty = match req.mode.as_str() {
+        "menu" => req.actions.is_empty(),
+        "perms" => req.perms.is_empty(),
+        _ => req.nets.is_empty() || req.containers.is_empty(),
     };
     if empty {
         std::process::exit(1);
@@ -1381,6 +1478,43 @@ mod tests {
         assert_eq!(w.perm_value("x11"), ("default".to_owned(), true));
         let _ = w.update(Msg::Perm(0, 2));
         assert!(!w.answer().contains("perm"), "{}", w.answer());
+    }
+
+    /// A menu's headings are lines, not choices: the highlight starts on the
+    /// first choice and passes over them, digits count the choices alone,
+    /// and a heading is never answered.
+    #[test]
+    fn a_menus_headings_are_not_choices() {
+        let text = "mode\tmenu\ntitle\tt\naction\t#\tПрограмма\theading\n\
+                    action\trestart\tЗанова\t\naction\tclose\tЗакрыть\tdanger\n\
+                    action\t#\tКонтейнер\theading\naction\tperms\tРазрешения\t\n";
+        let mut w = Window::new(parse_request(text));
+        assert_eq!(w.entry, 1);
+        w.step_entry(1);
+        w.step_entry(1);
+        assert_eq!(w.entry, 4, "the heading passed over");
+        w.step_entry(1);
+        assert_eq!(w.entry, 1, "round to the first choice");
+        press(&mut w, Key::Character("3".into()));
+        assert_eq!(w.entry, 4);
+        assert_eq!(w.choices(), [1, 2, 4]);
+        assert!(w.heading(3));
+    }
+
+    /// A container's permissions alone: its rows, guarded, and the changes
+    /// answered — nothing before the guard.
+    #[test]
+    fn the_permissions_window_answers_its_changes() {
+        let text = "mode\tperms\ntitle\tРазрешения\n\
+                    perm\tx11\tX\tdefault:как у всех;on:вкл.;off:выкл.\n\
+                    permof\tthis\tДля всех\tx11=default\nguard\t1500\n";
+        let mut w = Window::new(parse_request(text));
+        assert!(w.perms_only());
+        let _ = w.update(Msg::Perm(0, 1));
+        assert_eq!(w.perms_answer(), "", "taken before the guard");
+        arm(&mut w);
+        let _ = w.update(Msg::Perm(0, 2));
+        assert_eq!(w.perms_answer(), "perm\tx11\toff\n");
     }
 
     /// In a zone's window Enter starts only in the network that asks; digits

@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The frame's ☰ in parts** (2026-10-15, the owner): «Программа «X»» —
+  its network rule (always allow, always deny, ask again), its restart and
+  close; «Контейнер «Y» — для всех его программ» — its permissions in a
+  window of their own (guarded, the launch window's rows) and its network
+  pin; «Сеть «Z» — для всех её программ» — cutting it off. What is changed
+  for whom is said where it is chosen.
 - **Permissions in the launch window** (2026-10-15, the owner): under the
   lists, what the chosen container may do as it is now — its own X server,
   the camera, the microphone, the screen, the network of a program with
@@ -54,6 +60,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   warns.
 
 ### Fixed
+- A browser's connection asked about as «Неизвестная программа»: a flow
+  whose socket was gone before it was looked at is now its instance's
+  program when that instance runs one program only.
 - **Firefox launched again into its container** opens a window of the copy
   already running there instead of "Firefox is already running, but is not
   responding". Mozilla's programs hand a second launch over the session bus

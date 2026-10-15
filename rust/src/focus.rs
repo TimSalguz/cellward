@@ -673,12 +673,42 @@ pub fn refused_entries(
         return Vec::new();
     };
     let mut out = Vec::new();
-    if crate::netrules::denied_locally(&tools.config, &record, &program) {
-        out.push((
-            "net-ask".to_owned(),
-            format!("Снова спрашивать о сети для «{label}»"),
-            false,
-        ));
+    // The program's own network rule, where Nix said nothing of it: what it
+    // is not yet, and back to asked.
+    let rules = crate::netrules::Rules::load(&tools.config, &record);
+    let rule = rules
+        .programs
+        .iter()
+        .find(|(p, _, _)| *p == program)
+        .map(|(_, verdict, source)| (*verdict, *source));
+    // Offline there is no network to allow; «без изоляции» has it always.
+    let networked = launch.is_some_and(|l| l.zone != "offline");
+    if networked
+        && !rule.is_some_and(|(_, source)| source == crate::container::Source::Nix)
+        && record != crate::container::OPEN_RECORD
+    {
+        use crate::verdicts::Verdict;
+        if rule.map(|(v, _)| v) != Some(Verdict::Allow) {
+            out.push((
+                "net-allow".to_owned(),
+                format!("Сеть «{label}»: всегда разрешать"),
+                false,
+            ));
+        }
+        if rule.map(|(v, _)| v) != Some(Verdict::Deny) {
+            out.push((
+                "net-deny".to_owned(),
+                format!("Сеть «{label}»: всегда запрещать"),
+                false,
+            ));
+        }
+        if rule.is_some() {
+            out.push((
+                "net-ask".to_owned(),
+                format!("Сеть «{label}»: снова спрашивать"),
+                false,
+            ));
+        }
     }
     if crate::microphone::denied(&tools.config, &record, &program) {
         out.push((
@@ -697,6 +727,15 @@ pub fn refused_entries(
     out
 }
 
+/// The record of `launch`'s container: the real home's, a container's;
+/// none for a throwaway's or a launch not known.
+fn container_record(tools: &Tools, launch: Option<&Launch>) -> Option<String> {
+    match launch?.selector.as_deref()? {
+        "" => Some(crate::container::MAIN_RECORD.to_owned()),
+        selector => crate::container::load(tools, selector).map(|c| c.name),
+    }
+}
+
 /// The record of `launch`'s container, and its program's key.
 fn refused_record(tools: &Tools, launch: Option<&Launch>) -> Option<(String, String)> {
     let l = launch?;
@@ -708,40 +747,49 @@ fn refused_record(tools: &Tools, launch: Option<&Launch>) -> Option<(String, Str
     Some((record, program))
 }
 
+/// The tag of a heading of the menu: a line that is no entry
+/// (`crate::window::HEADING`).
+const HEADING: &str = crate::window::HEADING;
+
+/// What the menu is to show of a window's container besides what its launch
+/// says: its name as a heading says it (none: not known, a throwaway's),
+/// whether its permissions can be changed here, and the program's own
+/// entries ([`refused_entries`]).
+#[derive(Debug, Clone, Default)]
+pub struct MenuParts {
+    pub container: Option<String>,
+    pub perms: bool,
+    pub program: Vec<(String, String, bool)>,
+}
+
 /// The entries of the hotkey menu for the program of a window: `(tag, label,
-/// danger)`.
+/// danger)`, in three parts under their headings — the program alone, its
+/// container (every program of it), its network (every program of that) —
+/// so that what is changed for whom is said where it is chosen (the owner,
+/// 2026-10-15).
 pub fn menu_entries(
     label: &str,
     launch: Option<&Launch>,
     pin: &Pin,
+    parts: &MenuParts,
 ) -> Vec<(String, String, bool)> {
     let mut out = Vec::new();
     let entry = |tag: &str, text: String, danger: bool| (tag.to_owned(), text, danger);
-    if let Some(l) = launch.filter(|l| l.program.is_some()) {
-        match pin {
-            Pin::Unbind { container, network } => out.push(entry(
-                "unpin",
-                format!(
-                    "Спрашивать сеть контейнера «{container}» при запуске (сейчас всегда {})",
-                    in_net(network)
-                ),
-                false,
-            )),
-            Pin::Bind(container) => out.push(entry(
-                "pin",
-                format!("Контейнер «{container}» — всегда {}", in_net(&l.zone)),
-                false,
-            )),
-            Pin::Main => out.push(entry(
-                "pin",
-                format!(
-                    "Всегда запускать «{label}» в настоящем доме {}",
-                    in_net(&l.zone)
-                ),
-                false,
-            )),
-            Pin::Nothing => {}
-        }
+    out.push(entry(HEADING, format!("Программа «{label}»"), false));
+    // The real home's "always" is the program's: it moves to a container of
+    // its own network, nobody else does.
+    if let (Some(l), Pin::Main) = (launch.filter(|l| l.program.is_some()), pin) {
+        out.push(entry(
+            "pin",
+            format!(
+                "Всегда запускать «{label}» в настоящем доме {}",
+                in_net(&l.zone)
+            ),
+            false,
+        ));
+    }
+    out.extend(parts.program.iter().cloned());
+    if launch.is_some_and(|l| l.program.is_some()) {
         out.push(entry(
             "restart",
             format!("Закрыть «{label}» и запустить снова — выбрать сеть и контейнер…"),
@@ -749,7 +797,49 @@ pub fn menu_entries(
         ));
     }
     out.push(entry("close", format!("Закрыть «{label}»"), true));
+    let mut container = Vec::new();
+    if parts.perms {
+        container.push(entry(
+            "perms",
+            "Разрешения: X-сервер, камера, микрофон, экран, сеть, фокус…".to_owned(),
+            false,
+        ));
+    }
+    if let Some(l) = launch.filter(|l| l.program.is_some()) {
+        match pin {
+            Pin::Unbind {
+                container: name,
+                network,
+            } => container.push(entry(
+                "unpin",
+                format!(
+                    "Спрашивать сеть контейнера «{name}» при запуске (сейчас всегда {})",
+                    in_net(network)
+                ),
+                false,
+            )),
+            Pin::Bind(name) => container.push(entry(
+                "pin",
+                format!("Контейнер «{name}» — всегда {}", in_net(&l.zone)),
+                false,
+            )),
+            Pin::Main | Pin::Nothing => {}
+        }
+    }
+    if !container.is_empty() {
+        let heading = match &parts.container {
+            Some(name) => format!("{name} — для всех его программ"),
+            None => "Контейнер — для всех его программ".to_owned(),
+        };
+        out.push(entry(HEADING, heading, false));
+        out.extend(container);
+    }
     if let Some(l) = launch.filter(|l| l.zone != crate::launch::UNCONFINED && l.zone != "offline") {
+        out.push(entry(
+            HEADING,
+            format!("Сеть «{}» — для всех её программ", l.zone),
+            false,
+        ));
         out.push(entry(
             "kill-zone",
             format!(
@@ -798,7 +888,8 @@ fn ask_menu(tools: &Tools, menu: &crate::window::Menu) -> Option<String> {
             .replace('&', "＆")
             .into(),
     ];
-    for (tag, label, _) in &menu.actions {
+    // kdialog has no headings: their entries go without them.
+    for (tag, label, _) in menu.actions.iter().filter(|(t, _, _)| t != HEADING) {
         argv.push(tag.into());
         argv.push(label.into());
     }
@@ -1022,19 +1113,31 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
     let program = launch.as_ref().and_then(|l| l.program.clone());
     let label = window_name(&tools.state, &window, launch.as_ref());
     let pin = launch.as_ref().map_or(Pin::Nothing, |l| pin_of(tools, l));
+    let record = container_record(tools, launch.as_ref());
+    let parts = MenuParts {
+        container: record.as_deref().map(|r| match r {
+            crate::container::MAIN_RECORD => "Настоящий дом".to_owned(),
+            name => format!("Контейнер «{name}»"),
+        }),
+        perms: record
+            .as_deref()
+            .is_some_and(|r| r != crate::container::OPEN_RECORD),
+        program: refused_entries(tools, &label, launch.as_ref()),
+    };
+    let entries = menu_entries(&label, launch.as_ref(), &pin, &parts);
+    // Not offered for a system zone's window: see "kill-zone" below — its
+    // heading with it.
+    let system = launch
+        .as_ref()
+        .is_some_and(|l| crate::system::run_dir(&l.zone).exists());
     let menu = crate::window::Menu {
         title: label.clone(),
         notes: vec![describe(&tools.state, &window, launch.as_ref())],
-        // Not offered for a system zone's window: see "kill-zone" below.
-        actions: menu_entries(&label, launch.as_ref(), &pin)
+        actions: entries
             .into_iter()
-            .filter(|(tag, _, _)| {
-                tag != "kill-zone"
-                    || !launch
-                        .as_ref()
-                        .is_some_and(|l| crate::system::run_dir(&l.zone).exists())
+            .filter(|(tag, text, _)| {
+                !system || (tag != "kill-zone" && !(tag == HEADING && text.starts_with("Сеть «")))
             })
-            .chain(refused_entries(tools, &label, launch.as_ref()))
             .collect(),
         ..Default::default()
     };
@@ -1159,15 +1262,62 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             }
         }
-        "net-ask" | "mic-ask" | "cam-ask" => {
+        "perms" => {
+            let Some(record) = &record else { return 0 };
+            let rows = crate::launch_perms::rows(tools);
+            let of = crate::launch_perms::perm_of(
+                "this",
+                crate::launch_perms::scope(match record.as_str() {
+                    crate::container::MAIN_RECORD => crate::launch_perms::Scope::Main,
+                    name => crate::launch_perms::Scope::Named(name, &[]),
+                }),
+                crate::launch_perms::of_record(tools, record),
+            );
+            let request = crate::window::render_perms(
+                &format!(
+                    "Разрешения — {}",
+                    parts.container.clone().unwrap_or_default()
+                ),
+                &[
+                    "Действует для программ, запущенных после этого; камера, микрофон и \
+                   экран — со следующего вопроса"
+                        .to_owned(),
+                ],
+                &rows,
+                &of,
+            );
+            let Some(changes) = crate::window::ask_perms(&tools.window, &request) else {
+                return 0;
+            };
+            let mut said = Vec::new();
+            for done in crate::launch_perms::apply(tools, record, &changes) {
+                match done {
+                    Ok(line) | Err(line) => said.push(line),
+                }
+            }
+            if !said.is_empty() {
+                notify(&label, &said.join("\n"));
+            }
+        }
+        "net-allow" | "net-deny" | "net-ask" | "mic-ask" | "cam-ask" => {
             let Some((record, program)) = refused_record(tools, launch.as_ref()) else {
                 return 0;
             };
-            let done = if choice == "net-ask" {
+            let done = if choice.starts_with("net-") {
                 let file = crate::container::policy_dir_in(&tools.config, &record)
                     .join(crate::container::FILE);
-                crate::netrules::write_line(&file, &program, None)
-                    .map(|()| "О сети спросят при её следующем соединении")
+                let (verdict, said) = match choice.as_str() {
+                    "net-allow" => (
+                        Some(crate::verdicts::Verdict::Allow),
+                        "Сеть ей разрешена — с её следующего соединения",
+                    ),
+                    "net-deny" => (
+                        Some(crate::verdicts::Verdict::Deny),
+                        "Сеть ей запрещена — с её следующего соединения",
+                    ),
+                    _ => (None, "О сети спросят при её следующем соединении"),
+                };
+                crate::netrules::write_line(&file, &program, verdict).map(|()| said)
             } else if choice == "mic-ask" {
                 crate::microphone::set_denied(&tools.config, &record, &program, false)
                     .map(|()| "О микрофоне спросят, когда она попросит его снова")
@@ -1722,6 +1872,8 @@ mod tests {
 
     /// What the menu offers follows what is known: a program of the registry
     /// can be pinned or restarted; a real zone can be cut off; the host cannot.
+    /// Each under the heading of whom it is for: the program, its container,
+    /// its network.
     #[test]
     fn the_menu_offers_what_is_known_of_the_window() {
         let launch = Launch {
@@ -1731,45 +1883,64 @@ mod tests {
         };
         let tags =
             |e: Vec<(String, String, bool)>| e.into_iter().map(|(t, _, _)| t).collect::<Vec<_>>();
+        let none = MenuParts::default();
         assert_eq!(
-            tags(menu_entries("Лис", Some(&launch), &Pin::Main)),
-            ["pin", "restart", "close", "kill-zone"]
+            tags(menu_entries("Лис", Some(&launch), &Pin::Main, &none)),
+            ["#", "pin", "restart", "close", "#", "kill-zone"]
         );
+        let work = MenuParts {
+            container: Some("Контейнер «work»".to_owned()),
+            perms: true,
+            program: vec![("net-allow".to_owned(), "Сеть".to_owned(), false)],
+        };
+        let entries = menu_entries("Лис", Some(&launch), &Pin::Bind("work".into()), &work);
         assert_eq!(
-            tags(menu_entries(
-                "Лис",
-                Some(&launch),
-                &Pin::Bind("work".into())
-            )),
-            ["pin", "restart", "close", "kill-zone"]
+            tags(entries.clone()),
+            [
+                "#",
+                "net-allow",
+                "restart",
+                "close",
+                "#",
+                "perms",
+                "pin",
+                "#",
+                "kill-zone"
+            ]
         );
+        assert_eq!(entries[0].1, "Программа «Лис»");
+        assert_eq!(entries[4].1, "Контейнер «work» — для всех его программ");
+        assert_eq!(entries[7].1, "Сеть «nl» — для всех её программ");
         let unbind = Pin::Unbind {
             container: "work".into(),
             network: "nl".into(),
         };
-        let entries = menu_entries("Лис", Some(&launch), &unbind);
+        let entries = menu_entries("Лис", Some(&launch), &unbind, &none);
         assert_eq!(
             tags(entries.clone()),
-            ["unpin", "restart", "close", "kill-zone"]
+            ["#", "restart", "close", "#", "unpin", "#", "kill-zone"]
         );
-        assert!(entries[0].1.contains("«work»"), "{entries:?}");
+        assert!(entries[4].1.contains("«work»"), "{entries:?}");
         // A throwaway container, a network from Nix: nothing to pin.
         assert_eq!(
-            tags(menu_entries("Лис", Some(&launch), &Pin::Nothing)),
-            ["restart", "close", "kill-zone"]
+            tags(menu_entries("Лис", Some(&launch), &Pin::Nothing, &none)),
+            ["#", "restart", "close", "#", "kill-zone"]
         );
         let host = Launch {
             zone: crate::launch::UNCONFINED.to_owned(),
             ..Launch::default()
         };
         assert_eq!(
-            tags(menu_entries("x", Some(&host), &Pin::Nothing)),
-            ["close"]
+            tags(menu_entries("x", Some(&host), &Pin::Nothing, &none)),
+            ["#", "close"]
         );
-        assert_eq!(tags(menu_entries("x", None, &Pin::Nothing)), ["close"]);
-        let entries = menu_entries("Лис", Some(&launch), &Pin::Main);
-        assert!(entries[3].2, "cutting a zone off is marked as dangerous");
-        assert!(entries[3].1.contains("nl"));
+        assert_eq!(
+            tags(menu_entries("x", None, &Pin::Nothing, &none)),
+            ["#", "close"]
+        );
+        let entries = menu_entries("Лис", Some(&launch), &Pin::Main, &none);
+        assert!(entries[5].2, "cutting a zone off is marked as dangerous");
+        assert!(entries[5].1.contains("nl"));
     }
 
     /// `window-menu`: the focused window's by default, a launch's by
@@ -2012,7 +2183,7 @@ mod tests {
     /// the network the kernel says.
     #[test]
     fn a_window_of_a_child_is_found_through_its_parents() {
-        let state = std::env::temp_dir().join(format!("vz-focus-{}", std::process::id()));
+        let state = std::env::temp_dir().join(format!("vz-focus-parents-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);
         let running = state.join(".running");
         let dir = running.join("sb:work");

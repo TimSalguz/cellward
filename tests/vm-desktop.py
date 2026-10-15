@@ -651,11 +651,55 @@ if wanted(PW):
         )
         print("rows again:", rows2)
         assert rows2[0][0] > x11[2], "X11 is not shown on as it was set"
-    alice("systemctl --user stop pw-pick-1 pw-pick-2", check=False)
+        # The window it opened goes with it: the unit keeps its processes.
+        alice("systemctl --user kill pw-pick-2", check=False)
+        machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=30)
+        # The frame's ☰ of its window: the program, its container, under
+        # their headings; the container's permissions window from there.
+        sup = next(w["pid"] for w in windows() if w["app_id"] == "pw-a")
+        alice(f"systemd-run --user --unit=pw-menu --setenv=WAYLAND_DISPLAY={nested} cellward window-menu --pid {sup}")
+        machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
+        machine.sleep(3)
+        shot("pw-menu")
+        # restart, close, then the container's: its permissions.
+        alice(f"WAYLAND_DISPLAY={nested} wtype -s 400 -k 3 -k Return")
+        machine.sleep(4)
+        shot("pw-perms")
+        print(alice("pgrep -a vpn-zone-window || true", check=False))
+        print(alice("journalctl --user --no-pager -u pw-menu -o cat | tail -20", check=False))
+        machine.succeed("pgrep -x vpn-zone-window")
+        alice(f"WAYLAND_DISPLAY={nested} wtype -s 400 -k Escape")
+        machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=30)
+    alice("systemctl --user stop pw-pick-1 pw-pick-2 pw-menu", check=False)
     machine.sleep(3)
 
 
-# --- 7. Programs in a layer over the home and in a home of their own -------
+# --- 7. Whose a browser's connection is ----------------------------------------
+
+CH = "Chromium's connection: the question names the program"
+
+if wanted(CH):
+    with scenario(CH):
+        alice("cellward container create chbox --home private")
+        alice("install -Dm600 /dev/null /home/alice/.config/vpn-zones/containers/chbox/perms")
+        run(
+            "ch-net",
+            "host --container chbox -- chromium --no-first-run --ozone-platform=wayland "
+            "--password-store=basic http://192.0.2.2:8080/ch",
+            env="--setenv=VPN_ZONE_APPID=chromium-browser",
+        )
+        machine.sleep(25)
+        shot("ch-question")
+        traffic = alice("cellward traffic --connections 2>&1 | tail -30", check=False)
+        print(traffic)
+        assert "192.0.2.2:8080 · Chromium" in traffic, "the connection is nobody's"
+        print(machine.succeed("ps -u alice -o pid,ppid,comm,args --forest | grep -iE 'chrom|vpn-zone|vz-' | grep -v grep | cut -c1-200"))
+        print(alice("journalctl --user --no-pager -o cat | grep -iE 'неизвестн|unknown|owner' | tail -20", check=False))
+    alice("systemctl --user stop ch-net", check=False)
+    machine.sleep(3)
+
+
+# --- 8. Programs in a layer over the home and in a home of their own -------
 
 for home in ["overlay", "private"]:
     for program, cmd, app in [
