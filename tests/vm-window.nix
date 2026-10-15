@@ -714,7 +714,7 @@ let
 
       # The network question on the program's own window (docs/FIREWALL.md
       # §4.3.1): a panel of the proxy's, a hasty click none, «Запретить» a
-      # rule, «Разрешить…» the launch window on the launch's compositor.
+      # rule, «Разрешить, пока работает» this run's — both after the countdown.
       exec(open("${./vm-window-question.py}").read())
 
       # A daemon the program leaves behind (stage 3 of the container design,
