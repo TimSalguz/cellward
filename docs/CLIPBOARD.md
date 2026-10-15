@@ -31,10 +31,35 @@ The Wayland proxy of each launch (`rust/src/clip.rs`, `wl_frame.rs`):
 - A program of the host that is not proxied reads every selection and every
   mark, as before.
 
-## Next: the history
+## The history (in progress)
 
-Encrypted at rest, kept apart per container, opened by a key; no limit on how
-much is kept; a search that answers instantly over tens of millions of
-entries (an index on disk, read through `mmap`), by date and by a query built
-from blocks — text, digits, ranges, starts and ends — with the expression
-shown in words and tried live.
+The store and search are built (`clip/`, crate `clipstore`; its format, its
+measurements and what its index leaks are in its `lib.rs`); the daemon and the
+window are next.
+
+A clipboard manager of cellward's own, by container: each container's copies
+in a history of its own, the host's in one of its own; a copy goes to another
+container only when the person moves it there in the window.
+
+- **What records.** One daemon on the host, `cellward clipd`, watching the
+  compositor's selection through `data-control` (still closed to containers).
+  The mark on what a launch copied names its instance, so its container; an
+  unmarked selection is the host's.
+- **What is kept.** Every copy: its types and contents (text, images, files'
+  URIs), when it was copied, and every time it was pasted through the window.
+  No limit but the disk's.
+- **Encrypted at rest.** Contents with a key of the user's (a file of the
+  state directory, 0600; a TPM-sealed one next). The search index holds no
+  plain text: its terms are keyed hashes of trigrams.
+- **Search.** Immutable segments, memory-mapped (`memmap2`), each with an FST
+  from hashed trigram to its entries; new copies in a small segment merged
+  into larger ones. A query: words, a pattern built from blocks (text, digit,
+  number in a range, one of, start and end of line, word boundary — said in
+  words and tried live), a type, a container, and dates — copied or pasted on
+  a day, at an hour, around a date.
+- **The window.** Opened from the frame (📋) or a key, on the container of the
+  window it belongs to: the history as a messenger shows its messages, newest
+  at the bottom, images inline, a date between days; Enter pastes into the
+  program (the daemon sets the selection with that container's mark, the
+  proxy presses Ctrl+V for it); «Перенести в…» moves a copy to another
+  container's history.
