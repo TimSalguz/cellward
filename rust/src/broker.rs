@@ -468,6 +468,19 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                 Ok(selection) if !crate::cli::safe_zone_name(&selection.zone) => {
                     "refused: сеть — не имя зоны".to_owned()
                 }
+                // An open throwaway sandbox is joined from the host's
+                // launch window only: a program of a zone that could add one
+                // to it would read that home — another program's, whatever
+                // the question said.
+                Ok(selection)
+                    if matches!(
+                        selection.sandbox,
+                        crate::launch::Sandbox::Throwaway(Some(_))
+                    ) =>
+                {
+                    "refused: к открытому разовому контейнеру присоединяются только с хоста"
+                        .to_owned()
+                }
                 Ok(selection) => {
                     let target = selection.zone.to_string_lossy().into_owned();
                     let locked = match origin.network() {
@@ -923,7 +936,11 @@ pub fn selection_selector(selection: &crate::launch::Selection) -> String {
     use crate::launch::{Container, Sandbox};
     match (&selection.sandbox, &selection.container) {
         (Sandbox::Named(name), _) => name.to_string_lossy().into_owned(),
-        (Sandbox::Throwaway, _) => "__fs__".to_owned(),
+        // A join is refused before it is asked about (`handle`).
+        (Sandbox::Throwaway(None), _) => "__fs__".to_owned(),
+        (Sandbox::Throwaway(Some(name)), _) => {
+            crate::launch::throwaway_selector(&name.to_string_lossy())
+        }
         (Sandbox::None, Container::Named(name) | Container::MainNamed(name)) => {
             name.to_string_lossy().into_owned()
         }

@@ -25,15 +25,20 @@
 //! — a rule. A program not found is asked about with no "always": there is
 //! no key to write it for.
 //!
-//! **Closed, not answered, not shown** (no session, no window): "no" for the
-//! instance's life — fail-closed, and a program that keeps connecting opens
-//! no question after question.
+//! **Closed, not shown** (no session, no window): "no" for the instance's
+//! life — fail-closed, and a program that keeps connecting opens no
+//! question after question. **Not answered**: it waits, with no time limit
+//! (the owner, 2026-10-15: a question is not closed by time) — its flows
+//! held, until the person answers, or the program or the instance ends.
 //!
-//! **One at a time.** An instance has one question open; the next program's
-//! waits for it. Every new flow of a program asked about waits with the
-//! first, held by the relay, and the answer is theirs all.
+//! **One per program.** A program has one question open; every new flow
+//! of it asked about waits with the first, held by the relay, and the
+//! answer is theirs all. Another program's question is its own, at once —
+//! on its own window: a question nobody answered yet does not hold back
+//! every other program of the container. Questions on one window are shown
+//! there one after another (`crate::wl_proxy`'s supervisor).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -87,8 +92,8 @@ pub struct Asker {
     first: HashMap<Program, (String, Option<i32>)>,
     /// The answers for the instance's life.
     session: HashMap<Program, Verdict>,
-    /// The program asked about now, and those waiting their turn.
-    open: Option<Program>,
+    /// The programs asked about now, and those to be asked next.
+    open: HashSet<Program>,
     queue: VecDeque<Program>,
 }
 
@@ -120,7 +125,7 @@ impl Asker {
             waiting: HashMap::new(),
             first: HashMap::new(),
             session: HashMap::new(),
-            open: None,
+            open: HashSet::new(),
             queue: VecDeque::new(),
         })
     }
@@ -154,15 +159,18 @@ impl Asker {
         None
     }
 
-    /// The next program's question, when none is open.
+    /// The questions of the programs waiting for one, each opened.
     fn next(&mut self) {
-        if self.open.is_some() {
-            return;
+        while let Some(program) = self.queue.pop_front() {
+            if !self.open.contains(&program) {
+                self.start(program);
+            }
         }
-        let Some(program) = self.queue.pop_front() else {
-            return;
-        };
-        self.open = Some(program.clone());
+    }
+
+    /// The question of `program`, in a thread of its own.
+    fn start(&mut self, program: Program) {
+        self.open.insert(program.clone());
         let label = program
             .as_deref()
             .map(|key| label_of(&self.state, key))
@@ -172,8 +180,12 @@ impl Asker {
         let always = self.record.is_some() && program.is_some();
         let (window, shown) = (self.window.clone(), self.shown.clone());
         let at = launch.map(|pid| (self.runtime.clone(), pid));
-        let timeout = crate::timings::QUESTION.read(&self.config).0.duration();
+        // No time to answer in (the owner, 2026-10-15): the flows are held
+        // until the person says, and a question open on the program's window
+        // waits there. It ends with its program or the instance.
+        let timeout = None;
         let (tx, wake) = (self.tx.clone(), self.wake.1.clone());
+        let program_of_failed = program.clone();
         let spawned = std::thread::Builder::new()
             .name("net-question".to_owned())
             .spawn(move || {
@@ -191,8 +203,7 @@ impl Asker {
             });
         if spawned.is_err() {
             // Nothing to ask in: closed.
-            let program = self.open.clone().flatten();
-            let _ = self.tx.send((program, Answer::Closed));
+            let _ = self.tx.send((program_of_failed, Answer::Closed));
             // SAFETY: as in the thread.
             unsafe { libc::write(self.wake.1.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
         }
@@ -245,9 +256,7 @@ impl Asker {
                 decided.push((key, verdict));
             }
             self.first.remove(&program);
-            if self.open.as_ref() == Some(&program) {
-                self.open = None;
-            }
+            self.open.remove(&program);
         }
         self.next();
         decided
@@ -381,7 +390,7 @@ mod tests {
                     Asker::new(Path::new(""), &config, &root, &root, Some("work".into())).unwrap();
                 let program = Some("browser".to_owned());
                 // A question is already open with two held connections.
-                asker.open = Some(program.clone());
+                asker.open.insert(program.clone());
                 asker.waiting.insert(program.clone(), vec![key(1), key(2)]);
                 let file =
                     crate::container::policy_dir_in(&config, "work").join(crate::container::FILE);
@@ -394,7 +403,7 @@ mod tests {
                 );
                 assert_eq!(std::fs::read_to_string(&file).unwrap(), *rule);
                 assert!(!asker.session.contains_key(&program));
-                assert!(asker.open.is_none());
+                assert!(asker.open.is_empty());
             }
         }
         let _ = std::fs::remove_dir_all(root);
@@ -411,8 +420,8 @@ mod tests {
 
     /// No window to ask in: the question is closed — "no" for the
     /// instance's life, every waiting flow of the program denied, the next
-    /// flow decided at once; another program's question waited its turn and
-    /// comes next.
+    /// flow decided at once; another program's question is its own, asked
+    /// beside it, not after it.
     #[test]
     fn a_question_that_cannot_be_shown_is_no_for_the_instances_life() {
         let root = std::env::temp_dir().join(format!("vz-netask-{}", std::process::id()));
@@ -441,8 +450,9 @@ mod tests {
         assert_eq!(
             asker.ask(None, None, key(3), "y:80".into()),
             None,
-            "waits its turn"
+            "decided before it was asked"
         );
+        assert_eq!(asker.open.len(), 2, "one question per program, at once");
         let mut decided = Vec::new();
         while decided.len() < 3 {
             let mut fds = [libc::pollfd {

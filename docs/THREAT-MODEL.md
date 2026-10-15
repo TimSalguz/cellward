@@ -233,7 +233,7 @@ whatever its network gives its containers (2026-09-28, H8).
 | | **Identity and fingerprint** | | | |
 | I1 | One container (a browser profile) used in two networks | yes (own home, layer) | one network at a time; changing it is an action of its own; running programs keep their network | vm31 u9 |
 | I2 | The main home used in two networks | no | `main` is one identity by definition; the launch window says so | — |
-| I3 | `machine-id` | sandbox: yes · zone: **no** | a persistent one per named sandbox, a new one for each throwaway sandbox | sm9 |
+| I3 | `machine-id` | sandbox: yes · zone: **no** | a persistent one per named sandbox, a new one for each throwaway container, shared by the programs joined to it | sm9 |
 | I4 | `/sys` (DMI), `/etc`, the host name, installed software (`/nix/store`), the frame colour | no | `/sys`, `/etc` and `/nix/store` are readable in the sandbox too | — |
 | | **Launch paths: the broker and the picker** | | | |
 | L1 | A zone program starts something in another network | hermetic: only through the broker · ordinary: **no** (P1) | the same container without a question, otherwise a window on the host; "always" only for store paths; the command pinned by path | vm18 u7 |

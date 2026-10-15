@@ -3085,6 +3085,7 @@ mod tests {
             "",
             "__main__",
             "__fs__",
+            "__fs__:7-9",
             "__tmp__",
             "tmpjoin:/tmp/x",
             "sb:",

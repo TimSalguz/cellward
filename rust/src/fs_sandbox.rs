@@ -657,6 +657,21 @@ fn tmp_is_the_instances(mark: &Path) -> bool {
         && fs::symlink_metadata(mark).is_ok_and(|m| m.is_file() && m.uid() != me)
 }
 
+/// A throwaway sandbox's shared home (`zone::throwaway_home`), when it is
+/// the keeper's: its directory not ours and written by nobody else, so that
+/// no program of the sandbox could have put anything in the home's place,
+/// and the home itself a directory of ours. `None`: a home of its own, a
+/// tmpfs, as before.
+fn throwaway_home(home: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: getuid takes nothing and cannot fail.
+    let me = unsafe { libc::getuid() };
+    let dir = fs::symlink_metadata(home.parent()?).ok()?;
+    let own = fs::symlink_metadata(home).ok()?;
+    let keepers = dir.is_dir() && dir.uid() != me && dir.mode() & 0o022 == 0;
+    (keepers && own.is_dir() && own.uid() == me).then(|| home.to_path_buf())
+}
+
 fn push(v: &mut Vec<OsString>, s: &str) {
     v.push(OsString::from(s));
 }
@@ -1427,12 +1442,17 @@ pub fn run(args: Args) -> u8 {
     // (`settle_permissions`): in a zone the store of answers is read-only
     // (`zone::hide_project_state`), so that no program answers for itself.
     // Here it is read — and asked, not remembered, only when that failed.
-    let (perm_file, sandbox_home) = perm_paths(&home, &args.app_id, args.sandbox.as_deref());
+    let (perm_file, mut sandbox_home) = perm_paths(&home, &args.app_id, args.sandbox.as_deref());
     if let Some(dir) = &sandbox_home {
         if let Err(e) = fs::create_dir_all(dir) {
             eprintln!("fs-sandbox: cannot create {}: {e}", dir.display());
             return EXIT_NOT_STARTED;
         }
+    }
+    // A throwaway one in its instance: the home its keeper made, which every
+    // program joined to it shares and which goes with the instance.
+    if args.sandbox.is_none() && share_tmp {
+        sandbox_home = throwaway_home(Path::new(crate::zone::THROWAWAY_HOME));
     }
 
     let mut asked = None;
@@ -1982,6 +2002,26 @@ mod tests {
         assert_eq!(a.sandbox, None);
         // Tools that were not given are looked up on PATH.
         assert_eq!(a.tools.kdialog, PathBuf::from("kdialog"));
+    }
+
+    /// The shared home of a throwaway sandbox is taken only from a directory
+    /// that is not ours: one a program could have made — every program runs
+    /// as us — gives a home of its own instead. (Its keeper's directory, the
+    /// one taken, is checked by the VM test, as only a namespace's root
+    /// makes it.)
+    #[test]
+    fn a_throwaway_home_a_program_could_have_made_is_not_taken() {
+        let base = std::env::temp_dir().join(format!("vz-tw-home-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let home = base.join("dir").join("home");
+        fs::create_dir_all(&home).unwrap();
+        assert_eq!(throwaway_home(&home), None);
+        // Nor a link in the home's place.
+        let linked = base.join("dir").join("linked");
+        std::os::unix::fs::symlink(&home, &linked).unwrap();
+        assert_eq!(throwaway_home(&linked), None);
+        assert_eq!(throwaway_home(&base.join("dir").join("none")), None);
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -12,8 +12,12 @@
 #   - the permission panel on a real Firefox window (in its container's own
 #     X server) and on foot, clicked as people click: a click too soon is
 #     none and is seen to be none, one after resting on the button answers;
-#   - AyuGram (the owner's messenger), and KeePassXC closed into a tray,
+#   - AyuGram, and KeePassXC closed into a tray,
 #     launched again from the menu: no question, its window to the front;
+#   - a throwaway container: a second program joins the open one and sees
+#     its home, a new one is empty, the launch window offers the open one,
+#     a program open there launched again asks — and the home goes with
+#     its last program;
 #   - Firefox in a container layered over the home and in one of its own;
 #     TeamSpeak too where its tarball is given (`teamspeakSrc`).
 #

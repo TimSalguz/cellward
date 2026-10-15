@@ -483,7 +483,88 @@ if wanted("KeePassXC in the tray, launched again from the menu: its window comes
     alice("systemctl --user stop kp-a kp-other kp-menu", check=False)
 
 
-# --- 5. Programs in a layer over the home and in a home of their own -------
+# --- 5. A throwaway container: open, joined, and gone with its programs ---
+
+TW = "Throwaway containers: a second program joins the open one, a new one is empty"
+
+
+def tw_alive(unit, seconds=6):
+    machine.sleep(seconds)
+    return unit_active(unit)
+
+
+if wanted(TW):
+    with scenario(TW):
+        for app in ["tw-a", "tw-b", "tw-c", "tw-d", "tw-e"]:
+            alice(f"install -Dm600 /dev/null ~/.config/vpn-zones/fs-perms/{app}")
+        # Each foot lives on only while its home is what it should be.
+        run(
+            "tw-a",
+            "offline --fs-sandbox -- foot --app-id tw-a sh -c 'echo hi > ~/joined; sleep 600'",
+            env="--setenv=VPN_ZONE_APPID=tw-a",
+        )
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {NIRI_MSG} --json windows' | grep -q tw-a",
+            timeout=120,
+        )
+        record = alice("cat ~/.local/state/vpn-zones/.running/__main__/tw-a").split()
+        print("tw-a record:", record)
+        assert record[2].startswith("__fs__:"), record
+        name = record[2].split(":", 1)[1]
+        run(
+            "tw-b",
+            f"offline --fs-sandbox --join {name} -- foot --app-id tw-b sh -c 'test -e ~/joined && sleep 600'",
+            env="--setenv=VPN_ZONE_APPID=tw-b",
+        )
+        assert tw_alive("tw-b"), "the joined program did not see the open one's home"
+        run(
+            "tw-c",
+            "offline --fs-sandbox -- foot --app-id tw-c sh -c '! test -e ~/joined && sleep 600'",
+            env="--setenv=VPN_ZONE_APPID=tw-c",
+        )
+        assert tw_alive("tw-c"), "a new throwaway container saw another one's home"
+        shot("tw-open")
+
+        # The launch window: the open one offered to join, by its programs.
+        alice(
+            f"systemd-run --user --unit=tw-pick --setenv=WAYLAND_DISPLAY={nested} "
+            f"--setenv=NIRI_SOCKET={niri_socket} "
+            "vpn-zone-pick --id tw-e -- foot --app-id tw-e"
+        )
+        machine.sleep(6)
+        shot("tw-window")
+        alice("systemctl --user stop tw-pick", check=False)
+
+        # Again, for a program that hands a launch over: asked, there or new.
+        alice("mkdir -p ~/.local/state/vpn-zones/.handover && touch ~/.local/state/vpn-zones/.handover/tw-a")
+        alice(
+            f"systemd-run --user --unit=tw-again --setenv=WAYLAND_DISPLAY={nested} "
+            f"--setenv=NIRI_SOCKET={niri_socket} "
+            "vpn-zone-pick --id tw-a -- foot --app-id tw-a sh -c 'sleep 600'"
+        )
+        machine.sleep(6)
+        shot("tw-again")
+        assert unit_active("tw-again"), "no question for a program open in a throwaway container"
+        alice("systemctl --user stop tw-again", check=False)
+
+        # Its home goes with its last program.
+        alice("systemctl --user stop tw-a tw-b", check=False)
+        machine.wait_until_fails(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user list-units --plain "
+            f"--no-legend vpn-zone-container@*' | grep -F ':fs:{name.split('-')[0]}'",
+            timeout=60,
+        )
+        run(
+            "tw-d",
+            f"offline --fs-sandbox --join {name} -- foot --app-id tw-d sh -c '! test -e ~/joined && sleep 600'",
+            env="--setenv=VPN_ZONE_APPID=tw-d",
+        )
+        assert tw_alive("tw-d"), "the home of a throwaway container outlived its programs"
+    alice("systemctl --user stop tw-a tw-b tw-c tw-d tw-pick tw-again", check=False)
+    machine.sleep(3)
+
+
+# --- 6. Programs in a layer over the home and in a home of their own -------
 
 for home in ["overlay", "private"]:
     for program, cmd, app in [

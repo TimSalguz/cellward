@@ -210,7 +210,7 @@ fn human(fields: &[(String, String)]) -> String {
         "launch-unconfined" => {
             let container = match get("container") {
                 "" => "настоящий дом".to_owned(),
-                "__fs__" => "разовый контейнер".to_owned(),
+                c if crate::launch::throwaway_of(c).is_some() => "разовый контейнер".to_owned(),
                 c => format!("контейнер {c}"),
             };
             format!(

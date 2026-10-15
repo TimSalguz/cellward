@@ -229,8 +229,10 @@ pub enum Container {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sandbox {
     None,
-    /// `--fs-sandbox`: an empty home that dies with the program.
-    Throwaway,
+    /// `--fs-sandbox [--join NAME]`: an empty home that dies with the last
+    /// program in it — a new one, or the open one named (its instance's,
+    /// [`throwaway_name`]), for one more program to share.
+    Throwaway(Option<OsString>),
     /// `--sandbox <name>`: a persistent home shared by everything started into
     /// that sandbox.
     Named(OsString),
@@ -246,6 +248,7 @@ pub enum ArgError {
     MissingZone,
     MissingProfile,
     MissingJoinDir,
+    MissingJoinName,
     MissingSandbox,
     MissingContainer,
 }
@@ -256,6 +259,7 @@ impl fmt::Display for ArgError {
             Self::MissingZone => write!(f, "нужно имя"),
             Self::MissingProfile => write!(f, "нужно имя контейнера (--profile)"),
             Self::MissingJoinDir => write!(f, "нужен каталог временного контейнера"),
+            Self::MissingJoinName => write!(f, "нужно имя открытого разового контейнера"),
             Self::MissingSandbox => write!(f, "нужно имя контейнера (--sandbox)"),
             Self::MissingContainer => write!(f, "нужно имя контейнера"),
         }
@@ -321,7 +325,14 @@ impl Selection {
         let sandbox = match rest.first().map(OsString::as_os_str) {
             Some(f) if f == "--fs-sandbox" => {
                 rest.remove(0);
-                Sandbox::Throwaway
+                if rest.first().is_some_and(|f| f == "--join") {
+                    let name = rest.get(1).filter(|n| !n.is_empty()).cloned();
+                    let name = name.ok_or(ArgError::MissingJoinName)?;
+                    rest.drain(..2.min(rest.len()));
+                    Sandbox::Throwaway(Some(name))
+                } else {
+                    Sandbox::Throwaway(None)
+                }
             }
             Some(f) if f == "--sandbox" => {
                 let name = rest.get(1).filter(|n| !n.is_empty()).cloned();
@@ -377,6 +388,9 @@ pub fn strip_selection(argv: &[OsString]) -> Vec<OsString> {
     match rest.first().map(OsString::as_os_str) {
         Some(f) if f == "--fs-sandbox" => {
             rest.remove(0);
+            if rest.first().is_some_and(|f| f == "--join") {
+                rest.drain(..2.min(rest.len()));
+            }
         }
         Some(f) if f == "--sandbox" => {
             rest.drain(..2.min(rest.len()));
@@ -1792,10 +1806,9 @@ fn instance_of(
                 .unwrap_or_default();
             crate::instance::id_of(Of::Throwaway(layer), network).ok_or_else(none)?
         }
-        (Sandbox::Throwaway, _) => {
-            let pid = std::process::id() as i32;
-            let unique = format!("{pid}-{}", crate::sys::start_time(pid).unwrap_or(0));
-            crate::instance::id_of(Of::ThrowawaySandbox(&unique), network).ok_or_else(none)?
+        (Sandbox::Throwaway(join), _) => {
+            let name = throwaway_name(join.as_deref());
+            crate::instance::id_of(Of::ThrowawaySandbox(&name), network).ok_or_else(none)?
         }
         (Sandbox::None, Container::Main) => {
             crate::instance::id_of(Of::Main, network).ok_or_else(none)?
@@ -2199,8 +2212,21 @@ pub fn record_name(selection: &Selection) -> Option<String> {
 /// finished (its data are not where the launch would look).
 pub fn resolve_selection(tools: &Tools, selection: Selection) -> Result<Selection, String> {
     use crate::container::Home;
+    // The open throwaway sandbox joined: a name its instance could have —
+    // never a path, nor anybody else's directory.
+    if let Sandbox::Throwaway(Some(name)) = &selection.sandbox {
+        let joinable = name.to_str().is_some_and(|name| {
+            crate::instance::id_of(crate::instance::Of::ThrowawaySandbox(name), "offline").is_some()
+        });
+        if !joinable {
+            return Err(format!(
+                "«{}» — не имя разового контейнера",
+                name.to_string_lossy()
+            ));
+        }
+    }
     let (asked, sandbox_asked) = match (&selection.container, &selection.sandbox) {
-        (Container::Main, Sandbox::None | Sandbox::Throwaway)
+        (Container::Main, Sandbox::None | Sandbox::Throwaway(_))
         | (Container::TmpNew | Container::TmpJoin(_), Sandbox::None) => return Ok(selection),
         (Container::Named(name) | Container::MainNamed(name), Sandbox::None) => {
             (name.to_string_lossy().into_owned(), false)
@@ -2385,7 +2411,7 @@ fn trust_of(
             let home = crate::container::data_dir(tools, &name).join("home");
             (name, Some(home))
         }
-        (Sandbox::Throwaway, _) => return (None, None, Vec::new()),
+        (Sandbox::Throwaway(_), _) => return (None, None, Vec::new()),
         (Sandbox::None, Container::Named(name)) => (name.to_string_lossy().into_owned(), None),
         // The main home's certificates are the host's: none of its own.
         (Sandbox::None, _) => return (None, None, Vec::new()),
@@ -2520,13 +2546,50 @@ fn delegate(tools: &Tools, argv: &[OsString]) -> u8 {
     EXIT_NOT_STARTED
 }
 
+/// The name of a throwaway sandbox (its instance `:fs:<name>`): the open one
+/// joined, or this launch's own — its launcher's pid and start time, the same
+/// on every call, as the instance and the registry record must agree.
+pub fn throwaway_name(join: Option<&OsStr>) -> String {
+    match join {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None => {
+            let pid = std::process::id() as i32;
+            format!("{pid}-{}", crate::sys::start_time(pid).unwrap_or(0))
+        }
+    }
+}
+
+/// What the registry says of a launch into the throwaway sandbox `name`:
+/// `__fs__:<name>`, which a later launch joins by (`picker`). Plain `__fs__`
+/// is a record of a build before throwaway sandboxes could be joined.
+pub fn throwaway_selector(name: &str) -> String {
+    format!("{THROWAWAY_SELECTOR}:{name}")
+}
+
+/// The selector of a throwaway sandbox, alone or before `:<name>`.
+pub const THROWAWAY_SELECTOR: &str = "__fs__";
+
+/// Is `selector` a throwaway sandbox's ([`throwaway_selector`]), of either
+/// shape — and which one, when it says.
+pub fn throwaway_of(selector: &str) -> Option<Option<&str>> {
+    if selector == THROWAWAY_SELECTOR {
+        return Some(None);
+    }
+    let name = selector
+        .strip_prefix(THROWAWAY_SELECTOR)?
+        .strip_prefix(':')?;
+    Some(Some(name).filter(|n| !n.is_empty()))
+}
+
 /// What was chosen for the container, as the registry records it (the third
-/// field): the container's name, `__fs__` for a throwaway sandbox, the
+/// field): the container's name, `__fs__:<name>` for a throwaway sandbox, the
 /// temporary container's directory name, empty for the main profile.
 fn selector_of(selection: &Selection, profile: &OsStr) -> OsString {
     match (&selection.sandbox, &selection.container) {
         (Sandbox::Named(name), _) | (Sandbox::None, Container::MainNamed(name)) => name.clone(),
-        (Sandbox::Throwaway, _) => OsString::from("__fs__"),
+        (Sandbox::Throwaway(join), _) => {
+            OsString::from(throwaway_selector(&throwaway_name(join.as_deref())))
+        }
         (Sandbox::None, _) => profile.to_owned(),
     }
 }
@@ -3465,7 +3528,7 @@ mod tests {
         // Nothing named: nothing to resolve.
         assert_eq!(
             resolve(&["nl", "--fs-sandbox", "--", "x"]),
-            Ok((Container::Main, Sandbox::Throwaway))
+            Ok((Container::Main, Sandbox::Throwaway(None)))
         );
         assert_eq!(
             resolve(&["nl", "--", "x"]),
@@ -3585,7 +3648,15 @@ mod tests {
     #[test]
     fn every_sandbox_shape_is_recognised() {
         let s = Selection::parse(&argv(&["nl", "--fs-sandbox", "--", "x"])).unwrap();
-        assert_eq!(s.sandbox, Sandbox::Throwaway);
+        assert_eq!(s.sandbox, Sandbox::Throwaway(None));
+        let s =
+            Selection::parse(&argv(&["nl", "--fs-sandbox", "--join", "7-9", "--", "x"])).unwrap();
+        assert_eq!(s.sandbox, Sandbox::Throwaway(Some(os("7-9"))));
+        assert_eq!(s.cmd, argv(&["x"]));
+        assert_eq!(
+            Selection::parse(&argv(&["nl", "--fs-sandbox", "--join"])),
+            Err(ArgError::MissingJoinName)
+        );
         let s = Selection::parse(&argv(&["nl", "--sandbox", "work", "--", "x"])).unwrap();
         assert_eq!(s.sandbox, Sandbox::Named(os("work")));
         assert_eq!(s.cmd, argv(&["x"]));

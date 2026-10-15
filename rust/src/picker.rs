@@ -478,6 +478,9 @@ pub struct Container {
     /// `--sandbox <name>`: a container made with a home of its own at its
     /// first launch — the program's own, a new one, or one that is gone.
     pub sandbox: String,
+    /// With `fs_sandbox`: the open throwaway sandbox joined (`--fs-sandbox
+    /// --join`), by its name; empty for a new one.
+    pub join: String,
 }
 
 impl Container {
@@ -514,6 +517,15 @@ impl Container {
                 fs_sandbox: true,
                 ..Self::default()
             }),
+            // An open one, as its programs' records name it.
+            other if launch::throwaway_of(other).is_some() => {
+                let join = launch::throwaway_of(other).flatten().unwrap_or_default();
+                Some(Self {
+                    fs_sandbox: true,
+                    join: join.to_owned(),
+                    ..Self::default()
+                })
+            }
             TMP => Some(Self {
                 profile: TMP.to_owned(),
                 ..Self::default()
@@ -548,6 +560,9 @@ impl Container {
         if !self.sandbox.is_empty() {
             return self.sandbox.clone();
         }
+        if self.fs_sandbox && !self.join.is_empty() {
+            return launch::throwaway_selector(&self.join);
+        }
         if self.fs_sandbox {
             return THROWAWAY.to_owned();
         }
@@ -557,7 +572,7 @@ impl Container {
     /// Is this a one-off container that must not be remembered? Remembering it
     /// would make a throwaway permanent.
     pub fn is_throwaway_container(&self) -> bool {
-        self.profile == TMP || self.profile.starts_with(TMPJOIN_PREFIX)
+        self.profile == TMP || self.profile.starts_with(TMPJOIN_PREFIX) || !self.join.is_empty()
     }
 
     fn own_sandbox(key: &str) -> Self {
@@ -879,7 +894,7 @@ fn label_of(selector: &str, home: Option<crate::container::Home>) -> String {
     match selector {
         "" | MAIN => "настоящий дом".to_owned(),
         crate::container::OPEN_RECORD => "без изоляции".to_owned(),
-        THROWAWAY => "разовый".to_owned(),
+        other if launch::throwaway_of(other).is_some() => "разовый".to_owned(),
         other => {
             let (name, home) = match other.strip_prefix(SANDBOX_PREFIX) {
                 Some(name) => (name, Some(Home::Private)),
@@ -904,6 +919,18 @@ pub struct ProfileRow {
     /// The network the container is bound to, empty when it has none yet:
     /// the window does not offer it with another.
     pub bound: String,
+    /// The programs open in it now, by their names for a person.
+    pub open: Vec<String>,
+}
+
+/// A throwaway sandbox that is open: its name (`launch::throwaway_name`),
+/// the network its instance is in, and its programs, by their names for a
+/// person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenThrowaway {
+    pub name: String,
+    pub zone: String,
+    pub who: Vec<String>,
 }
 
 /// A throwaway container that is already open: the directory to join, and the
@@ -1052,6 +1079,7 @@ pub fn window_containers(
     sandboxes: &[ProfileRow],
     profiles: &[ProfileRow],
     tmp_joins: &[TmpJoinRow],
+    fs_open: &[OpenThrowaway],
     current: &str,
 ) -> Vec<window::Item> {
     use crate::container::Home;
@@ -1072,23 +1100,51 @@ pub fn window_containers(
         ),
         item(
             "__ownsb__",
-            "Свой контейнер — постоянный дом только этой программы",
+            "Свой контейнер — постоянный дом только этой программы; будет создан",
         ),
         item(
             THROWAWAY,
-            "Разовый контейнер — пустой дом, стирается при выходе",
+            "Новый разовый контейнер — пустой дом, стирается, когда выйдет последняя программа",
         ),
     ];
+    // The open ones, right below: one more program into the same empty home,
+    // in the network it is in.
+    for (n, open) in fs_open.iter().enumerate() {
+        let mut it = item(
+            &launch::throwaway_selector(&open.name),
+            &format!(
+                "Открытый разовый контейнер{} — {}",
+                if fs_open.len() > 1 {
+                    format!(" {}", n + 1)
+                } else {
+                    String::new()
+                },
+                open_now(&open.who)
+            ),
+        );
+        it.bound = Some(open.zone.clone());
+        items.push(it);
+    }
     for row in sandboxes {
         if row.name == own {
-            // The program's own: the row above — with its network, when it
-            // has one.
+            // The program's own: the row above — made already, with its
+            // network when it has one.
             if let Some(it) = items.iter_mut().find(|i| i.tag == "__ownsb__") {
+                it.label = format!(
+                    "Свой контейнер «{}» — постоянный дом только этой программы; создан{}",
+                    row.name,
+                    open_suffix(&row.open)
+                );
                 it.bound = Some(row.bound.clone()).filter(|z| !z.is_empty());
             }
             continue;
         }
-        let label = format!("Контейнер «{}» — {}", row.name, Home::Private.label());
+        let label = format!(
+            "Контейнер «{}» — {}{}",
+            row.name,
+            Home::Private.label(),
+            open_suffix(&row.open)
+        );
         let mut it = item(&row.name, &label);
         it.busy = Some(row.busy_in.clone()).filter(|z| !z.is_empty());
         it.bound = Some(row.bound.clone()).filter(|z| !z.is_empty());
@@ -1104,7 +1160,12 @@ pub fn window_containers(
         } else {
             Home::Layer
         };
-        let label = format!("Контейнер «{}» — {}", profile.name, home.label());
+        let label = format!(
+            "Контейнер «{}» — {}{}",
+            profile.name,
+            home.label(),
+            open_suffix(&profile.open)
+        );
         let mut it = item(&profile.name, &label);
         // The main home is one identity in every network: never "busy".
         it.busy = Some(profile.busy_in.clone()).filter(|z| !z.is_empty() && !profile.main);
@@ -1150,6 +1211,20 @@ pub fn window_containers(
     items
 }
 
+/// "открыт: firefox, foot" — what runs in a container now, for its row.
+fn open_now(who: &[String]) -> String {
+    format!("открыт: {}", who.join(", "))
+}
+
+/// [`open_now`] after a row's text, or nothing when nothing runs there.
+fn open_suffix(who: &[String]) -> String {
+    if who.is_empty() {
+        String::new()
+    } else {
+        format!("; {}", open_now(who))
+    }
+}
+
 /// A container answer of the window as the menu would have said it, with its
 /// pin: the menu had an "— всегда" row where the window has a checkbox.
 pub fn window_container_choice(tag: &str, pin: bool) -> ProfileChoice {
@@ -1157,7 +1232,10 @@ pub fn window_container_choice(tag: &str, pin: bool) -> ProfileChoice {
         _ if !pin => parse_profile_choice(tag),
         "" => parse_profile_choice("pinmain"),
         TMP | "__newsb__" | "__new__" => parse_profile_choice(tag),
-        t if t.starts_with(TMPJOIN_PREFIX) => parse_profile_choice(t),
+        // An open one is no choice for always: it ends with its programs.
+        t if t.starts_with(TMPJOIN_PREFIX) || launch::throwaway_of(t).is_some() => {
+            parse_profile_choice(t)
+        }
         t => parse_profile_choice(&format!("pin:{t}")),
     }
 }
@@ -1339,6 +1417,7 @@ fn container_rows(tools: &Tools) -> (Vec<ProfileRow>, Vec<ProfileRow>) {
             name: c.name.clone(),
             busy_in,
             bound,
+            open: open_programs(&tools.state, &running.join(&c.name), |_| true),
         };
         if c.home == Home::Private {
             sandboxes.push(row);
@@ -1347,6 +1426,54 @@ fn container_rows(tools: &Tools) -> (Vec<ProfileRow>, Vec<ProfileRow>) {
         }
     }
     (sandboxes, profiles)
+}
+
+/// The programs with a live record in the registry directory `dir` whose
+/// selector `takes`, by their names for a person (`.labels`), each once.
+fn open_programs(state: &Path, dir: &Path, takes: impl Fn(&str) -> bool) -> Vec<String> {
+    let running = state.join(".running");
+    let alive = |pid| registry::alive(&running, pid);
+    let mut who: Vec<String> = Vec::new();
+    for (key, record) in registry::live_records(dir, &alive) {
+        if !takes(&record.selector) {
+            continue;
+        }
+        let name = read_setting(&state.join(".labels").join(&key)).unwrap_or(key);
+        if !who.contains(&name) {
+            who.push(name);
+        }
+    }
+    who.sort();
+    who
+}
+
+/// The throwaway sandboxes open now, from the registry: the records whose
+/// selector names one (`launch::throwaway_selector`), in a network an
+/// instance has — a throwaway sandbox of the host's network has none to
+/// join, its home is its program's alone.
+fn open_throwaway_sandboxes(state: &Path) -> Vec<OpenThrowaway> {
+    let running = state.join(".running");
+    let alive = |pid| registry::alive(&running, pid);
+    let mut out: Vec<OpenThrowaway> = Vec::new();
+    for dir in registry::dirs(&running) {
+        for (_, record) in registry::live_records(&dir, &alive) {
+            let Some(Some(name)) = launch::throwaway_of(&record.selector) else {
+                continue;
+            };
+            let zone = launch::network_name(&record.zone);
+            if launch::is_unconfined_name(zone) || out.iter().any(|o| o.name == name) {
+                continue;
+            }
+            let selector = record.selector.clone();
+            out.push(OpenThrowaway {
+                name: name.to_owned(),
+                zone: zone.to_owned(),
+                who: open_programs(state, &dir, |s| s == selector),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 /// What the launch window is asked: both columns as the memory has them.
@@ -1385,6 +1512,7 @@ fn window_request(
             &sandboxes,
             &profiles,
             &open_throwaways(&running),
+            &open_throwaway_sandboxes(&tools.state),
             &current,
         ),
         // "Always" for the network is for the main home only: a container's
@@ -1479,16 +1607,30 @@ pub fn parse_net_choice(tag: &str) -> NetChoice {
 /// to `.pinnedprofile`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileChoice {
-    Main { pin: bool },
-    OwnSandbox { pin: bool },
-    Throwaway { pin: bool },
-    Sandbox { name: String, pin: bool },
+    Main {
+        pin: bool,
+    },
+    OwnSandbox {
+        pin: bool,
+    },
+    Throwaway {
+        pin: bool,
+    },
+    /// The open throwaway sandbox of this name: one more program in it.
+    ThrowawayJoin(String),
+    Sandbox {
+        name: String,
+        pin: bool,
+    },
     NewSandbox,
     Tmp,
     TmpJoin(String),
     NewProfile,
     Unpin,
-    Profile { name: String, pin: bool },
+    Profile {
+        name: String,
+        pin: bool,
+    },
 }
 
 /// Order matters and is the shell's `case` order: `pin:__ownsb__`,
@@ -1507,6 +1649,9 @@ pub fn parse_profile_choice(tag: &str) -> ProfileChoice {
         "__new__" => ProfileChoice::NewProfile,
         "unpinprof" => ProfileChoice::Unpin,
         other => {
+            if let Some(Some(name)) = launch::throwaway_of(other) {
+                return ProfileChoice::ThrowawayJoin(name.to_owned());
+            }
             if let Some(name) = other.strip_prefix(SANDBOX_PREFIX) {
                 return ProfileChoice::Sandbox {
                     name: name.to_owned(),
@@ -1564,6 +1709,10 @@ pub fn run_argv(
         argv.push(container.sandbox.as_str().into());
     } else if container.fs_sandbox {
         argv.push("--fs-sandbox".into());
+        if !container.join.is_empty() {
+            argv.push("--join".into());
+            argv.push(container.join.as_str().into());
+        }
     }
     argv.push("--".into());
     argv.extend(cmd.iter().cloned());
@@ -1680,15 +1829,18 @@ pub fn main() -> ExitCode {
         // without a window of its own, and the window of the copy that runs
         // is then raised for the person's click.
         NetStep::Running { zone, selector } => {
-            return launch_asked(
-                &tools,
-                &key,
-                &label,
-                &zone,
-                &Container::from_selector(&selector, |n| container_exists(&tools, n)),
-                &args.cmd,
-                &memory,
-            );
+            let mut container =
+                Container::from_selector(&selector, |n| container_exists(&tools, n));
+            // Open in a throwaway sandbox: the window there, or a new empty
+            // home — which, the person says.
+            if !container.join.is_empty() {
+                match again_in_throwaway(&tools, &label) {
+                    Again::There => {}
+                    Again::New => container.join.clear(),
+                    Again::Nothing => return ExitCode::SUCCESS,
+                }
+            }
+            return launch_asked(&tools, &key, &label, &zone, &container, &args.cmd, &memory);
         }
         NetStep::Bound { zone } => zone_choice = zone,
         NetStep::Ask { default } => {
@@ -1848,6 +2000,38 @@ pub fn main() -> ExitCode {
         &args.cmd,
         &memory,
     )
+}
+
+/// The answer to [`again_in_throwaway`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Again {
+    There,
+    New,
+    Nothing,
+}
+
+/// A program that hands a launch over is open in a throwaway sandbox: to
+/// its window there, or into a new one, with an empty home of its own? With
+/// nowhere to ask, its window — what a click on a running program always
+/// was.
+fn again_in_throwaway(tools: &Tools, label: &str) -> Again {
+    let text = format!(
+        "«{label}» уже открыта в разовом контейнере.\n\
+         Переключиться к её окну там — или открыть ещё одну, в новом разовом контейнере \
+         с пустым домом?"
+    );
+    let answers = [
+        ("cancel", "Отмена", false),
+        ("new", "Открыть в новом разовом", false),
+        ("there", "Переключиться к открытой", false),
+    ];
+    match crate::window::question(&tools.window, "Уже открыта", &text, None, &answers, None)
+    {
+        crate::window::Asked::Chose(tag) if tag == "there" => Again::There,
+        crate::window::Asked::Chose(tag) if tag == "new" => Again::New,
+        crate::window::Asked::NotShown => Again::There,
+        _ => Again::Nothing,
+    }
 }
 
 /// How long the window a zone's program brought up starts nothing: the
@@ -2336,6 +2520,11 @@ fn apply_profile_choice(
                 ..Container::default()
             })
         }
+        ProfileChoice::ThrowawayJoin(name) => Some(Container {
+            fs_sandbox: true,
+            join: name,
+            ..Container::default()
+        }),
         // `sb:<name>` of an older menu or window: the container by its name.
         ProfileChoice::Sandbox { name, pin: want } => {
             let name = canon(tools, &format!("{SANDBOX_PREFIX}{name}"));
@@ -3691,6 +3880,7 @@ mod tests {
         assert_eq!(container_label(""), "настоящий дом");
         assert_eq!(container_label(MAIN), "настоящий дом");
         assert_eq!(container_label(THROWAWAY), "разовый");
+        assert_eq!(container_label("__fs__:7-9"), "разовый");
         assert_eq!(container_label("sb:app-firefox"), "свой");
         assert_eq!(container_label("sb:work"), "work — свой дом");
         assert_eq!(container_label("work"), "work");
@@ -3712,18 +3902,21 @@ mod tests {
                 busy_in: "de".to_owned(),
                 main: false,
                 bound: String::new(),
+                open: Vec::new(),
             },
             ProfileRow {
                 name: "личное".to_owned(),
                 busy_in: String::new(),
                 main: false,
                 bound: String::new(),
+                open: Vec::new(),
             },
             ProfileRow {
                 name: "files".to_owned(),
                 busy_in: "de".to_owned(),
                 main: true,
                 bound: String::new(),
+                open: Vec::new(),
             },
         ];
         let joins = vec![TmpJoinRow {
@@ -4031,13 +4224,26 @@ mod tests {
         // The two halves of one contract: whatever menu row was chosen, the
         // line that comes out has to be understood by `vpn-zone run`.
         use crate::launch::{Sandbox, Selection};
-        for tag in ["", "__fs__", "sb:work", "work", "__tmp__", "tmpjoin:/tmp/p"] {
+        for tag in [
+            "",
+            "__fs__",
+            "__fs__:7-9",
+            "sb:work",
+            "work",
+            "__tmp__",
+            "tmpjoin:/tmp/p",
+        ] {
             // `sb:work` of an older window: here, before anything resolves
             // it, the name as a sandbox.
             let container = match parse_profile_choice(tag) {
                 ProfileChoice::Main { .. } => Container::default(),
                 ProfileChoice::Throwaway { .. } => Container {
                     fs_sandbox: true,
+                    ..Container::default()
+                },
+                ProfileChoice::ThrowawayJoin(join) => Container {
+                    fs_sandbox: true,
+                    join,
                     ..Container::default()
                 },
                 ProfileChoice::Sandbox { name, .. } => Container {
@@ -4070,7 +4276,8 @@ mod tests {
                     "«{tag}»"
                 );
             } else if container.fs_sandbox {
-                assert_eq!(parsed.sandbox, Sandbox::Throwaway, "«{tag}»");
+                let join = (!container.join.is_empty()).then(|| container.join.as_str().into());
+                assert_eq!(parsed.sandbox, Sandbox::Throwaway(join), "«{tag}»");
             }
         }
     }
@@ -4089,11 +4296,19 @@ mod tests {
             dir: "/tmp/vpn-profile-abc".to_owned(),
             who: " firefox".to_owned(),
         }];
+        let fs_open = vec![OpenThrowaway {
+            name: "7-9".to_owned(),
+            zone: "nl".to_owned(),
+            who: vec!["Firefox".to_owned(), "foot".to_owned()],
+        }];
+        let mut bank = row("банк", false);
+        bank.open = vec!["Firefox".to_owned()];
         let items = window_containers(
             "firefox",
             &[row("общая", false)],
-            &[row("банк", false), row("files", true)],
+            &[bank, row("files", true)],
             &joins,
+            &fs_open,
             "",
         );
         let labels: Vec<(&str, &str)> = items
@@ -4113,14 +4328,19 @@ mod tests {
                 ),
                 (
                     "__ownsb__",
-                    "Свой контейнер — постоянный дом только этой программы"
+                    "Свой контейнер — постоянный дом только этой программы; будет создан"
                 ),
                 (
                     "__fs__",
-                    "Разовый контейнер — пустой дом, стирается при выходе"
+                    "Новый разовый контейнер — пустой дом, стирается, когда выйдет \
+                     последняя программа"
+                ),
+                (
+                    "__fs__:7-9",
+                    "Открытый разовый контейнер — открыт: Firefox, foot"
                 ),
                 ("общая", "Контейнер «общая» — свой дом"),
-                ("банк", "Контейнер «банк» — слой над домом"),
+                ("банк", "Контейнер «банк» — слой над домом; открыт: Firefox"),
                 ("files", "Контейнер «files» — настоящий дом"),
                 (
                     "tmpjoin:/tmp/vpn-profile-abc",
@@ -4170,6 +4390,7 @@ mod tests {
             &[row("app-firefox", "nl"), row("dev", "de")],
             &[row("work", "")],
             &[],
+            &[],
             "",
         );
         let bound_of = |tag: &str| items.iter().find(|i| i.tag == tag).unwrap().bound.clone();
@@ -4177,7 +4398,7 @@ mod tests {
         assert_eq!(bound_of("dev").as_deref(), Some("de"));
         assert_eq!(bound_of("work"), None);
 
-        let containers = window_containers("firefox", &[], &[], &[], "sb:removed");
+        let containers = window_containers("firefox", &[], &[], &[], &[], "sb:removed");
         let chosen: Vec<&str> = containers
             .iter()
             .filter(|i| i.selected)
