@@ -187,6 +187,28 @@ with subtest("real TCP remains held until niri's guarded question is explicitly 
     peer.wait_until_succeeds(requested("allowed?from=container"), timeout=30)
     alice("systemctl --user stop niri-net-allow")
 
+with subtest("a blocked address is not reached, and nobody is asked about it"):
+    alice("cellward container create niri-block --home private")
+    alice("install -Dm600 /dev/null /home/alice/.config/vpn-zones/containers/niri-block/perms")
+    alice("cellward container net niri-block block 192.0.2.2")
+    assert "заблокировано: 192.0.2.2" in alice("cellward container net niri-block")
+    assert "block\tniri-block\t192.0.2.2\tlocal" in alice("cellward _panel")
+    command = (
+        "sleep 2; exec 3<>/dev/tcp/192.0.2.2/8080; "
+        "printf 'GET /blocked HTTP/1.0\\r\\nHost: peer\\r\\n\\r\\n' >&3; cat <&3; sleep 600"
+    )
+    alice(
+        f"systemd-run --user --unit=niri-blocked --setenv=WAYLAND_DISPLAY={nested} "
+        "--setenv=VPN_ZONE_APPID=niri-blocked "
+        f"cellward run host --container niri-block -- bash -c {shlex.quote(command)}"
+    )
+    machine.sleep(12)
+    peer.fail(requested("blocked"))
+    machine.fail("pgrep -x vpn-zone-window")
+    alice("systemctl --user stop niri-blocked")
+    alice("cellward container net niri-block unblock 192.0.2.2")
+    assert "заблокировано" not in alice("cellward container net niri-block")
+
 with subtest("closing the network question keeps actual TCP closed"):
     network_question("niri-net-close", "closed", window=False)
     # A program with no window to show a panel on is asked in the guarded

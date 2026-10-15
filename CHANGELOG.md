@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Blocked destinations of a container** (2026-10-15, the owner): a name
+  with every name below it, an address, a network — `cellward container net
+  <c> block|unblock <target>`, `containers.<c>.firewall.block` in Nix, and
+  the network window. A new flow to one is denied before any program's rule
+  and without a question; a name is seen through the DNS answers the relay
+  reads (a program's own DNS over HTTPS escapes a name, not an address).
 - **The clipboard by container** (2026-10-15, the owner;
   `docs/CLIPBOARD.md`): a program reads its own container's copies freely,
   another container's or the host's only within two seconds of a paste of

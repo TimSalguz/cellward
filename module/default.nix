@@ -602,6 +602,7 @@ let
       ++ lib.optional (c.firewall.default != null) "net_default = ${c.firewall.default}"
       ++ map (p: "net_allow = ${p}") c.firewall.allow
       ++ map (p: "net_deny = ${p}") c.firewall.deny
+      ++ map (b: "net_block = ${b}") c.firewall.block
       ++ map (device: "device = ${device}") c.permissions.devices
       ++ lib.mapAttrsToList (scheme: app: "link = ${scheme} ${app}") c.links
     )
@@ -691,6 +692,16 @@ let
           default = [ ];
           example = [ "com.example.Tracker" ];
           description = "Программы контейнера (id ярлыка), у которых сети нет: их соединения не уходят.";
+        };
+        block = lib.mkOption {
+          type = lib.types.listOf (lib.types.strMatching "[0-9A-Za-z.:/-]+");
+          default = [ ];
+          example = [
+            "example.com"
+            "203.0.113.7"
+            "198.51.100.0/24"
+          ];
+          description = "Куда программам контейнера нельзя: имя (с поддоменами), адрес или сеть. Новое соединение к адресу, который DNS дал за это имя, или к самому адресу не уходит, чья бы программа ни была. Имя видно только по обычным ответам DNS: DNS-over-HTTPS самой программы его обходит — адрес так не обойти. Локально: cellward container net <к> block|unblock <цель>; снять заданное здесь можно только здесь.";
         };
       };
       permissions.x11 = lib.mkOption {
