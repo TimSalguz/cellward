@@ -18,7 +18,10 @@
 //! over 30 days (`crate::traffic` of vpn-zones), each by its frame's colour;
 //! and their latest connections — which program, to where (the name a DNS
 //! answer gave), how much each way, how long ago (`crate::flows`,
-//! `crate::owners`).
+//! `crate::owners`) — a tree since 2026-10-15: a program of a container,
+//! and under it the sites it talks to, a site's names under it; each to be
+//! blocked for that container (`container net <c> block <target>`) once the
+//! person confirms, and what is blocked listed with the way back.
 //! **Контейнеры**: the list, and for the one chosen its home, network and
 //! state, its network to change (live, with a word on what that breaks,
 //! when its programs run in another), its granted directories, and what
@@ -29,13 +32,13 @@
 //! a program is first offered, the launchers' mode, the screen's and the
 //! input's guard, and the programs pinned to a container, to forget.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use iced::keyboard::{self, key, Key};
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, text, text_input, tooltip};
 use iced::{Alignment, Color, Element, Length, Size, Subscription, Task};
 
 /// A container, as `cellward _panel` says it.
@@ -95,6 +98,17 @@ struct Use {
     inb: u64,
 }
 
+/// A destination blocked for a container (`container net <c> block`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Block {
+    container: String,
+    /// A site, a name or an address, as it was blocked.
+    target: String,
+    /// `local`: blocked here, unblocked here; `nix`: declared in the
+    /// configuration, changed there.
+    source: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Data {
     containers: Vec<Cont>,
@@ -110,6 +124,7 @@ struct Data {
     settings: Vec<(String, String, String)>,
     /// `(key, name, container)`.
     pins: Vec<(String, String, String)>,
+    blocks: Vec<Block>,
 }
 
 fn color_of(hex: &str) -> Option<Color> {
@@ -181,6 +196,11 @@ fn parse(text: &str) -> Data {
                 d.programs
                     .push(((*of).to_owned(), (*name).to_owned(), num(out), num(inb)))
             }
+            ["block", of, target, source] => d.blocks.push(Block {
+                container: (*of).to_owned(),
+                target: (*target).to_owned(),
+                source: (*source).to_owned(),
+            }),
             [kind @ ("today" | "month"), of, network, out, inb] => {
                 let u = Use {
                     container: (*of).to_owned(),
@@ -238,6 +258,233 @@ fn destination(c: &Conn) -> String {
         "tcp" | "udp" if host.contains(':') => format!("[{host}]:{}", c.port),
         "tcp" | "udp" => format!("{host}:{}", c.port),
         _ => format!("{host} ({})", c.proto),
+    }
+}
+
+/// Second levels under a country's domain that are no site of their own
+/// (`bbc.co.uk`, `example.com.au`, `city.ac.jp`): a short list, not the
+/// Public Suffix List — the tree groups by it and nothing else does. A site
+/// it gets wrong is shown under a name too short or too long, and its block
+/// blocks what the row says, no more.
+const SECOND_LEVELS: [&str; 12] = [
+    "ac", "co", "com", "edu", "go", "gov", "mil", "ne", "net", "nic", "or", "org",
+];
+
+/// The site a name is of — its registrable domain: the last two labels, the
+/// last three under a two-letter country's generic second level. An
+/// address, or a name of one or two labels, is itself.
+fn site_of(host: &str) -> String {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return host;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    let n = labels.len();
+    if n < 3 {
+        return host;
+    }
+    let keep = if labels[n - 1].len() == 2 && SECOND_LEVELS.contains(&labels[n - 2]) {
+        3
+    } else {
+        2
+    };
+    labels[n - keep..].join(".")
+}
+
+/// An address of no name, for a person: the address alone on the web's
+/// own ports, else as [`destination`] says it.
+fn address_text(c: &Conn) -> String {
+    let web = matches!(c.proto.as_str(), "tcp" | "udp") && matches!(c.port.as_str(), "80" | "443");
+    if web {
+        c.remote.clone()
+    } else {
+        destination(c)
+    }
+}
+
+/// One destination of a program's connections, summed over them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Dest {
+    /// As shown.
+    label: String,
+    /// What blocking it blocks: the site, the name, the address.
+    target: String,
+    out: u64,
+    inb: u64,
+    /// The latest of its connections' last activity.
+    last: u64,
+    /// A site's names, when it has one other than itself.
+    subs: Vec<Dest>,
+}
+
+impl Dest {
+    fn total(&self) -> u64 {
+        self.out.saturating_add(self.inb)
+    }
+
+    fn add(&mut self, c: &Conn) {
+        self.out = self.out.saturating_add(c.out);
+        self.inb = self.inb.saturating_add(c.inb);
+        self.last = self.last.max(c.last);
+    }
+}
+
+/// The entry of `all` shown as `label`, made if there is none.
+fn dest_entry<'a>(all: &'a mut Vec<Dest>, label: &str, target: &str) -> &'a mut Dest {
+    let at = match all.iter().position(|d| d.label == label) {
+        Some(at) => at,
+        None => {
+            all.push(Dest {
+                label: label.to_owned(),
+                target: target.to_owned(),
+                ..Dest::default()
+            });
+            all.len() - 1
+        }
+    };
+    &mut all[at]
+}
+
+/// The most bytes first; equals by name, so that a reload does not
+/// shuffle them.
+fn by_bytes(all: &mut [Dest]) {
+    all.sort_by(|a, b| {
+        b.total()
+            .cmp(&a.total())
+            .then_with(|| a.label.cmp(&b.label))
+    });
+}
+
+/// A program of a container, and where its connections go.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Group {
+    /// What its fold is kept by across reloads: the container (an
+    /// instance of none: its id) and the program.
+    key: String,
+    /// `-`: an instance of no container.
+    container: String,
+    /// One of its instances: its colour.
+    instance: String,
+    /// The program; empty: none found.
+    who: String,
+    out: u64,
+    inb: u64,
+    dests: Vec<Dest>,
+}
+
+impl Group {
+    fn total(&self) -> u64 {
+        self.out.saturating_add(self.inb)
+    }
+}
+
+/// The connections as a tree: by container and program, the most bytes
+/// first (one with none yet last), and under each its sites by bytes — a
+/// site's names under it when it has others than itself; an address of no
+/// name, a row of its own.
+fn groups(d: &Data) -> Vec<Group> {
+    let mut all: Vec<Group> = Vec::new();
+    for c in &d.flows {
+        let container = d
+            .instances
+            .iter()
+            .find(|i| i.id == c.instance)
+            .map_or("-", |i| i.container.as_str());
+        let holder = if container == "-" {
+            c.instance.as_str()
+        } else {
+            container
+        };
+        let key = format!("{holder}\t{}", c.who);
+        let at = match all.iter().position(|g| g.key == key) {
+            Some(at) => at,
+            None => {
+                all.push(Group {
+                    key,
+                    container: container.to_owned(),
+                    instance: c.instance.clone(),
+                    who: c.who.clone(),
+                    ..Group::default()
+                });
+                all.len() - 1
+            }
+        };
+        let g = &mut all[at];
+        g.out = g.out.saturating_add(c.out);
+        g.inb = g.inb.saturating_add(c.inb);
+        if c.name.is_empty() {
+            dest_entry(&mut g.dests, &address_text(c), &c.remote).add(c);
+        } else {
+            let name = c.name.trim_end_matches('.').to_ascii_lowercase();
+            let site = site_of(&name);
+            let s = dest_entry(&mut g.dests, &site, &site);
+            s.add(c);
+            dest_entry(&mut s.subs, &name, &name).add(c);
+        }
+    }
+    for g in &mut all {
+        for s in &mut g.dests {
+            if s.subs.len() == 1 && s.subs[0].label == s.label {
+                s.subs.clear();
+            }
+            by_bytes(&mut s.subs);
+        }
+        by_bytes(&mut g.dests);
+    }
+    all.sort_by(|a, b| {
+        b.total()
+            .cmp(&a.total())
+            .then_with(|| a.who.is_empty().cmp(&b.who.is_empty()))
+            .then_with(|| a.who.cmp(&b.who))
+            .then_with(|| a.key.cmp(&b.key))
+    });
+    all
+}
+
+/// The container of the built-in «без изоляции» (`container::OPEN_RECORD`
+/// of vpn-zones): nothing of its network is walled, nothing to block in it.
+const OPEN: &str = "open";
+
+/// A program's container, in words.
+fn container_words(container: &str) -> String {
+    match container {
+        "-" => "без контейнера".to_owned(),
+        OPEN => "без изоляции".to_owned(),
+        // `picker::own_name` of vpn-zones.
+        c if c.starts_with("app-") => "свой контейнер".to_owned(),
+        c => format!("контейнер «{c}»"),
+    }
+}
+
+/// Whether a destination can be blocked for a container: one with a name,
+/// and not «без изоляции».
+fn blockable(container: &str) -> bool {
+    container != "-" && container != OPEN
+}
+
+/// A long name shortened in its middle: its start, and its end — the site.
+fn shortened(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max || max < 16 {
+        return s.to_owned();
+    }
+    let head: String = s.chars().take(10).collect();
+    let tail: String = s.chars().skip(n - (max - 11)).collect();
+    format!("{head}…{tail}")
+}
+
+/// Words of less weight — the tree's glyphs, a container in words, how long
+/// ago: the text's own colour, fainter, in either theme.
+fn dim(theme: &iced::Theme) -> text::Style {
+    text::Style {
+        color: Some(
+            theme
+                .extended_palette()
+                .background
+                .base
+                .text
+                .scale_alpha(0.6),
+        ),
     }
 }
 
@@ -343,6 +590,13 @@ enum Pending {
     },
     /// Every program's pin forgotten.
     ForgetAll,
+    /// A destination blocked for a container: asked on its row first — a
+    /// program cut off from a site by a stray click is worse than a click
+    /// more.
+    Block {
+        container: String,
+        target: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -395,6 +649,17 @@ enum Msg {
     Forget(String),
     ForgetAllAsk,
     ForgetAllGo,
+    /// A program's row in the connections, folded or unfolded (its key).
+    Fold(String),
+    /// A site's row, its names shown or not (its program's key and the site).
+    FoldSite(String),
+    /// A program's every destination shown, or the first ones only.
+    Whole(String),
+    /// `(container, target)`: to block, asked first.
+    BlockAsk(String, String),
+    BlockGo,
+    /// `(container, target)`.
+    Unblock(String, String),
 }
 
 struct Panel {
@@ -415,6 +680,13 @@ struct Panel {
     busy: bool,
     /// What reading `cellward _panel` said, when it failed.
     trouble: Option<String>,
+    /// The connections' tree as the person left it, by [`Group::key`]
+    /// (sites: the key, a tab, the site) — kept across the reloads, which
+    /// make the tree anew every second: programs folded, sites unfolded,
+    /// programs with every destination shown.
+    folded: HashSet<String>,
+    unfolded: HashSet<String>,
+    whole: HashSet<String>,
 }
 
 /// Run `cellward <args>` off the window's threads; its output, or why not.
@@ -562,6 +834,9 @@ impl Panel {
             said: None,
             busy: false,
             trouble: None,
+            folded: HashSet::new(),
+            unfolded: HashSet::new(),
+            whole: HashSet::new(),
         }
     }
 
@@ -616,8 +891,55 @@ impl Panel {
         match msg {
             Msg::Tab(tab) => {
                 self.tab = tab;
+                // A block asked on the network's tab is not left waiting
+                // behind another.
+                if matches!(self.pending, Some(Pending::Block { .. })) {
+                    self.pending = None;
+                }
                 Task::none()
             }
+            Msg::Fold(key) => {
+                if !self.folded.remove(&key) {
+                    self.folded.insert(key);
+                }
+                Task::none()
+            }
+            Msg::FoldSite(key) => {
+                if !self.unfolded.remove(&key) {
+                    self.unfolded.insert(key);
+                }
+                Task::none()
+            }
+            Msg::Whole(key) => {
+                if !self.whole.remove(&key) {
+                    self.whole.insert(key);
+                }
+                Task::none()
+            }
+            Msg::BlockAsk(container, target) => {
+                if !self.busy {
+                    self.said = None;
+                    self.pending = Some(Pending::Block { container, target });
+                }
+                Task::none()
+            }
+            Msg::BlockGo => match self.pending.clone() {
+                Some(Pending::Block { container, target }) => self.act(vec![
+                    "container".into(),
+                    "net".into(),
+                    container,
+                    "block".into(),
+                    target,
+                ]),
+                _ => Task::none(),
+            },
+            Msg::Unblock(container, target) => self.act(vec![
+                "container".into(),
+                "net".into(),
+                container,
+                "unblock".into(),
+                target,
+            ]),
             Msg::Tick => load(self.cellward.clone()),
             Msg::Loaded(Ok(text)) => {
                 let now = Instant::now();
@@ -1086,6 +1408,7 @@ impl Panel {
             self.use_rows("Сегодня", &self.data.today),
             self.use_rows("За 30 дней", &self.data.month),
         ]
+        .push(self.view_blocks(None))
         .spacing(18);
         scrollable(page).height(Length::Fill).into()
     }
@@ -1123,52 +1446,324 @@ impl Panel {
         block.into()
     }
 
-    /// The latest connections of every running container, the latest first.
+    /// Whether `target` is blocked for `container` already: itself, or a
+    /// name it is under (a name's block takes its subdomains, `netrules`
+    /// of vpn-zones). A network's block is not looked into: its addresses
+    /// keep their ⊘, and the core says what is so.
+    fn blocked(&self, container: &str, target: &str) -> bool {
+        self.data.blocks.iter().any(|b| {
+            b.container == container
+                && (b.target == target
+                    || target
+                        .strip_suffix(b.target.as_str())
+                        .is_some_and(|rest| rest.ends_with('.')))
+        })
+    }
+
+    /// «Блокировать X для контейнера «c»?», on the row it was asked on.
+    fn block_question(container_name: &str, target: &str) -> Element<'static, Msg> {
+        container(
+            row![
+                text(format!(
+                    "Блокировать {target} для контейнера «{container_name}»? Программы \
+                     контейнера перестанут до него доходить."
+                ))
+                .size(13)
+                .width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                button(text("Блокировать").size(13))
+                    .padding([4, 10])
+                    .style(button::danger)
+                    .on_press(Msg::BlockGo),
+                button(text("Отмена  Esc").size(13))
+                    .padding([4, 10])
+                    .style(button::secondary)
+                    .on_press(Msg::Cancel),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding(8)
+        .width(Length::Fill)
+        .style(container::bordered_box)
+        .into()
+    }
+
+    /// A destination's row under its program: the tree's glyphs, its bytes
+    /// each way, its name — a site's to unfold to its names —, how long ago,
+    /// and its block.
+    fn dest_row(
+        &self,
+        glyphs: String,
+        fold: Option<(bool, Msg)>,
+        d: &Dest,
+        of: &str,
+        now: u64,
+        idle: bool,
+    ) -> Element<'static, Msg> {
+        let label = text(shortened(&d.label, 56))
+            .size(14)
+            .wrapping(iced::widget::text::Wrapping::Glyph);
+        let name: Element<'static, Msg> = match fold {
+            Some((open, msg)) => button(
+                row![
+                    text(if open { "▼" } else { "▶" })
+                        .size(11)
+                        .width(Length::Fixed(16.0)),
+                    label,
+                ]
+                .align_y(Alignment::Center),
+            )
+            .padding(0)
+            .width(Length::Fill)
+            .style(button::text)
+            .on_press(msg)
+            .into(),
+            None => row![iced::widget::space().width(Length::Fixed(16.0)), label]
+                .width(Length::Fill)
+                .into(),
+        };
+        let action: Element<'static, Msg> = if self.blocked(of, &d.target) {
+            text("заблокировано").size(12).style(text::danger).into()
+        } else if blockable(of) {
+            tooltip(
+                button(text("⊘").size(14))
+                    .padding([0, 8])
+                    .style(button::secondary)
+                    .on_press_maybe(idle.then(|| Msg::BlockAsk(of.to_owned(), d.target.clone()))),
+                container(text("Блокировать").size(12))
+                    .padding([2, 6])
+                    .style(container::rounded_box),
+                tooltip::Position::Left,
+            )
+            .into()
+        } else {
+            iced::widget::space().into()
+        };
+        row![
+            text(glyphs).size(14).width(Length::Fixed(44.0)).style(dim),
+            text(format!("↓ {}", bytes(d.inb)))
+                .size(13)
+                .width(Length::Fixed(88.0)),
+            text(format!("↑ {}", bytes(d.out)))
+                .size(13)
+                .width(Length::Fixed(88.0))
+                .style(dim),
+            name,
+            text(ago(now.saturating_sub(d.last)))
+                .size(12)
+                .width(Length::Fixed(96.0))
+                .style(dim),
+            container(action)
+                .width(Length::Fixed(96.0))
+                .align_x(iced::alignment::Horizontal::Right),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
+    /// The connections of every running container as a tree: a program of
+    /// a container — folded by a click on its row, and kept so across the
+    /// reloads —, under it where it talks to, the most first, a site's
+    /// names under the site; each to be blocked for the container, asked on
+    /// its row first.
     fn view_flows(&self) -> Element<'_, Msg> {
-        const SHOWN: usize = 40;
-        let mut block = column![text("Соединения").size(17)].spacing(4);
+        const SHOWN: usize = 15;
+        let mut block = column![text("Соединения").size(17)].spacing(2);
         if self.data.flows.is_empty() {
             block = block.push(text("соединений не было").size(13));
         }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        let mut flows: Vec<&Conn> = self.data.flows.iter().collect();
-        flows.sort_by_key(|c| std::cmp::Reverse(c.last));
-        for c in flows.into_iter().take(SHOWN) {
+        let idle = !self.busy && self.pending.is_none();
+        let asked = match &self.pending {
+            Some(Pending::Block { container, target }) => Some((container, target)),
+            _ => None,
+        };
+        let mut asked_shown = false;
+        let mut tree = column![].spacing(4);
+        for g in groups(&self.data) {
             let color = self
                 .data
                 .instances
                 .iter()
-                .find(|i| i.id == c.instance)
+                .find(|i| i.id == g.instance)
                 .map_or(Color::from_rgb8(0x88, 0x88, 0x88), |i| {
                     self.color_of_instance(i)
                 });
-            let who = if c.who.is_empty() {
-                "—"
+            let open = !self.folded.contains(&g.key);
+            let who = if g.who.is_empty() {
+                "неизвестная программа".to_owned()
             } else {
-                c.who.as_str()
+                g.who.clone()
             };
-            block = block.push(
+            tree = tree.push(
                 row![
-                    text("●").size(14).color(color),
-                    text(who).size(14).width(Length::Fixed(180.0)),
-                    text(destination(c))
+                    button(
+                        row![
+                            text(if open { "▼" } else { "▶" })
+                                .size(11)
+                                .width(Length::Fixed(14.0)),
+                            text("●").size(14).color(color),
+                            text(who).size(15),
+                            text(format!("({})", container_words(&g.container)))
+                                .size(13)
+                                .style(dim),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([3, 4])
+                    .width(Length::Fill)
+                    .style(button::text)
+                    .on_press(Msg::Fold(g.key.clone())),
+                    text(format!("↓ {}", bytes(g.inb)))
                         .size(14)
-                        .width(Length::Fixed(280.0))
-                        .wrapping(iced::widget::text::Wrapping::Glyph),
-                    text(format!("↑ {}", bytes(c.out)))
+                        .width(Length::Fixed(96.0)),
+                    text(format!("↑ {}", bytes(g.out)))
                         .size(14)
-                        .width(Length::Fixed(100.0)),
-                    text(format!("↓ {}", bytes(c.inb)))
-                        .size(14)
-                        .width(Length::Fixed(100.0)),
-                    text(ago(now.saturating_sub(c.last))).size(13),
+                        .width(Length::Fixed(96.0)),
                 ]
-                .spacing(8),
+                .spacing(6)
+                .align_y(Alignment::Center),
             );
+            if !open {
+                continue;
+            }
+            let whole = self.whole.contains(&g.key);
+            let shown = if whole {
+                g.dests.len()
+            } else {
+                g.dests.len().min(SHOWN)
+            };
+            let more = g.dests.len() > SHOWN;
+            let mut children = column![].spacing(3);
+            for (n, d) in g.dests.iter().take(shown).enumerate() {
+                let last = n + 1 == shown && !more;
+                let site_key = format!("{}\t{}", g.key, d.label);
+                let unfolded = self.unfolded.contains(&site_key);
+                let fold = (!d.subs.is_empty()).then_some((unfolded, Msg::FoldSite(site_key)));
+                let glyph = if last { "└─" } else { "├─" };
+                children = children.push(self.dest_row(
+                    glyph.to_owned(),
+                    fold,
+                    d,
+                    &g.container,
+                    now,
+                    idle,
+                ));
+                if !asked_shown && asked == Some((&g.container, &d.target)) {
+                    asked_shown = true;
+                    children = children.push(Self::block_question(&g.container, &d.target));
+                }
+                if !unfolded {
+                    continue;
+                }
+                let stem = if last { "   " } else { "│  " };
+                for (m, s) in d.subs.iter().enumerate() {
+                    let glyph = if m + 1 == d.subs.len() {
+                        "└─"
+                    } else {
+                        "├─"
+                    };
+                    children = children.push(self.dest_row(
+                        format!("{stem}{glyph}"),
+                        None,
+                        s,
+                        &g.container,
+                        now,
+                        idle,
+                    ));
+                    if !asked_shown && asked == Some((&g.container, &s.target)) {
+                        asked_shown = true;
+                        children = children.push(Self::block_question(&g.container, &s.target));
+                    }
+                }
+            }
+            if more {
+                let label = if whole {
+                    "свернуть".to_owned()
+                } else {
+                    format!("ещё {}…", g.dests.len() - SHOWN)
+                };
+                children = children.push(
+                    row![
+                        text("└─").size(14).width(Length::Fixed(44.0)).style(dim),
+                        button(text(label).size(13))
+                            .padding([1, 6])
+                            .style(button::text)
+                            .on_press(Msg::Whole(g.key.clone())),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                );
+            }
+            tree = tree.push(container(children).padding(iced::Padding {
+                left: 22.0,
+                ..iced::Padding::ZERO
+            }));
         }
-        block.into()
+        // Its row folded away, or gone with the reload: the question stays,
+        // above the tree.
+        if let (Some((of, target)), false) = (asked, asked_shown) {
+            block = block.push(Self::block_question(of, target));
+        }
+        block.push(tree).into()
+    }
+
+    /// What is blocked: of the container `only`, or of every one with the
+    /// container's name; none when nothing is.
+    fn view_blocks(&self, only: Option<&str>) -> Option<Element<'_, Msg>> {
+        let blocks: Vec<&Block> = self
+            .data
+            .blocks
+            .iter()
+            .filter(|b| only.is_none_or(|o| b.container == o))
+            .collect();
+        if blocks.is_empty() {
+            return None;
+        }
+        let idle = !self.busy && self.pending.is_none();
+        let mut block =
+            column![text("Заблокировано").size(if only.is_some() { 16 } else { 17 })].spacing(4);
+        for b in blocks {
+            let mut line = row![].spacing(8).align_y(Alignment::Center);
+            if only.is_none() {
+                let color = self
+                    .data
+                    .containers
+                    .iter()
+                    .find(|c| c.name == b.container)
+                    .and_then(|c| c.color)
+                    .unwrap_or(Color::from_rgb8(0x88, 0x88, 0x88));
+                line = line.push(text("●").size(14).color(color)).push(
+                    text(b.container.as_str())
+                        .size(14)
+                        .width(Length::Fixed(200.0)),
+                );
+            }
+            line = line.push(
+                text(b.target.as_str())
+                    .size(14)
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::Glyph),
+            );
+            let undo: Element<'_, Msg> = if b.source == "nix" {
+                text("задано в Nix").size(12).style(dim).into()
+            } else {
+                button(text("Разблокировать").size(13))
+                    .padding([3, 8])
+                    .style(button::secondary)
+                    .on_press_maybe(
+                        idle.then(|| Msg::Unblock(b.container.clone(), b.target.clone())),
+                    )
+                    .into()
+            };
+            block = block.push(line.push(undo));
+        }
+        Some(block.into())
     }
 
     fn view_containers(&self) -> Element<'_, Msg> {
@@ -1337,6 +1932,8 @@ impl Panel {
         );
         page = page.push(text("Действия").size(16));
         page = page.push(acts);
+        // What is blocked for it (blocked on the network's tab).
+        page = page.push(self.view_blocks(Some(&c.name)));
         // Its permissions, as cellward explains them.
         page = page.push(text("Разрешения").size(16));
         let explained = match &self.explained {
@@ -1976,6 +2573,163 @@ mod tests {
         assert_eq!(d.month[0].out, 9000);
         assert_eq!(color_of("#12345"), None);
         assert_eq!(color_of("123456"), None);
+    }
+
+    /// Two programs of a container, one of another, one of none found, one
+    /// with no traffic yet; names of one site, an address on the web's port
+    /// and one on another.
+    const TREE: &str = "container\twork\tlayer\tnl\t#3366ff\n\
+        container\tapp-chat\tprivate\tnl\t#33ff66\n\
+        instance\tw1\twork\tnl\t0\t0\t1\n\
+        instance\tc1\tapp-chat\tnl\t0\t0\t1\n\
+        flow\tw1\ttcp\t10.0.0.1\t443\trr4sn-2o.googlevideo.com\tBrowser\t10\t5000\t100\n\
+        flow\tw1\ttcp\t10.0.0.2\t443\trr2.googlevideo.com.\tBrowser\t10\t3000\t300\n\
+        flow\tw1\ttcp\t10.0.0.3\t443\tgithub.com\tBrowser\t5\t100\t200\n\
+        flow\tw1\ttcp\t10.0.0.4\t443\t\tBrowser\t1\t1\t50\n\
+        flow\tw1\tudp\t10.0.0.4\t3478\t\tBrowser\t1\t9000\t60\n\
+        flow\tw1\ttcp\t10.0.0.5\t443\t\tEditor\t0\t0\t70\n\
+        flow\tc1\tudp\t2001:db8::1\t443\t\tChat\t100\t100\t80\n\
+        flow\tc1\ttcp\t10.0.0.6\t443\t\t\t50\t50\t90\n\
+        block\twork\tgithub.com\tlocal\n\
+        block\twork\tads.example\tnix\n\
+        block\tnobody\n";
+
+    /// Programs by container, the most first and the silent last; under
+    /// each, sites by bytes, a site's names under it, an address with its
+    /// port where it is not the web's.
+    #[test]
+    fn connections_are_a_tree_by_container_and_program() {
+        let g = groups(&parse(TREE));
+        let heads: Vec<(&str, &str)> = g
+            .iter()
+            .map(|g| (g.container.as_str(), g.who.as_str()))
+            .collect();
+        assert_eq!(
+            heads,
+            vec![
+                ("work", "Browser"),
+                ("app-chat", "Chat"),
+                ("app-chat", ""),
+                ("work", "Editor"),
+            ]
+        );
+        let b = &g[0];
+        assert_eq!((b.out, b.inb), (27, 17101));
+        let rows: Vec<(&str, &str, u64)> = b
+            .dests
+            .iter()
+            .map(|d| (d.label.as_str(), d.target.as_str(), d.total()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("10.0.0.4:3478", "10.0.0.4", 9001),
+                ("googlevideo.com", "googlevideo.com", 8020),
+                ("github.com", "github.com", 105),
+                ("10.0.0.4", "10.0.0.4", 2),
+            ]
+        );
+        // The site sums its names and keeps the latest; its names under it,
+        // the trailing dot of a DNS name gone.
+        let site = &b.dests[1];
+        assert_eq!(site.last, 300);
+        let names: Vec<&str> = site.subs.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["rr4sn-2o.googlevideo.com", "rr2.googlevideo.com"]
+        );
+        // A site that is only itself has nothing to unfold.
+        assert!(b.dests[2].subs.is_empty());
+        assert_eq!(g[1].dests[0].label, "2001:db8::1");
+        assert_eq!(container_words(&g[1].container), "свой контейнер");
+        assert_eq!(container_words("work"), "контейнер «work»");
+        assert!(!blockable(OPEN) && !blockable("-") && blockable("work"));
+        assert_eq!(
+            shortened("rr4sn-2oxxxxxxxxxxxxxxxxxxxxxxxxxx.googlevideo.com", 32),
+            "rr4sn-2oxx…xxxxx.googlevideo.com"
+        );
+    }
+
+    #[test]
+    fn a_name_is_grouped_by_its_site() {
+        assert_eq!(site_of("rr4sn-2o.googlevideo.com"), "googlevideo.com");
+        assert_eq!(site_of("www.bbc.co.uk"), "bbc.co.uk");
+        assert_eq!(site_of("bbc.co.uk"), "bbc.co.uk");
+        assert_eq!(site_of("github.com"), "github.com");
+        assert_eq!(site_of("API.GitHub.com."), "github.com");
+        assert_eq!(site_of("a.b.example.com.au"), "example.com.au");
+        // A three-letter country code is no country's: two labels.
+        assert_eq!(site_of("www.example.co.org"), "co.org");
+        assert_eq!(site_of("149.154.167.50"), "149.154.167.50");
+        assert_eq!(site_of("2001:db8::1"), "2001:db8::1");
+        assert_eq!(site_of("localhost"), "localhost");
+    }
+
+    /// What the person folded and unfolded stays so when the panel reads
+    /// its lines again, as it does every second.
+    #[test]
+    fn the_tree_stays_as_it_was_left_across_a_reload() {
+        let mut p = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Network);
+        let _ = p.update(Msg::Loaded(Ok(TREE.to_owned())));
+        let g = groups(&p.data);
+        let _ = p.update(Msg::Fold(g[1].key.clone()));
+        let site = format!("{}\t{}", g[0].key, "googlevideo.com");
+        let _ = p.update(Msg::FoldSite(site.clone()));
+        let _ = p.update(Msg::Loaded(Ok(TREE.to_owned())));
+        assert!(p.folded.contains(&groups(&p.data)[1].key));
+        assert!(!p.folded.contains(&groups(&p.data)[0].key));
+        assert!(p.unfolded.contains(&site));
+        // Folded again: open.
+        let _ = p.update(Msg::Fold(g[1].key.clone()));
+        assert!(p.folded.is_empty());
+        // A block is asked, not done; Esc's cancel and another tab drop it.
+        let _ = p.update(Msg::BlockAsk("work".into(), "googlevideo.com".into()));
+        assert_eq!(
+            p.pending,
+            Some(Pending::Block {
+                container: "work".into(),
+                target: "googlevideo.com".into()
+            })
+        );
+        assert!(!p.busy);
+        let _ = p.update(Msg::Tab(Tab::Containers));
+        assert_eq!(p.pending, None);
+        let _ = p.update(Msg::Tab(Tab::Network));
+        let _ = p.update(Msg::BlockAsk("work".into(), "github.com".into()));
+        let _ = p.update(Msg::BlockGo);
+        assert!(p.busy && p.pending.is_none());
+        // The view is drawn, the question's row and all.
+        p.busy = false;
+        let _ = p.update(Msg::BlockAsk("work".into(), "github.com".into()));
+        let _ = p.view();
+    }
+
+    #[test]
+    fn blocks_are_read() {
+        let d = parse(TREE);
+        assert_eq!(
+            d.blocks,
+            vec![
+                Block {
+                    container: "work".into(),
+                    target: "github.com".into(),
+                    source: "local".into()
+                },
+                Block {
+                    container: "work".into(),
+                    target: "ads.example".into(),
+                    source: "nix".into()
+                },
+            ]
+        );
+        assert!(parse(DATA).blocks.is_empty());
+        // A name's block takes its subdomains, and only them.
+        let mut p = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Network);
+        p.data = d;
+        assert!(p.blocked("work", "github.com"));
+        assert!(p.blocked("work", "api.github.com"));
+        assert!(!p.blocked("work", "notgithub.com"));
+        assert!(!p.blocked("app-chat", "github.com"));
     }
 
     #[test]

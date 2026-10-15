@@ -811,6 +811,169 @@ for home in ["overlay", "private"]:
             alice(f"systemctl --user stop {unit}", check=False)
             machine.sleep(3)
 
+# --- 11. The cellward window's connections, a tree ------------------------------
+
+TREE = "The cellward window's connections: a tree by program, a site blocked from its row"
+
+
+def runs_at(at, y, x0, x1):
+    """A row of the screen as runs of one colour: (from, to, colour)."""
+    out = []
+    start, colour = x0, at(x0, y)
+    for x in range(x0 + 1, x1 + 1):
+        c = at(x, y) if x < x1 else None
+        if c != colour:
+            out.append((start, x - 1, colour))
+            start, colour = x, c
+    return out
+
+
+def spans_down(found):
+    """Points found row by row, one per thing: rows next to each other at
+    about the same x are one thing — its middle."""
+    things = []
+    for x, y in sorted(found, key=lambda p: (p[1], p[0])):
+        if things and y - things[-1][2] <= 2 and abs(x - things[-1][0]) <= 6:
+            things[-1][2] = y
+        else:
+            things.append([x, y, y])
+    return [(x, (top + bottom) // 2) for x, top, bottom in things]
+
+
+def block_buttons(at):
+    """The ⊘ buttons, top to bottom: down the column through their right
+    padding (the page's 16 pixels in, 4 more — no glyph there), runs of
+    one grey, not the page's, 12 to 30 pixels high; their middles, at
+    the button's own middle column."""
+    w, h = at.size
+    page = at(w - 3, h - 3)
+    x = w - 16 - 4
+    buttons = []
+    start, colour = 110, at(x, 110)
+    for y in range(111, h + 1):
+        c = at(x, y) if y < h else None
+        if c != colour:
+            grey = colour is not None and colour[0] == colour[1] == colour[2]
+            if grey and colour != page and 12 <= y - start <= 30:
+                buttons.append((x - 10, (start + y - 1) // 2))
+            start, colour = y, c
+    assert len(buttons) >= 2, f"no ⊘ buttons: {buttons}"
+    return buttons
+
+
+def danger_button(at):
+    """The confirmation's «Блокировать»: a red run 60 pixels wide or more."""
+    w, h = at.size
+    found = []
+    for y in range(110, h):
+        for a, b, (r, g, bl) in runs_at(at, y, 0, w - 1):
+            if r > 150 and g < 110 and bl < 110 and b - a + 1 >= 60:
+                found.append(((a + b) // 2, y))
+    assert found, "no «Блокировать»"
+    return spans_down(found)[0]
+
+
+if wanted(TREE):
+    with scenario(TREE):
+        # Real containers and the real `container net … block`; the
+        # connections are made up — names a DNS answer would have given, in
+        # a VM with no DNS — by a `cellward` in front of the real one that
+        # adds them to what `_panel` says and passes every other command on.
+        real = alice("readlink -f $(command -v cellward)").strip()
+        alice("cellward container create treebox --home private")
+        alice("cellward container create app-chat --home private")
+        flows = [
+            # (instance, proto, remote, port, name, who, out, in, ago)
+            ("treebox", "tcp", "203.0.113.10", "443", "www.youtube.com", "Browser", 41_000_000, 1_181_116_006, 2),
+            ("treebox", "udp", "203.0.113.11", "443", "rr4sn-2o.googlevideo.com", "Browser", 900_000, 106_954_752, 5),
+            ("treebox", "udp", "203.0.113.12", "443", "rr2---sn-abcdefgh.googlevideo.com", "Browser", 300_000, 52_428_800, 9),
+            ("treebox", "tcp", "203.0.113.13", "443", "i.ytimg.com", "Browser", 20_000, 4_194_304, 30),
+            ("treebox", "tcp", "203.0.113.14", "443", "github.com", "Browser", 9_000, 104_448, 12),
+            ("treebox", "tcp", "203.0.113.15", "443", "api.github.com", "Browser", 3_000, 20_480, 40),
+            ("treebox", "tcp", "198.51.100.7", "8443", "", "Browser", 1_000, 5_530, 75),
+            ("treebox", "udp", "2001:db8::53", "443", "", "Browser", 2_000, 3_000, 130),
+            ("treebox", "tcp", "203.0.113.20", "443", "updates.example.org", "Updater", 500, 0, 600),
+            ("app-chat", "udp", "198.51.100.40", "9987", "", "Chat", 3_145_728, 276_824_064, 1),
+            ("app-chat", "tcp", "203.0.113.30", "443", "voice.example.net", "Chat", 50_000, 400_000, 20),
+            ("app-chat", "tcp", "203.0.113.31", "443", "", "", 0, 0, 300),
+        ]
+        lines = [
+            "instance\ttreebox\ttreebox\toffline\t45000000\t1350000000\tNOW",
+            "instance\tapp-chat\tapp-chat\toffline\t3200000\t277000000\tNOW",
+        ]
+        for i, proto, remote, port, name, who, out, inb, ago in flows:
+            lines.append(f"flow\t{i}\t{proto}\t{remote}\t{port}\t{name}\t{who}\t{out}\t{inb}\tNOW-{ago}")
+        data = base64.b64encode(("\n".join(lines) + "\n").encode()).decode()
+        machine.succeed(f"echo {data} | base64 -d > /tmp/tree.panel && chmod 644 /tmp/tree.panel")
+        fake = (
+            "#!/bin/sh\n"
+            'if [ "$1" = _panel ]; then\n'
+            f"  {real} _panel | grep -v '^instance\\|^flow'\n"
+            # NOW, NOW-<seconds>: when, from the clock of the moment.
+            "  awk -F'\\t' -v OFS='\\t' -v now=$(date +%s) "
+            "'{ for (i = 1; i <= NF; i++) if ($i ~ /^NOW/) { sub(/^NOW-?/, \"\", $i); $i = now - $i } print }' "
+            "/tmp/tree.panel\n"
+            "  exit 0\n"
+            "fi\n"
+            'echo "$*" >> /tmp/tree-calls\n'
+            f'exec {real} "$@"\n'
+        )
+        machine.succeed(
+            f"echo {base64.b64encode(fake.encode()).decode()} | base64 -d > /tmp/tree-cellward "
+            "&& chmod 755 /tmp/tree-cellward && touch /tmp/tree-calls && chmod 666 /tmp/tree-calls"
+        )
+        print(alice("/tmp/tree-cellward _panel | grep -E '^(instance|flow|container)'"))
+        tools = alice(f"grep -m1 -o '/nix/store/[^ \"]*-vpn-zone-tools.json' {real}").strip()
+        win = machine.succeed(f"grep -o '\"window\": *\"[^\"]*\"' {tools}").strip().split('"')[3]
+        pointer("move", 5, 5)
+        alice(
+            f"systemd-run --user --unit=vmtree --setenv=WAYLAND_DISPLAY={nested} "
+            f"{win} panel --cellward /tmp/tree-cellward --tab network"
+        )
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {NIRI_MSG} --json windows' | grep -q '\"cellward\"'",
+            timeout=60,
+        )
+        tree_win = next(w for w in windows() if w["app_id"] == "cellward")
+        alice(f"{NIRI_MSG} action focus-window --id {tree_win['id']}")
+        alice(f"{NIRI_MSG} action fullscreen-window")
+        machine.sleep(4)
+        buttons = settled("tree", block_buttons)
+        print("⊘ buttons:", buttons)
+        # The second site of the browser (googlevideo.com): unfolded by a
+        # click on its name, left of its «… назад».
+        x, y = buttons[1]
+        click(x - 260, y, rest=0.3)
+        machine.sleep(2)
+        before = len(buttons)
+        buttons = settled("tree-site", block_buttons)
+        print("⊘ buttons, the site unfolded:", buttons)
+        # Its two names under it, each with its own ⊘.
+        assert len(buttons) == before + 2, (before, buttons)
+        # The first site's ⊘: asked on its row, nothing done yet.
+        x, y = buttons[0]
+        click(x, y, rest=0.6)
+        machine.sleep(2)
+        bx, by = settled("tree-asked", danger_button)
+        assert "block" not in alice("cat /tmp/tree-calls"), "blocked before it was confirmed"
+        click(bx, by, rest=0.3)
+        machine.wait_until_succeeds("grep -q 'container net treebox block youtube.com' /tmp/tree-calls", timeout=20)
+        machine.sleep(3)
+        shot("tree-blocked")
+        out = alice(f"{real} _panel | grep '^block'")
+        print(out)
+        assert "block\ttreebox\tyoutube.com\tlocal" in out, out
+        # The container's page: what is blocked for it, to unblock.
+        names = [l.split("\t")[1] for l in alice(f"{real} _panel").splitlines() if l.startswith("container\t")]
+        downs = " ".join(["-k Down"] * (names.index("treebox") + 1))
+        alice(f"WAYLAND_DISPLAY={nested} wtype -s 400 -k Right {downs}")
+        machine.sleep(2)
+        shot("tree-container-page")
+        print(alice("cat /tmp/tree-calls"))
+    alice("systemctl --user stop vmtree", check=False)
+    machine.sleep(2)
+
+
 if os.environ.get("VM_DESKTOP_RECORD"):
     alice("systemctl --user kill -s INT vmrec", check=False)
     # Done once its file stops growing (it writes the index last).
