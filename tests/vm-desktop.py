@@ -872,14 +872,46 @@ if wanted(CW):
         shot("clipwin-search")
         alice(f"WAYLAND_DISPLAY={nested} wtype -k BackSpace -k BackSpace -k BackSpace -k BackSpace")
         machine.sleep(1)
-        # «⋯», at the right end of the search bar.
+        # «⋯», at the right end of the search bar: the builder. Its places
+        # from the window's corner, as it lays itself out at 640×760.
         left, top, right, bottom = box
-        click(right - 30, bottom - 28, rest=0.2)
-        machine.sleep(1.5)
+
+        def at(x, y, rest=0.2):
+            click(left + x, top + y, rest=rest)
+            machine.sleep(0.8)
+
+        def typed(words):
+            alice(f"WAYLAND_DISPLAY={nested} wtype -M ctrl a -m ctrl")
+            alice(f"WAYLAND_DISPLAY={nested} wtype " + shlex.quote(words))
+            machine.sleep(0.8)
+
+        at(608, 730)
+        at(62, 108)  # + Текст
+        at(148, 369)  # its text
+        typed("порт ")
+        at(195, 196)  # + Число в диапазоне
+        shot("clipwin-builder-blocks")
+        at(168, 506)  # its «до»
+        typed("65535")
+        # The rail of the builder's scroll bar, low: to its end.
+        at(623, 690)
+        shot("clipwin-builder-end")
+        at(320, 610)  # the text to try it on
+        typed("порт 22, порт 8080, порт 70000")
+        at(623, 690)
         shot("clipwin-builder")
-        # Esc closes the builder, Enter pastes the chosen — the newest.
-        alice(f"WAYLAND_DISPLAY={nested} wtype -k Escape")
+        # Searched by: the feed has what matches.
+        at(110, 686)
         machine.sleep(1)
+        shot("clipwin-pattern-found")
+        # «Перенести в…» on the one found, then the other history's name.
+        at(206, 141)
+        shot("clipwin-move")
+        at(154, 141)
+        moved = alice("cellward-clip list cwb", check=False)
+        print("cwb:", moved)
+        assert "пароль 1234" in moved, moved
+        # Enter pastes the chosen — the newest found.
         alice(f"WAYLAND_DISPLAY={nested} wtype -k Return")
         machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=20)
         said = alice("journalctl --user --no-pager -o cat -u cwwin", check=False)
