@@ -84,6 +84,10 @@ container only when the person moves it there in the window.
   container's secrets: hidden preview, typing only, never in the
   selection. A later copy of the same contents (keyed hash) is not kept and
   leaves no trace — no count, no gap in numbers — so copying guesses does not
-  tell which one is a secret. Nothing in a container reaches the daemon's
-  socket; the guessing is the person's own at the window only. Moving a
+  tell which one is a secret. Nor does it change anything a program sees:
+  the selection is left as it is, never cleared or replaced on a match — a
+  program copying guesses and pasting them back would see which one
+  vanished. The selection is cleared only when the person marks an entry, of
+  contents the program had anyway. Nothing in a container reaches the
+  daemon's socket. Moving a
   secret to another container: from its menu, confirmed.
