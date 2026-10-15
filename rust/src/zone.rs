@@ -2965,6 +2965,10 @@ impl Epochs {
     /// in the current epoch — launched from a login session's scope, which
     /// the kernel does not let move (`crate::epoch`) —, and the note.
     fn look(&mut self, members: &[(i32, OwnedFd)]) -> Vec<i32> {
+        // The launches' cgroups nobody is in any more, gone.
+        if let Some(epoch) = &self.now {
+            crate::epoch::sweep(epoch);
+        }
         let outside: Vec<i32> = match &self.now {
             Some(epoch) => members
                 .iter()

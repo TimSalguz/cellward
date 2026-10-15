@@ -32,6 +32,17 @@
 //! switched while it runs ([`LiveSwitch`] `outside`), and after a switch
 //! the wall is up for good and it has no way out — said to the person.
 //!
+//! **A cgroup of each launch's** (`docs/FIREWALL.md` §3): below the epoch,
+//! `e<N>/l<pid>-<start>` — the pid and start time of the launch's
+//! `container-enter`, which waits for it on the host —, made by the launch's
+//! child and entered before it enters the instance ([`Epoch::place_launch`]).
+//! What the launch's processes use, and which of its programs a socket or a
+//! process is, read from there without walking parents. The wall is the
+//! epoch's (`socket cgroupv2 level` compares the ancestor at the epoch's
+//! depth), so a launch's cgroup changes nothing of it; a switch moves each
+//! launch's cgroup into the next epoch whole ([`move_all`]), and the keeper
+//! takes away those nobody is in ([`sweep`]).
+//!
 //! **Whether an instance can be switched live** ([`LIVE_SWITCH`], the
 //! keeper's note): its kind (a named container's; not `<c>:<net>`, a
 //! throwaway), what its keeper found at its start — its cgroup delegated,
@@ -142,6 +153,43 @@ impl Epoch {
         (epoch.path.ends_with(&format!("/e{n}")) && !epoch.unit().is_empty()).then_some(epoch)
     }
 
+    /// The cgroup of the launch named `leaf` ([`leaf_name`]), in the host's
+    /// tree.
+    pub fn leaf_dir(&self, leaf: &str) -> PathBuf {
+        self.dir().join(leaf)
+    }
+
+    /// Put the calling process into a cgroup of its launch's own, `leaf`
+    /// below this epoch, made now; where it cannot be made — or `leaf` is
+    /// no launch's name —, into the epoch itself, as before launches had
+    /// cgroups. The kernel's refusal to move it as [`Epoch::place_self`].
+    pub fn place_launch(&self, leaf: &str) -> io::Result<()> {
+        if is_leaf(leaf) {
+            let dir = self.leaf_dir(leaf);
+            let placed = match fs::create_dir(&dir) {
+                Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
+                _ => fs::OpenOptions::new()
+                    .write(true)
+                    .open(dir.join("cgroup.procs"))
+                    .and_then(|mut procs| procs.write_all(b"0")),
+            };
+            let Err(why) = placed else {
+                return Ok(());
+            };
+            // Said only where the epoch takes it: a launch from a login
+            // session is refused both, which its caller says.
+            let fallback = self.place_self();
+            if fallback.is_ok() {
+                eprintln!(
+                    "container-enter: the launch's own cgroup {} ({why}) — in the epoch's",
+                    dir.display()
+                );
+            }
+            return fallback;
+        }
+        self.place_self()
+    }
+
     /// Put the calling process into this epoch: `0` — "myself" — written to
     /// its `cgroup.procs`, as the calling process's user. The kernel's
     /// refusal as it is: a writer that may not write the common ancestor's
@@ -151,6 +199,61 @@ impl Epoch {
             .write(true)
             .open(self.dir().join("cgroup.procs"))?;
         procs.write_all(b"0")
+    }
+}
+
+/// The name of a launch's cgroup ([`Epoch::place_launch`]): `l<pid>-<start
+/// time>` of the process that waits for it — a number alone could be
+/// another's once that one is gone and its cgroup still holds what it left.
+pub fn leaf_name(pid: i32, start: u64) -> String {
+    format!("l{pid}-{start}")
+}
+
+/// Whether `name` is a launch's cgroup's ([`leaf_name`]).
+pub fn is_leaf(name: &str) -> bool {
+    name.strip_prefix('l')
+        .and_then(|rest| rest.split_once('-'))
+        .is_some_and(|(pid, start)| {
+            !pid.is_empty()
+                && !start.is_empty()
+                && pid.bytes().all(|b| b.is_ascii_digit())
+                && start.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+/// `(pid, start time)` of the process a launch's cgroup is named by.
+pub fn leaf_of(name: &str) -> Option<(i32, u64)> {
+    let (pid, start) = name.strip_prefix('l')?.split_once('-')?;
+    is_leaf(name).then_some(())?;
+    Some((pid.parse().ok()?, start.parse().ok()?))
+}
+
+/// The launches' cgroups below `dir` (an epoch's), by name.
+pub fn leaves(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| is_leaf(n))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The launches' cgroups of `epoch` nobody is in, taken away (the keeper's,
+/// at each look). One something entered meanwhile stays: the kernel refuses
+/// to remove a cgroup with a process in it.
+pub fn sweep(epoch: &Epoch) {
+    for leaf in leaves(&epoch.dir()) {
+        let dir = epoch.leaf_dir(&leaf);
+        let empty =
+            fs::read_to_string(dir.join("cgroup.events")).is_ok_and(|t| !events_populated(&t));
+        if empty {
+            let _ = fs::remove_dir(&dir);
+        }
     }
 }
 
@@ -259,32 +362,53 @@ pub fn move_all(
 ) -> Result<(), Gave> {
     let events = from.dir().join("cgroup.events");
     let watch = crate::sys::Inotify::watch_for(&events, libc::IN_MODIFY).ok();
-    let into = to.dir().join("cgroup.procs");
     loop {
         if stop() {
             return Err(Gave::Stopped);
         }
-        let mut text = String::new();
-        fs::File::open(from.dir().join("cgroup.procs"))
-            .and_then(|mut f| f.read_to_string(&mut text))
-            .map_err(Gave::Io)?;
-        let pids = procs_of(&text);
-        for pid in &pids {
-            // One write per pid: the kernel takes one number a write.
-            match fs::write(&into, pid.to_string()) {
+        // The epoch's own processes, then each launch's cgroup's into the
+        // same launch's cgroup of the next epoch.
+        let mut moved = move_procs(&from.dir(), &to.dir())?;
+        for leaf in leaves(&from.dir()) {
+            let into = to.leaf_dir(&leaf);
+            match fs::create_dir(&into) {
                 Ok(()) => {}
-                Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(Gave::Io(e)),
             }
+            moved |= move_procs(&from.leaf_dir(&leaf), &into)?;
         }
         if !populated(from).map_err(Gave::Io)? {
             return Ok(());
         }
-        if !pids.is_empty() {
+        if moved {
             continue;
         }
         wait_for(watch.as_ref(), wake).map_err(Gave::Io)?;
     }
+}
+
+/// Every process of the cgroup `from` written into `to`'s `cgroup.procs`:
+/// whether there was any. A process gone meanwhile is skipped.
+fn move_procs(from: &Path, to: &Path) -> Result<bool, Gave> {
+    let mut text = String::new();
+    match fs::File::open(from.join("cgroup.procs")).and_then(|mut f| f.read_to_string(&mut text)) {
+        Ok(_) => {}
+        // A launch's cgroup taken away meanwhile: nobody in it.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(Gave::Io(e)),
+    }
+    let pids = procs_of(&text);
+    let into = to.join("cgroup.procs");
+    for pid in &pids {
+        // One write per pid: the kernel takes one number a write.
+        match fs::write(&into, pid.to_string()) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {}
+            Err(e) => return Err(Gave::Io(e)),
+        }
+    }
+    Ok(!pids.is_empty())
 }
 
 /// Wait for the watch (or the keeper's wake-up pipe) to have something; no
@@ -336,8 +460,12 @@ fn wait_for(watch: Option<&crate::sys::Inotify>, wake: Option<RawFd>) -> io::Res
     Ok(())
 }
 
-/// The epoch's cgroup removed — empty by then ([`move_all`]).
+/// The epoch's cgroup removed — empty by then ([`move_all`]) —, its
+/// launches' cgroups first.
 pub fn remove(epoch: &Epoch) -> io::Result<()> {
+    for leaf in leaves(&epoch.dir()) {
+        fs::remove_dir(epoch.leaf_dir(&leaf))?;
+    }
     fs::remove_dir(epoch.dir())
 }
 
@@ -428,6 +556,30 @@ pub fn probe_verdict(line: &str) -> Result<(), &'static str> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A launch's cgroup is named by its waiter's pid and start time, and
+    /// nothing else passes for one.
+    #[test]
+    fn a_launchs_cgroup_has_a_name_of_its_own() {
+        let name = leaf_name(4242, 987_654);
+        assert_eq!(name, "l4242-987654");
+        assert!(is_leaf(&name));
+        assert_eq!(leaf_of(&name), Some((4242, 987_654)));
+        for not in [
+            "l", "l42", "l-1", "l42-", "lx-1", "e2", "infra", "l4-2-3", "l../1-2",
+        ] {
+            assert!(!is_leaf(not), "{not}");
+            assert_eq!(leaf_of(not), None, "{not}");
+        }
+        let base = std::env::temp_dir().join(format!("vz-leaves-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        for d in ["l1-2", "l3-4", "e5", "x"] {
+            fs::create_dir_all(base.join(d)).unwrap();
+        }
+        fs::write(base.join("l9-9"), "a file").unwrap();
+        assert_eq!(leaves(&base), ["l1-2", "l3-4"]);
+        let _ = fs::remove_dir_all(&base);
+    }
     use super::*;
 
     const UNIT: &str = "/user.slice/user-1000.slice/user@1000.service/app.slice/\

@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **A cgroup of each launch's** in a container's instance
+  (`e<epoch>/l<pid>-<start>`, `docs/FIREWALL.md` §3): made before the launch
+  enters the instance, moved whole by a live switch, swept when empty — the
+  ground for per-program accounting and the task manager.
 - **The frame's settings from the window menu** («Рамка — для всех окон»): a
   window of rows — shown or hidden, width, style, title, buttons, radius, the
   fullscreen button, the double click — and the container's own colour; a

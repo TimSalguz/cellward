@@ -120,7 +120,11 @@ with subtest("an instance's programs are in its epoch; one from a login session 
     assert cg.endswith("/vpn-zone-container@vmia.service"), cg
     # The unit's slice has `\x2d` in its name: quoted for the shell.
     unit_cg = shlex.quote(f"/sys/fs/cgroup{cg}")
-    procs = machine.succeed(f"cat {unit_cg}/e1/cgroup.procs").split()
+    # Each launch in a cgroup of its own below the epoch: none in the
+    # epoch's own.
+    print(machine.succeed("journalctl --no-pager -o cat | grep -F 'container-enter' | tail -5 || true"))
+    assert not machine.succeed(f"cat {unit_cg}/e1/cgroup.procs").split()
+    procs = machine.succeed(f"cat {unit_cg}/e1/l*/cgroup.procs").split()
     comms = [machine.succeed(f"cat /proc/{p}/comm").strip() for p in procs]
     assert "sleep" in comms, (procs, comms)
     keeper = machine.succeed(f"cat {unit_cg}/infra/cgroup.procs").split()

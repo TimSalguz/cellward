@@ -23,6 +23,7 @@ refused (`settings`, and `locked-target` into B locked), a launch of it into
 A locked too, and `--restart` goes.
 """
 
+import re
 import tempfile
 
 SW = "vmsw"
@@ -174,6 +175,16 @@ def launch(unit, net, cmd):
         f"systemd-run --user --collect --unit={unit} -E PATH=\"$PATH\" "
         f"cellward run {net} --container {SW} -- {cmd}"
     )
+
+
+def keep_cgroup():
+    """The cgroup of swkeep's program (`sleep infinity`): its launch's own,
+    below the instance's epoch (`crate::epoch`, `e<N>/l<pid>-<start>`)."""
+    pid = machine.succeed("pgrep -u alice -n -f '^sleep infinity$'").strip()
+    path = machine.succeed(f"cat /proc/{pid}/cgroup").strip().split("::", 1)[1]
+    m = re.search(r"/e(\d+)/(l\d+-\d+)$", path)
+    assert m, path
+    return int(m.group(1)), m.group(2)
 
 
 def logged(tag, source):
@@ -467,6 +478,9 @@ with subtest("switch: settings frozen wider than B's, or not hermetic into a loc
     alice(f"cellward container rm {WD}")
 
 with subtest("switch: A to B live — programs stay, nothing of A goes on in B, DNS follows"):
+    # Each launch in a cgroup of its own below the epoch.
+    keep_before = keep_cgroup()
+    assert keep_before[0] == 1, keep_before
     dns_before = server.succeed("cat /tmp/dns.log")
     out = alice(f"cellward container set {SW} network vmswb --yes")
     assert "«vmswb»" in out and "эпоха 2" in out, out
@@ -477,6 +491,8 @@ with subtest("switch: A to B live — programs stay, nothing of A goes on in B, 
     assert (i["network"], i["exit"], i["why"], i["epoch"]) == ("vmswb", "through", None, 2), i
     assert i["switch"]["state"] == "idle", i
     alice("systemctl --user is-active swkeep swuudp swreuse swv6 swping")
+    # The launch's cgroup moved whole into the next epoch.
+    assert keep_cgroup() == (2, keep_before[1]), (keep_cgroup(), keep_before)
     # A new connection goes out through B.
     out = in_placed(SW, "vmswb", "socat -T10 - TCP:10.99.0.1:8080")
     assert "peer=10.99.0.3" in out, out
