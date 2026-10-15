@@ -64,6 +64,26 @@ container only when the person moves it there in the window.
 - **The window.** Opened from the frame (📋) or a key, on the container of the
   window it belongs to: the history as a messenger shows its messages, newest
   at the bottom, images inline, a date between days; Enter pastes into the
-  program (the daemon sets the selection with that container's mark, the
-  proxy presses Ctrl+V for it); «Перенести в…» moves a copy to another
-  container's history.
+  program (the daemon sets both selections with a mark of its own, which it
+  does not keep again; the launch's proxy presses Shift+Insert in that
+  program's connection once the program has the selection and the focus —
+  Ctrl+V quotes the next key in a terminal); «Перенести в…» moves a copy to
+  another container's history, confirmed.
+
+### Planned: typing and secrets
+
+- **Typing.** For fields that refuse a paste: the proxy types the entry into
+  the program's connection with a delay set in ms — not a compositor's
+  virtual keyboard, so nothing typed reaches another program whatever the
+  focus does. The target is chosen on the window itself: it dims under the
+  proxy's overlay, the person clicks the field, the proxy passes that click
+  to the program and keeps its keyboard focus until the typing ends.
+  Characters missing from the keymap: a keymap of that connection for the
+  typing.
+- **Secrets.** An entry marked a secret leaves the history for its
+  container's secrets: hidden preview, typing only, never in the
+  selection. A later copy of the same contents (keyed hash) is not kept and
+  leaves no trace — no count, no gap in numbers — so copying guesses does not
+  tell which one is a secret. Nothing in a container reaches the daemon's
+  socket; the guessing is the person's own at the window only. Moving a
+  secret to another container: from its menu, confirmed.

@@ -780,7 +780,36 @@ if wanted(HIST):
         assert "word-of-a-throwaway" not in everything, everything
         # Sealed: none of it in the clear on disk.
         machine.fail("grep -r -l -a word-of- /home/alice/.local/state/cellward-clip")
-    alice("systemctl --user stop clipd hist-main hist-b hist-tw", check=False)
+        # An entry of histb's history pasted into a terminal of histb: the
+        # daemon makes it the selection, the launch's proxy presses Ctrl+V
+        # once the program is told of it — not kept again.
+        alice("systemctl --user stop hist-main hist-b hist-tw", check=False)
+        alice(f"echo something-else | WAYLAND_DISPLAY={nested} wl-copy")
+        machine.sleep(2)
+        run("hist-term", "offline --container histb -- foot --app-id histterm sh -c "
+            "'read x; echo \"$x\" > ~/hist-pasted.txt; sleep 600'",
+            env="--setenv=VPN_ZONE_APPID=hist-term")
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {NIRI_MSG} --json windows' | grep -q histterm",
+            timeout=60,
+        )
+        win = next(w for w in windows() if w["app_id"] == "histterm")
+        alice(f"{NIRI_MSG} action focus-window --id {win['id']}")
+        machine.sleep(2)
+        entry = next(l for l in alice("cellward-clip list histb").splitlines() if "word-of-histb" in l)
+        pid = alice("ls /run/user/1000/vpn-zones/ask/").split()
+        assert len(pid) == 1, pid
+        alice(f"cellward clip-window --pid {pid[0]} --entry histb {entry.split()[0]}")
+        machine.sleep(1)
+        alice(f"WAYLAND_DISPLAY={nested} wtype -k Return")
+        machine.wait_until_succeeds("grep -q word-of-histb /home/alice/hist-pasted.txt", timeout=20)
+        shot("hist-pasted")
+        searched = alice("cellward-clip ask search histb q=histb")
+        print("searched:", searched)
+        row = next(l.split("\t") for l in searched.splitlines() if "word-of-histb" in l)
+        assert row[4] == "1", f"the paste not counted: {row}"
+        assert "something-else" not in alice("cellward-clip list histb")
+    alice("systemctl --user stop clipd hist-main hist-b hist-tw hist-term", check=False)
     machine.sleep(2)
 
 

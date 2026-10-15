@@ -93,6 +93,9 @@ mod segment;
 /// What the recorder decides of a selection (`cellward-clip daemon`).
 pub mod recorder;
 
+/// The daemon's socket of questions: requests and answers.
+pub mod protocol;
+
 #[cfg(test)]
 mod tests;
 
