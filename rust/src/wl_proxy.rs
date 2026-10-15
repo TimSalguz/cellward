@@ -216,7 +216,10 @@ pub fn ask_request(text: &str, labels: &[&str]) -> Option<Vec<u8>> {
         payload.push(0);
         payload.extend_from_slice(label.as_bytes());
     }
+    // Never empty: a payload of no words and one label could be
+    // [`PASTE_ASK`]'s.
     if payload.len() > MAX_QUESTION
+        || text.is_empty()
         || text.contains('\0')
         || labels.iter().any(|l| l.contains('\0'))
     {
@@ -226,6 +229,18 @@ pub fn ask_request(text: &str, labels: &[&str]) -> Option<Vec<u8>> {
     let mut out = len.to_le_bytes().to_vec();
     out.extend_from_slice(&payload);
     Some(out)
+}
+
+/// Not a question: what `cellward clip-window` sends on [`ask_path`] once
+/// the history made the entry chosen the selection — "paste it into this
+/// launch". A question never starts with NUL ([`ask_request`]). Answered
+/// [`ASK_YES`] when passed on to the proxy, [`ASK_NOWHERE`] with none.
+pub const PASTE_ASK: &[u8] = b"\0paste";
+
+/// [`PASTE_ASK`] as it is sent: its length first, as a question's.
+pub fn paste_request() -> Vec<u8> {
+    let len = u16::try_from(PASTE_ASK.len()).unwrap_or(0).to_le_bytes();
+    [&len[..], PASTE_ASK].concat()
 }
 
 /// The person chose the first answer, the safe one — "no".
@@ -375,6 +390,9 @@ const NOWHERE: u8 = b'o';
 /// of the rest (two bytes, little-endian) and the rest,
 /// `crate::frame::Frame::to_arg`'s. No answer.
 const FRAME: u8 = b'l';
+/// Supervisor → proxy: paste for the person what the clipboard history just
+/// made the selection (`crate::clip::want_paste`, [`PASTE_ASK`]). No answer.
+const PASTE: u8 = b'v';
 /// A frame's line at most.
 const MAX_FRAME_ARG: usize = 256;
 
@@ -1068,6 +1086,7 @@ impl Proxy {
             if listener_at.is_some_and(|at| fds[at].revents != 0) {
                 self.accept_askers();
             }
+            self.pastes();
             self.next_question();
             if let (Some(at), Some(signals)) = (signals_at, &self.signals) {
                 if fds[at].revents != 0 {
@@ -1303,6 +1322,24 @@ impl Proxy {
             self.asking
                 .waiting
                 .push_back((UnixStream::from(fd), Vec::new()));
+        }
+    }
+
+    /// The pastes asked for ([`PASTE_ASK`]): passed on to the proxy, each
+    /// asker told and let go of.
+    fn pastes(&mut self) {
+        let waiting = std::mem::take(&mut self.asking.waiting);
+        for (stream, buf) in waiting {
+            if asked_of(&buf) != Some(PASTE_ASK) {
+                self.asking.waiting.push_back((stream, buf));
+                continue;
+            }
+            let sent = self
+                .channel
+                .as_ref()
+                .is_some_and(|c| sys::send_with_fds(c.as_raw_fd(), &[PASTE], &[]).is_ok());
+            self.asking
+                .say(&stream, if sent { ASK_YES } else { ASK_NOWHERE });
         }
     }
 
@@ -2441,6 +2478,7 @@ fn serve(
                     }
                     Answer::Question(question) => questions.ask(question),
                     Answer::Retract(seq) => questions.retract(seq),
+                    Answer::Paste => crate::wl_frame::paste_now(),
                     // The frame changed on the fly: every connection's
                     // windows laid anew, and the next connection's too.
                     Answer::Frame(frame, pixel) => {
@@ -2543,6 +2581,7 @@ enum Answer {
     Refused,
     Question(Question),
     Retract(u8),
+    Paste,
     /// The frame changed on the fly, and the memfd of its new colours when
     /// they, the look or the title's mode changed.
     Frame(Frame, Option<OwnedFd>),
@@ -2560,6 +2599,7 @@ fn answer(channel: &UnixStream) -> Answer {
             None => Answer::Refused,
         },
         Ok((1, _, _)) if byte[0] == REFUSED => Answer::Refused,
+        Ok((1, _, _)) if byte[0] == PASTE => Answer::Paste,
         // The rest of it is there: the supervisor sends a message whole.
         Ok((1, _, _)) if byte[0] == QUESTION => {
             let mut head = [0u8; 3];
@@ -6306,7 +6346,7 @@ mod tests {
             ATTENTION,
             RESTART,
         ];
-        for byte in [QUESTION, RETRACT, ANSWERED, NOWHERE] {
+        for byte in [QUESTION, RETRACT, ANSWERED, NOWHERE, PASTE] {
             assert!(!others.contains(&byte), "{}", byte as char);
         }
         assert_ne!(QUESTION, RETRACT);

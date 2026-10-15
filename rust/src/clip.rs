@@ -40,6 +40,10 @@ pub const MARK_PREFIX: &str = "application/x-cellward-clip-";
 /// How long after a paste of the person's a foreign selection may be read.
 pub const PASTE_WINDOW: Duration = Duration::from_secs(2);
 
+/// What the clipboard history offers beside an entry it made the selection
+/// for a paste (`cellward-clip`'s `select`): a mark of nobody's instance.
+pub const HISTORY_MARK: &str = "application/x-cellward-clip-recorder";
+
 /// Below the runtime directory: an instance's secret, one file each.
 pub const DIR: &str = "vpn-zones/clip";
 
@@ -61,6 +65,12 @@ pub enum Which {
 #[derive(Default)]
 struct State {
     mark: RefCell<Option<String>>,
+    /// A paste of the history's to press for the person, until then.
+    inject: Cell<Option<Instant>>,
+    /// Offers that came with [`HISTORY_MARK`], the last few by id; and
+    /// whether the selection the program was told of last is one.
+    history_offers: RefCell<VecDeque<u64>>,
+    history_selected: Cell<bool>,
     clipboard: Cell<Option<Instant>>,
     primary: Cell<Option<Instant>>,
     dragged: RefCell<VecDeque<u64>>,
@@ -263,6 +273,63 @@ pub fn pasting(which: Which) {
     });
 }
 
+/// The person chose an entry of the clipboard history to paste into this
+/// launch (`cellward clip-window`): the history made it the selection, and
+/// the proxy presses Ctrl+V for the program — now, where a keyboard of it
+/// has the focus, or when one gets it, within [`PASTE_WINDOW`].
+pub fn want_paste() {
+    STATE.with(|s| s.inject.set(Some(Instant::now() + PASTE_WINDOW)));
+    pasting(Which::Clipboard);
+}
+
+/// Whether a paste is to be pressed now: true once, within its time, and
+/// only on the history's selection — the program told of it, so that the
+/// Ctrl+V reads what the person chose, not what was there before.
+pub fn take_paste() -> bool {
+    STATE.with(|s| {
+        if !s.history_selected.get() {
+            return false;
+        }
+        s.inject.take().is_some_and(|until| Instant::now() < until)
+    })
+}
+
+/// An offer came with [`HISTORY_MARK`].
+pub fn history_offer(offer: u64) {
+    STATE.with(|s| {
+        let mut o = s.history_offers.borrow_mut();
+        o.push_back(offer);
+        while o.len() > 16 {
+            o.pop_front();
+        }
+    });
+}
+
+/// The program is told of a new selection (`None`: none).
+pub fn selection(offer: Option<u64>) {
+    STATE.with(|s| {
+        let history = offer.is_some_and(|o| s.history_offers.borrow().contains(&o));
+        s.history_selected.set(history);
+    });
+}
+
+/// The time of an event pressed by the proxy, in a key event's
+/// milliseconds: the monotonic clock's, as compositors give theirs.
+pub fn now_ms() -> u32 {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: one timespec, written by the kernel.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) };
+    (t.tv_sec as u64 * 1000 + t.tv_nsec as u64 / 1_000_000) as u32
+}
+
+/// Ctrl's mask and V's key, for a paste pressed by the proxy.
+pub fn paste_chord(keys: &PasteKeys) -> (u32, u32) {
+    (CONTROL, keys.v.first().copied().unwrap_or(KEY_V))
+}
+
 /// An offer the person drags onto the program: read as dropped.
 pub fn dragged(offer: u64) {
     STATE.with(|s| {
@@ -409,6 +476,27 @@ mod tests {
         assert!(!may_read(false, Which::Clipboard, "text/plain", 3));
         pasting(Which::Clipboard);
         assert!(may_read(false, Which::Clipboard, "text/plain", 3));
+    }
+
+    /// A paste of the history's is pressed once, and only once the program
+    /// was told of the history's selection.
+    #[test]
+    fn a_paste_of_the_history_waits_for_its_selection() {
+        selection(None);
+        want_paste();
+        assert!(!take_paste(), "the selection before is not what was chosen");
+        selection(Some(41));
+        assert!(
+            !take_paste(),
+            "an offer without the mark is not the history's"
+        );
+        history_offer(42);
+        selection(Some(42));
+        assert!(take_paste());
+        assert!(!take_paste(), "pressed once");
+        assert!(may_read(false, Which::Clipboard, "text/plain", 42));
+        assert!(!may_read(false, Which::Clipboard, HISTORY_MARK, 42));
+        assert!(is_mark(HISTORY_MARK) && !is_own(HISTORY_MARK));
     }
 
     #[test]

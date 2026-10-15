@@ -4035,6 +4035,74 @@ struct Keyboard {
     /// The program's surface a leave of it was held back from (3d,
     /// `Frames::always_focused`): passed on before the next enter.
     held: Option<Weak<WlSurface>>,
+    /// What a paste pressed for the person needs of it ([`paste_now`]).
+    focus: Rc<Cell<Focus>>,
+}
+
+/// A keyboard of the program as a paste pressed by the proxy sees it.
+#[derive(Clone, Copy, Default)]
+struct Focus {
+    /// A surface of the program has its focus.
+    on: bool,
+    serial: u32,
+    /// Depressed, latched, locked, group: as the compositor said last.
+    mods: (u32, u32, u32, u32),
+    /// Ctrl's mask and V's key, by its keymap.
+    chord: (u32, u32),
+}
+
+/// A keyboard of the program, and what [`paste_now`] needs of it.
+type Keyed = (Weak<WlKeyboard>, Rc<Cell<Focus>>);
+
+thread_local! {
+    // The program's keyboards, every connection's: the proxy is one thread.
+    static KEYBOARDS: RefCell<Vec<Keyed>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The supervisor says: paste the selection the clipboard history just made
+/// (`crate::clip::want_paste`). Pressed at once on a keyboard of the program
+/// with the focus, or at the next enter of one.
+pub(crate) fn paste_now() {
+    crate::clip::want_paste();
+    KEYBOARDS.with(|k| k.borrow_mut().retain(|(kb, _)| kb.strong_count() > 0));
+    paste_waiting();
+}
+
+/// A paste waiting ([`paste_now`]) pressed, if it can be now.
+fn paste_waiting() {
+    let focused = KEYBOARDS.with(|k| {
+        k.borrow()
+            .iter()
+            .filter_map(|(kb, f)| Some((kb.upgrade()?, f.get())))
+            .find(|(_, f)| f.on)
+    });
+    if let Some((keyboard, focus)) = focused {
+        if crate::clip::take_paste() {
+            press_paste(&keyboard, focus);
+        }
+    }
+}
+
+/// Ctrl+V, pressed and let go of, the modifiers as they were after it. Not
+/// a paste of the program's own: it reads what the history set, as a paste
+/// of the person's ([`crate::clip::pasting`]).
+fn press_paste(keyboard: &WlKeyboard, f: Focus) {
+    let (ctrl, key) = f.chord;
+    let (depressed, latched, locked, group) = f.mods;
+    let time = crate::clip::now_ms();
+    crate::clip::pasting(crate::clip::Which::Clipboard);
+    keyboard.send_modifiers(f.serial, depressed | ctrl, latched, locked, group);
+    keyboard.send_key(f.serial, time, key, WlKeyboardKeyState::PRESSED);
+    keyboard.send_key(f.serial, time, key, WlKeyboardKeyState::RELEASED);
+    keyboard.send_modifiers(f.serial, depressed, latched, locked, group);
+}
+
+impl Keyboard {
+    fn set_focus(&self, change: impl FnOnce(&mut Focus)) {
+        let mut f = self.focus.get();
+        change(&mut f);
+        self.focus.set(f);
+    }
 }
 
 impl WlKeyboardHandler for Keyboard {
@@ -4049,6 +4117,8 @@ impl WlKeyboardHandler for Keyboard {
             if let Some(text) = crate::clip::read_keymap(fd, size) {
                 self.paste = crate::clip::paste_keys(&text);
             }
+            let chord = crate::clip::paste_chord(&self.paste);
+            self.set_focus(|f| f.chord = chord);
         }
         slf.send_keymap(format, fd, size);
     }
@@ -4061,6 +4131,11 @@ impl WlKeyboardHandler for Keyboard {
         keys: &[u8],
     ) {
         self.menu = !programs(surface);
+        let on = !self.menu;
+        self.set_focus(|f| {
+            f.on = on;
+            f.serial = serial;
+        });
         if !self.menu {
             if let Some(gone) = self.held.take().and_then(|w| w.upgrade()).filter(programs) {
                 slf.send_leave(serial, &gone);
@@ -4087,6 +4162,7 @@ impl WlKeyboardHandler for Keyboard {
                 slf.send_modifiers(serial, 0, 0, self.locked.0, self.locked.1);
                 self.held = Some(Rc::downgrade(surface));
             } else {
+                self.set_focus(|f| f.on = false);
                 slf.send_leave(serial, surface);
             }
         }
@@ -4139,7 +4215,14 @@ impl WlKeyboardHandler for Keyboard {
         self.depressed = mods_depressed;
         if !self.menu {
             self.locked = (mods_locked, group);
+            self.set_focus(|f| {
+                f.serial = serial;
+                f.mods = (mods_depressed, mods_latched, mods_locked, group);
+            });
             slf.send_modifiers(serial, mods_depressed, mods_latched, mods_locked, group);
+            // A compositor says the modifiers after every enter: the paste
+            // waiting goes after both.
+            paste_waiting();
         }
     }
 }
@@ -5181,6 +5264,15 @@ impl WlSeatHandler for Seat {
 
     fn handle_get_keyboard(&mut self, slf: &Rc<WlSeat>, id: &Rc<WlKeyboard>) {
         slf.send_get_keyboard(id);
+        let focus = Rc::new(Cell::new(Focus {
+            chord: crate::clip::paste_chord(&crate::clip::PasteKeys::default()),
+            ..Focus::default()
+        }));
+        KEYBOARDS.with(|k| {
+            let mut k = k.borrow_mut();
+            k.retain(|(kb, _)| kb.strong_count() > 0);
+            k.push((Rc::downgrade(id), focus.clone()));
+        });
         id.set_handler(Keyboard {
             f: self.f.clone(),
             menu: false,
@@ -5189,6 +5281,7 @@ impl WlSeatHandler for Seat {
             depressed: 0,
             paste: crate::clip::PasteKeys::default(),
             held: None,
+            focus,
         });
     }
 }
@@ -6093,6 +6186,12 @@ impl WlDataDeviceHandler for DataDevice {
         id.set_handler(Offer::default());
         slf.send_data_offer(id);
     }
+
+    fn handle_selection(&mut self, slf: &Rc<WlDataDevice>, id: Option<&Rc<WlDataOffer>>) {
+        slf.send_selection(id);
+        crate::clip::selection(id.map(|o| o.unique_id()));
+        paste_waiting();
+    }
 }
 
 /// What the program copies (`wl_data_source`): a mark of ours it cannot
@@ -6125,6 +6224,9 @@ impl WlDataOfferHandler for Offer {
     fn handle_offer(&mut self, slf: &Rc<WlDataOffer>, mime_type: &str) {
         if crate::clip::is_mark(mime_type) {
             self.own |= crate::clip::is_own(mime_type);
+            if mime_type == crate::clip::HISTORY_MARK {
+                crate::clip::history_offer(slf.unique_id());
+            }
             return;
         }
         slf.send_offer(mime_type);

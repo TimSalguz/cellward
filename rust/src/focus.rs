@@ -736,6 +736,149 @@ fn container_record(tools: &Tools, launch: Option<&Launch>) -> Option<String> {
     }
 }
 
+/// The clipboard history of `launch`'s container (`crate::clip`): its
+/// record's, as the launch told it to the history; none for a throwaway
+/// container, whose copies are not kept, or a launch not known.
+fn clip_history(tools: &Tools, launch: Option<&Launch>) -> Option<String> {
+    let selector = launch?.selector.as_deref()?;
+    if crate::launch::throwaway_of(selector).is_some() {
+        return None;
+    }
+    container_record(tools, launch).filter(|r| r != crate::container::OPEN_RECORD)
+}
+
+/// The clipboard history's socket (`cellward-clip daemon`).
+fn clip_socket() -> std::path::PathBuf {
+    crate::broker::runtime_dir().join("cellward-clip.sock")
+}
+
+/// One request to the clipboard history: its answer's first line.
+fn ask_clip(request: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(clip_socket())
+        .map_err(|e| format!("история буфера не отвечает: {e}"))?;
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let mut answer = String::new();
+    let _ = stream.take(4096).read_to_string(&mut answer);
+    Ok(answer.lines().next().unwrap_or_default().to_owned())
+}
+
+/// `cellward clip-window --pid <launch>` and the menu's «Вставить из
+/// истории»: the history's window for the person to choose an entry in
+/// (`vpn-zone-window clip`); the entry chosen made the selection by the
+/// history (`select`), and pasted into the launch — its proxy presses
+/// Ctrl+V for its program (`crate::wl_proxy::PASTE_ASK`). Nothing of the
+/// history goes anywhere but where the person chose it to.
+pub fn clip_window(tools: &Tools, args: &[OsString]) -> u8 {
+    let pid = match parse_menu_args(args) {
+        Ok(MenuArgs {
+            pid: Some(pid),
+            restart: false,
+            network: false,
+        }) => pid,
+        _ => {
+            eprintln!("cellward clip-window --pid <pid>");
+            return 2;
+        }
+    };
+    let launch = launch_with_tools(tools, pid);
+    let label = window_name(
+        &tools.state,
+        &Window {
+            pid,
+            ..Window::default()
+        },
+        launch.as_ref(),
+    );
+    match clip_history(tools, launch.as_ref()) {
+        Some(history) => paste_from_history(tools, pid, &label, &history),
+        None => {
+            crate::dialog::notify(
+                &tools.notify_send,
+                None,
+                "5000",
+                &label,
+                "У этой программы нет истории буфера обмена: разовый контейнер или запуск не через cellward",
+            );
+            0
+        }
+    }
+}
+
+fn paste_from_history(tools: &Tools, pid: i32, label: &str, history: &str) -> u8 {
+    let notify = |body: &str| {
+        crate::dialog::notify(&tools.notify_send, None, "5000", label, body);
+    };
+    let out = Command::new(&tools.window)
+        .args(["clip", "--history", history, "--launch"])
+        .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .output();
+    let out = match out {
+        Ok(out) if out.status.success() => out,
+        Ok(_) => return 0,
+        Err(e) => {
+            notify(&format!("Окно истории буфера не открылось: {e}"));
+            return 1;
+        }
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some((from, id)) = text.lines().find_map(|l| {
+        let mut words = l.split('\t');
+        match (words.next(), words.next(), words.next(), words.next()) {
+            (Some("paste"), Some(h), Some(id), None)
+                if crate::clip::valid_history(h)
+                    && h != crate::clip::NO_HISTORY
+                    && id.parse::<u64>().is_ok() =>
+            {
+                Some((h.to_owned(), id.to_owned()))
+            }
+            _ => None,
+        }
+    }) else {
+        return 0;
+    };
+    match ask_clip(&format!("select\t{from}\t{id}\n")) {
+        Ok(answer) if answer == "ok" => {}
+        Ok(answer) => {
+            notify(&format!(
+                "История буфера: {}",
+                answer.strip_prefix("error\t").unwrap_or(&answer)
+            ));
+            return 1;
+        }
+        Err(e) => {
+            notify(&e);
+            return 1;
+        }
+    }
+    if !paste_into(pid) {
+        notify("Запись в буфере обмена — вставьте её сами: окна программы не нашлось");
+    }
+    0
+}
+
+/// The launch of supervisor `pid` asked to paste ([`crate::wl_proxy::PASTE_ASK`]):
+/// whether its proxy took it.
+fn paste_into(pid: i32) -> bool {
+    use std::io::{Read, Write};
+    let path = crate::wl_proxy::ask_path(&crate::broker::runtime_dir(), pid);
+    let Ok(mut stream) = std::os::unix::net::UnixStream::connect(path) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    if stream.write_all(&crate::wl_proxy::paste_request()).is_err() {
+        return false;
+    }
+    let mut answer = [0u8; 1];
+    matches!(stream.read(&mut answer), Ok(1)) && answer[0] == crate::wl_proxy::ASK_YES
+}
+
 /// The record of `launch`'s container, and its program's key.
 fn refused_record(tools: &Tools, launch: Option<&Launch>) -> Option<(String, String)> {
     let l = launch?;
@@ -759,6 +902,8 @@ const HEADING: &str = crate::window::HEADING;
 pub struct MenuParts {
     pub container: Option<String>,
     pub perms: bool,
+    /// The container keeps a clipboard history, and the history runs.
+    pub clip: bool,
     pub program: Vec<(String, String, bool)>,
 }
 
@@ -789,6 +934,13 @@ pub fn menu_entries(
         ));
     }
     out.extend(parts.program.iter().cloned());
+    if parts.clip {
+        out.push(entry(
+            "clip",
+            "Вставить из истории буфера обмена…".to_owned(),
+            false,
+        ));
+    }
     if launch.is_some_and(|l| l.program.is_some()) {
         out.push(entry(
             "restart",
@@ -1122,6 +1274,7 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
         perms: record
             .as_deref()
             .is_some_and(|r| r != crate::container::OPEN_RECORD),
+        clip: clip_history(tools, launch.as_ref()).is_some() && clip_socket().exists(),
         program: refused_entries(tools, &label, launch.as_ref()),
     };
     let entries = menu_entries(&label, launch.as_ref(), &pin, &parts);
@@ -1260,6 +1413,11 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
             if let Err(e) = started {
                 notify(&label, &format!("Не запустилась: {e}"));
                 return 1;
+            }
+        }
+        "clip" => {
+            if let Some(history) = clip_history(tools, launch.as_ref()) {
+                return paste_from_history(tools, window.pid, &label, &history);
             }
         }
         "perms" => {
@@ -1891,6 +2049,7 @@ mod tests {
         let work = MenuParts {
             container: Some("Контейнер «work»".to_owned()),
             perms: true,
+            clip: true,
             program: vec![("net-allow".to_owned(), "Сеть".to_owned(), false)],
         };
         let entries = menu_entries("Лис", Some(&launch), &Pin::Bind("work".into()), &work);
@@ -1899,6 +2058,7 @@ mod tests {
             [
                 "#",
                 "net-allow",
+                "clip",
                 "restart",
                 "close",
                 "#",
@@ -1909,8 +2069,8 @@ mod tests {
             ]
         );
         assert_eq!(entries[0].1, "Программа «Лис»");
-        assert_eq!(entries[4].1, "Контейнер «work» — для всех его программ");
-        assert_eq!(entries[7].1, "Сеть «nl» — для всех её программ");
+        assert_eq!(entries[5].1, "Контейнер «work» — для всех его программ");
+        assert_eq!(entries[8].1, "Сеть «nl» — для всех её программ");
         let unbind = Pin::Unbind {
             container: "work".into(),
             network: "nl".into(),
