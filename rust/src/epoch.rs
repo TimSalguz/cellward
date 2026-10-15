@@ -173,13 +173,19 @@ impl Epoch {
                     .open(dir.join("cgroup.procs"))
                     .and_then(|mut procs| procs.write_all(b"0")),
             };
-            match placed {
-                Ok(()) => return Ok(()),
-                Err(e) => eprintln!(
-                    "container-enter: the launch's own cgroup {} ({e}) — in the epoch's",
+            let Err(why) = placed else {
+                return Ok(());
+            };
+            // Said only where the epoch takes it: a launch from a login
+            // session is refused both, which its caller says.
+            let fallback = self.place_self();
+            if fallback.is_ok() {
+                eprintln!(
+                    "container-enter: the launch's own cgroup {} ({why}) — in the epoch's",
                     dir.display()
-                ),
+                );
             }
+            return fallback;
         }
         self.place_self()
     }
