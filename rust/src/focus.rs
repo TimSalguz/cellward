@@ -772,15 +772,13 @@ fn ask_clip(request: &str) -> Result<String, String> {
 /// history (`select`), and pasted into the launch — its proxy presses
 /// Ctrl+V for its program (`crate::wl_proxy::PASTE_ASK`). Nothing of the
 /// history goes anywhere but where the person chose it to.
+///
+/// `--entry <history> <id>`: that entry, without the window — for scripts.
 pub fn clip_window(tools: &Tools, args: &[OsString]) -> u8 {
-    let pid = match parse_menu_args(args) {
-        Ok(MenuArgs {
-            pid: Some(pid),
-            restart: false,
-            network: false,
-        }) => pid,
-        _ => {
-            eprintln!("cellward clip-window --pid <pid>");
+    let (pid, entry) = match parse_clip_args(args) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("{e}");
             return 2;
         }
     };
@@ -793,6 +791,9 @@ pub fn clip_window(tools: &Tools, args: &[OsString]) -> u8 {
         },
         launch.as_ref(),
     );
+    if let Some((history, id)) = entry {
+        return paste_entry(tools, pid, &label, &history, &id);
+    }
     match clip_history(tools, launch.as_ref()) {
         Some(history) => paste_from_history(tools, pid, &label, &history),
         None => {
@@ -805,6 +806,30 @@ pub fn clip_window(tools: &Tools, args: &[OsString]) -> u8 {
             );
             0
         }
+    }
+}
+
+/// `--pid <pid> [--entry <history> <id>]`.
+fn parse_clip_args(args: &[OsString]) -> Result<(i32, Option<(String, String)>), String> {
+    let usage = "cellward clip-window --pid <pid> [--entry <история> <номер>]";
+    let words: Vec<&str> = args
+        .iter()
+        .map(|a| a.to_str().ok_or(usage))
+        .collect::<Result<_, _>>()?;
+    let pid = match words.as_slice() {
+        ["--pid", pid, ..] => pid.parse::<i32>().ok().filter(|p| *p > 0).ok_or(usage)?,
+        _ => return Err(usage.to_owned()),
+    };
+    match &words[2..] {
+        [] => Ok((pid, None)),
+        ["--entry", history, id]
+            if crate::clip::valid_history(history)
+                && *history != crate::clip::NO_HISTORY
+                && id.parse::<u64>().is_ok() =>
+        {
+            Ok((pid, Some(((*history).to_owned(), (*id).to_owned()))))
+        }
+        _ => Err(usage.to_owned()),
     }
 }
 
@@ -842,6 +867,14 @@ fn paste_from_history(tools: &Tools, pid: i32, label: &str, history: &str) -> u8
         }
     }) else {
         return 0;
+    };
+    paste_entry(tools, pid, label, &from, &id)
+}
+
+/// Entry `id` of `history` made the selection, and pasted into the launch.
+fn paste_entry(tools: &Tools, pid: i32, label: &str, from: &str, id: &str) -> u8 {
+    let notify = |body: &str| {
+        crate::dialog::notify(&tools.notify_send, None, "5000", label, body);
     };
     match ask_clip(&format!("select\t{from}\t{id}\n")) {
         Ok(answer) if answer == "ok" => {}
@@ -2101,6 +2134,27 @@ mod tests {
         let entries = menu_entries("Лис", Some(&launch), &Pin::Main, &none);
         assert!(entries[5].2, "cutting a zone off is marked as dangerous");
         assert!(entries[5].1.contains("nl"));
+    }
+
+    #[test]
+    fn the_clip_window_takes_a_pid_and_maybe_an_entry() {
+        let parse =
+            |args: &[&str]| parse_clip_args(&args.iter().map(OsString::from).collect::<Vec<_>>());
+        assert_eq!(parse(&["--pid", "7"]), Ok((7, None)));
+        assert_eq!(
+            parse(&["--pid", "7", "--entry", "work", "12"]),
+            Ok((7, Some(("work".to_owned(), "12".to_owned()))))
+        );
+        for bad in [
+            &[][..],
+            &["--pid", "0"],
+            &["--pid", "7", "--entry", "-", "1"],
+            &["--pid", "7", "--entry", "../x", "1"],
+            &["--pid", "7", "--entry", "work", "x"],
+            &["--pid", "7", "extra"],
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
     }
 
     /// `window-menu`: the focused window's by default, a launch's by

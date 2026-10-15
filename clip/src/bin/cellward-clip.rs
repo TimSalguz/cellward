@@ -72,12 +72,17 @@ fn main() -> ExitCode {
             }
             _ => usage(),
         },
+        // Any request of the protocol (`clipstore::protocol`), its words as
+        // arguments: for scripts, and for the tests.
+        Some("ask") if args.len() > 1 && args[1..].iter().all(|w| !w.contains(['\t', '\n'])) => {
+            ask(&args[1..].join("\t"))
+        }
         _ => usage(),
     }
 }
 
 fn usage() -> ExitCode {
-    eprintln!("cellward-clip daemon | histories | list <история> [сколько]");
+    eprintln!("cellward-clip daemon | histories | list <история> [сколько] | ask <запрос>…");
     ExitCode::from(2)
 }
 
