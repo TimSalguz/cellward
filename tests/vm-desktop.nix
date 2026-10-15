@@ -25,6 +25,8 @@
 #     when the person pastes it;
 #   - the clipboard history: each copy kept in its container's history,
 #     the host's in its own, a throwaway container's nowhere, sealed;
+#   - the clipboard history's window: the feed with its days and an image,
+#     a search, the pattern builder, Enter printing the entry to paste;
 #   - the cellward window's connections as a tree by program and site, a
 #     site blocked for its container from its row, confirmed first;
 #   - Firefox in a container layered over the home and in one of its own;

@@ -39,8 +39,12 @@
 use std::io::Read;
 
 mod checklist;
+mod clip;
+mod clipd;
+mod days;
 mod login;
 mod panel;
+mod pattern;
 
 use iced::keyboard::{self, key, Key};
 use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
@@ -1160,6 +1164,14 @@ fn main() -> iced::Result {
     if args.first().map(String::as_str) == Some("login") {
         return login::run().map_err(|e| {
             eprintln!("vpn-zone-window login: {e}");
+            std::process::exit(EXIT_NOT_SHOWN)
+        });
+    }
+    // The clipboard history of a container (`clip.rs`): its entries, a
+    // search, and one to paste into the window it was opened from.
+    if args.first().map(String::as_str) == Some("clip") {
+        return clip::run(&args[1..]).map_err(|e| {
+            eprintln!("vpn-zone-window clip: {e}");
             std::process::exit(EXIT_NOT_SHOWN)
         });
     }
