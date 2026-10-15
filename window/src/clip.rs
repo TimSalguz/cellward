@@ -1,0 +1,1833 @@
+//! `vpn-zone-window clip --history <name> [--launch <pid>] [--title <text>]`
+//! — the clipboard history of one container (cellward's `docs/CLIPBOARD.md`),
+//! as a messenger shows its messages: the oldest at the top, the newest at
+//! the bottom where the window opens, a date between days, older copies
+//! loaded as the person scrolls up.
+//!
+//! It holds nothing: every entry, every content comes from the daemon
+//! (`clipd.rs`), asked off the window's threads. It pastes nothing either:
+//! with `--launch` (the launch of the window it was opened from) Enter or
+//! «Вставить» prints `paste⇥<history>⇥<id>` and exits 0 — the command that
+//! opened it (`cellward clip-window`) has the daemon set that entry as the
+//! selection, with the container's mark, and the program's proxy press
+//! Ctrl+V. Without `--launch` there is nothing to paste into: the history is
+//! browsed, an entry moved to another history or deleted. Esc, or closing
+//! the window: exit 1, nothing printed.
+//!
+//! The search bar at the bottom, as a message is typed: words, live. «⋯» the
+//! pattern builder (`pattern.rs`); 📅 what was copied or pasted when, in
+//! local time (`days.rs`), and which kind of content.
+//!
+//! Keyboard: ↑/↓ the entry, Enter pastes it, / or Ctrl+F the search, Esc
+//! closes what is open — a question, the builder, the dates — and then the
+//! window.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use iced::keyboard::{self, key, Key};
+use iced::widget::scrollable::{AbsoluteOffset, Viewport};
+use iced::widget::{
+    button, checkbox, column, container, mouse_area, operation, pick_list, rich_text, row,
+    scrollable, span, text, text_editor, text_input,
+};
+use iced::{Alignment, Color, Element, Font, Length, Size, Subscription, Task};
+
+use crate::clipd::{self, Entry, Filter, PAGE};
+use crate::days;
+use crate::pattern::{self, Alphabet, Builder, Kind, Tag, Times, Tried};
+
+const FEED: &str = "clip-feed";
+const SEARCH: &str = "clip-search";
+
+/// How long typing rests before the search is asked.
+const DEBOUNCE_MS: u64 = 150;
+
+/// A preview shows at most this many lines.
+const PREVIEW_LINES: usize = 12;
+
+/// Which moments a date filter is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateOf {
+    Copied,
+    Pasted,
+}
+
+/// A date filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum When {
+    All,
+    Today,
+    Yesterday,
+    Week,
+    /// The day typed in `Dates::day`.
+    Day,
+    /// Around the moment typed in `Dates::at`, ± `Dates::hours`.
+    Around,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dates {
+    of: DateOf,
+    when: When,
+    day: String,
+    at: String,
+    hours: String,
+}
+
+impl Default for Dates {
+    fn default() -> Self {
+        Self {
+            of: DateOf::Copied,
+            when: When::All,
+            day: String::new(),
+            at: String::new(),
+            hours: "2".to_owned(),
+        }
+    }
+}
+
+/// A search's dates: `(copied, pasted, around)`.
+type Bounds = (Option<(i64, i64)>, Option<(i64, i64)>, Option<(i64, i64)>);
+
+impl Dates {
+    /// The filter's bounds in ms, local days; `Err` says what does not read.
+    fn bounds(&self, now: i64) -> Result<Bounds, String> {
+        let range = match self.when {
+            When::All => return Ok((None, None, None)),
+            When::Today => (days::day_start(now), days::day_shift(now, 1)),
+            When::Yesterday => (days::day_shift(now, -1), days::day_start(now)),
+            When::Week => (days::day_shift(now, -6), days::day_shift(now, 1)),
+            When::Day => {
+                let day = days::parse_date(&self.day, now, false)
+                    .ok_or("Дата не читается: ДД.ММ или ДД.ММ.ГГГГ")?;
+                (day, days::day_shift(day, 1))
+            }
+            When::Around => {
+                let at = days::parse_date(&self.at, now, true)
+                    .ok_or("Дата не читается: ДД.ММ.ГГГГ ЧЧ:ММ")?;
+                let hours: f64 = self
+                    .hours
+                    .trim()
+                    .replace(',', ".")
+                    .parse()
+                    .ok()
+                    .filter(|h: &f64| *h > 0.0 && *h <= 24.0 * 366.0)
+                    .ok_or("Часы не читаются: число больше нуля")?;
+                let window = (hours * 3_600_000.0) as i64;
+                return Ok(match self.of {
+                    // The daemon's own "around" is a copy's.
+                    DateOf::Copied => (None, None, Some((at, window))),
+                    DateOf::Pasted => (None, Some((at - window, at + window)), None),
+                });
+            }
+        };
+        Ok(match self.of {
+            DateOf::Copied => (Some(range), None, None),
+            DateOf::Pasted => (None, Some(range), None),
+        })
+    }
+
+    /// The filter in words, for the line of what is filtered.
+    fn words(&self) -> Option<String> {
+        let of = match self.of {
+            DateOf::Copied => "скопировано",
+            DateOf::Pasted => "вставлено",
+        };
+        let when = match self.when {
+            When::All => return None,
+            When::Today => "сегодня".to_owned(),
+            When::Yesterday => "вчера".to_owned(),
+            When::Week => "за неделю".to_owned(),
+            When::Day => self.day.trim().to_owned(),
+            When::Around => format!("около {} ± {} ч", self.at.trim(), self.hours.trim()),
+        };
+        Some(format!("{of} {when}"))
+    }
+}
+
+/// The kinds of content to filter by: `(type, word)`.
+const KINDS: [(&str, &str); 3] = [
+    ("text/plain", "текст"),
+    ("image/*", "картинки"),
+    ("text/uri-list", "файлы и ссылки"),
+];
+
+/// A key the window acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Press {
+    Up,
+    Down,
+    Enter,
+    Search,
+    Escape,
+}
+
+#[derive(Debug, Clone)]
+pub enum Msg {
+    Loaded {
+        gen: u64,
+        older: bool,
+        result: Result<Vec<Entry>, String>,
+    },
+    Scrolled(Viewport),
+    Words(String),
+    Rested(u64),
+    Select(usize),
+    Paste(u64),
+    Whole(u64),
+    Got(u64, Result<String, String>),
+    Fold(u64),
+    MoveAsk(u64),
+    Histories(Result<Vec<String>, String>),
+    MoveTo(u64, String),
+    Moved(Result<String, String>),
+    DeleteAsk(u64),
+    DeleteYes(u64),
+    Deleted(u64, Result<String, String>),
+    Cancel,
+    Key(Press),
+    Dismiss,
+    // The filters.
+    DatesOpen,
+    DateOf(DateOf),
+    When(When),
+    Day(String),
+    At(String),
+    Hours(String),
+    Kind(usize, bool),
+    ClearAll,
+    // The pattern builder.
+    BuilderOpen,
+    Add(Tag),
+    Remove(usize),
+    Shift(usize, isize),
+    Chars(usize, String),
+    From(usize, String),
+    To(usize, String),
+    Alone(usize, bool),
+    Letters(usize, Alphabet),
+    Times(usize, Times),
+    N(usize, String),
+    M(usize, String),
+    Lazy(usize, bool),
+    Flag(usize, bool),
+    Sample(text_editor::Action),
+    Apply,
+    Unapply,
+}
+
+pub struct Clip {
+    history: String,
+    can_paste: bool,
+    socket: PathBuf,
+    now: i64,
+    /// Oldest first, as shown.
+    entries: Vec<Entry>,
+    /// Older entries than the first are left to load.
+    older: bool,
+    loading: bool,
+    /// The search's generation: an answer to an older one is dropped.
+    gen: u64,
+    /// The typing's: a rest of an older one asks nothing.
+    typed: u64,
+    selected: Option<usize>,
+    words: String,
+    kinds: [bool; 3],
+    dates: Dates,
+    dates_open: bool,
+    /// The pattern searched by, once applied from the builder.
+    re: Option<String>,
+    builder: Builder,
+    builder_open: bool,
+    sample: text_editor::Content,
+    /// Whole texts fetched: shown in place of the preview.
+    whole: HashMap<u64, String>,
+    /// Moving an entry: the histories to move it to, once known.
+    moving: Option<(u64, Option<Vec<String>>)>,
+    deleting: Option<u64>,
+    error: Option<String>,
+    notice: Option<String>,
+    /// The feed's offset from its bottom, and its height.
+    view: (f32, f32),
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
+/// What is printed for the caller to paste.
+pub fn paste_line(history: &str, id: u64) -> String {
+    format!("paste\t{history}\t{id}\n")
+}
+
+/// A size, for a person.
+fn size_words(bytes: u64) -> String {
+    match bytes {
+        0..=1023 => format!("{bytes} Б"),
+        1024..=1_048_575 => format!("{} КБ", (bytes + 512) / 1024),
+        _ => format!("{:.1} МБ", bytes as f64 / 1_048_576.0).replace('.', ","),
+    }
+}
+
+/// «раз»/«раза» after a count.
+fn times(n: u32) -> &'static str {
+    match (n % 10, n % 100) {
+        (2..=4, r) if !(12..=14).contains(&r) => "раза",
+        _ => "раз",
+    }
+}
+
+/// An entry's line of when: copied, how many times, pasted.
+fn meta_line(e: &Entry, now: i64) -> String {
+    let mut words = vec![days::hour_label(e.copied_at)];
+    if e.copies > 1 {
+        words.push(format!(
+            "скопировано {} {}, последний — {}",
+            e.copies,
+            times(e.copies),
+            days::when_label(e.last_copied, now)
+        ));
+    }
+    if e.pastes > 0 {
+        let last = if e.last_pasted > 0 {
+            format!(", последний — {}", days::when_label(e.last_pasted, now))
+        } else {
+            String::new()
+        };
+        words.push(format!("вставлено {} {}{last}", e.pastes, times(e.pastes)));
+    }
+    words.join(" · ")
+}
+
+/// The preview cut at `PREVIEW_LINES`, and whether there is more to see.
+fn preview(e: &Entry) -> (String, bool) {
+    let lines: Vec<&str> = e.preview.lines().collect();
+    let cut = lines.len() > PREVIEW_LINES;
+    let shown = if cut {
+        format!("{}\n…", lines[..PREVIEW_LINES].join("\n"))
+    } else {
+        e.preview.clone()
+    };
+    let longer = e
+        .text_size()
+        .is_some_and(|size| size > e.preview.len() as u64);
+    (shown, cut || longer)
+}
+
+/// Roughly how tall an entry's bubble is: to keep the one chosen by keys in
+/// view without measuring the feed.
+fn guessed_height(e: &Entry, whole: Option<&String>, chosen: bool) -> f32 {
+    let lines = match whole {
+        Some(t) => t.lines().count(),
+        None if e.image().is_some() => 1,
+        None => e.preview.lines().count().min(PREVIEW_LINES + 1),
+    }
+    .max(1);
+    // Text, the line of when, padding; the actions under the chosen one.
+    let mut h = 22.0 * lines as f32 + 46.0;
+    if chosen {
+        h += 40.0;
+    }
+    h
+}
+
+/// `ms` in ms, slept on a thread of its own.
+fn later(ms: u64, then: Msg) -> Task<Msg> {
+    Task::perform(
+        clipd::off_thread(move || std::thread::sleep(std::time::Duration::from_millis(ms))),
+        move |_| then.clone(),
+    )
+}
+
+fn dim(theme: &iced::Theme) -> text::Style {
+    text::Style {
+        color: Some(
+            theme
+                .extended_palette()
+                .background
+                .base
+                .text
+                .scale_alpha(0.6),
+        ),
+    }
+}
+
+fn danger(theme: &iced::Theme) -> text::Style {
+    text::Style {
+        color: Some(theme.extended_palette().danger.base.color),
+    }
+}
+
+/// A section's small title, as the builder's.
+fn label(t: &str) -> Element<'_, Msg> {
+    text(t.to_uppercase()).size(11).style(dim).into()
+}
+
+fn card(theme: &iced::Theme, chosen: bool) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(p.background.weak.color.into()),
+        border: iced::Border {
+            color: if chosen {
+                p.primary.base.color
+            } else {
+                p.background.strong.color
+            },
+            width: if chosen { 2.0 } else { 1.0 },
+            radius: 10.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
+fn pill(theme: &iced::Theme) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(p.background.strong.color.scale_alpha(0.5).into()),
+        border: iced::border::rounded(10),
+        ..container::Style::default()
+    }
+}
+
+fn mono<'a>(t: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
+    text(t).font(Font::MONOSPACE)
+}
+
+impl Clip {
+    pub fn new(history: String, can_paste: bool, socket: PathBuf) -> Self {
+        Self {
+            history,
+            can_paste,
+            socket,
+            now: now_ms(),
+            entries: Vec::new(),
+            older: false,
+            loading: false,
+            gen: 0,
+            typed: 0,
+            selected: None,
+            words: String::new(),
+            kinds: [false; 3],
+            dates: Dates::default(),
+            dates_open: false,
+            re: None,
+            builder: Builder::default(),
+            builder_open: false,
+            sample: text_editor::Content::new(),
+            whole: HashMap::new(),
+            moving: None,
+            deleting: None,
+            error: None,
+            notice: None,
+            view: (0.0, 0.0),
+        }
+    }
+
+    /// What the search asks, the dates as of `now`.
+    pub fn filter(&self, now: i64) -> Result<Filter, String> {
+        let (copied, pasted, around) = self.dates.bounds(now)?;
+        Ok(Filter {
+            words: self.words.clone(),
+            re: self.re.clone(),
+            types: KINDS
+                .iter()
+                .zip(self.kinds)
+                .filter(|(_, on)| *on)
+                .map(|((t, _), _)| (*t).to_owned())
+                .collect(),
+            copied,
+            pasted,
+            around,
+        })
+    }
+
+    fn filtered(&self) -> bool {
+        !self.words.trim().is_empty()
+            || self.re.is_some()
+            || self.kinds.iter().any(|k| *k)
+            || self.dates.when != When::All
+    }
+
+    /// Ask a page: the newest (a new search), or older than the first shown.
+    fn load(&mut self, older: bool) -> Task<Msg> {
+        let now = now_ms();
+        let filter = match self.filter(now) {
+            Ok(f) => f,
+            Err(why) => {
+                self.error = Some(why);
+                return Task::none();
+            }
+        };
+        let before = if older {
+            match self.entries.first() {
+                Some(e) => Some(e.id),
+                None => return Task::none(),
+            }
+        } else {
+            None
+        };
+        self.now = now;
+        self.loading = true;
+        let request = clipd::search_request(&self.history, &filter, before, PAGE);
+        let socket = self.socket.clone();
+        let gen = self.gen;
+        Task::perform(
+            clipd::off_thread(move || {
+                clipd::ask_text(&socket, &request)
+                    .map_err(|f| f.text())
+                    .and_then(|a| clipd::parse_entries(&a))
+            }),
+            move |r| Msg::Loaded {
+                gen,
+                older,
+                result: r.unwrap_or_else(|| Err("служба истории не ответила".to_owned())),
+            },
+        )
+    }
+
+    /// A new search: the feed from its newest again.
+    fn search(&mut self) -> Task<Msg> {
+        self.gen += 1;
+        self.loading = false;
+        self.load(false)
+    }
+
+    /// Ask the daemon `request` expecting `ok[⇥value]`.
+    fn ok(
+        &self,
+        request: String,
+        then: impl Fn(Result<String, String>) -> Msg + Send + 'static,
+    ) -> Task<Msg> {
+        let socket = self.socket.clone();
+        Task::perform(
+            clipd::off_thread(move || {
+                clipd::ask_text(&socket, &request)
+                    .map_err(|f| f.text())
+                    .and_then(|a| clipd::parse_ok(&a))
+            }),
+            move |r| then(r.unwrap_or_else(|| Err("служба истории не ответила".to_owned()))),
+        )
+    }
+
+    fn entry(&self, id: u64) -> Option<&Entry> {
+        self.entries.iter().find(|e| e.id == id)
+    }
+
+    /// Keep the chosen entry in the feed's view: from the guessed heights
+    /// of the entries under it (the feed is anchored at its bottom).
+    fn reveal(&self) -> Task<Msg> {
+        let Some(i) = self.selected else {
+            return Task::none();
+        };
+        let (offset, height) = self.view;
+        if height <= 0.0 {
+            return Task::none();
+        }
+        let h = |j: usize| {
+            let e = &self.entries[j];
+            guessed_height(e, self.whole.get(&e.id), self.selected == Some(j)) + 10.0
+        };
+        let below: f32 = (i + 1..self.entries.len()).map(h).sum();
+        let top = below + h(i);
+        let to = if below < offset {
+            below - 8.0
+        } else if top > offset + height {
+            top - height + 8.0
+        } else {
+            return Task::none();
+        };
+        operation::scroll_to(
+            FEED,
+            AbsoluteOffset {
+                x: None,
+                y: Some(to.max(0.0)),
+            },
+        )
+    }
+
+    fn paste(&self, id: u64) {
+        if self.can_paste && self.entry(id).is_some() {
+            print!("{}", paste_line(&self.history, id));
+            std::process::exit(0);
+        }
+    }
+
+    pub fn update(&mut self, msg: Msg) -> Task<Msg> {
+        match msg {
+            Msg::Loaded { gen, older, result } => {
+                if gen != self.gen {
+                    return Task::none();
+                }
+                self.loading = false;
+                match result {
+                    Ok(mut page) => {
+                        self.older = page.len() >= PAGE;
+                        page.reverse();
+                        if older {
+                            let n = page.len();
+                            page.append(&mut self.entries);
+                            self.entries = page;
+                            self.selected = self.selected.map(|i| i + n);
+                        } else {
+                            self.entries = page;
+                            self.selected = self.entries.len().checked_sub(1);
+                            self.whole.clear();
+                            return operation::scroll_to(
+                                FEED,
+                                AbsoluteOffset {
+                                    x: None,
+                                    y: Some(0.0),
+                                },
+                            );
+                        }
+                    }
+                    Err(why) => self.error = Some(why),
+                }
+            }
+            Msg::Scrolled(v) => {
+                self.view = (v.absolute_offset().y, v.bounds().height);
+                // Near the top: the page before.
+                if v.absolute_offset_reversed().y < 120.0 && self.older && !self.loading {
+                    return self.load(true);
+                }
+            }
+            Msg::Words(w) => {
+                self.words = w;
+                self.typed += 1;
+                return later(DEBOUNCE_MS, Msg::Rested(self.typed));
+            }
+            Msg::Rested(typed) => {
+                if typed == self.typed {
+                    return self.search();
+                }
+            }
+            Msg::Select(i) => {
+                if i < self.entries.len() && self.selected != Some(i) {
+                    self.selected = Some(i);
+                    self.moving = None;
+                    self.deleting = None;
+                }
+            }
+            Msg::Paste(id) => self.paste(id),
+            Msg::Whole(id) => {
+                let Some(mime) = self
+                    .entry(id)
+                    .and_then(|e| e.text_type())
+                    .map(str::to_owned)
+                else {
+                    return Task::none();
+                };
+                let request = clipd::get_request(&self.history, id, &mime);
+                let socket = self.socket.clone();
+                return Task::perform(
+                    clipd::off_thread(move || {
+                        clipd::ask(&socket, &request)
+                            .map_err(|f| f.text())
+                            .and_then(|bytes| clipd::read_got(bytes.as_slice()))
+                            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    }),
+                    move |r| {
+                        Msg::Got(
+                            id,
+                            r.unwrap_or_else(|| Err("служба истории не ответила".to_owned())),
+                        )
+                    },
+                );
+            }
+            Msg::Got(id, result) => match result {
+                Ok(t) => {
+                    self.whole.insert(id, t);
+                }
+                Err(why) => self.error = Some(why),
+            },
+            Msg::Fold(id) => {
+                self.whole.remove(&id);
+            }
+            Msg::MoveAsk(id) => {
+                self.deleting = None;
+                self.moving = Some((id, None));
+                let socket = self.socket.clone();
+                return Task::perform(
+                    clipd::off_thread(move || {
+                        clipd::ask_text(&socket, "histories")
+                            .map_err(|f| f.text())
+                            .and_then(|a| clipd::parse_histories(&a))
+                    }),
+                    |r| {
+                        Msg::Histories(
+                            r.unwrap_or_else(|| Err("служба истории не ответила".to_owned())),
+                        )
+                    },
+                );
+            }
+            Msg::Histories(result) => match result {
+                Ok(mut names) => {
+                    names.retain(|n| *n != self.history);
+                    if let Some((_, list)) = &mut self.moving {
+                        *list = Some(names);
+                    }
+                }
+                Err(why) => {
+                    self.moving = None;
+                    self.error = Some(why);
+                }
+            },
+            Msg::MoveTo(id, to) => {
+                let request = clipd::move_request(&self.history, id, &to);
+                return self.ok(request, move |r| {
+                    Msg::Moved(r.map(|_| format!("Скопировано в историю «{to}»")))
+                });
+            }
+            Msg::Moved(result) => {
+                self.moving = None;
+                match result {
+                    Ok(said) => self.notice = Some(said),
+                    Err(why) => self.error = Some(why),
+                }
+            }
+            Msg::DeleteAsk(id) => {
+                self.moving = None;
+                self.deleting = Some(id);
+            }
+            Msg::DeleteYes(id) => {
+                return self.ok(clipd::delete_request(&self.history, id), move |r| {
+                    Msg::Deleted(id, r)
+                });
+            }
+            Msg::Deleted(id, result) => {
+                self.deleting = None;
+                match result {
+                    Ok(_) => {
+                        if let Some(i) = self.entries.iter().position(|e| e.id == id) {
+                            self.entries.remove(i);
+                            self.whole.remove(&id);
+                            self.selected = match self.selected {
+                                Some(s) if s > i => Some(s - 1),
+                                Some(s) if s == i => (!self.entries.is_empty())
+                                    .then(|| i.min(self.entries.len() - 1)),
+                                s => s,
+                            };
+                        }
+                    }
+                    Err(why) => self.error = Some(why),
+                }
+            }
+            Msg::Cancel => {
+                self.moving = None;
+                self.deleting = None;
+            }
+            Msg::Key(press) => return self.key(press),
+            Msg::Dismiss => {
+                self.error = None;
+                self.notice = None;
+            }
+            Msg::DatesOpen => {
+                self.dates_open = !self.dates_open;
+                self.builder_open = false;
+            }
+            Msg::DateOf(of) => {
+                self.dates.of = of;
+                return self.dates_changed();
+            }
+            Msg::When(when) => {
+                self.dates.when = when;
+                return self.dates_changed();
+            }
+            Msg::Day(t) => {
+                self.dates.day = t;
+                return self.dates_changed();
+            }
+            Msg::At(t) => {
+                self.dates.at = t;
+                return self.dates_changed();
+            }
+            Msg::Hours(t) => {
+                self.dates.hours = t;
+                return self.dates_changed();
+            }
+            Msg::Kind(i, on) => {
+                if let Some(k) = self.kinds.get_mut(i) {
+                    *k = on;
+                }
+                return self.search();
+            }
+            Msg::ClearAll => {
+                self.words.clear();
+                self.re = None;
+                self.kinds = [false; 3];
+                self.dates.when = When::All;
+                return self.search();
+            }
+            Msg::BuilderOpen => {
+                self.builder_open = !self.builder_open;
+                self.dates_open = false;
+            }
+            Msg::Add(tag) => self.builder.add(tag),
+            Msg::Remove(i) => self.builder.remove(i),
+            Msg::Shift(i, by) => self.builder.shift(i, by),
+            Msg::Chars(i, t) => {
+                if let Some(b) = self.builder.blocks.get_mut(i) {
+                    match &mut b.kind {
+                        Kind::Text(s) | Kind::OneOf(s) | Kind::NoneOf(s) => *s = t,
+                        _ => {}
+                    }
+                }
+            }
+            Msg::From(i, t) | Msg::To(i, t) if !t.chars().all(|c| c.is_ascii_digit()) => {
+                let _ = (i, t);
+            }
+            Msg::From(i, t) => {
+                if let Some(Kind::Number(from, _, _)) =
+                    self.builder.blocks.get_mut(i).map(|b| &mut b.kind)
+                {
+                    *from = t;
+                }
+            }
+            Msg::To(i, t) => {
+                if let Some(Kind::Number(_, to, _)) =
+                    self.builder.blocks.get_mut(i).map(|b| &mut b.kind)
+                {
+                    *to = t;
+                }
+            }
+            Msg::Alone(i, on) => {
+                if let Some(Kind::Number(_, _, alone)) =
+                    self.builder.blocks.get_mut(i).map(|b| &mut b.kind)
+                {
+                    *alone = on;
+                }
+            }
+            Msg::Letters(i, a) => {
+                if let Some(b) = self.builder.blocks.get_mut(i) {
+                    b.kind = Kind::Letter(a);
+                }
+            }
+            Msg::Times(i, t) => {
+                if let Some(b) = self.builder.blocks.get_mut(i) {
+                    b.times = t;
+                }
+            }
+            Msg::N(i, t) | Msg::M(i, t) if !t.chars().all(|c| c.is_ascii_digit()) => {
+                let _ = (i, t);
+            }
+            Msg::N(i, t) => {
+                if let Some(b) = self.builder.blocks.get_mut(i) {
+                    b.n = t;
+                }
+            }
+            Msg::M(i, t) => {
+                if let Some(b) = self.builder.blocks.get_mut(i) {
+                    b.m = t;
+                }
+            }
+            Msg::Lazy(i, on) => {
+                if let Some(b) = self.builder.blocks.get_mut(i) {
+                    b.lazy = on;
+                }
+            }
+            Msg::Flag(i, on) => match i {
+                0 => self.builder.any_case = on,
+                1 => self.builder.every_line = on,
+                _ => self.builder.dot_all = on,
+            },
+            Msg::Sample(action) => {
+                self.sample.perform(action);
+                self.builder.sample = self.sample.text();
+            }
+            Msg::Apply => {
+                let p = self.builder.pattern();
+                if !p.is_empty() && !matches!(self.builder.try_it(), Tried::Broken(_)) {
+                    self.re = Some(p);
+                    self.builder_open = false;
+                    return self.search();
+                }
+            }
+            Msg::Unapply => {
+                self.re = None;
+                return self.search();
+            }
+        }
+        Task::none()
+    }
+
+    fn dates_changed(&mut self) -> Task<Msg> {
+        // A date half typed searches nothing yet, and says nothing yet.
+        if self.dates.bounds(now_ms()).is_err() {
+            return Task::none();
+        }
+        self.search()
+    }
+
+    pub fn key(&mut self, press: Press) -> Task<Msg> {
+        match press {
+            Press::Escape => {
+                if self.deleting.is_some() || self.moving.is_some() {
+                    self.deleting = None;
+                    self.moving = None;
+                } else if self.builder_open {
+                    self.builder_open = false;
+                } else if self.dates_open {
+                    self.dates_open = false;
+                } else {
+                    std::process::exit(1);
+                }
+            }
+            Press::Search => {
+                self.builder_open = false;
+                return operation::focus(SEARCH);
+            }
+            // The builder's own fields take the arrows and Enter.
+            _ if self.builder_open => {}
+            Press::Up | Press::Down => {
+                if self.entries.is_empty() {
+                    return Task::none();
+                }
+                let last = self.entries.len() - 1;
+                let next = match (self.selected, press) {
+                    (None, _) => last,
+                    (Some(i), Press::Up) => i.saturating_sub(1),
+                    (Some(i), _) => (i + 1).min(last),
+                };
+                if self.selected != Some(next) {
+                    self.moving = None;
+                    self.deleting = None;
+                }
+                self.selected = Some(next);
+                let reveal = self.reveal();
+                // At the oldest shown: the page before, as a scroll up would.
+                if press == Press::Up && next == 0 && self.older && !self.loading {
+                    return Task::batch([reveal, self.load(true)]);
+                }
+                return reveal;
+            }
+            Press::Enter => {
+                if self.deleting.is_none() && self.moving.is_none() {
+                    if let Some(e) = self.selected.and_then(|i| self.entries.get(i)) {
+                        self.paste(e.id);
+                    }
+                }
+            }
+        }
+        Task::none()
+    }
+
+    pub fn view(&self) -> Element<'_, Msg> {
+        let mut page = column![].spacing(8).padding(12);
+        if let Some(why) = &self.error {
+            page = page.push(
+                row![
+                    text(format!("⚠ {why}"))
+                        .size(14)
+                        .style(danger)
+                        .width(Length::Fill),
+                    button(text("✕").size(12))
+                        .style(button::text)
+                        .on_press(Msg::Dismiss),
+                ]
+                .align_y(Alignment::Center),
+            );
+        } else if let Some(said) = &self.notice {
+            page = page.push(
+                row![
+                    text(said.as_str()).size(14).width(Length::Fill),
+                    button(text("✕").size(12))
+                        .style(button::text)
+                        .on_press(Msg::Dismiss),
+                ]
+                .align_y(Alignment::Center),
+            );
+        }
+        page = page.push(if self.builder_open {
+            self.view_builder()
+        } else {
+            self.view_feed()
+        });
+        if self.dates_open {
+            page = page.push(self.view_dates());
+        }
+        if let Some(line) = self.filters_line() {
+            page = page.push(line);
+        }
+        page = page.push(
+            row![
+                button(text("📅").size(16))
+                    .padding([6, 10])
+                    .style(if self.dates_open {
+                        button::primary
+                    } else {
+                        button::secondary
+                    })
+                    .on_press(Msg::DatesOpen),
+                text_input("Поиск по истории — слова, через пробел", &self.words)
+                    .id(SEARCH)
+                    .on_input(Msg::Words)
+                    .padding(8)
+                    .size(15),
+                button(text("⋯").size(16))
+                    .padding([6, 12])
+                    .style(if self.builder_open {
+                        button::primary
+                    } else {
+                        button::secondary
+                    })
+                    .on_press(Msg::BuilderOpen),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        );
+        page.into()
+    }
+
+    /// What the feed is filtered by, with the way back.
+    fn filters_line(&self) -> Option<Element<'_, Msg>> {
+        let mut said = Vec::new();
+        if let Some(d) = self.dates.words() {
+            said.push(d);
+        }
+        let kinds: Vec<&str> = KINDS
+            .iter()
+            .zip(self.kinds)
+            .filter(|(_, on)| *on)
+            .map(|((_, w), _)| *w)
+            .collect();
+        if !kinds.is_empty() {
+            said.push(format!("только {}", kinds.join(", ")));
+        }
+        if let Some(re) = &self.re {
+            said.push(format!("шаблон /{re}/"));
+        }
+        if said.is_empty() {
+            return None;
+        }
+        Some(
+            row![
+                text(format!("Фильтр: {}", said.join(" · ")))
+                    .size(13)
+                    .style(dim)
+                    .width(Length::Fill),
+                button(text("Сбросить").size(13))
+                    .style(button::text)
+                    .on_press(Msg::ClearAll),
+            ]
+            .align_y(Alignment::Center)
+            .into(),
+        )
+    }
+
+    fn view_feed(&self) -> Element<'_, Msg> {
+        let mut feed = column![].spacing(10).padding([4, 14]);
+        if self.older {
+            feed = feed.push(
+                container(
+                    text(if self.loading {
+                        "Загрузка…"
+                    } else {
+                        "Прокрутите выше — там ещё"
+                    })
+                    .size(12)
+                    .style(dim),
+                )
+                .center_x(Length::Fill),
+            );
+        } else if !self.entries.is_empty() {
+            feed = feed
+                .push(container(text("Начало истории").size(12).style(dim)).center_x(Length::Fill));
+        }
+        let mut day = None;
+        for (i, e) in self.entries.iter().enumerate() {
+            let this = days::day_start(e.copied_at);
+            if day != Some(this) {
+                day = Some(this);
+                feed = feed.push(
+                    container(
+                        container(text(days::day_label(e.copied_at, self.now)).size(12))
+                            .padding([3, 12])
+                            .style(pill),
+                    )
+                    .center_x(Length::Fill),
+                );
+            }
+            feed = feed.push(self.bubble(i, e));
+        }
+        if self.entries.is_empty() {
+            let said = if self.loading {
+                "Загрузка…"
+            } else if self.error.is_some() {
+                ""
+            } else if self.filtered() {
+                "Ничего не найдено"
+            } else {
+                "История пуста: здесь появится всё, что копируют в этом контейнере"
+            };
+            feed = feed.push(
+                container(text(said).size(14).style(dim))
+                    .center_x(Length::Fill)
+                    .padding(40),
+            );
+        }
+        scrollable(feed)
+            .id(FEED)
+            .anchor_bottom()
+            .on_scroll(Msg::Scrolled)
+            .height(Length::Fill)
+            .width(Length::Fill)
+            .into()
+    }
+
+    fn bubble<'a>(&'a self, i: usize, e: &'a Entry) -> Element<'a, Msg> {
+        let chosen = self.selected == Some(i);
+        let mut body = column![].spacing(6);
+        if let Some((mime, size)) = e.image() {
+            // The window's toolkit is built without image decoding (its
+            // codecs' crates are not among the ones it builds from): the
+            // image said, not shown.
+            let kind = mime.strip_prefix("image/").unwrap_or(mime);
+            body = body.push(text(format!("🖼 картинка {kind} · {}", size_words(*size))).size(15));
+        } else if let Some(whole) = self.whole.get(&e.id) {
+            body = body.push(text(whole.as_str()).size(15));
+            body = body.push(
+                button(text("свернуть").size(12))
+                    .style(button::text)
+                    .padding(0)
+                    .on_press(Msg::Fold(e.id)),
+            );
+        } else {
+            let (shown, more) = preview(e);
+            body = body.push(text(shown).size(15));
+            if more && e.text_type().is_some() {
+                body = body.push(
+                    button(text("показать целиком").size(12))
+                        .style(button::text)
+                        .padding(0)
+                        .on_press(Msg::Whole(e.id)),
+                );
+            }
+        }
+        body = body.push(text(meta_line(e, self.now)).size(12).style(dim));
+        if chosen {
+            body = body.push(self.actions(e));
+        }
+        let bubble = container(body)
+            .padding([8, 12])
+            .max_width(540)
+            .style(move |t| card(t, chosen));
+        mouse_area(bubble).on_press(Msg::Select(i)).into()
+    }
+
+    fn actions<'a>(&'a self, e: &'a Entry) -> Element<'a, Msg> {
+        if self.deleting == Some(e.id) {
+            return row![
+                text("Удалить эту запись из истории?").size(13),
+                button(text("Удалить").size(13))
+                    .style(button::danger)
+                    .on_press(Msg::DeleteYes(e.id)),
+                button(text("Отмена").size(13))
+                    .style(button::secondary)
+                    .on_press(Msg::Cancel),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into();
+        }
+        if let Some((id, names)) = &self.moving {
+            if *id == e.id {
+                let mut line = row![text("Перенести в:").size(13)]
+                    .spacing(6)
+                    .align_y(Alignment::Center);
+                match names {
+                    None => line = line.push(text("…").size(13)),
+                    Some(names) if names.is_empty() => {
+                        line = line.push(text("других историй нет").size(13).style(dim))
+                    }
+                    Some(names) => {
+                        for n in names {
+                            line = line.push(
+                                button(text(n.as_str()).size(13))
+                                    .style(button::secondary)
+                                    .on_press(Msg::MoveTo(e.id, n.clone())),
+                            );
+                        }
+                    }
+                }
+                line = line.push(
+                    button(text("Отмена").size(13))
+                        .style(button::text)
+                        .on_press(Msg::Cancel),
+                );
+                return line.wrap().into();
+            }
+        }
+        let mut line = row![].spacing(8).align_y(Alignment::Center);
+        if self.can_paste {
+            line = line.push(
+                button(text("Вставить  ⏎").size(13))
+                    .style(button::primary)
+                    .on_press(Msg::Paste(e.id)),
+            );
+        }
+        line.push(
+            button(text("Перенести в…").size(13))
+                .style(button::secondary)
+                .on_press(Msg::MoveAsk(e.id)),
+        )
+        .push(
+            button(text("Удалить").size(13))
+                .style(button::secondary)
+                .on_press(Msg::DeleteAsk(e.id)),
+        )
+        .into()
+    }
+
+    fn view_dates(&self) -> Element<'_, Msg> {
+        let choice = |label: &'static str, on: bool, msg: Msg| {
+            button(text(label).size(13))
+                .padding([4, 10])
+                .style(if on {
+                    button::primary
+                } else {
+                    button::secondary
+                })
+                .on_press(msg)
+        };
+        let of = self.dates.of;
+        let when = self.dates.when;
+        let mut panel = column![
+            row![
+                choice(
+                    "скопировано",
+                    of == DateOf::Copied,
+                    Msg::DateOf(DateOf::Copied)
+                ),
+                choice(
+                    "вставлено",
+                    of == DateOf::Pasted,
+                    Msg::DateOf(DateOf::Pasted)
+                ),
+            ]
+            .spacing(6),
+            row![
+                choice("когда угодно", when == When::All, Msg::When(When::All)),
+                choice("сегодня", when == When::Today, Msg::When(When::Today)),
+                choice("вчера", when == When::Yesterday, Msg::When(When::Yesterday)),
+                choice("за неделю", when == When::Week, Msg::When(When::Week)),
+                choice("в день…", when == When::Day, Msg::When(When::Day)),
+                choice("около…", when == When::Around, Msg::When(When::Around)),
+            ]
+            .spacing(6)
+            .wrap(),
+        ]
+        .spacing(8);
+        match when {
+            When::Day => {
+                panel = panel.push(
+                    row![
+                        text("день").size(13),
+                        text_input("ДД.ММ.ГГГГ", &self.dates.day)
+                            .on_input(Msg::Day)
+                            .width(140)
+                            .padding(5),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+            }
+            When::Around => {
+                panel = panel.push(
+                    row![
+                        text("около").size(13),
+                        text_input("ДД.ММ.ГГГГ ЧЧ:ММ", &self.dates.at)
+                            .on_input(Msg::At)
+                            .width(180)
+                            .padding(5),
+                        text("±").size(13),
+                        text_input("2", &self.dates.hours)
+                            .on_input(Msg::Hours)
+                            .width(60)
+                            .padding(5),
+                        text("ч").size(13),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+            }
+            _ => {}
+        }
+        if let Err(why) = self.dates.bounds(self.now) {
+            panel = panel.push(text(why).size(12).style(danger));
+        }
+        let mut kinds = row![text("что:").size(13)]
+            .spacing(10)
+            .align_y(Alignment::Center);
+        for (i, (_, word)) in KINDS.iter().enumerate() {
+            kinds = kinds.push(
+                checkbox(self.kinds[i])
+                    .label(*word)
+                    .size(16)
+                    .text_size(13)
+                    .on_toggle(move |on| Msg::Kind(i, on)),
+            );
+        }
+        panel = panel.push(kinds.wrap());
+        container(panel)
+            .padding(10)
+            .width(Length::Fill)
+            .style(|t| card(t, false))
+            .into()
+    }
+
+    fn view_builder(&self) -> Element<'_, Msg> {
+        let b = &self.builder;
+        let mut page = column![row![
+            text("Конструктор шаблона").size(18).width(Length::Fill),
+            button(text("Закрыть  Esc").size(13))
+                .style(button::secondary)
+                .on_press(Msg::BuilderOpen),
+        ]
+        .align_y(Alignment::Center)]
+        .spacing(10)
+        .padding([4, 14]);
+
+        page = page.push(label("Добавить блок"));
+        for (group, tags) in pattern::PALETTE {
+            let mut chips = row![].spacing(6);
+            for tag in tags.iter().copied() {
+                chips = chips.push(
+                    button(text(format!("+ {}", tag.name())).size(13))
+                        .padding([5, 10])
+                        .style(button::secondary)
+                        .on_press(Msg::Add(tag)),
+                );
+            }
+            page = page.push(
+                column![
+                    text(group).size(11).style(dim),
+                    chips.wrap().vertical_spacing(6)
+                ]
+                .spacing(4),
+            );
+        }
+
+        page = page.push(label("Последовательность"));
+        if b.blocks.is_empty() {
+            page = page.push(
+                container(
+                    text("Пока пусто — добавьте первый блок кнопкой выше")
+                        .size(13)
+                        .style(dim),
+                )
+                .center_x(Length::Fill)
+                .padding(16)
+                .style(|t| card(t, false)),
+            );
+        }
+        for (i, block) in b.blocks.iter().enumerate() {
+            page = page.push(self.view_block(i, block));
+        }
+
+        // The result: the pattern, its flags, whether it compiles.
+        let tried = b.try_it();
+        let pattern = b.pattern();
+        let mut out = column![row![
+            mono("/").style(dim),
+            mono(if pattern.is_empty() {
+                "пусто".to_owned()
+            } else {
+                pattern.clone()
+            })
+            .width(Length::Fill),
+            mono("/").style(dim),
+        ]
+        .spacing(2)]
+        .spacing(8);
+        out = out.push(
+            row![
+                checkbox(b.any_case)
+                    .label("без учёта регистра")
+                    .text_size(13)
+                    .size(16)
+                    .on_toggle(|on| Msg::Flag(0, on)),
+                checkbox(b.every_line)
+                    .label("^ и $ на каждой строке")
+                    .text_size(13)
+                    .size(16)
+                    .on_toggle(|on| Msg::Flag(1, on)),
+                checkbox(b.dot_all)
+                    .label("точка включает переносы")
+                    .text_size(13)
+                    .size(16)
+                    .on_toggle(|on| Msg::Flag(2, on)),
+            ]
+            .spacing(14)
+            .wrap(),
+        );
+        if let Tried::Broken(why) = &tried {
+            out = out.push(
+                text(format!("Ошибка в шаблоне: {why}"))
+                    .size(12)
+                    .style(danger),
+            );
+        }
+        page = page.push(
+            container(out)
+                .padding(12)
+                .width(Length::Fill)
+                .style(|t| card(t, false)),
+        );
+
+        page = page.push(label("Что это означает"));
+        let words = b.explain();
+        if words.is_empty() {
+            page = page.push(text("добавьте блоки выше").size(13).style(dim));
+        } else {
+            let mut list = column![].spacing(4);
+            for (i, w) in words.into_iter().enumerate() {
+                list = list.push(
+                    row![
+                        mono(format!("{}.", i + 1)).size(12).style(dim),
+                        text(w).size(14)
+                    ]
+                    .spacing(8),
+                );
+            }
+            for f in b.flags_words() {
+                list = list.push(text(format!("— {f}")).size(13).style(dim));
+            }
+            page = page.push(list);
+        }
+
+        page = page.push(label("Проверка на своём тексте"));
+        page = page.push(
+            text_editor(&self.sample)
+                .placeholder("Вставьте сюда текст, чтобы проверить совпадения…")
+                .on_action(Msg::Sample)
+                .font(Font::MONOSPACE)
+                .size(13)
+                .height(90),
+        );
+        if let Tried::Found(found) = &tried {
+            let spans: Vec<_> = pattern::pieces(&b.sample, found)
+                .into_iter()
+                .map(|(piece, hit)| {
+                    let s = span(piece).font(Font::MONOSPACE);
+                    if hit {
+                        s.background(Color::from_rgba(0.2, 0.31, 0.48, 0.25))
+                            .color(Color::from_rgb(0.2, 0.31, 0.48))
+                    } else {
+                        s
+                    }
+                })
+                .collect();
+            page = page.push(
+                container(rich_text::<(), _, _, _>(spans).size(13))
+                    .padding(10)
+                    .width(Length::Fill)
+                    .style(|t| card(t, false)),
+            );
+            page = page.push(mono(pattern::count_words(found.len())).size(12).style(dim));
+        }
+
+        let usable = !pattern.is_empty() && !matches!(tried, Tried::Broken(_));
+        let mut buttons = row![button(text("Искать по шаблону").size(14))
+            .padding([6, 14])
+            .style(button::primary)
+            .on_press_maybe(usable.then_some(Msg::Apply))]
+        .spacing(8);
+        if self.re.is_some() {
+            buttons = buttons.push(
+                button(text("Искать без шаблона").size(14))
+                    .padding([6, 14])
+                    .style(button::secondary)
+                    .on_press(Msg::Unapply),
+            );
+        }
+        page = page.push(buttons);
+        scrollable(page)
+            .height(Length::Fill)
+            .width(Length::Fill)
+            .into()
+    }
+
+    fn view_block<'a>(&'a self, i: usize, block: &'a pattern::Block) -> Element<'a, Msg> {
+        let small = |t: &'static str| text(t).size(11).style(dim);
+        let icon = |t: &'static str, msg: Msg| {
+            button(text(t).size(12))
+                .padding([2, 8])
+                .style(button::secondary)
+                .on_press(msg)
+        };
+        let mut card_body = column![row![
+            mono(format!("{}. {}", i + 1, block.kind.tag().name()))
+                .size(13)
+                .width(Length::Fill),
+            icon("↑", Msg::Shift(i, -1)),
+            icon("↓", Msg::Shift(i, 1)),
+            icon("✕", Msg::Remove(i)),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center)]
+        .spacing(8);
+        let field =
+            |name: &'static str, value: &'a str, msg: fn(usize, String) -> Msg, width: f32| {
+                column![
+                    small(name),
+                    text_input("", value)
+                        .on_input(move |t| msg(i, t))
+                        .font(Font::MONOSPACE)
+                        .size(13)
+                        .padding(5)
+                        .width(width),
+                ]
+                .spacing(3)
+            };
+        match &block.kind {
+            Kind::Text(t) => card_body = card_body.push(field("какой текст", t, Msg::Chars, 220.0)),
+            Kind::OneOf(t) => {
+                card_body = card_body.push(field("какие символы", t, Msg::Chars, 220.0))
+            }
+            Kind::NoneOf(t) => {
+                card_body = card_body.push(field("какие символы исключить", t, Msg::Chars, 220.0))
+            }
+            Kind::Letter(a) => {
+                card_body = card_body.push(
+                    column![
+                        small("алфавит"),
+                        pick_list(Alphabet::ALL, Some(*a), move |a| Msg::Letters(i, a))
+                            .text_size(13),
+                    ]
+                    .spacing(3),
+                )
+            }
+            Kind::Number(from, to, alone) => {
+                card_body = card_body.push(
+                    row![
+                        field("от", from, Msg::From, 80.0),
+                        field("до", to, Msg::To, 80.0),
+                        checkbox(*alone)
+                            .label("это отдельное число, не часть длинного")
+                            .text_size(13)
+                            .size(16)
+                            .on_toggle(move |on| Msg::Alone(i, on)),
+                    ]
+                    .spacing(10)
+                    .align_y(Alignment::End)
+                    .wrap(),
+                )
+            }
+            _ => {}
+        }
+        if !block.kind.is_position() {
+            let mut quant = row![
+                small("сколько раз:"),
+                pick_list(Times::ALL, Some(block.times), move |t| Msg::Times(i, t)).text_size(13),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            let number = |value: &'a str, msg: fn(usize, String) -> Msg| {
+                text_input("", value)
+                    .on_input(move |t| msg(i, t))
+                    .size(13)
+                    .padding(5)
+                    .width(56)
+            };
+            if matches!(
+                block.times,
+                Times::Exactly | Times::Between | Times::AtLeast
+            ) {
+                quant = quant.push(number(&block.n, Msg::N));
+            }
+            if block.times == Times::Between {
+                quant = quant
+                    .push(text("—").size(13))
+                    .push(number(&block.m, Msg::M));
+            }
+            if block.times != Times::One {
+                quant = quant.push(
+                    checkbox(block.lazy)
+                        .label("как можно меньше")
+                        .text_size(13)
+                        .size(16)
+                        .on_toggle(move |on| Msg::Lazy(i, on)),
+                );
+            }
+            card_body = card_body.push(quant.wrap());
+        }
+        container(card_body)
+            .padding([10, 12])
+            .width(Length::Fill)
+            .style(|t| card(t, false))
+            .into()
+    }
+
+    fn subscription(&self) -> Subscription<Msg> {
+        iced::event::listen_with(|event, status, _window| match event {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                let free = status == iced::event::Status::Ignored;
+                match key.as_ref() {
+                    Key::Named(key::Named::Escape) => Some(Msg::Key(Press::Escape)),
+                    Key::Named(key::Named::ArrowUp) => Some(Msg::Key(Press::Up)),
+                    Key::Named(key::Named::ArrowDown) => Some(Msg::Key(Press::Down)),
+                    // A field that took Enter (the builder's text) keeps it.
+                    Key::Named(key::Named::Enter) if free => Some(Msg::Key(Press::Enter)),
+                    Key::Character("f" | "а") if modifiers.command() => {
+                        Some(Msg::Key(Press::Search))
+                    }
+                    Key::Character("/") if free => Some(Msg::Key(Press::Search)),
+                    _ => None,
+                }
+            }
+            iced::Event::Window(iced::window::Event::CloseRequested) => {
+                Some(Msg::Key(Press::Escape))
+            }
+            _ => None,
+        })
+    }
+}
+
+/// `clip …`: the window, until an entry is pasted or it is closed.
+pub fn run(args: &[String]) -> iced::Result {
+    let mut history = None;
+    let mut launch = None;
+    let mut title = None;
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        let value = rest.next().cloned().unwrap_or_default();
+        match flag.as_str() {
+            "--history" if !value.is_empty() => history = Some(value),
+            "--launch" => launch = value.parse::<u32>().ok(),
+            "--title" if !value.is_empty() => title = Some(value),
+            _ => {}
+        }
+    }
+    let Some(history) = history else {
+        eprintln!("vpn-zone-window clip: needs --history <name>");
+        std::process::exit(2);
+    };
+    let title = title.unwrap_or_else(|| format!("Буфер обмена: {history}"));
+    let can_paste = launch.is_some();
+    iced::application(
+        move || {
+            let mut clip = Clip::new(history.clone(), can_paste, clipd::socket_path());
+            let first = clip.search();
+            (clip, Task::batch([first, operation::focus(SEARCH)]))
+        },
+        Clip::update,
+        Clip::view,
+    )
+    .title(move |_: &Clip| title.clone())
+    .theme(|_: &Clip| None::<iced::Theme>)
+    .subscription(Clip::subscription)
+    .exit_on_close_request(false)
+    .window(iced::window::Settings {
+        size: Size::new(640.0, 760.0),
+        position: iced::window::Position::Centered,
+        // A fixed size: floated by the compositor itself, as a dialog.
+        resizable: false,
+        #[cfg(target_os = "linux")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: "vpn-zone-window".to_owned(),
+            ..Default::default()
+        },
+        ..iced::window::Settings::default()
+    })
+    .run()?;
+    // Closed without a paste.
+    std::process::exit(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: u64, copied_at: i64) -> Entry {
+        Entry {
+            id,
+            copied_at,
+            last_copied: copied_at,
+            copies: 1,
+            types: vec![("text/plain".to_owned(), 3)],
+            preview: format!("e{id}"),
+            ..Entry::default()
+        }
+    }
+
+    fn clip() -> Clip {
+        Clip::new("main".to_owned(), true, PathBuf::from("/nonexistent/sock"))
+    }
+
+    #[test]
+    fn the_filter_becomes_a_search() {
+        let now = days::at(2026, 10, 12, 15, 0);
+        let mut c = clip();
+        assert_eq!(c.filter(now).unwrap(), Filter::default());
+        c.words = "пароль wifi".to_owned();
+        c.kinds = [false, true, false];
+        c.builder.add(Tag::Digit);
+        c.builder.blocks[0].times = Times::Exactly;
+        c.builder.blocks[0].n = "4".to_owned();
+        c.builder.any_case = true;
+        let _ = c.update(Msg::Apply);
+        assert_eq!(c.re.as_deref(), Some("(?i)[0-9]{4}"));
+        c.dates.when = When::Today;
+        let f = c.filter(now).unwrap();
+        let today = (days::at(2026, 10, 12, 0, 0), days::at(2026, 10, 13, 0, 0));
+        assert_eq!(f.copied, Some(today));
+        assert_eq!(
+            clipd::search_request("main", &f, None, PAGE),
+            format!(
+                "search\tmain\tq=пароль wifi\tre=(?i)[0-9]{{4}}\ttype=image/*\tcopied={}-{}\tlimit=50",
+                today.0, today.1
+            )
+        );
+        c.dates.of = DateOf::Pasted;
+        c.dates.when = When::Yesterday;
+        let f = c.filter(now).unwrap();
+        assert_eq!(f.pasted, Some((days::at(2026, 10, 11, 0, 0), today.0)));
+        assert_eq!(f.copied, None);
+        c.dates.when = When::Week;
+        assert_eq!(
+            c.filter(now).unwrap().pasted,
+            Some((days::at(2026, 10, 6, 0, 0), today.1))
+        );
+        c.dates.when = When::Day;
+        c.dates.day = "1.10".to_owned();
+        assert_eq!(
+            c.filter(now).unwrap().pasted,
+            Some((days::at(2026, 10, 1, 0, 0), days::at(2026, 10, 2, 0, 0)))
+        );
+        c.dates.day = "что-то".to_owned();
+        assert!(c.filter(now).is_err());
+        c.dates.when = When::Around;
+        c.dates.at = "12.10.2026 14:00".to_owned();
+        c.dates.hours = "1,5".to_owned();
+        let at = days::at(2026, 10, 12, 14, 0);
+        assert_eq!(
+            c.filter(now).unwrap().pasted,
+            Some((at - 5_400_000, at + 5_400_000))
+        );
+        c.dates.of = DateOf::Copied;
+        assert_eq!(c.filter(now).unwrap().around, Some((at, 5_400_000)));
+        assert_eq!(
+            c.dates.words().unwrap(),
+            "скопировано около 12.10.2026 14:00 ± 1,5 ч"
+        );
+        // A pattern that does not compile is not searched by.
+        let mut d = clip();
+        d.builder.add(Tag::AnyChar);
+        d.builder.blocks[0].times = Times::Between;
+        d.builder.blocks[0].m = "1000000".to_owned();
+        let _ = d.update(Msg::Apply);
+        assert_eq!(d.re, None);
+    }
+
+    #[test]
+    fn pages_are_kept_oldest_first() {
+        let mut c = clip();
+        c.gen = 1;
+        let page: Vec<Entry> = (0..PAGE as u64)
+            .rev()
+            .map(|id| entry(id + 100, 1000 + id as i64))
+            .collect();
+        let _ = c.update(Msg::Loaded {
+            gen: 1,
+            older: false,
+            result: Ok(page),
+        });
+        assert_eq!(c.entries.first().unwrap().id, 100);
+        assert_eq!(c.entries.last().unwrap().id, 149);
+        assert!(c.older);
+        assert_eq!(c.selected, Some(PAGE - 1), "the newest is chosen at open");
+        // An older page goes on top; the choice stays on its entry.
+        let _ = c.update(Msg::Loaded {
+            gen: 1,
+            older: true,
+            result: Ok(vec![entry(99, 999), entry(98, 998)]),
+        });
+        assert_eq!(c.entries[0].id, 98);
+        assert_eq!(c.entries[c.selected.unwrap()].id, 149);
+        assert!(!c.older);
+        // An answer of a search since replaced is dropped.
+        let _ = c.update(Msg::Loaded {
+            gen: 0,
+            older: false,
+            result: Ok(vec![]),
+        });
+        assert_eq!(c.entries.len(), PAGE + 2);
+        let _ = c.update(Msg::Loaded {
+            gen: 1,
+            older: false,
+            result: Err("нет".to_owned()),
+        });
+        assert_eq!(c.error.as_deref(), Some("нет"));
+    }
+
+    #[test]
+    fn keys_move_the_choice() {
+        let mut c = clip();
+        let _ = c.key(Press::Up);
+        assert_eq!(c.selected, None, "nothing to choose");
+        c.entries = (1..=3).map(|id| entry(id, id as i64)).collect();
+        let _ = c.key(Press::Down);
+        assert_eq!(c.selected, Some(2), "the newest first");
+        let _ = c.key(Press::Down);
+        assert_eq!(c.selected, Some(2), "nothing below the newest");
+        let _ = c.key(Press::Up);
+        let _ = c.key(Press::Up);
+        let _ = c.key(Press::Up);
+        assert_eq!(c.selected, Some(0));
+        let _ = c.update(Msg::Select(1));
+        assert_eq!(c.selected, Some(1));
+        // A question open is closed by Esc first, then the builder.
+        c.deleting = Some(2);
+        c.builder_open = true;
+        let _ = c.key(Press::Escape);
+        assert!(c.deleting.is_none() && c.builder_open);
+        // The builder's fields keep the arrows.
+        let _ = c.key(Press::Down);
+        assert_eq!(c.selected, Some(1));
+        let _ = c.key(Press::Escape);
+        assert!(!c.builder_open);
+        let _ = c.key(Press::Down);
+        assert_eq!(c.selected, Some(2));
+        // A deleted entry: the choice to its neighbour.
+        let _ = c.update(Msg::Deleted(3, Ok(String::new())));
+        assert_eq!(c.selected, Some(1));
+        assert_eq!(c.entries.len(), 2);
+    }
+
+    #[test]
+    fn an_entry_is_said() {
+        let now = days::at(2026, 10, 12, 15, 0);
+        let mut e = entry(1, days::at(2026, 10, 12, 9, 5));
+        assert_eq!(meta_line(&e, now), "09:05");
+        e.copies = 3;
+        e.last_copied = days::at(2026, 10, 12, 10, 0);
+        e.pastes = 2;
+        e.last_pasted = days::at(2026, 10, 11, 18, 30);
+        assert_eq!(
+            meta_line(&e, now),
+            "09:05 · скопировано 3 раза, последний — 10:00 · вставлено 2 раза, последний — вчера в 18:30"
+        );
+        assert_eq!(paste_line("main", 7), "paste\tmain\t7\n");
+        assert_eq!(size_words(812), "812 Б");
+        assert_eq!(size_words(3072), "3 КБ");
+        assert_eq!(size_words(1_300_000), "1,2 МБ");
+        e.preview = (1..=20)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (shown, more) = preview(&e);
+        assert!(more);
+        assert_eq!(shown.lines().count(), PREVIEW_LINES + 1);
+        e.preview = "abc".to_owned();
+        e.types = vec![("text/plain".to_owned(), 3)];
+        assert_eq!(preview(&e), ("abc".to_owned(), false));
+        e.types = vec![("text/plain".to_owned(), 5000)];
+        assert!(preview(&e).1, "the daemon cut it");
+        assert_eq!(times(21), "раз");
+        assert_eq!(times(1), "раз");
+        assert_eq!(times(13), "раз");
+    }
+}
