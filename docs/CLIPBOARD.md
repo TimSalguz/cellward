@@ -39,7 +39,10 @@ and what its index leaks are in its `lib.rs`) and the recorder are built:
 only holder of the key and the histories; `cellward-clip histories` and
 `cellward-clip list <history>` ask it on its socket. A password manager's copy
 (`x-kde-passwordManagerHint`) and a throwaway container's are not kept. The
-window is next.
+window: `vpn-zone-window clip --history <h> [--launch <pid>]` — it asks the
+daemon on the same socket, holds no key, and pastes nothing itself: Enter
+prints `paste⇥<history>⇥<id>` for the command that opened it. Images are
+named in it, not drawn (its toolkit is built without image codecs).
 
 A clipboard manager of cellward's own, by container: each container's copies
 in a history of its own, the host's in one of its own; a copy goes to another

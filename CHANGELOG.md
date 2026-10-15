@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The clipboard history's window** (`vpn-zone-window clip`): a container's
+  history as a messenger's feed — newest at the bottom, a date between days,
+  older pages on scrolling up —; search by words, by a pattern built from
+  blocks (said in words, tried live), by when it was copied or pasted and by
+  kind; an entry pasted (Enter), moved to another history or deleted.
 - **The clipboard history is recorded** (`programs.cellward.clipboard.history
   = true`): `cellward-clip daemon` keeps every copy in its container's history
   — by the mark the launch put on it —, the host's in its own, a throwaway

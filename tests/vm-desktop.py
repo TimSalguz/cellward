@@ -784,6 +784,111 @@ if wanted(HIST):
     machine.sleep(2)
 
 
+# --- 9b. The clipboard history's window -------------------------------------------
+
+CW = "The clipboard history window: the feed, a search, the pattern builder"
+
+
+def tiny_png():
+    """A 48×32 PNG of a gradient, made here: no image tool in the machine."""
+    import struct
+    import zlib
+
+    w, h = 48, 32
+    raw = b"".join(
+        b"\0" + b"".join(bytes((x * 5, y * 8, 160)) for x in range(w)) for y in range(h)
+    )
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+def window_box(at):
+    """The box of what is not niri's background above the bar: the one
+    window on the screen."""
+    w, h = at.size
+    bg = at(5, 5)
+    xs, ys = [], []
+    for y in range(0, h - 40, 4):
+        for x in range(0, w, 4):
+            if at(x, y) != bg:
+                xs.append(x)
+                ys.append(y)
+    assert xs, "no window"
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+if wanted(CW):
+    with scenario(CW):
+        alice("systemctl --user stop cellward-clip clipd", check=False)
+        alice(f"systemd-run --user --unit=clipd --setenv=WAYLAND_DISPLAY={nested} cellward-clip daemon")
+        machine.sleep(2)
+        alice("cellward container create cwb --home main")
+        png = base64.b64encode(tiny_png()).decode()
+        alice(f"echo {png} | base64 -d > ~/tiny.png")
+        # A copy of two days ago: the clock set back while it is made.
+        now = int(machine.succeed("date +%s"))
+        up = float(machine.succeed("cut -d' ' -f1 /proc/uptime"))
+        machine.succeed(f"date -s @{now - 2 * 86400 - 3600}")
+        run("cw-old", "offline -- sh -c 'printf %s \"старое сообщение позавчера\" | wl-copy; sleep 600'",
+            env="--setenv=VPN_ZONE_APPID=cw-old")
+        machine.sleep(5)
+        gone = float(machine.succeed("cut -d' ' -f1 /proc/uptime")) - up
+        machine.succeed(f"date -s @{now + int(gone) + 1}")
+        run("cw-main", "offline -- sh -c '"
+            "printf %s \"привет мир\" | wl-copy; sleep 2; "
+            "printf %s \"пароль 1234 от wifi, порт 8080\" | wl-copy; sleep 2; "
+            "printf \"строка один\\nстрока два\\nстрока три\" | wl-copy; sleep 2; "
+            "wl-copy -t image/png < ~/tiny.png; sleep 600'",
+            env="--setenv=VPN_ZONE_APPID=cw-main")
+        machine.sleep(10)
+        run("cw-b", "offline --container cwb -- sh -c 'printf %s \"слово другой истории\" | wl-copy; sleep 600'",
+            env="--setenv=VPN_ZONE_APPID=cw-b")
+        machine.sleep(5)
+        print(alice("cellward-clip list main", check=False))
+        print(alice("cellward-clip list cwb", check=False))
+        window = machine.succeed("ls -d /nix/store/*-vpn-zone-window-*/bin/vpn-zone-window | head -1").strip()
+        alice(
+            f"systemd-run --user --unit=cwwin --setenv=WAYLAND_DISPLAY={nested} "
+            f"{window} clip --history main --launch 1"
+        )
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {NIRI_MSG} --json windows' | grep -q vpn-zone-window",
+            timeout=60,
+        )
+        machine.sleep(3)
+        box = window_box(shot("clipwin-feed"))
+        print("the window:", box)
+        # Words, live: the feed is what has them.
+        alice(f"WAYLAND_DISPLAY={nested} wtype 1234")
+        machine.sleep(2)
+        shot("clipwin-search")
+        alice(f"WAYLAND_DISPLAY={nested} wtype -k BackSpace -k BackSpace -k BackSpace -k BackSpace")
+        machine.sleep(1)
+        # «⋯», at the right end of the search bar.
+        left, top, right, bottom = box
+        click(right - 30, bottom - 28, rest=0.2)
+        machine.sleep(1.5)
+        shot("clipwin-builder")
+        # Esc closes the builder, Enter pastes the chosen — the newest.
+        alice(f"WAYLAND_DISPLAY={nested} wtype -k Escape")
+        machine.sleep(1)
+        alice(f"WAYLAND_DISPLAY={nested} wtype -k Return")
+        machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=20)
+        said = alice("journalctl --user --no-pager -o cat -u cwwin", check=False)
+        print(said)
+        assert "paste\tmain\t" in said, said
+    alice("systemctl --user stop clipd cw-old cw-main cw-b cwwin", check=False)
+    machine.sleep(2)
+
+
 # --- 10. Whose a browser's connection is ----------------------------------------
 
 CH = "Chromium's connection: the question names the program"
