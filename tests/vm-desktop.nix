@@ -18,6 +18,8 @@
 #     its home, a new one is empty, the launch window offers the open one,
 #     a program open there launched again asks — and the home goes with
 #     its last program;
+#   - the permissions in the launch window: one changed there is kept in
+#     the container's record and shown as it is at the next launch;
 #   - Firefox in a container layered over the home and in one of its own;
 #     TeamSpeak too where its tarball is given (`teamspeakSrc`).
 #

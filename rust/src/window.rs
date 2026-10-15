@@ -28,6 +28,13 @@
 //! offer⇥<line>⇥<text>                 (what the program's preset offers its
 //!                                      container, `crate::presets`: a
 //!                                      checkbox each, unticked)
+//! perm⇥<key>⇥<label>⇥<value>:<text>;…  (a permission, its choices: one row
+//!                                      of the permissions under the lists)
+//! permof⇥<tag>⇥<scope>⇥<key>=<value>[!],…
+//!                                     (a container's permissions as they
+//!                                      are: whom a change is for, and each
+//!                                      value — `!` one that cannot be
+//!                                      changed here; none: nothing to set)
 //! ```
 //!
 //! Flags, comma-separated: `selected`; `dead` (the tunnel does not answer);
@@ -44,6 +51,8 @@
 //! pin-container⇥0|1
 //! rule⇥0|1                            (where the request had one)
 //! offer⇥<line>                        (each offer ticked)
+//! perm⇥<key>⇥<value>                  (each permission changed for the
+//!                                      container chosen)
 //! ```
 //!
 //! The same window is the hotkey menu of a running program
@@ -98,6 +107,28 @@ pub struct Request {
     /// What the program's preset offers its container (`crate::presets`):
     /// `(line, text)`, a checkbox each, unticked.
     pub offers: Vec<(String, String)>,
+    /// The permissions a container can be given here, a row each.
+    pub perms: Vec<Perm>,
+    /// Each container's, by its tag.
+    pub perm_of: Vec<PermOf>,
+}
+
+/// A permission's row: its key, its name, and its choices `(value, text)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Perm {
+    pub key: String,
+    pub label: String,
+    pub choices: Vec<(String, String)>,
+}
+
+/// A container's permissions as they are: whom a change is for (`scope`,
+/// for a person), and `(key, value, fixed)` — fixed: not to be changed
+/// here (Nix's, or not this container's to say).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PermOf {
+    pub tag: String,
+    pub scope: String,
+    pub values: Vec<(String, String, bool)>,
 }
 
 /// The hotkey menu: entries to choose one of.
@@ -314,6 +345,8 @@ pub struct Reply {
     pub rule: bool,
     /// The offers ticked, by their lines.
     pub offers: Vec<String>,
+    /// The permissions changed for the container chosen: `(key, value)`.
+    pub perms: Vec<(String, String)>,
 }
 
 /// A field as the format can carry it: tabs and line breaks become spaces.
@@ -388,7 +421,48 @@ pub fn render(req: &Request) -> String {
     for (line, text) in &req.offers {
         out.push_str(&format!("offer\t{}\t{}\n", clean(line), clean(text)));
     }
+    for perm in &req.perms {
+        let choices: Vec<String> = perm
+            .choices
+            .iter()
+            .map(|(value, text)| format!("{}:{}", word(value), clean(text).replace(';', ",")))
+            .collect();
+        out.push_str(&format!(
+            "perm\t{}\t{}\t{}\n",
+            word(&perm.key),
+            clean(&perm.label),
+            choices.join(";")
+        ));
+    }
+    for of in &req.perm_of {
+        let values: Vec<String> = of
+            .values
+            .iter()
+            .map(|(key, value, fixed)| {
+                format!(
+                    "{}={}{}",
+                    word(key),
+                    word(value),
+                    if *fixed { "!" } else { "" }
+                )
+            })
+            .collect();
+        out.push_str(&format!(
+            "permof\t{}\t{}\t{}\n",
+            clean(&of.tag),
+            clean(&of.scope),
+            values.join(",")
+        ));
+    }
     out
+}
+
+/// A key or a value of a permission: letters, digits, `_` and `-` only — the
+/// separators of its line never in it.
+fn word(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        .collect()
 }
 
 /// The window's answer. `None` when it is not one: no network or no container
@@ -406,6 +480,11 @@ pub fn parse_reply(text: &str) -> Option<Reply> {
             "pin-container" => reply.pin_container = value == "1",
             "rule" => reply.rule = value == "1",
             "offer" if !value.is_empty() => reply.offers.push(value.to_owned()),
+            "perm" => {
+                if let Some((key, value)) = value.split_once('\t') {
+                    reply.perms.push((key.to_owned(), value.to_owned()));
+                }
+            }
             _ => {}
         }
     }
@@ -539,11 +618,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The permissions go a line each, their words kept to what the line's
+    /// separators cannot be part of.
+    #[test]
+    fn the_permissions_go_a_line_each() {
+        let req = Request {
+            perms: vec![Perm {
+                key: "x11".to_owned(),
+                label: "Свой\tX".to_owned(),
+                choices: vec![
+                    (
+                        "default".to_owned(),
+                        "как у всех (выкл.; сейчас)".to_owned(),
+                    ),
+                    ("on".to_owned(), "вкл.".to_owned()),
+                ],
+            }],
+            perm_of: vec![PermOf {
+                tag: "work".to_owned(),
+                scope: "Для всех программ «work»".to_owned(),
+                values: vec![
+                    ("x11".to_owned(), "on".to_owned(), false),
+                    ("camera".to_owned(), "no,=!".to_owned(), true),
+                ],
+            }],
+            ..Request::default()
+        };
+        let text = render(&req);
+        assert!(
+            text.contains("perm\tx11\tСвой X\tdefault:как у всех (выкл., сейчас);on:вкл.\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("permof\twork\tДля всех программ «work»\tx11=on,camera=no!\n"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn an_answer_needs_a_network_and_a_container() {
         let reply = parse_reply(
             "net\tnl\ncontainer\t__newsb__\nname\tобщая\npin-net\t1\npin-container\t0\nrule\t1\n\
-             offer\tcamera=on\noffer\t\n",
+             offer\tcamera=on\noffer\t\nperm\tx11\ton\nperm\tbroken\n",
         )
         .unwrap();
         assert_eq!(
@@ -556,6 +672,7 @@ mod tests {
                 pin_container: false,
                 rule: true,
                 offers: vec!["camera=on".to_owned()],
+                perms: vec![("x11".to_owned(), "on".to_owned())],
             }
         );
         // The main container is the empty tag — present, and empty.

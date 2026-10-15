@@ -140,6 +140,7 @@ pub mod journal;
 pub mod json;
 pub mod kill;
 pub mod launch;
+pub mod launch_perms;
 pub mod links;
 pub mod microphone;
 pub mod netask;

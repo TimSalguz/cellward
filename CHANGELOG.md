@@ -6,6 +6,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Permissions in the launch window** (2026-10-15, the owner): under the
+  lists, what the chosen container may do as it is now — its own X server,
+  the camera, the microphone, the screen, the network of a program with
+  no rule, the focus — changed right there and kept in the container's
+  record, as `cellward container set` keeps it; the window says whom a
+  change is for. A new throwaway container has no record: its X server
+  and camera are that launch's alone (new `run --with x11=on|off`,
+  `--with camera=no|black|ask|yes`, refused for a container with a record
+  and to a zone's program). What Nix set is shown and not changeable.
 - **A throwaway container can be joined while it is open** (2026-10-15,
   the owner). Its home is no longer one launch's: it lives in its
   instance's own memory, made by the instance's keeper, and every program

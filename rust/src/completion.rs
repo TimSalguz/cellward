@@ -200,6 +200,8 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                             "--sandbox",
                             "--fs-sandbox",
                             "--tmp-profile",
+                            "--join",
+                            "--with",
                             "--",
                         ],
                     ),

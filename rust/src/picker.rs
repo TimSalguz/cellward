@@ -481,6 +481,9 @@ pub struct Container {
     /// With `fs_sandbox`: the open throwaway sandbox joined (`--fs-sandbox
     /// --join`), by its name; empty for a new one.
     pub join: String,
+    /// This launch's own permissions (`run --with`), for a container with
+    /// no record to keep them in (`crate::launch_perms`).
+    pub with: Vec<OsString>,
 }
 
 impl Container {
@@ -1277,6 +1280,7 @@ fn ask_window(
     if !container.is_throwaway_container() {
         remember(&tools.state, ".lastprofile", key, &selector);
     }
+    let container = with_permissions(tools, key, &reply, container);
     let shared = !reply.pin_container && shared_default(memory, &container, None);
     let container = settle_network(tools, key, container, &reply.net, reply.pin_net, shared);
     // The preset's offers ticked: the chosen container's words — one that
@@ -1292,6 +1296,67 @@ fn ask_window(
         }
     }
     Some(Some((reply.net, container)))
+}
+
+/// The permissions the window changed, where they are kept: the record of
+/// the container chosen (made first, for the program's own one not made
+/// yet), or this launch's own (`run --with`) for one with no record. What
+/// came of each to the journal of the picker, a refusal (Nix's) to the
+/// person too.
+fn with_permissions(
+    tools: &Tools,
+    key: &str,
+    reply: &window::Reply,
+    mut container: Container,
+) -> Container {
+    let changes = crate::launch_perms::valid(&reply.perms);
+    if changes.is_empty() {
+        return container;
+    }
+    let record = match reply.container.as_str() {
+        "" => Some(crate::container::MAIN_RECORD.to_owned()),
+        "__ownsb__" => {
+            let own = own_name(key);
+            if !container_exists(tools, &own) {
+                if let Err(e) =
+                    crate::container::create(tools, &own, crate::container::Home::Private)
+                {
+                    eprintln!("vpn-zone-pick: свой контейнер «{own}» не создан: {e}");
+                }
+            }
+            Some(own)
+        }
+        THROWAWAY | TMP => {
+            container.with = crate::launch_perms::with_args(&changes);
+            None
+        }
+        "__newsb__" | "__new__" => Some(container.profile.clone()).filter(|p| !p.is_empty()),
+        tag if launch::throwaway_of(tag).is_some()
+            || tag.starts_with(TMPJOIN_PREFIX)
+            || tag == OPEN_ROW.0 =>
+        {
+            None
+        }
+        tag => Some(tag.to_owned()),
+    };
+    if let Some(record) = record {
+        for done in crate::launch_perms::apply(tools, &record, &changes) {
+            match done {
+                Ok(line) => eprintln!("vpn-zone-pick: «{record}»: {line}"),
+                Err(why) => {
+                    eprintln!("vpn-zone-pick: «{record}»: {why}");
+                    dialog::notify(
+                        &tools.notify_send,
+                        None,
+                        "8000",
+                        "Разрешение не изменено",
+                        &why,
+                    );
+                }
+            }
+        }
+    }
+    container
 }
 
 /// Is this container the program's by the global default alone — a named
@@ -1540,7 +1605,101 @@ fn window_request(
             .map_or(zone, |n| n.label.as_str());
         req.notes.push(format!("Уже открыта: {shown}"));
     }
+    // What each container may do, as it is now, to change right there.
+    req.perms = crate::launch_perms::rows(tools);
+    let open: Vec<(&str, &[String])> = sandboxes
+        .iter()
+        .chain(&profiles)
+        .map(|r| (r.name.as_str(), r.open.as_slice()))
+        .collect();
+    let own = own_name(key);
+    let own_made = sandboxes.iter().any(|r| r.name == own);
+    req.perm_of = req
+        .containers
+        .iter()
+        .filter_map(|item| {
+            let scope = perm_scope(&item.tag, &own, own_made, &open)?;
+            let values = match scope {
+                PermScope::Record(record) => crate::launch_perms::of_record(tools, record),
+                PermScope::New => crate::launch_perms::of_new(),
+                PermScope::Launch => crate::launch_perms::of_launch(false),
+                PermScope::Joined | PermScope::Open => crate::launch_perms::of_launch(true),
+            };
+            Some(crate::launch_perms::perm_of(
+                &item.tag,
+                crate::launch_perms::scope(scope.kind(&item.tag, &own, own_made, &open)),
+                if scope == PermScope::Open {
+                    Vec::new()
+                } else {
+                    values
+                },
+            ))
+        })
+        .collect();
     req
+}
+
+/// Where the permissions of a container row of the window are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermScope<'a> {
+    /// Its record: the real home's, the program's own, a named one's.
+    Record(&'a str),
+    /// One to be made: nothing of its own yet.
+    New,
+    /// None to keep them: this launch's alone (a new throwaway one).
+    Launch,
+    /// An open throwaway one: what it was opened with.
+    Joined,
+    /// «Без изоляции»: everything, nothing to say.
+    Open,
+}
+
+impl<'a> PermScope<'a> {
+    fn kind(
+        self,
+        tag: &'a str,
+        own: &'a str,
+        own_made: bool,
+        open: &[(&'a str, &'a [String])],
+    ) -> crate::launch_perms::Scope<'a> {
+        use crate::launch_perms::Scope;
+        match self {
+            PermScope::Record(crate::container::MAIN_RECORD) => Scope::Main,
+            PermScope::Record(name) if name == own => Scope::Own(own, own_made),
+            PermScope::Record(name) => Scope::Named(
+                name,
+                open.iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(&[][..], |(_, o)| *o),
+            ),
+            PermScope::New if tag == "__ownsb__" => Scope::Own(own, false),
+            PermScope::New => Scope::New,
+            PermScope::Launch => Scope::Launch,
+            PermScope::Joined => Scope::Joined,
+            PermScope::Open => Scope::Open,
+        }
+    }
+}
+
+/// The permissions of the window's container row `tag`: whose they are.
+/// `None` for a row it does not know.
+fn perm_scope<'a>(
+    tag: &'a str,
+    own: &'a str,
+    own_made: bool,
+    open: &[(&'a str, &'a [String])],
+) -> Option<PermScope<'a>> {
+    Some(match tag {
+        "" => PermScope::Record(crate::container::MAIN_RECORD),
+        t if t == OPEN_ROW.0 => PermScope::Open,
+        "__ownsb__" if own_made => PermScope::Record(own),
+        "__ownsb__" | "__newsb__" | "__new__" => PermScope::New,
+        THROWAWAY | TMP => PermScope::Launch,
+        t if launch::throwaway_of(t).is_some() || t.starts_with(TMPJOIN_PREFIX) => {
+            PermScope::Joined
+        }
+        t => PermScope::Record(open.iter().find(|(n, _)| *n == t)?.0),
+    })
 }
 
 /// Show the launch window. `None`: it would not start. `Some(None)`: closed,
@@ -1714,6 +1873,7 @@ pub fn run_argv(
             argv.push(container.join.as_str().into());
         }
     }
+    argv.extend(container.with.iter().cloned());
     argv.push("--".into());
     argv.extend(cmd.iter().cloned());
     argv
@@ -4355,6 +4515,29 @@ mod tests {
                 ("__new__", "Новый контейнер — слой над домом…"),
             ]
         );
+    }
+
+    /// Each row of the window shows the permissions of where they are kept:
+    /// a record, a container to be made, this launch alone, or nothing to
+    /// say.
+    #[test]
+    fn each_container_row_shows_whose_permissions_it_has() {
+        let open = [("work", &[][..]), ("app-firefox", &[][..])];
+        let of = |tag, made| perm_scope(tag, "app-firefox", made, &open);
+        assert_eq!(of("", true), Some(PermScope::Record("main")));
+        assert_eq!(of("open", true), Some(PermScope::Open));
+        assert_eq!(
+            of("__ownsb__", true),
+            Some(PermScope::Record("app-firefox"))
+        );
+        assert_eq!(of("__ownsb__", false), Some(PermScope::New));
+        assert_eq!(of("__newsb__", true), Some(PermScope::New));
+        assert_eq!(of("__fs__", true), Some(PermScope::Launch));
+        assert_eq!(of("__tmp__", true), Some(PermScope::Launch));
+        assert_eq!(of("__fs__:7-9", true), Some(PermScope::Joined));
+        assert_eq!(of("tmpjoin:/x", true), Some(PermScope::Joined));
+        assert_eq!(of("work", true), Some(PermScope::Record("work")));
+        assert_eq!(of("gone", true), None);
     }
 
     /// A remembered choice that is no longer offered starts the question on
