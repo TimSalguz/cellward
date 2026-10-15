@@ -674,7 +674,36 @@ if wanted(PW):
     machine.sleep(3)
 
 
-# --- 7. Whose a browser's connection is ----------------------------------------
+# --- 7. A launch from a program of another launch ---------------------------
+
+NESTED = "A program under the proxy starts another through cellward: its window comes"
+
+if wanted(NESTED):
+    with scenario(NESTED):
+        # As a file manager opens a file in another program: a shell under
+        # the proxy runs `cellward run`, with the restricted socket in its
+        # WAYLAND_DISPLAY.
+        run(
+            "nest-outer",
+            "unconfined -- foot --app-id nest-outer sh -c "
+            "'sleep 3; cellward run unconfined -- foot --app-id nest-inner; sleep 600'",
+            env="--setenv=VPN_ZONE_APPID=nest-outer",
+        )
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {NIRI_MSG} --json windows' | grep -q nest-inner",
+            timeout=60,
+        )
+        shot("nest")
+        print(alice("journalctl --user --no-pager -o cat | grep -F 'outside this launch' | tail -5", check=False))
+        machine.fail(
+            "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 journalctl --user --no-pager -o cat' "
+            "| grep -F 'outside this launch'"
+        )
+    alice("systemctl --user stop nest-outer", check=False)
+    machine.sleep(2)
+
+
+# --- 8. Whose a browser's connection is ----------------------------------------
 
 CH = "Chromium's connection: the question names the program"
 
@@ -699,7 +728,7 @@ if wanted(CH):
     machine.sleep(3)
 
 
-# --- 8. Programs in a layer over the home and in a home of their own -------
+# --- 9. Programs in a layer over the home and in a home of their own -------
 
 for home in ["overlay", "private"]:
     for program, cmd, app in [

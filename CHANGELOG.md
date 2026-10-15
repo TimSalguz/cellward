@@ -60,6 +60,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   warns.
 
 ### Fixed
+- A program started through cellward from a program under the Wayland
+  proxy (a file manager opening a file in another program) got that
+  program's restricted socket as its compositor: the proxy refused it, and
+  nothing opened. A launch's program is now told the session's compositor
+  (`VPN_ZONE_COMPOSITOR`), and a launch, its window and its proxy started
+  from it use that.
+- A program brought back from a tray by a click in the launcher is looked
+  for for ten seconds, not three: a messenger under load was given up on.
 - A connection whose launch was not found was asked about as
   «Неизвестная программа». The question now says what is known: the
   process holding the socket by its name, its container, "программа не

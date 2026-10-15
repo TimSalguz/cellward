@@ -44,6 +44,9 @@ const USAGE: &str = "cellward — сетевые зоны с VPN, без root\n(
 
 /// Entry point of the `vpn-zone` binary.
 pub fn main() -> ExitCode {
+    // From a program of another launch: the session's compositor
+    // (`wl_sandbox::session_compositor`).
+    crate::wl_sandbox::session_compositor();
     // `args_os`: a launcher can hand a file name through a `%U` field code, and
     // file names are bytes. Refusing to start a program because its argument is
     // not valid Unicode would be a regression against every other launcher.
