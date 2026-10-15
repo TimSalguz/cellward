@@ -770,7 +770,7 @@ fn ask_clip(request: &str) -> Result<String, String> {
 /// истории»: the history's window for the person to choose an entry in
 /// (`vpn-zone-window clip`); the entry chosen made the selection by the
 /// history (`select`), and pasted into the launch — its proxy presses
-/// Ctrl+V for its program (`crate::wl_proxy::PASTE_ASK`). Nothing of the
+/// Shift+Insert for its program (`crate::wl_proxy::PASTE_ASK`). Nothing of the
 /// history goes anywhere but where the person chose it to.
 ///
 /// `--entry <history> <id>`: that entry, without the window — for scripts.

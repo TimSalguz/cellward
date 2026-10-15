@@ -593,18 +593,33 @@ impl App {
             .collect();
         let mut types: Vec<String> = self.own.keys().cloned().collect();
         types.push(OWN_MARK.to_owned());
+        // Both selections, the primary one first: the paste a launch's proxy
+        // presses is Shift+Insert, which terminals take as a paste of the
+        // primary selection, and it is pressed once the clipboard's arrives
+        // (`crate::clip::take_paste` of the core) — the primary one there by
+        // then.
         if let (Some(manager), Some(device)) = (&self.ext, &self.ext_device) {
-            let source = manager.create_data_source(qh, ());
-            for t in &types {
-                source.offer(t.clone());
-            }
-            device.set_selection(Some(&source));
+            let source = |qh| {
+                let source = manager.create_data_source(qh, ());
+                for t in &types {
+                    source.offer(t.clone());
+                }
+                source
+            };
+            device.set_primary_selection(Some(&source(qh)));
+            device.set_selection(Some(&source(qh)));
         } else if let (Some(manager), Some(device)) = (&self.wlr, &self.wlr_device) {
-            let source = manager.create_data_source(qh, ());
-            for t in &types {
-                source.offer(t.clone());
+            let source = |qh| {
+                let source = manager.create_data_source(qh, ());
+                for t in &types {
+                    source.offer(t.clone());
+                }
+                source
+            };
+            if device.version() >= 2 {
+                device.set_primary_selection(Some(&source(qh)));
             }
-            device.set_selection(Some(&source));
+            device.set_selection(Some(&source(qh)));
         }
     }
 

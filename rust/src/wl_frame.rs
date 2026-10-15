@@ -4047,7 +4047,7 @@ struct Focus {
     serial: u32,
     /// Depressed, latched, locked, group: as the compositor said last.
     mods: (u32, u32, u32, u32),
-    /// Ctrl's mask and V's key, by its keymap.
+    /// The paste's modifier mask and key, by its keymap.
     chord: (u32, u32),
 }
 
@@ -4083,7 +4083,8 @@ fn paste_waiting() {
     }
 }
 
-/// Ctrl+V, pressed and let go of, the modifiers as they were after it. Not
+/// The paste's chord (`crate::clip::paste_chord`), pressed and let go of,
+/// the modifiers as they were after it. Not
 /// a paste of the program's own: it reads what the history set, as a paste
 /// of the person's ([`crate::clip::pasting`]).
 fn press_paste(keyboard: &WlKeyboard, f: Focus) {

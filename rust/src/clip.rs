@@ -275,7 +275,7 @@ pub fn pasting(which: Which) {
 
 /// The person chose an entry of the clipboard history to paste into this
 /// launch (`cellward clip-window`): the history made it the selection, and
-/// the proxy presses Ctrl+V for the program — now, where a keyboard of it
+/// the proxy presses Shift+Insert for the program — now, where a keyboard of it
 /// has the focus, or when one gets it, within [`PASTE_WINDOW`].
 pub fn want_paste() {
     STATE.with(|s| s.inject.set(Some(Instant::now() + PASTE_WINDOW)));
@@ -284,7 +284,7 @@ pub fn want_paste() {
 
 /// Whether a paste is to be pressed now: true once, within its time, and
 /// only on the history's selection — the program told of it, so that the
-/// Ctrl+V reads what the person chose, not what was there before.
+/// paste reads what the person chose, not what was there before.
 pub fn take_paste() -> bool {
     STATE.with(|s| {
         if !s.history_selected.get() {
@@ -325,9 +325,13 @@ pub fn now_ms() -> u32 {
     (t.tv_sec as u64 * 1000 + t.tv_nsec as u64 / 1_000_000) as u32
 }
 
-/// Ctrl's mask and V's key, for a paste pressed by the proxy.
+/// The modifier's mask and the key of a paste pressed by the proxy:
+/// Shift+Insert. Ctrl+V is no paste in a terminal (it quotes the next key
+/// there); Shift+Insert is one nearly everywhere — GTK, Qt, Chromium,
+/// Firefox, LibreOffice — and in terminals of the primary selection, which
+/// the history sets too.
 pub fn paste_chord(keys: &PasteKeys) -> (u32, u32) {
-    (CONTROL, keys.v.first().copied().unwrap_or(KEY_V))
+    (SHIFT, keys.insert.first().copied().unwrap_or(KEY_INSERT))
 }
 
 /// An offer the person drags onto the program: read as dropped.
