@@ -244,6 +244,52 @@ fn program_of(pid: i32, launches: &HashMap<i32, String>) -> Option<(String, i32)
     None
 }
 
+/// The one program open in instance `id`, in `network`, by the live records
+/// of its container's registry directory `registry` (under `running`):
+/// its key and a launch's pid — when every live launch of the instance is
+/// of that one program. A flow whose socket was gone before it was looked
+/// at (a browser's short QUIC exchange) is then that program's, not
+/// "unknown": nothing else of the instance was started by a launch, and a
+/// container of one program is the common case (its own). Two programs, or
+/// none: `None` — nothing guessed. Not for a throwaway layer, whose
+/// directory is not the instance's alone.
+pub fn sole_program(
+    running: &Path,
+    registry: &Path,
+    id: &str,
+    network: &str,
+) -> Option<(String, i32)> {
+    use crate::instance::{FS_PREFIX, TMP_PREFIX};
+    if id.starts_with(TMP_PREFIX) {
+        return None;
+    }
+    let throwaway = id
+        .strip_prefix(FS_PREFIX)
+        .map(crate::launch::throwaway_selector);
+    let main = crate::instance::container_of(id).is_none() && throwaway.is_none();
+    let alive = |pid| crate::registry::alive(running, pid);
+    let mut found: Option<(String, i32)> = None;
+    for (key, record) in crate::registry::live_records(registry, &alive) {
+        if crate::launch::network_name(&record.zone) != network {
+            continue;
+        }
+        let ours = match &throwaway {
+            Some(selector) => record.selector == *selector,
+            None if main => record.selector.is_empty(),
+            None => true,
+        };
+        if !ours {
+            continue;
+        }
+        match &found {
+            Some((had, _)) if *had != key => return None,
+            Some(_) => {}
+            None => found = Some((key, record.pid)),
+        }
+    }
+    found
+}
+
 /// The launch process `pid` belongs to, among the container's in
 /// `registry`: its program's key and the launch's pid.
 pub fn launch_of(registry: &Path, pid: i32) -> Option<(String, i32)> {
@@ -472,6 +518,41 @@ fn append(dir: &Path, text: &str) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// An ownerless flow is the instance's program only when it has one:
+    /// the live launches of this instance alone — its network, its kind —
+    /// all of one program.
+    #[test]
+    fn an_instance_of_one_program_owns_what_nobody_was_found_for() {
+        let base = std::env::temp_dir().join(format!("vz-sole-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let running = base.join(".running");
+        let main = running.join(crate::registry::MAIN);
+        fs::create_dir_all(&main).unwrap();
+        let me = std::process::id() as i32;
+        let gone = 999_999_999;
+        // Another network's launch, a throwaway's, a dead one: none count.
+        fs::write(main.join("browser"), format!("{me} nl \n{me} de \n")).unwrap();
+        fs::write(
+            main.join("chat"),
+            format!("{gone} nl \n{me} nl __fs__:1-2\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            sole_program(&running, &main, "main:nl", "nl"),
+            Some(("browser".to_owned(), me))
+        );
+        assert_eq!(
+            sole_program(&running, &main, ":fs:1-2", "nl"),
+            Some(("chat".to_owned(), me))
+        );
+        assert_eq!(sole_program(&running, &main, ":tmp:x", "nl"), None);
+        // Two programs: nobody's.
+        fs::write(main.join("chat"), format!("{me} nl \n")).unwrap();
+        assert_eq!(sole_program(&running, &main, "main:nl", "nl"), None);
+        let _ = fs::remove_dir_all(&base);
+    }
+
     use super::*;
     use crate::flows::Key;
 

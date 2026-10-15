@@ -55,7 +55,10 @@ Remaining boundaries found in this review:
   to a stricter Nix policy. It does not change the container's chosen route.
 - Unidentified programs share the `None` identity in the current asker. A
   temporary answer for one can affect other unidentified programs in the same
-  instance. These rules do not isolate programs from each other inside a
+  instance. A flow whose socket was gone before it was looked at (a
+  browser's short QUIC exchange) is the instance's program when every live
+  launch of the instance is of one program — the common case of a program's
+  own container; with two or more it stays unidentified. These rules do not isolate programs from each other inside a
   container; use separate containers for that boundary.
 - Rule changes are evaluated for new flows. They do not revoke an already
   authorized connection. The stale-question fix also checks connections that
