@@ -1770,6 +1770,12 @@ let
           for path in [".config/autostart/x.desktop", ".local/share/applications/x.desktop", ".config/systemd/x"]:
               in_zone(hp, f"sh -c '! touch /home/alice/{path}'")
           alice("touch ~/.config/autostart/from-host && rm ~/.config/autostart/from-host")
+          # Which program the host opens links with: made before the zone came
+          # up, nothing there before, so neither written nor put in place
+          # (docs/LEAK-MODEL.md §11).
+          machine.succeed("test -f /home/alice/.config/mimeapps.list")
+          in_zone(hp, "sh -c '! echo x >> /home/alice/.config/mimeapps.list'")
+          in_zone(hp, "sh -c '! rm /home/alice/.config/mimeapps.list'")
           # Nor is the name of a directory above one of them the zone's to
           # change (review 2026-09-27: `mv ~/.config` took the covers along,
           # and a new ~/.config/autostart was the host's).

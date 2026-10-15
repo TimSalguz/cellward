@@ -1072,6 +1072,21 @@ fn prepare_host(zone: &Zone, label: &str) {
                     .create(&path);
             }
         }
+        // Which program the host opens links and files with: made empty when
+        // missing, for the same reason — a container that could make
+        // `~/.config/mimeapps.list`, or the desktop's own that is read before
+        // it, would choose the host's browser (`docs/LEAK-MODEL.md` §11).
+        let desktops = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        for file in mimeapps_to_make(&zone.home, &desktops) {
+            if fs::symlink_metadata(&file).is_err() {
+                use std::os::unix::fs::OpenOptionsExt;
+                let _ = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&file);
+            }
+        }
         // The Nix client's cache, which a container's own goes over.
         let nix_cache = zone.home.join(NIX_CACHE);
         if fs::symlink_metadata(&nix_cache).is_err() {
@@ -6847,7 +6862,44 @@ pub(crate) fn host_run_places(home: &Path) -> Vec<PathBuf> {
         .iter()
         .chain(HOST_RUNS_IN_ZONES)
         .map(|p| home.join(p))
+        .chain(desktop_mimeapps(home))
         .collect()
+}
+
+/// The desktops' own `mimeapps.list` files in `~/.config` that are there
+/// (`kde-mimeapps.list`, `niri-mimeapps.list`…): read before the common one
+/// by a desktop of that name, so covered with it.
+fn desktop_mimeapps(home: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(home.join(".config")) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.ends_with("-mimeapps.list") && !name.starts_with('.')
+        })
+        .map(|e| e.path())
+        .collect();
+    out.sort();
+    out
+}
+
+/// The `mimeapps.list` files made empty before a hermetic space comes up,
+/// when missing: the common one, and the session's `desktops`' own
+/// (`XDG_CURRENT_DESKTOP`, as the host's programs read them).
+fn mimeapps_to_make(home: &Path, desktops: &str) -> Vec<PathBuf> {
+    let config = home.join(".config");
+    let mut out = vec![config.join("mimeapps.list")];
+    for desktop in desktops.split(':').filter(|d| {
+        !d.is_empty()
+            && d.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }) {
+        out.push(config.join(format!("{}-mimeapps.list", desktop.to_ascii_lowercase())));
+    }
+    out
 }
 
 /// What the host runs from the home, read-only in a hermetic zone (owner,
@@ -6951,6 +7003,7 @@ fn pin_parents(zone: &Zone) -> Result<(), String> {
         .chain(crate::home_layer::STORAGE.iter())
         .map(|p| zone.home.join(p))
         .chain(zone.protect.iter().cloned())
+        .chain(desktop_mimeapps(&zone.home))
         .collect();
     places.extend(input_method_places(&zone.home));
     // The state directory: a zone's is its directory's parent, an
@@ -10078,6 +10131,32 @@ mod tests {
         // Not there, or not `true`: off.
         assert!(!frozen(text, "audio_manager"));
         assert!(!frozen("hermetic=yes\n", "hermetic"));
+    }
+
+    /// Which program opens links: the common file and the desktops' own,
+    /// made when missing — the session's desktops by their names, nothing
+    /// that is not one — and those there covered with the rest.
+    #[test]
+    fn the_hosts_link_handlers_are_made_and_covered() {
+        let home = std::env::temp_dir().join(format!("vz-mime-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".config")).unwrap();
+        fs::write(home.join(".config/kde-mimeapps.list"), "").unwrap();
+        fs::write(home.join(".config/notes.txt"), "").unwrap();
+        let covered = host_run_places(&home);
+        assert!(covered.contains(&home.join(".config/mimeapps.list")));
+        assert!(covered.contains(&home.join(".config/kde-mimeapps.list")));
+        assert!(!covered.contains(&home.join(".config/notes.txt")));
+        let made = mimeapps_to_make(&home, "niri:../x:GNOME");
+        assert_eq!(
+            made,
+            [
+                home.join(".config/mimeapps.list"),
+                home.join(".config/niri-mimeapps.list"),
+                home.join(".config/gnome-mimeapps.list"),
+            ]
+        );
+        let _ = fs::remove_dir_all(&home);
     }
 
     /// The places the host runs, each once, and what the review of

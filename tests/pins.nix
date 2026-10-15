@@ -11,9 +11,9 @@
 {
   # nixpkgs, branch nixos-26.05
   nixpkgs = builtins.fetchTarball {
-    name = "nixpkgs-nixos-26.05-062346a6";
-    url = "https://github.com/NixOS/nixpkgs/archive/062346a6d85bc4b49dfaa61c986e9c5be21217d1.tar.gz";
-    sha256 = "063ximydq4y927a6vq6aajvznf0mdyxnv4z29q8j09jiss5q5585";
+    name = "nixpkgs-nixos-26.05-a033e66a";
+    url = "https://github.com/NixOS/nixpkgs/archive/a033e66ab94a6bedf2c3d58d93a36319d3cbbbaf.tar.gz";
+    sha256 = "140gms89455qvs29g7zwnx66z0h9ycf4hvfg7lh84rqi79sh7yfa";
   };
 
   # home-manager, branch release-26.05 (paired with the nixpkgs above)

@@ -228,6 +228,16 @@ pub fn migrate_slots(container_dir: &Path) {
         if !from.is_dir() || fs::symlink_metadata(&to).is_ok() {
             continue;
         }
+        // The layer is its programs' to write: a link left along the way
+        // (`upper/.local` → anywhere) would take the move there.
+        if linked_on_the_way(container_dir, &to) {
+            eprintln!(
+                "profile: {} not moved into the layer: a link on the way to {}",
+                from.display(),
+                to.display()
+            );
+            continue;
+        }
         let moved = to
             .parent()
             .map_or(Ok(()), fs::create_dir_all)
@@ -240,6 +250,24 @@ pub fn migrate_slots(container_dir: &Path) {
             );
         }
     }
+}
+
+/// Whether a part of `to` below `base` is a link (or not a directory, but
+/// the last) — where a move must not go.
+fn linked_on_the_way(base: &Path, to: &Path) -> bool {
+    let Ok(rel) = to.strip_prefix(base) else {
+        return true;
+    };
+    let mut at = base.to_path_buf();
+    for part in rel.components() {
+        at.push(part);
+        match fs::symlink_metadata(&at) {
+            Ok(m) if m.file_type().is_symlink() => return true,
+            Ok(m) if !m.is_dir() && at != to => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Bind `rel` of the real home (`real`, a descriptor opened before the layer)
@@ -336,6 +364,23 @@ fn open_beneath(dir: &OwnedFd, rel: &Path) -> Option<OwnedFd> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A link in the layer on the way to where a slot moves stops the move.
+    #[test]
+    fn a_slot_is_not_moved_through_a_link() {
+        let base = std::env::temp_dir().join(format!("vz-slot-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("home/upper")).unwrap();
+        fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(base.join("elsewhere"), base.join("home/upper/.local")).unwrap();
+        assert!(linked_on_the_way(
+            &base,
+            &base.join("home/upper/.local/share")
+        ));
+        assert!(!linked_on_the_way(&base, &base.join("home/upper/.config")));
+        let _ = fs::remove_dir_all(&base);
+    }
+
     use super::*;
 
     /// What is given back is reached below the real home through no link:

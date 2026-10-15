@@ -1287,10 +1287,24 @@ pub fn write_if_changed(target: &Path, content: &str) -> u32 {
 /// a fragment. Two passes do run at once: the path unit reacts to the very
 /// write a manual `vpn-zone sync` makes. The temporary does not end in
 /// `.desktop`, so no pass ever collects it.
+///
+/// The temporary is made new, never opened where it is: its name is known,
+/// and a link put there by anyone who writes the directory would take the
+/// write wherever it points (the class of CVE-2026-87766). A leftover is
+/// removed first — a link itself, not what it names.
 pub fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     let tmp = target.with_file_name(format!(".{name}.vpn-zone-tmp"));
-    fs::write(&tmp, bytes)
+    let _ = fs::remove_file(&tmp);
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(bytes))
         .and_then(|()| fs::rename(&tmp, target))
         .inspect_err(|_| {
             let _ = fs::remove_file(&tmp);
