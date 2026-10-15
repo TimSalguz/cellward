@@ -23,6 +23,8 @@
 #     frame's ☰ in parts under headings, its permissions window;
 #   - the clipboard by container: another container's copy is read only
 #     when the person pastes it;
+#   - the cellward window's connections as a tree by program and site, a
+#     site blocked for its container from its row, confirmed first;
 #   - Firefox in a container layered over the home and in one of its own;
 #     TeamSpeak too where its tarball is given (`teamspeakSrc`).
 #

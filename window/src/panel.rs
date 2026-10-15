@@ -1446,12 +1446,18 @@ impl Panel {
         block.into()
     }
 
-    /// Whether `target` is blocked for `container` already.
+    /// Whether `target` is blocked for `container` already: itself, or a
+    /// name it is under (a name's block takes its subdomains, `netrules`
+    /// of vpn-zones). A network's block is not looked into: its addresses
+    /// keep their ⊘, and the core says what is so.
     fn blocked(&self, container: &str, target: &str) -> bool {
-        self.data
-            .blocks
-            .iter()
-            .any(|b| b.container == container && b.target == target)
+        self.data.blocks.iter().any(|b| {
+            b.container == container
+                && (b.target == target
+                    || target
+                        .strip_suffix(b.target.as_str())
+                        .is_some_and(|rest| rest.ends_with('.')))
+        })
     }
 
     /// «Блокировать X для контейнера «c»?», on the row it was asked on.
@@ -2717,6 +2723,13 @@ mod tests {
             ]
         );
         assert!(parse(DATA).blocks.is_empty());
+        // A name's block takes its subdomains, and only them.
+        let mut p = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Network);
+        p.data = d;
+        assert!(p.blocked("work", "github.com"));
+        assert!(p.blocked("work", "api.github.com"));
+        assert!(!p.blocked("work", "notgithub.com"));
+        assert!(!p.blocked("app-chat", "github.com"));
     }
 
     #[test]
