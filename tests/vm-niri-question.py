@@ -105,7 +105,7 @@ with subtest("niri routes a deliberate pointer click to the permission panel"):
     buttons, row = settled("niri-question", panel_buttons)
     left, right = buttons[0]
     pointer("move", (left + right) // 2, row)
-    machine.sleep(2.5)
+    machine.sleep(3.5)
     pointer("press")
     pointer("release")
     machine.wait_until_succeeds("test -s /tmp/niri-panel-deny.reply", timeout=15)
@@ -118,7 +118,7 @@ with subtest("niri accepts the permission panel's guarded Allow button in place"
     buttons, row = settled("niri-question-more", panel_buttons)
     left, right = buttons[1]
     pointer("move", (left + right) // 2, row)
-    machine.sleep(2.5)
+    machine.sleep(3.5)
     pointer("press")
     pointer("release")
     machine.wait_until_succeeds("test -s /tmp/niri-panel-allow.reply", timeout=15)
@@ -164,10 +164,13 @@ def network_question(unit, path, *, app_id=None, container=""):
 
 
 def allow_network_panel(name):
+    # Off the panel first: a button the pointer is on is lit, in another
+    # colour than the one the buttons are found by.
+    pointer("move", 5, 5)
     buttons, row = settled(name, panel_buttons)
     left, right = buttons[1]
     pointer("move", (left + right) // 2, row)
-    machine.sleep(2.5)
+    machine.sleep(3.5)
     pointer("press")
     pointer("release")
 
