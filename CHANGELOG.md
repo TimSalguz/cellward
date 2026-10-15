@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The network window's connections as a tree** (2026-10-15, the owner):
+  by program and container, each group's sites by traffic, a site unfolded
+  to its names; a destination blocked for its container from its row after
+  a confirmation in place, and the blocked ones listed to take back.
 - **Blocked destinations of a container** (2026-10-15, the owner): a name
   with every name below it, an address, a network — `cellward container net
   <c> block|unblock <target>`, `containers.<c>.firewall.block` in Nix, and
