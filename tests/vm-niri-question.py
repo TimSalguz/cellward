@@ -32,7 +32,7 @@ def question(name):
         "import socket; s=socket.socket(socket.AF_UNIX); "
         f"s.connect('/run/user/1000/vpn-zones/ask/{supervisor}'); "
         f"s.sendall({(len(payload).to_bytes(2, 'little') + payload)!r}); "
-        "s.settimeout(30); reply=s.recv(512); "
+        "s.settimeout(90); reply=s.recv(512); "
         f"open('/tmp/{name}.reply', 'wb').write(reply)"
     )
     python = POINTER.split()[0]
@@ -125,12 +125,15 @@ with subtest("niri accepts the permission panel's guarded Allow button in place"
     reply = machine.succeed("cat /tmp/niri-panel-allow.reply").strip()
     assert reply == "y" + nested, reply
 
-with subtest("an unanswered panel hands off on niri, never silently denies or allows"):
+with subtest("an unanswered panel stays on its window: no hand-over, no answer by time"):
     pointer("move", 5, 5)
-    question("niri-panel-fallback")
-    machine.wait_until_succeeds("test -s /tmp/niri-panel-fallback.reply", timeout=25)
-    reply = machine.succeed("cat /tmp/niri-panel-fallback.reply").strip()
-    assert reply == "m" + nested, reply
+    question("niri-panel-stays")
+    settled("niri-panel-stays", panel_buttons)
+    machine.sleep(25)
+    machine.fail("test -s /tmp/niri-panel-stays.reply")
+    settled("niri-panel-stays-later", panel_buttons)
+    # Its asker gives up: the panel goes with it.
+    alice("systemctl --user stop niri-panel-stays")
 
 # The main-home guard correctly refuses foot in two networks at once.
 # Finish the offline input probe before opening its host-network instance.
@@ -146,17 +149,19 @@ def requested(path):
     return f"journalctl -u permission-http --no-pager | grep -F 'GET /{path} HTTP'"
 
 
-def network_question(unit, path, *, app_id=None, container=""):
+def network_question(unit, path, *, app_id=None, container="", window=True):
     # Unique launch keys avoid inheriting a previous program's session answer.
     command = (
         "sleep 4; exec 3<>/dev/tcp/192.0.2.2/8080; "
         f"printf 'GET /{path} HTTP/1.0\\r\\nHost: peer\\r\\n\\r\\n' >&3; "
         "cat <&3; sleep 600"
     )
+    # Without a window of its own, nowhere for a panel: the launch window.
+    program = f"foot --app-id {unit} bash -c" if window else "bash -c"
     alice(
         f"systemd-run --user --unit={unit} --setenv=WAYLAND_DISPLAY={nested} "
         f"--setenv=VPN_ZONE_APPID={app_id or unit} "
-        f"cellward run host {container} -- foot --app-id {unit} bash -c {shlex.quote(command)}"
+        f"cellward run host {container} -- {program} {shlex.quote(command)}"
     )
     # The connection remains held while its panel is unanswered.
     machine.sleep(5)
@@ -183,9 +188,9 @@ with subtest("real TCP remains held until niri's guarded question is explicitly 
     alice("systemctl --user stop niri-net-allow")
 
 with subtest("closing the network question keeps actual TCP closed"):
-    network_question("niri-net-close", "closed")
-    # If nobody answers in the application window, the safe fallback remains
-    # a guarded launch window; closing it is a refusal.
+    network_question("niri-net-close", "closed", window=False)
+    # A program with no window to show a panel on is asked in the guarded
+    # launch window; closing it is a refusal.
     machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=90)
     x, y = settled("niri-network-close", close_menu_button)
     pointer("move", x, y)

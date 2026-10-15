@@ -15,17 +15,22 @@ question. The proxy still cannot grant permission. Persistent denial retains
 its hover guard and protection against application popups. The separate window
 still requires keyboard focus and a quiet interval before accepting an answer.
 
-After 15 seconds without a panel answer, the supervisor retracts it and hands
-the request to the guarded window. It includes the original Wayland display,
-even if the keeper's systemd environment names no display or a different one.
-Late panel replies cannot answer a retracted question. The supervisor's poll
-can add up to two seconds; the overall configured question timeout still
-applies, so a shorter timeout may expire before this handoff.
+A panel stays on the program's window until it is answered there. The
+guarded window asks only where there is no window to show a panel on: the
+program has none (a tray or background program), none appeared within five
+seconds, or its windows closed while the question was open. It opens on the
+original Wayland display, even if the keeper's systemd environment names no
+display or a different one. Late panel replies cannot answer a retracted
+question.
 
-This covers network, microphone and camera panels through their common
-supervisor. Closing the final question still denies access. It does not
-automatically grant access, create an allow rule or extend the question's
-overall deadline.
+Network and camera questions have no deadline: held connections wait, and a
+camera shows black frames, until the person answers or the program ends.
+The microphone keeps its 25 seconds, under libpulse's own 30: a later "yes"
+would open the microphone for a stream the program has abandoned. Closing a
+question still denies access; nothing is granted by time.
+
+Each program has its own network question, on its own window; several on one
+window are shown one after another.
 
 ## Network policy
 

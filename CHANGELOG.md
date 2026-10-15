@@ -5,7 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **A throwaway container can be joined while it is open** (2026-10-15,
+  the owner). Its home is no longer one launch's: it lives in its
+  instance's own memory, made by the instance's keeper, and every program
+  joined to it shares it until the last one ends. The launch window lists
+  the open ones with their programs ("Открытый разовый контейнер — открыт:
+  …"); `cellward run <net> --fs-sandbox --join <name>` does it from a
+  terminal. A program open in one and launched again from the menu asks:
+  to its window there, or into a new one. Only from the host: the broker
+  refuses a zone's program a join.
+- The launch window says which containers exist and what runs in them:
+  the program's own container "создан" or "будет создан", every container
+  "открыт: …".
+
 ### Changed
+- **A permission panel waits on the program's window until it is
+  answered** (2026-10-15, the owner): no more hand-over to the launch
+  window after 15 seconds, which brought up a second question beside the
+  first. The launch window asks only where no panel can be shown — no
+  window of the program's, or its windows closed. Network and camera
+  questions have no deadline any more (`question-timeout` is the broker's
+  alone); the microphone keeps its 25 s, under libpulse's 30. Each program
+  of a container has its own network question at once, instead of waiting
+  for another program's to be answered.
 - **The X server is the container's, in every network** (2026-10-15, the
   owner). An X server of its own (xwayland-satellite) is the container's
   word (`cellward container set <c> x11 on|off`, `containers.<c>.permissions.x11`,

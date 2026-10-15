@@ -9,8 +9,8 @@
 //! window first (`crate::onwindow`: a panel under its title, whose one
 //! answer is «Отказать»; «Разрешить…» or no window of the program's ask in
 //! the launch window, guarded), a "yes" sooner than a question is read taken
-//! for a slip (`microphone::considered`), and nothing answered in the
-//! question's time (`cellward question-timeout`) is "no" for this launch.
+//! for a slip (`microphone::considered`), and a question closed unanswered
+//! is "no" for this launch; it has no time limit (the owner, 2026-10-15).
 //! Its answers: once — this launch's; always — `camera = yes` in the
 //! container's record (its next launches get the real cameras as they are);
 //! no — [`DENIED`] in the record, not asked again.
@@ -129,7 +129,10 @@ impl Asking {
     /// Ask the person, and settle it: "always" and "no" written, every
     /// answer in the journal.
     pub fn ask(&self) -> Decision {
-        let timeout = crate::timings::QUESTION.read(&self.config).0.duration();
+        // No time to answer in (the owner, 2026-10-15): the frames are black
+        // until the person says, and a question open on the program's window
+        // waits there — a question closed by time was a "no" nobody said.
+        let timeout: Option<std::time::Duration> = None;
         let text = question(&self.zone, &self.who, &self.label);
         let title = match &self.who {
             Who::Container(name) => {
