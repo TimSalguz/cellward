@@ -178,6 +178,8 @@ let
   # Окно запуска (сеть и контейнер рядом) — отдельный крейт с iced
   # (../window/package.nix): ядро выше от него не тяжелеет.
   vpn-zone-window = pkgs.callPackage ../window/package.nix { };
+  # История буфера обмена (../clip/package.nix): своя, как окно.
+  cellward-clip = pkgs.callPackage ../clip/package.nix { };
 
   # Чем открываются ссылки программ зоны и песочницы (LEAK-MODEL §2): xdg-open,
   # но без запасного браузера. Для схемы без обработчика xdg-open берёт
@@ -1270,6 +1272,11 @@ in
       description = "PATH-шимы: программа, назначенная контейнеру, набранная в терминале, идёт через пикер, как щелчок по ярлыку. Каталог ~/.local/share/vpn-zones/bin добавляется в PATH сессии. Удобство, а не граница: процесс хоста всегда может запустить store-путь напрямую.";
     };
 
+    clipboard.history = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "История буфера обмена по контейнерам (docs/CLIPBOARD.md): у каждого контейнера своя, у хоста своя, зашифрованы на диске (~/.local/state/cellward-clip). Пишет служба cellward-clip — без сети, только сокеты Unix. cellward-clip histories / list <история>.";
+    };
     tunnelWatch.enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -1912,7 +1919,7 @@ in
     )
   );
 
-  home.packages = [
+  home.packages = lib.optional cfg.clipboard.history cellward-clip ++ [
     cellward # и псевдонимы cw, vpn-zone
     vpn-zone-sync
     vpn-zone-pick
@@ -2107,6 +2114,31 @@ in
       ExecStart = "${cellward}/bin/cellward _broker";
       Restart = "on-failure";
     };
+  };
+
+  # История буфера: на хосте и без изоляции — она видит всё копируемое, —
+  # поэтому урезана тем, что юниту пользователя доступно: сеть ей не
+  # нужна совсем, только сокеты Unix (композитор), своя папка и ничего
+  # исполняемого в памяти.
+  systemd.user.services.cellward-clip = lib.mkIf cfg.clipboard.history {
+    Unit = {
+      Description = "История буфера обмена по контейнерам";
+      PartOf = [ "graphical-session.target" ];
+      After = [ "graphical-session.target" ];
+    };
+    Service = {
+      ExecStart = "${cellward-clip}/bin/cellward-clip daemon";
+      Restart = "on-failure";
+      RestartSec = 2;
+      RestrictAddressFamilies = [ "AF_UNIX" ];
+      NoNewPrivileges = true;
+      LockPersonality = true;
+      MemoryDenyWriteExecute = true;
+      RestrictRealtime = true;
+      SystemCallArchitectures = "native";
+      UMask = "0077";
+    };
+    Install.WantedBy = [ "graphical-session.target" ];
   };
 
   systemd.user.services.vpn-zone-watch = lib.mkIf cfg.tunnelWatch.enable {

@@ -31,6 +31,15 @@ memmap2 = "0.9"
 # The query's pattern, and the literal runs it requires (the prefilter).
 regex = "1"
 regex-syntax = "0.8"
+# The recorder (`cellward-clip daemon`): the compositor's selection through
+# data-control — ext-data-control-v1, else wlr-data-control.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+[[bin]]
+name = "cellward-clip"
+path = "src/bin/cellward-clip.rs"
 
 [profile.release]
 debug = false

@@ -23,6 +23,8 @@
 #     frame's ☰ in parts under headings, its permissions window;
 #   - the clipboard by container: another container's copy is read only
 #     when the person pastes it;
+#   - the clipboard history: each copy kept in its container's history,
+#     the host's in its own, a throwaway container's nowhere, sealed;
 #   - the cellward window's connections as a tree by program and site, a
 #     site blocked for its container from its row, confirmed first;
 #   - Firefox in a container layered over the home and in one of its own;
@@ -99,6 +101,7 @@ let
           # As on the owner's desktop: every network hermetic, the title
           # strip always there.
           programs.cellward.hermetic.default = true;
+          programs.cellward.clipboard.history = true;
           programs.cellward.frame = {
             colors.offline = "#ff00ff";
             colors.host = "#00c8ff";

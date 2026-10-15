@@ -307,13 +307,33 @@ pub fn may_read(own: bool, which: Which, mime_type: &str, offer: u64) -> bool {
     })
 }
 
+/// What a launch tells the clipboard history (`cellward-clipd`) of whose its
+/// copies are: the history they go to, by its container's record (a
+/// container's name, `main` for the real home), or [`NO_HISTORY`] — a
+/// throwaway container's copies are not kept past it.
+pub const NO_HISTORY: &str = "-";
+
+/// Whether `name` may name a history: a record's name, or [`NO_HISTORY`].
+pub fn valid_history(name: &str) -> bool {
+    name == NO_HISTORY
+        || (!name.is_empty()
+            && name.len() <= 128
+            && !name.starts_with(['.', '-'])
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')))
+}
+
 /// The secret of the instance whose restricted sockets are `key`
-/// (`wl_sandbox`'s zone): read, or made at its first launch — sixteen random
-/// bytes as hex, a file only its user reads, never through a link. `None`
-/// when it can be neither: every copy foreign then, which is the closed way.
-pub fn token_for(runtime: &Path, key: &str) -> Option<String> {
+/// (`wl_sandbox`'s zone), with the history its copies go to: read, or made
+/// at its first launch — sixteen random bytes as hex, then the history on a
+/// line of its own, in a file only its user reads, never through a link.
+/// The history daemon reads the same file to know whose a marked copy is.
+/// `None` when it can be neither: every copy foreign then, which is the
+/// closed way.
+pub fn token_for(runtime: &Path, key: &str, history: &str) -> Option<String> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    if key.is_empty() || key.contains('/') || key.starts_with('.') {
+    if key.is_empty() || key.contains('/') || key.starts_with('.') || !valid_history(history) {
         return None;
     }
     let dir: PathBuf = runtime.join(DIR);
@@ -324,29 +344,46 @@ pub fn token_for(runtime: &Path, key: &str) -> Option<String> {
     let path = dir.join(key);
     let valid = |t: &str| t.len() == 32 && t.bytes().all(|b| b.is_ascii_hexdigit());
     let mut text = String::new();
+    let mut token = None;
     if let Ok(mut f) = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)
     {
-        if f.read_to_string(&mut text).is_ok() && valid(text.trim()) {
-            return Some(text.trim().to_owned());
+        if f.read_to_string(&mut text).is_ok() {
+            let mut lines = text.lines();
+            let had = lines.next().unwrap_or_default().trim();
+            if valid(had) {
+                if lines.next().map(str::trim) == Some(history) {
+                    return Some(had.to_owned());
+                }
+                token = Some(had.to_owned());
+            }
         }
     }
-    let mut bytes = [0u8; 16];
-    fs::File::open("/dev/urandom")
-        .and_then(|mut r| r.read_exact(&mut bytes))
-        .ok()?;
-    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    let _ = fs::remove_file(&path);
+    let token = match token {
+        Some(token) => token,
+        None => {
+            let mut bytes = [0u8; 16];
+            fs::File::open("/dev/urandom")
+                .and_then(|mut r| r.read_exact(&mut bytes))
+                .ok()?;
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        }
+    };
+    // Written new beside it and renamed over: a reader never sees half.
+    let tmp = dir.join(format!(".{key}.tmp"));
+    let _ = fs::remove_file(&tmp);
     let mut f = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)
+        .open(&tmp)
         .ok()?;
-    f.write_all(token.as_bytes()).ok()?;
+    f.write_all(format!("{token}\n{history}\n").as_bytes())
+        .ok()?;
+    fs::rename(&tmp, &path).ok()?;
     Some(token)
 }
 
@@ -415,13 +452,23 @@ xkb_symbols "pc+us+ru" {
     fn an_instances_secret_is_its_own_and_kept() {
         let base = std::env::temp_dir().join(format!("vz-clip-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
-        let one = token_for(&base, "i-1").unwrap();
-        assert_eq!(token_for(&base, "i-1").unwrap(), one);
-        assert_ne!(token_for(&base, "i-2").unwrap(), one);
-        assert_eq!(token_for(&base, "../x"), None);
+        let one = token_for(&base, "i-1", "work").unwrap();
+        assert_eq!(token_for(&base, "i-1", "work").unwrap(), one);
+        assert_ne!(token_for(&base, "i-2", "work").unwrap(), one);
+        assert_eq!(token_for(&base, "../x", "work"), None);
+        assert_eq!(token_for(&base, "i-4", "../x"), None);
+        // Its history said beside it, for the daemon; the secret kept.
+        assert_eq!(
+            fs::read_to_string(base.join(DIR).join("i-1")).unwrap(),
+            format!("{one}\nwork\n")
+        );
+        assert_eq!(token_for(&base, "i-1", NO_HISTORY).unwrap(), one);
+        assert!(fs::read_to_string(base.join(DIR).join("i-1"))
+            .unwrap()
+            .ends_with("\n-\n"));
         let link = base.join(DIR).join("i-3");
         std::os::unix::fs::symlink(base.join("elsewhere"), &link).unwrap();
-        let three = token_for(&base, "i-3").unwrap();
+        let three = token_for(&base, "i-3", "main").unwrap();
         assert!(!base.join("elsewhere").exists(), "written through the link");
         assert_eq!(three.len(), 32);
         let _ = fs::remove_dir_all(&base);

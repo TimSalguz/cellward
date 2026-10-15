@@ -33,9 +33,13 @@ The Wayland proxy of each launch (`rust/src/clip.rs`, `wl_frame.rs`):
 
 ## The history (in progress)
 
-The store and search are built (`clip/`, crate `clipstore`; its format, its
-measurements and what its index leaks are in its `lib.rs`); the daemon and the
-window are next.
+The store and search (`clip/`, crate `clipstore`; its format, its measurements
+and what its index leaks are in its `lib.rs`) and the recorder are built:
+`programs.cellward.clipboard.history = true` runs `cellward-clip daemon`, the
+only holder of the key and the histories; `cellward-clip histories` and
+`cellward-clip list <history>` ask it on its socket. A password manager's copy
+(`x-kde-passwordManagerHint`) and a throwaway container's are not kept. The
+window is next.
 
 A clipboard manager of cellward's own, by container: each container's copies
 in a history of its own, the host's in one of its own; a copy goes to another
