@@ -4,9 +4,10 @@ window (docs/FIREWALL.md §4.3.1, the owner's decision of 2026-09-29).
 A program in the host's own network opens a connection its rules ask
 about; the instance's keeper asks on the launch's socket of questions, its
 supervisor hands the question to the Wayland proxy, and the proxy shows a
-panel under the window's title: «Запретить» and «Разрешить…». A click too
-soon is none; «Запретить» after the guard is the answer, a rule; «Разрешить…»
-opens the launch window, on the launch's compositor.
+panel under the window's title: «Запретить» and «Разрешить, пока
+работает». A click too soon is none; after the countdown «Запретить» is the
+answer, a rule, and «Разрешить, пока работает» one for this run. (A
+program with no window is asked in the launch window: tests/vm-niri-question.py.)
 
 Executed by the main test script with exec(), in its globals: machine,
 alice, display, swaysock, find, view, shot, width, title; POINTER, the
@@ -138,7 +139,7 @@ with subtest("the network question is a panel on the program's window; a hasty c
     machine.fail("pgrep -x vpn-zone-window")
     alice("systemctl --user stop vmaskq")
 
-with subtest("«Разрешить…» asks in the launch window, on the launch's compositor"):
+with subtest("«Разрешить, пока работает» answers on the panel after its countdown: no second window"):
     # The rule of the last subtest is the program's: this one is asked
     # about anew once it is gone.
     alice(f"grep -rlE '^net_deny *=' {RULES} | xargs -r sed -i -E '/^net_deny *=/d'")
@@ -148,20 +149,21 @@ with subtest("«Разрешить…» asks in the launch window, on the launch
     runs, row = buttons_of(at, box)
     assert len(runs) == 2, (runs, box)
     deny, more = runs
+    # Too soon: nothing, and the panel stays — no launch window either,
+    # however long it is up (no hand-over by time, 2026-10-15).
     qpointer("move", (more[0] + more[1]) // 2, row)
-    # Opening a guarded question grants nothing: an ordinary click works.
     qpointer("press")
     qpointer("release")
-    machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
-    win = machine.succeed("pgrep -x vpn-zone-window").split()[0]
-    env = machine.succeed(f"tr '\\0' '\\n' < /proc/{win}/environ")
-    assert f"WAYLAND_DISPLAY={display}" in env.split("\n"), env
     machine.sleep(2)
-    alice(f"WAYLAND_DISPLAY={display} grim /tmp/question-launch-window.png")
-    machine.copy_from_vm("/tmp/question-launch-window.png", "")
-    # Closed without an answer: "no" for the instance's life, no rule.
-    alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
-    machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=15)
+    assert panel_of(before, shot("question-allow-hasty"), x, y, w) is not None, "the panel went"
+    # After its countdown: the answer — for this run, no rule kept.
+    machine.sleep(2.5)
+    qpointer("press")
+    qpointer("release")
+    machine.sleep(2)
+    assert panel_of(before, shot("question-allowed"), x, y, w) is None, "the panel stayed"
+    machine.fail("pgrep -x vpn-zone-window")
     machine.fail(DENIED)
+    machine.fail("grep -rEq '^net_allow *= *[^ ]' " + RULES)
     alice("systemctl --user stop vmaskr")
     alice("systemctl --user stop vmpointerq")
