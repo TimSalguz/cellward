@@ -1,0 +1,36 @@
+[package]
+name = "cellward-clip"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "cellward's clipboard history by container: its encrypted store and search"
+publish = false
+
+# A crate of its own, not a member of rust/ (like window/): the history's
+# cryptography, index and regex engine are not the core's to carry. The
+# daemon that records copies (`cellward clipd`, next) will be a binary of
+# this crate, on this library.
+[lib]
+name = "clipstore"
+path = "src/lib.rs"
+
+[dependencies]
+# Key-file opening flags, getrandom(2), flock(2).
+libc = "0.2"
+# Contents and previews sealed with XChaCha20-Poly1305 (random 192-bit
+# nonces); index terms and dedup hashes keyed with HMAC-SHA256. RustCrypto,
+# pure Rust.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+hmac = "0.12"
+sha2 = "0.10"
+# The log's frames and the segments' headers.
+crc32fast = "1"
+# Sealed segments: memory-mapped, an FST from hashed trigram to postings.
+fst = "0.4"
+memmap2 = "0.9"
+# The query's pattern, and the literal runs it requires (the prefilter).
+regex = "1"
+regex-syntax = "0.8"
+
+[profile.release]
+debug = false
