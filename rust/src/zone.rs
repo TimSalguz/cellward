@@ -3948,40 +3948,20 @@ impl Transport {
             .map(|(_, names)| names)
             .unwrap_or_default();
         let mut decided = Vec::new();
-        // A flow with no owner found: the instance's one program, if it has
-        // only one (`owners::sole_program`) — looked up once for the round.
-        let mut sole: Option<Option<(String, i32)>> = None;
         for (f, owner) in fresh.iter().zip(&owners) {
             if !crate::relay::gated(&f.key) {
                 decided.push((f.key, crate::verdicts::Verdict::Allow));
                 continue;
             }
-            let found = owner
-                .as_ref()
-                .and_then(|o| o.program.clone().map(|p| (p, o.launch)));
-            let (program, launch) = match found {
-                Some((program, launch)) => (Some(program), launch),
-                None => {
-                    let sole = sole.get_or_insert_with(|| {
-                        crate::owners::sole_program(
-                            &self.state.join(".running"),
-                            &registry,
-                            &self.id,
-                            &self.network,
-                        )
-                    });
-                    match sole {
-                        Some((program, pid)) => (Some(program.clone()), Some(*pid)),
-                        None => (None, owner.as_ref().and_then(|o| o.launch)),
-                    }
-                }
-            };
+            let program = owner.as_ref().and_then(|o| o.program.clone());
             match rules.decide(program.as_deref()).verdict() {
                 Some(verdict) => decided.push((f.key, verdict)),
                 None => match self.asker.as_mut() {
                     Some(asker) => {
                         let to = crate::netask::destination(&f.key, &names);
-                        if let Some(verdict) = asker.ask(program, launch, f.key, to) {
+                        let launch = owner.as_ref().and_then(|o| o.launch);
+                        let process = owner.as_ref().map(|o| o.process.clone());
+                        if let Some(verdict) = asker.ask(program, launch, process, f.key, to) {
                             decided.push((f.key, verdict));
                         }
                     }

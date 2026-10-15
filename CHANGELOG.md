@@ -60,9 +60,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   warns.
 
 ### Fixed
-- A browser's connection asked about as «Неизвестная программа»: a flow
-  whose socket was gone before it was looked at is now its instance's
-  program when that instance runs one program only.
+- A connection whose launch was not found was asked about as
+  «Неизвестная программа». The question now says what is known: the
+  process holding the socket by its name, its container, "программа не
+  определена" — the container's, never guessed to be some program's.
 - **Firefox launched again into its container** opens a window of the copy
   already running there instead of "Firefox is already running, but is not
   responding". Mozilla's programs hand a second launch over the session bus
