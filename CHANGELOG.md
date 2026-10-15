@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Paste from the clipboard history** (the frame menu's «Вставить из истории
+  буфера обмена…», `cellward clip-window --pid <pid> [--entry <h> <id>]`): the
+  entry chosen becomes both selections, and the launch's proxy presses
+  Shift+Insert in that program's connection once it has them and the focus.
 - **The clipboard history's window** (`vpn-zone-window clip`): a container's
   history as a messenger's feed — newest at the bottom, a date between days,
   older pages on scrolling up —; search by words, by a pattern built from
