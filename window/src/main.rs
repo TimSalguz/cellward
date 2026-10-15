@@ -94,6 +94,61 @@ struct Request {
     /// container, each a checkbox, unticked (step 3 of vpn-zones'
     /// `docs/PERMISSIONS.md` §11.15); a ticked one answered `offer⇥<line>`.
     offers: Vec<(String, String)>,
+    /// `perm⇥<key>⇥<label>⇥<value>:<text>;…`: a permission a container can
+    /// be given here, a row each under the lists.
+    perms: Vec<Perm>,
+    /// `permof⇥<tag>⇥<scope>⇥<key>=<value>[!],…`: a container's
+    /// permissions as they are, and whom a change is for.
+    perm_of: Vec<PermOf>,
+}
+
+/// A permission's row: its key, its name, its choices `(value, text)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Perm {
+    key: String,
+    label: String,
+    choices: Vec<(String, String)>,
+}
+
+/// A container's permissions: whom a change is for, and `(key, value,
+/// fixed)` — fixed: not to be changed here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PermOf {
+    tag: String,
+    scope: String,
+    values: Vec<(String, String, bool)>,
+}
+
+fn parse_perm(fields: &[&str]) -> Option<Perm> {
+    let key = (*fields.first()?).to_owned();
+    let label = (*fields.get(1)?).to_owned();
+    let choices: Vec<(String, String)> = fields
+        .get(2)?
+        .split(';')
+        .filter_map(|c| c.split_once(':'))
+        .map(|(v, t)| (v.to_owned(), t.to_owned()))
+        .collect();
+    (!key.is_empty() && !choices.is_empty()).then_some(Perm {
+        key,
+        label,
+        choices,
+    })
+}
+
+fn parse_perm_of(fields: &[&str]) -> Option<PermOf> {
+    let tag = (*fields.first()?).to_owned();
+    let scope = (*fields.get(1)?).to_owned();
+    let values = fields
+        .get(2)
+        .unwrap_or(&"")
+        .split(',')
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| match v.strip_suffix('!') {
+            Some(v) => (k.to_owned(), v.to_owned(), true),
+            None => (k.to_owned(), v.to_owned(), false),
+        })
+        .collect();
+    Some(PermOf { tag, scope, values })
 }
 
 fn parse_item(fields: &[&str]) -> Option<Item> {
@@ -153,6 +208,8 @@ fn parse_request(text: &str) -> Request {
             "offer" if fields.len() >= 3 && !fields[1].is_empty() => req
                 .offers
                 .push((fields[1].to_owned(), fields[2].to_owned())),
+            "perm" => req.perms.extend(parse_perm(&fields[1..])),
+            "permof" => req.perm_of.extend(parse_perm_of(&fields[1..])),
             _ => {}
         }
     }
@@ -180,6 +237,8 @@ enum Msg {
     Rule(bool),
     /// An offer of the preset, by its index, ticked or not.
     Offer(usize, bool),
+    /// A permission's choice for the container chosen: the row, the choice.
+    Perm(usize, usize),
     Name(String),
     Launch,
     Cancel,
@@ -207,6 +266,8 @@ struct Window {
     rule: bool,
     /// The request's offers ticked, one each.
     offered: Vec<bool>,
+    /// The permissions changed: `(container tag, key) → value`.
+    changed: std::collections::HashMap<(String, String), String>,
     name: String,
     /// False while the request's guard runs.
     armed: bool,
@@ -249,6 +310,7 @@ impl Window {
             pin_container: req.pin_container,
             rule: false,
             offered: vec![false; req.offers.len()],
+            changed: std::collections::HashMap::new(),
             pane: Pane::Net,
             net,
             container,
@@ -335,6 +397,36 @@ impl Window {
         }
     }
 
+    fn container_tag(&self) -> &str {
+        self.req
+            .containers
+            .get(self.container)
+            .map_or("", |c| c.tag.as_str())
+    }
+
+    /// The permissions of the container chosen, as the request has them.
+    fn perm_of(&self) -> Option<&PermOf> {
+        let tag = self.container_tag();
+        self.req.perm_of.iter().find(|p| p.tag == tag)
+    }
+
+    /// A permission of the container chosen: its value now (changed or as
+    /// it was), and whether it is fixed — every one is where the request
+    /// says nothing of the container.
+    fn perm_value(&self, key: &str) -> (String, bool) {
+        let tag = self.container_tag();
+        let had = self
+            .perm_of()
+            .and_then(|p| p.values.iter().find(|(k, _, _)| k == key));
+        let Some((_, value, fixed)) = had else {
+            return ("default".to_owned(), true);
+        };
+        match self.changed.get(&(tag.to_owned(), key.to_owned())) {
+            Some(changed) if !fixed => (changed.clone(), false),
+            _ => (value.clone(), *fixed),
+        }
+    }
+
     /// The answer, as the picker reads it.
     fn answer(&self) -> String {
         let mut out = format!("net\t{}\n", self.net_tag());
@@ -357,6 +449,16 @@ impl Window {
         for ((line, _), ticked) in self.req.offers.iter().zip(&self.offered) {
             if *ticked {
                 out.push_str(&format!("offer\t{line}\n"));
+            }
+        }
+        // The permissions changed for the container chosen, and only what
+        // differs from what it had.
+        if let Some(of) = self.perm_of() {
+            for (key, value, fixed) in &of.values {
+                let (now, _) = self.perm_value(key);
+                if !fixed && now != *value {
+                    out.push_str(&format!("perm\t{key}\t{now}\n"));
+                }
             }
         }
         out
@@ -393,6 +495,7 @@ impl Window {
                 | Msg::PinContainer(_)
                 | Msg::Rule(_)
                 | Msg::Offer(_, _)
+                | Msg::Perm(_, _)
                 | Msg::Name(_)
                 | Msg::Launch
                 | Msg::Action(_)
@@ -437,6 +540,18 @@ impl Window {
             Msg::Offer(i, v) => {
                 if let Some(ticked) = self.offered.get_mut(i) {
                     *ticked = v;
+                }
+            }
+            Msg::Perm(row, choice) => {
+                let Some(perm) = self.req.perms.get(row) else {
+                    return Task::none();
+                };
+                let Some((value, _)) = perm.choices.get(choice) else {
+                    return Task::none();
+                };
+                if !self.perm_value(&perm.key).1 {
+                    let tag = self.container_tag().to_owned();
+                    self.changed.insert((tag, perm.key.clone()), value.clone());
                 }
             }
             // Armed by the last guard started, and only with the focus.
@@ -715,6 +830,9 @@ impl Window {
             Length::Fill
         };
         page = page.push(row![left, right].spacing(16).height(lists));
+        if !self.req.perms.is_empty() {
+            page = page.push(self.perms_view());
+        }
         if let Some(rule) = &self.req.rule {
             page = page.push(checkbox(self.rule).label(rule).on_toggle(Msg::Rule));
         }
@@ -770,6 +888,61 @@ impl Window {
                 .align_y(Alignment::Center),
         );
         page.into()
+    }
+
+    /// The permissions of the container chosen, a row each: its name and
+    /// its choices, the one in force marked. The same rows for every
+    /// container — the window keeps the height it opened at —, those that
+    /// cannot be changed here not pressable. Above them, whom a change is
+    /// for: every program of the container, or this launch alone.
+    fn perms_view(&self) -> Element<'_, Msg> {
+        let scope = self.perm_of().map_or(
+            "У этого контейнера здесь нечего выбирать",
+            |p| p.scope.as_str(),
+        );
+        let mut block = column![
+            text("Разрешения").size(15),
+            text(scope)
+                .size(13)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+        ]
+        .spacing(4);
+        for (row_at, perm) in self.req.perms.iter().enumerate() {
+            let (now, fixed) = self.perm_value(&perm.key);
+            let mut choices = row![].spacing(4);
+            for (choice_at, (value, label)) in perm.choices.iter().enumerate() {
+                let style = if *value == now {
+                    if fixed {
+                        button::secondary
+                    } else {
+                        button::primary
+                    }
+                } else {
+                    button::text
+                };
+                choices = choices.push(
+                    button(text(label.as_str()).size(12))
+                        .padding([2, 6])
+                        .style(style)
+                        .on_press_maybe((!fixed).then_some(Msg::Perm(row_at, choice_at))),
+                );
+            }
+            block = block.push(
+                row![
+                    text(perm.label.as_str())
+                        .size(13)
+                        .width(Length::Fixed(230.0)),
+                    choices
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        container(block)
+            .padding(8)
+            .width(Length::Fill)
+            .style(container::bordered_box)
+            .into()
     }
 
     /// The command a zone's program asks to run: apart from the notes, the
@@ -836,7 +1009,7 @@ fn arm_after(guard: u64, holds: u64) -> Task<Msg> {
 /// The heights a window opens at no lower than, and no higher than: most
 /// screens have the latter free under a panel. A longer list scrolls.
 const MIN_HEIGHT: f32 = 160.0;
-const MAX_HEIGHT: f32 = 640.0;
+const MAX_HEIGHT: f32 = 760.0;
 
 /// The size the window opens at: the width of its kind, and the height of
 /// its page laid out by iced — every list whole, at its own height, with
@@ -1168,6 +1341,46 @@ mod tests {
             w.answer()
         );
         assert!(!w.answer().contains("camera"));
+    }
+
+    /// The permissions: each container's own shown, a change answered only
+    /// for the container chosen and only where it differs; a fixed one is
+    /// not changed; a container the request says nothing of has every one
+    /// fixed.
+    #[test]
+    fn a_permission_changed_is_answered_for_the_container_chosen() {
+        let text = "title\tt\nnet\tnl\tnl\tselected\n\
+                    container\twork\tWork\tselected\ncontainer\topen\tOpen\n\
+                    perm\tx11\tX\tdefault:как у всех (выкл.);on:вкл.;off:выкл.\n\
+                    perm\tcamera\tКамера\tdefault:как у всех;no:нет;yes:да\n\
+                    permof\twork\tДля всех программ «work»\tx11=default,camera=no!\n";
+        let req = parse_request(text);
+        assert_eq!(req.perms.len(), 2);
+        assert_eq!(
+            req.perm_of[0].values,
+            [
+                ("x11".to_owned(), "default".to_owned(), false),
+                ("camera".to_owned(), "no".to_owned(), true)
+            ]
+        );
+        let mut w = Window::new(req);
+        assert!(!w.answer().contains("perm"));
+        let _ = w.update(Msg::Perm(0, 1));
+        // Fixed (Nix's): nothing.
+        let _ = w.update(Msg::Perm(1, 2));
+        assert_eq!(w.perm_value("x11"), ("on".to_owned(), false));
+        assert_eq!(w.perm_value("camera"), ("no".to_owned(), true));
+        assert!(w.answer().ends_with("perm\tx11\ton\n"), "{}", w.answer());
+        // Back to what it had: nothing to say.
+        let _ = w.update(Msg::Perm(0, 0));
+        assert!(!w.answer().contains("perm"));
+        // A container the request has nothing for: every one fixed, and
+        // nothing of another container's goes with it.
+        let _ = w.update(Msg::Perm(0, 1));
+        let _ = w.update(Msg::Container(1));
+        assert_eq!(w.perm_value("x11"), ("default".to_owned(), true));
+        let _ = w.update(Msg::Perm(0, 2));
+        assert!(!w.answer().contains("perm"), "{}", w.answer());
     }
 
     /// In a zone's window Enter starts only in the network that asks; digits

@@ -199,6 +199,10 @@ pub struct Selection {
     pub zone: OsString,
     pub container: Container,
     pub sandbox: Sandbox,
+    /// `--with <key>=<value>`, repeated: a permission of this launch alone
+    /// ([`WITH_KEYS`]), where its container has no record to keep one in —
+    /// a throwaway's; refused for one that has ([`resolve_selection`]).
+    pub with: Vec<(String, String)>,
     /// The program and its arguments. May be empty: the shell version passed
     /// nothing to `nsenter` in that case, and `nsenter` with no command starts a
     /// shell inside the zone — which is a perfectly good thing to want.
@@ -249,6 +253,7 @@ pub enum ArgError {
     MissingProfile,
     MissingJoinDir,
     MissingJoinName,
+    BadWith,
     MissingSandbox,
     MissingContainer,
 }
@@ -260,6 +265,10 @@ impl fmt::Display for ArgError {
             Self::MissingProfile => write!(f, "нужно имя контейнера (--profile)"),
             Self::MissingJoinDir => write!(f, "нужен каталог временного контейнера"),
             Self::MissingJoinName => write!(f, "нужно имя открытого разового контейнера"),
+            Self::BadWith => write!(
+                f,
+                "--with: x11=on|off или camera=no|black|ask|yes — разрешение одного запуска"
+            ),
             Self::MissingSandbox => write!(f, "нужно имя контейнера (--sandbox)"),
             Self::MissingContainer => write!(f, "нужно имя контейнера"),
         }
@@ -343,6 +352,17 @@ impl Selection {
             _ => Sandbox::None,
         };
 
+        let mut with = Vec::new();
+        while rest.first().is_some_and(|f| f == "--with") {
+            let pair = rest
+                .get(1)
+                .and_then(|w| w.to_str())
+                .and_then(with_of)
+                .ok_or(ArgError::BadWith)?;
+            with.push(pair);
+            rest.drain(..2);
+        }
+
         if rest.first().is_some_and(|f| f == "--") {
             rest.remove(0);
         }
@@ -351,9 +371,37 @@ impl Selection {
             zone,
             container,
             sandbox,
+            with,
             cmd: rest,
         })
     }
+}
+
+/// What `--with` may say, and the words each takes: the permissions a
+/// launch decides itself, not its container's instance — an X server of
+/// its own, and the cameras.
+pub const WITH_KEYS: [(&str, &[&str]); 2] = [
+    ("x11", &["on", "off"]),
+    ("camera", &["no", "black", "ask", "yes"]),
+];
+
+/// `<key>=<value>` of `--with`, if it is one [`WITH_KEYS`] takes.
+fn with_of(word: &str) -> Option<(String, String)> {
+    let (key, value) = word.split_once('=')?;
+    WITH_KEYS
+        .iter()
+        .any(|(k, values)| *k == key && values.contains(&value))
+        .then(|| (key.to_owned(), value.to_owned()))
+}
+
+/// This launch's own word for `key` (`--with`), if it said one.
+fn with_word<'a>(selection: &'a Selection, key: &str) -> Option<&'a str> {
+    selection
+        .with
+        .iter()
+        .rev()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
 }
 
 /// Drop the selection arguments of a `run` line and leave the command.
@@ -396,6 +444,9 @@ pub fn strip_selection(argv: &[OsString]) -> Vec<OsString> {
             rest.drain(..2.min(rest.len()));
         }
         _ => {}
+    }
+    while rest.first().is_some_and(|f| f == "--with") {
+        rest.drain(..2.min(rest.len()));
     }
     if rest.first().is_some_and(|f| f == "--") {
         rest.remove(0);
@@ -843,7 +894,11 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         let zone_dir = tools.state.join(&zone_name);
         match record_name(&selection) {
             Some(name) => crate::container::camera_for(&zone_dir, &tools.config, &zone_name, &name),
-            None => crate::hermetic::camera(&zone_dir, &tools.config, &zone_name).0,
+            // A launch with no record: its own word (`--with`), else the
+            // template's.
+            None => with_word(&selection, "camera")
+                .and_then(crate::camera::Mode::parse)
+                .unwrap_or_else(|| crate::hermetic::camera(&zone_dir, &tools.config, &zone_name).0),
         }
         .given(crate::camera::host_has_camera())
     };
@@ -892,9 +947,13 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // The container's own word, else the template's (`x11::effective`):
     // whatever the network — it only says where packets go (2026-10-15).
     let container_x11 = crate::x11::effective(
-        record_name(&selection)
-            .and_then(|name| crate::container::load(tools, &name))
-            .and_then(|c| c.x11.map(|x11| x11.value)),
+        match record_name(&selection) {
+            Some(name) => {
+                crate::container::load(tools, &name).and_then(|c| c.x11.map(|x11| x11.value))
+            }
+            // A launch with no record: its own word (`--with`).
+            None => with_word(&selection, "x11").map(|w| w == "on"),
+        },
         crate::permissions::flag(&tools.config, "x11").0,
     );
     let own_x11 = container_x11
@@ -2212,6 +2271,15 @@ pub fn record_name(selection: &Selection) -> Option<String> {
 /// finished (its data are not where the launch would look).
 pub fn resolve_selection(tools: &Tools, selection: Selection) -> Result<Selection, String> {
     use crate::container::Home;
+    // A launch's own permissions only where there is no record to keep
+    // them: a container's are its record's, changed there.
+    if !selection.with.is_empty() && record_name(&selection).is_some() {
+        return Err(
+            "--with — разрешения одного запуска, только для разового контейнера: у этого \
+             контейнера они свои (cellward container set)"
+                .to_owned(),
+        );
+    }
     // The open throwaway sandbox joined: a name its instance could have —
     // never a path, nor anybody else's directory.
     if let Sandbox::Throwaway(Some(name)) = &selection.sandbox {
@@ -3656,6 +3724,44 @@ mod tests {
         assert_eq!(
             Selection::parse(&argv(&["nl", "--fs-sandbox", "--join"])),
             Err(ArgError::MissingJoinName)
+        );
+        // A launch's own permissions, after the container's flags.
+        let s = Selection::parse(&argv(&[
+            "nl",
+            "--fs-sandbox",
+            "--with",
+            "x11=on",
+            "--with",
+            "camera=black",
+            "--",
+            "x",
+        ]))
+        .unwrap();
+        assert_eq!(
+            s.with,
+            [
+                ("x11".to_owned(), "on".to_owned()),
+                ("camera".to_owned(), "black".to_owned())
+            ]
+        );
+        assert_eq!(s.cmd, argv(&["x"]));
+        for bad in ["x11=maybe", "hermetic=off", "x11"] {
+            assert_eq!(
+                Selection::parse(&argv(&["nl", "--fs-sandbox", "--with", bad, "--", "x"])),
+                Err(ArgError::BadWith),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            strip_selection(&argv(&[
+                "nl",
+                "--fs-sandbox",
+                "--with",
+                "x11=on",
+                "--",
+                "x"
+            ])),
+            argv(&["x"])
         );
         let s = Selection::parse(&argv(&["nl", "--sandbox", "work", "--", "x"])).unwrap();
         assert_eq!(s.sandbox, Sandbox::Named(os("work")));

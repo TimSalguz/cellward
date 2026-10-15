@@ -481,6 +481,11 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
                     "refused: к открытому разовому контейнеру присоединяются только с хоста"
                         .to_owned()
                 }
+                // A launch's own permissions are the host's launch window's
+                // to give: a zone's program would give itself the cameras.
+                Ok(selection) if !selection.with.is_empty() => {
+                    "refused: разрешения одного запуска (--with) задаются только с хоста".to_owned()
+                }
                 Ok(selection) => {
                     let target = selection.zone.to_string_lossy().into_owned();
                     let locked = match origin.network() {

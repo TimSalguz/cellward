@@ -45,7 +45,8 @@ launcher → vpn-zone-pick --id K -- cmd
           → last choice (.last/.lastprofile) → defaults
   dialogs: network, then (on request or when pinned-but-free) container
   → cellward run <net> [--profile P | --tmp-profile [--join D]]
-                       [--sandbox S | --fs-sandbox] -- cmd
+                       [--sandbox S | --fs-sandbox [--join N]]
+                       [--with K=V]… -- cmd
       delegation out of a zone / lock → container → wrappers
       (wl-sandbox, fs-sandbox) → conflict warning → zone start
       → registry → exec: nsenter | unshare → profile-run → program

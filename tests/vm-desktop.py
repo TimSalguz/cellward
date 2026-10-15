@@ -564,7 +564,98 @@ if wanted(TW):
     machine.sleep(3)
 
 
-# --- 6. Programs in a layer over the home and in a home of their own -------
+# --- 6. The permissions in the launch window ---------------------------------
+
+PW = "Permissions in the launch window: changed there, kept in the container, shown again"
+
+
+def blue_boxes(at):
+    """The window's blue (primary) buttons: (left, top, right, bottom). A
+    button's rows above and below its text are blue from edge to edge; the
+    rows of one button share its edges and lie within its height."""
+    w, h = at.size
+    blue = lambda p: p is not None and 50 < p[0] < 150 and 50 < p[1] < 150 and p[2] > 180
+    boxes = []
+    for y in range(h):
+        x = 0
+        while x < w:
+            if not blue(at(x, y)):
+                x += 1
+                continue
+            start = x
+            while x < w and blue(at(x, y)):
+                x += 1
+            if x - start < 30:
+                continue
+            for box in boxes:
+                if abs(box[0] - start) <= 2 and abs(box[2] - (x - 1)) <= 2 and y - box[1] <= 18:
+                    box[3] = y
+                    break
+            else:
+                boxes.append([start, y, x - 1, y])
+    return [b for b in boxes if b[3] - b[1] >= 6]
+
+
+def perm_rows(boxes):
+    """The chosen buttons of the permissions: one a row, all starting where
+    the choices of every row start."""
+    lefts = [b[0] for b in boxes]
+    left = max(set(lefts), key=lefts.count)
+    return sorted([b for b in boxes if b[0] == left], key=lambda b: b[1])
+
+
+if wanted(PW):
+    with scenario(PW):
+        alice("cellward container create pwbox --home private")
+        alice("install -Dm600 /dev/null ~/.config/vpn-zones/containers/pwbox/perms")
+        alice("mkdir -p ~/.local/state/vpn-zones/.lastprofile && echo pwbox > ~/.local/state/vpn-zones/.lastprofile/pw-a")
+        # As a launcher starts it: the program outlives the picker, which
+        # ends once its window is up (a unit's end would take it along).
+        pick = (
+            f"systemd-run --user --unit={{unit}} -p KillMode=process --setenv=WAYLAND_DISPLAY={nested} "
+            f"--setenv=NIRI_SOCKET={niri_socket} --setenv=XDG_SESSION_TYPE=wayland "
+            "vpn-zone-pick --id pw-a -- foot --app-id pw-a sh -c 'sleep 600'"
+        )
+        alice(pick.format(unit="pw-pick-1"))
+        machine.sleep(6)
+        at = shot("pw-window-1")
+        boxes = sorted(blue_boxes(at), key=lambda b: b[1])
+        print("blue boxes:", boxes)
+        # The rows of the permissions: right of their names; the button to
+        # start: the lowest.
+        launch = boxes[-1]
+        # The first row of the permissions, the X server's: its chosen
+        # button the topmost of those that start where the choices do.
+        rows = perm_rows(boxes)
+        assert rows, boxes
+        x11 = rows[0]
+        # «вкл.»: the choice right after «как у всех».
+        click(x11[2] + 20, (x11[1] + x11[3]) // 2, rest=0.3)
+        machine.sleep(1)
+        shot("pw-window-1-on")
+        click((launch[0] + launch[2]) // 2, (launch[1] + launch[3]) // 2, rest=0.3)
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {NIRI_MSG} --json windows' | grep -q pw-a",
+            timeout=120,
+        )
+        print(alice("cat ~/.config/vpn-zones/containers/pwbox/*.conf 2>/dev/null; ls ~/.config/vpn-zones/containers/pwbox/", check=False))
+        alice("grep -rqx 'x11 = true' ~/.config/vpn-zones/containers/pwbox/")
+        print(alice("journalctl --user --no-pager -u pw-pick-1 -o cat | tail -5", check=False))
+        # Again: the window shows it as it is now.
+        alice(pick.format(unit="pw-pick-2"))
+        machine.sleep(6)
+        at = shot("pw-window-2")
+        rows2 = sorted(
+            [b for b in blue_boxes(at) if b[3] - b[1] < 30 and b[1] > x11[1] - 10],
+            key=lambda b: b[1],
+        )
+        print("rows again:", rows2)
+        assert rows2[0][0] > x11[2], "X11 is not shown on as it was set"
+    alice("systemctl --user stop pw-pick-1 pw-pick-2", check=False)
+    machine.sleep(3)
+
+
+# --- 7. Programs in a layer over the home and in a home of their own -------
 
 for home in ["overlay", "private"]:
     for program, cmd, app in [

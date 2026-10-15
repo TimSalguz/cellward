@@ -44,7 +44,8 @@ English: [LAUNCHERS.md](LAUNCHERS.md) · Связанное: [CONTAINERS.ru.md](
   диалоги: сеть, затем (по запросу или при закреплённой сети и свободном
            контейнере) контейнер
   → cellward run <сеть> [--profile P | --tmp-profile [--join D]]
-                        [--sandbox S | --fs-sandbox] -- cmd
+                        [--sandbox S | --fs-sandbox [--join N]]
+                        [--with K=V]… -- cmd
       делегирование наружу / замок → контейнер → обёртки
       (wl-sandbox, fs-sandbox) → предупреждение о конфликте → подъём зоны
       → реестр → exec: nsenter | unshare → profile-run → программа
