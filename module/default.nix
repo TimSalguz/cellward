@@ -861,6 +861,8 @@ let
     "waylandProxy.exceptions"
     "connection"
     "clipboard.history"
+    "clipboard.window.textLines"
+    "clipboard.window.imageLines"
     "frame.colors"
     "frame.width"
     "frame.title"
@@ -1277,6 +1279,16 @@ in
       type = lib.types.bool;
       default = false;
       description = "История буфера обмена по контейнерам (docs/CLIPBOARD.md): у каждого контейнера своя, у хоста своя, зашифрованы на диске (~/.local/state/cellward-clip). Пишет служба cellward-clip — без сети, только сокеты Unix. cellward-clip histories / list <история>.";
+    };
+    clipboard.window.textLines = lib.mkOption {
+      type = lib.types.ints.between 1 10;
+      default = 3;
+      description = "Сколько первых строк текста показывает запись в окне истории буфера — дальше «показать целиком».";
+    };
+    clipboard.window.imageLines = lib.mkOption {
+      type = lib.types.ints.between 1 30;
+      default = 3;
+      description = "Высота миниатюры картинки в окне истории буфера, в строках текста.";
     };
     tunnelWatch.enable = lib.mkOption {
       type = lib.types.bool;
@@ -1797,6 +1809,10 @@ in
     })
     (lib.mkIf (cfg.askAgainAfter != null) {
       ".config/vpn-zones/declared/ask-again".text = cfg.askAgainAfter;
+    })
+    (lib.mkIf cfg.clipboard.history {
+      ".config/vpn-zones/declared/clip-window".text =
+        "lines ${toString cfg.clipboard.window.textLines}\nimage-lines ${toString cfg.clipboard.window.imageLines}\n";
     })
     (lib.mkIf (cfg.questionTimeout != null) {
       ".config/vpn-zones/declared/question-timeout".text = cfg.questionTimeout;

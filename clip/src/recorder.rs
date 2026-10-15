@@ -160,17 +160,41 @@ pub fn to_read(types: &[String]) -> Vec<String> {
     out
 }
 
-/// A copy's preview: its text's first line, cut to 200 characters; an
-/// image by its type and size.
+/// Lines of a text's preview at most: the window shows as many of them as
+/// it is set to.
+pub const PREVIEW_LINES: usize = 10;
+/// Characters of a preview's line at most.
+const PREVIEW_LINE: usize = 200;
+
+/// A copy's preview: its text's first [`PREVIEW_LINES`] lines from the first
+/// that is not blank, each cut to 200 characters, `…` after what is left
+/// out; an image by its type and size.
 pub fn preview(contents: &[(String, Vec<u8>)]) -> Option<String> {
     if let Some((_, text)) = contents.iter().find(|(t, _)| TEXTS.contains(&t.as_str())) {
         let text = String::from_utf8_lossy(text);
-        let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-        let mut cut: String = line.trim().chars().take(200).collect();
-        if line.trim().chars().count() > 200 {
-            cut.push('…');
+        let mut lines = text
+            .lines()
+            .skip_while(|l| l.trim().is_empty())
+            .map(str::trim_end)
+            .peekable();
+        let mut out: Vec<String> = Vec::new();
+        while let Some(line) = lines.next() {
+            let mut cut: String = line.chars().take(PREVIEW_LINE).collect();
+            if line.chars().count() > PREVIEW_LINE {
+                cut.push('…');
+            }
+            out.push(cut);
+            if out.len() == PREVIEW_LINES {
+                if lines.peek().is_some() {
+                    out.push("…".to_owned());
+                }
+                break;
+            }
         }
-        return Some(cut);
+        while out.last().is_some_and(|l| l.trim().is_empty()) {
+            out.pop();
+        }
+        return Some(out.join("\n"));
     }
     contents
         .iter()
@@ -256,8 +280,14 @@ mod tests {
         assert!(!is_secret(&offered));
         let long = format!("\n  {}  \nsecond", "я".repeat(250));
         let said = preview(&[("text/plain".to_owned(), long.into_bytes())]).unwrap();
-        assert_eq!(said.chars().count(), 201);
-        assert!(said.ends_with('…'));
+        let first = said.lines().next().unwrap();
+        assert_eq!(first.chars().count(), 201);
+        assert!(first.ends_with('…'));
+        assert_eq!(said.lines().nth(1), Some("second"));
+        let many: String = (1..=15).map(|n| format!("{n}\n")).collect();
+        let said = preview(&[("text/plain".to_owned(), many.into_bytes())]).unwrap();
+        assert_eq!(said.lines().count(), PREVIEW_LINES + 1);
+        assert!(said.ends_with("10\n…"));
         assert_eq!(
             preview(&[("image/png".to_owned(), vec![0; 3000])]).unwrap(),
             "картинка png · 3 КБ"

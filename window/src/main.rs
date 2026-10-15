@@ -45,6 +45,7 @@ mod days;
 mod login;
 mod panel;
 mod pattern;
+mod thumb;
 
 use iced::keyboard::{self, key, Key};
 use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};

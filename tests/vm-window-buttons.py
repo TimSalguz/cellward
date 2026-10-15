@@ -122,9 +122,9 @@ with subtest("the frame's ≡ drops its menu down; a row of it opens the window 
     assert at(*spot) == border and under != border, (at(*spot), under)
     # Nothing started yet: the dropdown is the proxy's alone.
     machine.fail(f"journalctl --no-pager | grep -F 'window-menu --pid {sup}'")
-    # Its third row, «Все действия окна…», lit under the pointer, then
+    # Its fourth row, «Все действия окна…», lit under the pointer, then
     # chosen: the window menu of the launch, as the ≡ opened it before.
-    row = (right - 20, top + 1 + 2 * 28 + 14)
+    row = (right - 20, top + 1 + 3 * 28 + 14)
     pointer("move", *row)
     at = shot("frame-dropdown-lit")
     assert at(right - 8, row[1]) != border, "the row under the pointer is lit"

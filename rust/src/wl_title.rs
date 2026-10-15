@@ -103,6 +103,9 @@ pub enum MenuRow {
     /// Fullscreen inside the window, on or off (`crate::frame::
     /// FullscreenButton::Menu`).
     InWindow,
+    /// The clipboard history of the launch's container, an entry pasted
+    /// into the window (`cellward clip-window`).
+    Clipboard,
     Actions,
     Close,
 }
@@ -113,6 +116,7 @@ impl MenuRow {
             Self::Network => "Сменить сеть…",
             Self::Restart => "Перезапустить с выбором сети…",
             Self::InWindow => "Во весь экран внутри окна",
+            Self::Clipboard => "Вставить из истории буфера…",
             Self::Actions => "Все действия окна…",
             Self::Close => "Закрыть окно",
         }
@@ -120,18 +124,20 @@ impl MenuRow {
 }
 
 /// The dropdown's rows, top to bottom.
-pub const MENU: [MenuRow; 4] = [
+pub const MENU: [MenuRow; 5] = [
     MenuRow::Network,
     MenuRow::Restart,
+    MenuRow::Clipboard,
     MenuRow::Actions,
     MenuRow::Close,
 ];
 /// ... with fullscreen inside the window among them, where the buttons put
 /// it there.
-const MENU_IN_WINDOW: [MenuRow; 5] = [
+const MENU_IN_WINDOW: [MenuRow; 6] = [
     MenuRow::Network,
     MenuRow::Restart,
     MenuRow::InWindow,
+    MenuRow::Clipboard,
     MenuRow::Actions,
     MenuRow::Close,
 ];
@@ -2481,7 +2487,7 @@ mod tests {
         let Some(bytes) = font() else { return };
         let prepared = Prepared::new(bytes, "nl · work").expect("a font");
         let (w, h) = menu_size(&prepared.menu);
-        assert!(w >= MENU_MIN_WIDTH && h == 4 * MENU_ROW + 2 * MENU_EDGE);
+        assert!(w >= MENU_MIN_WIDTH && h == 5 * MENU_ROW + 2 * MENU_EDGE);
         let (dw, dh, pixels) =
             render_menu(&prepared.font, &prepared.menu, 480, Rgb(0x30, 0x60, 0x90));
         assert_eq!(
@@ -2489,7 +2495,7 @@ mod tests {
             (device(w, MENU_MAX_SCALE), device(h, MENU_MAX_SCALE))
         );
         let image = (dw * dh * 4) as usize;
-        assert_eq!(pixels.len(), image * 5);
+        assert_eq!(pixels.len(), image * 6);
         let row = |variant: usize, r: i32| {
             let y = device(MENU_EDGE, 240) + r * device(MENU_ROW, 240) + 1;
             let at = variant * image + ((y * dw + dw - 3) * 4) as usize;
@@ -2845,6 +2851,7 @@ mod tests {
                 MenuRow::Network,
                 MenuRow::Restart,
                 MenuRow::InWindow,
+                MenuRow::Clipboard,
                 MenuRow::Actions,
                 MenuRow::Close
             ][..]

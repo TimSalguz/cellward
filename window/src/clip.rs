@@ -44,7 +44,13 @@ const SEARCH: &str = "clip-search";
 const DEBOUNCE_MS: u64 = 150;
 
 /// A preview shows at most this many lines.
-const PREVIEW_LINES: usize = 12;
+const PREVIEW_LINES: usize = 3;
+/// An image's thumbnail, in lines of text high, unless `--image-lines`.
+const IMAGE_LINES: u32 = 3;
+/// A line of a bubble's text (size 15), in pixels.
+const LINE: f32 = 20.0;
+/// An image larger than this is named, not fetched for a thumbnail.
+const MAX_THUMB_SOURCE: u64 = 32 << 20;
 
 /// Which moments a date filter is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +183,7 @@ pub enum Msg {
     Paste(u64),
     Whole(u64),
     Got(u64, Result<String, String>),
+    Thumb(u64, Result<crate::thumb::Thumb, String>),
     Fold(u64),
     MoveAsk(u64),
     Histories(Result<Vec<String>, String>),
@@ -219,6 +226,12 @@ pub enum Msg {
 
 pub struct Clip {
     history: String,
+    /// A text's lines shown before «показать целиком», and an image's
+    /// thumbnail's height in lines.
+    lines: usize,
+    image_lines: u32,
+    /// Thumbnails made, or why not.
+    thumbs: HashMap<u64, Result<iced::widget::image::Handle, String>>,
     can_paste: bool,
     socket: PathBuf,
     now: i64,
@@ -302,12 +315,12 @@ fn meta_line(e: &Entry, now: i64) -> String {
     words.join(" · ")
 }
 
-/// The preview cut at `PREVIEW_LINES`, and whether there is more to see.
-fn preview(e: &Entry) -> (String, bool) {
+/// The preview cut at `max` lines, and whether there is more to see.
+fn preview(e: &Entry, max: usize) -> (String, bool) {
     let lines: Vec<&str> = e.preview.lines().collect();
-    let cut = lines.len() > PREVIEW_LINES;
+    let cut = lines.len() > max;
     let shown = if cut {
-        format!("{}\n…", lines[..PREVIEW_LINES].join("\n"))
+        format!("{}\n…", lines[..max].join("\n"))
     } else {
         e.preview.clone()
     };
@@ -319,11 +332,11 @@ fn preview(e: &Entry) -> (String, bool) {
 
 /// Roughly how tall an entry's bubble is: to keep the one chosen by keys in
 /// view without measuring the feed.
-fn guessed_height(e: &Entry, whole: Option<&String>, chosen: bool) -> f32 {
+fn guessed_height(e: &Entry, whole: Option<&String>, chosen: bool, max: (usize, u32)) -> f32 {
     let lines = match whole {
         Some(t) => t.lines().count(),
-        None if e.image().is_some() => 1,
-        None => e.preview.lines().count().min(PREVIEW_LINES + 1),
+        None if e.image().is_some() => max.1 as usize,
+        None => e.preview.lines().count().min(max.0 + 1),
     }
     .max(1);
     // Text, the line of when, padding; the actions under the chosen one.
@@ -366,10 +379,18 @@ fn label(t: &str) -> Element<'_, Msg> {
     text(t.to_uppercase()).size(11).style(dim).into()
 }
 
-fn card(theme: &iced::Theme, chosen: bool) -> container::Style {
+/// A bubble: every other one a shade apart, to tell them apart at a glance.
+fn card(theme: &iced::Theme, chosen: bool, odd: bool) -> container::Style {
     let p = theme.extended_palette();
     container::Style {
-        background: Some(p.background.weak.color.into()),
+        background: Some(
+            if odd {
+                p.background.weaker.color
+            } else {
+                p.background.weak.color
+            }
+            .into(),
+        ),
         border: iced::Border {
             color: if chosen {
                 p.primary.base.color
@@ -400,6 +421,9 @@ impl Clip {
     pub fn new(history: String, can_paste: bool, socket: PathBuf) -> Self {
         Self {
             history,
+            lines: PREVIEW_LINES,
+            image_lines: IMAGE_LINES,
+            thumbs: HashMap::new(),
             can_paste,
             socket,
             now: now_ms(),
@@ -512,6 +536,35 @@ impl Clip {
         )
     }
 
+    /// The thumbnails of a page's PNGs not made yet, each fetched and made
+    /// off the window's thread.
+    fn thumbs_of(&mut self, page: &[Entry]) -> Task<Msg> {
+        let height = (self.image_lines as f32 * LINE) as u32;
+        let mut tasks = Vec::new();
+        for e in page {
+            let Some((mime, size)) = e.image() else {
+                continue;
+            };
+            if mime != "image/png" || *size > MAX_THUMB_SOURCE || self.thumbs.contains_key(&e.id) {
+                continue;
+            }
+            // Asked once: an answer that is an error is kept as one.
+            self.thumbs.insert(e.id, Err(String::new()));
+            let (id, socket) = (e.id, self.socket.clone());
+            let request = clipd::get_request(&self.history, id, mime);
+            tasks.push(Task::perform(
+                clipd::off_thread(move || {
+                    clipd::ask(&socket, &request)
+                        .map_err(|f| f.text())
+                        .and_then(|bytes| clipd::read_got(bytes.as_slice()))
+                        .and_then(|png| crate::thumb::of_png(&png, height))
+                }),
+                move |r| Msg::Thumb(id, r.unwrap_or_else(|| Err("нет ответа".to_owned()))),
+            ));
+        }
+        Task::batch(tasks)
+    }
+
     fn entry(&self, id: u64) -> Option<&Entry> {
         self.entries.iter().find(|e| e.id == id)
     }
@@ -528,7 +581,12 @@ impl Clip {
         }
         let h = |j: usize| {
             let e = &self.entries[j];
-            guessed_height(e, self.whole.get(&e.id), self.selected == Some(j)) + 10.0
+            guessed_height(
+                e,
+                self.whole.get(&e.id),
+                self.selected == Some(j),
+                (self.lines, self.image_lines),
+            ) + 10.0
         };
         let below: f32 = (i + 1..self.entries.len()).map(h).sum();
         let top = below + h(i);
@@ -566,22 +624,27 @@ impl Clip {
                     Ok(mut page) => {
                         self.older = page.len() >= PAGE;
                         page.reverse();
+                        let thumbs = self.thumbs_of(&page);
                         if older {
                             let n = page.len();
                             page.append(&mut self.entries);
                             self.entries = page;
                             self.selected = self.selected.map(|i| i + n);
+                            return thumbs;
                         } else {
                             self.entries = page;
                             self.selected = self.entries.len().checked_sub(1);
                             self.whole.clear();
-                            return operation::scroll_to(
-                                FEED,
-                                AbsoluteOffset {
-                                    x: None,
-                                    y: Some(0.0),
-                                },
-                            );
+                            return Task::batch([
+                                thumbs,
+                                operation::scroll_to(
+                                    FEED,
+                                    AbsoluteOffset {
+                                        x: None,
+                                        y: Some(0.0),
+                                    },
+                                ),
+                            ]);
                         }
                     }
                     Err(why) => self.error = Some(why),
@@ -643,6 +706,12 @@ impl Clip {
                 }
                 Err(why) => self.error = Some(why),
             },
+            Msg::Thumb(id, made) => {
+                self.thumbs.insert(
+                    id,
+                    made.map(|t| iced::widget::image::Handle::from_rgba(t.width, t.height, t.rgba)),
+                );
+            }
             Msg::Fold(id) => {
                 self.whole.remove(&id);
             }
@@ -1084,11 +1153,22 @@ impl Clip {
         let chosen = self.selected == Some(i);
         let mut body = column![].spacing(6);
         if let Some((mime, size)) = e.image() {
-            // The window's toolkit is built without image decoding (its
-            // codecs' crates are not among the ones it builds from): the
-            // image said, not shown.
+            // A PNG as its thumbnail (`thumb`); any other image, or one not
+            // made yet, said.
             let kind = mime.strip_prefix("image/").unwrap_or(mime);
-            body = body.push(text(format!("🖼 картинка {kind} · {}", size_words(*size))).size(15));
+            match self.thumbs.get(&e.id) {
+                Some(Ok(handle)) => {
+                    body = body.push(
+                        iced::widget::image(handle.clone())
+                            .height(Length::Shrink)
+                            .content_fit(iced::ContentFit::None),
+                    );
+                }
+                _ => {
+                    body = body
+                        .push(text(format!("🖼 картинка {kind} · {}", size_words(*size))).size(15));
+                }
+            }
         } else if let Some(whole) = self.whole.get(&e.id) {
             body = body.push(text(whole.as_str()).size(15));
             body = body.push(
@@ -1098,7 +1178,7 @@ impl Clip {
                     .on_press(Msg::Fold(e.id)),
             );
         } else {
-            let (shown, more) = preview(e);
+            let (shown, more) = preview(e, self.lines);
             body = body.push(text(shown).size(15));
             if more && e.text_type().is_some() {
                 body = body.push(
@@ -1116,7 +1196,7 @@ impl Clip {
         let bubble = container(body)
             .padding([8, 12])
             .max_width(540)
-            .style(move |t| card(t, chosen));
+            .style(move |t| card(t, chosen, i % 2 == 1));
         mouse_area(bubble).on_press(Msg::Select(i)).into()
     }
 
@@ -1277,7 +1357,7 @@ impl Clip {
         container(panel)
             .padding(10)
             .width(Length::Fill)
-            .style(|t| card(t, false))
+            .style(|t| card(t, false, false))
             .into()
     }
 
@@ -1323,7 +1403,7 @@ impl Clip {
                 )
                 .center_x(Length::Fill)
                 .padding(16)
-                .style(|t| card(t, false)),
+                .style(|t| card(t, false, false)),
             );
         }
         for (i, block) in b.blocks.iter().enumerate() {
@@ -1377,7 +1457,7 @@ impl Clip {
             container(out)
                 .padding(12)
                 .width(Length::Fill)
-                .style(|t| card(t, false)),
+                .style(|t| card(t, false, false)),
         );
 
         page = page.push(label("Что это означает"));
@@ -1427,7 +1507,7 @@ impl Clip {
                 container(rich_text::<(), _, _, _>(spans).size(13))
                     .padding(10)
                     .width(Length::Fill)
-                    .style(|t| card(t, false)),
+                    .style(|t| card(t, false, false)),
             );
             page = page.push(mono(pattern::count_words(found.len())).size(12).style(dim));
         }
@@ -1560,7 +1640,7 @@ impl Clip {
         container(card_body)
             .padding([10, 12])
             .width(Length::Fill)
-            .style(|t| card(t, false))
+            .style(|t| card(t, false, false))
             .into()
     }
 
@@ -1594,6 +1674,8 @@ pub fn run(args: &[String]) -> iced::Result {
     let mut history = None;
     let mut launch = None;
     let mut title = None;
+    let mut lines = PREVIEW_LINES;
+    let mut image_lines = IMAGE_LINES;
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
         let value = rest.next().cloned().unwrap_or_default();
@@ -1601,6 +1683,20 @@ pub fn run(args: &[String]) -> iced::Result {
             "--history" if !value.is_empty() => history = Some(value),
             "--launch" => launch = value.parse::<u32>().ok(),
             "--title" if !value.is_empty() => title = Some(value),
+            "--lines" => {
+                lines = value
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=50).contains(n))
+                    .unwrap_or(lines)
+            }
+            "--image-lines" => {
+                image_lines = value
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=30).contains(n))
+                    .unwrap_or(image_lines)
+            }
             _ => {}
         }
     }
@@ -1613,6 +1709,8 @@ pub fn run(args: &[String]) -> iced::Result {
     iced::application(
         move || {
             let mut clip = Clip::new(history.clone(), can_paste, clipd::socket_path());
+            clip.lines = lines;
+            clip.image_lines = image_lines;
             let first = clip.search();
             (clip, Task::batch([first, operation::focus(SEARCH)]))
         },
@@ -1821,14 +1919,14 @@ mod tests {
             .map(|n| n.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        let (shown, more) = preview(&e);
+        let (shown, more) = preview(&e, 5);
         assert!(more);
-        assert_eq!(shown.lines().count(), PREVIEW_LINES + 1);
+        assert_eq!(shown.lines().count(), 6);
         e.preview = "abc".to_owned();
         e.types = vec![("text/plain".to_owned(), 3)];
-        assert_eq!(preview(&e), ("abc".to_owned(), false));
+        assert_eq!(preview(&e, 3), ("abc".to_owned(), false));
         e.types = vec![("text/plain".to_owned(), 5000)];
-        assert!(preview(&e).1, "the daemon cut it");
+        assert!(preview(&e, 3).1, "the daemon cut it");
         assert_eq!(times(21), "раз");
         assert_eq!(times(1), "раз");
         assert_eq!(times(13), "раз");

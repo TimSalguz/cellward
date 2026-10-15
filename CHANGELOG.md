@@ -14,7 +14,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   history as a messenger's feed — newest at the bottom, a date between days,
   older pages on scrolling up —; search by words, by a pattern built from
   blocks (said in words, tried live), by when it was copied or pasted and by
-  kind; an entry pasted (Enter), moved to another history or deleted.
+  kind; an entry pasted (Enter), moved to another history or deleted. PNGs as
+  thumbnails, `clipboard.window.imageLines` high; texts cut at
+  `clipboard.window.textLines`; every other entry shaded apart; opened from
+  the frame's ≡ too.
 - **The clipboard history is recorded** (`programs.cellward.clipboard.history
   = true`): `cellward-clip daemon` keeps every copy in its container's history
   — by the mark the launch put on it —, the host's in its own, a throwaway

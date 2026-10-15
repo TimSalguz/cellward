@@ -25,9 +25,11 @@ iced = { version = "0.14", default-features = false, features = [
     "linux-theme-detection",
     "wayland",
     "x11",
+    "image-without-codecs",
 ] }
 regex = { version = "1", default-features = false, features = ["std", "unicode"] }
 libc = "0.2"
+png = "0.18"
 
 [profile.release]
 opt-level = "s"
