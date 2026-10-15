@@ -1046,6 +1046,17 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         // What becomes of the program's asking for the focus
         // (`crate::wl_focus`): its container's policy. `input`, the
         // default, is wl-sandbox's own and not said.
+        // Whose its copies are, for the clipboard history (`crate::clip`):
+        // its container's record; a throwaway one keeps none.
+        wrap.push("--clip-history".into());
+        wrap.push(
+            record_name(&selection)
+                .filter(|_| {
+                    !container.ephemeral && !matches!(selection.sandbox, Sandbox::Throwaway(_))
+                })
+                .unwrap_or_else(|| crate::clip::NO_HISTORY.to_owned())
+                .into(),
+        );
         let focus = crate::wl_focus::of_launch(tools, record_name(&selection).as_deref());
         if focus != crate::wl_focus::FocusPolicy::Input {
             wrap.push("--focus".into());

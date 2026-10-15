@@ -286,6 +286,9 @@ pub struct Args {
     /// `--camera black|ask`: a black camera for the launch, served from
     /// here ([`start_camera`]); `None` for any other.
     pub camera: Option<crate::camera::Mode>,
+    /// `--clip-history <name>`: the clipboard history its copies go to
+    /// (`crate::clip::NO_HISTORY` when none; `main` when not said).
+    pub clip_history: String,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
 }
@@ -366,6 +369,7 @@ impl Args {
         let mut focus = crate::wl_focus::FocusPolicy::default();
         let mut always_focused = false;
         let mut camera = None;
+        let mut clip_history = crate::container::MAIN_RECORD.to_owned();
         let mut words = argv[..split].iter();
         while let Some(word) = words.next() {
             if word == "--no-proxy" {
@@ -400,6 +404,12 @@ impl Args {
                     return Err(ArgError::BadFrame);
                 }
                 container = Some(name.into_owned());
+            } else if word == "--clip-history" {
+                let name = words.next().ok_or(ArgError::BadFrame)?.to_string_lossy();
+                if !crate::clip::valid_history(&name) {
+                    return Err(ArgError::BadFrame);
+                }
+                clip_history = name.into_owned();
             } else if word == "--always-focused" {
                 always_focused = true;
             } else if word == "--focus" {
@@ -461,6 +471,7 @@ impl Args {
             frame,
             focus,
             camera,
+            clip_history,
             cmd,
         })
     }
@@ -834,7 +845,7 @@ pub fn run(args: Args) -> u8 {
         proxy_speaks = word.is_some();
         // Its instance's mark, for the clipboard by container (`crate::clip`):
         // the restricted sockets' directory is the instance's.
-        let clip = crate::clip::token_for(&runtime_dir, &args.zone);
+        let clip = crate::clip::token_for(&runtime_dir, &args.zone, &args.clip_history);
         match wl_proxy::start(
             &listener,
             &up.path,

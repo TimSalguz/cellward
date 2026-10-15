@@ -90,6 +90,9 @@ mod query;
 mod record;
 mod segment;
 
+/// What the recorder decides of a selection (`cellward-clip daemon`).
+pub mod recorder;
+
 #[cfg(test)]
 mod tests;
 

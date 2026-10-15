@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The clipboard history is recorded** (`programs.cellward.clipboard.history
+  = true`): `cellward-clip daemon` keeps every copy in its container's history
+  — by the mark the launch put on it —, the host's in its own, a throwaway
+  container's and a password manager's nowhere; it alone holds the key, and
+  `cellward-clip histories|list` ask it. A user unit with no network.
 - The clipboard history's store (`clip/`, `clipstore`): encrypted at rest
   (XChaCha20-Poly1305; the index's terms are keyed hashes), memory-mapped
   segments with an FST of trigrams and time indexes; on ten million entries

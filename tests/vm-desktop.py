@@ -748,7 +748,43 @@ if wanted(CLIP):
     machine.sleep(2)
 
 
-# --- 9. Whose a browser's connection is ----------------------------------------
+# --- 9. The clipboard history -----------------------------------------------------
+
+HIST = "The clipboard history: each copy in its container's history, sealed"
+
+if wanted(HIST):
+    with scenario(HIST):
+        alice(f"systemctl --user stop cellward-clip; systemd-run --user --unit=clipd --setenv=WAYLAND_DISPLAY={nested} cellward-clip daemon")
+        machine.sleep(2)
+        alice("cellward container create histb --home main")
+        for unit, args, word in [
+            ("hist-main", "offline", "word-of-the-real-home"),
+            ("hist-b", "offline --container histb", "word-of-histb"),
+            ("hist-tw", "offline --fs-sandbox", "word-of-a-throwaway"),
+        ]:
+            run(unit, f"{args} -- sh -c 'echo {word} | wl-copy; sleep 600'",
+                env=f"--setenv=VPN_ZONE_APPID={unit}")
+            machine.sleep(5)
+        alice(f"echo word-of-the-host | WAYLAND_DISPLAY={nested} wl-copy")
+        machine.sleep(3)
+        print(alice("journalctl --user --no-pager -u clipd -o cat | tail -20", check=False))
+        print(alice("cellward-clip histories", check=False))
+        main_h = alice("cellward-clip list main", check=False)
+        b_h = alice("cellward-clip list histb", check=False)
+        host_h = alice("cellward-clip list host", check=False)
+        print("main:", main_h, "histb:", b_h, "host:", host_h)
+        assert "word-of-the-real-home" in main_h and "word-of-histb" not in main_h, main_h
+        assert "word-of-histb" in b_h, b_h
+        assert "word-of-the-host" in host_h, host_h
+        everything = main_h + b_h + host_h
+        assert "word-of-a-throwaway" not in everything, everything
+        # Sealed: none of it in the clear on disk.
+        machine.fail("grep -r -l -a word-of- /home/alice/.local/state/cellward-clip")
+    alice("systemctl --user stop clipd hist-main hist-b hist-tw", check=False)
+    machine.sleep(2)
+
+
+# --- 10. Whose a browser's connection is ----------------------------------------
 
 CH = "Chromium's connection: the question names the program"
 
