@@ -97,6 +97,36 @@ const SANDBOX_ENGINE: &str = "vpn-zone";
 /// Below the runtime directory: one directory per zone for the restricted
 /// sockets of its launches.
 pub const SOCKET_DIR: &str = "vpn-zones/wayland";
+
+/// The session's compositor, as the program of a launch is told it beside
+/// its own restricted socket ([`session_compositor`]).
+pub const COMPOSITOR_ENV: &str = "VPN_ZONE_COMPOSITOR";
+
+/// Whether a `WAYLAND_DISPLAY` is one of ours: a launch's restricted socket
+/// (below [`SOCKET_DIR`]), relative or absolute.
+pub fn ours(display: &std::ffi::OsStr) -> bool {
+    let text = display.to_string_lossy();
+    text.starts_with(SOCKET_DIR) || text.contains(&format!("/{SOCKET_DIR}/"))
+}
+
+/// A launch started by the program of another (a file manager opening a
+/// file in another program, a messenger opening a folder): its
+/// `WAYLAND_DISPLAY` is that launch's restricted socket, whose proxy takes
+/// that launch's connections alone — the new launch's window, its question,
+/// its own proxy would all be refused there. The session's compositor
+/// instead, as that launch was told it ([`COMPOSITOR_ENV`]). Anything else is
+/// left as it is.
+pub fn session_compositor() {
+    let Some(display) = std::env::var_os("WAYLAND_DISPLAY") else {
+        return;
+    };
+    if !ours(&display) {
+        return;
+    }
+    if let Some(session) = std::env::var_os(COMPOSITOR_ENV).filter(|s| !s.is_empty() && !ours(s)) {
+        std::env::set_var("WAYLAND_DISPLAY", session);
+    }
+}
 /// The directory for launches that enter no zone.
 pub const NO_ZONE: &str = "unconfined";
 
@@ -673,6 +703,9 @@ fn start_camera(ask: bool, display: Option<&OsStr>) -> Result<(OwnedFd, u32), St
 /// [`run_plain`] (which never returns unless the program itself could not be
 /// started); after, the program is not started ([`not_started`]).
 pub fn run(args: Args) -> u8 {
+    // Started by a program of another launch (a file manager opening a
+    // file): the session's compositor, not that launch's restricted socket.
+    session_compositor();
     // Taken before anything is started: the program never inherits it. The
     // proxy says the word; every way without a proxy says that none will
     // come (`run_plain`, and below).
@@ -848,6 +881,13 @@ pub fn run(args: Args) -> u8 {
     drop(listener);
 
     let previous_display = std::env::var_os("WAYLAND_DISPLAY");
+    // The session's compositor, said to the program beside its own socket:
+    // what a launch it starts in turn — through cellward, with a socket of
+    // its own — is to register with ([`session_compositor`]). A name to
+    // connect to, which the program could reach anyway: it grants nothing.
+    if let Some(display) = previous_display.as_ref().filter(|d| !ours(d)) {
+        std::env::set_var(COMPOSITOR_ENV, display);
+    }
     std::env::set_var("WAYLAND_DISPLAY", sock_name);
     // WAYLAND_SOCKET (an inherited descriptor) would override WAYLAND_DISPLAY,
     // and the program would go to the ordinary socket past the whole point.
@@ -983,6 +1023,20 @@ const NOT_STARTED_INSIDE: &str = "запуск закончился, не нач
 
 #[cfg(test)]
 mod tests {
+
+    /// A launch's restricted socket is ours, relative or absolute; the
+    /// session's compositor is not.
+    #[test]
+    fn a_launchs_socket_is_known_for_ours() {
+        use std::ffi::OsStr;
+        assert!(ours(OsStr::new("vpn-zones/wayland/i-1/wl-sandbox-7")));
+        assert!(ours(OsStr::new(
+            "/run/user/1000/vpn-zones/wayland/nl/wl-sandbox-7"
+        )));
+        assert!(!ours(OsStr::new("wayland-1")));
+        assert!(!ours(OsStr::new("/run/user/1000/wayland-1")));
+    }
+
     use super::*;
 
     fn argv(args: &[&str]) -> Vec<OsString> {

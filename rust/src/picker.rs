@@ -1883,6 +1883,9 @@ pub fn run_argv(
 
 /// Entry point of the `vpn-zone-pick` binary.
 pub fn main() -> ExitCode {
+    // From a program of another launch: the session's compositor, for the
+    // window and the launch (`wl_sandbox::session_compositor`).
+    crate::wl_sandbox::session_compositor();
     // `args_os`: a launcher hands file names through `%U` field codes, and file
     // names are bytes.
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -3081,8 +3084,10 @@ fn raise_running(state: &Path, key: &str) {
     }
 }
 
-/// How long [`raise_running`] looks for the window of the copy that runs.
-const RAISE_WITHIN: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long [`raise_running`] looks for the window of the copy that runs:
+/// one brought back from a tray maps it when it gets to it — three seconds
+/// was not enough for the owner's messenger under load (2026-10-15).
+const RAISE_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Why a launch did not start, when nothing on the way said it.
 const NOT_STARTED_UNSAID: &str = "запуск закончился, не начав программу (код 127) — причина в \
