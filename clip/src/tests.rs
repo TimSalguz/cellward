@@ -63,6 +63,7 @@ fn small() -> Options {
         fanout: 2,
         sync: false,
         auto_merge: true,
+        time_set_max: 1 << 16,
     }
 }
 
@@ -297,6 +298,48 @@ fn date_ranges_and_pastes() {
         ..Query::default()
     };
     assert_eq!(h.query(&qb, None, 100).unwrap(), vec![ids[1]]);
+    drop(h);
+
+    // The same with every range checked per candidate (no sets).
+    let opts = Options {
+        time_set_max: 0,
+        ..small()
+    };
+    let h = History::open_with(d.path(), &k, opts).unwrap();
+    let words_in = |w: &str, q: Query| {
+        h.query(
+            &Query {
+                text_terms: vec![w.into()],
+                ..q
+            },
+            None,
+            100,
+        )
+        .unwrap()
+    };
+    let q3 = Query {
+        copied: Some(3 * day..4 * day),
+        ..Query::default()
+    };
+    assert_eq!(
+        words_in("item 1", q3),
+        vec![ids[15], ids[14], ids[13], ids[12]]
+    );
+    let q20 = Query {
+        copied: Some(20 * day..21 * day),
+        ..Query::default()
+    };
+    assert_eq!(words_in("item", q20), vec![ids[2]]);
+    let qp = Query {
+        pasted: Some(30 * day..32 * day),
+        ..Query::default()
+    };
+    assert_eq!(words_in("item 4", qp), vec![ids[41], ids[40]]);
+    let qa = Query {
+        around: Some((30 * day, 1000)),
+        ..Query::default()
+    };
+    assert_eq!(words_in("item", qa), vec![ids[40], ids[1]]);
 }
 
 #[test]
@@ -586,6 +629,7 @@ fn bench_ten_million() {
         fanout: 8,
         sync: false,
         auto_merge: true,
+        time_set_max: 1 << 16,
     };
     // A vocabulary of random words, used Zipf-like: a few very common, most
     // rare.
@@ -669,12 +713,17 @@ fn bench_ten_million() {
             .last()
             .map(|&b| h.query(q, Some(b), 50).unwrap().len())
             .unwrap_or(0);
+        let next_t = ts.elapsed();
+        // Again, its pages now in the page cache.
+        let ts = Instant::now();
+        h.query(q, None, 50).unwrap();
         eprintln!(
-            "query {label}: first page {} ids in {:?}; next page {} in {:?}",
+            "query {label}: first page {} ids in {:?} (again: {:?}); next page {} in {:?}",
             page.len(),
             first,
+            ts.elapsed(),
             next,
-            ts.elapsed()
+            next_t
         );
     };
     let rare = vocab.last().unwrap().clone();
@@ -701,17 +750,19 @@ fn bench_ten_million() {
         },
     );
     let day = 86_400_000;
+    // The middle of the history's span.
+    let mid = start_ms + (n as i64 * step / 2) / day * day;
     time(
         "one day",
         &Query {
-            copied: Some(start_ms + 100 * day..start_ms + 101 * day),
+            copied: Some(mid..mid + day),
             ..Query::default()
         },
     );
     time(
         "pasted, one hour",
         &Query {
-            pasted: Some(start_ms + 200 * day..start_ms + 200 * day + 3_600_000),
+            pasted: Some(mid..mid + 3_600_000),
             ..Query::default()
         },
     );
@@ -719,7 +770,7 @@ fn bench_ten_million() {
         "rare word in a month",
         &Query {
             text_terms: vec![vocab[40_000].clone()],
-            copied: Some(start_ms + 30 * day..start_ms + 60 * day),
+            copied: Some(mid - 15 * day..mid + 15 * day),
             ..Query::default()
         },
     );

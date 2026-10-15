@@ -225,6 +225,14 @@ impl Segment {
         }
     }
 
+    /// How many events of `kind` are in `[from, to)`.
+    pub fn time_count(&self, kind: u8, from: i64, to: i64) -> usize {
+        let t = self.table(if kind == COPIED { S_COPIED } else { S_PASTED });
+        let lo = t.partition_point(|i| t.i64(i, 0) < from);
+        let hi = t.partition_point(|i| t.i64(i, 0) < to);
+        hi.saturating_sub(lo)
+    }
+
     /// The ids of the events of `kind` in `[from, to)`.
     pub fn time_range(&self, kind: u8, from: i64, to: i64, out: &mut Vec<u64>) {
         let t = self.table(if kind == COPIED { S_COPIED } else { S_PASTED });

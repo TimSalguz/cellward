@@ -71,7 +71,17 @@
 //! of entries, not every match. A word shorter than three characters, and
 //! a pattern requiring no literal run of three, have no trigram: they are
 //! checked by decrypting entry after entry (narrowed by the other
-//! conditions, if any) — slow on a large history.
+//! conditions, if any) — slow on a large history. So is a pattern whose
+//! literal is common and whose matches are rare (`word\s+\d{4}$` over ten
+//! million entries: seconds): every entry with the word is decrypted until
+//! a page is found. A wide time range with words is checked on each
+//! candidate ([`Options::time_set_max`]) rather than gathered first.
+//!
+//! Measured (`tests::bench_ten_million`, ten million short texts, 4.2 GB
+//! after a full merge): ~36k appends a second including seals and merges;
+//! open under a millisecond; a first page from warm pages in 0.05–0.7 ms
+//! for a rare word, a common word, two words, a day, a rare word in a
+//! month; from a cold page cache, tens to hundreds of milliseconds.
 
 mod active;
 mod codec;
@@ -269,6 +279,10 @@ pub struct Options {
     pub sync: bool,
     /// Merge after a seal when segments pile up (else only [`History::compact`]).
     pub auto_merge: bool,
+    /// A time range of more events than this, in a query that has words or
+    /// types too, is checked on each candidate instead of being made a set
+    /// of ids first.
+    pub time_set_max: usize,
 }
 
 impl Default for Options {
@@ -278,6 +292,7 @@ impl Default for Options {
             fanout: 8,
             sync: true,
             auto_merge: true,
+            time_set_max: 1 << 16,
         }
     }
 }
@@ -776,7 +791,24 @@ impl History {
         }))
     }
 
-    /// The ids of the events of `kind` in `[from, to)`, ascending, once each.
+    /// How many events of `kind` are in `[from, to)` (two binary searches a
+    /// segment).
+    fn time_count(&self, kind: u8, from: i64, to: i64) -> usize {
+        let sealed: usize = self
+            .segments
+            .iter()
+            .map(|s| s.time_count(kind, from, to))
+            .sum();
+        sealed
+            + self
+                .active
+                .events
+                .iter()
+                .filter(|e| e.2 == kind && from <= e.1 && e.1 < to)
+                .count()
+    }
+
+    /// The ids of the events of `kind` in `[from, to)`.
     fn time_ids(&self, kind: u8, from: i64, to: i64, out: &mut Vec<u64>) {
         for s in &self.segments {
             s.time_range(kind, from, to, out);
@@ -828,29 +860,42 @@ impl History {
                 .map(|t| self.keys.term(TERM_TYPE, t.to_ascii_lowercase().as_bytes()))
                 .collect()
         });
+        // A time condition: the kinds of event, and the range. Turned into a
+        // set of ids when that set is small or nothing else narrows the
+        // search; else (a month of a large history and a rare word) checked
+        // on each candidate by its own events, which costs a lookup per
+        // candidate instead of collecting and sorting the range's every id.
+        let mut conds: Vec<(&[u8], i64, i64)> = Vec::new();
+        if let Some(r) = &q.copied {
+            conds.push((&[COPIED], r.start, r.end));
+        }
+        if let Some(r) = &q.pasted {
+            conds.push((&[PASTED], r.start, r.end));
+        }
+        if let Some((t, w)) = q.around {
+            let w = w.abs();
+            conds.push((
+                &[COPIED, PASTED],
+                t.saturating_sub(w),
+                t.saturating_add(w).saturating_add(1),
+            ));
+        }
+        let narrowed = !hashes.is_empty() || types.is_some();
         let mut times: Vec<Vec<u64>> = Vec::new();
-        let mut push_time = |kinds: &[u8], from: i64, to: i64| {
-            let mut v = Vec::new();
+        let mut deferred: Vec<(&[u8], i64, i64)> = Vec::new();
+        for (kinds, from, to) in conds {
+            let count: usize = kinds.iter().map(|&k| self.time_count(k, from, to)).sum();
+            if narrowed && count > self.opts.time_set_max {
+                deferred.push((kinds, from, to));
+                continue;
+            }
+            let mut v = Vec::with_capacity(count);
             for &k in kinds {
                 self.time_ids(k, from, to, &mut v);
             }
             v.sort_unstable();
             v.dedup();
             times.push(v);
-        };
-        if let Some(r) = &q.copied {
-            push_time(&[COPIED], r.start, r.end);
-        }
-        if let Some(r) = &q.pasted {
-            push_time(&[PASTED], r.start, r.end);
-        }
-        if let Some((t, w)) = q.around {
-            let w = w.abs();
-            push_time(
-                &[COPIED, PASTED],
-                t.saturating_sub(w),
-                t.saturating_add(w).saturating_add(1),
-            );
         }
         let need_text = !words.is_empty() || re.is_some();
         let below = before.unwrap_or(u64::MAX);
@@ -924,6 +969,18 @@ impl History {
                 at = id;
                 if self.is_deleted(id) {
                     continue;
+                }
+                if !deferred.is_empty() {
+                    let (copies, pastes) = self.events_of(id);
+                    let within = |&(kinds, from, to): &(&[u8], i64, i64)| {
+                        kinds.iter().any(|&k| {
+                            let ev = if k == COPIED { &copies } else { &pastes };
+                            ev.iter().any(|&t| from <= t && t < to)
+                        })
+                    };
+                    if !deferred.iter().all(within) {
+                        continue;
+                    }
                 }
                 if need_text {
                     let blob = match part {
