@@ -841,16 +841,22 @@ def spans_down(found):
 
 
 def block_buttons(at):
-    """The ⊘ buttons: in the right quarter, below the tabs, runs of one
-    colour not the page's, 20 to 40 pixels wide — top to bottom."""
+    """The ⊘ buttons, top to bottom: down the column through their right
+    padding (the page's 16 pixels in, 4 more — no glyph there), runs of
+    one grey, not the page's, 12 to 30 pixels high; their middles, at
+    the button's own middle column."""
     w, h = at.size
     page = at(w - 3, h - 3)
-    found = []
-    for y in range(110, h):
-        for a, b, c in runs_at(at, y, w * 3 // 4, w - 20):
-            if c != page and 20 <= b - a + 1 <= 40:
-                found.append(((a + b) // 2, y))
-    buttons = spans_down(found)
+    x = w - 16 - 4
+    buttons = []
+    start, colour = 110, at(x, 110)
+    for y in range(111, h + 1):
+        c = at(x, y) if y < h else None
+        if c != colour:
+            grey = colour is not None and colour[0] == colour[1] == colour[2]
+            if grey and colour != page and 12 <= y - start <= 30:
+                buttons.append((x - 10, (start + y - 1) // 2))
+            start, colour = y, c
     assert len(buttons) >= 2, f"no ⊘ buttons: {buttons}"
     return buttons
 
@@ -939,8 +945,11 @@ if wanted(TREE):
         x, y = buttons[1]
         click(x - 260, y, rest=0.3)
         machine.sleep(2)
+        before = len(buttons)
         buttons = settled("tree-site", block_buttons)
         print("⊘ buttons, the site unfolded:", buttons)
+        # Its two names under it, each with its own ⊘.
+        assert len(buttons) == before + 2, (before, buttons)
         # The first site's ⊘: asked on its row, nothing done yet.
         x, y = buttons[0]
         click(x, y, rest=0.6)

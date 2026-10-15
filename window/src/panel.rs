@@ -1583,7 +1583,7 @@ impl Panel {
             _ => None,
         };
         let mut asked_shown = false;
-        let mut tree = column![].spacing(2);
+        let mut tree = column![].spacing(4);
         for g in groups(&self.data) {
             let color = self
                 .data
@@ -1639,7 +1639,7 @@ impl Panel {
                 g.dests.len().min(SHOWN)
             };
             let more = g.dests.len() > SHOWN;
-            let mut children = column![].spacing(1);
+            let mut children = column![].spacing(3);
             for (n, d) in g.dests.iter().take(shown).enumerate() {
                 let last = n + 1 == shown && !more;
                 let site_key = format!("{}\t{}", g.key, d.label);
