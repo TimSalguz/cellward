@@ -113,7 +113,7 @@ pub enum MenuRow {
 impl MenuRow {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Network => "Сменить сеть…",
+            Self::Network => "Сменить сеть контейнера…",
             Self::Restart => "Перезапустить с выбором сети…",
             Self::InWindow => "Во весь экран внутри окна",
             Self::Clipboard => "Вставить из истории буфера…",

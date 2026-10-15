@@ -105,6 +105,9 @@ struct Request {
     /// `permof⇥<tag>⇥<scope>⇥<key>=<value>[!],…`: a container's
     /// permissions as they are, and whom a change is for.
     perm_of: Vec<PermOf>,
+    /// The permissions block's heading (`block`): «Разрешения» unless said
+    /// — the frame's settings are shown as the same rows.
+    block: Option<String>,
 }
 
 /// A permission's row: its key, its name, its choices `(value, text)`.
@@ -215,6 +218,9 @@ fn parse_request(text: &str) -> Request {
                 .push((fields[1].to_owned(), fields[2].to_owned())),
             "perm" => req.perms.extend(parse_perm(&fields[1..])),
             "permof" => req.perm_of.extend(parse_perm_of(&fields[1..])),
+            "block" if fields.len() >= 2 && !fields[1].is_empty() => {
+                req.block = Some(fields[1].to_string())
+            }
             _ => {}
         }
     }
@@ -1003,7 +1009,7 @@ impl Window {
             |p| p.scope.as_str(),
         );
         let mut block = column![
-            text("Разрешения").size(15),
+            text(self.req.block.as_deref().unwrap_or("Разрешения")).size(15),
             text(scope)
                 .size(13)
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
@@ -1034,7 +1040,8 @@ impl Window {
                     text(perm.label.as_str())
                         .size(13)
                         .width(Length::Fixed(230.0)),
-                    choices
+                    // Many choices (the frame's colours) go on below.
+                    choices.wrap().vertical_spacing(2)
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),

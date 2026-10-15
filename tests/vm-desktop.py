@@ -661,8 +661,10 @@ if wanted(PW):
         machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
         machine.sleep(3)
         shot("pw-menu")
-        # restart, close, then the container's: its permissions.
-        alice(f"WAYLAND_DISPLAY={nested} wtype -s 400 -k 3 -k Return")
+        # restart, close, then the container's: its permissions — after
+        # «Вставить из истории» where the history runs.
+        history = machine.execute("test -S /run/user/1000/cellward-clip.sock")[0] == 0
+        alice(f"WAYLAND_DISPLAY={nested} wtype -s 400 -k {4 if history else 3} -k Return")
         machine.sleep(4)
         shot("pw-perms")
         print(alice("pgrep -a vpn-zone-window || true", check=False))
@@ -670,7 +672,29 @@ if wanted(PW):
         machine.succeed("pgrep -x vpn-zone-window")
         alice(f"WAYLAND_DISPLAY={nested} wtype -s 400 -k Escape")
         machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=30)
-    alice("systemctl --user stop pw-pick-1 pw-pick-2 pw-menu", check=False)
+        # The frame's settings: the menu's last entry, for every window. The
+        # first row Nix leaves to change, one choice on, saved: `cellward
+        # frame` says another thing.
+        before = alice("cellward frame")
+        alice(f"systemd-run --user --unit=pw-menu2 --setenv=WAYLAND_DISPLAY={nested} cellward window-menu --pid {sup}")
+        machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
+        machine.sleep(3)
+        alice(f"WAYLAND_DISPLAY={nested} wtype -s 400 -k Up -k Return")
+        machine.sleep(4)
+        at = shot("pw-frame")
+        machine.succeed("pgrep -x vpn-zone-window")
+        rows = perm_rows(blue_boxes(at))
+        print("frame rows:", rows)
+        row = rows[1]
+        click(row[2] + 14, (row[1] + row[3]) // 2, rest=0.3)
+        machine.sleep(2)
+        shot("pw-frame-changed")
+        alice(f"WAYLAND_DISPLAY={nested} wtype -k Return")
+        machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=30)
+        said = alice("cellward frame")
+        print(said)
+        assert said != before, said
+    alice("systemctl --user stop pw-pick-1 pw-pick-2 pw-menu pw-menu2", check=False)
     machine.sleep(3)
 
 
