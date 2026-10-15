@@ -323,8 +323,8 @@ fn leaves_by_id(dir: &Path) -> HashMap<u64, (PathBuf, String)> {
 }
 
 /// The owner of a socket made in a launch's cgroup `leaf`: the launch, by
-/// its waiter. The process named: one of the cgroup's whose descriptors are
-/// closed — no readable one holds the socket, or it would have been found
+/// its waiter. The process named: the newest of the cgroup's whose
+/// descriptors are closed — no readable one holds the socket, or it would have been found
 /// —, else its newest; the one that made it may be gone, or one of several.
 fn by_leaf((path, leaf): &(PathBuf, String), launches: &HashMap<i32, String>) -> Option<Owner> {
     let (waiter, start) = crate::epoch::leaf_of(leaf)?;
@@ -336,8 +336,11 @@ fn by_leaf((path, leaf): &(PathBuf, String), launches: &HashMap<i32, String>) ->
         fs::read_dir(format!("/proc/{pid}/fd"))
             .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
     };
+    // The newest closed one: the launch's own wrapper closes itself too,
+    // and the program comes after it.
     let pid = pids
         .iter()
+        .rev()
         .find(closed)
         .or(pids.last())
         .copied()
