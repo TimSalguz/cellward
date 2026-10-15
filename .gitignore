@@ -2,6 +2,7 @@ result
 result-*
 rust/target/
 window/target/
+clip/target/
 CLAUDE.md
 claude.md
 codex-session-*.md

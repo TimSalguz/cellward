@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- The clipboard history's store (`clip/`, `clipstore`): encrypted at rest
+  (XChaCha20-Poly1305; the index's terms are keyed hashes), memory-mapped
+  segments with an FST of trigrams and time indexes; on ten million entries
+  the first page of a search comes in under a millisecond once cached. The
+  daemon and the window that use it are next.
 - **The network window's connections as a tree** (2026-10-15, the owner):
   by program and container, each group's sites by traffic, a site unfolded
   to its names; a destination blocked for its container from its row after
