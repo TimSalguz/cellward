@@ -860,6 +860,7 @@ let
     "waylandProxy.enable"
     "waylandProxy.exceptions"
     "connection"
+    "clipboard.history"
     "frame.colors"
     "frame.width"
     "frame.title"
