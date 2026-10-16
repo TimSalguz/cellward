@@ -30,6 +30,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   address — the VPN's side, encrypted to its server, or a public one asked in
   clear past it —, in `doctor` (`dns-side`) and on each zone's row in the
   cellward window.
+- **`cellward add` says what the new zone is linked to**, before it is ever
+  up: each server by a name (resolved once in the host's network, seen by
+  the host's provider) or an address, and where its names go.
 - **Open a file or a folder from the real home** (`LEAK-MODEL.md` §2): the
   portal's `OpenFile`/`OpenDirectory` of a program of the real home goes to
   the broker, which checks the file on the host — in the home, every link

@@ -728,6 +728,10 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
         return 1;
     }
     println!("зона {} создана", name.to_string_lossy());
+    // What it is linked to, before it is ever up (§5, §6 of the leak model).
+    for line in crate::dnspath::links_of(&text) {
+        println!("  {line}");
+    }
     0
 }
 
