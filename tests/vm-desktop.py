@@ -262,6 +262,65 @@ alice("systemctl --user stop ff-main-off ff-main-host", check=False)
 machine.sleep(3)
 
 
+# --- 2b. A link from another program of the same home and network ------------
+
+
+def first_menu_action(at):
+    """The guarded launch window's first entry: its highlighted one (blue)."""
+    points = []
+    w, h = at.size
+    for y in range(h):
+        for x in range(0, w, 2):
+            red, green, blue = at(x, y)
+            if 50 < red < 150 and 50 < green < 150 and blue > 180:
+                points.append((x, y))
+    assert len(points) > 500, "the guarded menu's selected entry not found"
+    xs, ys = zip(*points)
+    return (min(xs) + max(xs)) // 2, (min(ys) + max(ys)) // 2
+
+
+if wanted('a link from another program into the Firefox already open: a tab there'):
+    with scenario("a link from another program into the Firefox already open: a tab there"):
+        # Firefox of the real home in a network; a messenger of the same
+        # home and network opens a link; the person picks the same home and
+        # network: the link goes to the Firefox already running — no second
+        # one, no "already running" or "not responding" (the owner,
+        # 2026-10-16).
+        run("ff-link", "offline -- firefox --new-window about:blank", env="--setenv=VPN_ZONE_APPID=firefox")
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {NIRI_MSG} --json windows' | grep -q firefox",
+            timeout=120,
+        )
+        machine.sleep(5)
+        before = [t for t in titles() if t[0] == "firefox"]
+        assert len(before) == 1 and len(firefox_mains()) == 1, (before, firefox_mains())
+        alice("cellward container links main set https firefox")
+        run(
+            "link-ask",
+            "offline -- gdbus call --session --dest org.freedesktop.portal.Desktop "
+            "--object-path /org/freedesktop/portal/desktop "
+            "--method org.freedesktop.portal.OpenURI.OpenURI '' 'https://link.test/' '{}'",
+        )
+        machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=60)
+        machine.sleep(2)
+        x, y = settled("ff-link-asked", first_menu_action)
+        click(x, y, rest=2.5)
+        machine.sleep(12)
+        shot("ff-link-opened")
+        after = [t for t in titles() if t[0] == "firefox"]
+        print("windows:", titles())
+        print(alice("journalctl --user --no-pager -o cat | grep -i -E 'firefox|link' | tail -30", check=False))
+        assert not any(t[1] in ("Close Firefox", "Firefox is already running") or "not responding" in t[1]
+                       for t in after), after
+        assert len(firefox_mains()) == 1, firefox_mains()
+        assert len(after) == 1, after
+        assert after[0][1] != before[0][1], ("the link did not reach the open Firefox", before, after)
+        alice("cellward container links main rm https")
+
+alice("systemctl --user stop ff-link link-ask", check=False)
+machine.sleep(3)
+
+
 # --- 3. The permission panel, clicked as people click -------------------------
 
 
