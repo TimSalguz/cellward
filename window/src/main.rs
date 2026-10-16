@@ -43,9 +43,9 @@ mod clip;
 mod clipd;
 mod days;
 mod login;
+mod metro;
 mod panel;
 mod pattern;
-mod scheme;
 mod thumb;
 
 use iced::keyboard::{self, key, Key};

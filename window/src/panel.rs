@@ -136,10 +136,6 @@ struct ProcRow {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Data {
-    /// The host's interfaces (`iface` lines).
-    ifaces: Vec<crate::scheme::Iface>,
-    /// Each zone's tunnel and servers: `zone → (kind, servers)` (`endpoint`).
-    tunnels: HashMap<String, (String, Vec<crate::scheme::Server>)>,
     /// Where each zone's names go past its tunnel: `zone → (vpn|public|-,
     /// words)` (`dns` lines).
     dns: HashMap<String, (String, String)>,
@@ -206,32 +202,6 @@ fn parse(text: &str) -> Data {
             ["pin", key, name, to] => {
                 d.pins
                     .push(((*key).to_owned(), (*name).to_owned(), (*to).to_owned()))
-            }
-            ["iface", name, kind, up, addrs] => d.ifaces.push(crate::scheme::Iface {
-                name: (*name).to_owned(),
-                kind: (*kind).to_owned(),
-                up: *up == "1",
-                addrs: addrs
-                    .split(',')
-                    .filter(|a| !a.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
-            }),
-            ["endpoint", zone, kind, raw, addr, named, dev, via] => {
-                let opt = |v: &str| (v != "-").then(|| v.to_owned());
-                let entry = d
-                    .tunnels
-                    .entry((*zone).to_owned())
-                    .or_insert_with(|| ((*kind).to_owned(), Vec::new()));
-                if *raw != "-" {
-                    entry.1.push(crate::scheme::Server {
-                        raw: (*raw).to_owned(),
-                        addr: opt(addr),
-                        named: *named == "1",
-                        dev: opt(dev),
-                        via: opt(via),
-                    });
-                }
             }
             ["dns", zone, side, words] => {
                 d.dns.insert(
@@ -779,8 +749,14 @@ enum Msg {
     /// Space and Delete, outside a field.
     TasksSpace,
     TasksDelete,
-    /// The zone the scheme draws.
-    SchemeZone(String),
+    /// `cellward scheme --lines`, read.
+    SchemeLoaded(Result<String, String>),
+    /// A row of the scheme chosen, or let go (chosen again).
+    SchemePin(String),
+    /// The stretch under the pointer: `(row, hop)`.
+    SchemeHover(Option<(String, usize)>),
+    /// The row under the pointer in the list beside the scheme.
+    SchemeFocus(Option<String>),
     Modifiers(keyboard::Modifiers),
 }
 
@@ -819,8 +795,15 @@ struct Panel {
     picked: HashSet<(String, String)>,
     opened: HashSet<(String, String)>,
     ctrl: bool,
-    /// The zone the scheme draws: chosen, else the first one up.
-    scheme_zone: Option<String>,
+    /// The scheme as last read, laid out; why not, when reading failed.
+    metro: Option<crate::metro::Metro>,
+    metro_trouble: Option<String>,
+    /// Being read now; when it was read last.
+    metro_busy: bool,
+    metro_at: Option<Instant>,
+    scheme_pin: Option<String>,
+    scheme_hover: Option<(String, usize)>,
+    scheme_focus: Option<String>,
 }
 
 /// Run `cellward <args>` off the window's threads; its output, or why not.
@@ -978,7 +961,13 @@ impl Panel {
             picked: HashSet::new(),
             opened: HashSet::new(),
             ctrl: false,
-            scheme_zone: None,
+            metro: None,
+            metro_trouble: None,
+            metro_busy: false,
+            metro_at: None,
+            scheme_pin: None,
+            scheme_hover: None,
+            scheme_focus: None,
         }
     }
 
@@ -1089,7 +1078,7 @@ impl Panel {
                 if matches!(self.pending, Some(Pending::Block { .. })) {
                     self.pending = None;
                 }
-                Task::none()
+                self.read_scheme()
             }
             Msg::Fold(key) => {
                 if !self.folded.remove(&key) {
@@ -1133,7 +1122,7 @@ impl Panel {
                 "unblock".into(),
                 target,
             ]),
-            Msg::Tick => load(self.cellward.clone()),
+            Msg::Tick => Task::batch([load(self.cellward.clone()), self.read_scheme()]),
             Msg::Loaded(Ok(text)) => {
                 let now = Instant::now();
                 let data = parse(&text);
@@ -1336,8 +1325,46 @@ impl Panel {
                 Task::none()
             }
             Msg::ZoneDo(zone, verb) => self.act(vec![verb.to_owned(), zone]),
-            Msg::SchemeZone(zone) => {
-                self.scheme_zone = Some(zone);
+            Msg::SchemeLoaded(said) => {
+                self.metro_busy = false;
+                self.metro_at = Some(Instant::now());
+                match said {
+                    Ok(lines) => {
+                        let metro = crate::metro::Metro::new(crate::metro::parse(&lines));
+                        // What was chosen, gone: let go.
+                        let there = |id: &Option<String>| {
+                            id.as_ref().is_some_and(|id| metro.row(id).is_some())
+                        };
+                        if !there(&self.scheme_pin) {
+                            self.scheme_pin = None;
+                        }
+                        if !there(&self.scheme_focus) {
+                            self.scheme_focus = None;
+                        }
+                        if !there(&self.scheme_hover.as_ref().map(|h| h.0.clone())) {
+                            self.scheme_hover = None;
+                        }
+                        self.metro = Some(metro);
+                        self.metro_trouble = None;
+                    }
+                    Err(why) => self.metro_trouble = Some(why),
+                }
+                Task::none()
+            }
+            Msg::SchemePin(id) => {
+                self.scheme_pin = if self.scheme_pin.as_ref() == Some(&id) {
+                    None
+                } else {
+                    Some(id)
+                };
+                Task::none()
+            }
+            Msg::SchemeHover(under) => {
+                self.scheme_hover = under;
+                Task::none()
+            }
+            Msg::SchemeFocus(id) => {
+                self.scheme_focus = id;
                 Task::none()
             }
             Msg::Modifiers(m) => {
@@ -2528,89 +2555,190 @@ impl Panel {
         )
     }
 
-    /// **Схема**: one zone as it is linked (`crate::scheme`), its zones to
-    /// choose from above it.
+    /// `cellward scheme --lines` while the scheme is shown: each few
+    /// seconds, one reading at a time — it looks into every zone.
+    fn read_scheme(&mut self) -> Task<Msg> {
+        let due = self
+            .metro_at
+            .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(3));
+        if self.tab != Tab::Scheme || self.metro_busy || !due {
+            return Task::none();
+        }
+        self.metro_busy = true;
+        let args = vec!["scheme".to_owned(), "--lines".to_owned()];
+        Task::perform(cellward(self.cellward.clone(), args), Msg::SchemeLoaded)
+    }
+
+    /// **Схема**: every flow and every kind of packet, each a line from its
+    /// source to its end (`crate::metro`); the rows listed beside it, the
+    /// one chosen or pointed at told in full under it.
     fn view_scheme(&self) -> Element<'_, Msg> {
-        let zones: Vec<&Net> = self
-            .data
-            .networks
-            .iter()
-            .filter(|n| n.kind == "zone" || n.kind == "host")
-            .collect();
-        let chosen = self
-            .scheme_zone
-            .clone()
-            .filter(|z| zones.iter().any(|n| &n.name == z))
-            .or_else(|| zones.iter().find(|n| n.up).map(|n| n.name.clone()))
-            .or_else(|| zones.first().map(|n| n.name.clone()));
-        let Some(zone) = chosen else {
-            return text("Подключений нет: добавьте VPN на вкладке «Подключения»")
-                .size(14)
-                .into();
+        let Some(metro) = &self.metro else {
+            let said = match &self.metro_trouble {
+                Some(why) => format!("Схема не читается: {why}"),
+                None => "Читаю схему…".to_owned(),
+            };
+            return text(said).size(14).into();
         };
-        let mut pick = row![].spacing(6);
-        for n in &zones {
-            pick = pick.push(
-                button(text(n.name.as_str()).size(13))
-                    .padding([4, 10])
-                    .style(if n.name == zone {
-                        button::primary
-                    } else {
-                        button::secondary
-                    })
-                    .on_press(Msg::SchemeZone(n.name.clone())),
+        let hover_row = self.scheme_hover.as_ref().map(|h| h.0.as_str());
+        let focus = hover_row
+            .or(self.scheme_focus.as_deref())
+            .or(self.scheme_pin.as_deref());
+        let mut list = column![].spacing(2);
+        let mut group: Option<&str> = None;
+        for lane in &metro.lanes {
+            let r = &metro.scheme.rows[lane.row];
+            if group != Some(r.group.as_str()) {
+                group = Some(&r.group);
+                list = list.push(
+                    container(text(metro.group_title(&r.group)).size(12))
+                        .padding(iced::Padding::new(0.0).top(8.0)),
+                );
+            }
+            // Its colour as the theme is, light or dark.
+            let (mark, _) = crate::metro::list_mark(r, &iced::Theme::Light);
+            let of = r.clone();
+            let color = move |theme: &iced::Theme| text::Style {
+                color: Some(crate::metro::list_mark(&of, theme).1),
+            };
+            let count = if r.count > 0 {
+                format!(" ×{}", r.count)
+            } else {
+                String::new()
+            };
+            let line = row![
+                text(mark).size(13).style(color).width(16),
+                text(format!(
+                    "{} · {}{count}",
+                    r.name,
+                    crate::metro::kind_words(&r.kind)
+                ))
+                .size(12),
+            ]
+            .spacing(4);
+            let chosen = self.scheme_pin.as_deref() == Some(r.id.as_str());
+            list = list.push(
+                iced::widget::mouse_area(
+                    button(line)
+                        .padding([2, 6])
+                        .width(Length::Fill)
+                        .style(if chosen {
+                            button::primary
+                        } else {
+                            button::text
+                        })
+                        .on_press(Msg::SchemePin(r.id.clone())),
+                )
+                .on_enter(Msg::SchemeFocus(Some(r.id.clone())))
+                .on_exit(Msg::SchemeFocus(None)),
             );
         }
-        let net = zones.iter().find(|n| n.name == zone);
-        let (kind, servers) = self
-            .data
-            .tunnels
-            .get(&zone)
-            .cloned()
-            .unwrap_or_else(|| ("offline".to_owned(), Vec::new()));
-        let conts = self
-            .data
-            .instances
-            .iter()
-            .filter(|i| i.network == zone)
-            .map(|i| {
-                let (out, inb) = self.rates.get(&i.id).copied().unwrap_or((0.0, 0.0));
-                crate::scheme::Cont {
-                    name: if i.container == "-" {
-                        i.id.clone()
-                    } else {
-                        i.container.clone()
-                    },
-                    out,
-                    inb,
-                }
+        let canvas = iced::widget::canvas(crate::metro::View {
+            metro,
+            focus,
+            pinned: self.scheme_pin.as_deref(),
+            hover: Msg::SchemeHover,
+            pin: Msg::SchemePin,
+        })
+        .width(metro.width)
+        .height(metro.height);
+        let map = scrollable(canvas)
+            .direction(scrollable::Direction::Both {
+                vertical: scrollable::Scrollbar::default(),
+                horizontal: scrollable::Scrollbar::default(),
             })
-            .collect();
-        let scheme = crate::scheme::Scheme {
-            zone: zone.clone(),
-            up: net.is_some_and(|n| n.up),
-            color: net
-                .and_then(|n| n.color)
-                .unwrap_or(Color::from_rgb8(0x88, 0x88, 0x88)),
-            kind,
-            servers,
-            dns: self
-                .data
-                .dns
-                .get(&zone)
-                .cloned()
-                .unwrap_or_else(|| ("-".to_owned(), String::new())),
-            conts,
-            ifaces: self.data.ifaces.clone(),
-        };
-        column![
-            pick,
-            iced::widget::canvas(scheme)
-                .width(Length::Fill)
-                .height(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::FillPortion(3));
+        let detail = container(scrollable(self.scheme_detail(metro)).height(Length::Fill))
+            .padding(8)
+            .width(Length::Fill)
+            .height(Length::FillPortion(1))
+            .style(container::bordered_box);
+        let mut right = column![map, detail].spacing(8);
+        if let Some(why) = &self.metro_trouble {
+            right = right.push(text(format!("Последнее чтение не удалось: {why}")).size(12));
+        }
+        row![
+            container(scrollable(list).height(Length::Fill)).width(300),
+            right
         ]
         .spacing(10)
         .into()
+    }
+
+    /// The stretch pointed at, else the row pointed at or chosen, in full.
+    fn scheme_detail<'a>(&self, metro: &'a crate::metro::Metro) -> Element<'a, Msg> {
+        let focus = self
+            .scheme_hover
+            .as_ref()
+            .map(|h| h.0.as_str())
+            .or(self.scheme_focus.as_deref())
+            .or(self.scheme_pin.as_deref());
+        let Some(r) = focus.and_then(|id| metro.row(id)) else {
+            return text("Выберите поток слева или наведите на участок линии.")
+                .size(13)
+                .into();
+        };
+        let mut page = column![].spacing(4);
+        if let Some((_, i)) = &self.scheme_hover {
+            if let Some(h) = r.hops.get(*i) {
+                let from = if *i == 0 {
+                    r.from.as_str()
+                } else {
+                    r.hops[*i - 1].to.as_str()
+                };
+                page = page.push(
+                    text(format!(
+                        "{}: {} → {}",
+                        r.name,
+                        metro.name_of(from),
+                        metro.name_of(&h.to)
+                    ))
+                    .size(13),
+                );
+                page = page.push(text(format!("что: {}", h.what)).size(12));
+                page = page.push(text(format!("в чём: {}", h.wrap)).size(12));
+                page = page.push(
+                    text(format!(
+                        "видит: {} ({})",
+                        h.seen_by,
+                        crate::metro::sees_words(&h.sees)
+                    ))
+                    .size(12),
+                );
+                return page.into();
+            }
+        }
+        let bytes = if r.count > 0 {
+            format!(
+                " · {} соед., ↑ {} Б ↓ {} Б",
+                r.count, r.out_bytes, r.in_bytes
+            )
+        } else {
+            String::new()
+        };
+        let by_design = if r.observed {
+            ""
+        } else {
+            " · так пойдёт, ещё не видели"
+        };
+        page = page.push(text(format!("{}{bytes}{by_design}", r.name)).size(13));
+        page = page.push(text(format!("от: {}", metro.name_of(&r.from))).size(12));
+        for (n, h) in r.hops.iter().enumerate() {
+            page = page.push(
+                text(format!(
+                    "{}. {} — {} · в: {} · видит: {}",
+                    n + 1,
+                    metro.name_of(&h.to),
+                    h.what,
+                    h.wrap,
+                    h.seen_by
+                ))
+                .size(12),
+            );
+        }
+        page = page.push(text(format!("Конец: {}", r.end_text)).size(12));
+        page.into()
     }
 
     /// **Задачи**: each container's launches by their cgroups, what they
