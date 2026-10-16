@@ -4096,6 +4096,82 @@ impl Transport {
     }
 }
 
+/// The files of sysfs that name this very machine and nothing a program
+/// needs: `(directory, entry's file)` — each entry of the directory, its
+/// file. Monitors' EDID (with their serial numbers), disks' and USB devices'
+/// serials, the radios' hardware addresses.
+const SYSFS_SERIALS: [(&str, &str); 8] = [
+    ("/sys/class/drm", "edid"),
+    ("/sys/class/nvme", "serial"),
+    ("/sys/block", "device/serial"),
+    ("/sys/block", "device/wwid"),
+    ("/sys/block", "wwid"),
+    ("/sys/bus/usb/devices", "serial"),
+    ("/sys/class/ieee80211", "macaddress"),
+    ("/sys/class/bluetooth", "address"),
+];
+
+/// What of sysfs is the machine's fingerprint, out of an instance's sight
+/// (`LEAK-MODEL.md` §10): the same in every container and every network, so
+/// one machine behind all of them. A sysfs of the instance's own network
+/// namespace, which has no device of the host's — none of their hardware
+/// addresses —; DMI (the machine's maker, model, board) and the firmware's
+/// tables behind an empty read-only tmpfs; each file of [`SYSFS_SERIALS`]
+/// read as empty (`/dev/null` bound over it). The GPU's and the rest's
+/// devices stay: drivers read them. Not fatal — a fingerprint is no way out
+/// —, and said where a part is not done.
+fn own_sysfs(zone: &Zone) {
+    let flags = libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+    if let Err(e) = sys::mount(OsStr::new("sysfs"), Path::new("/sys"), "sysfs", flags, "") {
+        eprintln!(
+            "instance {}: no sysfs of its own ({e}) — the host's network devices stay visible",
+            zone.name()
+        );
+    }
+    for dir in ["/sys/devices/virtual/dmi", "/sys/firmware"] {
+        let dir = Path::new(dir);
+        if dir.is_dir() {
+            if let Err(e) = sys::mount(
+                OsStr::new("tmpfs"),
+                dir,
+                "tmpfs",
+                flags,
+                "mode=0555,size=4k",
+            ) {
+                eprintln!(
+                    "instance {}: {} not covered ({e})",
+                    zone.name(),
+                    dir.display()
+                );
+            }
+        }
+    }
+    let mut covered = 0;
+    for (dir, file) in SYSFS_SERIALS {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let Ok(path) = fs::canonicalize(entry.path().join(file)) else {
+                continue;
+            };
+            // Only sysfs's own files: a canonical path out of /sys is none.
+            if !path.starts_with("/sys") || !path.is_file() {
+                continue;
+            }
+            match sys::mount(OsStr::new("/dev/null"), &path, "", libc::MS_BIND, "") {
+                Ok(()) => covered += 1,
+                Err(e) => eprintln!(
+                    "instance {}: {} not covered ({e})",
+                    zone.name(),
+                    path.display()
+                ),
+            }
+        }
+    }
+    println!(
+        "instance {}: the machine's fingerprint in sysfs covered (DMI, firmware, {covered} serials)",
+        zone.name()
+    );
+}
+
 /// `/sys/fs/cgroup` covered in an instance, by an empty read-only tmpfs: it
 /// names every unit and scope of the user's (`vpn-zone@nl.service`,
 /// `app-firefox@….scope`), which zones and containers run and the programs
@@ -8251,6 +8327,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     let zone = &hide_project_state(zone)?;
     hide_container_storage(zone)?;
     if zone.instance.is_some() {
+        own_sysfs(zone);
         cover_cgroupfs(zone)?;
     }
 
