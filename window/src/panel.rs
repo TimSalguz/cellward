@@ -1,5 +1,5 @@
 //! `vpn-zone-window panel --cellward <cellward>
-//! [--tab network|containers|zones|settings] [--dirs <kdialog>]` — the
+//! [--tab network|tasks|containers|zones|settings] [--dirs <kdialog>]` — the
 //! cellward window (2026-09-28): the network monitor, the containers, the
 //! zones and the settings, on the toolkit of the launch window, in place of
 //! the chains of kdialog menus `cellward-gui` was.
@@ -109,8 +109,35 @@ struct Block {
     source: String,
 }
 
+/// A launch of an instance, by its cgroup (`task`, `crate::tasks` of
+/// vpn-zones).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TaskRow {
+    instance: String,
+    leaf: String,
+    /// Its program, for a person; empty: not known.
+    name: String,
+    frozen: bool,
+    rss_kib: u64,
+    ticks: u64,
+    hz: u64,
+}
+
+/// A process of a launch (`tproc`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ProcRow {
+    instance: String,
+    leaf: String,
+    pid: u32,
+    comm: String,
+    rss_kib: u64,
+    ticks: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Data {
+    tasks: Vec<TaskRow>,
+    procs: Vec<ProcRow>,
     containers: Vec<Cont>,
     networks: Vec<Net>,
     instances: Vec<Inst>,
@@ -173,6 +200,23 @@ fn parse(text: &str) -> Data {
                 d.pins
                     .push(((*key).to_owned(), (*name).to_owned(), (*to).to_owned()))
             }
+            ["task", id, leaf, name, frozen, rss, ticks, hz] => d.tasks.push(TaskRow {
+                instance: (*id).to_owned(),
+                leaf: (*leaf).to_owned(),
+                name: (*name).to_owned(),
+                frozen: *frozen == "1",
+                rss_kib: num(rss),
+                ticks: num(ticks),
+                hz: num(hz).max(1),
+            }),
+            ["tproc", id, leaf, pid, comm, rss, ticks] => d.procs.push(ProcRow {
+                instance: (*id).to_owned(),
+                leaf: (*leaf).to_owned(),
+                pid: pid.parse().unwrap_or(0),
+                comm: (*comm).to_owned(),
+                rss_kib: num(rss),
+                ticks: num(ticks),
+            }),
             ["instance", id, of, network, out, inb, since] => d.instances.push(Inst {
                 id: (*id).to_owned(),
                 container: (*of).to_owned(),
@@ -516,12 +560,33 @@ fn network_text(network: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Network,
+    Tasks,
     Containers,
     Zones,
     Settings,
 }
 
-const TABS: [Tab; 4] = [Tab::Network, Tab::Containers, Tab::Zones, Tab::Settings];
+const TABS: [Tab; 5] = [
+    Tab::Network,
+    Tab::Tasks,
+    Tab::Containers,
+    Tab::Zones,
+    Tab::Settings,
+];
+
+/// A launch's name for the person: its program's, else its cgroup's.
+fn task_name(t: &TaskRow) -> String {
+    if t.name.is_empty() {
+        format!("запуск {}", t.leaf)
+    } else {
+        t.name.clone()
+    }
+}
+
+/// KiB as MiB, for a person.
+fn mib(kib: u64) -> String {
+    format!("{} МБ", kib.div_ceil(1024))
+}
 
 /// The name a zone made of this config is offered: the file's without
 /// `.conf`, anything but letters, digits, `_` and `-` a dash —
@@ -576,6 +641,8 @@ enum Pending {
     Remove,
     /// A zone to cut off: its programs killed at once.
     Kill(String),
+    /// Launches to end, every process of each: `(instance, launch, name)`.
+    EndTasks(Vec<(String, String, String)>),
     /// A zone to remove, its config's copy with it.
     RemoveZone(String),
     /// A zone to make of this config, by this name.
@@ -660,6 +727,18 @@ enum Msg {
     BlockGo,
     /// `(container, target)`.
     Unblock(String, String),
+    /// A launch clicked: chosen alone, or added to (Ctrl) the chosen.
+    TaskPick(String, String),
+    /// A launch's processes shown or not.
+    TaskOpen(String, String),
+    /// `cellward tasks pause|resume` of every chosen launch.
+    TasksDo(&'static str),
+    TasksEndAsk,
+    TasksEndGo,
+    /// Space and Delete, outside a field.
+    TasksSpace,
+    TasksDelete,
+    Modifiers(keyboard::Modifiers),
 }
 
 struct Panel {
@@ -687,6 +766,16 @@ struct Panel {
     folded: HashSet<String>,
     unfolded: HashSet<String>,
     whole: HashSet<String>,
+    /// The last reading of each launch's and each process's CPU ticks, and
+    /// what they used since the one before, in percent of a core.
+    task_ticks: HashMap<(String, String), (u64, Instant)>,
+    task_cpu: HashMap<(String, String), f64>,
+    proc_ticks: HashMap<u32, (u64, Instant)>,
+    proc_cpu: HashMap<u32, f64>,
+    /// The launches chosen, and those whose processes are shown.
+    picked: HashSet<(String, String)>,
+    opened: HashSet<(String, String)>,
+    ctrl: bool,
 }
 
 /// Run `cellward <args>` off the window's threads; its output, or why not.
@@ -837,7 +926,65 @@ impl Panel {
             folded: HashSet::new(),
             unfolded: HashSet::new(),
             whole: HashSet::new(),
+            task_ticks: HashMap::new(),
+            task_cpu: HashMap::new(),
+            proc_ticks: HashMap::new(),
+            proc_cpu: HashMap::new(),
+            picked: HashSet::new(),
+            opened: HashSet::new(),
+            ctrl: false,
         }
+    }
+
+    /// CPU use of each launch and process since the reading before, in
+    /// percent of a core: the ticks between two readings.
+    fn count_cpu(&mut self, data: &Data, now: Instant) {
+        let pct = |ticks: u64, was: Option<&(u64, Instant)>, hz: u64| {
+            was.and_then(|(t, at)| {
+                let dt = now.duration_since(*at).as_secs_f64();
+                (dt > 0.2).then(|| ticks.saturating_sub(*t) as f64 / hz as f64 / dt * 100.0)
+            })
+        };
+        let hz = data.tasks.first().map_or(100, |t| t.hz);
+        let mut ticks = HashMap::new();
+        let mut cpu = HashMap::new();
+        for t in &data.tasks {
+            let key = (t.instance.clone(), t.leaf.clone());
+            if let Some(c) = pct(t.ticks, self.task_ticks.get(&key), t.hz) {
+                cpu.insert(key.clone(), c);
+            }
+            ticks.insert(key, (t.ticks, now));
+        }
+        self.task_ticks = ticks;
+        self.task_cpu = cpu;
+        let mut ticks = HashMap::new();
+        let mut cpu = HashMap::new();
+        for p in &data.procs {
+            if let Some(c) = pct(p.ticks, self.proc_ticks.get(&p.pid), hz) {
+                cpu.insert(p.pid, c);
+            }
+            ticks.insert(p.pid, (p.ticks, now));
+        }
+        self.proc_ticks = ticks;
+        self.proc_cpu = cpu;
+        // A launch gone: not chosen any more.
+        let alive: HashSet<(String, String)> = data
+            .tasks
+            .iter()
+            .map(|t| (t.instance.clone(), t.leaf.clone()))
+            .collect();
+        self.picked.retain(|k| alive.contains(k));
+        self.opened.retain(|k| alive.contains(k));
+    }
+
+    /// The launches chosen, in the order they are shown, with their names.
+    fn picked_sorted(&self) -> Vec<(String, String, String)> {
+        self.data
+            .tasks
+            .iter()
+            .filter(|t| self.picked.contains(&(t.instance.clone(), t.leaf.clone())))
+            .map(|t| (t.instance.clone(), t.leaf.clone(), task_name(t)))
+            .collect()
     }
 
     fn chosen(&self) -> Option<&Cont> {
@@ -963,6 +1110,7 @@ impl Panel {
                 }
                 self.last = last;
                 self.rates = rates;
+                self.count_cpu(&data, now);
                 self.data = data;
                 self.trouble = None;
                 // A container gone: nothing chosen.
@@ -1142,6 +1290,64 @@ impl Panel {
                 Task::none()
             }
             Msg::ZoneDo(zone, verb) => self.act(vec![verb.to_owned(), zone]),
+            Msg::Modifiers(m) => {
+                self.ctrl = m.control();
+                Task::none()
+            }
+            Msg::TaskPick(instance, leaf) => {
+                let key = (instance, leaf);
+                if self.ctrl {
+                    if !self.picked.remove(&key) {
+                        self.picked.insert(key);
+                    }
+                } else {
+                    self.picked = HashSet::from([key]);
+                }
+                Task::none()
+            }
+            Msg::TaskOpen(instance, leaf) => {
+                let key = (instance, leaf);
+                if !self.opened.remove(&key) {
+                    self.opened.insert(key);
+                }
+                Task::none()
+            }
+            Msg::TasksDo(verb) => {
+                let all: Vec<Vec<String>> = self
+                    .picked_sorted()
+                    .into_iter()
+                    .map(|(i, l, _)| vec!["tasks".into(), verb.into(), i, l])
+                    .collect();
+                if all.is_empty() {
+                    return Task::none();
+                }
+                self.busy = true;
+                self.said = None;
+                Task::perform(cellward_all(self.cellward.clone(), all), Msg::Done)
+            }
+            Msg::TasksEndAsk => {
+                let picked = self.picked_sorted();
+                if !picked.is_empty() {
+                    self.pending = Some(Pending::EndTasks(picked));
+                }
+                Task::none()
+            }
+            Msg::TasksEndGo => match self.pending.take() {
+                Some(Pending::EndTasks(all)) => {
+                    self.busy = true;
+                    self.said = None;
+                    self.picked.clear();
+                    let all = all
+                        .into_iter()
+                        .map(|(i, l, _)| vec!["tasks".into(), "kill".into(), i, l])
+                        .collect();
+                    Task::perform(cellward_all(self.cellward.clone(), all), Msg::Done)
+                }
+                other => {
+                    self.pending = other;
+                    Task::none()
+                }
+            },
             Msg::KillAsk(zone) => {
                 self.pending = Some(Pending::Kill(zone));
                 Task::none()
@@ -1232,6 +1438,52 @@ impl Panel {
                 Task::none()
             }
             Msg::ForgetAllGo => self.act(vec!["forget".into(), "--all".into()]),
+            Msg::Step(by) if self.tab == Tab::Tasks => {
+                if self.pending.is_some() {
+                    return Task::none();
+                }
+                let keys: Vec<(String, String)> = self
+                    .data
+                    .tasks
+                    .iter()
+                    .map(|t| (t.instance.clone(), t.leaf.clone()))
+                    .collect();
+                if keys.is_empty() {
+                    return Task::none();
+                }
+                // From the last chosen, in the order shown.
+                let at = keys.iter().rposition(|k| self.picked.contains(k));
+                let next = match at {
+                    None => 0,
+                    Some(i) => (i as i64 + i64::from(by)).clamp(0, keys.len() as i64 - 1) as usize,
+                };
+                let key = keys[next].clone();
+                if self.ctrl {
+                    self.picked.insert(key);
+                } else {
+                    self.picked = HashSet::from([key]);
+                }
+                Task::none()
+            }
+            // Space: the chosen paused, or resumed where they all are paused.
+            Msg::TasksSpace => {
+                if self.tab != Tab::Tasks || self.pending.is_some() || self.busy {
+                    return Task::none();
+                }
+                let all_paused = self
+                    .data
+                    .tasks
+                    .iter()
+                    .filter(|t| self.picked.contains(&(t.instance.clone(), t.leaf.clone())))
+                    .all(|t| t.frozen);
+                self.update(Msg::TasksDo(if all_paused { "resume" } else { "pause" }))
+            }
+            Msg::TasksDelete => {
+                if self.tab != Tab::Tasks || self.busy {
+                    return Task::none();
+                }
+                self.update(Msg::TasksEndAsk)
+            }
             Msg::Step(by) => {
                 if self.tab != Tab::Containers || self.pending.is_some() {
                     return Task::none();
@@ -1299,6 +1551,7 @@ impl Panel {
             .map_or(String::new(), |t| format!("⚠ {t}"));
         let top = row![
             tab("Сеть", Tab::Network),
+            tab("Задачи", Tab::Tasks),
             tab("Контейнеры", Tab::Containers),
             tab("Подключения", Tab::Zones),
             tab("Настройки", Tab::Settings),
@@ -1312,6 +1565,7 @@ impl Panel {
         .align_y(Alignment::Center);
         let body = match self.tab {
             Tab::Network => self.view_network(),
+            Tab::Tasks => self.view_tasks(),
             Tab::Containers => self.view_containers(),
             Tab::Zones => self.view_zones(),
             Tab::Settings => self.view_settings(),
@@ -2100,6 +2354,24 @@ impl Panel {
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
         };
         let block: Element<'a, Msg> = match pending {
+            Pending::EndTasks(all) => {
+                let names: Vec<&str> = all.iter().map(|(_, _, n)| n.as_str()).collect();
+                column![
+                    question(format!(
+                        "Завершить {}: {}? Каждый запуск — со всеми его процессами сразу, \
+                         несохранённое пропадёт.",
+                        if all.len() == 1 {
+                            "запуск"
+                        } else {
+                            "запуски"
+                        },
+                        names.join(", ")
+                    )),
+                    row![go("Завершить", Some(Msg::TasksEndGo), true), cancel].spacing(6)
+                ]
+                .spacing(8)
+                .into()
+            }
             Pending::Kill(zone) => column![
                 question(format!(
                     "Оборвать подключение «{zone}»? Все его программы — удалённый доступ, \
@@ -2202,6 +2474,175 @@ impl Panel {
                 .style(container::bordered_box)
                 .into(),
         )
+    }
+
+    /// **Задачи**: each container's launches by their cgroups, what they
+    /// use now, and their processes when unfolded; chosen by a click, more
+    /// with Ctrl, paused, resumed, ended (asked first).
+    fn view_tasks(&self) -> Element<'_, Msg> {
+        let mut page = column![].spacing(8);
+        if let Some(block) = self.pending.as_ref().and_then(|p| self.view_general(p)) {
+            page = page.push(block);
+        }
+        let idle = !self.busy && self.pending.is_none();
+        let some = !self.picked.is_empty();
+        let act = |label: &'static str, msg: Msg, danger: bool| {
+            button(text(label).size(13))
+                .padding([4, 10])
+                .style(if danger {
+                    button::danger
+                } else {
+                    button::secondary
+                })
+                .on_press_maybe((idle && some).then_some(msg))
+        };
+        page = page.push(
+            row![
+                act("Пауза", Msg::TasksDo("pause"), false),
+                act("Продолжить", Msg::TasksDo("resume"), false),
+                act("Завершить…", Msg::TasksEndAsk, true),
+                text(if some {
+                    format!("выбрано: {}", self.picked.len())
+                } else {
+                    "щелчок или ↑/↓ — выбрать запуск, с Ctrl — ещё один; Пробел — пауза, \
+                     Delete — завершить"
+                        .to_owned()
+                })
+                .size(12),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        );
+        let mut instances: Vec<&str> = self
+            .data
+            .tasks
+            .iter()
+            .map(|t| t.instance.as_str())
+            .collect();
+        instances.dedup();
+        if instances.is_empty() {
+            page = page.push(text("Ни одна программа не запущена в контейнере").size(14));
+        }
+        for id in instances {
+            let tasks: Vec<&TaskRow> = self
+                .data
+                .tasks
+                .iter()
+                .filter(|t| t.instance == id)
+                .collect();
+            let network = self
+                .data
+                .instances
+                .iter()
+                .find(|i| i.id == id)
+                .map(|i| i.network.clone())
+                .unwrap_or_default();
+            let color = self
+                .data
+                .containers
+                .iter()
+                .find(|c| c.name == id.split(':').next().unwrap_or(id))
+                .and_then(|c| c.color)
+                .unwrap_or(Color::from_rgb8(0x88, 0x88, 0x88));
+            let rss: u64 = tasks.iter().map(|t| t.rss_kib).sum();
+            let cpu: f64 = tasks
+                .iter()
+                .filter_map(|t| self.task_cpu.get(&(t.instance.clone(), t.leaf.clone())))
+                .sum();
+            page = page.push(
+                row![
+                    text("●").size(14).color(color),
+                    text(if network.is_empty() {
+                        id.to_owned()
+                    } else {
+                        format!("{id} · {network}")
+                    })
+                    .size(15)
+                    .width(Length::Fill),
+                    text(format!("{} · ЦП {:.0}%", mib(rss), cpu)).size(13),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+            for t in tasks {
+                let key = (t.instance.clone(), t.leaf.clone());
+                let chosen = self.picked.contains(&key);
+                let open = self.opened.contains(&key);
+                let procs: Vec<&ProcRow> = self
+                    .data
+                    .procs
+                    .iter()
+                    .filter(|p| p.instance == t.instance && p.leaf == t.leaf)
+                    .collect();
+                let cpu = self
+                    .task_cpu
+                    .get(&key)
+                    .map_or("—".to_owned(), |c| format!("{c:.0}%"));
+                let line = row![
+                    button(text(if open { "▾" } else { "▸" }).size(13))
+                        .padding([0, 4])
+                        .style(button::text)
+                        .on_press(Msg::TaskOpen(t.instance.clone(), t.leaf.clone())),
+                    text(format!(
+                        "{}{}",
+                        task_name(t),
+                        if t.frozen { " — на паузе" } else { "" }
+                    ))
+                    .size(14)
+                    .width(Length::Fill),
+                    text(mib(t.rss_kib)).size(13).width(Length::Fixed(80.0)),
+                    text(format!("ЦП {cpu}"))
+                        .size(13)
+                        .width(Length::Fixed(70.0)),
+                    text(format!("процессов {}", procs.len())).size(12),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center);
+                page = page.push(
+                    button(line)
+                        .padding([2, 6])
+                        .width(Length::Fill)
+                        .style(if chosen {
+                            button::primary
+                        } else {
+                            button::text
+                        })
+                        .on_press(Msg::TaskPick(t.instance.clone(), t.leaf.clone())),
+                );
+                if open {
+                    for p in procs {
+                        let cpu = self
+                            .proc_cpu
+                            .get(&p.pid)
+                            .map_or("—".to_owned(), |c| format!("{c:.0}%"));
+                        page = page.push(
+                            row![
+                                text(format!("{} · {}", p.comm, p.pid))
+                                    .size(12)
+                                    .width(Length::Fill),
+                                text(mib(p.rss_kib)).size(12).width(Length::Fixed(80.0)),
+                                text(format!("ЦП {cpu}"))
+                                    .size(12)
+                                    .width(Length::Fixed(70.0)),
+                            ]
+                            .spacing(8)
+                            .padding(iced::Padding {
+                                left: 40.0,
+                                ..iced::Padding::ZERO
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+        page = page.push(
+            text(
+                "Память — сумма по процессам: общая между ними считается не раз. Пауза \
+                 замораживает все процессы запуска сразу; завершить — убить их все.",
+            )
+            .size(12),
+        );
+        scrollable(page).height(Length::Fill).into()
     }
 
     fn view_zones(&self) -> Element<'_, Msg> {
@@ -2438,6 +2879,7 @@ impl Panel {
 
     fn subscription(&self) -> Subscription<Msg> {
         iced::event::listen_with(|event, status, _window| match event {
+            iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => Some(Msg::Modifiers(m)),
             iced::Event::Keyboard(keyboard::Event::KeyPressed {
                 key: Key::Named(named),
                 ..
@@ -2450,6 +2892,8 @@ impl Panel {
                     key::Named::ArrowRight if free => Some(Msg::TabStep(1)),
                     key::Named::ArrowUp if free => Some(Msg::Step(-1)),
                     key::Named::ArrowDown if free => Some(Msg::Step(1)),
+                    key::Named::Space if free => Some(Msg::TasksSpace),
+                    key::Named::Delete if free => Some(Msg::TasksDelete),
                     _ => None,
                 }
             }
@@ -2469,6 +2913,7 @@ pub fn run(args: &[String]) -> iced::Result {
         match flag.as_str() {
             "--cellward" => cellward = Some(PathBuf::from(value)),
             "--dirs" if !value.is_empty() => dirs = Some(PathBuf::from(value)),
+            "--tab" if value == "tasks" => tab = Tab::Tasks,
             "--tab" if value == "containers" => tab = Tab::Containers,
             "--tab" if value == "zones" => tab = Tab::Zones,
             "--tab" if value == "settings" => tab = Tab::Settings,
@@ -2524,6 +2969,55 @@ mod tests {
         today\twork\tnl\t1500\t3000\n\
         month\twork\tnl\t9000\t12000\n\
         what\tever\n";
+
+    /// The task lines read, CPU made of two readings' ticks, launches
+    /// chosen alone or with Ctrl, and what is ended asked first.
+    #[test]
+    fn the_tasks_are_read_counted_and_chosen() {
+        let reading = |ticks: u64| {
+            format!(
+                "task\twork\tl10-20\tFirefox\t0\t204800\t{ticks}\t100\n\
+                 tproc\twork\tl10-20\t42\tfirefox\t204800\t{ticks}\n\
+                 task\twork\tl11-21\t\t1\t1024\t5\t100\n"
+            )
+        };
+        let d = parse(&reading(100));
+        assert_eq!(d.tasks.len(), 2);
+        assert_eq!(d.procs[0].comm, "firefox");
+        assert!(d.tasks[1].frozen && task_name(&d.tasks[1]) == "запуск l11-21");
+        assert_eq!(mib(204800), "200 МБ");
+        let mut p = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Tasks);
+        let then = Instant::now();
+        p.count_cpu(&d, then);
+        assert!(p.task_cpu.is_empty(), "one reading says no CPU yet");
+        p.count_cpu(
+            &parse(&reading(150)),
+            then + std::time::Duration::from_secs(1),
+        );
+        let firefox = p.task_cpu[&("work".to_owned(), "l10-20".to_owned())];
+        assert!((firefox - 50.0).abs() < 0.5, "{firefox}");
+        assert!((p.proc_cpu[&42] - 50.0).abs() < 0.5);
+        p.data = parse(&reading(150));
+        let _ = p.update(Msg::TaskPick("work".into(), "l10-20".into()));
+        let _ = p.update(Msg::TaskPick("work".into(), "l11-21".into()));
+        assert_eq!(p.picked.len(), 1, "a click alone chooses one");
+        let _ = p.update(Msg::Modifiers(keyboard::Modifiers::CTRL));
+        let _ = p.update(Msg::TaskPick("work".into(), "l10-20".into()));
+        assert_eq!(p.picked.len(), 2);
+        let _ = p.update(Msg::TasksEndAsk);
+        assert!(
+            matches!(&p.pending, Some(Pending::EndTasks(all)) if all.len() == 2),
+            "ended only once asked"
+        );
+        let _ = p.update(Msg::Cancel);
+        assert!(p.pending.is_none());
+        // A launch gone: not chosen.
+        p.count_cpu(
+            &parse("task\twork\tl10-20\tFirefox\t0\t1\t1\t100\n"),
+            Instant::now(),
+        );
+        assert_eq!(p.picked.len(), 1);
+    }
 
     /// The panel's lines read back: each kind in its place, a path of a
     /// container not listed and a line of no kind skipped.
