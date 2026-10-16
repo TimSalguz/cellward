@@ -4833,7 +4833,39 @@ fn prepare_backend(zone: &Zone, raw: &[u8]) -> Result<Backend, String> {
         );
     }
 
-    let endpoints = cfg.resolve_endpoints(resolve_endpoint);
+    // A name is resolved once (`LEAK-MODEL.md` §5): the host's resolver and
+    // its provider see which VPN this is and when it is up, and may answer
+    // wrong. Its address is kept in the zone's directory and used from then
+    // on; `cellward endpoint refresh <zone>` forgets it.
+    let mut kept = read_endpoint_cache(&zone.path(ENDPOINT_CACHE));
+    let mut learned = false;
+    let endpoints = cfg.resolve_endpoints(|endpoint| match endpoint_host_kind(endpoint) {
+        EndpointHostKind::Literal(addr) => Some(addr),
+        EndpointHostKind::Name(name) => {
+            if let Some(addr) = kept.get(&name) {
+                return Some(*addr);
+            }
+            let addr = resolve_endpoint(endpoint)?;
+            println!(
+                "zone {}: the endpoint {name} resolved in the host's network, once — kept as {addr}",
+                zone.name()
+            );
+            kept.insert(name, addr);
+            learned = true;
+            Some(addr)
+        }
+    });
+    if learned {
+        if let Err(e) = write_private(
+            &zone.path(ENDPOINT_CACHE),
+            endpoint_cache_text(&kept).as_bytes(),
+        ) {
+            eprintln!(
+                "zone {}: the endpoint's address not kept ({e})",
+                zone.name()
+            );
+        }
+    }
     if endpoints.is_empty() {
         eprintln!(
             "zone {}: no Endpoint in the config — the tunnel has nowhere to go",
@@ -9870,6 +9902,27 @@ pub fn resolv_conf_with_search(dns: &[String], search: Option<&str>) -> (String,
     (text, defaulted)
 }
 
+/// The addresses the zone's endpoint names were resolved to, in its
+/// directory: a `name⇥address` line each (`prepare_backend`).
+pub const ENDPOINT_CACHE: &str = "endpoints";
+
+/// [`ENDPOINT_CACHE`] read: a line that does not read is skipped.
+pub fn read_endpoint_cache(path: &Path) -> std::collections::BTreeMap<String, IpAddr> {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let (name, addr) = l.split_once('\t')?;
+            Some((name.to_owned(), addr.trim().parse().ok()?))
+        })
+        .collect()
+}
+
+/// [`ENDPOINT_CACHE`]'s text.
+pub fn endpoint_cache_text(kept: &std::collections::BTreeMap<String, IpAddr>) -> String {
+    kept.iter().map(|(n, a)| format!("{n}\t{a}\n")).collect()
+}
+
 /// Host of an endpoint: an address we already have, or a name to resolve.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EndpointHostKind {
@@ -10092,6 +10145,25 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// An endpoint's address kept reads back; a line of another shape is none.
+    #[test]
+    fn an_endpoints_address_is_kept() {
+        let mut kept = std::collections::BTreeMap::new();
+        kept.insert("vpn.example.org".to_owned(), "192.0.2.7".parse().unwrap());
+        kept.insert("v6.example.org".to_owned(), "2001:db8::7".parse().unwrap());
+        let dir = std::env::temp_dir().join(format!("vz-endpoints-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(ENDPOINT_CACHE);
+        fs::write(
+            &path,
+            endpoint_cache_text(&kept) + "junk\nbad\tnot-an-address\n",
+        )
+        .unwrap();
+        assert_eq!(read_endpoint_cache(&path), kept);
+        assert!(read_endpoint_cache(&dir.join("none")).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
     use super::*;
 
     #[test]

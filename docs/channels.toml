@@ -199,7 +199,7 @@ to = "host-network"
 kind = "connects"
 guard = "asks the zone's DNS through the zone"
 test = "tests/vm.nix: DNS leak capture"
-known = "LEAK-MODEL §5/§6: the VPN server's name, DNS in clear past the tunnel"
+known = "LEAK-MODEL §6: DNS in clear past the tunnel (the server's name: resolved once, §5)"
 
 [[edge]]
 from = "program"
