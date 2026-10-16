@@ -575,11 +575,12 @@ fn host_way(
     };
     // No gateway: what it goes to is on the link itself — nothing between.
     let Some(via) = via else {
+        // Named by its interface: a host may be on two networks.
         let lan = s.place(
             &format!("link:{dev}"),
             Layer::Outside,
-            "Локальная сеть",
-            "без шлюза: адресат в ней",
+            &format!("Сеть {dev}"),
+            "адресат прямо в ней, без шлюза",
         );
         return vec![
             hop(&ifc, what, "IP-пакет хоста", Sees::Machine, "только машина"),
@@ -588,7 +589,12 @@ fn host_way(
     };
     // The gateway is what the host knows: the next hop of its route. A
     // router, a provider's box, a phone sharing its network — not known.
-    let lan = s.place(&format!("lan:{dev}"), Layer::Outside, "Шлюз", via);
+    let lan = s.place(
+        &format!("lan:{dev}"),
+        Layer::Outside,
+        &format!("Шлюз {via}"),
+        &format!("в сети {dev}"),
+    );
     let isp = s.place(
         &format!("isp:{dev}"),
         Layer::Outside,
@@ -1790,7 +1796,7 @@ mod tests {
         assert!(s
             .places
             .iter()
-            .any(|p| p.id == "link:wlp2s0" && p.name == "Локальная сеть"));
+            .any(|p| p.id == "link:wlp2s0" && p.name == "Сеть wlp2s0"));
     }
 
     /// A denied program ends at the gate; so does what the gate drops.
