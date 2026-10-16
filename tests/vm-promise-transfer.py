@@ -440,7 +440,11 @@ def xf_zone(zone, addr, addr6):
         f"UDP-RECV:9998,bind=10.99.0.1,reuseaddr OPEN:{got},creat,append"
     )
     alice("cellward container net main deny socat")
-    alice(placed(f"printf 'kernel-{zone}\\n' | {run} socat -u - UDP:10.99.0.1:9998"))
+    # The kernel refuses the send itself: the program hears EPERM.
+    alice(
+        placed(f"printf 'kernel-{zone}\\n' | {run} socat -u - UDP:10.99.0.1:9998")
+        + " 2>&1 | grep -q 'Operation not permitted'"
+    )
     machine.sleep(3)
     server.fail(f"grep -q kernel-{zone} {got}")
     c = json.loads(alice("cellward traffic --connections --json"))
