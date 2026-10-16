@@ -87,6 +87,28 @@ pub struct Instance {
     /// Its rules' named counters (`zone::INSTANCE_COUNTERS`): packets each
     /// drop rule dropped; none, not read.
     pub counters: Vec<(String, u64)>,
+    /// Of those, each launch's (`zone::WHO_TABLE`): its program — none, not
+    /// found —, the counter's name, its packets.
+    pub by_launch: Vec<(Option<String>, String, u64)>,
+}
+
+/// The counts by launch of `nft list table inet vpnzone_who` text: each
+/// rule's leaf and kind (its comment) and its packets.
+pub fn parse_by_launch(text: &str) -> Vec<(String, String, u64)> {
+    text.lines()
+        .filter_map(|line| {
+            let packets: u64 = line
+                .split("counter packets ")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()?;
+            let comment = line.split("comment \"").nth(1)?.split('"').next()?;
+            let (leaf, kind) = comment.split_once(' ')?;
+            Some((leaf.to_owned(), kind.to_owned(), packets))
+        })
+        .collect()
 }
 
 /// The named counters of `nft list counters` text: each one's name and its
@@ -141,6 +163,28 @@ fn counters_of(tools: &Tools, pid: i32) -> Vec<(String, u64)> {
             eprintln!("scheme: the counters of instance {pid} not read: {e}");
             Vec::new()
         })
+}
+
+/// The counts by launch of the instance whose space is process `pid`
+/// ([`parse_by_launch`]), read as its counters are.
+fn by_launch_of(tools: &Tools, pid: i32) -> Vec<(String, String, u64)> {
+    std::process::Command::new(&tools.nsenter)
+        .args([
+            "--preserve-credentials",
+            "--keep-caps",
+            "-U",
+            "-n",
+            "-t",
+            &pid.to_string(),
+            "--",
+        ])
+        .arg(&tools.nft)
+        .args(["list", "table", "inet", crate::zone::WHO_TABLE])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| parse_by_launch(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
 }
 
 /// A flow of an instance's.
@@ -271,17 +315,76 @@ pub fn facts(tools: &Tools) -> Facts {
             if let Some(t) = decisions {
                 t.close();
             }
-            let counters = crate::instance::running(&tools.state)
+            let running = crate::instance::running(&tools.state)
                 .into_iter()
-                .find(|i| i.id == l.id)
+                .find(|i| i.id == l.id);
+            let counters = running
+                .as_ref()
                 .map(|i| counters_of(tools, i.pid))
                 .unwrap_or_default();
+            // Each launch's drops, by its program (`owners::launch_of`: its
+            // leaf's waiter, still the one of that start).
+            let registry = tools
+                .state
+                .join(".running")
+                .join(l.container.as_deref().unwrap_or(crate::registry::MAIN));
+            let labels = &l.labels;
+            // Each launch's counts: as its keeper added them up at the
+            // counting table's last making (`zone::DROPS_BY_LAUNCH`, its
+            // program found while it was there), and what the live table
+            // counted since — by its program.
+            let mut totals: std::collections::BTreeMap<(String, String), (String, u64)> =
+                std::collections::BTreeMap::new();
+            let kept = running
+                .as_ref()
+                .and_then(|i| {
+                    std::fs::read_to_string(i.dir.join(crate::zone::DROPS_BY_LAUNCH)).ok()
+                })
+                .unwrap_or_default();
+            for line in kept.lines() {
+                let mut f = line.split('\t');
+                if let (Some(leaf), Some(key), Some(kind), Some(Ok(packets))) = (
+                    f.next(),
+                    f.next(),
+                    f.next(),
+                    f.next().map(str::parse::<u64>),
+                ) {
+                    totals.insert(
+                        (leaf.to_owned(), kind.to_owned()),
+                        (key.to_owned(), packets),
+                    );
+                }
+            }
+            let live = running
+                .as_ref()
+                .map(|i| by_launch_of(tools, i.pid))
+                .unwrap_or_default();
+            for (leaf, kind, packets) in live {
+                let entry = totals.entry((leaf.clone(), kind)).or_insert_with(|| {
+                    let key = crate::epoch::leaf_of(&leaf)
+                        .filter(|(waiter, start)| crate::sys::start_time(*waiter) == Some(*start))
+                        .and_then(|(waiter, _)| crate::owners::launch_of(&registry, waiter))
+                        .map(|(key, _)| key)
+                        .unwrap_or_default();
+                    (key, 0)
+                });
+                entry.1 += packets;
+            }
+            let by_launch = totals
+                .into_iter()
+                .map(|((_, kind), (key, packets))| {
+                    let program =
+                        (!key.is_empty()).then(|| labels.get(&key).cloned().unwrap_or(key));
+                    (program, kind, packets)
+                })
+                .collect();
             Instance {
                 id: l.id,
                 container: l.container,
                 network: l.network,
                 flows,
                 counters,
+                by_launch,
             }
         })
         .collect();
@@ -334,6 +437,11 @@ pub struct Place {
     pub gate: bool,
     /// What is inside is not known (the networks past the gateway).
     pub unknown: bool,
+    /// Takes the packets in on one side and makes them anew on the other —
+    /// the relay (frames to a stream), passt (frames to the zone's
+    /// connections), the encryptor (IP to encrypted UDP), pasta (the zone's
+    /// packets to the host's sockets) —, where one passes them through.
+    pub translates: bool,
 }
 
 /// Who can read a hop's contents.
@@ -497,6 +605,9 @@ impl Scheme {
                 tech: tech.to_owned(),
                 gate: false,
                 unknown: false,
+                translates: ["relay:", "passt:", "tun:", "out:"]
+                    .iter()
+                    .any(|k| id.starts_with(k)),
             });
         }
         id.to_owned()
@@ -1111,7 +1222,16 @@ pub fn build(facts: &Facts) -> Scheme {
             "программы и ядро",
             "контейнера",
         );
-        for (name, packets) in &inst.counters {
+        // Each counter's packets by whose they were: each launch's own (its
+        // cgroup's, `zone::WHO_TABLE`), named by its program; the rest — the
+        // kernel's own, a launch outside a group of its own — said as such.
+        let rest_from = s.place(
+            &format!("prog:{}:~", inst.id),
+            Layer::Program,
+            "ядро или запуск вне своей группы",
+            "контейнера",
+        );
+        for (name, total) in &inst.counters {
             let (title, why) = match name.as_str() {
                 "bcast4" => ("broadcast IPv4", "широковещательные — в туннель не уходят"),
                 "mcast4" => (
@@ -1127,12 +1247,28 @@ pub fn build(facts: &Facts) -> Scheme {
                 ),
                 _ => continue,
             };
-            s.rows.push(Row {
-                id: format!("{}:wall:{name}", inst.id),
+            let mut by: Vec<(String, u64)> = Vec::new();
+            for (program, _, packets) in inst
+                .by_launch
+                .iter()
+                .filter(|(_, k, p)| k == name && *p > 0)
+            {
+                let who = program
+                    .clone()
+                    .unwrap_or_else(|| "неизвестная программа".into());
+                match by.iter_mut().find(|(w, _)| *w == who) {
+                    Some((_, n)) => *n += packets,
+                    None => by.push((who, *packets)),
+                }
+            }
+            let theirs: u64 = by.iter().map(|(_, n)| n).sum();
+            let rest = total.saturating_sub(theirs);
+            let row = |id: String, from: String, packets: u64| Row {
+                id,
                 group: group.clone(),
                 name: title.into(),
                 kind: Kind::Dropped,
-                from: senders.clone(),
+                from,
                 hops: vec![hop(
                     &wall,
                     title,
@@ -1141,11 +1277,32 @@ pub fn build(facts: &Facts) -> Scheme {
                     "только контейнер",
                 )],
                 end: End::Denied(format!("стена контейнера: {why} — {packets} пакет(ов)")),
-                count: usize::try_from(*packets).unwrap_or(usize::MAX),
+                count: usize::try_from(packets).unwrap_or(usize::MAX),
                 out_bytes: 0,
                 in_bytes: 0,
                 observed: true,
-            });
+            };
+            for (who, packets) in &by {
+                let from = s.place(
+                    &format!("prog:{}:{who}", inst.id),
+                    Layer::Program,
+                    who,
+                    "программа",
+                );
+                s.rows.push(row(
+                    format!("{}:wall:{name}:{who}", inst.id),
+                    from,
+                    *packets,
+                ));
+            }
+            // The rest: always there — a counter that dropped nothing too.
+            if rest > 0 || by.is_empty() {
+                s.rows.push(row(
+                    format!("{}:wall:{name}", inst.id),
+                    rest_from.clone(),
+                    rest,
+                ));
+            }
         }
         // What is not there by design, said: no DHCP.
         s.rows.push(Row {
@@ -1176,14 +1333,37 @@ pub fn build(facts: &Facts) -> Scheme {
         // From its way out on: the tunnel's own packets are born there.
         let at = way.hops.iter().position(|h| h.to.starts_with("out:"));
         if let (Some(at), None) = (at, &way.cut) {
-            let from = way.hops[at].to.clone();
+            // The VPN's client is a program too, and says so: the tunnel's
+            // device in the encryptor for WireGuard's kinds — its handshakes
+            // and keepalives leave by the way out —, the client process in
+            // the way out for OpenConnect.
+            let (from, hops, name) = if zone.kind == "openconnect" {
+                (
+                    way.hops[at].to.clone(),
+                    way.hops[at + 1..].to_vec(),
+                    format!("openconnect · клиент VPN зоны {}: TLS, DTLS", zone.name),
+                )
+            } else {
+                let mut hops = vec![way.hops[at].clone()];
+                hops[0].what = "рукопожатие и keepalive".into();
+                hops.extend(way.hops[at + 1..].iter().cloned());
+                (
+                    format!("tun:{}", zone.name),
+                    hops,
+                    format!(
+                        "{} · клиент VPN зоны {}: рукопожатие, keepalive",
+                        kind_word(zone.kind),
+                        zone.name
+                    ),
+                )
+            };
             s.rows.push(Row {
                 id: format!("{}:handshake", zone.name),
                 group: group.clone(),
-                name: "Туннель держит связь".into(),
+                name,
                 kind: Kind::Handshake,
                 from,
-                hops: way.hops[at + 1..].to_vec(),
+                hops,
                 end: End::Arrives("сервер VPN".into()),
                 count: 0,
                 out_bytes: 0,
@@ -1531,13 +1711,14 @@ pub fn json(s: &Scheme) -> String {
         .iter()
         .map(|p| {
             format!(
-                "{{\"id\":{},\"layer\":{},\"name\":{},\"tech\":{},\"gate\":{},\"unknown\":{}}}",
+                "{{\"id\":{},\"layer\":{},\"name\":{},\"tech\":{},\"gate\":{},\"unknown\":{},\"translates\":{}}}",
                 string(&p.id),
                 string(p.layer.word()),
                 string(&p.name),
                 string(&p.tech),
                 p.gate,
-                p.unknown
+                p.unknown,
+                p.translates
             )
         })
         .collect();
@@ -1766,6 +1947,7 @@ mod tests {
                 network: "nl".into(),
                 flows,
                 counters: vec![("bcast4".into(), 3), ("mcast6".into(), 0)],
+                by_launch: vec![(Some("Firefox".into()), "bcast4".into(), 2)],
             }],
             default: Some(("wlp2s0".into(), Some("192.168.1.1".into()))),
         }
@@ -1834,7 +2016,7 @@ mod tests {
             .iter()
             .map(|h| h.to.as_str())
             .collect();
-        assert_eq!(to, ["if:wlp2s0", "link:wlp2s0", "vpn:nl"]);
+        assert_eq!(to, ["out:nl", "if:wlp2s0", "link:wlp2s0", "vpn:nl"]);
         assert!(s
             .places
             .iter()
@@ -2012,8 +2194,11 @@ mod tests {
         assert!(r.hops.iter().skip(1).all(|h| h.sees == Sees::Stranger));
         assert!(r.hops[1].what.contains("vpn.example.org"));
         assert!(matches!(&r.end, End::Answered(t) if t.contains("запомнен")));
+        // The VPN's client, its source: the tunnel's device, by the encryptor.
         let hs = row(&s, "nl:handshake");
-        assert_eq!(hs.from, "out:nl");
+        assert_eq!(hs.from, "tun:nl");
+        assert!(hs.name.contains("клиент VPN"), "{}", hs.name);
+        assert!(s.places.iter().any(|p| p.id == "out:nl" && p.translates));
         assert_eq!(hs.hops.last().unwrap().to, "vpn:nl");
     }
 
@@ -2070,9 +2255,16 @@ mod tests {
             row(&s, "work-1:Firefox:dropped").end,
             End::Denied(_)
         ));
+        // Firefox's two by its launch, the one left the kernel's or one
+        // outside a group of its own.
+        let f = row(&s, "work-1:wall:bcast4:Firefox");
+        assert_eq!(
+            (f.count, f.observed, f.from.as_str()),
+            (2, true, "prog:work-1:Firefox")
+        );
         let b = row(&s, "work-1:wall:bcast4");
-        assert_eq!((b.count, b.observed), (3, true));
-        assert!(matches!(&b.end, End::Denied(t) if t.contains("3 пакет")));
+        assert_eq!((b.count, b.from.as_str()), (1, "prog:work-1:~"));
+        assert!(matches!(&b.end, End::Denied(t) if t.contains("1 пакет")));
         assert_eq!(b.hops[0].to, "wall:work-1");
         assert_eq!(row(&s, "work-1:wall:mcast6").count, 0);
         for id in [
@@ -2087,6 +2279,17 @@ mod tests {
             assert!(!row(&s, id).observed, "{id}");
         }
         assert!(json(&s).contains("\"observed\":false"));
+    }
+
+    /// The counts by launch read back from their rules' comments.
+    #[test]
+    fn the_counts_by_launch_are_read() {
+        let text = "table inet vpnzone_who {\n\tchain output {\n\t\ttype filter hook output priority -10; policy accept;\n\
+                    \t\tsocket cgroupv2 level 4 \"u/x/e1/l12-34\" ip daddr 224.0.0.0/4 counter packets 5 bytes 300 comment \"l12-34 mcast4\"\n\t}\n}\n";
+        assert_eq!(
+            parse_by_launch(text),
+            [("l12-34".to_owned(), "mcast4".to_owned(), 5)]
+        );
     }
 
     /// `nft list counters`, read back.

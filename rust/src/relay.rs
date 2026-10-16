@@ -1521,6 +1521,55 @@ fn diag_socket_main(args: &[OsString]) -> u8 {
     }
 }
 
+/// `frame-relay --who --nft P --a4 A [--leaf PATH]…`: the instance's counts
+/// by launch (`zone::who_ruleset`) loaded anew, for the launches' cgroups
+/// given — as its keeper sees them when they change. Counts only: the
+/// instance's own rules decide.
+fn who_main(args: &[OsString]) -> u8 {
+    // SAFETY: prctl with these arguments takes no pointers.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    let (mut nft, mut a4, mut leaves) = (None, None, Vec::new());
+    let mut rest = args;
+    while let [flag, value, tail @ ..] = rest {
+        match flag.to_str() {
+            Some("--nft") => nft = absolute(value).ok(),
+            Some("--a4") => a4 = value.to_str().and_then(|v| v.parse::<Ipv4Addr>().ok()),
+            Some("--leaf") => leaves.push(value.to_string_lossy().into_owned()),
+            _ => {
+                eprintln!(
+                    "vpn-zone-core frame-relay --who: unknown argument {}",
+                    flag.to_string_lossy()
+                );
+                return 2;
+            }
+        }
+        rest = tail;
+    }
+    let (Some(nft), Some(a4)) = (nft, a4) else {
+        eprintln!("vpn-zone-core frame-relay --who: needs --nft and --a4");
+        return 2;
+    };
+    // What the table counted so far, before it is made anew: the keeper
+    // keeps the launches' that are gone (their rules go with them).
+    if let Ok(out) = std::process::Command::new(&nft)
+        .args(["list", "table", "inet", crate::zone::WHO_TABLE])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        print!("{}", String::from_utf8_lossy(&out.stdout));
+    }
+    let loaded =
+        crate::zone::who_ruleset(a4, &leaves).and_then(|r| crate::zone::feed_nft(&nft, &r));
+    match loaded {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("vpn-zone-core frame-relay --who: {e}");
+            1
+        }
+    }
+}
+
 fn seal_main(args: &[OsString]) -> u8 {
     // SAFETY: prctl with these arguments takes no pointers.
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
@@ -1563,6 +1612,7 @@ pub fn main(args: &[OsString]) -> u8 {
         Some("--attach") => return attach_main(&args[1..]),
         Some("--probe") => return probe_main(&args[1..]),
         Some("--seal") => return seal_main(&args[1..]),
+        Some("--who") => return who_main(&args[1..]),
         Some("--diag-socket") => return diag_socket_main(&args[1..]),
         _ => {}
     }
