@@ -441,10 +441,3 @@ kind = "spawns"
 guard = "what the host runs from the home read-only in a hermetic container (protect_host_files)"
 test = "tests/vm-protect.py; tests/vm.nix: mimeapps"
 
-[[edge]]
-from = "host-home"
-to = "host-process"
-kind = "spawns"
-guard = ""
-test = ""
-known = "IDE settings and tasks (VS Code, Zed, JetBrains), KWin scripts and plasmoids, lazygit: not among the places covered"

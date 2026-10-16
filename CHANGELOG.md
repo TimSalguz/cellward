@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- **Editors' settings and the desktop shell's scripts are among what the host
+  runs**: `~/.config/Code/User` (and VSCodium's, Cursor's, Code OSS's), Zed's,
+  JetBrains', lazygit's, KWin's scripts and Plasma's widgets are read-only in
+  a hermetic container of the real home — a task or a git path there is code
+  the host's editor runs. An IDE belongs in a container of its own.
 - **The machine's fingerprint in a container's sysfs** (`LEAK-MODEL.md` §10):
   an instance has a sysfs of its own network namespace (no host device, no
   hardware address of them), DMI and the firmware's tables covered, monitors'
