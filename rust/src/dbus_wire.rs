@@ -351,6 +351,31 @@ pub fn portal_call(msg: &[u8], h: &Header) -> Result<(Vec<String>, Option<String
     Ok((strings, token))
 }
 
+/// The file descriptors' indices among a portal call's arguments before its
+/// options (`OpenFile`'s `h`), in order: what the message's descriptors are.
+pub fn portal_call_fds(msg: &[u8], h: &Header) -> Result<Vec<u32>> {
+    let sig = h.signature.as_deref().unwrap_or("");
+    let Some(before) = sig.strip_suffix("a{sv}") else {
+        return Err(WireError("not a portal call (no options at the end)"));
+    };
+    let mut r = Reader {
+        buf: msg,
+        pos: h.body_offset,
+        little: h.little,
+    };
+    let mut fds = Vec::new();
+    for code in before.bytes() {
+        match code {
+            b's' => {
+                r.string()?;
+            }
+            b'h' => fds.push(r.u32()?),
+            _ => return Err(WireError("unexpected argument before the options")),
+        }
+    }
+    Ok(fds)
+}
+
 /// A body that is one string (`s`), as the bus answers `GetNameOwner`.
 pub fn body_string(msg: &[u8], h: &Header) -> Result<String> {
     if h.signature.as_deref() != Some("s") {

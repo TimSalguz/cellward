@@ -130,6 +130,91 @@ pub fn decode_link(bytes: &[u8]) -> Option<(OsString, Vec<OsString>)> {
     decode_with(LINK_MAGIC, bytes)
 }
 
+/// The magic of a file to open (`OpenFile`, `OpenDirectory` of a program of
+/// the real home, [`file_target`]).
+const FILE_MAGIC: &[u8] = b"VZF1\0";
+
+/// A file to open, as bytes: its path as the asking program sees it,
+/// `file` or `dir` (the folder it is in, or that it is), and the container.
+pub fn encode_file(path: &OsStr, folder: bool, container: &str) -> Vec<u8> {
+    encode_with(
+        FILE_MAGIC,
+        b"",
+        &[
+            path.to_owned(),
+            if folder { "dir" } else { "file" }.into(),
+            container.into(),
+        ],
+    )
+}
+
+pub fn decode_file(bytes: &[u8]) -> Option<(OsString, Vec<OsString>)> {
+    decode_with(FILE_MAGIC, bytes)
+}
+
+/// A file request's path and type, checked on the host (`LEAK-MODEL.md` §2):
+/// an absolute path that, every link followed, is still in the real home and
+/// not in CellWard's own settings or state; a directory or a plain file;
+/// never what runs — any `x` bit of a file, or a type of a program, a script
+/// or a launcher (`crate::mime::runs`). `dir`: the folder it is in, or that
+/// it is — what the portal's `OpenDirectory` shows.
+fn file_target(tools: &Tools, args: &[OsString]) -> Result<(PathBuf, String), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let (Some(path), Some(how)) = (args.first(), args.get(1).and_then(|h| h.to_str())) else {
+        return Err("нет файла".to_owned());
+    };
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return Err("путь не полный".to_owned());
+    }
+    let real = std::fs::canonicalize(path).map_err(|_| "файла нет".to_owned())?;
+    let home = std::fs::canonicalize(&tools.home).unwrap_or_else(|_| tools.home.clone());
+    let own = [
+        &tools.config,
+        &tools.state,
+        &tools.profiles,
+        &tools.sandboxes,
+    ]
+    .iter()
+    .filter_map(|d| std::fs::canonicalize(d).ok())
+    .any(|d| real.starts_with(&d));
+    if !real.starts_with(&home) || own {
+        return Err("файл не из настоящего дома".to_owned());
+    }
+    let meta = std::fs::metadata(&real).map_err(|_| "файла нет".to_owned())?;
+    let target = match how {
+        "dir" if meta.is_dir() => real,
+        "dir" => real.parent().map(Path::to_path_buf).ok_or("нет папки")?,
+        "file" if meta.is_file() => real,
+        "file" if meta.is_dir() => real,
+        _ => return Err("не файл и не папка".to_owned()),
+    };
+    let is_dir = std::fs::metadata(&target).is_ok_and(|m| m.is_dir());
+    let kind = crate::mime::of_path(&tools.home, &target, is_dir);
+    if !is_dir && (meta.permissions().mode() & 0o111 != 0 || crate::mime::runs(&kind)) {
+        return Err(format!("исполняемое не открывается никогда ({kind})"));
+    }
+    Ok((target, kind))
+}
+
+/// The client half of a file to open (`bus_filter`): as [`link`].
+pub fn open_file(path: &OsStr, folder: bool, container: &str) -> Linked {
+    let Some(answer) = exchange_text(&encode_file(path, folder, container)) else {
+        return Linked::NoBroker;
+    };
+    if answer == "ok" {
+        Linked::Opened
+    } else if answer == NOT_A_ZONE {
+        Linked::NotAZone
+    } else {
+        eprintln!(
+            "брокер: {}",
+            answer.strip_prefix("refused: ").unwrap_or(&answer)
+        );
+        Linked::Refused
+    }
+}
+
 fn decode_with(magic: &[u8], bytes: &[u8]) -> Option<(OsString, Vec<OsString>)> {
     let rest = bytes.strip_prefix(magic)?;
     let mut parts = rest.split(|b| *b == 0);
@@ -434,6 +519,7 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
         Some("запрос длиннее 64 КиБ")
     } else if decode_pick(&bytes)
         .or_else(|| decode_link(&bytes))
+        .or_else(|| decode_file(&bytes))
         .or_else(|| decode(&bytes))
         .is_some_and(|(app_id, _)| app_id.len() > MAX_APP_ID)
     {
@@ -453,7 +539,13 @@ fn handle(tools: &Tools, mut stream: UnixStream) {
         return;
     }
     if let Some((_, args)) = decode_link(&bytes) {
-        let answer = handle_link(tools, &origin, peer.as_ref(), &args);
+        let answer = handle_link(tools, &origin, peer.as_ref(), &args, None);
+        eprintln!("broker: {answer}");
+        let _ = stream.write_all(format!("{answer}\n").as_bytes());
+        return;
+    }
+    if let Some((_, args)) = decode_file(&bytes) {
+        let answer = handle_link(tools, &origin, peer.as_ref(), &args, Some(()));
         eprintln!("broker: {answer}");
         let _ = stream.write_all(format!("{answer}\n").as_bytes());
         return;
@@ -1474,8 +1566,14 @@ fn is_zones_filter(tools: &Tools, zone: &str, peer: Option<&Peer>) -> bool {
 /// container's rule, else the distribution's window of choice —, then the
 /// launch window, as for [`handle_pick`], with the rule offered where the
 /// container is known and has none for this scheme.
-fn handle_link(tools: &Tools, origin: &Origin, peer: Option<&Peer>, args: &[OsString]) -> String {
-    let answer = link_answer(tools, origin, peer, args);
+fn handle_link(
+    tools: &Tools,
+    origin: &Origin,
+    peer: Option<&Peer>,
+    args: &[OsString],
+    file: Option<()>,
+) -> String {
+    let answer = link_answer(tools, origin, peer, args, file);
     let decision = if answer.0 == "ok" {
         "started"
     } else {
@@ -1524,6 +1622,7 @@ fn link_answer(
     origin: &Origin,
     peer: Option<&Peer>,
     args: &[OsString],
+    file: Option<()>,
 ) -> (String, String, String, String, String) {
     let refused = |why: String, shown: &str| {
         (
@@ -1546,23 +1645,41 @@ fn link_answer(
             nothing(),
         );
     };
-    let Some(uri) = args.first().and_then(|u| u.to_str()) else {
-        return refused("нет ссылки".to_owned(), "");
+    // A link — its scheme its type —, or a file of the real home
+    // ([`file_target`]).
+    let (shown, scheme, content_type, arg) = match file {
+        None => {
+            let Some(uri) = args.first().and_then(|u| u.to_str()) else {
+                return refused("нет ссылки".to_owned(), "");
+            };
+            let shown = crate::bus_filter::loggable(uri);
+            if let Err(why) = crate::bus_filter::acceptable(uri) {
+                return refused(format!("ссылка не принята: {why}"), &shown);
+            }
+            let Some(scheme) = crate::links::scheme_of(uri) else {
+                return refused("у ссылки нет схемы".to_owned(), &shown);
+            };
+            let content_type = crate::links::scheme_type(&scheme);
+            (shown, Some(scheme), content_type, OsString::from(uri))
+        }
+        Some(()) => match file_target(tools, args) {
+            Ok((path, kind)) => (format!("file:{kind}"), None, kind, path.into_os_string()),
+            Err(why) => return refused(why, "file"),
+        },
     };
-    let shown = crate::bus_filter::loggable(uri);
-    if let Err(why) = crate::bus_filter::acceptable(uri) {
-        return refused(format!("ссылка не принята: {why}"), &shown);
-    }
-    let Some(scheme) = crate::links::scheme_of(uri) else {
-        return refused("у ссылки нет схемы".to_owned(), &shown);
-    };
+    let uri = arg.to_string_lossy().into_owned();
+    let uri = uri.as_str();
     // Whose program asks: the zone's filter's word from that filter alone
     // (`main`: the zone's own; a container's name; nothing: not known),
     // anyone else's container as the kernel says.
     // An instance's program is its container's, whatever any word says: the
     // instance is the container (J2 of the container design) — its filter's
     // word is not read, nor needed.
-    let word = match args.get(1).and_then(|c| c.to_str()) {
+    // The container's word: after the link, or after a file's path and how.
+    let word = match args
+        .get(if file.is_some() { 2 } else { 1 })
+        .and_then(|c| c.to_str())
+    {
         _ if matches!(origin, Origin::Instance { .. }) => asking_container(tools, origin, peer)
             .map(|c| {
                 if c.is_empty() {
@@ -1606,20 +1723,40 @@ fn link_answer(
             .filter(|(_, groups)| crate::desktop::desktop_entry(groups).is_some())
     };
     // The container's rule, where its program is still there.
-    let ruled = match &asker {
-        Asker::Container(c) => crate::links::rule(c, &scheme).filter(|id| entry_of(id).is_some()),
+    let ruled = match (&asker, &scheme) {
+        (Asker::Container(c), Some(scheme)) => {
+            crate::links::rule(c, scheme).filter(|id| entry_of(id).is_some())
+        }
         _ => None,
     };
+    // A file is opened from the real home alone: there its path is the
+    // host's, and nothing is brought from anywhere else.
+    if scheme.is_none() {
+        let real_home = match &asker {
+            Asker::Main => true,
+            Asker::Container(c) => c.home == crate::container::Home::Main,
+            Asker::Unknown => false,
+        };
+        if !real_home {
+            return refused(
+                "файл открывается только из настоящего дома: у этого контейнера дом свой"
+                    .to_owned(),
+                &shown,
+            );
+        }
+    }
     let id = match &ruled {
         Some(id) => id.clone(),
         None => {
-            let default =
-                crate::links::distro_default(&crate::links::mimeapps_files(&tools.home), &scheme);
-            let programs = crate::links::programs_for(
+            let default = crate::links::distro_default_of_type(
+                &crate::links::mimeapps_files(&tools.home),
+                &content_type,
+            );
+            let programs = crate::links::programs_of_type(
                 &dirs,
                 &tools.home,
                 &tools.state,
-                &scheme,
+                &content_type,
                 default.as_deref(),
             );
             // One program for such links: nothing to choose, as on a phone.
@@ -1636,11 +1773,12 @@ fn link_answer(
                     Ok(guard) => asking = Some(guard),
                     Err(why) => return refused(why, &shown),
                 }
-                match crate::links::choose(
+                let file_uri = format!("file://{uri}");
+                match crate::links::choose_of_type(
                     &tools.busctl,
                     &tools.kdialog,
-                    &scheme,
-                    uri,
+                    &content_type,
+                    if scheme.is_some() { uri } else { &file_uri },
                     &programs,
                     question_timeout(tools),
                 ) {
@@ -1660,7 +1798,7 @@ fn link_answer(
     let Some(entry) = crate::desktop::desktop_entry(&groups) else {
         return refused(format!("{id} — не ярлык программы"), &shown);
     };
-    let (cmd, used) = crate::desktop::expand_exec(entry, &file, &[OsString::from(uri)]);
+    let (cmd, used) = crate::desktop::expand_exec(entry, &file, std::slice::from_ref(&arg));
     if cmd.is_empty() || !used {
         return refused(format!("{id} не принимает ссылок"), &shown);
     }
@@ -1693,8 +1831,8 @@ fn link_answer(
         .exists();
     // "Always", per container and only where it is known: the program kept
     // for this scheme — the choice of it skipped next time, the window not.
-    let offer = match (&asker, &ruled) {
-        (Asker::Container(c), None) => Some(format!(
+    let offer = match (&asker, &ruled, &scheme) {
+        (Asker::Container(c), None, Some(scheme)) => Some(format!(
             "Всегда открывать ссылки {scheme}: из контейнера {} в {name}",
             c.name
         )),
@@ -1728,8 +1866,8 @@ fn link_answer(
         .map(|z| z.to_string_lossy().into_owned())
         .unwrap_or_default();
     if keep {
-        if let Asker::Container(c) = &asker {
-            if let Err(e) = crate::container::set_link(tools, &c.name, &scheme, Some(&id)) {
+        if let (Asker::Container(c), Some(scheme)) = (&asker, &scheme) {
+            if let Err(e) = crate::container::set_link(tools, &c.name, scheme, Some(&id)) {
                 eprintln!(
                     "broker: the rule for {scheme} links of {} not kept: {e}",
                     c.name
@@ -1956,6 +2094,74 @@ fn exchange_text(request: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A file from the real home is checked on the host: in the home, every
+    /// link followed, not CellWard's own, never what runs; "the folder" of a
+    /// file is the one it is in.
+    #[test]
+    fn a_file_of_the_real_home_is_checked_before_it_opens() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("vz-filetarget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let entries: std::collections::BTreeMap<String, String> = Tools::keys()
+            .iter()
+            .map(|k| {
+                let dir = match *k {
+                    "home" => base.join("home"),
+                    "state" => base.join("home/.local/state/vpn-zones"),
+                    "config" => base.join("home/.config/vpn-zones"),
+                    "profiles" | "sandboxes" => base.join(k),
+                    other => PathBuf::from(format!("/p/{other}")),
+                };
+                ((*k).to_owned(), dir.to_string_lossy().into_owned())
+            })
+            .collect();
+        let tools = Tools::from_entries(Path::new("/m.json"), &entries).unwrap();
+        let home = base.join("home");
+        for d in ["docs", ".local/state/vpn-zones", ".config/vpn-zones"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        std::fs::write(home.join("docs/page.html"), "<p>").unwrap();
+        std::fs::write(home.join("docs/run.bin"), "x").unwrap();
+        std::fs::set_permissions(
+            home.join("docs/run.bin"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        std::fs::write(base.join("outside/secret"), "s").unwrap();
+        std::os::unix::fs::symlink(base.join("outside/secret"), home.join("docs/link")).unwrap();
+        std::fs::write(home.join(".config/vpn-zones/x"), "c").unwrap();
+        let ask = |path: &Path, how: &str| {
+            file_target(&tools, &[path.as_os_str().to_owned(), how.into()])
+        };
+        let (path, _) = ask(&home.join("docs/page.html"), "file").unwrap();
+        assert!(path.ends_with("docs/page.html"));
+        let (folder, kind) = ask(&home.join("docs/page.html"), "dir").unwrap();
+        assert!(
+            folder.ends_with("docs") && kind == crate::mime::DIRECTORY,
+            "{folder:?}"
+        );
+        assert!(
+            ask(&home.join("docs/run.bin"), "file").is_err(),
+            "an executable"
+        );
+        assert!(
+            ask(&home.join("docs/link"), "file").is_err(),
+            "a link out of the home"
+        );
+        assert!(ask(&base.join("outside/secret"), "file").is_err());
+        assert!(
+            ask(&home.join(".config/vpn-zones/x"), "file").is_err(),
+            "CellWard's own"
+        );
+        assert!(
+            ask(Path::new("docs/page.html"), "file").is_err(),
+            "not absolute"
+        );
+        assert!(ask(&home.join("docs/none"), "file").is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
     use super::*;
 
     /// What a question shows is what a "yes" starts: a bare name is pinned

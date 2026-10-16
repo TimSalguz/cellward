@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **Open a file or a folder from the real home** (`LEAK-MODEL.md` §2): the
+  portal's `OpenFile`/`OpenDirectory` of a program of the real home goes to
+  the broker, which checks the file on the host — in the home, every link
+  followed, never what runs — and opens it as a link: the program for its
+  type, then the launch window. Before, it was refused.
 - **The real home in another network is asked first** (`LEAK-MODEL.md` §4):
   the picker remembers the networks a program went out to from the real home
   (or a container of the real home); another one only after «в прежней сети

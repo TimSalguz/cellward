@@ -123,8 +123,8 @@ const MAX_URI: usize = 8 * 1024;
 const NOTICE_EVERY: Duration = Duration::from_secs(30);
 /// What a refused file says.
 const FILE_NOTICE: &str = "Программа из контейнера попросила открыть файл другой программой. \
-     Сейчас это сделала бы программа хоста, в сети хоста, — поэтому файл не открыт. Откройте \
-     его из файлового менеджера или из самой программы.";
+     Так открывается только файл настоящего дома и только не исполняемый — этот не открыт. \
+     Откройте его из файлового менеджера или из самой программы.";
 
 /// `vpn-zone-core bus-filter --listen <socket> --upstream <socket> --opener <program>
 /// [--via-broker <zone>] [--portal-app <app-id>]
@@ -1496,7 +1496,7 @@ fn client_to_bus(
     client: &UnixStream,
     upstream: &UnixStream,
     conn: &Conn,
-    ctx: &Ctx,
+    ctx: &Arc<Ctx>,
 ) -> io::Result<()> {
     let mut buf = vec![0u8; READ_CHUNK];
     let mut fds: VecDeque<OwnedFd> = VecDeque::new();
@@ -1563,7 +1563,7 @@ fn client_to_bus(
             match door(&h) {
                 // The descriptors of an answered call are dropped — closed.
                 Some(which @ (Door::Network | Door::Proxy)) => answer_value(conn, ctx, &h, which)?,
-                Some(which) => answer(conn, ctx, &msg, &h, which)?,
+                Some(which) => answer(conn, ctx, &msg, &h, which, &carried)?,
                 // So are those of a refused one.
                 None if refused(&h).is_some() => {
                     deny(conn, ctx, &h, &refused(&h).unwrap_or_default())?
@@ -1743,7 +1743,14 @@ fn marked_reply(conn: &Conn, ctx: &Ctx, msg: &[u8], h: &Header) -> Option<Vec<u8
 
 /// Answer a call the way the portal would: the request's handle, then its
 /// `Response` — done, or cancelled.
-fn answer(conn: &Conn, ctx: &Ctx, msg: &[u8], h: &Header, which: Door) -> io::Result<()> {
+fn answer(
+    conn: &Conn,
+    ctx: &Arc<Ctx>,
+    msg: &[u8],
+    h: &Header,
+    which: Door,
+    carried: &[OwnedFd],
+) -> io::Result<()> {
     let parsed = wire::portal_call(msg, h)
         .map_err(|e| {
             eprintln!(
@@ -1790,12 +1797,25 @@ fn answer(conn: &Conn, ctx: &Ctx, msg: &[u8], h: &Header, which: Door) -> io::Re
             }
         },
         Door::File => {
-            eprintln!(
-                "bus-filter: {} refused — a file of the sandbox is not opened on the host",
-                h.member.as_deref().unwrap_or("?")
-            );
-            notify(ctx, "Файл не открыт", FILE_NOTICE);
-            RESPONSE_OTHER
+            // The file the descriptor is, as this side sees it: by its path
+            // the broker opens it — from the real home alone, where the path
+            // is the host's (`broker::file_target`).
+            let path = wire::portal_call_fds(msg, h)
+                .ok()
+                .and_then(|fds| fds.first().copied())
+                .and_then(|i| carried.get(i as usize))
+                .and_then(|fd| fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).ok());
+            let folder = h.member.as_deref() == Some("OpenDirectory");
+            match path {
+                Some(path) => open_file(ctx, path, folder, &conn.who),
+                None => {
+                    eprintln!(
+                        "bus-filter: {} refused — no file with it",
+                        h.member.as_deref().unwrap_or("?")
+                    );
+                    RESPONSE_OTHER
+                }
+            }
         }
         Door::Email => {
             eprintln!(
@@ -1882,6 +1902,32 @@ fn open_link(ctx: &Ctx, uri: &str, who: &crate::origin::Who) -> u32 {
         }
         _ => eprintln!("bus-filter: link {shown}: no broker to hand it to — not opened"),
     });
+    RESPONSE_OK
+}
+
+/// Hand a file of the program's to the broker on the host, as a link
+/// ([`open_link`]): there it is opened only if it is of the real home and
+/// does not run; else the person is told why not.
+fn open_file(ctx: &Arc<Ctx>, path: PathBuf, folder: bool, who: &crate::origin::Who) -> u32 {
+    if !ctx.may_open() {
+        eprintln!("bus-filter: a file refused: more than {MAX_OPENS_PER_MINUTE} a minute");
+        return RESPONSE_OTHER;
+    }
+    let claim = match who {
+        crate::origin::Who::Main => crate::broker::LINK_MAIN.to_owned(),
+        crate::origin::Who::Container(name) => name.clone(),
+        crate::origin::Who::Unknown => String::new(),
+    };
+    let ctx = Arc::clone(ctx);
+    thread::spawn(
+        move || match crate::broker::open_file(path.as_os_str(), folder, &claim) {
+            crate::broker::Linked::Opened => eprintln!("bus-filter: a file → the broker"),
+            _ => {
+                eprintln!("bus-filter: a file not opened");
+                notify(&ctx, "Файл не открыт", FILE_NOTICE);
+            }
+        },
+    );
     RESPONSE_OK
 }
 
