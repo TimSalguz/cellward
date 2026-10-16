@@ -395,21 +395,25 @@ if wanted(X11N):
         def probe(unit, args):
             """What a program of `args` sees of X: its own display, every
             display it may reach, the windows on it, the clipboard."""
-            out = f"/home/alice/{unit}.out"
-            alice(f"rm -f {out}")
+            # Its home is its container's: what it says is read from its
+            # unit's journal.
             script = (
-                f"exec > {out} 2>&1; "
+                "exec 2>&1; "
                 "echo DISPLAY=$DISPLAY; ls -A /tmp/.X11-unix; "
                 "for n in $(seq 0 9) $(seq 100 120); do "
                 "  xdpyinfo -display :$n >/dev/null 2>&1 && echo reach :$n; done; "
                 "xwininfo -root -tree | grep -c secretwin || true; "
                 "xdotool search --name secretwin || echo no-window; "
                 "timeout 3 xclip -o -selection clipboard || echo no-clipboard; "
-                "echo done"
+                "echo done; sleep 600"
             )
             run(unit, f"{args} -- sh -c {shlex.quote(script)}", env=f"--setenv=VPN_ZONE_APPID={unit}")
-            machine.wait_until_succeeds(f"grep -q '^done' {out}", timeout=60)
-            text = machine.succeed(f"cat {out}")
+            journal = f"journalctl --user --no-pager -o cat -u {unit}"
+            machine.wait_until_succeeds(
+                f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {journal}' | grep -qx done",
+                timeout=60,
+            )
+            text = alice(journal)
             print(unit, text)
             return text
 
