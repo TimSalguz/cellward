@@ -295,11 +295,15 @@ if wanted('a link from another program into the Firefox already open: a tab ther
         before = [t for t in titles() if t[0] == "firefox"]
         assert len(before) == 1 and len(firefox_mains()) == 1, (before, firefox_mains())
         alice("cellward container links main set https firefox")
+        # The broker asks on the session's display, as a desktop session
+        # gives its user manager: the test's nested one, set here.
+        alice(f"systemctl --user set-environment WAYLAND_DISPLAY={nested} XDG_SESSION_TYPE=wayland")
+        alice("systemctl --user stop vpn-zone-broker.service", check=False)
         run(
             "link-ask",
             "offline -- gdbus call --session --dest org.freedesktop.portal.Desktop "
             "--object-path /org/freedesktop/portal/desktop "
-            "--method org.freedesktop.portal.OpenURI.OpenURI '' 'https://link.test/' '{}'",
+            "--method org.freedesktop.portal.OpenURI.OpenURI '' 'https://link.test/' '@a{sv} {}'",
         )
         machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=60)
         machine.sleep(2)
