@@ -26,6 +26,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   3 but the status pipe at the exec, and `doctor` checks it (`inherited`).
 
 ### Added
+- **Where a zone's names go, said** (`LEAK-MODEL.md` §6): by its resolver's
+  address — the VPN's side, encrypted to its server, or a public one asked in
+  clear past it —, in `doctor` (`dns-side`) and on each zone's row in the
+  cellward window.
 - **Open a file or a folder from the real home** (`LEAK-MODEL.md` §2): the
   portal's `OpenFile`/`OpenDirectory` of a program of the real home goes to
   the broker, which checks the file on the host — in the home, every link
