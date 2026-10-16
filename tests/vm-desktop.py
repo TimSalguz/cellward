@@ -265,8 +265,9 @@ machine.sleep(3)
 # --- 2b. A link from another program of the same home and network ------------
 
 
-def first_menu_action(at):
-    """The guarded launch window's first entry: its highlighted one (blue)."""
+def launch_button(at):
+    """The launch window's «Запустить»: its lowest blue block, once its
+    countdown is over (lighter while it lasts)."""
     points = []
     w, h = at.size
     for y in range(h):
@@ -274,8 +275,11 @@ def first_menu_action(at):
             red, green, blue = at(x, y)
             if 50 < red < 150 and 50 < green < 150 and blue > 180:
                 points.append((x, y))
-    assert len(points) > 500, "the guarded menu's selected entry not found"
-    xs, ys = zip(*points)
+    assert len(points) > 200, "no blue block: the window not there yet"
+    bottom = max(y for _, y in points)
+    block = [(x, y) for x, y in points if y > bottom - 30]
+    assert len(block) > 200, "the button still counting down"
+    xs, ys = zip(*block)
     return (min(xs) + max(xs)) // 2, (min(ys) + max(ys)) // 2
 
 
@@ -294,7 +298,9 @@ if wanted('a link from another program into the Firefox already open: a tab ther
         machine.sleep(5)
         before = [t for t in titles() if t[0] == "firefox"]
         assert len(before) == 1 and len(firefox_mains()) == 1, (before, firefox_mains())
-        alice("cellward container links main set https firefox")
+        # The real home has no rule of links: its program is chosen each
+        # time (links.rs) — the distribution's default first, Firefox.
+        alice("mkdir -p ~/.config && printf '[Default Applications]\\nx-scheme-handler/https=firefox.desktop\\n' > ~/.config/mimeapps.list")
         # The broker asks on the session's display, as a desktop session
         # gives its user manager: the test's nested one, set here.
         alice(f"systemctl --user set-environment WAYLAND_DISPLAY={nested} XDG_SESSION_TYPE=wayland")
@@ -305,9 +311,22 @@ if wanted('a link from another program into the Firefox already open: a tab ther
             "--object-path /org/freedesktop/portal/desktop "
             "--method org.freedesktop.portal.OpenURI.OpenURI '' 'https://link.test/' '@a{sv} {}'",
         )
-        machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=60)
+        # The program: the menu of those that open links, Firefox first.
+        # Its window on the screen, by its title (links.rs `kdialog_menu`).
+        for _ in range(60):
+            if any(t[1] == "Открыть ссылку" for t in titles()):
+                break
+            machine.sleep(1)
+        else:
+            raise AssertionError(f"no window to choose the program: {titles()}")
         machine.sleep(2)
-        x, y = settled("ff-link-asked", first_menu_action)
+        shot("ff-link-program")
+        alice(f"WAYLAND_DISPLAY={nested} wtype -k Return")
+        # The container and the network: the same home and network, chosen
+        # already — «Запустить» once its countdown is over.
+        machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=60)
+        machine.sleep(4)
+        x, y = settled("ff-link-asked", launch_button)
         click(x, y, rest=2.5)
         machine.sleep(12)
         shot("ff-link-opened")
@@ -319,7 +338,7 @@ if wanted('a link from another program into the Firefox already open: a tab ther
         assert len(firefox_mains()) == 1, firefox_mains()
         assert len(after) == 1, after
         assert after[0][1] != before[0][1], ("the link did not reach the open Firefox", before, after)
-        alice("cellward container links main rm https")
+        alice("rm -f ~/.config/mimeapps.list")
 
 alice("systemctl --user stop ff-link link-ask", check=False)
 machine.sleep(3)
