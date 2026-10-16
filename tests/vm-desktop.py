@@ -294,7 +294,9 @@ if wanted('a link from another program into the Firefox already open: a tab ther
         machine.sleep(5)
         before = [t for t in titles() if t[0] == "firefox"]
         assert len(before) == 1 and len(firefox_mains()) == 1, (before, firefox_mains())
-        alice("cellward container links main set https firefox")
+        # The real home has no rule of links: its program is chosen each
+        # time (links.rs) — the distribution's default first, Firefox.
+        alice("mkdir -p ~/.config && printf '[Default Applications]\\nx-scheme-handler/https=firefox.desktop\\n' > ~/.config/mimeapps.list")
         # The broker asks on the session's display, as a desktop session
         # gives its user manager: the test's nested one, set here.
         alice(f"systemctl --user set-environment WAYLAND_DISPLAY={nested} XDG_SESSION_TYPE=wayland")
@@ -305,6 +307,12 @@ if wanted('a link from another program into the Firefox already open: a tab ther
             "--object-path /org/freedesktop/portal/desktop "
             "--method org.freedesktop.portal.OpenURI.OpenURI '' 'https://link.test/' '@a{sv} {}'",
         )
+        # The program: the menu of those that open links, Firefox first.
+        machine.wait_until_succeeds("pgrep -x kdialog", timeout=60)
+        machine.sleep(3)
+        shot("ff-link-program")
+        alice(f"WAYLAND_DISPLAY={nested} wtype -k Return")
+        # The container and the network: the same home and network, first.
         machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=60)
         machine.sleep(2)
         x, y = settled("ff-link-asked", first_menu_action)
@@ -319,7 +327,7 @@ if wanted('a link from another program into the Firefox already open: a tab ther
         assert len(firefox_mains()) == 1, firefox_mains()
         assert len(after) == 1, after
         assert after[0][1] != before[0][1], ("the link did not reach the open Firefox", before, after)
-        alice("cellward container links main rm https")
+        alice("rm -f ~/.config/mimeapps.list")
 
 alice("systemctl --user stop ff-link link-ask", check=False)
 machine.sleep(3)
