@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- **A program too short to be found no longer passes its denial**
+  (`FIREWALL.md` §9): a flow whose program the keeper could not find — a
+  datagram sent and the program gone, a raw socket — took the container's
+  default, so with "yes" a denied program's datagram went out. Now such a
+  flow is denied where any program of the container is; a ping is also
+  found by its raw socket.
 - **The firewall's gate holds a ping and DNS too** (`FIREWALL.md` §9): a
   program denied the network could still ping, carrying data in the pings,
   and ask the container's DNS forwarder names, carrying it in the names.

@@ -339,13 +339,32 @@ impl Rules {
         self.decide(program).verdict()
     }
 
-    /// The rule for `program` (`None`: not found — the default).
+    /// The rule for a flow whose program was not found — a socket gone by
+    /// the time it was looked for (a datagram sent, the program ended), a
+    /// raw one, a process of no launch: the default, but never "yes" where
+    /// a program is denied — that one may be it (the owner, 2026-10-16: a
+    /// program too short to be found must not be a way past its rule).
+    pub fn unknown(&self) -> Rule {
+        let rule = self.default_rule();
+        let denied = self.programs.iter().any(|(_, v, _)| *v == Verdict::Deny);
+        if rule == Rule::Allow && denied {
+            Rule::Deny
+        } else {
+            rule
+        }
+    }
+
+    /// The rule for `program` (`None`: not found — [`Rules::unknown`]).
     pub fn decide(&self, program: Option<&str>) -> Rule {
         if self.open {
             return Rule::Allow;
         }
-        program
-            .and_then(|p| self.programs.iter().find(|(q, _, _)| q == p))
+        let Some(program) = program else {
+            return self.unknown();
+        };
+        self.programs
+            .iter()
+            .find(|(q, _, _)| q == program)
             .map_or_else(|| self.default_rule(), |(_, v, _)| Rule::of(*v))
     }
 }
@@ -680,6 +699,28 @@ mod tests {
             ..key(ICMP6, "ff02::2", 133)
         };
         assert_eq!(r.of_flow(&rs, None, Some("curl")), Some(Verdict::Allow));
+    }
+
+    /// A flow of no program found: the default, but "no" where a program
+    /// is denied and the default is "yes" — the denied one may be it.
+    #[test]
+    fn an_unknown_program_is_never_let_past_a_denial() {
+        let r = rules("", "# unknown, its own directory\nnet_default = allow\n");
+        assert_eq!(r.decide(None), Rule::Allow);
+        let r = rules(
+            "",
+            "# unknown, its own directory\nnet_default = allow\nnet_deny = curl\n",
+        );
+        assert_eq!(r.decide(None), Rule::Deny);
+        assert_eq!(r.decide(Some("firefox")), Rule::Allow);
+        let r = rules(
+            "",
+            "# unknown, its own directory\nnet_default = allow\nnet_allow = firefox\n",
+        );
+        assert_eq!(r.decide(None), Rule::Allow);
+        // "Ask" still asks: about a program it cannot name.
+        let r = rules("", "# unknown, its own directory\nnet_deny = curl\n");
+        assert_eq!(r.decide(None), Rule::Ask);
     }
 
     /// A program's line, the record's default without one, the template's
