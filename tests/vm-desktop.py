@@ -778,7 +778,9 @@ HIST = "The clipboard history: each copy in its container's history, sealed"
 
 if wanted(HIST):
     with scenario(HIST):
-        alice(f"systemctl --user stop cellward-clip; systemd-run --user --unit=clipd --setenv=WAYLAND_DISPLAY={nested} cellward-clip daemon")
+        # A history of its own: what scenarios before kept is not in it.
+        alice("systemctl --user stop cellward-clip clipd; rm -rf ~/.local/state/cellward-clip")
+        alice(f"systemd-run --user --unit=clipd --setenv=WAYLAND_DISPLAY={nested} cellward-clip daemon")
         machine.sleep(2)
         alice("cellward container create histb --home main")
         for unit, args, word in [
@@ -821,9 +823,8 @@ if wanted(HIST):
         alice(f"{NIRI_MSG} action focus-window --id {win['id']}")
         machine.sleep(2)
         entry = next(l for l in alice("cellward-clip list histb").splitlines() if "word-of-histb" in l)
-        pid = alice("ls /run/user/1000/vpn-zones/ask/").split()
-        assert len(pid) == 1, pid
-        alice(f"cellward clip-window --pid {pid[0]} --entry histb {entry.split()[0]}")
+        # The terminal's launch: its window's pid is its supervisor's.
+        alice(f"cellward clip-window --pid {win['pid']} --entry histb {entry.split()[0]}")
         machine.sleep(1)
         alice(f"WAYLAND_DISPLAY={nested} wtype -k Return")
         machine.wait_until_succeeds("grep -q word-of-histb /home/alice/hist-pasted.txt", timeout=20)
@@ -881,6 +882,7 @@ def window_box(at):
 if wanted(CW):
     with scenario(CW):
         alice("systemctl --user stop cellward-clip clipd", check=False)
+        alice("systemctl --user stop cellward-clip clipd; rm -rf ~/.local/state/cellward-clip")
         alice(f"systemd-run --user --unit=clipd --setenv=WAYLAND_DISPLAY={nested} cellward-clip daemon")
         machine.sleep(2)
         alice("cellward container create cwb --home main")
